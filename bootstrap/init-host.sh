@@ -101,6 +101,7 @@ banner() {
 # ---------------------------------------------------------------------------
 # Step 1: System updates
 # ---------------------------------------------------------------------------
+echo "##BOXMUNGE:STEP:1:15:Updating system packages"
 banner "Step 1/14: System updates"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -109,6 +110,7 @@ apt-get upgrade -y -qq
 # ---------------------------------------------------------------------------
 # Step 2: Install required packages
 # ---------------------------------------------------------------------------
+echo "##BOXMUNGE:STEP:2:15:Installing required packages"
 banner "Step 2/14: Installing required packages"
 apt-get install -y -qq \
     ca-certificates \
@@ -131,6 +133,7 @@ apt-get install -y -qq \
 # ---------------------------------------------------------------------------
 # Step 3: Install Docker (official repo)
 # ---------------------------------------------------------------------------
+echo "##BOXMUNGE:STEP:3:15:Installing Docker"
 banner "Step 3/14: Installing Docker"
 if command -v docker &>/dev/null; then
     echo "Docker already installed — skipping."
@@ -157,6 +160,7 @@ fi
 # ---------------------------------------------------------------------------
 # Step 4: Create deploy user (BEFORE SSH hardening to avoid lockout)
 # ---------------------------------------------------------------------------
+echo "##BOXMUNGE:STEP:4:15:Creating users and SSH keys"
 banner "Step 4/14: Creating deploy user (restricted boxmunge shell)..."
 if id "${DEPLOY_USER}" &>/dev/null; then
     echo "User '${DEPLOY_USER}' already exists — skipping useradd."
@@ -208,6 +212,7 @@ echo "Supervisor user 'supervisor' ready with full shell and SSH key installed."
 # ---------------------------------------------------------------------------
 # Step 5: Configure SSH (deploy user must exist first — lockout prevention)
 # ---------------------------------------------------------------------------
+echo "##BOXMUNGE:STEP:5:15:Configuring SSH"
 banner "Step 5/14: Configuring SSH (port ${SSH_PORT})"
 SSHD_CONFIG="/etc/ssh/sshd_config"
 
@@ -239,6 +244,7 @@ systemctl restart sshd
 # ---------------------------------------------------------------------------
 # Step 6: Configure firewall (ufw)
 # ---------------------------------------------------------------------------
+echo "##BOXMUNGE:STEP:6:15:Configuring firewall"
 banner "Step 6/14: Configuring firewall (ufw)"
 ufw --force reset
 ufw default deny incoming
@@ -251,6 +257,7 @@ ufw --force enable
 # ---------------------------------------------------------------------------
 # Step 7: Configure fail2ban
 # ---------------------------------------------------------------------------
+echo "##BOXMUNGE:STEP:7:15:Configuring fail2ban"
 banner "Step 7/14: Configuring fail2ban"
 cat > /etc/fail2ban/jail.local <<EOF
 [DEFAULT]
@@ -269,6 +276,7 @@ systemctl restart fail2ban
 # ---------------------------------------------------------------------------
 # Step 7b: CrowdSec, AIDE, Auditd, AppArmor
 # ---------------------------------------------------------------------------
+echo "##BOXMUNGE:STEP:8:15:Installing security tools"
 source "$(dirname "$0")/crowdsec.sh"
 source "$(dirname "$0")/aide.sh"
 source "$(dirname "$0")/auditd.sh"
@@ -277,6 +285,7 @@ source "$(dirname "$0")/apparmor.sh"
 # ---------------------------------------------------------------------------
 # Step 8: Configure unattended-upgrades
 # ---------------------------------------------------------------------------
+echo "##BOXMUNGE:STEP:9:15:Configuring automatic updates"
 banner "Step 8/14: Configuring unattended-upgrades"
 if [[ "${ID}" == "ubuntu" ]]; then
     cat > /etc/apt/apt.conf.d/50unattended-upgrades <<'EOF'
@@ -313,6 +322,7 @@ systemctl restart unattended-upgrades
 # ---------------------------------------------------------------------------
 # Step 9: Create directory layout
 # ---------------------------------------------------------------------------
+echo "##BOXMUNGE:STEP:10:15:Creating directory layout"
 banner "Step 9/14: Creating /opt/boxmunge directory tree"
 install -d -m 755 -o root -g root \
     "${BOXMUNGE_ROOT}" \
@@ -345,6 +355,7 @@ install -d -m 755 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" "${BOXMUNGE_ROOT}/inbo
 # ---------------------------------------------------------------------------
 # Step 10: Configure Docker logging
 # ---------------------------------------------------------------------------
+echo "##BOXMUNGE:STEP:11:15:Configuring Docker logging"
 banner "Step 10/14: Configuring Docker logging defaults"
 install -d -m 755 /etc/docker
 cat > /etc/docker/daemon.json <<'EOF'
@@ -361,6 +372,7 @@ systemctl restart docker
 # ---------------------------------------------------------------------------
 # Step 11: Create Docker network and backup key; write boxmunge.yml
 # ---------------------------------------------------------------------------
+echo "##BOXMUNGE:STEP:12:15:Configuring Docker network and credentials"
 banner "Step 11/14: Docker network, backup key, boxmunge.yml"
 
 # Docker network
@@ -409,6 +421,7 @@ chown root:"${DEPLOY_USER}" "${BOXMUNGE_ROOT}/config/boxmunge.yml"
 # ---------------------------------------------------------------------------
 # Step 12: Install boxmunge CLI
 # ---------------------------------------------------------------------------
+echo "##BOXMUNGE:STEP:13:15:Installing boxmunge CLI"
 banner "Step 12/14: Adding boxmunge to PATH"
 
 cat > /etc/profile.d/boxmunge.sh <<EOF
@@ -425,6 +438,7 @@ fi
 # ---------------------------------------------------------------------------
 # Step 13: Write Caddyfile, compose.yml, start Caddy
 # ---------------------------------------------------------------------------
+echo "##BOXMUNGE:STEP:14:15:Deploying Caddy reverse proxy"
 banner "Step 13/14: Deploying Caddy reverse proxy"
 
 cat > "${BOXMUNGE_ROOT}/caddy/Caddyfile" <<EOF
@@ -485,6 +499,7 @@ CADDY_STATUS="$(docker inspect --format='{{.State.Status}}' boxmunge-caddy 2>/de
 # ---------------------------------------------------------------------------
 # Step 14/14: OS hardening
 # ---------------------------------------------------------------------------
+echo "##BOXMUNGE:STEP:15:15:OS hardening"
 banner "Step 14/14: OS hardening"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 bash "${SCRIPT_DIR}/harden.sh"
