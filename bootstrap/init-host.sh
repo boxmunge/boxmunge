@@ -26,6 +26,10 @@ HOSTNAME_ARG=""
 ADMIN_EMAIL=""
 SSH_KEY=""
 
+INSTALL_AIDE=true
+INSTALL_CROWDSEC=true
+INSTALL_AUTO_UPDATES=true
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
@@ -35,6 +39,9 @@ while [[ $# -gt 0 ]]; do
         --email)     ADMIN_EMAIL="$2";  shift 2 ;;
         --ssh-key)   SSH_KEY="$2";      shift 2 ;;
         --ssh-port)  SSH_PORT="$2";     shift 2 ;;
+        --no-aide)        INSTALL_AIDE=false;        shift ;;
+        --no-crowdsec)    INSTALL_CROWDSEC=false;    shift ;;
+        --no-auto-updates) INSTALL_AUTO_UPDATES=false; shift ;;
         *)
             echo "Unknown argument: $1" >&2
             echo "Usage: sudo bash init-host.sh --hostname HOST --email EMAIL --ssh-key KEY [--ssh-port PORT]" >&2
@@ -277,8 +284,18 @@ systemctl restart fail2ban
 # Step 7b: CrowdSec, AIDE, Auditd, AppArmor
 # ---------------------------------------------------------------------------
 echo "##BOXMUNGE:STEP:8:15:Installing security tools"
-source "$(dirname "$0")/crowdsec.sh"
-source "$(dirname "$0")/aide.sh"
+if [[ "${INSTALL_CROWDSEC}" == "true" ]]; then
+    source "$(dirname "$0")/crowdsec.sh"
+else
+    echo "Skipping CrowdSec (--no-crowdsec)"
+fi
+
+if [[ "${INSTALL_AIDE}" == "true" ]]; then
+    source "$(dirname "$0")/aide.sh"
+else
+    echo "Skipping AIDE (--no-aide)"
+fi
+
 source "$(dirname "$0")/auditd.sh"
 source "$(dirname "$0")/apparmor.sh"
 
@@ -286,9 +303,10 @@ source "$(dirname "$0")/apparmor.sh"
 # Step 8: Configure unattended-upgrades
 # ---------------------------------------------------------------------------
 echo "##BOXMUNGE:STEP:9:15:Configuring automatic updates"
-banner "Step 8/14: Configuring unattended-upgrades"
-if [[ "${ID}" == "ubuntu" ]]; then
-    cat > /etc/apt/apt.conf.d/50unattended-upgrades <<'EOF'
+if [[ "${INSTALL_AUTO_UPDATES}" == "true" ]]; then
+    banner "Step 8/14: Configuring unattended-upgrades"
+    if [[ "${ID}" == "ubuntu" ]]; then
+        cat > /etc/apt/apt.conf.d/50unattended-upgrades <<'EOF'
 Unattended-Upgrade::Allowed-Origins {
     "${distro_id}:${distro_codename}-security";
     "${distro_id}ESMApps:${distro_codename}-apps-security";
@@ -298,8 +316,8 @@ Unattended-Upgrade::AutoFixInterruptedDpkg "true";
 Unattended-Upgrade::MinimalSteps "true";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
 EOF
-else
-    cat > /etc/apt/apt.conf.d/50unattended-upgrades <<'EOF'
+    else
+        cat > /etc/apt/apt.conf.d/50unattended-upgrades <<'EOF'
 Unattended-Upgrade::Allowed-Origins {
     "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
 };
@@ -307,17 +325,20 @@ Unattended-Upgrade::AutoFixInterruptedDpkg "true";
 Unattended-Upgrade::MinimalSteps "true";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
 EOF
-fi
+    fi
 
-cat > /etc/apt/apt.conf.d/20auto-upgrades <<EOF
+    cat > /etc/apt/apt.conf.d/20auto-upgrades <<EOF
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 Unattended-Upgrade::Automatic-Reboot "true";
 Unattended-Upgrade::Automatic-Reboot-Time "${REBOOT_WINDOW}";
 EOF
 
-systemctl enable unattended-upgrades
-systemctl restart unattended-upgrades
+    systemctl enable unattended-upgrades
+    systemctl restart unattended-upgrades
+else
+    echo "Skipping unattended-upgrades (--no-auto-updates)"
+fi
 
 # ---------------------------------------------------------------------------
 # Step 9: Create directory layout
