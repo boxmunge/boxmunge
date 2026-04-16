@@ -68,6 +68,23 @@ def _version_newer(candidate: str, current: str) -> bool:
     return c > cur
 
 
+def _same_minor_line(candidate: str, current: str) -> bool:
+    """Check if candidate is on the same major.minor line as current."""
+    def to_minor(v: str) -> tuple[int, int] | None:
+        parts = v.split(".")
+        try:
+            major = int(parts[0])
+            minor = int(parts[1]) if len(parts) > 1 else 0
+            return (major, minor)
+        except (ValueError, IndexError):
+            return None
+    c = to_minor(candidate)
+    cur = to_minor(current)
+    if c is None or cur is None:
+        return False
+    return c == cur
+
+
 def check_for_security_update(paths: BoxPaths) -> dict[str, Any] | None:
     """Check if a security update is available. Returns release info or None."""
     current = read_installed_version(paths)
@@ -80,6 +97,8 @@ def check_for_security_update(paths: BoxPaths) -> dict[str, Any] | None:
         if not _is_security_release(release):
             continue
         tag = release.get("tag_name", "").lstrip("v")
+        if not _same_minor_line(tag, current_semver):
+            continue
         if _version_newer(tag, current_semver):
             release_url = release.get("html_url", "")
             if not release_url.startswith(f"https://github.com/{GITHUB_REPO}/releases/"):
