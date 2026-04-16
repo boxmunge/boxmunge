@@ -20,6 +20,7 @@ ALLOWED_COMMANDS: set[str] = {
     # Project lifecycle
     "add-git-project", "stage", "promote", "unstage",
     "prod-deploy", "rollback", "remove-project", "diff",
+    "project-add", "project-remove", "project-list",
     # Inbox
     "inbox",
     # Secrets

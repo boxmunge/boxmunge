@@ -34,6 +34,7 @@ from boxmunge.commands.self_test_cmd import cmd_self_test
 from boxmunge.commands.upgrade_cmd import cmd_upgrade
 from boxmunge.commands.auto_update_cmd import cmd_auto_update
 from boxmunge.commands.mcp_serve_cmd import cmd_mcp_serve
+from boxmunge.commands.project_cmd import cmd_project_add, cmd_project_remove, cmd_project_list
 
 # Command registry: name -> handler function
 COMMANDS: dict[str, Callable[[list[str]], None]] = {
@@ -72,6 +73,9 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "upgrade": cmd_upgrade,
     "auto-update": cmd_auto_update,
     "mcp-serve": cmd_mcp_serve,
+    "project-add": cmd_project_add,
+    "project-remove": cmd_project_remove,
+    "project-list": cmd_project_list,
 }
 
 

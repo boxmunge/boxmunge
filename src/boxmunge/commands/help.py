@@ -23,6 +23,9 @@ Project lifecycle:
   rollback <project>      Restore previous deployment
   remove-project <p>      Deregister and clean up (with confirmation)
   diff <project>          Preview what a deploy would change
+  project-add <name>      Register a project name on this server
+  project-remove <name>   Unregister a project name
+  project-list            List registered project names
 
 Inbox:
   inbox [project]         List uploaded bundles
