@@ -43,7 +43,7 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "doctor": cmd_doctor,
     "status": cmd_status,
     "test-alert": cmd_test_alert,
-    "deploy": cmd_deploy,
+    "prod-deploy": cmd_deploy,
     "inbox": cmd_inbox,
     "rollback": cmd_rollback,
     "remove-project": cmd_remove_project,

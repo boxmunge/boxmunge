@@ -32,3 +32,8 @@ class TestCLI:
                 with patch("sys.stderr", new_callable=StringIO):
                     main()
         assert exc_info.value.code == 2
+
+    def test_prod_deploy_registered(self) -> None:
+        from boxmunge.cli import COMMANDS
+        assert "prod-deploy" in COMMANDS
+        assert "deploy" not in COMMANDS

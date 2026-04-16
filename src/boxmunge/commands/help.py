@@ -19,7 +19,7 @@ Project lifecycle:
   stage <project>         Stage from latest source alongside production
   promote <project>       Promote staging to production
   unstage <project>       Tear down staging
-  deploy <project>        Deploy directly to production
+  prod-deploy <project>   Deploy directly to production (skip staging)
   rollback <project>      Restore previous deployment
   remove-project <p>      Deregister and clean up (with confirmation)
   diff <project>          Preview what a deploy would change
@@ -76,13 +76,13 @@ Deploying a bundle-based project:
   2. Upload:  scp -P 922 bundle.tar.gz deploy@<host>:
   3. Verify:  stage <project>    (check staging.<hostname>)
   4. Go live:  promote <project>
-  Or skip staging:  deploy <project>
+  Or skip staging:  prod-deploy <project>
 
 Deploying a git-based project:
   1. First time:  add-git-project <name> <repo-url>
   2. Stage:  stage <project> --ref <branch-or-tag>
   3. Verify, then:  promote <project>
-  Or skip staging:  deploy <project> --ref <tag>
+  Or skip staging:  prod-deploy <project> --ref <tag>
 
 Managing secrets:
   secrets set <project> DB_URL="postgres://..."
