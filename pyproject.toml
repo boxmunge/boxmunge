@@ -1,0 +1,34 @@
+[project]
+name = "boxmunge"
+version = "0.1.2"
+description = "Minimalist, agent-friendly VPS hosting framework"
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+tui = ["textual>=0.50"]
+mcp = ["mcp>=1.0"]
+
+[project.scripts]
+boxmunge = "boxmunge.cli:main"
+boxmunge-shell = "boxmunge.shell:main"
+boxmunge-sftp = "boxmunge.sftp_receive:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+boxmunge = ["tui/*.tcss"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: integration tests requiring Docker",
+]
+testpaths = ["tests"]
+pythonpath = ["src"]

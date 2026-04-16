@@ -1,0 +1,19 @@
+schema_version: 1
+id: 01CANARY00000000000000000
+project: boxmunge-canary
+source: bundle
+hosts:
+  - canary.localhost
+services:
+  web:
+    port: 8080
+    routes:
+      - path: /
+    health: /healthz
+    smoke: boxmunge-scripts/smoke.sh
+backup:
+  type: postgres
+  service: db
+  dump_command: "pg_dump -U canary canarydb"
+  restore_command: "psql -U canary canarydb"
+  retention: 1

@@ -1,0 +1,5 @@
+{
+    email __ADMIN_EMAIL__
+}
+
+import /etc/caddy/sites/*.conf

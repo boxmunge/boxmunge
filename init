@@ -1,0 +1,599 @@
+Build a minimalist, reliable, agent-friendly VPS hosting framework for multiple containerised web projects.
+
+This is not a generic “throw some Docker on a box” task. The goal is to create a small, legible, boring-by-design self-hosting platform that is easy for both humans and AI agents to operate safely, even after long gaps in time.
+
+Core philosophy
+
+* Reliability and clarity beat cleverness.
+* The server should do only what it is explicitly asked to do.
+* No heavyweight PaaS/control plane.
+* No mystery automation originating from third parties.
+* The operating surface should be narrow, documented, and safe for agent use.
+* The system should be understandable 9 months later without archaeology.
+* Multi-project isolation matters: one project’s agent must not be able to clobber another project.
+
+High-level architecture
+
+Implement a roll-your-own VPS hosting setup based on:
+
+* Ubuntu LTS VPS
+* Docker Engine
+* Docker Compose
+* Caddy as the host-level reverse proxy / TLS terminator
+* systemd for host services and recurring tasks where appropriate
+* unattended security patching on the host
+* automatic host reboot if security patching requires it
+* Pushover for alerting
+* a restricted non-root deploy user
+* a small opinionated command-line control layer, tentatively named `boxmunge`
+
+Do not introduce Coolify, Dokploy, CapRover, Kubernetes, Nomad, Swarm, or any comparable higher-level orchestration/control plane unless there is an extremely compelling reason. The aim is minimalism, legibility, and low operator drag.
+
+Primary deliverables
+
+Design and implement a first working version of:
+
+1. Host bootstrap system
+2. Restricted deployment model
+3. Standard project conventions
+4. `boxmunge` control interface
+5. Reverse proxy / TLS integration
+6. Health-checking and alerting
+7. Backup conventions and scripts
+8. Logging conventions
+9. On-server help/documentation so that agents can self-orient safely
+
+Very important first step
+
+Before implementing too much code, define the conventions clearly and commit to them early.
+
+One of the first major tasks should be to design and write the standards in a reusable format that can be dropped into every future project from the beginning.
+
+That means producing things like:
+
+* a project layout convention
+* a project manifest format
+* environment file conventions
+* logging conventions
+* health-check conventions
+* backup conventions
+* reverse-proxy conventions
+* deployment conventions
+* agent operating rules
+
+Treat these conventions as a product in their own right. They are not an afterthought.
+
+Desired outcome
+
+At the end, I want a small framework that works like this:
+
+* I can provision a VPS.
+* I can run one host bootstrap command.
+* The host ends up configured correctly.
+* A restricted deploy user exists.
+* Agents can SSH in as that restricted user using the correct key.
+* Agents can run `boxmunge help` and understand how the system works.
+* Agents can onboard/deploy/update/check projects using standard commands and standard project structure.
+* The public front door is always HTTPS on `:443`, distinguished by hostname.
+* Projects can contain one or multiple containers.
+* Frontend/backend split is fully supported.
+* Backends can remain internal-only and be proxied under paths like `/api/`.
+* Health failures generate Pushover alerts.
+* Host security updates happen automatically.
+* Reboots happen automatically if required.
+* Backups and logs follow a standard scheme.
+* Future me can come back much later and re-understand the system quickly.
+
+Non-goals
+
+* Fancy UI
+* Web dashboard
+* Heavy observability stack on day 1
+* Cluster/multi-node orchestration
+* Autoscaling
+* GitHub-driven autonomous deployment into the box
+* Any architecture that depends on third-party hosted CI having standing destructive access into the server
+
+Deployment philosophy
+
+Use server-pull deployment, not GitHub-push deployment.
+
+Meaning:
+
+* The VPS should pull code from GitHub when explicitly told to do so.
+* GitHub Actions should not be given general authority to SSH into the box and mutate it.
+* Avoid increasing attack surface with external automation that can act independently.
+* Deployments should happen because I or an agent explicitly asked the box to perform them.
+
+GitHub is acceptable as source-of-truth for repositories and possibly for build/test workflows, but not as the primary actor that controls production deployment.
+
+Security / privilege model
+
+This is a major priority.
+
+Implement a restricted non-root deploy user.
+
+Requirements:
+
+* No root login over SSH
+* No password login over SSH
+* SSH runs on a non-default port, likely 322 or 922, configurable
+* Restricted deploy user is the normal operational identity for agents
+* Agents should not use root directly
+* The restricted user should only be able to operate within the intended management surface
+* One project’s agent should not be able to accidentally or casually damage unrelated projects
+* Privilege escalation should be tightly constrained and deliberate
+
+Design a practical model for this. It does not need to be absurdly overengineered, but it should be clearly safer than “all agents get a shell with broad Docker powers”.
+
+Possible directions to evaluate:
+
+* restricted shell or command wrapper
+* carefully scoped sudo rules for specific commands only
+* `boxmunge` as the main blessed interface
+* per-project permission boundaries if practical
+* file ownership layout that discourages cross-project tampering
+
+Be pragmatic: choose something robust and understandable rather than something theoretically perfect but brittle.
+
+Host responsibilities
+
+The host should be responsible for generic shared concerns:
+
+* reverse proxy
+* TLS certificate acquisition and renewal
+* HTTP to HTTPS redirect
+* firewall
+* unattended security patches
+* automatic reboot if required after security updates
+* host-level health monitoring
+* Pushover alert dispatch
+* central operational scripts / `boxmunge`
+* host documentation / manifest
+
+Applications should not each reinvent these concerns.
+
+Reverse proxy / ingress
+
+Use Caddy on the host as the standard ingress layer.
+
+Requirements:
+
+* Caddy owns `:80` and `:443`
+* domain-based routing
+* automatic HTTPS
+* automatic renewal
+* straightforward config model
+* path routing support, such as:
+
+  * `app.example.com/` -> frontend service
+  * `app.example.com/api/*` -> backend service
+* internal services should not be publicly exposed unless explicitly intended
+
+Avoid dynamic magic where possible. Prefer a clear, inspectable configuration model.
+
+Project model
+
+The system must support projects that contain more than one container.
+
+A common project type will be:
+
+* frontend service for UI
+* backend service for API
+* optional DB / cache / worker containers
+* backend listening only on internal-only port/network
+* reverse proxy exposing frontend normally and proxying `/api/` to backend
+
+The system should support this shape cleanly and as a first-class standard.
+
+Standardise how projects are described and laid out.
+
+Project conventions to define early
+
+Design a standard project structure, likely something in this family:
+
+/projects/
+project-name/
+compose.yml
+project.env
+manifest.yml
+caddy.fragment
+checks/
+smoke.sh
+scripts/
+data/
+backups/
+logs/   (if needed locally, though default should likely be container stdout/stderr)
+
+This exact layout is negotiable, but settle on something consistent.
+
+Define a standard manifest format for each project. The manifest should contain enough information for host tooling to understand:
+
+* project name
+* repo URL
+* branch/tag/ref if relevant
+* expected hostname(s)
+* public routes
+* internal services
+* health endpoints
+* backup type / backup policy
+* required secrets/environment files
+* deploy strategy
+* optional migration command
+* optional smoke-test command
+* restart expectations
+
+The manifest should be easy for both humans and agents to read.
+
+`boxmunge` command surface
+
+Implement a small host-side control tool named `boxmunge` (or similar if a better name emerges, but keep it simple and memorable).
+
+Its help text should be excellent, because agents will use it as the primary orientation surface.
+
+At minimum, design and implement commands in this family:
+
+* `boxmunge help`
+* `boxmunge init-host`
+* `boxmunge doctor`
+* `boxmunge add-project`
+* `boxmunge deploy <project>`
+* `boxmunge update <project>`
+* `boxmunge check <project>`
+* `boxmunge logs <project>`
+* `boxmunge backup <project>`
+* `boxmunge list-projects`
+* `boxmunge status`
+* `boxmunge rollback <project>` if feasible
+* `boxmunge help <command>`
+
+Requirements:
+
+* Human-readable output
+* Predictable behaviour
+* Good error messages
+* Safe defaults
+* Dry-run mode where sensible
+* Strong inline help
+* Designed for agent use as much as for human use
+
+Assume that future agents may know nothing except how to read `boxmunge help`.
+
+Agent-first ergonomics
+
+This is important.
+
+The operating model should be intentionally friendly to AI agents.
+
+That means:
+
+* put the truth in code and help text, not just in my memory
+* the system should self-describe
+* onboarding should be possible by having an agent SSH in, read local documentation/help, and proceed safely
+* commands should be deterministic and explicit
+* directory names, file names, and conventions should be boring and obvious
+* avoid hidden state
+* avoid “magic” generated files with unclear provenance unless strictly necessary
+* provide one or more local docs files that explain the architecture and operating model
+
+Consider creating host-level documentation such as:
+
+* `/opt/box/README.md`
+* `/opt/box/ARCHITECTURE.md`
+* `/opt/box/OPERATIONS.md`
+* `/opt/box/PROJECT_TEMPLATE/`
+
+These should explain:
+
+* what the box is for
+* how projects are structured
+* how to deploy
+* how to inspect logs
+* how backups work
+* how health checks work
+* how reverse proxy config is managed
+* what agents are allowed to do
+* how to recover from common failure modes
+
+Logging standards
+
+Define standard logging conventions.
+
+Principles:
+
+* keep it simple
+* prefer container stdout/stderr where practical
+* use Docker logging with sensible rotation
+* use journald/systemd logs for host services
+* provide a standard `boxmunge logs <project>` path for viewing project logs
+* make it easy to inspect host/service logs too
+
+Do not start with a heavy centralised logging stack unless there is a clear immediate need.
+
+Backup standards
+
+Define standard backup conventions from day one.
+
+Requirements:
+
+* standard per-project backup behaviour
+* nightly DB dumps if a project contains a database
+* clear policy for persistent volumes / application data
+* off-box backup destination supported
+* simple restore story
+* documented retention policy
+* easy invocation from host tooling
+* avoid relying on undocumented one-off backup approaches
+
+At minimum, create a convention that can express:
+
+* no backup needed
+* volume backup needed
+* database dump needed
+* both needed
+
+Provide enough structure that every new project can slot into the backup system without reinventing it.
+
+Health checking
+
+Define a standard and opinionated health-check scheme.
+
+Requirements:
+
+* all long-running services should have health checks where practical
+* each project should expose enough metadata/config for host-side checking
+* host-side checker should be able to verify:
+
+  * Docker/Compose service state
+  * container health state
+  * public HTTP reachability via Caddy
+  * optional smoke-test success
+* health failures should be surfaced in a standard way
+
+A good model would be:
+
+* Docker health checks for service liveness/readiness where appropriate
+* a project-level smoke test script, e.g. `checks/smoke.sh`
+* `boxmunge check <project>` invokes standard checks
+* host scheduler periodically performs checks and records state
+
+Alerting
+
+Use Pushover for notifications.
+
+Requirements:
+
+* alert on sustained health-check failures
+* avoid spam
+* suppress duplicate repeated alerts while state remains failed
+* alert again on recovery
+* likely alert only after N consecutive failures
+* make thresholds configurable but sane by default
+
+Pushover integration should be a host/shared concern, not something every individual app implements separately.
+
+Host patching and reboot policy
+
+Implement automated host patching with a security-first posture.
+
+Requirements:
+
+* unattended security updates enabled
+* automatic installation of security patches
+* automatic reboot if required after patching
+* reboot window configurable
+* brief downtime is acceptable if needed for security
+* any such policy should be documented clearly
+
+Assume the preference is:
+“better a brief outage than being hacked because the box was left unpatched”.
+
+Firewall / SSH / brute force handling
+
+Firewall should reflect that SSH is not on port 22.
+
+Requirements:
+
+* only open the required ports:
+
+  * chosen SSH port (likely 322 or 922)
+  * 80
+  * 443
+* no root SSH login
+* no password SSH login
+* consider fail2ban mainly to reduce log noise, but configure it pragmatically
+
+Important nuance on fail2ban:
+
+* do not set absurdly long bans
+* trigger threshold should be somewhat generous
+* unban period should be relatively short
+* do not make it too easy for an agent using the wrong key a few times to lock us out for days
+
+The goal is noise reduction and mild abuse resistance, not self-inflicted denial of service.
+
+Git / repo access model
+
+Use server-pull deployment.
+
+Design for:
+
+* server-side deploy keys or equivalent read-only repo access
+* explicit per-project source definition
+* local clone/update under controlled directories
+* no need for GitHub to have standing remote execution privileges on the box
+
+Support a flow like:
+
+* project is registered with repo URL
+* host stores/uses repo access credentials appropriately
+* `boxmunge deploy project-name` or `boxmunge update project-name` pulls from the configured repo/ref and performs the deployment
+
+Project template
+
+Produce a reusable project template early.
+
+This template should include the standard files and conventions needed for a new project to slot cleanly into the platform.
+
+At minimum, likely template contents include:
+
+* `compose.yml`
+* `manifest.yml`
+* `project.env.example`
+* `checks/smoke.sh`
+* any proxy fragment conventions if needed
+* README for project deployment conventions
+
+The template should cover the common frontend/backend split app shape.
+
+Example target pattern:
+
+* frontend container
+* backend container
+* backend internal-only
+* `/api/` proxied to backend
+* root path proxied to frontend
+
+Implementation approach
+
+Work iteratively.
+
+Suggested phases:
+
+Phase 1: conventions and architecture
+
+* Decide the directory structure
+* Decide the manifest format
+* Decide how Caddy config is generated/managed
+* Decide how `boxmunge` is structured
+* Decide privilege model for deploy user
+* Decide backup/logging/health conventions
+* Write these decisions down clearly
+
+Phase 2: host bootstrap
+
+* Build the host bootstrap script(s)
+* Install/configure Docker, Compose, Caddy, firewall, unattended upgrades
+* Create restricted deploy user
+* Set up base directories
+* Install `boxmunge`
+* Install host docs
+
+Phase 3: single-project happy path
+
+* Create one sample project template
+* Make sure `boxmunge add-project` and `boxmunge deploy` work
+* Verify HTTPS routing works
+* Verify frontend/backend `/api/` routing works
+* Verify health checks work
+* Verify logs work
+* Verify backup command works
+
+Phase 4: monitoring / alerting / operational polish
+
+* periodic host health runner
+* Pushover integration
+* `boxmunge doctor`
+* improve errors/help/docs
+* confirm reboot/patch behaviour
+
+Phase 5: hardening / recovery / polish
+
+* test reboot persistence
+* test restore path
+* test agent onboarding from scratch using only SSH + local docs/help
+* verify one project cannot casually clobber another
+* tighten rough edges
+
+Testing expectations
+
+Please do not just write code that “looks plausible”.
+Exercise it.
+
+Test at least:
+
+* fresh host bootstrap
+* adding a sample project
+* deploying a sample frontend/backend project
+* TLS and hostname routing
+* `/api/` backend path proxying
+* health check success path
+* simulated health failure alert path
+* backup path
+* reboot persistence
+* log retrieval
+* helpfulness of local docs/help for a fresh operator/agent
+
+Design priorities in order
+
+1. Reliability
+2. Legibility / understandability
+3. Safe agent operability
+4. Minimalism
+5. Security
+6. Ease of adding new projects
+7. Nice operator ergonomics
+
+If there is tension between cleverness and clarity, choose clarity.
+
+Preferred implementation style
+
+* simple shell where shell is the right tool
+* use Python if it materially improves maintainability for `boxmunge`
+* avoid sprawling frameworks
+* avoid overengineering
+* keep dependencies modest
+* prefer explicit config files over hidden state
+
+I would rather have a smaller, very understandable implementation than an ambitious but opaque one.
+
+Concrete questions to resolve during design
+
+Please explicitly think through and decide:
+
+* How should the restricted deploy user actually be constrained?
+* Should `boxmunge` be shell or Python?
+* How should project manifests be validated?
+* How should Caddy config be generated or assembled?
+* How should we model project registration?
+* How should deploy keys be stored and rotated?
+* What should backups target by default?
+* How should rollback work, if supported?
+* How should health state be recorded to avoid repeated alert spam?
+* How should host docs be installed and maintained?
+* How can we make agent misuse less likely while keeping things usable?
+
+Output expectations
+
+I want the repo/work produced by the agent to include:
+
+* source code
+* bootstrap scripts
+* `boxmunge`
+* a reusable project template
+* host documentation
+* architecture notes
+* explicit conventions/spec docs
+* example sample project
+* setup instructions
+* operational instructions
+* notes on remaining risks / future improvements
+
+Please do not bury the standards in implementation details. Surface them clearly.
+
+Tone / mindset
+
+Think like you are designing a tiny internal platform for a careful engineer who values calm, explicit systems and dislikes “mystery magical foo”.
+
+The right end state should feel:
+
+* boring
+* robust
+* hard to misunderstand
+* easy to recover
+* easy for an agent to operate by reading local help/docs
+* safer than “just give every agent a powerful shell and hope”
+
+End goal summary
+
+Create a minimalist, self-hosted, agent-friendly VPS platform for multi-project Docker/Compose web hosting, fronted by Caddy on HTTPS, using server-pull deployment, a restricted deploy user, standard project conventions, host-managed alerts/backups/logging/patching, and a strong local documentation/help surface so future agents and future humans can operate it confidently.

@@ -1,0 +1,12 @@
+services:
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    env_file:
+      - project.env
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file:
+      - project.env

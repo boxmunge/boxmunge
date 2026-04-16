@@ -1,0 +1,25 @@
+# system/compose.yml
+# boxmunge-system container — managed by boxmunge platform
+# Do not edit directly.
+
+services:
+  system:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: boxmunge-system
+    restart: unless-stopped
+    volumes:
+      # Backup key (read-only)
+      - ${BOXMUNGE_CONFIG:-/opt/boxmunge/config}/backup.key:/config/backup.key:ro
+      # Project backups directory (read-write for encrypt/decrypt)
+      - ${BOXMUNGE_PROJECTS:-/opt/boxmunge/projects}:/projects
+      # Rclone config (read-only, if exists)
+      - ${RCLONE_CONFIG:-/dev/null}:/config/rclone.conf:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

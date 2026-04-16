@@ -1,0 +1,24 @@
+# boxmunge host configuration
+# Installed to /opt/boxmunge/config/boxmunge.yml during init-host.
+
+hostname: __HOSTNAME__
+ssh_port: 922
+admin_email: __ADMIN_EMAIL__
+
+pushover:
+  user_key: ""
+  app_token: ""
+
+backup_remote: ""
+
+health:
+  check_interval_minutes: 5
+  alert_threshold: 3
+
+reboot:
+  auto_reboot: true
+  reboot_window: "04:00"
+
+logging:
+  docker_max_size: "50m"
+  docker_max_file: 5

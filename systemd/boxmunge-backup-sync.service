@@ -1,0 +1,10 @@
+[Unit]
+Description=boxmunge backup sync to remote
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+User=deploy
+ExecStart=/opt/boxmunge/bin/boxmunge backup-sync
+StandardOutput=journal
+StandardError=journal

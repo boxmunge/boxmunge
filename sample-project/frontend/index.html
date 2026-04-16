@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html>
+<head><title>Sample App</title></head>
+<body>
+  <h1>Sample boxmunge project</h1>
+  <p>Frontend is running.</p>
+  <script>
+    fetch('/api/health')
+      .then(r => r.json())
+      .then(d => document.body.innerHTML += '<p>Backend: ' + d.status + '</p>');
+  </script>
+</body>
+</html>

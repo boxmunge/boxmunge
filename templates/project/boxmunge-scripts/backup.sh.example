@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Backup script for __PROJECT_NAME__
+#
+# Output the backup data to stdout. boxmunge handles compression,
+# encryption, and storage.
+#
+# Example: PostgreSQL dump
+# docker compose exec -T db pg_dump -U "${POSTGRES_USER:-app}" appdb
+
+set -euo pipefail
+
+echo "ERROR: backup.sh not configured" >&2
+exit 1

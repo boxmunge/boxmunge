@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Run tests
+        run: |
+          pip install -e '.[tui]'
+          pip install pytest
+          python -m pytest tests/ --ignore=tests/integration -v
+
+      - name: Build installer
+        run: make installer
+
+      - name: Generate SBOM
+        run: |
+          pip install cyclonedx-bom
+          bash scripts/generate-sbom.sh
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign artifacts
+        run: |
+          cosign sign-blob --yes \
+            --output-signature dist/boxmunge-installer.sig \
+            dist/boxmunge-installer.sh
+          sha256sum dist/boxmunge-installer.sh > dist/SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/boxmunge-installer.sh
+            dist/boxmunge-installer.sig
+            dist/SHA256SUMS
+            dist/sbom.json
+          generate_release_notes: true

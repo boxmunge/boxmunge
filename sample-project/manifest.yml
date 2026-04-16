@@ -1,0 +1,28 @@
+id: 01KN107SD5WQTA9DC8EXKFF2NP
+project: sample
+source: bundle
+hosts:
+- sample.localhost
+services:
+  frontend:
+    type: frontend
+    port: 8080
+    routes:
+    - path: /
+  backend:
+    type: backend
+    port: 9090
+    internal: true
+    routes:
+    - path: /api/*
+    health:
+      endpoint: /api/health
+      interval: 30s
+backup:
+  type: none
+deploy:
+  pre_deploy: ''
+  smoke_test: boxmunge-scripts/smoke.sh
+  snapshot_before_deploy: false
+env_files:
+- project.env

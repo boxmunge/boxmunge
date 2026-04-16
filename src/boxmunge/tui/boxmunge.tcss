@@ -1,0 +1,88 @@
+/* boxmunge TUI theme */
+
+Screen {
+    background: $surface;
+}
+
+#project-table {
+    height: 1fr;
+}
+
+DataTable {
+    height: 1fr;
+}
+
+DataTable > .datatable--cursor {
+    background: #1e3a2e;
+    color: white;
+}
+
+#host-bar {
+    dock: bottom;
+    height: 1;
+    background: $surface-darken-1;
+    color: $text-muted;
+    padding: 0 1;
+}
+
+#project-header {
+    height: 3;
+    padding: 0 1;
+    background: $surface-darken-1;
+}
+
+#project-header .project-name {
+    text-style: bold;
+    color: #7ec8e3;
+}
+
+.status-ok {
+    color: #4ade80;
+}
+
+.status-failing {
+    color: #fbbf24;
+}
+
+.status-critical {
+    color: #f87171;
+}
+
+.status-unknown {
+    color: #888888;
+}
+
+#detail-content {
+    height: 1fr;
+}
+
+/* Disable TabPane's own scrollbar — inner widgets handle scrolling */
+TabPane {
+    overflow-y: hidden;
+}
+
+#log-view {
+    height: 1fr;
+}
+
+RichLog {
+    height: 1fr;
+}
+
+/* DataTables in detail view: auto-height, no individual scroll */
+#services-table, #backups-table {
+    height: auto;
+    max-height: 50%;
+}
+
+VerticalScroll {
+    height: 1fr;
+}
+
+#action-bar {
+    dock: bottom;
+    height: 1;
+    background: $surface-darken-1;
+    color: $text-muted;
+    padding: 0 1;
+}

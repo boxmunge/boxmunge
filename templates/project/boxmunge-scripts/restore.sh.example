@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Restore script for __PROJECT_NAME__
+#
+# Read backup data from stdin. boxmunge handles decryption and
+# extraction before piping to this script.
+#
+# Example: PostgreSQL restore
+# docker compose exec -T db psql -U "${POSTGRES_USER:-app}" appdb
+
+set -euo pipefail
+
+echo "ERROR: restore.sh not configured" >&2
+exit 1

@@ -1,0 +1,18 @@
+boxmunge
+Copyright 2026 boxmunge contributors
+
+This product includes software developed by the boxmunge project
+(https://github.com/boxmunge/boxmunge).
+
+Licensed under the Apache License, Version 2.0.
+
+This product bundles or depends on the following third-party components:
+
+- age (https://github.com/FiloSottile/age) — BSD 3-Clause License
+- rclone (https://rclone.org/) — MIT License
+- Caddy (https://caddyserver.com/) — Apache License 2.0
+- CrowdSec (https://crowdsec.net/) — MIT License
+- PostgreSQL (https://www.postgresql.org/) — PostgreSQL License
+- PyYAML (https://pyyaml.org/) — MIT License
+- Textual (https://textual.textualize.io/) — MIT License
+- Docker (https://www.docker.com/) — Apache License 2.0

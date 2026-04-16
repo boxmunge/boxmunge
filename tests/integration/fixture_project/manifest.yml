@@ -1,0 +1,19 @@
+schema_version: 1
+id: 01INTEGRATIONTEST000000000
+project: inttest
+source: bundle
+hosts:
+  - inttest.localhost
+services:
+  web:
+    port: 8080
+    routes:
+      - path: /
+    health: /healthz
+    smoke: boxmunge-scripts/smoke.sh
+backup:
+  type: postgres
+  service: db
+  dump_command: "pg_dump -U testuser testdb"
+  restore_command: "psql -U testuser testdb"
+  retention: 3

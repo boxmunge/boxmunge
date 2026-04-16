@@ -1,0 +1,10 @@
+[Unit]
+Description=boxmunge nightly backup
+After=docker.service
+
+[Service]
+Type=oneshot
+User=deploy
+ExecStart=/opt/boxmunge/bin/boxmunge backup-all
+StandardOutput=journal
+StandardError=journal

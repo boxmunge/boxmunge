@@ -1,0 +1,27 @@
+# Virtual environments
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.pytest_cache/
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Superpowers brainstorm sessions
+.superpowers/
+
+# Internal design docs (specs and plans from development sessions)
+docs/superpowers/

@@ -1,0 +1,11 @@
+[Unit]
+Description=boxmunge security auto-update check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/boxmunge/bin/boxmunge auto-update
+User=root
+StandardOutput=journal
+StandardError=journal

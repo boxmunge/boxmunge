@@ -1,0 +1,41 @@
+# boxmunge project manifest
+# See /opt/boxmunge/docs/PROJECT_CONVENTIONS.md for full documentation.
+
+project: __PROJECT_NAME__
+repo: git@github.com:YOUR_ORG/__PROJECT_NAME__.git
+ref: main
+
+hosts:
+  - __PROJECT_NAME__.example.com
+
+services:
+  frontend:
+    type: frontend
+    port: 3000
+    routes:
+      - path: /
+  # backend:
+  #   type: backend
+  #   port: 8000
+  #   internal: true
+  #   routes:
+  #     - path: /api/*
+  #   health:
+  #     endpoint: /api/health
+  #     interval: 30s
+
+backup:
+  type: none
+  # Uncomment and configure if backups are needed:
+  # type: db-dump           # none | volume | db-dump | both
+  # dump_command: "boxmunge-scripts/backup.sh"
+  # restore_command: "boxmunge-scripts/restore.sh"
+  # retention: 7
+
+deploy:
+  pre_deploy: ""
+  smoke_test: "boxmunge-scripts/smoke.sh"
+  snapshot_before_deploy: true
+
+env_files:
+  - project.env
