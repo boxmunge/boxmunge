@@ -68,6 +68,8 @@ def parse_shell_command(command_string: str) -> tuple[str, list[str]]:
 
     Returns ("", []) for empty/whitespace input.
     Returns ("scp", args) for scp protocol commands.
+    Silently strips a leading 'boxmunge' prefix so that
+    'boxmunge help' and 'help' are equivalent.
     """
     stripped = command_string.strip()
     if not stripped:
@@ -77,6 +79,12 @@ def parse_shell_command(command_string: str) -> tuple[str, list[str]]:
         parts = shlex.split(stripped)
     except ValueError:
         parts = stripped.split()
+
+    # Strip leading 'boxmunge' so agents/users can type either form
+    if parts and parts[0] == "boxmunge":
+        parts = parts[1:]
+    if not parts:
+        return "", []
 
     return parts[0], parts[1:]
 
