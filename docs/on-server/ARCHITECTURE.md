@@ -13,12 +13,12 @@ Key features:
 - **Restricted deploy shell** -- agents connect as `deploy` and can only run boxmunge commands; no filesystem browsing, no raw docker, no shell utilities
 - **Standard project layout and manifest** -- every project declares its services, routing, backup strategy, and health checks in `manifest.yml`
 - **Staging environment** -- `stage` deploys alongside production at `staging.<hostname>` for verification before `promote`
-- **CLI-managed secrets** -- `boxmunge secrets` manages project-level and host-level secrets; no manual file editing
+- **CLI-managed secrets** -- `secrets` manages project-level and host-level secrets; no manual file editing
 - **Caddy reverse proxy in Docker** -- automatic HTTPS via Let's Encrypt, containerised for blast-radius containment
 - **Python CLI** -- `boxmunge` command covers the full lifecycle: deploy, stage, promote, backup, restore, health check
 - **Encrypted backups with mandatory restore** -- all backups encrypted with age; restore script required if backup type is not `none`
 - **Health checking with Pushover alerting** -- three-layer checks (Docker, HTTP, smoke test) with graduated alert logic
-- **On-server docs via agent-help** -- documentation accessible via `boxmunge agent-help <topic>` so agents can orient without filesystem access
+- **On-server docs via agent-help** -- documentation accessible via `agent-help <topic>` so agents can orient without filesystem access
 
 ---
 
@@ -61,7 +61,7 @@ Key features:
     boxmunge.log
 ```
 
-For project-level conventions (manifest format, script contracts, env file conventions), run `boxmunge agent-help conventions`.
+For project-level conventions (manifest format, script contracts, env file conventions), run `agent-help conventions`.
 
 ---
 
@@ -99,7 +99,7 @@ When a project is staged, its containers run alongside production on a separate 
 
 ### Config Generation
 
-`boxmunge deploy` (and `boxmunge stage`) reads the `services` block in `manifest.yml` and generates two files:
+`deploy` (and `stage`) reads the `services` block in `manifest.yml` and generates two files:
 
 1. Caddy site config -- reverse proxy rules, ordered by route specificity
 2. `compose.boxmunge.yml` -- Docker Compose overlay that attaches routable services to `boxmunge-proxy` with their aliases, injects env_files, and applies resource limits
@@ -121,7 +121,7 @@ The `deploy` user runs a restricted boxmunge shell. Agents connect as `deploy`.
 - Can **only** run `boxmunge` commands -- no `ls`, `cat`, `cd`, `docker`, or any other shell command
 - Cannot browse the filesystem or read files directly
 - Cannot run `sudo`
-- Documentation is accessed via `boxmunge agent-help <topic>`, not by reading files
+- Documentation is accessed via `agent-help <topic>`, not by reading files
 
 This is the complete interface for agents. There is nothing else.
 
@@ -166,7 +166,7 @@ boxmunge supports two project sources, declared in `manifest.yml` via the `sourc
 
 ### Deploy Steps
 
-`boxmunge deploy <project>` executes these steps in order:
+`deploy <project>` executes these steps in order:
 
 1. Resolve source -- locate bundle in inbox or pull from git repo
 2. Validate manifest -- schema check, required fields (`id`, `source`, `project`, `hosts`, services), backup/restore pairing
@@ -183,10 +183,10 @@ If any step fails, the deploy stops and reports the failure. No automatic rollba
 
 ### Staging Flow
 
-`boxmunge stage <project>` follows the same steps but deploys to the staging environment at `staging.<hostname>`. After verification:
+`stage <project>` follows the same steps but deploys to the staging environment at `staging.<hostname>`. After verification:
 
-- `boxmunge promote <project>` -- tears down staging, deploys to production
-- `boxmunge unstage <project>` -- tears down staging, production unchanged
+- `promote <project>` -- tears down staging, deploys to production
+- `unstage <project>` -- tears down staging, production unchanged
 
 Staging state is tracked under `state/staging/`.
 
@@ -194,10 +194,10 @@ Staging state is tracked under `state/staging/`.
 
 ## Secrets Storage
 
-Secrets are managed via `boxmunge secrets` and stored in env files:
+Secrets are managed via `secrets` and stored in env files:
 
 - **Project-level secrets** -- stored in `projects/<project>/secrets.env`, injected into containers via the compose overlay
-- **Host-level secrets** -- stored in `config/secrets/`, available to all projects, managed with `boxmunge secrets --host`
+- **Host-level secrets** -- stored in `config/secrets/`, available to all projects, managed with `secrets --host`
 
 Secrets are never edited manually. The CLI handles file creation, permissions, and format.
 
@@ -258,7 +258,7 @@ Checks run in three layers:
 | 1 | Warning/error | Alert after N consecutive failures (default 3); re-alert if message changes |
 | 2 | Critical failure | Alert immediately, stop containers, enter `critical_stopped` state |
 
-A project in `critical_stopped` state will not restart automatically. It requires an explicit `boxmunge deploy` to recover.
+A project in `critical_stopped` state will not restart automatically. It requires an explicit `deploy` to recover.
 
 ---
 
@@ -268,15 +268,15 @@ Recurring operations run via systemd timers:
 
 | Timer | Schedule | Command |
 |-------|----------|---------|
-| `boxmunge-health.timer` | Every 5 minutes | `boxmunge check-all` |
-| `boxmunge-backup.timer` | Daily at 02:00 | `boxmunge backup-all` |
-| `boxmunge-backup-sync.timer` | Daily at 03:00 | `boxmunge backup-sync` |
+| `boxmunge-health.timer` | Every 5 minutes | `check-all` |
+| `boxmunge-backup.timer` | Daily at 02:00 | `backup-all` |
+| `boxmunge-backup-sync.timer` | Daily at 03:00 | `backup-sync` |
 
 All timers use `Persistent=true` so a missed run (e.g., server was rebooted) executes on next start rather than being silently skipped.
 
 Host security patching is handled by unattended-upgrades, configured to install security updates automatically and reboot during a configurable maintenance window (default 04:00).
 
-`boxmunge doctor` verifies all timers are active and enabled as part of its host health check.
+`doctor` verifies all timers are active and enabled as part of its host health check.
 
 ---
 
@@ -293,9 +293,9 @@ If the system container is not running, boxmunge falls back to host-level tool e
 
 ## Platform Validation
 
-- `boxmunge self-test` — deploys a canary project, exercises backup/restore, tears down. Proves the pipeline works.
-- `boxmunge health` — non-destructive audit of Docker, Caddy, containers, permissions, config drift, hardening state, and recent errors.
-- `boxmunge upgrade` — stash current state, migrate manifests, regenerate configs, restart, self-test, health check.
+- `self-test` — deploys a canary project, exercises backup/restore, tears down. Proves the pipeline works.
+- `health` — non-destructive audit of Docker, Caddy, containers, permissions, config drift, hardening state, and recent errors.
+- `upgrade` — stash current state, migrate manifests, regenerate configs, restart, self-test, health check.
 
 ---
 

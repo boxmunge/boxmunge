@@ -2,7 +2,7 @@
 
 Step-by-step instructions for common tasks on a boxmunge-managed server.
 
-All operations use boxmunge commands. For detailed help on any command, run `boxmunge help <command>`.
+All operations use boxmunge commands. For detailed help on any command, run `help <command>`.
 
 ---
 
@@ -27,31 +27,31 @@ The standard workflow for deploying a project from a bundle.
 3. Verify the bundle arrived:
 
    ```
-   boxmunge inbox
+   inbox
    ```
 
 4. Stage the project (deploys to `staging.<hostname>`):
 
    ```
-   boxmunge stage myapp
+   stage myapp
    ```
 
 5. Verify the staged deployment works, then promote to production:
 
    ```
-   boxmunge promote myapp
+   promote myapp
    ```
 
    Or, if staging reveals problems, abandon it:
 
    ```
-   boxmunge unstage myapp
+   unstage myapp
    ```
 
 To skip staging and deploy directly to production:
 
 ```
-boxmunge deploy myapp
+deploy myapp
 ```
 
 ---
@@ -63,26 +63,26 @@ For projects hosted in a git repository.
 1. Register the project:
 
    ```
-   boxmunge add-git-project myapp --repo https://github.com/example/myapp.git
+   add-git-project myapp --repo https://github.com/example/myapp.git
    ```
 
 2. Stage or deploy:
 
    ```
-   boxmunge stage myapp
-   boxmunge promote myapp
+   stage myapp
+   promote myapp
    ```
 
    Or deploy directly:
 
    ```
-   boxmunge deploy myapp
+   deploy myapp
    ```
 
 Deploy a specific git ref:
 
 ```
-boxmunge deploy myapp --ref v1.2.3
+deploy myapp --ref v1.2.3
 ```
 
 ---
@@ -94,7 +94,7 @@ Staging deploys a project alongside production at `staging.<hostname>`, allowing
 Stage the project:
 
 ```
-boxmunge stage myapp
+stage myapp
 ```
 
 After verifying the staging environment:
@@ -102,13 +102,13 @@ After verifying the staging environment:
 - **Promote** -- tears down staging and deploys to production:
 
   ```
-  boxmunge promote myapp
+  promote myapp
   ```
 
 - **Unstage** -- tears down staging, production unchanged:
 
   ```
-  boxmunge unstage myapp
+  unstage myapp
   ```
 
 Staging is useful for:
@@ -124,14 +124,14 @@ Upload a new bundle and stage or deploy:
 
 ```
 scp -P 922 myapp-v2.tar.gz deploy@<host>:
-boxmunge stage myapp
-boxmunge promote myapp
+stage myapp
+promote myapp
 ```
 
 For git-based projects, deploy pulls the latest code:
 
 ```
-boxmunge deploy myapp
+deploy myapp
 ```
 
 ---
@@ -141,7 +141,7 @@ boxmunge deploy myapp
 Before deploying, preview what would change:
 
 ```
-boxmunge diff myapp
+diff myapp
 ```
 
 This shows differences between the current production state and the pending bundle or git ref, without making any changes.
@@ -155,10 +155,10 @@ Secrets are managed via the CLI. Two scopes are available:
 ### Project-level secrets
 
 ```
-boxmunge secrets set myapp DATABASE_URL postgres://...
-boxmunge secrets get myapp DATABASE_URL
-boxmunge secrets list myapp
-boxmunge secrets unset myapp OLD_KEY
+secrets set myapp DATABASE_URL postgres://...
+secrets get myapp DATABASE_URL
+secrets list myapp
+secrets unset myapp OLD_KEY
 ```
 
 Project secrets are stored in `secrets.env` and injected into the project's containers.
@@ -168,10 +168,10 @@ Project secrets are stored in `secrets.env` and injected into the project's cont
 Shared across all projects on the host:
 
 ```
-boxmunge secrets set --host PUSHOVER_TOKEN abc123
-boxmunge secrets get --host PUSHOVER_TOKEN
-boxmunge secrets list --host
-boxmunge secrets unset --host OLD_KEY
+secrets set --host PUSHOVER_TOKEN abc123
+secrets get --host PUSHOVER_TOKEN
+secrets list --host
+secrets unset --host OLD_KEY
 ```
 
 **Note:** `project.env` ships with the bundle and contains non-secret configuration. `secrets.env` is managed by the CLI and contains credentials. Do not confuse the two.
@@ -185,13 +185,13 @@ Bundles uploaded via scp land in the inbox automatically.
 List bundles in the inbox:
 
 ```
-boxmunge inbox
+inbox
 ```
 
 Remove old bundles:
 
 ```
-boxmunge inbox clean
+inbox clean
 ```
 
 ---
@@ -201,25 +201,25 @@ boxmunge inbox clean
 Run all health checks for one project (Docker container health, HTTP endpoint, smoke test):
 
 ```
-boxmunge check myapp
+check myapp
 ```
 
 Run health checks for every registered project:
 
 ```
-boxmunge check-all
+check-all
 ```
 
 View a dashboard of all projects and their current status:
 
 ```
-boxmunge status
+status
 ```
 
 Get the same dashboard as machine-parseable JSON:
 
 ```
-boxmunge status --json
+status --json
 ```
 
 Health checks also run automatically every 5 minutes via a systemd timer. Failures trigger Pushover alerts after the configured threshold.
@@ -231,31 +231,31 @@ Health checks also run automatically every 5 minutes via a systemd timer. Failur
 View recent logs for a project (all services):
 
 ```
-boxmunge logs myapp
+logs myapp
 ```
 
 View logs for a specific service within a project:
 
 ```
-boxmunge logs myapp backend
+logs myapp backend
 ```
 
 Show more lines (default is typically 100):
 
 ```
-boxmunge logs myapp --tail 500
+logs myapp --tail 500
 ```
 
 Live-tail logs (stream new output, press Ctrl-C to stop):
 
 ```
-boxmunge logs myapp --follow
+logs myapp --follow
 ```
 
 View the boxmunge operational audit log:
 
 ```
-boxmunge logs --boxmunge
+logs --boxmunge
 ```
 
 The operational log records every boxmunge action with timestamp, level, project, and message. It is the first place to check when something happened unexpectedly.
@@ -267,37 +267,37 @@ The operational log records every boxmunge action with timestamp, level, project
 Back up a single project (dump, compress, encrypt, store locally):
 
 ```
-boxmunge backup myapp
+backup myapp
 ```
 
 Back up all configured projects:
 
 ```
-boxmunge backup-all
+backup-all
 ```
 
 Sync all local encrypted backups to the configured off-box remote:
 
 ```
-boxmunge backup-sync
+backup-sync
 ```
 
 Restore from the most recent backup:
 
 ```
-boxmunge restore myapp
+restore myapp
 ```
 
 Restore from a specific snapshot:
 
 ```
-boxmunge restore myapp myapp-2026-03-30T020000.tar.gz.age
+restore myapp myapp-2026-03-30T020000.tar.gz.age
 ```
 
 Verify that a backup restores successfully (non-destructive):
 
 ```
-boxmunge test-restore myapp
+test-restore myapp
 ```
 
 ---
@@ -307,7 +307,7 @@ boxmunge test-restore myapp
 Undo the last deploy -- restore the pre-deploy snapshot and redeploy the previous state:
 
 ```
-boxmunge rollback myapp
+rollback myapp
 ```
 
 You will be shown what snapshot will be restored and asked to confirm before anything changes.
@@ -319,25 +319,25 @@ You will be shown what snapshot will be restored and asked to confirm before any
 Verify the host is correctly configured:
 
 ```
-boxmunge doctor
+doctor
 ```
 
 Send a test Pushover notification:
 
 ```
-boxmunge test-alert
+test-alert
 ```
 
 Show active Caddy sites and TLS certificate expiry dates:
 
 ```
-boxmunge caddy-status
+caddy-status
 ```
 
 List all registered projects with brief status:
 
 ```
-boxmunge list-projects
+list-projects
 ```
 
 ---
@@ -349,20 +349,20 @@ boxmunge list-projects
 Check the project logs for error output:
 
 ```
-boxmunge logs myapp
-boxmunge logs myapp backend
+logs myapp
+logs myapp backend
 ```
 
 Validate the manifest and compose file for problems:
 
 ```
-boxmunge validate myapp
+validate myapp
 ```
 
 Preview the current project state:
 
 ```
-boxmunge diff myapp
+diff myapp
 ```
 
 If deeper investigation is needed (inspecting files, Docker state, system config), this requires the **supervisor** user.
@@ -374,20 +374,20 @@ If deeper investigation is needed (inspecting files, Docker state, system config
 Check Caddy's status and active sites:
 
 ```
-boxmunge caddy-status
+caddy-status
 ```
 
 Check the project's health and routing config:
 
 ```
-boxmunge check myapp
-boxmunge validate myapp
+check myapp
+validate myapp
 ```
 
 If the config looks stale, redeploy to regenerate:
 
 ```
-boxmunge deploy myapp --no-snapshot
+deploy myapp --no-snapshot
 ```
 
 If deeper Caddy investigation is needed (container logs, config file inspection), this requires the **supervisor** user.
@@ -401,19 +401,19 @@ This state means the smoke test exited with code 2 -- a critical failure that ca
 Check the dashboard to confirm the state:
 
 ```
-boxmunge status
+status
 ```
 
 Check logs from just before the containers were stopped:
 
 ```
-boxmunge logs myapp --tail 200
+logs myapp --tail 200
 ```
 
 Once you have identified and fixed the underlying issue, redeploy:
 
 ```
-boxmunge deploy myapp
+deploy myapp
 ```
 
 ---
@@ -423,10 +423,10 @@ boxmunge deploy myapp
 Run doctor to see the current list of issues:
 
 ```
-boxmunge doctor
+doctor
 ```
 
-Each item in the output is labelled OK, WARN, or FAIL with a description. Address each FAIL, then each WARN, then re-run `boxmunge doctor`.
+Each item in the output is labelled OK, WARN, or FAIL with a description. Address each FAIL, then each WARN, then re-run `doctor`.
 
 Issues requiring system-level investigation or repair (systemd timers, file permissions, Caddy container state) require the **supervisor** user.
 
@@ -437,7 +437,7 @@ Issues requiring system-level investigation or repair (systemd timers, file perm
 **Option 1: Rollback** (fastest if the previous state was good)
 
 ```
-boxmunge rollback myapp
+rollback myapp
 ```
 
 **Option 2: Deploy a known-good bundle or ref**
@@ -445,7 +445,7 @@ boxmunge rollback myapp
 Upload a known-good bundle and deploy it, or deploy a specific git ref:
 
 ```
-boxmunge deploy myapp --ref v1.1.4
+deploy myapp --ref v1.1.4
 ```
 
 ---
@@ -455,8 +455,8 @@ boxmunge deploy myapp --ref v1.1.4
 Run a non-destructive audit:
 
 ```
-boxmunge health
-boxmunge health --json
+health
+health --json
 ```
 
 Exit codes: 0 = healthy, 1 = warnings, 2 = issues requiring attention.
@@ -466,7 +466,7 @@ Exit codes: 0 = healthy, 1 = warnings, 2 = issues requiring attention.
 Run the self-test (deploys a canary, exercises backup/restore, tears down):
 
 ```
-boxmunge self-test
+self-test
 ```
 
 ## Upgrading the Platform
@@ -474,7 +474,7 @@ boxmunge self-test
 Apply platform updates:
 
 ```
-boxmunge upgrade
+upgrade
 ```
 
 Security releases are applied automatically every 6 hours.
@@ -482,9 +482,9 @@ Security releases are applied automatically every 6 hours.
 ## Querying Logs
 
 ```
-boxmunge log --project myapp --level error --since 24h
-boxmunge log --json
-boxmunge log --project myapp --containers
+log --project myapp --level error --since 24h
+log --json
+log --project myapp --containers
 ```
 
 ---

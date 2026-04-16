@@ -61,17 +61,19 @@ Bundle and deploy:
 ```bash
 boxmunge bundle ./myapp
 scp -P 922 myapp.tar.gz deploy@box.example.com:
-ssh -p 922 deploy@box.example.com boxmunge deploy myapp
+ssh -p 922 deploy@box.example.com deploy myapp
 ```
 
 ### 3. Verify everything works
 
 ```bash
-ssh -p 922 deploy@box.example.com boxmunge self-test
-ssh -p 922 deploy@box.example.com boxmunge health
+ssh -p 922 deploy@box.example.com self-test
+ssh -p 922 deploy@box.example.com health
 ```
 
 ## Commands
+
+Server-side commands (run via SSH as the deploy user -- no `boxmunge` prefix needed):
 
 | Command | Description |
 |---------|-------------|

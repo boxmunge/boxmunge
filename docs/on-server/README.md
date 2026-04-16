@@ -7,27 +7,27 @@ A minimalist, agent-friendly VPS hosting framework for multiple Docker Compose w
 ## Quick Reference
 
 ```
-boxmunge help                 see all commands
-boxmunge agent-help <topic>   AI agent documentation
-boxmunge status               dashboard of all projects
-boxmunge list-projects        list registered projects
-boxmunge doctor               verify host health
+help                 see all commands
+agent-help <topic>   AI agent documentation
+status               dashboard of all projects
+list-projects        list registered projects
+doctor               verify host health
 
-boxmunge inbox                list uploaded bundles
-boxmunge inbox clean          remove old bundles
-boxmunge stage <project>      deploy to staging environment
-boxmunge promote <project>    promote staging to production
-boxmunge unstage <project>    tear down staging without promoting
-boxmunge deploy <project>     deploy directly to production
+inbox                list uploaded bundles
+inbox clean          remove old bundles
+stage <project>      deploy to staging environment
+promote <project>    promote staging to production
+unstage <project>    tear down staging without promoting
+deploy <project>     deploy directly to production
 
-boxmunge diff <project>       preview changes before deploying
-boxmunge add-git-project      register a git-based project
-boxmunge secrets              manage project and host secrets
+diff <project>       preview changes before deploying
+add-git-project      register a git-based project
+secrets              manage project and host secrets
 
-boxmunge check <project>      run health checks
-boxmunge logs <project>       view container logs
-boxmunge backup <project>     run encrypted backup
-boxmunge validate <project>   validate project config
+check <project>      run health checks
+logs <project>       view container logs
+backup <project>     run encrypted backup
+validate <project>   validate project config
 ```
 
 ---
@@ -38,7 +38,7 @@ boxmunge validate <project>   validate project config
 - Caddy runs in Docker as the reverse proxy, handling automatic HTTPS via Let's Encrypt
 - `boxmunge` reads project manifests to generate Caddy config and orchestrate deployments
 - A staging environment lets you verify changes at `staging.<hostname>` before promoting to production
-- Secrets are managed via the CLI (`boxmunge secrets`), not by editing files
+- Secrets are managed via the CLI (`secrets`), not by editing files
 - Backups are encrypted (age) and restore-tested before being considered valid
 - Health checks run on a schedule and send alerts via Pushover on failure
 - The host applies unattended security patches automatically
@@ -51,7 +51,7 @@ Access documentation via `agent-help`:
 
 | Topic | Command |
 |---|---|
-| System architecture | `boxmunge agent-help architecture` |
-| Operations guide | `boxmunge agent-help operations` |
-| Project conventions | `boxmunge agent-help conventions` |
-| Agent rules | `boxmunge agent-help rules` |
+| System architecture | `agent-help architecture` |
+| Operations guide | `agent-help operations` |
+| Project conventions | `agent-help conventions` |
+| Agent rules | `agent-help rules` |

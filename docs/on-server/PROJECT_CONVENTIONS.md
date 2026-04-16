@@ -249,11 +249,11 @@ boxmunge uses two environment files per project, both injected into containers v
 
 ### secrets.env (CLI-managed)
 
-Runtime secrets managed exclusively via `boxmunge secrets`:
+Runtime secrets managed exclusively via `secrets`:
 
 ```
-boxmunge secrets set myapp DATABASE_URL postgres://user:pass@db:5432/myapp
-boxmunge secrets set myapp SECRET_KEY supersecretvalue
+secrets set myapp DATABASE_URL postgres://user:pass@db:5432/myapp
+secrets set myapp SECRET_KEY supersecretvalue
 ```
 
 Do not edit `secrets.env` manually. The CLI handles file creation, permissions, and format. Secrets set via the CLI are available to containers on the next deploy.
