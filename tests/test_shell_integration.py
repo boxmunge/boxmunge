@@ -41,7 +41,7 @@ class TestAllCommandsDispatch:
         mock_run.return_value = MagicMock(returncode=0)
         result = run_command(command, [])
         mock_run.assert_called_once_with(
-            ["boxmunge", command]
+            ["boxmunge-server", command]
         )
         assert result == 0
 

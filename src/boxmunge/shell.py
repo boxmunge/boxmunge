@@ -202,7 +202,7 @@ def run_command(command: str, args: list[str]) -> int:
         )
         return 1
 
-    result = subprocess.run(["boxmunge", command] + args)
+    result = subprocess.run(["boxmunge-server", command] + args)
     return result.returncode
 
 

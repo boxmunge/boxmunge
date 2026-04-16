@@ -74,13 +74,13 @@ class TestDispatchCommand:
     def test_dispatches_allowed_command(self, mock_run: MagicMock) -> None:
         mock_run.return_value = MagicMock(returncode=0)
         run_command("status", [])
-        mock_run.assert_called_once_with(["boxmunge", "status"])
+        mock_run.assert_called_once_with(["boxmunge-server", "status"])
 
     @patch("boxmunge.shell.subprocess.run")
     def test_dispatches_with_args(self, mock_run: MagicMock) -> None:
         mock_run.return_value = MagicMock(returncode=0)
         run_command("prod-deploy", ["myapp", "--dry-run"])
-        mock_run.assert_called_once_with(["boxmunge", "prod-deploy", "myapp", "--dry-run"])
+        mock_run.assert_called_once_with(["boxmunge-server", "prod-deploy", "myapp", "--dry-run"])
 
     def test_rejects_unknown_command(self) -> None:
         assert run_command("bash", []) == 1
