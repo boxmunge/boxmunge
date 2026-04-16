@@ -63,8 +63,8 @@ def _get_paths() -> BoxPaths:
 # Tool functions — each wraps an existing run_* / cmd_* function
 # ---------------------------------------------------------------------------
 
-def _tool_deploy(project: str, ref: str | None = None,
-                 no_snapshot: bool = False, dry_run: bool = False) -> dict:
+def _tool_prod_deploy(project: str, ref: str | None = None,
+                      no_snapshot: bool = False, dry_run: bool = False) -> dict:
     from boxmunge.commands.deploy import run_deploy
     paths = _get_paths()
     return capture_tool_call(

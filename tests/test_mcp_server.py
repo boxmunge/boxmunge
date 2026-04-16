@@ -59,19 +59,19 @@ class TestCaptureToolCall:
 class TestToolRegistration:
     """Test that _tool_* wrappers correctly delegate to run_* functions."""
 
-    def test_deploy_tool_calls_run_deploy(self) -> None:
-        from boxmunge.mcp_tools import _tool_deploy
+    def test_prod_deploy_tool_calls_run_deploy(self) -> None:
+        from boxmunge.mcp_tools import _tool_prod_deploy
         with patch("boxmunge.commands.deploy.run_deploy") as mock:
             mock.return_value = 0
-            result = _tool_deploy("myapp")
+            result = _tool_prod_deploy("myapp")
         assert result["success"] is True
         mock.assert_called_once()
 
-    def test_deploy_tool_passes_all_args(self) -> None:
-        from boxmunge.mcp_tools import _tool_deploy
+    def test_prod_deploy_tool_passes_all_args(self) -> None:
+        from boxmunge.mcp_tools import _tool_prod_deploy
         with patch("boxmunge.commands.deploy.run_deploy") as mock:
             mock.return_value = 0
-            _tool_deploy("myapp", ref="v1.2", no_snapshot=True, dry_run=True)
+            _tool_prod_deploy("myapp", ref="v1.2", no_snapshot=True, dry_run=True)
         args, kwargs = mock.call_args
         assert args[0] == "myapp"
         assert kwargs["ref"] == "v1.2"
@@ -177,10 +177,10 @@ class TestToolRegistration:
         assert result["exit_code"] == 0
 
     def test_failed_tool_returns_failure(self) -> None:
-        from boxmunge.mcp_tools import _tool_deploy
+        from boxmunge.mcp_tools import _tool_prod_deploy
         with patch("boxmunge.commands.deploy.run_deploy") as mock:
             mock.return_value = 1
-            result = _tool_deploy("myapp")
+            result = _tool_prod_deploy("myapp")
         assert result["success"] is False
         assert result["exit_code"] == 1
 
@@ -205,3 +205,9 @@ class TestToolDefinitions:
         from boxmunge.mcp_server import _TOOL_DEFS
         names = [d["name"] for d in _TOOL_DEFS]
         assert len(names) == len(set(names)), f"Duplicate tool names: {names}"
+
+    def test_prod_deploy_tool_registered(self) -> None:
+        from boxmunge.mcp_server import _TOOL_DEFS
+        names = [t["name"] for t in _TOOL_DEFS]
+        assert "prod_deploy" in names
+        assert "deploy" not in names

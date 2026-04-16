@@ -12,7 +12,7 @@ from boxmunge.mcp_tools import (
     _tool_agent_help,
     _tool_backup,
     _tool_check,
-    _tool_deploy,
+    _tool_prod_deploy,
     _tool_health,
     _tool_inbox,
     _tool_list_projects,
@@ -35,8 +35,8 @@ from boxmunge.mcp_tools import (
 
 _TOOL_DEFS: list[dict[str, Any]] = [
     {
-        "name": "deploy",
-        "description": "Deploy a project to production.",
+        "name": "prod_deploy",
+        "description": "Deploy a project directly to production (skip staging).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -47,7 +47,7 @@ _TOOL_DEFS: list[dict[str, Any]] = [
             },
             "required": ["project"],
         },
-        "handler": _tool_deploy,
+        "handler": _tool_prod_deploy,
     },
     {
         "name": "stage",
