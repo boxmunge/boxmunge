@@ -13,11 +13,15 @@ from boxmunge.mcp_tools import (
     _tool_backup,
     _tool_check,
     _tool_prod_deploy,
+    _tool_handshake,
     _tool_health,
     _tool_inbox,
     _tool_list_projects,
     _tool_log,
     _tool_promote,
+    _tool_project_add,
+    _tool_project_list_mcp,
+    _tool_project_remove,
     _tool_restore,
     _tool_rollback,
     _tool_secrets,
@@ -252,6 +256,48 @@ _TOOL_DEFS: list[dict[str, Any]] = [
             },
         },
         "handler": _tool_agent_help,
+    },
+    {
+        "name": "project_add",
+        "description": "Register a project name on this server.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Project name to register"},
+            },
+            "required": ["name"],
+        },
+        "handler": _tool_project_add,
+    },
+    {
+        "name": "project_remove",
+        "description": "Unregister a project name (does not delete data).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Project name to unregister"},
+            },
+            "required": ["name"],
+        },
+        "handler": _tool_project_remove,
+    },
+    {
+        "name": "project_list",
+        "description": "List all registered project names.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+        "handler": _tool_project_list_mcp,
+    },
+    {
+        "name": "handshake",
+        "description": "Return server version and compatibility info.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+        "handler": _tool_handshake,
     },
 ]
 

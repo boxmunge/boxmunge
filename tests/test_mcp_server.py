@@ -199,7 +199,7 @@ class TestToolDefinitions:
 
     def test_tool_count(self) -> None:
         from boxmunge.mcp_server import _TOOL_DEFS
-        assert len(_TOOL_DEFS) == 18
+        assert len(_TOOL_DEFS) == 22
 
     def test_unique_tool_names(self) -> None:
         from boxmunge.mcp_server import _TOOL_DEFS
@@ -211,3 +211,25 @@ class TestToolDefinitions:
         names = [t["name"] for t in _TOOL_DEFS]
         assert "prod_deploy" in names
         assert "deploy" not in names
+
+
+class TestNewToolsRegistered:
+    def test_project_add_tool_registered(self) -> None:
+        from boxmunge.mcp_server import _TOOL_DEFS
+        names = [t["name"] for t in _TOOL_DEFS]
+        assert "project_add" in names
+
+    def test_project_remove_tool_registered(self) -> None:
+        from boxmunge.mcp_server import _TOOL_DEFS
+        names = [t["name"] for t in _TOOL_DEFS]
+        assert "project_remove" in names
+
+    def test_project_list_tool_registered(self) -> None:
+        from boxmunge.mcp_server import _TOOL_DEFS
+        names = [t["name"] for t in _TOOL_DEFS]
+        assert "project_list" in names
+
+    def test_handshake_tool_registered(self) -> None:
+        from boxmunge.mcp_server import _TOOL_DEFS
+        names = [t["name"] for t in _TOOL_DEFS]
+        assert "handshake" in names
