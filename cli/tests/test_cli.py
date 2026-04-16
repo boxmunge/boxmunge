@@ -37,7 +37,7 @@ class TestCLI:
     def test_all_commands_registered(self) -> None:
         from boxmunge_cli.cli import COMMANDS
         expected = {"init", "bundle", "stage", "promote", "prod-deploy",
-                    "status", "logs", "mcp-serve"}
+                    "status", "logs", "mcp-serve", "server-setup"}
         assert expected == set(COMMANDS.keys())
 
     def test_help_shows_only_local_commands(self, capsys) -> None:

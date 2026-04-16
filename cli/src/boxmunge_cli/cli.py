@@ -21,6 +21,7 @@ Commands:
   status                  Show project status on server
   logs                    Show project logs from server
   mcp-serve               Start MCP proxy to server
+  server-setup [user@]host  Set up a fresh Debian VPS as a boxmunge server
 
 Options:
   --version               Show version
@@ -157,6 +158,11 @@ def _cmd_mcp_serve(args: list[str]) -> None:
     sys.exit(run_mcp_proxy(config))
 
 
+def _cmd_server_setup_wrapper(args: list[str]) -> None:
+    from boxmunge_cli.server_setup.command import cmd_server_setup
+    cmd_server_setup(args)
+
+
 COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "init": cmd_init,
     "bundle": cmd_bundle,
@@ -166,6 +172,7 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "status": _cmd_ssh_passthrough("status"),
     "logs": _cmd_ssh_passthrough("logs"),
     "mcp-serve": _cmd_mcp_serve,
+    "server-setup": _cmd_server_setup_wrapper,
 }
 
 
