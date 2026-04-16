@@ -38,12 +38,11 @@ class TestMCPIntegration:
                     await session.initialize()
                     tools = await session.list_tools()
                     tool_names = {t.name for t in tools.tools}
-                    assert "deploy" in tool_names
+                    assert "prod_deploy" in tool_names
                     assert "health" in tool_names
                     assert "backup" in tool_names
                     assert "log" in tool_names
-                    assert "secrets_set" in tool_names
-                    assert len(tool_names) >= 18
+                    assert len(tool_names) >= 22
 
         asyncio.run(run())
 
