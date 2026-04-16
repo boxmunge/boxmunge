@@ -91,6 +91,12 @@ def run_deploy(
     dry_run: bool = False,
 ) -> int:
     """Execute the full deploy flow. Returns 0 on success, 1 on failure."""
+    from boxmunge.project_registry import is_registered
+    if not is_registered(project_name, paths):
+        print(f"ERROR: Project '{project_name}' is not registered on this server. "
+              f"Run: project-add {project_name}")
+        return 1
+
     project_dir = paths.project_dir(project_name)
 
     # Resolve from inbox for new projects and bundle-source upgrades.

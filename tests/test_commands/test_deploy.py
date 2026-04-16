@@ -13,6 +13,7 @@ from boxmunge.commands.deploy import (
     run_deploy,
 )
 from boxmunge.paths import BoxPaths
+from boxmunge.project_registry import add_project
 from boxmunge.state import read_state
 
 
@@ -110,8 +111,17 @@ class TestBundleSourceDeploy:
     @patch("boxmunge.commands.deploy.compose_up")
     @patch("boxmunge.commands.deploy.caddy_reload")
     def test_deploy_from_inbox(self, mock_reload, mock_up, paths):
+        add_project("testapp", paths)
         _place_deploy_bundle(paths)
         result = run_deploy("testapp", paths)
         assert result == 0
         assert paths.project_dir("testapp").exists()
         assert (paths.project_dir("testapp") / "manifest.yml").exists()
+
+
+class TestProjectRegistrationEnforcement:
+    def test_rejects_unregistered_project(self, paths: BoxPaths, capsys) -> None:
+        result = run_deploy("unregistered", paths)
+        assert result == 1
+        output = capsys.readouterr().out
+        assert "not registered" in output

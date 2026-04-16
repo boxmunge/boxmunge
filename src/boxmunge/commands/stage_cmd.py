@@ -15,6 +15,7 @@ from boxmunge.docker import compose_up, caddy_reload, DockerError
 from boxmunge.identity import check_project_identity, register_project_identity
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
+from boxmunge.project_registry import is_registered
 from boxmunge.source import resolve_bundle_source, SourceError
 from boxmunge.state import write_state
 
@@ -25,6 +26,12 @@ if TYPE_CHECKING:
 def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
               dry_run: bool = False) -> int:
     project_dir = paths.project_dir(project_name)
+
+    if not is_registered(project_name, paths):
+        print(f"ERROR: Project '{project_name}' is not registered on this server. "
+              f"Run: project-add {project_name}")
+        return 1
+
     is_new = not project_dir.exists() or not (project_dir / "manifest.yml").exists()
 
     # Resolve source for bundle projects (new or no repo)
