@@ -13,13 +13,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Every command the deploy shell accepts. This is the complete whitelist.
+# Every command the deploy shell accepts. This is the complete allowlist.
 ALLOWED_COMMANDS: set[str] = {
     # Host operations
-    "help", "agent-help", "doctor", "status", "test-alert",
+    "help", "agent-help", "doctor", "status", "test-alert", "handshake",
     # Project lifecycle
     "add-git-project", "stage", "promote", "unstage",
-    "deploy", "rollback", "remove-project", "diff",
+    "prod-deploy", "rollback", "remove-project", "diff",
+    "project-add", "project-remove", "project-list",
     # Inbox
     "inbox",
     # Secrets
@@ -51,7 +52,7 @@ This is a restricted shell. Available commands:
   help                Show all commands
   agent-help          AI agent orientation
   status              Dashboard of all projects
-  deploy <project>    Deploy to production
+  prod-deploy <project>  Deploy to production (skip staging)
   stage <project>     Stage for verification
   promote <project>   Promote staging to production
   inbox               List uploaded bundles
@@ -201,7 +202,7 @@ def run_command(command: str, args: list[str]) -> int:
         )
         return 1
 
-    result = subprocess.run(["boxmunge", command] + args)
+    result = subprocess.run(["boxmunge-server", command] + args)
     return result.returncode
 
 

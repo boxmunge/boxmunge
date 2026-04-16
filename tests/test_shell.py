@@ -16,13 +16,13 @@ class TestParseShellCommand:
         assert args == []
 
     def test_command_with_args(self) -> None:
-        cmd, args = parse_shell_command("deploy myapp")
-        assert cmd == "deploy"
+        cmd, args = parse_shell_command("prod-deploy myapp")
+        assert cmd == "prod-deploy"
         assert args == ["myapp"]
 
     def test_command_with_flags(self) -> None:
-        cmd, args = parse_shell_command("deploy myapp --dry-run")
-        assert cmd == "deploy"
+        cmd, args = parse_shell_command("prod-deploy myapp --dry-run")
+        assert cmd == "prod-deploy"
         assert args == ["myapp", "--dry-run"]
 
     def test_help_command(self) -> None:
@@ -58,7 +58,7 @@ class TestParseShellCommand:
 
 class TestAllowedCommands:
     def test_known_commands_are_allowed(self) -> None:
-        for cmd in ["help", "status", "deploy", "stage", "promote",
+        for cmd in ["help", "status", "prod-deploy", "stage", "promote",
                      "unstage", "inbox", "secrets", "check", "logs",
                      "agent-help", "doctor", "list-projects"]:
             assert cmd in ALLOWED_COMMANDS, f"{cmd} not in ALLOWED_COMMANDS"
@@ -74,13 +74,13 @@ class TestDispatchCommand:
     def test_dispatches_allowed_command(self, mock_run: MagicMock) -> None:
         mock_run.return_value = MagicMock(returncode=0)
         run_command("status", [])
-        mock_run.assert_called_once_with(["boxmunge", "status"])
+        mock_run.assert_called_once_with(["boxmunge-server", "status"])
 
     @patch("boxmunge.shell.subprocess.run")
     def test_dispatches_with_args(self, mock_run: MagicMock) -> None:
         mock_run.return_value = MagicMock(returncode=0)
-        run_command("deploy", ["myapp", "--dry-run"])
-        mock_run.assert_called_once_with(["boxmunge", "deploy", "myapp", "--dry-run"])
+        run_command("prod-deploy", ["myapp", "--dry-run"])
+        mock_run.assert_called_once_with(["boxmunge-server", "prod-deploy", "myapp", "--dry-run"])
 
     def test_rejects_unknown_command(self) -> None:
         assert run_command("bash", []) == 1

@@ -5,6 +5,7 @@ import pytest
 from boxmunge.commands.deploy import run_deploy
 from boxmunge.commands.rollback import run_rollback
 from boxmunge.paths import BoxPaths
+from boxmunge.project_registry import add_project
 
 
 pytestmark = [pytest.mark.integration]
@@ -14,6 +15,7 @@ class TestErrorPaths:
     def test_deploy_invalid_manifest_fails_cleanly(self, int_paths: BoxPaths) -> None:
         """Deploy with an invalid manifest returns error, no state change."""
         project_name = "badproject"
+        add_project(project_name, int_paths)
         project_dir = int_paths.project_dir(project_name)
         project_dir.mkdir(parents=True, exist_ok=True)
         (project_dir / "manifest.yml").write_text(
@@ -34,5 +36,6 @@ class TestErrorPaths:
 
     def test_deploy_nonexistent_project_no_bundle(self, int_paths: BoxPaths) -> None:
         """Deploy a project that doesn't exist and has no bundle fails cleanly."""
+        add_project("doesnotexist", int_paths)
         result = run_deploy("doesnotexist", int_paths)
         assert result == 1

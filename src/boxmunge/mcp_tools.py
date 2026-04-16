@@ -63,8 +63,8 @@ def _get_paths() -> BoxPaths:
 # Tool functions — each wraps an existing run_* / cmd_* function
 # ---------------------------------------------------------------------------
 
-def _tool_deploy(project: str, ref: str | None = None,
-                 no_snapshot: bool = False, dry_run: bool = False) -> dict:
+def _tool_prod_deploy(project: str, ref: str | None = None,
+                      no_snapshot: bool = False, dry_run: bool = False) -> dict:
     from boxmunge.commands.deploy import run_deploy
     paths = _get_paths()
     return capture_tool_call(
@@ -280,3 +280,46 @@ def _tool_agent_help(topic: str | None = None) -> dict:
         except SystemExit as e:
             return e.code or 0
     return capture_tool_call(wrapper)
+
+
+def _tool_project_add(name: str) -> dict:
+    from boxmunge.project_registry import add_project
+    paths = _get_paths()
+    def do_add() -> int:
+        add_project(name, paths)
+        print(f"Project '{name}' registered.")
+        return 0
+    return capture_tool_call(do_add)
+
+
+def _tool_project_remove(name: str) -> dict:
+    from boxmunge.project_registry import remove_project
+    paths = _get_paths()
+    def do_remove() -> int:
+        remove_project(name, paths)
+        print(f"Project '{name}' unregistered.")
+        return 0
+    return capture_tool_call(do_remove)
+
+
+def _tool_project_list_mcp() -> dict:
+    from boxmunge.project_registry import load_registered_projects
+    paths = _get_paths()
+    projects = sorted(load_registered_projects(paths))
+    return {
+        "success": True,
+        "exit_code": 0,
+        "data": {"projects": projects},
+        "messages": [],
+    }
+
+
+def _tool_handshake() -> dict:
+    from boxmunge.commands.handshake_cmd import run_handshake
+    data = run_handshake()
+    return {
+        "success": True,
+        "exit_code": 0,
+        "data": data,
+        "messages": [],
+    }

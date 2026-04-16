@@ -1,6 +1,6 @@
 [project]
-name = "boxmunge"
-version = "0.1.2"
+name = "boxmunge-server"
+version = "0.2.0"
 description = "Minimalist, agent-friendly VPS hosting framework"
 requires-python = ">=3.10"
 dependencies = [
@@ -12,7 +12,7 @@ tui = ["textual>=0.50"]
 mcp = ["mcp>=1.0"]
 
 [project.scripts]
-boxmunge = "boxmunge.cli:main"
+boxmunge-server = "boxmunge.cli:main"
 boxmunge-shell = "boxmunge.shell:main"
 boxmunge-sftp = "boxmunge.sftp_receive:main"
 

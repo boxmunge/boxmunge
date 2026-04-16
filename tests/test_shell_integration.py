@@ -19,9 +19,9 @@ class TestShellMain:
     def test_main_reads_ssh_original_command(self, mock_dispatch: MagicMock) -> None:
         """ForceCommand mode uses SSH_ORIGINAL_COMMAND."""
         with patch("sys.argv", ["boxmunge-shell"]):
-            with patch.dict(os.environ, {"SSH_ORIGINAL_COMMAND": "deploy myapp"}):
+            with patch.dict(os.environ, {"SSH_ORIGINAL_COMMAND": "prod-deploy myapp"}):
                 main()
-        mock_dispatch.assert_called_once_with("deploy", ["myapp"])
+        mock_dispatch.assert_called_once_with("prod-deploy", ["myapp"])
 
     @patch("boxmunge.shell.interactive_loop")
     def test_main_no_command_starts_interactive(self, mock_loop: MagicMock) -> None:
@@ -41,7 +41,7 @@ class TestAllCommandsDispatch:
         mock_run.return_value = MagicMock(returncode=0)
         result = run_command(command, [])
         mock_run.assert_called_once_with(
-            ["boxmunge", command]
+            ["boxmunge-server", command]
         )
         assert result == 0
 

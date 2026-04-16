@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""boxmunge deploy <project> — full deployment flow."""
+"""boxmunge prod-deploy <project> — full deployment flow."""
 
 import shlex
 import subprocess
@@ -91,6 +91,12 @@ def run_deploy(
     dry_run: bool = False,
 ) -> int:
     """Execute the full deploy flow. Returns 0 on success, 1 on failure."""
+    from boxmunge.project_registry import is_registered
+    if not is_registered(project_name, paths):
+        print(f"ERROR: Project '{project_name}' is not registered on this server. "
+              f"Run: project-add {project_name}")
+        return 1
+
     project_dir = paths.project_dir(project_name)
 
     # Resolve from inbox for new projects and bundle-source upgrades.
@@ -318,9 +324,9 @@ def run_deploy(
 
 
 def cmd_deploy(args: list[str]) -> None:
-    """CLI entry point for deploy command."""
+    """CLI entry point for prod-deploy command."""
     if not args:
-        print("Usage: boxmunge deploy <project> [--ref REF] [--no-snapshot] [--dry-run]",
+        print("Usage: prod-deploy <project> [--ref REF] [--no-snapshot] [--dry-run]",
               file=sys.stderr)
         sys.exit(2)
 

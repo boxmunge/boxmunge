@@ -55,7 +55,7 @@ def get_build_version() -> str:
     import subprocess
 
     try:
-        semver = version("boxmunge")
+        semver = version("boxmunge-server")
     except PackageNotFoundError:
         semver = FALLBACK_VERSION
 
