@@ -16,7 +16,7 @@ from pathlib import Path
 # Every command the deploy shell accepts. This is the complete allowlist.
 ALLOWED_COMMANDS: set[str] = {
     # Host operations
-    "help", "agent-help", "doctor", "status", "test-alert",
+    "help", "agent-help", "doctor", "status", "test-alert", "handshake",
     # Project lifecycle
     "add-git-project", "stage", "promote", "unstage",
     "prod-deploy", "rollback", "remove-project", "diff",
