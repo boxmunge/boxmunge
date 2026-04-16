@@ -1,0 +1,7 @@
+# TODO: Update with your project's actual services.
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - project.env
