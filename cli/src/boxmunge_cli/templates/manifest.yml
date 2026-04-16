@@ -1,0 +1,14 @@
+# TODO: Update hosts, services, and backup config for your project.
+id: null
+project: {project}
+source: bundle
+hosts:
+  - {project}.example.com
+services:
+  web:
+    port: 8080
+    routes:
+      - path: /
+    smoke: boxmunge-scripts/smoke.sh
+backup:
+  type: none
