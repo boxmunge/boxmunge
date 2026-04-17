@@ -32,6 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CACHE_DIR = REPO_ROOT / ".cache" / "vm"
 CLOUD_INIT_DIR = Path(__file__).resolve().parent / "cloud-init"
 CANARY_DIR = REPO_ROOT / "canary"
+CANARY_HOST = "canary.localhost"  # must match canary/manifest.yml hosts[0]
 
 DEBIAN_IMAGE_URL = (
     "https://cloud.debian.org/images/cloud/trixie/daily/latest/"
@@ -371,13 +372,18 @@ def step_fail(description: str, detail: str = ""):
 
 
 def curl_vm(path: str, host_header: str, method: str = "GET", data: str | None = None) -> tuple[int, str]:
-    """Make an HTTP request to the VM via port-forwarded HTTPS."""
+    """Make an HTTP request to the VM via port-forwarded HTTPS.
+
+    Uses --resolve to set the correct TLS SNI (Caddy rejects SNI mismatches
+    with local_certs) and routes through the port-forwarded HTTPS port.
+    """
     cmd = [
         "curl", "-sk",
         "-X", method,
-        "-H", f"Host: {host_header}",
+        "--resolve", f"{host_header}:443:127.0.0.1",
+        "--connect-to", f"{host_header}:443:localhost:{PORTS['https']}",
         "-w", "\n%{http_code}",
-        f"https://localhost:{PORTS['https']}{path}",
+        f"https://{host_header}{path}",
     ]
     if data is not None:
         cmd.extend(["-d", data])
@@ -389,6 +395,18 @@ def curl_vm(path: str, host_header: str, method: str = "GET", data: str | None =
     elif len(lines) == 1:
         return int(lines[0]), ""
     return 0, result.stderr
+
+
+def wait_for_http(path: str, host_header: str, timeout: int = 30) -> tuple[int, str]:
+    """Retry curl_vm until a non-zero HTTP code or timeout (seconds)."""
+    deadline = time.time() + timeout
+    code, body = 0, ""
+    while time.time() < deadline:
+        code, body = curl_vm(path, host_header)
+        if code != 0:
+            return code, body
+        time.sleep(2)
+    return code, body
 
 
 # ---------------------------------------------------------------------------
@@ -472,7 +490,7 @@ def phase_1_server_setup(hostname: str):
     step_pass("deploy and supervisor users exist")
 
 
-def phase_2_deploy_v1(work_dir: Path, hostname: str):
+def phase_2_deploy_v1(work_dir: Path):
     """Deploy canary project with VERSION=v1."""
     phase("Phase 2: Deploy v1")
 
@@ -524,26 +542,22 @@ def phase_2_deploy_v1(work_dir: Path, hostname: str):
     bundle = bundle_files[-1]
     step_pass(f"Bundle created: {bundle.name}")
 
-    # Upload bundle to server inbox via test user (deploy user SCP is broken)
+    # Upload bundle to deploy user via SCP (SFTP subsystem routes to inbox)
     scp_result = subprocess.run(
         ["scp", *SSH_OPTS, "-P", str(PORTS["ssh_boxmunge"]),
-         str(bundle), f"test@localhost:/tmp/"],
+         str(bundle), f"deploy@localhost:"],
         capture_output=True, text=True, check=False, timeout=60,
     )
     if scp_result.returncode != 0:
         step_fail("SCP upload failed", scp_result.stderr)
-    # Move into inbox as deploy user
-    ssh_run("supervisor", PORTS["ssh_boxmunge"],
-            f"sudo mv /tmp/{bundle.name} /opt/boxmunge/inbox/ && "
-            f"sudo chown deploy:deploy /opt/boxmunge/inbox/{bundle.name}")
     step_pass("Bundle uploaded to inbox")
 
     # Stage via deploy user
     ssh_run("deploy", PORTS["ssh_boxmunge"], f"stage boxmunge-canary")
     step_pass("boxmunge stage completed")
 
-    # Verify staging is live
-    code, body = curl_vm("/healthz", f"staging.{hostname}")
+    # Verify staging is live (retry — container may still be starting)
+    code, body = wait_for_http("/healthz", f"staging.{CANARY_HOST}")
     if code != 200:
         step_fail(f"Staging health check failed (HTTP {code})", body)
     step_pass("Staging is live")
@@ -559,8 +573,8 @@ def phase_2_deploy_v1(work_dir: Path, hostname: str):
     ssh_run("deploy", PORTS["ssh_boxmunge"], "promote boxmunge-canary")
     step_pass("boxmunge promote completed")
 
-    # Verify production is live
-    code, body = curl_vm("/healthz", hostname)
+    # Verify production is live (retry — container may still be starting)
+    code, body = wait_for_http("/healthz", CANARY_HOST)
     if code != 200:
         step_fail(f"Production health check failed (HTTP {code})", body)
     step_pass("Production is live")
@@ -573,18 +587,18 @@ def phase_2_deploy_v1(work_dir: Path, hostname: str):
     step_pass("Staging containers removed after promote")
 
 
-def phase_3_stateful_write_v1(hostname: str):
+def phase_3_stateful_write_v1():
     """Write data and verify version while v1 is deployed."""
     phase("Phase 3: Stateful Write (v1)")
 
     # Write data
-    code, _ = curl_vm("/data", hostname, method="POST", data="alpha")
+    code, _ = curl_vm("/data", CANARY_HOST, method="POST", data="alpha")
     if code not in (200, 201):
         step_fail(f"POST /data failed (HTTP {code})")
     step_pass("POST /data 'alpha' succeeded")
 
     # Read data back
-    code, body = curl_vm("/data", hostname)
+    code, body = curl_vm("/data", CANARY_HOST)
     if code != 200:
         step_fail(f"GET /data failed (HTTP {code})", body)
     data = json.loads(body)
@@ -593,7 +607,7 @@ def phase_3_stateful_write_v1(hostname: str):
     step_pass("GET /data returned 'alpha'")
 
     # Check version
-    code, body = curl_vm("/version", hostname)
+    code, body = curl_vm("/version", CANARY_HOST)
     if code != 200:
         step_fail(f"GET /version failed (HTTP {code})", body)
     if body.strip() != "v1":
@@ -601,7 +615,7 @@ def phase_3_stateful_write_v1(hostname: str):
     step_pass("GET /version returned 'v1'")
 
 
-def phase_4_backup(hostname: str) -> str:
+def phase_4_backup() -> str:
     """Run backup and return the snapshot filename."""
     phase("Phase 4: Backup")
 
@@ -621,7 +635,7 @@ def phase_4_backup(hostname: str) -> str:
     return snapshot
 
 
-def phase_5_deploy_v2_and_overwrite(work_dir: Path, hostname: str):
+def phase_5_deploy_v2_and_overwrite(work_dir: Path):
     """Redeploy with v2, write new data to overwrite v1 state."""
     phase("Phase 5: Deploy v2 and Overwrite")
 
@@ -644,12 +658,9 @@ def phase_5_deploy_v2_and_overwrite(work_dir: Path, hostname: str):
 
     subprocess.run(
         ["scp", *SSH_OPTS, "-P", str(PORTS["ssh_boxmunge"]),
-         str(bundle), f"test@localhost:/tmp/"],
+         str(bundle), f"deploy@localhost:"],
         capture_output=True, check=True, timeout=60,
     )
-    ssh_run("supervisor", PORTS["ssh_boxmunge"],
-            f"sudo mv /tmp/{bundle.name} /opt/boxmunge/inbox/ && "
-            f"sudo chown deploy:deploy /opt/boxmunge/inbox/{bundle.name}")
     ssh_run("deploy", PORTS["ssh_boxmunge"], "stage boxmunge-canary")
     step_pass("boxmunge stage (v2) completed")
 
@@ -657,26 +668,26 @@ def phase_5_deploy_v2_and_overwrite(work_dir: Path, hostname: str):
     step_pass("boxmunge promote (v2) completed")
 
     # Verify v2 is running
-    code, body = curl_vm("/version", hostname)
+    code, body = curl_vm("/version", CANARY_HOST)
     if body.strip() != "v2":
         step_fail(f"GET /version expected 'v2'", f"got '{body.strip()}'")
     step_pass("GET /version returned 'v2'")
 
     # Overwrite data
-    code, _ = curl_vm("/data", hostname, method="POST", data="bravo")
+    code, _ = curl_vm("/data", CANARY_HOST, method="POST", data="bravo")
     if code not in (200, 201):
         step_fail(f"POST /data 'bravo' failed (HTTP {code})")
     step_pass("POST /data 'bravo' succeeded")
 
     # Verify overwrite
-    code, body = curl_vm("/data", hostname)
+    code, body = curl_vm("/data", CANARY_HOST)
     data = json.loads(body)
     if data.get("value") != "bravo":
         step_fail(f"GET /data expected 'bravo'", f"got {data!r}")
     step_pass("GET /data returned 'bravo'")
 
 
-def phase_6_restore_and_verify(work_dir: Path, hostname: str, snapshot: str):
+def phase_6_restore_and_verify(work_dir: Path, snapshot: str):
     """Restore from backup and verify v1 state is back."""
     phase("Phase 6: Restore and Verify Rollback")
 
@@ -705,12 +716,9 @@ def phase_6_restore_and_verify(work_dir: Path, hostname: str, snapshot: str):
 
     subprocess.run(
         ["scp", *SSH_OPTS, "-P", str(PORTS["ssh_boxmunge"]),
-         str(bundle), f"test@localhost:/tmp/"],
+         str(bundle), f"deploy@localhost:"],
         capture_output=True, check=True, timeout=60,
     )
-    ssh_run("supervisor", PORTS["ssh_boxmunge"],
-            f"sudo mv /tmp/{bundle.name} /opt/boxmunge/inbox/ && "
-            f"sudo chown deploy:deploy /opt/boxmunge/inbox/{bundle.name}")
     ssh_run("deploy", PORTS["ssh_boxmunge"], "prod-deploy boxmunge-canary")
     step_pass("prod-deploy after restore completed")
 
@@ -718,13 +726,13 @@ def phase_6_restore_and_verify(work_dir: Path, hostname: str, snapshot: str):
     time.sleep(5)
 
     # Verify restored version
-    code, body = curl_vm("/version", hostname)
+    code, body = curl_vm("/version", CANARY_HOST)
     if body.strip() != "v1":
         step_fail(f"GET /version expected 'v1' after restore", f"got '{body.strip()}'")
     step_pass("GET /version returned 'v1' (restored)")
 
     # Verify restored data
-    code, body = curl_vm("/data", hostname)
+    code, body = curl_vm("/data", CANARY_HOST)
     data = json.loads(body)
     if data.get("value") != "alpha":
         step_fail(f"GET /data expected 'alpha' after restore", f"got {data!r}")
@@ -774,11 +782,11 @@ def cmd_run():
         work_dir = Path(tempfile.mkdtemp(prefix="boxmunge-vm-test-"))
 
         phase_1_server_setup(hostname)
-        phase_2_deploy_v1(work_dir, hostname)
-        phase_3_stateful_write_v1(hostname)
-        snapshot = phase_4_backup(hostname)
-        phase_5_deploy_v2_and_overwrite(work_dir, hostname)
-        phase_6_restore_and_verify(work_dir, hostname, snapshot)
+        phase_2_deploy_v1(work_dir)
+        phase_3_stateful_write_v1()
+        snapshot = phase_4_backup()
+        phase_5_deploy_v2_and_overwrite(work_dir)
+        phase_6_restore_and_verify(work_dir, snapshot)
 
         # Success
         elapsed = time.time() - start_time

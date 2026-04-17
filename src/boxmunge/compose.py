@@ -1,5 +1,7 @@
 """Generate Docker Compose override files for boxmunge proxy networking."""
+from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -39,6 +41,7 @@ def _build_service_override(
         if routes:
             alias = f"{prefix}-{svc_name}"
             svc_override["networks"] = {
+                "default": {},
                 "boxmunge-proxy": {
                     "aliases": [alias],
                 },
@@ -88,6 +91,20 @@ def generate_compose_override(
         override["services"] = services
 
     return yaml.dump(override, default_flow_style=False, sort_keys=False)
+
+
+def generate_staging_compose_base(compose_path: str | Path) -> str:
+    """Read compose.yml and return a copy with all ``ports`` stripped.
+
+    Staging runs alongside production with a different project name.
+    Docker Compose list-merging means an override file cannot remove ports
+    declared in the base, so we generate a staging-specific base instead.
+    """
+    raw = Path(compose_path).read_text()
+    doc = yaml.safe_load(raw)
+    for svc in (doc.get("services") or {}).values():
+        svc.pop("ports", None)
+    return yaml.dump(doc, default_flow_style=False, sort_keys=False)
 
 
 def generate_staging_compose_override(

@@ -36,7 +36,7 @@ class TestBuildScpCmd:
     def test_basic_upload(self) -> None:
         config = {"server": "box.example.com", "port": 922, "user": "deploy", "project": "myapp"}
         cmd = build_scp_cmd(config, "/tmp/myapp-2024.tar.gz")
-        assert cmd == ["scp", "-O", "-P", "922", "-o", "StrictHostKeyChecking=accept-new",
+        assert cmd == ["scp", "-P", "922", "-o", "StrictHostKeyChecking=accept-new",
                        "/tmp/myapp-2024.tar.gz", "deploy@box.example.com:"]
 
 
@@ -67,6 +67,6 @@ class TestRunScp:
         config = {"server": "box.example.com", "port": 922, "user": "deploy", "project": "myapp"}
         code = run_scp(config, "/tmp/bundle.tar.gz")
         call_args = mock_run.call_args[0][0]
-        assert call_args == ["scp", "-O", "-P", "922", "-o", "StrictHostKeyChecking=accept-new",
+        assert call_args == ["scp", "-P", "922", "-o", "StrictHostKeyChecking=accept-new",
                               "/tmp/bundle.tar.gz", "deploy@box.example.com:"]
         assert code == 0

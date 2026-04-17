@@ -189,10 +189,12 @@ def run_command(command: str, args: list[str]) -> int:
         return 1
 
     # SFTP subsystem — sshd routes this through the login shell as:
-    #   boxmunge-shell -c "/usr/lib/openssh/sftp-server"
+    #   boxmunge-shell -c "/opt/boxmunge/bin/boxmunge-sftp"
+    # (or the real sftp-server path if the Subsystem directive changes).
     # Run sftp-server, then post-process any new uploads via home-dir snapshot.
-    if command in ("sftp-server", "/usr/lib/openssh/sftp-server"):
-        return _handle_sftp(command, args)
+    cmd_base = os.path.basename(command) if "/" in command else command
+    if cmd_base in ("sftp-server", "boxmunge-sftp"):
+        return _handle_sftp("/usr/lib/openssh/sftp-server", args)
 
     if command not in ALLOWED_COMMANDS:
         print(
@@ -229,7 +231,8 @@ def interactive_loop() -> None:
         command, args = parse_shell_command(line)
         if not command:
             continue
-        if command in ("sftp-server", "/usr/lib/openssh/sftp-server", "scp"):
+        cmd_base = os.path.basename(command) if "/" in command else command
+        if cmd_base in ("sftp-server", "boxmunge-sftp", "scp"):
             print("ERROR: This command is not available in interactive mode.", file=sys.stderr)
             continue
         run_command(command, args)

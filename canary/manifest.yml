@@ -16,4 +16,4 @@ backup:
   service: db
   dump_command: "pg_dump -U canary canarydb"
   restore_command: "psql -U canary canarydb"
-  retention: 1
+  retention: 3

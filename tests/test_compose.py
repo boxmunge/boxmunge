@@ -51,6 +51,14 @@ class TestGenerateComposeOverride:
         aliases = parsed["services"]["backend"]["networks"]["boxmunge-proxy"]["aliases"]
         assert "myapp-backend" in aliases
 
+    def test_routable_services_keep_default_network(self) -> None:
+        """Routable services must stay on default network for inter-service DNS."""
+        override = generate_compose_override(FULL_MANIFEST)
+        parsed = yaml.safe_load(override)
+        networks = parsed["services"]["frontend"]["networks"]
+        assert "default" in networks
+        assert "boxmunge-proxy" in networks
+
     def test_aliases_are_project_scoped(self) -> None:
         override = generate_compose_override(FULL_MANIFEST)
         parsed = yaml.safe_load(override)

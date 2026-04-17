@@ -26,7 +26,9 @@ def run_unstage(project_name: str, paths: BoxPaths, dry_run: bool = False) -> in
     staging_override = paths.project_staging_compose_override(project_name)
     staging_project_name = f"{project_name}-staging"
     if staging_override.exists():
-        compose_files = ["compose.yml", "compose.boxmunge-staging.yml"]
+        staging_base = project_dir / "compose.staging-base.yml"
+        base = "compose.staging-base.yml" if staging_base.exists() else "compose.yml"
+        compose_files = [base, "compose.boxmunge-staging.yml"]
         try:
             compose_down(project_dir, compose_files=compose_files,
                          project_name=staging_project_name)
@@ -39,6 +41,10 @@ def run_unstage(project_name: str, paths: BoxPaths, dry_run: bool = False) -> in
 
     if staging_override.exists():
         staging_override.unlink()
+
+    staging_base = project_dir / "compose.staging-base.yml"
+    if staging_base.exists():
+        staging_base.unlink()
 
     try:
         caddy_reload(paths.caddy)

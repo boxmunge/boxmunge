@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.bundle import extract_bundle as _extract_bundle, copy_project_files as _copy_project_files
-from boxmunge.compose import generate_staging_compose_override
+from boxmunge.compose import generate_staging_compose_base, generate_staging_compose_override
 from boxmunge.docker import compose_up, caddy_reload, DockerError
 from boxmunge.identity import check_project_identity, register_project_identity
 from boxmunge.log import log_operation, log_error
@@ -138,10 +138,14 @@ def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
         manifest, env_files=staging_env_files or None
     ))
 
+    # Generate staging base (compose.yml with ports stripped to avoid conflicts)
+    staging_base = project_dir / "compose.staging-base.yml"
+    staging_base.write_text(generate_staging_compose_base(project_dir / "compose.yml"))
+
     # Start staging containers with separate project name
     print(f"  Starting staging containers...")
     staging_project_name = f"{project_name}-staging"
-    compose_files = ["compose.yml", "compose.boxmunge-staging.yml"]
+    compose_files = ["compose.staging-base.yml", "compose.boxmunge-staging.yml"]
     try:
         compose_up(project_dir, compose_files=compose_files,
                    project_name=staging_project_name)
@@ -162,7 +166,7 @@ def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
     if has_smoke:
         print(f"  Running smoke tests in containers...")
         from boxmunge.commands.check import run_smoke_in_container
-        staging_compose_files = ["compose.yml", "compose.boxmunge-staging.yml"]
+        staging_compose_files = ["compose.staging-base.yml", "compose.boxmunge-staging.yml"]
         smoke_result = run_smoke_in_container(
             project_dir, manifest, staging_compose_files,
             project_name=staging_project_name,

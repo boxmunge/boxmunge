@@ -103,10 +103,20 @@ class TestDispatchCommand:
         assert exc_info.value.code == 0
 
     @patch("boxmunge.shell.subprocess.run")
-    def test_handles_sftp(self, mock_run: MagicMock) -> None:
-        """SFTP subsystem is routed through the shell by sshd."""
+    def test_handles_sftp_direct(self, mock_run: MagicMock) -> None:
+        """SFTP subsystem via direct sftp-server path."""
         mock_run.return_value = MagicMock(returncode=0)
         with patch("boxmunge.shell.Path.home", return_value=Path("/tmp/fakehome")):
             result = run_command("/usr/lib/openssh/sftp-server", [])
         assert result == 0
+        mock_run.assert_called_once_with(["/usr/lib/openssh/sftp-server"], check=False)
+
+    @patch("boxmunge.shell.subprocess.run")
+    def test_handles_boxmunge_sftp(self, mock_run: MagicMock) -> None:
+        """SFTP subsystem via boxmunge-sftp wrapper (the normal case)."""
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("boxmunge.shell.Path.home", return_value=Path("/tmp/fakehome")):
+            result = run_command("/opt/boxmunge/bin/boxmunge-sftp", [])
+        assert result == 0
+        # Should delegate to the real sftp-server, not boxmunge-sftp
         mock_run.assert_called_once_with(["/usr/lib/openssh/sftp-server"], check=False)
