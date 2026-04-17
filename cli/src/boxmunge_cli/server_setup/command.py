@@ -154,10 +154,9 @@ def _run_install(
             setup_args.local_bundle,
             f"{user}@{host}:/tmp/boxmunge-release.tar.gz",
         ]
-        result = subprocess.run(scp_cmd, capture_output=True, text=True, check=False)
+        result = subprocess.run(scp_cmd, check=False)
         if result.returncode != 0:
             print("ERROR: Failed to upload bundle.", file=sys.stderr)
-            print(result.stderr, file=sys.stderr)
             return 1
         extract_script = (
             "set -e && cd /tmp && "

@@ -13,7 +13,7 @@ class PreflightError(Exception):
 def _ssh_cmd(user: str, host: str, port: int, needs_sudo: bool, command: str) -> list[str]:
     """Build an SSH command for a pre-flight check."""
     remote = f"sudo {command}" if needs_sudo else command
-    return ["ssh", "-p", str(port), "-o", "BatchMode=yes",
+    return ["ssh", "-p", str(port),
             "-o", "ConnectTimeout=10",
             "-o", "StrictHostKeyChecking=accept-new",
             "-o", "UserKnownHostsFile=/dev/null",
