@@ -81,12 +81,16 @@ class TestEndToEndStage:
         scp_calls = [c for c in mock_run.call_args_list
                      if c[0][0][0] == "scp"]
         assert len(scp_calls) == 1
-        assert "myapp-" in scp_calls[0][0][0][3]  # bundle filename
+        # Find the bundle filename arg (after scp, -P, port, -o, StrictHostKeyChecking...)
+        scp_args = scp_calls[0][0][0]
+        bundle_arg = [a for a in scp_args if "myapp-" in a]
+        assert bundle_arg, f"No bundle filename in SCP args: {scp_args}"
 
         # Verify SSH trigger was called
         ssh_calls = [c for c in mock_run.call_args_list
                      if c[0][0][0] == "ssh" and c[0][0][-2] == "stage"]
         assert len(ssh_calls) == 1
         assert ssh_calls[0][0][0] == [
-            "ssh", "-p", "922", "deploy@box.example.com", "stage", "myapp"
+            "ssh", "-p", "922", "-o", "StrictHostKeyChecking=accept-new",
+            "deploy@box.example.com", "stage", "myapp"
         ]

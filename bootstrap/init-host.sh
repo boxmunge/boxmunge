@@ -29,6 +29,7 @@ SSH_KEY=""
 INSTALL_AIDE=true
 INSTALL_CROWDSEC=true
 INSTALL_AUTO_UPDATES=true
+SELF_SIGNED_TLS=false
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -42,6 +43,7 @@ while [[ $# -gt 0 ]]; do
         --no-aide)        INSTALL_AIDE=false;        shift ;;
         --no-crowdsec)    INSTALL_CROWDSEC=false;    shift ;;
         --no-auto-updates) INSTALL_AUTO_UPDATES=false; shift ;;
+        --self-signed-tls)    SELF_SIGNED_TLS=true;           shift ;;
         *)
             echo "Unknown argument: $1" >&2
             echo "Usage: sudo bash init-host.sh --hostname HOST --email EMAIL --ssh-key KEY [--ssh-port PORT]" >&2
@@ -436,13 +438,16 @@ logging:
   docker_max_size: "50m"
   docker_max_file: 5
 EOF
+if [ "$SELF_SIGNED_TLS" = "true" ]; then
+    echo "tls_mode: internal" >> "${BOXMUNGE_ROOT}/config/boxmunge.yml"
+fi
 chmod 640 "${BOXMUNGE_ROOT}/config/boxmunge.yml"
 chown root:"${DEPLOY_USER}" "${BOXMUNGE_ROOT}/config/boxmunge.yml"
 
 # ---------------------------------------------------------------------------
 # Step 12: Install boxmunge CLI
 # ---------------------------------------------------------------------------
-echo "##BOXMUNGE:STEP:13:15:Installing boxmunge CLI"
+echo "##BOXMUNGE:STEP:13:15:Preparing PATH and login shell"
 banner "Step 12/14: Adding boxmunge to PATH"
 
 cat > /etc/profile.d/boxmunge.sh <<EOF
@@ -462,6 +467,16 @@ fi
 echo "##BOXMUNGE:STEP:14:15:Deploying Caddy reverse proxy"
 banner "Step 13/14: Deploying Caddy reverse proxy"
 
+if [ "$SELF_SIGNED_TLS" = "true" ]; then
+cat > "${BOXMUNGE_ROOT}/caddy/Caddyfile" <<EOF
+{
+    email ${ADMIN_EMAIL}
+    local_certs
+}
+
+import /etc/caddy/sites/*.conf
+EOF
+else
 cat > "${BOXMUNGE_ROOT}/caddy/Caddyfile" <<EOF
 {
     email ${ADMIN_EMAIL}
@@ -469,6 +484,7 @@ cat > "${BOXMUNGE_ROOT}/caddy/Caddyfile" <<EOF
 
 import /etc/caddy/sites/*.conf
 EOF
+fi
 chmod 640 "${BOXMUNGE_ROOT}/caddy/Caddyfile"
 chown root:"${DEPLOY_USER}" "${BOXMUNGE_ROOT}/caddy/Caddyfile"
 

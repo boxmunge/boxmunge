@@ -79,6 +79,12 @@ exec /opt/boxmunge/venv/bin/boxmunge "$@"
 WRAPPER
 chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge"
 
+cat > "${BOXMUNGE_ROOT}/bin/boxmunge-server" <<'WRAPPER'
+#!/usr/bin/env bash
+exec /opt/boxmunge/venv/bin/boxmunge-server "$@"
+WRAPPER
+chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-server"
+
 cat > "${BOXMUNGE_ROOT}/bin/boxmunge-shell" <<'WRAPPER'
 #!/usr/bin/env bash
 exec /opt/boxmunge/venv/bin/boxmunge-shell "$@"
@@ -129,6 +135,7 @@ chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-sftp"
 
 # Symlink into /usr/local/bin so boxmunge works in non-interactive SSH sessions
 ln -sf "${BOXMUNGE_ROOT}/bin/boxmunge" /usr/local/bin/boxmunge
+ln -sf "${BOXMUNGE_ROOT}/bin/boxmunge-server" /usr/local/bin/boxmunge-server
 
 # ---------------------------------------------------------------------------
 # On-server documentation

@@ -36,7 +36,10 @@ cat > /etc/audit/rules.d/boxmunge.rules <<'EOF'
 EOF
 
 systemctl enable auditd
-systemctl restart auditd
+if ! systemctl restart auditd 2>/dev/null; then
+    echo "WARNING: auditd failed to start (kernel audit support may be unavailable)."
+    echo "         This is expected in some virtualised environments."
+fi
 augenrules --load 2>/dev/null || true
 
 echo "Auditd installed with boxmunge rules."

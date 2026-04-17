@@ -18,7 +18,8 @@ class TestRunMcpProxy:
 
         mock_popen.assert_called_once()
         cmd = mock_popen.call_args[0][0]
-        assert cmd == ["ssh", "-p", "922", "deploy@box.example.com", "mcp-serve"]
+        assert cmd == ["ssh", "-p", "922", "-o", "StrictHostKeyChecking=accept-new",
+                       "deploy@box.example.com", "mcp-serve"]
 
     @patch("boxmunge_cli.mcp_proxy.subprocess.Popen")
     def test_uses_stdin_stdout_passthrough(self, mock_popen: MagicMock) -> None:

@@ -30,4 +30,4 @@ def render_progress_bar(current: int, total: int, description: str, width: int =
         pct = int((current / total) * 100)
     filled = int(width * current / total) if total > 0 else 0
     bar = "\u2588" * filled + "\u2591" * (width - filled)
-    return f"[{bar}] {pct:>3}%  {description}"
+    return f"[{bar}] {pct:>3}%  {description}..."

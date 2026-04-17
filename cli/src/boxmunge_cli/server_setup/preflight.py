@@ -14,7 +14,10 @@ def _ssh_cmd(user: str, host: str, port: int, needs_sudo: bool, command: str) ->
     """Build an SSH command for a pre-flight check."""
     remote = f"sudo {command}" if needs_sudo else command
     return ["ssh", "-p", str(port), "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=10", f"{user}@{host}", remote]
+            "-o", "ConnectTimeout=10",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "UserKnownHostsFile=/dev/null",
+            f"{user}@{host}", remote]
 
 
 def _run_check(user: str, host: str, port: int, command: str, needs_sudo: bool = False) -> subprocess.CompletedProcess:
@@ -84,9 +87,10 @@ def check_freshness(user: str, host: str, port: int, needs_sudo: bool) -> list[s
     """Scan for signs this isn't a fresh box. Returns list of warning strings."""
     warnings: list[str] = []
 
+    # Exclude the login user — providers often create a default non-root user
     result = _run_check(
         user, host, port,
-        "awk -F: '$3 >= 1000 && $1 != \"nobody\" {print $1}' /etc/passwd",
+        f"awk -F: '$3 >= 1000 && $1 != \"nobody\" && $1 != \"{user}\" {{print $1}}' /etc/passwd",
         needs_sudo,
     )
     if result.returncode == 0 and result.stdout.strip():
@@ -106,9 +110,11 @@ def check_freshness(user: str, host: str, port: int, needs_sudo: bool) -> list[s
     if result.returncode == 0 and result.stdout.strip():
         warnings.append("Services already listening on port 80 and/or 443")
 
+    # Exclude the login user's home dir — it's expected on provider images
     result = _run_check(
         user, host, port,
-        "find /home /var/www -mindepth 1 -maxdepth 1 2>/dev/null | head -5",
+        f"find /home /var/www -mindepth 1 -maxdepth 1 "
+        f"! -name '{user}' 2>/dev/null | head -5",
         needs_sudo,
     )
     if result.returncode == 0 and result.stdout.strip():

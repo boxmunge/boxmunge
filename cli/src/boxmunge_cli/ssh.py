@@ -16,6 +16,7 @@ def build_ssh_cmd(config: dict[str, Any], command: str, *args: str) -> list[str]
     cmd = [
         "ssh",
         "-p", str(config["port"]),
+        "-o", "StrictHostKeyChecking=accept-new",
         f"{config['user']}@{config['server']}",
         command,
     ]
@@ -28,6 +29,7 @@ def build_scp_cmd(config: dict[str, Any], local_path: str) -> list[str]:
     return [
         "scp",
         "-P", str(config["port"]),
+        "-o", "StrictHostKeyChecking=accept-new",
         local_path,
         f"{config['user']}@{config['server']}:",
     ]

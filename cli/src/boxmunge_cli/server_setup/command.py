@@ -36,6 +36,9 @@ class ServerSetupArgs:
     no_crowdsec: bool = False
     no_auto_updates: bool = False
     reboot_window: str = "04:00"
+    self_signed_tls: bool = False
+    yes: bool = False
+    local_bundle: str | None = None
 
 
 def parse_args(args: list[str]) -> ServerSetupArgs:
@@ -49,6 +52,9 @@ def parse_args(args: list[str]) -> ServerSetupArgs:
     no_crowdsec = False
     no_auto_updates = False
     reboot_window = "04:00"
+    self_signed_tls = False
+    yes = False
+    local_bundle: str | None = None
 
     i = 0
     positional: list[str] = []
@@ -71,6 +77,12 @@ def parse_args(args: list[str]) -> ServerSetupArgs:
             no_auto_updates = True; i += 1
         elif args[i] == "--reboot-window" and i + 1 < len(args):
             reboot_window = args[i + 1]; i += 2
+        elif args[i] == "--self-signed-tls":
+            self_signed_tls = True; i += 1
+        elif args[i] in ("-y", "--yes"):
+            yes = True; i += 1
+        elif args[i] == "--local-bundle" and i + 1 < len(args):
+            local_bundle = args[i + 1]; i += 2
         elif not args[i].startswith("-"):
             positional.append(args[i]); i += 1
         else:
@@ -97,13 +109,18 @@ def parse_args(args: list[str]) -> ServerSetupArgs:
         boxmunge_ssh_port=boxmunge_ssh_port,
         no_aide=no_aide, no_crowdsec=no_crowdsec,
         no_auto_updates=no_auto_updates, reboot_window=reboot_window,
+        self_signed_tls=self_signed_tls, yes=yes,
+        local_bundle=local_bundle,
     )
 
 
 def _ssh_cmd(user: str, host: str, port: int, needs_sudo: bool, command: str) -> list[str]:
     """Build SSH command with optional sudo prefix."""
     remote = f"sudo {command}" if needs_sudo else command
-    return ["ssh", "-p", str(port), f"{user}@{host}", remote]
+    return ["ssh", "-p", str(port),
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "UserKnownHostsFile=/dev/null",
+            f"{user}@{host}", remote]
 
 
 def _resolve_hostname(user: str, host: str, port: int, needs_sudo: bool) -> str:
@@ -122,31 +139,62 @@ def _run_install(
     user: str, host: str, port: int, needs_sudo: bool,
     setup_args: ServerSetupArgs, ssh_key: str,
 ) -> int:
-    """Pull release from GitHub on the server and run init-host.sh with progress tracking."""
+    """Upload or pull release on the server and run init-host.sh with progress tracking."""
     hostname = setup_args.hostname or host
 
-    # Step 1: Pull latest release and extract on server
-    pull_script = (
-        f"set -e && "
-        f"cd /tmp && "
-        f"RELEASE_URL=$(curl -sf 'https://api.github.com/repos/{GITHUB_REPO}/releases/latest' "
-        f"| python3 -c \"import sys,json; print(json.load(sys.stdin)['tarball_url'])\") && "
-        f"curl -sfL \"$RELEASE_URL\" -o boxmunge-release.tar.gz && "
-        f"rm -rf boxmunge-release && mkdir boxmunge-release && "
-        f"tar xzf boxmunge-release.tar.gz -C boxmunge-release --strip-components=1 && "
-        f"echo PULL_OK"
-    )
-    print("Fetching latest release from GitHub...")
-    cmd = _ssh_cmd(user, host, port, needs_sudo, f"bash -c '{pull_script}'")
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0 or "PULL_OK" not in result.stdout:
-        print("ERROR: Failed to fetch release from GitHub.", file=sys.stderr)
-        print(result.stderr, file=sys.stderr)
-        return 1
+    # Step 1: Get release onto the server
+    if setup_args.local_bundle:
+        # Upload local bundle via SCP and extract
+        print(f"Uploading local bundle: {setup_args.local_bundle}")
+        scp_cmd = [
+            "scp",
+            "-P", str(port),
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "UserKnownHostsFile=/dev/null",
+            setup_args.local_bundle,
+            f"{user}@{host}:/tmp/boxmunge-release.tar.gz",
+        ]
+        result = subprocess.run(scp_cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            print("ERROR: Failed to upload bundle.", file=sys.stderr)
+            print(result.stderr, file=sys.stderr)
+            return 1
+        extract_script = (
+            "set -e && cd /tmp && "
+            "rm -rf boxmunge-release && mkdir boxmunge-release && "
+            "tar xzf boxmunge-release.tar.gz -C boxmunge-release --strip-components=1 && "
+            "echo PULL_OK"
+        )
+        cmd = _ssh_cmd(user, host, port, needs_sudo, f"bash -c '{extract_script}'")
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0 or "PULL_OK" not in result.stdout:
+            print("ERROR: Failed to extract bundle on server.", file=sys.stderr)
+            print(result.stderr, file=sys.stderr)
+            return 1
+    else:
+        # Pull latest release from GitHub
+        pull_script = (
+            f"set -e && "
+            f"cd /tmp && "
+            f"RELEASE_URL=$(curl -sf 'https://api.github.com/repos/{GITHUB_REPO}/releases/latest' "
+            f"| python3 -c \"import sys,json; print(json.load(sys.stdin)['tarball_url'])\") && "
+            f"curl -sfL \"$RELEASE_URL\" -o boxmunge-release.tar.gz && "
+            f"rm -rf boxmunge-release && mkdir boxmunge-release && "
+            f"tar xzf boxmunge-release.tar.gz -C boxmunge-release --strip-components=1 && "
+            f"echo PULL_OK"
+        )
+        print("Fetching latest release from GitHub...")
+        cmd = _ssh_cmd(user, host, port, needs_sudo, f"bash -c '{pull_script}'")
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0 or "PULL_OK" not in result.stdout:
+            print("ERROR: Failed to fetch release from GitHub.", file=sys.stderr)
+            print(result.stderr, file=sys.stderr)
+            return 1
 
-    # Step 2: Run init-host.sh with progress tracking
+    # Step 2: Run install.sh (which calls init-host.sh for bootstrapping,
+    # then installs the Python package, wrapper scripts, and systemd units)
     init_cmd_parts = [
-        "bash /tmp/boxmunge-release/bootstrap/init-host.sh",
+        "bash /tmp/boxmunge-release/install.sh",
         f"--hostname {hostname}",
         f"--email {setup_args.email}",
         f"--ssh-key '{ssh_key}'",
@@ -158,6 +206,8 @@ def _run_install(
         init_cmd_parts.append("--no-crowdsec")
     if setup_args.no_auto_updates:
         init_cmd_parts.append("--no-auto-updates")
+    if setup_args.self_signed_tls:
+        init_cmd_parts.append("--self-signed-tls")
 
     remote_cmd = " ".join(init_cmd_parts)
     ssh_cmd = _ssh_cmd(user, host, port, needs_sudo, remote_cmd)
@@ -200,11 +250,12 @@ def cmd_server_setup(args: list[str]) -> None:
     setup_args = parse_args(args)
 
     # Interactive confirmation
-    print(f"This will turn [{setup_args.host}] into a boxmunge server.")
-    response = input("Are you sure? [y/N] ").strip().lower()
-    if response != "y":
-        print("Aborted.")
-        sys.exit(0)
+    if not setup_args.yes:
+        print(f"This will turn [{setup_args.host}] into a boxmunge server.")
+        response = input("Are you sure? [y/N] ").strip().lower()
+        if response != "y":
+            print("Aborted.")
+            sys.exit(0)
 
     # Detect SSH key
     try:
@@ -239,10 +290,11 @@ def cmd_server_setup(args: list[str]) -> None:
             for w in warnings:
                 print(f"  - {w}")
             print("\nboxmunge takes over the entire box. Proceeding may interfere with existing services.")
-            response = input("Continue anyway? [y/N] ").strip().lower()
-            if response != "y":
-                print("Aborted.")
-                sys.exit(0)
+            if not setup_args.yes:
+                response = input("Continue anyway? [y/N] ").strip().lower()
+                if response != "y":
+                    print("Aborted.")
+                    sys.exit(0)
         else:
             print("Ok")
 
