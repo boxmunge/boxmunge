@@ -7,6 +7,9 @@ import os
 import psycopg2
 
 
+VERSION_FILE = "/app/VERSION"
+
+
 def get_conn():
     return psycopg2.connect(os.environ["DATABASE_URL"])
 
@@ -19,21 +22,33 @@ def init_db():
     conn.close()
 
 
+def read_version() -> str:
+    try:
+        with open(VERSION_FILE) as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return "unknown"
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/healthz":
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"ok")
+        elif self.path == "/version":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(read_version().encode())
         elif self.path == "/data":
             conn = get_conn()
             cur = conn.cursor()
-            cur.execute("SELECT count(*) FROM canary_data")
-            count = cur.fetchone()[0]
+            cur.execute("SELECT value FROM canary_data ORDER BY id DESC LIMIT 1")
+            row = cur.fetchone()
             conn.close()
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(json.dumps({"count": count}).encode())
+            self.wfile.write(json.dumps({"value": row[0] if row else None}).encode())
         else:
             self.send_response(404)
             self.end_headers()
