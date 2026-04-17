@@ -93,43 +93,7 @@ chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-shell"
 
 cat > "${BOXMUNGE_ROOT}/bin/boxmunge-sftp" <<'WRAPPER'
 #!/usr/bin/env bash
-# SFTP subsystem handler for boxmunge.
-# For the deploy user: runs sftp-server normally (files land in ~deploy/),
-# then moves received files through the reception handler into the inbox.
-# For other users: passes through to the real sftp-server.
-DEPLOY_HOME="/home/deploy"
-
-if [ "$(id -un)" = "deploy" ]; then
-    # Snapshot existing files in home dir before sftp
-    before=$(ls -1 "$DEPLOY_HOME" 2>/dev/null)
-
-    /usr/lib/openssh/sftp-server "$@"
-    RC=$?
-
-    # Find new files that weren't there before
-    after=$(ls -1 "$DEPLOY_HOME" 2>/dev/null)
-    new_files=$(comm -13 <(echo "$before") <(echo "$after"))
-
-    for fname in $new_files; do
-        f="$DEPLOY_HOME/$fname"
-        [ -f "$f" ] || continue
-        /opt/boxmunge/venv/bin/python3 -c "
-from boxmunge.reception import receive_bundle
-from boxmunge.paths import BoxPaths
-from pathlib import Path
-import sys
-try:
-    dest = receive_bundle(Path('$f'), BoxPaths())
-    print(f'Received: {dest.name}', file=sys.stderr)
-except ValueError as e:
-    print(f'Upload rejected: {e}', file=sys.stderr)
-    Path('$f').unlink(missing_ok=True)
-"
-    done
-    exit $RC
-else
-    exec /usr/lib/openssh/sftp-server "$@"
-fi
+exec /opt/boxmunge/venv/bin/boxmunge-sftp "$@"
 WRAPPER
 chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-sftp"
 
@@ -161,6 +125,10 @@ systemctl enable --now \
     boxmunge-backup.timer \
     boxmunge-health.timer \
     boxmunge-backup-sync.timer
+
+# Auto-update timer disabled by default — requires release signature
+# verification (cosign) before it's safe to enable. Enable manually with:
+#   systemctl enable --now boxmunge-auto-update.timer
 
 # ---------------------------------------------------------------------------
 # Verify

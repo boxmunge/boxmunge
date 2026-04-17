@@ -109,10 +109,12 @@ backup:
   # Valid values: none, postgres, mysql, files, custom.
   type: postgres
 
-  # REQUIRED if type != none. Command run inside the container to produce a backup.
+  # REQUIRED if type != none. Command run inside the container via `sh -c`.
+  # These execute as arbitrary shell inside the target container (not on the host).
+  # The manifest author controls what runs here — treat these like Dockerfile RUN commands.
   dump_command: "pg_dump -U $POSTGRES_USER $POSTGRES_DB"
 
-  # REQUIRED if type != none. Command run inside the container to consume a restore.
+  # REQUIRED if type != none. Command run inside the container via `sh -c`.
   restore_command: "psql -U $POSTGRES_USER $POSTGRES_DB"
 
   # Number of daily backups to retain. Defaults to 7.

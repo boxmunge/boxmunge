@@ -1,43 +1,42 @@
 # boxmunge
 
-A minimalist, agent-friendly VPS hosting framework for running multiple Docker Compose projects on a single server.
+You've got side projects. Maybe five, maybe ten. Each one needs a server, TLS certificates, backups, security patches — and every one of them gets about 200 visitors a month. You're paying for separate VPSes, or you crammed everything onto one box and hope nothing collides. Backups? You set them up once. You've never tested a restore.
 
-## What is this?
+## One server, all your projects, everything handled
 
-boxmunge gives you a managed platform layer for your side projects without the overhead of a full PaaS. You get:
+Bring a fresh Debian VPS. Point your projects at it. Go back to building things.
 
-- **Multiple projects on one VPS** — each with its own Docker Compose setup, sharing the same server
-- **Automatic HTTPS** via Caddy + Let's Encrypt, zero configuration
-- **Encrypted backups** with mandatory restore scripts — no write-only backups
-- **Zero-downtime deploys** with staging/promote workflow
-- **Agent-friendly CLI** — designed for AI agents to manage deployments via SSH
-- **Host hardening out of the box** — UFW, CrowdSec, kernel hardening, file integrity monitoring, automatic security updates
-- **Self-test command** that proves your backup/restore pipeline actually works
+boxmunge turns a single server into a managed home for all your web projects. Each project gets its own Docker Compose setup, its own domain, its own backups — but they share the same box, the same automatic TLS, the same security hardening. You don't configure any of that. It's just there.
 
-## Who is this for?
+And here's what makes it feel like 2026: **your AI agent can run the whole thing.** Every boxmunge command works over SSH, so the same agent that helps you write code can deploy it, check on it, back it up, and restore it. You don't need to learn boxmunge. You don't need to learn Docker networking or Caddy configuration or UFW rules. You build your web project, your agent handles the rest.
 
-Individual developers who want to ship web projects without thinking about infrastructure. You want to say "deploy it" and have everything handled — TLS, reverse proxy, backups, monitoring, security patching.
+That's the real promise — not just "easy hosting," but one less tool you have to carry in your head.
 
-boxmunge is **not** for multi-tenant hosting, enterprise deployments, or situations requiring granular IAM. It's for the time-constrained solo developer who wants their pet projects and side hustles to go live without having to think about it.
+### What you get
 
-## Quickstart
+- **All your projects on one VPS** — each isolated in Docker Compose, sharing the server
+- **Automatic HTTPS** — Caddy + Let's Encrypt, zero configuration
+- **Encrypted backups that actually restore** — mandatory restore commands, tested by a self-test that proves it works
+- **Zero-downtime deploys** — stage, verify, promote
+- **Security hardening out of the box** — firewall, intrusion detection, kernel hardening, automatic security updates
+- **AI-native operations** — every command works over SSH and via MCP, designed for agents from day one
 
-### 1. Bootstrap a VPS
+## Getting started
 
-On a fresh Debian 13 server:
+### 1. Set up your server
+
+You need a fresh Debian 13 VPS with a public IP. Point your domain at it, then:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/boxmunge/boxmunge/main/init | sudo bash -s -- \
-  --hostname box.example.com \
-  --email you@example.com \
-  --ssh-key "ssh-ed25519 AAAA..."
+pip install boxmunge
+boxmunge server-setup you@your-server.example.com --email you@example.com
 ```
 
-This installs Docker, Caddy, boxmunge CLI, configures SSH, firewall, backups, and hardening.
+That's it. boxmunge SSHes in, installs everything, hardens the OS, and sets up the reverse proxy. Takes a few minutes.
 
-### 2. Deploy a project
+### 2. Ship a project
 
-Create a `manifest.yml` in your project:
+Add a `manifest.yml` to your project — it tells boxmunge what you're running and how to back it up. Or better yet, get your AI agent to do it for you.
 
 ```yaml
 project: myapp
@@ -49,63 +48,56 @@ services:
     port: 3000
     routes:
       - path: /
-    smoke: boxmunge-scripts/smoke.sh
 backup:
   type: postgres
   dump_command: "pg_dump -U myuser mydb"
   restore_command: "psql -U myuser mydb"
 ```
 
-Bundle and deploy:
+Then bundle, upload, and deploy:
 
 ```bash
-boxmunge bundle ./myapp
-scp -P 922 myapp.tar.gz deploy@box.example.com:
-ssh -p 922 deploy@box.example.com deploy myapp
+boxmunge stage myapp        # bundle, upload, start staging
+boxmunge promote myapp      # swap staging into production
 ```
 
-### 3. Verify everything works
+Your project is live at `https://myapp.example.com` with TLS, reverse proxy, and backups configured.
 
-```bash
-ssh -p 922 deploy@box.example.com self-test
-ssh -p 922 deploy@box.example.com health
-```
+### 3. Let your agent take over
 
-## Commands
-
-Server-side commands (run via SSH as the deploy user -- no `boxmunge` prefix needed):
-
-| Command | Description |
-|---------|-------------|
-| `deploy <project>` | Deploy to production |
-| `stage <project>` | Deploy to staging for verification |
-| `promote <project>` | Promote staging to production |
-| `backup <project>` | Create encrypted backup |
-| `restore <project>` | Restore from backup |
-| `rollback <project>` | Restore pre-deploy snapshot + redeploy previous version |
-| `self-test` | Prove backup/restore works via canary project |
-| `health` | Non-destructive platform audit |
-| `upgrade` | Update the platform (stash + migrate + restart) |
-| `log` | Query structured operational logs |
-| `secrets set/get/list/unset` | Manage project secrets |
-| `status` | Dashboard of all projects |
-
-## MCP (Model Context Protocol)
-
-boxmunge supports MCP for structured agent access. Add to your Claude Code or Cursor configuration:
+Add boxmunge to your AI agent's MCP configuration:
 
 ```json
 {
   "mcpServers": {
     "boxmunge": {
-      "command": "ssh",
-      "args": ["-p", "922", "deploy@your-box.example.com", "mcp-serve"]
+      "command": "boxmunge",
+      "args": ["mcp-serve"]
     }
   }
 }
 ```
 
-This gives your agent structured access to all boxmunge commands — deploy, backup, restore, health checks, log queries, and more — over the same SSH connection you already use.
+The local CLI reads your project's `.boxmunge` config to find the right server automatically — no hardcoded hosts, no risk of deploying to the wrong box. Now "deploy it" is a conversation, not a context switch.
+
+## Commands
+
+SSH into the deploy user and run commands directly — no `boxmunge` prefix needed:
+
+| Command | Description |
+|---------|-------------|
+| `stage <project>` | Deploy to staging for verification |
+| `promote <project>` | Promote staging to production |
+| `prod-deploy <project>` | Deploy straight to production |
+| `rollback <project>` | Restore pre-deploy snapshot and redeploy |
+| `backup <project>` | Create encrypted backup |
+| `restore <project>` | Restore from backup |
+| `self-test` | Prove backup/restore pipeline actually works |
+| `health` | Platform audit |
+| `status` | Dashboard of all projects |
+| `secrets set/get/list/unset` | Manage project secrets |
+| `upgrade` | Update the platform |
+| `log` | Query operational logs |
 
 ## Documentation
 

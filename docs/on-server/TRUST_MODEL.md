@@ -23,7 +23,8 @@ The `deploy` user can operate on any project — this is by design, not a gap. T
 ## What We Don't Isolate
 
 - **Network** — projects share the `boxmunge-proxy` Docker network and can technically reach each other. Acceptable for single-owner.
-- **Docker socket** — the deploy user has access via group membership. Necessary for container management.
+- **Docker group** — the deploy user is in the `docker` group, which is effectively equivalent to root on the host (a user can mount the host filesystem via `docker run -v /:/host`). This is an intentional trade-off: the deploy user needs to run `docker compose` for deployments, and Docker's permission model requires group membership. The restricted shell limits what the deploy user does *directly*, but it is not a privilege boundary against a determined attacker who already has SSH access as deploy. Key-only authentication is the real perimeter.
+- **Backup encryption key** — the deploy user can read the age identity key at `/opt/boxmunge/config/backup.key` (mode 640, group deploy). This is required for backup and restore operations to work without sudo. An authenticated deploy user can decrypt any backup snapshot.
 - **Backups** — the deploy user can trigger backup/restore for any project.
 
 ## Explicitly Out of Scope
@@ -49,4 +50,4 @@ boxmunge hardens the VPS as part of installation:
 
 ## Security Releases
 
-Security-tagged releases are applied automatically within 12 hours. The user never needs to check CVE reports. The `boxmunge upgrade` flow handles stashing, migration, and validation automatically.
+Security-tagged releases will be applied automatically once release signature verification (cosign) is implemented. Until then, the auto-update timer is disabled by default and upgrades must be triggered manually with `boxmunge upgrade`. The upgrade flow handles stashing, migration, and validation automatically.

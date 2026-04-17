@@ -241,6 +241,21 @@ _set_sshd PasswordAuthentication no
 _set_sshd ChallengeResponseAuthentication no
 _set_sshd UsePAM yes
 
+# Session and access limits
+_set_sshd MaxAuthTries 3
+_set_sshd LoginGraceTime 30
+_set_sshd ClientAliveInterval 300
+_set_sshd ClientAliveCountMax 2
+
+# Restrict SSH features — deploy user must not tunnel or forward
+_set_sshd AllowTcpForwarding no
+_set_sshd GatewayPorts no
+_set_sshd PermitTunnel no
+_set_sshd X11Forwarding no
+
+# Only named accounts may log in
+_set_sshd AllowUsers "${DEPLOY_USER} supervisor"
+
 # Replace the global SFTP subsystem with our wrapper.
 # Modern scp (OpenSSH 9+) uses the SFTP protocol, so scp uploads invoke
 # the sftp subsystem instead of the user's login shell. Our wrapper checks

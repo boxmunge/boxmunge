@@ -6,6 +6,7 @@ deploy state, and platform version. Used automatically during
 boxmunge upgrade; not a user-facing command.
 """
 
+import os
 import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ def create_stash(paths: BoxPaths) -> Path:
     Returns the path to the created archive.
     """
     paths.stashes.mkdir(parents=True, exist_ok=True)
+    os.chmod(paths.stashes, 0o700)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S")
     archive_path = paths.stashes / f"boxmunge-stash-{ts}.tar.gz"
 
@@ -47,6 +49,7 @@ def create_stash(paths: BoxPaths) -> Path:
                         if script.is_file():
                             tar.add(script, arcname=f"projects/{project_name}/boxmunge-scripts/{script.name}")
 
+    os.chmod(archive_path, 0o600)
     return archive_path
 
 
