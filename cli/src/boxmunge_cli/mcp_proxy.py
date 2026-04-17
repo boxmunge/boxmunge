@@ -19,7 +19,8 @@ def run_mcp_proxy(config: dict[str, Any]) -> int:
     def _terminate(signum: int, frame: Any) -> None:
         proc.terminate()
 
-    signal.signal(signal.SIGTERM, _terminate)
     signal.signal(signal.SIGINT, _terminate)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _terminate)
 
     return proc.wait()
