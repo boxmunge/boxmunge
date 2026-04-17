@@ -28,6 +28,7 @@ def build_scp_cmd(config: dict[str, Any], local_path: str) -> list[str]:
     """Build an SCP upload command list."""
     return [
         "scp",
+        "-O",  # legacy SCP protocol (not SFTP)
         "-P", str(config["port"]),
         "-o", "StrictHostKeyChecking=accept-new",
         local_path,

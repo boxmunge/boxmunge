@@ -20,6 +20,9 @@ build/
 *.swp
 *.swo
 
+# VM test cache (downloaded images, overlays, ephemeral keys)
+.cache/
+
 # Superpowers brainstorm sessions
 .superpowers/
 

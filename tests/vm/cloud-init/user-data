@@ -1,0 +1,12 @@
+#cloud-config
+users:
+  - name: test
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - __SSH_PUBLIC_KEY__
+
+# Do NOT run package_update — init-host.sh does its own apt update
+# and the two would race for the apt lock.
+package_update: false
+package_upgrade: false

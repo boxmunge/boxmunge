@@ -33,5 +33,8 @@ test-integration:
 test-all:
 	python3 -m pytest tests/ -v
 
+test-vm:
+	python3 tests/vm/vm-test.py
+
 clean:
 	rm -rf dist/
