@@ -116,11 +116,17 @@ def parse_args(args: list[str]) -> ServerSetupArgs:
 
 def _ssh_cmd(user: str, host: str, port: int, needs_sudo: bool, command: str) -> list[str]:
     """Build SSH command with optional sudo prefix."""
-    remote = f"sudo {command}" if needs_sudo else command
+    remote = f"sudo bash -c {_shell_quote(command)}" if needs_sudo else command
     return ["ssh", "-p", str(port),
             "-o", "StrictHostKeyChecking=accept-new",
             "-o", "UserKnownHostsFile=/dev/null",
             f"{user}@{host}", remote]
+
+
+def _shell_quote(s: str) -> str:
+    """Quote a string for embedding in a shell command using $'...' syntax."""
+    escaped = s.replace("\\", "\\\\").replace("'", "\\'")
+    return f"$'{escaped}'"
 
 
 def _resolve_hostname(user: str, host: str, port: int, needs_sudo: bool) -> str:
@@ -164,7 +170,7 @@ def _run_install(
             "tar xzf boxmunge-release.tar.gz -C boxmunge-release --strip-components=1 && "
             "echo PULL_OK"
         )
-        cmd = _ssh_cmd(user, host, port, needs_sudo, f"bash -c '{extract_script}'")
+        cmd = _ssh_cmd(user, host, port, needs_sudo, extract_script)
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0 or "PULL_OK" not in result.stdout:
             print("ERROR: Failed to extract bundle on server.", file=sys.stderr)
@@ -183,7 +189,7 @@ def _run_install(
             f"echo PULL_OK"
         )
         print("Fetching latest release from GitHub...")
-        cmd = _ssh_cmd(user, host, port, needs_sudo, f"bash -c '{pull_script}'")
+        cmd = _ssh_cmd(user, host, port, needs_sudo, pull_script)
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0 or "PULL_OK" not in result.stdout:
             print("ERROR: Failed to fetch release from GitHub.", file=sys.stderr)
