@@ -1,0 +1,9 @@
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - check-data:/data
+
+volumes:
+  check-data:

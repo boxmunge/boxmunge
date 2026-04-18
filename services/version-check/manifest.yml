@@ -1,0 +1,18 @@
+schema_version: 1
+id: 01VERSIONCHECK000000000000
+project: boxmunge-web
+source: bundle
+hosts:
+  - boxmunge.dev
+services:
+  web:
+    port: 8147
+    routes:
+      - path: /
+    health: /v1/check?v=0.0.0
+    smoke: boxmunge-scripts/smoke.sh
+backup:
+  type: volume
+  dump_command: "cp /data/checks.db /backup/checks.db"
+  restore_command: "cp /backup/checks.db /data/checks.db"
+  retention: 7
