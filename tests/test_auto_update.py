@@ -1,8 +1,6 @@
 """Tests for auto-update version targeting — security patches within major.minor line only."""
 
-import json
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from boxmunge.commands.auto_update_cmd import (
     _version_newer,
