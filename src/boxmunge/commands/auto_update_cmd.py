@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """boxmunge auto-update — check for and apply security releases.
 
-Checks GitHub releases for security-tagged updates. Applies via upgrade flow.
-Run by a systemd timer every 6 hours.
+Checks the boxmunge.dev version-check endpoint first, falling back to the
+GitHub Releases API. Applies via upgrade flow. Run by a systemd timer every
+6 hours.
 
 NOTE: Full signature verification (cosign) will be added when the release
 pipeline is active.
@@ -85,12 +86,28 @@ def _same_minor_line(candidate: str, current: str) -> bool:
     return c == cur
 
 
-def check_for_security_update(paths: BoxPaths) -> dict[str, Any] | None:
-    """Check if a security update is available. Returns release info or None."""
-    current = read_installed_version(paths)
-    current_semver, _ = parse_version_string(current)
+VERSION_CHECK_URL = "https://boxmunge.dev/v1/check"
 
-    releases = _fetch_releases()  # Raises UpdateCheckError on failure
+
+def _check_via_endpoint(current_version: str) -> dict[str, Any]:
+    """Query boxmunge.dev for update status. Raises UpdateCheckError on failure."""
+    url = f"{VERSION_CHECK_URL}?v={current_version}"
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": f"boxmunge/{current_version}"},
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        return json.loads(resp.read())
+    except urllib.error.URLError as e:
+        raise UpdateCheckError(f"Cannot reach version-check service: {e}") from e
+    except json.JSONDecodeError as e:
+        raise UpdateCheckError(f"Invalid response from version-check service: {e}") from e
+
+
+def _check_via_github(current_semver: str) -> dict[str, Any] | None:
+    """Fallback: check GitHub Releases API for security updates."""
+    releases = _fetch_releases()
     for release in releases:
         if release.get("draft") or release.get("prerelease"):
             continue
@@ -102,10 +119,32 @@ def check_for_security_update(paths: BoxPaths) -> dict[str, Any] | None:
         if _version_newer(tag, current_semver):
             release_url = release.get("html_url", "")
             if not release_url.startswith(f"https://github.com/{GITHUB_REPO}/releases/"):
-                continue  # Skip releases from unexpected sources
+                continue
             return {"version": tag, "url": release_url, "name": release.get("name", "")}
-
     return None
+
+
+def check_for_security_update(paths: BoxPaths) -> dict[str, Any] | None:
+    """Check if a security update is available. Returns release info or None.
+
+    Tries the boxmunge.dev endpoint first. Falls back to the GitHub Releases
+    API if the endpoint is unreachable.
+    """
+    current = read_installed_version(paths)
+    current_semver, _ = parse_version_string(current)
+
+    # Primary: boxmunge.dev version-check service
+    try:
+        result = _check_via_endpoint(current_semver)
+        if result.get("status") == "security_update_available" and result.get("security"):
+            sec = result["security"]
+            return {"version": sec["version"], "url": sec["url"], "name": f"v{sec['version']} [security]"}
+        return None
+    except UpdateCheckError:
+        pass
+
+    # Fallback: GitHub Releases API
+    return _check_via_github(current_semver)
 
 
 def run_auto_update(paths: BoxPaths) -> int:
