@@ -124,11 +124,8 @@ systemctl daemon-reload
 systemctl enable --now \
     boxmunge-backup.timer \
     boxmunge-health.timer \
-    boxmunge-backup-sync.timer
-
-# Auto-update timer disabled by default — requires release signature
-# verification (cosign) before it's safe to enable. Enable manually with:
-#   systemctl enable --now boxmunge-auto-update.timer
+    boxmunge-backup-sync.timer \
+    boxmunge-auto-update.timer
 
 # ---------------------------------------------------------------------------
 # Verify

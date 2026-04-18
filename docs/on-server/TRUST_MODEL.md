@@ -13,6 +13,7 @@ The `deploy` user can operate on any project — this is by design, not a gap. T
 ## What We Isolate
 
 **Platform tooling** runs inside containers for blast-radius containment:
+
 - **Caddy** (reverse proxy) — containerised, read-only filesystem, all capabilities dropped except NET_BIND_SERVICE
 - **boxmunge-system** (age, rclone) — containerised, read-only, no capabilities, non-root user
 
@@ -50,4 +51,4 @@ boxmunge hardens the VPS as part of installation:
 
 ## Security Releases
 
-Security-tagged releases will be applied automatically once release signature verification (cosign) is implemented. Until then, the auto-update timer is disabled by default and upgrades must be triggered manually with `boxmunge upgrade`. The upgrade flow handles stashing, migration, and validation automatically.
+Security-tagged releases are applied automatically within 12 hours. The `boxmunge upgrade` flow handles stashing, migration, and validation automatically. Release artifacts are signed with cosign when available; SHA256 checksums are always provided.
