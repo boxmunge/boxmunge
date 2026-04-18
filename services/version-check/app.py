@@ -23,30 +23,34 @@ def _init_db(db_path: Path) -> None:
     """Create the counter table if it doesn't exist."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS version_checks (
-            date    TEXT NOT NULL,
-            version TEXT NOT NULL,
-            count   INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (date, version)
-        )
-    """)
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS version_checks (
+                date    TEXT NOT NULL,
+                version TEXT NOT NULL,
+                count   INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (date, version)
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _record_check(db_path: Path, version: str) -> None:
     """Increment the daily counter for this version."""
     today = date.today().isoformat()
     conn = sqlite3.connect(db_path)
-    conn.execute(
-        """INSERT INTO version_checks (date, version, count)
-           VALUES (?, ?, 1)
-           ON CONFLICT (date, version) DO UPDATE SET count = count + 1""",
-        (today, version),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            """INSERT INTO version_checks (date, version, count)
+               VALUES (?, ?, 1)
+               ON CONFLICT (date, version) DO UPDATE SET count = count + 1""",
+            (today, version),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _parse_version(v: str) -> tuple[int, ...] | None:
@@ -129,6 +133,7 @@ def create_app() -> Flask:
     app = Flask(__name__, static_folder="static")
 
     _init_db(DB_PATH)
+    releases = _load_releases(RELEASES_PATH)
 
     @app.route("/v1/check")
     def check():
@@ -136,7 +141,6 @@ def create_app() -> Flask:
         if not version:
             return jsonify({"error": "missing version parameter"}), 400
 
-        releases = _load_releases(RELEASES_PATH)
         result = _check_version(releases, version)
         _record_check(DB_PATH, version)
 
