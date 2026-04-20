@@ -5,6 +5,7 @@ description = "Minimalist, agent-friendly VPS hosting framework"
 requires-python = ">=3.10"
 dependencies = [
     "PyYAML>=6.0",
+    "bcrypt>=4.0",
 ]
 
 [project.optional-dependencies]
