@@ -2,8 +2,9 @@
 
 import pytest
 import yaml
+from pathlib import Path
 
-from boxmunge.compose import generate_compose_override, generate_staging_compose_override
+from boxmunge.compose import generate_compose_override, generate_staging_compose_override, generate_staging_compose_base
 
 
 FULL_MANIFEST = {
@@ -268,3 +269,108 @@ class TestStagingOverrideEnvAndLimits:
         content = generate_staging_compose_override(manifest)
         parsed = yaml.safe_load(content)
         assert parsed["services"]["web"]["deploy"]["resources"]["limits"]["memory"] == "512m"
+
+
+class TestStagingComposeBaseBindMounts:
+    def _write_compose(self, tmp_path: Path, content: str) -> Path:
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text(content)
+        return compose_file
+
+    def test_relative_bind_mount_rewritten(self, tmp_path: Path) -> None:
+        compose = self._write_compose(tmp_path, """
+services:
+  web:
+    image: nginx
+    volumes:
+      - ./data:/app/data
+""")
+        result = generate_staging_compose_base(compose)
+        parsed = yaml.safe_load(result)
+        volumes = parsed["services"]["web"]["volumes"]
+        assert "./data-staging:/app/data" in volumes
+
+    def test_relative_bind_mount_with_options(self, tmp_path: Path) -> None:
+        compose = self._write_compose(tmp_path, """
+services:
+  web:
+    image: nginx
+    volumes:
+      - ./uploads:/app/uploads:ro
+""")
+        result = generate_staging_compose_base(compose)
+        parsed = yaml.safe_load(result)
+        volumes = parsed["services"]["web"]["volumes"]
+        assert "./uploads-staging:/app/uploads:ro" in volumes
+
+    def test_absolute_bind_mount_rewritten(self, tmp_path: Path) -> None:
+        compose = self._write_compose(tmp_path, """
+services:
+  db:
+    image: postgres
+    volumes:
+      - /opt/boxmunge/projects/myapp/data:/var/lib/postgresql/data
+""")
+        result = generate_staging_compose_base(compose)
+        parsed = yaml.safe_load(result)
+        volumes = parsed["services"]["db"]["volumes"]
+        assert "/opt/boxmunge/projects/myapp/data-staging:/var/lib/postgresql/data" in volumes
+
+    def test_named_volume_not_rewritten(self, tmp_path: Path) -> None:
+        compose = self._write_compose(tmp_path, """
+services:
+  db:
+    image: postgres
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+volumes:
+  dbdata:
+""")
+        result = generate_staging_compose_base(compose)
+        parsed = yaml.safe_load(result)
+        volumes = parsed["services"]["db"]["volumes"]
+        assert "dbdata:/var/lib/postgresql/data" in volumes
+
+    def test_ports_still_stripped(self, tmp_path: Path) -> None:
+        compose = self._write_compose(tmp_path, """
+services:
+  web:
+    image: nginx
+    ports:
+      - "8080:80"
+    volumes:
+      - ./data:/app/data
+""")
+        result = generate_staging_compose_base(compose)
+        parsed = yaml.safe_load(result)
+        assert "ports" not in parsed["services"]["web"]
+        assert "./data-staging:/app/data" in parsed["services"]["web"]["volumes"]
+
+    def test_no_volumes_unchanged(self, tmp_path: Path) -> None:
+        compose = self._write_compose(tmp_path, """
+services:
+  web:
+    image: nginx
+""")
+        result = generate_staging_compose_base(compose)
+        parsed = yaml.safe_load(result)
+        assert "volumes" not in parsed["services"]["web"]
+
+    def test_mixed_bind_and_named_volumes(self, tmp_path: Path) -> None:
+        compose = self._write_compose(tmp_path, """
+services:
+  app:
+    image: myapp
+    volumes:
+      - ./data:/app/data
+      - cache:/app/cache
+      - ./config:/app/config:ro
+volumes:
+  cache:
+""")
+        result = generate_staging_compose_base(compose)
+        parsed = yaml.safe_load(result)
+        volumes = parsed["services"]["app"]["volumes"]
+        assert "./data-staging:/app/data" in volumes
+        assert "cache:/app/cache" in volumes
+        assert "./config-staging:/app/config:ro" in volumes

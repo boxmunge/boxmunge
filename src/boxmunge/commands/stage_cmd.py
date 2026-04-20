@@ -118,9 +118,25 @@ def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
 
     # Generate staging configs
     print(f"Staging {project_name}...")
+    # Staging auth — inject basicauth if secrets are set
+    staging_auth = None
+    project_secrets_path = paths.project_secrets(project_name)
+    if project_secrets_path.exists():
+        from boxmunge.secrets import read_dotenv
+        secrets = read_dotenv(project_secrets_path)
+        auth_user = secrets.get("STAGING_AUTH_USER")
+        auth_pass = secrets.get("STAGING_AUTH_PASS")
+        if auth_user and auth_pass:
+            import bcrypt
+            hashed = bcrypt.hashpw(
+                auth_pass.encode(), bcrypt.gensalt()
+            ).decode()
+            staging_auth = (auth_user, hashed)
+            print(f"  Staging auth enabled for user '{auth_user}'")
+
     staging_conf = paths.project_staging_caddy_site(project_name)
     staging_conf.parent.mkdir(parents=True, exist_ok=True)
-    staging_conf.write_text(generate_staging_caddy_config(manifest))
+    staging_conf.write_text(generate_staging_caddy_config(manifest, auth=staging_auth))
 
     # Build env_files for staging (same as production)
     staging_env_files = {}
@@ -141,6 +157,21 @@ def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
     # Generate staging base (compose.yml with ports stripped to avoid conflicts)
     staging_base = project_dir / "compose.staging-base.yml"
     staging_base.write_text(generate_staging_compose_base(project_dir / "compose.yml"))
+
+    # Copy production data to staging if opted in
+    if manifest.get("staging", {}).get("copy_data"):
+        print("  Snapshotting production data for staging...")
+        from boxmunge.staging_data import snapshot_prod_data
+        try:
+            snapshot_prod_data(
+                project_name, project_dir,
+                project_dir / "compose.yml",
+            )
+            print("  Data snapshot complete.")
+        except Exception as e:
+            print(f"  ERROR: Data snapshot failed: {e}")
+            log_error("stage", f"Data snapshot failed: {e}", paths, project=project_name)
+            return 1
 
     # Start staging containers with separate project name
     print(f"  Starting staging containers...")

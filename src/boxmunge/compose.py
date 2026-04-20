@@ -93,17 +93,45 @@ def generate_compose_override(
     return yaml.dump(override, default_flow_style=False, sort_keys=False)
 
 
+def is_bind_mount(volume_str: str) -> bool:
+    """Check if a volume string is a bind mount (starts with . / or ~)."""
+    host_part = volume_str.split(":")[0]
+    return host_part.startswith((".", "/", "~"))
+
+
+def _rewrite_bind_mount(volume_str: str) -> str:
+    """Rewrite a bind-mount host path to add -staging suffix.
+
+    ./data:/app/data       -> ./data-staging:/app/data
+    ./data:/app/data:ro    -> ./data-staging:/app/data:ro
+    /abs/path:/container   -> /abs/path-staging:/container
+    """
+    parts = volume_str.split(":")
+    host_path = parts[0]
+    parts[0] = host_path + "-staging"
+    return ":".join(parts)
+
+
 def generate_staging_compose_base(compose_path: str | Path) -> str:
-    """Read compose.yml and return a copy with all ``ports`` stripped.
+    """Read compose.yml and return a copy with ports stripped and bind mounts rewritten.
 
     Staging runs alongside production with a different project name.
     Docker Compose list-merging means an override file cannot remove ports
     declared in the base, so we generate a staging-specific base instead.
+    Bind-mount host paths get a -staging suffix to prevent data sharing.
+    Named volumes are left unchanged — Docker Compose's project naming
+    already isolates them.
     """
     raw = Path(compose_path).read_text()
     doc = yaml.safe_load(raw)
     for svc in (doc.get("services") or {}).values():
         svc.pop("ports", None)
+        volumes = svc.get("volumes")
+        if volumes:
+            svc["volumes"] = [
+                _rewrite_bind_mount(v) if is_bind_mount(v) else v
+                for v in volumes
+            ]
     return yaml.dump(doc, default_flow_style=False, sort_keys=False)
 
 

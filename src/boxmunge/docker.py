@@ -79,6 +79,37 @@ def compose_down(
     _run(cmd, cwd=project_dir)
 
 
+def compose_stop(
+    project_dir: Path,
+    compose_files: list[str] | None = None,
+    project_name: str | None = None,
+    timeout: int = 15,
+) -> None:
+    """Run docker compose stop (without removing containers or volumes)."""
+    cmd = ["docker", "compose"]
+    if project_name:
+        cmd.extend(["-p", project_name])
+    for f in (compose_files or ["compose.yml"]):
+        cmd.extend(["-f", f])
+    cmd.extend(["stop", "-t", str(timeout)])
+    _run(cmd, cwd=project_dir)
+
+
+def compose_start(
+    project_dir: Path,
+    compose_files: list[str] | None = None,
+    project_name: str | None = None,
+) -> None:
+    """Run docker compose start (restart previously stopped containers)."""
+    cmd = ["docker", "compose"]
+    if project_name:
+        cmd.extend(["-p", project_name])
+    for f in (compose_files or ["compose.yml"]):
+        cmd.extend(["-f", f])
+    cmd.append("start")
+    _run(cmd, cwd=project_dir)
+
+
 def compose_logs(
     project_dir: Path,
     service: str | None = None,

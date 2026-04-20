@@ -312,3 +312,43 @@ class TestManifestResourceLimits:
         errors, warnings = validate_manifest(manifest, "testapp")
         limit_warnings = [w for w in warnings if "resource limits" in w.lower()]
         assert not limit_warnings
+
+
+class TestStagingValidation:
+    def _base_manifest(self) -> dict:
+        return {
+            "id": "01ABC",
+            "source": "bundle",
+            "project": "myapp",
+            "hosts": ["myapp.example.com"],
+            "services": {
+                "web": {
+                    "port": 8080,
+                    "routes": [{"path": "/"}],
+                    "limits": {"memory": "256m"},
+                },
+            },
+        }
+
+    def test_no_staging_section_is_valid(self) -> None:
+        manifest = self._base_manifest()
+        errors, warnings = validate_manifest(manifest, "myapp")
+        assert not errors
+
+    def test_staging_copy_data_bool_is_valid(self) -> None:
+        manifest = self._base_manifest()
+        manifest["staging"] = {"copy_data": True}
+        errors, warnings = validate_manifest(manifest, "myapp")
+        assert not errors
+
+    def test_staging_copy_data_non_bool_is_error(self) -> None:
+        manifest = self._base_manifest()
+        manifest["staging"] = {"copy_data": "yes"}
+        errors, warnings = validate_manifest(manifest, "myapp")
+        assert any("copy_data" in e and "boolean" in e for e in errors)
+
+    def test_staging_unknown_keys_warned(self) -> None:
+        manifest = self._base_manifest()
+        manifest["staging"] = {"copy_data": True, "unknown_key": 42}
+        errors, warnings = validate_manifest(manifest, "myapp")
+        assert any("unknown_key" in w for w in warnings)

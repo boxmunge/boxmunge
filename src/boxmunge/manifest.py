@@ -150,6 +150,19 @@ def validate_manifest(
                 "Specify the git repository URL."
             )
 
+    # Staging (optional)
+    staging = manifest.get("staging", {})
+    if staging:
+        _STAGING_KEYS = {"copy_data"}
+        unknown_staging = set(staging.keys()) - _STAGING_KEYS
+        for key in sorted(unknown_staging):
+            warnings.append(f"Unknown key in 'staging': '{key}'")
+        copy_data = staging.get("copy_data")
+        if copy_data is not None and not isinstance(copy_data, bool):
+            errors.append(
+                f"'staging.copy_data' must be a boolean, got {type(copy_data).__name__}."
+            )
+
     return errors, warnings
 
 
