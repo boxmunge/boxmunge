@@ -20,13 +20,9 @@ def read_dotenv(path: Path) -> dict[str, str]:
 
 
 def write_dotenv(path: Path, data: dict[str, str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{k}={v}\n" for k, v in sorted(data.items())]
-    path.write_text("".join(lines))
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+    from boxmunge.fileutil import atomic_write_text
+    content = "".join(f"{k}={v}\n" for k, v in sorted(data.items()))
+    atomic_write_text(path, content, mode=0o600)
 
 
 def set_key(path: Path, key: str, value: str) -> None:

@@ -45,8 +45,8 @@ def write_installed_version(
     paths: BoxPaths, semver: str, commit: str | None = None
 ) -> None:
     """Write the version string to the version file."""
-    paths.version_file.parent.mkdir(parents=True, exist_ok=True)
-    paths.version_file.write_text(format_version_string(semver, commit) + "\n")
+    from boxmunge.fileutil import atomic_write_text
+    atomic_write_text(paths.version_file, format_version_string(semver, commit) + "\n")
 
 
 def get_build_version() -> str:

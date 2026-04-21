@@ -64,7 +64,8 @@ def copy_project_files(src: Path, dest: Path, is_upgrade: bool) -> None:
 
     # Restore preserved env file on upgrade
     if is_upgrade and existing_env is not None:
-        (dest / "project.env").write_text(existing_env)
+        from boxmunge.fileutil import atomic_write_text
+        atomic_write_text(dest / "project.env", existing_env, mode=0o600)
 
     # Ensure required subdirectories exist
     (dest / "backups").mkdir(exist_ok=True)

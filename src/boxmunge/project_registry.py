@@ -32,8 +32,9 @@ def _auto_migrate(paths: BoxPaths, registry: Path) -> set[str]:
 
 
 def _save(registry: Path, names: set[str]) -> None:
-    registry.parent.mkdir(parents=True, exist_ok=True)
-    registry.write_text("".join(f"{n}\n" for n in sorted(names)))
+    from boxmunge.fileutil import atomic_write_text
+    content = "".join(f"{n}\n" for n in sorted(names))
+    atomic_write_text(registry, content)
 
 
 def load_registered_projects(paths: BoxPaths) -> set[str]:
