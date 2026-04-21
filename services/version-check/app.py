@@ -1,15 +1,20 @@
 """boxmunge version-check service.
 
-Serves two things:
-1. GET /v1/check?v=X — returns security/update status for the given version
-2. GET / — static landing page
+Serves:
+1. GET  /v1/check?v=X                    — security/update status for the given version
+2. POST /v1/report-failure               — record an upgrade failure
+3. GET  /v1/failures?version=X           — query failure summary for a version
+4. POST /v1/circuit-breaker/trip?version=X   — suppress a broken release (auth required)
+5. POST /v1/circuit-breaker/reset?version=X  — re-enable a release (auth required)
+6. GET  /                                — static landing page
 
 Source: https://github.com/boxmunge/boxmunge/tree/main/services/version-check
 """
 
 import json
+import os
 import sqlite3
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from flask import Flask, request, jsonify
@@ -18,9 +23,15 @@ SERVICE_DIR = Path(__file__).parent
 RELEASES_PATH = SERVICE_DIR / "releases.json"
 DB_PATH = Path("/data/checks.db")
 
+VALID_STAGES = {"preflight", "apply", "health_immediate", "health_probation"}
+
+
+# ---------------------------------------------------------------------------
+# Database
+# ---------------------------------------------------------------------------
 
 def _init_db(db_path: Path) -> None:
-    """Create the counter table if it doesn't exist."""
+    """Create all tables if they don't exist."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     try:
@@ -30,6 +41,24 @@ def _init_db(db_path: Path) -> None:
                 version TEXT NOT NULL,
                 count   INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (date, version)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS failures (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                version       TEXT NOT NULL,
+                installed_from TEXT NOT NULL,
+                stage         TEXT NOT NULL,
+                reported_at   TEXT NOT NULL,
+                remote_addr   TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS circuit_breaker (
+                version    TEXT PRIMARY KEY,
+                tripped    INTEGER NOT NULL DEFAULT 1,
+                tripped_by TEXT,
+                tripped_at TEXT NOT NULL
             )
         """)
         conn.commit()
@@ -52,6 +81,85 @@ def _record_check(db_path: Path, version: str) -> None:
     finally:
         conn.close()
 
+
+def _record_failure(db_path, version, installed_from, stage, reported_at, remote_addr):
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO failures (version, installed_from, stage, reported_at, remote_addr) VALUES (?, ?, ?, ?, ?)",
+            (version, installed_from, stage, reported_at, remote_addr))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _query_failures(db_path, version):
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT stage, COUNT(*) FROM failures WHERE version = ? GROUP BY stage",
+            (version,)).fetchall()
+        time_range = conn.execute(
+            "SELECT MIN(reported_at), MAX(reported_at) FROM failures WHERE version = ?",
+            (version,)).fetchone()
+    finally:
+        conn.close()
+    by_stage = {row[0]: row[1] for row in rows}
+    total = sum(by_stage.values())
+    return {
+        "version": version,
+        "total": total,
+        "by_stage": by_stage,
+        "first_seen": time_range[0] if total > 0 else None,
+        "last_seen": time_range[1] if total > 0 else None,
+    }
+
+
+def _is_circuit_broken(db_path, version):
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT tripped FROM circuit_breaker WHERE version = ? AND tripped = 1",
+            (version,)).fetchone()
+    finally:
+        conn.close()
+    return row is not None
+
+
+def _trip_circuit_breaker(db_path, version, tripped_by):
+    now = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """INSERT INTO circuit_breaker (version, tripped, tripped_by, tripped_at)
+               VALUES (?, 1, ?, ?)
+               ON CONFLICT (version) DO UPDATE SET tripped = 1, tripped_by = ?, tripped_at = ?""",
+            (version, tripped_by, now, tripped_by, now))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _reset_circuit_breaker(db_path, version):
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("UPDATE circuit_breaker SET tripped = 0 WHERE version = ?", (version,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _check_cb_auth(app_config):
+    secret = app_config.get("CB_SECRET") or os.environ.get("CB_SECRET", "")
+    if not secret:
+        return False
+    auth = request.headers.get("Authorization", "")
+    return auth == f"Bearer {secret}"
+
+
+# ---------------------------------------------------------------------------
+# Version logic
+# ---------------------------------------------------------------------------
 
 def _parse_version(v: str) -> tuple[int, ...] | None:
     """Parse semver string to tuple. Returns None if unparseable."""
@@ -91,13 +199,11 @@ def _load_releases(path: Path) -> list[dict]:
 
 def _check_version(releases: list[dict], caller_version: str) -> dict:
     """Compute the check response for a given caller version."""
-    # Find latest overall release
     latest = None
     for r in releases:
         if latest is None or _version_gt(r["version"], latest["version"]):
             latest = r
 
-    # Find latest security release on caller's minor line
     security = None
     for r in releases:
         if not r.get("security"):
@@ -109,7 +215,6 @@ def _check_version(releases: list[dict], caller_version: str) -> dict:
         if security is None or _version_gt(r["version"], security["version"]):
             security = r
 
-    # Build response
     security_resp = None
     if security:
         security_resp = {"version": security["version"], "url": security["url"]}
@@ -128,6 +233,10 @@ def _check_version(releases: list[dict], caller_version: str) -> dict:
     return {"status": status, "security": security_resp, "latest": latest_resp}
 
 
+# ---------------------------------------------------------------------------
+# App factory
+# ---------------------------------------------------------------------------
+
 def create_app() -> Flask:
     """Create and configure the Flask application."""
     app = Flask(__name__, static_folder="static")
@@ -144,9 +253,64 @@ def create_app() -> Flask:
         result = _check_version(releases, version)
         _record_check(DB_PATH, version)
 
+        held = None
+        if result.get("security"):
+            sec_version = result["security"]["version"]
+            if _is_circuit_broken(DB_PATH, sec_version):
+                held = {"version": sec_version, "reason": "circuit_breaker"}
+                result["security"] = None
+                if result.get("latest"):
+                    result["status"] = "update_available"
+                else:
+                    result["status"] = "up_to_date"
+        if held:
+            result["held"] = held
+
         response = jsonify(result)
         response.headers["Cache-Control"] = "no-cache"
         return response
+
+    @app.route("/v1/report-failure", methods=["POST"])
+    def report_failure():
+        body = request.get_json(silent=True) or {}
+        version = body.get("version")
+        stage = body.get("stage")
+        if not version:
+            return jsonify({"error": "missing required field: version"}), 400
+        if stage not in VALID_STAGES:
+            return jsonify({"error": f"invalid stage; must be one of {sorted(VALID_STAGES)}"}), 400
+        installed_from = body.get("installed_from", "")
+        timestamp = body.get("timestamp") or datetime.now(timezone.utc).isoformat()
+        _record_failure(DB_PATH, version, installed_from, stage, timestamp,
+                        request.remote_addr)
+        return "", 204
+
+    @app.route("/v1/failures")
+    def failures():
+        version = request.args.get("version", "").strip()
+        if not version:
+            return jsonify({"error": "missing version parameter"}), 400
+        return jsonify(_query_failures(DB_PATH, version))
+
+    @app.route("/v1/circuit-breaker/trip", methods=["POST"])
+    def cb_trip():
+        if not _check_cb_auth(app.config):
+            return jsonify({"error": "unauthorized"}), 401
+        version = request.args.get("version", "").strip()
+        if not version:
+            return jsonify({"error": "missing version parameter"}), 400
+        _trip_circuit_breaker(DB_PATH, version, tripped_by="api")
+        return jsonify({"status": "tripped", "version": version})
+
+    @app.route("/v1/circuit-breaker/reset", methods=["POST"])
+    def cb_reset():
+        if not _check_cb_auth(app.config):
+            return jsonify({"error": "unauthorized"}), 401
+        version = request.args.get("version", "").strip()
+        if not version:
+            return jsonify({"error": "missing version parameter"}), 400
+        _reset_circuit_breaker(DB_PATH, version)
+        return jsonify({"status": "reset", "version": version})
 
     @app.route("/")
     def index():
