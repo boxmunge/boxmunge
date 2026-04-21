@@ -31,39 +31,42 @@ standby_venv() { echo "$BOXMUNGE_ROOT/env-$(standby_slot)"; }
 is_blocklisted() {
     local version="$1"
     [[ -f "$BLOCKLIST_FILE" ]] || return 1
-    python3 -c "
-import json, sys
-bl = json.load(open('$BLOCKLIST_FILE'))
-sys.exit(0 if '$version' in bl else 1)
+    BM_VERSION="$version" BM_BLOCKLIST="$BLOCKLIST_FILE" python3 -c "
+import json, os, sys
+bl = json.load(open(os.environ['BM_BLOCKLIST']))
+sys.exit(0 if os.environ['BM_VERSION'] in bl else 1)
 "
 }
 
 add_blocklist() {
     local version="$1" reason="$2"
-    "$(active_venv)/bin/python" -c "
+    BM_VERSION="$version" BM_REASON="$reason" "$(active_venv)/bin/python" -c "
+import os
 from boxmunge.upgrade_state import add_to_blocklist
 from boxmunge.paths import BoxPaths
-add_to_blocklist(BoxPaths(), '$version', '$reason')
+add_to_blocklist(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_REASON'])
 "
 }
 
 report_failure() {
     local version="$1" from_version="$2" stage="$3"
-    "$(active_venv)/bin/python" -c "
+    BM_VERSION="$version" BM_FROM_VERSION="$from_version" BM_STAGE="$stage" "$(active_venv)/bin/python" -c "
+import os
 from boxmunge.report_failure import report_failure
-report_failure('$version', '$from_version', '$stage')
+report_failure(os.environ['BM_VERSION'], os.environ['BM_FROM_VERSION'], os.environ['BM_STAGE'])
 " 2>/dev/null || true
 }
 
 send_notification() {
     local title="$1" message="$2"
-    "$(active_venv)/bin/python" -c "
+    BM_TITLE="$title" BM_MESSAGE="$message" "$(active_venv)/bin/python" -c "
+import os
 from boxmunge.config import load_config
 from boxmunge.pushover import send_notification
 from boxmunge.paths import BoxPaths
 config = load_config(BoxPaths())
 po = config.get('pushover', {})
-send_notification(po.get('user_key',''), po.get('app_token',''), '$title', '$message')
+send_notification(po.get('user_key',''), po.get('app_token',''), os.environ['BM_TITLE'], os.environ['BM_MESSAGE'])
 " 2>/dev/null || true
 }
 
@@ -129,9 +132,10 @@ cmd_run() {
     # 2. PRE-FLIGHT
     log "Running pre-flight checks..."
 
-    if [[ -f "$BOXMUNGE_ROOT/config/cosign.pub" ]] && command -v cosign &>/dev/null; then
-        log "Signature verification: cosign available"
-    fi
+    # NOTE: Signature verification will be enabled when the release pipeline
+    # publishes signatures alongside packages. Until then, pre-flight relies
+    # on import test, CLI test, and dry-run validation.
+    log "Signature verification: not yet implemented, skipping"
 
     "$BOXMUNGE_ROOT/env-$standby/bin/python" -c "import boxmunge; print(boxmunge.__version__)" || {
         log "Pre-flight FAILED: import test"
@@ -183,10 +187,11 @@ cmd_run() {
 
     # 7. ENTER PROBATION
     log "Entering probation for $version..."
-    "$(active_venv)/bin/python" -c "
+    BM_VERSION="$version" BM_PREV_SLOT="$prev_slot" "$(active_venv)/bin/python" -c "
+import os
 from boxmunge.upgrade_state import write_probation
 from boxmunge.paths import BoxPaths
-write_probation(BoxPaths(), '$version', '$prev_slot', hours=6)
+write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT'], hours=6)
 "
 
     send_notification "boxmunge security update applied" "Updated to $version (probation: 6h)"
@@ -198,14 +203,23 @@ cmd_check_probation() {
     [[ -f "$PROBATION_FILE" ]] || exit 0
 
     local version prev_slot expires_at
-    version="$(python3 -c "import json; print(json.load(open('$PROBATION_FILE'))['version'])")"
-    prev_slot="$(python3 -c "import json; print(json.load(open('$PROBATION_FILE'))['previous_slot'])")"
-    expires_at="$(python3 -c "import json; print(json.load(open('$PROBATION_FILE'))['expires_at'])")"
+    local probation_data
+    probation_data="$(BM_PROBATION_FILE="$PROBATION_FILE" python3 -c "
+import json, os
+d = json.load(open(os.environ['BM_PROBATION_FILE']))
+print(d['version'])
+print(d['previous_slot'])
+print(d['expires_at'])
+")"
+    version="$(echo "$probation_data" | sed -n '1p')"
+    prev_slot="$(echo "$probation_data" | sed -n '2p')"
+    expires_at="$(echo "$probation_data" | sed -n '3p')"
 
     local expired
-    expired="$(python3 -c "
+    expired="$(BM_EXPIRES_AT="$expires_at" python3 -c "
+import os
 from datetime import datetime, timezone
-expires = datetime.fromisoformat('$expires_at')
+expires = datetime.fromisoformat(os.environ['BM_EXPIRES_AT'])
 print('yes' if datetime.now(timezone.utc) >= expires else 'no')
 ")"
 
@@ -232,10 +246,11 @@ print('yes' if datetime.now(timezone.utc) >= expires else 'no')
 
 cmd_clear_blocklist() {
     local version="${1:?Usage: boxmunge-upgrade clear-blocklist <version>}"
-    "$(active_venv)/bin/python" -c "
+    BM_VERSION="$version" "$(active_venv)/bin/python" -c "
+import os
 from boxmunge.upgrade_state import remove_from_blocklist
 from boxmunge.paths import BoxPaths
-remove_from_blocklist(BoxPaths(), '$version')
+remove_from_blocklist(BoxPaths(), os.environ['BM_VERSION'])
 "
     log "Cleared $version from blocklist"
 }
