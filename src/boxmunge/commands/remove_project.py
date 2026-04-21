@@ -4,7 +4,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from boxmunge.docker import compose_down, DockerError
+from boxmunge.docker import compose_down, caddy_reload, DockerError
 from boxmunge.log import log_operation
 from boxmunge.paths import BoxPaths
 
@@ -39,6 +39,10 @@ def run_remove_project(project_name: str, paths: BoxPaths, yes: bool = False) ->
     caddy_conf = paths.project_caddy_site(project_name)
     if caddy_conf.exists():
         caddy_conf.unlink()
+        try:
+            caddy_reload(paths.caddy)
+        except DockerError as e:
+            print(f"  WARN: Caddy reload failed: {e}")
 
     for state_file in [
         paths.project_health_state(project_name),

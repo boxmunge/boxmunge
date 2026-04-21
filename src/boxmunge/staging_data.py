@@ -41,12 +41,13 @@ def _run_in_system_container(cmd: str) -> None:
     subprocess.run(
         ["docker", "exec", "boxmunge-system", "sh", "-c", cmd],
         check=True, capture_output=True, text=True,
+        timeout=300,
     )
 
 
 def _docker_run(cmd: list[str]) -> None:
     """Run a short-lived Docker container."""
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300)
 
 
 def copy_bind_mounts(
@@ -118,11 +119,14 @@ def snapshot_prod_data(
     if not bind_mounts and not named_volumes:
         return
 
-    compose_stop(project_dir, project_name=project_name, timeout=15)
+    prod_compose_files = ["compose.yml", "compose.boxmunge.yml"]
+    compose_stop(project_dir, compose_files=prod_compose_files,
+                 project_name=project_name, timeout=15)
     try:
         if bind_mounts:
             copy_bind_mounts(bind_mounts, project_name)
         if named_volumes:
             copy_named_volumes(named_volumes, project_name)
     finally:
-        compose_start(project_dir, project_name=project_name)
+        compose_start(project_dir, compose_files=prod_compose_files,
+                      project_name=project_name)

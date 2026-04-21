@@ -17,8 +17,11 @@ def _list_bundles_for_project(project_name: str, paths: BoxPaths) -> list[Path]:
     bundles = []
     prefix = f"{project_name}-"
     for entry in paths.inbox.iterdir():
-        if entry.is_file() and entry.name.startswith(prefix) and entry.name.endswith(".tar.gz"):
-            bundles.append(entry)
+        try:
+            if entry.is_file() and entry.name.startswith(prefix) and entry.name.endswith(".tar.gz"):
+                bundles.append(entry)
+        except (FileNotFoundError, OSError):
+            continue  # file vanished between iterdir() and is_file()
     bundles.sort(key=lambda p: p.name, reverse=True)
     return bundles
 
@@ -51,5 +54,8 @@ def resolve_bundle_source(project_name: str, paths: BoxPaths, ref: str | None = 
         import shutil
         paths.inbox_consumed.mkdir(parents=True, exist_ok=True)
         for old_bundle in bundles[1:]:
-            shutil.move(str(old_bundle), str(paths.inbox_consumed / old_bundle.name))
+            try:
+                shutil.move(str(old_bundle), str(paths.inbox_consumed / old_bundle.name))
+            except (FileNotFoundError, OSError):
+                pass  # already consumed by another process
     return bundles[0]

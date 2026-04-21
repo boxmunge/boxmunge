@@ -49,8 +49,10 @@ def _migrate_project_manifests(paths: BoxPaths) -> list[str]:
 
         try:
             migrated_manifest = migrate_manifest(manifest, CURRENT_SCHEMA_VERSION)
-            manifest_path.write_text(
-                yaml.dump(migrated_manifest, default_flow_style=False, sort_keys=False)
+            from boxmunge.fileutil import atomic_write_text
+            atomic_write_text(
+                manifest_path,
+                yaml.dump(migrated_manifest, default_flow_style=False, sort_keys=False),
             )
             migrated.append(project_dir.name)
         except MigrationError as e:
@@ -179,12 +181,6 @@ def run_upgrade(paths: BoxPaths, skip_self_test: bool = False) -> int:
     if failed_projects:
         print(f"  FAILED: {', '.join(failed_projects)}")
 
-    # Step 6: Update version
-    print("[6/6] Updating version...")
-    semver, commit = parse_version_string(new_version)
-    write_installed_version(paths, semver, commit)
-    print(f"  Written: {new_version}")
-
     # Prune old stashes
     prune_stashes(paths, keep=5)
 
@@ -205,6 +201,10 @@ def run_upgrade(paths: BoxPaths, skip_self_test: bool = False) -> int:
     if health_result == 2:
         print("  Health check found issues requiring attention.")
         return 1
+
+    # Only write version after health check passes
+    semver, commit = parse_version_string(new_version)
+    write_installed_version(paths, semver, commit)
 
     print(f"\nUpgrade complete: {current_version} -> {new_version}")
 

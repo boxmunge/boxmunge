@@ -9,6 +9,7 @@ The backup key at /opt/boxmunge/config/backup.key must be an age identity file
 run `boxmunge doctor` to migrate the key.
 """
 
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -103,17 +104,33 @@ def backup_filename(project_name: str) -> str:
 
 
 def encrypt_file(input_path: Path, output_path: Path, key_path: Path) -> None:
-    """Encrypt a file using age, via system container if available."""
+    """Encrypt a file using age, via system container if available.
+
+    Writes to a temp file then renames to prevent partial encrypted files
+    from appearing under the final name.
+    """
     if not key_path.exists():
         raise FileNotFoundError(f"Backup encryption key not found: {key_path}")
 
-    recipient = _read_recipient(key_path)
-    container = _use_container()
-    _run_age_cmd([
-        "age", "--encrypt", "-r", recipient,
-        "-o", _resolve_path(output_path, container),
-        _resolve_path(input_path, container),
-    ])
+    import tempfile as _tempfile
+    fd, tmp_path_str = _tempfile.mkstemp(
+        dir=output_path.parent, prefix=".encrypt-", suffix=".tmp"
+    )
+    os.close(fd)
+    tmp_path = Path(tmp_path_str)
+
+    try:
+        recipient = _read_recipient(key_path)
+        container = _use_container()
+        _run_age_cmd([
+            "age", "--encrypt", "-r", recipient,
+            "-o", _resolve_path(tmp_path, container),
+            _resolve_path(input_path, container),
+        ])
+        os.rename(tmp_path, output_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def decrypt_file(input_path: Path, output_path: Path, key_path: Path) -> None:

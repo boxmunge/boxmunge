@@ -149,10 +149,16 @@ class TestSnapshotProdData:
 
         snapshot_prod_data("myapp", tmp_path, compose_path)
 
-        mock_stop.assert_called_once_with(tmp_path, project_name="myapp", timeout=15)
+        mock_stop.assert_called_once_with(
+            tmp_path, compose_files=["compose.yml", "compose.boxmunge.yml"],
+            project_name="myapp", timeout=15,
+        )
         mock_copy_bind.assert_called_once()
         mock_copy_named.assert_called_once()
-        mock_start.assert_called_once_with(tmp_path, project_name="myapp")
+        mock_start.assert_called_once_with(
+            tmp_path, compose_files=["compose.yml", "compose.boxmunge.yml"],
+            project_name="myapp",
+        )
 
         # Ordering is structurally guaranteed by the try/finally in snapshot_prod_data
 
