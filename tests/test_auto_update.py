@@ -1,5 +1,6 @@
 """Tests for auto-update version targeting — security patches within major.minor line only."""
 
+from pathlib import Path
 from unittest.mock import patch
 
 from boxmunge.commands.auto_update_cmd import (
@@ -7,8 +8,10 @@ from boxmunge.commands.auto_update_cmd import (
     _is_security_release,
     _same_minor_line,
     check_for_security_update,
+    run_auto_update,
     UpdateCheckError,
 )
+from boxmunge.paths import BoxPaths
 
 
 class TestSameMinorLine:
@@ -145,3 +148,40 @@ class TestVersionCheckEndpoint:
         }
         result = check_for_security_update(paths)
         assert result is None  # No security update — no action
+
+
+class TestDelegateToShim:
+    @patch("boxmunge.commands.auto_update_cmd._check_via_endpoint")
+    @patch("boxmunge.commands.auto_update_cmd.read_installed_version", return_value="0.2.0+abc1234")
+    @patch("boxmunge.commands.auto_update_cmd.is_blocklisted", return_value=False)
+    @patch("os.execvp")
+    def test_delegates_to_shim_on_security_update(
+        self, mock_exec, mock_blocked, mock_version, mock_endpoint
+    ):
+        mock_endpoint.return_value = {
+            "status": "security_update_available",
+            "security": {"version": "0.2.1", "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.1"},
+        }
+        paths = BoxPaths(root=Path("/tmp/test-bm"))
+        run_auto_update(paths)
+        mock_exec.assert_called_once()
+        call_args = mock_exec.call_args[0]
+        assert call_args[0] == "/tmp/test-bm/bin/boxmunge-upgrade"
+        assert "run" in call_args[1]
+        assert "0.2.1" in call_args[1]
+
+    @patch("boxmunge.commands.auto_update_cmd._check_via_endpoint")
+    @patch("boxmunge.commands.auto_update_cmd.read_installed_version", return_value="0.2.0+abc1234")
+    @patch("boxmunge.commands.auto_update_cmd.is_blocklisted", return_value=True)
+    @patch("os.execvp")
+    def test_skips_blocklisted_version(
+        self, mock_exec, mock_blocked, mock_version, mock_endpoint
+    ):
+        mock_endpoint.return_value = {
+            "status": "security_update_available",
+            "security": {"version": "0.2.1", "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.1"},
+        }
+        paths = BoxPaths(root=Path("/tmp/test-bm"))
+        result = run_auto_update(paths)
+        mock_exec.assert_not_called()
+        assert result == 0
