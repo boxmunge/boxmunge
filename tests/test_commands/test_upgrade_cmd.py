@@ -51,6 +51,21 @@ class TestDryRun:
         run_upgrade(paths, dry_run=True)
         mock_up.assert_not_called()
 
+    def test_dry_run_does_not_modify_manifests(self, tmp_path):
+        paths = _setup_paths(tmp_path)
+        # Create a project with an old schema version
+        project_dir = paths.project_dir("myapp")
+        project_dir.mkdir(parents=True)
+        import yaml
+        (project_dir / "manifest.yml").write_text(yaml.dump({
+            "schema_version": 1, "project": "myapp",
+            "source": "bundle", "hosts": ["myapp.test"],
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        }))
+        original = (project_dir / "manifest.yml").read_text()
+        run_upgrade(paths, dry_run=True)
+        assert (project_dir / "manifest.yml").read_text() == original
+
 
 class TestApplyMode:
     @patch("boxmunge.commands.upgrade_cmd.caddy_reload")

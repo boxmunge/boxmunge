@@ -149,12 +149,28 @@ def _run_dry(paths: BoxPaths) -> int:
     print("==========================\n")
 
     print("[1/2] Validating manifest migrations...")
-    try:
-        _migrate_project_manifests(paths)
-        print("  OK")
-    except Exception as e:
-        print(f"  ERROR: {e}")
-        return 1
+    if paths.projects.exists():
+        for project_dir in sorted(paths.projects.iterdir()):
+            if not project_dir.is_dir():
+                continue
+            manifest_path = project_dir / "manifest.yml"
+            if not manifest_path.exists():
+                continue
+            try:
+                manifest = load_manifest(manifest_path)
+            except ManifestError:
+                continue
+            source_version = manifest.get("schema_version", 1)
+            if source_version == CURRENT_SCHEMA_VERSION:
+                print(f"  {project_dir.name}: up to date")
+                continue
+            try:
+                migrate_manifest(manifest, CURRENT_SCHEMA_VERSION)
+                print(f"  {project_dir.name}: migration OK (schema v{source_version} -> v{CURRENT_SCHEMA_VERSION})")
+            except MigrationError as e:
+                print(f"  {project_dir.name}: ERROR: {e}")
+                return 1
+    print("  OK")
 
     print("[2/2] Validating config regeneration...")
     try:
