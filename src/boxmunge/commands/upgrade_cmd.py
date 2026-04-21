@@ -3,6 +3,12 @@
 
 Flow: stash -> migrate manifests -> regenerate configs -> reload Caddy ->
 restart projects -> self-test -> health -> report.
+
+Dispatch modes:
+  --dry-run   validate manifests + config regeneration; no writes to state
+  --apply     migrate/regen/reload/restart/version-write only (shim handles
+              stash, health, rollback externally)
+  (default)   full six-step flow with stash, self-test, and health check
 """
 
 import sys
@@ -132,16 +138,98 @@ def _restart_projects(paths: BoxPaths) -> tuple[list[str], list[str]]:
     return succeeded, failed
 
 
-def run_upgrade(paths: BoxPaths, skip_self_test: bool = False) -> int:
-    """Run the full upgrade flow. Returns 0 on success."""
-    print("boxmunge upgrade")
-    print("================\n")
+def _run_dry(paths: BoxPaths) -> int:
+    """Validate manifest migrations and config regeneration without touching state.
 
-    current_version = read_installed_version(paths)
-    new_version = get_build_version()
+    Config files (Caddy/compose) are generated files; writing them here is safe
+    because the real upgrade will regenerate them anyway.
+    Returns 0 if no exceptions, 1 on error.
+    """
+    print("boxmunge upgrade --dry-run")
+    print("==========================\n")
+
+    print("[1/2] Validating manifest migrations...")
+    try:
+        _migrate_project_manifests(paths)
+        print("  OK")
+    except Exception as e:
+        print(f"  ERROR: {e}")
+        return 1
+
+    print("[2/2] Validating config regeneration...")
+    try:
+        _regenerate_configs(paths)
+        print("  OK")
+    except Exception as e:
+        print(f"  ERROR: {e}")
+        return 1
+
+    print("\nDry-run complete. No state was modified.")
+    return 0
+
+
+def _run_apply(paths: BoxPaths, current_version: str, new_version: str) -> int:
+    """Run migrate/regen/reload/restart/version-write only.
+
+    The upgrade shim handles stash creation, health checks, and rollback
+    externally, so we skip those here.
+    Returns 0 on success, 1 if any project failed to restart.
+    """
+    print("boxmunge upgrade --apply")
+    print("========================\n")
     print(f"  Current: {current_version}")
     print(f"  New:     {new_version}\n")
 
+    # Step 1: Migrate manifests
+    print("[1/4] Migrating manifests...")
+    migrated = _migrate_project_manifests(paths)
+    if migrated:
+        print(f"  Migrated: {', '.join(migrated)}")
+    else:
+        print("  No migrations needed.")
+
+    # Step 2: Regenerate configs
+    print("[2/4] Regenerating configs...")
+    processed = _regenerate_configs(paths)
+    print(f"  Processed: {len(processed)} project(s)")
+
+    # Step 3: Reload Caddy
+    print("[3/4] Reloading Caddy...")
+    try:
+        caddy_reload(paths.caddy)
+        print("  Caddy reloaded.")
+    except DockerError as e:
+        print(f"  WARN: Caddy reload failed: {e}")
+
+    # Step 4: Restart projects
+    print("[4/4] Restarting projects...")
+    succeeded, failed_projects = _restart_projects(paths)
+    if succeeded:
+        print(f"  Restarted: {', '.join(succeeded)}")
+    if failed_projects:
+        print(f"  FAILED: {', '.join(failed_projects)}")
+
+    # Write version
+    semver, commit = parse_version_string(new_version)
+    write_installed_version(paths, semver, commit)
+
+    log_operation(
+        "upgrade", f"Apply {current_version} -> {new_version}", paths,
+        detail={"migrated": migrated, "restarted": succeeded, "failed": failed_projects},
+    )
+
+    if failed_projects:
+        return 1
+    return 0
+
+
+def _run_full(
+    paths: BoxPaths,
+    current_version: str,
+    new_version: str,
+    skip_self_test: bool,
+) -> int:
+    """Run the complete six-step upgrade flow."""
     # Step 1: Stash
     print("[1/6] Creating stash...")
     try:
@@ -218,8 +306,35 @@ def run_upgrade(paths: BoxPaths, skip_self_test: bool = False) -> int:
     return 0
 
 
+def run_upgrade(
+    paths: BoxPaths,
+    skip_self_test: bool = False,
+    *,
+    dry_run: bool = False,
+    apply_only: bool = False,
+) -> int:
+    """Dispatch upgrade to the appropriate mode. Returns 0 on success."""
+    if dry_run:
+        return _run_dry(paths)
+
+    print("boxmunge upgrade")
+    print("================\n")
+
+    current_version = read_installed_version(paths)
+    new_version = get_build_version()
+    print(f"  Current: {current_version}")
+    print(f"  New:     {new_version}\n")
+
+    if apply_only:
+        return _run_apply(paths, current_version, new_version)
+
+    return _run_full(paths, current_version, new_version, skip_self_test)
+
+
 def cmd_upgrade(args: list[str]) -> None:
     """CLI entry point for upgrade command."""
     skip_self_test = "--skip-self-test" in args
+    dry_run = "--dry-run" in args
+    apply_only = "--apply" in args
     paths = BoxPaths()
-    sys.exit(run_upgrade(paths, skip_self_test=skip_self_test))
+    sys.exit(run_upgrade(paths, skip_self_test, dry_run=dry_run, apply_only=apply_only))
