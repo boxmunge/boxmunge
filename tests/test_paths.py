@@ -53,3 +53,29 @@ class TestPreRegistered:
 
     def test_false_when_dir_missing(self, paths: BoxPaths) -> None:
         assert paths.is_project_pre_registered("nope") is False
+
+
+class TestUpgradeStatePaths:
+    def test_upgrade_state_dir(self, tmp_path):
+        paths = BoxPaths(root=tmp_path / "bm")
+        assert paths.upgrade_state == paths.root / "upgrade-state"
+
+    def test_blocklist_path(self, tmp_path):
+        paths = BoxPaths(root=tmp_path / "bm")
+        assert paths.blocklist == paths.upgrade_state / "blocklist.json"
+
+    def test_probation_path(self, tmp_path):
+        paths = BoxPaths(root=tmp_path / "bm")
+        assert paths.probation == paths.upgrade_state / "probation.json"
+
+    def test_upgrade_lock_path(self, tmp_path):
+        paths = BoxPaths(root=tmp_path / "bm")
+        assert paths.upgrade_lock == paths.upgrade_state / "upgrade.lock"
+
+    def test_active_slot_path(self, tmp_path):
+        paths = BoxPaths(root=tmp_path / "bm")
+        assert paths.active_slot == paths.upgrade_state / "active-slot"
+
+    def test_cosign_pub_path(self, tmp_path):
+        paths = BoxPaths(root=tmp_path / "bm")
+        assert paths.cosign_pub == paths.config / "cosign.pub"
