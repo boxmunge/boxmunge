@@ -14,7 +14,7 @@ Source: https://github.com/boxmunge/boxmunge/tree/main/services/version-check
 import json
 import os
 import sqlite3
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, request, jsonify
@@ -149,6 +149,30 @@ def _reset_circuit_breaker(db_path, version):
         conn.close()
 
 
+def _maybe_auto_trip(db_path: Path, version: str) -> None:
+    """Auto-trip circuit breaker if failure threshold is exceeded."""
+    threshold_str = os.environ.get("CIRCUIT_BREAKER_AUTO_THRESHOLD", "0")
+    try:
+        threshold = int(threshold_str)
+    except ValueError:
+        return
+    if threshold <= 0:
+        return
+
+    six_hours_ago = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    conn = sqlite3.connect(db_path)
+    try:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM failures WHERE version = ? AND reported_at > ?",
+            (version, six_hours_ago),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    if count >= threshold:
+        _trip_circuit_breaker(db_path, version, "auto")
+
+
 def _check_cb_auth(app_config):
     secret = app_config.get("CB_SECRET") or os.environ.get("CB_SECRET", "")
     if not secret:
@@ -280,9 +304,25 @@ def create_app() -> Flask:
         if stage not in VALID_STAGES:
             return jsonify({"error": f"invalid stage; must be one of {sorted(VALID_STAGES)}"}), 400
         installed_from = body.get("installed_from", "")
-        timestamp = body.get("timestamp") or datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        # Check rate limit: max 1 report per version per IP per hour
+        one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM failures WHERE version = ? AND remote_addr = ? AND reported_at > ?",
+                (version, request.remote_addr, one_hour_ago),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        if existing and existing[0] > 0:
+            return "", 204  # Silently accept but don't store (rate limited)
+
         _record_failure(DB_PATH, version, installed_from, stage, timestamp,
                         request.remote_addr)
+        _maybe_auto_trip(DB_PATH, version)
         return "", 204
 
     @app.route("/v1/failures")

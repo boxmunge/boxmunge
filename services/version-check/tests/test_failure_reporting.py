@@ -2,11 +2,11 @@
 import json
 import sqlite3
 import os
+import sys
 import pytest
 from pathlib import Path
 from unittest.mock import patch
 
-import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
@@ -63,14 +63,31 @@ class TestReportFailure:
             db.close()
         assert row == ("0.2.1", "apply")
 
+    def test_rate_limits_per_ip(self, client, tmp_path):
+        with patch("app.DB_PATH", tmp_path / "checks.db"):
+            # First report should be stored
+            client.post("/v1/report-failure", json={
+                "version": "0.2.1", "installed_from": "0.2.0",
+                "stage": "apply", "timestamp": "2024-01-15T14:30:00Z"})
+            # Second report from same IP within 1 hour should be silently accepted
+            client.post("/v1/report-failure", json={
+                "version": "0.2.1", "installed_from": "0.2.0",
+                "stage": "apply", "timestamp": "2024-01-15T14:35:00Z"})
+
+            db = sqlite3.connect(tmp_path / "checks.db")
+            count = db.execute("SELECT COUNT(*) FROM failures WHERE version = '0.2.1'").fetchone()[0]
+            db.close()
+        assert count == 1  # Only one stored despite two reports
+
 
 class TestFailureQuery:
     def test_returns_failure_summary(self, client, tmp_path):
         with patch("app.DB_PATH", tmp_path / "checks.db"):
-            for stage in ["preflight", "apply", "apply"]:
+            for i, stage in enumerate(["preflight", "apply", "apply"]):
                 client.post("/v1/report-failure", json={
                     "version": "0.2.1", "installed_from": "0.2.0",
-                    "stage": stage, "timestamp": "2024-01-15T14:30:00Z"})
+                    "stage": stage, "timestamp": "2024-01-15T14:30:00Z"},
+                    environ_base={"REMOTE_ADDR": f"10.0.0.{i + 1}"})
             resp = client.get("/v1/failures?version=0.2.1")
         assert resp.status_code == 200
         data = resp.get_json()
@@ -125,3 +142,31 @@ class TestCircuitBreaker:
     def test_reset_requires_auth(self, client):
         resp = client.post("/v1/circuit-breaker/reset?version=0.2.1")
         assert resp.status_code == 401
+
+
+class TestAutoTrip:
+    def test_auto_trip_disabled_by_default(self, client, app, tmp_path):
+        with patch("app.DB_PATH", tmp_path / "checks.db"):
+            for i in range(5):
+                client.post("/v1/report-failure", json={
+                    "version": "0.2.1", "installed_from": "0.2.0",
+                    "stage": "apply", "timestamp": "2024-01-15T14:30:00Z"},
+                    environ_base={"REMOTE_ADDR": f"10.0.0.{i + 1}"})
+            # Should not be tripped (auto-trip disabled)
+            resp = client.get("/v1/check?v=0.2.0")
+            data = resp.get_json()
+        assert data["security"]["version"] == "0.2.1"
+        assert data.get("held") is None
+
+    def test_auto_trip_when_threshold_reached(self, client, app, tmp_path):
+        with patch("app.DB_PATH", tmp_path / "checks.db"), \
+             patch.dict(os.environ, {"CIRCUIT_BREAKER_AUTO_THRESHOLD": "3"}):
+            for i in range(3):
+                client.post("/v1/report-failure", json={
+                    "version": "0.2.1", "installed_from": "0.2.0",
+                    "stage": "apply", "timestamp": "2024-01-15T14:30:00Z"},
+                    environ_base={"REMOTE_ADDR": f"10.0.0.{i + 1}"})
+            resp = client.get("/v1/check?v=0.2.0")
+            data = resp.get_json()
+        assert data["security"] is None
+        assert data["held"]["version"] == "0.2.1"
