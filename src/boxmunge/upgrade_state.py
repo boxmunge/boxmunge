@@ -16,13 +16,18 @@ if TYPE_CHECKING:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
-    """Read a JSON file, returning empty dict if missing or corrupt."""
+    """Read a JSON file. Returns empty dict if missing. Raises on corrupt."""
     if not path.exists():
         return {}
+    import logging
     try:
         return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
+    except json.JSONDecodeError as e:
+        logging.getLogger("boxmunge").error("Corrupt JSON in %s: %s", path, e)
+        raise
+    except OSError as e:
+        logging.getLogger("boxmunge").error("Cannot read %s: %s", path, e)
+        raise
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
