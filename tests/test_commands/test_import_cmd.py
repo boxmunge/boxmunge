@@ -91,7 +91,7 @@ class TestRunImport:
         assert result == 0
         assert paths.project_dir("testapp").exists()
         assert (paths.project_dir("testapp") / "manifest.yml").exists()
-        mock_deploy.assert_called_once_with("testapp", paths)
+        mock_deploy.assert_called_once_with("testapp", paths, _lock_held=True)
 
     @patch("boxmunge.commands.import_cmd.run_deploy")
     def test_upgrade_preserves_env(self, mock_deploy: MagicMock, paths: BoxPaths,

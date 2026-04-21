@@ -98,6 +98,9 @@ class BoxPaths:
     def project_staging_state(self, name: str) -> Path:
         return self.staging_state / f"{name}.json"
 
+    def project_lock_file(self, name: str) -> Path:
+        return self.state / f"{name}.lock"
+
     def is_project_pre_registered(self, name: str) -> bool:
         """True if project dir exists but has no manifest (secrets-only)."""
         project_dir = self.project_dir(name)

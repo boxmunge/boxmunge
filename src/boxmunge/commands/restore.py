@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 from boxmunge.backup import decrypt_file, BackupError
 from boxmunge.commands.backup_cmd import list_snapshots
 from boxmunge.docker import compose_down, compose_up, DockerError
+from boxmunge.fileutil import project_lock, LockError
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
@@ -18,32 +20,31 @@ def _restore_snapshot(
     snapshot_path: Path, project_dir: Path, key_path: Path,
     restore_command: str, project_name: str, service: str,
 ) -> bool:
-    """Decrypt snapshot and run the restore command inside the container."""
-    decrypted = snapshot_path.with_suffix("")  # strips .age
-    try:
-        decrypt_file(snapshot_path, decrypted, key_path)
+    """Decrypt snapshot into a temp directory and run the restore command."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        decrypted = Path(tmpdir) / snapshot_path.stem  # strips .age, lands in tmpdir
+        try:
+            decrypt_file(snapshot_path, decrypted, key_path)
 
-        cmd = [
-            "docker", "compose",
-            "-f", "compose.yml",
-            "-p", project_name,
-            "exec", "-T", service,
-            "sh", "-c", restore_command,
-        ]
+            cmd = [
+                "docker", "compose",
+                "-f", "compose.yml",
+                "-p", project_name,
+                "exec", "-T", service,
+                "sh", "-c", restore_command,
+            ]
 
-        with open(decrypted, "rb") as inf:
-            result = subprocess.run(
-                cmd, cwd=project_dir,
-                stdin=inf, capture_output=True, text=True,
-            )
-        if result.returncode != 0:
-            print(f"  ERROR: Restore command failed: {result.stderr}")
+            with open(decrypted, "rb") as inf:
+                result = subprocess.run(
+                    cmd, cwd=project_dir,
+                    stdin=inf, capture_output=True, text=True,
+                )
+            if result.returncode != 0:
+                print(f"  ERROR: Restore command failed: {result.stderr}")
+                return False
+        except (BackupError, FileNotFoundError) as e:
+            print(f"  ERROR: Decryption failed: {e}")
             return False
-    except (BackupError, FileNotFoundError) as e:
-        print(f"  ERROR: Decryption failed: {e}")
-        return False
-    finally:
-        decrypted.unlink(missing_ok=True)
 
     return True
 
@@ -53,6 +54,7 @@ def run_restore(
     paths: BoxPaths,
     snapshot: str | None = None,
     yes: bool = False,
+    _lock_held: bool = False,
 ) -> int:
     """Restore a project from a backup snapshot. Returns 0 on success, 1 on failure."""
     project_dir = paths.project_dir(project_name)
@@ -109,6 +111,28 @@ def run_restore(
         print(f"ERROR: Backup key not found: {key_path}")
         return 1
 
+    if _lock_held:
+        return _run_restore_inner(project_name, paths, snapshot_path, service, restore_command,
+                                  project_dir, key_path)
+
+    try:
+        with project_lock(project_name, paths):
+            return _run_restore_inner(project_name, paths, snapshot_path, service, restore_command,
+                                      project_dir, key_path)
+    except LockError as e:
+        print(f"ERROR: {e}")
+        return 1
+
+
+def _run_restore_inner(
+    project_name: str,
+    paths: BoxPaths,
+    snapshot_path: Path,
+    service: str,
+    restore_command: str,
+    project_dir: Path,
+    key_path: Path,
+) -> int:
     print(f"Restoring {project_name} from {snapshot_path.name}...")
 
     print("  Stopping project...")

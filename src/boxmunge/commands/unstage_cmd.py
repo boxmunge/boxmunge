@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING
 from boxmunge.docker import compose_down, caddy_reload, DockerError
+from boxmunge.fileutil import project_lock, LockError
 from boxmunge.log import log_operation
 from boxmunge.state import read_state, write_state
 
@@ -10,16 +11,8 @@ if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 
-def run_unstage(project_name: str, paths: BoxPaths, dry_run: bool = False) -> int:
-    staging_state = read_state(paths.project_staging_state(project_name))
-    if not staging_state.get("active"):
-        print(f"ERROR: No active staging for '{project_name}'.")
-        return 1
-
-    if dry_run:
-        print(f"[DRY RUN] Would tear down staging for '{project_name}'")
-        return 0
-
+def _run_unstage_inner(project_name: str, paths: BoxPaths, dry_run: bool = False) -> int:
+    """Inner unstage logic — caller must hold the project lock."""
     project_dir = paths.project_dir(project_name)
     print(f"Unstaging {project_name}...")
 
@@ -65,6 +58,28 @@ def run_unstage(project_name: str, paths: BoxPaths, dry_run: bool = False) -> in
         pass
 
     return 0
+
+
+def run_unstage(project_name: str, paths: BoxPaths, dry_run: bool = False,
+                _lock_held: bool = False) -> int:
+    """Tear down staging for a project. Returns 0 on success, 1 on failure."""
+    staging_state = read_state(paths.project_staging_state(project_name))
+    if not staging_state.get("active"):
+        print(f"ERROR: No active staging for '{project_name}'.")
+        return 1
+
+    if dry_run:
+        print(f"[DRY RUN] Would tear down staging for '{project_name}'")
+        return 0
+
+    if not _lock_held:
+        try:
+            with project_lock(project_name, paths):
+                return _run_unstage_inner(project_name, paths, dry_run)
+        except LockError as e:
+            print(f"ERROR: {e}")
+            return 1
+    return _run_unstage_inner(project_name, paths, dry_run)
 
 
 def cmd_unstage(args: list[str]) -> None:

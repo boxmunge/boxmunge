@@ -12,6 +12,7 @@ from boxmunge.caddy import generate_caddy_config
 from boxmunge.compose import generate_compose_override
 from boxmunge.config import load_config, ConfigError
 from boxmunge.docker import compose_up, caddy_reload, DockerError
+from boxmunge.fileutil import atomic_write_text, project_lock, LockError
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
 from boxmunge.paths import BoxPaths
@@ -55,11 +56,11 @@ def prepare_caddy_config(paths: BoxPaths, manifest: dict[str, Any]) -> None:
 
     override = paths.project_caddy_override(project_name)
     if override.exists():
-        site_conf.write_text(override.read_text())
+        atomic_write_text(site_conf, override.read_text())
         log_operation("deploy", f"Using custom Caddy config from {override.name}", paths, project=project_name)
     else:
         config = generate_caddy_config(manifest)
-        site_conf.write_text(config)
+        atomic_write_text(site_conf, config)
 
 
 def prepare_compose_override(paths: BoxPaths, manifest: dict[str, Any]) -> None:
@@ -80,23 +81,17 @@ def prepare_compose_override(paths: BoxPaths, manifest: dict[str, Any]) -> None:
         env_files["project_secrets"] = "./secrets.env"
 
     content = generate_compose_override(manifest, env_files=env_files or None)
-    override_path.write_text(content)
+    atomic_write_text(override_path, content)
 
 
-def run_deploy(
+def _run_deploy_inner(
     project_name: str,
     paths: BoxPaths,
     ref: str | None = None,
     no_snapshot: bool = False,
     dry_run: bool = False,
 ) -> int:
-    """Execute the full deploy flow. Returns 0 on success, 1 on failure."""
-    from boxmunge.project_registry import is_registered
-    if not is_registered(project_name, paths):
-        print(f"ERROR: Project '{project_name}' is not registered on this server. "
-              f"Run: project-add {project_name}")
-        return 1
-
+    """Inner deploy logic — caller must hold the project lock."""
     project_dir = paths.project_dir(project_name)
 
     # Resolve from inbox for new projects and bundle-source upgrades.
@@ -242,7 +237,7 @@ def run_deploy(
     if snapshot_enabled and not no_snapshot and backup_type != "none":
         print(f"  Taking pre-deploy snapshot...")
         from boxmunge.commands.backup_cmd import run_backup
-        backup_result = run_backup(project_name, paths)
+        backup_result = run_backup(project_name, paths, _lock_held=True)
         if backup_result != 0:
             print(f"  WARN: Pre-deploy backup failed — continuing deploy")
         else:
@@ -303,7 +298,10 @@ def run_deploy(
             log_warning("deploy", f"First deploy smoke {smoke_result.status} downgraded: {smoke_result.message}",
                         paths, project=project_name)
         else:
-            print(f"  WARN: Smoke test {smoke_result.status}: {smoke_result.message}")
+            print(f"  ERROR: Smoke test {smoke_result.status}: {smoke_result.message}")
+            log_error("deploy", f"Smoke test {smoke_result.status}: {smoke_result.message}",
+                      paths, project=project_name)
+            return 1
 
     # Record state
     record_deploy_state(paths, project_name, actual_ref, snapshot_name)
@@ -321,6 +319,31 @@ def run_deploy(
         pass
 
     return 0
+
+
+def run_deploy(
+    project_name: str,
+    paths: BoxPaths,
+    ref: str | None = None,
+    no_snapshot: bool = False,
+    dry_run: bool = False,
+    _lock_held: bool = False,
+) -> int:
+    """Execute the full deploy flow. Returns 0 on success, 1 on failure."""
+    from boxmunge.project_registry import is_registered
+    if not is_registered(project_name, paths):
+        print(f"ERROR: Project '{project_name}' is not registered on this server. "
+              f"Run: project-add {project_name}")
+        return 1
+
+    if not _lock_held:
+        try:
+            with project_lock(project_name, paths):
+                return _run_deploy_inner(project_name, paths, ref, no_snapshot, dry_run)
+        except LockError as e:
+            print(f"ERROR: {e}")
+            return 1
+    return _run_deploy_inner(project_name, paths, ref, no_snapshot, dry_run)
 
 
 def cmd_deploy(args: list[str]) -> None:

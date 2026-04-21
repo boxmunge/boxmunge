@@ -1,13 +1,16 @@
 """boxmunge backup/backup-all/backup-sync commands."""
 
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import boxmunge.backup as _backup
 from boxmunge.backup import backup_filename, prune_backups, BackupError
 from boxmunge.config import load_config, ConfigError
+from boxmunge.fileutil import project_lock, LockError
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
@@ -17,8 +20,13 @@ def _execute_dump(
     project_dir: Path, dump_command: str, project_name: str, service: str,
 ) -> Path:
     """Run the dump command inside the project container and capture output."""
-    raw_path = project_dir / "backups" / ".dump-in-progress.tar.gz"
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    backups_dir = project_dir / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    fd, raw_path_str = tempfile.mkstemp(
+        dir=backups_dir, prefix=".dump-", suffix=".tar.gz"
+    )
+    os.close(fd)
+    raw_path = Path(raw_path_str)
 
     cmd = [
         "docker", "compose",
@@ -53,7 +61,7 @@ def list_snapshots(paths: BoxPaths, project_name: str) -> list[Path]:
     )
 
 
-def run_backup(project_name: str, paths: BoxPaths) -> int:
+def run_backup(project_name: str, paths: BoxPaths, _lock_held: bool = False) -> int:
     """Run backup for a project. Returns 0 on success, 1 on failure."""
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists():
@@ -91,6 +99,29 @@ def run_backup(project_name: str, paths: BoxPaths) -> int:
         print(f"ERROR: Backup encryption key not found: {key_path}")
         return 1
 
+    if not _lock_held:
+        try:
+            with project_lock(project_name, paths):
+                return _run_backup_inner(
+                    project_name, paths, project_dir, dump_command, service, retention, key_path,
+                )
+        except LockError as e:
+            print(f"ERROR: {e}")
+            return 1
+    return _run_backup_inner(
+        project_name, paths, project_dir, dump_command, service, retention, key_path,
+    )
+
+
+def _run_backup_inner(
+    project_name: str,
+    paths: BoxPaths,
+    project_dir: Any,
+    dump_command: str,
+    service: str,
+    retention: int,
+    key_path: Any,
+) -> int:
     print(f"{project_name}: starting backup (service: {service})...")
 
     try:

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from boxmunge.bundle import extract_bundle, copy_project_files
 from boxmunge.commands.deploy import run_deploy
+from boxmunge.fileutil import project_lock, LockError
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
 from boxmunge.paths import BoxPaths
@@ -86,27 +87,35 @@ def run_import(
                     return 1
         else:
             print(f"Creating new project '{project_name}'")
-            target_dir.mkdir(parents=True, exist_ok=True)
 
-        # Step 4: Handle project.env for new projects
-        if not is_upgrade:
-            env_in_bundle = project_dir_extracted / "project.env"
-            env_example = project_dir_extracted / "project.env.example"
-            if not env_in_bundle.exists() and env_example.exists():
-                shutil.copy2(env_example, env_in_bundle)
-                print(f"  WARN: No project.env in bundle — copied from "
-                      f"project.env.example. Edit it with real values.")
+        # Acquire lock before any file mutations
+        try:
+            with project_lock(project_name, paths):
+                if not is_upgrade:
+                    target_dir.mkdir(parents=True, exist_ok=True)
 
-        # Step 5: Copy files
-        print(f"  Copying project files...")
-        _copy_project_files(project_dir_extracted, target_dir, is_upgrade)
+                # Step 4: Handle project.env for new projects
+                if not is_upgrade:
+                    env_in_bundle = project_dir_extracted / "project.env"
+                    env_example = project_dir_extracted / "project.env.example"
+                    if not env_in_bundle.exists() and env_example.exists():
+                        shutil.copy2(env_example, env_in_bundle)
+                        print(f"  WARN: No project.env in bundle — copied from "
+                              f"project.env.example. Edit it with real values.")
 
-    # Step 6: Deploy using standard flow
-    print(f"  Running deploy...")
-    result = run_deploy(project_name, paths)
-    if result != 0:
-        log_error("import", "Import deploy failed", paths, project=project_name)
-        return 1
+                # Step 5: Copy files
+                print(f"  Copying project files...")
+                _copy_project_files(project_dir_extracted, target_dir, is_upgrade)
+
+                # Step 6: Deploy using standard flow (lock already held)
+                print(f"  Running deploy...")
+                result = run_deploy(project_name, paths, _lock_held=True)
+                if result != 0:
+                    log_error("import", "Import deploy failed", paths, project=project_name)
+                    return 1
+        except LockError as e:
+            print(f"ERROR: {e}")
+            return 1
 
     log_operation("import", f"Imported from bundle: {bundle_path.name}", paths, project=project_name)
     return 0

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from boxmunge.commands.restore import run_restore
 from boxmunge.commands.deploy import run_deploy
+from boxmunge.fileutil import project_lock, LockError
 from boxmunge.log import log_operation
 from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state
@@ -59,16 +60,32 @@ def run_rollback(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
             print("Aborted.")
             return 1
 
+    try:
+        with project_lock(project_name, paths):
+            # Re-read target inside the lock to avoid TOCTOU
+            target = find_rollback_target(paths, project_name)
+            if target is None:
+                print(f"ERROR: Deploy state changed before lock was acquired.")
+                return 1
+            return _run_rollback_inner(project_name, paths, target)
+    except LockError as e:
+        print(f"ERROR: {e}")
+        return 1
+
+
+def _run_rollback_inner(
+    project_name: str, paths: BoxPaths, target: RollbackTarget,
+) -> int:
     print("\n--- Restoring data ---")
-    result = run_restore(project_name, paths, snapshot=target.snapshot, yes=True)
+    result = run_restore(project_name, paths, snapshot=target.snapshot, yes=True, _lock_held=True)
     if result != 0:
-        print(f"ERROR: Restore failed — rollback incomplete")
+        print("ERROR: Restore failed — rollback incomplete")
         return 1
 
     print("\n--- Redeploying previous version ---")
-    result = run_deploy(project_name, paths, ref=target.previous_ref, no_snapshot=True)
+    result = run_deploy(project_name, paths, ref=target.previous_ref, no_snapshot=True, _lock_held=True)
     if result != 0:
-        print(f"ERROR: Deploy failed — rollback incomplete")
+        print("ERROR: Deploy failed — rollback incomplete")
         return 1
 
     log_operation(

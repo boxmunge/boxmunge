@@ -12,6 +12,7 @@ from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.bundle import extract_bundle as _extract_bundle, copy_project_files as _copy_project_files
 from boxmunge.compose import generate_staging_compose_base, generate_staging_compose_override
 from boxmunge.docker import compose_up, caddy_reload, DockerError
+from boxmunge.fileutil import atomic_write_text, project_lock, LockError
 from boxmunge.identity import check_project_identity, register_project_identity
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
@@ -23,15 +24,10 @@ if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 
-def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
-              dry_run: bool = False) -> int:
+def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
+                     dry_run: bool = False) -> int:
+    """Inner stage logic — caller must hold the project lock."""
     project_dir = paths.project_dir(project_name)
-
-    if not is_registered(project_name, paths):
-        print(f"ERROR: Project '{project_name}' is not registered on this server. "
-              f"Run: project-add {project_name}")
-        return 1
-
     is_new = not project_dir.exists() or not (project_dir / "manifest.yml").exists()
 
     # Resolve source for bundle projects (new or no repo)
@@ -136,7 +132,7 @@ def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
 
     staging_conf = paths.project_staging_caddy_site(project_name)
     staging_conf.parent.mkdir(parents=True, exist_ok=True)
-    staging_conf.write_text(generate_staging_caddy_config(manifest, auth=staging_auth))
+    atomic_write_text(staging_conf, generate_staging_caddy_config(manifest, auth=staging_auth))
 
     # Build env_files for staging (same as production)
     staging_env_files = {}
@@ -150,13 +146,13 @@ def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
         staging_env_files["project_secrets"] = "./secrets.env"
 
     staging_override = paths.project_staging_compose_override(project_name)
-    staging_override.write_text(generate_staging_compose_override(
+    atomic_write_text(staging_override, generate_staging_compose_override(
         manifest, env_files=staging_env_files or None
     ))
 
     # Generate staging base (compose.yml with ports stripped to avoid conflicts)
     staging_base = project_dir / "compose.staging-base.yml"
-    staging_base.write_text(generate_staging_compose_base(project_dir / "compose.yml"))
+    atomic_write_text(staging_base, generate_staging_compose_base(project_dir / "compose.yml"))
 
     # Copy production data to staging if opted in
     if manifest.get("staging", {}).get("copy_data"):
@@ -230,6 +226,22 @@ def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
         pass
 
     return 0
+
+
+def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
+              dry_run: bool = False) -> int:
+    """Stage a project. Returns 0 on success, 1 on failure."""
+    if not is_registered(project_name, paths):
+        print(f"ERROR: Project '{project_name}' is not registered on this server. "
+              f"Run: project-add {project_name}")
+        return 1
+
+    try:
+        with project_lock(project_name, paths):
+            return _run_stage_inner(project_name, paths, ref, dry_run)
+    except LockError as e:
+        print(f"ERROR: {e}")
+        return 1
 
 
 def cmd_stage(args: list[str]) -> None:
