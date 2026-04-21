@@ -55,6 +55,12 @@ class BoxPaths:
         self.host_secrets = self.config / "secrets.env"
         self.stashes = root / "stashes"
         self.canary = root / "canary"
+        self.upgrade_state = root / "upgrade-state"
+        self.blocklist = self.upgrade_state / "blocklist.json"
+        self.probation = self.upgrade_state / "probation.json"
+        self.upgrade_lock = self.upgrade_state / "upgrade.lock"
+        self.active_slot = self.upgrade_state / "active-slot"
+        self.cosign_pub = self.config / "cosign.pub"
 
     def project_secrets(self, name: str) -> Path:
         return self.projects / name / "secrets.env"

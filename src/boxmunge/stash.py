@@ -71,3 +71,44 @@ def prune_stashes(paths: BoxPaths, keep: int = 3) -> list[Path]:
     for stash in to_prune:
         stash.unlink()
     return to_prune
+
+
+def restore_stash(paths: BoxPaths, archive: Path | None = None) -> Path:
+    """Restore platform state from a stash archive.
+
+    If no archive is specified, restores from the most recent stash.
+    Extracts config, deploy state, and project files back to their
+    original locations. Returns the path to the restored archive.
+
+    Raises FileNotFoundError if the archive or stash directory is empty.
+    """
+    if archive is None:
+        stashes = list_stashes(paths)
+        if not stashes:
+            raise FileNotFoundError("No stashes available to restore")
+        archive = stashes[0]
+
+    if not archive.exists():
+        raise FileNotFoundError(f"Stash not found: {archive}")
+
+    with tarfile.open(archive, "r:gz") as tar:
+        for member in tar.getmembers():
+            if member.name.startswith("config/"):
+                target = paths.config / member.name.removeprefix("config/")
+            elif member.name.startswith("state/deploy/"):
+                target = paths.deploy_state / member.name.removeprefix("state/deploy/")
+            elif member.name.startswith("projects/"):
+                target = paths.projects / member.name.removeprefix("projects/")
+            else:
+                continue
+
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            extracted = tar.extractfile(member)
+            if extracted is not None:
+                target.write_bytes(extracted.read())
+
+    return archive

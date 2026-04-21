@@ -2,14 +2,15 @@
 """boxmunge auto-update — check for and apply security releases.
 
 Checks the boxmunge.dev version-check endpoint first, falling back to the
-GitHub Releases API. Applies via upgrade flow. Run by a systemd timer every
-6 hours.
+GitHub Releases API. Delegates the actual upgrade to the boxmunge-upgrade shim
+via os.execvp. Run by a systemd timer every 6 hours.
 
 NOTE: Full signature verification (cosign) will be added when the release
 pipeline is active.
 """
 
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -17,6 +18,7 @@ from typing import Any
 
 from boxmunge.log import log_operation, log_error
 from boxmunge.paths import BoxPaths
+from boxmunge.upgrade_state import is_blocklisted
 from boxmunge.version import read_installed_version, parse_version_string
 
 
@@ -148,7 +150,11 @@ def check_for_security_update(paths: BoxPaths) -> dict[str, Any] | None:
 
 
 def run_auto_update(paths: BoxPaths) -> int:
-    """Check for and apply security updates. Returns 0 on success."""
+    """Check for and apply security updates. Returns 0 on success.
+
+    Delegates the actual upgrade to the boxmunge-upgrade shim, which
+    handles venv swap, pre-flight, rollback, and probation.
+    """
     print("Checking for security updates...")
     try:
         update = check_for_security_update(paths)
@@ -161,30 +167,21 @@ def run_auto_update(paths: BoxPaths) -> int:
         print("No security updates available.")
         return 0
 
-    print(f"Security update available: {update['name']} ({update['version']})")
-    log_operation("auto-update", f"Security release found: {update['version']}", paths)
+    version = update["version"]
+    url = update["url"]
 
-    from boxmunge.commands.upgrade_cmd import run_upgrade
-    result = run_upgrade(paths, skip_self_test=False)
+    if is_blocklisted(paths, version):
+        print(f"Version {version} is blocklisted on this box, skipping.")
+        log_operation("auto-update", f"Skipped blocklisted version: {version}", paths)
+        return 0
 
-    if result == 0:
-        log_operation("auto-update", f"Security update applied: {update['version']}", paths)
-        try:
-            from boxmunge.config import load_config
-            from boxmunge.pushover import send_notification
-            config = load_config(paths)
-            pushover = config.get("pushover", {})
-            send_notification(
-                pushover.get("user_key", ""), pushover.get("app_token", ""),
-                "boxmunge security update applied",
-                f"Updated to {update['version']}: {update['name']}",
-            )
-        except Exception:
-            pass
-    else:
-        log_error("auto-update", f"Security update failed: {update['version']}", paths)
+    print(f"Security update available: {update.get('name', version)} ({version})")
+    log_operation("auto-update", f"Security release found: {version}", paths)
 
-    return result
+    # Hand off to the upgrade shim
+    shim = str(paths.bin / "boxmunge-upgrade")
+    os.execvp(shim, [shim, "run", version, url])
+    return 1  # pragma: no cover — execvp doesn't return on success
 
 
 def cmd_auto_update(args: list[str]) -> None:
