@@ -4,7 +4,8 @@ After=docker.service
 
 [Service]
 Type=oneshot
-User=deploy
+User=root
+ExecStartPre=/opt/boxmunge/bin/boxmunge-upgrade check-probation
 ExecStart=/opt/boxmunge/bin/boxmunge check-all
 StandardOutput=journal
 StandardError=journal
