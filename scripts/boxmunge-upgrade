@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+# boxmunge-upgrade — orchestrates platform upgrades with rollback safety.
+#
+# This script is intentionally simple and self-contained. It NEVER imports
+# Python code — it only calls Python commands as subprocesses and checks
+# exit codes. This ensures rollback works even if the new code is broken.
+#
+# Entry points:
+#   boxmunge-upgrade run <version> <url>      — full upgrade flow
+#   boxmunge-upgrade check-probation          — called by health timer
+#   boxmunge-upgrade clear-blocklist <version> — manual blocklist mgmt
+
+set -euo pipefail
+
+BOXMUNGE_ROOT="${BOXMUNGE_ROOT:-/opt/boxmunge}"
+STATE_DIR="$BOXMUNGE_ROOT/upgrade-state"
+LOCK_FILE="$STATE_DIR/upgrade.lock"
+ACTIVE_SLOT_FILE="$STATE_DIR/active-slot"
+BLOCKLIST_FILE="$STATE_DIR/blocklist.json"
+PROBATION_FILE="$STATE_DIR/probation.json"
+BIN_DIR="$BOXMUNGE_ROOT/bin"
+
+log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) boxmunge-upgrade: $*" >&2; }
+die() { log "FATAL: $*"; exit 1; }
+
+active_slot() { cat "$ACTIVE_SLOT_FILE" 2>/dev/null || echo "a"; }
+standby_slot() { [[ "$(active_slot)" == "a" ]] && echo "b" || echo "a"; }
+active_venv() { echo "$BOXMUNGE_ROOT/env-$(active_slot)"; }
+standby_venv() { echo "$BOXMUNGE_ROOT/env-$(standby_slot)"; }
+
+is_blocklisted() {
+    local version="$1"
+    [[ -f "$BLOCKLIST_FILE" ]] || return 1
+    python3 -c "
+import json, sys
+bl = json.load(open('$BLOCKLIST_FILE'))
+sys.exit(0 if '$version' in bl else 1)
+"
+}
+
+add_blocklist() {
+    local version="$1" reason="$2"
+    "$(active_venv)/bin/python" -c "
+from boxmunge.upgrade_state import add_to_blocklist
+from boxmunge.paths import BoxPaths
+add_to_blocklist(BoxPaths(), '$version', '$reason')
+"
+}
+
+report_failure() {
+    local version="$1" from_version="$2" stage="$3"
+    "$(active_venv)/bin/python" -c "
+from boxmunge.report_failure import report_failure
+report_failure('$version', '$from_version', '$stage')
+" 2>/dev/null || true
+}
+
+send_notification() {
+    local title="$1" message="$2"
+    "$(active_venv)/bin/python" -c "
+from boxmunge.config import load_config
+from boxmunge.pushover import send_notification
+from boxmunge.paths import BoxPaths
+config = load_config(BoxPaths())
+po = config.get('pushover', {})
+send_notification(po.get('user_key',''), po.get('app_token',''), '$title', '$message')
+" 2>/dev/null || true
+}
+
+swap_to() {
+    local slot="$1"
+    ln -sfn "$BOXMUNGE_ROOT/env-$slot" "$BOXMUNGE_ROOT/env-active"
+    echo "$slot" > "$ACTIVE_SLOT_FILE"
+    ln -sfn "$BOXMUNGE_ROOT/env-active/bin/boxmunge" "$BIN_DIR/boxmunge"
+    log "Swapped active to slot $slot"
+}
+
+do_rollback() {
+    local new_version="$1" from_version="$2" stage="$3" prev_slot="$4"
+    log "ROLLBACK: $new_version failed at stage=$stage, reverting to slot $prev_slot"
+
+    swap_to "$prev_slot"
+
+    "$(active_venv)/bin/boxmunge" stash restore --latest 2>&1 || log "WARN: stash restore failed"
+
+    add_blocklist "$new_version" "$stage"
+    report_failure "$new_version" "$from_version" "$stage"
+    send_notification "boxmunge ROLLBACK" "Rolled back $new_version (stage: $stage)"
+
+    log "Rollback complete: reverted to $from_version"
+    exit 1
+}
+
+cmd_run() {
+    local version="${1:?Usage: boxmunge-upgrade run <version> <url>}"
+    local url="${2:?Usage: boxmunge-upgrade run <version> <url>}"
+
+    mkdir -p "$STATE_DIR"
+
+    exec 9>"$LOCK_FILE"
+    flock -n 9 || die "Another upgrade is in progress"
+
+    if is_blocklisted "$version"; then
+        log "Version $version is blocklisted, skipping"
+        exit 0
+    fi
+
+    local prev_slot from_version standby
+    prev_slot="$(active_slot)"
+    from_version="$("$(active_venv)/bin/boxmunge" --version 2>/dev/null || echo "unknown")"
+    standby="$(standby_slot)"
+
+    # 1. PREPARE
+    log "Preparing standby venv (slot $standby)..."
+    local avail_mb
+    avail_mb=$(df -m "$BOXMUNGE_ROOT" | awk 'NR==2{print $4}')
+    [[ "$avail_mb" -lt 100 ]] && die "Insufficient disk space: ${avail_mb}MB available, need 100MB"
+
+    rm -rf "$BOXMUNGE_ROOT/env-$standby"
+    python3 -m venv "$BOXMUNGE_ROOT/env-$standby"
+    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet "boxmunge-server==$version" || {
+        log "Failed to install boxmunge-server==$version"
+        rm -rf "$BOXMUNGE_ROOT/env-$standby"
+        add_blocklist "$version" "preflight_failed: pip_install"
+        report_failure "$version" "$from_version" "preflight"
+        exit 1
+    }
+
+    # 2. PRE-FLIGHT
+    log "Running pre-flight checks..."
+
+    if [[ -f "$BOXMUNGE_ROOT/config/cosign.pub" ]] && command -v cosign &>/dev/null; then
+        log "Signature verification: cosign available"
+    fi
+
+    "$BOXMUNGE_ROOT/env-$standby/bin/python" -c "import boxmunge; print(boxmunge.__version__)" || {
+        log "Pre-flight FAILED: import test"
+        rm -rf "$BOXMUNGE_ROOT/env-$standby"
+        add_blocklist "$version" "preflight_failed: import"
+        report_failure "$version" "$from_version" "preflight"
+        exit 1
+    }
+
+    "$BOXMUNGE_ROOT/env-$standby/bin/boxmunge" --version >/dev/null 2>&1 || {
+        log "Pre-flight FAILED: CLI version check"
+        rm -rf "$BOXMUNGE_ROOT/env-$standby"
+        add_blocklist "$version" "preflight_failed: cli_version"
+        report_failure "$version" "$from_version" "preflight"
+        exit 1
+    }
+
+    "$BOXMUNGE_ROOT/env-$standby/bin/boxmunge" upgrade --dry-run || {
+        log "Pre-flight FAILED: dry-run upgrade"
+        rm -rf "$BOXMUNGE_ROOT/env-$standby"
+        add_blocklist "$version" "preflight_failed: dry_run"
+        report_failure "$version" "$from_version" "preflight"
+        exit 1
+    }
+
+    log "Pre-flight passed"
+
+    # 3. STASH (using active/trusted venv)
+    log "Creating platform stash..."
+    "$(active_venv)/bin/boxmunge" stash create || die "Stash creation failed, aborting"
+
+    # 4. SWAP
+    log "Swapping to standby venv (slot $standby)..."
+    swap_to "$standby"
+
+    # 5. APPLY (using new active venv)
+    log "Applying upgrade..."
+    "$(active_venv)/bin/boxmunge" upgrade --apply || {
+        do_rollback "$version" "$from_version" "apply" "$prev_slot"
+    }
+
+    # 6. VERIFY
+    log "Running health check..."
+    local health_exit=0
+    "$(active_venv)/bin/boxmunge" health --json >/dev/null 2>&1 || health_exit=$?
+    if [[ "$health_exit" -eq 2 ]]; then
+        do_rollback "$version" "$from_version" "health_immediate" "$prev_slot"
+    fi
+
+    # 7. ENTER PROBATION
+    log "Entering probation for $version..."
+    "$(active_venv)/bin/python" -c "
+from boxmunge.upgrade_state import write_probation
+from boxmunge.paths import BoxPaths
+write_probation(BoxPaths(), '$version', '$prev_slot', hours=6)
+"
+
+    send_notification "boxmunge security update applied" "Updated to $version (probation: 6h)"
+    log "Upgrade to $version complete, probation started"
+    exit 0
+}
+
+cmd_check_probation() {
+    [[ -f "$PROBATION_FILE" ]] || exit 0
+
+    local version prev_slot expires_at
+    version="$(python3 -c "import json; print(json.load(open('$PROBATION_FILE'))['version'])")"
+    prev_slot="$(python3 -c "import json; print(json.load(open('$PROBATION_FILE'))['previous_slot'])")"
+    expires_at="$(python3 -c "import json; print(json.load(open('$PROBATION_FILE'))['expires_at'])")"
+
+    local expired
+    expired="$(python3 -c "
+from datetime import datetime, timezone
+expires = datetime.fromisoformat('$expires_at')
+print('yes' if datetime.now(timezone.utc) >= expires else 'no')
+")"
+
+    if [[ "$expired" == "yes" ]]; then
+        log "Probation expired for $version — promoting"
+        rm -rf "$BOXMUNGE_ROOT/env-$prev_slot"
+        rm -f "$PROBATION_FILE"
+        log "Version $version promoted"
+        exit 0
+    fi
+
+    local health_exit=0
+    timeout 60 "$(active_venv)/bin/boxmunge" health --json >/dev/null 2>&1 || health_exit=$?
+
+    if [[ "$health_exit" -eq 2 ]] || [[ "$health_exit" -ge 124 ]]; then
+        local from_version
+        from_version="$("$BOXMUNGE_ROOT/env-$prev_slot/bin/boxmunge" --version 2>/dev/null || echo "unknown")"
+        log "CRITICAL health failure during probation for $version"
+        do_rollback "$version" "$from_version" "health_probation" "$prev_slot"
+    fi
+
+    exit 0
+}
+
+cmd_clear_blocklist() {
+    local version="${1:?Usage: boxmunge-upgrade clear-blocklist <version>}"
+    "$(active_venv)/bin/python" -c "
+from boxmunge.upgrade_state import remove_from_blocklist
+from boxmunge.paths import BoxPaths
+remove_from_blocklist(BoxPaths(), '$version')
+"
+    log "Cleared $version from blocklist"
+}
+
+case "${1:-}" in
+    run)             shift; cmd_run "$@" ;;
+    check-probation) cmd_check_probation ;;
+    clear-blocklist) shift; cmd_clear_blocklist "$@" ;;
+    *)               die "Usage: boxmunge-upgrade {run|check-probation|clear-blocklist} [args]" ;;
+esac
