@@ -9,6 +9,7 @@ from boxmunge.commands.deploy import run_deploy
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.log import log_operation
 from boxmunge.paths import BoxPaths
+from boxmunge.probation import clear_probation_if_active
 from boxmunge.state import read_state
 
 
@@ -45,6 +46,7 @@ def find_rollback_target(paths: BoxPaths, project_name: str) -> RollbackTarget |
 
 def run_rollback(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
     """Rollback: restore pre-deploy snapshot + redeploy previous ref."""
+    clear_probation_if_active(paths, "rollback")
     target = find_rollback_target(paths, project_name)
     if target is None:
         print(f"ERROR: Cannot rollback {project_name} — no deploy history or snapshot")

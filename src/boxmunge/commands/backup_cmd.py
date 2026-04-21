@@ -14,6 +14,7 @@ from boxmunge.fileutil import project_lock, LockError
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
+from boxmunge.probation import clear_probation_if_active
 
 
 def _execute_dump(
@@ -63,6 +64,7 @@ def list_snapshots(paths: BoxPaths, project_name: str) -> list[Path]:
 
 def run_backup(project_name: str, paths: BoxPaths, _lock_held: bool = False) -> int:
     """Run backup for a project. Returns 0 on success, 1 on failure."""
+    clear_probation_if_active(paths, "backup")
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists():
         print(f"ERROR: Project not found: {project_name}")
