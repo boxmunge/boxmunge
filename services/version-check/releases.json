@@ -1,6 +1,11 @@
 {
   "releases": [
     {
+      "version": "0.3.4",
+      "security": false,
+      "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.3.4"
+    },
+    {
       "version": "0.3.3",
       "security": true,
       "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.3.3"
