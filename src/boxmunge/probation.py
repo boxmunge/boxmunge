@@ -8,7 +8,6 @@ user-caused issues from triggering an automatic rollback to an older
 """
 from __future__ import annotations
 
-import shutil
 from typing import TYPE_CHECKING
 
 from boxmunge.log import log_operation
@@ -19,16 +18,20 @@ if TYPE_CHECKING:
 
 
 def clear_probation_if_active(paths: BoxPaths, command: str) -> None:
-    """If in probation, promote immediately and clean up old venv."""
+    """If in probation, clear the probation marker so the upgrade is promoted.
+
+    Note: the old venv is NOT removed here — this code runs as the deploy
+    user which doesn't have permission to rmtree root-owned venv dirs.
+    The next health-timer fire (root context) sees the orphan venv and
+    cleans it up via boxmunge-upgrade check-probation.
+    """
     prob = read_probation(paths)
     if prob is None:
         return
 
-    previous_slot = prob.get("previous_slot")
-    if previous_slot:
-        old_venv = paths.root / f"env-{previous_slot}"
-        if old_venv.exists():
-            shutil.rmtree(old_venv)
-
     clear_probation(paths)
-    log_operation("upgrade", f"Probation ended early: user interaction ({command})", paths)
+    log_operation(
+        "upgrade",
+        f"Probation ended early: user interaction ({command})",
+        paths,
+    )

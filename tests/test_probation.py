@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for probation promotion on user interaction."""
 
-import shutil
 from pathlib import Path
 import pytest
 from boxmunge.paths import BoxPaths
@@ -24,16 +23,23 @@ class TestClearProbationIfActive:
         clear_probation_if_active(paths, "deploy")
         assert not paths.probation.exists()
 
-    def test_clears_probation_and_deletes_old_venv(self, paths):
+    def test_clears_probation_file_but_not_old_venv(self, paths):
+        """Deploy-user code must NOT rmtree root-owned venv dirs.
+
+        Orphan venv cleanup is deferred to the health timer (root context)
+        via boxmunge-upgrade check-probation.
+        """
         write_probation(paths, "0.2.1", "a", hours=6)
         clear_probation_if_active(paths, "deploy")
         assert not paths.probation.exists()
-        assert not (paths.root / "env-a").exists()
+        # Both venv dirs must survive — only root can remove them
+        assert (paths.root / "env-a").exists()
         assert (paths.root / "env-b").exists()
 
-    def test_clear_when_previous_slot_b(self, paths):
+    def test_clear_when_previous_slot_b_leaves_venvs(self, paths):
+        """Same invariant holds when previous slot is b."""
         write_probation(paths, "0.2.1", "b", hours=6)
         clear_probation_if_active(paths, "rollback")
         assert not paths.probation.exists()
         assert (paths.root / "env-a").exists()
-        assert not (paths.root / "env-b").exists()
+        assert (paths.root / "env-b").exists()
