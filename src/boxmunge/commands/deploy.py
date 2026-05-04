@@ -56,12 +56,15 @@ def prepare_caddy_config(paths: BoxPaths, manifest: dict[str, Any]) -> None:
     site_conf.parent.mkdir(parents=True, exist_ok=True)
 
     override = paths.project_caddy_override(project_name)
+    # mode=0o644: the Caddy container reads these as a host-mounted volume.
+    # The container's UID may not map to the host's deploy UID, so the files
+    # must be world-readable. They contain only routing config, no secrets.
     if override.exists():
-        atomic_write_text(site_conf, override.read_text())
+        atomic_write_text(site_conf, override.read_text(), mode=0o644)
         log_operation("deploy", f"Using custom Caddy config from {override.name}", paths, project=project_name)
     else:
         config = generate_caddy_config(manifest)
-        atomic_write_text(site_conf, config)
+        atomic_write_text(site_conf, config, mode=0o644)
 
 
 def prepare_compose_override(paths: BoxPaths, manifest: dict[str, Any]) -> None:

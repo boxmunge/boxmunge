@@ -2,7 +2,10 @@
 set -euo pipefail
 
 # Verify the version-check endpoint responds with valid JSON
-resp=$(curl -sf "http://boxmunge-web-web:8147/v1/check?v=0.0.0" 2>/dev/null) || {
+# The smoke test runs inside the project's docker compose network.
+# Compose service name (from compose.yml) is "web" — that's the DNS name
+# other containers use to reach this service.
+resp=$(curl -sf "http://web:8147/v1/check?v=0.0.0" 2>/dev/null) || {
     echo "FAIL: /v1/check endpoint unreachable" >&2
     exit 1
 }
