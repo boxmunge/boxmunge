@@ -303,7 +303,7 @@ cmd_auto() {
     # Manual upgrade trigger: discover latest release, then hand off to cmd_run.
     # Uses Python in the active venv to do discovery (boxmunge.dev → GitHub fallback)
     # and emits "version url" on stdout, or exits non-zero with a message.
-    local discovery
+    local discovery rc=0
     discovery="$("$(active_venv)/bin/python" -c "
 import json, sys, urllib.error, urllib.request
 from boxmunge.paths import BoxPaths
@@ -361,8 +361,7 @@ if not newer(version, current_semver):
     print(f'UP_TO_DATE: current={current_semver} latest={version}', file=sys.stderr)
     sys.exit(3)
 print(f'{version} {url}')
-")"
-    local rc=$?
+")" || rc=$?
     if [[ $rc -eq 3 ]]; then
         log "Already on latest version"
         exit 0
