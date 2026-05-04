@@ -74,7 +74,9 @@ swap_to() {
     local slot="$1"
     ln -sfn "$BOXMUNGE_ROOT/env-$slot" "$BOXMUNGE_ROOT/env-active"
     echo "$slot" > "$ACTIVE_SLOT_FILE"
-    ln -sfn "$BOXMUNGE_ROOT/env-active/bin/boxmunge" "$BIN_DIR/boxmunge"
+    # The user-facing /opt/boxmunge/bin/boxmunge-server wrapper already routes
+    # through env-active/bin/boxmunge-server, so the symlink swap above
+    # is sufficient — no need to touch the wrapper itself.
     log "Swapped active to slot $slot"
 }
 
@@ -84,7 +86,7 @@ do_rollback() {
 
     swap_to "$prev_slot"
 
-    "$(active_venv)/bin/boxmunge" stash restore --latest 2>&1 || log "WARN: stash restore failed"
+    "$(active_venv)/bin/boxmunge-server" stash restore --latest 2>&1 || log "WARN: stash restore failed"
 
     add_blocklist "$new_version" "$stage"
     report_failure "$new_version" "$from_version" "$stage"
@@ -110,7 +112,7 @@ cmd_run() {
 
     local prev_slot from_version standby
     prev_slot="$(active_slot)"
-    from_version="$("$(active_venv)/bin/boxmunge" --version 2>/dev/null || echo "unknown")"
+    from_version="$("$(active_venv)/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")"
     standby="$(standby_slot)"
 
     # 1. PREPARE
@@ -182,7 +184,7 @@ cmd_run() {
         exit 1
     }
 
-    "$BOXMUNGE_ROOT/env-$standby/bin/boxmunge" --version >/dev/null 2>&1 || {
+    "$BOXMUNGE_ROOT/env-$standby/bin/boxmunge-server" --version >/dev/null 2>&1 || {
         log "Pre-flight FAILED: CLI version check"
         rm -rf "$BOXMUNGE_ROOT/env-$standby"
         add_blocklist "$version" "preflight_failed: cli_version"
@@ -190,7 +192,7 @@ cmd_run() {
         exit 1
     }
 
-    "$BOXMUNGE_ROOT/env-$standby/bin/boxmunge" upgrade --dry-run || {
+    "$BOXMUNGE_ROOT/env-$standby/bin/boxmunge-server" upgrade --dry-run || {
         log "Pre-flight FAILED: dry-run upgrade"
         rm -rf "$BOXMUNGE_ROOT/env-$standby"
         add_blocklist "$version" "preflight_failed: dry_run"
@@ -202,7 +204,7 @@ cmd_run() {
 
     # 3. STASH (using active/trusted venv)
     log "Creating platform stash..."
-    "$(active_venv)/bin/boxmunge" stash create || die "Stash creation failed, aborting"
+    "$(active_venv)/bin/boxmunge-server" stash create || die "Stash creation failed, aborting"
 
     # 4. SWAP
     log "Swapping to standby venv (slot $standby)..."
@@ -210,14 +212,14 @@ cmd_run() {
 
     # 5. APPLY (using new active venv)
     log "Applying upgrade..."
-    "$(active_venv)/bin/boxmunge" upgrade --apply || {
+    "$(active_venv)/bin/boxmunge-server" upgrade --apply || {
         do_rollback "$version" "$from_version" "apply" "$prev_slot"
     }
 
     # 6. VERIFY
     log "Running health check..."
     local health_exit=0
-    "$(active_venv)/bin/boxmunge" health --json >/dev/null 2>&1 || health_exit=$?
+    "$(active_venv)/bin/boxmunge-server" health --json >/dev/null 2>&1 || health_exit=$?
     if [[ "$health_exit" -eq 2 ]]; then
         do_rollback "$version" "$from_version" "health_immediate" "$prev_slot"
     fi
@@ -269,11 +271,11 @@ print('yes' if datetime.now(timezone.utc) >= expires else 'no')
     fi
 
     local health_exit=0
-    timeout 60 "$(active_venv)/bin/boxmunge" health --json >/dev/null 2>&1 || health_exit=$?
+    timeout 60 "$(active_venv)/bin/boxmunge-server" health --json >/dev/null 2>&1 || health_exit=$?
 
     if [[ "$health_exit" -eq 2 ]] || [[ "$health_exit" -ge 124 ]]; then
         local from_version
-        from_version="$("$BOXMUNGE_ROOT/env-$prev_slot/bin/boxmunge" --version 2>/dev/null || echo "unknown")"
+        from_version="$("$BOXMUNGE_ROOT/env-$prev_slot/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")"
         log "CRITICAL health failure during probation for $version"
         do_rollback "$version" "$from_version" "health_probation" "$prev_slot"
     fi
