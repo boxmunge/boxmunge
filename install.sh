@@ -62,13 +62,18 @@ if [[ -d "${BOXMUNGE_ROOT}/venv" && ! -d "${BOXMUNGE_ROOT}/env-a" ]]; then
     echo "========================================================"
     echo "  Migrating from single-venv to two-venv layout"
     echo "========================================================"
-    mv "${BOXMUNGE_ROOT}/venv" "${BOXMUNGE_ROOT}/env-a"
+    # The old venv contains nothing recoverable for us — every package is
+    # about to be reinstalled in the next step. Don't `mv`: the venv's
+    # shebangs are absolute paths to /opt/boxmunge/venv/bin/python3 and
+    # don't survive a rename. Wipe and recreate fresh.
+    rm -rf "${BOXMUNGE_ROOT}/venv"
     mkdir -p "${BOXMUNGE_ROOT}/upgrade-state"
+    chmod 700 "${BOXMUNGE_ROOT}/upgrade-state"
     echo "a" > "${BOXMUNGE_ROOT}/upgrade-state/active-slot"
     echo "{}" > "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json"
+    python3 -m venv "${BOXMUNGE_ROOT}/env-a"
     ln -sfn "${BOXMUNGE_ROOT}/env-a" "${BOXMUNGE_ROOT}/env-active"
-    chmod 700 "${BOXMUNGE_ROOT}/upgrade-state"
-    echo "  Layout migrated: venv -> env-a, env-active symlink created"
+    echo "  Layout migrated: old venv removed, env-a created, env-active symlink in place"
 fi
 
 # ---------------------------------------------------------------------------
@@ -100,7 +105,10 @@ rm -rf "${SCRIPT_DIR}/build" "${SCRIPT_DIR}/src/"*.egg-info
 # ---------------------------------------------------------------------------
 cat > "${BOXMUNGE_ROOT}/bin/boxmunge" <<'WRAPPER'
 #!/usr/bin/env bash
-exec /opt/boxmunge/env-active/bin/boxmunge "$@"
+# The pip-installed entry point is named boxmunge-server (per pyproject.toml
+# project.scripts). The user-facing command is boxmunge — this wrapper
+# bridges the two.
+exec /opt/boxmunge/env-active/bin/boxmunge-server "$@"
 WRAPPER
 chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge"
 
@@ -160,10 +168,15 @@ systemctl enable --now \
     boxmunge-container-update.timer
 
 # ---------------------------------------------------------------------------
-# Verify
+# Record installed version (read by boxmunge auto-update to decide if a
+# new release is available). Package is named boxmunge-server in pyproject.
 # ---------------------------------------------------------------------------
-INSTALLED_VERSION="$("${BOXMUNGE_ROOT}/env-active/bin/pip" show boxmunge 2>/dev/null \
+INSTALLED_VERSION="$("${BOXMUNGE_ROOT}/env-active/bin/pip" show boxmunge-server 2>/dev/null \
     | grep '^Version:' | cut -d' ' -f2 || echo "unknown")"
+
+if [[ "${INSTALLED_VERSION}" != "unknown" ]]; then
+    echo "${INSTALLED_VERSION}" > "${BOXMUNGE_ROOT}/config/version"
+fi
 
 echo ""
 echo "========================================================"

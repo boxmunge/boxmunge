@@ -45,11 +45,14 @@ jobs:
           cosign sign-blob --yes \
             --output-signature dist/boxmunge-install.sig \
             dist/boxmunge-install.sh
-          sha256sum dist/boxmunge-install.sh dist/boxmunge-*.tar.gz > dist/SHA256SUMS
+          # Compute checksums with bare filenames so consumers can verify
+          # by running `sha256sum -c SHA256SUMS` from any directory
+          (cd dist && sha256sum boxmunge-install.sh boxmunge-*.tar.gz > SHA256SUMS)
 
       - name: Generate checksums (unsigned)
         if: steps.cosign.outcome != 'success'
-        run: sha256sum dist/boxmunge-install.sh dist/boxmunge-*.tar.gz > dist/SHA256SUMS
+        run: |
+          (cd dist && sha256sum boxmunge-install.sh boxmunge-*.tar.gz > SHA256SUMS)
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
