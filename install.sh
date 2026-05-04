@@ -55,6 +55,23 @@ if [[ -f "${KEY_FILE}" ]] && ! grep -q "^AGE-SECRET-KEY-" "${KEY_FILE}"; then
 fi
 
 # ---------------------------------------------------------------------------
+# Migrate v0.2.x single-venv layout to v0.3.0+ two-venv layout
+# ---------------------------------------------------------------------------
+if [[ -d "${BOXMUNGE_ROOT}/venv" && ! -d "${BOXMUNGE_ROOT}/env-a" ]]; then
+    echo ""
+    echo "========================================================"
+    echo "  Migrating from single-venv to two-venv layout"
+    echo "========================================================"
+    mv "${BOXMUNGE_ROOT}/venv" "${BOXMUNGE_ROOT}/env-a"
+    mkdir -p "${BOXMUNGE_ROOT}/upgrade-state"
+    echo "a" > "${BOXMUNGE_ROOT}/upgrade-state/active-slot"
+    echo "{}" > "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json"
+    ln -sfn "${BOXMUNGE_ROOT}/env-a" "${BOXMUNGE_ROOT}/env-active"
+    chmod 700 "${BOXMUNGE_ROOT}/upgrade-state"
+    echo "  Layout migrated: venv -> env-a, env-active symlink created"
+fi
+
+# ---------------------------------------------------------------------------
 # Install boxmunge Python package into isolated venv
 # ---------------------------------------------------------------------------
 echo ""
@@ -62,40 +79,54 @@ echo "========================================================"
 echo "  Installing boxmunge package"
 echo "========================================================"
 
-python3 -m venv "${BOXMUNGE_ROOT}/venv"
-"${BOXMUNGE_ROOT}/venv/bin/pip" install --quiet --upgrade pip
-"${BOXMUNGE_ROOT}/venv/bin/pip" install --quiet "${SCRIPT_DIR}[tui]"
+# For fresh installs, set up env-a as the active slot
+if [[ ! -L "${BOXMUNGE_ROOT}/env-active" ]]; then
+    mkdir -p "${BOXMUNGE_ROOT}/upgrade-state"
+    chmod 700 "${BOXMUNGE_ROOT}/upgrade-state"
+    echo "a" > "${BOXMUNGE_ROOT}/upgrade-state/active-slot"
+    echo "{}" > "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json"
+    python3 -m venv "${BOXMUNGE_ROOT}/env-a"
+    ln -sfn "${BOXMUNGE_ROOT}/env-a" "${BOXMUNGE_ROOT}/env-active"
+fi
+"${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --upgrade pip
+"${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet "${SCRIPT_DIR}[tui]"
 
 # pip install as root leaves root-owned build artifacts in the source directory.
 # Clean them up so the deploy user can rm the extraction dir on future upgrades.
 rm -rf "${SCRIPT_DIR}/build" "${SCRIPT_DIR}/src/"*.egg-info
 
 # ---------------------------------------------------------------------------
-# CLI wrapper (uses venv, not system Python)
+# CLI wrappers (use env-active, not a fixed venv path)
 # ---------------------------------------------------------------------------
 cat > "${BOXMUNGE_ROOT}/bin/boxmunge" <<'WRAPPER'
 #!/usr/bin/env bash
-exec /opt/boxmunge/venv/bin/boxmunge "$@"
+exec /opt/boxmunge/env-active/bin/boxmunge "$@"
 WRAPPER
 chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge"
 
 cat > "${BOXMUNGE_ROOT}/bin/boxmunge-server" <<'WRAPPER'
 #!/usr/bin/env bash
-exec /opt/boxmunge/venv/bin/boxmunge-server "$@"
+exec /opt/boxmunge/env-active/bin/boxmunge-server "$@"
 WRAPPER
 chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-server"
 
 cat > "${BOXMUNGE_ROOT}/bin/boxmunge-shell" <<'WRAPPER'
 #!/usr/bin/env bash
-exec /opt/boxmunge/venv/bin/boxmunge-shell "$@"
+exec /opt/boxmunge/env-active/bin/boxmunge-shell "$@"
 WRAPPER
 chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-shell"
 
 cat > "${BOXMUNGE_ROOT}/bin/boxmunge-sftp" <<'WRAPPER'
 #!/usr/bin/env bash
-exec /opt/boxmunge/venv/bin/boxmunge-sftp "$@"
+exec /opt/boxmunge/env-active/bin/boxmunge-sftp "$@"
 WRAPPER
 chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-sftp"
+
+# ---------------------------------------------------------------------------
+# Install the boxmunge-upgrade shim (orchestrates auto-updates)
+# ---------------------------------------------------------------------------
+cp "${SCRIPT_DIR}/scripts/boxmunge-upgrade" "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade"
+chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade"
 
 # Symlink into /usr/local/bin so boxmunge works in non-interactive SSH sessions
 ln -sf "${BOXMUNGE_ROOT}/bin/boxmunge" /usr/local/bin/boxmunge
@@ -125,12 +156,13 @@ systemctl enable --now \
     boxmunge-backup.timer \
     boxmunge-health.timer \
     boxmunge-backup-sync.timer \
-    boxmunge-auto-update.timer
+    boxmunge-auto-update.timer \
+    boxmunge-container-update.timer
 
 # ---------------------------------------------------------------------------
 # Verify
 # ---------------------------------------------------------------------------
-INSTALLED_VERSION="$("${BOXMUNGE_ROOT}/venv/bin/pip" show boxmunge 2>/dev/null \
+INSTALLED_VERSION="$("${BOXMUNGE_ROOT}/env-active/bin/pip" show boxmunge 2>/dev/null \
     | grep '^Version:' | cut -d' ' -f2 || echo "unknown")"
 
 echo ""
