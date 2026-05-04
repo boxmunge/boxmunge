@@ -1,4 +1,9 @@
-"""boxmunge logs — view project, host, and operational logs."""
+"""boxmunge logs — view container, host, and boxmunge service logs.
+
+Distinct from `boxmunge log` (the structured operational audit log). Use
+`logs` for live container debugging, journalctl, and boxmunge service tail;
+use `log` to query structured deploy/check/rollback events.
+"""
 
 import subprocess
 import sys
@@ -9,7 +14,6 @@ from boxmunge.docker import compose_logs, DockerError
 
 def cmd_logs(args: list[str]) -> None:
     """CLI entry point for logs command."""
-    print("Note: 'logs' is deprecated. Use 'boxmunge log' instead.", file=sys.stderr)
     paths = BoxPaths()
 
     if "--host" in args:

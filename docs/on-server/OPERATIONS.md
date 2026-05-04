@@ -334,10 +334,16 @@ Show active Caddy sites and TLS certificate expiry dates:
 caddy-status
 ```
 
-List all registered projects with brief status:
+See all projects, status, last-check and deployed-at timestamps:
 
 ```
-list-projects
+status
+```
+
+List the project allowlist (registered project names):
+
+```
+project-list
 ```
 
 ---

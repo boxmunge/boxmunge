@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""project-add, project-remove, project-list — manage the project allowlist."""
+"""project-add, project-list — manage the project allowlist.
+
+For destructive removal (containers + files + registry), use project-delete.
+"""
 
 import sys
 
 from boxmunge.paths import BoxPaths
-from boxmunge.project_registry import (
-    add_project,
-    load_registered_projects,
-    remove_project,
-)
+from boxmunge.project_registry import add_project, load_registered_projects
 
 
 def cmd_project_add(args: list[str]) -> None:
@@ -24,21 +23,6 @@ def cmd_project_add(args: list[str]) -> None:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(2)
     print(f"Project '{name}' registered.")
-
-
-def cmd_project_remove(args: list[str]) -> None:
-    """Unregister a project name (does not delete project data)."""
-    if not args:
-        print("Usage: project-remove <name>", file=sys.stderr)
-        sys.exit(2)
-    name = args[0]
-    paths = BoxPaths()
-    try:
-        remove_project(name, paths)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
-    print(f"Project '{name}' unregistered.")
 
 
 def cmd_project_list(args: list[str]) -> None:

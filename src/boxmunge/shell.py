@@ -19,8 +19,8 @@ ALLOWED_COMMANDS: set[str] = {
     "help", "agent-help", "doctor", "status", "test-alert", "handshake", "version",
     # Project lifecycle
     "add-git-project", "stage", "promote", "unstage",
-    "prod-deploy", "rollback", "remove-project", "diff",
-    "project-add", "project-remove", "project-list",
+    "prod-deploy", "rollback", "project-delete", "diff",
+    "project-add", "project-list",
     # Inbox
     "inbox",
     # Secrets
@@ -28,7 +28,7 @@ ALLOWED_COMMANDS: set[str] = {
     # Project operations
     "check", "check-all", "log", "logs",
     "backup", "backup-all", "backup-sync",
-    "restore", "list-projects", "validate",
+    "restore", "validate",
     "caddy-status", "test-restore",
     # TUI
     "console",

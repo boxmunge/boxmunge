@@ -127,12 +127,6 @@ def _tool_validate(project: str) -> dict:
     return capture_tool_call(lambda: run_validate(project, paths))
 
 
-def _tool_list_projects() -> dict:
-    from boxmunge.commands.list_projects import run_list_projects
-    paths = _get_paths()
-    return capture_tool_call(lambda: run_list_projects(paths))
-
-
 def _tool_secrets(args: list[str]) -> dict:
     from boxmunge.commands.secrets_cmd import run_secrets
     paths = _get_paths()
@@ -292,14 +286,10 @@ def _tool_project_add(name: str) -> dict:
     return capture_tool_call(do_add)
 
 
-def _tool_project_remove(name: str) -> dict:
-    from boxmunge.project_registry import remove_project
+def _tool_project_delete(name: str, yes: bool = False) -> dict:
+    from boxmunge.commands.project_delete_cmd import run_project_delete
     paths = _get_paths()
-    def do_remove() -> int:
-        remove_project(name, paths)
-        print(f"Project '{name}' unregistered.")
-        return 0
-    return capture_tool_call(do_remove)
+    return capture_tool_call(lambda: run_project_delete(name, paths, yes=yes))
 
 
 def _tool_project_list_mcp() -> dict:

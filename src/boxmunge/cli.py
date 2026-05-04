@@ -13,11 +13,10 @@ from boxmunge.commands.check import cmd_check, cmd_check_all
 from boxmunge.commands.deploy import cmd_deploy
 from boxmunge.commands.doctor import cmd_doctor
 from boxmunge.commands.help import cmd_help, cmd_agent_help
-from boxmunge.commands.list_projects import cmd_list_projects
 from boxmunge.commands.log_cmd import cmd_log
 from boxmunge.commands.logs import cmd_logs
 from boxmunge.commands.promote_cmd import cmd_promote
-from boxmunge.commands.remove_project import cmd_remove_project
+from boxmunge.commands.project_delete_cmd import cmd_project_delete
 from boxmunge.commands.restore import cmd_restore
 from boxmunge.commands.rollback import cmd_rollback
 from boxmunge.commands.stage_cmd import cmd_stage
@@ -35,7 +34,7 @@ from boxmunge.commands.upgrade_cmd import cmd_upgrade
 from boxmunge.commands.auto_update_cmd import cmd_auto_update
 from boxmunge.commands.container_update_cmd import cmd_container_update
 from boxmunge.commands.mcp_serve_cmd import cmd_mcp_serve
-from boxmunge.commands.project_cmd import cmd_project_add, cmd_project_remove, cmd_project_list
+from boxmunge.commands.project_cmd import cmd_project_add, cmd_project_list
 from boxmunge.commands.handshake_cmd import cmd_handshake
 from boxmunge.commands.stash_cmd import cmd_stash
 from boxmunge.commands.version_cmd import cmd_version
@@ -51,7 +50,7 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "prod-deploy": cmd_deploy,
     "inbox": cmd_inbox,
     "rollback": cmd_rollback,
-    "remove-project": cmd_remove_project,
+    "project-delete": cmd_project_delete,
     "check": cmd_check,
     "check-all": cmd_check_all,
     "log": cmd_log,
@@ -60,7 +59,6 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "backup-all": cmd_backup_all,
     "backup-sync": cmd_backup_sync,
     "restore": cmd_restore,
-    "list-projects": cmd_list_projects,
     "validate": cmd_validate,
     "caddy-status": cmd_caddy_status,
     "test-restore": cmd_test_restore,
@@ -79,7 +77,6 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "container-update": cmd_container_update,
     "mcp-serve": cmd_mcp_serve,
     "project-add": cmd_project_add,
-    "project-remove": cmd_project_remove,
     "project-list": cmd_project_list,
     "handshake": cmd_handshake,
     "stash": cmd_stash,

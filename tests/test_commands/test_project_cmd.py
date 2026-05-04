@@ -1,4 +1,4 @@
-"""Tests for project-add, project-remove, project-list commands."""
+"""Tests for project-add, project-list, project-delete commands."""
 
 import pytest
 from io import StringIO
@@ -31,24 +31,6 @@ class TestCmdProjectAdd:
         assert exc.value.code == 2
 
 
-class TestCmdProjectRemove:
-    def test_unregisters_project(self, paths: BoxPaths) -> None:
-        from boxmunge.commands.project_cmd import cmd_project_add, cmd_project_remove
-        from boxmunge.project_registry import is_registered
-        with patch("boxmunge.commands.project_cmd.BoxPaths", return_value=paths):
-            cmd_project_add(["myapp"])
-            cmd_project_remove(["myapp"])
-        assert not is_registered("myapp", paths)
-
-    def test_unknown_project_exits_1(self, paths: BoxPaths) -> None:
-        from boxmunge.commands.project_cmd import cmd_project_remove
-        with pytest.raises(SystemExit) as exc:
-            with patch("sys.stderr", new_callable=StringIO):
-                with patch("boxmunge.commands.project_cmd.BoxPaths", return_value=paths):
-                    cmd_project_remove(["ghost"])
-        assert exc.value.code == 1
-
-
 class TestCmdProjectList:
     def test_lists_registered_projects(self, paths: BoxPaths, capsys) -> None:
         from boxmunge.commands.project_cmd import cmd_project_add, cmd_project_list
@@ -66,3 +48,24 @@ class TestCmdProjectList:
             cmd_project_list([])
         output = capsys.readouterr().out
         assert "No projects registered" in output
+
+
+class TestCmdProjectDelete:
+    def test_cleans_up_registry_when_only_registered(self, paths: BoxPaths) -> None:
+        """project-delete must remove the registry entry even when project_dir absent."""
+        from boxmunge.commands.project_cmd import cmd_project_add
+        from boxmunge.commands.project_delete_cmd import run_project_delete
+        from boxmunge.project_registry import is_registered
+
+        with patch("boxmunge.commands.project_cmd.BoxPaths", return_value=paths):
+            cmd_project_add(["solo"])
+        assert is_registered("solo", paths)
+
+        rc = run_project_delete("solo", paths, yes=True)
+        assert rc == 0
+        assert not is_registered("solo", paths)
+
+    def test_unknown_project_exits_1(self, paths: BoxPaths) -> None:
+        from boxmunge.commands.project_delete_cmd import run_project_delete
+        rc = run_project_delete("ghost", paths, yes=True)
+        assert rc == 1

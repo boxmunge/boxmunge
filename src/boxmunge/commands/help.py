@@ -10,46 +10,56 @@ Usage: boxmunge <command> [options]
 Host operations:
   help [command]          Show help (this text, or detailed help for a command)
   agent-help              AI agent orientation
+  version                 Show installed boxmunge version
   doctor                  Verify host health and configuration
-  status                  Dashboard of all projects and host state
+  status                  Dashboard of all projects (status, last check, deployed-at)
+  health                  Run platform-wide health checks
+  self-test               Run canary self-test to verify platform integrity
+  handshake               Print server version and compatibility info
   test-alert              Send a test Pushover notification
 
 Project lifecycle:
-  add-git-project <name> <repo>  Create a project from a git repo
-  stage <project>         Stage from latest source alongside production
+  add-git-project <name> <repo>  Register a git-backed project
+  stage <project>         Stage alongside production for verification
   promote <project>       Promote staging to production
   unstage <project>       Tear down staging
   prod-deploy <project>   Deploy directly to production (skip staging)
   rollback <project>      Restore previous deployment
-  remove-project <p>      Deregister and clean up (with confirmation)
   diff <project>          Preview what a deploy would change
-  project-add <name>      Register a project name on this server
-  project-remove <name>   Unregister a project name
+  project-add <name>      Register a project name in the allowlist
   project-list            List registered project names
+  project-delete <p>      Destructive: stop, remove files, deregister (with confirm)
 
-Inbox:
+Inbox & secrets:
   inbox [project]         List uploaded bundles
   inbox clean [project]   Remove old bundles from inbox
-
-Secrets:
-  secrets set <project> KEY=VALUE   Set a project secret
-  secrets set --host KEY=VALUE      Set a host-level secret
-  secrets list <project|--host>     List secret keys
-  secrets get <project|--host> KEY  Read a secret value
-  secrets unset <project|--host> K  Remove a secret
+  secrets set <p> KEY=VAL Set a project secret
+  secrets set --host K=V  Set a host-level secret
+  secrets list <p|--host> List secret keys
+  secrets get <p|--host> K  Read a secret value
+  secrets unset <p|--host> K  Remove a secret
 
 Project operations:
   check <project>         Run health checks (docker + http + smoke)
   check-all               Check all projects
-  logs <project>          View container logs
+  validate <project>      Validate manifest, env, compose without deploying
+  log [filters]           Query structured operational audit log (deploy/check/rollback)
+  logs <project> [svc]    Tail container logs (--follow, --tail N)
+  logs --host             Show host journalctl for boxmunge-* units
+  logs --boxmunge         Tail the boxmunge service log
   backup <project>        Backup, encrypt, store locally
   backup-all              Backup all configured projects
-  backup-sync [proj]      Sync encrypted backups to off-box remote
+  backup-sync [project]   Sync encrypted backups to off-box remote
   restore <project>       Restore from a backup snapshot
-  list-projects           List registered projects with brief status
-  validate <project>      Validate manifest, env, compose without deploying
+  test-restore <project>  Verify backup restores into throwaway container
   caddy-status            Show Caddy sites and certificate expiry
-  test-restore <proj>     Verify backup restores into throwaway container
+  console                 Open the boxmunge TUI
+
+Platform updates:
+  upgrade                 Upgrade boxmunge platform from latest release
+  auto-update             Run the auto-update probation/promotion cycle
+  container-update        Pull and recreate Caddy and project image: containers
+  mcp-serve               Run MCP server (stdio) for AI agent integration
 
 Options:
   --dry-run               Show what would happen without doing it
@@ -93,10 +103,10 @@ Managing secrets:
   secrets list <project>
 
 First moves:
-  status              — see what's running
-  list-projects       — see what's deployed
+  status              — see what's deployed and its health
   doctor              — check host health
   inbox               — see uploaded bundles
+  log --tail 50       — recent ops audit (deploys, checks, rollbacks)
 
 When in doubt, use --dry-run first.
 

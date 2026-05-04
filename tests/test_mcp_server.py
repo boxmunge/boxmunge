@@ -160,11 +160,11 @@ class TestToolRegistration:
         assert result["success"] is True
         mock.assert_called_once()
 
-    def test_list_projects_tool(self) -> None:
-        from boxmunge.mcp_tools import _tool_list_projects
-        with patch("boxmunge.commands.list_projects.run_list_projects") as mock:
+    def test_project_delete_tool(self) -> None:
+        from boxmunge.mcp_tools import _tool_project_delete
+        with patch("boxmunge.commands.project_delete_cmd.run_project_delete") as mock:
             mock.return_value = 0
-            result = _tool_list_projects()
+            result = _tool_project_delete("myapp", yes=True)
         assert result["success"] is True
         mock.assert_called_once()
 
@@ -199,7 +199,7 @@ class TestToolDefinitions:
 
     def test_tool_count(self) -> None:
         from boxmunge.mcp_server import _TOOL_DEFS
-        assert len(_TOOL_DEFS) == 22
+        assert len(_TOOL_DEFS) == 21
 
     def test_unique_tool_names(self) -> None:
         from boxmunge.mcp_server import _TOOL_DEFS
@@ -219,10 +219,12 @@ class TestNewToolsRegistered:
         names = [t["name"] for t in _TOOL_DEFS]
         assert "project_add" in names
 
-    def test_project_remove_tool_registered(self) -> None:
+    def test_project_delete_tool_registered(self) -> None:
         from boxmunge.mcp_server import _TOOL_DEFS
         names = [t["name"] for t in _TOOL_DEFS]
-        assert "project_remove" in names
+        assert "project_delete" in names
+        assert "project_remove" not in names
+        assert "list_projects" not in names
 
     def test_project_list_tool_registered(self) -> None:
         from boxmunge.mcp_server import _TOOL_DEFS

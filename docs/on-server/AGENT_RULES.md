@@ -11,9 +11,8 @@ The deploy shell is a **restricted shell** that dispatches commands directly -- 
 Run these commands in order:
 
 1. `help` -- see all available commands
-2. `status` -- check the current state of the server
-3. `list-projects` -- see all managed projects
-4. `agent-help <topic>` -- read documentation (architecture, operations, conventions, rules)
+2. `status` -- check the current state of all projects
+3. `agent-help <topic>` -- read documentation (architecture, operations, conventions, rules)
 
 ---
 
@@ -27,14 +26,15 @@ These operations are safe to run without human confirmation:
 | Stage a project for verification | `stage <project>` |
 | Promote staging to production | `promote <project>` |
 | Abandon staging | `unstage <project>` |
-| Deploy directly to production | `deploy <project>` |
-| Register a git-based project | `add-git-project <name> --repo <url>` |
+| Deploy directly to production | `prod-deploy <project>` |
+| Register a git-based project | `add-git-project <name> <repo-url>` |
 | Preview changes before deploying | `diff <project>` |
 | Set a project secret | `secrets set <project> KEY value` |
 | Set a host-level secret | `secrets set --host KEY value` |
 | List secrets | `secrets list <project>` |
 | Check server/project health | `status` or `check <project>` |
-| View application logs | `logs <project>` |
+| Tail container logs | `logs <project>` |
+| Query ops audit log | `log --tail 50` |
 | Validate a project config | `validate <project>` |
 | Run a backup | `backup <project>` |
 | Run diagnostics | `doctor` |
@@ -49,7 +49,7 @@ These operations are safe to run without human confirmation:
 4. Stage: `stage myapp`
 5. Verify staging works, then promote: `promote myapp`
 
-Or skip staging: `deploy myapp`
+Or skip staging: `prod-deploy myapp`
 
 ### Managing secrets
 
@@ -75,7 +75,7 @@ These commands prompt for confirmation before executing. Use `--yes` only when y
 
 - `rollback <project>` -- rolls back to the previous deployment
 - `restore <project>` -- restores from a backup
-- `remove-project <project>` -- removes a project entirely
+- `project-delete <project>` -- destructively deletes a project (containers, files, registry entry)
 
 Do not pass `--yes` reflexively. Confirm the target project and the effect before proceeding.
 

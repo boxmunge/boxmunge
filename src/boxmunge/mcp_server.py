@@ -16,12 +16,11 @@ from boxmunge.mcp_tools import (
     _tool_handshake,
     _tool_health,
     _tool_inbox,
-    _tool_list_projects,
     _tool_log,
     _tool_promote,
     _tool_project_add,
+    _tool_project_delete,
     _tool_project_list_mcp,
-    _tool_project_remove,
     _tool_restore,
     _tool_rollback,
     _tool_secrets,
@@ -156,15 +155,6 @@ _TOOL_DEFS: list[dict[str, Any]] = [
         "handler": _tool_validate,
     },
     {
-        "name": "list_projects",
-        "description": "List all registered projects.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {},
-        },
-        "handler": _tool_list_projects,
-    },
-    {
         "name": "secrets",
         "description": "Manage project or host secrets (get, set, list, unset).",
         "inputSchema": {
@@ -270,16 +260,17 @@ _TOOL_DEFS: list[dict[str, Any]] = [
         "handler": _tool_project_add,
     },
     {
-        "name": "project_remove",
-        "description": "Unregister a project name (does not delete data).",
+        "name": "project_delete",
+        "description": "Destructively delete a project: stop containers, remove files, deregister. Requires yes=true to skip confirmation.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Project name to unregister"},
+                "name": {"type": "string", "description": "Project name to delete"},
+                "yes": {"type": "boolean", "description": "Skip interactive confirmation"},
             },
             "required": ["name"],
         },
-        "handler": _tool_project_remove,
+        "handler": _tool_project_delete,
     },
     {
         "name": "project_list",

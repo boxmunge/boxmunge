@@ -42,12 +42,15 @@ class TestMCPIntegration:
                     assert "health" in tool_names
                     assert "backup" in tool_names
                     assert "log" in tool_names
-                    assert len(tool_names) >= 22
+                    assert len(tool_names) >= 21
+                    assert "project_delete" in tool_names
+                    assert "list_projects" not in tool_names
+                    assert "project_remove" not in tool_names
 
         asyncio.run(run())
 
-    def test_list_projects_returns_structured(self) -> None:
-        """Call list_projects tool and verify response format."""
+    def test_project_list_returns_structured(self) -> None:
+        """Call project_list tool and verify response format."""
         import asyncio
         from mcp.client.session import ClientSession
         from mcp.client.stdio import stdio_client, StdioServerParameters
@@ -60,7 +63,7 @@ class TestMCPIntegration:
             async with stdio_client(server_params) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
-                    result = await session.call_tool("list_projects", {})
+                    result = await session.call_tool("project_list", {})
                     text = result.content[0].text
                     data = json.loads(text)
                     assert "success" in data
