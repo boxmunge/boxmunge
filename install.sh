@@ -46,6 +46,7 @@ if [[ -f "${KEY_FILE}" ]] && ! grep -q "^AGE-SECRET-KEY-" "${KEY_FILE}"; then
     echo "========================================================"
     mv "${KEY_FILE}" "${KEY_FILE}.old-passphrase"
     age-keygen -o "${KEY_FILE}" 2>/dev/null
+    chown root:deploy "${KEY_FILE}"
     chmod 640 "${KEY_FILE}"
     PUBKEY="$(age-keygen -y "${KEY_FILE}")"
     echo "  New public key: ${PUBKEY}"
@@ -143,6 +144,15 @@ fi
 mkdir -p "${BOXMUNGE_ROOT}/stashes"
 chown root:deploy "${BOXMUNGE_ROOT}/stashes"
 chmod 770 "${BOXMUNGE_ROOT}/stashes"
+
+# Ensure backup.key is readable by deploy (group). Manual `boxmunge backup`
+# from the deploy shell and pre-deploy snapshots from `prod-deploy` need to
+# read the age recipient out of this file. Idempotent — fixes hosts where
+# the v0.1.x → v0.1.2 migration left it as root:root 640.
+if [[ -f "${BOXMUNGE_ROOT}/config/backup.key" ]]; then
+    chown root:deploy "${BOXMUNGE_ROOT}/config/backup.key"
+    chmod 640 "${BOXMUNGE_ROOT}/config/backup.key"
+fi
 "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --upgrade pip
 "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet "${SCRIPT_DIR}[tui]"
 
