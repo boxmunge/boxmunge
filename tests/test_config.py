@@ -61,3 +61,31 @@ admin_email: admin@example.com
         assert cfg["ssh_port"] == 922
         assert cfg["health"]["check_interval_minutes"] == 5
         assert cfg["health"]["alert_threshold"] == 3
+
+
+class TestContainerUpdatesDefaults:
+    def test_container_updates_default_block(self, tmp_path):
+        from boxmunge.paths import BoxPaths
+        from boxmunge.config import load_config
+        paths = BoxPaths(root=tmp_path / "bm")
+        paths.config.mkdir(parents=True)
+        paths.config_file.write_text("hostname: t\nadmin_email: t@t\n")
+        cfg = load_config(paths)
+        assert cfg["container_updates"]["enabled"] is True
+        assert cfg["container_updates"]["strategy"] == "leave_broken"
+        assert cfg["container_updates"]["schedule"] == "*-*-* 03:00:00"
+
+    def test_container_updates_user_override(self, tmp_path):
+        from boxmunge.paths import BoxPaths
+        from boxmunge.config import load_config
+        paths = BoxPaths(root=tmp_path / "bm")
+        paths.config.mkdir(parents=True)
+        paths.config_file.write_text(
+            "hostname: t\nadmin_email: t@t\n"
+            "container_updates:\n"
+            "  strategy: rollback_to_previous\n"
+        )
+        cfg = load_config(paths)
+        assert cfg["container_updates"]["strategy"] == "rollback_to_previous"
+        # Other defaults preserved (deep merge)
+        assert cfg["container_updates"]["enabled"] is True
