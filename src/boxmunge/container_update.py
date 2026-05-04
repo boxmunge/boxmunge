@@ -9,11 +9,19 @@ it applies the configured strategy (leave_broken or rollback_to_previous).
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.manifest import load_manifest, ManifestError
+from boxmunge.docker import (
+    DockerError, compose_pull, compose_up,
+    container_image_digest, image_digest, tag_image, container_health,
+)
+from boxmunge.commands.backup_cmd import run_backup
+from boxmunge.log import log_operation, log_warning, log_error
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -123,3 +131,280 @@ def write_target_state(paths: "BoxPaths", name: str, state: dict[str, Any]) -> N
     paths.container_update_state.mkdir(parents=True, exist_ok=True)
     state_path = paths.container_update_target_state(name)
     atomic_write_text(state_path, json.dumps(state, indent=2) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Per-target update flow
+# ---------------------------------------------------------------------------
+
+_HEALTHCHECK_TIMEOUT_SEC = 90
+_HEALTHCHECK_POLL_INTERVAL_SEC = 3
+_NO_HEALTHCHECK_GRACE_SEC = 30
+
+
+def _services_with_image(target: UpdateTarget) -> dict[str, str]:
+    """Return {service_name: container_name} for image: services in this target.
+
+    For Caddy, returns {"caddy": "boxmunge-caddy"}.
+    For user projects, parses the compose file(s) for services with `image:`
+    directives and uses the configured container_name (or "<project>_<service>_1"
+    convention if not set).
+    """
+    import yaml
+    services: dict[str, str] = {}
+    for cf in target.compose_files:
+        path = target.project_dir / cf
+        if not path.exists():
+            continue
+        try:
+            data = yaml.safe_load(path.read_text()) or {}
+        except yaml.YAMLError:
+            continue
+        for svc_name, svc in (data.get("services") or {}).items():
+            if not isinstance(svc, dict):
+                continue
+            if "image" not in svc:
+                continue  # build: services excluded in phase 1
+            cname = svc.get("container_name") or f"{target.name}_{svc_name}_1"
+            services[svc_name] = cname
+    return services
+
+
+def _capture_service_digests(target: UpdateTarget) -> dict[str, str]:
+    """Snapshot the current image digest of each image: service in the target."""
+    digests: dict[str, str] = {}
+    for svc_name, container_name in _services_with_image(target).items():
+        d = container_image_digest(container_name)
+        if d:
+            digests[svc_name] = d
+    return digests
+
+
+def _wait_healthy(target: UpdateTarget, timeout_sec: int = _HEALTHCHECK_TIMEOUT_SEC) -> tuple[bool, list[str]]:
+    """Poll until all image: services report healthy or timeout.
+
+    Returns (all_healthy, list_of_unhealthy_service_names). Services with no
+    healthcheck defined are treated as healthy if the container has been
+    running for at least _NO_HEALTHCHECK_GRACE_SEC.
+    """
+    deadline = time.monotonic() + timeout_sec
+    services = _services_with_image(target)
+    grace_start = time.monotonic()
+    while time.monotonic() < deadline:
+        unhealthy: list[str] = []
+        all_ok = True
+        for svc_name, container_name in services.items():
+            status = container_health(container_name)
+            if status is None:
+                # No healthcheck defined — wait for grace period
+                if time.monotonic() - grace_start < _NO_HEALTHCHECK_GRACE_SEC:
+                    all_ok = False
+                # After grace, treat as healthy
+            elif status == "healthy":
+                pass
+            elif status in ("starting", "unhealthy"):
+                if status == "unhealthy":
+                    unhealthy.append(svc_name)
+                all_ok = False
+        if all_ok and not unhealthy:
+            return True, []
+        if unhealthy:
+            # An unhealthy verdict is final
+            return False, unhealthy
+        time.sleep(_HEALTHCHECK_POLL_INTERVAL_SEC)
+    # Timed out — collect final status
+    final_unhealthy = [
+        svc for svc, cn in services.items()
+        if container_health(cn) != "healthy" and container_health(cn) is not None
+    ]
+    return False, final_unhealthy or list(services.keys())
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _detect_image_changes(
+    target: UpdateTarget,
+    before: dict[str, str],
+    after: dict[str, str],
+) -> dict[str, str]:
+    """Return {service_name: new_digest} for services whose digest changed after pull.
+
+    Compares the post-pull captured digests against the pre-pull digests.
+    Falls back to inspecting the local image via image_digest() for any service
+    not present in after (e.g. container not running before pull).
+    """
+    import yaml
+    changed: dict[str, str] = {}
+    # First: compare the two capture snapshots
+    all_services: set[str] = set(before) | set(after)
+    for svc_name in all_services:
+        prev = before.get(svc_name)
+        curr = after.get(svc_name)
+        if curr and curr != prev:
+            changed[svc_name] = curr
+    # Second: for services with no running container, check the local image
+    for cf in target.compose_files:
+        path = target.project_dir / cf
+        if not path.exists():
+            continue
+        try:
+            data = yaml.safe_load(path.read_text()) or {}
+        except yaml.YAMLError:
+            continue
+        for svc_name, svc in (data.get("services") or {}).items():
+            if not isinstance(svc, dict) or "image" not in svc:
+                continue
+            if svc_name in changed or svc_name in before or svc_name in after:
+                continue  # already handled
+            local_digest = image_digest(svc["image"])
+            if local_digest:
+                changed[svc_name] = local_digest
+    return changed
+
+
+def _maybe_rollback(
+    paths: "BoxPaths", target: UpdateTarget,
+    result: dict[str, Any], before: dict[str, str],
+) -> None:
+    """If strategy is rollback_to_previous, retag previous digests and recreate."""
+    if target.strategy != "rollback_to_previous":
+        return
+
+    result["rollback_attempted"] = True
+    log_warning("container-update", f"Rolling back {target.name} to previous digests", paths, project=target.name)
+
+    import yaml
+    for cf in target.compose_files:
+        path = target.project_dir / cf
+        if not path.exists():
+            continue
+        data = yaml.safe_load(path.read_text()) or {}
+        for svc_name, svc in (data.get("services") or {}).items():
+            if not isinstance(svc, dict) or "image" not in svc:
+                continue
+            prev_digest = before.get(svc_name)
+            if not prev_digest:
+                continue
+            # Retag: image_ref:tag -> previous digest
+            try:
+                tag_image(prev_digest, svc["image"])
+            except DockerError as e:
+                log_error("container-update", f"Retag failed for {svc_name}: {e}", paths, project=target.name)
+                result["rollback_succeeded"] = False
+                return
+
+    # Recreate from the now-retagged local images
+    try:
+        compose_up(target.project_dir, compose_files=target.compose_files, build=False)
+    except DockerError as e:
+        log_error("container-update", f"Rollback recreate failed: {e}", paths, project=target.name)
+        result["rollback_succeeded"] = False
+        return
+
+    healthy, _ = _wait_healthy(target)
+    result["rollback_succeeded"] = healthy
+    if not healthy:
+        log_error("container-update", f"Rollback unhealthy for {target.name}", paths, project=target.name)
+    else:
+        log_operation("container-update", f"Rollback succeeded for {target.name}", paths, project=target.name)
+
+
+def _persist_result(
+    paths: "BoxPaths", target: UpdateTarget,
+    result: dict[str, Any], before: dict[str, str] | None,
+) -> None:
+    """Update the per-target state file with this run's outcome."""
+    existing = read_target_state(paths, target.name) or {}
+    state = {
+        "last_check": result["ts"],
+        "last_change": result["ts"] if result["status"] == "succeeded" else existing.get("last_change"),
+        "last_status": result["status"],
+        "current_digests": result.get("current_digests") or before or {},
+        "previous_digests": before or existing.get("previous_digests", {}),
+    }
+    write_target_state(paths, target.name, state)
+
+
+def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
+    """Update a single target. Returns a result dict suitable for logging."""
+    result: dict[str, Any] = {
+        "name": target.name,
+        "ts": _now(),
+        "status": "succeeded",
+        "rollback_attempted": False,
+        "rollback_succeeded": None,
+        "previous_digests": {},
+        "current_digests": {},
+        "reason": None,
+    }
+
+    # Step 1: Pre-update backup (if applicable)
+    if target.has_backup:
+        rc = run_backup(target.name, paths)
+        if rc != 0:
+            result["status"] = "failed"
+            result["reason"] = "backup_failed"
+            log_error("container-update", f"Backup failed for {target.name}, aborting update", paths, project=target.name)
+            _persist_result(paths, target, result, before=None)
+            return result
+
+    # Step 2: Capture current digests
+    before = _capture_service_digests(target)
+    result["previous_digests"] = before
+
+    # Step 3: Pull
+    try:
+        compose_pull(target.project_dir, compose_files=target.compose_files)
+    except DockerError as e:
+        result["status"] = "failed"
+        result["reason"] = f"pull_failed: {e}"
+        log_error("container-update", f"Pull failed for {target.name}: {e}", paths, project=target.name)
+        _persist_result(paths, target, result, before=before)
+        return result
+
+    # Step 4: Detect what changed
+    after_pull = _capture_service_digests(target)
+    changed = _detect_image_changes(target, before, after_pull)
+    if not changed:
+        result["status"] = "no_change"
+        result["current_digests"] = before
+        log_operation("container-update", f"No updates available for {target.name}", paths, project=target.name)
+        _persist_result(paths, target, result, before=before)
+        return result
+
+    # Step 5: Recreate
+    try:
+        compose_up(target.project_dir, compose_files=target.compose_files, build=False)
+    except DockerError as e:
+        result["status"] = "failed"
+        result["reason"] = f"recreate_failed: {e}"
+        log_error("container-update", f"Recreate failed for {target.name}: {e}", paths, project=target.name)
+        _maybe_rollback(paths, target, result, before)
+        _persist_result(paths, target, result, before=before)
+        return result
+
+    # Step 6: Healthcheck wait
+    healthy, unhealthy = _wait_healthy(target)
+    # Use post-pull digests as the current state; containers are now running
+    # the newly-pulled images.
+    result["current_digests"] = after_pull
+
+    if not healthy:
+        result["status"] = "failed"
+        result["reason"] = f"unhealthy: {','.join(unhealthy)}"
+        log_error(
+            "container-update",
+            f"Healthcheck failed for {target.name} services: {unhealthy}",
+            paths, project=target.name,
+        )
+        _maybe_rollback(paths, target, result, before)
+    else:
+        log_operation(
+            "container-update", f"Updated {target.name}", paths, project=target.name,
+            detail={"previous": before, "current": after_pull},
+        )
+
+    _persist_result(paths, target, result, before=before)
+    return result

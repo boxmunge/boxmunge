@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 import pytest
 import yaml
 from boxmunge.paths import BoxPaths
@@ -128,3 +129,153 @@ class TestTargetState:
         assert not paths.container_update_state.exists()
         write_target_state(paths, "caddy", {"last_status": "succeeded"})
         assert paths.container_update_state.exists()
+
+
+class TestUpdateTarget:
+    @patch("boxmunge.container_update.compose_pull")
+    @patch("boxmunge.container_update.compose_up")
+    @patch("boxmunge.container_update._capture_service_digests")
+    @patch("boxmunge.container_update._wait_healthy")
+    def test_no_change_when_digests_unchanged(
+        self, mock_wait, mock_capture, mock_up, mock_pull, paths
+    ):
+        from boxmunge.container_update import update_target, UpdateTarget
+        target = UpdateTarget(
+            name="caddy", project_dir=paths.caddy,
+            compose_files=["compose.yml"], strategy="leave_broken",
+            has_backup=False, is_caddy=True,
+        )
+        mock_capture.return_value = {"caddy": "sha256:same"}
+        # After pull, digest still the same
+        mock_capture.side_effect = [
+            {"caddy": "sha256:same"},  # before pull
+            {"caddy": "sha256:same"},  # after pull
+        ]
+        result = update_target(paths, target)
+        assert result["status"] == "no_change"
+        mock_up.assert_not_called()
+
+    @patch("boxmunge.container_update.compose_pull")
+    @patch("boxmunge.container_update.compose_up")
+    @patch("boxmunge.container_update._capture_service_digests")
+    @patch("boxmunge.container_update._wait_healthy")
+    def test_succeeds_on_digest_change_and_healthy(
+        self, mock_wait, mock_capture, mock_up, mock_pull, paths
+    ):
+        from boxmunge.container_update import update_target, UpdateTarget
+        target = UpdateTarget(
+            name="caddy", project_dir=paths.caddy,
+            compose_files=["compose.yml"], strategy="leave_broken",
+            has_backup=False, is_caddy=True,
+        )
+        mock_capture.side_effect = [
+            {"caddy": "sha256:old"},
+            {"caddy": "sha256:new"},
+        ]
+        mock_wait.return_value = (True, [])  # all healthy
+        result = update_target(paths, target)
+        assert result["status"] == "succeeded"
+        mock_up.assert_called_once()
+
+    @patch("boxmunge.container_update.compose_pull", side_effect=__import__("boxmunge.docker", fromlist=["DockerError"]).DockerError("network"))
+    @patch("boxmunge.container_update._capture_service_digests")
+    def test_failed_when_pull_fails(self, mock_capture, mock_pull, paths):
+        from boxmunge.container_update import update_target, UpdateTarget
+        target = UpdateTarget(
+            name="caddy", project_dir=paths.caddy,
+            compose_files=["compose.yml"], strategy="leave_broken",
+            has_backup=False, is_caddy=True,
+        )
+        mock_capture.return_value = {"caddy": "sha256:old"}
+        result = update_target(paths, target)
+        assert result["status"] == "failed"
+        assert "pull" in result.get("reason", "").lower()
+
+    @patch("boxmunge.container_update.compose_pull")
+    @patch("boxmunge.container_update.compose_up")
+    @patch("boxmunge.container_update._capture_service_digests")
+    @patch("boxmunge.container_update._wait_healthy")
+    def test_leave_broken_strategy_does_not_rollback(
+        self, mock_wait, mock_capture, mock_up, mock_pull, paths
+    ):
+        from boxmunge.container_update import update_target, UpdateTarget
+        target = UpdateTarget(
+            name="caddy", project_dir=paths.caddy,
+            compose_files=["compose.yml"], strategy="leave_broken",
+            has_backup=False, is_caddy=True,
+        )
+        mock_capture.side_effect = [
+            {"caddy": "sha256:old"},
+            {"caddy": "sha256:new"},
+        ]
+        mock_wait.return_value = (False, ["caddy"])  # unhealthy
+        result = update_target(paths, target)
+        assert result["status"] == "failed"
+        assert result["rollback_attempted"] is False
+        # compose up called once, NOT a second time for rollback
+        assert mock_up.call_count == 1
+
+    @patch("boxmunge.container_update.tag_image")
+    @patch("boxmunge.container_update.compose_pull")
+    @patch("boxmunge.container_update.compose_up")
+    @patch("boxmunge.container_update._capture_service_digests")
+    @patch("boxmunge.container_update._wait_healthy")
+    def test_rollback_strategy_retags_and_recreates(
+        self, mock_wait, mock_capture, mock_up, mock_pull, mock_tag, paths
+    ):
+        from boxmunge.container_update import update_target, UpdateTarget
+        target = UpdateTarget(
+            name="caddy", project_dir=paths.caddy,
+            compose_files=["compose.yml"], strategy="rollback_to_previous",
+            has_backup=False, is_caddy=True,
+        )
+        mock_capture.side_effect = [
+            {"caddy": "sha256:old"},
+            {"caddy": "sha256:new"},
+        ]
+        # First wait: unhealthy. Second wait (after rollback): healthy.
+        mock_wait.side_effect = [(False, ["caddy"]), (True, [])]
+        result = update_target(paths, target)
+        assert result["status"] == "failed"
+        assert result["rollback_attempted"] is True
+        assert result["rollback_succeeded"] is True
+        # tag_image was called to retag the previous digest
+        mock_tag.assert_called()
+        # compose up called twice (initial + rollback recreate)
+        assert mock_up.call_count == 2
+
+    @patch("boxmunge.container_update.run_backup")
+    @patch("boxmunge.container_update.compose_pull")
+    @patch("boxmunge.container_update._capture_service_digests")
+    def test_backup_runs_first_when_target_has_backup(
+        self, mock_capture, mock_pull, mock_backup, paths
+    ):
+        from boxmunge.container_update import update_target, UpdateTarget
+        _write_project(paths, "stateful", with_backup=True)
+        target = UpdateTarget(
+            name="stateful", project_dir=paths.project_dir("stateful"),
+            compose_files=["compose.yml"], strategy="leave_broken",
+            has_backup=True, is_caddy=False,
+        )
+        mock_capture.side_effect = [
+            {"web": "sha256:old"},
+            {"web": "sha256:old"},  # no change → no recreate
+        ]
+        mock_backup.return_value = 0
+        update_target(paths, target)
+        mock_backup.assert_called_once_with("stateful", paths)
+
+    @patch("boxmunge.container_update.run_backup", return_value=1)
+    @patch("boxmunge.container_update.compose_pull")
+    def test_aborts_when_backup_fails(self, mock_pull, mock_backup, paths):
+        from boxmunge.container_update import update_target, UpdateTarget
+        _write_project(paths, "stateful", with_backup=True)
+        target = UpdateTarget(
+            name="stateful", project_dir=paths.project_dir("stateful"),
+            compose_files=["compose.yml"], strategy="leave_broken",
+            has_backup=True, is_caddy=False,
+        )
+        result = update_target(paths, target)
+        assert result["status"] == "failed"
+        assert "backup" in result.get("reason", "").lower()
+        mock_pull.assert_not_called()
