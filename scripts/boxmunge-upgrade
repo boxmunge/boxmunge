@@ -347,11 +347,15 @@ except (urllib.error.URLError, json.JSONDecodeError):
         print(f'DISCOVERY_ERROR: cannot reach boxmunge.dev or GitHub: {e}', file=sys.stderr)
         sys.exit(2)
 
-latest = (result or {}).get('latest') or {}
+latest = (result or {}).get('latest')
+if latest is None:
+    # Endpoint explicitly says we're up-to-date (latest: null + status: up_to_date)
+    print(f'UP_TO_DATE: current={current_semver}', file=sys.stderr)
+    sys.exit(3)
 version = latest.get('version', '')
 url = latest.get('url', '')
 if not version or not url:
-    print('NO_RELEASE: discovery returned no usable version', file=sys.stderr)
+    print('NO_RELEASE: discovery returned malformed response', file=sys.stderr)
     sys.exit(2)
 if not newer(version, current_semver):
     print(f'UP_TO_DATE: current={current_semver} latest={version}', file=sys.stderr)
