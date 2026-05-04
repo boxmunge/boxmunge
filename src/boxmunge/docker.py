@@ -196,3 +196,67 @@ def caddy_validate(caddy_compose_dir: Path) -> bool:
         return True
     except DockerError:
         return False
+
+
+def compose_pull(
+    project_dir: Path,
+    compose_files: list[str] | None = None,
+    project_name: str | None = None,
+) -> None:
+    """Run docker compose pull in the project directory.
+
+    Pulls latest images for all services with image: directives.
+    Build: services are unaffected.
+    """
+    cmd = ["docker", "compose"]
+    if project_name:
+        cmd.extend(["-p", project_name])
+    for f in (compose_files or ["compose.yml"]):
+        cmd.extend(["-f", f])
+    cmd.append("pull")
+    _run(cmd, cwd=project_dir, timeout=_COMPOSE_UP_TIMEOUT)
+
+
+def image_digest(image_ref: str) -> str | None:
+    """Return the local image digest for an image reference, or None.
+
+    Uses docker inspect on the image (not the container). Returns the
+    first RepoDigest if present.
+    """
+    try:
+        result = _run(
+            ["docker", "inspect", "--format", "{{index .RepoDigests 0}}", image_ref],
+            capture=True,
+        )
+    except DockerError:
+        return None
+    raw = result.stdout.strip()
+    if not raw or raw == "<no value>":
+        return None
+    if "@" in raw:
+        return raw.split("@", 1)[1]
+    return raw if raw.startswith("sha256:") else None
+
+
+def container_image_digest(container_name: str) -> str | None:
+    """Return the image digest the named container is currently running.
+
+    Returns None if the container doesn't exist or has no resolvable digest.
+    """
+    try:
+        result = _run(
+            ["docker", "inspect", "--format", "{{.Image}}", container_name],
+            capture=True,
+            check=False,
+        )
+    except DockerError:
+        return None
+    image_id = result.stdout.strip()
+    if not image_id or image_id == "<no value>":
+        return None
+    return image_digest(image_id)
+
+
+def tag_image(source: str, target: str) -> None:
+    """Run docker tag <source> <target>. Source can be a digest or tag."""
+    _run(["docker", "tag", source, target])
