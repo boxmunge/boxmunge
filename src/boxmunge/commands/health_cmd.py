@@ -256,6 +256,9 @@ def run_health(paths: BoxPaths, *, as_json: bool = False) -> int:
     report.checks.append(check_config_drift(paths))
     report.checks.append(check_recent_errors(paths))
 
+    from boxmunge.health_checks.container_updates import check_container_updates
+    report.checks.append(check_container_updates(paths))
+
     # Host hardening checks
     from boxmunge.health_checks.hardening import (
         check_aide_status,
