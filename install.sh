@@ -127,6 +127,14 @@ if [[ -d "${BOXMUNGE_ROOT}/upgrade-state" ]]; then
     [[ -f "${BOXMUNGE_ROOT}/upgrade-state/active-slot" ]] && chmod 660 "${BOXMUNGE_ROOT}/upgrade-state/active-slot"
     [[ -f "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json" ]] && chmod 660 "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json"
 fi
+
+# Ensure caddy/sites perms: 775 root:deploy so deploy can write generated
+# configs (group) AND the caddy container can traverse the dir (other +x).
+# Idempotent — fixes existing installs where sites was 770 or 755.
+if [[ -d "${BOXMUNGE_ROOT}/caddy/sites" ]]; then
+    chown root:deploy "${BOXMUNGE_ROOT}/caddy/sites"
+    chmod 775 "${BOXMUNGE_ROOT}/caddy/sites"
+fi
 "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --upgrade pip
 "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet "${SCRIPT_DIR}[tui]"
 

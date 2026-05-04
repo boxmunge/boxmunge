@@ -370,8 +370,12 @@ install -d -m 750 -o root -g "${DEPLOY_USER}" \
     "${BOXMUNGE_ROOT}/config" \
     "${BOXMUNGE_ROOT}/caddy"
 
-# caddy/sites needs group write so deploy can write generated site configs
-install -d -m 770 -o root -g "${DEPLOY_USER}" \
+# caddy/sites needs:
+#   - group write so deploy can write generated site configs
+#   - other execute so the caddy container (which may run as a non-root
+#     user with no group membership) can traverse the dir to read the
+#     individual *.conf files (which are themselves 0o644)
+install -d -m 775 -o root -g "${DEPLOY_USER}" \
     "${BOXMUNGE_ROOT}/caddy/sites"
 
 install -d -m 755 -o root -g root \
