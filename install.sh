@@ -135,6 +135,14 @@ if [[ -d "${BOXMUNGE_ROOT}/caddy/sites" ]]; then
     chown root:deploy "${BOXMUNGE_ROOT}/caddy/sites"
     chmod 775 "${BOXMUNGE_ROOT}/caddy/sites"
 fi
+
+# Ensure stashes dir exists and is writable by deploy (group). Stash files
+# are created by deploy during upgrade flows; the dir itself is root-owned
+# so deploy cannot rename/delete the dir, only files inside.
+# Idempotent — fixes existing v0.3.x installs where stashes was root:root 700.
+mkdir -p "${BOXMUNGE_ROOT}/stashes"
+chown root:deploy "${BOXMUNGE_ROOT}/stashes"
+chmod 770 "${BOXMUNGE_ROOT}/stashes"
 "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --upgrade pip
 "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet "${SCRIPT_DIR}[tui]"
 
@@ -231,6 +239,25 @@ systemctl enable --now \
     boxmunge-backup-sync.timer \
     boxmunge-auto-update.timer \
     boxmunge-container-update.timer
+
+# ---------------------------------------------------------------------------
+# Sudoers: allow deploy to invoke the upgrade shim (single binary scope).
+# This lets `boxmunge upgrade` from the deploy shell route to the root-context
+# shim that handles stash + venv swap + probation properly. Same root of trust
+# as supervisor (deploy and supervisor share SSH keys).
+# ---------------------------------------------------------------------------
+SUDOERS_FILE="/etc/sudoers.d/boxmunge-deploy"
+SUDOERS_RULE="deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade"
+if [[ ! -f "${SUDOERS_FILE}" ]] || ! grep -qF "${SUDOERS_RULE}" "${SUDOERS_FILE}"; then
+    echo "${SUDOERS_RULE}" > "${SUDOERS_FILE}"
+    chmod 440 "${SUDOERS_FILE}"
+    chown root:root "${SUDOERS_FILE}"
+    visudo -cqf "${SUDOERS_FILE}" || {
+        rm -f "${SUDOERS_FILE}"
+        echo "ERROR: sudoers rule failed validation; not installed" >&2
+        exit 1
+    }
+fi
 
 # ---------------------------------------------------------------------------
 # Record installed version (read by boxmunge auto-update to decide if a

@@ -13,6 +13,9 @@ services:
     smoke: boxmunge-scripts/smoke.sh
 backup:
   type: volume
-  dump_command: "cp /data/checks.db /backup/checks.db"
-  restore_command: "cp /backup/checks.db /data/checks.db"
+  # boxmunge captures the dump command's stdout into the encrypted snapshot,
+  # then on restore pipes it back into stdin. The container only has
+  # check-data:/data mounted; there is no /backup mount.
+  dump_command: "cat /data/checks.db"
+  restore_command: "cat > /data/checks.db"
   retention: 7

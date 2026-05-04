@@ -45,6 +45,27 @@ class TestCreateStash:
         assert archive.name.startswith("boxmunge-stash-")
         assert archive.name.endswith(".tar.gz")
 
+    def test_does_not_chmod_existing_dir(self, tmp_path: Path) -> None:
+        """Regression: stash.create_stash must not chmod the dir.
+
+        On real installs the stashes dir is owned by root with the deploy user
+        in the group. A chmod from deploy context fails with EPERM and aborts
+        the upgrade. We rely on install.sh to set perms once."""
+        import os
+        paths = BoxPaths(root=tmp_path / "bm")
+        for d in ["config", "projects", "state/deploy", "logs"]:
+            (paths.root / d).mkdir(parents=True)
+        paths.stashes.mkdir(parents=True)
+        os.chmod(paths.stashes, 0o770)
+        (paths.config_file).write_text("hostname: test\nadmin_email: t@t\n")
+        write_installed_version(paths, "0.2.0", "abc1234")
+        _setup_project(paths, "myapp")
+
+        before = paths.stashes.stat().st_mode & 0o777
+        create_stash(paths)
+        after = paths.stashes.stat().st_mode & 0o777
+        assert before == after == 0o770
+
     def test_archive_contains_project_files(self, tmp_path: Path) -> None:
         paths = BoxPaths(root=tmp_path / "bm")
         for d in ["config", "projects", "state/deploy", "stashes", "logs"]:

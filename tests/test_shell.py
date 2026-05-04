@@ -83,6 +83,23 @@ class TestDispatchCommand:
         mock_run.assert_called_once_with(["boxmunge-server", "status"])
 
     @patch("boxmunge.shell.subprocess.run")
+    def test_upgrade_no_args_routes_to_shim(self, mock_run: MagicMock) -> None:
+        """Bare `upgrade` from deploy goes through the root-context shim
+        (which handles stash + venv swap that need root perms)."""
+        mock_run.return_value = MagicMock(returncode=0)
+        run_command("upgrade", [])
+        mock_run.assert_called_once_with(
+            ["sudo", "-n", "/opt/boxmunge/bin/boxmunge-upgrade", "auto"]
+        )
+
+    @patch("boxmunge.shell.subprocess.run")
+    def test_upgrade_with_flags_uses_boxmunge_server(self, mock_run: MagicMock) -> None:
+        """Flags like --dry-run are pre-flight checks that don't need root."""
+        mock_run.return_value = MagicMock(returncode=0)
+        run_command("upgrade", ["--dry-run"])
+        mock_run.assert_called_once_with(["boxmunge-server", "upgrade", "--dry-run"])
+
+    @patch("boxmunge.shell.subprocess.run")
     def test_dispatches_with_args(self, mock_run: MagicMock) -> None:
         mock_run.return_value = MagicMock(returncode=0)
         run_command("prod-deploy", ["myapp", "--dry-run"])

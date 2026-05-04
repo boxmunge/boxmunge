@@ -40,9 +40,14 @@ class TestAllCommandsDispatch:
                                         command: str) -> None:
         mock_run.return_value = MagicMock(returncode=0)
         result = run_command(command, [])
-        mock_run.assert_called_once_with(
-            ["boxmunge-server", command]
-        )
+        # `upgrade` is special-cased: routed through the root-context shim
+        # via sudo so it can stash root-owned config and swap the venv.
+        if command == "upgrade":
+            mock_run.assert_called_once_with(
+                ["sudo", "-n", "/opt/boxmunge/bin/boxmunge-upgrade", "auto"]
+            )
+        else:
+            mock_run.assert_called_once_with(["boxmunge-server", command])
         assert result == 0
 
     @pytest.mark.parametrize("command", [

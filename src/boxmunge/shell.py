@@ -208,6 +208,15 @@ def run_command(command: str, args: list[str]) -> int:
         )
         return 1
 
+    # `upgrade` needs root context (stash reads root-owned config + secrets,
+    # then swaps the env-active symlink). Route it through the bash shim,
+    # which is invokable by deploy via a scoped sudoers rule.
+    if command == "upgrade" and not args:
+        result = subprocess.run(
+            ["sudo", "-n", "/opt/boxmunge/bin/boxmunge-upgrade", "auto"]
+        )
+        return result.returncode
+
     result = subprocess.run(["boxmunge-server", command] + args)
     return result.returncode
 

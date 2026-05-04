@@ -75,3 +75,35 @@ class TestApplyMode:
         assert result == 0
         stashes = list(paths.stashes.glob("*.tar.gz"))
         assert len(stashes) == 0
+
+
+class TestArgParsing:
+    """cmd_upgrade arg parsing — previously silently ignored unknown args."""
+
+    def test_help_flag_prints_usage_and_exits_zero(self, capsys):
+        from boxmunge.commands.upgrade_cmd import cmd_upgrade
+        with pytest.raises(SystemExit) as exc:
+            cmd_upgrade(["--help"])
+        assert exc.value.code == 0
+        assert "Usage:" in capsys.readouterr().out
+
+    def test_short_help_flag_prints_usage(self, capsys):
+        from boxmunge.commands.upgrade_cmd import cmd_upgrade
+        with pytest.raises(SystemExit) as exc:
+            cmd_upgrade(["-h"])
+        assert exc.value.code == 0
+
+    def test_unknown_arg_exits_2_with_usage(self, capsys):
+        from boxmunge.commands.upgrade_cmd import cmd_upgrade
+        with pytest.raises(SystemExit) as exc:
+            cmd_upgrade(["--target", "0.3.5"])
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "unknown argument" in err
+        assert "Usage:" in err
+
+    def test_dry_run_and_apply_mutually_exclusive(self, capsys):
+        from boxmunge.commands.upgrade_cmd import cmd_upgrade
+        with pytest.raises(SystemExit) as exc:
+            cmd_upgrade(["--dry-run", "--apply"])
+        assert exc.value.code == 2

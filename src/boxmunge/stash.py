@@ -20,7 +20,9 @@ def create_stash(paths: BoxPaths) -> Path:
     Returns the path to the created archive.
     """
     paths.stashes.mkdir(parents=True, exist_ok=True)
-    os.chmod(paths.stashes, 0o700)
+    # Directory ownership/perms are set by install.sh as root:deploy 770.
+    # Do not chmod here — that fails when called from deploy context, and
+    # would also lock out the deploy group.
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S")
     archive_path = paths.stashes / f"boxmunge-stash-{ts}.tar.gz"
 

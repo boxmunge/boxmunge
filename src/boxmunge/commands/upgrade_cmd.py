@@ -347,10 +347,42 @@ def run_upgrade(
     return _run_full(paths, current_version, new_version, skip_self_test)
 
 
+UPGRADE_USAGE = """\
+Usage: boxmunge upgrade [--dry-run | --apply] [--skip-self-test]
+
+Manual upgrade entry point. From the deploy shell, `upgrade` (no args) is
+routed through the root-context bash shim which handles stash + venv swap +
+probation. The flags below are for the shim and direct invocations only.
+
+Flags:
+  --dry-run         Validate manifest migrations and config regeneration
+                    without modifying state. Used for pre-flight checks.
+  --apply           Migrate/regen/reload/restart only. The shim calls this
+                    after creating its own stash; do not use directly.
+  --skip-self-test  Skip the post-upgrade self-test step.
+  -h, --help        Show this message.
+"""
+
+
 def cmd_upgrade(args: list[str]) -> None:
     """CLI entry point for upgrade command."""
+    if "-h" in args or "--help" in args:
+        print(UPGRADE_USAGE)
+        sys.exit(0)
+
+    known = {"--skip-self-test", "--dry-run", "--apply"}
+    unknown = [a for a in args if a not in known]
+    if unknown:
+        print(f"ERROR: unknown argument(s): {' '.join(unknown)}", file=sys.stderr)
+        print(UPGRADE_USAGE, file=sys.stderr)
+        sys.exit(2)
+
     skip_self_test = "--skip-self-test" in args
     dry_run = "--dry-run" in args
     apply_only = "--apply" in args
+    if dry_run and apply_only:
+        print("ERROR: --dry-run and --apply are mutually exclusive", file=sys.stderr)
+        sys.exit(2)
+
     paths = BoxPaths()
     sys.exit(run_upgrade(paths, skip_self_test, dry_run=dry_run, apply_only=apply_only))
