@@ -227,24 +227,17 @@ def _now() -> str:
 def _detect_image_changes(
     target: UpdateTarget,
     before: dict[str, str],
-    after: dict[str, str],
 ) -> dict[str, str]:
-    """Return {service_name: new_digest} for services whose digest changed after pull.
+    """Return {service_name: new_digest} for services whose locally-pulled
+    image digest differs from the running container's digest.
 
-    Compares the post-pull captured digests against the pre-pull digests.
-    Falls back to inspecting the local image via image_digest() for any service
-    not present in after (e.g. container not running before pull).
+    Compares the post-pull local image digest (image_digest of the compose
+    file's `image:` ref) against the pre-pull running container digest.
+    A pull does NOT restart containers, so we cannot detect changes by
+    re-snapshotting running containers — we must inspect the local image.
     """
     import yaml
     changed: dict[str, str] = {}
-    # First: compare the two capture snapshots
-    all_services: set[str] = set(before) | set(after)
-    for svc_name in all_services:
-        prev = before.get(svc_name)
-        curr = after.get(svc_name)
-        if curr and curr != prev:
-            changed[svc_name] = curr
-    # Second: for services with no running container, check the local image
     for cf in target.compose_files:
         path = target.project_dir / cf
         if not path.exists():
@@ -256,10 +249,9 @@ def _detect_image_changes(
         for svc_name, svc in (data.get("services") or {}).items():
             if not isinstance(svc, dict) or "image" not in svc:
                 continue
-            if svc_name in changed or svc_name in before or svc_name in after:
-                continue  # already handled
             local_digest = image_digest(svc["image"])
-            if local_digest:
+            previous = before.get(svc_name)
+            if local_digest and local_digest != previous:
                 changed[svc_name] = local_digest
     return changed
 
@@ -364,9 +356,8 @@ def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
         _persist_result(paths, target, result, before=before)
         return result
 
-    # Step 4: Detect what changed
-    after_pull = _capture_service_digests(target)
-    changed = _detect_image_changes(target, before, after_pull)
+    # Step 4: Detect what changed (compares local image digest vs running digest)
+    changed = _detect_image_changes(target, before)
     if not changed:
         result["status"] = "no_change"
         result["current_digests"] = before
@@ -387,9 +378,9 @@ def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
 
     # Step 6: Healthcheck wait
     healthy, unhealthy = _wait_healthy(target)
-    # Use post-pull digests as the current state; containers are now running
-    # the newly-pulled images.
-    result["current_digests"] = after_pull
+    # Capture digests after recreate — containers are now running the new images.
+    new_digests = _capture_service_digests(target)
+    result["current_digests"] = new_digests
 
     if not healthy:
         result["status"] = "failed"
@@ -403,7 +394,7 @@ def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
     else:
         log_operation(
             "container-update", f"Updated {target.name}", paths, project=target.name,
-            detail={"previous": before, "current": after_pull},
+            detail={"previous": before, "current": new_digests},
         )
 
     _persist_result(paths, target, result, before=before)

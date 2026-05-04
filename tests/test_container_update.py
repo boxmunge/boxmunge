@@ -132,12 +132,13 @@ class TestTargetState:
 
 
 class TestUpdateTarget:
+    @patch("boxmunge.container_update.image_digest", return_value="sha256:same")
     @patch("boxmunge.container_update.compose_pull")
     @patch("boxmunge.container_update.compose_up")
     @patch("boxmunge.container_update._capture_service_digests")
     @patch("boxmunge.container_update._wait_healthy")
     def test_no_change_when_digests_unchanged(
-        self, mock_wait, mock_capture, mock_up, mock_pull, paths
+        self, mock_wait, mock_capture, mock_up, mock_pull, mock_image_digest, paths
     ):
         from boxmunge.container_update import update_target, UpdateTarget
         target = UpdateTarget(
@@ -145,22 +146,19 @@ class TestUpdateTarget:
             compose_files=["compose.yml"], strategy="leave_broken",
             has_backup=False, is_caddy=True,
         )
+        # Only one capture happens (before pull); local image digest matches → no change
         mock_capture.return_value = {"caddy": "sha256:same"}
-        # After pull, digest still the same
-        mock_capture.side_effect = [
-            {"caddy": "sha256:same"},  # before pull
-            {"caddy": "sha256:same"},  # after pull
-        ]
         result = update_target(paths, target)
         assert result["status"] == "no_change"
         mock_up.assert_not_called()
 
+    @patch("boxmunge.container_update.image_digest", return_value="sha256:new")
     @patch("boxmunge.container_update.compose_pull")
     @patch("boxmunge.container_update.compose_up")
     @patch("boxmunge.container_update._capture_service_digests")
     @patch("boxmunge.container_update._wait_healthy")
     def test_succeeds_on_digest_change_and_healthy(
-        self, mock_wait, mock_capture, mock_up, mock_pull, paths
+        self, mock_wait, mock_capture, mock_up, mock_pull, mock_image_digest, paths
     ):
         from boxmunge.container_update import update_target, UpdateTarget
         target = UpdateTarget(
@@ -169,8 +167,8 @@ class TestUpdateTarget:
             has_backup=False, is_caddy=True,
         )
         mock_capture.side_effect = [
-            {"caddy": "sha256:old"},
-            {"caddy": "sha256:new"},
+            {"caddy": "sha256:old"},   # before pull
+            {"caddy": "sha256:new"},   # after recreate
         ]
         mock_wait.return_value = (True, [])  # all healthy
         result = update_target(paths, target)
@@ -191,12 +189,13 @@ class TestUpdateTarget:
         assert result["status"] == "failed"
         assert "pull" in result.get("reason", "").lower()
 
+    @patch("boxmunge.container_update.image_digest", return_value="sha256:new")
     @patch("boxmunge.container_update.compose_pull")
     @patch("boxmunge.container_update.compose_up")
     @patch("boxmunge.container_update._capture_service_digests")
     @patch("boxmunge.container_update._wait_healthy")
     def test_leave_broken_strategy_does_not_rollback(
-        self, mock_wait, mock_capture, mock_up, mock_pull, paths
+        self, mock_wait, mock_capture, mock_up, mock_pull, mock_image_digest, paths
     ):
         from boxmunge.container_update import update_target, UpdateTarget
         target = UpdateTarget(
@@ -205,8 +204,8 @@ class TestUpdateTarget:
             has_backup=False, is_caddy=True,
         )
         mock_capture.side_effect = [
-            {"caddy": "sha256:old"},
-            {"caddy": "sha256:new"},
+            {"caddy": "sha256:old"},   # before pull
+            {"caddy": "sha256:new"},   # after recreate
         ]
         mock_wait.return_value = (False, ["caddy"])  # unhealthy
         result = update_target(paths, target)
@@ -215,13 +214,14 @@ class TestUpdateTarget:
         # compose up called once, NOT a second time for rollback
         assert mock_up.call_count == 1
 
+    @patch("boxmunge.container_update.image_digest", return_value="sha256:new")
     @patch("boxmunge.container_update.tag_image")
     @patch("boxmunge.container_update.compose_pull")
     @patch("boxmunge.container_update.compose_up")
     @patch("boxmunge.container_update._capture_service_digests")
     @patch("boxmunge.container_update._wait_healthy")
     def test_rollback_strategy_retags_and_recreates(
-        self, mock_wait, mock_capture, mock_up, mock_pull, mock_tag, paths
+        self, mock_wait, mock_capture, mock_up, mock_pull, mock_tag, mock_image_digest, paths
     ):
         from boxmunge.container_update import update_target, UpdateTarget
         target = UpdateTarget(
@@ -230,8 +230,8 @@ class TestUpdateTarget:
             has_backup=False, is_caddy=True,
         )
         mock_capture.side_effect = [
-            {"caddy": "sha256:old"},
-            {"caddy": "sha256:new"},
+            {"caddy": "sha256:old"},   # before pull
+            {"caddy": "sha256:new"},   # after recreate
         ]
         # First wait: unhealthy. Second wait (after rollback): healthy.
         mock_wait.side_effect = [(False, ["caddy"]), (True, [])]
@@ -244,11 +244,12 @@ class TestUpdateTarget:
         # compose up called twice (initial + rollback recreate)
         assert mock_up.call_count == 2
 
+    @patch("boxmunge.container_update.image_digest", return_value="sha256:old")
     @patch("boxmunge.container_update.run_backup")
     @patch("boxmunge.container_update.compose_pull")
     @patch("boxmunge.container_update._capture_service_digests")
     def test_backup_runs_first_when_target_has_backup(
-        self, mock_capture, mock_pull, mock_backup, paths
+        self, mock_capture, mock_pull, mock_backup, mock_image_digest, paths
     ):
         from boxmunge.container_update import update_target, UpdateTarget
         _write_project(paths, "stateful", with_backup=True)
@@ -257,10 +258,8 @@ class TestUpdateTarget:
             compose_files=["compose.yml"], strategy="leave_broken",
             has_backup=True, is_caddy=False,
         )
-        mock_capture.side_effect = [
-            {"web": "sha256:old"},
-            {"web": "sha256:old"},  # no change → no recreate
-        ]
+        # Only one capture (before pull); local image digest matches → no change
+        mock_capture.return_value = {"web": "sha256:old"}
         mock_backup.return_value = 0
         update_target(paths, target)
         mock_backup.assert_called_once_with("stateful", paths)
