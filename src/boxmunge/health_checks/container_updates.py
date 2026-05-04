@@ -35,22 +35,28 @@ def check_container_updates(paths: BoxPaths) -> HealthCheck:
     now = datetime.now(timezone.utc)
     threshold = now - timedelta(hours=_STALE_THRESHOLD_HOURS)
 
+    import logging
+    logger = logging.getLogger("boxmunge")
+
     for state_file in sorted(state_dir.glob("*.json")):
         try:
             data = json.loads(state_file.read_text())
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Skipping unreadable state file %s: %s", state_file, e)
             continue
         target = state_file.stem
         if data.get("last_status") == "failed":
             failed.append(target)
         last_check = data.get("last_check")
         if last_check:
+            # Normalize trailing Z to +00:00 (Python <3.11 doesn't accept Z)
+            normalized = last_check.replace("Z", "+00:00") if last_check.endswith("Z") else last_check
             try:
-                ts = datetime.fromisoformat(last_check)
+                ts = datetime.fromisoformat(normalized)
                 if ts < threshold:
                     stale.append(target)
-            except ValueError:
-                pass
+            except ValueError as e:
+                logger.warning("Unparseable last_check in %s: %s (%s)", state_file, last_check, e)
 
     if failed:
         return HealthCheck(

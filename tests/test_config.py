@@ -73,7 +73,6 @@ class TestContainerUpdatesDefaults:
         cfg = load_config(paths)
         assert cfg["container_updates"]["enabled"] is True
         assert cfg["container_updates"]["strategy"] == "leave_broken"
-        assert cfg["container_updates"]["schedule"] == "*-*-* 03:00:00"
 
     def test_container_updates_user_override(self, tmp_path):
         from boxmunge.paths import BoxPaths

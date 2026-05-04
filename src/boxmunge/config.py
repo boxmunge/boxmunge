@@ -23,7 +23,6 @@ DEFAULTS: dict[str, Any] = {
     "container_updates": {
         "enabled": True,
         "strategy": "leave_broken",
-        "schedule": "*-*-* 03:00:00",
     },
 }
 
