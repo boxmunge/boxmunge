@@ -20,6 +20,10 @@ DEFAULTS: dict[str, Any] = {
     "health": {"check_interval_minutes": 5, "alert_threshold": 3},
     "reboot": {"auto_reboot": True, "reboot_window": "04:00"},
     "logging": {"docker_max_size": "50m", "docker_max_file": 5},
+    "container_updates": {
+        "enabled": True,
+        "strategy": "leave_broken",
+    },
 }
 
 REQUIRED_FIELDS = ["hostname", "admin_email"]
