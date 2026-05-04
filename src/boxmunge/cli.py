@@ -33,6 +33,7 @@ from boxmunge.commands.health_cmd import cmd_health
 from boxmunge.commands.self_test_cmd import cmd_self_test
 from boxmunge.commands.upgrade_cmd import cmd_upgrade
 from boxmunge.commands.auto_update_cmd import cmd_auto_update
+from boxmunge.commands.container_update_cmd import cmd_container_update
 from boxmunge.commands.mcp_serve_cmd import cmd_mcp_serve
 from boxmunge.commands.project_cmd import cmd_project_add, cmd_project_remove, cmd_project_list
 from boxmunge.commands.handshake_cmd import cmd_handshake
@@ -74,6 +75,7 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "self-test": cmd_self_test,
     "upgrade": cmd_upgrade,
     "auto-update": cmd_auto_update,
+    "container-update": cmd_container_update,
     "mcp-serve": cmd_mcp_serve,
     "project-add": cmd_project_add,
     "project-remove": cmd_project_remove,
