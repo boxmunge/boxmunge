@@ -61,6 +61,11 @@ class BoxPaths:
         self.upgrade_lock = self.upgrade_state / "upgrade.lock"
         self.active_slot = self.upgrade_state / "active-slot"
         self.cosign_pub = self.config / "cosign.pub"
+        self.container_update_state = self.state / "container-updates"
+        self.container_update_lock = self.container_update_state / ".lock"
+
+    def container_update_target_state(self, name: str) -> Path:
+        return self.container_update_state / f"{name}.json"
 
     def project_secrets(self, name: str) -> Path:
         return self.projects / name / "secrets.env"

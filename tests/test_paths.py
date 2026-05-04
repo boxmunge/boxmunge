@@ -79,3 +79,17 @@ class TestUpgradeStatePaths:
     def test_cosign_pub_path(self, tmp_path):
         paths = BoxPaths(root=tmp_path / "bm")
         assert paths.cosign_pub == paths.config / "cosign.pub"
+
+
+class TestContainerUpdatePaths:
+    def test_container_update_state_dir(self, tmp_path):
+        paths = BoxPaths(root=tmp_path / "bm")
+        assert paths.container_update_state == paths.state / "container-updates"
+
+    def test_container_update_lock(self, tmp_path):
+        paths = BoxPaths(root=tmp_path / "bm")
+        assert paths.container_update_lock == paths.container_update_state / ".lock"
+
+    def test_container_update_target_state(self, tmp_path):
+        paths = BoxPaths(root=tmp_path / "bm")
+        assert paths.container_update_target_state("myapp") == paths.container_update_state / "myapp.json"
