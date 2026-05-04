@@ -45,11 +45,11 @@ jobs:
           cosign sign-blob --yes \
             --output-signature dist/boxmunge-install.sig \
             dist/boxmunge-install.sh
-          sha256sum dist/boxmunge-install.sh > dist/SHA256SUMS
+          sha256sum dist/boxmunge-install.sh dist/boxmunge-*.tar.gz > dist/SHA256SUMS
 
       - name: Generate checksums (unsigned)
         if: steps.cosign.outcome != 'success'
-        run: sha256sum dist/boxmunge-install.sh > dist/SHA256SUMS
+        run: sha256sum dist/boxmunge-install.sh dist/boxmunge-*.tar.gz > dist/SHA256SUMS
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -57,6 +57,7 @@ jobs:
           files: |
             dist/boxmunge-install.sh
             dist/boxmunge-install.sig
+            dist/boxmunge-*.tar.gz
             dist/SHA256SUMS
             dist/sbom.json
           fail_on_unmatched_files: false
