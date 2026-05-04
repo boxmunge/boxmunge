@@ -33,6 +33,28 @@ mkdir -p "$BOXMUNGE_ROOT/upgrade-state"
 assert_exit 0 "check-probation exits 0 with no probation file" bash "$SHIM" check-probation
 rm -rf "$BOXMUNGE_ROOT"
 
+# Orphan venv cleanup: no probation file + standby venv exists => venv removed
+# Skip this test when flock(1) is not available (macOS without util-linux).
+if command -v flock >/dev/null 2>&1; then
+    BOXMUNGE_ROOT="$(mktemp -d)"
+    export BOXMUNGE_ROOT
+    mkdir -p "$BOXMUNGE_ROOT/upgrade-state"
+    # Active slot is "a" (default), so standby is "b"
+    echo "a" > "$BOXMUNGE_ROOT/upgrade-state/active-slot"
+    mkdir -p "$BOXMUNGE_ROOT/env-b/bin"  # simulate orphan standby venv
+    assert_exit 0 "check-probation cleans up orphan standby venv" bash "$SHIM" check-probation
+    if [[ -d "$BOXMUNGE_ROOT/env-b" ]]; then
+        echo "FAIL: orphan env-b should have been removed"
+        FAIL=$((FAIL + 1))
+    else
+        echo "PASS: orphan env-b was cleaned up"
+        PASS=$((PASS + 1))
+    fi
+    rm -rf "$BOXMUNGE_ROOT"
+else
+    echo "SKIP: orphan venv cleanup test (flock not available on this platform)"
+fi
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]] || exit 1

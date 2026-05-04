@@ -239,6 +239,21 @@ write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT']
 }
 
 cmd_check_probation() {
+    mkdir -p "$STATE_DIR"
+    exec 9>"$LOCK_FILE"
+    flock -n 9 || exit 0  # an upgrade is in progress; retry on the next health-timer fire
+
+    # Orphan venv cleanup: if there's no probation file but the inactive slot
+    # has a venv, it's leftover from a deploy-context probation promotion
+    # (the deploy user cleared probation.json but couldn't rmtree root-owned dirs).
+    # Clean it up here in root context.
+    local inactive
+    inactive="$(standby_slot)"
+    if [[ ! -f "$PROBATION_FILE" ]] && [[ -d "$BOXMUNGE_ROOT/env-$inactive" ]]; then
+        log "Cleaning up orphan venv in inactive slot $inactive"
+        rm -rf "$BOXMUNGE_ROOT/env-$inactive"
+    fi
+
     [[ -f "$PROBATION_FILE" ]] || exit 0
 
     local version prev_slot expires_at
