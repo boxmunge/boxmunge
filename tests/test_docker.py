@@ -12,6 +12,7 @@ from boxmunge.docker import (
     image_digest,
     container_image_digest,
     tag_image,
+    container_running,
     DockerError,
 )
 
@@ -108,3 +109,25 @@ class TestTagImage:
         tag_image("sha256:abc123", "caddy:2-alpine")
         cmd = mock_run.call_args[0][0]
         assert cmd == ["docker", "tag", "sha256:abc123", "caddy:2-alpine"]
+
+
+class TestContainerRunning:
+    @patch("boxmunge.docker._run")
+    def test_returns_true_when_running(self, mock_run):
+        mock_result = MagicMock()
+        mock_result.stdout = "true\n"
+        mock_run.return_value = mock_result
+        assert container_running("mycontainer") is True
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ["docker", "inspect", "--format", "{{.State.Running}}", "mycontainer"]
+
+    @patch("boxmunge.docker._run")
+    def test_returns_false_when_not_running(self, mock_run):
+        mock_result = MagicMock()
+        mock_result.stdout = "false\n"
+        mock_run.return_value = mock_result
+        assert container_running("mycontainer") is False
+
+    @patch("boxmunge.docker._run", side_effect=DockerError("no such container"))
+    def test_returns_false_on_docker_error(self, mock_run):
+        assert container_running("nonexistent") is False

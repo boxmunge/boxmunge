@@ -278,3 +278,61 @@ class TestUpdateTarget:
         assert result["status"] == "failed"
         assert "backup" in result.get("reason", "").lower()
         mock_pull.assert_not_called()
+
+
+class TestContainerNameFallback:
+    def test_uses_hyphens_for_compose_v2(self, paths):
+        from boxmunge.container_update import _services_with_image, UpdateTarget
+        pdir = paths.project_dir("myapp")
+        pdir.mkdir(parents=True)
+        (pdir / "compose.yml").write_text(
+            "services:\n  web:\n    image: nginx:1.25\n"
+        )
+        target = UpdateTarget(
+            name="myapp", project_dir=pdir,
+            compose_files=["compose.yml"], strategy="leave_broken",
+            has_backup=False,
+        )
+        services = _services_with_image(target)
+        # Compose v2 convention uses hyphens, not underscores
+        assert services == {"web": "myapp-web-1"}
+
+
+class TestTargetStateErrors:
+    def test_read_target_state_raises_on_corrupt(self, paths):
+        import json
+        import pytest
+        from boxmunge.container_update import read_target_state
+        paths.container_update_state.mkdir(parents=True)
+        paths.container_update_target_state("caddy").write_text("not json {")
+        with pytest.raises(json.JSONDecodeError):
+            read_target_state(paths, "caddy")
+
+
+class TestPersistResult:
+    def test_persist_no_change_preserves_previous_digests(self, paths):
+        from boxmunge.container_update import _persist_result, UpdateTarget, write_target_state, read_target_state
+        paths.container_update_state.mkdir(parents=True)
+        # Existing state has a genuine previous_digests from an earlier update
+        write_target_state(paths, "caddy", {
+            "last_check": "2026-05-01T00:00:00+00:00",
+            "last_change": "2026-04-30T00:00:00+00:00",
+            "last_status": "succeeded",
+            "current_digests": {"caddy": "sha256:current"},
+            "previous_digests": {"caddy": "sha256:original"},
+        })
+        target = UpdateTarget(
+            name="caddy", project_dir=paths.caddy,
+            compose_files=["compose.yml"], strategy="leave_broken",
+            has_backup=False, is_caddy=True,
+        )
+        result = {
+            "name": "caddy", "ts": "2026-05-04T03:00:00+00:00",
+            "status": "no_change",
+            "rollback_attempted": False, "rollback_succeeded": None,
+            "current_digests": {"caddy": "sha256:current"},
+        }
+        _persist_result(paths, target, result, before={"caddy": "sha256:current"})
+        state = read_target_state(paths, "caddy")
+        # previous_digests must NOT be overwritten with the no-change "before"
+        assert state["previous_digests"] == {"caddy": "sha256:original"}

@@ -19,6 +19,7 @@ from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.docker import (
     DockerError, compose_pull, compose_up,
     container_image_digest, image_digest, tag_image, container_health,
+    container_running,
 )
 from boxmunge.commands.backup_cmd import run_backup
 from boxmunge.log import log_operation, log_warning, log_error
@@ -116,14 +117,16 @@ def build_targets(paths: "BoxPaths", config: dict[str, Any]) -> list[UpdateTarge
 
 
 def read_target_state(paths: "BoxPaths", name: str) -> dict[str, Any] | None:
-    """Read the state file for a target, or None if missing."""
+    """Read state file. None if missing. Raises on corrupt JSON."""
+    import logging
     state_path = paths.container_update_target_state(name)
     if not state_path.exists():
         return None
     try:
         return json.loads(state_path.read_text())
-    except json.JSONDecodeError:
-        return None
+    except json.JSONDecodeError as e:
+        logging.getLogger("boxmunge").error("Corrupt JSON in %s: %s", state_path, e)
+        raise
 
 
 def write_target_state(paths: "BoxPaths", name: str, state: dict[str, Any]) -> None:
@@ -165,7 +168,7 @@ def _services_with_image(target: UpdateTarget) -> dict[str, str]:
                 continue
             if "image" not in svc:
                 continue  # build: services excluded in phase 1
-            cname = svc.get("container_name") or f"{target.name}_{svc_name}_1"
+            cname = svc.get("container_name") or f"{target.name}-{svc_name}-1"
             services[svc_name] = cname
     return services
 
@@ -196,10 +199,16 @@ def _wait_healthy(target: UpdateTarget, timeout_sec: int = _HEALTHCHECK_TIMEOUT_
         for svc_name, container_name in services.items():
             status = container_health(container_name)
             if status is None:
-                # No healthcheck defined — wait for grace period
-                if time.monotonic() - grace_start < _NO_HEALTHCHECK_GRACE_SEC:
+                # None means either no healthcheck or container doesn't exist.
+                if not container_running(container_name):
+                    # Container is gone or never started — treat as unhealthy.
+                    unhealthy.append(svc_name)
                     all_ok = False
-                # After grace, treat as healthy
+                else:
+                    # Container is running but has no healthcheck — apply grace period.
+                    if time.monotonic() - grace_start < _NO_HEALTHCHECK_GRACE_SEC:
+                        all_ok = False
+                    # After grace, treat as healthy.
             elif status == "healthy":
                 pass
             elif status in ("starting", "unhealthy"):
@@ -307,14 +316,23 @@ def _persist_result(
     paths: "BoxPaths", target: UpdateTarget,
     result: dict[str, Any], before: dict[str, str] | None,
 ) -> None:
-    """Update the per-target state file with this run's outcome."""
+    """Update the per-target state file with this run's outcome.
+
+    previous_digests is only updated when a successful change occurred —
+    we preserve the prior previous_digests on no-change or failed runs so
+    that any future rollback can still find the older digest.
+    """
     existing = read_target_state(paths, target.name) or {}
     state = {
         "last_check": result["ts"],
         "last_change": result["ts"] if result["status"] == "succeeded" else existing.get("last_change"),
         "last_status": result["status"],
         "current_digests": result.get("current_digests") or before or {},
-        "previous_digests": before or existing.get("previous_digests", {}),
+        "previous_digests": (
+            before
+            if result["status"] == "succeeded" and before != result.get("current_digests")
+            else existing.get("previous_digests", before or {})
+        ),
     }
     write_target_state(paths, target.name, state)
 
@@ -338,7 +356,11 @@ def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
         if rc != 0:
             result["status"] = "failed"
             result["reason"] = "backup_failed"
-            log_error("container-update", f"Backup failed for {target.name}, aborting update", paths, project=target.name)
+            log_error(
+                "container-update", f"Backup failed for {target.name}, aborting update",
+                paths, project=target.name,
+                detail={"strategy": target.strategy, "reason": "backup_failed"},
+            )
             _persist_result(paths, target, result, before=None)
             return result
 
@@ -352,7 +374,11 @@ def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
     except DockerError as e:
         result["status"] = "failed"
         result["reason"] = f"pull_failed: {e}"
-        log_error("container-update", f"Pull failed for {target.name}: {e}", paths, project=target.name)
+        log_error(
+            "container-update", f"Pull failed for {target.name}: {e}",
+            paths, project=target.name,
+            detail={"strategy": target.strategy, "reason": str(e), "previous_digests": before},
+        )
         _persist_result(paths, target, result, before=before)
         return result
 
@@ -371,7 +397,11 @@ def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
     except DockerError as e:
         result["status"] = "failed"
         result["reason"] = f"recreate_failed: {e}"
-        log_error("container-update", f"Recreate failed for {target.name}: {e}", paths, project=target.name)
+        log_error(
+            "container-update", f"Recreate failed for {target.name}: {e}",
+            paths, project=target.name,
+            detail={"strategy": target.strategy, "reason": str(e), "previous_digests": before},
+        )
         _maybe_rollback(paths, target, result, before)
         _persist_result(paths, target, result, before=before)
         return result
@@ -385,12 +415,20 @@ def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
     if not healthy:
         result["status"] = "failed"
         result["reason"] = f"unhealthy: {','.join(unhealthy)}"
+        _maybe_rollback(paths, target, result, before)
         log_error(
             "container-update",
             f"Healthcheck failed for {target.name} services: {unhealthy}",
             paths, project=target.name,
+            detail={
+                "strategy": target.strategy,
+                "failed_services": unhealthy,
+                "previous_digests": before,
+                "current_digests": new_digests,
+                "rollback_attempted": result["rollback_attempted"],
+                "rollback_succeeded": result["rollback_succeeded"],
+            },
         )
-        _maybe_rollback(paths, target, result, before)
     else:
         log_operation(
             "container-update", f"Updated {target.name}", paths, project=target.name,

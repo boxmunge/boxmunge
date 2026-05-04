@@ -260,3 +260,16 @@ def container_image_digest(container_name: str) -> str | None:
 def tag_image(source: str, target: str) -> None:
     """Run docker tag <source> <target>. Source can be a digest or tag."""
     _run(["docker", "tag", source, target])
+
+
+def container_running(container_name: str) -> bool:
+    """Return True if the container exists and is in 'running' state."""
+    try:
+        result = _run(
+            ["docker", "inspect", "--format", "{{.State.Running}}", container_name],
+            capture=True,
+            check=False,
+        )
+    except DockerError:
+        return False
+    return result.stdout.strip() == "true"
