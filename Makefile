@@ -5,6 +5,7 @@ SRC_FILES     := $(shell find src -type f -name '*.py')
 SYSTEMD_FILES := $(shell find systemd -type f)
 CONFIG_FILES  := $(shell find config -type f)
 DOC_FILES     := $(shell find docs/on-server -type f 2>/dev/null)
+SCRIPT_FILES  := $(shell find scripts -type f)
 
 .PHONY: bundle installer test test-integration test-all clean
 
@@ -13,10 +14,10 @@ bundle: $(BUNDLE)
 installer: $(BUNDLE)
 	@./scripts/build-installer.sh
 
-$(BUNDLE): install.sh bootstrap/init-host.sh pyproject.toml $(SRC_FILES) $(SYSTEMD_FILES) $(CONFIG_FILES) $(DOC_FILES)
+$(BUNDLE): install.sh bootstrap/init-host.sh pyproject.toml $(SRC_FILES) $(SYSTEMD_FILES) $(CONFIG_FILES) $(DOC_FILES) $(SCRIPT_FILES)
 	@mkdir -p dist/.stage/boxmunge
 	cp install.sh pyproject.toml dist/.stage/boxmunge/
-	cp -r bootstrap src systemd config docs/on-server dist/.stage/boxmunge/
+	cp -r bootstrap src systemd config docs/on-server scripts dist/.stage/boxmunge/
 	find dist/.stage -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 	find dist/.stage -name '*.pyc' -delete 2>/dev/null || true
 	find dist/.stage -name '*.egg-info' -type d -exec rm -rf {} + 2>/dev/null || true
