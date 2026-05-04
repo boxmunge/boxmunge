@@ -16,7 +16,7 @@ from pathlib import Path
 # Every command the deploy shell accepts. This is the complete allowlist.
 ALLOWED_COMMANDS: set[str] = {
     # Host operations
-    "help", "agent-help", "doctor", "status", "test-alert", "handshake",
+    "help", "agent-help", "doctor", "status", "test-alert", "handshake", "version",
     # Project lifecycle
     "add-git-project", "stage", "promote", "unstage",
     "prod-deploy", "rollback", "remove-project", "diff",
@@ -44,13 +44,17 @@ ALLOWED_COMMANDS: set[str] = {
     "mcp-serve",
 }
 
-SHELL_BANNER = """\
-boxmunge deploy shell
+def _shell_banner() -> str:
+    """Build the interactive-shell banner including the installed version."""
+    from boxmunge.version import get_build_version
+    return f"""\
+boxmunge deploy shell ({get_build_version()})
 
 This is a restricted shell. Available commands:
 
   help                Show all commands
   agent-help          AI agent orientation
+  version             Show installed boxmunge version
   status              Dashboard of all projects
   prod-deploy <project>  Deploy to production (skip staging)
   stage <project>     Stage for verification
@@ -221,7 +225,7 @@ def dispatch_command(command: str, args: list[str]) -> None:
 
 def interactive_loop() -> None:
     """Run an interactive command loop for human SSH sessions."""
-    print(SHELL_BANNER)
+    print(_shell_banner())
     while True:
         try:
             line = input("boxmunge> ")

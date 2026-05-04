@@ -38,6 +38,7 @@ from boxmunge.commands.mcp_serve_cmd import cmd_mcp_serve
 from boxmunge.commands.project_cmd import cmd_project_add, cmd_project_remove, cmd_project_list
 from boxmunge.commands.handshake_cmd import cmd_handshake
 from boxmunge.commands.stash_cmd import cmd_stash
+from boxmunge.commands.version_cmd import cmd_version
 
 # Command registry: name -> handler function
 COMMANDS: dict[str, Callable[[list[str]], None]] = {
@@ -82,6 +83,7 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "project-list": cmd_project_list,
     "handshake": cmd_handshake,
     "stash": cmd_stash,
+    "version": cmd_version,
 }
 
 
