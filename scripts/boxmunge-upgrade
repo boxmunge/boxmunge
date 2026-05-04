@@ -121,8 +121,50 @@ cmd_run() {
 
     rm -rf "$BOXMUNGE_ROOT/env-$standby"
     python3 -m venv "$BOXMUNGE_ROOT/env-$standby"
-    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet "boxmunge-server==$version" || {
-        log "Failed to install boxmunge-server==$version"
+    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --upgrade pip || {
+        log "Failed to upgrade pip in standby venv"
+        rm -rf "$BOXMUNGE_ROOT/env-$standby"
+        add_blocklist "$version" "preflight_failed: pip_upgrade"
+        report_failure "$version" "$from_version" "preflight"
+        exit 1
+    }
+
+    # Download bundle from GitHub release
+    local tmp_download
+    tmp_download="$(mktemp -d)"
+    trap "rm -rf '$tmp_download'" RETURN
+    local bundle_url="https://github.com/boxmunge/boxmunge/releases/download/v${version}/boxmunge-${version}.tar.gz"
+    local sums_url="https://github.com/boxmunge/boxmunge/releases/download/v${version}/SHA256SUMS"
+
+    log "Downloading bundle from ${bundle_url}"
+    curl -sLf -o "$tmp_download/boxmunge-${version}.tar.gz" "$bundle_url" || {
+        log "Failed to download bundle"
+        rm -rf "$BOXMUNGE_ROOT/env-$standby"
+        add_blocklist "$version" "preflight_failed: bundle_download"
+        report_failure "$version" "$from_version" "preflight"
+        exit 1
+    }
+    curl -sLf -o "$tmp_download/SHA256SUMS" "$sums_url" || {
+        log "Failed to download SHA256SUMS"
+        rm -rf "$BOXMUNGE_ROOT/env-$standby"
+        add_blocklist "$version" "preflight_failed: checksum_download"
+        report_failure "$version" "$from_version" "preflight"
+        exit 1
+    }
+
+    # Verify checksum
+    (cd "$tmp_download" && sha256sum -c SHA256SUMS --ignore-missing) || {
+        log "Checksum verification FAILED"
+        rm -rf "$BOXMUNGE_ROOT/env-$standby"
+        add_blocklist "$version" "preflight_failed: checksum_mismatch"
+        report_failure "$version" "$from_version" "preflight"
+        exit 1
+    }
+
+    # Extract and pip install
+    tar xzf "$tmp_download/boxmunge-${version}.tar.gz" -C "$tmp_download"
+    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet "$tmp_download/boxmunge[tui]" || {
+        log "Failed to install boxmunge from bundle"
         rm -rf "$BOXMUNGE_ROOT/env-$standby"
         add_blocklist "$version" "preflight_failed: pip_install"
         report_failure "$version" "$from_version" "preflight"
@@ -131,11 +173,6 @@ cmd_run() {
 
     # 2. PRE-FLIGHT
     log "Running pre-flight checks..."
-
-    # NOTE: Signature verification will be enabled when the release pipeline
-    # publishes signatures alongside packages. Until then, pre-flight relies
-    # on import test, CLI test, and dry-run validation.
-    log "Signature verification: not yet implemented, skipping"
 
     "$BOXMUNGE_ROOT/env-$standby/bin/python" -c "import boxmunge; print(boxmunge.__version__)" || {
         log "Pre-flight FAILED: import test"
