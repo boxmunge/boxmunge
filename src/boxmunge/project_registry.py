@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Project registry — allowlist of known project names on this server.
 
-Storage: /opt/boxmunge/config/projects.txt (one name per line).
+Storage: /opt/boxmunge/state/projects.txt (one name per line, deploy-writable).
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 def _registry_path(paths: BoxPaths) -> Path:
-    return paths.config / "projects.txt"
+    return paths.state / "projects.txt"
 
 
 def _auto_migrate(paths: BoxPaths, registry: Path) -> set[str]:

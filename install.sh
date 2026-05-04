@@ -68,12 +68,33 @@ if [[ -d "${BOXMUNGE_ROOT}/venv" && ! -d "${BOXMUNGE_ROOT}/env-a" ]]; then
     # don't survive a rename. Wipe and recreate fresh.
     rm -rf "${BOXMUNGE_ROOT}/venv"
     mkdir -p "${BOXMUNGE_ROOT}/upgrade-state"
-    chmod 700 "${BOXMUNGE_ROOT}/upgrade-state"
+    chown root:deploy "${BOXMUNGE_ROOT}/upgrade-state"
+    chmod 770 "${BOXMUNGE_ROOT}/upgrade-state"
     echo "a" > "${BOXMUNGE_ROOT}/upgrade-state/active-slot"
+    chown root:deploy "${BOXMUNGE_ROOT}/upgrade-state/active-slot"
+    chmod 660 "${BOXMUNGE_ROOT}/upgrade-state/active-slot"
     echo "{}" > "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json"
+    chown root:deploy "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json"
+    chmod 660 "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json"
     python3 -m venv "${BOXMUNGE_ROOT}/env-a"
     ln -sfn "${BOXMUNGE_ROOT}/env-a" "${BOXMUNGE_ROOT}/env-active"
     echo "  Layout migrated: old venv removed, env-a created, env-active symlink in place"
+fi
+
+# ---------------------------------------------------------------------------
+# Migrate project registry from config/ (root-only) to state/ (deploy-writable)
+# ---------------------------------------------------------------------------
+OLD_REGISTRY="${BOXMUNGE_ROOT}/config/projects.txt"
+NEW_REGISTRY="${BOXMUNGE_ROOT}/state/projects.txt"
+if [[ -f "${OLD_REGISTRY}" && ! -f "${NEW_REGISTRY}" ]]; then
+    echo ""
+    echo "========================================================"
+    echo "  Moving project registry to state/ (deploy-writable)"
+    echo "========================================================"
+    mv "${OLD_REGISTRY}" "${NEW_REGISTRY}"
+    chown deploy:deploy "${NEW_REGISTRY}"
+    chmod 644 "${NEW_REGISTRY}"
+    echo "  Registry moved: ${OLD_REGISTRY} -> ${NEW_REGISTRY}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -87,11 +108,24 @@ echo "========================================================"
 # For fresh installs, set up env-a as the active slot
 if [[ ! -L "${BOXMUNGE_ROOT}/env-active" ]]; then
     mkdir -p "${BOXMUNGE_ROOT}/upgrade-state"
-    chmod 700 "${BOXMUNGE_ROOT}/upgrade-state"
+    chown root:deploy "${BOXMUNGE_ROOT}/upgrade-state"
+    chmod 770 "${BOXMUNGE_ROOT}/upgrade-state"
     echo "a" > "${BOXMUNGE_ROOT}/upgrade-state/active-slot"
+    chown root:deploy "${BOXMUNGE_ROOT}/upgrade-state/active-slot"
+    chmod 660 "${BOXMUNGE_ROOT}/upgrade-state/active-slot"
     echo "{}" > "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json"
+    chown root:deploy "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json"
+    chmod 660 "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json"
     python3 -m venv "${BOXMUNGE_ROOT}/env-a"
     ln -sfn "${BOXMUNGE_ROOT}/env-a" "${BOXMUNGE_ROOT}/env-active"
+fi
+
+# Ensure upgrade-state perms allow deploy access (idempotent — fixes existing v0.3.0/v0.3.1 installs)
+if [[ -d "${BOXMUNGE_ROOT}/upgrade-state" ]]; then
+    chown -R root:deploy "${BOXMUNGE_ROOT}/upgrade-state"
+    chmod 770 "${BOXMUNGE_ROOT}/upgrade-state"
+    [[ -f "${BOXMUNGE_ROOT}/upgrade-state/active-slot" ]] && chmod 660 "${BOXMUNGE_ROOT}/upgrade-state/active-slot"
+    [[ -f "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json" ]] && chmod 660 "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json"
 fi
 "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --upgrade pip
 "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet "${SCRIPT_DIR}[tui]"

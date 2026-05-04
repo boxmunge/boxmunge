@@ -55,7 +55,7 @@ class TestProjectRegistry:
             (proj / "manifest.yml").write_text(f"project: {name}\n")
         result = load_registered_projects(paths)
         assert result == {"alpha", "beta"}
-        assert (paths.config / "projects.txt").exists()
+        assert (paths.state / "projects.txt").exists()
 
     def test_auto_migrate_ignores_pre_registered_dirs(self, paths: BoxPaths) -> None:
         """Dirs without manifest.yml are pre-registered (secrets-only), skip them."""
