@@ -256,12 +256,9 @@ _set_sshd X11Forwarding no
 # Only named accounts may log in
 _set_sshd AllowUsers "${DEPLOY_USER} supervisor"
 
-# Replace the global SFTP subsystem with our wrapper.
-# Modern scp (OpenSSH 9+) uses the SFTP protocol, so scp uploads invoke
-# the sftp subsystem instead of the user's login shell. Our wrapper checks
-# if the user is deploy and routes through the reception handler; for all
-# other users it falls through to the real sftp-server.
-sed -i 's|^Subsystem.*sftp.*|Subsystem sftp /opt/boxmunge/bin/boxmunge-sftp|' "${SSHD_CONFIG}"
+# Note: the sshd Subsystem directive for SFTP is wired in install.sh, after
+# the wrapper binary exists at /opt/boxmunge/bin/boxmunge-sftp. Doing it here
+# would create a window where sshd points at a non-existent wrapper.
 
 systemctl restart sshd
 

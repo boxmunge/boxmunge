@@ -37,6 +37,12 @@ def main() -> None:
     except Exception:
         current_user = os.environ.get("USER", "")
 
+    # Breadcrumb on every invocation. sshd routes our stderr to the journal
+    # (look for "boxmunge-sftp:" via journalctl -u ssh). Silence here means
+    # the Subsystem directive is bypassing this wrapper — see boxmunge doctor.
+    print(f"boxmunge-sftp: invoked user={current_user} argv={sys.argv[1:]}",
+          file=sys.stderr, flush=True)
+
     # Non-deploy users get the real sftp-server unmodified
     if current_user != DEPLOY_USER:
         os.execv(REAL_SFTP_SERVER, [REAL_SFTP_SERVER] + sys.argv[1:])

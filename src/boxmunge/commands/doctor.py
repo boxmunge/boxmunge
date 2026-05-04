@@ -35,6 +35,37 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
         check("Config file loads", False, str(e))
         config = None
 
+    # SFTP subsystem wired to the boxmunge wrapper.
+    # When sshd's Subsystem points at the default /usr/lib/openssh/sftp-server
+    # instead of /opt/boxmunge/bin/boxmunge-sftp, uploads land in the deploy
+    # user's home dir and never reach the inbox. install.sh keeps this in
+    # sync, but config drift (manual edits, package upgrades, old bootstrap)
+    # can break it silently — so we check it explicitly.
+    sshd_config = Path("/etc/ssh/sshd_config")
+    expected_sftp = "/opt/boxmunge/bin/boxmunge-sftp"
+    if sshd_config.exists():
+        try:
+            actual = None
+            for raw in sshd_config.read_text().splitlines():
+                stripped = raw.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                parts = stripped.split()
+                if len(parts) >= 3 and parts[0] == "Subsystem" and parts[1] == "sftp":
+                    actual = parts[2]
+                    break
+            if actual is None:
+                check("SFTP subsystem wired", False,
+                      "no 'Subsystem sftp' line in sshd_config")
+            elif actual == expected_sftp:
+                check("SFTP subsystem wired", True, f"-> {actual}")
+            else:
+                check("SFTP subsystem wired", False,
+                      f"sshd routes SFTP to {actual!r}, expected {expected_sftp!r} "
+                      "— uploads bypass reception")
+        except OSError as e:
+            warn("SFTP subsystem wired", f"could not read {sshd_config}: {e}")
+
     # Backup key
     key_path = paths.backup_key
     if key_path.exists():

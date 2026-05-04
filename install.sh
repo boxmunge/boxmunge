@@ -173,6 +173,29 @@ WRAPPER
 chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-sftp"
 
 # ---------------------------------------------------------------------------
+# Wire sshd's SFTP subsystem to boxmunge-sftp.
+#
+# Modern OpenSSH (9+) routes scp through the SFTP protocol, so the Subsystem
+# directive — not the login shell — decides where uploads go. The wrapper
+# only runs uploads through reception if sshd actually invokes it. This step
+# is idempotent and runs on every install/upgrade so the wiring cannot drift.
+# ---------------------------------------------------------------------------
+SSHD_CONFIG="/etc/ssh/sshd_config"
+SFTP_SUBSYSTEM_LINE="Subsystem sftp ${BOXMUNGE_ROOT}/bin/boxmunge-sftp"
+if grep -qxF "${SFTP_SUBSYSTEM_LINE}" "${SSHD_CONFIG}"; then
+    echo "  sshd Subsystem already wired to boxmunge-sftp"
+else
+    if grep -qE '^Subsystem[[:space:]]+sftp[[:space:]]' "${SSHD_CONFIG}"; then
+        sed -i "s|^Subsystem[[:space:]]\\+sftp[[:space:]].*|${SFTP_SUBSYSTEM_LINE}|" "${SSHD_CONFIG}"
+    else
+        printf '\n%s\n' "${SFTP_SUBSYSTEM_LINE}" >> "${SSHD_CONFIG}"
+    fi
+    /usr/sbin/sshd -t
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd
+    echo "  sshd Subsystem rewired to boxmunge-sftp + reload sent"
+fi
+
+# ---------------------------------------------------------------------------
 # Install the boxmunge-upgrade shim (orchestrates auto-updates)
 # ---------------------------------------------------------------------------
 cp "${SCRIPT_DIR}/scripts/boxmunge-upgrade" "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade"
