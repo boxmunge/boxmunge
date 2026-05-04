@@ -8,9 +8,11 @@ it applies the configured strategy (leave_broken or rollback_to_previous).
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from boxmunge.fileutil import atomic_write_text
 from boxmunge.manifest import load_manifest, ManifestError
 
 if TYPE_CHECKING:
@@ -103,3 +105,21 @@ def build_targets(paths: "BoxPaths", config: dict[str, Any]) -> list[UpdateTarge
                 targets.append(target)
 
     return targets
+
+
+def read_target_state(paths: "BoxPaths", name: str) -> dict[str, Any] | None:
+    """Read the state file for a target, or None if missing."""
+    state_path = paths.container_update_target_state(name)
+    if not state_path.exists():
+        return None
+    try:
+        return json.loads(state_path.read_text())
+    except json.JSONDecodeError:
+        return None
+
+
+def write_target_state(paths: "BoxPaths", name: str, state: dict[str, Any]) -> None:
+    """Write the state file for a target atomically."""
+    paths.container_update_state.mkdir(parents=True, exist_ok=True)
+    state_path = paths.container_update_target_state(name)
+    atomic_write_text(state_path, json.dumps(state, indent=2) + "\n")

@@ -102,3 +102,29 @@ class TestBuildTargets:
         targets = build_targets(paths, config)
         caddy = targets[0]
         assert caddy.has_backup is False
+
+
+class TestTargetState:
+    def test_read_missing_returns_none(self, paths):
+        from boxmunge.container_update import read_target_state
+        assert read_target_state(paths, "nope") is None
+
+    def test_write_then_read(self, paths):
+        from boxmunge.container_update import write_target_state, read_target_state
+        paths.container_update_state.mkdir(parents=True)
+        state = {
+            "last_check": "2026-05-04T03:00:00Z",
+            "last_change": "2026-05-02T03:00:00Z",
+            "last_status": "succeeded",
+            "current_digests": {"caddy": "sha256:abc"},
+            "previous_digests": {"caddy": "sha256:def"},
+        }
+        write_target_state(paths, "caddy", state)
+        assert read_target_state(paths, "caddy") == state
+
+    def test_write_creates_state_dir(self, paths):
+        from boxmunge.container_update import write_target_state
+        # state dir does NOT exist yet
+        assert not paths.container_update_state.exists()
+        write_target_state(paths, "caddy", {"last_status": "succeeded"})
+        assert paths.container_update_state.exists()
