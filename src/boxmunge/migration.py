@@ -58,3 +58,18 @@ def migrate_manifest(manifest: dict[str, Any], target_version: int) -> dict[str,
         transform = _MIGRATIONS[(from_v, to_v)]
         result = transform(result)
     return result
+
+
+def _migrate_v1_to_v2(manifest: dict[str, Any]) -> dict[str, Any]:
+    """No-op migration: v1 -> v2.
+
+    v0.5 introduces the security: block, but it's optional. Existing v1
+    manifests need only their schema_version bumped to v2 — the security
+    defaults apply silently at deploy time without any manifest edit.
+    """
+    result = dict(manifest)
+    result["schema_version"] = 2
+    return result
+
+
+register_migration(1, 2, _migrate_v1_to_v2)

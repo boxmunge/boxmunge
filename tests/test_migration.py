@@ -80,3 +80,25 @@ class TestMigrateManifest:
         manifest = {"project": "test"}
         result = migrate_manifest(manifest, target_version=2)
         assert result["schema_version"] == 2
+
+
+class TestV1toV2Migration:
+    def test_v1_no_security_block_becomes_v2(self) -> None:
+        v1 = {
+            "schema_version": 1,
+            "project": "demo",
+            "services": {"web": {"port": 3000}},
+        }
+        result = migrate_manifest(v1, target_version=2)
+        assert result["schema_version"] == 2
+        # Manifest is otherwise unchanged
+        assert result["project"] == "demo"
+        assert result["services"] == {"web": {"port": 3000}}
+        # No injected security block — defaults are silent
+        assert "security" not in result
+
+    def test_implicit_v1_default_migrates(self) -> None:
+        # Manifest with no schema_version is treated as v1.
+        v1 = {"project": "demo", "services": {"web": {"port": 3000}}}
+        result = migrate_manifest(v1, target_version=2)
+        assert result["schema_version"] == 2
