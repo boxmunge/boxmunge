@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.bundle import extract_bundle as _extract_bundle, copy_project_files as _copy_project_files
 from boxmunge.compose import generate_staging_compose_base, generate_staging_compose_override
+from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.docker import compose_up, caddy_reload, DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
 from boxmunge.identity import check_project_identity, register_project_identity
@@ -18,6 +19,7 @@ from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
 from boxmunge.pause import is_paused
 from boxmunge.project_registry import is_registered
+from boxmunge.security_overlay import services_with_off_profile
 from boxmunge.security_warn import warn_off_services
 from boxmunge.source import resolve_bundle_source, SourceError
 from boxmunge.state import write_state
@@ -113,6 +115,19 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
         if dry_run:
             print(f"[DRY RUN] Would stage '{project_name}'")
             return 0
+
+    # Validate user compose.yml against silent-floor-defeating keys BEFORE
+    # we generate the staging base + overlay. Same rationale as in deploy.
+    off_services = {svc for svc, _ in services_with_off_profile(manifest)}
+    try:
+        validate_user_compose(
+            project_dir / "compose.yml", off_services=off_services,
+        )
+    except ComposeSecurityError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        log_error("stage", f"Compose validation rejected: {e}",
+                  paths, project=project_name)
+        return 1
 
     # Generate staging configs
     print(f"Staging {project_name}...")

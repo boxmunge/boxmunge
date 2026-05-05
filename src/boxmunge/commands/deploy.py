@@ -10,6 +10,7 @@ from typing import Any
 
 from boxmunge.caddy import generate_caddy_config
 from boxmunge.compose import generate_compose_override
+from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.config import load_config, ConfigError
 from boxmunge.docker import compose_up, caddy_reload, DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
@@ -18,6 +19,7 @@ from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.pause import is_paused
 from boxmunge.probation import clear_probation_if_active
+from boxmunge.security_overlay import services_with_off_profile
 from boxmunge.security_warn import warn_off_services
 from boxmunge.state import read_state, write_state
 
@@ -280,6 +282,20 @@ def _run_deploy_inner(
         except subprocess.CalledProcessError as e:
             print(f"  ERROR: Pre-deploy failed: {e.stderr}")
             return 1
+
+    # Validate user compose.yml against silent-floor-defeating keys BEFORE
+    # we generate the overlay. Compose's multi-file merge would otherwise
+    # let user-side `privileged: true` etc. win over the boxmunge baseline.
+    off_services = {svc for svc, _ in services_with_off_profile(manifest)}
+    try:
+        validate_user_compose(
+            paths.project_compose(project_name), off_services=off_services,
+        )
+    except ComposeSecurityError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        log_error("deploy", f"Compose validation rejected: {e}",
+                  paths, project=project_name)
+        return 1
 
     # Generate configs
     print(f"  Generating Caddy config...")

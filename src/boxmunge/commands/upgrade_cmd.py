@@ -19,11 +19,13 @@ import yaml
 from boxmunge.commands.deploy import prepare_caddy_config, prepare_compose_override
 from boxmunge.commands.health_cmd import run_health
 from boxmunge.commands.self_test_cmd import run_self_test
+from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.docker import compose_up, caddy_reload, DockerError
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, validate_manifest, ManifestError, CURRENT_SCHEMA_VERSION
 from boxmunge.migration import migrate_manifest, MigrationError
 from boxmunge.paths import BoxPaths
+from boxmunge.security_overlay import services_with_off_profile
 from boxmunge.stash import create_stash, prune_stashes
 from boxmunge.version import read_installed_version, write_installed_version, get_build_version, parse_version_string
 
@@ -111,6 +113,24 @@ def _regenerate_configs(paths: BoxPaths) -> list[str]:
             continue
 
         project_name = manifest.get("project", project_dir.name)
+        # Validate user compose.yml against silent-floor-defeating keys
+        # BEFORE regenerating the overlay. A hostile compose.yml that
+        # slipped in pre-validation must not survive an upgrade.
+        off_services = {svc for svc, _ in services_with_off_profile(manifest)}
+        try:
+            validate_user_compose(
+                paths.project_compose(project_name), off_services=off_services,
+            )
+        except ComposeSecurityError as e:
+            log_error(
+                "upgrade",
+                f"Compose validation rejected during regen: {e}",
+                paths, project=project_name,
+            )
+            # Skip this project's regen — leave its existing configs in
+            # place. Upgrade should not silently produce a fresh overlay
+            # over a hostile user compose.yml.
+            continue
         try:
             prepare_caddy_config(paths, manifest)
             prepare_compose_override(paths, manifest, component="upgrade")

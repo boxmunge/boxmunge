@@ -16,6 +16,7 @@ from pathlib import Path
 import yaml
 
 from boxmunge.commands.deploy import prepare_caddy_config, prepare_compose_override
+from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.docker import (
     compose_pull, compose_up, caddy_reload, DockerError,
 )
@@ -24,6 +25,7 @@ from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import is_paused, clear_paused_state
 from boxmunge.paths import BoxPaths, validate_project_name
 from boxmunge.pushover import send_notification
+from boxmunge.security_overlay import services_with_off_profile
 from boxmunge.state import read_state, write_state
 
 
@@ -134,6 +136,20 @@ def run_resume(
         print(f"ERROR: compose up failed: {e}", file=sys.stderr)
         log_error("resume", f"compose up failed: {e}", paths,
                   project=project_name)
+        return 1
+
+    # Validate user compose.yml against silent-floor-defeating keys BEFORE
+    # regenerating the overlay. Resume re-applies the same merge rules as
+    # deploy so the same guard applies.
+    off_services = {svc for svc, _ in services_with_off_profile(manifest)}
+    try:
+        validate_user_compose(
+            paths.project_compose(project_name), off_services=off_services,
+        )
+    except ComposeSecurityError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        log_error("resume", f"Compose validation rejected: {e}",
+                  paths, project=project_name)
         return 1
 
     # Restore Caddy site config from manifest (regenerated).
