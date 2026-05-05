@@ -144,3 +144,19 @@ class TestSecretsLogging:
         entries = _read_log_entries(paths)
         # `get` must not be logged — read-only.
         assert all(e.get("component") != "secrets" for e in entries)
+
+
+class TestSecretsUsageExitCodes:
+    """Audit H-2c: usage errors must return 2, operational errors return 1."""
+
+    def test_no_subcommand_returns_2(self, paths: BoxPaths) -> None:
+        # No args at all — usage error
+        assert run_secrets([], paths) == 2
+
+    def test_unknown_subcommand_returns_2(self, paths: BoxPaths) -> None:
+        assert run_secrets(["bogus"], paths) == 2
+
+    def test_missing_key_returns_1_not_2(self, paths) -> None:
+        # Real failure (key not found) — operational, exit 1
+        paths.project_dir("myapp").mkdir(parents=True)
+        assert run_secrets(["get", "myapp", "NOPE"], paths) == 1

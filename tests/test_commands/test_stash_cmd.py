@@ -17,14 +17,17 @@ class TestStashRestore:
     def test_restore_no_args_shows_error(self):
         with pytest.raises(SystemExit) as exc:
             cmd_stash(["restore"])
-        assert exc.value.code != 0
+        # Usage error: missing --latest -> exit 2
+        assert exc.value.code == 2
 
     def test_no_subcommand_shows_usage(self):
         with pytest.raises(SystemExit) as exc:
             cmd_stash([])
-        assert exc.value.code == 1
+        # No subcommand -> usage error -> exit 2
+        assert exc.value.code == 2
 
     def test_unknown_subcommand_exits(self):
         with pytest.raises(SystemExit) as exc:
             cmd_stash(["unknown"])
-        assert exc.value.code == 1
+        # Unknown subcommand -> usage error -> exit 2
+        assert exc.value.code == 2

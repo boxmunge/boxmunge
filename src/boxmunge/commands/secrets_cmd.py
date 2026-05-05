@@ -25,7 +25,7 @@ def _resolve_secrets_path(
         try:
             validate_project_name(project_name)
         except ValueError as e:
-            print(f"ERROR: {e}")
+            print(f"ERROR: {e}", file=sys.stderr)
             return None, args[1:], None
         project_dir = paths.project_dir(project_name)
         if not project_dir.exists():
@@ -39,11 +39,11 @@ def _cmd_set(args: list[str], paths: BoxPaths) -> int:
     if secrets_path is None:
         return 1
     if not rest:
-        print("ERROR: Missing KEY=VALUE argument")
+        print("ERROR: Missing KEY=VALUE argument", file=sys.stderr)
         return 1
     assignment = rest[0]
     if "=" not in assignment:
-        print(f"ERROR: Expected KEY=VALUE, got: {assignment!r}")
+        print(f"ERROR: Expected KEY=VALUE, got: {assignment!r}", file=sys.stderr)
         return 1
     key, _, value = assignment.partition("=")
     set_key(secrets_path, key, value)
@@ -56,12 +56,12 @@ def _cmd_get(args: list[str], paths: BoxPaths) -> int:
     if secrets_path is None:
         return 1
     if not rest:
-        print("ERROR: Missing KEY argument")
+        print("ERROR: Missing KEY argument", file=sys.stderr)
         return 1
     key = rest[0]
     value = get_key(secrets_path, key)
     if value is None:
-        print(f"ERROR: Key '{key}' not found")
+        print(f"ERROR: Key '{key}' not found", file=sys.stderr)
         return 1
     print(value)
     return 0
@@ -81,7 +81,7 @@ def _cmd_unset(args: list[str], paths: BoxPaths) -> int:
     if secrets_path is None:
         return 1
     if not rest:
-        print("ERROR: Missing KEY argument")
+        print("ERROR: Missing KEY argument", file=sys.stderr)
         return 1
     key = rest[0]
     unset_key(secrets_path, key)
@@ -98,15 +98,22 @@ _SUBCOMMANDS = {
 
 
 def run_secrets(args: list[str], paths: BoxPaths) -> int:
-    """Dispatch secrets subcommands. Returns 0 on success, 1 on failure."""
+    """Dispatch secrets subcommands.
+
+    Returns 0 on success, 2 on usage errors (no/unknown subcommand),
+    1 on operational failures (missing key, etc.).
+    """
     if not args:
-        print("Usage: boxmunge secrets <set|get|list|unset> [--host | <project>] ...")
-        return 1
+        print(
+            "Usage: boxmunge secrets <set|get|list|unset> [--host | <project>] ...",
+            file=sys.stderr,
+        )
+        return 2
     subcommand = args[0]
     handler = _SUBCOMMANDS.get(subcommand)
     if handler is None:
-        print(f"ERROR: Unknown subcommand '{subcommand}'")
-        return 1
+        print(f"ERROR: Unknown subcommand '{subcommand}'", file=sys.stderr)
+        return 2
     return handler(args[1:], paths)
 
 
