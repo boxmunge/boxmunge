@@ -28,3 +28,7 @@ build/
 
 # Internal design docs (specs and plans from development sessions)
 docs/superpowers/
+
+# Project bundles built locally for deploy (timestamped, ephemeral).
+# The release tarball at dist/boxmunge-*.tar.gz is already covered by dist/ above.
+services/boxmunge-web-*.tar.gz
