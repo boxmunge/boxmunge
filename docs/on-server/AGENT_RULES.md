@@ -42,6 +42,7 @@ These operations are safe to run without human confirmation:
 | Read documentation | `agent-help <topic>` |
 | Pause a project (planned maintenance) | `pause <project>` |
 | Resume a paused project (pulls latest images) | `resume <project>` |
+| Show effective container security posture | `boxmunge security <project> [--json]` |
 
 ### Deploying a project (standard workflow)
 
@@ -110,6 +111,7 @@ If a task requires any of the above, it requires the **supervisor** user. Note t
 - Check `status` before and after making changes
 - Do not retry a failed operation blindly -- understand why it failed first
 - Set secrets before the first deploy so containers start with the right environment
+- If asked about container security or you are about to relax a `security:` setting, run `boxmunge security <project>` first to see the current effective posture, and read `agent-help security` for the full model
 
 ---
 

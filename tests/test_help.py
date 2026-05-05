@@ -25,3 +25,9 @@ class TestHelpText:
     def test_agent_help_does_not_reference_filesystem(self) -> None:
         # Agent help should not tell agents to read files from the filesystem
         assert "/opt/boxmunge/docs/" not in AGENT_HELP_TEXT
+
+
+def test_agent_help_security_topic_resolves(tmp_path, monkeypatch) -> None:
+    """`agent-help security` resolves to SECURITY.md."""
+    from boxmunge.commands.help import AGENT_HELP_TOPICS
+    assert AGENT_HELP_TOPICS["security"] == "SECURITY.md"

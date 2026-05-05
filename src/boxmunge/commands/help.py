@@ -123,6 +123,7 @@ For detailed documentation, run:
   agent-help operations       Step-by-step operational guides
   agent-help conventions      Project manifest and conventions
   agent-help rules            Agent guardrails and safe practices
+  agent-help security         Container security model and opt-outs
 """
 
 # Map topic names to on-server doc filenames
@@ -131,6 +132,7 @@ AGENT_HELP_TOPICS: dict[str, str] = {
     "operations": "OPERATIONS.md",
     "conventions": "PROJECT_CONVENTIONS.md",
     "rules": "AGENT_RULES.md",
+    "security": "SECURITY.md",
 }
 
 
