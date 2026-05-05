@@ -181,11 +181,17 @@ def _run_health_checks(paths: BoxPaths) -> tuple[int, dict]:
         check_ufw,
         check_unattended_upgrades,
     )
+    from boxmunge.config import ConfigError, load_config
+    from boxmunge.log import log_warning
     try:
-        from boxmunge.config import load_config
         config = load_config(paths)
         ssh_port = config.get("ssh_port", 922)
-    except Exception:
+    except ConfigError as e:
+        log_warning(
+            "health",
+            f"could not load config, defaulting ssh_port=922: {e}",
+            paths,
+        )
         ssh_port = 922
 
     report.checks.append(check_ufw(ssh_port=ssh_port))

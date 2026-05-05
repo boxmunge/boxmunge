@@ -140,3 +140,65 @@ class TestCheckConfigDrift:
         )
         check = check_config_drift(paths)
         assert check.status == "ok"
+
+
+class TestSshPortLookup:
+    """run_health logs and falls back to 922 when load_config raises
+    ConfigError, instead of swallowing every exception in sight."""
+
+    def test_config_error_logged_and_default_used(self, paths: BoxPaths) -> None:
+        from unittest.mock import patch
+        from boxmunge.commands.health_cmd import run_health
+        from boxmunge.config import ConfigError
+
+        ok_check = HealthCheck("stub", "ok", "")
+        captured_ssh_port: dict[str, int] = {}
+
+        def capture_ufw(ssh_port: int = 922) -> HealthCheck:
+            captured_ssh_port["value"] = ssh_port
+            return ok_check
+
+        # Patch every check so we can run end-to-end without touching the
+        # host. The ssh_port path uses local imports, so we patch at the
+        # source modules.
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for t in [
+                "boxmunge.commands.health_cmd.check_docker_running",
+                "boxmunge.commands.health_cmd.check_caddy_container",
+                "boxmunge.commands.health_cmd.check_system_container",
+                "boxmunge.commands.health_cmd.check_file_permissions",
+                "boxmunge.commands.health_cmd.check_age_key",
+                "boxmunge.commands.health_cmd.check_project_containers",
+                "boxmunge.commands.health_cmd.check_config_drift",
+                "boxmunge.commands.health_cmd.check_recent_errors",
+            ]:
+                stack.enter_context(patch(t, return_value=ok_check))
+            for t in [
+                "boxmunge.health_checks.container_updates.check_container_updates",
+                "boxmunge.health_checks.security.check_security_profiles",
+                "boxmunge.health_checks.hardening.check_crowdsec",
+                "boxmunge.health_checks.hardening.check_aide_status",
+                "boxmunge.health_checks.hardening.check_auditd",
+                "boxmunge.health_checks.hardening.check_unattended_upgrades",
+                "boxmunge.health_checks.hardening.check_sysctl_hardening",
+                "boxmunge.health_checks.hardening.check_systemd_timers",
+            ]:
+                stack.enter_context(patch(t, return_value=ok_check))
+            stack.enter_context(patch(
+                "boxmunge.health_checks.hardening.check_ufw",
+                side_effect=capture_ufw,
+            ))
+            stack.enter_context(patch(
+                "boxmunge.config.load_config",
+                side_effect=ConfigError("file gone"),
+            ))
+            mw = stack.enter_context(patch("boxmunge.log.log_warning"))
+            run_health(paths, as_json=True)
+
+        assert captured_ssh_port["value"] == 922
+        assert any(
+            "ssh_port=922" in c.args[1] for c in mw.call_args_list
+        ), (
+            f"expected log_warning about ssh_port default; got {mw.call_args_list}"
+        )
