@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from boxmunge.paths import BoxPaths
+from boxmunge.pause import is_paused
 
 
 @dataclass
@@ -163,6 +164,8 @@ def check_project_containers(paths: BoxPaths) -> HealthCheck:
 
     down_projects = []
     for name in projects:
+        if is_paused(name, paths):
+            continue
         compose_cmd = ["docker", "compose", "-f", "compose.yml"]
         override = paths.project_compose_override(name)
         if override.exists():
