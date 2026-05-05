@@ -144,7 +144,8 @@ def run_resume(
     off_services = {svc for svc, _ in services_with_off_profile(manifest)}
     try:
         validate_user_compose(
-            paths.project_compose(project_name), off_services=off_services,
+            paths.project_compose(project_name), paths,
+            off_services=off_services,
         )
     except ComposeSecurityError as e:
         print(f"ERROR: {e}", file=sys.stderr)
@@ -173,7 +174,7 @@ def run_resume(
         log_warning("resume", f"Smoke failed after resume: {smoke_msg}",
                     paths, project=project_name)
         try:
-            from boxmunge.config import load_config
+            from boxmunge.config import ConfigError, load_config
             cfg = load_config(paths)
             po = cfg.get("pushover", {})
             send_notification(
@@ -181,8 +182,9 @@ def run_resume(
                 "boxmunge resume: smoke failed",
                 f"{project_name} resumed but smoke test failed: {smoke_msg}",
             )
-        except Exception:
-            pass
+        except (ConfigError, OSError, KeyError) as e:
+            log_warning("resume", f"could not send Pushover: {e}",
+                        paths, project=project_name)
 
     # Clear paused state (regardless of smoke outcome — project is
     # no longer paused, just possibly unhealthy).
