@@ -71,3 +71,29 @@ class TestReadPausedState:
     def test_returns_none_when_not_paused(self, tmp_path: Path) -> None:
         paths = _setup(tmp_path)
         assert read_paused_state("myapp", paths) is None
+
+
+class TestRenderMaintenanceCaddyConfig:
+    def test_includes_all_hosts(self) -> None:
+        from boxmunge.pause import render_maintenance_caddy_config
+        config = render_maintenance_caddy_config(["a.example.com", "b.example.com"])
+        assert "a.example.com" in config
+        assert "b.example.com" in config
+
+    def test_serves_503_with_retry_after(self) -> None:
+        from boxmunge.pause import render_maintenance_caddy_config
+        config = render_maintenance_caddy_config(["a.example.com"])
+        assert "503" in config
+        assert "Retry-After" in config
+
+    def test_uses_file_server_from_maintenance_dir(self) -> None:
+        from boxmunge.pause import render_maintenance_caddy_config
+        config = render_maintenance_caddy_config(["a.example.com"])
+        assert "/etc/caddy/maintenance" in config
+        assert "file_server" in config
+
+    def test_raises_if_no_hosts(self) -> None:
+        import pytest
+        from boxmunge.pause import render_maintenance_caddy_config
+        with pytest.raises(ValueError, match="at least one host"):
+            render_maintenance_caddy_config([])

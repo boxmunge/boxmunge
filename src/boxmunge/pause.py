@@ -51,3 +51,25 @@ def read_paused_state(
     if not path.exists():
         return None
     return json.loads(path.read_text())
+
+
+def render_maintenance_caddy_config(hosts: list[str]) -> str:
+    """Generate a Caddyfile fragment that serves the maintenance page.
+
+    Issues HTTP 503 with a Retry-After header, serving the static HTML
+    out of /etc/caddy/maintenance (mounted from
+    /opt/boxmunge/caddy/maintenance on the host).
+    """
+    if not hosts:
+        raise ValueError("Maintenance config requires at least one host")
+    host_block = ", ".join(hosts)
+    return (
+        f"{host_block} {{\n"
+        f"  handle {{\n"
+        f"    header Retry-After 3600\n"
+        f"    root * /etc/caddy/maintenance\n"
+        f"    file_server\n"
+        f"    respond 503\n"
+        f"  }}\n"
+        f"}}\n"
+    )
