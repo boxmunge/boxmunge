@@ -40,10 +40,16 @@ class TestGenerateComposeOverride:
         networks = parsed["services"]["frontend"]["networks"]
         assert "boxmunge-proxy" in networks
 
-    def test_internal_services_excluded(self) -> None:
+    def test_internal_services_excluded_from_proxy(self) -> None:
+        """Non-routable services don't get proxy-network aliases.
+
+        They may still appear in the overlay for other reasons (env_files,
+        limits, hardening), but never with a boxmunge-proxy network entry.
+        """
         override = generate_compose_override(FULL_MANIFEST)
         parsed = yaml.safe_load(override)
-        assert "db" not in parsed["services"]
+        db = parsed["services"].get("db", {})
+        assert "networks" not in db
 
     def test_backend_with_routes_gets_proxy_network(self) -> None:
         override = generate_compose_override(FULL_MANIFEST)
@@ -374,3 +380,60 @@ volumes:
         assert "./data-staging:/app/data" in volumes
         assert "cache:/app/cache" in volumes
         assert "./config-staging:/app/config:ro" in volumes
+
+
+class TestComposeSecurityHardening:
+    def _manifest(self, security=None, service_security=None):
+        m = {
+            "project": "demo",
+            "hosts": ["demo.example.com"],
+            "services": {
+                "web": {
+                    "type": "frontend",
+                    "port": 3000,
+                    "routes": [{"path": "/"}],
+                },
+            },
+        }
+        if security is not None:
+            m["security"] = security
+        if service_security is not None:
+            m["services"]["web"]["security"] = service_security
+        return m
+
+    def test_default_injects_no_new_privileges_init_pids_capdrop(self) -> None:
+        override = generate_compose_override(self._manifest())
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        assert "no-new-privileges:true" in web["security_opt"]
+        assert web["init"] is True
+        assert web["pids_limit"] == 512
+        assert "NET_ADMIN" in web["cap_drop"]
+        assert "NET_RAW" in web["cap_drop"]
+
+    def test_off_omits_hardening_fields(self) -> None:
+        override = generate_compose_override(
+            self._manifest(security={"profile": "off", "reason": "test"})
+        )
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        assert "security_opt" not in web
+        assert "init" not in web
+        assert "pids_limit" not in web
+        assert "cap_drop" not in web
+
+    def test_service_cap_add_subtracts_from_drop(self) -> None:
+        override = generate_compose_override(
+            self._manifest(service_security={"cap_add": ["NET_RAW"]})
+        )
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        assert "NET_RAW" not in web["cap_drop"]
+        assert "NET_RAW" in web["cap_add"]
+
+    def test_per_service_pids_override(self) -> None:
+        override = generate_compose_override(
+            self._manifest(service_security={"pids_limit": 4096})
+        )
+        parsed = yaml.safe_load(override)
+        assert parsed["services"]["web"]["pids_limit"] == 4096

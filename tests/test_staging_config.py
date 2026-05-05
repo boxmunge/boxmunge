@@ -58,7 +58,12 @@ class TestStagingComposeOverride:
             assert "default" in networks, f"{svc} missing default network"
             assert "boxmunge-proxy" in networks, f"{svc} missing boxmunge-proxy"
 
-    def test_internal_services_excluded(self) -> None:
+    def test_internal_services_excluded_from_proxy(self) -> None:
+        """Non-routable services don't get proxy-network aliases in staging.
+
+        They may still appear for hardening, env_files, or limits, but
+        never with a boxmunge-proxy network entry.
+        """
         manifest = {
             **MANIFEST,
             "services": {
@@ -67,7 +72,9 @@ class TestStagingComposeOverride:
             },
         }
         content = generate_staging_compose_override(manifest)
-        assert "db" not in content
+        parsed = yaml.safe_load(content)
+        db = parsed["services"].get("db", {})
+        assert "networks" not in db
 
 
 class TestStagingComposeBase:
