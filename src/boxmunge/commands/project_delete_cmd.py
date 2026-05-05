@@ -63,7 +63,7 @@ def run_project_delete(project_name: str, paths: BoxPaths, yes: bool = False) ->
         except ValueError:
             pass
 
-    log_operation("delete", "Project deleted", paths, project=project_name)
+    log_operation("project-delete", "Project deleted", paths, project=project_name)
     print(f"Project '{project_name}' deleted.")
     return 0
 
