@@ -143,3 +143,13 @@ class TestDispatchCommand:
         assert result == 0
         # Should delegate to the real sftp-server, not boxmunge-sftp
         mock_run.assert_called_once_with(["/usr/lib/openssh/sftp-server"], check=False)
+
+
+class TestPauseResumeAllowed:
+    def test_pause_in_allowlist(self) -> None:
+        from boxmunge.shell import ALLOWED_COMMANDS
+        assert "pause" in ALLOWED_COMMANDS
+
+    def test_resume_in_allowlist(self) -> None:
+        from boxmunge.shell import ALLOWED_COMMANDS
+        assert "resume" in ALLOWED_COMMANDS

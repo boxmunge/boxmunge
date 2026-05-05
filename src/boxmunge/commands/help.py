@@ -25,6 +25,8 @@ Project lifecycle:
   unstage <project>       Tear down staging
   prod-deploy <project>   Deploy directly to production (skip staging)
   rollback <project>      Restore previous deployment
+  pause <project>         Take offline with a styled maintenance page
+  resume <project>        Bring back online (pulls latest images first)
   diff <project>          Preview what a deploy would change
   project-add <name>      Register a project name in the allowlist
   project-list            List registered project names
@@ -101,6 +103,11 @@ Managing secrets:
   secrets set <project> DB_URL="postgres://..."
   secrets set --host GITHUB_TOKEN=ghp_xxx
   secrets list <project>
+
+Scheduled maintenance:
+  pause <project>     — take offline; visitors see a maintenance page
+  resume <project>    — bring back online; pulls latest images first
+                        (use --skip-security-checks only in emergencies)
 
 First moves:
   status              — see what's deployed and its health

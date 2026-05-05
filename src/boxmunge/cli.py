@@ -26,6 +26,8 @@ from boxmunge.commands.test_restore_cmd import cmd_test_restore
 from boxmunge.commands.diff_cmd import cmd_diff
 from boxmunge.commands.secrets_cmd import cmd_secrets
 from boxmunge.commands.unstage_cmd import cmd_unstage
+from boxmunge.commands.pause_cmd import cmd_pause
+from boxmunge.commands.resume_cmd import cmd_resume
 from boxmunge.commands.validate import cmd_validate
 from boxmunge.commands.bundle_cmd import cmd_bundle
 from boxmunge.commands.health_cmd import cmd_health
@@ -67,6 +69,8 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "stage": cmd_stage,
     "promote": cmd_promote,
     "unstage": cmd_unstage,
+    "pause": cmd_pause,
+    "resume": cmd_resume,
     "secrets": cmd_secrets,
     "diff": cmd_diff,
     "bundle": cmd_bundle,
