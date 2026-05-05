@@ -37,3 +37,10 @@ class TestCLI:
         from boxmunge.cli import COMMANDS
         assert "prod-deploy" in COMMANDS
         assert "deploy" not in COMMANDS
+
+
+def test_security_command_is_registered() -> None:
+    from boxmunge.cli import COMMANDS
+    assert "security" in COMMANDS
+    from boxmunge.commands.security_cmd import cmd_security
+    assert COMMANDS["security"] is cmd_security
