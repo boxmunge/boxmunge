@@ -171,6 +171,38 @@ def run_check(project_name: str, paths: BoxPaths, verbose: bool = True) -> int:
     return worst_status
 
 
+# Window after deploy/resume during which warning-level failures are masked.
+# A health timer firing in the second between deploy completion and the
+# container becoming responsive is a false alarm — the next 15-minute check
+# is the real verdict. Critical failures are NOT masked.
+DEPLOY_GRACE_SECONDS = 60
+
+
+def _within_deploy_grace(project_name: str, paths: BoxPaths, now_iso: str) -> bool:
+    """True if the project was started within DEPLOY_GRACE_SECONDS.
+
+    Reads `last_started_at` from the deploy state, written by deploy
+    and resume. Missing field (e.g. project not started since this code
+    rolled out) returns False — fall through to normal failure handling.
+    """
+    from datetime import datetime, timezone
+
+    deploy_state = read_state(paths.project_deploy_state(project_name))
+    last_started = deploy_state.get("last_started_at", "")
+    if not last_started:
+        return False
+    try:
+        started_dt = datetime.fromisoformat(last_started.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if started_dt.tzinfo is None:
+        started_dt = started_dt.replace(tzinfo=timezone.utc)
+    now_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    return (now_dt - started_dt).total_seconds() < DEPLOY_GRACE_SECONDS
+
+
 def update_health_state(
     project_name: str,
     check_result: int,
@@ -201,6 +233,22 @@ def update_health_state(
     prev_message = state.get("failure_reason", "")
     consecutive = state.get("consecutive_failures", 0)
     alerted = state.get("alerted", False)
+
+    # Warning during deploy/resume grace: log it, update last_check, but
+    # don't escalate to FAILING and don't increment the failure counter.
+    # Critical (check_result == 2) is NOT masked — it stops containers
+    # which is too serious to silence.
+    if check_result == 1 and _within_deploy_grace(project_name, paths, now):
+        log_operation(
+            "health",
+            f"Skipped warning during deploy/resume grace window: {message}",
+            paths, project=project_name,
+        )
+        write_state(state_path, {
+            **state,
+            "last_check": now,
+        })
+        return
 
     if check_result == 0:
         # Recovery

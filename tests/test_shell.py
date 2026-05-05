@@ -100,6 +100,25 @@ class TestDispatchCommand:
         mock_run.assert_called_once_with(["boxmunge-server", "upgrade", "--dry-run"])
 
     @patch("boxmunge.shell.subprocess.run")
+    def test_upgrade_target_version_routes_to_shim(self, mock_run: MagicMock) -> None:
+        """`upgrade --target VERSION` goes through the root-context shim
+        (downloading a specific bundle requires the same privileged path
+        as `upgrade auto`)."""
+        mock_run.return_value = MagicMock(returncode=0)
+        run_command("upgrade", ["--target", "0.3.5"])
+        mock_run.assert_called_once_with(
+            ["sudo", "-n", "/opt/boxmunge/bin/boxmunge-upgrade", "target", "0.3.5"]
+        )
+
+    @patch("boxmunge.shell.subprocess.run")
+    def test_upgrade_target_without_version_errors(self, mock_run: MagicMock) -> None:
+        """`upgrade --target` without a version must fail noisily and must NOT
+        be routed onward (neither to the shim nor to boxmunge-server)."""
+        rc = run_command("upgrade", ["--target"])
+        assert rc != 0
+        mock_run.assert_not_called()
+
+    @patch("boxmunge.shell.subprocess.run")
     def test_dispatches_with_args(self, mock_run: MagicMock) -> None:
         mock_run.return_value = MagicMock(returncode=0)
         run_command("prod-deploy", ["myapp", "--dry-run"])

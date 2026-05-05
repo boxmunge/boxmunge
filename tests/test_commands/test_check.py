@@ -173,3 +173,108 @@ class TestRunCheckPreRegistered:
         captured = capsys.readouterr()
         assert "pre-registered" in captured.out
         assert "boxmunge deploy myapp" in captured.out
+
+
+class TestDeployResumeGracePeriod:
+    """Health-timer fires in the second between deploy/resume and the
+    container becoming responsive. The first warning-level failure
+    in that window is a false alarm — the next check (15 min later)
+    is the real verdict. Mask the alert without hiding genuine outages
+    that persist past the grace window.
+    """
+
+    def _setup(self, paths: BoxPaths):
+        from boxmunge.state import write_state
+        paths.state.mkdir(parents=True, exist_ok=True)
+        (paths.state / "deploy").mkdir(parents=True, exist_ok=True)
+        (paths.state / "health").mkdir(parents=True, exist_ok=True)
+        (paths.root / "logs").mkdir(parents=True, exist_ok=True)
+        (paths.root / "config").mkdir(parents=True, exist_ok=True)
+        paths.config_file.write_text("hostname: t\nadmin_email: t@t\n")
+
+    def test_warning_within_grace_does_not_mark_failing(self, paths: BoxPaths):
+        from datetime import datetime, timezone
+        from boxmunge.commands.check import update_health_state
+        from boxmunge.state import read_state, write_state
+
+        self._setup(paths)
+        # Project just started: last_started_at = now
+        now_iso = datetime.now(timezone.utc).isoformat()
+        write_state(paths.project_deploy_state("myapp"), {
+            "current_ref": "main",
+            "deployed_at": now_iso,
+            "last_started_at": now_iso,
+        })
+
+        # Warning-level failure (smoke flake while service is starting)
+        update_health_state("myapp", check_result=1, message="connection refused", paths=paths)
+
+        state = read_state(paths.project_health_state("myapp"))
+        assert state.get("status") != "failing", (
+            f"warning within grace must not mark failing; got status={state.get('status')!r}"
+        )
+        assert state.get("consecutive_failures", 0) == 0, (
+            "consecutive_failures must not increment during grace window"
+        )
+
+    def test_warning_outside_grace_marks_failing(self, paths: BoxPaths):
+        from datetime import datetime, timedelta, timezone
+        from boxmunge.commands.check import update_health_state
+        from boxmunge.state import read_state, write_state
+
+        self._setup(paths)
+        # Started 10 minutes ago — well outside grace
+        old_iso = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        write_state(paths.project_deploy_state("myapp"), {
+            "current_ref": "main",
+            "deployed_at": old_iso,
+            "last_started_at": old_iso,
+        })
+
+        update_health_state("myapp", check_result=1, message="real failure", paths=paths)
+
+        state = read_state(paths.project_health_state("myapp"))
+        assert state["status"] == "failing", (
+            f"warning outside grace must mark failing; got {state.get('status')!r}"
+        )
+
+    def test_critical_within_grace_still_stops_containers(self, paths: BoxPaths):
+        """Critical failures (smoke exit 2) are too serious to mask. They
+        stop containers and mark status critical_stopped regardless of
+        deploy timing — operators MUST be alerted."""
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+        from boxmunge.commands.check import update_health_state
+        from boxmunge.state import read_state, write_state
+
+        self._setup(paths)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        write_state(paths.project_deploy_state("myapp"), {
+            "current_ref": "main",
+            "deployed_at": now_iso,
+            "last_started_at": now_iso,
+        })
+
+        # Stub compose_down so we don't actually shell out
+        with patch("boxmunge.commands.check.compose_down"):
+            update_health_state("myapp", check_result=2, message="hard failure", paths=paths)
+
+        state = read_state(paths.project_health_state("myapp"))
+        assert state["status"] == "critical_stopped", (
+            "critical failures during grace must still escalate"
+        )
+
+    def test_no_started_state_falls_through_to_normal_failure_path(self, paths: BoxPaths):
+        """Old projects that haven't been started since the upgrade have
+        no last_started_at field; behavior must match pre-grace logic
+        (warning increments consecutive_failures)."""
+        from boxmunge.commands.check import update_health_state
+        from boxmunge.state import read_state
+
+        self._setup(paths)
+        # No deploy state at all (or no last_started_at field)
+        update_health_state("myapp", check_result=1, message="some warning", paths=paths)
+
+        state = read_state(paths.project_health_state("myapp"))
+        assert state["status"] == "failing"
+        assert state["consecutive_failures"] == 1

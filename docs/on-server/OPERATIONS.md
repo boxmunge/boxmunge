@@ -346,6 +346,18 @@ boxmunge resume myapp --skip-security-checks   # only if you accept the risk
 
 This brings containers up on whatever images are already cached locally. Do not use it casually -- you are explicitly accepting that the project may be running known-vulnerable code.
 
+### Caddy maintenance-dir mount
+
+The styled 503 page is served by Caddy from `/etc/caddy/maintenance` (mounted from `/opt/boxmunge/caddy/maintenance/` on the host). The mount is fixed in `caddy/compose.yml`. If you ever hand-edit the Caddy compose file without changing the bundled version, `install.sh`'s file-equality check (`cmp -s`) will not detect the drift and `docker compose up -d` will not recreate the container -- the running Caddy will keep its stale mounts.
+
+If the maintenance page does not render after an upgrade, force a Caddy recreate explicitly:
+
+```
+sudo docker compose -f /opt/boxmunge/caddy/compose.yml up -d --force-recreate
+```
+
+Then `curl -I https://your-paused-host/` and confirm it returns `HTTP/1.1 503` with `Retry-After: 3600`.
+
 ---
 
 ## Host Maintenance

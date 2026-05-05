@@ -1,6 +1,6 @@
 [project]
 name = "boxmunge-server"
-version = "0.4.1"
+version = "0.4.2"
 description = "Minimalist, agent-friendly VPS hosting framework"
 requires-python = ">=3.10"
 dependencies = [

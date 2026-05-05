@@ -24,6 +24,7 @@ from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import is_paused, clear_paused_state
 from boxmunge.paths import BoxPaths, validate_project_name
 from boxmunge.pushover import send_notification
+from boxmunge.state import read_state, write_state
 
 
 def _has_image_services(project_dir: Path, compose_files: list[str]) -> bool:
@@ -170,6 +171,15 @@ def run_resume(
     # Clear paused state (regardless of smoke outcome — project is
     # no longer paused, just possibly unhealthy).
     clear_paused_state(project_name, paths)
+
+    # Bump last_started_at so the health-check grace window kicks in.
+    # The 1-second race between resume completion and the container
+    # becoming responsive used to surface as a transient FAILING status.
+    from datetime import datetime, timezone
+    deploy_state_path = paths.project_deploy_state(project_name)
+    deploy_state = read_state(deploy_state_path)
+    deploy_state["last_started_at"] = datetime.now(timezone.utc).isoformat()
+    write_state(deploy_state_path, deploy_state)
 
     log_operation("resume", "Project resumed", paths,
                   project=project_name,

@@ -138,6 +138,81 @@ fi
 rm -rf "$test_dir"
 unset BOXMUNGE_ROOT
 
+# ---------------------------------------------------------------------------
+# cmd_target — pin to specific version, bypass discovery
+# ---------------------------------------------------------------------------
+
+# target with no version: usage error
+out="$(bash "$SHIM" target 2>&1 >/dev/null || true)"
+if [[ "$out" == *"Usage: boxmunge-upgrade target"* ]]; then
+    echo "PASS: target without version shows usage"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: target without version (got '$out')"
+    FAIL=$((FAIL + 1))
+fi
+
+# target with malformed version (contains shell metachars): rejected
+for bad in "1.0" "abc" "1.0.0; rm -rf /" "../../etc/passwd" "1.0.0\$(whoami)"; do
+    out="$(bash "$SHIM" target "$bad" 2>&1 >/dev/null || true)"
+    if [[ "$out" == *"Invalid version"* ]]; then
+        echo "PASS: target rejects malformed version '$bad'"
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: target accepted malformed version '$bad' (got '$out')"
+        FAIL=$((FAIL + 1))
+    fi
+done
+
+# target with valid version: validation passes (then proceeds to cmd_run which
+# will fail later without infrastructure — we only test that the dispatch works
+# and validation passes, by checking we get past the case statement).
+# Using a noop $BOXMUNGE_ROOT means cmd_run will fail at preflight, which is fine.
+test_dir="$(mktemp -d)"
+export BOXMUNGE_ROOT="$test_dir"
+mkdir -p "$BOXMUNGE_ROOT/upgrade-state" "$BOXMUNGE_ROOT/env-a/bin"
+
+# Mock boxmunge-server so --version probe in cmd_run doesn't fail
+cat > "$BOXMUNGE_ROOT/env-a/bin/boxmunge-server" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$BOXMUNGE_ROOT/env-a/bin/boxmunge-server"
+
+out="$(bash "$SHIM" target "0.3.5" 2>&1 >/dev/null || true)"
+# We expect to see "Targeted upgrade: 0.3.5" log AND get past validation.
+# If validation rejected it, "Invalid version" would appear instead.
+if [[ "$out" == *"Targeted upgrade: 0.3.5"* && "$out" != *"Invalid version"* ]]; then
+    echo "PASS: target accepts valid semver and dispatches to cmd_run"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: target with valid version (got '$out')"
+    FAIL=$((FAIL + 1))
+fi
+
+# Pre-release versions are also valid (e.g. 0.3.5-rc.1)
+out="$(bash "$SHIM" target "0.3.5-rc.1" 2>&1 >/dev/null || true)"
+if [[ "$out" == *"Targeted upgrade: 0.3.5-rc.1"* && "$out" != *"Invalid version"* ]]; then
+    echo "PASS: target accepts pre-release version"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: target with pre-release version (got '$out')"
+    FAIL=$((FAIL + 1))
+fi
+
+rm -rf "$test_dir"
+unset BOXMUNGE_ROOT
+
+# Updated usage message includes 'target'
+out="$(bash "$SHIM" 2>&1 >/dev/null || true)"
+if [[ "$out" == *"target"* ]]; then
+    echo "PASS: usage line lists 'target' subcommand"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: usage line missing 'target' (got '$out')"
+    FAIL=$((FAIL + 1))
+fi
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]] || exit 1

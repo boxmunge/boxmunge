@@ -8,6 +8,7 @@
 # Entry points:
 #   boxmunge-upgrade run <version> <url>      — full upgrade flow with explicit version
 #   boxmunge-upgrade auto                     — discover latest + run (manual upgrade UX)
+#   boxmunge-upgrade target <version>         — pin to a specific version (bypass discovery)
 #   boxmunge-upgrade check-probation          — called by health timer
 #   boxmunge-upgrade clear-blocklist <version> — manual blocklist mgmt
 
@@ -331,6 +332,19 @@ cmd_auto() {
     esac
 }
 
+cmd_target() {
+    local version="${1:?Usage: boxmunge-upgrade target <version>}"
+    # Validate version: digits.digits.digits with optional pre-release suffix.
+    # The version is interpolated into a URL; reject anything that could
+    # contain shell metacharacters or path traversal.
+    if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]; then
+        die "Invalid version: '$version' (expected semver like 0.3.5 or 0.3.5-rc.1)"
+    fi
+    local url="https://github.com/boxmunge/boxmunge/releases/download/v${version}/boxmunge-${version}.tar.gz"
+    log "Targeted upgrade: $version"
+    cmd_run "$version" "$url"
+}
+
 cmd_clear_blocklist() {
     local version="${1:?Usage: boxmunge-upgrade clear-blocklist <version>}"
     BM_VERSION="$version" "$(active_venv)/bin/python" -c "
@@ -345,7 +359,8 @@ remove_from_blocklist(BoxPaths(), os.environ['BM_VERSION'])
 case "${1:-}" in
     run)             shift; cmd_run "$@" ;;
     auto)            cmd_auto ;;
+    target)          shift; cmd_target "$@" ;;
     check-probation) cmd_check_probation ;;
     clear-blocklist) shift; cmd_clear_blocklist "$@" ;;
-    *)               die "Usage: boxmunge-upgrade {run|auto|check-probation|clear-blocklist} [args]" ;;
+    *)               die "Usage: boxmunge-upgrade {run|auto|target|check-probation|clear-blocklist} [args]" ;;
 esac

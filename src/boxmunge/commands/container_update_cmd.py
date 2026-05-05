@@ -136,9 +136,33 @@ def run_container_update(
             if target.is_caddy:
                 continue
             if is_paused(target.name, paths):
+                # Pre-fetch images for paused projects: dry-run pulls (no
+                # apply) so resume time stays short, and we surface what's
+                # pending so the operator can see queued updates in the log.
+                # Failures here MUST be non-fatal (e.g. registry outage) —
+                # this is best-effort visibility, not a hard requirement.
+                try:
+                    paused_result = _dry_run_target(paths, target)
+                except Exception as e:
+                    paused_result = {
+                        "name": target.name, "status": "failed",
+                        "reason": f"dry_run_exception: {e}",
+                        "previous_digests": {}, "current_digests": {},
+                    }
+                pending = sorted((paused_result.get("current_digests") or {}).keys()
+                                 if paused_result.get("status") == "would_change" else [])
+                # Reframe status to 'paused' so the run summary doesn't count it as failed.
+                paused_result["status"] = "paused"
+                paused_result["pending_services"] = pending
+                results.append(paused_result)
+                if pending:
+                    msg = f"Skipped paused project (pending updates: {', '.join(pending)})"
+                else:
+                    msg = "Skipped paused project (no pending updates)"
                 log_operation(
-                    "container-update", "Skipped paused project", paths,
+                    "container-update", msg, paths,
                     project=target.name,
+                    detail={"pending_services": pending},
                 )
                 continue
             try:

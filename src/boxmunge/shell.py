@@ -218,6 +218,22 @@ def run_command(command: str, args: list[str]) -> int:
         )
         return result.returncode
 
+    # `upgrade --target VERSION` lets an operator pin to a specific older
+    # build (e.g. roll forward to a known-good version after a bad release).
+    # Same privileged path as `upgrade auto`, just with discovery bypassed.
+    if command == "upgrade" and args[:1] == ["--target"]:
+        if len(args) != 2 or not args[1]:
+            print(
+                "ERROR: --target requires a version argument "
+                "(e.g. `upgrade --target 0.3.5`)",
+                file=sys.stderr,
+            )
+            return 2
+        result = subprocess.run(
+            ["sudo", "-n", "/opt/boxmunge/bin/boxmunge-upgrade", "target", args[1]]
+        )
+        return result.returncode
+
     result = subprocess.run(["boxmunge-server", command] + args)
     return result.returncode
 
