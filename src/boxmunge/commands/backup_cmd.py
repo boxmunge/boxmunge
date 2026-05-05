@@ -14,6 +14,7 @@ from boxmunge.fileutil import project_lock, LockError
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
+from boxmunge.pause import is_paused
 from boxmunge.probation import clear_probation_if_active
 
 
@@ -64,6 +65,12 @@ def list_snapshots(paths: BoxPaths, project_name: str) -> list[Path]:
 
 def run_backup(project_name: str, paths: BoxPaths, _lock_held: bool = False) -> int:
     """Run backup for a project. Returns 0 on success, 1 on failure."""
+    if is_paused(project_name, paths):
+        print(
+            f"ERROR: Project '{project_name}' is paused. Resume first.",
+            file=sys.stderr,
+        )
+        return 1
     clear_probation_if_active(paths, "backup")
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists():
@@ -174,6 +181,9 @@ def run_backup_all(paths: BoxPaths) -> int:
 
     worst = 0
     for name in projects:
+        if is_paused(name, paths):
+            print(f"  Skipping {name}: paused.")
+            continue
         result = run_backup(name, paths)
         worst = max(worst, result)
 

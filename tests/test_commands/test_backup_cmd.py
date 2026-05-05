@@ -4,7 +4,8 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from boxmunge.commands.backup_cmd import run_backup, list_snapshots
+from boxmunge.commands.backup_cmd import run_backup, run_backup_all, list_snapshots
+from boxmunge.pause import write_paused_state
 from boxmunge.paths import BoxPaths
 
 
@@ -93,6 +94,43 @@ class TestRunBackup:
         captured = capsys.readouterr()
         assert "pre-registered" in captured.out
         assert "boxmunge deploy myapp" in captured.out
+
+
+class TestBackupRefusesPaused:
+    def test_run_backup_refuses_paused(self, paths: BoxPaths, capsys) -> None:
+        _setup_project(paths, MANIFEST_WITH_BACKUP)
+        write_paused_state("myapp", paths)
+
+        rc = run_backup("myapp", paths)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "paused" in err.lower()
+
+
+class TestBackupAllSkipsPaused:
+    @patch("boxmunge.commands.backup_cmd.run_backup")
+    def test_skips_paused_in_all(
+        self, mock_backup: MagicMock, paths: BoxPaths, capsys
+    ) -> None:
+        for name in ("myapp", "otherapp"):
+            pdir = paths.project_dir(name)
+            pdir.mkdir(parents=True)
+            (pdir / "manifest.yml").write_text(
+                MANIFEST_WITH_BACKUP.replace("project: myapp", f"project: {name}")
+            )
+
+        write_paused_state("myapp", paths)
+        mock_backup.return_value = 0
+
+        run_backup_all(paths)
+
+        called_projects = [call.args[0] for call in mock_backup.call_args_list]
+        assert "myapp" not in called_projects
+        assert "otherapp" in called_projects
+
+        captured = capsys.readouterr()
+        assert "myapp" in captured.out
+        assert "paused" in captured.out.lower()
 
 
 class TestListSnapshots:
