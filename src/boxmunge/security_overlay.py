@@ -249,6 +249,52 @@ def services_with_off_profile(manifest: dict[str, Any]) -> list[tuple[str, str]]
     return result
 
 
+def services_with_overrides(manifest: dict[str, Any]) -> list[tuple[str, list[str]]]:
+    """Return [(service_name, [diff_descriptions])] for every service whose
+    effective config differs from the default baseline AND is not `off`.
+
+    Used for info-level visibility in health and check reports — surfaces
+    deliberate per-flag relaxations like `cap_add: [NET_RAW]` so an operator
+    or new team member can see at a glance which services have been tuned.
+
+    Services on `profile: off` are NOT returned here — they are handled by
+    `services_with_off_profile` at warning level.
+    """
+    project_sec = manifest.get("security") or {}
+    services = manifest.get("services") or {}
+    default_baseline = _baseline_for_profile(PROFILE_DEFAULT)
+    result: list[tuple[str, list[str]]] = []
+
+    for svc_name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        svc_sec = svc.get("security")
+        if _effective_profile(project_sec, svc_sec) == PROFILE_OFF:
+            continue
+        resolved = resolve_security(project_sec, svc_sec)
+        if resolved == default_baseline:
+            continue
+        diffs: list[str] = []
+        # Compare each known field. Surface differences in deterministic order.
+        for key in ("no_new_privileges", "init", "pids_limit", "cap_drop", "cap_add"):
+            if key == "no_new_privileges":
+                # Map back from security_opt presence.
+                resolved_nnp = "no-new-privileges:true" in resolved.get("security_opt", [])
+                default_nnp = "no-new-privileges:true" in default_baseline.get("security_opt", [])
+                if resolved_nnp != default_nnp:
+                    diffs.append(f"no_new_privileges={resolved_nnp}")
+                continue
+            if key == "cap_drop":
+                if set(resolved.get(key, [])) != set(default_baseline.get(key, [])):
+                    diffs.append(f"cap_drop={sorted(resolved.get(key, []))}")
+                continue
+            if resolved.get(key) != default_baseline.get(key):
+                diffs.append(f"{key}={resolved.get(key, '(unset)')}")
+        if diffs:
+            result.append((svc_name, diffs))
+    return result
+
+
 def render_compose_security_fragment(resolved: dict[str, Any]) -> dict[str, Any]:
     """Convert the resolver output into the compose service fragment.
 

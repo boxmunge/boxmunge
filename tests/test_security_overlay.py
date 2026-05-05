@@ -268,6 +268,98 @@ class TestOffProfileEnumeration:
         assert services_with_off_profile(manifest) == []
 
 
+from boxmunge.security_overlay import services_with_overrides
+
+
+class TestServicesWithOverrides:
+    """F4: surface per-flag overrides for info-level visibility."""
+
+    def test_default_profile_no_overrides_returns_empty(self) -> None:
+        manifest = {
+            "project": "demo",
+            "services": {"web": {"port": 3000}},
+        }
+        assert services_with_overrides(manifest) == []
+
+    def test_explicit_default_no_overrides_returns_empty(self) -> None:
+        manifest = {
+            "project": "demo",
+            "security": {"profile": "default"},
+            "services": {"web": {"port": 3000}},
+        }
+        assert services_with_overrides(manifest) == []
+
+    def test_off_services_excluded(self) -> None:
+        # off is handled by services_with_off_profile at warn level.
+        manifest = {
+            "project": "demo",
+            "services": {
+                "web": {
+                    "port": 3000,
+                    "security": {"profile": "off", "reason": "x"},
+                },
+            },
+        }
+        assert services_with_overrides(manifest) == []
+
+    def test_cap_add_surfaced(self) -> None:
+        manifest = {
+            "project": "demo",
+            "services": {
+                "web": {
+                    "port": 3000,
+                    "security": {"cap_add": ["NET_RAW"]},
+                },
+            },
+        }
+        result = services_with_overrides(manifest)
+        assert len(result) == 1
+        svc_name, diffs = result[0]
+        assert svc_name == "web"
+        # cap_add and the resulting cap_drop change should both appear.
+        assert any("cap_add" in d and "NET_RAW" in d for d in diffs)
+
+    def test_pids_limit_override_surfaced(self) -> None:
+        manifest = {
+            "project": "demo",
+            "services": {
+                "web": {
+                    "port": 3000,
+                    "security": {"pids_limit": 4096},
+                },
+            },
+        }
+        result = services_with_overrides(manifest)
+        assert result == [("web", ["pids_limit=4096"])]
+
+    def test_no_new_privileges_disable_surfaced(self) -> None:
+        manifest = {
+            "project": "demo",
+            "services": {
+                "web": {
+                    "port": 3000,
+                    "security": {"no_new_privileges": False},
+                },
+            },
+        }
+        result = services_with_overrides(manifest)
+        assert len(result) == 1
+        assert any("no_new_privileges" in d for d in result[0][1])
+
+    def test_project_level_override_applies_to_all_services(self) -> None:
+        manifest = {
+            "project": "demo",
+            "security": {"pids_limit": 2048},
+            "services": {
+                "web": {"port": 3000},
+                "worker": {"port": 4000},
+            },
+        }
+        result = services_with_overrides(manifest)
+        names = sorted(s for s, _ in result)
+        assert names == ["web", "worker"]
+
+
 from boxmunge.security_overlay import render_compose_security_fragment
 
 

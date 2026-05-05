@@ -12,7 +12,10 @@ from typing import TYPE_CHECKING
 
 from boxmunge.commands.health_cmd import HealthCheck
 from boxmunge.manifest import ManifestError, load_manifest
-from boxmunge.security_overlay import services_with_off_profile
+from boxmunge.security_overlay import (
+    services_with_off_profile,
+    services_with_overrides,
+)
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -31,6 +34,7 @@ def check_security_profiles(paths: BoxPaths) -> HealthCheck:
         )
 
     off_entries: list[str] = []
+    override_entries: list[str] = []
     for project_dir in sorted(paths.projects.iterdir()):
         if not project_dir.is_dir():
             continue
@@ -46,12 +50,23 @@ def check_security_profiles(paths: BoxPaths) -> HealthCheck:
         for svc_name, reason in services_with_off_profile(manifest):
             reason_text = reason or "(no reason recorded)"
             off_entries.append(f"{project_name}/{svc_name}: {reason_text}")
+        for svc_name, diffs in services_with_overrides(manifest):
+            override_entries.append(f"{project_name}/{svc_name} ({', '.join(diffs)})")
 
+    # `off` services are warn-level. Overrides are appended to detail
+    # for visibility but do not escalate status.
     if off_entries:
+        detail = "SECURITY OFF -- " + "; ".join(off_entries)
+        if override_entries:
+            detail += " | overrides: " + "; ".join(override_entries)
         return HealthCheck(
-            name="security-profiles",
-            status="warn",
-            detail="SECURITY OFF -- " + "; ".join(off_entries),
+            name="security-profiles", status="warn", detail=detail,
+        )
+    if override_entries:
+        return HealthCheck(
+            name="security-profiles", status="ok",
+            detail="all services on default profile (with overrides: "
+                   + "; ".join(override_entries) + ")",
         )
     return HealthCheck(
         name="security-profiles", status="ok",

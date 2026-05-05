@@ -143,20 +143,27 @@ def run_check(project_name: str, paths: BoxPaths, verbose: bool = True) -> int:
 
     worst_status = 0
 
-    # Surface profile: off as a posture warning during routine checks.
-    # The line is informational/posture, not runtime health — the operator
-    # explicitly opted out with a reason, so we do not escalate the exit
-    # code (no Pushover alert flood every 15 minutes). The deploy-time
-    # warning and `boxmunge security` are the canonical alerts; this line
-    # ensures the posture is visible in routine `check` output too.
-    # Default profile produces no message (silent success).
-    from boxmunge.security_overlay import services_with_off_profile
+    # Surface security posture during routine checks.
+    # - profile: off services produce a WARNING line (no exit-code escalation
+    #   — the operator opted in with a reason; the deploy-time warning is the
+    #   canonical alert, this is just routine visibility).
+    # - per-flag overrides produce an INFO line so they are visible to a new
+    #   operator scanning a project, without implying anything is wrong.
+    # Default profile + no overrides produces no message (silent success).
+    from boxmunge.security_overlay import (
+        services_with_off_profile, services_with_overrides,
+    )
     if verbose:
         for svc_name, reason in services_with_off_profile(manifest):
             reason_text = reason or "(no reason recorded)"
             print(
                 f"  security: WARNING SECURITY OFF -- {svc_name} "
                 f"(reason: {reason_text})"
+            )
+        for svc_name, diffs in services_with_overrides(manifest):
+            print(
+                f"  security: INFO override -- {svc_name} "
+                f"({', '.join(diffs)})"
             )
 
     # Per-service smoke tests — exec inside each container
