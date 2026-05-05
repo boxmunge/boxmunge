@@ -9,6 +9,7 @@ Also logs to stderr for interactive use (human-readable format).
 
 import json
 import logging
+import logging.handlers
 import sys
 from datetime import datetime, timezone
 from typing import Any
@@ -76,9 +77,14 @@ def get_logger(paths: BoxPaths | None = None) -> logging.Logger:
     stderr_handler.setLevel(logging.INFO)
     logger.addHandler(stderr_handler)
 
-    # JSON file handler (if paths provided and log dir exists)
+    # JSON file handler with daily rotation, keep 90 days
+    # (if paths provided and log dir exists)
     if paths is not None and paths.logs.exists():
-        fh = logging.FileHandler(paths.log_file)
+        fh = logging.handlers.TimedRotatingFileHandler(
+            paths.log_file,
+            when="midnight",
+            backupCount=90,
+        )
         fh.setFormatter(_JsonFormatter())
         fh.setLevel(logging.DEBUG)
         logger.addHandler(fh)

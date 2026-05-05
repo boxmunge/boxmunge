@@ -1,9 +1,16 @@
 """Tests for structured JSON-lines logging."""
 
 import json
+import logging.handlers
 from pathlib import Path
 
-from boxmunge.log import log_operation, log_warning, log_error, _reset_logger
+from boxmunge.log import (
+    get_logger,
+    log_operation,
+    log_warning,
+    log_error,
+    _reset_logger,
+)
 from boxmunge.paths import BoxPaths
 
 
@@ -59,3 +66,42 @@ class TestStructuredLog:
         assert len(lines) == 2
         assert json.loads(lines[0])["project"] == "a"
         assert json.loads(lines[1])["project"] == "b"
+
+
+class TestLogRotation:
+    def setup_method(self):
+        _reset_logger()
+
+    def test_file_handler_is_timed_rotating(self, tmp_path: Path) -> None:
+        """File handler must rotate daily; the plain FileHandler grew unbounded."""
+        paths = BoxPaths(root=tmp_path / "bm")
+        paths.logs.mkdir(parents=True)
+        logger = get_logger(paths)
+        file_handlers = [
+            h for h in logger.handlers
+            if isinstance(h, logging.FileHandler)
+        ]
+        assert len(file_handlers) == 1
+        fh = file_handlers[0]
+        assert isinstance(fh, logging.handlers.TimedRotatingFileHandler)
+
+    def test_rotation_keeps_90_days(self, tmp_path: Path) -> None:
+        paths = BoxPaths(root=tmp_path / "bm")
+        paths.logs.mkdir(parents=True)
+        logger = get_logger(paths)
+        fh = next(
+            h for h in logger.handlers
+            if isinstance(h, logging.handlers.TimedRotatingFileHandler)
+        )
+        assert fh.backupCount == 90
+
+    def test_rotation_at_midnight(self, tmp_path: Path) -> None:
+        paths = BoxPaths(root=tmp_path / "bm")
+        paths.logs.mkdir(parents=True)
+        logger = get_logger(paths)
+        fh = next(
+            h for h in logger.handlers
+            if isinstance(h, logging.handlers.TimedRotatingFileHandler)
+        )
+        # `when="midnight"` is normalised to "MIDNIGHT" internally.
+        assert fh.when.upper() == "MIDNIGHT"
