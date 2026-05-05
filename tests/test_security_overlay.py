@@ -141,3 +141,45 @@ class TestServiceFieldOverrides:
             service_security=None,
         )
         assert result["pids_limit"] == 1024
+
+
+from boxmunge.security_overlay import (
+    validate_security_block, SecurityValidationError,
+)
+
+
+class TestValidation:
+    def test_default_profile_no_block_passes(self) -> None:
+        validate_security_block(None, context="project")
+
+    def test_unknown_profile_rejected(self) -> None:
+        with pytest.raises(SecurityValidationError, match="Unknown profile"):
+            validate_security_block({"profile": "custom"}, context="project")
+
+    def test_reserved_profile_rejected_in_v05(self) -> None:
+        with pytest.raises(SecurityValidationError, match="reserved"):
+            validate_security_block({"profile": "strict"}, context="project")
+
+    def test_invalid_cap_name_in_drop_rejected(self) -> None:
+        with pytest.raises(SecurityValidationError, match="Unknown capability"):
+            validate_security_block(
+                {"cap_drop": ["NET_ADMIN", "SYS_NUKE"]}, context="project"
+            )
+
+    def test_invalid_cap_name_in_add_rejected(self) -> None:
+        with pytest.raises(SecurityValidationError, match="Unknown capability"):
+            validate_security_block(
+                {"cap_add": ["FOO_BAR"]}, context="project"
+            )
+
+    def test_negative_pids_limit_rejected(self) -> None:
+        with pytest.raises(SecurityValidationError, match="pids_limit"):
+            validate_security_block({"pids_limit": -1}, context="project")
+
+    def test_pids_limit_zero_accepted_as_disable(self) -> None:
+        # 0 is the explicit-disable sentinel.
+        validate_security_block({"pids_limit": 0}, context="project")
+
+    def test_pids_limit_string_rejected(self) -> None:
+        with pytest.raises(SecurityValidationError, match="pids_limit"):
+            validate_security_block({"pids_limit": "many"}, context="project")

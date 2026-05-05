@@ -141,3 +141,66 @@ def resolve_security(
     baseline = _apply_overrides(baseline, service_security)
     baseline = _subtract_cap_adds(baseline)
     return baseline
+
+
+class SecurityValidationError(ValueError):
+    """Raised when a security: block is malformed."""
+
+
+def validate_security_block(
+    block: dict[str, Any] | None, context: str
+) -> None:
+    """Validate a security: block. Raises SecurityValidationError on problems.
+
+    `context` is "project" or a service name like "service:web", used in
+    error messages so the operator can locate the offending block.
+    """
+    if block is None:
+        return
+    if not isinstance(block, dict):
+        raise SecurityValidationError(
+            f"{context}: security block must be a mapping, got {type(block).__name__}"
+        )
+
+    if "profile" in block:
+        profile = block["profile"]
+        if profile in RESERVED_PROFILES:
+            raise SecurityValidationError(
+                f"{context}: profile {profile!r} is reserved for a future "
+                f"boxmunge release. Use {sorted(KNOWN_PROFILES)} for now."
+            )
+        if profile not in KNOWN_PROFILES:
+            raise SecurityValidationError(
+                f"{context}: Unknown profile {profile!r}. "
+                f"Valid profiles: {sorted(KNOWN_PROFILES)}."
+            )
+
+    for cap_field in ("cap_drop", "cap_add"):
+        if cap_field not in block:
+            continue
+        caps = block[cap_field]
+        if not isinstance(caps, list):
+            raise SecurityValidationError(
+                f"{context}: {cap_field} must be a list, got {type(caps).__name__}"
+            )
+        for cap in caps:
+            if not isinstance(cap, str) or cap not in VALID_CAP_NAMES:
+                raise SecurityValidationError(
+                    f"{context}: Unknown capability {cap!r} in {cap_field}. "
+                    f"Run `agent-help security` for the valid list."
+                )
+
+    if "pids_limit" in block:
+        v = block["pids_limit"]
+        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+            raise SecurityValidationError(
+                f"{context}: pids_limit must be a non-negative integer "
+                f"(0 disables the limit), got {v!r}"
+            )
+
+    for bool_field in ("no_new_privileges", "init"):
+        if bool_field in block and not isinstance(block[bool_field], bool):
+            raise SecurityValidationError(
+                f"{context}: {bool_field} must be true or false, "
+                f"got {block[bool_field]!r}"
+            )
