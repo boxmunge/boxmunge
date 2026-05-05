@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 from contextlib import redirect_stdout
 
 import pytest
@@ -49,8 +50,17 @@ class TestWarnOffServices:
         assert "demo/web" in out
         assert "deliberate" in out
 
-    def test_component_passed_to_log(self, fake_paths) -> None:
-        # Use a sentinel to verify component string flows through.
+    @pytest.mark.parametrize(
+        "component", ["deploy", "stage", "promote", "resume", "upgrade"],
+    )
+    def test_component_passed_to_log(self, fake_paths, component: str) -> None:
+        """Component string must flow through to the JSON log entry.
+
+        Note: `promote` currently logs as `component="promote"` here because
+        warn_off_services receives the component arg directly. The audit-G-1
+        finding (`promote` callsite passes "deploy") is a Phase 6 fix; this
+        test asserts the *flow* of the component arg, not the upstream caller.
+        """
         manifest = {
             "project": "demo",
             "security": {"profile": "off", "reason": "x"},
@@ -58,6 +68,41 @@ class TestWarnOffServices:
         }
         buf = io.StringIO()
         with redirect_stdout(buf):
-            warn_off_services(fake_paths, manifest, component="stage")
-        # The function should not crash with a custom component name.
+            warn_off_services(fake_paths, manifest, component=component)
         assert "SECURITY OFF" in buf.getvalue()
+        # Inspect the JSON log file: component field must equal the arg.
+        entries = [
+            json.loads(line)
+            for line in fake_paths.log_file.read_text().strip().splitlines()
+            if line
+        ]
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry["component"] == component
+        assert entry["project"] == "demo"
+        assert entry["level"] == "warn"
+
+    def test_structured_detail_event_field(self, fake_paths) -> None:
+        """Operators filter on detail.event=security_off — must be set."""
+        manifest = {
+            "project": "demo",
+            "security": {"profile": "off", "reason": "deliberate"},
+            "services": {"web": {"port": 3000}, "worker": {"port": 4000}},
+        }
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            warn_off_services(fake_paths, manifest, component="deploy")
+        entries = [
+            json.loads(line)
+            for line in fake_paths.log_file.read_text().strip().splitlines()
+            if line
+        ]
+        # One entry per (service, reason) pair.
+        assert len(entries) == 2
+        for entry in entries:
+            detail = entry["detail"]
+            assert detail["event"] == "security_off"
+            assert detail["reason"] == "deliberate"
+            assert detail["service"] in {"web", "worker"}
+        services_logged = {e["detail"]["service"] for e in entries}
+        assert services_logged == {"web", "worker"}

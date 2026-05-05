@@ -29,4 +29,9 @@ def warn_off_services(paths: Any, manifest: dict[str, Any], component: str) -> N
             f"SECURITY OFF: {project}/{svc_name} (reason: {reason})",
             paths,
             project=project,
+            detail={
+                "event": "security_off",
+                "service": svc_name,
+                "reason": reason,
+            },
         )
