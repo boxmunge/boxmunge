@@ -214,3 +214,36 @@ def validate_security_block(
                 f"{context}: {bool_field} must be true or false, "
                 f"got {block[bool_field]!r}"
             )
+
+
+def _effective_profile(
+    project_security: dict[str, Any] | None,
+    service_security: dict[str, Any] | None,
+) -> str:
+    project_security = project_security or {}
+    service_security = service_security or {}
+    if "profile" in service_security:
+        return service_security["profile"]
+    return project_security.get("profile", PROFILE_DEFAULT)
+
+
+def services_with_off_profile(manifest: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return [(service_name, reason)] for every service resolving to profile: off.
+
+    Reason is taken from the service's own security block if it set
+    profile: off there, otherwise from the project-level block.
+    """
+    project_sec = manifest.get("security") or {}
+    services = manifest.get("services") or {}
+    result: list[tuple[str, str]] = []
+    for svc_name, svc in services.items():
+        svc_sec = svc.get("security") if isinstance(svc, dict) else None
+        if _effective_profile(project_sec, svc_sec) != PROFILE_OFF:
+            continue
+        # Reason precedence: service-level reason wins if service set off.
+        if isinstance(svc_sec, dict) and svc_sec.get("profile") == PROFILE_OFF:
+            reason = svc_sec.get("reason", "")
+        else:
+            reason = project_sec.get("reason", "")
+        result.append((svc_name, reason))
+    return result

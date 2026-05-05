@@ -213,3 +213,56 @@ class TestReasonRequired:
         validate_security_block(
             {"profile": "default", "pids_limit": 2048}, context="project"
         )
+
+
+from boxmunge.security_overlay import services_with_off_profile
+
+
+class TestOffProfileEnumeration:
+    def test_no_security_block_returns_empty(self) -> None:
+        manifest = {
+            "project": "demo",
+            "services": {"web": {"port": 3000}},
+        }
+        assert services_with_off_profile(manifest) == []
+
+    def test_project_off_lists_all_services(self) -> None:
+        manifest = {
+            "project": "demo",
+            "security": {"profile": "off", "reason": "test"},
+            "services": {
+                "web": {"port": 3000},
+                "worker": {"port": 4000},
+            },
+        }
+        result = services_with_off_profile(manifest)
+        assert sorted(s for s, _ in result) == ["web", "worker"]
+        assert all(reason == "test" for _, reason in result)
+
+    def test_service_off_overrides_project_default(self) -> None:
+        manifest = {
+            "project": "demo",
+            "security": {"profile": "default"},
+            "services": {
+                "web": {
+                    "port": 3000,
+                    "security": {"profile": "off", "reason": "honeypot"},
+                },
+                "worker": {"port": 4000},
+            },
+        }
+        result = services_with_off_profile(manifest)
+        assert result == [("web", "honeypot")]
+
+    def test_service_default_overrides_project_off(self) -> None:
+        manifest = {
+            "project": "demo",
+            "security": {"profile": "off", "reason": "lifted by services"},
+            "services": {
+                "web": {
+                    "port": 3000,
+                    "security": {"profile": "default"},
+                },
+            },
+        }
+        assert services_with_off_profile(manifest) == []
