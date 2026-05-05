@@ -74,6 +74,36 @@ class TestAllowedCommands:
                      "python", "python3", "curl", "wget", "docker"]:
             assert cmd not in ALLOWED_COMMANDS, f"{cmd} should not be allowed"
 
+    def test_every_cli_command_has_an_allowlist_decision(self) -> None:
+        """Every command registered in cli.COMMANDS must either be in
+        ALLOWED_COMMANDS or in INTENTIONALLY_RESTRICTED below.
+
+        Catches the v0.5.0 bug where `security` was added to cli.COMMANDS
+        but forgotten in shell.ALLOWED_COMMANDS — making it invisible to
+        the deploy user.
+        """
+        from boxmunge.cli import COMMANDS
+
+        # Commands deliberately not exposed to the deploy shell (root-only,
+        # or wrappers shell.py routes through sudo to the upgrade shim).
+        INTENTIONALLY_RESTRICTED = {
+            "init-host",         # Bootstrap-only, runs as root before deploy user exists.
+            "_discover-update",  # Internal JSON dispatcher used by the upgrade shim.
+            "handshake",         # Used by the local CLI to fingerprint the box; not for ops.
+            "stash",             # Root-context only; reached via the upgrade shim.
+            "container-update",  # Triggered by systemd timer, not by operators.
+            "bundle",            # Local-dev only — packages a project on the developer's machine.
+        }
+
+        for cmd in COMMANDS:
+            assert cmd in ALLOWED_COMMANDS or cmd in INTENTIONALLY_RESTRICTED, (
+                f"CLI command '{cmd}' is registered in cli.COMMANDS but not "
+                f"in shell.ALLOWED_COMMANDS or INTENTIONALLY_RESTRICTED. "
+                f"If it's an operator command, add it to ALLOWED_COMMANDS. "
+                f"If it's intentionally root-only, add it to "
+                f"INTENTIONALLY_RESTRICTED in this test."
+            )
+
 
 class TestDispatchCommand:
     @patch("boxmunge.shell.subprocess.run")
