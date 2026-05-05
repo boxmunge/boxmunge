@@ -357,14 +357,25 @@ def cmd_check(args: list[str]) -> None:
     sys.exit(run_check(args[0], paths))
 
 
-def cmd_check_all(args: list[str]) -> None:
-    """CLI entry point for check-all command."""
-    paths = BoxPaths()
+def run_check_all(args: list[str], paths: BoxPaths) -> int:
+    """Run health checks across every project.
+
+    Default mode (mutator): writes health state, may call ``compose_down``
+    on critical results, and emits Pushover notifications. This is the
+    form the systemd timer drives.
+
+    ``--read-only``: run the same per-project checks and print the report,
+    but skip every side effect — no state writes, no container stops,
+    no notifications. The exit code still reflects the worst severity.
+
+    Returns the worst per-project status (0 ok, 1 warning, 2 critical).
+    """
+    read_only = "--read-only" in args
     worst = 0
     projects_dir = paths.projects
     if not projects_dir.exists():
         print("No projects directory.")
-        sys.exit(0)
+        return 0
 
     projects = sorted(
         p.name for p in projects_dir.iterdir()
@@ -373,30 +384,46 @@ def cmd_check_all(args: list[str]) -> None:
 
     if not projects:
         print("No projects to check.")
-        sys.exit(0)
+        return 0
 
     for name in projects:
         result = run_check(name, paths)
 
-        # Determine message from smoke test
-        try:
-            manifest = load_manifest(paths.project_manifest(name))
-        except ManifestError:
-            manifest = {}
-        message = ""
-        if result != 0:
-            has_smoke = any(
-                svc.get("smoke") for svc in manifest.get("services", {}).values()
-            )
-            if has_smoke:
-                project_dir = paths.project_dir(name)
-                compose_files = ["compose.yml", "compose.boxmunge.yml"]
-                sr = run_smoke_in_container(
-                    project_dir, manifest, compose_files,
+        if not read_only:
+            # Mutator path: also runs the smoke a second time to capture
+            # the failure message for Pushover. Skipped under --read-only
+            # because there is no state to update and no alert to send.
+            try:
+                manifest = load_manifest(paths.project_manifest(name))
+            except ManifestError:
+                manifest = {}
+            message = ""
+            if result != 0:
+                has_smoke = any(
+                    svc.get("smoke") for svc in manifest.get("services", {}).values()
                 )
-                message = sr.message
+                if has_smoke:
+                    project_dir = paths.project_dir(name)
+                    compose_files = ["compose.yml", "compose.boxmunge.yml"]
+                    sr = run_smoke_in_container(
+                        project_dir, manifest, compose_files,
+                    )
+                    message = sr.message
 
-        update_health_state(name, result, message, paths)
+            update_health_state(name, result, message, paths)
+
         worst = max(worst, result)
 
-    sys.exit(worst)
+    return worst
+
+
+def cmd_check_all(args: list[str]) -> None:
+    """CLI entry point for check-all command.
+
+    Without --read-only this is the timer-driven mutator: it writes per-
+    project health state, can call compose_down on critical results, and
+    emits Pushover notifications. With --read-only it only prints the
+    report; no side effects.
+    """
+    paths = BoxPaths()
+    sys.exit(run_check_all(args, paths))

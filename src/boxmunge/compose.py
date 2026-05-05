@@ -12,6 +12,10 @@ from boxmunge.security_overlay import (
 )
 
 
+class ComposeError(ValueError):
+    """Raised when a compose document is structurally invalid for boxmunge use."""
+
+
 def _build_env_file_list(env_files: dict[str, str] | None) -> list[str]:
     """Build ordered env_file list from an env_files dict."""
     if not env_files:
@@ -40,7 +44,14 @@ def _build_service_override(
     project_security = manifest.get("security")
     services: dict[str, Any] = {}
 
-    for svc_name, svc in manifest.get("services", {}).items():
+    manifest_services = manifest.get("services", {})
+    if not isinstance(manifest_services, dict):
+        raise ComposeError(
+            f"manifest 'services' must be a mapping "
+            f"(got {type(manifest_services).__name__})"
+        )
+
+    for svc_name, svc in manifest_services.items():
         svc_override: dict[str, Any] = {}
         routes = svc.get("routes", [])
 
@@ -135,7 +146,22 @@ def generate_staging_compose_base(compose_path: str | Path) -> str:
     """
     raw = Path(compose_path).read_text()
     doc = yaml.safe_load(raw)
-    for svc in (doc.get("services") or {}).values():
+    if not isinstance(doc, dict):
+        raise ComposeError(
+            f"compose.yml must be a YAML mapping at the top level "
+            f"(got {type(doc).__name__})"
+        )
+    services = doc.get("services")
+    if services is not None and not isinstance(services, dict):
+        raise ComposeError(
+            f"compose.yml 'services' must be a mapping "
+            f"(got {type(services).__name__})"
+        )
+    for svc in (services or {}).values():
+        if not isinstance(svc, dict):
+            # A non-dict service entry is malformed but we don't have to fail
+            # the whole file — just skip the rewrite for this entry.
+            continue
         svc.pop("ports", None)
         volumes = svc.get("volumes")
         if volumes:

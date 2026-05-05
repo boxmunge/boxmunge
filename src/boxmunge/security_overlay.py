@@ -164,6 +164,16 @@ def validate_security_block(
 
     if "profile" in block:
         profile = block["profile"]
+        # YAML 1.1 boolean trap: unquoted `off`/`on`/`yes`/`no` are parsed as
+        # booleans by PyYAML, so `profile: off` becomes `profile: False`. We
+        # surface a targeted error rather than the cryptic "Unknown profile
+        # False" the generic branch would emit. (See audit finding #4.)
+        if isinstance(profile, bool):
+            raise SecurityValidationError(
+                f"{context}: profile parsed as boolean {profile} -- quote it: "
+                f"profile: \"off\". YAML 1.1 parses unquoted off/on/yes/no "
+                f"as booleans."
+            )
         if profile in RESERVED_PROFILES:
             raise SecurityValidationError(
                 f"{context}: profile {profile!r} is reserved for a future "
@@ -234,7 +244,11 @@ def services_with_off_profile(manifest: dict[str, Any]) -> list[tuple[str, str]]
     profile: off there, otherwise from the project-level block.
     """
     project_sec = manifest.get("security") or {}
+    if not isinstance(project_sec, dict):
+        project_sec = {}
     services = manifest.get("services") or {}
+    if not isinstance(services, dict):
+        return []
     result: list[tuple[str, str]] = []
     for svc_name, svc in services.items():
         svc_sec = svc.get("security") if isinstance(svc, dict) else None
@@ -261,7 +275,11 @@ def services_with_overrides(manifest: dict[str, Any]) -> list[tuple[str, list[st
     `services_with_off_profile` at warning level.
     """
     project_sec = manifest.get("security") or {}
+    if not isinstance(project_sec, dict):
+        project_sec = {}
     services = manifest.get("services") or {}
+    if not isinstance(services, dict):
+        return []
     default_baseline = _baseline_for_profile(PROFILE_DEFAULT)
     result: list[tuple[str, list[str]]] = []
 

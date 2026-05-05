@@ -82,9 +82,13 @@ Last-resort: turn the whole posture off for one service. Requires a non-empty `r
 services:
   web:
     security:
-      profile: off
+      profile: "off"
       reason: "deliberate honeypot service, see issue #42"
 ```
+
+Quote `"off"`: PyYAML parses unquoted `off` as YAML 1.1 boolean `False`,
+which the validator catches with a targeted error, but writing the quotes
+in the first place avoids the round-trip.
 
 A deploy-time `[WARNING] SECURITY OFF` message is emitted on every `stage`, `promote`, `deploy`, and `prod-deploy` for any service on `profile: off`. The warning is repeated by design — the shortest path to making it go away is removing `profile: off` from the manifest.
 
@@ -95,11 +99,19 @@ A deploy-time `[WARNING] SECURITY OFF` message is emitted on every `stage`, `pro
 ### Introspection
 
 ```text
-boxmunge security <project>          # human-readable
-boxmunge security <project> --json   # machine-readable (used by MCP)
+boxmunge security <project>           # human-readable
+boxmunge security <project> --json    # machine-readable (used by MCP)
+boxmunge check <project>              # read-only health check, single project
+boxmunge check-all --read-only        # read-only health check, every project
 ```
 
 Shows the effective posture per service after profile + override resolution.
+
+`boxmunge check-all` (without `--read-only`) is **state-mutating**: it
+writes per-project health JSON, may call `compose_down` on critical
+failures, and emits Pushover notifications. That form is what the systemd
+health timer drives. Use `--read-only` for an introspection-only run that
+prints the same report with no side effects.
 
 ## Security Releases
 

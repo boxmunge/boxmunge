@@ -185,6 +185,30 @@ class TestValidation:
             validate_security_block({"pids_limit": "many"}, context="project")
 
 
+class TestYamlBooleanTrap:
+    """Audit Finding 4: PyYAML parses unquoted `off` as YAML 1.1 boolean False.
+
+    Without the targeted check, the operator sees a confusing
+    ``Unknown profile False`` message and may not realise the fix is to
+    quote the literal string in their manifest.
+    """
+
+    def test_profile_false_yields_targeted_error(self) -> None:
+        with pytest.raises(SecurityValidationError) as exc:
+            validate_security_block({"profile": False}, context="project")
+        msg = str(exc.value)
+        assert "boolean" in msg.lower()
+        assert 'profile: "off"' in msg
+        # Must NOT degrade to the cryptic generic "Unknown profile False"
+        assert "Unknown profile False" not in msg
+
+    def test_profile_true_also_caught(self) -> None:
+        # `on` -> True is the symmetric trap; same fix applies.
+        with pytest.raises(SecurityValidationError) as exc:
+            validate_security_block({"profile": True}, context="project")
+        assert "boolean" in str(exc.value).lower()
+
+
 class TestReasonRequired:
     def test_off_without_reason_rejected(self) -> None:
         with pytest.raises(SecurityValidationError, match="reason"):
@@ -216,6 +240,30 @@ class TestReasonRequired:
 
 
 from boxmunge.security_overlay import services_with_off_profile
+
+
+class TestEnumerationShapeGuards:
+    """Audit Finding 11: services_with_off_profile / services_with_overrides
+    must not AttributeError on a malformed services section. Validation
+    catches the problem upstream, but these helpers are also called from
+    health and check paths after potentially partial validation."""
+
+    def test_off_profile_services_as_list_returns_empty(self) -> None:
+        manifest = {"project": "demo", "services": ["a", "b"]}
+        assert services_with_off_profile(manifest) == []
+
+    def test_off_profile_services_as_string_returns_empty(self) -> None:
+        manifest = {"project": "demo", "services": "web"}
+        assert services_with_off_profile(manifest) == []
+
+    def test_off_profile_services_missing_returns_empty(self) -> None:
+        manifest = {"project": "demo"}
+        assert services_with_off_profile(manifest) == []
+
+    def test_overrides_services_as_list_returns_empty(self) -> None:
+        from boxmunge.security_overlay import services_with_overrides
+        manifest = {"project": "demo", "services": ["a", "b"]}
+        assert services_with_overrides(manifest) == []
 
 
 class TestOffProfileEnumeration:

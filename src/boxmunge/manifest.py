@@ -9,6 +9,47 @@ import yaml
 
 _VALID_SERVICE_NAME = re.compile(r'^[a-z0-9][a-z0-9\-]{0,62}$')
 
+# Hostnames flow into the Caddyfile via simple ``", ".join(hosts)``. Any
+# whitespace or Caddy directive metacharacter inside a host string would
+# allow injection of arbitrary directives. The regex enforces a strict
+# DNS-style label format (lowercase, hyphens between alphanumerics, TLD
+# of two or more letters), with `localhost` and `*.<domain>` allowed
+# explicitly. Wildcards additionally require ``allow_wildcard_hosts: true``
+# at the manifest top level (TLS wildcards need DNS-01 challenge wiring).
+_HOST_FORBIDDEN_CHARS = frozenset(';{}:()[]\'"`\\<>')
+_HOST_LABEL_RE = re.compile(
+    r'^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$'
+)
+_HOST_WILDCARD_RE = re.compile(
+    r'^\*\.([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$'
+)
+
+
+def _validate_host(entry: object) -> str | None:
+    """Return None if the host entry is acceptable, otherwise an error string.
+
+    Returns an error suffix to be combined with the entry name; the caller
+    composes the full error message including the offending value.
+    """
+    if not isinstance(entry, str):
+        return f"must be a string, got {type(entry).__name__}"
+    if any(ch.isspace() for ch in entry):
+        return "contains whitespace"
+    for bad in _HOST_FORBIDDEN_CHARS:
+        if bad in entry:
+            return f"contains forbidden character {bad!r}"
+    if entry != entry.lower():
+        return "must be lowercase (DNS is case-insensitive but the manifest format is not)"
+    if entry == "localhost":
+        return None
+    if entry.startswith("*."):
+        if _HOST_WILDCARD_RE.match(entry):
+            return "wildcard"  # sentinel — caller handles opt-in check
+        return "is not a valid wildcard hostname"
+    if _HOST_LABEL_RE.match(entry):
+        return None
+    return "is not a valid hostname"
+
 
 CURRENT_SCHEMA_VERSION = 2
 
@@ -35,7 +76,7 @@ def load_manifest(path: Path) -> dict[str, Any]:
 
 
 def validate_manifest(
-    manifest: dict[str, Any], expected_name: str
+    manifest: Any, expected_name: str
 ) -> tuple[list[str], list[str]]:
     """Validate a parsed manifest against the boxmunge project conventions.
 
@@ -43,6 +84,14 @@ def validate_manifest(
     """
     errors: list[str] = []
     warnings: list[str] = []
+
+    # Top-level shape guard. A YAML document like a list (`- foo`), scalar
+    # (`just a string`), or empty file (`None`) would otherwise AttributeError
+    # deep inside the validator on the first .get() call. Surface a single
+    # clear error and stop.
+    if not isinstance(manifest, dict):
+        errors.append("manifest.yml must be a YAML mapping at the top level")
+        return errors, warnings
 
     # Schema version check
     schema_version = manifest.get("schema_version", 1)
@@ -68,9 +117,29 @@ def validate_manifest(
     hosts = manifest.get("hosts", [])
     if not hosts:
         errors.append("'hosts' must contain at least one hostname.")
+    elif not isinstance(hosts, list):
+        errors.append("'hosts' must be a list")
+    else:
+        allow_wildcard = bool(manifest.get("allow_wildcard_hosts", False))
+        for entry in hosts:
+            problem = _validate_host(entry)
+            if problem is None:
+                continue
+            if problem == "wildcard":
+                if allow_wildcard:
+                    continue
+                errors.append(
+                    f"wildcard host {entry!r} requires 'allow_wildcard_hosts: "
+                    f"true' at the manifest top level"
+                )
+                continue
+            errors.append(f"host {entry!r} is invalid: {problem}")
 
     # Services
     services = manifest.get("services", {})
+    if not isinstance(services, dict):
+        errors.append("'services' must be a mapping")
+        return errors, warnings  # Can't validate further with a malformed services block
     if not services:
         errors.append("'services' must define at least one service.")
     else:
@@ -106,6 +175,10 @@ def validate_manifest(
     )
 
     project_security = manifest.get("security")
+    if project_security is not None and not isinstance(project_security, dict):
+        errors.append("'security' must be a mapping")
+        # Skip remaining security validation rather than feed garbage downstream.
+        project_security = None
     has_any_security_block = project_security is not None or any(
         isinstance(svc, dict) and svc.get("security") is not None
         for svc in services.values()
@@ -132,6 +205,9 @@ def validate_manifest(
 
     # Backup
     backup = manifest.get("backup", {})
+    if not isinstance(backup, dict):
+        errors.append("'backup' must be a mapping")
+        backup = {}
     backup_type = backup.get("type", "none")
     if backup_type != "none":
         if not backup.get("dump_command"):
@@ -183,6 +259,9 @@ def validate_manifest(
 
     # Staging (optional)
     staging = manifest.get("staging", {})
+    if staging and not isinstance(staging, dict):
+        errors.append("'staging' must be a mapping")
+        staging = {}
     if staging:
         _STAGING_KEYS = {"copy_data"}
         unknown_staging = set(staging.keys()) - _STAGING_KEYS

@@ -79,9 +79,14 @@ services:
 services:
   honeypot:
     security:
-      profile: off
+      profile: "off"
       reason: "intentional honeypot service, see issue #42"
 ```
+
+Note the quotes around `"off"`. PyYAML parses unquoted `off`, `on`, `yes`, `no`
+as YAML 1.1 booleans, and `profile: off` would silently become
+`profile: False`. The validator catches that and tells you to quote it, but
+get into the habit of writing it correctly the first time.
 
 Requirements:
 

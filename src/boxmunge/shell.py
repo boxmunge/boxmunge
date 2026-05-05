@@ -28,7 +28,13 @@ ALLOWED_COMMANDS: set[str] = {
     "secrets",
     # Container security introspection (read-only)
     "security",
-    # Project operations
+    # Project operations.
+    # `check` is read-only. `check-all` is the timer-driven mutator: it
+    # writes per-project health state, can call compose_down on critical
+    # results, and emits Pushover notifications. Use `check-all --read-only`
+    # for an introspection-only run that prints the report without side
+    # effects. The deploy user has access to both forms; the systemd timer
+    # at systemd/boxmunge-health.service uses the mutator form.
     "check", "check-all", "log", "logs",
     "backup", "backup-all", "backup-sync",
     "restore", "validate",

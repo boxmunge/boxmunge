@@ -489,3 +489,21 @@ class TestComposeSecurityHardening:
         assert "pids_limit" not in web
         assert web["deploy"]["resources"]["limits"]["pids"] == 4096
         assert web["deploy"]["resources"]["limits"]["memory"] == "256m"
+
+
+class TestComposeShapeGuards:
+    """Audit Finding 11: defensive type guards on staging base compose."""
+
+    def test_staging_base_with_services_as_list_raises(self, tmp_path: Path) -> None:
+        from boxmunge.compose import ComposeError
+        compose_path = tmp_path / "compose.yml"
+        compose_path.write_text("services:\n  - web\n  - worker\n")
+        with pytest.raises(ComposeError, match="services"):
+            generate_staging_compose_base(compose_path)
+
+    def test_staging_base_with_top_level_string_raises(self, tmp_path: Path) -> None:
+        from boxmunge.compose import ComposeError
+        compose_path = tmp_path / "compose.yml"
+        compose_path.write_text("just a string\n")
+        with pytest.raises(ComposeError, match="mapping"):
+            generate_staging_compose_base(compose_path)

@@ -342,3 +342,83 @@ class TestDeployResumeGracePeriod:
         state = read_state(paths.project_health_state("myapp"))
         assert state["status"] == "failing"
         assert state["consecutive_failures"] == 1
+
+
+class TestCheckAllReadOnly:
+    """Audit Finding 1: cmd_check_all is documented near 'read-only'
+    introspection but writes health state, calls compose_down, and
+    sends Pushover. Provide a --read-only flag that runs the same
+    per-project checks without those side effects."""
+
+    def _write_project(self, paths: BoxPaths, name: str, manifest: dict) -> None:
+        import yaml
+        paths.project_dir(name).mkdir(parents=True, exist_ok=True)
+        paths.project_manifest(name).write_text(yaml.dump(manifest))
+        paths.project_deploy_state(name).parent.mkdir(parents=True, exist_ok=True)
+        paths.project_deploy_state(name).write_text('{"current_ref": "main"}')
+
+    def _minimal_manifest(self) -> dict:
+        return {
+            "schema_version": 2, "id": "01TEST",
+            "project": "myapp", "source": "bundle",
+            "hosts": ["myapp.example.com"],
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        }
+
+    def test_default_invocation_mutates_state(
+        self, paths: BoxPaths, monkeypatch,
+    ) -> None:
+        from unittest.mock import patch
+        from boxmunge.commands.check import run_check_all
+
+        self._write_project(paths, "myapp", self._minimal_manifest())
+
+        with patch("boxmunge.commands.check.update_health_state") as mock_update:
+            run_check_all([], paths)
+
+        assert mock_update.called, (
+            "default cmd_check_all invocation must continue calling "
+            "update_health_state — that's the timer-driven mutator path"
+        )
+
+    def test_read_only_skips_state_mutation(
+        self, paths: BoxPaths,
+    ) -> None:
+        from unittest.mock import patch
+        from boxmunge.commands.check import run_check_all
+
+        self._write_project(paths, "myapp", self._minimal_manifest())
+
+        with patch("boxmunge.commands.check.update_health_state") as mock_update:
+            run_check_all(["--read-only"], paths)
+
+        assert not mock_update.called, (
+            "--read-only must not call update_health_state — no health "
+            "state writes, no compose_down, no Pushover"
+        )
+
+    def test_read_only_returns_worst_status(
+        self, paths: BoxPaths, monkeypatch,
+    ) -> None:
+        """Even with --read-only, the exit code reflects the worst severity
+        per the existing convention so callers (operators, CI) can branch
+        on success/failure."""
+        from boxmunge.commands import check as check_mod
+        from boxmunge.commands.check import run_check_all
+
+        # Two projects, one healthy (returns 0) and one critical (returns 2).
+        m1 = self._minimal_manifest()
+        m1["project"] = "okapp"
+        self._write_project(paths, "okapp", m1)
+        m2 = self._minimal_manifest()
+        m2["project"] = "badapp"
+        self._write_project(paths, "badapp", m2)
+
+        # Stub run_check so we don't depend on real smoke execution.
+        def _fake_run_check(name: str, paths: BoxPaths, verbose: bool = True) -> int:
+            return 2 if name == "badapp" else 0
+
+        monkeypatch.setattr(check_mod, "run_check", _fake_run_check)
+
+        result = run_check_all(["--read-only"], paths)
+        assert result == 2

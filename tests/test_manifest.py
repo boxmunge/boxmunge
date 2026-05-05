@@ -430,3 +430,150 @@ class TestSecurityValidation:
         assert any(
             "security" in e and "schema_version" in e for e in errors
         )
+
+
+class TestHostnameValidation:
+    """Audit Finding 12: hostnames flow into the Caddyfile via simple
+    ``", ".join(hosts)`` and a host containing a newline or directive
+    metacharacter could inject Caddy directives. Validate per-entry."""
+
+    def _manifest(self, hosts: list[str], **extra: object) -> dict:
+        m = {
+            "id": "01TEST", "project": "demo", "source": "bundle",
+            "hosts": hosts,
+            "services": {"web": {"port": 3000, "routes": [{"path": "/"}]}},
+        }
+        m.update(extra)
+        return m
+
+    def test_plain_domain_accepted(self) -> None:
+        errors, _ = validate_manifest(self._manifest(["example.com"]), "demo")
+        assert not any("hosts" in e.lower() and "invalid" in e.lower() for e in errors)
+
+    def test_subdomain_accepted(self) -> None:
+        errors, _ = validate_manifest(self._manifest(["app.example.com"]), "demo")
+        assert not any("invalid" in e.lower() for e in errors)
+
+    def test_localhost_accepted(self) -> None:
+        errors, _ = validate_manifest(self._manifest(["localhost"]), "demo")
+        assert not any("invalid" in e.lower() for e in errors)
+
+    def test_wildcard_rejected_without_optin(self) -> None:
+        errors, _ = validate_manifest(self._manifest(["*.example.com"]), "demo")
+        assert any(
+            "wildcard" in e.lower() and "allow_wildcard_hosts" in e
+            for e in errors
+        )
+
+    def test_wildcard_accepted_with_optin(self) -> None:
+        m = self._manifest(["*.example.com"], allow_wildcard_hosts=True)
+        errors, _ = validate_manifest(m, "demo")
+        assert not any("wildcard" in e.lower() for e in errors)
+
+    def test_embedded_newline_rejected(self) -> None:
+        errors, _ = validate_manifest(
+            self._manifest(["evil.com\nlocalhost {"]), "demo",
+        )
+        assert any("invalid" in e.lower() for e in errors)
+
+    def test_directive_chars_rejected(self) -> None:
+        errors, _ = validate_manifest(
+            self._manifest(["; ls /etc; #"]), "demo",
+        )
+        assert any("invalid" in e.lower() for e in errors)
+
+    def test_uppercase_rejected_with_friendly_message(self) -> None:
+        errors, _ = validate_manifest(self._manifest(["EXAMPLE.COM"]), "demo")
+        assert any(
+            "invalid" in e.lower() and "lowercase" in e.lower() for e in errors
+        )
+
+    def test_port_in_host_rejected(self) -> None:
+        errors, _ = validate_manifest(
+            self._manifest(["example.com:8080"]), "demo",
+        )
+        assert any("invalid" in e.lower() for e in errors)
+
+    def test_curly_braces_rejected(self) -> None:
+        errors, _ = validate_manifest(
+            self._manifest(["example.com {"]), "demo",
+        )
+        assert any("invalid" in e.lower() for e in errors)
+
+    def test_backtick_rejected(self) -> None:
+        errors, _ = validate_manifest(
+            self._manifest(["`echo evil`.com"]), "demo",
+        )
+        assert any("invalid" in e.lower() for e in errors)
+
+
+class TestManifestShapeGuards:
+    """Audit Finding 11: isinstance guards on top-level + section types.
+
+    Without these guards, malformed manifests AttributeError deep inside the
+    validator instead of producing an actionable error message.
+    """
+
+    def test_top_level_string_rejected_clearly(self) -> None:
+        # `yaml.safe_load("just a string")` returns "just a string", not dict.
+        errors, _ = validate_manifest("just a string", expected_name="demo")
+        assert any("mapping" in e.lower() and "manifest" in e.lower() for e in errors)
+
+    def test_top_level_list_rejected_clearly(self) -> None:
+        errors, _ = validate_manifest(["a", "b"], expected_name="demo")
+        assert any("mapping" in e.lower() and "manifest" in e.lower() for e in errors)
+
+    def test_top_level_none_rejected_clearly(self) -> None:
+        # Empty manifest file -> safe_load returns None.
+        errors, _ = validate_manifest(None, expected_name="demo")
+        assert any("mapping" in e.lower() and "manifest" in e.lower() for e in errors)
+
+    def test_services_as_list_rejected_clearly(self) -> None:
+        manifest = {
+            "id": "01TEST", "project": "demo", "source": "bundle",
+            "hosts": ["demo.example.com"],
+            "services": ["web", "worker"],
+        }
+        errors, _ = validate_manifest(manifest, expected_name="demo")
+        assert any("services" in e and "mapping" in e for e in errors)
+        # Must not have AttributeError'd on .items() somewhere along the way.
+
+    def test_services_as_string_rejected_clearly(self) -> None:
+        manifest = {
+            "id": "01TEST", "project": "demo", "source": "bundle",
+            "hosts": ["demo.example.com"],
+            "services": "web",
+        }
+        errors, _ = validate_manifest(manifest, expected_name="demo")
+        assert any("services" in e and "mapping" in e for e in errors)
+
+    def test_security_as_list_rejected_clearly(self) -> None:
+        manifest = {
+            "schema_version": 2,
+            "id": "01TEST", "project": "demo", "source": "bundle",
+            "hosts": ["demo.example.com"],
+            "services": {"web": {"port": 3000, "routes": [{"path": "/"}]}},
+            "security": ["profile", "default"],
+        }
+        errors, _ = validate_manifest(manifest, expected_name="demo")
+        assert any("security" in e and "mapping" in e for e in errors)
+
+    def test_backup_as_list_rejected_clearly(self) -> None:
+        manifest = {
+            "id": "01TEST", "project": "demo", "source": "bundle",
+            "hosts": ["demo.example.com"],
+            "services": {"web": {"port": 3000, "routes": [{"path": "/"}]}},
+            "backup": ["type", "none"],
+        }
+        errors, _ = validate_manifest(manifest, expected_name="demo")
+        assert any("backup" in e and "mapping" in e for e in errors)
+
+    def test_staging_as_list_rejected_clearly(self) -> None:
+        manifest = {
+            "id": "01TEST", "project": "demo", "source": "bundle",
+            "hosts": ["demo.example.com"],
+            "services": {"web": {"port": 3000, "routes": [{"path": "/"}]}},
+            "staging": ["copy_data", True],
+        }
+        errors, _ = validate_manifest(manifest, expected_name="demo")
+        assert any("staging" in e and "mapping" in e for e in errors)
