@@ -97,3 +97,11 @@ class TestRenderMaintenanceCaddyConfig:
         from boxmunge.pause import render_maintenance_caddy_config
         with pytest.raises(ValueError, match="at least one host"):
             render_maintenance_caddy_config([])
+
+    def test_status_inside_file_server_block(self) -> None:
+        from boxmunge.pause import render_maintenance_caddy_config
+        config = render_maintenance_caddy_config(["a.example.com"])
+        # Verify "status 503" appears, AND "respond" does NOT appear
+        # (respond would short-circuit file_server).
+        assert "status 503" in config
+        assert "respond" not in config

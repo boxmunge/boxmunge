@@ -68,8 +68,9 @@ def render_maintenance_caddy_config(hosts: list[str]) -> str:
         f"  handle {{\n"
         f"    header Retry-After 3600\n"
         f"    root * /etc/caddy/maintenance\n"
-        f"    file_server\n"
-        f"    respond 503\n"
+        f"    file_server {{\n"
+        f"      status 503\n"
+        f"    }}\n"
         f"  }}\n"
         f"}}\n"
     )
