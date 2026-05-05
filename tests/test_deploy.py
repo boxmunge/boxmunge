@@ -1,5 +1,7 @@
 """Tests for boxmunge.commands.deploy."""
 
+import io
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -42,3 +44,57 @@ class TestDeployEnvFiles:
 
         override = (pdir / "compose.boxmunge.yml").read_text()
         assert "secrets.env" in override
+
+
+class TestComposeOverrideEmitsOffWarning:
+    def test_warning_printed_when_off(self, tmp_path, monkeypatch) -> None:
+        # Build a paths-like with a real project_compose_override target.
+        from boxmunge.paths import BoxPaths
+        proj = tmp_path / "projects" / "demo"
+        proj.mkdir(parents=True)
+        (proj / "project.env").write_text("X=1\n")
+
+        # Monkey-patch BoxPaths to point at tmp_path.
+        monkeypatch.setattr(BoxPaths, "__init__", lambda self: None)
+        paths = BoxPaths()
+        paths.host_secrets = tmp_path / "host_secrets.env"  # absent
+        paths.project_compose_override = lambda name: proj / "compose.boxmunge.yml"
+        paths.project_dir = lambda name: proj
+        paths.project_secrets = lambda name: proj / "secrets.env"
+
+        manifest = {
+            "project": "demo",
+            "hosts": ["demo.example.com"],
+            "security": {"profile": "off", "reason": "test"},
+            "services": {
+                "web": {"port": 3000, "routes": [{"path": "/"}]},
+            },
+        }
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            prepare_compose_override(paths, manifest)
+        out = buf.getvalue()
+        assert "SECURITY OFF" in out
+        assert "demo/web" in out
+        assert "test" in out
+
+    def test_no_warning_when_default(self, tmp_path, monkeypatch) -> None:
+        from boxmunge.paths import BoxPaths
+        proj = tmp_path / "projects" / "demo"
+        proj.mkdir(parents=True)
+        monkeypatch.setattr(BoxPaths, "__init__", lambda self: None)
+        paths = BoxPaths()
+        paths.host_secrets = tmp_path / "host_secrets.env"
+        paths.project_compose_override = lambda name: proj / "compose.boxmunge.yml"
+        paths.project_dir = lambda name: proj
+        paths.project_secrets = lambda name: proj / "secrets.env"
+
+        manifest = {
+            "project": "demo",
+            "hosts": ["demo.example.com"],
+            "services": {"web": {"port": 3000, "routes": [{"path": "/"}]}},
+        }
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            prepare_compose_override(paths, manifest)
+        assert "SECURITY OFF" not in buf.getvalue()
