@@ -176,7 +176,8 @@ def cmd_doctor(args: list[str]) -> None:
     """CLI entry point for doctor command."""
     paths = BoxPaths()
     as_json = "--json" in args
-    print("boxmunge doctor")
-    print("=" * 40)
+    if not as_json:
+        print("boxmunge doctor")
+        print("=" * 40)
     exit_code = run_doctor(paths, as_json=as_json)
     sys.exit(exit_code)
