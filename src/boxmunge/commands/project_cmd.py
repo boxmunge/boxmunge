@@ -6,6 +6,7 @@ For destructive removal (containers + files + registry), use project-delete.
 
 import sys
 
+from boxmunge.log import log_operation
 from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import add_project, load_registered_projects
 
@@ -22,6 +23,7 @@ def cmd_project_add(args: list[str]) -> None:
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(2)
+    log_operation("project-add", "Project registered", paths, project=name)
     print(f"Project '{name}' registered.")
 
 

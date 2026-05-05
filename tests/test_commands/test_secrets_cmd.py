@@ -1,5 +1,8 @@
 """Tests for boxmunge secrets command."""
+import json
+
 from boxmunge.commands.secrets_cmd import run_secrets
+from boxmunge.log import _reset_logger
 from boxmunge.paths import BoxPaths
 from boxmunge.secrets import read_dotenv
 
@@ -74,3 +77,70 @@ class TestSecretsUnset:
         result = run_secrets(["unset", "myapp", "KEY"], paths)
         assert result == 0
         assert "KEY" not in read_dotenv(paths.project_secrets("myapp"))
+
+
+def _read_log_entries(paths: BoxPaths) -> list[dict]:
+    """Parse boxmunge.log JSON-lines into dicts."""
+    if not paths.log_file.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in paths.log_file.read_text().strip().splitlines()
+        if line
+    ]
+
+
+class TestSecretsLogging:
+    def setup_method(self):
+        _reset_logger()
+
+    def teardown_method(self):
+        _reset_logger()
+
+    def test_set_project_secret_logs_action(self, paths: BoxPaths) -> None:
+        paths.project_dir("myapp").mkdir(parents=True)
+        run_secrets(["set", "myapp", "DB_URL=postgres://secret/db"], paths)
+        entries = [e for e in _read_log_entries(paths)
+                   if e.get("component") == "secrets"]
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry["component"] == "secrets"
+        assert entry["project"] == "myapp"
+        assert "DB_URL" in entry["msg"]
+        # The value MUST never appear in the log.
+        assert "postgres://secret/db" not in json.dumps(entry)
+
+    def test_set_host_secret_logs_with_no_project(self, paths: BoxPaths) -> None:
+        run_secrets(["set", "--host", "GITHUB_TOKEN=ghp_secret_xxxx"], paths)
+        entries = [e for e in _read_log_entries(paths)
+                   if e.get("component") == "secrets"]
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry["project"] is None
+        assert "GITHUB_TOKEN" in entry["msg"]
+        assert "ghp_secret_xxxx" not in json.dumps(entry)
+
+    def test_unset_project_secret_logs_action(self, paths: BoxPaths) -> None:
+        paths.project_dir("myapp").mkdir(parents=True)
+        run_secrets(["set", "myapp", "KEY=val"], paths)
+        run_secrets(["unset", "myapp", "KEY"], paths)
+        entries = [e for e in _read_log_entries(paths)
+                   if e.get("component") == "secrets"]
+        # set + unset
+        assert len(entries) == 2
+        unset_entry = entries[-1]
+        assert unset_entry["component"] == "secrets"
+        assert unset_entry["project"] == "myapp"
+        assert "unset" in unset_entry["msg"]
+        assert "KEY" in unset_entry["msg"]
+
+    def test_get_does_not_log(self, paths: BoxPaths) -> None:
+        paths.project_dir("myapp").mkdir(parents=True)
+        run_secrets(["set", "myapp", "KEY=val"], paths)
+        # Drop the set entry so we can isolate get behaviour.
+        if paths.log_file.exists():
+            paths.log_file.unlink()
+        run_secrets(["get", "myapp", "KEY"], paths)
+        entries = _read_log_entries(paths)
+        # `get` must not be logged — read-only.
+        assert all(e.get("component") != "secrets" for e in entries)

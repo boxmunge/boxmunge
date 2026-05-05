@@ -1,9 +1,11 @@
 """Tests for boxmunge inbox command."""
 
+import json
 import pytest
 from pathlib import Path
 
 from boxmunge.commands.inbox_cmd import run_inbox_list, run_inbox_clean
+from boxmunge.log import _reset_logger
 from boxmunge.paths import BoxPaths
 
 
@@ -81,3 +83,39 @@ class TestInboxClean:
     def test_clean_empty_inbox(self, paths: BoxPaths) -> None:
         result = run_inbox_clean(paths, project_filter=None, yes=True)
         assert result == 0
+
+
+class TestInboxCleanLogging:
+    def setup_method(self):
+        _reset_logger()
+
+    def teardown_method(self):
+        _reset_logger()
+
+    def test_clean_logs_removed_bundles(self, paths: BoxPaths) -> None:
+        _place_bundle(paths, "testapp", "2026-03-31T091500000000")
+        _place_bundle(paths, "other", "2026-03-31T110000000000")
+        run_inbox_clean(paths, project_filter=None, yes=True)
+        entries = [
+            json.loads(line)
+            for line in paths.log_file.read_text().strip().splitlines()
+            if line
+        ]
+        inbox_entries = [e for e in entries if e.get("component") == "inbox"]
+        assert len(inbox_entries) == 1
+        entry = inbox_entries[0]
+        assert "Cleaned 2 bundle(s)" in entry["msg"]
+        removed = entry["detail"]["removed"]
+        assert len(removed) == 2
+        assert any("testapp" in name for name in removed)
+        assert any("other" in name for name in removed)
+
+    def test_clean_no_bundles_does_not_log(self, paths: BoxPaths) -> None:
+        run_inbox_clean(paths, project_filter=None, yes=True)
+        if paths.log_file.exists():
+            entries = [
+                json.loads(line)
+                for line in paths.log_file.read_text().strip().splitlines()
+                if line
+            ]
+            assert all(e.get("component") != "inbox" for e in entries)

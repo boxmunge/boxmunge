@@ -3,18 +3,22 @@
 import sys
 from pathlib import Path
 
+from boxmunge.log import log_operation
 from boxmunge.paths import BoxPaths
 from boxmunge.secrets import get_key, list_keys, read_dotenv, set_key, unset_key
 
 
-def _resolve_secrets_path(args: list[str], paths: BoxPaths) -> tuple[Path | None, list[str]]:
-    """Return (secrets_path, remaining_args) from a --host or project-name args list.
+def _resolve_secrets_path(
+    args: list[str], paths: BoxPaths,
+) -> tuple[Path | None, list[str], str | None]:
+    """Return (secrets_path, remaining_args, project) from args.
 
+    `project` is the project name for log emission, or None for --host scope.
     For project secrets: creates the project directory if it doesn't exist.
     This allows setting secrets before first deploy (pre-registration).
     """
     if args and args[0] == "--host":
-        return paths.host_secrets, args[1:]
+        return paths.host_secrets, args[1:], None
     if args:
         project_name = args[0]
         from boxmunge.paths import validate_project_name
@@ -22,16 +26,16 @@ def _resolve_secrets_path(args: list[str], paths: BoxPaths) -> tuple[Path | None
             validate_project_name(project_name)
         except ValueError as e:
             print(f"ERROR: {e}")
-            return None, args[1:]
+            return None, args[1:], None
         project_dir = paths.project_dir(project_name)
         if not project_dir.exists():
             project_dir.mkdir(parents=True)
-        return paths.project_secrets(project_name), args[1:]
-    return None, args
+        return paths.project_secrets(project_name), args[1:], project_name
+    return None, args, None
 
 
 def _cmd_set(args: list[str], paths: BoxPaths) -> int:
-    secrets_path, rest = _resolve_secrets_path(args, paths)
+    secrets_path, rest, project = _resolve_secrets_path(args, paths)
     if secrets_path is None:
         return 1
     if not rest:
@@ -43,11 +47,12 @@ def _cmd_set(args: list[str], paths: BoxPaths) -> int:
         return 1
     key, _, value = assignment.partition("=")
     set_key(secrets_path, key, value)
+    log_operation("secrets", f"set {key}", paths, project=project)
     return 0
 
 
 def _cmd_get(args: list[str], paths: BoxPaths) -> int:
-    secrets_path, rest = _resolve_secrets_path(args, paths)
+    secrets_path, rest, _ = _resolve_secrets_path(args, paths)
     if secrets_path is None:
         return 1
     if not rest:
@@ -63,7 +68,7 @@ def _cmd_get(args: list[str], paths: BoxPaths) -> int:
 
 
 def _cmd_list(args: list[str], paths: BoxPaths) -> int:
-    secrets_path, _ = _resolve_secrets_path(args, paths)
+    secrets_path, _, _ = _resolve_secrets_path(args, paths)
     if secrets_path is None:
         return 1
     for key in list_keys(secrets_path):
@@ -72,13 +77,15 @@ def _cmd_list(args: list[str], paths: BoxPaths) -> int:
 
 
 def _cmd_unset(args: list[str], paths: BoxPaths) -> int:
-    secrets_path, rest = _resolve_secrets_path(args, paths)
+    secrets_path, rest, project = _resolve_secrets_path(args, paths)
     if secrets_path is None:
         return 1
     if not rest:
         print("ERROR: Missing KEY argument")
         return 1
-    unset_key(secrets_path, rest[0])
+    key = rest[0]
+    unset_key(secrets_path, key)
+    log_operation("secrets", f"unset {key}", paths, project=project)
     return 0
 
 

@@ -1,9 +1,11 @@
 """Tests for project-add, project-list, project-delete commands."""
 
+import json
 import pytest
 from io import StringIO
 from unittest.mock import patch
 
+from boxmunge.log import _reset_logger
 from boxmunge.paths import BoxPaths
 
 
@@ -69,3 +71,55 @@ class TestCmdProjectDelete:
         from boxmunge.commands.project_delete_cmd import run_project_delete
         rc = run_project_delete("ghost", paths, yes=True)
         assert rc == 1
+
+
+def _read_log_entries(paths: BoxPaths) -> list[dict]:
+    if not paths.log_file.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in paths.log_file.read_text().strip().splitlines()
+        if line
+    ]
+
+
+class TestProjectAddLogging:
+    def setup_method(self):
+        _reset_logger()
+
+    def teardown_method(self):
+        _reset_logger()
+
+    def test_project_add_logs_registration(self, paths: BoxPaths) -> None:
+        from boxmunge.commands.project_cmd import cmd_project_add
+        with patch("boxmunge.commands.project_cmd.BoxPaths", return_value=paths):
+            cmd_project_add(["myapp"])
+        entries = [e for e in _read_log_entries(paths)
+                   if e.get("component") == "project-add"]
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry["project"] == "myapp"
+        assert "registered" in entry["msg"].lower()
+
+
+class TestProjectDeleteLogging:
+    def setup_method(self):
+        _reset_logger()
+
+    def teardown_method(self):
+        _reset_logger()
+
+    def test_project_delete_uses_project_delete_component(
+        self, paths: BoxPaths,
+    ) -> None:
+        """Component must match CLI verb (was 'delete', now 'project-delete')."""
+        from boxmunge.commands.project_cmd import cmd_project_add
+        from boxmunge.commands.project_delete_cmd import run_project_delete
+        with patch("boxmunge.commands.project_cmd.BoxPaths", return_value=paths):
+            cmd_project_add(["solo"])
+        run_project_delete("solo", paths, yes=True)
+        entries = [e for e in _read_log_entries(paths)
+                   if e.get("component") == "project-delete"]
+        assert len(entries) == 1
+        # No legacy "delete" component.
+        assert all(e.get("component") != "delete" for e in _read_log_entries(paths))

@@ -103,9 +103,17 @@ def run_inbox_clean(
             print("Aborted.")
             return 0
 
+    removed_names = [t.name for t in targets]
     for t in targets:
         t.unlink()
-    print(f"Removed {len(targets)} bundle(s).")
+    from boxmunge.log import log_operation
+    log_operation(
+        "inbox",
+        f"Cleaned {len(removed_names)} bundle(s)",
+        paths,
+        detail={"removed": removed_names},
+    )
+    print(f"Removed {len(removed_names)} bundle(s).")
     return 0
 
 
