@@ -10,7 +10,7 @@ import yaml
 _VALID_SERVICE_NAME = re.compile(r'^[a-z0-9][a-z0-9\-]{0,62}$')
 
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 
 class ManifestError(Exception):
@@ -98,6 +98,25 @@ def validate_manifest(
                     f"Service '{svc_name}' has no resource limits. "
                     "Consider setting memory/cpu limits to prevent resource starvation."
                 )
+
+    # Security block — optional. Validates project-level and per-service blocks.
+    from boxmunge.security_overlay import (
+        SecurityValidationError,
+        validate_security_block,
+    )
+
+    project_security = manifest.get("security")
+    try:
+        validate_security_block(project_security, context="project")
+    except SecurityValidationError as e:
+        errors.append(str(e))
+
+    for svc_name, svc in services.items():
+        svc_security = svc.get("security") if isinstance(svc, dict) else None
+        try:
+            validate_security_block(svc_security, context=f"service:{svc_name}")
+        except SecurityValidationError as e:
+            errors.append(str(e))
 
     # Backup
     backup = manifest.get("backup", {})

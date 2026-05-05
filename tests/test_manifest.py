@@ -3,7 +3,12 @@
 import pytest
 from pathlib import Path
 
-from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
+from boxmunge.manifest import (
+    CURRENT_SCHEMA_VERSION,
+    ManifestError,
+    load_manifest,
+    validate_manifest,
+)
 
 
 VALID_MANIFEST = """\
@@ -352,3 +357,43 @@ class TestStagingValidation:
         manifest["staging"] = {"copy_data": True, "unknown_key": 42}
         errors, warnings = validate_manifest(manifest, "myapp")
         assert any("unknown_key" in w for w in warnings)
+
+
+class TestSecurityValidation:
+    def _base_manifest(self, **extra) -> dict:
+        m = {
+            "schema_version": 2,
+            "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+            "source": "bundle",
+            "project": "demo",
+            "hosts": ["demo.example.com"],
+            "services": {
+                "web": {"port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh"},
+            },
+        }
+        m.update(extra)
+        return m
+
+    def test_current_schema_is_2(self) -> None:
+        assert CURRENT_SCHEMA_VERSION == 2
+
+    def test_no_security_block_passes(self) -> None:
+        errors, _ = validate_manifest(self._base_manifest(), expected_name="demo")
+        # security is optional
+        assert all("security" not in e for e in errors)
+
+    def test_off_without_reason_errors(self) -> None:
+        m = self._base_manifest(security={"profile": "off"})
+        errors, _ = validate_manifest(m, expected_name="demo")
+        assert any("reason" in e for e in errors)
+
+    def test_unknown_profile_errors(self) -> None:
+        m = self._base_manifest(security={"profile": "ultra"})
+        errors, _ = validate_manifest(m, expected_name="demo")
+        assert any("profile" in e.lower() for e in errors)
+
+    def test_service_security_validates_too(self) -> None:
+        m = self._base_manifest()
+        m["services"]["web"]["security"] = {"profile": "off"}  # missing reason
+        errors, _ = validate_manifest(m, expected_name="demo")
+        assert any("service:web" in e and "reason" in e for e in errors)
