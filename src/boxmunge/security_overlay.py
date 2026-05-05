@@ -111,6 +111,16 @@ def _apply_overrides(baseline: dict[str, Any], overrides: dict[str, Any]) -> dic
     return result
 
 
+def _subtract_cap_adds(result: dict[str, Any]) -> dict[str, Any]:
+    """Remove any cap from cap_drop that also appears in cap_add."""
+    cap_add = result.get("cap_add", [])
+    if not cap_add:
+        return result
+    cap_drop = result.get("cap_drop", [])
+    result["cap_drop"] = [c for c in cap_drop if c not in cap_add]
+    return result
+
+
 def resolve_security(
     project_security: dict[str, Any] | None,
     service_security: dict[str, Any] | None,
@@ -129,4 +139,5 @@ def resolve_security(
         baseline = _baseline_for_profile(project_profile)
         baseline = _apply_overrides(baseline, project_security)
     baseline = _apply_overrides(baseline, service_security)
+    baseline = _subtract_cap_adds(baseline)
     return baseline

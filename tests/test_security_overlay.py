@@ -102,3 +102,42 @@ class TestProjectFieldOverrides:
         )
         assert "NET_ADMIN" in result["cap_drop"]
         assert result["pids_limit"] == 1024
+
+
+class TestCapAddSubtractsFromDrop:
+    def test_cap_add_removes_matching_drop(self) -> None:
+        result = resolve_security(
+            project_security={"profile": "default"},
+            service_security={"cap_add": ["NET_RAW"]},
+        )
+        assert "NET_RAW" not in result["cap_drop"]
+        # Other drops untouched
+        assert "SYS_PTRACE" in result["cap_drop"]
+        assert "NET_RAW" in result["cap_add"]
+
+    def test_cap_add_with_cap_drop_override(self) -> None:
+        result = resolve_security(
+            project_security={
+                "profile": "default",
+                "cap_drop": ["NET_ADMIN", "NET_RAW"],
+            },
+            service_security={"cap_add": ["NET_RAW"]},
+        )
+        assert result["cap_drop"] == ["NET_ADMIN"]
+        assert result["cap_add"] == ["NET_RAW"]
+
+
+class TestServiceFieldOverrides:
+    def test_service_pids_overrides_project_pids(self) -> None:
+        result = resolve_security(
+            project_security={"profile": "default", "pids_limit": 1024},
+            service_security={"pids_limit": 4096},
+        )
+        assert result["pids_limit"] == 4096
+
+    def test_service_inherits_when_block_absent(self) -> None:
+        result = resolve_security(
+            project_security={"profile": "default", "pids_limit": 1024},
+            service_security=None,
+        )
+        assert result["pids_limit"] == 1024
