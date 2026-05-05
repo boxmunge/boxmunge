@@ -49,13 +49,8 @@ def _run_unstage_inner(project_name: str, paths: BoxPaths, dry_run: bool = False
     log_operation("unstage", "Unstaged", paths, project=project_name)
     print(f"{project_name}: staging torn down.")
 
-    try:
-        from boxmunge.config import load_config
-        from boxmunge.webhooks import fire_webhook
-        config = load_config(paths)
-        fire_webhook("unstage", project_name, config)
-    except Exception:
-        pass
+    from boxmunge.webhooks import webhook_safe
+    webhook_safe("unstage", project_name, paths)
 
     return 0
 

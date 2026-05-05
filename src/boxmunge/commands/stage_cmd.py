@@ -121,7 +121,8 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
     off_services = {svc for svc, _ in services_with_off_profile(manifest)}
     try:
         validate_user_compose(
-            project_dir / "compose.yml", off_services=off_services,
+            project_dir / "compose.yml", paths,
+            off_services=off_services,
         )
     except ComposeSecurityError as e:
         print(f"ERROR: {e}", file=sys.stderr)
@@ -238,13 +239,8 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
 
     log_operation("stage", "Staged", paths, project=project_name)
 
-    try:
-        from boxmunge.config import load_config
-        from boxmunge.webhooks import fire_webhook
-        config = load_config(paths)
-        fire_webhook("stage", project_name, config, details={"ref": ref or "latest"})
-    except Exception:
-        pass
+    from boxmunge.webhooks import webhook_safe
+    webhook_safe("stage", project_name, paths, details={"ref": ref or "latest"})
 
     return 0
 

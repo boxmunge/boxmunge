@@ -98,13 +98,8 @@ def _run_rollback_inner(
     )
     print(f"\n{project_name}: rollback complete")
 
-    try:
-        from boxmunge.config import load_config
-        from boxmunge.webhooks import fire_webhook
-        config = load_config(paths)
-        fire_webhook("rollback", project_name, config)
-    except Exception:
-        pass
+    from boxmunge.webhooks import webhook_safe
+    webhook_safe("rollback", project_name, paths)
 
     return 0
 

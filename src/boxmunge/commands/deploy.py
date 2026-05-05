@@ -290,7 +290,8 @@ def _run_deploy_inner(
     off_services = {svc for svc, _ in services_with_off_profile(manifest)}
     try:
         validate_user_compose(
-            paths.project_compose(project_name), off_services=off_services,
+            paths.project_compose(project_name), paths,
+            off_services=off_services,
         )
     except ComposeSecurityError as e:
         print(f"ERROR: {e}", file=sys.stderr)
@@ -349,13 +350,8 @@ def _run_deploy_inner(
     log_operation("deploy", f"Deploy completed ref={actual_ref}", paths, project=project_name, detail={"ref": actual_ref})
     print(f"{project_name}: deployed successfully (ref: {actual_ref})")
 
-    try:
-        from boxmunge.config import load_config
-        from boxmunge.webhooks import fire_webhook
-        config = load_config(paths)
-        fire_webhook("deploy", project_name, config, details={"ref": actual_ref})
-    except Exception:
-        pass
+    from boxmunge.webhooks import webhook_safe
+    webhook_safe("deploy", project_name, paths, details={"ref": actual_ref})
 
     return 0
 

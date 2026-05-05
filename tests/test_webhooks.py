@@ -2,7 +2,8 @@
 import json
 import pytest
 from unittest.mock import patch, MagicMock
-from boxmunge.webhooks import fire_webhook, build_payload
+from boxmunge.config import ConfigError
+from boxmunge.webhooks import build_payload, fire_webhook, webhook_safe
 
 class TestBuildPayload:
     def test_includes_required_fields(self):
@@ -71,3 +72,38 @@ class TestFireWebhook:
 
     def test_empty_webhooks_list(self):
         fire_webhook("deploy", "myapp", {"webhooks": [], "hostname": "box01.example.com"})
+
+
+class TestWebhookSafe:
+    def test_swallows_config_error_and_logs(self, paths):
+        with patch("boxmunge.webhooks.load_config",
+                   side_effect=ConfigError("missing")):
+            with patch("boxmunge.webhooks.log_warning") as mock_warn:
+                webhook_safe("deploy", "myapp", paths)
+                mock_warn.assert_called_once()
+                args = mock_warn.call_args[0]
+                assert args[0] == "webhook"
+                assert "deploy" in args[1]
+
+    def test_swallows_os_error_and_logs(self, paths):
+        with patch("boxmunge.webhooks.load_config",
+                   side_effect=OSError("disk gone")):
+            with patch("boxmunge.webhooks.log_warning") as mock_warn:
+                webhook_safe("deploy", "myapp", paths)
+                mock_warn.assert_called_once()
+
+    def test_propagates_attribute_error(self, paths):
+        # Programming errors must surface, not be silently swallowed.
+        with patch("boxmunge.webhooks.load_config",
+                   side_effect=AttributeError("typo in attr")):
+            with pytest.raises(AttributeError):
+                webhook_safe("deploy", "myapp", paths)
+
+    def test_calls_fire_webhook_with_details(self, paths):
+        with patch("boxmunge.webhooks.load_config",
+                   return_value={"webhooks": [], "hostname": "h"}):
+            with patch("boxmunge.webhooks.fire_webhook") as mock_fire:
+                webhook_safe("deploy", "myapp", paths, details={"ref": "abc"})
+                mock_fire.assert_called_once()
+                kwargs = mock_fire.call_args.kwargs
+                assert kwargs["details"] == {"ref": "abc"}

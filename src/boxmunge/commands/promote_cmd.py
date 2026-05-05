@@ -68,13 +68,8 @@ def _run_promote_inner(
     log_operation("promote", "Promoted from staging to production", paths, project=project_name)
     print(f"{project_name}: promoted to production successfully.")
 
-    try:
-        from boxmunge.config import load_config
-        from boxmunge.webhooks import fire_webhook
-        config = load_config(paths)
-        fire_webhook("promote", project_name, config)
-    except Exception:
-        pass
+    from boxmunge.webhooks import webhook_safe
+    webhook_safe("promote", project_name, paths)
 
     return 0
 
