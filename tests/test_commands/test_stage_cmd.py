@@ -145,3 +145,15 @@ class TestProjectRegistrationEnforcement:
         _place_real_bundle(paths)
         result = run_stage("testapp", paths)
         assert result == 0
+
+
+class TestRefusesPaused:
+    def test_refuses_paused_project(self, paths, capsys):
+        from boxmunge.pause import write_paused_state
+        add_project("testapp", paths)
+        _place_real_bundle(paths)
+        write_paused_state("testapp", paths)
+        rc = run_stage("testapp", paths)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "paused" in err.lower()

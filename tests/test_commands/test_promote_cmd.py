@@ -57,3 +57,17 @@ class TestRunPromote:
         run_promote("testapp", paths)
         deploy_call = mock_deploy.call_args
         assert deploy_call[0][0] == "testapp"
+
+
+class TestRefusesPaused:
+    def test_refuses_paused_project(self, paths, capsys):
+        from boxmunge.pause import write_paused_state
+        pdir = paths.project_dir("testapp")
+        pdir.mkdir(parents=True, exist_ok=True)
+        (pdir / "manifest.yml").write_text(VALID_MANIFEST)
+        write_state(paths.project_staging_state("testapp"), {"active": True})
+        write_paused_state("testapp", paths)
+        rc = run_promote("testapp", paths)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "paused" in err.lower()

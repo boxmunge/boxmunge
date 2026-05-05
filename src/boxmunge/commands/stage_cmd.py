@@ -16,6 +16,7 @@ from boxmunge.fileutil import atomic_write_text, project_lock, LockError
 from boxmunge.identity import check_project_identity, register_project_identity
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
+from boxmunge.pause import is_paused
 from boxmunge.project_registry import is_registered
 from boxmunge.source import resolve_bundle_source, SourceError
 from boxmunge.state import write_state
@@ -231,6 +232,11 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
 def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
               dry_run: bool = False) -> int:
     """Stage a project. Returns 0 on success, 1 on failure."""
+    if is_paused(project_name, paths):
+        print(f"ERROR: Project '{project_name}' is paused. "
+              f"Run 'resume {project_name}' before staging.",
+              file=sys.stderr)
+        return 1
     if not is_registered(project_name, paths):
         print(f"ERROR: Project '{project_name}' is not registered on this server. "
               f"Run: project-add {project_name}")

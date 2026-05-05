@@ -125,3 +125,14 @@ class TestProjectRegistrationEnforcement:
         assert result == 1
         output = capsys.readouterr().out
         assert "not registered" in output
+
+
+class TestRefusesPaused:
+    def test_refuses_paused_project(self, paths: BoxPaths, capsys) -> None:
+        from boxmunge.pause import write_paused_state
+        add_project("myapp", paths)
+        write_paused_state("myapp", paths)
+        rc = run_deploy("myapp", paths)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "paused" in err.lower()

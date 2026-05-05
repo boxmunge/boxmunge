@@ -16,6 +16,7 @@ from boxmunge.fileutil import atomic_write_text, project_lock, LockError
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
 from boxmunge.paths import BoxPaths
+from boxmunge.pause import is_paused
 from boxmunge.probation import clear_probation_if_active
 from boxmunge.state import read_state, write_state
 
@@ -334,6 +335,11 @@ def run_deploy(
     _lock_held: bool = False,
 ) -> int:
     """Execute the full deploy flow. Returns 0 on success, 1 on failure."""
+    if is_paused(project_name, paths):
+        print(f"ERROR: Project '{project_name}' is paused. "
+              f"Run 'resume {project_name}' before deploying.",
+              file=sys.stderr)
+        return 1
     clear_probation_if_active(paths, "deploy")
     from boxmunge.project_registry import is_registered
     if not is_registered(project_name, paths):
