@@ -40,6 +40,8 @@ These operations are safe to run without human confirmation:
 | Run diagnostics | `doctor` |
 | Clean up old bundles | `inbox clean` |
 | Read documentation | `agent-help <topic>` |
+| Pause a project (planned maintenance) | `pause <project>` |
+| Resume a paused project (pulls latest images) | `resume <project>` |
 
 ### Deploying a project (standard workflow)
 
@@ -76,6 +78,8 @@ These commands prompt for confirmation before executing. Use `--yes` only when y
 - `rollback <project>` -- rolls back to the previous deployment
 - `restore <project>` -- restores from a backup
 - `project-delete <project>` -- destructively deletes a project (containers, files, registry entry)
+- `pause <project>` -- takes the site offline with a maintenance page
+- `resume <project> --skip-security-checks` -- DANGEROUS: brings up potentially vulnerable images without pulling fresh
 
 Do not pass `--yes` reflexively. Confirm the target project and the effect before proceeding.
 

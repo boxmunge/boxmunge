@@ -21,6 +21,8 @@ promote <project>    promote staging to production
 unstage <project>    tear down staging without promoting
 prod-deploy <p>      deploy directly to production
 rollback <p>         restore previous deployment
+pause <project>      take offline with maintenance page
+resume <project>     bring back online (pulls latest images first)
 project-delete <p>   destructive removal (containers + files + registry)
 
 diff <project>       preview changes before deploying

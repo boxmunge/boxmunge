@@ -314,6 +314,40 @@ You will be shown what snapshot will be restored and asked to confirm before any
 
 ---
 
+## Pause and Resume
+
+Take a project offline temporarily without tearing it down. Visitors see a styled 503 maintenance page branded "Scheduled maintenance" -- not a broken site.
+
+Use pause for planned maintenance, post-incident triage, or while you reconfigure something risky:
+
+```
+boxmunge pause myapp --reason "rolling key rotation"
+```
+
+Containers are stopped via `docker compose stop`, so state is preserved on disk and resume is fast. While paused:
+
+- Health checks, scheduled backups, and container-update sweeps skip the project
+- `deploy`, `stage`, and `promote` refuse to run against it
+- `backup-sync` continues (off-box copies of existing snapshots are unaffected)
+
+To bring it back:
+
+```
+boxmunge resume myapp
+```
+
+`resume` pulls the latest images by default. This is a deliberate safety guarantee: a project that was paused for hours or days should not come back on stale, potentially vulnerable images.
+
+For emergency overrides (e.g., the registry is unreachable and you need the site up now):
+
+```
+boxmunge resume myapp --skip-security-checks   # only if you accept the risk
+```
+
+This brings containers up on whatever images are already cached locally. Do not use it casually -- you are explicitly accepting that the project may be running known-vulnerable code.
+
+---
+
 ## Host Maintenance
 
 Verify the host is correctly configured:
