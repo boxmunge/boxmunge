@@ -21,7 +21,7 @@ from boxmunge.commands.health_cmd import run_health
 from boxmunge.commands.self_test_cmd import run_self_test
 from boxmunge.docker import compose_up, caddy_reload, DockerError
 from boxmunge.log import log_operation, log_error, log_warning
-from boxmunge.manifest import load_manifest, ManifestError, CURRENT_SCHEMA_VERSION
+from boxmunge.manifest import load_manifest, validate_manifest, ManifestError, CURRENT_SCHEMA_VERSION
 from boxmunge.migration import migrate_manifest, MigrationError
 from boxmunge.paths import BoxPaths
 from boxmunge.stash import create_stash, prune_stashes
@@ -55,17 +55,36 @@ def _migrate_project_manifests(paths: BoxPaths) -> list[str]:
 
         try:
             migrated_manifest = migrate_manifest(manifest, CURRENT_SCHEMA_VERSION)
-            from boxmunge.fileutil import atomic_write_text
-            atomic_write_text(
-                manifest_path,
-                yaml.dump(migrated_manifest, default_flow_style=False, sort_keys=False),
-            )
-            migrated.append(project_dir.name)
         except MigrationError as e:
             log_error(
                 "upgrade", f"Failed to migrate {project_dir.name}: {e}",
                 paths, project=project_dir.name,
             )
+            continue
+
+        # Validate the migrated manifest BEFORE writing it.
+        # A migration that produces invalid output is a real bug — fail noisily
+        # rather than persisting a malformed manifest the operator will hit
+        # later at deploy time.
+        errors, _ = validate_manifest(migrated_manifest, expected_name=project_dir.name)
+        if errors:
+            log_error(
+                "upgrade",
+                f"Migrated manifest for {project_dir.name} failed validation: "
+                f"{'; '.join(errors)}. Original manifest left in place.",
+                paths, project=project_dir.name,
+            )
+            raise MigrationError(
+                f"Migrated manifest for {project_dir.name} failed validation. "
+                f"Errors: {'; '.join(errors)}"
+            )
+
+        from boxmunge.fileutil import atomic_write_text
+        atomic_write_text(
+            manifest_path,
+            yaml.dump(migrated_manifest, default_flow_style=False, sort_keys=False),
+        )
+        migrated.append(project_dir.name)
 
     return migrated
 
