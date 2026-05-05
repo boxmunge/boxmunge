@@ -137,6 +137,34 @@ if [[ -d "${BOXMUNGE_ROOT}/caddy/sites" ]]; then
     chmod 775 "${BOXMUNGE_ROOT}/caddy/sites"
 fi
 
+# Ensure maintenance dir exists and is mounted into Caddy. Used by the
+# pause/resume feature (v0.4) — Caddy serves a static 503 page from here
+# while a project is paused. Idempotent.
+mkdir -p "${BOXMUNGE_ROOT}/caddy/maintenance"
+chown root:deploy "${BOXMUNGE_ROOT}/caddy/maintenance"
+chmod 755 "${BOXMUNGE_ROOT}/caddy/maintenance"
+if [[ -f "${SCRIPT_DIR}/caddy/maintenance/index.html" ]]; then
+    cp "${SCRIPT_DIR}/caddy/maintenance/index.html" \
+        "${BOXMUNGE_ROOT}/caddy/maintenance/index.html"
+    chmod 644 "${BOXMUNGE_ROOT}/caddy/maintenance/index.html"
+fi
+
+# Refresh system Caddy compose so existing installs pick up new mounts
+# (e.g., the v0.4 maintenance bind-mount). If the compose file actually
+# changed, restart Caddy so the new mount takes effect.
+if [[ -f "${SCRIPT_DIR}/caddy/compose.yml" ]]; then
+    CADDY_COMPOSE_CHANGED=0
+    if ! cmp -s "${SCRIPT_DIR}/caddy/compose.yml" "${BOXMUNGE_ROOT}/caddy/compose.yml"; then
+        CADDY_COMPOSE_CHANGED=1
+    fi
+    cp "${SCRIPT_DIR}/caddy/compose.yml" "${BOXMUNGE_ROOT}/caddy/compose.yml"
+    chown root:deploy "${BOXMUNGE_ROOT}/caddy/compose.yml"
+    chmod 640 "${BOXMUNGE_ROOT}/caddy/compose.yml"
+    if [[ "${CADDY_COMPOSE_CHANGED}" -eq 1 ]] && docker inspect boxmunge-caddy >/dev/null 2>&1; then
+        docker compose -f "${BOXMUNGE_ROOT}/caddy/compose.yml" up -d
+    fi
+fi
+
 # Ensure stashes dir exists and is writable by deploy (group). Stash files
 # are created by deploy during upgrade flows; the dir itself is root-owned
 # so deploy cannot rename/delete the dir, only files inside.

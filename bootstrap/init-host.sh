@@ -519,6 +519,7 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./sites:/etc/caddy/sites:ro
+      - ./maintenance:/etc/caddy/maintenance:ro
       - caddy_data:/data
       - caddy_config:/config
     networks:
