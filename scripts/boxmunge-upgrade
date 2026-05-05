@@ -300,81 +300,35 @@ print('yes' if datetime.now(timezone.utc) >= expires else 'no')
 }
 
 cmd_auto() {
-    # Manual upgrade trigger: discover latest release, then hand off to cmd_run.
-    # Uses Python in the active venv to do discovery (boxmunge.dev → GitHub fallback)
-    # and emits "version url" on stdout, or exits non-zero with a message.
-    local discovery rc=0
-    discovery="$("$(active_venv)/bin/python" -c "
-import json, sys, urllib.error, urllib.request
-from boxmunge.paths import BoxPaths
-from boxmunge.version import read_installed_version, parse_version_string
+    local result action version url msg
+    result="$("$(active_venv)/bin/boxmunge-server" _discover-update --json 2>/dev/null)" || \
+        die "Discovery failed (boxmunge-server _discover-update returned non-zero)"
 
-current_semver, _ = parse_version_string(read_installed_version(BoxPaths()))
+    action="$(echo "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("action",""))')"
 
-def via_endpoint():
-    req = urllib.request.Request(
-        f'https://boxmunge.dev/v1/check?v={current_semver}',
-        headers={'User-Agent': f'boxmunge/{current_semver}'},
-    )
-    resp = urllib.request.urlopen(req, timeout=10)
-    return json.loads(resp.read())
-
-def via_github():
-    req = urllib.request.Request(
-        'https://api.github.com/repos/boxmunge/boxmunge/releases/latest',
-        headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'boxmunge'},
-    )
-    resp = urllib.request.urlopen(req, timeout=30)
-    rel = json.loads(resp.read())
-    tag = rel.get('tag_name', '').lstrip('v')
-    return {'latest': {'version': tag, 'url': rel.get('html_url', '')}}
-
-def newer(candidate, current):
-    try:
-        c = tuple(int(x) for x in candidate.split('.'))
-        cur = tuple(int(x) for x in current.split('.'))
-    except ValueError:
-        return False
-    n = max(len(c), len(cur))
-    return c + (0,)*(n-len(c)) > cur + (0,)*(n-len(cur))
-
-try:
-    result = via_endpoint()
-except (urllib.error.URLError, json.JSONDecodeError):
-    try:
-        result = via_github()
-    except (urllib.error.URLError, json.JSONDecodeError) as e:
-        print(f'DISCOVERY_ERROR: cannot reach boxmunge.dev or GitHub: {e}', file=sys.stderr)
-        sys.exit(2)
-
-latest = (result or {}).get('latest')
-if latest is None:
-    # Endpoint explicitly says we're up-to-date (latest: null + status: up_to_date)
-    print(f'UP_TO_DATE: current={current_semver}', file=sys.stderr)
-    sys.exit(3)
-version = latest.get('version', '')
-url = latest.get('url', '')
-if not version or not url:
-    print('NO_RELEASE: discovery returned malformed response', file=sys.stderr)
-    sys.exit(2)
-if not newer(version, current_semver):
-    print(f'UP_TO_DATE: current={current_semver} latest={version}', file=sys.stderr)
-    sys.exit(3)
-print(f'{version} {url}')
-")" || rc=$?
-    if [[ $rc -eq 3 ]]; then
-        log "Already on latest version"
-        exit 0
-    fi
-    if [[ $rc -ne 0 ]]; then
-        die "Discovery failed (rc=$rc)"
-    fi
-
-    local version url
-    version="$(echo "$discovery" | awk '{print $1}')"
-    url="$(echo "$discovery" | awk '{print $2}')"
-    log "Manual upgrade: discovered $version at $url"
-    cmd_run "$version" "$url"
+    case "$action" in
+        upgrade)
+            version="$(echo "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+            url="$(echo     "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["url"])')"
+            log "Manual upgrade: discovered $version at $url"
+            cmd_run "$version" "$url"
+            ;;
+        up_to_date)
+            log "Already on latest version"
+            exit 0
+            ;;
+        blocklisted)
+            log "Latest version is blocklisted on this box; nothing to do"
+            exit 0
+            ;;
+        error)
+            msg="$(echo "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("message","(no message)"))')"
+            die "Discovery error: $msg"
+            ;;
+        *)
+            die "Unknown action from _discover-update: $action"
+            ;;
+    esac
 }
 
 cmd_clear_blocklist() {

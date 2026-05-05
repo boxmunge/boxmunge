@@ -67,6 +67,77 @@ else
     echo "SKIP: orphan venv cleanup test (flock not available on this platform)"
 fi
 
+# ---------------------------------------------------------------------------
+# cmd_auto dispatch tests — mock boxmunge-server _discover-update
+# ---------------------------------------------------------------------------
+
+test_dir="$(mktemp -d)"
+export BOXMUNGE_ROOT="$test_dir"
+mkdir -p "$BOXMUNGE_ROOT/upgrade-state" "$BOXMUNGE_ROOT/env-a/bin"
+
+# Helper: install a mock boxmunge-server that returns canned JSON for
+# _discover-update and short-circuits cmd_run by exiting 0.
+mock_boxmunge_server() {
+    local response="$1"
+    cat > "$BOXMUNGE_ROOT/env-a/bin/boxmunge-server" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "_discover-update" ]]; then
+    cat <<JSON
+$response
+JSON
+    exit 0
+fi
+# Any other invocation: succeed silently (covers --version probes etc.)
+exit 0
+EOF
+    chmod +x "$BOXMUNGE_ROOT/env-a/bin/boxmunge-server"
+}
+
+# Case 1: up_to_date — shim should log + exit 0
+mock_boxmunge_server '{"action":"up_to_date","current_version":"0.4.0"}'
+set +e
+out="$(bash "$SHIM" auto 2>&1)"
+rc=$?
+set -e
+if [[ $rc -eq 0 && "$out" == *"Already on latest version"* ]]; then
+    echo "PASS: cmd_auto/up_to_date logs and exits 0"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: cmd_auto/up_to_date (rc=$rc, out='$out')"
+    FAIL=$((FAIL + 1))
+fi
+
+# Case 2: error — shim should die with the error message
+mock_boxmunge_server '{"action":"error","message":"endpoint down"}'
+set +e
+out="$(bash "$SHIM" auto 2>&1)"
+rc=$?
+set -e
+if [[ $rc -ne 0 && "$out" == *"endpoint down"* ]]; then
+    echo "PASS: cmd_auto/error dies with discovery message"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: cmd_auto/error (rc=$rc, out='$out')"
+    FAIL=$((FAIL + 1))
+fi
+
+# Case 3: blocklisted — shim should log + exit 0
+mock_boxmunge_server '{"action":"blocklisted","version":"0.4.1"}'
+set +e
+out="$(bash "$SHIM" auto 2>&1)"
+rc=$?
+set -e
+if [[ $rc -eq 0 && "$out" == *"blocklisted"* ]]; then
+    echo "PASS: cmd_auto/blocklisted logs and exits 0"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: cmd_auto/blocklisted (rc=$rc, out='$out')"
+    FAIL=$((FAIL + 1))
+fi
+
+rm -rf "$test_dir"
+unset BOXMUNGE_ROOT
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]] || exit 1
