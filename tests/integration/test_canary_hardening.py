@@ -32,7 +32,7 @@ def _inspect(container: str) -> dict:
 
 def test_canary_web_has_no_new_privileges() -> None:
     """canary's `web` service must run with no-new-privileges."""
-    cid = _container_id_for("canary-web")
+    cid = _container_id_for("boxmunge-canary-web")
     info = _inspect(cid)
     sec_opt = info["HostConfig"].get("SecurityOpt") or []
     assert any("no-new-privileges" in s for s in sec_opt), \
@@ -40,14 +40,14 @@ def test_canary_web_has_no_new_privileges() -> None:
 
 
 def test_canary_web_has_pids_limit() -> None:
-    cid = _container_id_for("canary-web")
+    cid = _container_id_for("boxmunge-canary-web")
     info = _inspect(cid)
     pids = info["HostConfig"].get("PidsLimit")
     assert pids == 512, f"expected pids_limit=512, got {pids!r}"
 
 
 def test_canary_web_drops_dangerous_caps() -> None:
-    cid = _container_id_for("canary-web")
+    cid = _container_id_for("boxmunge-canary-web")
     info = _inspect(cid)
     cap_drop = info["HostConfig"].get("CapDrop") or []
     for cap in ("NET_ADMIN", "SYS_PTRACE", "SYS_MODULE", "NET_RAW"):
@@ -55,7 +55,7 @@ def test_canary_web_drops_dangerous_caps() -> None:
 
 
 def test_canary_web_has_init_true() -> None:
-    cid = _container_id_for("canary-web")
+    cid = _container_id_for("boxmunge-canary-web")
     info = _inspect(cid)
     assert info["HostConfig"].get("Init") is True, \
         "Init flag not set on canary-web"
