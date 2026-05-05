@@ -5,6 +5,7 @@ import sys
 from datetime import datetime, timezone
 
 from boxmunge.paths import BoxPaths
+from boxmunge.pause import is_paused
 from boxmunge.state import read_state
 
 
@@ -45,6 +46,17 @@ def run_status(paths: BoxPaths, as_json: bool = False) -> int:
 
     rows = []
     for name in deployed:
+        if is_paused(name, paths):
+            deploy = read_state(paths.project_deploy_state(name))
+            deployed_at = deploy.get("deployed_at", "-")
+            rows.append({
+                "project": name,
+                "status": "PAUSED",
+                "last_check": "-",
+                "deployed_at": deployed_at,
+                "raw_status": "paused",
+            })
+            continue
         health = read_state(paths.project_health_state(name))
         deploy = read_state(paths.project_deploy_state(name))
 
