@@ -26,6 +26,8 @@ ALLOWED_COMMANDS: set[str] = {
     "inbox",
     # Secrets
     "secrets",
+    # Container security introspection (read-only)
+    "security",
     # Project operations
     "check", "check-all", "log", "logs",
     "backup", "backup-all", "backup-sync",

@@ -59,7 +59,7 @@ class TestParseShellCommand:
 class TestAllowedCommands:
     def test_known_commands_are_allowed(self) -> None:
         for cmd in ["help", "status", "version", "prod-deploy", "stage", "promote",
-                     "unstage", "inbox", "secrets", "check", "log", "logs",
+                     "unstage", "inbox", "secrets", "security", "check", "log", "logs",
                      "agent-help", "doctor", "project-add", "project-list",
                      "project-delete"]:
             assert cmd in ALLOWED_COMMANDS, f"{cmd} not in ALLOWED_COMMANDS"
