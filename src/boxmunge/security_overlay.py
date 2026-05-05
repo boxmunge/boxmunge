@@ -73,6 +73,44 @@ def _baseline_for_profile(profile: str) -> dict[str, Any]:
     raise ValueError(f"Unknown profile: {profile!r}")
 
 
+_OVERRIDE_FIELDS = ("no_new_privileges", "init", "pids_limit", "cap_drop", "cap_add")
+
+
+def _apply_overrides(baseline: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """Apply individual field overrides on top of a baseline dict.
+
+    Fail-safe semantics: omitting a field never disables a protection — the
+    baseline value remains in effect. Disabling requires an explicit value
+    (e.g. no_new_privileges: false).
+    """
+    result = dict(baseline)
+    for field in _OVERRIDE_FIELDS:
+        if field not in overrides:
+            continue
+        value = overrides[field]
+        if field == "no_new_privileges":
+            sec_opt = list(result.get("security_opt", []))
+            sec_opt = [s for s in sec_opt if s != "no-new-privileges:true"]
+            if value is True:
+                sec_opt.append("no-new-privileges:true")
+            if sec_opt:
+                result["security_opt"] = sec_opt
+            else:
+                result.pop("security_opt", None)
+        elif field == "init":
+            result["init"] = bool(value)
+        elif field == "pids_limit":
+            if value == 0:
+                result.pop("pids_limit", None)
+            else:
+                result["pids_limit"] = int(value)
+        elif field == "cap_drop":
+            result["cap_drop"] = list(value)
+        elif field == "cap_add":
+            result["cap_add"] = list(value)
+    return result
+
+
 def resolve_security(
     project_security: dict[str, Any] | None,
     service_security: dict[str, Any] | None,
@@ -80,15 +118,15 @@ def resolve_security(
     """Resolve effective security posture for a single service.
 
     Caller is responsible for schema validation BEFORE calling this function.
-    See validate_security_block() for validation. resolve_security assumes
-    inputs are well-formed.
     """
     project_security = project_security or {}
     service_security = service_security or {}
 
     project_profile = project_security.get("profile", PROFILE_DEFAULT)
     if "profile" in service_security:
-        profile = service_security["profile"]
+        baseline = _baseline_for_profile(service_security["profile"])
     else:
-        profile = project_profile
-    return _baseline_for_profile(profile)
+        baseline = _baseline_for_profile(project_profile)
+        baseline = _apply_overrides(baseline, project_security)
+    baseline = _apply_overrides(baseline, service_security)
+    return baseline

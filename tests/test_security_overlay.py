@@ -62,3 +62,43 @@ class TestOffProfile:
             service_security={"profile": "off", "reason": "deliberate"},
         )
         assert result == {}
+
+
+class TestProjectFieldOverrides:
+    def test_pids_limit_override(self) -> None:
+        result = resolve_security(
+            project_security={"profile": "default", "pids_limit": 2048},
+            service_security=None,
+        )
+        assert result["pids_limit"] == 2048
+
+    def test_no_new_privileges_explicit_false_disables(self) -> None:
+        result = resolve_security(
+            project_security={"profile": "default", "no_new_privileges": False},
+            service_security=None,
+        )
+        assert "no-new-privileges:true" not in result.get("security_opt", [])
+
+    def test_init_explicit_false_disables(self) -> None:
+        result = resolve_security(
+            project_security={"profile": "default", "init": False},
+            service_security=None,
+        )
+        assert result.get("init") is False or "init" not in result
+
+    def test_cap_drop_replaces_default_list(self) -> None:
+        result = resolve_security(
+            project_security={"profile": "default", "cap_drop": ["NET_ADMIN"]},
+            service_security=None,
+        )
+        assert result["cap_drop"] == ["NET_ADMIN"]
+        assert "NET_RAW" not in result["cap_drop"]
+
+    def test_omitted_field_inherits_profile_value(self) -> None:
+        # Override only pids_limit. cap_drop must remain the default list.
+        result = resolve_security(
+            project_security={"profile": "default", "pids_limit": 1024},
+            service_security=None,
+        )
+        assert "NET_ADMIN" in result["cap_drop"]
+        assert result["pids_limit"] == 1024
