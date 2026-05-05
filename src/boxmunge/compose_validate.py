@@ -24,6 +24,7 @@ from typing import Any
 import yaml
 
 from boxmunge.log import log_warning
+from boxmunge.paths import BoxPaths
 
 
 class ComposeSecurityError(Exception):
@@ -196,6 +197,7 @@ _CHECKS = (
 
 def validate_user_compose(
     compose_path: Path,
+    paths: BoxPaths,
     off_services: set[str] | None = None,
 ) -> None:
     """Parse compose.yml and reject hostile keys.
@@ -251,6 +253,7 @@ def validate_user_compose(
                     "compose-validate",
                     f"hostile compose key {key} on service {svc_name} "
                     f"(profile: off — allowed)",
+                    paths,
                 )
                 # Continue scanning this service so the operator sees ALL
                 # warnings for an opted-out service, not just the first.

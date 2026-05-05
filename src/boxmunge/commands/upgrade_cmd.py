@@ -114,7 +114,8 @@ def _regenerate_configs(paths: BoxPaths) -> list[str]:
         off_services = {svc for svc, _ in services_with_off_profile(manifest)}
         try:
             validate_user_compose(
-                paths.project_compose(project_name), off_services=off_services,
+                paths.project_compose(project_name), paths,
+                off_services=off_services,
             )
         except ComposeSecurityError as e:
             log_error(

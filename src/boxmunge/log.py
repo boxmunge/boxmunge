@@ -59,8 +59,13 @@ def _reset_logger() -> None:
     _logger = None
 
 
-def get_logger(paths: BoxPaths | None = None) -> logging.Logger:
-    """Get or create the boxmunge operational logger."""
+def get_logger(paths: BoxPaths) -> logging.Logger:
+    """Get or create the boxmunge operational logger.
+
+    `paths` is required: the logger always wants the log directory so its
+    file handler can attach. Callers without paths must construct a
+    BoxPaths(tmp_path) explicitly — the previous Optional-paths path
+    silently dropped the file handler and made deploy logs vanish."""
     global _logger
     if _logger is not None:
         return _logger
@@ -78,8 +83,9 @@ def get_logger(paths: BoxPaths | None = None) -> logging.Logger:
     logger.addHandler(stderr_handler)
 
     # JSON file handler with daily rotation, keep 90 days
-    # (if paths provided and log dir exists)
-    if paths is not None and paths.logs.exists():
+    # (only if log dir exists; tests sometimes use a freshly-made BoxPaths
+    # whose logs/ subdir hasn't been created yet — fine, just skip)
+    if paths.logs.exists():
         fh = logging.handlers.TimedRotatingFileHandler(
             paths.log_file,
             when="midnight",
@@ -97,7 +103,7 @@ def _log(
     level: int,
     component: str,
     message: str,
-    paths: BoxPaths | None = None,
+    paths: BoxPaths,
     project: str | None = None,
     detail: dict[str, Any] | None = None,
 ) -> None:
@@ -113,7 +119,7 @@ def _log(
 def log_operation(
     component: str,
     message: str,
-    paths: BoxPaths | None = None,
+    paths: BoxPaths,
     project: str | None = None,
     detail: dict[str, Any] | None = None,
 ) -> None:
@@ -124,7 +130,7 @@ def log_operation(
 def log_warning(
     component: str,
     message: str,
-    paths: BoxPaths | None = None,
+    paths: BoxPaths,
     project: str | None = None,
     detail: dict[str, Any] | None = None,
 ) -> None:
@@ -135,7 +141,7 @@ def log_warning(
 def log_error(
     component: str,
     message: str,
-    paths: BoxPaths | None = None,
+    paths: BoxPaths,
     project: str | None = None,
     detail: dict[str, Any] | None = None,
 ) -> None:
