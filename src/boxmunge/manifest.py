@@ -106,6 +106,18 @@ def validate_manifest(
     )
 
     project_security = manifest.get("security")
+    has_any_security_block = project_security is not None or any(
+        isinstance(svc, dict) and svc.get("security") is not None
+        for svc in services.values()
+    )
+    if has_any_security_block and schema_version < 2:
+        errors.append(
+            f"manifest declares a 'security:' block but schema_version is "
+            f"{schema_version}. The 'security:' block requires schema_version: 2 "
+            f"(boxmunge 0.5.0+). Bump schema_version to 2 — boxmunge upgrades "
+            f"existing v1 manifests automatically; the migration is a no-op."
+        )
+
     try:
         validate_security_block(project_security, context="project")
     except SecurityValidationError as e:

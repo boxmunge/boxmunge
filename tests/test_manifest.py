@@ -397,3 +397,36 @@ class TestSecurityValidation:
         m["services"]["web"]["security"] = {"profile": "off"}  # missing reason
         errors, _ = validate_manifest(m, expected_name="demo")
         assert any("service:web" in e and "reason" in e for e in errors)
+
+    def test_security_block_with_schema_v1_errors(self) -> None:
+        """F3: declaring a security: block on a v1 manifest is an error.
+
+        Catches the local-dev mistake of copying the new template into an
+        un-migrated manifest. Real migrations bump schema_version
+        automatically; an explicit v1 manifest with a security block is
+        a configuration confusion we want to surface immediately.
+        """
+        m = self._base_manifest()
+        m["schema_version"] = 1
+        m["security"] = {"profile": "default"}
+        errors, _ = validate_manifest(m, expected_name="demo")
+        assert any(
+            "security" in e and "schema_version" in e for e in errors
+        ), f"expected schema_version coherence error, got: {errors}"
+
+    def test_v1_without_security_block_passes(self) -> None:
+        """A v1 manifest without a security block is still valid (legacy)."""
+        m = self._base_manifest()
+        m["schema_version"] = 1
+        errors, _ = validate_manifest(m, expected_name="demo")
+        # No security-related errors
+        assert not any("security" in e for e in errors)
+
+    def test_per_service_security_block_with_schema_v1_errors(self) -> None:
+        m = self._base_manifest()
+        m["schema_version"] = 1
+        m["services"]["web"]["security"] = {"profile": "default"}
+        errors, _ = validate_manifest(m, expected_name="demo")
+        assert any(
+            "security" in e and "schema_version" in e for e in errors
+        )
