@@ -21,7 +21,7 @@ def run_promote(project_name: str, paths: BoxPaths, dry_run: bool = False) -> in
         return 1
     staging_state = read_state(paths.project_staging_state(project_name))
     if not staging_state.get("active"):
-        print(f"ERROR: No active staging for '{project_name}'.")
+        print(f"ERROR: No active staging for '{project_name}'.", file=sys.stderr)
         return 1
 
     if dry_run:
@@ -33,11 +33,11 @@ def run_promote(project_name: str, paths: BoxPaths, dry_run: bool = False) -> in
             # Re-read state inside the lock to avoid TOCTOU
             staging_state = read_state(paths.project_staging_state(project_name))
             if not staging_state.get("active"):
-                print(f"ERROR: Staging was torn down before lock was acquired.")
+                print(f"ERROR: Staging was torn down before lock was acquired.", file=sys.stderr)
                 return 1
             return _run_promote_inner(project_name, paths, staging_state)
     except LockError as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
 
@@ -51,9 +51,12 @@ def _run_promote_inner(
 
     # Deploy to production FIRST — staging stays live as fallback
     print("  Deploying to production...")
-    deploy_result = run_deploy(project_name, paths, ref=ref_arg, _lock_held=True)
+    deploy_result = run_deploy(
+        project_name, paths, ref=ref_arg, _lock_held=True,
+        component="promote",
+    )
     if deploy_result != 0:
-        print("ERROR: Production deploy failed. Staging is still live.")
+        print("ERROR: Production deploy failed. Staging is still live.", file=sys.stderr)
         return 1
 
     # Only tear down staging after successful production deploy

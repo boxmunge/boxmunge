@@ -56,10 +56,11 @@ class TestWarnOffServices:
     def test_component_passed_to_log(self, fake_paths, component: str) -> None:
         """Component string must flow through to the JSON log entry.
 
-        Note: `promote` currently logs as `component="promote"` here because
-        warn_off_services receives the component arg directly. The audit-G-1
-        finding (`promote` callsite passes "deploy") is a Phase 6 fix; this
-        test asserts the *flow* of the component arg, not the upstream caller.
+        Phase 6 (audit G-1) fixed the upstream caller chain so promote now
+        passes ``component="promote"`` through ``run_deploy`` to
+        ``warn_off_services``. The end-to-end test for that wiring lives in
+        ``tests/test_commands/test_promote_cmd.py`` — this test only asserts
+        that the component arg flows through ``warn_off_services``.
         """
         manifest = {
             "project": "demo",
