@@ -107,3 +107,44 @@ class TestRunResume:
         paths, _ = _setup_paused(tmp_path)
         rc = run_resume("ghost", paths, yes=True)
         assert rc == 1
+
+
+class TestSkipSecurityChecks:
+    @patch("boxmunge.commands.resume_cmd.prepare_compose_override")
+    @patch("boxmunge.commands.resume_cmd.prepare_caddy_config")
+    @patch("boxmunge.commands.resume_cmd.compose_pull")
+    @patch("boxmunge.commands.resume_cmd.compose_up")
+    @patch("boxmunge.commands.resume_cmd.caddy_reload")
+    @patch("boxmunge.commands.resume_cmd.run_smoke")
+    def test_skip_flag_skips_pull(self, mock_smoke, _reload, _up, mock_pull, _caddy, _override, tmp_path):
+        mock_smoke.return_value = (True, "ok")
+        from boxmunge.commands.resume_cmd import run_resume
+        paths, name = _setup_paused(tmp_path)
+        run_resume(name, paths, yes=True, skip_security_checks=True)
+        mock_pull.assert_not_called()
+
+    @patch("boxmunge.commands.resume_cmd.prepare_compose_override")
+    @patch("boxmunge.commands.resume_cmd.prepare_caddy_config")
+    @patch("boxmunge.commands.resume_cmd.compose_pull")
+    @patch("boxmunge.commands.resume_cmd.compose_up")
+    @patch("boxmunge.commands.resume_cmd.caddy_reload")
+    @patch("boxmunge.commands.resume_cmd.run_smoke")
+    def test_skip_flag_still_runs_smoke(self, mock_smoke, _reload, _up, _pull, _caddy, _override, tmp_path):
+        mock_smoke.return_value = (True, "ok")
+        from boxmunge.commands.resume_cmd import run_resume
+        paths, name = _setup_paused(tmp_path)
+        run_resume(name, paths, yes=True, skip_security_checks=True)
+        mock_smoke.assert_called_once()
+
+    def test_cmd_resume_parses_skip_flag(self, tmp_path, monkeypatch):
+        from boxmunge.commands.resume_cmd import cmd_resume
+        called_with = {}
+        monkeypatch.setattr(
+            "boxmunge.commands.resume_cmd.run_resume",
+            lambda *a, **kw: (called_with.update(kw), 0)[1],
+        )
+        import pytest
+        with pytest.raises(SystemExit):
+            cmd_resume(["myapp", "--skip-security-checks", "--yes"])
+        assert called_with.get("skip_security_checks") is True
+        assert called_with.get("yes") is True
