@@ -421,6 +421,19 @@ If deeper investigation is needed (inspecting files, Docker state, system config
 
 ---
 
+### Smoke script fails after upgrade with "permission denied" on `ping` or `traceroute`
+
+v0.5 hardening drops `NET_RAW` from every container by default — so `ping`, `traceroute`, and a handful of HTTP probe libraries that fall back to ICMP will fail with `Operation not permitted`. Most apps do not need `NET_RAW`; if your smoke script genuinely does, opt back in by adding to the project manifest:
+
+```yaml
+security:
+  cap_add: [NET_RAW]
+```
+
+Place at the project level to apply to every service, or under a specific service to scope. After redeploying, `security <project>` will show `NET_RAW` no longer in `cap_drop` and present in `cap_add`. See `agent-help security` for the full hardening model.
+
+---
+
 ### Caddy isn't routing
 
 Check Caddy's status and active sites:
