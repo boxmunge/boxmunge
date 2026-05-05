@@ -291,6 +291,39 @@ This provides blast-radius containment — a compromised tool binary can't touch
 
 If the system container is not running, boxmunge falls back to host-level tool execution (for development and testing).
 
+## Per-Project Container Hardening
+
+Beyond the platform containers above, boxmunge applies a silent hardening layer to every user service at deploy time.
+
+The `default` profile (applied when no `security:` block is present) injects into the generated `compose.boxmunge.yml`:
+
+- `security_opt: ["no-new-privileges:true"]` — blocks setuid / file-cap escalation inside the container
+- `init: true` — Tini for signal handling and zombie reaping
+- `pids_limit: 512` — kills fork bombs and exec storms
+- `cap_drop` of 14 dangerous Linux capabilities not in Docker's default deny set (`NET_ADMIN`, `SYS_PTRACE`, `SYS_MODULE`, `SYS_RAWIO`, `SYS_TIME`, `SYS_BOOT`, `MAC_ADMIN`, `MAC_OVERRIDE`, `MKNOD`, `AUDIT_WRITE`, `WAKE_ALARM`, `BLOCK_SUSPEND`, `LEASE`, `NET_RAW`)
+
+Existing v1 manifests gain the floor automatically on next deploy — no edits required.
+
+### Relaxation
+
+Projects that need a specific protection eased declare a `security:` block in `manifest.yml`. Project-level applies to every service; per-service blocks override. Strongly preferred is keeping `profile: default` and tweaking the single field that needs relaxing (e.g. `cap_add: [NET_RAW]`, `pids_limit: 2048`).
+
+A last-resort `profile: "off"` requires a non-empty `reason` and triggers repeated `[WARNING] SECURITY OFF` deploy-time output.
+
+### compose_validate
+
+Before configs are written, `compose_validate.py` (added in v0.5) inspects the project's user-authored `compose.yml` and rejects any keys that would defeat the hardening floor — e.g. `privileged: true`, `cap_add: [SYS_ADMIN]`, `security_opt` overrides that re-enable privilege escalation. This runs at validate, stage, and deploy time, so the floor cannot be silently sidestepped from the user side.
+
+### Where it fits in the deploy flow
+
+Between step 5 ("Generate configs") and step 6 ("Start containers") in the deploy flow above, boxmunge:
+
+1. Resolves the effective security posture per service (profile + project overrides + service overrides + cap_add subtraction).
+2. Runs `compose_validate` on the user's `compose.yml`.
+3. Emits the hardening fields into `compose.boxmunge.yml` so `docker compose up -d` applies them.
+
+See `TRUST_MODEL.md` for the threat model and `agent-help security` for the runtime introspection command.
+
 ## Platform Validation
 
 - `self-test` — deploys a canary project, exercises backup/restore, tears down. Proves the pipeline works.

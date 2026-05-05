@@ -31,7 +31,7 @@ This policy covers:
 
 Out of scope:
 - Third-party dependencies (report to their maintainers, but let us know if it affects boxmunge)
-- User-deployed projects running on boxmunge (that's your responsibility)
+- Vulnerabilities in user-authored application code or its dependencies. boxmunge applies container-level hardening by default; see `docs/on-server/SECURITY.md` for the model.
 
 ## Supported Versions
 

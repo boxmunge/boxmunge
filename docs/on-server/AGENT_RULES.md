@@ -43,6 +43,13 @@ These operations are safe to run without human confirmation:
 | Pause a project (planned maintenance) | `pause <project>` |
 | Resume a paused project (pulls latest images) | `resume <project>` |
 | Show effective container security posture | `security <project> [--json]` |
+| Audit overall platform health | `health` |
+| Show server boxmunge version | `version` |
+| List registered project names | `project-list` |
+| Health-check every project | `check-all` (state-mutating; use `check-all --read-only` for pure introspection) |
+| Compatibility info for client handshake | `handshake` |
+
+Several commands accept a `--json` flag for machine-readable output, useful when an agent needs to parse rather than render: `check --json`, `validate --json`, `inbox --json`, `project-list --json`, plus `status --json`, `health --json`, `security <project> --json`, and `log --json`.
 
 ### Deploying a project (standard workflow)
 
@@ -127,7 +134,7 @@ If a task requires any of the above, it requires the **supervisor** user. Note t
 
 ### New project from git
 
-1. `add-git-project <name> --repo <url>` -- register the project
+1. `add-git-project <name> <repo-url> [--ref REF]` -- register the project
 2. `secrets set <project> KEY value` -- set required secrets
 3. `stage <project>` -- deploy to staging
 4. `check <project>` -- verify health

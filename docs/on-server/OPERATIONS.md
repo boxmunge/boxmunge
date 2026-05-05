@@ -51,7 +51,7 @@ The standard workflow for deploying a project from a bundle.
 To skip staging and deploy directly to production:
 
 ```
-deploy myapp
+prod-deploy myapp
 ```
 
 ---
@@ -63,7 +63,13 @@ For projects hosted in a git repository.
 1. Register the project:
 
    ```
-   add-git-project myapp --repo https://github.com/example/myapp.git
+   add-git-project <name> <repo-url> [--ref REF]
+   ```
+
+   For example:
+
+   ```
+   add-git-project myapp https://github.com/example/myapp.git
    ```
 
 2. Stage or deploy:
@@ -76,13 +82,13 @@ For projects hosted in a git repository.
    Or deploy directly:
 
    ```
-   deploy myapp
+   prod-deploy myapp
    ```
 
 Deploy a specific git ref:
 
 ```
-deploy myapp --ref v1.2.3
+prod-deploy myapp --ref v1.2.3
 ```
 
 ---
@@ -131,7 +137,7 @@ promote myapp
 For git-based projects, deploy pulls the latest code:
 
 ```
-deploy myapp
+prod-deploy myapp
 ```
 
 ---
@@ -327,7 +333,7 @@ boxmunge pause myapp --reason "rolling key rotation"
 Containers are stopped via `docker compose stop`, so state is preserved on disk and resume is fast. While paused:
 
 - Health checks, scheduled backups, and container-update sweeps skip the project
-- `deploy`, `stage`, and `promote` refuse to run against it
+- `prod-deploy`, `stage`, and `promote` refuse to run against it
 - `backup-sync` continues (off-box copies of existing snapshots are unaffected)
 
 To bring it back:
@@ -452,7 +458,7 @@ validate myapp
 If the config looks stale, redeploy to regenerate:
 
 ```
-deploy myapp --no-snapshot
+prod-deploy myapp --no-snapshot
 ```
 
 If deeper Caddy investigation is needed (container logs, config file inspection), this requires the **supervisor** user.
@@ -478,7 +484,7 @@ logs myapp --tail 200
 Once you have identified and fixed the underlying issue, redeploy:
 
 ```
-deploy myapp
+prod-deploy myapp
 ```
 
 ---
@@ -510,7 +516,7 @@ rollback myapp
 Upload a known-good bundle and deploy it, or deploy a specific git ref:
 
 ```
-deploy myapp --ref v1.1.4
+prod-deploy myapp --ref v1.1.4
 ```
 
 ---
@@ -569,6 +575,6 @@ Configure your AI agent (Claude Code, Cursor, etc.) to use boxmunge via MCP:
 }
 ```
 
-The agent will discover all available tools automatically. Available tools include: deploy, stage, promote, backup, restore, rollback, health, log, secrets, and more.
+The agent will discover all available tools automatically. Available tools include: prod-deploy, stage, promote, backup, restore, rollback, health, log, secrets, and more.
 
 Requires the `mcp` package on the server: `pip install boxmunge[mcp]`

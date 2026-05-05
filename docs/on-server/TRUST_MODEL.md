@@ -4,6 +4,27 @@ How boxmunge handles security boundaries, isolation, and access control.
 
 ---
 
+## Threat Model
+
+boxmunge's defences are calibrated against a specific set of attackers. Future evolutions may extend this scope; today, severity assessments assume the model below.
+
+### In scope
+
+- **Network-level third-party attackers** — scanning, brute-force SSH, DDoS, malicious traffic targeting the public surface. Mitigations: UFW, CrowdSec, fail2ban, kernel hardening, key-only SSH on a non-default port.
+- **Supply-chain compromise of platform releases** — a tampered boxmunge release reaching the box. Mitigations: SHA256 checksums on all releases; cosign signing planned.
+- **Container-escape blast radius** — a compromised user container should not trivially own the host. Mitigations: per-service capability drops, `no-new-privileges`, `pids_limit`, Tini, the host-level platform-container hardening.
+
+### Out of scope (current product)
+
+- **Malicious operators** — anyone with `supervisor` or `deploy` SSH access is fully trusted. The restricted shell is a UX guard against accidents and a reduction in agent context-pollution surface, not a privilege boundary against a determined attacker who already has a key.
+- **Malicious agents / MCP tools** — at present, agents and tools invoked through the deploy shell or MCP are treated equivalently to operators. A future product evolution may split agent trust from operator trust; today they are the same principal.
+
+### Single human operator
+
+The same person holds keys to `deploy` and `supervisor`. There is no per-project access control, no per-tenant credential isolation, no audit of "which operator did this." If you need any of those, boxmunge is the wrong tool.
+
+---
+
 ## Single-Owner Model
 
 boxmunge assumes all projects on a box belong to one person or entity. There is no per-project access control and no multi-user IAM.
@@ -90,7 +111,7 @@ Quote `"off"`: PyYAML parses unquoted `off` as YAML 1.1 boolean `False`,
 which the validator catches with a targeted error, but writing the quotes
 in the first place avoids the round-trip.
 
-A deploy-time `[WARNING] SECURITY OFF` message is emitted on every `stage`, `promote`, `deploy`, and `prod-deploy` for any service on `profile: off`. The warning is repeated by design — the shortest path to making it go away is removing `profile: off` from the manifest.
+A deploy-time `[WARNING] SECURITY OFF` message is emitted on every `stage`, `promote`, `deploy`, `prod-deploy`, `resume`, and `upgrade` for any service on `profile: off`. The warning is repeated by design — the shortest path to making it go away is removing `profile: off` from the manifest.
 
 ### Profile ladder
 

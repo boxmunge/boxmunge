@@ -18,21 +18,22 @@ That's the real promise — not just "easy hosting," but one less tool you have 
 - **Automatic HTTPS** — Caddy + Let's Encrypt, zero configuration
 - **Encrypted backups that actually restore** — mandatory restore commands, tested by a self-test that proves it works
 - **Zero-downtime deploys** — stage, verify, promote
-- **Security hardening out of the box** — firewall, intrusion detection, kernel hardening, automatic security updates
+- **Host security hardening out of the box** — firewall, intrusion detection, kernel hardening, automatic security updates
+- **Per-container security hardening** — every service runs with no-new-privileges, dropped Linux capabilities, and PID limits by default; see `agent-help security` on the server
 - **AI-native operations** — every command works over SSH and via MCP, designed for agents from day one
 
 ## Getting started
 
 ### 1. Set up your server
 
-You need a fresh Debian 13 VPS with a public IP. Point your domain at it, then:
+You need a fresh Debian 13 VPS with a public IP. Copy the install script up and run it as root:
 
 ```bash
-pip install boxmunge
-boxmunge server-setup you@your-server.example.com --email you@example.com
+scp install.sh root@your-server.example.com:
+ssh root@your-server.example.com bash install.sh
 ```
 
-That's it. boxmunge SSHes in, installs everything, hardens the OS, and sets up the reverse proxy. Takes a few minutes.
+That's it. The script installs Docker, hardens the OS, sets up Caddy as a reverse proxy in a container, creates the `deploy` and `supervisor` users, and lays down the boxmunge CLI on the server. Takes a few minutes. See [INSTALL.md](INSTALL.md) for the local CLI install (used to build bundles before upload).
 
 ### 2. Ship a project
 
@@ -54,11 +55,18 @@ backup:
   restore_command: "psql -U myuser mydb"
 ```
 
-Then bundle, upload, and deploy:
+Build a bundle locally, upload it to the server, then stage and promote from inside the deploy user's restricted shell (no `boxmunge` prefix needed there):
 
 ```bash
-boxmunge stage myapp        # bundle, upload, start staging
-boxmunge promote myapp      # swap staging into production
+# Locally
+pip install boxmunge                          # see INSTALL.md
+boxmunge bundle ./myapp                       # produces myapp-<ts>.tar.gz
+scp -P 922 myapp-*.tar.gz deploy@your-server.example.com:
+
+# On the server (ssh into the deploy user's restricted shell)
+ssh -p 922 deploy@your-server.example.com
+> stage myapp                                 # deploys to staging.<hostname>
+> promote myapp                               # swap staging into production
 ```
 
 Your project is live at `https://myapp.example.com` with TLS, reverse proxy, and backups configured.
@@ -101,10 +109,12 @@ SSH into the deploy user and run commands directly — no `boxmunge` prefix need
 
 ## Documentation
 
+- [Local install](INSTALL.md) — installing the boxmunge CLI on your workstation for bundling
 - [Architecture](docs/on-server/ARCHITECTURE.md) — system design and components
 - [Operations](docs/on-server/OPERATIONS.md) — step-by-step guides
 - [Project Conventions](docs/on-server/PROJECT_CONVENTIONS.md) — manifest format
 - [Trust Model](docs/on-server/TRUST_MODEL.md) — security model and boundaries
+- [Container Security](docs/on-server/SECURITY.md) — per-container hardening details
 - [Contributing](CONTRIBUTING.md) — how to contribute
 - [Security Policy](SECURITY.md) — reporting vulnerabilities
 - [Code of Conduct](CODE_OF_CONDUCT.md)

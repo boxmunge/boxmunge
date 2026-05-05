@@ -91,7 +91,7 @@ get into the habit of writing it correctly the first time.
 Requirements:
 
 - `reason` must be a non-empty string. Schema validation rejects missing or blank reasons.
-- Every `stage`, `promote`, `deploy`, and `prod-deploy` will print a multi-line `[WARNING] SECURITY OFF` message including the reason. This is by design and not silenceable except by removing `profile: off`.
+- Every `stage`, `promote`, `deploy`, `prod-deploy`, `resume`, and `upgrade` will print a multi-line `[WARNING] SECURITY OFF` message including the reason. This is by design and not silenceable except by removing `profile: off`.
 - `boxmunge health` raises a warning for any project with services on `profile: off`.
 
 ## Inheritance and resolution
