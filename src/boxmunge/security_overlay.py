@@ -247,3 +247,23 @@ def services_with_off_profile(manifest: dict[str, Any]) -> list[tuple[str, str]]
             reason = project_sec.get("reason", "")
         result.append((svc_name, reason))
     return result
+
+
+def render_compose_security_fragment(resolved: dict[str, Any]) -> dict[str, Any]:
+    """Convert the resolver output into the compose service fragment.
+
+    Strips empty list/dict values so the rendered overlay stays clean.
+    cap_add: [] is dropped (it's the default state); cap_drop: [] is dropped.
+    """
+    out: dict[str, Any] = {}
+    if resolved.get("security_opt"):
+        out["security_opt"] = list(resolved["security_opt"])
+    if "init" in resolved:
+        out["init"] = bool(resolved["init"])
+    if "pids_limit" in resolved:
+        out["pids_limit"] = int(resolved["pids_limit"])
+    if resolved.get("cap_drop"):
+        out["cap_drop"] = list(resolved["cap_drop"])
+    if resolved.get("cap_add"):
+        out["cap_add"] = list(resolved["cap_add"])
+    return out

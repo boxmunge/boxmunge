@@ -266,3 +266,30 @@ class TestOffProfileEnumeration:
             },
         }
         assert services_with_off_profile(manifest) == []
+
+
+from boxmunge.security_overlay import render_compose_security_fragment
+
+
+class TestComposeFragment:
+    def test_default_renders_all_keys(self) -> None:
+        fragment = render_compose_security_fragment({
+            "security_opt": ["no-new-privileges:true"],
+            "init": True,
+            "pids_limit": 512,
+            "cap_drop": ["NET_RAW"],
+            "cap_add": [],
+        })
+        assert fragment["security_opt"] == ["no-new-privileges:true"]
+        assert fragment["init"] is True
+        assert fragment["pids_limit"] == 512
+        assert fragment["cap_drop"] == ["NET_RAW"]
+        assert "cap_add" not in fragment
+
+    def test_off_yields_empty_fragment(self) -> None:
+        fragment = render_compose_security_fragment({})
+        assert fragment == {}
+
+    def test_empty_cap_drop_omitted(self) -> None:
+        fragment = render_compose_security_fragment({"cap_drop": []})
+        assert "cap_drop" not in fragment
