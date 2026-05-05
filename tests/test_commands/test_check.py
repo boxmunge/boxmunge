@@ -345,6 +345,82 @@ class TestDeployResumeGracePeriod:
         assert state["consecutive_failures"] == 1
 
 
+class TestCriticalCleanup:
+    """Cleanup paths around the critical failure handler.
+
+    7b: when compose_down fails during a critical health event we MUST log
+    the failure — silently swallowing it leaves operators with no signal
+    that containers may still be running.
+
+    7e: when Pushover is not configured but a critical event fires we MUST
+    log "alert dropped" — the previous code happily called send_notification
+    with empty strings and the alert silently went nowhere.
+    """
+
+    def _setup(self, paths: BoxPaths):
+        from boxmunge.state import write_state
+        paths.state.mkdir(parents=True, exist_ok=True)
+        (paths.state / "deploy").mkdir(parents=True, exist_ok=True)
+        (paths.state / "health").mkdir(parents=True, exist_ok=True)
+        (paths.root / "logs").mkdir(parents=True, exist_ok=True)
+        (paths.root / "config").mkdir(parents=True, exist_ok=True)
+
+    def _write_pushover_config(self, paths: BoxPaths) -> None:
+        paths.config_file.write_text(
+            "hostname: t\nadmin_email: t@t\n"
+            "pushover:\n  user_key: u\n  app_token: a\n"
+        )
+
+    def test_compose_down_failure_is_logged(self, paths: BoxPaths):
+        from boxmunge.commands.check import update_health_state
+        from boxmunge.docker import DockerError
+
+        self._setup(paths)
+        self._write_pushover_config(paths)
+
+        with patch("boxmunge.commands.check.compose_down",
+                   side_effect=DockerError("daemon gone")), \
+             patch("boxmunge.commands.check.send_notification"), \
+             patch("boxmunge.commands.check.log_error") as mock_err:
+            update_health_state(
+                "myapp", check_result=2, message="hard failure", paths=paths,
+            )
+
+        # Multiple log_error calls happen (CRITICAL + compose_down failure).
+        # We assert one of them references the compose_down failure.
+        compose_failure_calls = [
+            c for c in mock_err.call_args_list
+            if "compose down failed during critical" in c.args[1]
+        ]
+        assert len(compose_failure_calls) == 1, (
+            f"expected compose_down failure to be logged; got {mock_err.call_args_list}"
+        )
+
+    def test_critical_without_pushover_logs_alert_dropped(self, paths: BoxPaths):
+        from boxmunge.commands.check import update_health_state
+
+        self._setup(paths)
+        # No pushover config: write a minimal config that omits keys.
+        paths.config_file.write_text("hostname: t\nadmin_email: t@t\n")
+
+        with patch("boxmunge.commands.check.send_notification") as mock_send, \
+             patch("boxmunge.commands.check.compose_down"), \
+             patch("boxmunge.commands.check.log_error") as mock_err:
+            update_health_state(
+                "myapp", check_result=2, message="hard failure", paths=paths,
+            )
+
+        # send_notification must NOT be called with empty creds.
+        mock_send.assert_not_called()
+        dropped_calls = [
+            c for c in mock_err.call_args_list
+            if "Pushover not configured" in c.args[1] and "alert dropped" in c.args[1]
+        ]
+        assert len(dropped_calls) == 1, (
+            f"expected alert-dropped log; got {mock_err.call_args_list}"
+        )
+
+
 class TestCheckAllReadOnly:
     """Audit Finding 1: cmd_check_all is documented near 'read-only'
     introspection but writes health state, calls compose_down, and

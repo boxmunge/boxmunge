@@ -298,14 +298,19 @@ def update_health_state(
     if check_result == 2:
         # Critical — alert immediately, stop containers
         title, body = format_alert(project_name, "critical", message)
-        send_notification(user_key, app_token, title, body, priority=1)
+        if user_key and app_token:
+            send_notification(user_key, app_token, title, body, priority=1)
+        else:
+            log_error("health", "CRITICAL but Pushover not configured — alert dropped",
+                      paths, project=project_name)
         log_error("health", f"CRITICAL: {message} — stopping containers", paths, project=project_name)
 
         project_dir = paths.project_dir(project_name)
         try:
             compose_down(project_dir)
-        except DockerError:
-            pass
+        except DockerError as e:
+            log_error("health", f"compose down failed during critical: {e}",
+                      paths, project=project_name)
 
         write_state(state_path, {
             "last_check": now,
