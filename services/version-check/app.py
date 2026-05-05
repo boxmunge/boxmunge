@@ -6,7 +6,8 @@ Serves:
 3. GET  /v1/failures?version=X           — query failure summary for a version
 4. POST /v1/circuit-breaker/trip?version=X   — suppress a broken release (auth required)
 5. POST /v1/circuit-breaker/reset?version=X  — re-enable a release (auth required)
-6. GET  /                                — static landing page
+6. GET  /v1/admin/version-checks?last=N  — daily check counts by version (auth required)
+7. GET  /                                — static landing page
 
 Source: https://github.com/boxmunge/boxmunge/tree/main/services/version-check
 """
@@ -24,6 +25,12 @@ RELEASES_PATH = SERVICE_DIR / "releases.json"
 DB_PATH = Path("/data/checks.db")
 
 VALID_STAGES = {"preflight", "apply", "health_immediate", "health_probation"}
+
+# Stats endpoint window cap. Stops a runaway query against an unbounded
+# version_checks table; 90 days is plenty for a "is anyone using this?"
+# weekly summary.
+STATS_MAX_DAYS = 90
+STATS_DEFAULT_DAYS = 7
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +186,86 @@ def _check_cb_auth(app_config):
         return False
     auth = request.headers.get("Authorization", "")
     return auth == f"Bearer {secret}"
+
+
+def _check_stats_auth(app_config):
+    """Authorize the admin/version-checks endpoint.
+
+    Accepts EITHER `Authorization: Bearer <secret>` OR `?token=<secret>`.
+    URL token is the convenience path for simple poll bots; Bearer is
+    preferred (URLs end up in proxy logs).
+
+    Uses STATS_SECRET, NOT CB_SECRET — different blast radius. A leaked
+    stats token is read-only over check counts; a leaked CB token can
+    suppress security releases fleetwide.
+    """
+    secret = app_config.get("STATS_SECRET") or os.environ.get("STATS_SECRET", "")
+    if not secret:
+        return False
+    bearer = request.headers.get("Authorization", "")
+    if bearer == f"Bearer {secret}":
+        return True
+    return request.args.get("token", "") == secret
+
+
+def _query_version_checks(db_path: Path, days: int) -> dict:
+    """Aggregate the version_checks table for the last `days` days.
+
+    Returns:
+      {
+        "since": "YYYY-MM-DD",   # earliest day in window (inclusive)
+        "until": "YYYY-MM-DD",   # latest day in window (today, inclusive)
+        "days": N,
+        "totals":  [ {"version": "X", "count": N}, ... ],   # sorted by count desc
+        "by_date": [ {"date": "...", "version": "X", "count": N}, ... ]
+      }
+    """
+    until = date.today()
+    since = until - timedelta(days=days - 1)  # inclusive of today
+    since_iso = since.isoformat()
+    until_iso = until.isoformat()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT date, version, count FROM version_checks "
+            "WHERE date >= ? AND date <= ? "
+            "ORDER BY date DESC, count DESC",
+            (since_iso, until_iso),
+        ).fetchall()
+        totals_rows = conn.execute(
+            "SELECT version, SUM(count) AS total FROM version_checks "
+            "WHERE date >= ? AND date <= ? "
+            "GROUP BY version ORDER BY total DESC",
+            (since_iso, until_iso),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    return {
+        "since": since_iso,
+        "until": until_iso,
+        "days": days,
+        "totals": [{"version": v, "count": c} for v, c in totals_rows],
+        "by_date": [{"date": d, "version": v, "count": c} for d, v, c in rows],
+    }
+
+
+def _parse_last_param(raw: str | None) -> int:
+    """Coerce ?last=N to a sane integer in [1, STATS_MAX_DAYS].
+
+    Default applied for missing or unparseable values. Cap applied for
+    excessive values. Negative or zero falls back to default.
+    """
+    if not raw:
+        return STATS_DEFAULT_DAYS
+    try:
+        n = int(raw)
+    except ValueError:
+        return STATS_DEFAULT_DAYS
+    if n <= 0:
+        return STATS_DEFAULT_DAYS
+    return min(n, STATS_MAX_DAYS)
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +438,19 @@ def create_app() -> Flask:
             return jsonify({"error": "missing version parameter"}), 400
         _reset_circuit_breaker(DB_PATH, version)
         return jsonify({"status": "reset", "version": version})
+
+    @app.route("/v1/admin/version-checks")
+    def admin_version_checks():
+        """Daily check counts by version, last N days. Auth required.
+
+        Counts are /v1/check hits, NOT unique boxes — a single box checks
+        ~24x/day per its auto-update timer. Use this as a "is anyone
+        running boxmunge?" signal, not for precise install counts.
+        """
+        if not _check_stats_auth(app.config):
+            return jsonify({"error": "unauthorized"}), 401
+        days = _parse_last_param(request.args.get("last"))
+        return jsonify(_query_version_checks(DB_PATH, days))
 
     @app.route("/")
     def index():
