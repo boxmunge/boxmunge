@@ -175,6 +175,70 @@ class TestRunCheckPreRegistered:
         assert "boxmunge deploy myapp" in captured.out
 
 
+class TestRunCheckSurfacesProfileOff:
+    """Task 19: profile: off must surface in `boxmunge check` output.
+
+    The line is informational/posture — it does not escalate the exit code
+    (the operator already opted out with a reason; alerting via Pushover
+    every 15 minutes would be noise, not signal).
+    """
+
+    def _write_manifest(self, paths: BoxPaths, name: str, manifest: dict) -> None:
+        import yaml
+        paths.project_dir(name).mkdir(parents=True, exist_ok=True)
+        paths.project_manifest(name).write_text(yaml.dump(manifest))
+        # Mark as deployed so run_check doesn't reject as pre-registered
+        paths.project_deploy_state(name).parent.mkdir(parents=True, exist_ok=True)
+        paths.project_deploy_state(name).write_text('{"current_ref": "main"}')
+
+    def test_off_project_emits_security_off_warning(
+        self, paths: BoxPaths, capsys,
+    ) -> None:
+        self._write_manifest(paths, "myapp", {
+            "schema_version": 1, "id": "01TEST", "project": "myapp",
+            "source": "bundle", "hosts": ["myapp.test"],
+            "security": {"profile": "off", "reason": "legacy binary"},
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        })
+
+        run_check("myapp", paths)
+        out = capsys.readouterr().out
+        assert "SECURITY OFF" in out
+        assert "web" in out
+        assert "legacy binary" in out
+
+    def test_default_profile_no_security_message(
+        self, paths: BoxPaths, capsys,
+    ) -> None:
+        self._write_manifest(paths, "myapp", {
+            "schema_version": 1, "id": "01TEST", "project": "myapp",
+            "source": "bundle", "hosts": ["myapp.test"],
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        })
+
+        run_check("myapp", paths)
+        out = capsys.readouterr().out
+        assert "SECURITY" not in out
+        assert "security:" not in out
+
+    def test_off_does_not_escalate_exit_code(
+        self, paths: BoxPaths,
+    ) -> None:
+        """profile: off is a posture finding the operator opted into. It
+        does not flip a healthy project to warning/critical for the runtime
+        health pipeline (which would trigger Pushover every 15 minutes)."""
+        self._write_manifest(paths, "myapp", {
+            "schema_version": 1, "id": "01TEST", "project": "myapp",
+            "source": "bundle", "hosts": ["myapp.test"],
+            "security": {"profile": "off", "reason": "legacy"},
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        })
+
+        # No smoke test, no other failures -> exit 0 even with profile: off
+        result = run_check("myapp", paths)
+        assert result == 0
+
+
 class TestDeployResumeGracePeriod:
     """Health-timer fires in the second between deploy/resume and the
     container becoming responsive. The first warning-level failure
