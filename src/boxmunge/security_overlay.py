@@ -84,5 +84,11 @@ def resolve_security(
     inputs are well-formed.
     """
     project_security = project_security or {}
-    profile = project_security.get("profile", PROFILE_DEFAULT)
+    service_security = service_security or {}
+
+    project_profile = project_security.get("profile", PROFILE_DEFAULT)
+    if "profile" in service_security:
+        profile = service_security["profile"]
+    else:
+        profile = project_profile
     return _baseline_for_profile(profile)

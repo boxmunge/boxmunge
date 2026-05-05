@@ -46,3 +46,19 @@ class TestConstants:
 
     def test_default_pids_limit(self) -> None:
         assert DEFAULT_PIDS_LIMIT == 512
+
+
+class TestOffProfile:
+    def test_off_profile_yields_empty_payload(self) -> None:
+        result = resolve_security(
+            project_security={"profile": "off", "reason": "needed"},
+            service_security=None,
+        )
+        assert result == {}
+
+    def test_service_off_overrides_project_default(self) -> None:
+        result = resolve_security(
+            project_security={"profile": "default"},
+            service_security={"profile": "off", "reason": "deliberate"},
+        )
+        assert result == {}
