@@ -1,5 +1,10 @@
 """Tests for project registry — allowlist of known project names."""
 
+import fcntl
+import os
+import threading
+import time
+
 import pytest
 from pathlib import Path
 
@@ -64,3 +69,67 @@ class TestProjectRegistry:
         proj.mkdir(parents=True)
         result = load_registered_projects(paths)
         assert result == set()
+
+
+class TestProjectRegistryConcurrency:
+    """4d (audit D-2b): add_project / remove_project must serialise.
+
+    Without the flock, two concurrent add_project calls can each load the
+    same set, mutate locally, and race to save — losing one of the additions.
+    """
+
+    def test_concurrent_adds_do_not_lose_writes(self, paths: BoxPaths) -> None:
+        """An add_project call must block while the registry lock is held
+        elsewhere, then complete and produce a consistent on-disk result."""
+        from boxmunge.project_registry import add_project, load_registered_projects
+
+        # Manually grab the registry flock to simulate another writer mid-flight.
+        lock_path = paths.state / ".registry.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+        completed = threading.Event()
+
+        def add_in_thread() -> None:
+            add_project("alpha", paths)
+            completed.set()
+
+        t = threading.Thread(target=add_in_thread, daemon=True)
+        t.start()
+
+        # Give the thread a window to attempt the add. Because the flock is
+        # held externally, add_project must block — completed.set() must NOT
+        # fire within this window.
+        time.sleep(0.2)
+        assert not completed.is_set(), (
+            "add_project did not block while the registry lock was held"
+        )
+
+        # Release the lock; the thread should proceed and finish promptly.
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+        t.join(timeout=2.0)
+        assert completed.is_set(), "add_project did not complete after lock release"
+        assert "alpha" in load_registered_projects(paths)
+
+    def test_parallel_adds_all_persisted(self, paths: BoxPaths) -> None:
+        """Many threaded add_project calls must all land in the registry —
+        no lost-update race."""
+        from boxmunge.project_registry import add_project, load_registered_projects
+
+        names = [f"proj{i:02d}" for i in range(20)]
+        threads = [
+            threading.Thread(target=add_project, args=(n, paths), daemon=True)
+            for n in names
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5.0)
+
+        registered = load_registered_projects(paths)
+        assert set(names) <= registered, (
+            f"Lost adds: missing {set(names) - registered}"
+        )

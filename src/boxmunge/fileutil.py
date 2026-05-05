@@ -112,3 +112,31 @@ def project_lock(project_name: str, paths: "BoxPaths") -> Iterator[None]:
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+
+
+@contextmanager
+def registry_lock(paths: "BoxPaths") -> Iterator[None]:
+    """Acquire an exclusive registry-wide lock. Blocking.
+
+    Used to serialise load -> mutate -> save sequences against the project
+    registry (state/projects.txt) so concurrent add/remove calls cannot lose
+    each other's writes. Scope is registry-wide rather than per-project: the
+    operation we're protecting is "rewrite the whole projects.txt", which
+    sees every name.
+
+    Blocks (LOCK_EX without LOCK_NB) — the protected critical section is a
+    tiny file rewrite, so contention should resolve in milliseconds. We
+    deliberately do not raise LockError here: callers are
+    add_project / remove_project, which the operator expects to succeed
+    rather than fail with "try again".
+    """
+    lock_path = paths.state / ".registry.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)

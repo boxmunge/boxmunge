@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from boxmunge.fileutil import registry_lock
 from boxmunge.paths import validate_project_name
 
 if TYPE_CHECKING:
@@ -50,21 +51,31 @@ def load_registered_projects(paths: BoxPaths) -> set[str]:
 
 
 def add_project(name: str, paths: BoxPaths) -> None:
-    """Register a project name. Raises ValueError for invalid names."""
+    """Register a project name. Raises ValueError for invalid names.
+
+    The load -> mutate -> save sequence is wrapped in a registry-wide flock
+    so concurrent add/remove calls cannot lose each other's writes.
+    """
     validate_project_name(name)
-    registry = _registry_path(paths)
-    projects = load_registered_projects(paths)
-    projects.add(name)
-    _save(registry, projects)
+    with registry_lock(paths):
+        registry = _registry_path(paths)
+        projects = load_registered_projects(paths)
+        projects.add(name)
+        _save(registry, projects)
 
 
 def remove_project(name: str, paths: BoxPaths) -> None:
-    """Unregister a project name. Raises ValueError if not registered."""
-    projects = load_registered_projects(paths)
-    if name not in projects:
-        raise ValueError(f"Project '{name}' is not registered on this server.")
-    projects.discard(name)
-    _save(_registry_path(paths), projects)
+    """Unregister a project name. Raises ValueError if not registered.
+
+    The load -> mutate -> save sequence is wrapped in a registry-wide flock
+    so concurrent add/remove calls cannot lose each other's writes.
+    """
+    with registry_lock(paths):
+        projects = load_registered_projects(paths)
+        if name not in projects:
+            raise ValueError(f"Project '{name}' is not registered on this server.")
+        projects.discard(name)
+        _save(_registry_path(paths), projects)
 
 
 def is_registered(name: str, paths: BoxPaths) -> bool:
