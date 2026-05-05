@@ -18,9 +18,7 @@ from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.pause import is_paused
 from boxmunge.probation import clear_probation_if_active
-from boxmunge.security_overlay import (
-    services_with_off_profile, format_off_warning,
-)
+from boxmunge.security_warn import warn_off_services
 from boxmunge.state import read_state, write_state
 
 
@@ -97,17 +95,7 @@ def prepare_compose_override(paths: BoxPaths, manifest: dict[str, Any]) -> None:
 
     # Deploy-time warning for any service resolving to profile: off.
     # Repeated by design — see spec §"Deploy-time warning".
-    off = services_with_off_profile(manifest)
-    if off:
-        msg = format_off_warning(project_name, off)
-        print(msg)
-        for svc_name, reason in off:
-            log_warning(
-                "deploy",
-                f"SECURITY OFF: {project_name}/{svc_name} (reason: {reason})",
-                paths,
-                project=project_name,
-            )
+    warn_off_services(paths, manifest, component="deploy")
 
 
 def _run_deploy_inner(

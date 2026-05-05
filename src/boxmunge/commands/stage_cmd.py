@@ -18,6 +18,7 @@ from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
 from boxmunge.pause import is_paused
 from boxmunge.project_registry import is_registered
+from boxmunge.security_warn import warn_off_services
 from boxmunge.source import resolve_bundle_source, SourceError
 from boxmunge.state import write_state
 
@@ -150,6 +151,10 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
     atomic_write_text(staging_override, generate_staging_compose_override(
         manifest, env_files=staging_env_files or None
     ))
+
+    # Deploy-time warning for any service resolving to profile: off.
+    # Repeated by design — see spec §"Deploy-time warning".
+    warn_off_services(paths, manifest, component="stage")
 
     # Generate staging base (compose.yml with ports stripped to avoid conflicts)
     staging_base = project_dir / "compose.staging-base.yml"

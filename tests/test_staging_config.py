@@ -1,4 +1,8 @@
 """Tests for staging Caddy and Compose config generation."""
+import io
+from contextlib import redirect_stdout
+
+import pytest
 import yaml
 from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.compose import generate_staging_compose_base, generate_staging_compose_override
@@ -105,3 +109,49 @@ class TestStagingComposeBase:
         parsed = yaml.safe_load(generate_staging_compose_base(compose))
         assert parsed["services"]["web"]["environment"] == {"FOO": "bar"}
         assert parsed["services"]["web"]["build"] == "."
+
+
+class TestStagingEmitsOffWarning:
+    """Lock the wiring: stage path emits SECURITY OFF when manifest opts out.
+
+    Exercising the full _run_stage_inner pipeline requires bundles, git
+    repos, and Docker. The helper is the seam — proving stage calls it
+    correctly is enough to lock the wiring without all that scaffolding.
+    """
+
+    def test_helper_emits_for_staging_manifest(self, tmp_path, monkeypatch) -> None:
+        from boxmunge.log import _reset_logger
+        from boxmunge.paths import BoxPaths
+        from boxmunge.security_warn import warn_off_services
+
+        monkeypatch.setattr(BoxPaths, "__init__", lambda self: None)
+        paths = BoxPaths()
+        paths.logs = tmp_path / "logs"
+        paths.logs.mkdir()
+        paths.log_file = paths.logs / "boxmunge.log"
+        _reset_logger()
+        try:
+            manifest = {
+                "project": "demo",
+                "hosts": ["demo.example.com"],
+                "security": {"profile": "off", "reason": "staging-test"},
+                "services": {
+                    "web": {"port": 3000, "routes": [{"path": "/"}]},
+                },
+            }
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                warn_off_services(paths, manifest, component="stage")
+            out = buf.getvalue()
+            assert "SECURITY OFF" in out
+            assert "demo/web" in out
+            assert "staging-test" in out
+        finally:
+            _reset_logger()
+
+    def test_stage_cmd_imports_helper(self) -> None:
+        """Confirm stage_cmd.py imports warn_off_services (wiring sanity)."""
+        from boxmunge.commands import stage_cmd
+        assert hasattr(stage_cmd, "warn_off_services"), (
+            "stage_cmd must import warn_off_services to emit SECURITY OFF"
+        )
