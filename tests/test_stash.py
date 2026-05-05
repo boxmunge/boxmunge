@@ -1,13 +1,22 @@
 """Tests for platform stash — captures state for safe upgrades."""
 
+import io
 import json
 import tarfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import yaml
 
-from boxmunge.stash import create_stash, list_stashes, prune_stashes, restore_stash
+from boxmunge.stash import (
+    STASH_FORMAT_VERSION,
+    StashError,
+    create_stash,
+    list_stashes,
+    prune_stashes,
+    restore_stash,
+)
 from boxmunge.paths import BoxPaths
 from boxmunge.version import write_installed_version
 
@@ -172,3 +181,186 @@ class TestRestoreStash:
         paths.stashes.mkdir(parents=True)
         with pytest.raises(FileNotFoundError):
             restore_stash(paths)
+
+
+def _make_paths(tmp_path: Path) -> BoxPaths:
+    paths = BoxPaths(root=tmp_path / "bm")
+    for d in ["config", "projects", "state/deploy", "stashes", "logs"]:
+        (paths.root / d).mkdir(parents=True)
+    return paths
+
+
+def _build_malicious_archive(
+    archive_path: Path,
+    members: list[tuple[tarfile.TarInfo, bytes | None]],
+    include_meta: bool = True,
+) -> None:
+    """Build a tarball with arbitrary members for traversal/symlink tests."""
+    with tarfile.open(archive_path, "w:gz") as tar:
+        if include_meta:
+            payload = json.dumps({
+                "format_version": STASH_FORMAT_VERSION,
+                "platform_version": "test",
+                "created_at": "2026-05-05T00:00:00+00:00",
+            }).encode()
+            info = tarfile.TarInfo(name="boxmunge-stash-meta.json")
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+        for info, data in members:
+            if data is None:
+                tar.addfile(info)
+            else:
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+
+
+class TestStashTraversalGuards:
+    def test_rejects_dotdot_segment(self, tmp_path: Path) -> None:
+        paths = _make_paths(tmp_path)
+        archive = paths.stashes / "malicious.tar.gz"
+        info = tarfile.TarInfo(name="config/../../etc/evil")
+        _build_malicious_archive(archive, [(info, b"pwn")])
+        with pytest.raises(StashError, match="suspicious"):
+            restore_stash(paths, archive)
+
+    def test_rejects_absolute_path(self, tmp_path: Path) -> None:
+        paths = _make_paths(tmp_path)
+        archive = paths.stashes / "malicious.tar.gz"
+        info = tarfile.TarInfo(name="/etc/evil")
+        _build_malicious_archive(archive, [(info, b"pwn")])
+        with pytest.raises(StashError, match="suspicious"):
+            restore_stash(paths, archive)
+
+    def test_allows_dotdot_substring_in_name(self, tmp_path: Path) -> None:
+        """foo..bar (no path separator) should not trigger guard."""
+        paths = _make_paths(tmp_path)
+        archive = paths.stashes / "ok.tar.gz"
+        info = tarfile.TarInfo(name="config/foo..bar")
+        _build_malicious_archive(archive, [(info, b"hello")])
+        # Should restore without raising
+        restore_stash(paths, archive)
+        assert (paths.config / "foo..bar").read_bytes() == b"hello"
+
+    def test_rejects_symlink_member(self, tmp_path: Path) -> None:
+        paths = _make_paths(tmp_path)
+        archive = paths.stashes / "symlink.tar.gz"
+        info = tarfile.TarInfo(name="config/evil")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        _build_malicious_archive(archive, [(info, None)])
+        with pytest.raises(StashError):
+            restore_stash(paths, archive)
+
+
+class TestStashAtomicWrites:
+    def test_rename_failure_keeps_target_intact(self, tmp_path: Path) -> None:
+        """When os.rename fails mid-restore, original target file untouched."""
+        paths = _make_paths(tmp_path)
+        (paths.config_file).write_text("hostname: original\nadmin_email: t@t\n")
+        write_installed_version(paths, "0.2.0", "abc1234")
+        _setup_project(paths, "myapp")
+        archive = create_stash(paths)
+
+        # Mutate target so restore would change it
+        paths.config_file.write_text("hostname: corrupt\n")
+
+        with patch("boxmunge.fileutil.os.rename", side_effect=OSError("simulated SIGKILL")):
+            with pytest.raises(OSError):
+                restore_stash(paths, archive)
+
+        # Target intact (still corrupt content, not partial bytes)
+        assert paths.config_file.read_text() == "hostname: corrupt\n"
+        # No leftover temp files
+        temps = list(paths.config.glob(".*tmp"))
+        assert temps == []
+
+
+class TestStashSchemaVersion:
+    def test_create_writes_meta_file(self, tmp_path: Path) -> None:
+        paths = _make_paths(tmp_path)
+        (paths.config_file).write_text("hostname: t\nadmin_email: t@t\n")
+        write_installed_version(paths, "0.5.3", "deadbee")
+        _setup_project(paths, "myapp")
+        archive = create_stash(paths)
+        with tarfile.open(archive, "r:gz") as tar:
+            names = tar.getnames()
+            assert "boxmunge-stash-meta.json" in names
+            extracted = tar.extractfile("boxmunge-stash-meta.json")
+            assert extracted is not None
+            meta = json.loads(extracted.read())
+        assert meta["format_version"] == STASH_FORMAT_VERSION
+        assert meta["platform_version"] == "0.5.3+deadbee"
+        assert "created_at" in meta
+
+    def test_restore_with_current_version(self, tmp_path: Path) -> None:
+        paths = _make_paths(tmp_path)
+        (paths.config_file).write_text("hostname: t\nadmin_email: t@t\n")
+        write_installed_version(paths, "0.5.3", "deadbee")
+        _setup_project(paths, "myapp")
+        archive = create_stash(paths)
+        # Should restore without raising
+        restore_stash(paths, archive)
+
+    def test_restore_with_newer_version_raises(self, tmp_path: Path) -> None:
+        paths = _make_paths(tmp_path)
+        archive = paths.stashes / "future.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            payload = json.dumps({
+                "format_version": STASH_FORMAT_VERSION + 1,
+                "platform_version": "9.9.9",
+                "created_at": "2099-01-01T00:00:00+00:00",
+            }).encode()
+            info = tarfile.TarInfo(name="boxmunge-stash-meta.json")
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+        with pytest.raises(StashError, match="newer than this installation"):
+            restore_stash(paths, archive)
+
+    def test_restore_legacy_no_meta_warns(self, tmp_path: Path) -> None:
+        """Legacy stashes (created before meta file existed) restore w/ warning."""
+        paths = _make_paths(tmp_path)
+        archive = paths.stashes / "legacy.tar.gz"
+        # Build a legacy-format stash (no meta file) using direct tarfile
+        with tarfile.open(archive, "w:gz") as tar:
+            payload = b"hostname: legacy\nadmin_email: t@t\n"
+            info = tarfile.TarInfo(name="config/boxmunge.yml")
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+
+        with patch("boxmunge.stash.log_warning") as mock_warn:
+            restore_stash(paths, archive)
+        assert mock_warn.called
+        # Verify the warning mentions absent format marker
+        call_args = mock_warn.call_args
+        assert "format_version" in call_args.args[1] or "format_version" in str(call_args)
+        # And the file actually got restored
+        assert paths.config_file.read_text() == "hostname: legacy\nadmin_email: t@t\n"
+
+
+class TestStashLogging:
+    def test_create_emits_log_operation(self, tmp_path: Path) -> None:
+        paths = _make_paths(tmp_path)
+        (paths.config_file).write_text("hostname: t\nadmin_email: t@t\n")
+        write_installed_version(paths, "0.5.3", "deadbee")
+        _setup_project(paths, "myapp")
+        with patch("boxmunge.stash.log_operation") as mock_log:
+            create_stash(paths)
+        assert mock_log.called
+        # First positional arg is component
+        assert mock_log.call_args.args[0] == "stash"
+        # Detail should include format_version
+        kwargs = mock_log.call_args.kwargs
+        assert kwargs.get("detail", {}).get("format_version") == STASH_FORMAT_VERSION
+
+    def test_restore_emits_log_operation(self, tmp_path: Path) -> None:
+        paths = _make_paths(tmp_path)
+        (paths.config_file).write_text("hostname: t\nadmin_email: t@t\n")
+        write_installed_version(paths, "0.5.3", "deadbee")
+        _setup_project(paths, "myapp")
+        archive = create_stash(paths)
+        with patch("boxmunge.stash.log_operation") as mock_log:
+            restore_stash(paths, archive)
+        assert mock_log.called
+        # Verify "restored" message
+        msgs = [c.args[1] for c in mock_log.call_args_list]
+        assert any("restored" in m.lower() for m in msgs)

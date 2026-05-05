@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from boxmunge.fileutil import atomic_write_text
+from boxmunge.fileutil import atomic_write_bytes, atomic_write_text
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.paths import BoxPaths
 
@@ -50,6 +50,62 @@ class TestAtomicWriteText:
                 atomic_write_text(target, "content")
         temps = list(tmp_path.glob(".*tmp"))
         assert temps == []
+
+
+class TestAtomicWriteBytes:
+    def test_writes_content(self, tmp_path: Path) -> None:
+        target = tmp_path / "test.bin"
+        atomic_write_bytes(target, b"hello world")
+        assert target.read_bytes() == b"hello world"
+
+    def test_overwrites_existing(self, tmp_path: Path) -> None:
+        target = tmp_path / "test.bin"
+        target.write_bytes(b"old content")
+        atomic_write_bytes(target, b"new content")
+        assert target.read_bytes() == b"new content"
+
+    def test_creates_parent_dirs(self, tmp_path: Path) -> None:
+        target = tmp_path / "sub" / "dir" / "test.bin"
+        atomic_write_bytes(target, b"nested")
+        assert target.read_bytes() == b"nested"
+
+    def test_no_temp_file_on_success(self, tmp_path: Path) -> None:
+        target = tmp_path / "test.bin"
+        atomic_write_bytes(target, b"content")
+        temps = list(tmp_path.glob(".*tmp"))
+        assert temps == []
+
+    def test_no_partial_write_on_error(self, tmp_path: Path) -> None:
+        target = tmp_path / "test.bin"
+        target.write_bytes(b"original")
+        with patch("boxmunge.fileutil.os.fsync", side_effect=OSError("disk full")):
+            with pytest.raises(OSError):
+                atomic_write_bytes(target, b"new content that should not appear")
+        assert target.read_bytes() == b"original"
+
+    def test_temp_cleaned_up_on_error(self, tmp_path: Path) -> None:
+        target = tmp_path / "test.bin"
+        with patch("boxmunge.fileutil.os.fsync", side_effect=OSError("disk full")):
+            with pytest.raises(OSError):
+                atomic_write_bytes(target, b"content")
+        temps = list(tmp_path.glob(".*tmp"))
+        assert temps == []
+
+    def test_rename_failure_keeps_original(self, tmp_path: Path) -> None:
+        """SIGKILL-equivalent: rename fails mid-write, original intact."""
+        target = tmp_path / "test.bin"
+        target.write_bytes(b"original")
+        with patch("boxmunge.fileutil.os.rename", side_effect=OSError("simulated")):
+            with pytest.raises(OSError):
+                atomic_write_bytes(target, b"would-be-new")
+        assert target.read_bytes() == b"original"
+        temps = list(tmp_path.glob(".*tmp"))
+        assert temps == []
+
+    def test_mode_applied(self, tmp_path: Path) -> None:
+        target = tmp_path / "test.bin"
+        atomic_write_bytes(target, b"content", mode=0o600)
+        assert (target.stat().st_mode & 0o777) == 0o600
 
 
 class TestProjectLock:

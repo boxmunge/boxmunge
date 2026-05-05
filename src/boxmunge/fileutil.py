@@ -53,6 +53,37 @@ def atomic_write_text(path: Path, content: str, mode: int | None = None) -> None
         raise
 
 
+def atomic_write_bytes(path: Path, content: bytes, mode: int | None = None) -> None:
+    """Write bytes to path atomically via temp file + rename.
+
+    Binary counterpart of atomic_write_text. Creates parent directories
+    if needed. Uses fsync for durability and os.rename for atomicity
+    (same-filesystem guarantee). If mode is provided, the temp file is
+    chmod'd before rename so the final file is never visible with wrong
+    permissions.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_path = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        if mode is not None:
+            os.chmod(tmp_path, mode)
+        os.rename(tmp_path, path)
+        _chown_deploy(str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 class LockError(Exception):
     """Raised when a project lock cannot be acquired."""
 
