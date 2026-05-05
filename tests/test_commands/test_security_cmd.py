@@ -61,6 +61,15 @@ def test_security_json_returns_structured_data(project_with_default) -> None:
     assert payload["off_services"] == []
 
 
+def test_security_json_flag_first(project_with_default) -> None:
+    """Audit H-3b: ``--json`` must be detected even when it precedes the project."""
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        cmd_security(["--json", "demo"])
+    payload = json.loads(buf.getvalue())
+    assert payload["project"] == "demo"
+
+
 def test_security_json_off_services(monkeypatch, tmp_path) -> None:
     proj = tmp_path / "projects" / "demo"
     proj.mkdir(parents=True)

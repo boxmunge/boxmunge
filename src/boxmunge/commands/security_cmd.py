@@ -99,8 +99,12 @@ def cmd_security(args: list[str]) -> None:
         print(USAGE)
         sys.exit(0 if args else 2)
 
-    project = args[0]
-    as_json = "--json" in args[1:]
+    as_json = "--json" in args
+    positional = [a for a in args if not a.startswith("--")]
+    if not positional:
+        print(USAGE)
+        sys.exit(2)
+    project = positional[0]
 
     paths = _paths()
     manifest_path = paths.project_manifest(project)
