@@ -60,7 +60,8 @@ def cmd_logs(args: list[str]) -> None:
             positional_consumed = True
             i += 1
         else:
-            i += 1
+            print(f"ERROR: unknown argument: {arg}", file=sys.stderr)
+            sys.exit(2)
 
     project_dir = paths.project_dir(project)
     if not project_dir.exists():

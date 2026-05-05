@@ -122,7 +122,8 @@ def run_log(args: list[str], paths: BoxPaths) -> int:
             containers = True
             i += 1
         else:
-            i += 1
+            print(f"ERROR: unknown argument: {arg}", file=sys.stderr)
+            return 2
 
     if project:
         from boxmunge.paths import validate_project_name

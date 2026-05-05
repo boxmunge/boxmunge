@@ -211,7 +211,7 @@ def _run_dry(paths: BoxPaths) -> int:
         _regenerate_configs(paths)
         print("  OK")
     except Exception as e:
-        print(f"  ERROR: {e}")
+        print(f"  ERROR: {e}", file=sys.stderr)
         return 1
 
     print("\nDry-run complete. No state was modified.")
@@ -286,7 +286,7 @@ def _run_full(
         archive = create_stash(paths)
         print(f"  Stash: {archive.name}")
     except Exception as e:
-        print(f"  ERROR: Stash failed: {e}")
+        print(f"  ERROR: Stash failed: {e}", file=sys.stderr)
         log_error("upgrade", f"Stash failed: {e}", paths)
         return 1
 

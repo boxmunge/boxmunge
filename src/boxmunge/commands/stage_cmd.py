@@ -39,30 +39,30 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
         try:
             bundle_path = resolve_bundle_source(project_name, paths, ref=ref)
         except SourceError as e:
-            print(f"ERROR: {e}")
+            print(f"ERROR: {e}", file=sys.stderr)
             return 1
 
         with tempfile.TemporaryDirectory() as tmpdir:
             try:
                 extracted = _extract_bundle(bundle_path, Path(tmpdir))
             except ValueError as e:
-                print(f"ERROR: {e}")
+                print(f"ERROR: {e}", file=sys.stderr)
                 return 1
 
             manifest_path = extracted / "manifest.yml"
             if not manifest_path.exists():
-                print("ERROR: Bundle missing manifest.yml")
+                print("ERROR: Bundle missing manifest.yml", file=sys.stderr)
                 return 1
 
             try:
                 manifest = load_manifest(manifest_path)
             except ManifestError as e:
-                print(f"ERROR: {e}")
+                print(f"ERROR: {e}", file=sys.stderr)
                 return 1
 
             errors, warnings = validate_manifest(manifest, project_name)
             if errors:
-                print("ERROR: Manifest validation failed:")
+                print("ERROR: Manifest validation failed:", file=sys.stderr)
                 for e in errors:
                     print(f"  {e}")
                 return 1
@@ -73,7 +73,7 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
             try:
                 check_project_identity(project_name, manifest_id, paths)
             except ValueError as e:
-                print(f"ERROR: {e}")
+                print(f"ERROR: {e}", file=sys.stderr)
                 return 1
 
             if dry_run:
@@ -96,7 +96,7 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
         try:
             manifest = load_manifest(paths.project_manifest(project_name))
         except ManifestError as e:
-            print(f"ERROR: {e}")
+            print(f"ERROR: {e}", file=sys.stderr)
             return 1
 
         # For git projects, fetch and checkout the requested ref
@@ -109,7 +109,7 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
                 subprocess.run(["git", "checkout", ref], cwd=repo_dir,
                                check=True, capture_output=True, text=True)
             except subprocess.CalledProcessError as e:
-                print(f"ERROR: Git checkout failed: {e.stderr}")
+                print(f"ERROR: Git checkout failed: {e.stderr}", file=sys.stderr)
                 return 1
 
         if dry_run:
@@ -186,7 +186,7 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
             )
             print("  Data snapshot complete.")
         except Exception as e:
-            print(f"  ERROR: Data snapshot failed: {e}")
+            print(f"  ERROR: Data snapshot failed: {e}", file=sys.stderr)
             log_error("stage", f"Data snapshot failed: {e}", paths, project=project_name)
             return 1
 
@@ -198,7 +198,7 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
         compose_up(project_dir, compose_files=compose_files,
                    project_name=staging_project_name)
     except DockerError as e:
-        print(f"  ERROR: {e}")
+        print(f"  ERROR: {e}", file=sys.stderr)
         log_error("stage", f"Stage failed: {e}", paths, project=project_name)
         return 1
 
@@ -259,14 +259,14 @@ def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
         return 1
     if not is_registered(project_name, paths):
         print(f"ERROR: Project '{project_name}' is not registered on this server. "
-              f"Run: project-add {project_name}")
+              f"Run: project-add {project_name}", file=sys.stderr)
         return 1
 
     try:
         with project_lock(project_name, paths):
             return _run_stage_inner(project_name, paths, ref, dry_run)
     except LockError as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
 
@@ -296,6 +296,7 @@ def cmd_stage(args: list[str]) -> None:
             dry_run = True
             i += 1
         else:
-            i += 1
+            print(f"ERROR: unknown argument: {remaining[i]}", file=sys.stderr)
+            sys.exit(2)
     paths = BoxPaths()
     sys.exit(run_stage(project, paths, ref=ref, dry_run=dry_run))
