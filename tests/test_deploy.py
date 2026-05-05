@@ -98,3 +98,40 @@ class TestComposeOverrideEmitsOffWarning:
         with redirect_stdout(buf):
             prepare_compose_override(paths, manifest)
         assert "SECURITY OFF" not in buf.getvalue()
+
+    def test_component_param_threads_through(self, tmp_path, monkeypatch) -> None:
+        """`component=` is forwarded to warn_off_services so upgrade/resume
+        don't get misattributed as 'deploy' in the structured log."""
+        from boxmunge.paths import BoxPaths
+        proj = tmp_path / "projects" / "demo"
+        proj.mkdir(parents=True)
+        monkeypatch.setattr(BoxPaths, "__init__", lambda self: None)
+        paths = BoxPaths()
+        paths.host_secrets = tmp_path / "host_secrets.env"
+        paths.project_compose_override = lambda name: proj / "compose.boxmunge.yml"
+        paths.project_dir = lambda name: proj
+        paths.project_secrets = lambda name: proj / "secrets.env"
+
+        manifest = {
+            "project": "demo",
+            "hosts": ["demo.example.com"],
+            "security": {"profile": "off", "reason": "test"},
+            "services": {"web": {"port": 3000, "routes": [{"path": "/"}]}},
+        }
+
+        captured: list[str] = []
+
+        def fake_warn(p, m, *, component):
+            captured.append(component)
+
+        monkeypatch.setattr(
+            "boxmunge.commands.deploy.warn_off_services", fake_warn,
+        )
+
+        # Default
+        prepare_compose_override(paths, manifest)
+        # Explicit override (mirrors upgrade_cmd / resume_cmd call sites)
+        prepare_compose_override(paths, manifest, component="upgrade")
+        prepare_compose_override(paths, manifest, component="resume")
+
+        assert captured == ["deploy", "upgrade", "resume"]

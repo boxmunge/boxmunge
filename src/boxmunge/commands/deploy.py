@@ -73,8 +73,16 @@ def prepare_caddy_config(paths: BoxPaths, manifest: dict[str, Any]) -> None:
         atomic_write_text(site_conf, config, mode=0o644)
 
 
-def prepare_compose_override(paths: BoxPaths, manifest: dict[str, Any]) -> None:
-    """Generate compose.boxmunge.yml for a project."""
+def prepare_compose_override(
+    paths: BoxPaths,
+    manifest: dict[str, Any],
+    component: str = "deploy",
+) -> None:
+    """Generate compose.boxmunge.yml for a project.
+
+    `component` labels the SECURITY OFF log entry so callers from upgrade /
+    resume don't misattribute the warning as "deploy".
+    """
     project_name = manifest["project"]
     override_path = paths.project_compose_override(project_name)
     override_path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,7 +103,7 @@ def prepare_compose_override(paths: BoxPaths, manifest: dict[str, Any]) -> None:
 
     # Deploy-time warning for any service resolving to profile: off.
     # Repeated by design — see spec §"Deploy-time warning".
-    warn_off_services(paths, manifest, component="deploy")
+    warn_off_services(paths, manifest, component=component)
 
 
 def _run_deploy_inner(

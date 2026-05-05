@@ -140,7 +140,7 @@ def run_resume(
     print("  Restoring Caddy routing...")
     try:
         prepare_caddy_config(paths, manifest)
-        prepare_compose_override(paths, manifest)
+        prepare_compose_override(paths, manifest, component="resume")
         caddy_reload(paths.caddy)
     except (DockerError, OSError) as e:
         print(f"ERROR: Caddy restore failed: {e}", file=sys.stderr)

@@ -94,7 +94,7 @@ def _regenerate_configs(paths: BoxPaths) -> list[str]:
         project_name = manifest.get("project", project_dir.name)
         try:
             prepare_caddy_config(paths, manifest)
-            prepare_compose_override(paths, manifest)
+            prepare_compose_override(paths, manifest, component="upgrade")
             processed.append(project_name)
         except Exception as e:
             log_warning(
