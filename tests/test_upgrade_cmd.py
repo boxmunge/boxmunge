@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from boxmunge.commands.upgrade_cmd import _migrate_project_manifests
+from boxmunge.manifest import ManifestError
 from boxmunge.migration import (
     MigrationError, register_migration, _MIGRATIONS,
 )
@@ -93,6 +94,56 @@ class TestMigratePostValidation:
 
             # On-disk manifest must be unchanged.
             assert mf.read_text() == original_text
+        finally:
+            if original_v1_to_v2 is not None:
+                register_migration(1, 2, original_v1_to_v2)
+
+
+class TestMigrateFailLoud:
+    """4a: per-project ManifestError/MigrationError must propagate, not be silently skipped.
+
+    A corrupted manifest or a migrate_manifest failure means the project never
+    gets its schema bumped or overlay regenerated. Continuing past such a
+    failure would let the upgrade report success while leaving stale state on
+    disk; the shim relies on a non-zero exit to trigger rollback.
+    """
+
+    def test_corrupted_manifest_raises_manifest_error(self, paths_stub) -> None:
+        """A project whose manifest is not a YAML mapping must cause
+        _migrate_project_manifests to raise ManifestError (was: silently
+        skipped)."""
+        proj = paths_stub.projects / "broken"
+        proj.mkdir(parents=True)
+        # Valid YAML but not a mapping — load_manifest raises ManifestError.
+        (proj / "manifest.yml").write_text("- just\n- a\n- list\n")
+
+        with pytest.raises(ManifestError, match="not a YAML mapping"):
+            _migrate_project_manifests(paths_stub)
+
+    def test_migrate_manifest_failure_raises(self, paths_stub) -> None:
+        """A project where migrate_manifest itself raises must propagate the
+        MigrationError (was: caught + continue, project silently skipped)."""
+        original_v1_to_v2 = _MIGRATIONS.get((1, 2))
+
+        def raising_v1_to_v2(manifest):
+            raise MigrationError("simulated migration failure")
+
+        register_migration(1, 2, raising_v1_to_v2)
+        try:
+            v1 = {
+                "schema_version": 1,
+                "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+                "source": "bundle",
+                "project": "demo",
+                "hosts": ["demo.example.com"],
+                "services": {
+                    "web": {"port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh"},
+                },
+            }
+            _write_manifest(paths_stub, "demo", v1)
+
+            with pytest.raises(MigrationError, match="simulated migration failure"):
+                _migrate_project_manifests(paths_stub)
         finally:
             if original_v1_to_v2 is not None:
                 register_migration(1, 2, original_v1_to_v2)

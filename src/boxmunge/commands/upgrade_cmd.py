@@ -46,23 +46,18 @@ def _migrate_project_manifests(paths: BoxPaths) -> list[str]:
         if not manifest_path.exists():
             continue
 
-        try:
-            manifest = load_manifest(manifest_path)
-        except ManifestError:
-            continue
+        # ManifestError and MigrationError both propagate. A corrupted manifest
+        # means this project never gets its schema bumped or overlay regenerated;
+        # silently skipping would let the upgrade report success while leaving
+        # the project in a stale/broken state. Raise instead — the shim will
+        # roll back to the previous slot.
+        manifest = load_manifest(manifest_path)
 
         source_version = manifest.get("schema_version", 1)
         if source_version == CURRENT_SCHEMA_VERSION:
             continue
 
-        try:
-            migrated_manifest = migrate_manifest(manifest, CURRENT_SCHEMA_VERSION)
-        except MigrationError as e:
-            log_error(
-                "upgrade", f"Failed to migrate {project_dir.name}: {e}",
-                paths, project=project_dir.name,
-            )
-            continue
+        migrated_manifest = migrate_manifest(manifest, CURRENT_SCHEMA_VERSION)
 
         # Validate the migrated manifest BEFORE writing it.
         # A migration that produces invalid output is a real bug — fail noisily
