@@ -63,7 +63,17 @@ def _build_service_override(
 
         # Security hardening — silent defaults injected here.
         resolved = resolve_security(project_security, svc.get("security"))
-        svc_override.update(render_compose_security_fragment(resolved))
+        sec_fragment = render_compose_security_fragment(resolved)
+
+        # Avoid Docker Compose's "can't set distinct values on 'pids_limit'
+        # and 'deploy.resources.limits.pids'" error: when manifest limits
+        # already created a deploy.resources.limits block, nest pids_limit
+        # under it as `pids` rather than emitting at the top level.
+        if "deploy" in svc_override and "pids_limit" in sec_fragment:
+            pids_value = sec_fragment.pop("pids_limit")
+            svc_override["deploy"]["resources"]["limits"]["pids"] = pids_value
+
+        svc_override.update(sec_fragment)
 
         if svc_override:
             services[svc_name] = svc_override

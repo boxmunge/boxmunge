@@ -437,3 +437,55 @@ class TestComposeSecurityHardening:
         )
         parsed = yaml.safe_load(override)
         assert parsed["services"]["web"]["pids_limit"] == 4096
+
+    def test_pids_nested_under_deploy_when_manifest_has_limits(self) -> None:
+        """Regression: when manifest declares limits (e.g. memory/cpus), the
+        rendered overlay creates `deploy.resources.limits`. Adding
+        top-level `pids_limit` AND `deploy.resources.limits` together makes
+        Docker Compose fail with "can't set distinct values on 'pids_limit'
+        and 'deploy.resources.limits.pids'". Workaround: when the deploy
+        block exists, nest pids under it.
+        """
+        m = self._manifest()
+        m["services"]["web"]["limits"] = {"memory": "256m", "cpus": "0.5"}
+
+        override = generate_compose_override(m)
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+
+        # Top-level pids_limit MUST NOT be present (would conflict).
+        assert "pids_limit" not in web, (
+            "pids_limit at top level conflicts with deploy.resources.limits. "
+            "It must be nested under deploy.resources.limits.pids instead."
+        )
+        # Memory and cpus from manifest still present.
+        assert web["deploy"]["resources"]["limits"]["memory"] == "256m"
+        assert web["deploy"]["resources"]["limits"]["cpus"] == "0.5"
+        # pids nested.
+        assert web["deploy"]["resources"]["limits"]["pids"] == 512
+        # Other hardening still at top level.
+        assert "no-new-privileges:true" in web["security_opt"]
+        assert web["init"] is True
+        assert "NET_ADMIN" in web["cap_drop"]
+
+    def test_pids_at_top_level_when_manifest_has_no_limits(self) -> None:
+        """When the manifest doesn't declare limits, no deploy block is
+        created — pids_limit stays at the top level (the default)."""
+        override = generate_compose_override(self._manifest())
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        assert web["pids_limit"] == 512
+        # No deploy block should have been created.
+        assert "deploy" not in web
+
+    def test_pids_nested_respects_per_service_override(self) -> None:
+        """A service-level pids_limit override (e.g. 4096) on a service with
+        manifest limits must end up nested under deploy.resources.limits.pids."""
+        m = self._manifest(service_security={"pids_limit": 4096})
+        m["services"]["web"]["limits"] = {"memory": "256m"}
+        override = generate_compose_override(m)
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        assert "pids_limit" not in web
+        assert web["deploy"]["resources"]["limits"]["pids"] == 4096
+        assert web["deploy"]["resources"]["limits"]["memory"] == "256m"
