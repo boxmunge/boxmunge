@@ -147,6 +147,57 @@ boxmunge validates `manifest.yml` on every deploy and rejects invalid manifests 
 
 ---
 
+## `security:` (optional)
+
+Per-project / per-service container hardening. Absence of the block applies
+the `default` profile silently — most projects need nothing here.
+
+### Project-level fields
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `profile` | string | `default` | One of `default`, `off`. (`strict`, `paranoid` reserved.) |
+| `reason` | string | — | **Required when `profile: off`.** Non-empty. Reproduced in deploy warnings. |
+| `no_new_privileges` | bool | `true` | Set `false` to disable. |
+| `init` | bool | `true` | Set `false` to disable Tini. |
+| `pids_limit` | int | `512` | Set `0` to disable. |
+| `cap_drop` | list[str] | dangerous-cap list | If specified, REPLACES the default list. |
+| `cap_add` | list[str] | `[]` | Capabilities to keep; subtracted from `cap_drop`. |
+
+### Per-service `security:`
+
+Same fields as above. Inherits project-level values for any field omitted. A service-level `profile` overrides the project-level `profile`.
+
+### Examples
+
+Most common — keep default, tweak one thing:
+
+```yaml
+security:
+  cap_add: [NET_RAW]
+```
+
+Per-service override:
+
+```yaml
+services:
+  worker:
+    security:
+      pids_limit: 2048
+```
+
+Last-resort opt-out (REQUIRES `reason`):
+
+```yaml
+services:
+  honeypot:
+    security:
+      profile: off
+      reason: "intentional honeypot, see issue #42"
+```
+
+---
+
 ## Compose File Conventions
 
 `compose.yml` is written and maintained by the project. It must:

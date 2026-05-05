@@ -39,3 +39,23 @@ deploy:
 
 env_files:
   - project.env
+
+# Container security hardening — silent defaults applied to every service
+# unless you explicitly opt out. The block below is OPTIONAL; absence means
+# "default profile applied to all services". You only need this block if you
+# want to relax a specific protection.
+#
+# Available profiles for v0.5: default | off
+# (strict and paranoid are reserved names for future tiers.)
+#
+# To opt one service out entirely (use sparingly — REQUIRES `reason`):
+#   security:
+#     profile: off
+#     reason: "your justification — appears in deploy warnings"
+#
+# To keep `default` and tweak individual fields (much more common):
+#   security:
+#     pids_limit: 2048           # raise process count ceiling
+#     cap_add: [NET_RAW]         # re-add a capability we drop by default
+#
+# Run `agent-help security` on the server for full details.

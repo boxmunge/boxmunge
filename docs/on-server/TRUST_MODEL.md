@@ -49,6 +49,58 @@ boxmunge hardens the VPS as part of installation:
 - **Unattended upgrades** — automatic OS security patches
 - **Automatic security updates** — boxmunge checks for its own security releases every 6 hours
 
+## Per-Project Container Hardening
+
+In addition to the host-level and platform-container hardening above, boxmunge applies a per-service hardening layer to every user project, silently and by default.
+
+### What's applied (profile: `default`)
+
+Every service in `compose.boxmunge.yml` receives:
+
+- `security_opt: ["no-new-privileges:true"]` — blocks setuid / file-cap escalation inside the container.
+- `init: true` — Tini for signal handling and zombie reaping.
+- `pids_limit: 512` — kills fork bombs and exec storms.
+- `cap_drop` of dangerous capabilities not in Docker's default deny set: `NET_ADMIN, SYS_PTRACE, SYS_MODULE, SYS_RAWIO, SYS_TIME, SYS_BOOT, MAC_ADMIN, MAC_OVERRIDE, MKNOD, AUDIT_WRITE, WAKE_ALARM, BLOCK_SUSPEND, LEASE, NET_RAW`.
+
+These defaults are the **silent floor**. Existing v1 manifests need no edits — the v1→v2 migration adds nothing. The next deploy applies the protections automatically.
+
+### How to relax a protection
+
+Add a `security:` block to your `manifest.yml`. Project-level applies to all services; per-service overrides win.
+
+Strongly preferred: keep `profile: default` and tweak only the field that needs relaxing.
+
+```yaml
+security:
+  cap_add: [NET_RAW]      # re-add NET_RAW for ping/traceroute health checks
+  pids_limit: 2048        # raise the process ceiling
+```
+
+Last-resort: turn the whole posture off for one service. Requires a non-empty `reason`. The reason is reproduced in deploy logs and `boxmunge security` output.
+
+```yaml
+services:
+  web:
+    security:
+      profile: off
+      reason: "deliberate honeypot service, see issue #42"
+```
+
+A deploy-time `[WARNING] SECURITY OFF` message is emitted on every `stage`, `promote`, `deploy`, and `prod-deploy` for any service on `profile: off`. The warning is repeated by design — the shortest path to making it go away is removing `profile: off` from the manifest.
+
+### Profile ladder
+
+`off` → `default` → `strict` (Tier 3) → `paranoid` (Tier 8). `strict` and `paranoid` are reserved names; manifests using them today fail validation. They will arrive in future boxmunge releases with explicit migration guidance.
+
+### Introspection
+
+```text
+boxmunge security <project>          # human-readable
+boxmunge security <project> --json   # machine-readable (used by MCP)
+```
+
+Shows the effective posture per service after profile + override resolution.
+
 ## Security Releases
 
 Security-tagged releases are applied automatically within 12 hours. The `boxmunge upgrade` flow handles stashing, migration, and validation automatically. Release artifacts are signed with cosign when available; SHA256 checksums are always provided.
