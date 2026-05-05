@@ -100,6 +100,9 @@ class BoxPaths:
     def project_deploy_state(self, name: str) -> Path:
         return self.deploy_state / f"{name}.json"
 
+    def project_paused_state(self, name: str) -> Path:
+        return self.deploy_state / f"{name}.paused.json"
+
     def project_staging_caddy_site(self, name: str) -> Path:
         return self.caddy_sites / f"{name}-staging.conf"
 
