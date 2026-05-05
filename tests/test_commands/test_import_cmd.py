@@ -5,7 +5,8 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from boxmunge.commands.import_cmd import _extract_bundle, run_import
+from boxmunge.bundle import extract_bundle
+from boxmunge.commands.import_cmd import run_import
 from boxmunge.paths import BoxPaths
 
 
@@ -57,13 +58,13 @@ class TestExtractBundle:
         bundle = _make_bundle(tmp_path)
         dest = tmp_path / "extract"
         dest.mkdir()
-        project_dir = _extract_bundle(bundle, dest)
+        project_dir = extract_bundle(bundle, dest)
         assert project_dir.name == "testapp"
         assert (project_dir / "manifest.yml").exists()
 
     def test_rejects_missing_file(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="not found"):
-            _extract_bundle(tmp_path / "nope.tar.gz", tmp_path)
+            extract_bundle(tmp_path / "nope.tar.gz", tmp_path)
 
     def test_rejects_multiple_top_dirs(self, tmp_path: Path) -> None:
         staging = tmp_path / "staging"
@@ -78,7 +79,7 @@ class TestExtractBundle:
         dest = tmp_path / "extract"
         dest.mkdir()
         with pytest.raises(ValueError, match="exactly one"):
-            _extract_bundle(bundle, dest)
+            extract_bundle(bundle, dest)
 
 
 class TestRunImport:

@@ -13,11 +13,6 @@ from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 
-# Module-level aliases used by stage_cmd and deploy (underscore names are the
-# public API surface for internal callers — kept here to avoid a wide rename).
-_extract_bundle = extract_bundle
-_copy_project_files = copy_project_files
-
 
 def run_import(
     bundle_path_str: str,
@@ -34,7 +29,7 @@ def run_import(
     # Step 1: Extract to temp dir
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
-            project_dir_extracted = _extract_bundle(bundle_path, Path(tmpdir))
+            project_dir_extracted = extract_bundle(bundle_path, Path(tmpdir))
         except ValueError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
@@ -105,7 +100,7 @@ def run_import(
 
                 # Step 5: Copy files
                 print(f"  Copying project files...")
-                _copy_project_files(project_dir_extracted, target_dir, is_upgrade)
+                copy_project_files(project_dir_extracted, target_dir, is_upgrade)
 
                 # Step 6: Deploy using standard flow (lock already held)
                 print(f"  Running deploy...")
