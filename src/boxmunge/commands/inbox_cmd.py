@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -73,6 +75,32 @@ def run_inbox_list(paths: BoxPaths, project_filter: str | None) -> int:
     return 0
 
 
+def _run_inbox_list_json(paths: BoxPaths, project_filter: str | None) -> int:
+    """Emit the inbox listing as JSON on stdout. Returns 0."""
+    items: list[dict[str, object]] = []
+    if paths.inbox.exists():
+        for entry in paths.inbox.iterdir():
+            if not (entry.is_file() and entry.suffix == ".gz"):
+                continue
+            parsed = _parse_bundle_filename(entry.name)
+            if not parsed:
+                continue
+            project, _ = parsed
+            if project_filter and project != project_filter:
+                continue
+            stat = entry.stat()
+            mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+            items.append({
+                "name": entry.name,
+                "project": project,
+                "size": stat.st_size,
+                "mtime": mtime.isoformat().replace("+00:00", "Z"),
+            })
+    items.sort(key=lambda b: b["mtime"], reverse=True)
+    print(json.dumps({"bundles": items}))
+    return 0
+
+
 def run_inbox_clean(
     paths: BoxPaths, project_filter: str | None, yes: bool = False
 ) -> int:
@@ -123,6 +151,7 @@ def cmd_inbox(args: list[str]) -> None:
     paths = BoxPaths()
 
     yes = "--yes" in args
+    as_json = "--json" in args
     positional = [a for a in args if not a.startswith("--")]
 
     if positional and positional[0] == "clean":
@@ -130,4 +159,6 @@ def cmd_inbox(args: list[str]) -> None:
         sys.exit(run_inbox_clean(paths, project_filter=project, yes=yes))
     else:
         project = positional[0] if positional else None
+        if as_json:
+            sys.exit(_run_inbox_list_json(paths, project_filter=project))
         sys.exit(run_inbox_list(paths, project_filter=project))

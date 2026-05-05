@@ -51,6 +51,29 @@ class TestCmdProjectList:
         output = capsys.readouterr().out
         assert "No projects registered" in output
 
+    def test_json_lists_registered_projects(
+        self, paths: BoxPaths, capsys,
+    ) -> None:
+        from boxmunge.commands.project_cmd import (
+            cmd_project_add, cmd_project_list,
+        )
+        with patch("boxmunge.commands.project_cmd.BoxPaths", return_value=paths):
+            cmd_project_add(["alpha"])
+            cmd_project_add(["beta"])
+            capsys.readouterr()  # Drop the project-add output
+            cmd_project_list(["--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload == {"projects": ["alpha", "beta"]}
+
+    def test_json_empty_registry(
+        self, paths: BoxPaths, capsys,
+    ) -> None:
+        from boxmunge.commands.project_cmd import cmd_project_list
+        with patch("boxmunge.commands.project_cmd.BoxPaths", return_value=paths):
+            cmd_project_list(["--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload == {"projects": []}
+
 
 class TestCmdProjectDelete:
     def test_cleans_up_registry_when_only_registered(self, paths: BoxPaths) -> None:

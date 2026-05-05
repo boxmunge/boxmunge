@@ -1,5 +1,6 @@
 """Tests for boxmunge check command — health checking logic."""
 
+import json
 import subprocess
 import pytest
 from pathlib import Path
@@ -171,8 +172,8 @@ class TestRunCheckPreRegistered:
         result = run_check("myapp", paths)
         assert result == 1
         captured = capsys.readouterr()
-        assert "pre-registered" in captured.out
-        assert "boxmunge deploy myapp" in captured.out
+        assert "pre-registered" in captured.err
+        assert "boxmunge deploy myapp" in captured.err
 
 
 class TestRunCheckSurfacesProfileOff:
@@ -422,3 +423,59 @@ class TestCheckAllReadOnly:
 
         result = run_check_all(["--read-only"], paths)
         assert result == 2
+
+
+class TestCheckJson:
+    """Audit H-3: `boxmunge check <project> --json` for MCP/agent consumption."""
+
+    def _write_project(self, paths: BoxPaths, name: str, manifest: dict) -> None:
+        import yaml
+        paths.project_dir(name).mkdir(parents=True, exist_ok=True)
+        paths.project_manifest(name).write_text(yaml.dump(manifest))
+        paths.project_deploy_state(name).parent.mkdir(parents=True, exist_ok=True)
+        paths.project_deploy_state(name).write_text('{"current_ref": "main"}')
+
+    def test_json_output_parses(self, paths: BoxPaths, capsys, monkeypatch) -> None:
+        from boxmunge.commands.check import cmd_check
+        self._write_project(paths, "myapp", {
+            "schema_version": 2, "id": "01TEST",
+            "project": "myapp", "source": "bundle",
+            "hosts": ["myapp.example.com"],
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        })
+        monkeypatch.setattr(
+            "boxmunge.commands.check.BoxPaths", lambda: paths,
+        )
+        with pytest.raises(SystemExit) as exc:
+            cmd_check(["myapp", "--json"])
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        payload = json.loads(out)
+        assert payload["project"] == "myapp"
+        assert payload["exit_code"] == 0
+
+    def test_json_output_includes_smoke_when_configured(
+        self, paths: BoxPaths, capsys, monkeypatch,
+    ) -> None:
+        from boxmunge.commands.check import cmd_check
+        self._write_project(paths, "myapp", {
+            "schema_version": 2, "id": "01TEST",
+            "project": "myapp", "source": "bundle",
+            "hosts": ["myapp.example.com"],
+            "services": {"web": {
+                "port": 8080, "routes": [{"path": "/"}],
+                "smoke": "boxmunge-scripts/smoke.sh",
+            }},
+        })
+        monkeypatch.setattr(
+            "boxmunge.commands.check.BoxPaths", lambda: paths,
+        )
+        with patch(
+            "boxmunge.commands.check.run_smoke_in_container",
+            return_value=SmokeResult(status="ok", message=""),
+        ):
+            with pytest.raises(SystemExit):
+                cmd_check(["myapp", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["smoke"] == {"status": "ok", "message": ""}
+        assert payload["exit_code"] == 0

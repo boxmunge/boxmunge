@@ -3,8 +3,11 @@
 import json
 import pytest
 from pathlib import Path
+from unittest.mock import patch
 
-from boxmunge.commands.inbox_cmd import run_inbox_list, run_inbox_clean
+from boxmunge.commands.inbox_cmd import (
+    cmd_inbox, run_inbox_list, run_inbox_clean,
+)
 from boxmunge.log import _reset_logger
 from boxmunge.paths import BoxPaths
 
@@ -119,3 +122,37 @@ class TestInboxCleanLogging:
                 if line
             ]
             assert all(e.get("component") != "inbox" for e in entries)
+
+
+class TestInboxJson:
+    """Audit H-3: `boxmunge inbox --json` returns a structured bundle list."""
+
+    def test_json_lists_bundles(
+        self, paths: BoxPaths, capsys, monkeypatch,
+    ) -> None:
+        _place_bundle(paths, "alpha", "2026-04-01T100000000000")
+        _place_bundle(paths, "beta", "2026-04-02T100000000000")
+        from boxmunge.commands import inbox_cmd as inbox_mod
+        # Inbox imports BoxPaths lazily inside cmd_inbox; patch the source.
+        monkeypatch.setattr("boxmunge.paths.BoxPaths", lambda: paths)
+        with pytest.raises(SystemExit) as exc:
+            cmd_inbox(["--json"])
+        assert exc.value.code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert "bundles" in payload
+        names = [b["name"] for b in payload["bundles"]]
+        assert any("alpha" in n for n in names)
+        assert any("beta" in n for n in names)
+        # Each item has the documented schema fields
+        for b in payload["bundles"]:
+            assert {"name", "size", "mtime", "project"} <= b.keys()
+
+    def test_json_empty_inbox(
+        self, paths: BoxPaths, capsys, monkeypatch,
+    ) -> None:
+        monkeypatch.setattr("boxmunge.paths.BoxPaths", lambda: paths)
+        with pytest.raises(SystemExit) as exc:
+            cmd_inbox(["--json"])
+        assert exc.value.code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload == {"bundles": []}

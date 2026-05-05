@@ -4,6 +4,7 @@
 For destructive removal (containers + files + registry), use project-delete.
 """
 
+import json
 import sys
 
 from boxmunge.log import log_operation
@@ -29,10 +30,14 @@ def cmd_project_add(args: list[str]) -> None:
 
 def cmd_project_list(args: list[str]) -> None:
     """List all registered project names."""
+    as_json = "--json" in args
     paths = BoxPaths()
-    projects = load_registered_projects(paths)
+    projects = sorted(load_registered_projects(paths))
+    if as_json:
+        print(json.dumps({"projects": projects}))
+        return
     if not projects:
         print("No projects registered. Use 'project-add <name>' to register one.")
         return
-    for name in sorted(projects):
+    for name in projects:
         print(name)

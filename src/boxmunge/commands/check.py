@@ -1,5 +1,6 @@
 """boxmunge check <project> — run health checks."""
 
+import json
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -122,20 +123,20 @@ def run_check(project_name: str, paths: BoxPaths, verbose: bool = True) -> int:
 
     if not project_dir.exists():
         if verbose:
-            print(f"ERROR: Project not found: {project_name}")
+            print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
         return 1
 
     if paths.is_project_pre_registered(project_name):
         if verbose:
             print(f"ERROR: Project '{project_name}' is pre-registered (secrets set) but "
-                  f"not yet deployed. Deploy first with: boxmunge deploy {project_name}")
+                  f"not yet deployed. Deploy first with: boxmunge deploy {project_name}", file=sys.stderr)
         return 1
 
     try:
         manifest = load_manifest(manifest_path)
     except ManifestError as e:
         if verbose:
-            print(f"ERROR: {e}")
+            print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
     if verbose:
@@ -340,21 +341,83 @@ def update_health_state(
     })
 
 
+_STATUS_FROM_EXIT = {0: "ok", 1: "warning", 2: "critical"}
+
+
+def _run_check_json(project_name: str, paths: BoxPaths) -> int:
+    """Run health check and emit a single JSON object on stdout.
+
+    Schema:
+      {"project": "X", "exit_code": 0, "smoke": {"status": "...", "message": "..."}}
+
+    The smoke object is omitted when no service in the manifest declares one.
+    """
+    project_dir = paths.project_dir(project_name)
+    manifest_path = paths.project_manifest(project_name)
+    payload: dict[str, Any] = {"project": project_name}
+
+    if not project_dir.exists():
+        payload["exit_code"] = 1
+        payload["error"] = f"Project not found: {project_name}"
+        print(json.dumps(payload))
+        return 1
+
+    if paths.is_project_pre_registered(project_name):
+        payload["exit_code"] = 1
+        payload["error"] = (
+            f"Project '{project_name}' is pre-registered (secrets set) but "
+            f"not yet deployed."
+        )
+        print(json.dumps(payload))
+        return 1
+
+    try:
+        manifest = load_manifest(manifest_path)
+    except ManifestError as e:
+        payload["exit_code"] = 1
+        payload["error"] = str(e)
+        print(json.dumps(payload))
+        return 1
+
+    has_smoke = any(svc.get("smoke") for svc in manifest.get("services", {}).values())
+    smoke_obj: dict[str, str] | None = None
+    worst = 0
+    if has_smoke:
+        compose_files = ["compose.yml", "compose.boxmunge.yml"]
+        result = run_smoke_in_container(project_dir, manifest, compose_files)
+        smoke_obj = {"status": result.status, "message": result.message}
+        if result.status == "critical":
+            worst = 2
+        elif result.status == "warning":
+            worst = 1
+
+    payload["exit_code"] = worst
+    payload["status"] = _STATUS_FROM_EXIT.get(worst, "unknown")
+    if smoke_obj is not None:
+        payload["smoke"] = smoke_obj
+    print(json.dumps(payload))
+    return worst
+
+
 def cmd_check(args: list[str]) -> None:
     """CLI entry point for check command."""
-    if not args:
-        print("Usage: boxmunge check <project>", file=sys.stderr)
+    as_json = "--json" in args
+    positional = [a for a in args if not a.startswith("--")]
+    if not positional:
+        print("Usage: boxmunge check <project> [--json]", file=sys.stderr)
         sys.exit(2)
 
     from boxmunge.paths import validate_project_name
     try:
-        validate_project_name(args[0])
+        validate_project_name(positional[0])
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(2)
 
     paths = BoxPaths()
-    sys.exit(run_check(args[0], paths))
+    if as_json:
+        sys.exit(_run_check_json(positional[0], paths))
+    sys.exit(run_check(positional[0], paths))
 
 
 def run_check_all(args: list[str], paths: BoxPaths) -> int:

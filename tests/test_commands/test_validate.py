@@ -1,9 +1,11 @@
 """Tests for boxmunge validate command."""
 
+import json
 import pytest
 from pathlib import Path
+from unittest.mock import patch
 
-from boxmunge.commands.validate import run_validate
+from boxmunge.commands.validate import run_validate, cmd_validate
 from boxmunge.paths import BoxPaths
 
 
@@ -69,5 +71,45 @@ class TestValidate:
         exit_code = run_validate("myapp", paths)
         assert exit_code == 1
         captured = capsys.readouterr()
-        assert "pre-registered" in captured.out
-        assert "boxmunge deploy myapp" in captured.out
+        assert "pre-registered" in captured.err
+        assert "boxmunge deploy myapp" in captured.err
+
+
+class TestValidateJson:
+    """Audit H-3: `boxmunge validate <project> --json` for agents."""
+
+    def test_json_valid_project(
+        self, paths: BoxPaths, capsys, monkeypatch,
+    ) -> None:
+        _setup_project(paths, "myapp", VALID_MANIFEST)
+        monkeypatch.setattr(
+            "boxmunge.commands.validate.BoxPaths", lambda: paths,
+        )
+        with pytest.raises(SystemExit) as exc:
+            cmd_validate(["myapp", "--json"])
+        assert exc.value.code == 0
+        payload = json.loads(capsys.readouterr().out)
+        # Manifest may produce non-blocking warnings (e.g. resource limits);
+        # the contract is "valid + errors empty" — warnings just travel.
+        assert payload["project"] == "myapp"
+        assert payload["valid"] is True
+        assert payload["errors"] == []
+        assert isinstance(payload["warnings"], list)
+
+    def test_json_invalid_project(
+        self, paths: BoxPaths, capsys, monkeypatch,
+    ) -> None:
+        bad = VALID_MANIFEST.replace(
+            "hosts:\n  - myapp.example.com", "hosts: []",
+        )
+        _setup_project(paths, "myapp", bad)
+        monkeypatch.setattr(
+            "boxmunge.commands.validate.BoxPaths", lambda: paths,
+        )
+        with pytest.raises(SystemExit) as exc:
+            cmd_validate(["myapp", "--json"])
+        assert exc.value.code == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["project"] == "myapp"
+        assert payload["valid"] is False
+        assert payload["errors"]
