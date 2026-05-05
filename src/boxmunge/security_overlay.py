@@ -267,3 +267,41 @@ def render_compose_security_fragment(resolved: dict[str, Any]) -> dict[str, Any]
     if resolved.get("cap_add"):
         out["cap_add"] = list(resolved["cap_add"])
     return out
+
+
+def format_off_warning(
+    project: str, off_services: list[tuple[str, str]]
+) -> str:
+    """Format the deploy-time SECURITY OFF warning, or "" if none apply.
+
+    The exact wording is part of the spec — the warning is meant to be
+    repeatedly visible and to steer the operator toward per-flag overrides.
+    """
+    if not off_services:
+        return ""
+    lines = []
+    for svc_name, reason in off_services:
+        lines.append(
+            f"[WARNING] SECURITY OFF — {project}/{svc_name} is deploying "
+            f"without container hardening."
+        )
+        lines.append(
+            f"          Reason recorded in manifest: {reason!r}"
+        )
+        lines.append(
+            "          This service has no `no-new-privileges`, no fork-bomb "
+            "protection, no\n          dropped capabilities. The container "
+            "has the same privilege ceiling as\n          the Docker daemon "
+            "allows by default — a single privilege-escalation\n          "
+            "vulnerability inside the container becomes a privilege-escalation"
+        )
+        lines.append(
+            "          vulnerability against the host's container runtime."
+        )
+        lines.append(
+            "          If you need to relax a specific protection, prefer "
+            "`cap_add: [...]`\n          or `pids_limit: <higher>` under the "
+            "default profile rather than\n          turning security off "
+            "entirely. See `agent-help security`."
+        )
+    return "\n".join(lines)

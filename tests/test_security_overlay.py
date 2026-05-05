@@ -293,3 +293,31 @@ class TestComposeFragment:
     def test_empty_cap_drop_omitted(self) -> None:
         fragment = render_compose_security_fragment({"cap_drop": []})
         assert "cap_drop" not in fragment
+
+
+from boxmunge.security_overlay import format_off_warning
+
+
+class TestOffWarningFormat:
+    def test_no_off_services_yields_empty(self) -> None:
+        msg = format_off_warning(project="demo", off_services=[])
+        assert msg == ""
+
+    def test_single_off_service_includes_reason_and_keyword(self) -> None:
+        msg = format_off_warning(
+            project="demo",
+            off_services=[("worker", "deliberate honeypot, see #42")],
+        )
+        assert "SECURITY OFF" in msg
+        assert "demo/worker" in msg
+        assert "deliberate honeypot, see #42" in msg
+
+    def test_multiple_services_listed(self) -> None:
+        msg = format_off_warning(
+            project="demo",
+            off_services=[("web", "r1"), ("worker", "r2")],
+        )
+        assert "demo/web" in msg
+        assert "demo/worker" in msg
+        assert "r1" in msg
+        assert "r2" in msg
