@@ -156,8 +156,29 @@ cmd_run() {
         exit 1
     }
 
-    # Verify checksum
-    (cd "$tmp_download" && sha256sum -c SHA256SUMS --ignore-missing) || {
+    # Verify checksum.
+    #
+    # SHA256SUMS lines are produced by `sha256sum <file>` and have the
+    # canonical form: `<64-hex-hash>  <filename>` (two spaces, bare filename
+    # — the release workflow takes care to write bare filenames).
+    #
+    # We do NOT pass --ignore-missing: it makes `sha256sum -c` succeed when
+    # the SHA256SUMS file lists zero matching files. An adversary who could
+    # publish a SHA256SUMS without a line for our bundle would then pass
+    # verification trivially. So instead we (a) require that SHA256SUMS
+    # contains a line for the exact bundle filename we just downloaded, and
+    # (b) run the full check.
+    local expected_filename="boxmunge-${version}.tar.gz"
+    if ! grep -q "  ${expected_filename}\$" "${tmp_download}/SHA256SUMS"; then
+        log "Checksum verification FAILED: SHA256SUMS does not list ${expected_filename}"
+        rm -rf "$BOXMUNGE_ROOT/env-$standby"
+        add_blocklist "$version" "preflight_failed: checksum_missing_entry"
+        report_failure "$version" "$from_version" "preflight"
+        exit 1
+    fi
+    # SHA256SUMS may also list boxmunge-install.sh and other release artefacts
+    # we did not download; restrict the check to just the bundle line.
+    (cd "$tmp_download" && grep "  ${expected_filename}\$" SHA256SUMS | sha256sum -c -) || {
         log "Checksum verification FAILED"
         rm -rf "$BOXMUNGE_ROOT/env-$standby"
         add_blocklist "$version" "preflight_failed: checksum_mismatch"
@@ -287,14 +308,25 @@ print('yes' if datetime.now(timezone.utc) >= expires else 'no')
         exit 0
     fi
 
+    # Probation health check semantics:
+    #   exit 2     -> CRITICAL: real health regression -> rollback
+    #   exit 124+  -> OPERATIONAL: timed out / killed (e.g. multiple sequential
+    #                 docker subprocess timeouts on a busy host can exceed our
+    #                 budget without any platform regression). Skip rollback;
+    #                 the next health-timer fire will retry. do_rollback is
+    #                 idempotent in the sense that a real regression will be
+    #                 caught on the next tick.
+    #   else        -> healthy (or warnings only) -> continue probation
     local health_exit=0
-    timeout 60 "$(active_venv)/bin/boxmunge-server" health --json >/dev/null 2>&1 || health_exit=$?
+    timeout 180 "$(active_venv)/bin/boxmunge-server" health --json >/dev/null 2>&1 || health_exit=$?
 
-    if [[ "$health_exit" -eq 2 ]] || [[ "$health_exit" -ge 124 ]]; then
+    if [[ "$health_exit" -eq 2 ]]; then
         local from_version
         from_version="$("$BOXMUNGE_ROOT/env-$prev_slot/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")"
-        log "CRITICAL health failure during probation for $version"
+        log "CRITICAL health failure during probation for $version — rolling back"
         do_rollback "$version" "$from_version" "health_probation" "$prev_slot"
+    elif [[ "$health_exit" -ge 124 ]]; then
+        log "WARN: probation health check timed out (exit $health_exit) for $version — skipping rollback, next health-timer will retry"
     fi
 
     exit 0
