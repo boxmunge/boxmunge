@@ -71,10 +71,29 @@ def run_restore(
         return 1
 
     backup_conf = manifest.get("backup", {})
-    service = backup_conf.get("service", "web")
+    if not backup_conf:
+        print(
+            f"ERROR: No backup configuration found in manifest for "
+            f"{project_name} — restore requires `backup.service` and "
+            f"`backup.restore_command`.",
+            file=sys.stderr,
+        )
+        return 1
+    service = backup_conf.get("service")
+    if not service:
+        print(
+            f"ERROR: backup.service is missing from manifest for "
+            f"{project_name}.",
+            file=sys.stderr,
+        )
+        return 1
     restore_command = backup_conf.get("restore_command", "")
     if not restore_command:
-        print(f"ERROR: No restore_command configured for {project_name}", file=sys.stderr)
+        print(
+            f"ERROR: backup.restore_command is missing from manifest for "
+            f"{project_name}.",
+            file=sys.stderr,
+        )
         return 1
 
     snapshots = list_snapshots(paths, project_name)

@@ -22,6 +22,7 @@ services:
       - path: /
 backup:
   type: db-dump
+  service: web
   dump_command: "boxmunge-scripts/backup.sh"
   restore_command: "boxmunge-scripts/restore.sh"
   retention: 3
@@ -56,6 +57,67 @@ class TestRunRestore:
             f.unlink()
         exit_code = run_restore("myapp", paths, snapshot=None, yes=True)
         assert exit_code == 1
+
+    def test_fails_loud_when_backup_missing_from_manifest(
+        self, paths: BoxPaths, capsys
+    ) -> None:
+        """A manifest with no `backup:` block must produce a friendly error
+        rather than silently inventing service='web' and tripping a docker
+        exec failure deep in the restore path."""
+        pdir = paths.project_dir("myapp")
+        pdir.mkdir(parents=True)
+        (pdir / "manifest.yml").write_text(
+            "project: myapp\nrepo: \"\"\nref: main\n"
+            "hosts:\n  - myapp.example.com\n"
+            "services:\n  web:\n    type: frontend\n    port: 3000\n"
+            "    routes:\n      - path: /\n"
+            "env_files: []\n"
+        )
+        (pdir / "compose.yml").write_text("services:\n  web:\n    image: nginx\n")
+
+        exit_code = run_restore("myapp", paths, snapshot=None, yes=True)
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "No backup configuration" in captured.err
+
+    def test_fails_loud_when_service_missing(
+        self, paths: BoxPaths, capsys
+    ) -> None:
+        pdir = paths.project_dir("myapp")
+        pdir.mkdir(parents=True)
+        (pdir / "manifest.yml").write_text(
+            "project: myapp\nrepo: \"\"\nref: main\n"
+            "hosts:\n  - myapp.example.com\n"
+            "services:\n  web:\n    type: frontend\n    port: 3000\n"
+            "    routes:\n      - path: /\n"
+            "backup:\n  type: db-dump\n"
+            "  restore_command: ./restore.sh\n"
+            "env_files: []\n"
+        )
+        (pdir / "compose.yml").write_text("services:\n  web:\n    image: nginx\n")
+
+        exit_code = run_restore("myapp", paths, snapshot=None, yes=True)
+        assert exit_code == 1
+        assert "backup.service" in capsys.readouterr().err
+
+    def test_fails_loud_when_restore_command_missing(
+        self, paths: BoxPaths, capsys
+    ) -> None:
+        pdir = paths.project_dir("myapp")
+        pdir.mkdir(parents=True)
+        (pdir / "manifest.yml").write_text(
+            "project: myapp\nrepo: \"\"\nref: main\n"
+            "hosts:\n  - myapp.example.com\n"
+            "services:\n  web:\n    type: frontend\n    port: 3000\n"
+            "    routes:\n      - path: /\n"
+            "backup:\n  type: db-dump\n  service: db\n"
+            "env_files: []\n"
+        )
+        (pdir / "compose.yml").write_text("services:\n  web:\n    image: nginx\n")
+
+        exit_code = run_restore("myapp", paths, snapshot=None, yes=True)
+        assert exit_code == 1
+        assert "backup.restore_command" in capsys.readouterr().err
 
     @patch("boxmunge.commands.restore._restore_snapshot")
     @patch("boxmunge.commands.restore.compose_down")
