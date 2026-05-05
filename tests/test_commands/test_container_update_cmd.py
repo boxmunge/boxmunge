@@ -128,6 +128,77 @@ class TestDryRun:
         assert rc == 0
 
 
+class TestSkipsPausedProjects:
+    def test_paused_project_not_updated(self, paths):
+        from boxmunge.pause import write_paused_state
+
+        # Paused project
+        pdir = paths.project_dir("paused-app")
+        pdir.mkdir(parents=True)
+        (pdir / "manifest.yml").write_text(yaml.dump({
+            "schema_version": 1, "id": "01PAUSED", "project": "paused-app",
+            "source": "bundle", "hosts": ["paused-app.test"],
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        }))
+        (pdir / "compose.yml").write_text(
+            "services:\n  web:\n    image: nginx:1.25\n    container_name: paused_web\n"
+        )
+
+        # Active project
+        adir = paths.project_dir("active-app")
+        adir.mkdir(parents=True)
+        (adir / "manifest.yml").write_text(yaml.dump({
+            "schema_version": 1, "id": "01ACTIVE", "project": "active-app",
+            "source": "bundle", "hosts": ["active-app.test"],
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        }))
+        (adir / "compose.yml").write_text(
+            "services:\n  web:\n    image: nginx:1.25\n    container_name: active_web\n"
+        )
+
+        write_paused_state("paused-app", paths)
+
+        call_log = []
+        def fake_update(paths, target):
+            call_log.append(target.name)
+            return {"name": target.name, "status": "succeeded"}
+
+        with patch("boxmunge.commands.container_update_cmd.update_target", side_effect=fake_update):
+            rc = run_container_update(paths)
+
+        assert "paused-app" not in call_log
+        assert "active-app" in call_log
+        assert "caddy" in call_log
+        assert rc == 0
+
+    def test_paused_project_skipped_in_dry_run(self, paths):
+        from boxmunge.pause import write_paused_state
+
+        pdir = paths.project_dir("paused-app")
+        pdir.mkdir(parents=True)
+        (pdir / "manifest.yml").write_text(yaml.dump({
+            "schema_version": 1, "id": "01PAUSED", "project": "paused-app",
+            "source": "bundle", "hosts": ["paused-app.test"],
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        }))
+        (pdir / "compose.yml").write_text(
+            "services:\n  web:\n    image: nginx:1.25\n    container_name: paused_web\n"
+        )
+
+        write_paused_state("paused-app", paths)
+
+        call_log = []
+        def fake_dry(paths, target):
+            call_log.append(target.name)
+            return {"name": target.name, "status": "no_change"}
+
+        with patch("boxmunge.commands.container_update_cmd._dry_run_target", side_effect=fake_dry):
+            rc = run_container_update(paths, dry_run=True)
+
+        assert "paused-app" not in call_log
+        assert rc == 0
+
+
 class TestLock:
     def test_skips_when_lock_held(self, paths):
         paths.container_update_state.mkdir(parents=True)

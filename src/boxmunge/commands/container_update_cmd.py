@@ -10,6 +10,7 @@ from boxmunge.container_update import (
     UpdateTarget, build_targets, update_target, read_target_state,
 )
 from boxmunge.log import log_operation, log_warning, log_error
+from boxmunge.pause import is_paused
 from boxmunge.paths import BoxPaths
 
 
@@ -133,6 +134,12 @@ def run_container_update(
         # Step 5: Update user projects independently
         for target in targets:
             if target.is_caddy:
+                continue
+            if is_paused(target.name, paths):
+                log_operation(
+                    "container-update", "Skipped paused project", paths,
+                    project=target.name,
+                )
                 continue
             try:
                 if dry_run:
