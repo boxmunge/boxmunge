@@ -4,6 +4,27 @@ from boxmunge.security_overlay import (
     PROFILE_DEFAULT, PROFILE_OFF, KNOWN_PROFILES, RESERVED_PROFILES,
     DEFAULT_CAP_DROP, DEFAULT_PIDS_LIMIT,
 )
+from boxmunge.security_overlay import resolve_security
+
+
+class TestDefaultProfile:
+    def test_absent_security_block_yields_default_payload(self) -> None:
+        # No project-level security, no service-level security.
+        result = resolve_security(project_security=None, service_security=None)
+        assert result["security_opt"] == ["no-new-privileges:true"]
+        assert result["init"] is True
+        assert result["pids_limit"] == 512
+        assert "NET_ADMIN" in result["cap_drop"]
+        assert "NET_RAW" in result["cap_drop"]
+        assert result["cap_add"] == []
+
+    def test_explicit_default_profile_yields_same_payload(self) -> None:
+        result = resolve_security(
+            project_security={"profile": "default"},
+            service_security=None,
+        )
+        assert result["security_opt"] == ["no-new-privileges:true"]
+        assert result["pids_limit"] == 512
 
 
 class TestConstants:

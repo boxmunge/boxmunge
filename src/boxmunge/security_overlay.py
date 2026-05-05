@@ -56,3 +56,33 @@ VALID_CAP_NAMES: set[str] = {
 }
 
 DEFAULT_PIDS_LIMIT = 512
+
+
+def _baseline_for_profile(profile: str) -> dict[str, Any]:
+    """Return the unmodified baseline dict for a named profile."""
+    if profile == PROFILE_DEFAULT:
+        return {
+            "security_opt": ["no-new-privileges:true"],
+            "init": True,
+            "pids_limit": DEFAULT_PIDS_LIMIT,
+            "cap_drop": list(DEFAULT_CAP_DROP),
+            "cap_add": [],
+        }
+    if profile == PROFILE_OFF:
+        return {}
+    raise ValueError(f"Unknown profile: {profile!r}")
+
+
+def resolve_security(
+    project_security: dict[str, Any] | None,
+    service_security: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve effective security posture for a single service.
+
+    Caller is responsible for schema validation BEFORE calling this function.
+    See validate_security_block() for validation. resolve_security assumes
+    inputs are well-formed.
+    """
+    project_security = project_security or {}
+    profile = project_security.get("profile", PROFILE_DEFAULT)
+    return _baseline_for_profile(profile)
