@@ -65,7 +65,7 @@ def run_unstage(project_name: str, paths: BoxPaths, dry_run: bool = False,
     """Tear down staging for a project. Returns 0 on success, 1 on failure."""
     staging_state = read_state(paths.project_staging_state(project_name))
     if not staging_state.get("active"):
-        print(f"ERROR: No active staging for '{project_name}'.")
+        print(f"ERROR: No active staging for '{project_name}'.", file=sys.stderr)
         return 1
 
     if dry_run:
@@ -77,7 +77,7 @@ def run_unstage(project_name: str, paths: BoxPaths, dry_run: bool = False,
             with project_lock(project_name, paths):
                 return _run_unstage_inner(project_name, paths, dry_run)
         except LockError as e:
-            print(f"ERROR: {e}")
+            print(f"ERROR: {e}", file=sys.stderr)
             return 1
     return _run_unstage_inner(project_name, paths, dry_run)
 

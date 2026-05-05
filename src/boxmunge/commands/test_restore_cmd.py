@@ -18,13 +18,13 @@ def run_test_restore(project_name: str, paths: BoxPaths) -> int:
     """
     snapshots = list_snapshots(paths, project_name)
     if not snapshots:
-        print(f"ERROR: No backup snapshots found for {project_name}")
+        print(f"ERROR: No backup snapshots found for {project_name}", file=sys.stderr)
         return 1
 
     snapshot = snapshots[0]
     key_path = paths.backup_key
     if not key_path.exists():
-        print(f"ERROR: Backup key not found: {key_path}")
+        print(f"ERROR: Backup key not found: {key_path}", file=sys.stderr)
         return 1
 
     print(f"Testing restore of {snapshot.name}...")

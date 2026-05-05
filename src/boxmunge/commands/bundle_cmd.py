@@ -68,18 +68,18 @@ def run_bundle(project_dir_str: str, output: str | None = None,
                validate_only: bool = False) -> int:
     project_dir = Path(project_dir_str).resolve()
     if not project_dir.is_dir():
-        print(f"ERROR: Not a directory: {project_dir}")
+        print(f"ERROR: Not a directory: {project_dir}", file=sys.stderr)
         return 1
 
     manifest_path = project_dir / "manifest.yml"
     if not manifest_path.exists():
-        print(f"ERROR: No manifest.yml in {project_dir}")
+        print(f"ERROR: No manifest.yml in {project_dir}", file=sys.stderr)
         return 1
 
     try:
         manifest = load_manifest(manifest_path)
     except ManifestError as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
     project_name = manifest.get("project", project_dir.name)
@@ -93,7 +93,7 @@ def run_bundle(project_dir_str: str, output: str | None = None,
 
     errors, warnings = validate_manifest(manifest, project_name)
     if errors:
-        print("ERROR: Manifest validation failed:")
+        print("ERROR: Manifest validation failed:", file=sys.stderr)
         for e in errors:
             print(f"  {e}")
         return 1
@@ -102,16 +102,16 @@ def run_bundle(project_dir_str: str, output: str | None = None,
 
     compose_path = project_dir / "compose.yml"
     if not compose_path.exists():
-        print(f"ERROR: No compose.yml in {project_dir}")
+        print(f"ERROR: No compose.yml in {project_dir}", file=sys.stderr)
         return 1
 
     try:
         compose_data = yaml.safe_load(compose_path.read_text())
         if not isinstance(compose_data, dict):
-            print("ERROR: compose.yml is not a valid YAML mapping")
+            print("ERROR: compose.yml is not a valid YAML mapping", file=sys.stderr)
             return 1
     except yaml.YAMLError as e:
-        print(f"ERROR: compose.yml parse error: {e}")
+        print(f"ERROR: compose.yml parse error: {e}", file=sys.stderr)
         return 1
 
     if validate_only:
@@ -150,7 +150,8 @@ def cmd_bundle(args: list[str]) -> None:
             positional.append(filtered[i])
             i += 1
         else:
-            i += 1
+            print(f"ERROR: unknown argument: {filtered[i]}", file=sys.stderr)
+            sys.exit(2)
     if not positional:
         print(BUNDLE_HELP)
         sys.exit(2)

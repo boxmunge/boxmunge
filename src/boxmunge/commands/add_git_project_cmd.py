@@ -21,7 +21,7 @@ def run_add_git_project(
     project_dir = paths.project_dir(name)
 
     if project_dir.exists() and (project_dir / "manifest.yml").exists():
-        print(f"ERROR: Project '{name}' already exists.")
+        print(f"ERROR: Project '{name}' already exists.", file=sys.stderr)
         return 1
 
     repo_dir = project_dir / "repo"
@@ -33,23 +33,23 @@ def run_add_git_project(
         clone_cmd.extend([repo_url, str(repo_dir)])
         subprocess.run(clone_cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
-        print(f"ERROR: Git clone failed: {e.stderr}")
+        print(f"ERROR: Git clone failed: {e.stderr}", file=sys.stderr)
         return 1
 
     manifest_path = repo_dir / "manifest.yml"
     if not manifest_path.exists():
-        print(f"ERROR: Repository has no manifest.yml at root.")
+        print(f"ERROR: Repository has no manifest.yml at root.", file=sys.stderr)
         return 1
 
     try:
         manifest = load_manifest(manifest_path)
     except ManifestError as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
     errors, warnings = validate_manifest(manifest, name)
     if errors:
-        print(f"ERROR: Manifest validation failed:")
+        print(f"ERROR: Manifest validation failed:", file=sys.stderr)
         for e in errors:
             print(f"  {e}")
         return 1
@@ -60,7 +60,7 @@ def run_add_git_project(
     try:
         check_project_identity(name, manifest_id, paths)
     except ValueError as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
     project_dir.mkdir(parents=True, exist_ok=True)
@@ -100,7 +100,8 @@ def cmd_add_git_project(args: list[str]) -> None:
             positional.append(args[i])
             i += 1
         else:
-            i += 1
+            print(f"ERROR: unknown argument: {args[i]}", file=sys.stderr)
+            sys.exit(2)
 
     if len(positional) < 2:
         print("Usage: boxmunge add-git-project <name> <repo-url> [--ref REF]",

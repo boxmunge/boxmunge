@@ -53,20 +53,20 @@ def _compare_dirs(current: Path, incoming: Path) -> tuple[list[str], list[str], 
 def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists():
-        print(f"ERROR: Project '{project_name}' not found.")
+        print(f"ERROR: Project '{project_name}' not found.", file=sys.stderr)
         return 1
 
     try:
         bundle_path = resolve_bundle_source(project_name, paths, ref=ref)
     except SourceError as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
             extracted = extract_bundle(bundle_path, Path(tmpdir))
         except ValueError as e:
-            print(f"ERROR: {e}")
+            print(f"ERROR: {e}", file=sys.stderr)
             return 1
 
         print(f"{project_name}: comparing current vs {bundle_path.name}")
@@ -137,6 +137,7 @@ def cmd_diff(args: list[str]) -> None:
             ref = remaining[i + 1]
             i += 2
         else:
-            i += 1
+            print(f"ERROR: unknown argument: {remaining[i]}", file=sys.stderr)
+            sys.exit(2)
     paths = BoxPaths()
     sys.exit(run_diff(project, paths, ref=ref))

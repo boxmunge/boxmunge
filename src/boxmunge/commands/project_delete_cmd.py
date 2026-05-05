@@ -14,7 +14,7 @@ def run_project_delete(project_name: str, paths: BoxPaths, yes: bool = False) ->
     """Delete a project: stop containers, remove Caddy config, delete files, deregister."""
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists() and not is_registered(project_name, paths):
-        print(f"ERROR: Project not found: {project_name}")
+        print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
         return 1
 
     if not yes:

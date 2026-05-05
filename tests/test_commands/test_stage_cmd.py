@@ -135,8 +135,8 @@ class TestProjectRegistrationEnforcement:
         _place_real_bundle(paths)
         result = run_stage("testapp", paths)
         assert result == 1
-        output = capsys.readouterr().out
-        assert "not registered" in output
+        captured = capsys.readouterr()
+        assert "not registered" in captured.err
 
     @patch("boxmunge.commands.stage_cmd.caddy_reload")
     @patch("boxmunge.commands.stage_cmd.compose_up")

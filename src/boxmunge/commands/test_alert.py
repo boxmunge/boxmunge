@@ -14,7 +14,7 @@ def cmd_test_alert(args: list[str]) -> None:
     try:
         config = load_config(paths)
     except ConfigError as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 
     pushover = config.get("pushover", {})
@@ -22,7 +22,7 @@ def cmd_test_alert(args: list[str]) -> None:
     app_token = pushover.get("app_token", "")
 
     if not user_key or not app_token:
-        print("ERROR: Pushover credentials not configured in boxmunge.yml")
+        print("ERROR: Pushover credentials not configured in boxmunge.yml", file=sys.stderr)
         print("Set pushover.user_key and pushover.app_token")
         sys.exit(1)
 
@@ -39,5 +39,5 @@ def cmd_test_alert(args: list[str]) -> None:
         print("Test alert sent successfully.")
         sys.exit(0)
     else:
-        print("ERROR: Failed to send test alert. Check credentials and network.")
+        print("ERROR: Failed to send test alert. Check credentials and network.", file=sys.stderr)
         sys.exit(1)

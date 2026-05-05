@@ -114,6 +114,7 @@ def _run_deploy_inner(
     ref: str | None = None,
     no_snapshot: bool = False,
     dry_run: bool = False,
+    component: str = "deploy",
 ) -> int:
     """Inner deploy logic — caller must hold the project lock."""
     project_dir = paths.project_dir(project_name)
@@ -135,7 +136,7 @@ def _run_deploy_inner(
             bundle_path = resolve_bundle_source(project_name, paths, ref=ref)
         except SourceError:
             if is_new:
-                print(f"ERROR: No bundles for '{project_name}' in inbox and no existing project.")
+                print(f"ERROR: No bundles for '{project_name}' in inbox and no existing project.", file=sys.stderr)
                 return 1
             # Existing project, no new bundle — redeploy what's on disk
             bundle_path = None
@@ -145,23 +146,23 @@ def _run_deploy_inner(
                 try:
                     extracted = _extract_bundle(bundle_path, Path(tmpdir))
                 except ValueError as e:
-                    print(f"ERROR: {e}")
+                    print(f"ERROR: {e}", file=sys.stderr)
                     return 1
 
                 manifest_path_extracted = extracted / "manifest.yml"
                 if not manifest_path_extracted.exists():
-                    print("ERROR: Bundle missing manifest.yml")
+                    print("ERROR: Bundle missing manifest.yml", file=sys.stderr)
                     return 1
 
                 try:
                     manifest_data = load_manifest(manifest_path_extracted)
                 except ManifestError as e:
-                    print(f"ERROR: {e}")
+                    print(f"ERROR: {e}", file=sys.stderr)
                     return 1
 
                 errors_check, warnings_check = validate_manifest(manifest_data, project_name)
                 if errors_check:
-                    print("ERROR: Manifest validation failed:")
+                    print("ERROR: Manifest validation failed:", file=sys.stderr)
                     for err in errors_check:
                         print(f"  {err}")
                     return 1
@@ -170,7 +171,7 @@ def _run_deploy_inner(
                 try:
                     check_project_identity(project_name, manifest_id, paths)
                 except ValueError as e:
-                    print(f"ERROR: {e}")
+                    print(f"ERROR: {e}", file=sys.stderr)
                     return 1
 
                 if dry_run:
@@ -192,19 +193,19 @@ def _run_deploy_inner(
             ref = None
 
     if not project_dir.exists():
-        print(f"ERROR: Project not found: {project_dir}")
+        print(f"ERROR: Project not found: {project_dir}", file=sys.stderr)
         return 1
 
     manifest_path = paths.project_manifest(project_name)
     try:
         manifest = load_manifest(manifest_path)
     except ManifestError as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
     errors, warnings = validate_manifest(manifest, project_name)
     if errors:
-        print(f"ERROR: Manifest validation failed:")
+        print(f"ERROR: Manifest validation failed:", file=sys.stderr)
         for e in errors:
             print(f"  {e}")
         return 1
@@ -240,7 +241,7 @@ def _run_deploy_inner(
                 cwd=repo_dir, check=False, capture_output=True, text=True,
             )
         except subprocess.CalledProcessError as e:
-            print(f"  ERROR: Git pull failed: {e.stderr}")
+            print(f"  ERROR: Git pull failed: {e.stderr}", file=sys.stderr)
             return 1
 
     # Get current ref
@@ -280,7 +281,7 @@ def _run_deploy_inner(
                 capture_output=True, text=True,
             )
         except subprocess.CalledProcessError as e:
-            print(f"  ERROR: Pre-deploy failed: {e.stderr}")
+            print(f"  ERROR: Pre-deploy failed: {e.stderr}", file=sys.stderr)
             return 1
 
     # Validate user compose.yml against silent-floor-defeating keys BEFORE
@@ -302,7 +303,7 @@ def _run_deploy_inner(
     prepare_caddy_config(paths, manifest)
 
     print(f"  Generating compose overlay...")
-    prepare_compose_override(paths, manifest)
+    prepare_compose_override(paths, manifest, component=component)
 
     # Start containers
     print(f"  Starting containers...")
@@ -310,7 +311,7 @@ def _run_deploy_inner(
     try:
         compose_up(project_dir, compose_files=compose_files)
     except DockerError as e:
-        print(f"  ERROR: {e}")
+        print(f"  ERROR: {e}", file=sys.stderr)
         log_error("deploy", f"Deploy failed: container start: {e}", paths, project=project_name)
         return 1
 
@@ -336,7 +337,7 @@ def _run_deploy_inner(
             log_warning("deploy", f"First deploy smoke {smoke_result.status} downgraded: {smoke_result.message}",
                         paths, project=project_name)
         else:
-            print(f"  ERROR: Smoke test {smoke_result.status}: {smoke_result.message}")
+            print(f"  ERROR: Smoke test {smoke_result.status}: {smoke_result.message}", file=sys.stderr)
             log_error("deploy", f"Smoke test {smoke_result.status}: {smoke_result.message}",
                       paths, project=project_name)
             return 1
@@ -366,8 +367,13 @@ def run_deploy(
     no_snapshot: bool = False,
     dry_run: bool = False,
     _lock_held: bool = False,
+    component: str = "deploy",
 ) -> int:
-    """Execute the full deploy flow. Returns 0 on success, 1 on failure."""
+    """Execute the full deploy flow. Returns 0 on success, 1 on failure.
+
+    `component` labels the SECURITY OFF log entry so promote/rollback callers
+    can attribute the warning to the correct CLI verb (default: "deploy").
+    """
     if is_paused(project_name, paths):
         print(f"ERROR: Project '{project_name}' is paused. "
               f"Run 'resume {project_name}' before deploying.",
@@ -377,17 +383,22 @@ def run_deploy(
     from boxmunge.project_registry import is_registered
     if not is_registered(project_name, paths):
         print(f"ERROR: Project '{project_name}' is not registered on this server. "
-              f"Run: project-add {project_name}")
+              f"Run: project-add {project_name}", file=sys.stderr)
         return 1
 
     if not _lock_held:
         try:
             with project_lock(project_name, paths):
-                return _run_deploy_inner(project_name, paths, ref, no_snapshot, dry_run)
+                return _run_deploy_inner(
+                    project_name, paths, ref, no_snapshot, dry_run,
+                    component=component,
+                )
         except LockError as e:
-            print(f"ERROR: {e}")
+            print(f"ERROR: {e}", file=sys.stderr)
             return 1
-    return _run_deploy_inner(project_name, paths, ref, no_snapshot, dry_run)
+    return _run_deploy_inner(
+        project_name, paths, ref, no_snapshot, dry_run, component=component,
+    )
 
 
 def cmd_deploy(args: list[str]) -> None:
@@ -423,7 +434,8 @@ def cmd_deploy(args: list[str]) -> None:
             dry_run = True
             i += 1
         else:
-            i += 1
+            print(f"ERROR: unknown argument: {remaining[i]}", file=sys.stderr)
+            sys.exit(2)
 
     paths = BoxPaths()
     exit_code = run_deploy(project, paths, ref=ref, no_snapshot=no_snapshot,

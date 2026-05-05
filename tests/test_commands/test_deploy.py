@@ -7,6 +7,7 @@ import pytest
 from pathlib import Path
 
 from boxmunge.commands.deploy import (
+    cmd_deploy,
     record_deploy_state,
     prepare_caddy_config,
     prepare_compose_override,
@@ -123,8 +124,8 @@ class TestProjectRegistrationEnforcement:
     def test_rejects_unregistered_project(self, paths: BoxPaths, capsys) -> None:
         result = run_deploy("unregistered", paths)
         assert result == 1
-        output = capsys.readouterr().out
-        assert "not registered" in output
+        captured = capsys.readouterr()
+        assert "not registered" in captured.err
 
 
 class TestRefusesPaused:
@@ -136,3 +137,15 @@ class TestRefusesPaused:
         assert rc == 1
         err = capsys.readouterr().err
         assert "paused" in err.lower()
+
+
+class TestRejectsUnknownArgs:
+    """Audit H-1b: silent-drop for unknown args was a footgun. Reject loudly."""
+
+    def test_unknown_flag_returns_2(self, capfd) -> None:
+        with pytest.raises(SystemExit) as exc:
+            cmd_deploy(["myapp", "--not-a-flag"])
+        assert exc.value.code == 2
+        captured = capfd.readouterr()
+        assert "ERROR" in captured.err
+        assert "--not-a-flag" in captured.err

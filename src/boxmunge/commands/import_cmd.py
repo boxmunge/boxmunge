@@ -36,7 +36,7 @@ def run_import(
         try:
             project_dir_extracted = _extract_bundle(bundle_path, Path(tmpdir))
         except ValueError as e:
-            print(f"ERROR: {e}")
+            print(f"ERROR: {e}", file=sys.stderr)
             return 1
 
         project_name = project_dir_extracted.name
@@ -44,23 +44,23 @@ def run_import(
         # Step 2: Validate manifest
         manifest_path = project_dir_extracted / "manifest.yml"
         if not manifest_path.exists():
-            print(f"ERROR: Bundle missing manifest.yml")
+            print(f"ERROR: Bundle missing manifest.yml", file=sys.stderr)
             return 1
 
         compose_path = project_dir_extracted / "compose.yml"
         if not compose_path.exists():
-            print(f"ERROR: Bundle missing compose.yml")
+            print(f"ERROR: Bundle missing compose.yml", file=sys.stderr)
             return 1
 
         try:
             manifest = load_manifest(manifest_path)
         except ManifestError as e:
-            print(f"ERROR: {e}")
+            print(f"ERROR: {e}", file=sys.stderr)
             return 1
 
         errors, warnings = validate_manifest(manifest, project_name)
         if errors:
-            print(f"ERROR: Bundle manifest is invalid:")
+            print(f"ERROR: Bundle manifest is invalid:", file=sys.stderr)
             for e in errors:
                 print(f"  {e}")
             return 1
@@ -114,7 +114,7 @@ def run_import(
                     log_error("import", "Import deploy failed", paths, project=project_name)
                     return 1
         except LockError as e:
-            print(f"ERROR: {e}")
+            print(f"ERROR: {e}", file=sys.stderr)
             return 1
 
     log_operation("import", f"Imported from bundle: {bundle_path.name}", paths, project=project_name)

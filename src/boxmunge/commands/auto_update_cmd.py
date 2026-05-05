@@ -38,7 +38,7 @@ def run_auto_update(paths: BoxPaths) -> int:
         return 0
     if action == "error":
         msg = result.get("message", "unknown")
-        print(f"ERROR: Update check failed: {msg}")
+        print(f"ERROR: Update check failed: {msg}", file=sys.stderr)
         log_error("auto-update", f"Update check failed: {msg}", paths)
         return 1
     if action == "upgrade":
@@ -50,7 +50,7 @@ def run_auto_update(paths: BoxPaths) -> int:
         os.execvp(shim, [shim, "run", version, url])
         return 1  # pragma: no cover — execvp doesn't return on success
     # Defensive: unknown action.
-    print(f"ERROR: Unknown discovery action: {action}")
+    print(f"ERROR: Unknown discovery action: {action}", file=sys.stderr)
     return 1
 
 

@@ -8,7 +8,7 @@ def cmd_console(args: list[str]) -> None:
     try:
         from boxmunge.tui.app import BoxmungeApp
     except ImportError:
-        print("ERROR: TUI requires textual. Install with: pip install boxmunge[tui]")
+        print("ERROR: TUI requires textual. Install with: pip install boxmunge[tui]", file=sys.stderr)
         sys.exit(1)
 
     from boxmunge.paths import BoxPaths

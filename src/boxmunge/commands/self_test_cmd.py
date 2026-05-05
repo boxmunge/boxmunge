@@ -240,7 +240,7 @@ def run_self_test(paths: BoxPaths, as_json: bool = False) -> int:
     project_dir = paths.project_dir(CANARY_PROJECT)
 
     if not canary_src.exists() or not (canary_src / "manifest.yml").exists():
-        print("ERROR: Canary project not found. Is boxmunge installed correctly?")
+        print("ERROR: Canary project not found. Is boxmunge installed correctly?", file=sys.stderr)
         return 1
 
     try:

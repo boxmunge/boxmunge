@@ -92,8 +92,8 @@ class TestRunBackup:
         exit_code = run_backup("myapp", paths)
         assert exit_code == 1
         captured = capsys.readouterr()
-        assert "pre-registered" in captured.out
-        assert "boxmunge deploy myapp" in captured.out
+        assert "pre-registered" in captured.err
+        assert "boxmunge deploy myapp" in captured.err
 
 
 class TestBackupRefusesPaused:

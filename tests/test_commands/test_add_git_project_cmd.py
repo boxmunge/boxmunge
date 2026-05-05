@@ -4,7 +4,9 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from boxmunge.commands.add_git_project_cmd import run_add_git_project
+from boxmunge.commands.add_git_project_cmd import (
+    cmd_add_git_project, run_add_git_project,
+)
 from boxmunge.log import _reset_logger
 from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state
@@ -110,3 +112,23 @@ class TestAddGitProjectLogging:
         components = {e.get("component") for e in entries}
         assert "add-git-project" in components
         assert "add-project" not in components
+
+
+class TestErrorOutputGoesToStderr:
+    """Audit H-4: ERROR prints in commands/*.py must go to stderr.
+
+    Single integration check covering the sweep — exhaustive per-line
+    coverage would be mechanical noise. add-git-project with no args is
+    a representative example and exercises ``cmd_add_git_project``.
+    """
+
+    def test_missing_args_writes_to_stderr(self, capfd) -> None:
+        # Empty args path exits before touching any boxmunge state, so no
+        # monkeypatch fixture is needed — only the usage error itself.
+        with pytest.raises(SystemExit) as exc:
+            cmd_add_git_project([])
+        assert exc.value.code == 2
+        captured = capfd.readouterr()
+        # Usage prints to stderr
+        assert "Usage" in captured.err
+        assert captured.out == ""

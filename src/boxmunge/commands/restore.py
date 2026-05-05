@@ -41,10 +41,10 @@ def _restore_snapshot(
                     stdin=inf, capture_output=True, text=True,
                 )
             if result.returncode != 0:
-                print(f"  ERROR: Restore command failed: {result.stderr}")
+                print(f"  ERROR: Restore command failed: {result.stderr}", file=sys.stderr)
                 return False
         except (BackupError, FileNotFoundError) as e:
-            print(f"  ERROR: Decryption failed: {e}")
+            print(f"  ERROR: Decryption failed: {e}", file=sys.stderr)
             return False
 
     return True
@@ -61,25 +61,25 @@ def run_restore(
     clear_probation_if_active(paths, "restore")
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists():
-        print(f"ERROR: Project not found: {project_name}")
+        print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
         return 1
 
     try:
         manifest = load_manifest(paths.project_manifest(project_name))
     except ManifestError as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
     backup_conf = manifest.get("backup", {})
     service = backup_conf.get("service", "web")
     restore_command = backup_conf.get("restore_command", "")
     if not restore_command:
-        print(f"ERROR: No restore_command configured for {project_name}")
+        print(f"ERROR: No restore_command configured for {project_name}", file=sys.stderr)
         return 1
 
     snapshots = list_snapshots(paths, project_name)
     if not snapshots:
-        print(f"ERROR: No backup snapshots found for {project_name}")
+        print(f"ERROR: No backup snapshots found for {project_name}", file=sys.stderr)
         return 1
 
     if snapshot:
@@ -88,10 +88,10 @@ def run_restore(
         resolved = snapshot_path.resolve()
         expected_root = paths.project_backups(project_name).resolve()
         if not str(resolved).startswith(str(expected_root) + "/"):
-            print("ERROR: Invalid snapshot path (path traversal detected)")
+            print("ERROR: Invalid snapshot path (path traversal detected)", file=sys.stderr)
             return 1
         if not snapshot_path.exists():
-            print(f"ERROR: Snapshot not found: {snapshot}")
+            print(f"ERROR: Snapshot not found: {snapshot}", file=sys.stderr)
             return 1
     else:
         print(f"Available snapshots for {project_name}:")
@@ -110,7 +110,7 @@ def run_restore(
 
     key_path = paths.backup_key
     if not key_path.exists():
-        print(f"ERROR: Backup key not found: {key_path}")
+        print(f"ERROR: Backup key not found: {key_path}", file=sys.stderr)
         return 1
 
     if _lock_held:
@@ -122,7 +122,7 @@ def run_restore(
             return _run_restore_inner(project_name, paths, snapshot_path, service, restore_command,
                                       project_dir, key_path)
     except LockError as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
 
@@ -179,7 +179,7 @@ def _run_restore_inner(
                     break
             time.sleep(1)
     except (DockerError, subprocess.CalledProcessError) as e:
-        print(f"  ERROR: Could not start {service} for restore: {e}")
+        print(f"  ERROR: Could not start {service} for restore: {e}", file=sys.stderr)
         return 1
 
     print("  Decrypting and restoring...")
@@ -194,7 +194,7 @@ def _run_restore_inner(
     try:
         compose_up(project_dir, compose_files=compose_files)
     except DockerError as e:
-        print(f"  ERROR: Start failed: {e}")
+        print(f"  ERROR: Start failed: {e}", file=sys.stderr)
         return 1
 
     log_operation("restore", f"Restored from {snapshot_path.name}", paths, project=project_name)

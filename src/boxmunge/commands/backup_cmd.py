@@ -74,18 +74,18 @@ def run_backup(project_name: str, paths: BoxPaths, _lock_held: bool = False) -> 
     clear_probation_if_active(paths, "backup")
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists():
-        print(f"ERROR: Project not found: {project_name}")
+        print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
         return 1
 
     if paths.is_project_pre_registered(project_name):
         print(f"ERROR: Project '{project_name}' is pre-registered (secrets set) but "
-              f"not yet deployed. Deploy first with: boxmunge deploy {project_name}")
+              f"not yet deployed. Deploy first with: boxmunge deploy {project_name}", file=sys.stderr)
         return 1
 
     try:
         manifest = load_manifest(paths.project_manifest(project_name))
     except ManifestError as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
     backup_conf = manifest.get("backup", {})
@@ -97,7 +97,7 @@ def run_backup(project_name: str, paths: BoxPaths, _lock_held: bool = False) -> 
 
     dump_command = backup_conf.get("dump_command", "")
     if not dump_command:
-        print(f"ERROR: backup type is '{backup_type}' but no dump_command defined")
+        print(f"ERROR: backup type is '{backup_type}' but no dump_command defined", file=sys.stderr)
         return 1
 
     service = backup_conf.get("service", "web")
@@ -105,7 +105,7 @@ def run_backup(project_name: str, paths: BoxPaths, _lock_held: bool = False) -> 
     key_path = paths.backup_key
 
     if not key_path.exists():
-        print(f"ERROR: Backup encryption key not found: {key_path}")
+        print(f"ERROR: Backup encryption key not found: {key_path}", file=sys.stderr)
         return 1
 
     if not _lock_held:
@@ -115,7 +115,7 @@ def run_backup(project_name: str, paths: BoxPaths, _lock_held: bool = False) -> 
                     project_name, paths, project_dir, dump_command, service, retention, key_path,
                 )
         except LockError as e:
-            print(f"ERROR: {e}")
+            print(f"ERROR: {e}", file=sys.stderr)
             return 1
     return _run_backup_inner(
         project_name, paths, project_dir, dump_command, service, retention, key_path,
@@ -136,7 +136,7 @@ def _run_backup_inner(
     try:
         raw_path = _execute_dump(project_dir, dump_command, project_name, service)
     except BackupError as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR: {e}", file=sys.stderr)
         log_error("backup", f"Backup dump failed: {e}", paths, project=project_name)
         return 1
 
@@ -147,7 +147,7 @@ def _run_backup_inner(
     try:
         _backup.encrypt_file(raw_path, encrypted_path, key_path)
     except (BackupError, FileNotFoundError) as e:
-        print(f"ERROR: Encryption failed: {e}")
+        print(f"ERROR: Encryption failed: {e}", file=sys.stderr)
         raw_path.unlink(missing_ok=True)
         log_error("backup", f"Backup encrypt failed: {e}", paths, project=project_name)
         return 1
@@ -195,12 +195,12 @@ def run_backup_sync(paths: BoxPaths, project_name: str | None = None) -> int:
     try:
         config = load_config(paths)
     except ConfigError as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
     remote = config.get("backup_remote", "")
     if not remote:
-        print("ERROR: backup_remote not configured in boxmunge.yml")
+        print("ERROR: backup_remote not configured in boxmunge.yml", file=sys.stderr)
         return 1
 
     if project_name:
@@ -222,7 +222,7 @@ def run_backup_sync(paths: BoxPaths, project_name: str | None = None) -> int:
         try:
             system_exec(rclone_cmd)
         except SystemContainerError as e:
-            print(f"ERROR: rclone sync failed: {e}")
+            print(f"ERROR: rclone sync failed: {e}", file=sys.stderr)
             return 1
     else:
         # Fallback: host-level rclone
@@ -233,10 +233,10 @@ def run_backup_sync(paths: BoxPaths, project_name: str | None = None) -> int:
                 check=True, capture_output=True, text=True,
             )
         except subprocess.CalledProcessError as e:
-            print(f"ERROR: rclone sync failed: {e.stderr}")
+            print(f"ERROR: rclone sync failed: {e.stderr}", file=sys.stderr)
             return 1
         except FileNotFoundError:
-            print("ERROR: rclone not found — install rclone or start the system container")
+            print("ERROR: rclone not found — install rclone or start the system container", file=sys.stderr)
             return 1
 
     log_operation("backup", f"Backup sync to {dest} completed", paths)
