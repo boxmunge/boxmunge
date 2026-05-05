@@ -183,3 +183,33 @@ class TestValidation:
     def test_pids_limit_string_rejected(self) -> None:
         with pytest.raises(SecurityValidationError, match="pids_limit"):
             validate_security_block({"pids_limit": "many"}, context="project")
+
+
+class TestReasonRequired:
+    def test_off_without_reason_rejected(self) -> None:
+        with pytest.raises(SecurityValidationError, match="reason"):
+            validate_security_block({"profile": "off"}, context="project")
+
+    def test_off_with_empty_reason_rejected(self) -> None:
+        with pytest.raises(SecurityValidationError, match="reason"):
+            validate_security_block(
+                {"profile": "off", "reason": ""}, context="project"
+            )
+
+    def test_off_with_whitespace_reason_rejected(self) -> None:
+        with pytest.raises(SecurityValidationError, match="reason"):
+            validate_security_block(
+                {"profile": "off", "reason": "   \t\n"}, context="project"
+            )
+
+    def test_off_with_real_reason_passes(self) -> None:
+        validate_security_block(
+            {"profile": "off", "reason": "deliberate honeypot, see #42"},
+            context="project",
+        )
+
+    def test_default_profile_doesnt_require_reason(self) -> None:
+        validate_security_block({"profile": "default"}, context="project")
+        validate_security_block(
+            {"profile": "default", "pids_limit": 2048}, context="project"
+        )

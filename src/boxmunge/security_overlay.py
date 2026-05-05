@@ -175,6 +175,16 @@ def validate_security_block(
                 f"Valid profiles: {sorted(KNOWN_PROFILES)}."
             )
 
+    if block.get("profile") == PROFILE_OFF:
+        reason = block.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise SecurityValidationError(
+                f"{context}: profile 'off' requires a non-empty 'reason' "
+                f"field documenting why the project/service is opting out "
+                f"of container hardening. The reason will be reproduced in "
+                f"deploy warnings and `boxmunge security` output."
+            )
+
     for cap_field in ("cap_drop", "cap_add"):
         if cap_field not in block:
             continue
