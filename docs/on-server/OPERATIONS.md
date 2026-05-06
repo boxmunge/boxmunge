@@ -427,6 +427,20 @@ If deeper investigation is needed (inspecting files, Docker state, system config
 
 ---
 
+### Manifest validation rejects a wildcard host
+
+If `validate` or `deploy` reports `wildcard host '*.example.com' requires 'allow_wildcard_hosts: true' at the manifest top level`, that's the deliberate opt-in gate for wildcards. boxmunge runs single-tenant, but a wildcard on one project can still capture traffic intended for adjacent projects on the same Caddy. Add the flag explicitly when you mean it:
+
+```yaml
+allow_wildcard_hosts: true
+hosts:
+  - "*.example.com"
+```
+
+Plain hostnames don't need the flag. See `SECURITY.md` for the routing-isolation trade-off.
+
+---
+
 ### Smoke script fails after upgrade with "permission denied" on `ping` or `traceroute`
 
 v0.5 hardening drops `NET_RAW` from every container by default — so `ping`, `traceroute`, and a handful of HTTP probe libraries that fall back to ICMP will fail with `Operation not permitted`. Most apps do not need `NET_RAW`; if your smoke script genuinely does, opt back in by adding to the project manifest:

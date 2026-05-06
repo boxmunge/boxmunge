@@ -55,6 +55,16 @@ hosts:
   - myapp.example.com
   - www.myapp.example.com
 
+# Optional. Required when any entry in `hosts` is a wildcard (e.g. *.example.com).
+# Wildcards are rejected by default because, on a single Caddy instance,
+# one project's wildcard can capture traffic intended for adjacent projects.
+# boxmunge runs single-tenant and treats this as the operator's call — but
+# you must opt in explicitly so it never happens by accident.
+#
+# allow_wildcard_hosts: true
+# hosts:
+#   - "*.example.com"
+
 # REQUIRED. One or more services. Each key is the Docker Compose service name.
 services:
   frontend:
@@ -139,7 +149,7 @@ boxmunge validates `manifest.yml` on every deploy and rejects invalid manifests 
 2. **`project` is required** and must exactly match the project's directory name. A mismatch is an error.
 3. **`source` is required** and must be `bundle` or `git`.
 4. **`repo` is required if `source: git`**. The `ref` field defaults to `main` if omitted.
-5. **`hosts` is required** and must contain at least one hostname.
+5. **`hosts` is required** and must contain at least one hostname. Wildcard hosts (e.g. `*.example.com`) are rejected unless the manifest top level sets `allow_wildcard_hosts: true` — see SECURITY.md for the trade-off.
 6. **Each `web` service must have `port`** and **at least one entry in `routes`**. Routes must be dicts with a `path` key.
 7. **`limits`** fields are optional per service. `limits.memory` accepts Docker memory format (e.g., `256m`, `1g`). `limits.cpus` accepts a numeric string (e.g., `"0.5"`, `"2.0"`).
 8. **If `backup.type` is not `none`**, both `dump_command` and `restore_command` are mandatory. A backup you cannot restore is not a backup.

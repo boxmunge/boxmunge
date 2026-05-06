@@ -110,6 +110,18 @@ Two invariants:
 - **Absence inherits.** Omitting a field never disables a protection.
 - **Disabling is explicit.** Set `no_new_privileges: false`, `pids_limit: 0`, etc.
 
+## Wildcard hosts and routing isolation
+
+boxmunge rejects wildcard host entries (e.g. `*.example.com`) by default. On a single Caddy instance shared between projects, a wildcard on one project can capture traffic intended for adjacent projects whose plain hostnames happen to fall under that wildcard. boxmunge runs single-tenant — every project on a host is owned by the same operator — so this is a footgun, not a multi-tenant breach. We still gate it behind an explicit opt-in:
+
+```yaml
+allow_wildcard_hosts: true
+hosts:
+  - "*.example.com"
+```
+
+Without `allow_wildcard_hosts: true`, manifest validation refuses to deploy. With it set, you accept that any plain `foo.example.com` belonging to another project on the same host is at risk of being shadowed by the wildcard's routes. Don't enable it on a host where you intend to operate adjacent projects under the same parent domain.
+
 ## What is NOT applied in v0.5 (and why)
 
 | Not applied | Reason | When |
