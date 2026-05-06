@@ -8,8 +8,58 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge.fileutil import atomic_write_bytes, atomic_write_text
-from boxmunge.fileutil import project_lock, LockError
+from boxmunge.fileutil import open_shared_lockfile, project_lock, LockError
 from boxmunge.paths import BoxPaths
+
+
+class TestOpenSharedLockfile:
+    def test_creates_parent_dir(self, tmp_path: Path) -> None:
+        lock = tmp_path / "deep" / "nested" / ".test.lock"
+        fd = open_shared_lockfile(lock)
+        try:
+            assert lock.exists()
+            assert lock.parent.is_dir()
+        finally:
+            os.close(fd)
+
+    def test_file_mode_is_group_writable(self, tmp_path: Path) -> None:
+        """Mode 0o664 so root and deploy group can both take the flock.
+
+        Regression: when root creates the lock first (e.g. upgrade shim),
+        deploy was getting EACCES on subsequent flock attempts.
+        """
+        lock = tmp_path / ".group-writable.lock"
+        fd = open_shared_lockfile(lock)
+        try:
+            mode = lock.stat().st_mode & 0o777
+            # Group write bit must be set; we accept 0o664 specifically
+            # but tolerate umask narrowing if the caller's environment
+            # is unusual. Hard requirement: group can write.
+            assert mode & 0o060 == 0o060, f"mode {oct(mode)} is not group-writable"
+        finally:
+            os.close(fd)
+
+    def test_existing_file_chmodded_back_to_0o664(self, tmp_path: Path) -> None:
+        """If a file exists at narrower perms (e.g. created by older code),
+        the helper must widen it on next open so locks remain shareable."""
+        lock = tmp_path / ".old.lock"
+        lock.touch(mode=0o600)
+        fd = open_shared_lockfile(lock)
+        try:
+            mode = lock.stat().st_mode & 0o777
+            assert mode == 0o664, f"mode should have been widened to 0o664, got {oct(mode)}"
+        finally:
+            os.close(fd)
+
+    def test_returns_writable_fd(self, tmp_path: Path) -> None:
+        lock = tmp_path / ".writable.lock"
+        fd = open_shared_lockfile(lock)
+        try:
+            os.write(fd, b"x")  # would EBADF if read-only
+            os.lseek(fd, 0, os.SEEK_SET)
+            assert os.read(fd, 1) == b"x"
+        finally:
+            os.close(fd)
 
 
 class TestAtomicWriteText:

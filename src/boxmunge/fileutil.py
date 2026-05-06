@@ -23,6 +23,34 @@ def _chown_deploy(path: str) -> None:
         pass
 
 
+def open_shared_lockfile(path: Path) -> int:
+    """Open (or create) a lock file usable by both root and the deploy user.
+
+    boxmunge runs ops under multiple uids: root for the upgrade shim and
+    systemd timers, deploy for the restricted shell. Without explicit perms,
+    whichever uid creates a lock file first locks the other out forever
+    (lock files persist across reboots in /opt/boxmunge/state).
+
+    This helper:
+    - Creates the parent directory if needed.
+    - Opens the file with mode 0o664 (group-writable) so both root and any
+      uid in the deploy group can take the flock.
+    - Chmods explicitly post-open in case umask narrowed the create mode.
+    - Best-effort chgrp deploy when running as root, so a deploy uid can
+      open the same file later.
+
+    Returns the fd. Caller is responsible for fcntl.flock and os.close.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o664)
+    try:
+        os.chmod(str(path), 0o664)
+    except OSError:
+        pass
+    _chown_deploy(str(path))
+    return fd
+
+
 def atomic_write_text(path: Path, content: str, mode: int | None = None) -> None:
     """Write content to path atomically via temp file + rename.
 
@@ -96,9 +124,7 @@ def project_lock(project_name: str, paths: "BoxPaths") -> Iterator[None]:
     Lock files are left on disk after release (advisory flock).
     """
     lock_path = paths.project_lock_file(project_name)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    fd = open_shared_lockfile(lock_path)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -131,9 +157,7 @@ def registry_lock(paths: "BoxPaths") -> Iterator[None]:
     rather than fail with "try again".
     """
     lock_path = paths.state / ".registry.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    fd = open_shared_lockfile(lock_path)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield

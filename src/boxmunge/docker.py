@@ -12,6 +12,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+from boxmunge.fileutil import open_shared_lockfile
+
 _DEFAULT_TIMEOUT = 120
 _COMPOSE_UP_TIMEOUT = 300
 _CADDY_RELOAD_TIMEOUT = 30
@@ -184,9 +186,8 @@ def _caddy_reload_lock(lock_dir: Path) -> Iterator[None]:
     deploy-A's subsequent reload ingests and fails on. The protected section
     is short (~100ms typical), so blocking is fine.
     """
-    lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / ".caddy.lock"
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    fd = open_shared_lockfile(lock_path)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
