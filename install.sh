@@ -57,11 +57,45 @@ install_cosign() {
     rm -f /tmp/cosign
 }
 
+# ---------------------------------------------------------------------------
+# Trivy install — required for CVE scanning (boxmunge security scan).
+# Failure is fatal — without Trivy, the daily CVE scan timer cannot run.
+#
+# Trivy is installed from Aqua Security's official Debian repo. The signing
+# key is fetched once and dearmored to /usr/share/keyrings/trivy.gpg. The
+# repo URL points at "generic main" which serves all Debian/Ubuntu releases.
+# ---------------------------------------------------------------------------
+install_trivy() {
+    if command -v trivy >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "  Installing Trivy (CVE scanner)..."
+
+    # Fetch and dearmor the signing key into the trusted keyrings dir.
+    if [[ ! -f /usr/share/keyrings/trivy.gpg ]]; then
+        curl -sSLf https://aquasecurity.github.io/trivy-repo/deb/public.key \
+            | gpg --dearmor -o /usr/share/keyrings/trivy.gpg
+    fi
+
+    # Add the repo definition (idempotent — overwrites if present).
+    echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+        > /etc/apt/sources.list.d/trivy.list
+
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y trivy
+}
+
 echo ""
 echo "========================================================"
 echo "  Ensuring cosign is installed (release signature verification)"
 echo "========================================================"
 install_cosign
+
+echo ""
+echo "========================================================"
+echo "  Ensuring Trivy is installed (CVE vulnerability scanner)"
+echo "========================================================"
+install_trivy
 
 # ---------------------------------------------------------------------------
 # System bootstrap (fresh install only)
@@ -331,7 +365,8 @@ systemctl enable --now \
     boxmunge-health.timer \
     boxmunge-backup-sync.timer \
     boxmunge-auto-update.timer \
-    boxmunge-container-update.timer
+    boxmunge-container-update.timer \
+    boxmunge-cve-scan.timer
 
 # ---------------------------------------------------------------------------
 # Sudoers: allow deploy to invoke the upgrade shim (single binary scope).
