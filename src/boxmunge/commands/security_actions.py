@@ -54,6 +54,7 @@ from boxmunge.cve.scanner import (
 from boxmunge.cve.suppressions import SuppressionsError, load_suppressions
 from boxmunge.docker import container_image_digest
 from boxmunge.manifest import ManifestError, load_manifest
+from boxmunge.security_overlay import services_with_off_profile
 from boxmunge.paths import BoxPaths, validate_project_name
 from boxmunge.project_registry import is_registered, load_registered_projects
 
@@ -174,7 +175,17 @@ def _scan_one_project(
     """
     manifest, compose, posture_str, dangerously = _project_meta(paths, project)
     posture = parse_posture(posture_str)
-    profile = hardening_profile_from_compose(compose)
+    # Services with profile != off get boxmunge's hardening overlay applied
+    # at runtime. Pass the overlay set through so the policy doesn't penalise
+    # a project for relying on overlay defaults (e.g. no-new-privileges) it
+    # didn't redeclare in its own compose.yml.
+    off_services = {svc for svc, _ in services_with_off_profile(manifest)}
+    overlay_services = (
+        set((compose.get("services") or {}).keys()) - off_services
+    )
+    profile = hardening_profile_from_compose(
+        compose, services_with_overlay=overlay_services,
+    )
     suppressions_path = _project_suppressions_path(paths, project)
     try:
         supps = load_suppressions(suppressions_path)

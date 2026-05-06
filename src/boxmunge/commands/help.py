@@ -125,6 +125,8 @@ For detailed documentation, run:
   agent-help conventions      Project manifest and conventions
   agent-help rules            Agent guardrails and safe practices
   agent-help security         Container security model and opt-outs
+  agent-help cve              CVE policy reference (posture, suppressions, scan)
+  agent-help cve-incident     Step-by-step playbook for handling a CVE alert
 """
 
 # Map topic names to on-server doc filenames
@@ -134,6 +136,8 @@ AGENT_HELP_TOPICS: dict[str, str] = {
     "conventions": "PROJECT_CONVENTIONS.md",
     "rules": "AGENT_RULES.md",
     "security": "SECURITY.md",
+    "cve": "CVE_POLICY.md",
+    "cve-incident": "CVE_INCIDENT_PLAYBOOK.md",
 }
 
 

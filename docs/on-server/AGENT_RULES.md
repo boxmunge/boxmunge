@@ -119,6 +119,7 @@ If a task requires any of the above, it requires the **supervisor** user. Note t
 - Do not retry a failed operation blindly -- understand why it failed first
 - Set secrets before the first deploy so containers start with the right environment
 - If asked about container security or you are about to relax a `security:` setting, run `security <project>` first to see the current effective posture, and read `agent-help security` for the full model
+- If a CVE alert arrives (Pushover or otherwise), or you see `QUARANTINED` / `STILL_RUNNING_AT_RISK` / expired-suppression in `security` output, follow `agent-help cve-incident` end to end. Don't suppress without a concrete exploitability reason; don't resume a project without first re-scanning to confirm no quarantine-level findings remain.
 
 ---
 

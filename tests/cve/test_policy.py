@@ -619,6 +619,10 @@ def test_hardening_profile_single_service_no_read_only_field() -> None:
 
 
 def test_hardening_profile_no_new_privileges_false_explicit() -> None:
+    """When the service is NOT in services_with_overlay (i.e. profile: off),
+    a literal `no-new-privileges:false` in compose flips the field. With
+    overlay applied — the v0.6.2 default — compose_validate would reject
+    that combination upstream, so the function trusts the overlay."""
     compose = {
         "services": {
             "web": {
@@ -627,7 +631,58 @@ def test_hardening_profile_no_new_privileges_false_explicit() -> None:
             },
         },
     }
+    profile = hardening_profile_from_compose(
+        compose, services_with_overlay=set(),
+    )
+    assert profile.no_new_privileges is False
+
+
+def test_hardening_profile_no_new_privileges_overlay_enforces_default() -> None:
+    """v0.6.2: a service with overlay applied (profile: default) is treated
+    as having no-new-privileges enforced, even if user compose doesn't
+    redeclare it. Avoids false-positive penalty for projects that simply
+    rely on boxmunge's silent floor."""
+    compose = {
+        "services": {
+            "web": {
+                "read_only": True,
+                # No security_opt declaration
+            },
+        },
+    }
+    profile = hardening_profile_from_compose(
+        compose, services_with_overlay={"web"},
+    )
+    assert profile.no_new_privileges is True
+
+
+def test_hardening_profile_overlay_default_applies_to_all_services() -> None:
+    """services_with_overlay=None (default) means "every service has overlay"
+    — backward-compatible with callers that haven't been updated."""
+    compose = {
+        "services": {
+            "web": {"read_only": True},
+            "worker": {"read_only": True},
+        },
+    }
     profile = hardening_profile_from_compose(compose)
+    assert profile.no_new_privileges is True
+
+
+def test_hardening_profile_overlay_partial_off_service_still_weakens() -> None:
+    """If one service has profile: off (and no explicit no-new-privileges),
+    the project's no_new_privileges drops to False — single weakened service
+    dominates."""
+    compose = {
+        "services": {
+            "web": {"read_only": True},
+            "off_svc": {"read_only": True},
+        },
+    }
+    profile = hardening_profile_from_compose(
+        compose, services_with_overlay={"web"},
+    )
+    # off_svc isn't in overlay set; lacks explicit no-new-privileges → weakens.
     assert profile.no_new_privileges is False
 
 
@@ -699,8 +754,10 @@ def test_hardening_profile_multi_service_extra_caps_or_fold() -> None:
 
 
 def test_hardening_profile_no_new_privileges_false_takes_precedence() -> None:
-    """If any service has 'no-new-privileges:false' in security_opt, the
-    project's no_new_privileges is False even if other services have :true."""
+    """If a profile: off service has 'no-new-privileges:false' in
+    security_opt alongside :true, the project's no_new_privileges is False.
+    With overlay applied, compose_validate rejects this combination upstream,
+    so we exercise the off-profile path here."""
     compose = {
         "services": {
             "web": {
@@ -716,5 +773,8 @@ def test_hardening_profile_no_new_privileges_false_takes_precedence() -> None:
             },
         },
     }
-    profile = hardening_profile_from_compose(compose)
+    # Both services treated as profile: off (overlay set is empty).
+    profile = hardening_profile_from_compose(
+        compose, services_with_overlay=set(),
+    )
     assert profile.no_new_privileges is False

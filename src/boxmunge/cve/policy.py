@@ -402,7 +402,11 @@ def evaluate_project(
 # ---------- compose extraction ----------
 
 
-def hardening_profile_from_compose(compose: dict[str, Any]) -> HardeningProfile:
+def hardening_profile_from_compose(
+    compose: dict[str, Any],
+    *,
+    services_with_overlay: set[str] | None = None,
+) -> HardeningProfile:
     """Extract the project's effective hardening profile from a parsed compose.yml.
 
     The project-level profile is the worst-case (most weakened) across all
@@ -411,18 +415,34 @@ def hardening_profile_from_compose(compose: dict[str, Any]) -> HardeningProfile:
     risk model: a single weakened service exposes the project's blast radius.
 
     Reads the user's compose.yml — i.e. pre-overlay-merge. Boxmunge's overlay
-    enforces hardening by default; this function captures user *deviations*.
+    enforces hardening by default; this function captures user *deviations*
+    from that baseline.
+
+    `services_with_overlay`: services where boxmunge's hardening overlay is
+    active (every service whose effective profile is not "off"). For these
+    services we treat `no-new-privileges` as enforced by the overlay even if
+    the user's compose doesn't declare it explicitly — the overlay sets it,
+    `compose_validate` already rejects user attempts to flip it back via
+    `no-new-privileges:false`, so the runtime guarantee holds. If `None`
+    (default), assume every service has the overlay applied — backward-
+    compatible with callers that haven't been updated and matches the
+    common case for new deployments.
+
+    `read_only` and `cap_add` are NOT in the default overlay (read_only is
+    only added by the strict profile; cap_add is always user-driven), so
+    they're judged on the literal compose declaration regardless of overlay.
 
     For each service:
       - read_only: True iff `read_only: true` is explicitly set
-      - no_new_privileges: True iff `security_opt` contains "no-new-privileges:true"
-        AND no entry contains "no-new-privileges:false"
+      - no_new_privileges: True iff overlay applies OR (`security_opt`
+        contains "no-new-privileges:true" AND no entry contains
+        "no-new-privileges:false")
       - extra_caps_added: True iff `cap_add` is non-empty
       - privileged: True iff `privileged: true`
 
-    Project-level: AND across services for the True-required fields, OR for the
-    True-bad fields. With zero services we vacuously return a fully-hardened
-    profile — there's nothing to scan, so policy is moot.
+    Project-level: AND across services for the True-required fields, OR for
+    the True-bad fields. With zero services we vacuously return a fully-
+    hardened profile — there's nothing to scan, so policy is moot.
     """
     services = compose.get("services") or {}
     if not isinstance(services, dict) or not services:
@@ -433,37 +453,51 @@ def hardening_profile_from_compose(compose: dict[str, Any]) -> HardeningProfile:
             privileged=False,
         )
 
+    # When None, default to "every service has overlay applied" — every named
+    # service is in the assumed set.
+    overlay_set: set[str] = (
+        services_with_overlay
+        if services_with_overlay is not None
+        else set(services.keys())
+    )
+
     project_read_only = True
     project_no_new_privileges = True
     project_extra_caps_added = False
     project_privileged = False
 
-    for svc in services.values():
+    for svc_name, svc in services.items():
         if not isinstance(svc, dict):
             continue
 
         # read_only — must be explicitly True; anything else (missing or False)
-        # weakens the project.
+        # weakens the project. Overlay does NOT enforce this on default profile.
         if svc.get("read_only") is not True:
             project_read_only = False
 
-        # no_new_privileges — True iff "no-new-privileges:true" present AND
-        # no "no-new-privileges:false" present in security_opt.
-        sec_opt = svc.get("security_opt") or []
-        if not isinstance(sec_opt, list):
-            sec_opt = []
-        has_true = any(s == "no-new-privileges:true" for s in sec_opt)
-        has_false = any(s == "no-new-privileges:false" for s in sec_opt)
-        svc_nnp = has_true and not has_false
+        # no_new_privileges — overlay enforces it for non-off services.
+        # Otherwise, fall back to literal compose declaration.
+        if svc_name in overlay_set:
+            svc_nnp = True
+        else:
+            sec_opt = svc.get("security_opt") or []
+            if not isinstance(sec_opt, list):
+                sec_opt = []
+            has_true = any(s == "no-new-privileges:true" for s in sec_opt)
+            has_false = any(s == "no-new-privileges:false" for s in sec_opt)
+            svc_nnp = has_true and not has_false
         if not svc_nnp:
             project_no_new_privileges = False
 
-        # extra_caps_added — any non-empty cap_add list weakens.
+        # extra_caps_added — any non-empty cap_add list weakens. Overlay's
+        # cap_drop is extended (not replaced) by user cap_add, so a user
+        # cap_add really does relax the profile.
         cap_add = svc.get("cap_add") or []
         if isinstance(cap_add, list) and len(cap_add) > 0:
             project_extra_caps_added = True
 
-        # privileged — any True weakens.
+        # privileged — any True weakens. Already rejected by compose_validate
+        # on non-off services, but tolerated here for tests / off-profile.
         if svc.get("privileged") is True:
             project_privileged = True
 
