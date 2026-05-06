@@ -27,14 +27,22 @@ That's the real promise — not just "easy hosting," but one less tool you have 
 
 ### 1. Set up your server
 
-You need a fresh Debian 13 VPS with a public IP. Copy the install script up and run it as root:
+You need a fresh Debian 13 VPS with a public IP. Download the latest self-extracting installer, copy it to the server, and run it as root with your hostname, contact email, and SSH public key:
 
 ```bash
-scp install.sh root@your-server.example.com:
-ssh root@your-server.example.com bash install.sh
+# Locally — fetch the installer and capture your SSH public key
+curl -fsSLO https://github.com/boxmunge/boxmunge/releases/latest/download/boxmunge-install.sh
+scp boxmunge-install.sh root@your-server.example.com:
+SSH_KEY="$(cat ~/.ssh/id_ed25519.pub)"
+
+# On the server — run as root
+ssh root@your-server.example.com "bash boxmunge-install.sh \
+    --hostname your-server.example.com \
+    --email you@example.com \
+    --ssh-key '${SSH_KEY}'"
 ```
 
-That's it. The script installs Docker, hardens the OS, sets up Caddy as a reverse proxy in a container, creates the `deploy` and `supervisor` users, and lays down the boxmunge CLI on the server. Takes a few minutes. See [INSTALL.md](INSTALL.md) for the local CLI install (used to build bundles before upload).
+That's it. The installer carries the entire boxmunge bundle inside it — installs Docker, hardens the OS, sets up Caddy as a reverse proxy in a container, creates the `deploy` and `supervisor` users, and lays down the boxmunge CLI on the server. Takes a few minutes. See [INSTALL.md](INSTALL.md) for the local CLI install (used to build bundles before upload).
 
 ### 2. Ship a project
 
