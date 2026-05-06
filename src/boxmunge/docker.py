@@ -6,8 +6,10 @@ simple and avoids the Docker SDK dependency.
 """
 
 import fcntl
+import logging
 import os
 import subprocess
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -17,6 +19,14 @@ from boxmunge.fileutil import open_shared_lockfile
 _DEFAULT_TIMEOUT = 120
 _COMPOSE_UP_TIMEOUT = 300
 _CADDY_RELOAD_TIMEOUT = 30
+# Audit D-NEW-2: caddy_validate previously inherited the 120s default. Under
+# the reload lock, that meant a crashed Caddy could block every other deploy
+# for two minutes. 30s matches the reload timeout — long enough for a healthy
+# Caddy, short enough that a wedged container doesn't hold the queue hostage.
+_CADDY_VALIDATE_TIMEOUT = 30
+# Audit E-NEW-3: log a warning when a deploy waits more than this long for
+# the global Caddy reload lock — visible signal that deploys are queueing.
+_CADDY_LOCK_WAIT_WARN_SECONDS = 0.1
 
 
 class DockerError(Exception):
@@ -185,11 +195,21 @@ def _caddy_reload_lock(lock_dir: Path) -> Iterator[None]:
     pass validate, then have deploy-B write a malformed site config that
     deploy-A's subsequent reload ingests and fails on. The protected section
     is short (~100ms typical), so blocking is fine.
+
+    Audit E-NEW-3: any wait longer than the warn threshold is logged via
+    the boxmunge logger so prolonged contention is visible in operations.
+    Happy-path waits stay silent.
     """
     lock_path = lock_dir / ".caddy.lock"
     fd = open_shared_lockfile(lock_path)
     try:
+        start = time.monotonic()
         fcntl.flock(fd, fcntl.LOCK_EX)
+        elapsed = time.monotonic() - start
+        if elapsed >= _CADDY_LOCK_WAIT_WARN_SECONDS:
+            logging.getLogger("boxmunge").warning(
+                "caddy reload waited %.1fs for lock", elapsed,
+            )
         yield
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -216,13 +236,18 @@ def caddy_reload(caddy_compose_dir: Path, lock_dir: Path) -> None:
 
 
 def caddy_validate(caddy_compose_dir: Path) -> bool:
-    """Validate Caddy configuration. Returns True if valid."""
+    """Validate Caddy configuration. Returns True if valid.
+
+    Audit D-NEW-2: capped at _CADDY_VALIDATE_TIMEOUT (30s) so a wedged
+    Caddy container can't hold the reload lock for the full 120s default.
+    """
     try:
         _run(
             ["docker", "compose", "exec", "caddy", "caddy", "validate",
              "--config", "/etc/caddy/Caddyfile"],
             cwd=caddy_compose_dir,
             capture=True,
+            timeout=_CADDY_VALIDATE_TIMEOUT,
         )
         return True
     except DockerError:

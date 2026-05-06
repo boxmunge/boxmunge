@@ -210,3 +210,91 @@ class TestCaddyReloadLock:
 
         assert completed.wait(timeout=2.0), "caddy_reload did not unblock after lock release"
         t.join(timeout=1.0)
+
+
+class TestCaddyValidateTimeout:
+    """Audit D-NEW-2: caddy_validate must use a 30s timeout, not the 120s default."""
+
+    def test_validate_constant_is_30s(self) -> None:
+        from boxmunge.docker import _CADDY_VALIDATE_TIMEOUT
+        assert _CADDY_VALIDATE_TIMEOUT == 30
+
+    @patch("boxmunge.docker._run")
+    def test_validate_passes_timeout_to_run(
+        self, mock_run, tmp_path: Path,
+    ) -> None:
+        from boxmunge.docker import caddy_validate, _CADDY_VALIDATE_TIMEOUT
+        caddy_validate(tmp_path)
+        kwargs = mock_run.call_args.kwargs
+        assert kwargs.get("timeout") == _CADDY_VALIDATE_TIMEOUT
+
+
+class TestCaddyLockContentionLogging:
+    """Audit E-NEW-3: caddy reload lock contention >threshold logs a warning.
+
+    The boxmunge logger sets propagate=False once initialised by another
+    test, so caplog can't see it via root. Attach a handler directly.
+    """
+
+    @staticmethod
+    def _attach_capture():
+        import logging as _l
+        records: list = []
+
+        class _ListHandler(_l.Handler):
+            def emit(self, record):  # type: ignore[override]
+                records.append(record)
+
+        h = _ListHandler(level=_l.WARNING)
+        _l.getLogger("boxmunge").addHandler(h)
+        return h, records
+
+    def test_long_wait_logs_warning(self, tmp_path: Path) -> None:
+        import logging as _l
+        caddy_dir = tmp_path / "caddy"
+        caddy_dir.mkdir()
+        lock_dir = tmp_path / "state"
+        lock_dir.mkdir()
+        lock_path = lock_dir / ".caddy.lock"
+
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+        completed = threading.Event()
+
+        def _do_reload() -> None:
+            with patch("boxmunge.docker._run"):
+                caddy_reload(caddy_dir, lock_dir)
+            completed.set()
+
+        h, records = self._attach_capture()
+        try:
+            t = threading.Thread(target=_do_reload, daemon=True)
+            t.start()
+            # Hold lock for >0.1s then release.
+            time.sleep(0.25)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+            assert completed.wait(timeout=2.0)
+            t.join(timeout=1.0)
+        finally:
+            _l.getLogger("boxmunge").removeHandler(h)
+
+        msgs = [r.getMessage() for r in records]
+        assert any("waited" in m and "lock" in m for m in msgs), msgs
+
+    def test_fast_path_no_warning(self, tmp_path: Path) -> None:
+        """Happy path (no contention) must not emit lock-wait warnings."""
+        import logging as _l
+        caddy_dir = tmp_path / "caddy"
+        caddy_dir.mkdir()
+        lock_dir = tmp_path / "state"
+        lock_dir.mkdir()
+        h, records = self._attach_capture()
+        try:
+            with patch("boxmunge.docker._run"):
+                caddy_reload(caddy_dir, lock_dir)
+        finally:
+            _l.getLogger("boxmunge").removeHandler(h)
+        msgs = [r.getMessage() for r in records]
+        assert not any("waited" in m for m in msgs), msgs
