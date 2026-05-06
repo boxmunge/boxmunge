@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from boxmunge.compose_validate import ComposeSecurityError, validate_user_compose
+from boxmunge.paths import BoxPaths
 
 
 pytestmark = pytest.mark.integration
@@ -119,6 +120,7 @@ def test_hostile_compose_rejected_before_merge(tmp_path: Path) -> None:
     """
     compose_path = tmp_path / "compose.yml"
     compose_path.write_text(_HOSTILE_COMPOSE)
+    paths = BoxPaths(root=tmp_path)
 
     with pytest.raises(ComposeSecurityError, match="privileged"):
-        validate_user_compose(compose_path)
+        validate_user_compose(compose_path, paths)
