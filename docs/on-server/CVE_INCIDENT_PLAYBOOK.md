@@ -163,17 +163,26 @@ regenerates Caddy, restarts containers, runs smoke.
 
 ### B. Tighten hardening (exploitable, low impact, can drop penalty)
 
-Adding `read_only: true` or `security_opt: ["no-new-privileges:true"]` to a
-service drops the hardening penalty, which can drop the effective severity
-below the posture threshold. This is a manifest/compose change — you don't
-have file-edit authority in the deploy shell. Hand off:
+Adding `read_only: true` to a service drops the hardening penalty by 1
+and can move the effective severity below the posture threshold.
+read_only is NOT in boxmunge's default overlay (it's a strict-profile
+feature), so the user must opt in by declaring it.
+
+Do not redeclare `security_opt: ["no-new-privileges:true"]` in user
+compose — the default-profile overlay already sets it, and Compose
+rejects duplicate list items at merge time. The CVE-policy penalty
+calc is overlay-aware (v0.6.2+), so relying on the overlay's
+no-new-privileges does not incur a penalty.
+
+This is a manifest/compose change — you don't have file-edit authority
+in the deploy shell. Hand off:
 
 > Project `<name>` is quarantined on `<CVE>`. The CVE is exploitable but
 > low-impact, and the hardening penalty (+`<n>`) is what pushed effective
-> severity above threshold. Recommend: edit `services/<name>/compose.yml` to
-> add `read_only: true` (and explicit `security_opt: ["no-new-privileges:true"]`),
-> rebundle, redeploy. Effective severity should drop to `<X>`, below the
-> `<posture>` threshold.
+> severity above threshold. Recommend: edit `services/<name>/compose.yml`
+> to add `read_only: true` (and a `tmpfs: ['/tmp']` if the app writes
+> there), rebundle, redeploy. Effective severity should drop to `<X>`,
+> below the `<posture>` threshold.
 
 ### C. Accept the quarantine
 
