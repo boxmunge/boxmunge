@@ -29,8 +29,8 @@ These operations are safe to run without human confirmation:
 | Deploy directly to production | `prod-deploy <project>` |
 | Register a git-based project | `add-git-project <name> <repo-url>` |
 | Preview changes before deploying | `diff <project>` |
-| Set a project secret | `secrets set <project> KEY value` |
-| Set a host-level secret | `secrets set --host KEY value` |
+| Set a project secret | `secrets set <project> KEY=value` |
+| Set a host-level secret | `secrets set --host KEY=value` |
 | List secrets | `secrets list <project>` |
 | Check server/project health | `status` or `check <project>` |
 | Tail container logs | `logs <project>` |
@@ -66,15 +66,15 @@ Or skip staging: `prod-deploy myapp`
 Set secrets before deploying so they are available to containers:
 
 ```
-secrets set myapp DATABASE_URL postgres://...
-secrets set myapp SECRET_KEY supersecretvalue
+secrets set myapp DATABASE_URL=postgres://...
+secrets set myapp SECRET_KEY=supersecretvalue
 secrets list myapp
 ```
 
 Host-level secrets (shared across all projects):
 
 ```
-secrets set --host PUSHOVER_TOKEN abc123
+secrets set --host PUSHOVER_TOKEN=abc123
 ```
 
 ---
@@ -127,7 +127,7 @@ If a task requires any of the above, it requires the **supervisor** user. Note t
 ### New project from bundle
 
 1. `inbox` -- confirm bundle is present
-2. `secrets set <project> KEY value` -- set required secrets
+2. `secrets set <project> KEY=value` -- set required secrets
 3. `stage <project>` -- deploy to staging
 4. `check <project>` -- verify health
 5. `promote <project>` -- go live
@@ -135,7 +135,7 @@ If a task requires any of the above, it requires the **supervisor** user. Note t
 ### New project from git
 
 1. `add-git-project <name> <repo-url> [--ref REF]` -- register the project
-2. `secrets set <project> KEY value` -- set required secrets
+2. `secrets set <project> KEY=value` -- set required secrets
 3. `stage <project>` -- deploy to staging
 4. `check <project>` -- verify health
 5. `promote <project>` -- go live

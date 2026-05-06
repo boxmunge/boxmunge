@@ -161,7 +161,7 @@ Secrets are managed via the CLI. Two scopes are available:
 ### Project-level secrets
 
 ```
-secrets set myapp DATABASE_URL postgres://...
+secrets set myapp DATABASE_URL=postgres://...
 secrets get myapp DATABASE_URL
 secrets list myapp
 secrets unset myapp OLD_KEY
@@ -174,7 +174,7 @@ Project secrets are stored in `secrets.env` and injected into the project's cont
 Shared across all projects on the host:
 
 ```
-secrets set --host PUSHOVER_TOKEN abc123
+secrets set --host PUSHOVER_TOKEN=abc123
 secrets get --host PUSHOVER_TOKEN
 secrets list --host
 secrets unset --host OLD_KEY
