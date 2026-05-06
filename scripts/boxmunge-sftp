@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# boxmunge-sftp — thin wrapper that forwards to the venv-installed entry point.
+#
+# Lives at /opt/boxmunge/bin/boxmunge-sftp on the target host. sshd's
+# Subsystem directive points here; the wrapper resolves through env-active
+# so slot swaps during upgrade pick up the new venv automatically.
+#
+# Kept as a real file in scripts/ (rather than written inline by install.sh)
+# so the upgrade shim's self-update loop can refresh it from a release bundle.
+exec /opt/boxmunge/env-active/bin/boxmunge-sftp "$@"

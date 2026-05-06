@@ -254,10 +254,10 @@ exec /opt/boxmunge/env-active/bin/boxmunge-shell "$@"
 WRAPPER
 chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-shell"
 
-cat > "${BOXMUNGE_ROOT}/bin/boxmunge-sftp" <<'WRAPPER'
-#!/usr/bin/env bash
-exec /opt/boxmunge/env-active/bin/boxmunge-sftp "$@"
-WRAPPER
+# boxmunge-sftp is a real script in scripts/ so the upgrade shim's
+# self-update loop can refresh it from a release bundle (audit C-NEW-6).
+# Copy from the bundle, not an inline heredoc.
+cp "${SCRIPT_DIR}/scripts/boxmunge-sftp" "${BOXMUNGE_ROOT}/bin/boxmunge-sftp"
 chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-sftp"
 
 # ---------------------------------------------------------------------------
