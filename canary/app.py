@@ -43,12 +43,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/data":
             conn = get_conn()
             cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM canary_data")
+            count = cur.fetchone()[0]
             cur.execute("SELECT value FROM canary_data ORDER BY id DESC LIMIT 1")
             row = cur.fetchone()
             conn.close()
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(json.dumps({"value": row[0] if row else None}).encode())
+            self.wfile.write(json.dumps({
+                "count": count,
+                "value": row[0] if row else None,
+            }).encode())
         else:
             self.send_response(404)
             self.end_headers()
