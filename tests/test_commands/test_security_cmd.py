@@ -70,6 +70,79 @@ def test_security_json_flag_first(project_with_default) -> None:
     assert payload["project"] == "demo"
 
 
+def test_security_text_missing_schema_version_fails_loud(monkeypatch, tmp_path, capsys) -> None:
+    """Audit I-2c: a manifest missing schema_version must NOT silently default
+    to 1 — operators get a clear error on stderr and exit 1."""
+    proj = tmp_path / "projects" / "demo"
+    proj.mkdir(parents=True)
+    manifest = {
+        # schema_version intentionally omitted
+        "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+        "source": "bundle",
+        "project": "demo",
+        "hosts": ["demo.example.com"],
+        "services": {
+            "web": {"port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh"},
+        },
+    }
+    (proj / "manifest.yml").write_text(yaml.safe_dump(manifest))
+    from boxmunge.paths import BoxPaths
+    monkeypatch.setattr(BoxPaths, "__init__", lambda self: None)
+    paths = BoxPaths()
+    paths.projects = tmp_path / "projects"
+    paths.project_dir = lambda name: tmp_path / "projects" / name
+    paths.project_manifest = lambda name: tmp_path / "projects" / name / "manifest.yml"
+    monkeypatch.setattr("boxmunge.commands.security_cmd._paths", lambda: paths)
+    # Bypass load_manifest's own schema validation so we can exercise the
+    # security_cmd fail-loud path directly with a hand-edited manifest.
+    monkeypatch.setattr(
+        "boxmunge.commands.security_cmd.load_manifest",
+        lambda path: manifest,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_security(["demo"])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "schema_version" in captured.err
+    assert "ERROR" in captured.err
+
+
+def test_security_json_missing_schema_version_fails_loud(monkeypatch, tmp_path, capsys) -> None:
+    """Same fail-loud guarantee for the --json code path."""
+    proj = tmp_path / "projects" / "demo"
+    proj.mkdir(parents=True)
+    manifest = {
+        # schema_version intentionally omitted
+        "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+        "source": "bundle",
+        "project": "demo",
+        "hosts": ["demo.example.com"],
+        "services": {
+            "web": {"port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh"},
+        },
+    }
+    (proj / "manifest.yml").write_text(yaml.safe_dump(manifest))
+    from boxmunge.paths import BoxPaths
+    monkeypatch.setattr(BoxPaths, "__init__", lambda self: None)
+    paths = BoxPaths()
+    paths.projects = tmp_path / "projects"
+    paths.project_dir = lambda name: tmp_path / "projects" / name
+    paths.project_manifest = lambda name: tmp_path / "projects" / name / "manifest.yml"
+    monkeypatch.setattr("boxmunge.commands.security_cmd._paths", lambda: paths)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_cmd.load_manifest",
+        lambda path: manifest,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_security(["demo", "--json"])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "schema_version" in captured.err
+    assert "ERROR" in captured.err
+
+
 def test_security_json_off_services(monkeypatch, tmp_path) -> None:
     proj = tmp_path / "projects" / "demo"
     proj.mkdir(parents=True)

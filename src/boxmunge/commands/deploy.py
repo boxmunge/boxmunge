@@ -47,7 +47,7 @@ def record_deploy_state(
     new_state = {
         "current_ref": ref,
         "deployed_at": now_iso,
-        # Drives the health-check grace window in check.update_health_state.
+        # Drives the health-check grace window in health_state.update_health_state.
         # Updated on resume too; spurious mid-startup smoke flakes get masked.
         "last_started_at": now_iso,
         "pre_deploy_snapshot": snapshot or "",

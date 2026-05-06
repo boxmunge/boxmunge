@@ -38,7 +38,7 @@ def _resolved_for_each_service(manifest: dict[str, Any]) -> dict[str, dict[str, 
 
 def _format_text(manifest: dict[str, Any]) -> str:
     project = manifest["project"]
-    schema = manifest.get("schema_version", 1)
+    schema = manifest["schema_version"]
     project_sec = manifest.get("security") or {}
     project_profile = project_sec.get("profile", PROFILE_DEFAULT)
 
@@ -80,7 +80,7 @@ def _format_json(manifest: dict[str, Any]) -> str:
     project_sec = manifest.get("security") or {}
     payload: dict[str, Any] = {
         "project": project,
-        "schema_version": manifest.get("schema_version", 1),
+        "schema_version": manifest["schema_version"],
         "project_profile": project_sec.get("profile", PROFILE_DEFAULT),
         "project_reason": project_sec.get("reason"),
         "services": {},
@@ -112,6 +112,16 @@ def cmd_security(args: list[str]) -> None:
         manifest = load_manifest(manifest_path)
     except ManifestError as e:
         print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Fail loud on a hand-edited manifest missing schema_version. The
+    # default-to-1 fallback is correct in manifest validation and migration
+    # but here it papers over operator confusion (audit I-2c).
+    if "schema_version" not in manifest:
+        print(
+            f"ERROR: manifest for project '{project}' is missing schema_version",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if as_json:
