@@ -293,6 +293,7 @@ def _run_deploy_inner(
             paths.project_compose(project_name), paths,
             off_services=off_services,
             project_name=project_name,
+            cve_policy=manifest.get("security"),
         )
     except ComposeSecurityError as e:
         # Exit code 3 reserved for compose hardening rejections (audit H-N2).

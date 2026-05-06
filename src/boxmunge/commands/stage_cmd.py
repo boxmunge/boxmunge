@@ -124,6 +124,7 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
             project_dir / "compose.yml", paths,
             off_services=off_services,
             project_name=project_name,
+            cve_policy=manifest.get("security"),
         )
     except ComposeSecurityError as e:
         # Exit code 3 reserved for compose hardening rejections (audit H-N2).

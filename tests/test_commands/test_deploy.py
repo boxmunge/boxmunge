@@ -139,6 +139,63 @@ class TestRefusesPaused:
         assert "paused" in err.lower()
 
 
+class TestCvePolicyValidatorWiring:
+    """Regression: validate_user_compose must receive the manifest's security
+    block as cve_policy, otherwise posture/dangerously_disable_quarantine
+    cross-validation rules silently never fire (caught in v0.6.0 smoke).
+
+    Same pattern is applied in stage_cmd, resume_cmd, upgrade_cmd — this
+    test in deploy is the canonical one.
+    """
+
+    def _bundle_with_security(self, paths: BoxPaths) -> None:
+        manifest = (
+            "id: 01TESTULID0000000000000000\n"
+            "schema_version: 2\n"
+            "project: testapp\n"
+            "source: bundle\n"
+            "hosts:\n"
+            "  - testapp.example.com\n"
+            "services:\n"
+            "  web:\n"
+            "    port: 8080\n"
+            "    routes:\n"
+            "      - path: /\n"
+            "backup:\n"
+            "  type: none\n"
+            "security:\n"
+            "  posture: strict\n"
+        )
+        staging = paths.root / "tmp_staging" / "testapp"
+        staging.mkdir(parents=True, exist_ok=True)
+        (staging / "manifest.yml").write_text(manifest)
+        (staging / "compose.yml").write_text(
+            "services:\n  web:\n    image: nginx\n    read_only: true\n"
+        )
+        bundle_path = paths.inbox / "testapp-2026-05-07T000000000000.tar.gz"
+        with tarfile.open(bundle_path, "w:gz") as tar:
+            tar.add(staging, arcname="testapp")
+
+    @patch("boxmunge.commands.deploy.compose_up")
+    @patch("boxmunge.commands.deploy.caddy_reload")
+    def test_deploy_passes_security_block_as_cve_policy(
+        self, _reload, _up, paths: BoxPaths,
+    ) -> None:
+        add_project("testapp", paths)
+        self._bundle_with_security(paths)
+        with patch(
+            "boxmunge.commands.deploy.validate_user_compose",
+        ) as mock_validate:
+            run_deploy("testapp", paths)
+        # Caller MUST pass cve_policy={'posture': 'strict'} — the manifest's
+        # security block. Otherwise posture/dangerously rules never fire.
+        kwargs = mock_validate.call_args.kwargs
+        assert kwargs.get("cve_policy") == {"posture": "strict"}, (
+            f"validate_user_compose called with cve_policy="
+            f"{kwargs.get('cve_policy')!r}; expected manifest's security block"
+        )
+
+
 class TestRejectsUnknownArgs:
     """Audit H-1b: silent-drop for unknown args was a footgun. Reject loudly."""
 

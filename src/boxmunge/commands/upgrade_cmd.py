@@ -118,6 +118,7 @@ def _regenerate_configs(paths: BoxPaths) -> list[str]:
                 paths.project_compose(project_name), paths,
                 off_services=off_services,
                 project_name=project_name,
+                cve_policy=manifest.get("security"),
             )
         except ComposeSecurityError as e:
             log_error(
