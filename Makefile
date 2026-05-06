@@ -14,7 +14,7 @@ BUNDLE  := dist/boxmunge-$(VERSION).tar.gz
 # step below fails the build if a declared entry is missing from staging,
 # so the manifest cannot drift from the cp commands.
 # ---------------------------------------------------------------------------
-BUNDLE_DIRS         := bootstrap src systemd config scripts caddy
+BUNDLE_DIRS         := bootstrap src systemd config scripts caddy canary
 BUNDLE_RENAMED_DIRS := docs/on-server=on-server
 BUNDLE_TOP_FILES    := install.sh pyproject.toml
 

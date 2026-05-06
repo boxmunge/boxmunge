@@ -229,6 +229,17 @@ cmd_run() {
     log "Creating platform stash..."
     "$(active_venv)/bin/boxmunge-server" stash create || die "Stash creation failed, aborting"
 
+    # 3a. Refresh tree-level templates that aren't shipped in the venv.
+    # Today: the canary project, used by `boxmunge self-test`. Without this,
+    # an auto-updated host has no /opt/boxmunge/canary and self-test errors.
+    # Runs as root; perms aren't a concern. Overwrite any prior dir.
+    if [[ -d "$tmp_download/boxmunge/canary" ]]; then
+        log "Refreshing /opt/boxmunge/canary from bundle..."
+        rm -rf "$BOXMUNGE_ROOT/canary"
+        cp -r "$tmp_download/boxmunge/canary" "$BOXMUNGE_ROOT/canary"
+        chown -R root:root "$BOXMUNGE_ROOT/canary"
+    fi
+
     # 4. SWAP
     log "Swapping to standby venv (slot $standby)..."
     swap_to "$standby"

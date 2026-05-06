@@ -1,4 +1,5 @@
 """Tests for boxmunge stage command."""
+import os
 import tarfile
 import pytest
 from pathlib import Path
@@ -99,6 +100,33 @@ class TestRunStage:
         assert not bundle.exists()
         consumed = list(paths.inbox_consumed.iterdir())
         assert len(consumed) == 1
+
+    @patch("boxmunge.commands.stage_cmd.caddy_reload")
+    @patch("boxmunge.commands.stage_cmd.compose_up")
+    def test_staging_files_world_readable_for_caddy(self, mock_up, mock_reload, paths):
+        """Caddy site config + staging compose files must be 0o644 so the
+        Caddy container (different uid inside the container) can read them.
+        Regression: 0o600 from atomic_write_text default broke `stage` on
+        real installs — Caddy's reload validation failed with permission
+        denied during stage."""
+        add_project("testapp", paths)
+        _place_real_bundle(paths)
+        run_stage("testapp", paths)
+
+        staging_conf = paths.project_staging_caddy_site("testapp")
+        assert staging_conf.exists()
+        assert os.stat(staging_conf).st_mode & 0o777 == 0o644, \
+            f"Caddy staging site config must be world-readable; got {oct(os.stat(staging_conf).st_mode & 0o777)}"
+
+        staging_override = paths.project_staging_compose_override("testapp")
+        assert staging_override.exists()
+        assert os.stat(staging_override).st_mode & 0o777 == 0o644, \
+            f"Staging compose override must be 0o644; got {oct(os.stat(staging_override).st_mode & 0o777)}"
+
+        staging_base = paths.project_dir("testapp") / "compose.staging-base.yml"
+        assert staging_base.exists()
+        assert os.stat(staging_base).st_mode & 0o777 == 0o644, \
+            f"Staging compose base must be 0o644; got {oct(os.stat(staging_base).st_mode & 0o777)}"
 
     @patch("boxmunge.commands.stage_cmd.caddy_reload")
     @patch("boxmunge.commands.stage_cmd.compose_up")

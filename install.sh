@@ -261,6 +261,19 @@ if [[ -d "${SCRIPT_DIR}/on-server" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Canary project template (used by `boxmunge self-test`)
+#
+# self_test_cmd._canary_project_path() looks at /opt/boxmunge/canary first.
+# If we don't ship it, self-test errors with "Canary project not found"
+# on every real install.
+# ---------------------------------------------------------------------------
+if [[ -d "${SCRIPT_DIR}/canary" ]]; then
+    rm -rf "${BOXMUNGE_ROOT}/canary"
+    cp -r "${SCRIPT_DIR}/canary" "${BOXMUNGE_ROOT}/canary"
+    chown -R root:root "${BOXMUNGE_ROOT}/canary"
+fi
+
+# ---------------------------------------------------------------------------
 # Systemd units
 # ---------------------------------------------------------------------------
 echo ""

@@ -150,7 +150,9 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
 
     staging_conf = paths.project_staging_caddy_site(project_name)
     staging_conf.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(staging_conf, generate_staging_caddy_config(manifest, auth=staging_auth))
+    # mode=0o644: Caddy container reads this from a host-mounted volume; its
+    # uid may not map to the deploy uid. Same rationale as deploy.py.
+    atomic_write_text(staging_conf, generate_staging_caddy_config(manifest, auth=staging_auth), mode=0o644)
 
     # Build env_files for staging (same as production)
     staging_env_files = {}
@@ -164,9 +166,12 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
         staging_env_files["project_secrets"] = "./secrets.env"
 
     staging_override = paths.project_staging_compose_override(project_name)
+    # mode=0o644: read by `docker compose` which runs in deploy/root contexts
+    # but the file is also read inside the Caddy/compose toolchain — keep
+    # consistent with the site config above.
     atomic_write_text(staging_override, generate_staging_compose_override(
         manifest, env_files=staging_env_files or None
-    ))
+    ), mode=0o644)
 
     # Deploy-time warning for any service resolving to profile: off.
     # Repeated by design — see spec §"Deploy-time warning".
@@ -174,7 +179,8 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
 
     # Generate staging base (compose.yml with ports stripped to avoid conflicts)
     staging_base = project_dir / "compose.staging-base.yml"
-    atomic_write_text(staging_base, generate_staging_compose_base(project_dir / "compose.yml"))
+    # mode=0o644: same rationale as the override above.
+    atomic_write_text(staging_base, generate_staging_compose_base(project_dir / "compose.yml"), mode=0o644)
 
     # Copy production data to staging if opted in
     if manifest.get("staging", {}).get("copy_data"):

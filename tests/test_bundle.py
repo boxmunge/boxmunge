@@ -26,6 +26,11 @@ REQUIRED_BUNDLE_DIRS = [
     "on-server",
     "scripts",
     "caddy",
+    # canary/ ships in the release bundle so install.sh + the upgrade shim
+    # can place it at /opt/boxmunge/canary, where `boxmunge self-test` looks
+    # for it. Without this, self-test errors with "Canary project not found"
+    # on every real install (regression caught during v0.5.4 fleet test).
+    "canary",
 ]
 
 REQUIRED_BUNDLE_FILES = [
@@ -85,7 +90,6 @@ def test_bundle_excludes_dev_only_dirs(bundle_path: Path):
     forbidden_prefixes = [
         "boxmunge/tests/",
         "boxmunge/cli/",
-        "boxmunge/canary/",
         "boxmunge/sample-project/",
         "boxmunge/services/",
         "boxmunge/system/",
