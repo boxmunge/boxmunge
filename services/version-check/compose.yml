@@ -4,6 +4,18 @@ services:
     restart: unless-stopped
     volumes:
       - check-data:/data
+    # Read-only rootfs — hardens against post-exploit persistence.
+    # /tmp must remain writeable (gunicorn worker scratch); tmpfs is
+    # size-bounded and never persisted.
+    read_only: true
+    tmpfs:
+      - /tmp
+    # Declared explicitly — boxmunge's default profile overlay also
+    # sets this, but declaring it in the user's compose self-documents
+    # the hardening posture and zeroes the CVE-policy hardening penalty
+    # (which inspects the user's compose, not the merged result).
+    security_opt:
+      - "no-new-privileges:true"
 
 volumes:
   check-data:

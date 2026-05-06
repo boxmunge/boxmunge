@@ -1,0 +1,6 @@
+suppressions:
+  - cve: CVE-2026-3219
+    until: 2026-08-07
+    reason: "pip 25.0.1 archive-handling CVE. pip is build-time only in this image; the runtime container runs gunicorn and never invokes pip. Attack vector requires user-initiated install with malformed archive — not reachable from the served HTTP surface."
+    reviewed_by: jon
+    added: 2026-05-07
