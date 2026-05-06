@@ -24,7 +24,13 @@ SERVICE_DIR = Path(__file__).parent
 RELEASES_PATH = SERVICE_DIR / "releases.json"
 DB_PATH = Path("/data/checks.db")
 
-VALID_STAGES = {"preflight", "apply", "health_immediate", "health_probation"}
+VALID_STAGES = {
+    "preflight",
+    "apply",
+    "apply_partial_rollback",
+    "health_immediate",
+    "health_probation",
+}
 
 # Stats endpoint window cap. Stops a runaway query against an unbounded
 # version_checks table; 90 days is plenty for a "is anyone using this?"

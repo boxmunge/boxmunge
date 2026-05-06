@@ -25,6 +25,32 @@ BIN_DIR="$BOXMUNGE_ROOT/bin"
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) boxmunge-upgrade: $*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
 
+# bm_log <level> <component> <msg> [<detail-json>]
+#
+# Best-effort write to /opt/boxmunge/logs/boxmunge.log via the active venv's
+# Python (so `boxmunge log` surfaces shim phase events alongside everything
+# else). The shim is the operator's only recovery surface — a logging
+# failure must not crash the upgrade — so the body is wrapped in
+# `2>/dev/null || true`.
+#
+# Levels: info | warn | error. Detail JSON defaults to {}.
+bm_log() {
+    local level="$1" component="$2" msg="$3" detail="${4:-"{}"}"
+    BM_LEVEL="$level" BM_COMPONENT="$component" BM_MSG="$msg" BM_DETAIL="$detail" \
+        "$(active_venv)/bin/python" - <<'PYBM' 2>/dev/null || true
+import json, os
+from boxmunge.paths import BoxPaths
+from boxmunge.log import log_operation, log_warning, log_error
+fns = {"info": log_operation, "warn": log_warning, "error": log_error}
+fn = fns.get(os.environ["BM_LEVEL"], log_operation)
+try:
+    detail = json.loads(os.environ["BM_DETAIL"])
+except Exception:
+    detail = {"raw": os.environ.get("BM_DETAIL", "")}
+fn(os.environ["BM_COMPONENT"], os.environ["BM_MSG"], BoxPaths(), detail=detail)
+PYBM
+}
+
 # Cosign verification pins. The release workflow keyless-signs SHA256SUMS via
 # Sigstore's Fulcio + Rekor. We pin the OIDC issuer and the workflow identity
 # so a signature from any other workflow (or any other repo) is rejected.
@@ -123,10 +149,36 @@ swap_to() {
 do_rollback() {
     local new_version="$1" from_version="$2" stage="$3" prev_slot="$4"
     log "ROLLBACK: $new_version failed at stage=$stage, reverting to slot $prev_slot"
+    bm_log warn upgrade "rollback initiated" "{\"version\": \"$new_version\", \"from_version\": \"$from_version\", \"stage\": \"$stage\"}"
 
     swap_to "$prev_slot"
 
-    "$(active_venv)/bin/boxmunge-server" stash restore --latest 2>&1 || log "WARN: stash restore failed"
+    # Stash restore is the part of rollback that returns config + state to the
+    # pre-upgrade snapshot. If it fails, the venv has been swapped back but
+    # disk state may be partly upgraded — a hybrid configuration that the old
+    # code is not guaranteed to handle. Treat this as a HARD failure and
+    # demand operator attention. Distinct exit code (2) so probation /
+    # monitoring can tell partial-rollback from clean-rollback (exit 1).
+    local stash_stderr stash_exit=0
+    stash_stderr="$("$(active_venv)/bin/boxmunge-server" stash restore --latest 2>&1)" || stash_exit=$?
+    if [[ "$stash_exit" -ne 0 ]]; then
+        log "ERROR: stash restore failed during rollback (exit $stash_exit)"
+        log "ERROR: stash restore stderr: $stash_stderr"
+        bm_log error upgrade "rollback partial — manual intervention required" \
+            "{\"version\": \"$new_version\", \"stage\": \"$stage\", \"stash_exit\": $stash_exit}"
+        add_blocklist "$new_version" "${stage}_partial_rollback"
+        report_failure "$new_version" "$from_version" "apply_partial_rollback"
+        # Truncate stderr in the alert body — Pushover messages are length-limited.
+        local stderr_excerpt="${stash_stderr:0:500}"
+        send_notification "boxmunge ROLLBACK PARTIAL" \
+            "ROLLBACK PARTIAL — manual intervention required.
+Version: $new_version
+Stage: $stage
+Stash restore exit: $stash_exit
+Stderr (truncated): $stderr_excerpt"
+        log "Rollback PARTIAL: venv reverted to slot $prev_slot but stash restore failed"
+        exit 2
+    fi
 
     add_blocklist "$new_version" "$stage"
     report_failure "$new_version" "$from_version" "$stage"
@@ -230,6 +282,7 @@ cmd_run() {
         exit 1
     fi
     log "Cosign signature on SHA256SUMS verified (release-workflow identity)"
+    bm_log info upgrade "signature verified" "{\"version\": \"$version\"}"
 
     # Verify checksum.
     #
@@ -313,6 +366,7 @@ cmd_run() {
         rm -rf "$BOXMUNGE_ROOT/canary"
         cp -r "$tmp_download/boxmunge/canary" "$BOXMUNGE_ROOT/canary"
         chown -R root:root "$BOXMUNGE_ROOT/canary"
+        bm_log info upgrade "canary refreshed" "{\"version\": \"$version\"}"
     fi
 
     # 3b. Self-update the upgrade shim itself.
@@ -320,17 +374,33 @@ cmd_run() {
     # bug fixes) take effect only on the upgrade AFTER they ship —
     # because the running shim was the one shipped with the prior version.
     # The shim runs as root and lives at $BIN_DIR; copy in place atomically.
-    if [[ -f "$tmp_download/boxmunge/scripts/boxmunge-upgrade" ]]; then
-        log "Self-updating upgrade shim from bundle..."
-        install -m 0755 -o root -g root \
-            "$tmp_download/boxmunge/scripts/boxmunge-upgrade" \
-            "$BIN_DIR/boxmunge-upgrade"
+    #
+    # Gate on `bash -n` first: if a future release ships a syntactically
+    # broken shim, the install would overwrite the working shim and brick
+    # `boxmunge-upgrade` until install.sh is re-run. The venv install still
+    # happens; the fix in the new shim is just deferred to the next release.
+    local new_shim="$tmp_download/boxmunge/scripts/boxmunge-upgrade"
+    if [[ -f "$new_shim" ]]; then
+        if bash -n "$new_shim" 2>/dev/null; then
+            log "Self-updating upgrade shim from bundle..."
+            install -m 0755 -o root -g root "$new_shim" "$BIN_DIR/boxmunge-upgrade"
+            bm_log info upgrade "shim self-updated" "{\"version\": \"$version\"}"
+        else
+            log "ERROR: new shim has syntax errors; refusing to install. Old shim retained."
+            bm_log error upgrade "shim self-update skipped: bash -n failed" "{\"version\": \"$version\"}"
+        fi
         # Also refresh any other shims under bin/ if the bundle ships them.
         # boxmunge-sftp is the SFTP wrapper invoked by sshd; same self-bootstrap concern.
         for shim_name in boxmunge-sftp; do
             shim_src="$tmp_download/boxmunge/scripts/$shim_name"
             if [[ -f "$shim_src" ]]; then
-                install -m 0755 -o root -g root "$shim_src" "$BIN_DIR/$shim_name"
+                if bash -n "$shim_src" 2>/dev/null; then
+                    install -m 0755 -o root -g root "$shim_src" "$BIN_DIR/$shim_name"
+                    bm_log info upgrade "wrapper self-updated" "{\"name\": \"$shim_name\", \"version\": \"$version\"}"
+                else
+                    log "ERROR: new $shim_name has syntax errors; refusing to install. Old wrapper retained."
+                    bm_log error upgrade "wrapper self-update skipped: bash -n failed" "{\"name\": \"$shim_name\", \"version\": \"$version\"}"
+                fi
             fi
         done
     fi
@@ -347,8 +417,13 @@ cmd_run() {
 
     # 6. VERIFY
     log "Running health check..."
+    # Bound the immediate post-swap health check. A wedged docker socket
+    # or stuck subprocess could otherwise hang here indefinitely. Use
+    # --kill-after=10 to escalate SIGTERM -> SIGKILL if the process refuses
+    # to die. Budget is shorter than probation's 180s because this is the
+    # post-swap quick check; probation does the long-running validation.
     local health_exit=0
-    "$(active_venv)/bin/boxmunge-server" health --json >/dev/null 2>&1 || health_exit=$?
+    timeout --kill-after=10 60 "$(active_venv)/bin/boxmunge-server" health --json >/dev/null 2>&1 || health_exit=$?
     if [[ "$health_exit" -eq 2 ]]; then
         do_rollback "$version" "$from_version" "health_immediate" "$prev_slot"
     fi
@@ -361,6 +436,7 @@ from boxmunge.upgrade_state import write_probation
 from boxmunge.paths import BoxPaths
 write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT'], hours=6)
 "
+    bm_log info upgrade "probation entered" "{\"version\": \"$version\", \"prev_slot\": \"$prev_slot\", \"hours\": 6}"
 
     send_notification "boxmunge security update applied" "Updated to $version (probation: 6h)"
     log "Upgrade to $version complete, probation started"
@@ -411,6 +487,7 @@ print('yes' if datetime.now(timezone.utc) >= expires else 'no')
         rm -rf "$BOXMUNGE_ROOT/env-$prev_slot"
         rm -f "$PROBATION_FILE"
         log "Version $version promoted"
+        bm_log info upgrade "probation passed" "{\"version\": \"$version\"}"
         exit 0
     fi
 
@@ -423,8 +500,12 @@ print('yes' if datetime.now(timezone.utc) >= expires else 'no')
     #                 idempotent in the sense that a real regression will be
     #                 caught on the next tick.
     #   else        -> healthy (or warnings only) -> continue probation
+    # --kill-after=10 escalates SIGTERM -> SIGKILL if the health subprocess
+    # ignores the initial SIGTERM (e.g. wedged docker socket). Without it,
+    # `timeout 180` waits indefinitely for an unresponsive process and
+    # successive timer fires stack stuck health invocations.
     local health_exit=0
-    timeout 180 "$(active_venv)/bin/boxmunge-server" health --json >/dev/null 2>&1 || health_exit=$?
+    timeout --kill-after=10 180 "$(active_venv)/bin/boxmunge-server" health --json >/dev/null 2>&1 || health_exit=$?
 
     if [[ "$health_exit" -eq 2 ]]; then
         local from_version
