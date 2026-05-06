@@ -174,6 +174,16 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
 
 def cmd_doctor(args: list[str]) -> None:
     """CLI entry point for doctor command."""
+    known_flags = {"--json"}
+    unknown = [a for a in args if a not in known_flags]
+    if unknown:
+        print(
+            f"ERROR: unknown argument(s): {' '.join(unknown)}",
+            file=sys.stderr,
+        )
+        print("Usage: boxmunge doctor [--json]", file=sys.stderr)
+        sys.exit(2)
+
     paths = BoxPaths()
     as_json = "--json" in args
     if not as_json:

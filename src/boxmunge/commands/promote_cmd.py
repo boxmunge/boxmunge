@@ -57,7 +57,9 @@ def _run_promote_inner(
     )
     if deploy_result != 0:
         print("ERROR: Production deploy failed. Staging is still live.", file=sys.stderr)
-        return 1
+        # Preserve hardening-rejection exit code (3) so operators can
+        # distinguish security policy failures from generic deploy errors.
+        return deploy_result if deploy_result == 3 else 1
 
     # Only tear down staging after successful production deploy
     print("  Tearing down staging...")
@@ -79,8 +81,30 @@ def cmd_promote(args: list[str]) -> None:
     if not args:
         print("Usage: boxmunge promote <project> [--dry-run]", file=sys.stderr)
         sys.exit(2)
+
+    known_flags = {"--dry-run"}
+    unknown = [a for a in args if a.startswith("--") and a not in known_flags]
+    if unknown:
+        print(
+            f"ERROR: unknown argument(s): {' '.join(unknown)}",
+            file=sys.stderr,
+        )
+        print("Usage: boxmunge promote <project> [--dry-run]", file=sys.stderr)
+        sys.exit(2)
+
     dry_run = "--dry-run" in args
-    project = [a for a in args if not a.startswith("--")][0]
+    positional = [a for a in args if not a.startswith("--")]
+    if not positional:
+        print("Usage: boxmunge promote <project> [--dry-run]", file=sys.stderr)
+        sys.exit(2)
+    if len(positional) > 1:
+        print(
+            f"ERROR: unknown argument(s): {' '.join(positional[1:])}",
+            file=sys.stderr,
+        )
+        print("Usage: boxmunge promote <project> [--dry-run]", file=sys.stderr)
+        sys.exit(2)
+    project = positional[0]
 
     from boxmunge.paths import validate_project_name
     try:

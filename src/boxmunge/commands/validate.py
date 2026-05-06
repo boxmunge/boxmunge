@@ -108,9 +108,26 @@ def _run_validate_json(project_name: str, paths: BoxPaths) -> int:
 
 def cmd_validate(args: list[str]) -> None:
     """CLI entry point for validate command."""
+    known_flags = {"--json"}
+    unknown = [a for a in args if a.startswith("--") and a not in known_flags]
+    if unknown:
+        print(
+            f"ERROR: unknown argument(s): {' '.join(unknown)}",
+            file=sys.stderr,
+        )
+        print("Usage: boxmunge validate <project> [--json]", file=sys.stderr)
+        sys.exit(2)
+
     as_json = "--json" in args
     positional = [a for a in args if not a.startswith("--")]
     if not positional:
+        print("Usage: boxmunge validate <project> [--json]", file=sys.stderr)
+        sys.exit(2)
+    if len(positional) > 1:
+        print(
+            f"ERROR: unknown argument(s): {' '.join(positional[1:])}",
+            file=sys.stderr,
+        )
         print("Usage: boxmunge validate <project> [--json]", file=sys.stderr)
         sys.exit(2)
 

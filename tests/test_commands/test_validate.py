@@ -113,3 +113,16 @@ class TestValidateJson:
         assert payload["project"] == "myapp"
         assert payload["valid"] is False
         assert payload["errors"]
+
+
+class TestValidateUnknownArg:
+    """Audit H-N1: cmd_validate rejects unknown flags."""
+
+    def test_unknown_flag_exits_2(self, capsys) -> None:
+        from boxmunge.commands.validate import cmd_validate
+        with pytest.raises(SystemExit) as exc:
+            cmd_validate(["myapp", "--not-a-flag"])
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "ERROR" in err
+        assert "--not-a-flag" in err

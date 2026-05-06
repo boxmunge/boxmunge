@@ -38,3 +38,15 @@ class TestDoctorJson:
             cmd_doctor([])
         out = capsys.readouterr().out
         assert "boxmunge doctor" in out
+
+
+class TestDoctorUnknownArg:
+    """Audit H-N1: cmd_doctor rejects unknown flags."""
+
+    def test_unknown_flag_exits_2(self, capsys) -> None:
+        with pytest.raises(SystemExit) as exc:
+            cmd_doctor(["--not-a-flag"])
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "ERROR" in err
+        assert "--not-a-flag" in err

@@ -173,3 +173,13 @@ def test_security_json_off_services(monkeypatch, tmp_path) -> None:
     assert payload["project_profile"] == "off"
     assert payload["off_services"] == [{"service": "web", "reason": "deliberate"}]
     assert payload["services"]["web"] == {}
+
+
+def test_security_unknown_flag_exits_2(capsys) -> None:
+    """Audit H-N1: cmd_security rejects unknown flags."""
+    with pytest.raises(SystemExit) as exc:
+        cmd_security(["demo", "--not-a-flag"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "ERROR" in err
+    assert "--not-a-flag" in err

@@ -99,10 +99,27 @@ def cmd_security(args: list[str]) -> None:
         print(USAGE)
         sys.exit(0 if args else 2)
 
+    known_flags = {"--json"}
+    unknown = [a for a in args if a.startswith("--") and a not in known_flags]
+    if unknown:
+        print(
+            f"ERROR: unknown argument(s): {' '.join(unknown)}",
+            file=sys.stderr,
+        )
+        print(USAGE, file=sys.stderr)
+        sys.exit(2)
+
     as_json = "--json" in args
     positional = [a for a in args if not a.startswith("--")]
     if not positional:
         print(USAGE)
+        sys.exit(2)
+    if len(positional) > 1:
+        print(
+            f"ERROR: unknown argument(s): {' '.join(positional[1:])}",
+            file=sys.stderr,
+        )
+        print(USAGE, file=sys.stderr)
         sys.exit(2)
     project = positional[0]
 

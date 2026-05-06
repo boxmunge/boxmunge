@@ -374,3 +374,16 @@ class TestCheckJson:
         payload = json.loads(capsys.readouterr().out)
         assert payload["smoke"] == {"status": "ok", "message": ""}
         assert payload["exit_code"] == 0
+
+
+class TestCheckUnknownArg:
+    """Audit H-N1: cmd_check rejects unknown flags (not silent-drop)."""
+
+    def test_unknown_flag_exits_2(self, capsys) -> None:
+        from boxmunge.commands.check import cmd_check
+        with pytest.raises(SystemExit) as exc:
+            cmd_check(["myapp", "--not-a-flag"])
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "ERROR" in err
+        assert "--not-a-flag" in err

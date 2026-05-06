@@ -142,3 +142,44 @@ class TestPromoteComponentTagging:
             component="promote",
         )
         assert observed == ["promote"]
+
+
+class TestPromoteUnknownArg:
+    """Audit H-N1: cmd_promote rejects unknown flags."""
+
+    def test_unknown_flag_exits_2(self, capsys) -> None:
+        import pytest
+        from boxmunge.commands.promote_cmd import cmd_promote
+        with pytest.raises(SystemExit) as exc:
+            cmd_promote(["myapp", "--not-a-flag"])
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "ERROR" in err
+        assert "--not-a-flag" in err
+
+
+class TestPromoteComposeRejectionExit3:
+    """Audit H-N2: hardening rejection from underlying deploy returns 3."""
+
+    @patch("boxmunge.commands.promote_cmd.run_deploy")
+    @patch("boxmunge.commands.promote_cmd.run_unstage")
+    def test_hardening_rejection_propagates_3(
+        self, mock_unstage, mock_deploy, paths,
+    ):
+        # Reuse setup fixture from TestRunPromote.
+        pdir = paths.project_dir("testapp")
+        pdir.mkdir(parents=True, exist_ok=True)
+        (pdir / "manifest.yml").write_text(VALID_MANIFEST)
+        (pdir / "compose.yml").write_text("services:\n  web:\n    image: nginx\n")
+        paths.project_staging_compose_override("testapp").write_text(
+            "networks:\n  boxmunge-proxy:\n    external: true\n")
+        paths.project_staging_caddy_site("testapp").write_text(
+            "staging.testapp.example.com {}\n")
+        write_state(paths.project_staging_state("testapp"), {"active": True})
+
+        # Underlying deploy hits compose validation and returns 3.
+        mock_deploy.return_value = 3
+        result = run_promote("testapp", paths)
+        assert result == 3
+        # Unstage must NOT run — production is hostile, staging stays live.
+        mock_unstage.assert_not_called()
