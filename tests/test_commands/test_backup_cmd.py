@@ -241,6 +241,128 @@ class TestBackupAllLockSkip:
         mock_notify.assert_not_called()
         assert rc == 1
 
+    @patch("boxmunge.commands.backup_cmd.log_operation")
+    @patch("boxmunge.commands.backup_cmd._notify_persistent_locks")
+    @patch("boxmunge.commands.backup_cmd.run_backup")
+    def test_first_pass_lock_logs_retry_intent(
+        self, mock_backup: MagicMock, mock_notify: MagicMock,
+        mock_log_op: MagicMock,
+        paths: BoxPaths, monkeypatch,
+    ) -> None:
+        """Audit E-NEW-4: first-pass lock skip emits a structured log line
+        ("locked, retrying") so the forensic trail isn't only on stdout.
+        """
+        self._setup_two_projects(paths)
+        monkeypatch.setattr(backup_cmd, "_LOCK_RETRY_BUDGET_SECONDS", 0.1)
+        monkeypatch.setattr(backup_cmd, "_LOCK_RETRY_INTERVAL_SECONDS", 0.05)
+
+        fd = self._hold_project_lock(paths, "alpha")
+        try:
+            mock_backup.return_value = 0
+            run_backup_all(paths)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+        retry_msgs = [
+            c for c in mock_log_op.call_args_list
+            if c.args[1] == "locked, retrying" and c.kwargs.get("project") == "alpha"
+        ]
+        assert len(retry_msgs) == 1, mock_log_op.call_args_list
+
+    @patch("boxmunge.commands.backup_cmd.log_operation")
+    @patch("boxmunge.commands.backup_cmd._notify_persistent_locks")
+    @patch("boxmunge.commands.backup_cmd.run_backup")
+    def test_retry_success_emits_log_entry(
+        self, mock_backup: MagicMock, mock_notify: MagicMock,
+        mock_log_op: MagicMock,
+        paths: BoxPaths, monkeypatch,
+    ) -> None:
+        """Audit E-NEW-4: retry success emits "backup completed after retry"."""
+        self._setup_two_projects(paths)
+        monkeypatch.setattr(backup_cmd, "_LOCK_RETRY_BUDGET_SECONDS", 1.0)
+        monkeypatch.setattr(backup_cmd, "_LOCK_RETRY_INTERVAL_SECONDS", 0.05)
+
+        # Hold alpha briefly then release in a thread.
+        fd = self._hold_project_lock(paths, "alpha")
+        import threading
+        import time as _time
+
+        def _release():
+            _time.sleep(0.15)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        threading.Thread(target=_release, daemon=True).start()
+
+        mock_backup.return_value = 0
+        run_backup_all(paths)
+
+        retry_completed = [
+            c for c in mock_log_op.call_args_list
+            if c.args[1] == "backup completed after retry"
+            and c.kwargs.get("project") == "alpha"
+        ]
+        assert len(retry_completed) == 1, mock_log_op.call_args_list
+
+
+class TestNotifyPersistentLocks:
+    """Audit D-NEW-3: distinguish Pushover-sent vs Pushover-not-configured."""
+
+    @patch("boxmunge.commands.backup_cmd.log_operation")
+    @patch("boxmunge.commands.backup_cmd.log_warning")
+    @patch("boxmunge.pushover.send_notification")
+    @patch("boxmunge.commands.backup_cmd.load_config")
+    def test_pushover_sent_logs_operation(
+        self, mock_load: MagicMock, mock_send: MagicMock,
+        mock_log_warn: MagicMock, mock_log_op: MagicMock,
+        paths: BoxPaths,
+    ) -> None:
+        from boxmunge.commands.backup_cmd import _notify_persistent_locks
+        mock_load.return_value = {
+            "pushover": {"user_key": "u", "app_token": "t"},
+        }
+        mock_send.return_value = True
+        _notify_persistent_locks(paths, ["alpha"])
+        sent_logs = [
+            c for c in mock_log_op.call_args_list
+            if "Pushover sent" in c.args[1]
+        ]
+        assert len(sent_logs) == 1
+        # No warning when alert was actually delivered.
+        warn_logs = [
+            c for c in mock_log_warn.call_args_list
+            if "alert dropped" in c.args[1]
+        ]
+        assert warn_logs == []
+
+    @patch("boxmunge.commands.backup_cmd.log_operation")
+    @patch("boxmunge.commands.backup_cmd.log_warning")
+    @patch("boxmunge.pushover.send_notification")
+    @patch("boxmunge.commands.backup_cmd.load_config")
+    def test_pushover_unconfigured_logs_warning(
+        self, mock_load: MagicMock, mock_send: MagicMock,
+        mock_log_warn: MagicMock, mock_log_op: MagicMock,
+        paths: BoxPaths,
+    ) -> None:
+        from boxmunge.commands.backup_cmd import _notify_persistent_locks
+        # Empty pushover config -> send_notification returns False.
+        mock_load.return_value = {"pushover": {}}
+        mock_send.return_value = False
+        _notify_persistent_locks(paths, ["alpha", "beta"])
+
+        dropped = [
+            c for c in mock_log_warn.call_args_list
+            if "alert dropped" in c.args[1]
+        ]
+        assert len(dropped) == 1
+        assert "Pushover not configured" in dropped[0].args[1]
+        # No "Pushover sent" log entry on the unconfigured branch.
+        sent_logs = [
+            c for c in mock_log_op.call_args_list
+            if "Pushover sent" in c.args[1]
+        ]
+        assert sent_logs == []
+
 
 class TestListSnapshots:
     def test_lists_existing_snapshots(self, paths: BoxPaths) -> None:

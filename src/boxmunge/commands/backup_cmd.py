@@ -1,5 +1,6 @@
 """boxmunge backup/backup-all/backup-sync commands."""
 
+import enum
 import os
 import subprocess
 import sys
@@ -22,6 +23,19 @@ from boxmunge.probation import clear_probation_if_active
 # Bounded so a stuck deploy doesn't keep nightly backup running forever.
 _LOCK_RETRY_BUDGET_SECONDS = 30.0
 _LOCK_RETRY_INTERVAL_SECONDS = 2.0
+
+
+class BackupAttemptResult(enum.Enum):
+    """Outcome of a single locked-backup attempt (audit I-NEW-2).
+
+    Replaces the previous stringly-typed status (`"ok"` / `"failed"` /
+    `"locked"`). Members' ``.value`` matches the original strings so the
+    log lines and any external integrations remain unchanged.
+    """
+
+    OK = "ok"
+    FAILED = "failed"
+    LOCKED = "locked"
 
 
 def _execute_dump(
@@ -169,20 +183,20 @@ def _run_backup_inner(
     return 0
 
 
-def _attempt_locked_backup(name: str, paths: BoxPaths) -> str:
-    """Attempt a single backup under the project lock.
+def _attempt_locked_backup(name: str, paths: BoxPaths) -> BackupAttemptResult:
+    """Attempt a single backup under the project lock (audit I-NEW-2).
 
-    Returns one of:
-      - "ok"       — backup succeeded (rc 0)
-      - "failed"   — backup ran but returned non-zero (real failure)
-      - "locked"   — project lock was held by another operation
+    Returns:
+      - ``BackupAttemptResult.OK``     — backup succeeded (rc 0)
+      - ``BackupAttemptResult.FAILED`` — backup ran but returned non-zero
+      - ``BackupAttemptResult.LOCKED`` — project lock was held by another op
     """
     try:
         with project_lock(name, paths):
             rc = run_backup(name, paths, _lock_held=True)
     except LockError:
-        return "locked"
-    return "ok" if rc == 0 else "failed"
+        return BackupAttemptResult.LOCKED
+    return BackupAttemptResult.OK if rc == 0 else BackupAttemptResult.FAILED
 
 
 def _notify_persistent_locks(paths: BoxPaths, locked: list[str]) -> None:
@@ -192,6 +206,10 @@ def _notify_persistent_locks(paths: BoxPaths, locked: list[str]) -> None:
     project's nightly backup window with no operator-visible signal. Pushover
     is the operator's only out-of-band channel; failures here must surface
     in the log.
+
+    Audit D-NEW-3: send_notification returns False when Pushover keys are
+    empty. Without surfacing that, the operator can't tell "alert sent" from
+    "alert silently dropped". Both branches now leave a forensic trail.
     """
     if not locked:
         return
@@ -200,7 +218,7 @@ def _notify_persistent_locks(paths: BoxPaths, locked: list[str]) -> None:
         cfg = load_config(paths)
         po = cfg.get("pushover", {})
         names = ", ".join(locked)
-        send_notification(
+        sent = send_notification(
             po.get("user_key", ""), po.get("app_token", ""),
             "boxmunge backup-all SKIPPED (locked)",
             f"Backup skipped for projects: {names}. They were locked at backup "
@@ -211,6 +229,21 @@ def _notify_persistent_locks(paths: BoxPaths, locked: list[str]) -> None:
         log_error(
             "backup", f"Pushover lock-skip alert failed: {e}", paths,
             detail={"locked": locked},
+        )
+        return
+
+    if sent:
+        log_operation(
+            "backup",
+            f"Pushover sent for {len(locked)} persistent locks",
+            paths, detail={"locked": locked},
+        )
+    else:
+        log_warning(
+            "backup",
+            f"persistent backup locks ({len(locked)}); "
+            "Pushover not configured — alert dropped",
+            paths, detail={"locked": locked},
         )
 
 
@@ -245,11 +278,16 @@ def run_backup_all(paths: BoxPaths) -> int:
             print(f"  Skipping {name}: paused.")
             continue
         result = _attempt_locked_backup(name, paths)
-        if result == "ok":
+        if result == BackupAttemptResult.OK:
             continue
-        if result == "locked":
+        if result == BackupAttemptResult.LOCKED:
             locked.append(name)
             print(f"  {name}: locked, will retry")
+            # Audit E-NEW-4: surface the first-pass lock skip in the
+            # structured log too (previously only printed to stdout).
+            log_operation(
+                "backup", "locked, retrying", paths, project=name,
+            )
             continue
         failed.append(name)
 
@@ -263,15 +301,20 @@ def run_backup_all(paths: BoxPaths) -> int:
             if time.monotonic() >= deadline:
                 still_locked.append(name)
                 continue
-            outcome: str = "locked"
+            outcome: BackupAttemptResult = BackupAttemptResult.LOCKED
             while time.monotonic() < deadline:
                 outcome = _attempt_locked_backup(name, paths)
-                if outcome != "locked":
+                if outcome != BackupAttemptResult.LOCKED:
                     break
                 time.sleep(_LOCK_RETRY_INTERVAL_SECONDS)
-            if outcome == "ok":
+            if outcome == BackupAttemptResult.OK:
+                # Audit E-NEW-4: forensic trail for retry success.
+                log_operation(
+                    "backup", "backup completed after retry",
+                    paths, project=name,
+                )
                 continue
-            if outcome == "failed":
+            if outcome == BackupAttemptResult.FAILED:
                 failed.append(name)
             else:
                 still_locked.append(name)
