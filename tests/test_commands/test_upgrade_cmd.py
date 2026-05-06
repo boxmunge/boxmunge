@@ -139,6 +139,75 @@ class TestRestartRespectsLock:
         assert skipped == []
 
 
+class TestLockSkipPushoverNotification:
+    """D-NEW-1: when _restart_projects skips locked projects during upgrade,
+    a Pushover notification must fire so non-interactive operators see it."""
+
+    def _make_project(self, paths: BoxPaths, name: str) -> None:
+        import yaml
+        pdir = paths.project_dir(name)
+        pdir.mkdir(parents=True)
+        (pdir / "manifest.yml").write_text(yaml.dump({
+            "schema_version": 2, "project": name,
+            "source": "bundle", "hosts": [f"{name}.test"],
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        }))
+
+    @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
+    @patch("boxmunge.commands.upgrade_cmd.compose_up")
+    @patch("boxmunge.pushover.send_notification")
+    def test_pushover_fires_when_apply_skips_locked_project(
+        self, mock_pushover, mock_up, mock_reload, tmp_path
+    ) -> None:
+        # Configure pushover so the wrapper actually attempts to send
+        paths = _setup_paths(tmp_path)
+        paths.config_file.write_text(
+            "hostname: test\nadmin_email: t@t\n"
+            "pushover:\n  user_key: u\n  app_token: t\n"
+        )
+        self._make_project(paths, "alpha")
+        self._make_project(paths, "beta")
+
+        import os, fcntl
+        alpha_lock = paths.project_lock_file("alpha")
+        alpha_lock.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(alpha_lock), os.O_CREAT | os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            result = run_upgrade(paths, apply_only=True)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+        assert result == 0
+        # Exactly one Pushover call, summarising the skipped project
+        assert mock_pushover.call_count == 1
+        call_args = mock_pushover.call_args
+        # send_notification(user_key, app_token, title, message)
+        title = call_args.args[2] if len(call_args.args) >= 3 else call_args.kwargs.get("title", "")
+        message = call_args.args[3] if len(call_args.args) >= 4 else call_args.kwargs.get("message", "")
+        assert "skipped" in title.lower()
+        assert "alpha" in message
+
+    @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
+    @patch("boxmunge.commands.upgrade_cmd.compose_up")
+    @patch("boxmunge.pushover.send_notification")
+    def test_pushover_silent_when_no_skips(
+        self, mock_pushover, mock_up, mock_reload, tmp_path
+    ) -> None:
+        paths = _setup_paths(tmp_path)
+        paths.config_file.write_text(
+            "hostname: test\nadmin_email: t@t\n"
+            "pushover:\n  user_key: u\n  app_token: t\n"
+        )
+        self._make_project(paths, "alpha")
+
+        result = run_upgrade(paths, apply_only=True)
+        assert result == 0
+        # No skips -> no notification
+        mock_pushover.assert_not_called()
+
+
 class TestArgParsing:
     """cmd_upgrade arg parsing — previously silently ignored unknown args."""
 

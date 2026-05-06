@@ -142,6 +142,40 @@ def _regenerate_configs(paths: BoxPaths) -> list[str]:
     return processed
 
 
+def _notify_locked_skips(paths: BoxPaths, skipped_locked: list[str]) -> None:
+    """Send a Pushover summary when _restart_projects skipped any projects.
+
+    The lock-skip is logged but, in non-interactive contexts (cron timer,
+    auto-update path), the operator never sees the warning. This raises
+    the visibility to the same channel as other upgrade-time alerts.
+    Pushover failures degrade gracefully to log_error — same I-2b pattern
+    as container_update_cmd._send_summary_alert.
+    """
+    if not skipped_locked:
+        return
+    title = "boxmunge upgrade — projects skipped restart"
+    names = ", ".join(skipped_locked)
+    body = (
+        f"Upgrade applied but {len(skipped_locked)} project(s) skipped "
+        f"restart (locked): {names}. They will pick up new config on next "
+        f"deploy."
+    )
+    try:
+        from boxmunge.config import load_config
+        from boxmunge.pushover import send_notification
+        cfg = load_config(paths)
+        po = cfg.get("pushover", {})
+        send_notification(
+            po.get("user_key", ""), po.get("app_token", ""),
+            title, body,
+        )
+    except Exception as e:
+        log_error(
+            "upgrade", f"Pushover lock-skip alert failed: {e}", paths,
+            detail={"skipped_locked": skipped_locked},
+        )
+
+
 def _restart_projects(
     paths: BoxPaths,
 ) -> tuple[list[str], list[str], list[str]]:
@@ -281,6 +315,7 @@ def _run_apply(paths: BoxPaths, current_version: str, new_version: str) -> int:
         print(f"  Restarted: {', '.join(succeeded)}")
     if skipped_locked:
         print(f"  Skipped (locked): {', '.join(skipped_locked)}")
+    _notify_locked_skips(paths, skipped_locked)
     if failed_projects:
         print(f"  FAILED: {', '.join(failed_projects)}")
 
@@ -348,6 +383,7 @@ def _run_full(
         print(f"  Restarted: {', '.join(succeeded)}")
     if skipped_locked:
         print(f"  Skipped (locked): {', '.join(skipped_locked)}")
+    _notify_locked_skips(paths, skipped_locked)
     if failed_projects:
         print(f"  FAILED: {', '.join(failed_projects)}")
 
