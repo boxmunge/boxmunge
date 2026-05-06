@@ -63,6 +63,9 @@ class BoxPaths:
         self.cosign_pub = self.config / "cosign.pub"
         self.container_update_state = self.state / "container-updates"
         self.container_update_lock = self.container_update_state / ".lock"
+        # CVE migration grace marker (singleton, fleet-wide).
+        # Created lazily on first scan after upgrade; never re-init.
+        self.cve_grace_state = self.state / "cve-grace.json"
 
     def container_update_target_state(self, name: str) -> Path:
         return self.container_update_state / f"{name}.json"
@@ -102,6 +105,12 @@ class BoxPaths:
 
     def project_paused_state(self, name: str) -> Path:
         return self.deploy_state / f"{name}.paused.json"
+
+    def project_quarantine_state(self, name: str) -> Path:
+        return self.deploy_state / f"{name}.quarantined.json"
+
+    def project_scan_state(self, name: str) -> Path:
+        return self.state / "scans" / f"{name}.json"
 
     def project_staging_caddy_site(self, name: str) -> Path:
         return self.caddy_sites / f"{name}-staging.conf"

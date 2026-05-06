@@ -38,6 +38,12 @@ class TestStagingPaths:
             paths.state / "staging" / "myapp.json"
 
 
+class TestScanStatePath:
+    def test_project_scan_state(self, paths: BoxPaths) -> None:
+        assert paths.project_scan_state("myapp") == \
+            paths.state / "scans" / "myapp.json"
+
+
 class TestPreRegistered:
     def test_true_when_dir_exists_no_manifest(self, paths: BoxPaths) -> None:
         pdir = paths.project_dir("myapp")
@@ -102,3 +108,12 @@ class TestProjectPausedState:
         paths = BoxPaths(root=Path("/tmp/test-bm"))
         assert paths.project_paused_state("myapp") == \
             Path("/tmp/test-bm/state/deploy/myapp.paused.json")
+
+
+class TestProjectQuarantineState:
+    def test_quarantine_state_path(self) -> None:
+        from boxmunge.paths import BoxPaths
+        from pathlib import Path
+        paths = BoxPaths(root=Path("/tmp/test-bm"))
+        assert paths.project_quarantine_state("myapp") == \
+            Path("/tmp/test-bm/state/deploy/myapp.quarantined.json")
