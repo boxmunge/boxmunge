@@ -865,3 +865,279 @@ services:
             for call in mw.call_args_list:
                 # project=None means structured logs simply don't carry the field.
                 assert call.kwargs.get("project") is None
+
+
+# ---------------------------------------------------------------------------
+# v0.6.0 — CVE policy cross-validation. Project-level CVE-policy fields
+# (`dangerously_disable_quarantine`, `posture: strict`) demand `read_only:
+# true` on every non-off service as defense in depth. Off services log a
+# warning instead of raising.
+# ---------------------------------------------------------------------------
+
+class TestCveCrossValidation:
+    # --- Rule A: dangerously_disable_quarantine requires read_only -----------
+
+    def test_disable_quarantine_with_readonly_passes(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    read_only: true
+""")
+        validate_user_compose(
+            compose, paths,
+            cve_policy={"dangerously_disable_quarantine": True},
+        )
+
+    def test_disable_quarantine_with_readonly_false_rejected(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    read_only: false
+""")
+        with pytest.raises(ComposeSecurityError) as exc:
+            validate_user_compose(
+                compose, paths,
+                cve_policy={"dangerously_disable_quarantine": True},
+            )
+        msg = str(exc.value)
+        assert "service web" in msg
+        assert "dangerously_disable_quarantine: true requires" in msg
+        assert "read_only: true" in msg
+        assert "Read-only rootfs" in msg
+
+    def test_disable_quarantine_without_readonly_key_rejected(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+""")
+        with pytest.raises(ComposeSecurityError, match="dangerously_disable_quarantine"):
+            validate_user_compose(
+                compose, paths,
+                cve_policy={"dangerously_disable_quarantine": True},
+            )
+
+    def test_disable_quarantine_offending_service_in_off_warns_only(
+        self, tmp_path: Path, paths, capsys
+    ) -> None:
+        from boxmunge.log import _reset_logger
+        _reset_logger()
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    read_only: false
+""")
+        # No raise — off service downgrades to warning.
+        validate_user_compose(
+            compose, paths,
+            off_services={"web"},
+            cve_policy={"dangerously_disable_quarantine": True},
+        )
+        captured = capsys.readouterr()
+        assert "web" in captured.err
+        assert "dangerously_disable_quarantine" in captured.err
+        assert "read_only" in captured.err
+
+    def test_disable_quarantine_false_does_not_apply_rule(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+""")
+        validate_user_compose(
+            compose, paths,
+            cve_policy={"dangerously_disable_quarantine": False},
+        )
+
+    def test_disable_quarantine_absent_does_not_apply_rule(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+""")
+        # Empty cve_policy dict — neither rule applies.
+        validate_user_compose(compose, paths, cve_policy={})
+
+    def test_cve_policy_none_does_not_apply_rules(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+""")
+        validate_user_compose(compose, paths, cve_policy=None)
+
+    def test_disable_quarantine_first_offender_named_in_error(
+        self, tmp_path: Path, paths
+    ) -> None:
+        # Service ordering follows insertion order. `alpha` is missing
+        # read_only first, so the error must name `alpha`, not `beta`.
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  alpha:
+    image: a
+    read_only: false
+  beta:
+    image: b
+    read_only: true
+  gamma:
+    image: c
+""")
+        with pytest.raises(ComposeSecurityError) as exc:
+            validate_user_compose(
+                compose, paths,
+                cve_policy={"dangerously_disable_quarantine": True},
+            )
+        msg = str(exc.value)
+        assert "service alpha" in msg
+        assert "service beta" not in msg
+        assert "service gamma" not in msg
+
+    # --- Rule B: posture: strict requires read_only --------------------------
+
+    def test_posture_strict_with_readonly_passes(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    read_only: true
+  api:
+    image: api
+    read_only: true
+""")
+        validate_user_compose(
+            compose, paths, cve_policy={"posture": "strict"},
+        )
+
+    def test_posture_strict_without_readonly_rejected(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+""")
+        with pytest.raises(ComposeSecurityError) as exc:
+            validate_user_compose(
+                compose, paths, cve_policy={"posture": "strict"},
+            )
+        msg = str(exc.value)
+        assert "service web" in msg
+        assert "posture 'strict' requires read_only: true" in msg
+        assert "balanced" in msg or "relaxed" in msg
+
+    def test_posture_strict_offending_service_in_off_warns_only(
+        self, tmp_path: Path, paths, capsys
+    ) -> None:
+        from boxmunge.log import _reset_logger
+        _reset_logger()
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+""")
+        validate_user_compose(
+            compose, paths,
+            off_services={"web"},
+            cve_policy={"posture": "strict"},
+        )
+        captured = capsys.readouterr()
+        assert "web" in captured.err
+        assert "strict" in captured.err
+        assert "read_only" in captured.err
+
+    def test_posture_balanced_does_not_apply_rule(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+""")
+        validate_user_compose(
+            compose, paths, cve_policy={"posture": "balanced"},
+        )
+
+    def test_posture_relaxed_does_not_apply_rule(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+""")
+        validate_user_compose(
+            compose, paths, cve_policy={"posture": "relaxed"},
+        )
+
+    def test_posture_absent_does_not_apply_rule(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+""")
+        # No `posture` key — Rule B inert.
+        validate_user_compose(
+            compose, paths,
+            cve_policy={"dangerously_disable_quarantine": False},
+        )
+
+    # --- Combined: rule order ------------------------------------------------
+
+    def test_both_rules_trigger_rule_a_wins(
+        self, tmp_path: Path, paths
+    ) -> None:
+        # Service violates both rules. Rule A (dangerously_disable_quarantine)
+        # runs first per spec, so its message must be the one raised.
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+""")
+        with pytest.raises(ComposeSecurityError) as exc:
+            validate_user_compose(
+                compose, paths,
+                cve_policy={
+                    "dangerously_disable_quarantine": True,
+                    "posture": "strict",
+                },
+            )
+        msg = str(exc.value)
+        assert "dangerously_disable_quarantine: true requires" in msg
+        # Rule B's distinctive phrasing must NOT appear.
+        assert "posture 'strict' requires" not in msg
+
+    # --- Backward-compat: signature stays optional ---------------------------
+
+    def test_signature_remains_compatible_without_cve_policy(
+        self, tmp_path: Path, paths
+    ) -> None:
+        # Existing callers don't pass cve_policy. Must keep working.
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+""")
+        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, off_services={"web"})
+        validate_user_compose(
+            compose, paths, off_services=None, project_name="demo",
+        )

@@ -16,6 +16,15 @@ PROFILE_OFF = "off"
 KNOWN_PROFILES: set[str] = {PROFILE_DEFAULT, PROFILE_OFF}
 RESERVED_PROFILES: set[str] = {"strict", "paranoid"}
 
+# v0.6.0 CVE policy: project-level posture controls quarantine severity
+# threshold. Independent of `profile` — the two coexist freely. Default
+# (when absent) is interpreted as "balanced" by downstream readers; we
+# do NOT inject a default into the manifest dict during validation.
+POSTURE_RELAXED = "relaxed"
+POSTURE_BALANCED = "balanced"
+POSTURE_STRICT = "strict"
+KNOWN_POSTURES: set[str] = {POSTURE_RELAXED, POSTURE_BALANCED, POSTURE_STRICT}
+
 # Default `cap_drop` list. Capabilities in this list are NOT in Docker's
 # default deny set, but are dangerous and rarely needed by application code.
 # See spec §"Default cap_drop list" for rationale per cap.
@@ -223,6 +232,44 @@ def validate_security_block(
             raise SecurityValidationError(
                 f"{context}: {bool_field} must be true or false, "
                 f"got {block[bool_field]!r}"
+            )
+
+    if "posture" in block:
+        if context != "project":
+            raise SecurityValidationError(
+                f"{context}: 'posture' is only valid at the project level "
+                f"(manifest top-level security: block), not per-service. "
+                f"CVE posture applies to the whole project."
+            )
+        posture = block["posture"]
+        # YAML 1.1 boolean trap: bool is a subtype of str-ish parsing failure
+        # — bare `strict` is fine but check the type explicitly so we don't
+        # accept `posture: true` etc.
+        if not isinstance(posture, str) or isinstance(posture, bool):
+            raise SecurityValidationError(
+                f"{context}: posture must be a string, "
+                f"got {type(posture).__name__}: {posture!r}"
+            )
+        if posture not in KNOWN_POSTURES:
+            raise SecurityValidationError(
+                f"{context}: Unknown posture {posture!r}. "
+                f"Valid postures: {sorted(KNOWN_POSTURES)}."
+            )
+
+    if "dangerously_disable_quarantine" in block:
+        if context != "project":
+            raise SecurityValidationError(
+                f"{context}: 'dangerously_disable_quarantine' is only valid "
+                f"at the project level (manifest top-level security: block), "
+                f"not per-service. CVE posture applies to the whole project."
+            )
+        v = block["dangerously_disable_quarantine"]
+        # bool is a subtype of int, so check bool first to avoid 0/1 slipping
+        # through as "boolean".
+        if not isinstance(v, bool):
+            raise SecurityValidationError(
+                f"{context}: 'dangerously_disable_quarantine' must be a "
+                f"boolean (true or false), got {type(v).__name__}: {v!r}"
             )
 
 

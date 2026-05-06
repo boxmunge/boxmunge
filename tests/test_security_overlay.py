@@ -239,6 +239,109 @@ class TestReasonRequired:
         )
 
 
+class TestPostureValidation:
+    """v0.6.0 CVE policy: project-level `posture` field schema validation."""
+
+    @pytest.mark.parametrize("posture", ["relaxed", "balanced", "strict"])
+    def test_valid_posture_accepted_at_project_level(self, posture: str) -> None:
+        validate_security_block({"posture": posture}, context="project")
+
+    def test_posture_absent_is_valid(self) -> None:
+        validate_security_block({}, context="project")
+        validate_security_block({"profile": "default"}, context="project")
+
+    def test_invalid_posture_string_rejected(self) -> None:
+        with pytest.raises(SecurityValidationError) as exc:
+            validate_security_block({"posture": "wibble"}, context="project")
+        msg = str(exc.value)
+        assert "Unknown posture" in msg
+        # Valid postures must be enumerated for the operator.
+        assert "balanced" in msg
+        assert "relaxed" in msg
+        assert "strict" in msg
+
+    @pytest.mark.parametrize(
+        "value",
+        [42, True, False, ["balanced"], {"name": "balanced"}],
+        ids=["int", "true", "false", "list", "dict"],
+    )
+    def test_non_string_posture_rejected(self, value) -> None:
+        with pytest.raises(SecurityValidationError) as exc:
+            validate_security_block({"posture": value}, context="project")
+        msg = str(exc.value)
+        assert "posture" in msg
+        # Type name is informative for the operator.
+        assert type(value).__name__ in msg
+
+    def test_posture_at_service_level_rejected(self) -> None:
+        with pytest.raises(SecurityValidationError) as exc:
+            validate_security_block(
+                {"posture": "strict"}, context="service:web"
+            )
+        msg = str(exc.value)
+        assert "posture" in msg
+        assert "project level" in msg
+
+    def test_posture_coexists_with_profile_off(self) -> None:
+        # posture is independent of profile — no cross-field rejection.
+        validate_security_block(
+            {"profile": "off", "reason": "honeypot", "posture": "strict"},
+            context="project",
+        )
+
+
+class TestDangerouslyDisableQuarantineValidation:
+    """v0.6.0 CVE policy: project-level `dangerously_disable_quarantine`."""
+
+    def test_true_accepted_at_project_level(self) -> None:
+        validate_security_block(
+            {"dangerously_disable_quarantine": True}, context="project"
+        )
+
+    def test_false_accepted_at_project_level(self) -> None:
+        validate_security_block(
+            {"dangerously_disable_quarantine": False}, context="project"
+        )
+
+    def test_field_absent_is_valid(self) -> None:
+        validate_security_block({}, context="project")
+
+    @pytest.mark.parametrize(
+        "value",
+        [0, 1, "true", "false", [True], {"yes": True}],
+        ids=["int_zero", "int_one", "str_true", "str_false", "list", "dict"],
+    )
+    def test_non_bool_rejected(self, value) -> None:
+        with pytest.raises(SecurityValidationError) as exc:
+            validate_security_block(
+                {"dangerously_disable_quarantine": value}, context="project"
+            )
+        msg = str(exc.value)
+        assert "dangerously_disable_quarantine" in msg
+        assert "boolean" in msg
+        assert type(value).__name__ in msg
+
+    def test_field_at_service_level_rejected(self) -> None:
+        with pytest.raises(SecurityValidationError) as exc:
+            validate_security_block(
+                {"dangerously_disable_quarantine": True},
+                context="service:web",
+            )
+        msg = str(exc.value)
+        assert "dangerously_disable_quarantine" in msg
+        assert "project level" in msg
+
+    def test_coexists_with_profile_default(self) -> None:
+        validate_security_block(
+            {
+                "profile": "default",
+                "dangerously_disable_quarantine": True,
+                "posture": "relaxed",
+            },
+            context="project",
+        )
+
+
 from boxmunge.security_overlay import services_with_off_profile
 
 

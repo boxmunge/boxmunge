@@ -243,6 +243,92 @@ _MULTI_CHECKS = (_check_security_opt, _check_cap_add, _check_volumes)
 
 
 # ---------------------------------------------------------------------------
+# v0.6.0 CVE-policy cross-validators
+#
+# These run after the per-service hostile-key pass, only when the relevant
+# project-level CVE-policy field is set. Each helper returns a violation
+# message for a single service or None — the caller decides whether to
+# raise (non-off service) or warn (off service).
+# ---------------------------------------------------------------------------
+
+_DISABLE_QUARANTINE_MSG = (
+    "service {svc}: dangerously_disable_quarantine: true requires\n"
+    "read_only: true. Either drop dangerously_disable_quarantine from the\n"
+    "manifest's security: block, or restore read-only rootfs on this\n"
+    "service. Read-only rootfs is the only remaining post-exploit defense\n"
+    "when CVE quarantine is disabled."
+)
+
+_STRICT_POSTURE_MSG = (
+    "service {svc}: posture 'strict' requires read_only: true. Strict\n"
+    "posture quarantines on Medium-severity CVEs; this requires defense in\n"
+    "depth. Either lower posture to 'balanced'/'relaxed' or restore\n"
+    "read-only rootfs on this service."
+)
+
+
+def _service_is_read_only(svc: dict[str, Any]) -> bool:
+    """True iff the service explicitly declares `read_only: true`.
+
+    Anything else (False, missing, None, truthy non-bool) violates — this
+    is a deliberate boolean-identity check, not a truthiness test.
+    """
+    return svc.get("read_only") is True
+
+
+def _check_disable_quarantine_requires_readonly(
+    svc: dict[str, Any], svc_name: str
+) -> str | None:
+    if _service_is_read_only(svc):
+        return None
+    return _DISABLE_QUARANTINE_MSG.format(svc=svc_name)
+
+
+def _check_strict_posture_requires_readonly(
+    svc: dict[str, Any], svc_name: str
+) -> str | None:
+    if _service_is_read_only(svc):
+        return None
+    return _STRICT_POSTURE_MSG.format(svc=svc_name)
+
+
+def _enforce_cve_rule(
+    services: dict[str, Any],
+    off: set[str],
+    paths: BoxPaths,
+    project_name: str | None,
+    rule_label: str,
+    check_fn,
+) -> None:
+    """Run a CVE-policy rule across all services.
+
+    Off services log every offender; the first non-off offender raises.
+    Off-service warnings are emitted before any raise (matches the existing
+    multi-hit hostile-key pattern in the per-service pass).
+    """
+    pending_raise: tuple[str, str] | None = None
+    for svc_name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        violation = check_fn(svc, svc_name)
+        if violation is None:
+            continue
+        if svc_name in off:
+            log_warning(
+                "compose-validate",
+                f"{rule_label} on service {svc_name} "
+                f"(profile: off — allowed): read_only is not true",
+                paths,
+                project=project_name,
+            )
+            continue
+        if pending_raise is None:
+            pending_raise = (svc_name, violation)
+    if pending_raise is not None:
+        raise ComposeSecurityError(pending_raise[1])
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -251,6 +337,7 @@ def validate_user_compose(
     paths: BoxPaths,
     off_services: set[str] | None = None,
     project_name: str | None = None,
+    cve_policy: dict | None = None,
 ) -> None:
     """Parse compose.yml and reject hostile keys.
 
@@ -261,6 +348,15 @@ def validate_user_compose(
 
     `project_name` is threaded into log_warning so structured logs can be
     filtered with `boxmunge log --project <name>` (audit E-NEW-2).
+
+    `cve_policy` is the project-level security: block (or None / empty).
+    Two project-level CVE-policy fields demand defense in depth:
+      - `dangerously_disable_quarantine: true` requires `read_only: true`
+        on every non-off service.
+      - `posture: 'strict'` requires `read_only: true` on every non-off
+        service.
+    Off services log a warning instead of raising. Rule A (disable
+    quarantine) runs before Rule B (strict posture) — first rejection wins.
 
     Raises ComposeSecurityError on the first hostile key in a non-off
     service, or if the file cannot be read/parsed.
@@ -325,4 +421,21 @@ def validate_user_compose(
             f"service {svc_name}: {key} = {value} defeats boxmunge "
             f"hardening; remove it or set security.profile: off "
             f"with reason"
+        )
+
+    # CVE-policy cross-validation. Rule A first, then Rule B — order is
+    # part of the spec. Each rule is inert unless its triggering field is
+    # set, so the common path (no CVE policy) is a single dict lookup.
+    policy = cve_policy or {}
+    if policy.get("dangerously_disable_quarantine") is True:
+        _enforce_cve_rule(
+            services, off, paths, project_name,
+            rule_label="dangerously_disable_quarantine requires read_only",
+            check_fn=_check_disable_quarantine_requires_readonly,
+        )
+    if policy.get("posture") == "strict":
+        _enforce_cve_rule(
+            services, off, paths, project_name,
+            rule_label="posture 'strict' requires read_only",
+            check_fn=_check_strict_posture_requires_readonly,
         )
