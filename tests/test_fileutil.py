@@ -1,6 +1,7 @@
 """Tests for boxmunge.fileutil — atomic writes and project locking."""
 
 import fcntl
+import logging
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -195,3 +196,81 @@ class TestProjectLock:
             pass
         with project_lock("myapp", paths):
             pass  # should not raise
+
+
+class TestChownDeployErrorClass:
+    """Audit I-NEW-1 / C-NEW-4: KeyError silent, OSError logs warning.
+
+    The boxmunge logger sets propagate=False once it has been initialised
+    by an earlier test, so caplog (which intercepts via the root logger)
+    can't see records. These tests attach a temporary handler directly to
+    the boxmunge logger to capture records reliably.
+    """
+
+    @staticmethod
+    def _captured_records() -> tuple[logging.Handler, list]:
+        import logging as _l
+        records: list = []
+
+        class _ListHandler(_l.Handler):
+            def emit(self, record):  # type: ignore[override]
+                records.append(record)
+
+        h = _ListHandler(level=_l.WARNING)
+        return h, records
+
+    def test_no_deploy_user_silent(self, tmp_path: Path) -> None:
+        import logging as _l
+        from boxmunge.fileutil import _chown_deploy
+        target = tmp_path / "f"
+        target.write_text("x")
+        h, records = self._captured_records()
+        _l.getLogger("boxmunge").addHandler(h)
+        try:
+            with patch("boxmunge.fileutil.os.getuid", return_value=0), \
+                 patch("boxmunge.fileutil.pwd.getpwnam",
+                       side_effect=KeyError("deploy")):
+                _chown_deploy(str(target))
+        finally:
+            _l.getLogger("boxmunge").removeHandler(h)
+        assert records == []
+
+    def test_oserror_logs_warning(self, tmp_path: Path) -> None:
+        import logging as _l
+        from boxmunge.fileutil import _chown_deploy
+        target = tmp_path / "f"
+        target.write_text("x")
+
+        class _PW:
+            pw_uid = 1000
+            pw_gid = 1000
+
+        h, records = self._captured_records()
+        _l.getLogger("boxmunge").addHandler(h)
+        try:
+            with patch("boxmunge.fileutil.os.getuid", return_value=0), \
+                 patch("boxmunge.fileutil.pwd.getpwnam", return_value=_PW), \
+                 patch("boxmunge.fileutil.os.chown",
+                       side_effect=OSError("EPERM")):
+                _chown_deploy(str(target))
+        finally:
+            _l.getLogger("boxmunge").removeHandler(h)
+        # OSError must surface in the boxmunge logger (forensic trail).
+        assert len(records) == 1
+        msg = records[0].getMessage()
+        assert "chown" in msg.lower()
+        assert "EPERM" in msg
+
+    def test_non_root_silent_no_log(self, tmp_path: Path) -> None:
+        import logging as _l
+        from boxmunge.fileutil import _chown_deploy
+        target = tmp_path / "f"
+        target.write_text("x")
+        h, records = self._captured_records()
+        _l.getLogger("boxmunge").addHandler(h)
+        try:
+            with patch("boxmunge.fileutil.os.getuid", return_value=1000):
+                _chown_deploy(str(target))
+        finally:
+            _l.getLogger("boxmunge").removeHandler(h)
+        assert records == []

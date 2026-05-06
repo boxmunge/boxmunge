@@ -1,6 +1,7 @@
 """File utilities — atomic writes and project locking."""
 
 import fcntl
+import logging
 import os
 import pwd
 import tempfile
@@ -13,14 +14,35 @@ if TYPE_CHECKING:
 
 
 def _chown_deploy(path: str) -> None:
-    """Best-effort chown to the deploy user when running as root."""
+    """Best-effort chown to the deploy user when running as root.
+
+    Audit I-NEW-1 / C-NEW-4: distinguish KeyError (deploy user not yet
+    created during bootstrap or in dev/test machines — silent return is
+    correct) from OSError (perms drift, ENOSPC, EROFS, EIO, file-vanished
+    races). OSError used to be silently swallowed alongside KeyError, which
+    masked the same class of bug we spent two releases fixing. Now it logs
+    a warning on the boxmunge logger so a forensic trail exists, but still
+    does not raise — the caller is using us in a "best-effort" mode and
+    the operational path should not fail because chown couldn't fix perms.
+    """
     if os.getuid() != 0:
         return
     try:
         pw = pwd.getpwnam("deploy")
+    except KeyError:
+        # No 'deploy' user — bootstrap hasn't created it yet, or this is a
+        # dev/test box where it isn't expected. Silent return preserves
+        # existing behaviour.
+        return
+    try:
         os.chown(path, pw.pw_uid, pw.pw_gid)
-    except (KeyError, OSError):
-        pass
+    except OSError as e:
+        # Perms-related: log but don't raise — chown is best-effort. A
+        # genuine perms problem will surface again in the operational
+        # path that needs the file readable, with a more specific error.
+        logging.getLogger("boxmunge").warning(
+            "chown(%s, deploy) failed: %s", path, e,
+        )
 
 
 def open_shared_lockfile(path: Path) -> int:
