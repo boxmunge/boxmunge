@@ -126,10 +126,11 @@ def run_resume(
             project_name=project_name,
         )
     except ComposeSecurityError as e:
+        # Exit code 3 reserved for compose hardening rejections (audit H-N2).
         print(f"ERROR: {e}", file=sys.stderr)
         log_error("resume", f"Compose validation rejected: {e}",
                   paths, project=project_name)
-        return 1
+        return 3
 
     # Pull images (unless overridden or no image: services).
     if pull_image_services and not skip_security_checks:

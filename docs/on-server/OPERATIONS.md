@@ -546,6 +546,22 @@ health --json
 
 Exit codes: 0 = healthy, 1 = warnings, 2 = issues requiring attention.
 
+## Command Exit Codes
+
+The boxmunge CLI uses these conventions across mutating commands
+(`deploy`, `stage`, `promote`, `resume`, `upgrade`):
+
+- `0` — success
+- `1` — generic operational failure (image pull, smoke test, Caddy reload, etc.)
+- `2` — usage error (unknown flag, missing argument) or critical health (`check`)
+- `3` — compose hardening rejection (validate_user_compose found a
+  policy-violating key in the project's `compose.yml`; the deploy/stage/
+  promote/resume aborted before touching containers)
+
+Exit code 3 is reserved for hardening rejections so an operator can
+distinguish a security-policy failure ("fix your compose.yml") from a
+generic operational failure ("retry / investigate logs").
+
 ## Proving Backup/Restore Works
 
 Run the self-test (deploys a canary, exercises backup/restore, tears down):

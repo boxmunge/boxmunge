@@ -295,10 +295,13 @@ def _run_deploy_inner(
             project_name=project_name,
         )
     except ComposeSecurityError as e:
+        # Exit code 3 reserved for compose hardening rejections (audit H-N2).
+        # Distinguishes operator-actionable security policy violations from
+        # generic operational failures (which return 1).
         print(f"ERROR: {e}", file=sys.stderr)
         log_error("deploy", f"Compose validation rejected: {e}",
                   paths, project=project_name)
-        return 1
+        return 3
 
     # Generate configs
     print(f"  Generating Caddy config...")

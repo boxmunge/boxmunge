@@ -185,3 +185,20 @@ class TestRefusesPaused:
         assert rc == 1
         err = capsys.readouterr().err
         assert "paused" in err.lower()
+
+
+class TestStageComposeRejectionExit3:
+    """Audit H-N2: hardening rejection returns exit code 3, not 1."""
+
+    @patch("boxmunge.commands.stage_cmd.caddy_reload")
+    @patch("boxmunge.commands.stage_cmd.compose_up")
+    def test_hostile_compose_returns_3(self, mock_up, mock_reload, paths):
+        from boxmunge.compose_validate import ComposeSecurityError
+        add_project("testapp", paths)
+        _place_real_bundle(paths)
+        with patch(
+            "boxmunge.commands.stage_cmd.validate_user_compose",
+            side_effect=ComposeSecurityError("simulated hostile key: privileged"),
+        ):
+            rc = run_stage("testapp", paths)
+        assert rc == 3

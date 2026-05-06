@@ -149,3 +149,22 @@ class TestRejectsUnknownArgs:
         captured = capfd.readouterr()
         assert "ERROR" in captured.err
         assert "--not-a-flag" in captured.err
+
+
+class TestDeployComposeRejectionExit3:
+    """Audit H-N2: hardening rejection returns exit code 3, not 1."""
+
+    def test_hostile_compose_returns_3(self, paths: BoxPaths) -> None:
+        add_project("testapp", paths)
+        _place_deploy_bundle(paths)
+        # Replace just-extracted compose.yml after first deploy run? Easier:
+        # mock validate_user_compose to raise ComposeSecurityError directly.
+        from boxmunge.compose_validate import ComposeSecurityError
+        with patch(
+            "boxmunge.commands.deploy.validate_user_compose",
+            side_effect=ComposeSecurityError("simulated hostile key: privileged"),
+        ):
+            with patch("boxmunge.commands.deploy.compose_up"):
+                with patch("boxmunge.commands.deploy.caddy_reload"):
+                    rc = run_deploy("testapp", paths)
+        assert rc == 3

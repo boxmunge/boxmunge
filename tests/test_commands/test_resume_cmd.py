@@ -221,7 +221,8 @@ class TestResumeValidatesBeforeUp:
             "services:\n  web:\n    image: nginx\n    privileged: true\n"
         )
         rc = run_resume(name, paths, yes=True)
-        assert rc == 1
+        # Audit H-N2: hardening rejection is exit code 3, not generic 1.
+        assert rc == 3
         # Critical: neither compose_pull nor compose_up may run on a hostile
         # compose.yml. Resume must reject before any container action.
         mock_pull.assert_not_called()
