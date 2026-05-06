@@ -315,6 +315,26 @@ cmd_run() {
         chown -R root:root "$BOXMUNGE_ROOT/canary"
     fi
 
+    # 3b. Self-update the upgrade shim itself.
+    # Without this, shim improvements (cosign verify, new install steps,
+    # bug fixes) take effect only on the upgrade AFTER they ship —
+    # because the running shim was the one shipped with the prior version.
+    # The shim runs as root and lives at $BIN_DIR; copy in place atomically.
+    if [[ -f "$tmp_download/boxmunge/scripts/boxmunge-upgrade" ]]; then
+        log "Self-updating upgrade shim from bundle..."
+        install -m 0755 -o root -g root \
+            "$tmp_download/boxmunge/scripts/boxmunge-upgrade" \
+            "$BIN_DIR/boxmunge-upgrade"
+        # Also refresh any other shims under bin/ if the bundle ships them.
+        # boxmunge-sftp is the SFTP wrapper invoked by sshd; same self-bootstrap concern.
+        for shim_name in boxmunge-sftp; do
+            shim_src="$tmp_download/boxmunge/scripts/$shim_name"
+            if [[ -f "$shim_src" ]]; then
+                install -m 0755 -o root -g root "$shim_src" "$BIN_DIR/$shim_name"
+            fi
+        done
+    fi
+
     # 4. SWAP
     log "Swapping to standby venv (slot $standby)..."
     swap_to "$standby"
