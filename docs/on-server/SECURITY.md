@@ -136,6 +136,12 @@ Without `allow_wildcard_hosts: true`, manifest validation refuses to deploy. Wit
 
 See `agent-help architecture` and the on-server `TRUST_MODEL.md` for adjacent context (host hardening, restricted shell, platform container hardening).
 
+## CVE policy
+
+Container hardening is one half of the protection model — the other is responding when a CVE is published against an image you're running. boxmunge v0.6.0+ scans deployed images daily via Trivy and automatically quarantines projects when an unfixed CVE crosses the project's configured posture threshold.
+
+See [CVE_POLICY.md](CVE_POLICY.md) for posture tiers, the suppression workflow, and the recovery flow after a quarantine.
+
 ## Supply-chain protection (release signing)
 
 Every boxmunge release tarball's `SHA256SUMS` is keyless-signed by the GitHub Actions release workflow using Sigstore (Fulcio + Rekor). The upgrade shim verifies that signature against a pinned certificate identity (the release workflow on a `vX.Y.Z` tag of this exact repo, issued by GitHub's OIDC) BEFORE running `sha256sum -c`. cosign is hard-required: if it's missing, the upgrade aborts noisily rather than degrading to checksum-only. This breaks the circularity of "verify the tarball with a hash file pulled from the same release" — an attacker who replaces both files in lockstep can no longer pass verification without also forging a Fulcio certificate tying the signature to this repo's release workflow. An unsigned release (e.g. one where the cosign install step in CI failed) will be refused by the shim, not silently installed.
