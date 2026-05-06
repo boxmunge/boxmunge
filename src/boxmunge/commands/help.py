@@ -43,7 +43,8 @@ Inbox & secrets:
 
 Project operations:
   check <project>         Run health checks (docker + http + smoke)
-  check-all               Check all projects
+  check-all [--read-only] Check all projects (--read-only skips state writes,
+                          Pushover alerts, and compose_down on critical)
   validate <project>      Validate manifest, env, compose without deploying
   log [filters]           Query structured operational audit log (deploy/check/rollback)
   logs <project> [svc]    Tail container logs (--follow, --tail N)

@@ -19,6 +19,12 @@ class TestHelpText:
     def test_help_does_not_include_import(self) -> None:
         assert "import <bundle>" not in HELP_TEXT
 
+    def test_help_documents_check_all_read_only_flag(self) -> None:
+        """Audit H-N3: check-all --read-only must be visible in help."""
+        assert "--read-only" in HELP_TEXT
+        # The flag belongs to check-all, not somewhere else.
+        assert "check-all [--read-only]" in HELP_TEXT
+
     def test_agent_help_mentions_restricted_shell(self) -> None:
         assert "restricted" in AGENT_HELP_TEXT.lower() or "deploy shell" in AGENT_HELP_TEXT.lower()
 
