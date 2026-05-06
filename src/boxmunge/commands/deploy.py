@@ -319,7 +319,7 @@ def _run_deploy_inner(
     # Reload Caddy
     print(f"  Reloading Caddy...")
     try:
-        caddy_reload(paths.caddy)
+        caddy_reload(paths.caddy, paths.state)
     except DockerError as e:
         print(f"  WARN: Caddy reload failed: {e}")
 

@@ -77,6 +77,68 @@ class TestApplyMode:
         assert len(stashes) == 0
 
 
+class TestRestartRespectsLock:
+    """4b: _restart_projects must skip projects whose project_lock is held."""
+
+    def _make_project(self, paths: BoxPaths, name: str) -> None:
+        import yaml
+        pdir = paths.project_dir(name)
+        pdir.mkdir(parents=True)
+        (pdir / "manifest.yml").write_text(yaml.dump({
+            "schema_version": 2, "project": name,
+            "source": "bundle", "hosts": [f"{name}.test"],
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        }))
+
+    @patch("boxmunge.commands.upgrade_cmd.compose_up")
+    def test_locked_project_is_skipped_not_raised(
+        self, mock_up, tmp_path
+    ) -> None:
+        from boxmunge.commands.upgrade_cmd import _restart_projects
+        from boxmunge.fileutil import project_lock
+
+        paths = _setup_paths(tmp_path)
+        self._make_project(paths, "alpha")
+        self._make_project(paths, "beta")
+
+        # Hold alpha's lock from this thread (NB: project_lock is non-blocking).
+        # Use a separate thread so the same-process flock semantics still apply
+        # at fd level (advisory POSIX locks are per-process by file descriptor).
+        # Simpler: open the same lock file in a different fd before calling.
+        import os, fcntl
+        alpha_lock = paths.project_lock_file("alpha")
+        alpha_lock.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(alpha_lock), os.O_CREAT | os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            succeeded, failed, skipped = _restart_projects(paths)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+        assert "alpha" in skipped
+        assert "beta" in succeeded
+        assert failed == []
+        # compose_up was only called for beta.
+        assert mock_up.call_count == 1
+
+    @patch("boxmunge.commands.upgrade_cmd.compose_up")
+    def test_no_locks_held_returns_all_succeeded(
+        self, mock_up, tmp_path
+    ) -> None:
+        from boxmunge.commands.upgrade_cmd import _restart_projects
+
+        paths = _setup_paths(tmp_path)
+        self._make_project(paths, "alpha")
+        self._make_project(paths, "beta")
+
+        succeeded, failed, skipped = _restart_projects(paths)
+
+        assert sorted(succeeded) == ["alpha", "beta"]
+        assert failed == []
+        assert skipped == []
+
+
 class TestArgParsing:
     """cmd_upgrade arg parsing — previously silently ignored unknown args."""
 

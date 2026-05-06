@@ -5,9 +5,12 @@ All Docker interaction goes through subprocess calls. This keeps boxmunge
 simple and avoids the Docker SDK dependency.
 """
 
+import fcntl
+import os
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 _DEFAULT_TIMEOUT = 120
 _COMPOSE_UP_TIMEOUT = 300
@@ -172,16 +175,43 @@ def container_health(container_name: str) -> str | None:
     return status
 
 
-def caddy_reload(caddy_compose_dir: Path) -> None:
-    """Reload Caddy configuration gracefully. Validates first to prevent bad config."""
-    if not caddy_validate(caddy_compose_dir):
-        raise DockerError("Caddy config validation failed — reload aborted to prevent downtime")
-    _run(
-        ["docker", "compose", "exec", "caddy", "caddy", "reload",
-         "--config", "/etc/caddy/Caddyfile"],
-        cwd=caddy_compose_dir,
-        timeout=_CADDY_RELOAD_TIMEOUT,
-    )
+@contextmanager
+def _caddy_reload_lock(lock_dir: Path) -> Iterator[None]:
+    """Global Caddy validate+reload flock. Blocking, bounded section.
+
+    Serialises validate+reload across concurrent deploys so deploy-A cannot
+    pass validate, then have deploy-B write a malformed site config that
+    deploy-A's subsequent reload ingests and fails on. The protected section
+    is short (~100ms typical), so blocking is fine.
+    """
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / ".caddy.lock"
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def caddy_reload(caddy_compose_dir: Path, lock_dir: Path) -> None:
+    """Reload Caddy configuration gracefully under a global lock.
+
+    Validates first to prevent bad config; the (validate + reload) sequence
+    runs under a flock at lock_dir/.caddy.lock so two concurrent deploys
+    cannot race past each other's validate. Callers pass paths.state as
+    lock_dir.
+    """
+    with _caddy_reload_lock(lock_dir):
+        if not caddy_validate(caddy_compose_dir):
+            raise DockerError("Caddy config validation failed — reload aborted to prevent downtime")
+        _run(
+            ["docker", "compose", "exec", "caddy", "caddy", "reload",
+             "--config", "/etc/caddy/Caddyfile"],
+            cwd=caddy_compose_dir,
+            timeout=_CADDY_RELOAD_TIMEOUT,
+        )
 
 
 def caddy_validate(caddy_compose_dir: Path) -> bool:

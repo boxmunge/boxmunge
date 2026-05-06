@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -11,11 +12,16 @@ import boxmunge.backup as _backup
 from boxmunge.backup import backup_filename, prune_backups, BackupError
 from boxmunge.config import load_config, ConfigError
 from boxmunge.fileutil import project_lock, LockError
-from boxmunge.log import log_operation, log_error
+from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.pause import is_paused
 from boxmunge.probation import clear_probation_if_active
+
+# Total wall-clock budget for retrying lock-held projects in run_backup_all.
+# Bounded so a stuck deploy doesn't keep nightly backup running forever.
+_LOCK_RETRY_BUDGET_SECONDS = 30.0
+_LOCK_RETRY_INTERVAL_SECONDS = 2.0
 
 
 def _execute_dump(
@@ -163,8 +169,59 @@ def _run_backup_inner(
     return 0
 
 
+def _attempt_locked_backup(name: str, paths: BoxPaths) -> str:
+    """Attempt a single backup under the project lock.
+
+    Returns one of:
+      - "ok"       — backup succeeded (rc 0)
+      - "failed"   — backup ran but returned non-zero (real failure)
+      - "locked"   — project lock was held by another operation
+    """
+    try:
+        with project_lock(name, paths):
+            rc = run_backup(name, paths, _lock_held=True)
+    except LockError:
+        return "locked"
+    return "ok" if rc == 0 else "failed"
+
+
+def _notify_persistent_locks(paths: BoxPaths, locked: list[str]) -> None:
+    """Send a Pushover alert for projects that remained locked through retries.
+
+    Without this, a deploy started just before 02:00 silently consumes its
+    project's nightly backup window with no operator-visible signal. Pushover
+    is the operator's only out-of-band channel; failures here must surface
+    in the log.
+    """
+    if not locked:
+        return
+    try:
+        from boxmunge.pushover import send_notification
+        cfg = load_config(paths)
+        po = cfg.get("pushover", {})
+        names = ", ".join(locked)
+        send_notification(
+            po.get("user_key", ""), po.get("app_token", ""),
+            "boxmunge backup-all SKIPPED (locked)",
+            f"Backup skipped for projects: {names}. They were locked at backup "
+            f"time and remained locked through retries — likely a stuck deploy "
+            f"or a long-running maintenance op.",
+        )
+    except (ConfigError, OSError) as e:
+        log_error(
+            "backup", f"Pushover lock-skip alert failed: {e}", paths,
+            detail={"locked": locked},
+        )
+
+
 def run_backup_all(paths: BoxPaths) -> int:
-    """Backup all projects that have backup configured."""
+    """Backup all projects that have backup configured.
+
+    For projects whose project_lock is held by another operation (a deploy in
+    progress), backups are deferred and retried with a short budget; if the
+    lock is still held after retries, the project is reported as locked-skipped
+    via Pushover and the run exits with status 1 so the operator has visibility.
+    """
     projects_dir = paths.projects
     if not projects_dir.exists():
         print("No projects directory.")
@@ -179,15 +236,58 @@ def run_backup_all(paths: BoxPaths) -> int:
         print("No projects to backup.")
         return 0
 
-    worst = 0
+    failed: list[str] = []
+    locked: list[str] = []
+
+    # First pass: try every non-paused project once.
     for name in projects:
         if is_paused(name, paths):
             print(f"  Skipping {name}: paused.")
             continue
-        result = run_backup(name, paths)
-        worst = max(worst, result)
+        result = _attempt_locked_backup(name, paths)
+        if result == "ok":
+            continue
+        if result == "locked":
+            locked.append(name)
+            print(f"  {name}: locked, will retry")
+            continue
+        failed.append(name)
 
-    return worst
+    # Bounded retry pass for locked projects: a deploy that's wrapping up
+    # should release its lock within seconds; a stuck op never will. Don't
+    # let nightly backup hang on a single project.
+    if locked:
+        deadline = time.monotonic() + _LOCK_RETRY_BUDGET_SECONDS
+        still_locked: list[str] = []
+        for name in locked:
+            if time.monotonic() >= deadline:
+                still_locked.append(name)
+                continue
+            outcome: str = "locked"
+            while time.monotonic() < deadline:
+                outcome = _attempt_locked_backup(name, paths)
+                if outcome != "locked":
+                    break
+                time.sleep(_LOCK_RETRY_INTERVAL_SECONDS)
+            if outcome == "ok":
+                continue
+            if outcome == "failed":
+                failed.append(name)
+            else:
+                still_locked.append(name)
+        locked = still_locked
+
+    if locked:
+        log_warning(
+            "backup",
+            f"backup-all skipped (locked): {', '.join(locked)}",
+            paths, detail={"locked": locked},
+        )
+        _notify_persistent_locks(paths, locked)
+
+    if failed or locked:
+        return 1
+    return 0
 
 
 def run_backup_sync(paths: BoxPaths, project_name: str | None = None) -> int:

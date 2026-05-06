@@ -1,9 +1,12 @@
 """Tests for boxmunge backup command logic."""
 
+import fcntl
+import os
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import boxmunge.commands.backup_cmd as backup_cmd
 from boxmunge.commands.backup_cmd import run_backup, run_backup_all, list_snapshots
 from boxmunge.pause import write_paused_state
 from boxmunge.paths import BoxPaths
@@ -131,6 +134,112 @@ class TestBackupAllSkipsPaused:
         captured = capsys.readouterr()
         assert "myapp" in captured.out
         assert "paused" in captured.out.lower()
+
+
+class TestBackupAllLockSkip:
+    """4c: backup-all retries lock-held projects + Pushover-alerts persistent skips."""
+
+    def _setup_two_projects(self, paths: BoxPaths) -> None:
+        for name in ("alpha", "beta"):
+            pdir = paths.project_dir(name)
+            pdir.mkdir(parents=True)
+            (pdir / "manifest.yml").write_text(
+                MANIFEST_WITH_BACKUP.replace("project: myapp", f"project: {name}")
+            )
+
+    def _hold_project_lock(self, paths: BoxPaths, name: str) -> int:
+        """Open and EX-lock the project's lock file. Returns the fd."""
+        lock_path = paths.project_lock_file(name)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd
+
+    @patch("boxmunge.commands.backup_cmd._notify_persistent_locks")
+    @patch("boxmunge.commands.backup_cmd.run_backup")
+    def test_locked_project_is_retried_then_alerted(
+        self, mock_backup: MagicMock, mock_notify: MagicMock,
+        paths: BoxPaths, monkeypatch,
+    ) -> None:
+        """A project whose lock stays held past the retry budget must be
+        reported via Pushover (not just silently rolled into rc=1)."""
+        self._setup_two_projects(paths)
+        # Shrink budget so the test runs in <1s.
+        monkeypatch.setattr(backup_cmd, "_LOCK_RETRY_BUDGET_SECONDS", 0.2)
+        monkeypatch.setattr(backup_cmd, "_LOCK_RETRY_INTERVAL_SECONDS", 0.05)
+
+        # alpha's lock is held for the entirety of the test.
+        fd = self._hold_project_lock(paths, "alpha")
+        try:
+            mock_backup.return_value = 0
+            rc = run_backup_all(paths)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+        # beta backed up; alpha never made it past the lock check.
+        called_names = [c.args[0] for c in mock_backup.call_args_list]
+        assert "beta" in called_names
+        assert "alpha" not in called_names
+
+        # Pushover alert was triggered for alpha.
+        mock_notify.assert_called_once()
+        notified = mock_notify.call_args[0][1]
+        assert notified == ["alpha"]
+
+        # Exit code is 1 because of the persistent skip.
+        assert rc == 1
+
+    @patch("boxmunge.commands.backup_cmd._notify_persistent_locks")
+    @patch("boxmunge.commands.backup_cmd.run_backup")
+    def test_locked_project_recovers_within_budget(
+        self, mock_backup: MagicMock, mock_notify: MagicMock,
+        paths: BoxPaths, monkeypatch,
+    ) -> None:
+        """If the lock is released during the retry window, backup succeeds
+        and no Pushover alert fires."""
+        self._setup_two_projects(paths)
+        monkeypatch.setattr(backup_cmd, "_LOCK_RETRY_BUDGET_SECONDS", 1.0)
+        monkeypatch.setattr(backup_cmd, "_LOCK_RETRY_INTERVAL_SECONDS", 0.05)
+
+        # Hold alpha's lock briefly, release in a thread.
+        fd = self._hold_project_lock(paths, "alpha")
+        import threading, time as _time
+        def _release_after_short_delay():
+            _time.sleep(0.15)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        threading.Thread(target=_release_after_short_delay, daemon=True).start()
+
+        mock_backup.return_value = 0
+        rc = run_backup_all(paths)
+
+        # Both projects eventually backed up.
+        called_names = sorted(c.args[0] for c in mock_backup.call_args_list)
+        assert "alpha" in called_names
+        assert "beta" in called_names
+
+        mock_notify.assert_not_called()
+        assert rc == 0
+
+    @patch("boxmunge.commands.backup_cmd._notify_persistent_locks")
+    @patch("boxmunge.commands.backup_cmd.run_backup")
+    def test_real_failure_not_treated_as_lock_skip(
+        self, mock_backup: MagicMock, mock_notify: MagicMock,
+        paths: BoxPaths,
+    ) -> None:
+        """A non-zero return from run_backup is a real failure, not a lock-skip.
+        Pushover lock-skip alert must NOT fire for ordinary backup failures."""
+        self._setup_two_projects(paths)
+        # alpha "fails" with rc=1 (e.g. dump error); beta succeeds.
+        def side(name, paths_, _lock_held=False):
+            return 1 if name == "alpha" else 0
+        mock_backup.side_effect = side
+
+        rc = run_backup_all(paths)
+
+        mock_notify.assert_not_called()
+        assert rc == 1
 
 
 class TestListSnapshots:

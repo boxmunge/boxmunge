@@ -1,5 +1,9 @@
 """Tests for boxmunge.docker — compose stop/start commands."""
 
+import fcntl
+import os
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch, call, MagicMock
 
@@ -13,6 +17,7 @@ from boxmunge.docker import (
     container_image_digest,
     tag_image,
     container_running,
+    caddy_reload,
     DockerError,
 )
 
@@ -131,3 +136,77 @@ class TestContainerRunning:
     @patch("boxmunge.docker._run", side_effect=DockerError("no such container"))
     def test_returns_false_on_docker_error(self, mock_run):
         assert container_running("nonexistent") is False
+
+
+class TestCaddyReloadLock:
+    """caddy_reload must serialise validate+reload under a flock at lock_dir/.caddy.lock.
+
+    Without the lock, two parallel deploys race: deploy-A passes validate,
+    deploy-B writes a malformed site config, deploy-A's reload then fails
+    on a config that was valid when checked. The lock turns that into a
+    serialised sequence.
+    """
+
+    @patch("boxmunge.docker._run")
+    def test_creates_lock_file_in_lock_dir(self, mock_run, tmp_path: Path) -> None:
+        caddy_dir = tmp_path / "caddy"
+        caddy_dir.mkdir()
+        lock_dir = tmp_path / "state"
+
+        caddy_reload(caddy_dir, lock_dir)
+
+        assert (lock_dir / ".caddy.lock").exists()
+
+    @patch("boxmunge.docker._run")
+    def test_validate_and_reload_both_called(
+        self, mock_run, tmp_path: Path
+    ) -> None:
+        caddy_dir = tmp_path / "caddy"
+        caddy_dir.mkdir()
+        lock_dir = tmp_path / "state"
+
+        caddy_reload(caddy_dir, lock_dir)
+
+        # First call is validate, second is reload.
+        assert mock_run.call_count == 2
+        validate_cmd = mock_run.call_args_list[0][0][0]
+        reload_cmd = mock_run.call_args_list[1][0][0]
+        assert "validate" in validate_cmd
+        assert "reload" in reload_cmd
+
+    def test_concurrent_reloads_serialize(self, tmp_path: Path) -> None:
+        """When the lock is held externally, caddy_reload blocks until released.
+
+        Holds the lock from a separate thread; starts caddy_reload (with
+        _run mocked); confirms it hasn't completed while the lock is held;
+        releases the lock; confirms it then completes promptly.
+        """
+        caddy_dir = tmp_path / "caddy"
+        caddy_dir.mkdir()
+        lock_dir = tmp_path / "state"
+        lock_dir.mkdir()
+        lock_path = lock_dir / ".caddy.lock"
+
+        # Externally acquire the lock.
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+        completed = threading.Event()
+
+        def _do_reload() -> None:
+            with patch("boxmunge.docker._run"):
+                caddy_reload(caddy_dir, lock_dir)
+            completed.set()
+
+        t = threading.Thread(target=_do_reload, daemon=True)
+        t.start()
+
+        # While we hold the lock, the reload thread must be blocked.
+        assert not completed.wait(timeout=0.3)
+
+        # Release the external lock; reload should now complete.
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+        assert completed.wait(timeout=2.0), "caddy_reload did not unblock after lock release"
+        t.join(timeout=1.0)

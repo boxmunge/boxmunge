@@ -40,7 +40,7 @@ def _run_unstage_inner(project_name: str, paths: BoxPaths, dry_run: bool = False
         staging_base.unlink()
 
     try:
-        caddy_reload(paths.caddy)
+        caddy_reload(paths.caddy, paths.state)
     except DockerError as e:
         print(f"  WARN: Caddy reload failed: {e}")
 

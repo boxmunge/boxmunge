@@ -192,7 +192,7 @@ def run_container_update(
     finally:
         try:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
-        except Exception:
+        except OSError:
             pass
         lock_file.close()
 

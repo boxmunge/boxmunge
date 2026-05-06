@@ -43,7 +43,7 @@ def run_project_delete(project_name: str, paths: BoxPaths, yes: bool = False) ->
     if caddy_conf.exists():
         caddy_conf.unlink()
         try:
-            caddy_reload(paths.caddy)
+            caddy_reload(paths.caddy, paths.state)
         except DockerError as e:
             print(f"  WARN: Caddy reload failed: {e}")
 

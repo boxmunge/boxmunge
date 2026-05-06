@@ -21,6 +21,7 @@ from boxmunge.commands.health_cmd import run_health
 from boxmunge.commands.self_test_cmd import run_self_test
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.docker import compose_up, caddy_reload, DockerError
+from boxmunge.fileutil import project_lock, LockError
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, validate_manifest, ManifestError, CURRENT_SCHEMA_VERSION
 from boxmunge.migration import migrate_manifest, MigrationError
@@ -140,12 +141,22 @@ def _regenerate_configs(paths: BoxPaths) -> list[str]:
     return processed
 
 
-def _restart_projects(paths: BoxPaths) -> tuple[list[str], list[str]]:
-    """Restart all deployed projects. Returns (succeeded, failed) lists."""
-    succeeded = []
-    failed = []
+def _restart_projects(
+    paths: BoxPaths,
+) -> tuple[list[str], list[str], list[str]]:
+    """Restart all deployed projects under per-project locks.
+
+    Returns (succeeded, failed, skipped_locked) lists. A project whose
+    project_lock is held by another operation is skipped (logged as a
+    warning), not retried and not raised — the v0.4 concurrency contract
+    is that all mutating compose ops hold project_lock; an upgrade that
+    races a deploy must defer to the deploy.
+    """
+    succeeded: list[str] = []
+    failed: list[str] = []
+    skipped_locked: list[str] = []
     if not paths.projects.exists():
-        return succeeded, failed
+        return succeeded, failed, skipped_locked
 
     for project_dir in sorted(paths.projects.iterdir()):
         if not project_dir.is_dir():
@@ -161,16 +172,26 @@ def _restart_projects(paths: BoxPaths) -> tuple[list[str], list[str]]:
             compose_files.append("compose.boxmunge.yml")
 
         try:
-            compose_up(project_dir, compose_files=compose_files)
-            succeeded.append(project_name)
-        except DockerError as e:
-            failed.append(project_name)
-            log_error(
-                "upgrade", f"Failed to restart {project_name}: {e}",
+            with project_lock(project_name, paths):
+                try:
+                    compose_up(project_dir, compose_files=compose_files)
+                    succeeded.append(project_name)
+                except DockerError as e:
+                    failed.append(project_name)
+                    log_error(
+                        "upgrade", f"Failed to restart {project_name}: {e}",
+                        paths, project=project_name,
+                    )
+        except LockError:
+            skipped_locked.append(project_name)
+            log_warning(
+                "upgrade",
+                f"Skipped restart of project {project_name} — held by another "
+                f"operation; will be picked up on next deploy or container-update",
                 paths, project=project_name,
             )
 
-    return succeeded, failed
+    return succeeded, failed, skipped_locked
 
 
 def _run_dry(paths: BoxPaths) -> int:
@@ -247,16 +268,18 @@ def _run_apply(paths: BoxPaths, current_version: str, new_version: str) -> int:
     # Step 3: Reload Caddy
     print("[3/4] Reloading Caddy...")
     try:
-        caddy_reload(paths.caddy)
+        caddy_reload(paths.caddy, paths.state)
         print("  Caddy reloaded.")
     except DockerError as e:
         print(f"  WARN: Caddy reload failed: {e}")
 
     # Step 4: Restart projects
     print("[4/4] Restarting projects...")
-    succeeded, failed_projects = _restart_projects(paths)
+    succeeded, failed_projects, skipped_locked = _restart_projects(paths)
     if succeeded:
         print(f"  Restarted: {', '.join(succeeded)}")
+    if skipped_locked:
+        print(f"  Skipped (locked): {', '.join(skipped_locked)}")
     if failed_projects:
         print(f"  FAILED: {', '.join(failed_projects)}")
 
@@ -266,7 +289,12 @@ def _run_apply(paths: BoxPaths, current_version: str, new_version: str) -> int:
 
     log_operation(
         "upgrade", f"Apply {current_version} -> {new_version}", paths,
-        detail={"migrated": migrated, "restarted": succeeded, "failed": failed_projects},
+        detail={
+            "migrated": migrated,
+            "restarted": succeeded,
+            "skipped_locked": skipped_locked,
+            "failed": failed_projects,
+        },
     )
 
     if failed_projects:
@@ -307,16 +335,18 @@ def _run_full(
     # Step 4: Reload Caddy
     print("[4/6] Reloading Caddy...")
     try:
-        caddy_reload(paths.caddy)
+        caddy_reload(paths.caddy, paths.state)
         print("  Caddy reloaded.")
     except DockerError as e:
         print(f"  WARN: Caddy reload failed: {e}")
 
     # Step 5: Restart projects
     print("[5/6] Restarting projects...")
-    succeeded, failed_projects = _restart_projects(paths)
+    succeeded, failed_projects, skipped_locked = _restart_projects(paths)
     if succeeded:
         print(f"  Restarted: {', '.join(succeeded)}")
+    if skipped_locked:
+        print(f"  Skipped (locked): {', '.join(skipped_locked)}")
     if failed_projects:
         print(f"  FAILED: {', '.join(failed_projects)}")
 
@@ -349,7 +379,12 @@ def _run_full(
 
     log_operation(
         "upgrade", f"Upgrade {current_version} -> {new_version}", paths,
-        detail={"migrated": migrated, "restarted": succeeded, "failed": failed_projects},
+        detail={
+            "migrated": migrated,
+            "restarted": succeeded,
+            "skipped_locked": skipped_locked,
+            "failed": failed_projects,
+        },
     )
 
     if failed_projects:

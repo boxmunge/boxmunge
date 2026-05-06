@@ -62,7 +62,7 @@ def run_pause(
         site_conf = render_maintenance_caddy_config(hosts)
         atomic_write_text(paths.project_caddy_site(project_name),
                           site_conf, mode=0o644)
-        caddy_reload(paths.caddy)
+        caddy_reload(paths.caddy, paths.state)
     except (DockerError, OSError) as e:
         print(f"ERROR: Failed to swap Caddy config: {e}", file=sys.stderr)
         log_error("pause", f"Caddy swap failed: {e}", paths,
