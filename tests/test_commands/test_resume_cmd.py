@@ -195,3 +195,69 @@ class TestSkipSecurityChecks:
             cmd_resume(["myapp", "--skip-security-checks", "--yes"])
         assert called_with.get("skip_security_checks") is True
         assert called_with.get("yes") is True
+
+
+class TestResumeValidatesBeforeUp:
+    """A-NEW-1: resume must validate user compose.yml BEFORE compose_pull
+    and BEFORE compose_up. A hostile compose.yml introduced while paused
+    must not start the privileged container before the validator rejects.
+    """
+
+    @patch("boxmunge.commands.resume_cmd.prepare_compose_override")
+    @patch("boxmunge.commands.resume_cmd.prepare_caddy_config")
+    @patch("boxmunge.commands.resume_cmd.compose_pull")
+    @patch("boxmunge.commands.resume_cmd.compose_up")
+    @patch("boxmunge.commands.resume_cmd.caddy_reload")
+    @patch("boxmunge.commands.resume_cmd.run_smoke")
+    def test_hostile_compose_blocks_before_compose_up(
+        self, mock_smoke, _reload, mock_up, mock_pull, _caddy, _override, tmp_path,
+    ):
+        mock_smoke.return_value = (True, "ok")
+        from boxmunge.commands.resume_cmd import run_resume
+        from boxmunge.pause import is_paused
+        paths, name = _setup_paused(tmp_path)
+        # Replace compose.yml with a hostile one (privileged: true).
+        (paths.project_dir(name) / "compose.yml").write_text(
+            "services:\n  web:\n    image: nginx\n    privileged: true\n"
+        )
+        rc = run_resume(name, paths, yes=True)
+        assert rc == 1
+        # Critical: neither compose_pull nor compose_up may run on a hostile
+        # compose.yml. Resume must reject before any container action.
+        mock_pull.assert_not_called()
+        mock_up.assert_not_called()
+        # Project remains paused — resume bailed out clean.
+        assert is_paused(name, paths)
+
+    @patch("boxmunge.commands.resume_cmd.prepare_compose_override")
+    @patch("boxmunge.commands.resume_cmd.prepare_caddy_config")
+    @patch("boxmunge.commands.resume_cmd.compose_pull")
+    @patch("boxmunge.commands.resume_cmd.compose_up")
+    @patch("boxmunge.commands.resume_cmd.caddy_reload")
+    @patch("boxmunge.commands.resume_cmd.run_smoke")
+    def test_validate_runs_before_pull_and_up_call_order(
+        self, mock_smoke, _reload, mock_up, mock_pull, _caddy, _override, tmp_path,
+    ):
+        """Assert ordering: validate -> pull -> up (validate is first)."""
+        mock_smoke.return_value = (True, "ok")
+        from boxmunge.commands.resume_cmd import run_resume
+
+        paths, name = _setup_paused(tmp_path)
+
+        order: list[str] = []
+        mock_pull.side_effect = lambda *a, **kw: order.append("pull")
+        mock_up.side_effect = lambda *a, **kw: order.append("up")
+
+        with patch(
+            "boxmunge.commands.resume_cmd.validate_user_compose"
+        ) as mock_validate:
+            mock_validate.side_effect = lambda *a, **kw: order.append("validate")
+            rc = run_resume(name, paths, yes=True)
+
+        assert rc == 0
+        assert order[0] == "validate", (
+            f"validate must run before pull/up — order: {order}"
+        )
+        assert "pull" in order and "up" in order
+        assert order.index("validate") < order.index("pull")
+        assert order.index("validate") < order.index("up")

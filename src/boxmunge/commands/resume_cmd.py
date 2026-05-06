@@ -113,6 +113,24 @@ def run_resume(
             print("Aborted.")
             return 1
 
+    # Validate user compose.yml against silent-floor-defeating keys BEFORE
+    # any container action. A hostile compose.yml introduced while the
+    # project was paused must not survive even an image pull or compose_up
+    # — reject before touching containers (audit A-NEW-1). Mirrors the
+    # ordering used in deploy/stage.
+    off_services = {svc for svc, _ in services_with_off_profile(manifest)}
+    try:
+        validate_user_compose(
+            paths.project_compose(project_name), paths,
+            off_services=off_services,
+            project_name=project_name,
+        )
+    except ComposeSecurityError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        log_error("resume", f"Compose validation rejected: {e}",
+                  paths, project=project_name)
+        return 1
+
     # Pull images (unless overridden or no image: services).
     if pull_image_services and not skip_security_checks:
         print("  Pulling latest images...")
@@ -136,21 +154,6 @@ def run_resume(
         print(f"ERROR: compose up failed: {e}", file=sys.stderr)
         log_error("resume", f"compose up failed: {e}", paths,
                   project=project_name)
-        return 1
-
-    # Validate user compose.yml against silent-floor-defeating keys BEFORE
-    # regenerating the overlay. Resume re-applies the same merge rules as
-    # deploy so the same guard applies.
-    off_services = {svc for svc, _ in services_with_off_profile(manifest)}
-    try:
-        validate_user_compose(
-            paths.project_compose(project_name), paths,
-            off_services=off_services,
-        )
-    except ComposeSecurityError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        log_error("resume", f"Compose validation rejected: {e}",
-                  paths, project=project_name)
         return 1
 
     # Restore Caddy site config from manifest (regenerated).
