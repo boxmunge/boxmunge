@@ -105,3 +105,35 @@ class TestLogRotation:
         )
         # `when="midnight"` is normalised to "MIDNIGHT" internally.
         assert fh.when.upper() == "MIDNIGHT"
+
+    def test_log_file_chmod_0o664_on_open(self, tmp_path: Path) -> None:
+        """Regression: when the upgrade shim (root) opens the rotated log first,
+        deploy user must still be able to append. The handler chmods 0o664 on
+        every _open() so writers in either context can share the file."""
+        paths = BoxPaths(root=tmp_path / "bm")
+        paths.logs.mkdir(parents=True)
+        logger = get_logger(paths)
+        # Force a write to actually open the file
+        logger.info("opener", extra={"component": "test", "project": None, "detail": None})
+        log_file = paths.log_file
+        assert log_file.exists()
+        mode = log_file.stat().st_mode & 0o777
+        # Must be group-writable; 0o664 is the target. We accept >=0o660 because
+        # umask interactions on some systems may produce 0o660 if umask is 0o007.
+        assert mode & 0o060 == 0o060, (
+            f"log file {log_file} mode {oct(mode)} is not group-writable; "
+            f"deploy user will be locked out after root-context rotation"
+        )
+
+    def test_handler_class_is_shared_subclass(self, tmp_path: Path) -> None:
+        """The handler must be the boxmunge subclass that handles perms,
+        not a plain TimedRotatingFileHandler."""
+        from boxmunge.log import _SharedTimedRotatingFileHandler
+        paths = BoxPaths(root=tmp_path / "bm")
+        paths.logs.mkdir(parents=True)
+        logger = get_logger(paths)
+        fh = next(
+            h for h in logger.handlers
+            if isinstance(h, logging.handlers.TimedRotatingFileHandler)
+        )
+        assert isinstance(fh, _SharedTimedRotatingFileHandler)
