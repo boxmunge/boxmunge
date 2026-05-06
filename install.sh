@@ -14,12 +14,54 @@ BOXMUNGE_ROOT="/opt/boxmunge"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ---------------------------------------------------------------------------
+# Cosign — pinned version + checksum.
+#
+# Used by the upgrade shim to verify the keyless signature on SHA256SUMS for
+# every release before installing. Hard-required, no fallback. Pin the binary
+# version + checksum so a compromised github.com release page can't swap in
+# a malicious cosign. Source of truth for the checksum is upstream's
+# `cosign_checksums.txt` for the same release.
+# ---------------------------------------------------------------------------
+export COSIGN_VERSION="v2.4.1"
+export COSIGN_SHA256="8b24b946dd5809c6bd93de08033bcf6bc0ed7d336b7785787c080f574b89249b"
+
+# ---------------------------------------------------------------------------
 # Pre-flight
 # ---------------------------------------------------------------------------
 if [[ "$(id -u)" -ne 0 ]]; then
     echo "ERROR: This script must be run as root." >&2
     exit 1
 fi
+
+# ---------------------------------------------------------------------------
+# Install cosign (used by the upgrade shim to verify release signatures).
+#
+# Idempotent: if the pinned version is already installed, this is a no-op.
+# Failure is fatal — the upgrade shim hard-requires cosign and would refuse
+# to install future releases otherwise.
+# ---------------------------------------------------------------------------
+install_cosign() {
+    if command -v cosign >/dev/null 2>&1; then
+        local installed_version
+        installed_version="$(cosign version 2>&1 | grep -oE 'GitVersion:[[:space:]]*v[0-9.]+' | head -1 | awk '{print $NF}')"
+        if [[ "${installed_version}" == "${COSIGN_VERSION}" ]]; then
+            return 0
+        fi
+        echo "  cosign present (version='${installed_version}'), upgrading to ${COSIGN_VERSION}"
+    fi
+    echo "  Installing cosign ${COSIGN_VERSION}..."
+    local url="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+    curl -sSLf "${url}" -o /tmp/cosign
+    echo "${COSIGN_SHA256}  /tmp/cosign" | sha256sum -c -
+    install -m 0755 /tmp/cosign /usr/local/bin/cosign
+    rm -f /tmp/cosign
+}
+
+echo ""
+echo "========================================================"
+echo "  Ensuring cosign is installed (release signature verification)"
+echo "========================================================"
+install_cosign
 
 # ---------------------------------------------------------------------------
 # System bootstrap (fresh install only)

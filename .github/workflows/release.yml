@@ -39,19 +39,33 @@ jobs:
         continue-on-error: true
         id: cosign
 
-      - name: Sign artifacts
+      - name: Sign artifacts (cosign keyless)
         if: steps.cosign.outcome == 'success'
         run: |
+          # Compute checksums with bare filenames so consumers can verify
+          # by running `sha256sum -c SHA256SUMS` from any directory.
+          # SHA256SUMS is computed FIRST so the signature covers it.
+          (cd dist && sha256sum boxmunge-install.sh boxmunge-*.tar.gz > SHA256SUMS)
+          # Keyless sign SHA256SUMS — this is the signature the upgrade shim
+          # verifies. Output BOTH .sig and .cert; keyless verify-blob needs
+          # the certificate to chain to Fulcio + Rekor.
+          cosign sign-blob --yes \
+            --output-signature dist/SHA256SUMS.sig \
+            --output-certificate dist/SHA256SUMS.cert \
+            dist/SHA256SUMS
+          # Sign the install script too for parity (used by fresh installs).
           cosign sign-blob --yes \
             --output-signature dist/boxmunge-install.sig \
+            --output-certificate dist/boxmunge-install.cert \
             dist/boxmunge-install.sh
-          # Compute checksums with bare filenames so consumers can verify
-          # by running `sha256sum -c SHA256SUMS` from any directory
-          (cd dist && sha256sum boxmunge-install.sh boxmunge-*.tar.gz > SHA256SUMS)
 
-      - name: Generate checksums (unsigned)
+      - name: Generate checksums (unsigned — upgrade shim WILL refuse this release)
         if: steps.cosign.outcome != 'success'
         run: |
+          # The cosign installer step failed. We still emit SHA256SUMS so a
+          # human can audit the artifacts, but the upgrade shim hard-requires
+          # a valid cosign signature on SHA256SUMS and will refuse to install
+          # this release. To recover, re-run this workflow from a clean state.
           (cd dist && sha256sum boxmunge-install.sh boxmunge-*.tar.gz > SHA256SUMS)
 
       - name: Create GitHub Release
@@ -60,8 +74,11 @@ jobs:
           files: |
             dist/boxmunge-install.sh
             dist/boxmunge-install.sig
+            dist/boxmunge-install.cert
             dist/boxmunge-*.tar.gz
             dist/SHA256SUMS
+            dist/SHA256SUMS.sig
+            dist/SHA256SUMS.cert
             dist/sbom.json
           fail_on_unmatched_files: false
           generate_release_notes: true

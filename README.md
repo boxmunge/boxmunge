@@ -19,6 +19,7 @@ That's the real promise — not just "easy hosting," but one less tool you have 
 - **Encrypted backups that actually restore** — mandatory restore commands, tested by a self-test that proves it works
 - **Zero-downtime deploys** — stage, verify, promote
 - **Host security hardening out of the box** — firewall, intrusion detection, kernel hardening, automatic security updates
+- **Signed releases** — every release's `SHA256SUMS` is keyless-signed via Sigstore (cosign + Fulcio + Rekor), and the upgrade shim verifies the signature against this repo's release workflow before installing — unsigned releases are refused
 - **Per-container security hardening** — every service runs with no-new-privileges, dropped Linux capabilities, and PID limits by default; see `agent-help security` on the server
 - **AI-native operations** — every command works over SSH and via MCP, designed for agents from day one
 

@@ -11,7 +11,7 @@ boxmunge's defences are calibrated against a specific set of attackers. Future e
 ### In scope
 
 - **Network-level third-party attackers** — scanning, brute-force SSH, DDoS, malicious traffic targeting the public surface. Mitigations: UFW, CrowdSec, fail2ban, kernel hardening, key-only SSH on a non-default port.
-- **Supply-chain compromise of platform releases** — a tampered boxmunge release reaching the box. Mitigations: SHA256 checksums on all releases; cosign signing planned.
+- **Supply-chain compromise of platform releases** — a tampered boxmunge release reaching the box. Mitigations: every release's `SHA256SUMS` is keyless-signed by the GitHub Actions release workflow (Sigstore Fulcio + Rekor), and the upgrade shim verifies the signature against a pinned workflow identity and OIDC issuer before installing. cosign is hard-required — an unsigned release is refused, not silently installed. This closes the prior circularity (where SHA256SUMS and the bundle came from the same release URL and could be replaced in lockstep).
 - **Container-escape blast radius** — a compromised user container should not trivially own the host. Mitigations: per-service capability drops, `no-new-privileges`, `pids_limit`, Tini, the host-level platform-container hardening.
 
 ### Out of scope (current product)
@@ -136,4 +136,4 @@ prints the same report with no side effects.
 
 ## Security Releases
 
-Security-tagged releases are applied automatically within 12 hours. The `boxmunge upgrade` flow handles stashing, migration, and validation automatically. Release artifacts are signed with cosign when available; SHA256 checksums are always provided.
+Security-tagged releases are applied automatically within 12 hours. The `boxmunge upgrade` flow handles stashing, migration, and validation automatically. Release `SHA256SUMS` files are keyless-signed by the GitHub Actions release workflow (Sigstore Fulcio + Rekor), and the upgrade shim hard-requires a valid signature pinned to this repo's release workflow on a `vX.Y.Z` tag — an unsigned release is refused.
