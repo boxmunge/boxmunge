@@ -2,23 +2,18 @@
 """User compose.yml validator — guards the silent-floor hardening claim.
 
 A user-authored `compose.yml` is merged with boxmunge's generated
-`compose.boxmunge.yml` overlay. Docker Compose's multi-file merge semantics
-let certain user keys win over the overlay (`privileged`, `pid`,
-`network_mode`, `userns_mode` overwrite; `cap_add` and `volumes` and
-`security_opt` extend), so a user `compose.yml` that declares
-`privileged: true` or `cap_add: [SYS_ADMIN]` defeats the boxmunge baseline.
-
-This module parses the compose.yml *before* the overlay is generated and
-rejects any key that would defeat the silent floor. Services explicitly
-opted out via `security.profile: off` get a warning instead of a rejection
-— the operator already accepted the risk for those.
-
-Pure-ish module: file I/O is read-only on the compose path; `log_warning`
-is the only side-effect, and only fires for opted-out services.
+`compose.boxmunge.yml` overlay. Compose's multi-file merge semantics let
+certain user keys win over the overlay (privileged/pid/network_mode/
+userns_mode/ipc/cgroupns_mode overwrite; cap_add/volumes/security_opt/
+devices/device_cgroup_rules extend). This module parses compose.yml
+*before* the overlay is generated and rejects any key that would defeat
+the silent floor. Services explicitly opted out via `security.profile:
+off` get warnings instead of rejection — every offender on multi-entry
+fields is surfaced so the operator sees the full picture.
 """
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 import yaml
@@ -28,58 +23,41 @@ from boxmunge.paths import BoxPaths
 
 
 class ComposeSecurityError(Exception):
-    """Raised when a user compose.yml declares a key that defeats boxmunge hardening."""
+    """Raised when a user compose.yml declares a key that defeats hardening."""
 
 
 # ---------------------------------------------------------------------------
 # Hostile-key inventory
 # ---------------------------------------------------------------------------
 
-# Caps that we always reject in user `cap_add`, even though the boxmunge
-# baseline does not drop them (`cap_add` is the legitimate opt-back-in
-# mechanism for caps in DEFAULT_CAP_DROP, e.g. NET_RAW for ping/traceroute).
-# This list captures caps where there is no legitimate "opt back in" — they
-# unwind container isolation so far that no normal app should need them.
+# Caps with no legitimate "opt back in" — they unwind isolation so far that
+# no normal app needs them. Caps in security_overlay.DEFAULT_CAP_DROP (e.g.
+# NET_RAW for ping, NET_ADMIN for namespace-managing apps) are NOT in this
+# set — adding them back via cap_add is the legitimate opt-back-in path.
 _ALWAYS_HOSTILE_CAPS: set[str] = {
-    "SYS_ADMIN",
-    "DAC_READ_SEARCH",
-    "BPF",
-    "PERFMON",
-    "SYS_RESOURCE",
+    "SYS_ADMIN", "DAC_READ_SEARCH", "BPF", "PERFMON", "SYS_RESOURCE",
 }
 
 # Substrings (case-insensitive) that indicate a hostile security_opt entry.
+# `no-new-privileges:false` defeats the overlay's `:true` under list-merge.
 _HOSTILE_SECURITY_OPT_SUBSTRINGS: tuple[str, ...] = (
-    "unconfined",
-    "label:disable",
+    "unconfined", "label:disable", "no-new-privileges:false",
 )
 
-# Host paths that must never be exposed to a container by a user compose.
-# Match against the source side of any bind mount (short or long syntax).
-_HOSTILE_VOLUME_SOURCES: set[str] = {
-    "/var/run/docker.sock",
-    "/proc",
-    "/sys",
-    "/",
-    "/etc",
-    "/dev",
-}
-
-
-def _hostile_caps() -> set[str]:
-    """Effective hostile-cap set — the always-hostile names.
-
-    Note: caps in security_overlay.DEFAULT_CAP_DROP are NOT considered hostile
-    when they appear in `cap_add`. Adding them back is the legitimate
-    opt-back-in mechanism (e.g. NET_RAW for ping/traceroute, NET_ADMIN for
-    apps that manage their own network namespace).
-    """
-    return set(_ALWAYS_HOSTILE_CAPS)
+# Host paths that must never be exposed via bind-mount source. Matched with
+# POSIX path-prefix semantics — descendants are also rejected.
+_HOSTILE_VOLUME_SOURCES: tuple[str, ...] = (
+    "/var/run/docker.sock", "/proc", "/sys", "/etc", "/dev", "/",
+)
 
 
 # ---------------------------------------------------------------------------
-# Per-key validators — each returns (key, value) on first hit, or None.
-# `key` and `value` are stringified for the error message.
+# Per-key validators
+#
+# Single-hit checks return `tuple[str, str] | None` — the (key, value) of the
+# first offender. Multi-hit checks (cap_add, security_opt, volumes) return
+# `list[tuple[str, str]]` — every offender, so off-service warnings surface
+# the complete picture (audit I-NEW-3).
 # ---------------------------------------------------------------------------
 
 def _check_privileged(svc: dict[str, Any]) -> tuple[str, str] | None:
@@ -88,76 +66,107 @@ def _check_privileged(svc: dict[str, Any]) -> tuple[str, str] | None:
     return None
 
 
+def _scalar_host_match(svc: dict[str, Any], key: str) -> tuple[str, str] | None:
+    val = svc.get(key)
+    if isinstance(val, str) and val.lower() == "host":
+        return (key, val)
+    return None
+
+
 def _check_pid(svc: dict[str, Any]) -> tuple[str, str] | None:
     pid = svc.get("pid")
-    if pid is None:
-        return None
     if not isinstance(pid, str):
         return None
-    if pid == "host" or pid.startswith("container:"):
+    lowered = pid.lower()
+    if lowered == "host" or lowered.startswith("container:"):
         return ("pid", pid)
     return None
 
 
 def _check_userns_mode(svc: dict[str, Any]) -> tuple[str, str] | None:
-    if svc.get("userns_mode") == "host":
-        return ("userns_mode", "host")
-    return None
+    return _scalar_host_match(svc, "userns_mode")
 
 
 def _check_network_mode(svc: dict[str, Any]) -> tuple[str, str] | None:
-    if svc.get("network_mode") == "host":
-        return ("network_mode", "host")
+    return _scalar_host_match(svc, "network_mode")
+
+
+def _check_ipc(svc: dict[str, Any]) -> tuple[str, str] | None:
+    """`ipc: host` shares the host IPC namespace — escape vector."""
+    return _scalar_host_match(svc, "ipc")
+
+
+def _check_cgroupns_mode(svc: dict[str, Any]) -> tuple[str, str] | None:
+    """`cgroupns_mode: host` shares the host cgroup namespace."""
+    return _scalar_host_match(svc, "cgroupns_mode")
+
+
+def _check_devices(svc: dict[str, Any]) -> tuple[str, str] | None:
+    """Any non-empty `devices` list exposes host devices to the container."""
+    devs = svc.get("devices")
+    if isinstance(devs, list) and devs:
+        return ("devices", str(devs[0]))
     return None
 
 
-def _check_security_opt(svc: dict[str, Any]) -> tuple[str, str] | None:
+def _check_device_cgroup_rules(svc: dict[str, Any]) -> tuple[str, str] | None:
+    """`device_cgroup_rules` (e.g. "c *:* rwm") grants device-class access."""
+    rules = svc.get("device_cgroup_rules")
+    if isinstance(rules, list) and rules:
+        return ("device_cgroup_rules", str(rules[0]))
+    return None
+
+
+def _check_cgroup_parent(svc: dict[str, Any]) -> tuple[str, str] | None:
+    """Reject cgroup_parent values that look like traversal or absolute
+    placement. Flat names (e.g. "my-cgroup") are allowed.
+    """
+    val = svc.get("cgroup_parent")
+    if not isinstance(val, str) or not val:
+        return None
+    if val.startswith("/") or ".." in val:
+        return ("cgroup_parent", val)
+    return None
+
+
+def _check_security_opt(svc: dict[str, Any]) -> list[tuple[str, str]]:
     sec_opt = svc.get("security_opt")
     if not isinstance(sec_opt, list):
-        return None
+        return []
+    hits: list[tuple[str, str]] = []
     for entry in sec_opt:
         if not isinstance(entry, str):
             continue
         lowered = entry.lower()
-        for needle in _HOSTILE_SECURITY_OPT_SUBSTRINGS:
-            if needle in lowered:
-                return ("security_opt", entry)
-    return None
+        if any(needle in lowered for needle in _HOSTILE_SECURITY_OPT_SUBSTRINGS):
+            hits.append(("security_opt", entry))
+    return hits
 
 
-def _check_cap_add(svc: dict[str, Any]) -> tuple[str, str] | None:
+def _check_cap_add(svc: dict[str, Any]) -> list[tuple[str, str]]:
     cap_add = svc.get("cap_add")
     if not isinstance(cap_add, list):
-        return None
-    hostile = _hostile_caps()
+        return []
+    hits: list[tuple[str, str]] = []
     for cap in cap_add:
-        if not isinstance(cap, str):
-            continue
-        if cap.upper() in hostile:
-            return ("cap_add", cap)
-    return None
+        if isinstance(cap, str) and cap.upper() in _ALWAYS_HOSTILE_CAPS:
+            hits.append(("cap_add", cap))
+    return hits
 
 
 def _bind_source(entry: Any) -> str | None:
     """Extract the source side of a volume entry, or None if not a bind mount.
 
-    Short syntax: "src:dst[:opts]" — `src` is everything before the first ':'
-    (Windows-style absolute paths with drive letters are not a target here;
-    boxmunge runs on Linux).
-
-    Long syntax: {"type": "bind", "source": "...", ...}.
-
-    Named volumes ("volname:/dst") are not bind mounts — we still return the
-    bare name so the caller can compare it; named-volume names will not match
-    any entry in _HOSTILE_VOLUME_SOURCES (they don't start with '/').
+    Short syntax: "src:dst[:opts]" — source is everything before the first
+    ':'. Long syntax: {"type": "bind", "source": "...", ...}. Anonymous
+    volume targets ("/data") have no source — return None. Named volumes
+    ("name:/dst") return the name; it won't match a hostile path.
     """
     if isinstance(entry, str):
         if ":" not in entry:
-            # Anonymous volume like "/data" used as a target only — no source.
             return None
         return entry.split(":", 1)[0]
     if isinstance(entry, dict):
-        # Long syntax. Only bind mounts expose a host path.
         if entry.get("type") != "bind":
             return None
         src = entry.get("source")
@@ -165,30 +174,72 @@ def _bind_source(entry: Any) -> str | None:
     return None
 
 
-def _check_volumes(svc: dict[str, Any]) -> tuple[str, str] | None:
+def _has_env_substitution(src: str) -> bool:
+    """True if the source contains Compose env-var substitution.
+
+    Compose substitutes `${VAR}` and `$VAR` from the project env at runtime
+    — we cannot validate the resolved value statically. Reject up front;
+    fail noisily, never fall back.
+    """
+    return "${" in src or src.startswith("$")
+
+
+def _is_hostile_volume_source(src: str) -> bool:
+    """POSIX path-prefix match against _HOSTILE_VOLUME_SOURCES.
+
+    Matches if `src` equals or descends from any hostile entry. Relative
+    paths and named-volume strings (no leading '/') never match.
+    """
+    if not src.startswith("/"):
+        return False
+    src_path = PurePosixPath(src)
+    for hostile in _HOSTILE_VOLUME_SOURCES:
+        # `/` is exact-match only — every absolute path is a descendant of
+        # root, so prefix matching here would reject every legit bind mount.
+        if hostile == "/":
+            if src == "/":
+                return True
+            continue
+        hostile_path = PurePosixPath(hostile)
+        if src_path == hostile_path:
+            return True
+        try:
+            src_path.relative_to(hostile_path)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _check_volumes(svc: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return every hostile volume entry — env-substitution OR hostile prefix."""
     volumes = svc.get("volumes")
     if not isinstance(volumes, list):
-        return None
+        return []
+    hits: list[tuple[str, str]] = []
     for entry in volumes:
         src = _bind_source(entry)
         if src is None:
             continue
-        if src in _HOSTILE_VOLUME_SOURCES:
-            return ("volumes", str(entry))
-    return None
+        if _has_env_substitution(src):
+            hits.append((
+                "volumes",
+                f"{entry} (env-var substitution in volumes: source not "
+                f"supported — write the host path literally for "
+                f"hardening verification)",
+            ))
+            continue
+        if _is_hostile_volume_source(src):
+            hits.append(("volumes", str(entry)))
+    return hits
 
 
-# Order matters only for which key is reported first when multiple are
-# hostile on the same service. Keep deterministic for stable error messages.
-_CHECKS = (
-    _check_privileged,
-    _check_pid,
-    _check_userns_mode,
-    _check_network_mode,
-    _check_security_opt,
-    _check_cap_add,
-    _check_volumes,
+_SINGLE_CHECKS = (
+    _check_privileged, _check_pid, _check_userns_mode, _check_network_mode,
+    _check_ipc, _check_cgroupns_mode, _check_devices,
+    _check_device_cgroup_rules, _check_cgroup_parent,
 )
+_MULTI_CHECKS = (_check_security_opt, _check_cap_add, _check_volumes)
 
 
 # ---------------------------------------------------------------------------
@@ -196,18 +247,23 @@ _CHECKS = (
 # ---------------------------------------------------------------------------
 
 def validate_user_compose(
-    compose_path: Path,
+    compose_path,
     paths: BoxPaths,
     off_services: set[str] | None = None,
+    project_name: str | None = None,
 ) -> None:
     """Parse compose.yml and reject hostile keys.
 
-    For services in `off_services` (those that resolve to profile: off in
+    For services in `off_services` (those with `security.profile: off` in
     the manifest), hostile keys produce log_warning entries instead of
-    raising — the operator already opted out of the hardening.
+    raising. For multi-entry fields (cap_add, security_opt, volumes) every
+    offender is logged.
 
-    Raises ComposeSecurityError on the first hostile key in a non-off service,
-    or if the file cannot be read/parsed.
+    `project_name` is threaded into log_warning so structured logs can be
+    filtered with `boxmunge log --project <name>` (audit E-NEW-2).
+
+    Raises ComposeSecurityError on the first hostile key in a non-off
+    service, or if the file cannot be read/parsed.
     """
     off = off_services or set()
 
@@ -221,9 +277,7 @@ def validate_user_compose(
     try:
         doc = yaml.safe_load(raw)
     except yaml.YAMLError as e:
-        raise ComposeSecurityError(
-            f"could not parse compose.yml: {e}"
-        ) from e
+        raise ComposeSecurityError(f"could not parse compose.yml: {e}") from e
 
     if doc is None:
         return
@@ -243,23 +297,32 @@ def validate_user_compose(
     for svc_name, svc in services.items():
         if not isinstance(svc, dict):
             continue
-        for check in _CHECKS:
+
+        findings: list[tuple[str, str]] = []
+        for check in _SINGLE_CHECKS:
             hit = check(svc)
-            if hit is None:
-                continue
-            key, value = hit
-            if svc_name in off:
+            if hit is not None:
+                findings.append(hit)
+        for multi in _MULTI_CHECKS:
+            findings.extend(multi(svc))
+
+        if not findings:
+            continue
+
+        if svc_name in off:
+            for key, value in findings:
                 log_warning(
                     "compose-validate",
                     f"hostile compose key {key} on service {svc_name} "
-                    f"(profile: off — allowed)",
+                    f"(profile: off — allowed): {value}",
                     paths,
+                    project=project_name,
                 )
-                # Continue scanning this service so the operator sees ALL
-                # warnings for an opted-out service, not just the first.
-                continue
-            raise ComposeSecurityError(
-                f"service {svc_name}: {key} = {value} defeats boxmunge "
-                f"hardening; remove it or set security.profile: off "
-                f"with reason"
-            )
+            continue
+
+        key, value = findings[0]
+        raise ComposeSecurityError(
+            f"service {svc_name}: {key} = {value} defeats boxmunge "
+            f"hardening; remove it or set security.profile: off "
+            f"with reason"
+        )

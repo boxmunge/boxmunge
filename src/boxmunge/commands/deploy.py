@@ -292,6 +292,7 @@ def _run_deploy_inner(
         validate_user_compose(
             paths.project_compose(project_name), paths,
             off_services=off_services,
+            project_name=project_name,
         )
     except ComposeSecurityError as e:
         print(f"ERROR: {e}", file=sys.stderr)

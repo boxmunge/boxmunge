@@ -478,3 +478,390 @@ services:
 """)
         with pytest.raises(ComposeSecurityError):
             validate_user_compose(compose, paths, off_services=None)
+
+
+# ---------------------------------------------------------------------------
+# A-NEW-3 — Hostile-volume Path-prefix matching (subpaths must be rejected)
+# ---------------------------------------------------------------------------
+
+class TestRejectsHostileVolumeSubpaths:
+    def test_proc_self_subpath_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - /proc/self:/host_self
+""")
+        with pytest.raises(ComposeSecurityError, match="volumes"):
+            validate_user_compose(compose, paths)
+
+    def test_etc_passwd_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - /etc/passwd:/etc/passwd:ro
+""")
+        with pytest.raises(ComposeSecurityError, match="volumes"):
+            validate_user_compose(compose, paths)
+
+    def test_etc_shadow_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - /etc/shadow:/x
+""")
+        with pytest.raises(ComposeSecurityError, match="volumes"):
+            validate_user_compose(compose, paths)
+
+    def test_dev_block_device_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - /dev/sda:/dev/sda
+""")
+        with pytest.raises(ComposeSecurityError, match="volumes"):
+            validate_user_compose(compose, paths)
+
+    def test_sys_fs_cgroup_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - /sys/fs/cgroup:/cg
+""")
+        with pytest.raises(ComposeSecurityError, match="volumes"):
+            validate_user_compose(compose, paths)
+
+    def test_docker_sock_lookalike_dir_rejected(self, tmp_path: Path, paths) -> None:
+        # /var/run/docker.sock is a file; an attacker mounting a sibling
+        # directory like /var/run/docker.sock.d/sock would be a lookalike.
+        # We treat the docker.sock path as a strict prefix: subpaths under it
+        # are rejected via the same prefix-match rule.
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - /var/run/docker.sock/anything:/sock
+""")
+        with pytest.raises(ComposeSecurityError, match="volumes"):
+            validate_user_compose(compose, paths)
+
+    def test_benign_home_path_accepted(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - /home/deploy/foo:/foo
+""")
+        validate_user_compose(compose, paths)
+
+
+# ---------------------------------------------------------------------------
+# A-NEW-4 — Variable substitution in volume sources is rejected up front.
+# ---------------------------------------------------------------------------
+
+class TestRejectsVolumeEnvSubstitution:
+    def test_brace_substitution_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - ${SOCK_PATH}:/var/run/docker.sock
+""")
+        with pytest.raises(ComposeSecurityError, match="substitution"):
+            validate_user_compose(compose, paths)
+
+    def test_bare_dollar_substitution_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - $HOME/foo:/etc
+""")
+        with pytest.raises(ComposeSecurityError, match="substitution"):
+            validate_user_compose(compose, paths)
+
+    def test_brace_substitution_in_long_syntax_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - type: bind
+        source: ${PROC_PATH}
+        target: /host_proc
+""")
+        with pytest.raises(ComposeSecurityError, match="substitution"):
+            validate_user_compose(compose, paths)
+
+
+# ---------------------------------------------------------------------------
+# A-NEW-5 — `no-new-privileges:false` rejected as security_opt.
+# ---------------------------------------------------------------------------
+
+class TestRejectsNoNewPrivilegesFalse:
+    def test_no_new_privileges_false_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    security_opt:
+      - no-new-privileges:false
+""")
+        with pytest.raises(ComposeSecurityError, match="security_opt"):
+            validate_user_compose(compose, paths)
+
+    def test_no_new_privileges_false_mixed_case_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    security_opt:
+      - No-New-Privileges:False
+""")
+        with pytest.raises(ComposeSecurityError, match="security_opt"):
+            validate_user_compose(compose, paths)
+
+
+# ---------------------------------------------------------------------------
+# A-NEW-6 — Additional escape-vector keys.
+# ---------------------------------------------------------------------------
+
+class TestRejectsIpcHost:
+    def test_ipc_host_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    ipc: host
+""")
+        with pytest.raises(ComposeSecurityError, match="ipc"):
+            validate_user_compose(compose, paths)
+
+
+class TestRejectsCgroupnsHost:
+    def test_cgroupns_mode_host_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    cgroupns_mode: host
+""")
+        with pytest.raises(ComposeSecurityError, match="cgroupns_mode"):
+            validate_user_compose(compose, paths)
+
+
+class TestRejectsDevices:
+    def test_non_empty_devices_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    devices:
+      - /dev/kvm:/dev/kvm
+""")
+        with pytest.raises(ComposeSecurityError, match="devices"):
+            validate_user_compose(compose, paths)
+
+    def test_empty_devices_accepted(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    devices: []
+""")
+        validate_user_compose(compose, paths)
+
+
+class TestRejectsDeviceCgroupRules:
+    def test_non_empty_device_cgroup_rules_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    device_cgroup_rules:
+      - "c *:* rwm"
+""")
+        with pytest.raises(ComposeSecurityError, match="device_cgroup_rules"):
+            validate_user_compose(compose, paths)
+
+
+class TestRejectsHostileCgroupParent:
+    def test_absolute_path_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    cgroup_parent: /system.slice
+""")
+        with pytest.raises(ComposeSecurityError, match="cgroup_parent"):
+            validate_user_compose(compose, paths)
+
+    def test_dotdot_traversal_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    cgroup_parent: foo/../bar
+""")
+        with pytest.raises(ComposeSecurityError, match="cgroup_parent"):
+            validate_user_compose(compose, paths)
+
+    def test_flat_name_accepted(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    cgroup_parent: my-cgroup
+""")
+        validate_user_compose(compose, paths)
+
+
+# ---------------------------------------------------------------------------
+# A-NEW-7 — Case-insensitive scalar checks.
+# ---------------------------------------------------------------------------
+
+class TestCaseInsensitiveScalarChecks:
+    def test_pid_HOST_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    pid: HOST
+""")
+        with pytest.raises(ComposeSecurityError, match="pid"):
+            validate_user_compose(compose, paths)
+
+    def test_network_mode_Host_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    network_mode: Host
+""")
+        with pytest.raises(ComposeSecurityError, match="network_mode"):
+            validate_user_compose(compose, paths)
+
+    def test_userns_mode_HOST_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    userns_mode: HOST
+""")
+        with pytest.raises(ComposeSecurityError, match="userns"):
+            validate_user_compose(compose, paths)
+
+
+# ---------------------------------------------------------------------------
+# I-NEW-3 — Off-service warnings now surface ALL hostile entries.
+# ---------------------------------------------------------------------------
+
+class TestOffServiceSurfacesAllHostileEntries:
+    def test_multiple_hostile_caps_each_logged(
+        self, tmp_path: Path, paths, capsys
+    ) -> None:
+        from boxmunge.log import _reset_logger
+        _reset_logger()
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    cap_add:
+      - SYS_ADMIN
+      - BPF
+""")
+        validate_user_compose(compose, paths, off_services={"web"})
+        captured = capsys.readouterr()
+        assert "SYS_ADMIN" in captured.err
+        assert "BPF" in captured.err
+
+    def test_multiple_hostile_volumes_each_logged(
+        self, tmp_path: Path, paths, capsys
+    ) -> None:
+        from boxmunge.log import _reset_logger
+        _reset_logger()
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - /proc:/host/proc
+      - /etc:/host/etc
+""")
+        validate_user_compose(compose, paths, off_services={"web"})
+        captured = capsys.readouterr()
+        # Two warnings — one per hostile entry.
+        assert captured.err.count("hostile compose key volumes") >= 2
+
+    def test_multiple_hostile_security_opts_each_logged(
+        self, tmp_path: Path, paths, capsys
+    ) -> None:
+        from boxmunge.log import _reset_logger
+        _reset_logger()
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+""")
+        validate_user_compose(compose, paths, off_services={"web"})
+        captured = capsys.readouterr()
+        assert captured.err.count("hostile compose key security_opt") >= 2
+
+
+# ---------------------------------------------------------------------------
+# E-NEW-2 — `validate_user_compose` accepts project_name and threads it.
+# ---------------------------------------------------------------------------
+
+class TestProjectNameThreaded:
+    def test_project_name_passed_to_log_warning(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    privileged: true
+""")
+        from unittest.mock import patch
+        with patch("boxmunge.compose_validate.log_warning") as mw:
+            validate_user_compose(
+                compose, paths, off_services={"web"},
+                project_name="myapp",
+            )
+            assert mw.called
+            # Every call must pass project="myapp" so `boxmunge log --project`
+            # can filter compose-validate warnings.
+            for call in mw.call_args_list:
+                assert call.kwargs.get("project") == "myapp"
+
+    def test_project_name_optional(self, tmp_path: Path, paths) -> None:
+        # Existing call sites without project_name still work.
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    privileged: true
+""")
+        from unittest.mock import patch
+        with patch("boxmunge.compose_validate.log_warning") as mw:
+            validate_user_compose(compose, paths, off_services={"web"})
+            assert mw.called
+            for call in mw.call_args_list:
+                # project=None means structured logs simply don't carry the field.
+                assert call.kwargs.get("project") is None

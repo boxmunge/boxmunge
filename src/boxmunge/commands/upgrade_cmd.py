@@ -117,6 +117,7 @@ def _regenerate_configs(paths: BoxPaths) -> list[str]:
             validate_user_compose(
                 paths.project_compose(project_name), paths,
                 off_services=off_services,
+                project_name=project_name,
             )
         except ComposeSecurityError as e:
             log_error(

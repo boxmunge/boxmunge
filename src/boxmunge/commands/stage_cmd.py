@@ -123,6 +123,7 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
         validate_user_compose(
             project_dir / "compose.yml", paths,
             off_services=off_services,
+            project_name=project_name,
         )
     except ComposeSecurityError as e:
         print(f"ERROR: {e}", file=sys.stderr)
