@@ -35,6 +35,13 @@ from boxmunge.paths import BoxPaths
 _LOGGER = logging.getLogger("boxmunge")
 
 
+def _extra(
+    project: str | None = None, detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Structured-extras helper for cve-quarantine events."""
+    return {"component": "cve-quarantine", "project": project, "detail": detail}
+
+
 class QuarantineError(Exception):
     """Quarantine action could not complete."""
 
@@ -135,11 +142,28 @@ def quarantine_project(
         _LOGGER.info(
             "quarantine: re-asserting on already-quarantined project %s "
             "(new headline %s)", project_name, headline.finding.cve_id,
+            extra=_extra(
+                project=project_name,
+                detail={
+                    "cve_id": headline.finding.cve_id,
+                    "severity": headline.effective_severity.value,
+                    "image_ref": image_ref,
+                    "re_assert": True,
+                },
+            ),
         )
     else:
         _LOGGER.info(
             "quarantine: firing on %s (headline %s, image %s)",
             project_name, headline.finding.cve_id, image_ref,
+            extra=_extra(
+                project=project_name,
+                detail={
+                    "cve_id": headline.finding.cve_id,
+                    "severity": headline.effective_severity.value,
+                    "image_ref": image_ref,
+                },
+            ),
         )
 
     # 1. State file FIRST.
@@ -178,8 +202,11 @@ def quarantine_project(
             f"Failed to stop containers for {project_name!r}: {e}",
         ) from e
 
-    _LOGGER.info("quarantine: %s now offline behind maintenance page",
-                 project_name)
+    _LOGGER.info(
+        "quarantine: %s now offline behind maintenance page",
+        project_name,
+        extra=_extra(project=project_name),
+    )
 
 
 def lift_quarantine(
@@ -215,10 +242,14 @@ def lift_quarantine(
         _LOGGER.info(
             "quarantine: lift requested for %s but not quarantined — no-op",
             project_name,
+            extra=_extra(project=project_name),
         )
         return
 
-    _LOGGER.info("quarantine: lifting on %s", project_name)
+    _LOGGER.info(
+        "quarantine: lifting on %s", project_name,
+        extra=_extra(project=project_name),
+    )
 
     # 1. Restore normal Caddy site config.
     try:
@@ -252,4 +283,7 @@ def lift_quarantine(
     # 4. Only now clear state — surviving past compose_up means the
     #    project is genuinely back online.
     clear_quarantine_state(project_name, paths)
-    _LOGGER.info("quarantine: %s lifted, back online", project_name)
+    _LOGGER.info(
+        "quarantine: %s lifted, back online", project_name,
+        extra=_extra(project=project_name),
+    )

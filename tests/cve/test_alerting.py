@@ -370,6 +370,13 @@ def test_send_alerts_no_pushover_config_logs_warning_returns_zero(
     sent = send_alerts((alert,), paths)
     assert sent == 0
     assert "alerts skipped, pushover not configured" in caplog.text
+    # Wave 3 / audit A-1: warnings carry component='cve-alert' so
+    # `boxmunge log --component cve-alert` finds them.
+    matching = [
+        r for r in caplog.records
+        if getattr(r, "component", None) == "cve-alert"
+    ]
+    assert matching, "expected at least one record with component='cve-alert'"
 
 
 def test_send_alerts_calls_send_notification_per_alert(
@@ -411,6 +418,13 @@ def test_send_alerts_continues_on_failure(monkeypatch, tmp_path, caplog) -> None
     assert sent == 2
     assert "pushover send failed" in caplog.text
     assert "t2" in caplog.text
+    # Wave 3 / audit A-1: send-failure warnings carry component='cve-alert'.
+    matching = [
+        r for r in caplog.records
+        if getattr(r, "component", None) == "cve-alert"
+        and "pushover send failed" in r.getMessage()
+    ]
+    assert matching, "expected pushover-send-failed record with cve-alert"
 
 
 # ---------- emit_scan_alerts ----------

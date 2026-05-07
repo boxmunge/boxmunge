@@ -12,7 +12,10 @@ from boxmunge.cve.suppressions import (
     add_suppression,
     expired_suppressions,
     find_active_suppression,
+    find_recent_removal,
+    history_path_for,
     load_suppressions,
+    record_removal,
     remove_suppression,
 )
 
@@ -470,3 +473,119 @@ def test_remove_unknown_cve_id_raises(tmp_path: Path) -> None:
     with pytest.raises(SuppressionsError) as ei:
         remove_suppression(path, "CVE-2026-9999")
     assert "CVE-2026-9999" in str(ei.value)
+
+
+# ---------- removal history (audit D-2) ----------
+
+
+def test_history_path_is_sibling(tmp_path: Path) -> None:
+    sup = tmp_path / "security" / "suppressions.yml"
+    history = history_path_for(sup)
+    assert history == tmp_path / "security" / "suppressions.history.yml"
+
+
+def test_record_removal_creates_history_file(tmp_path: Path) -> None:
+    sup_path = tmp_path / "security" / "suppressions.yml"
+    sup_path.parent.mkdir(parents=True, exist_ok=True)
+    prior = _make(
+        cve_id="CVE-2026-1234", until=date(2026, 8, 1),
+        added=date(2026, 5, 6), reason="r", reviewed_by="jon",
+    )
+    record_removal(sup_path, prior=prior, removed_at=date(2026, 5, 10))
+    history = history_path_for(sup_path)
+    assert history.exists()
+    text = history.read_text()
+    assert "CVE-2026-1234" in text
+    assert "2026-05-10" in text
+
+
+def test_find_recent_removal_within_window(tmp_path: Path) -> None:
+    sup_path = tmp_path / "security" / "suppressions.yml"
+    sup_path.parent.mkdir(parents=True, exist_ok=True)
+    prior = _make(
+        cve_id="CVE-2026-1234", until=date(2026, 8, 1),
+        added=date(2026, 5, 1), reason="reviewed",
+    )
+    record_removal(sup_path, prior=prior, removed_at=date(2026, 5, 5))
+    found = find_recent_removal(
+        sup_path, "CVE-2026-1234",
+        today=date(2026, 5, 10), max_age_days=7,
+    )
+    assert found is not None
+    assert found.cve_id == "CVE-2026-1234"
+    assert found.previous_until == date(2026, 8, 1)
+    assert found.previous_added == date(2026, 5, 1)
+    assert found.removed_at == date(2026, 5, 5)
+    assert found.previous_reason == "reviewed"
+
+
+def test_find_recent_removal_outside_window(tmp_path: Path) -> None:
+    sup_path = tmp_path / "security" / "suppressions.yml"
+    sup_path.parent.mkdir(parents=True, exist_ok=True)
+    prior = _make(cve_id="CVE-2026-1234")
+    record_removal(sup_path, prior=prior, removed_at=date(2026, 1, 1))
+    found = find_recent_removal(
+        sup_path, "CVE-2026-1234",
+        today=date(2026, 5, 10), max_age_days=7,
+    )
+    # 130 days > 7-day window — treated as not recent.
+    assert found is None
+
+
+def test_find_recent_removal_no_history(tmp_path: Path) -> None:
+    sup_path = tmp_path / "security" / "suppressions.yml"
+    found = find_recent_removal(
+        sup_path, "CVE-2026-1234", today=date(2026, 5, 10),
+    )
+    assert found is None
+
+
+def test_find_recent_removal_unknown_cve(tmp_path: Path) -> None:
+    sup_path = tmp_path / "security" / "suppressions.yml"
+    sup_path.parent.mkdir(parents=True, exist_ok=True)
+    prior = _make(cve_id="CVE-2026-1234")
+    record_removal(sup_path, prior=prior, removed_at=date(2026, 5, 5))
+    assert find_recent_removal(
+        sup_path, "CVE-2026-9999", today=date(2026, 5, 10),
+    ) is None
+
+
+def test_record_removal_appends_multiple(tmp_path: Path) -> None:
+    sup_path = tmp_path / "security" / "suppressions.yml"
+    sup_path.parent.mkdir(parents=True, exist_ok=True)
+    prior_a = _make(cve_id="CVE-2026-1111", added=date(2026, 5, 1))
+    prior_b = _make(cve_id="CVE-2026-2222", added=date(2026, 5, 2))
+    record_removal(sup_path, prior=prior_a, removed_at=date(2026, 5, 5))
+    record_removal(sup_path, prior=prior_b, removed_at=date(2026, 5, 6))
+    text = history_path_for(sup_path).read_text()
+    assert "CVE-2026-1111" in text
+    assert "CVE-2026-2222" in text
+
+
+def test_find_recent_removal_picks_most_recent(tmp_path: Path) -> None:
+    """When the same CVE is suppressed, removed, suppressed, removed again,
+    the most recent removal is what we surface."""
+    sup_path = tmp_path / "security" / "suppressions.yml"
+    sup_path.parent.mkdir(parents=True, exist_ok=True)
+    prior_old = _make(cve_id="CVE-2026-1234", added=date(2026, 1, 1))
+    prior_new = _make(cve_id="CVE-2026-1234", added=date(2026, 5, 1))
+    record_removal(sup_path, prior=prior_old, removed_at=date(2026, 1, 5))
+    record_removal(sup_path, prior=prior_new, removed_at=date(2026, 5, 8))
+    found = find_recent_removal(
+        sup_path, "CVE-2026-1234", today=date(2026, 5, 10),
+    )
+    assert found is not None
+    assert found.removed_at == date(2026, 5, 8)
+    assert found.previous_added == date(2026, 5, 1)
+
+
+def test_record_removal_uses_atomic_write(tmp_path: Path) -> None:
+    sup_path = tmp_path / "security" / "suppressions.yml"
+    sup_path.parent.mkdir(parents=True, exist_ok=True)
+    prior = _make(cve_id="CVE-2026-1234")
+    record_removal(sup_path, prior=prior, removed_at=date(2026, 5, 5))
+    # No leftover .tmp scratch files.
+    leftovers = [
+        p for p in sup_path.parent.iterdir() if p.suffix == ".tmp"
+    ]
+    assert leftovers == []

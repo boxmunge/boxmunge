@@ -169,3 +169,41 @@ def test_mark_heads_up_sent_persists(tmp_path) -> None:
     assert rebuilt.heads_up_sent is True
     assert rebuilt.installed_at == state.installed_at
     assert rebuilt.expires_at == state.expires_at
+
+
+# ---------- structured-extras (audit A-1) ----------
+
+
+def test_init_grace_emits_structured_log(tmp_path) -> None:
+    """Wave 3: grace init log carries component='cve-grace', project=None."""
+    import logging as _logging
+    paths = _paths(tmp_path)
+
+    records: list = []
+
+    class _ListHandler(_logging.Handler):
+        def emit(self, record):  # type: ignore[override]
+            records.append(record)
+
+    h = _ListHandler(level=_logging.INFO)
+    logger = _logging.getLogger("boxmunge")
+    saved_level = logger.level
+    logger.setLevel(_logging.INFO)
+    logger.addHandler(h)
+    try:
+        init_grace_if_missing(paths, now=_now())
+    finally:
+        logger.removeHandler(h)
+        logger.setLevel(saved_level)
+
+    grace_records = [
+        r for r in records
+        if getattr(r, "component", None) == "cve-grace"
+    ]
+    assert len(grace_records) == 1
+    rec = grace_records[0]
+    assert getattr(rec, "project", "missing") is None
+    detail = getattr(rec, "detail", None)
+    assert isinstance(detail, dict)
+    assert "installed_at" in detail
+    assert "expires_at" in detail

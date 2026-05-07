@@ -49,6 +49,13 @@ from boxmunge.pushover import send_notification
 _LOGGER = logging.getLogger("boxmunge")
 
 
+def _extra(
+    project: str | None = None, detail: dict | None = None,
+) -> dict:
+    """Structured-extras helper for cve-alert events."""
+    return {"component": "cve-alert", "project": project, "detail": detail}
+
+
 AlertKind = Literal[
     "quarantine",
     "still_running",
@@ -463,6 +470,7 @@ def send_alerts(alerts: tuple[Alert, ...], paths: BoxPaths) -> int:
             "alerts skipped, pushover not configured "
             "(%d alert(s) would have been sent)",
             len(alerts),
+            extra=_extra(detail={"alert_count": len(alerts)}),
         )
         return 0
 
@@ -476,6 +484,10 @@ def send_alerts(alerts: tuple[Alert, ...], paths: BoxPaths) -> int:
         except Exception as e:  # defensive: pushover.send_notification swallows  # noqa: BLE001
             _LOGGER.warning(
                 "pushover send raised for %r: %s", alert.title, e,
+                extra=_extra(detail={
+                    "alert_kind": alert.kind, "title": alert.title,
+                    "error": str(e),
+                }),
             )
             ok = False
         if ok:
@@ -484,6 +496,9 @@ def send_alerts(alerts: tuple[Alert, ...], paths: BoxPaths) -> int:
             _LOGGER.warning(
                 "pushover send failed for %r (kind=%s)",
                 alert.title, alert.kind,
+                extra=_extra(detail={
+                    "alert_kind": alert.kind, "title": alert.title,
+                }),
             )
     return sent
 

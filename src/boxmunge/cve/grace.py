@@ -49,6 +49,12 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger("boxmunge")
 
+
+def _extra(detail: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Structured-extras helper: grace state is fleet-level, project=None."""
+    return {"component": "cve-grace", "project": None, "detail": detail}
+
+
 GRACE_DURATION = timedelta(hours=24)
 
 
@@ -182,6 +188,10 @@ def init_grace_if_missing(
     _LOGGER.info(
         "CVE migration grace initialised; full enforcement begins %s",
         state.expires_at.isoformat(),
+        extra=_extra(detail={
+            "installed_at": state.installed_at.isoformat(),
+            "expires_at": state.expires_at.isoformat(),
+        }),
     )
     return state
 

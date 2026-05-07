@@ -312,3 +312,138 @@ def remove_suppression(path: Path, cve_id: str) -> Suppression:
     remaining = tuple(s for s in existing if s.cve_id != cve_id)
     atomic_write_text(path, _serialise(remaining), mode=0o644)
     return target
+
+
+# ---------- removal history (audit D-2: silent extension detection) ----------
+
+
+def history_path_for(suppressions_path: Path) -> Path:
+    """Return the sibling history file path for the active suppressions file.
+
+    Active list lives at ``<project>/security/suppressions.yml``. Removal
+    history is kept as a separate sibling file so the active-list parser
+    never has to handle history entries.
+    """
+    return suppressions_path.parent / "suppressions.history.yml"
+
+
+def _serialise_history(entries: tuple[dict[str, Any], ...]) -> str:
+    payload = {"removed": list(entries)}
+    return yaml.safe_dump(payload, sort_keys=False, default_flow_style=False)
+
+
+def _load_history(path: Path) -> tuple[dict[str, Any], ...]:
+    if not path.exists():
+        return ()
+    try:
+        text = path.read_text()
+    except OSError as e:
+        raise SuppressionsError(
+            f"Cannot read suppressions history file {path}: {e}"
+        ) from e
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        raise SuppressionsError(
+            f"Cannot parse YAML in {path}: {e}"
+        ) from e
+    if data is None:
+        return ()
+    if not isinstance(data, dict) or not isinstance(
+        data.get("removed"), list,
+    ):
+        raise SuppressionsError(
+            f"{path} must be a mapping with a 'removed' list"
+        )
+    return tuple(e for e in data["removed"] if isinstance(e, dict))
+
+
+def record_removal(
+    suppressions_path: Path,
+    *,
+    prior: Suppression,
+    removed_at: date,
+) -> None:
+    """Append an entry to the project's suppressions.history.yml file.
+
+    Records the prior Suppression's cve_id, until, added, reason,
+    reviewed_by plus the ``removed_at`` date. Atomic write. Used by the
+    unsuppress flow so a follow-up suppress can detect silent extensions
+    (audit D-2).
+    """
+    if not isinstance(removed_at, date):
+        raise SuppressionsError("'removed_at' must be a date instance")
+    history_path = history_path_for(suppressions_path)
+    existing = _load_history(history_path)
+    new_entry = {
+        "cve": prior.cve_id,
+        "removed_at": removed_at.isoformat(),
+        "previous_until": prior.until.isoformat(),
+        "previous_added": prior.added.isoformat(),
+        "previous_reason": prior.reason,
+        "previous_reviewed_by": prior.reviewed_by,
+    }
+    merged = existing + (new_entry,)
+    atomic_write_text(
+        history_path, _serialise_history(merged), mode=0o644,
+    )
+
+
+@dataclass(frozen=True)
+class RecentRemoval:
+    """A previous suppression that was removed within a recent window."""
+
+    cve_id: str
+    removed_at: date
+    previous_until: date
+    previous_added: date
+    previous_reason: str
+    previous_reviewed_by: str
+
+
+def find_recent_removal(
+    suppressions_path: Path,
+    cve_id: str,
+    *,
+    today: date,
+    max_age_days: int = 7,
+) -> RecentRemoval | None:
+    """Return the most recent removal of ``cve_id`` within ``max_age_days``.
+
+    Used by the suppress flow to detect silent extensions (operator
+    unsuppress + suppress within a short window). Returns None when no
+    matching entry exists or the most recent removal is older than the
+    window.
+    """
+    history_path = history_path_for(suppressions_path)
+    raw = _load_history(history_path)
+    matching: list[RecentRemoval] = []
+    for entry in raw:
+        if entry.get("cve") != cve_id:
+            continue
+        try:
+            removed_at = date.fromisoformat(str(entry["removed_at"]))
+            previous_until = date.fromisoformat(str(entry["previous_until"]))
+            previous_added = date.fromisoformat(str(entry["previous_added"]))
+        except (KeyError, ValueError) as e:
+            raise SuppressionsError(
+                f"Malformed removal entry in {history_path}: {entry!r} ({e})"
+            ) from e
+        prev_reason = entry.get("previous_reason", "")
+        prev_reviewer = entry.get("previous_reviewed_by", "")
+        matching.append(RecentRemoval(
+            cve_id=cve_id,
+            removed_at=removed_at,
+            previous_until=previous_until,
+            previous_added=previous_added,
+            previous_reason=str(prev_reason),
+            previous_reviewed_by=str(prev_reviewer),
+        ))
+    if not matching:
+        return None
+    matching.sort(key=lambda r: r.removed_at, reverse=True)
+    most_recent = matching[0]
+    age_days = (today - most_recent.removed_at).days
+    if age_days < 0 or age_days > max_age_days:
+        return None
+    return most_recent

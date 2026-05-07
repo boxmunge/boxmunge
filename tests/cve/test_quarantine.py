@@ -507,3 +507,120 @@ class TestLiftQuarantineFailures:
             )
             mock_reload.assert_not_called()
             mock_up.assert_not_called()
+
+
+# ---------- structured-extras (audit A-1) ----------
+
+
+class TestStructuredLogging:
+    """Wave 3: cve/quarantine.py info events must carry component=
+    'cve-quarantine' and the correct project so `boxmunge log` finds them."""
+
+    def test_quarantine_firing_log_carries_component_and_project(
+        self, tmp_path: Path,
+    ) -> None:
+        import logging as _logging
+        paths = _setup_paths(tmp_path)
+        project_dir = tmp_path / "projects" / "myapp"
+        project_dir.mkdir(parents=True)
+
+        records: list = []
+
+        class _ListHandler(_logging.Handler):
+            def emit(self, record):  # type: ignore[override]
+                records.append(record)
+
+        h = _ListHandler(level=_logging.INFO)
+        logger = _logging.getLogger("boxmunge")
+        saved_level = logger.level
+        logger.setLevel(_logging.INFO)
+        logger.addHandler(h)
+        try:
+            with patch(
+                "boxmunge.cve.quarantine.atomic_write_text",
+            ), patch(
+                "boxmunge.cve.quarantine.caddy_reload",
+            ), patch(
+                "boxmunge.cve.quarantine.compose_stop",
+            ):
+                quarantine_project(
+                    "myapp", paths,
+                    project_dir=project_dir,
+                    hosts=["a.example.com"],
+                    compose_files=["compose.yml"],
+                    headline=_disposition(cve_id="CVE-2026-7777"),
+                    image_ref="myapp:1.2.3",
+                )
+        finally:
+            logger.removeHandler(h)
+            logger.setLevel(saved_level)
+
+        # Two info records: "firing on..." and "now offline...".
+        component_records = [
+            r for r in records
+            if getattr(r, "component", None) == "cve-quarantine"
+        ]
+        assert len(component_records) >= 2
+        # Every one of those records carries the project name.
+        for r in component_records:
+            assert getattr(r, "project", None) == "myapp"
+        # The "firing" record has cve_id in its detail.
+        firing = [
+            r for r in component_records
+            if "firing on" in r.getMessage()
+        ]
+        assert len(firing) == 1
+        detail = getattr(firing[0], "detail", None)
+        assert isinstance(detail, dict)
+        assert detail.get("cve_id") == "CVE-2026-7777"
+        assert detail.get("image_ref") == "myapp:1.2.3"
+
+    def test_lift_logs_carry_component_and_project(
+        self, tmp_path: Path,
+    ) -> None:
+        import logging as _logging
+        paths = _setup_paths(tmp_path)
+        project_dir = tmp_path / "projects" / "myapp"
+        project_dir.mkdir(parents=True)
+        write_quarantine_state(
+            "myapp", paths,
+            headline=_disposition(),
+            image_ref="myapp:1.2.3",
+        )
+
+        records: list = []
+
+        class _ListHandler(_logging.Handler):
+            def emit(self, record):  # type: ignore[override]
+                records.append(record)
+
+        h = _ListHandler(level=_logging.INFO)
+        logger = _logging.getLogger("boxmunge")
+        saved_level = logger.level
+        logger.setLevel(_logging.INFO)
+        logger.addHandler(h)
+        try:
+            with patch(
+                "boxmunge.cve.quarantine.atomic_write_text",
+            ), patch(
+                "boxmunge.cve.quarantine.caddy_reload",
+            ), patch(
+                "boxmunge.cve.quarantine.compose_up",
+            ):
+                lift_quarantine(
+                    "myapp", paths,
+                    project_dir=project_dir,
+                    project_caddy_site_content="NORMAL",
+                    compose_files=["compose.yml"],
+                )
+        finally:
+            logger.removeHandler(h)
+            logger.setLevel(saved_level)
+
+        component_records = [
+            r for r in records
+            if getattr(r, "component", None) == "cve-quarantine"
+        ]
+        assert component_records, "expected cve-quarantine log records"
+        for r in component_records:
+            assert getattr(r, "project", None) == "myapp"
