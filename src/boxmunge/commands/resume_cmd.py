@@ -17,6 +17,7 @@ import yaml
 
 from boxmunge.commands.deploy import prepare_caddy_config, prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
+from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker import (
     compose_pull, compose_up, caddy_reload, DockerError,
 )
@@ -83,6 +84,19 @@ def run_resume(
     if not is_paused(project_name, paths):
         print(f"ERROR: Project '{project_name}' is not paused.",
               file=sys.stderr)
+        return 1
+
+    # Wave 1: pause-resume (this command) must NOT silently un-quarantine.
+    # Lifting CVE quarantine has its own dedicated command path
+    # (`boxmunge security resume`) which re-scans before lifting.
+    if is_quarantined(project_name, paths):
+        print(
+            f"ERROR: Project '{project_name}' is CVE-quarantined. "
+            f"Run `boxmunge security resume {project_name}` to restore.\n"
+            f"       (Resume re-scans first; if a quarantine-level finding "
+            f"remains, you must suppress or wait for upstream fix.)",
+            file=sys.stderr,
+        )
         return 1
 
     try:

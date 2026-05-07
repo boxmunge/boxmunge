@@ -142,6 +142,53 @@ class TestCheckConfigDrift:
         assert check.status == "ok"
 
 
+class TestCheckProjectContainersSkipsQuarantined:
+    """Wave 1: check_project_containers must NOT mis-attribute a deliberately-
+    stopped (CVE-quarantined) project as a health failure. Mirrors the
+    paused-skip behavior."""
+
+    def _make_project(self, paths: BoxPaths, name: str) -> None:
+        for d in ["projects/" + name, "caddy/sites"]:
+            (paths.root / d).mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "schema_version": 1,
+            "id": "01TEST",
+            "project": name,
+            "source": "bundle",
+            "hosts": [f"{name}.test"],
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        }
+        paths.project_manifest(name).write_text(yaml.dump(manifest))
+
+    def test_quarantined_project_not_reported_as_down(
+        self, tmp_path: Path,
+    ) -> None:
+        from unittest.mock import patch
+        from boxmunge.commands.health_cmd import check_project_containers
+        paths = BoxPaths(root=tmp_path / "bm")
+        for d in ["config"]:
+            (paths.root / d).mkdir(parents=True, exist_ok=True)
+        self._make_project(paths, "alpha")
+        # Mark alpha CVE-quarantined.
+        paths.project_quarantine_state("alpha").parent.mkdir(
+            parents=True, exist_ok=True,
+        )
+        paths.project_quarantine_state("alpha").write_text("{}")
+
+        # If subprocess.run gets called, it means we did NOT skip the
+        # quarantined project. Make it explode if invoked.
+        with patch(
+            "boxmunge.commands.health_cmd.subprocess.run",
+            side_effect=AssertionError(
+                "subprocess.run must not be called for a quarantined project",
+            ),
+        ):
+            check = check_project_containers(paths)
+        # alpha was the only project and it was quarantined → no project
+        # checked → "All N project(s) have running containers" reads 0.
+        assert check.status == "ok"
+
+
 class TestSshPortLookup:
     """run_health logs and falls back to 922 when load_config raises
     ConfigError, instead of swallowing every exception in sight."""

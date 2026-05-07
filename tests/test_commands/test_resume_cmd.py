@@ -109,6 +109,34 @@ class TestRunResume:
         assert rc == 1
 
 
+class TestResumeRefusesQuarantined:
+    """Wave 1: the pause-resume command must NOT silently un-quarantine.
+    Quarantine lift is owned by `boxmunge security resume`, which re-scans
+    first."""
+
+    @patch("boxmunge.commands.resume_cmd.compose_pull")
+    @patch("boxmunge.commands.resume_cmd.compose_up")
+    @patch("boxmunge.commands.resume_cmd.caddy_reload")
+    def test_refuses_quarantined_project(
+        self, _reload, mock_up, mock_pull, tmp_path, capsys,
+    ):
+        from boxmunge.commands.resume_cmd import run_resume
+        paths, name = _setup_paused(tmp_path)
+        # Mark quarantined alongside paused.
+        paths.project_quarantine_state(name).parent.mkdir(
+            parents=True, exist_ok=True,
+        )
+        paths.project_quarantine_state(name).write_text("{}")
+        rc = run_resume(name, paths, yes=True)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "quarantine" in err.lower()
+        assert "security resume" in err
+        # Mutating side effects MUST NOT have run.
+        mock_pull.assert_not_called()
+        mock_up.assert_not_called()
+
+
 class TestSkipSecurityChecks:
     @patch("boxmunge.commands.resume_cmd.prepare_compose_override")
     @patch("boxmunge.commands.resume_cmd.prepare_caddy_config")
@@ -262,3 +290,55 @@ class TestResumeValidatesBeforeUp:
         assert "pull" in order and "up" in order
         assert order.index("validate") < order.index("pull")
         assert order.index("validate") < order.index("up")
+
+
+class TestCvePolicyValidatorWiring:
+    """C-1 regression: resume_cmd must pass the manifest's `security` block
+    as `cve_policy` to validate_user_compose. Mirrors the deploy.py canonical
+    test in test_deploy.py::TestCvePolicyValidatorWiring.
+    """
+
+    def _setup_paused_with_security(self, tmp_path: Path) -> tuple[BoxPaths, str]:
+        """Same as _setup_paused, but with manifest.security.posture=strict
+        and read_only on every service so validate_user_compose passes its
+        cross-validators (we still mock it, but want the wiring real)."""
+        paths = BoxPaths(root=tmp_path / "bm")
+        for d in ["config", "projects/myapp", "state/deploy",
+                  "state/health", "caddy/sites", "logs"]:
+            (paths.root / d).mkdir(parents=True, exist_ok=True)
+        paths.config_file.write_text("hostname: t\nadmin_email: a@b\n")
+        (paths.project_dir("myapp") / "manifest.yml").write_text(yaml.dump({
+            "schema_version": 2, "id": "01TEST", "project": "myapp",
+            "source": "bundle", "hosts": ["myapp.test"],
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+            "security": {"posture": "strict"},
+        }))
+        (paths.project_dir("myapp") / "compose.yml").write_text(
+            "services:\n  web:\n    image: nginx:1.25\n    read_only: true\n"
+        )
+        paths.project_caddy_site("myapp").write_text("# maintenance fragment\n")
+        from boxmunge.pause import write_paused_state
+        write_paused_state("myapp", paths)
+        return paths, "myapp"
+
+    @patch("boxmunge.commands.resume_cmd.prepare_compose_override")
+    @patch("boxmunge.commands.resume_cmd.prepare_caddy_config")
+    @patch("boxmunge.commands.resume_cmd.compose_pull")
+    @patch("boxmunge.commands.resume_cmd.compose_up")
+    @patch("boxmunge.commands.resume_cmd.caddy_reload")
+    @patch("boxmunge.commands.resume_cmd.run_smoke")
+    def test_resume_passes_security_block_as_cve_policy(
+        self, mock_smoke, _reload, _up, _pull, _caddy, _override, tmp_path,
+    ):
+        mock_smoke.return_value = (True, "ok")
+        from boxmunge.commands.resume_cmd import run_resume
+        paths, name = self._setup_paused_with_security(tmp_path)
+        with patch(
+            "boxmunge.commands.resume_cmd.validate_user_compose",
+        ) as mock_validate:
+            run_resume(name, paths, yes=True)
+        kwargs = mock_validate.call_args.kwargs
+        assert kwargs.get("cve_policy") == {"posture": "strict"}, (
+            f"validate_user_compose called with cve_policy="
+            f"{kwargs.get('cve_policy')!r}; expected manifest's security block"
+        )

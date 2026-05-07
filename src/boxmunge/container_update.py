@@ -22,6 +22,7 @@ from boxmunge.docker import (
     container_running,
 )
 from boxmunge.commands.backup_cmd import run_backup
+from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.log import log_operation, log_warning, log_error
 
 if TYPE_CHECKING:
@@ -349,6 +350,21 @@ def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
         "current_digests": {},
         "reason": None,
     }
+
+    # Wave 1 defense-in-depth: callers of update_target SHOULD already
+    # filter quarantined projects (see container_update_cmd's
+    # run_container_update). If a future direct caller forgets, refuse
+    # to pull/recreate here too — Caddy targets are exempt because they
+    # are not user projects and have no quarantine state.
+    if not target.is_caddy and is_quarantined(target.name, paths):
+        log_operation(
+            "container-update",
+            f"Refused to update quarantined project '{target.name}' — "
+            f"use `boxmunge security resume` to lift",
+            paths, project=target.name,
+        )
+        result["status"] = "quarantined"
+        return result
 
     # Step 1: Pre-update backup (if applicable)
     if target.has_backup:

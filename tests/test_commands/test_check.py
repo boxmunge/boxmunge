@@ -320,6 +320,86 @@ class TestCheckAllReadOnly:
         assert result == 2
 
 
+class TestCheckAllSkipsQuarantined:
+    """Wave 1: the cron-driven check-all mutator must NOT run smoke against
+    a deliberately-stopped (CVE-quarantined) project — that would fail,
+    bump consecutive_failures, and possibly call compose_down on already-
+    stopped containers, polluting the health state."""
+
+    def _write_project(self, paths: BoxPaths, name: str) -> None:
+        import yaml
+        paths.project_dir(name).mkdir(parents=True, exist_ok=True)
+        paths.project_manifest(name).write_text(yaml.dump({
+            "schema_version": 2, "id": "01TEST",
+            "project": name, "source": "bundle",
+            "hosts": [f"{name}.example.com"],
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        }))
+        paths.project_deploy_state(name).parent.mkdir(parents=True, exist_ok=True)
+        paths.project_deploy_state(name).write_text('{"current_ref": "main"}')
+
+    def test_quarantined_project_not_checked(
+        self, paths: BoxPaths, monkeypatch,
+    ) -> None:
+        from unittest.mock import patch
+        from boxmunge.commands import check as check_mod
+        from boxmunge.commands.check import run_check_all
+
+        self._write_project(paths, "myapp")
+        # Quarantine.
+        paths.project_quarantine_state("myapp").parent.mkdir(
+            parents=True, exist_ok=True,
+        )
+        paths.project_quarantine_state("myapp").write_text("{}")
+
+        run_calls: list[str] = []
+        def _fake_run_check(name: str, paths: BoxPaths, verbose: bool = True) -> int:
+            run_calls.append(name)
+            return 0
+
+        monkeypatch.setattr(check_mod, "run_check", _fake_run_check)
+
+        with patch("boxmunge.commands.check.update_health_state") as mock_update:
+            rc = run_check_all([], paths)
+
+        # run_check MUST NOT have run for the quarantined project.
+        assert run_calls == []
+        # update_health_state MUST NOT have been invoked — quarantined
+        # projects don't transition health state.
+        mock_update.assert_not_called()
+        # The skip MUST NOT fail the broader check-all run.
+        assert rc == 0
+
+    def test_quarantined_project_skip_logged(
+        self, paths: BoxPaths, monkeypatch,
+    ) -> None:
+        from unittest.mock import patch
+        from boxmunge.commands import check as check_mod
+        from boxmunge.commands.check import run_check_all
+
+        self._write_project(paths, "myapp")
+        paths.project_quarantine_state("myapp").parent.mkdir(
+            parents=True, exist_ok=True,
+        )
+        paths.project_quarantine_state("myapp").write_text("{}")
+
+        monkeypatch.setattr(
+            check_mod, "run_check",
+            lambda *a, **kw: 0,
+        )
+
+        with patch("boxmunge.commands.check.log_operation") as mock_log:
+            run_check_all([], paths)
+
+        skip_logs = [
+            c for c in mock_log.call_args_list
+            if c.args[0] == "check-all"
+            and "quarantine" in c.args[1].lower()
+            and c.kwargs.get("project") == "myapp"
+        ]
+        assert len(skip_logs) == 1, mock_log.call_args_list
+
+
 class TestCheckJson:
     """Audit H-3: `boxmunge check <project> --json` for MCP/agent consumption."""
 

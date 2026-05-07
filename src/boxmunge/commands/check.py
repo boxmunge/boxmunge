@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from boxmunge.commands.health_state import update_health_state
+from boxmunge.cve.quarantine import is_quarantined
+from boxmunge.log import log_operation
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 
@@ -317,6 +319,19 @@ def run_check_all(args: list[str], paths: BoxPaths) -> int:
         return 0
 
     for name in projects:
+        # Wave 1: a CVE-quarantined project is intentionally stopped.
+        # Running smoke (which depends on a live container) would fail,
+        # escalate to alerts via update_health_state, and possibly call
+        # compose_down on an already-stopped project. Skip cleanly with
+        # a structured log entry so the operator can see why.
+        if is_quarantined(name, paths):
+            log_operation(
+                "check-all",
+                f"Skipped quarantined project '{name}' — use "
+                f"`boxmunge security resume` to lift",
+                paths, project=name,
+            )
+            continue
         result = run_check(name, paths)
 
         if not read_only:

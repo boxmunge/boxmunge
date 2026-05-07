@@ -76,6 +76,32 @@ class TestRefusesPaused:
         assert "paused" in err.lower()
 
 
+class TestRefusesQuarantined:
+    """Wave 1: promote must refuse a CVE-quarantined project."""
+
+    @patch("boxmunge.commands.promote_cmd.run_deploy")
+    @patch("boxmunge.commands.promote_cmd.run_unstage")
+    def test_refuses_quarantined_project(
+        self, mock_unstage, mock_deploy, paths, capsys,
+    ):
+        pdir = paths.project_dir("testapp")
+        pdir.mkdir(parents=True, exist_ok=True)
+        (pdir / "manifest.yml").write_text(VALID_MANIFEST)
+        write_state(paths.project_staging_state("testapp"), {"active": True})
+        paths.project_quarantine_state("testapp").parent.mkdir(
+            parents=True, exist_ok=True,
+        )
+        paths.project_quarantine_state("testapp").write_text("{}")
+        rc = run_promote("testapp", paths)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "quarantine" in err.lower()
+        assert "security resume" in err
+        # Underlying mutating helpers MUST NOT have run.
+        mock_deploy.assert_not_called()
+        mock_unstage.assert_not_called()
+
+
 class TestPromoteComponentTagging:
     """Audit G-1: promote must tag SECURITY OFF logs with component="promote".
 

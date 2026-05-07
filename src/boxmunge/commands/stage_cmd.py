@@ -12,6 +12,7 @@ from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.bundle import extract_bundle as _extract_bundle, copy_project_files as _copy_project_files
 from boxmunge.compose import generate_staging_compose_base, generate_staging_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
+from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker import compose_up, caddy_reload, DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
 from boxmunge.identity import check_project_identity, register_project_identity
@@ -261,6 +262,15 @@ def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
         print(f"ERROR: Project '{project_name}' is paused. "
               f"Run 'resume {project_name}' before staging.",
               file=sys.stderr)
+        return 1
+    if is_quarantined(project_name, paths):
+        print(
+            f"ERROR: Project '{project_name}' is CVE-quarantined. "
+            f"Run `boxmunge security resume {project_name}` to restore.\n"
+            f"       (Resume re-scans first; if a quarantine-level finding "
+            f"remains, you must suppress or wait for upstream fix.)",
+            file=sys.stderr,
+        )
         return 1
     if not is_registered(project_name, paths):
         print(f"ERROR: Project '{project_name}' is not registered on this server. "

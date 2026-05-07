@@ -12,6 +12,7 @@ from typing import Any
 import boxmunge.backup as _backup
 from boxmunge.backup import backup_filename, prune_backups, BackupError
 from boxmunge.config import load_config, ConfigError
+from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
@@ -91,6 +92,21 @@ def run_backup(project_name: str, paths: BoxPaths, _lock_held: bool = False) -> 
             file=sys.stderr,
         )
         return 1
+    # Wave 1: backups of stopped (CVE-quarantined) services are pointless
+    # and would emit confusing "volume empty" warnings — skip cleanly with
+    # a structured log entry, returning 0 (no broader operation to fail).
+    if is_quarantined(project_name, paths):
+        print(
+            f"{project_name}: skipping backup — CVE-quarantined "
+            f"(use `boxmunge security resume` to lift)",
+        )
+        log_operation(
+            "backup",
+            f"Skipped quarantined project '{project_name}' — use "
+            f"`boxmunge security resume` to lift",
+            paths, project=project_name,
+        )
+        return 0
     clear_probation_if_active(paths, "backup")
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists():
@@ -272,10 +288,19 @@ def run_backup_all(paths: BoxPaths) -> int:
     failed: list[str] = []
     locked: list[str] = []
 
-    # First pass: try every non-paused project once.
+    # First pass: try every non-paused, non-quarantined project once.
     for name in projects:
         if is_paused(name, paths):
             print(f"  Skipping {name}: paused.")
+            continue
+        if is_quarantined(name, paths):
+            print(f"  Skipping {name}: CVE-quarantined.")
+            log_operation(
+                "backup",
+                f"Skipped quarantined project '{name}' — use "
+                f"`boxmunge security resume` to lift",
+                paths, project=name,
+            )
             continue
         result = _attempt_locked_backup(name, paths)
         if result == BackupAttemptResult.OK:

@@ -139,6 +139,33 @@ class TestRefusesPaused:
         assert "paused" in err.lower()
 
 
+class TestRefusesQuarantined:
+    """Wave 1: deploy must refuse a CVE-quarantined project so the platform
+    does not silently undo a security action on the next operator-driven
+    flow. Mirrors the paused-refusal pattern."""
+
+    @patch("boxmunge.commands.deploy.compose_up")
+    @patch("boxmunge.commands.deploy.caddy_reload")
+    def test_refuses_quarantined_project(
+        self, mock_reload, mock_up, paths: BoxPaths, capsys,
+    ) -> None:
+        add_project("myapp", paths)
+        # Create the quarantine state file directly — exercising the
+        # is_quarantined() predicate without standing up a full scan flow.
+        paths.project_quarantine_state("myapp").parent.mkdir(
+            parents=True, exist_ok=True,
+        )
+        paths.project_quarantine_state("myapp").write_text("{}")
+        rc = run_deploy("myapp", paths)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "quarantine" in err.lower()
+        assert "security resume" in err
+        # Mutating side effects MUST NOT have run.
+        mock_up.assert_not_called()
+        mock_reload.assert_not_called()
+
+
 class TestCvePolicyValidatorWiring:
     """Regression: validate_user_compose must receive the manifest's security
     block as cve_policy, otherwise posture/dangerously_disable_quarantine

@@ -136,6 +136,57 @@ class TestBackupAllSkipsPaused:
         assert "paused" in captured.out.lower()
 
 
+class TestBackupSkipsQuarantined:
+    """Wave 1: backups of stopped (CVE-quarantined) services are pointless
+    and may surface confusing volume-empty warnings — skip cleanly."""
+
+    @patch("boxmunge.commands.backup_cmd._execute_dump")
+    @patch("boxmunge.backup.encrypt_file")
+    def test_run_backup_skips_quarantined(
+        self, mock_encrypt, mock_dump, paths: BoxPaths, capsys,
+    ) -> None:
+        _setup_project(paths, MANIFEST_WITH_BACKUP)
+        paths.project_quarantine_state("myapp").parent.mkdir(
+            parents=True, exist_ok=True,
+        )
+        paths.project_quarantine_state("myapp").write_text("{}")
+        rc = run_backup("myapp", paths)
+        # Skip is non-fatal — returns 0.
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "quarantine" in out.lower()
+        # Mutating helpers MUST NOT have run.
+        mock_dump.assert_not_called()
+        mock_encrypt.assert_not_called()
+
+    @patch("boxmunge.commands.backup_cmd.run_backup")
+    def test_skips_quarantined_in_all(
+        self, mock_backup: MagicMock, paths: BoxPaths, capsys,
+    ) -> None:
+        for name in ("myapp", "otherapp"):
+            pdir = paths.project_dir(name)
+            pdir.mkdir(parents=True)
+            (pdir / "manifest.yml").write_text(
+                MANIFEST_WITH_BACKUP.replace("project: myapp", f"project: {name}")
+            )
+        # Quarantine myapp; otherapp stays normal.
+        paths.project_quarantine_state("myapp").parent.mkdir(
+            parents=True, exist_ok=True,
+        )
+        paths.project_quarantine_state("myapp").write_text("{}")
+        mock_backup.return_value = 0
+
+        run_backup_all(paths)
+
+        called_projects = [call.args[0] for call in mock_backup.call_args_list]
+        assert "myapp" not in called_projects
+        assert "otherapp" in called_projects
+
+        captured = capsys.readouterr()
+        assert "myapp" in captured.out
+        assert "quarantine" in captured.out.lower()
+
+
 class TestBackupAllLockSkip:
     """4c: backup-all retries lock-held projects + Pushover-alerts persistent skips."""
 

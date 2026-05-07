@@ -309,6 +309,65 @@ class TestTargetStateErrors:
             read_target_state(paths, "caddy")
 
 
+class TestUpdateTargetSkipsQuarantined:
+    """Wave 1 defense-in-depth: update_target itself refuses to pull/recreate
+    a CVE-quarantined user project, even if a future caller forgets to
+    pre-filter. Caddy is exempt — it has no quarantine state."""
+
+    @patch("boxmunge.container_update.compose_pull")
+    @patch("boxmunge.container_update.compose_up")
+    @patch("boxmunge.container_update.run_backup")
+    def test_quarantined_project_returns_quarantined_status(
+        self, mock_backup, mock_up, mock_pull, paths,
+    ):
+        from boxmunge.container_update import update_target, UpdateTarget
+        _write_project(paths, "quar-app")
+        # Mark CVE-quarantined.
+        paths.project_quarantine_state("quar-app").parent.mkdir(
+            parents=True, exist_ok=True,
+        )
+        paths.project_quarantine_state("quar-app").write_text("{}")
+
+        target = UpdateTarget(
+            name="quar-app", project_dir=paths.project_dir("quar-app"),
+            compose_files=["compose.yml"], strategy="leave_broken",
+            has_backup=False, is_caddy=False,
+        )
+        result = update_target(paths, target)
+        assert result["status"] == "quarantined"
+        # Mutating side effects MUST NOT have run.
+        mock_pull.assert_not_called()
+        mock_up.assert_not_called()
+        mock_backup.assert_not_called()
+
+    @patch("boxmunge.container_update.image_digest", return_value="sha256:same")
+    @patch("boxmunge.container_update.compose_pull")
+    @patch("boxmunge.container_update.compose_up")
+    @patch("boxmunge.container_update._capture_service_digests")
+    @patch("boxmunge.container_update._wait_healthy")
+    def test_caddy_is_not_blocked_by_quarantine_check(
+        self, mock_wait, mock_capture, mock_up, mock_pull, mock_image_digest, paths,
+    ):
+        """Caddy targets must continue updating regardless — quarantine state
+        applies to user projects only."""
+        from boxmunge.container_update import update_target, UpdateTarget
+        target = UpdateTarget(
+            name="caddy", project_dir=paths.caddy,
+            compose_files=["compose.yml"], strategy="leave_broken",
+            has_backup=False, is_caddy=True,
+        )
+        # Even if a stray "caddy.quarantined.json" exists (it shouldn't),
+        # Caddy targets short-circuit via the is_caddy flag.
+        paths.project_quarantine_state("caddy").parent.mkdir(
+            parents=True, exist_ok=True,
+        )
+        paths.project_quarantine_state("caddy").write_text("{}")
+        mock_capture.return_value = {"caddy": "sha256:same"}
+        result = update_target(paths, target)
+        # No-change path runs; status is no_change (not quarantined).
+        assert result["status"] == "no_change"
+
+
 class TestPersistResult:
     def test_persist_no_change_preserves_previous_digests(self, paths):
         from boxmunge.container_update import _persist_result, UpdateTarget, write_target_state, read_target_state

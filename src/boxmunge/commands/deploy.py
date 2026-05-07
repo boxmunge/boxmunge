@@ -12,6 +12,7 @@ from boxmunge.caddy import generate_caddy_config
 from boxmunge.compose import generate_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.config import load_config, ConfigError
+from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker import compose_up, caddy_reload, DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
 from boxmunge.log import log_operation, log_error, log_warning
@@ -379,6 +380,15 @@ def run_deploy(
         print(f"ERROR: Project '{project_name}' is paused. "
               f"Run 'resume {project_name}' before deploying.",
               file=sys.stderr)
+        return 1
+    if is_quarantined(project_name, paths):
+        print(
+            f"ERROR: Project '{project_name}' is CVE-quarantined. "
+            f"Run `boxmunge security resume {project_name}` to restore.\n"
+            f"       (Resume re-scans first; if a quarantine-level finding "
+            f"remains, you must suppress or wait for upstream fix.)",
+            file=sys.stderr,
+        )
         return 1
     clear_probation_if_active(paths, "deploy")
     from boxmunge.project_registry import is_registered

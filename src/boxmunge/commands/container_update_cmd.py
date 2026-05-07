@@ -9,6 +9,7 @@ from boxmunge.config import load_config, ConfigError
 from boxmunge.container_update import (
     UpdateTarget, build_targets, update_target, read_target_state,
 )
+from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.log import log_operation, log_warning, log_error
 from boxmunge.pause import is_paused
 from boxmunge.paths import BoxPaths
@@ -134,6 +135,23 @@ def run_container_update(
         # Step 5: Update user projects independently
         for target in targets:
             if target.is_caddy:
+                continue
+            # Wave 1: a CVE-quarantined project must NOT be pulled or
+            # recreated by the daily container-update cron — that would
+            # silently un-quarantine on the next image change. Skip
+            # entirely (no dry-run pre-fetch either; the project is
+            # intentionally stopped, not paused for resume).
+            if is_quarantined(target.name, paths):
+                log_operation(
+                    "container-update",
+                    f"Skipped quarantined project '{target.name}' — use "
+                    f"`boxmunge security resume` to lift",
+                    paths, project=target.name,
+                )
+                results.append({
+                    "name": target.name, "status": "quarantined",
+                    "previous_digests": {}, "current_digests": {},
+                })
                 continue
             if is_paused(target.name, paths):
                 # Pre-fetch images for paused projects: dry-run pulls (no

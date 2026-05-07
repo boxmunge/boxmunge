@@ -187,6 +187,27 @@ class TestRefusesPaused:
         assert "paused" in err.lower()
 
 
+class TestRefusesQuarantined:
+    """Wave 1: stage must refuse a CVE-quarantined project."""
+
+    @patch("boxmunge.commands.stage_cmd.caddy_reload")
+    @patch("boxmunge.commands.stage_cmd.compose_up")
+    def test_refuses_quarantined_project(self, mock_up, mock_reload, paths, capsys):
+        add_project("testapp", paths)
+        _place_real_bundle(paths)
+        paths.project_quarantine_state("testapp").parent.mkdir(
+            parents=True, exist_ok=True,
+        )
+        paths.project_quarantine_state("testapp").write_text("{}")
+        rc = run_stage("testapp", paths)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "quarantine" in err.lower()
+        assert "security resume" in err
+        mock_up.assert_not_called()
+        mock_reload.assert_not_called()
+
+
 class TestStageComposeRejectionExit3:
     """Audit H-N2: hardening rejection returns exit code 3, not 1."""
 
@@ -202,3 +223,55 @@ class TestStageComposeRejectionExit3:
         ):
             rc = run_stage("testapp", paths)
         assert rc == 3
+
+
+class TestCvePolicyValidatorWiring:
+    """C-1 regression: stage_cmd must pass the manifest's `security` block as
+    `cve_policy` to validate_user_compose. Mirrors the deploy.py canonical
+    test in test_deploy.py::TestCvePolicyValidatorWiring.
+    """
+
+    def _bundle_with_security(self, paths: BoxPaths) -> None:
+        manifest = (
+            "id: 01TESTULID0000000000000000\n"
+            "schema_version: 2\n"
+            "project: testapp\n"
+            "source: bundle\n"
+            "hosts:\n"
+            "  - testapp.example.com\n"
+            "services:\n"
+            "  web:\n"
+            "    port: 8080\n"
+            "    routes:\n"
+            "      - path: /\n"
+            "backup:\n"
+            "  type: none\n"
+            "security:\n"
+            "  posture: strict\n"
+        )
+        staging = paths.root / "tmp_staging_sec" / "testapp"
+        staging.mkdir(parents=True, exist_ok=True)
+        (staging / "manifest.yml").write_text(manifest)
+        (staging / "compose.yml").write_text(
+            "services:\n  web:\n    image: nginx\n    read_only: true\n"
+        )
+        bundle_path = paths.inbox / "testapp-2026-05-07T010000000000.tar.gz"
+        with tarfile.open(bundle_path, "w:gz") as tar:
+            tar.add(staging, arcname="testapp")
+
+    @patch("boxmunge.commands.stage_cmd.caddy_reload")
+    @patch("boxmunge.commands.stage_cmd.compose_up")
+    def test_stage_passes_security_block_as_cve_policy(
+        self, _up, _reload, paths: BoxPaths,
+    ) -> None:
+        add_project("testapp", paths)
+        self._bundle_with_security(paths)
+        with patch(
+            "boxmunge.commands.stage_cmd.validate_user_compose",
+        ) as mock_validate:
+            run_stage("testapp", paths)
+        kwargs = mock_validate.call_args.kwargs
+        assert kwargs.get("cve_policy") == {"posture": "strict"}, (
+            f"validate_user_compose called with cve_policy="
+            f"{kwargs.get('cve_policy')!r}; expected manifest's security block"
+        )

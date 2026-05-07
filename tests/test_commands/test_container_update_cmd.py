@@ -298,6 +298,74 @@ class TestSkipsPausedProjects:
         assert rc == 0
 
 
+def _make_quarantined_project(paths, name="quarantined-app"):
+    """Helper: write a project file tree and mark it CVE-quarantined."""
+    pdir = paths.project_dir(name)
+    pdir.mkdir(parents=True)
+    (pdir / "manifest.yml").write_text(yaml.dump({
+        "schema_version": 1, "id": "01" + name.upper().replace("-", ""),
+        "project": name, "source": "bundle", "hosts": [f"{name}.test"],
+        "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+    }))
+    (pdir / "compose.yml").write_text(
+        f"services:\n  web:\n    image: nginx:1.25\n    container_name: {name}_web\n"
+    )
+    paths.project_quarantine_state(name).parent.mkdir(parents=True, exist_ok=True)
+    paths.project_quarantine_state(name).write_text("{}")
+
+
+class TestSkipsQuarantinedProjects:
+    """Wave 1: container-update must NOT pull/recreate a CVE-quarantined
+    project. Unlike paused (which does a dry-run pre-fetch for fast
+    resume), quarantine is "stay stopped" — so we skip entirely."""
+
+    def test_quarantined_project_not_updated(self, paths):
+        _make_quarantined_project(paths, "quar-app")
+
+        update_call_log = []
+        def fake_update(paths, target):
+            update_call_log.append(target.name)
+            return {"name": target.name, "status": "succeeded"}
+
+        dry_call_log = []
+        def fake_dry(paths, target):
+            dry_call_log.append(target.name)
+            return {"name": target.name, "status": "no_change",
+                    "previous_digests": {}, "current_digests": {}}
+
+        with patch("boxmunge.commands.container_update_cmd.update_target", side_effect=fake_update), \
+             patch("boxmunge.commands.container_update_cmd._dry_run_target", side_effect=fake_dry):
+            rc = run_container_update(paths)
+
+        # Neither update_target nor _dry_run_target may run for the
+        # quarantined project — quarantine is stronger than paused.
+        assert "quar-app" not in update_call_log
+        assert "quar-app" not in dry_call_log
+        assert "caddy" in update_call_log
+        assert rc == 0
+
+    def test_quarantined_project_logged_as_skip(self, paths):
+        _make_quarantined_project(paths, "quar-app")
+
+        captured: list = []
+        def fake_log_op(component, message, paths, **kwargs):
+            if kwargs.get("project") == "quar-app":
+                captured.append((component, message, kwargs))
+
+        def fake_update(paths, target):
+            return {"name": target.name, "status": "succeeded"}
+
+        with patch("boxmunge.commands.container_update_cmd.log_operation", side_effect=fake_log_op), \
+             patch("boxmunge.commands.container_update_cmd.update_target", side_effect=fake_update):
+            run_container_update(paths)
+
+        assert captured, "expected a log_operation call for the quarantined project"
+        component, message, _ = captured[0]
+        assert component == "container-update"
+        assert "quarantine" in message.lower()
+        assert "security resume" in message
+
+
 class TestLock:
     def test_skips_when_lock_held(self, paths):
         paths.container_update_state.mkdir(parents=True)

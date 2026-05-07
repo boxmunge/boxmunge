@@ -11,6 +11,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.paths import BoxPaths
 from boxmunge.pause import is_paused
 
@@ -165,6 +166,11 @@ def check_project_containers(paths: BoxPaths) -> HealthCheck:
     down_projects = []
     for name in projects:
         if is_paused(name, paths):
+            continue
+        # Wave 1: a CVE-quarantined project is intentionally stopped —
+        # surfacing it as "no running containers" would mis-attribute
+        # an operator-driven security action as a health failure.
+        if is_quarantined(name, paths):
             continue
         compose_cmd = ["docker", "compose", "-f", "compose.yml"]
         override = paths.project_compose_override(name)
