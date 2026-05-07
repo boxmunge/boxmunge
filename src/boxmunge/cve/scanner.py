@@ -34,6 +34,11 @@ _TRIVY_NOT_FOUND_MSG = (
 )
 
 
+def _extra(detail: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Structured-extras helper: the scanner is fleet-level, project=None."""
+    return {"component": "cve-scan", "project": None, "detail": detail}
+
+
 class Severity(Enum):
     """CVE severity classes. Ordering used for deterministic sort."""
 
@@ -42,6 +47,20 @@ class Severity(Enum):
     HIGH = "High"
     CRITICAL = "Critical"
     UNKNOWN = "Unknown"
+
+    @classmethod
+    def from_trivy_string(cls, raw: str | None) -> "Severity":
+        """Map a Trivy severity string to the Severity enum.
+
+        Case-insensitive: "CRITICAL", "Critical", "critical" all map to
+        Severity.CRITICAL. Anything else (including None or empty) maps
+        to UNKNOWN. Audit F-4: defensive against schema drift — if Trivy
+        ever emits mixed-case strings, every finding stays correctly
+        classified rather than silently downgrading to UNKNOWN.
+        """
+        if not raw:
+            return cls.UNKNOWN
+        return _TRIVY_SEVERITY_MAP.get(raw.upper(), cls.UNKNOWN)
 
 
 # Sort priority: higher number = sorts earlier in descending sort.
@@ -54,6 +73,9 @@ _SEVERITY_RANK: dict[Severity, int] = {
     Severity.UNKNOWN: 0,
 }
 
+# Internal map keyed by upper-case Trivy severity. Use
+# Severity.from_trivy_string() rather than indexing this directly so
+# case-normalization stays at one boundary.
 _TRIVY_SEVERITY_MAP: dict[str, Severity] = {
     "LOW": Severity.LOW,
     "MEDIUM": Severity.MEDIUM,
@@ -118,17 +140,20 @@ def refresh_db() -> None:
     except FileNotFoundError:
         _LOGGER.warning(
             "trivy DB refresh skipped: %s", _TRIVY_NOT_FOUND_MSG,
+            extra=_extra(),
         )
     except subprocess.TimeoutExpired:
         _LOGGER.warning(
             "trivy DB refresh timed out after %ds — continuing with existing DB",
             _DB_REFRESH_TIMEOUT,
+            extra=_extra(detail={"timeout_s": _DB_REFRESH_TIMEOUT}),
         )
     except subprocess.CalledProcessError as e:
         stderr = (e.stderr or "").strip()
         _LOGGER.warning(
             "trivy DB refresh failed (exit %d): %s — continuing with existing DB",
             e.returncode, stderr,
+            extra=_extra(detail={"exit_code": e.returncode, "stderr": stderr}),
         )
 
 
@@ -202,16 +227,19 @@ def _parse_findings(payload: dict[str, Any]) -> tuple[Finding, ...]:
 
     for result in results:
         for vuln in result.get("Vulnerabilities") or []:
-            raw_sev = (vuln.get("Severity") or "").upper()
-            severity = _TRIVY_SEVERITY_MAP.get(raw_sev)
-            if severity is None:
+            raw_sev = vuln.get("Severity")
+            severity = Severity.from_trivy_string(raw_sev)
+            if severity is Severity.UNKNOWN and (raw_sev or "").upper() != "UNKNOWN":
+                # Trivy emitted a value we don't recognise — log once and
+                # carry on with UNKNOWN. The empty/None case is handled
+                # silently (treated as a vuln with no severity field).
                 if not unknown_severity_logged:
                     _LOGGER.warning(
                         "trivy returned unrecognised severity %r — mapping to UNKNOWN",
-                        vuln.get("Severity"),
+                        raw_sev,
+                        extra=_extra(detail={"raw_severity": raw_sev}),
                     )
                     unknown_severity_logged = True
-                severity = Severity.UNKNOWN
 
             findings.append(Finding(
                 cve_id=vuln.get("VulnerabilityID", ""),

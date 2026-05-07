@@ -2,315 +2,108 @@
 """Action handlers for `boxmunge security` subcommands: scan and resume.
 
 The suppress/unsuppress handlers live in security_suppress.py — they share
-no internals beyond the suppressions-path helper.
+no internals beyond the suppressions-path helper. The per-project scan
+mechanics live in security_scan_core.py — keep this file focused on
+fleet orchestration (grace heads-up, exit codes, lock-skip handling).
 """
 from __future__ import annotations
 
-import logging
+import fcntl
+import os
 import sys
 import time
-from datetime import date, datetime, timezone
-from pathlib import Path
-from typing import Any
+from datetime import datetime, timezone
 
-import yaml
-
+from boxmunge.commands.security_scan_core import scan_one_project
 from boxmunge.cve.alerting import (
-    emit_scan_alerts,
     format_grace_heads_up_alert,
     send_alerts,
 )
 from boxmunge.cve.grace import (
     GraceError,
-    GraceState,
     init_grace_if_missing,
     mark_heads_up_sent,
+    read_grace_state,
 )
-from boxmunge.cve.policy import (
-    Disposition,
-    ProjectDecision,
-    evaluate_project,
-    hardening_profile_from_compose,
-    parse_posture,
-)
+from boxmunge.cve.policy import Disposition, ProjectDecision
 from boxmunge.cve.quarantine import (
     QuarantineError,
     is_quarantined,
     lift_quarantine,
-    quarantine_project,
 )
-from boxmunge.cve.scan_state import (
-    decisions_from_scan_state,
-    read_scan_state,
-    write_scan_state,
-)
-from boxmunge.cve.scanner import (
-    ScanResult,
-    ScannerError,
-    TrivyNotInstalledError,
-    refresh_db,
-    scan_image,
-)
-from boxmunge.cve.suppressions import SuppressionsError, load_suppressions
-from boxmunge.docker import container_image_digest
+from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
+from boxmunge.fileutil import LockError, open_shared_lockfile, project_lock
+from boxmunge.log import log_warning
 from boxmunge.manifest import ManifestError, load_manifest
-from boxmunge.security_overlay import services_with_off_profile
 from boxmunge.paths import BoxPaths, validate_project_name
 from boxmunge.project_registry import is_registered, load_registered_projects
-
-_LOGGER = logging.getLogger("boxmunge")
 
 
 # ---------- helpers ----------
 
 
-def _project_suppressions_path(paths: BoxPaths, project: str) -> Path:
-    return paths.project_dir(project) / "security" / "suppressions.yml"
+def _maybe_fire_grace_heads_up(
+    paths: BoxPaths,
+    *,
+    decisions_by_project: dict[str, ProjectDecision],
+    posture_by_project: dict[str, str],
+    dangerously_by_project: dict[str, bool],
+) -> None:
+    """Fire the one-time grace heads-up alert under a fleet-wide flock.
 
+    Audit E-1: read-decide-write of grace.heads_up_sent must be atomic
+    across concurrent fleet scans (cron + manual). Without the lock, two
+    scans both pass the ``not heads_up_sent`` check and Pushover is spammed
+    twice. The lock file lives at ``state/.cve-grace.lock`` (matches the
+    ``.caddy.lock`` / ``.registry.lock`` pattern, shared between root and
+    deploy uids).
 
-def _container_name(project: str, service: str) -> str:
-    """Replicate the convention used in commands/check.py."""
-    return f"{project}-{service}-1"
-
-
-def _today() -> date:
-    return datetime.now(timezone.utc).date()
-
-
-def _load_compose(project_dir: Path) -> dict[str, Any]:
-    """Load the user compose.yml as a parsed dict."""
-    path = project_dir / "compose.yml"
-    if not path.exists():
-        return {}
-    try:
-        data = yaml.safe_load(path.read_text()) or {}
-    except yaml.YAMLError as e:
-        raise RuntimeError(f"Failed to parse compose.yml: {e}") from e
-    if not isinstance(data, dict):
-        return {}
-    return data
-
-
-def _identify_images(
-    manifest: dict[str, Any], compose: dict[str, Any], project: str,
-) -> tuple[list[str], list[str]]:
-    """Return (images, warnings).
-
-    For each service: prefer the running container's image digest; fall back
-    to the compose-declared image. Build-only services are skipped with a
-    warning.
+    Failures of send/persist are logged but never raised — alerting must
+    not block the scan.
     """
-    images: list[str] = []
-    warnings: list[str] = []
-    services = manifest.get("services") or {}
-    compose_services = compose.get("services") or {}
-
-    for svc_name in services.keys():
-        cname = _container_name(project, svc_name)
-        digest = container_image_digest(cname)
-        if digest:
-            # digest already includes "sha256:..." prefix — qualify with image
-            # ref if available so the scan target is unambiguous.
-            svc_compose = compose_services.get(svc_name, {})
-            base_ref = svc_compose.get("image") if isinstance(svc_compose, dict) else None
-            if base_ref and "@" not in base_ref:
-                # Strip any tag and pin to digest.
-                short = base_ref.split(":", 1)[0]
-                images.append(f"{short}@{digest}")
-            else:
-                images.append(digest)
-            continue
-
-        # Container not running: fall back to compose image.
-        svc_compose = compose_services.get(svc_name, {})
-        if isinstance(svc_compose, dict):
-            image_ref = svc_compose.get("image")
-            if image_ref:
-                images.append(image_ref)
-                continue
-        warnings.append(
-            f"service {svc_name!r}: no running container and no image declared "
-            f"in compose (build-only) — skipping"
-        )
-
-    return images, warnings
-
-
-def _project_meta(
-    paths: BoxPaths, project: str,
-) -> tuple[dict[str, Any], dict[str, Any], str, bool]:
-    """Load manifest + compose, derive posture and dangerously_disable flag."""
-    manifest = load_manifest(paths.project_manifest(project))
-    compose = _load_compose(paths.project_dir(project))
-    sec_block = manifest.get("security") or {}
-    posture = sec_block.get("posture") or "balanced"
-    dangerously = bool(sec_block.get("dangerously_disable_quarantine", False))
-    return manifest, compose, posture, dangerously
-
-
-def _scan_one_project(
-    paths: BoxPaths, project: str, *, in_grace: bool = False,
-) -> tuple[
-    ProjectDecision | None,
-    list[ProjectDecision],
-    list[str],
-    str,
-    bool,
-]:
-    """Scan a single project, persist state, take quarantine action.
-
-    Returns (headline_decision, all_decisions, warnings, posture_str,
-    dangerously). ``headline_decision`` is the first decision that
-    requires quarantine (used to trigger the action), or None if no
-    decision quarantines.
-
-    When ``in_grace`` is True, both quarantine actions and per-project
-    transition alerts are suppressed. The scan_state is still written
-    so subsequent scans see correct prior state.
-
-    Raises:
-        TrivyNotInstalledError: when the Trivy binary is missing.
-        RuntimeError: on irrecoverable failures (manifest unreadable, all
-            images failed to scan).
-    """
-    manifest, compose, posture_str, dangerously = _project_meta(paths, project)
-    posture = parse_posture(posture_str)
-    # Services with profile != off get boxmunge's hardening overlay applied
-    # at runtime. Pass the overlay set through so the policy doesn't penalise
-    # a project for relying on overlay defaults (e.g. no-new-privileges) it
-    # didn't redeclare in its own compose.yml.
-    off_services = {svc for svc, _ in services_with_off_profile(manifest)}
-    overlay_services = (
-        set((compose.get("services") or {}).keys()) - off_services
-    )
-    profile = hardening_profile_from_compose(
-        compose, services_with_overlay=overlay_services,
-    )
-    suppressions_path = _project_suppressions_path(paths, project)
+    lock_path = paths.state / ".cve-grace.lock"
+    fd = open_shared_lockfile(lock_path)
     try:
-        supps = load_suppressions(suppressions_path)
-    except SuppressionsError as e:
-        raise RuntimeError(
-            f"Failed to load suppressions for {project!r}: {e}"
-        ) from e
-
-    # Load the prior scan_state BEFORE we overwrite it. Used by the alerting
-    # path to detect transitions (new quarantine, expired suppression, ...).
-    scan_state_path = paths.project_scan_state(project)
-    prior_state = read_scan_state(scan_state_path)
-    prior_decisions: tuple[ProjectDecision, ...] = ()
-    if prior_state is not None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        # Re-read inside the lock: another process may have raced us
+        # between the outer check and lock acquisition.
         try:
-            prior_decisions = decisions_from_scan_state(
-                prior_state, project_name=project,
+            current = read_grace_state(paths)
+        except GraceError as e:
+            log_warning(
+                "cve-scan",
+                f"grace state unreadable while firing heads-up: {e}",
+                paths,
             )
-        except (ValueError, KeyError) as e:
-            # A malformed prior state file shouldn't block the scan; log and
-            # treat as "no prior" (alerts will be emitted as if first scan).
-            _LOGGER.warning(
-                "ignoring unreadable prior scan state for %s: %s", project, e,
-            )
-
-    images, warnings = _identify_images(manifest, compose, project)
-    if not images:
-        # Persist an empty scan-state so we don't wedge the per-project view.
-        write_scan_state(scan_state_path, decisions=())
-        return None, [], warnings, posture_str, dangerously
-
-    decisions: list[ProjectDecision] = []
-    failed: list[str] = []
-    today = _today()
-    for image_ref in images:
-        try:
-            sr: ScanResult = scan_image(image_ref)
-        except TrivyNotInstalledError:
-            raise
-        except ScannerError as e:
-            _LOGGER.warning(
-                "scan failed for %s image %s: %s", project, image_ref, e,
-            )
-            failed.append(image_ref)
-            warnings.append(f"image {image_ref}: scan failed ({e})")
-            continue
-        decision = evaluate_project(
-            project, sr,
-            posture=posture,
-            hardening_profile=profile,
-            dangerously_disable_quarantine=dangerously,
-            suppressions=supps,
-            today=today,
+            return
+        if current is None or current.heads_up_sent:
+            return
+        alert = format_grace_heads_up_alert(
+            expires_at=current.expires_at,
+            decisions_by_project=decisions_by_project,
+            posture_by_project=posture_by_project,
+            dangerously_by_project=dangerously_by_project,
         )
-        decisions.append(decision)
-
-    if failed and not decisions:
-        raise RuntimeError(
-            f"All images failed to scan for project {project!r}"
-        )
-
-    write_scan_state(scan_state_path, decisions=tuple(decisions))
-
-    # Emit Pushover alerts for state transitions (new quarantine, newly
-    # at-risk-running, suppression expired, new sub-threshold finding).
-    # Best-effort — failures here do NOT fail the scan; the durable record
-    # is the scan_state file just written.
-    #
-    # During the migration grace window, transition alerts are suppressed:
-    # the operator gets the single fleet-level heads-up alert instead.
-    if not in_grace:
-        prior_by_image = {pd.image_ref: pd for pd in prior_decisions}
-        for current_decision in decisions:
-            prior_decision = prior_by_image.get(current_decision.image_ref)
-            try:
-                emit_scan_alerts(
-                    project_name=project,
-                    posture=posture_str,
-                    current=current_decision,
-                    prior=prior_decision,
-                    suppressions=supps,
-                    paths=paths,
-                )
-            except Exception as e:  # noqa: BLE001 — alerting must never block scan
-                _LOGGER.warning(
-                    "alert emission failed for %s (%s): %s",
-                    project, current_decision.image_ref, e,
-                )
-
-    # Decide whether quarantine action fires.
-    headline_decision = None
-    headline_disp = None
-    for decision in decisions:
-        for disp in decision.findings:
-            if disp.disposition == Disposition.QUARANTINE:
-                headline_decision = decision
-                headline_disp = disp
-                break
-        if headline_decision is not None:
-            break
-
-    # During grace we still compute the headline decision (so the heads-up
-    # alert can summarise it) but never fire the quarantine action.
-    if (
-        not in_grace
-        and headline_decision
-        and headline_disp
-        and not is_quarantined(project, paths)
-    ):
-        compose_files = ["compose.yml"]
-        if paths.project_compose_override(project).exists():
-            compose_files.append("compose.boxmunge.yml")
         try:
-            quarantine_project(
-                project, paths,
-                project_dir=paths.project_dir(project),
-                hosts=manifest.get("hosts") or [],
-                compose_files=compose_files,
-                headline=headline_disp,
-                image_ref=headline_decision.image_ref,
+            send_alerts((alert,), paths)
+        except Exception as e:  # noqa: BLE001 — alerting must never block scan
+            log_warning(
+                "cve-scan", f"heads-up alert send raised: {e}", paths,
             )
-        except QuarantineError as e:
-            warnings.append(f"quarantine action failed: {e}")
-
-    return headline_decision, decisions, warnings, posture_str, dangerously
+        # Persist regardless of delivery success: operator can see grace
+        # state in `boxmunge security` and we don't want repeated sends
+        # if Pushover is down.
+        try:
+            mark_heads_up_sent(paths, current)
+        except OSError as e:
+            log_warning(
+                "cve-scan",
+                f"failed to persist heads_up_sent flag: {e}",
+                paths,
+            )
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def _summarise_decisions(decisions: list[ProjectDecision]) -> str:
@@ -395,6 +188,9 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
 
     start = time.monotonic()
     failures = 0
+    skipped_locked: list[str] = []
+    quarantined_projects: list[str] = []
+    at_risk_running_projects: list[str] = []
     decisions_by_project: dict[str, ProjectDecision] = {}
     posture_by_project: dict[str, str] = {}
     dangerously_by_project: dict[str, bool] = {}
@@ -402,8 +198,23 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
     for name in targets:
         try:
             headline, decisions, warnings, posture_str, dangerously = (
-                _scan_one_project(paths, name, in_grace=in_grace)
+                scan_one_project(paths, name, in_grace=in_grace)
             )
+        except LockError:
+            # Audit A-2: another operation holds the project lock. Skip and
+            # warn — consistent with upgrade_cmd._restart_projects. The next
+            # cron tick will re-attempt.
+            skipped_locked.append(name)
+            log_warning(
+                "cve-scan",
+                f"scan: skipped project {name} — held by another operation",
+                paths, project=name,
+            )
+            print(
+                f"{name}: SKIPPED — held by another operation; will be "
+                f"picked up on next scan",
+            )
+            continue
         except TrivyNotInstalledError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
@@ -414,6 +225,19 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
         for w in warnings:
             print(f"{name}: WARN — {w}")
         print(f"{name}: {_summarise_decisions(decisions)}")
+
+        # Track per-project disposition outcomes for the F-8 exit code.
+        # is_quarantined() reads the live state file (just written above on
+        # the quarantine path); STILL_RUNNING_AT_RISK is observable from
+        # the decisions list directly.
+        if is_quarantined(name, paths):
+            quarantined_projects.append(name)
+        for d in decisions:
+            for f in d.findings:
+                if f.disposition == Disposition.STILL_RUNNING_AT_RISK:
+                    if name not in at_risk_running_projects:
+                        at_risk_running_projects.append(name)
+                    break
 
         # Capture per-project state for the heads-up summary. We pick the
         # first decision (one image per project for typical deployments;
@@ -432,32 +256,44 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
         and not grace.heads_up_sent
         and decisions_by_project
     ):
-        alert = format_grace_heads_up_alert(
-            expires_at=grace.expires_at,
+        _maybe_fire_grace_heads_up(
+            paths,
             decisions_by_project=decisions_by_project,
             posture_by_project=posture_by_project,
             dangerously_by_project=dangerously_by_project,
         )
-        try:
-            send_alerts((alert,), paths)
-        except Exception as e:  # noqa: BLE001 — alerting must never block scan
-            _LOGGER.warning("heads-up alert send raised: %s", e)
-        # Persist the sent flag regardless of delivery success: the
-        # operator can see grace state in `boxmunge security` and we
-        # don't want repeated sends if Pushover is down.
-        try:
-            mark_heads_up_sent(paths, grace)
-        except OSError as e:
-            _LOGGER.warning("failed to persist heads_up_sent flag: %s", e)
 
     elapsed = time.monotonic() - start
     print(f"Scanned {len(targets)} projects in {elapsed:.1f}s.")
+    if skipped_locked:
+        print(f"Skipped (locked): {', '.join(skipped_locked)}")
     if in_grace:
         print(
             f"Migration grace ACTIVE — full enforcement begins "
             f"{grace.expires_at.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC",
         )
-    return 0 if failures == 0 else 1
+
+    # Audit F-8: distinguish exit codes so operator scripts can react.
+    # 1 = scan failed (Trivy missing handled above; runtime/manifest fails)
+    # 2 = scan completed, ≥1 project quarantined or at-risk-running
+    # 0 = clean
+    if failures > 0:
+        return 1
+    if quarantined_projects or at_risk_running_projects:
+        bits: list[str] = []
+        if quarantined_projects:
+            bits.append(
+                f"{len(quarantined_projects)} quarantined "
+                f"({', '.join(quarantined_projects)})",
+            )
+        if at_risk_running_projects:
+            bits.append(
+                f"{len(at_risk_running_projects)} at-risk-running "
+                f"({', '.join(at_risk_running_projects)})",
+            )
+        print(f"Attention required: {'; '.join(bits)}. Exit code 2.")
+        return 2
+    return 0
 
 
 # ---------- subcommand: resume ----------
@@ -490,8 +326,18 @@ def cmd_security_resume(args: list[str], paths: BoxPaths) -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
+    # The pre-lift scan acquires its own per-project lock inside
+    # scan_one_project (audit A-2). LockError surfaces as a clear "try
+    # again" message rather than a hidden race.
     try:
-        _, decisions, _, _, _ = _scan_one_project(paths, project)
+        _, decisions, _, _, _ = scan_one_project(paths, project)
+    except LockError:
+        print(
+            f"ERROR: Another operation is in progress for '{project}'. "
+            f"Try again shortly.",
+            file=sys.stderr,
+        )
+        return 1
     except TrivyNotInstalledError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
@@ -521,6 +367,23 @@ def cmd_security_resume(args: list[str], paths: BoxPaths) -> int:
 
     print("  Re-scan: clear (no quarantine-level findings)")
 
+    # Audit A-2: lift section must hold the per-project lock so
+    # config-regen + compose_up + state-clear cannot interleave with a
+    # concurrent deploy/promote/container-update.
+    try:
+        with project_lock(project, paths):
+            return _resume_lift(paths, project)
+    except LockError:
+        print(
+            f"ERROR: Another operation is in progress for '{project}'. "
+            f"Try again shortly.",
+            file=sys.stderr,
+        )
+        return 1
+
+
+def _resume_lift(paths: BoxPaths, project: str) -> int:
+    """Inner lift section. Caller MUST hold the per-project lock."""
     # Render normal Caddy site config + compose override using the
     # deploy helpers (the resume_cmd flow does the same).
     from boxmunge.commands.deploy import (

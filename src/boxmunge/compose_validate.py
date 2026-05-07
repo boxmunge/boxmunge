@@ -46,8 +46,15 @@ _HOSTILE_SECURITY_OPT_SUBSTRINGS: tuple[str, ...] = (
 
 # Host paths that must never be exposed via bind-mount source. Matched with
 # POSIX path-prefix semantics — descendants are also rejected.
+#
+# Both `/var/run/docker.sock` and `/run/docker.sock` are listed explicitly:
+# on modern Debian/Ubuntu `/var/run` is a symlink to `/run`, so a hostile
+# compose can mount the unsymlinked `/run/docker.sock` and bypass the
+# `/var/run/docker.sock` rule (audit B-1). We do NOT list `/run` itself —
+# that would reject every legitimate `/run/myapp` tmpfs mount.
 _HOSTILE_VOLUME_SOURCES: tuple[str, ...] = (
-    "/var/run/docker.sock", "/proc", "/sys", "/etc", "/dev", "/",
+    "/var/run/docker.sock", "/run/docker.sock",
+    "/proc", "/sys", "/etc", "/dev", "/",
 )
 
 

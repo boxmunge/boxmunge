@@ -365,3 +365,117 @@ class TestRefreshDb:
 
         assert len(records) == 1
         assert "timed out" in records[0].getMessage().lower()
+
+
+class TestSeverityFromTrivyString:
+    """Audit F-4: severity case normalization is encapsulated."""
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("CRITICAL", Severity.CRITICAL),
+            ("Critical", Severity.CRITICAL),
+            ("critical", Severity.CRITICAL),
+            ("HIGH", Severity.HIGH),
+            ("High", Severity.HIGH),
+            ("high", Severity.HIGH),
+            ("MEDIUM", Severity.MEDIUM),
+            ("Medium", Severity.MEDIUM),
+            ("medium", Severity.MEDIUM),
+            ("LOW", Severity.LOW),
+            ("Low", Severity.LOW),
+            ("low", Severity.LOW),
+            ("UNKNOWN", Severity.UNKNOWN),
+            ("Unknown", Severity.UNKNOWN),
+            ("unknown", Severity.UNKNOWN),
+        ],
+    )
+    def test_known_strings_round_trip_case_insensitively(
+        self, raw: str, expected: Severity,
+    ) -> None:
+        assert Severity.from_trivy_string(raw) is expected
+
+    def test_empty_string_maps_to_unknown(self) -> None:
+        assert Severity.from_trivy_string("") is Severity.UNKNOWN
+
+    def test_none_maps_to_unknown(self) -> None:
+        assert Severity.from_trivy_string(None) is Severity.UNKNOWN
+
+    def test_unrecognised_string_maps_to_unknown(self) -> None:
+        # Defensive: a value Trivy invents should not raise — UNKNOWN is
+        # the right shelter, with the (non-empty) input logged in the
+        # caller's parse loop.
+        assert Severity.from_trivy_string("FATAL") is Severity.UNKNOWN
+
+
+# ---------- structured-extras (audit A-1) ----------
+
+
+class TestStructuredLogging:
+    """Wave 3: cve/scanner.py warnings must carry component='cve-scan'
+    extras so `boxmunge log --component cve-scan` finds them."""
+
+    @patch("boxmunge.cve.scanner.subprocess.run")
+    def test_refresh_db_failure_extras_carry_component(
+        self, mock_run: MagicMock,
+    ) -> None:
+        mock_run.side_effect = subprocess.CalledProcessError(
+            returncode=1, cmd=["trivy"], stderr="net unreachable",
+        )
+        h, records = _captured_records()
+        logging.getLogger("boxmunge").addHandler(h)
+        try:
+            refresh_db()
+        finally:
+            logging.getLogger("boxmunge").removeHandler(h)
+        assert len(records) == 1
+        rec = records[0]
+        assert getattr(rec, "component", None) == "cve-scan"
+        assert getattr(rec, "project", "missing") is None
+
+    @patch(
+        "boxmunge.cve.scanner.subprocess.run", side_effect=FileNotFoundError(),
+    )
+    def test_refresh_db_missing_binary_extras(
+        self, _mock_run: MagicMock,
+    ) -> None:
+        h, records = _captured_records()
+        logging.getLogger("boxmunge").addHandler(h)
+        try:
+            refresh_db()
+        finally:
+            logging.getLogger("boxmunge").removeHandler(h)
+        assert len(records) == 1
+        rec = records[0]
+        assert getattr(rec, "component", None) == "cve-scan"
+        assert getattr(rec, "project", "missing") is None
+
+    @patch("boxmunge.cve.scanner.subprocess.run")
+    def test_unknown_severity_warning_extras(
+        self, mock_run: MagicMock,
+    ) -> None:
+        payload = {
+            "Results": [{
+                "Vulnerabilities": [
+                    {
+                        "VulnerabilityID": "CVE-X",
+                        "PkgName": "p", "InstalledVersion": "1",
+                        "Severity": "FUNKY", "Title": "t",
+                    },
+                ],
+            }],
+        }
+        mock_run.return_value = _make_completed(json.dumps(payload))
+        h, records = _captured_records()
+        logging.getLogger("boxmunge").addHandler(h)
+        try:
+            scan_image("img:tag")
+        finally:
+            logging.getLogger("boxmunge").removeHandler(h)
+        assert len(records) == 1
+        rec = records[0]
+        assert getattr(rec, "component", None) == "cve-scan"
+        # Detail dict carries the offending raw severity for forensic use.
+        detail = getattr(rec, "detail", None)
+        assert isinstance(detail, dict)
+        assert detail.get("raw_severity") == "FUNKY"

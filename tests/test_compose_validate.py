@@ -311,6 +311,47 @@ services:
         with pytest.raises(ComposeSecurityError, match="volumes"):
             validate_user_compose(compose, paths)
 
+    def test_run_docker_sock_short_syntax_rejected(self, tmp_path: Path, paths) -> None:
+        # Audit B-1: on modern Debian /var/run is a symlink to /run, so the
+        # canonical Docker socket path is /run/docker.sock. The validator
+        # must reject the unsymlinked path explicitly.
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - /run/docker.sock:/var/run/docker.sock
+""")
+        with pytest.raises(ComposeSecurityError, match="volumes"):
+            validate_user_compose(compose, paths)
+
+    def test_run_docker_sock_long_syntax_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - type: bind
+        source: /run/docker.sock
+        target: /sock
+""")
+        with pytest.raises(ComposeSecurityError, match="volumes"):
+            validate_user_compose(compose, paths)
+
+    def test_run_subpath_still_allowed(self, tmp_path: Path, paths) -> None:
+        # Audit B-1 boundary: /run by itself must NOT be rejected — many
+        # legitimate apps mount /run/myapp tmpfs paths. Only /run/docker.sock
+        # (and its descendants) and /var/run/docker.sock are hostile.
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - /run/myapp:/run/myapp
+""")
+        # Should not raise.
+        validate_user_compose(compose, paths)
+
     def test_proc_mount_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
 services:
