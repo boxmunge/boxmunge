@@ -213,6 +213,77 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# ---------------------------------------------------------------------------
+# Installer self-update — install.sh fingerprint write, shim 3c contents
+# ---------------------------------------------------------------------------
+
+INSTALL_SH="$SCRIPT_DIR/../install.sh"
+
+# install.sh must syntax-check.
+if bash -n "$INSTALL_SH" 2>/dev/null; then
+    echo "PASS: install.sh passes bash -n"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: install.sh fails bash -n"
+    FAIL=$((FAIL + 1))
+fi
+
+# install.sh must contain the fingerprint write block (state/installer.sha256)
+# and the shim must contain the matching read+compare block. Without both,
+# the self-update mechanism breaks silently.
+if grep -q "state/installer.sha256" "$INSTALL_SH"; then
+    echo "PASS: install.sh writes state/installer.sha256"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: install.sh missing state/installer.sha256 fingerprint write"
+    FAIL=$((FAIL + 1))
+fi
+if grep -q "state/installer.sha256" "$SHIM" \
+   && grep -q "system upgrade" "$SHIM"; then
+    echo "PASS: shim references state/installer.sha256 + system-upgrade flow"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: shim missing install.sh self-update (3c) wiring"
+    FAIL=$((FAIL + 1))
+fi
+
+# install.sh fingerprint write smoke test: create a stand-in install.sh in a
+# tmpdir, run the 4-line hash-write fragment with BOXMUNGE_ROOT pointed at
+# the tmpdir, assert state/installer.sha256 matches sha256sum of the source.
+#
+# Skipped on platforms without sha256sum (e.g. macOS without coreutils) —
+# the fingerprint write target is Debian-only and the production code path
+# uses sha256sum which is part of coreutils.
+if command -v sha256sum >/dev/null 2>&1; then
+    fp_dir="$(mktemp -d)"
+    mkdir -p "$fp_dir/state"
+    cat > "$fp_dir/install.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "stand-in"
+EOF
+    expected_hash="$(sha256sum "$fp_dir/install.sh" | awk '{print $1}')"
+    (
+        BOXMUNGE_ROOT="$fp_dir"
+        SCRIPT_DIR="$fp_dir"
+        INSTALLER_HASH_FILE="${BOXMUNGE_ROOT}/state/installer.sha256"
+        mkdir -p "$(dirname "${INSTALLER_HASH_FILE}")"
+        sha256sum "${SCRIPT_DIR}/install.sh" 2>/dev/null \
+            | awk '{print $1}' > "${INSTALLER_HASH_FILE}.tmp"
+        mv -f "${INSTALLER_HASH_FILE}.tmp" "${INSTALLER_HASH_FILE}"
+    )
+    written_hash="$(cat "$fp_dir/state/installer.sha256" 2>/dev/null || echo "")"
+    if [[ "$written_hash" == "$expected_hash" && -n "$expected_hash" ]]; then
+        echo "PASS: install.sh fingerprint write fragment produces sha256 of source"
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: install.sh fingerprint mismatch (expected '$expected_hash', got '$written_hash')"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -rf "$fp_dir"
+else
+    echo "SKIP: install.sh fingerprint smoke test (sha256sum not available)"
+fi
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]] || exit 1

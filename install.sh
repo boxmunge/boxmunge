@@ -64,11 +64,25 @@ install_cosign() {
 # Trivy is installed from Aqua Security's official Debian repo. The signing
 # key is fetched once and dearmored to /usr/share/keyrings/trivy.gpg. The
 # repo URL points at "generic main" which serves all Debian/Ubuntu releases.
+#
+# Idempotency:
+#   The presence-on-PATH check is paired with a dpkg-query check on the
+#   package state. If the binary exists but dpkg's recorded status is not
+#   "installed" (e.g. partial install, manual binary drop into /usr/local,
+#   or `apt remove` leaving config residue), the install path is re-entered
+#   and apt-get install is run with --reinstall to recover.
 # ---------------------------------------------------------------------------
 install_trivy() {
-    if command -v trivy >/dev/null 2>&1; then
+    if command -v trivy >/dev/null 2>&1 \
+       && dpkg-query -W -f='${db:Status-Status}' trivy 2>/dev/null \
+            | grep -q "^installed$"; then
+        local installed_version
+        installed_version="$(trivy --version 2>/dev/null | head -1 \
+            | awk '{print $2}' || echo unknown)"
+        echo "  Trivy already installed (version=${installed_version}); skipping reinstall"
         return 0
     fi
+
     echo "  Installing Trivy (CVE scanner)..."
 
     # Fetch and dearmor the signing key into the trusted keyrings dir.
@@ -82,7 +96,15 @@ install_trivy() {
         > /etc/apt/sources.list.d/trivy.list
 
     apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y trivy
+    # --reinstall handles the dpkg-leftover case where a prior `apt remove`
+    # left metadata behind: a plain `install` would no-op if dpkg considers
+    # the package already present in some state.
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall trivy
+
+    local installed_version
+    installed_version="$(trivy --version 2>/dev/null | head -1 \
+        | awk '{print $2}' || echo unknown)"
+    echo "  Trivy installed (version=${installed_version})"
 }
 
 echo ""
@@ -397,6 +419,25 @@ INSTALLED_VERSION="$("${BOXMUNGE_ROOT}/env-active/bin/pip" show boxmunge-server 
 if [[ "${INSTALLED_VERSION}" != "unknown" ]]; then
     echo "${INSTALLED_VERSION}" > "${BOXMUNGE_ROOT}/config/version"
 fi
+
+# ---------------------------------------------------------------------------
+# Record the installer fingerprint (sha256 of this script as it was applied)
+# so the upgrade shim can detect when a future release ships an install.sh
+# that differs from the one this host already ran — and re-invoke install.sh
+# automatically before flipping to the new venv. Without this, system-level
+# changes (new apt packages, new systemd units, install.sh-only migrations)
+# silently require a manual `bash boxmunge-install.sh` after every upgrade.
+# Written last so a partial install (which exits earlier under `set -e`)
+# leaves the prior fingerprint in place — the shim will then re-run on the
+# next upgrade attempt.
+# ---------------------------------------------------------------------------
+INSTALLER_HASH_FILE="${BOXMUNGE_ROOT}/state/installer.sha256"
+mkdir -p "$(dirname "${INSTALLER_HASH_FILE}")"
+sha256sum "${SCRIPT_DIR}/install.sh" 2>/dev/null \
+    | awk '{print $1}' > "${INSTALLER_HASH_FILE}.tmp"
+mv -f "${INSTALLER_HASH_FILE}.tmp" "${INSTALLER_HASH_FILE}"
+chown root:deploy "${INSTALLER_HASH_FILE}" 2>/dev/null || true
+chmod 0644 "${INSTALLER_HASH_FILE}"
 
 echo ""
 echo "========================================================"

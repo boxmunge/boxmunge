@@ -405,6 +405,61 @@ cmd_run() {
         done
     fi
 
+    # 3c. System upgrade (install.sh re-run).
+    #
+    # Closes the v0.6.x gap where new system deps (Trivy, new systemd timers,
+    # apt packages) silently required a manual install.sh re-run after every
+    # auto-update. install.sh writes its own sha256 to state/installer.sha256
+    # at the end of every successful run — when the bundled install.sh differs
+    # from the on-disk fingerprint, we re-invoke it BEFORE the slot swap so
+    # system-level dependencies are in place by the time the new venv goes
+    # active. install.sh is hard-gated on `bash -n` for the same reason as
+    # the shim self-update above: a syntactically broken install.sh in a
+    # future release must NOT brick this host.
+    #
+    # On install.sh failure: fail noisily before the swap, blocklist this
+    # version, and exit. The prior venv stays active and the prior shim
+    # stays in place (we already swapped the shim above, but the new shim
+    # is meant to be backwards-compatible with the old layout). Operator
+    # diagnoses, fixes manually, and clears the blocklist.
+    #
+    # Missing-fingerprint case (first upgrade past this feature): treated
+    # as "needs upgrade" — install.sh re-runs, writes the fingerprint, and
+    # subsequent upgrades only re-run when the bundle changes install.sh.
+    local new_install_sh="$tmp_download/boxmunge/install.sh"
+    local installer_hash_file="$BOXMUNGE_ROOT/state/installer.sha256"
+    if [[ -f "$new_install_sh" ]]; then
+        if ! bash -n "$new_install_sh" 2>/dev/null; then
+            log "ERROR: bundled install.sh has syntax errors; refusing to run system upgrade"
+            bm_log error upgrade "system upgrade skipped: bash -n failed" "{\"version\": \"$version\"}"
+            rm -rf "$BOXMUNGE_ROOT/env-$standby"
+            add_blocklist "$version" "system_upgrade_failed: install_sh_syntax"
+            report_failure "$version" "$from_version" "system_upgrade"
+            exit 1
+        fi
+        local new_hash current_hash
+        new_hash="$(sha256sum "$new_install_sh" | awk '{print $1}')"
+        current_hash="$(cat "$installer_hash_file" 2>/dev/null || echo "")"
+        if [[ "$new_hash" != "$current_hash" ]]; then
+            log "install.sh changed (current=${current_hash:0:8}, new=${new_hash:0:8}); running system upgrade..."
+            bm_log info upgrade "system upgrade started" "{\"new_hash\": \"${new_hash:0:16}\", \"prev_hash\": \"${current_hash:0:16}\"}"
+            local sysup_exit=0
+            bash "$new_install_sh" || sysup_exit=$?
+            if [[ "$sysup_exit" -eq 0 ]]; then
+                bm_log info upgrade "system upgrade completed" "{\"hash\": \"${new_hash:0:16}\"}"
+            else
+                log "ERROR: install.sh failed (exit ${sysup_exit}); aborting upgrade before slot swap"
+                bm_log error upgrade "system upgrade failed" "{\"exit_code\": $sysup_exit}"
+                rm -rf "$BOXMUNGE_ROOT/env-$standby"
+                add_blocklist "$version" "system_upgrade_failed: install_sh_exit_${sysup_exit}"
+                report_failure "$version" "$from_version" "system_upgrade"
+                exit 1
+            fi
+        else
+            log "install.sh unchanged (${new_hash:0:8}); skipping system upgrade"
+        fi
+    fi
+
     # 4. SWAP
     log "Swapping to standby venv (slot $standby)..."
     swap_to "$standby"
