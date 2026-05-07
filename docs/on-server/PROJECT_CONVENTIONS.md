@@ -335,6 +335,33 @@ NODE_ENV=production
 
 ---
 
+## CVE Suppressions Convention
+
+If the project has any operator-reviewed CVE suppressions, they live in:
+
+```
+<project>/security/suppressions.yml
+```
+
+The file ships with the project bundle so the disposition trail travels
+with the project — every suppression carries its `cve`, `until`,
+`reason`, `reviewed_by`, and `added` fields. Schema and field
+requirements are defined in CVE_POLICY.md (`agent-help cve`).
+
+**Do not edit `suppressions.yml` manually.** It is managed exclusively
+by:
+
+```
+boxmunge security suppress <CVE> --project <name> --until <DATE> --reason <text>
+boxmunge security unsuppress <CVE> --project <name>
+```
+
+The CLI handles file creation, schema validation, atomic writes, and
+emits the corresponding `cve-suppress` audit log entry. Hand-edits
+bypass the audit trail and risk breaking the schema.
+
+---
+
 ## Caddy Override
 
 `caddy.override.conf` is an escape hatch for projects with routing requirements that boxmunge's generated Caddy config cannot express. If this file is present, boxmunge uses it **verbatim** in place of the generated Caddy configuration for the project's hosts.

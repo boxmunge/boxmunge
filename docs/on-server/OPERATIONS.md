@@ -590,6 +590,64 @@ log --project myapp --containers
 
 ---
 
+## CVE Policy
+
+boxmunge enforces a CVE policy on every deployed image: a daily Trivy
+scan, a posture-based quarantine for findings that cross the threshold,
+and an operator-driven suppression workflow for findings reviewed and
+judged not exploitable.
+
+Scan cadence:
+
+- Daily at 03:00 (±30 min jitter) via `boxmunge-cve-scan.timer`
+- On every `prod-deploy`, `stage`, `promote`, `resume`, and image update
+- Ad-hoc:
+
+  ```
+  boxmunge security scan              # all projects
+  boxmunge security scan myapp        # one project
+  ```
+
+Inspect state:
+
+```
+boxmunge security                    # fleet summary
+boxmunge security myapp              # per-project view
+boxmunge security --json             # machine-readable
+```
+
+Suppress a CVE that has been reviewed:
+
+```
+boxmunge security suppress CVE-2026-1234 \
+  --project myapp --until 2026-08-01 \
+  --reason "Endpoint not exposed in our config; vuln path unreachable."
+```
+
+If a project gets auto-quarantined, the maintenance page goes up and a
+critical Pushover alert fires. Investigate, then either wait for an
+upstream fix or suppress, then:
+
+```
+boxmunge security resume myapp
+```
+
+`security resume` re-scans first and refuses to lift if a quarantine-
+level finding still applies.
+
+Audit trails for the CVE machinery live in the structured log:
+
+```
+boxmunge log --component cve-scan
+boxmunge log --component cve-suppress
+```
+
+For the full reference (posture tiers, hardening penalty, suppression
+schema, alerts) see `agent-help cve` (CVE_POLICY.md). For a step-by-
+step incident playbook see `agent-help cve-incident`.
+
+---
+
 ## Agent Access via MCP
 
 Configure your AI agent (Claude Code, Cursor, etc.) to use boxmunge via MCP:

@@ -58,6 +58,14 @@ Project operations:
   caddy-status            Show Caddy sites and certificate expiry
   console                 Open the boxmunge TUI
 
+Container security & CVE policy:
+  security                        Fleet CVE summary (use --json for parseable)
+  security <project>              Per-project view (hardening + CVE state)
+  security scan [<project>]       Run Trivy scan now (no project = fleet)
+  security suppress <CVE>         Add a CVE suppression with --until and --reason
+  security unsuppress <CVE>       Remove a suppression
+  security resume <project>       Lift a CVE quarantine (re-scans first)
+
 Platform updates:
   upgrade                 Upgrade boxmunge platform from latest release
   upgrade --target VER    Pin platform to a specific version (e.g. 0.3.5)

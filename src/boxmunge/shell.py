@@ -26,7 +26,9 @@ ALLOWED_COMMANDS: set[str] = {
     "inbox",
     # Secrets
     "secrets",
-    # Container security introspection (read-only)
+    # Container security & CVE policy.
+    # - `security` (no args / <project>): introspection
+    # - `security scan|suppress|unsuppress|resume`: mutating
     "security",
     # Project operations.
     # `check` is read-only. `check-all` is the timer-driven mutator: it

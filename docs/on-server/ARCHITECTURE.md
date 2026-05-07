@@ -330,6 +330,17 @@ See `TRUST_MODEL.md` for the threat model and `agent-help security` for the runt
 - `health` — non-destructive audit of Docker, Caddy, containers, permissions, config drift, hardening state, and recent errors.
 - `upgrade` — stash current state, migrate manifests, regenerate configs, restart, self-test, health check.
 
+## CVE Policy Module
+
+Beyond per-container hardening, boxmunge runs a CVE policy engine that scans deployed images and quarantines projects whose findings cross a posture threshold.
+
+- **Where it sits** — runs after every successful deploy/stage/promote/resume, and via `boxmunge-cve-scan.timer` daily at 03:00 (±30 min jitter). Lives in `src/boxmunge/cve/` (scanner, policy, quarantine, suppressions, alerting, scan_state, grace) plus the orchestrating `commands/security_*.py`.
+- **Inputs** — Trivy's vulnerability DB (refreshed before each scan), the project's `manifest.yml` (`security.posture`, `dangerously_disable_quarantine`, hardening fields), and the project's `security/suppressions.yml` if present.
+- **Outputs** — per-project `.cve/scan_state.json` (the durable record), quarantine actions (`compose stop` + maintenance Caddy fragment + critical Pushover alert), informational alerts for sub-threshold findings, and structured `log_operation` entries under `cve-scan` / `cve-suppress` / `cve-quarantine` components.
+- **Per-project scan budget** — each project gets a 600-second wall-clock budget across its image scans. Exceeding it skips remaining images (logged at WARNING) and resumes on the next tick.
+
+See `agent-help cve` (CVE_POLICY.md) for posture tiers, hardening penalty, suppression schema, recovery flow, and alerts.
+
 ---
 
 ## MCP Server

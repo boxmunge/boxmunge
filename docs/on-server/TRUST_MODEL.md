@@ -137,3 +137,15 @@ prints the same report with no side effects.
 ## Security Releases
 
 Security-tagged releases are applied automatically within 12 hours. The `boxmunge upgrade` flow handles stashing, migration, and validation automatically. Release `SHA256SUMS` files are keyless-signed by the GitHub Actions release workflow (Sigstore Fulcio + Rekor), and the upgrade shim hard-requires a valid signature pinned to this repo's release workflow on a `vX.Y.Z` tag — an unsigned release is refused.
+
+## CVE Policy as a Defensive Layer
+
+boxmunge's CVE policy provides a defensive layer beyond container hardening. The policy treats unfixed upstream CVEs above the project's posture threshold as actionable: it quarantines projects automatically and surfaces operator-suppressible findings via the audit trail.
+
+The trust-model assumptions for this layer are explicit:
+
+- **Trivy's vulnerability database is correct.** False negatives in the DB pass through silently; false positives produce noise but never an unsafe outcome.
+- **Suppressions are honest operator decisions.** A suppression is a signed-off declaration that a CVE has been reviewed and judged not exploitable in the deployed config. boxmunge does not second-guess it; the audit trail and the `until` date are the controls.
+- **The operator is responsible for revisiting suppressions before they expire.** boxmunge enforces expiry mechanically (the finding becomes active again on the next scan after `until`) and emits a high-priority Pushover alert; what it cannot do is decide whether the CVE has actually been mitigated upstream or in the deployed code.
+
+Like the rest of the trust model, this layer assumes a single trusted operator. There is no per-project review delegation and no multi-party approval for suppressions; the audit log is the only record of who signed off on what. See `agent-help cve` for the policy reference and `agent-help cve-incident` for the response playbook.

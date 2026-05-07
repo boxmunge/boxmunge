@@ -80,6 +80,17 @@ Medium CVE quarantined a project running on `strict` posture.
 Rationale: running with read-only rootfs disabled means a Medium CVE
 behaves more like a High one in practice — the policy treats it that way.
 
+### Overlay-aware penalty (v0.6.2)
+
+boxmunge's default-profile overlay enforces `no-new-privileges` at
+runtime, applied via the generated `compose.boxmunge.yml`. The hardening
+penalty calculator is overlay-aware: projects that don't redeclare
+`security_opt: ["no-new-privileges:true"]` in their user `compose.yml`
+are NOT penalised for it — the overlay already protects them. (Re-
+declaring it in user compose would trigger a Compose merge duplicate-
+rejection error anyway; see the v0.6.3 dedupe note in
+"Recommendations" below.)
+
 ## Configuring posture (manifest.yml)
 
 `posture` and `dangerously_disable_quarantine` live at the project level
@@ -101,6 +112,15 @@ The compose validator rejects:
 - `posture: strict` on a project where any service does not set
   `read_only: true`. Strict posture without read-only rootfs is incoherent.
 - Any `posture` value other than `relaxed`, `balanced`, or `strict`.
+
+These cross-validators run on every entry point that materialises a
+project from its manifest+compose: `prod-deploy`, `stage`, `promote`,
+`resume`, and the `_regenerate_configs` step of `upgrade`. All of them
+reject the operation with **exit code 3** if `posture: strict` or
+`dangerously_disable_quarantine: true` is set without `read_only: true`
+on every service. Exit 3 is the reserved code for compose hardening
+rejections (see OPERATIONS.md "Command Exit Codes") so the operator can
+distinguish a security-policy failure from a generic operational one.
 
 For background on hardening profiles (`profile: default`, `profile: off`),
 see [SECURITY.md](SECURITY.md).
@@ -189,6 +209,25 @@ Rules:
 - A suppression is active while `today < until`. So `until: 2026-08-01`
   applies through 2026-07-31 and expires on 2026-08-01.
 
+### Audit trail (v0.7.0)
+
+Every `suppress` and `unsuppress` invocation emits a structured
+`cve-suppress` log entry, viewable with:
+
+```
+boxmunge log --component cve-suppress
+```
+
+The entry records the CVE, project, the operator (`reviewed_by` /
+`$USER`), the `until` date, and the reason.
+
+If the same CVE is re-suppressed within **7 days** of an `unsuppress`
+on the same project, the CLI prints a `NOTE:` to stderr describing
+how long ago the prior unsuppress happened, and the structured log
+entry includes `previously_suppressed=true` in its detail. The
+combination makes silent extension-of-suppression visible in the
+audit trail.
+
 ## Scan cadence
 
 - **Daily** at 03:00 system time via systemd timer `boxmunge-cve-scan.timer`,
@@ -210,6 +249,23 @@ Idempotency: the daily cron does not re-fire informational alerts for
 unchanged dispositions. Only state transitions (new finding, transition
 across threshold, suppression expiry, new quarantine, resume) produce
 alerts.
+
+### Per-project scan budget (v0.7.0)
+
+Each project gets a **600-second (10-minute) wall-clock budget** for the
+sum of its image scans. If a project exhausts the budget, remaining
+images for the current scan are skipped and the project resumes on the
+next cron tick. The skip is logged at WARNING with the elapsed time and
+the count of skipped images, so a project that consistently overflows
+becomes visible in the audit log:
+
+```
+boxmunge log --component cve-scan --level warning
+```
+
+Rationale: an unbounded scan on a fleet of misbehaving images would
+starve the rest of the cron-driven workload. The budget bounds the
+worst case while still letting normal scans complete in seconds.
 
 ## Migration grace
 
@@ -269,6 +325,42 @@ The per-project view shows posture, quarantine state (with the triggering
 CVE if applicable), the latest scan disposition per finding, and the
 project's active suppressions.
 
+## Quarantine enforcement across the lifecycle (v0.7.0)
+
+Once a project is quarantined, every operational entry point honours
+that state until `boxmunge security resume <project>` lifts it. There
+is no other path back. The behaviour splits into two camps:
+
+**Refuse with exit 1 (operator-initiated mutations):**
+
+- `prod-deploy <project>` / `deploy`
+- `stage <project>`
+- `promote <project>`
+- `resume <project>` (the pause-resume command — distinct from
+  `security resume`)
+
+These print an error pointing the operator at `boxmunge security
+resume <project>` and abort before touching containers or configs.
+
+**Skip with a logged ops entry (background sweeps):**
+
+- `upgrade` — `_regenerate_configs` re-renders the maintenance Caddy
+  fragment for the quarantined project (so the maintenance UX
+  persists across the upgrade) and `_restart_projects` skips
+  `compose up` entirely. The project's containers stay stopped.
+- `container-update` — pulls + recreates are skipped for quarantined
+  projects.
+- `backup` / `backup-all` — quarantined projects are skipped (the
+  containers are stopped; a backup would dump empty volumes).
+- `health` / `check-all` — the quarantine state is reported, no
+  smoke test is run, and the project does not contribute to fleet
+  failure counts.
+
+In both camps the skip is recorded via `log_operation` and visible in
+`boxmunge log --component <component>`. Only `boxmunge security
+resume <project>` lifts the quarantine; it re-scans first and refuses
+to lift if a quarantine-level finding still applies.
+
 ## Recovering a quarantined project
 
 1. **Inspect what triggered the quarantine:**
@@ -308,6 +400,24 @@ project's active suppressions.
 This is distinct from `boxmunge resume` (which lifts a manual `pause`).
 Quarantine state is separate from pause state — `boxmunge up` does not
 auto-resume CVE-quarantined projects across reboot.
+
+## Recommendations
+
+### Don't redeclare overlay-applied hardening (v0.6.3)
+
+Do not redeclare `security_opt: ["no-new-privileges:true"]` in your
+user `compose.yml`. The default-profile overlay already sets it in the
+generated `compose.boxmunge.yml`; declaring it in user compose
+produces a duplicate at compose merge and Docker Compose v2 rejects
+the deploy with a duplicate-key error. v0.6.2's penalty calc is
+overlay-aware, so the protection counts toward your hardening score
+even when it lives only in the overlay — there is no benefit to
+redeclaring it, only failure modes.
+
+If you need to *relax* a hardening field, use a `security:` block in
+the manifest (see PROJECT_CONVENTIONS.md and SECURITY.md). The
+overlay derives from the manifest, so the manifest is the only place
+to express intent.
 
 ## Out of scope (v0.6.0)
 
