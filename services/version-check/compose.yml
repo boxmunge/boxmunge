@@ -4,19 +4,15 @@ services:
     restart: unless-stopped
     volumes:
       - check-data:/data
-    # Read-only rootfs — hardens against post-exploit persistence.
-    # /tmp must remain writeable (gunicorn worker scratch); tmpfs is
-    # size-bounded and never persisted. read_only is NOT in boxmunge's
-    # default overlay (it's a strict-profile feature), so the user
-    # must declare it here to opt in.
-    read_only: true
-    tmpfs:
-      - /tmp
-    # Note: do NOT add `security_opt: ["no-new-privileges:true"]` here.
-    # The default profile overlay already sets it, and Docker Compose
-    # rejects duplicate list items when files are merged. v0.6.2+'s
-    # CVE-policy hardening penalty is overlay-aware, so the protection
-    # counts toward your hardening score without redeclaring.
+    # Hardening (read_only rootfs, /tmp tmpfs, no-new-privileges, init,
+    # cap_drop, pids_limit) is provided automatically by boxmunge's
+    # default-profile overlay. Do not redeclare those here — the overlay
+    # generator omits its read_only/tmpfs additions when user compose
+    # already declares them, but redundant declarations clutter the
+    # source and risk merge-time conflicts on later additions.
+    #
+    # To opt out of the read_only default: declare `read_only: false`
+    # explicitly (incurs +1 hardening penalty in CVE policy).
 
 volumes:
   check-data:
