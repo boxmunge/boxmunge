@@ -13,6 +13,7 @@ fields is surfaced so the operator sees the full picture.
 """
 from __future__ import annotations
 
+import re
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -20,6 +21,10 @@ import yaml
 
 from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
+from boxmunge.security_overlay import (
+    PROFILE_DEFAULT,
+    overlay_security_opt_for_profile,
+)
 
 
 class ComposeSecurityError(Exception):
@@ -181,14 +186,22 @@ def _bind_source(entry: Any) -> str | None:
     return None
 
 
+_ENV_SUBSTITUTION_RE = re.compile(r"\$\w|\$\{")
+
+
 def _has_env_substitution(src: str) -> bool:
     """True if the source contains Compose env-var substitution.
 
     Compose substitutes `${VAR}` and `$VAR` from the project env at runtime
     — we cannot validate the resolved value statically. Reject up front;
     fail noisily, never fall back.
+
+    The substitution can appear ANYWHERE in the source, not just at the
+    start: `/foo$BAR/x` and `/foo${BAR}/x` both expand at compose-merge
+    time and bypass static path validation. (Audit F-5: the v0.5.8 fix
+    closed the leading-`$` case but not embedded.)
     """
-    return "${" in src or src.startswith("$")
+    return bool(_ENV_SUBSTITUTION_RE.search(src))
 
 
 def _is_hostile_volume_source(src: str) -> bool:
@@ -297,6 +310,61 @@ def _check_strict_posture_requires_readonly(
     if _service_is_read_only(svc):
         return None
     return _STRICT_POSTURE_MSG.format(svc=svc_name)
+
+
+# ---------------------------------------------------------------------------
+# Compose-merge dedupe (audit "Compose merge dedupe — Option C")
+#
+# Background: Docker Compose v2's multi-file merge promotes `security_opt`
+# from override-overwrite to list-extend. If the user's compose.yml AND the
+# boxmunge overlay both declare `["no-new-privileges:true"]`, the merged
+# result has the entry twice — and Compose v2 explicitly rejects duplicate
+# items in `security_opt`. The v0.6.3 hotfix addressed this with operator
+# guidance ("don't redeclare it"); this validator adds defense-in-depth so
+# the operator gets a clear actionable error before the docker-compose
+# stack trace ever fires.
+#
+# Off-profile services skip this check: they are explicitly out of the
+# overlay's coverage, so any security_opt entry in their compose.yml is
+# theirs to manage alone.
+# ---------------------------------------------------------------------------
+
+
+_OVERLAY_DEDUPE_MSG = (
+    'service {svc}: security_opt entry "{entry}" is redundant — the '
+    "boxmunge default-profile overlay already sets it, and Docker Compose "
+    "rejects duplicate list items at merge time. Remove this entry from "
+    "your compose.yml; v0.6.2+ recognises the overlay's enforcement when "
+    "calculating the CVE hardening penalty, so removing the duplicate has "
+    "no effect on your project's security posture."
+)
+
+
+def _check_overlay_dedupe(
+    services: dict[str, Any], off: set[str],
+) -> tuple[str, str] | None:
+    """Return (svc_name, redundant_entry) for the first overlap, or None.
+
+    Compares each non-off service's user-declared security_opt against
+    the overlay's emitted list. The default profile is the only profile
+    that emits anything in v0.5/v0.6 — when other profiles ship, this
+    helper widens to look up the effective profile per service.
+    """
+    overlay_opts = set(overlay_security_opt_for_profile(PROFILE_DEFAULT))
+    if not overlay_opts:
+        return None
+    for svc_name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        if svc_name in off:
+            continue
+        user_opts = svc.get("security_opt")
+        if not isinstance(user_opts, list):
+            continue
+        for entry in user_opts:
+            if isinstance(entry, str) and entry in overlay_opts:
+                return (svc_name, entry)
+    return None
 
 
 def _enforce_cve_rule(
@@ -428,6 +496,19 @@ def validate_user_compose(
             f"service {svc_name}: {key} = {value} defeats boxmunge "
             f"hardening; remove it or set security.profile: off "
             f"with reason"
+        )
+
+    # Compose-merge dedupe defense-in-depth. Reject any user-declared
+    # security_opt entry that the boxmunge overlay would also emit for a
+    # non-off service — Docker Compose v2 rejects duplicate list items
+    # at merge time and the operator should see a clear actionable error
+    # before the docker-compose stack trace fires. (v0.6.3 footgun;
+    # Wave 3 / architecture audit Option C.)
+    overlay_overlap = _check_overlay_dedupe(services, off)
+    if overlay_overlap is not None:
+        svc_name, entry = overlay_overlap
+        raise ComposeSecurityError(
+            _OVERLAY_DEDUPE_MSG.format(svc=svc_name, entry=entry)
         )
 
     # CVE-policy cross-validation. Rule A first, then Rule B — order is

@@ -34,7 +34,12 @@ services:
 """)
         validate_user_compose(compose, paths)
 
-    def test_no_new_privileges_security_opt_accepted(self, tmp_path: Path, paths) -> None:
+    def test_no_new_privileges_security_opt_on_off_profile_accepted(
+        self, tmp_path: Path, paths,
+    ) -> None:
+        # Wave 3: redeclaring `no-new-privileges:true` is rejected on
+        # default-profile services (overlay-merge dedupe), but permitted
+        # when the service is explicitly opted out via profile: off.
         compose = _write(tmp_path / "compose.yml", """
 services:
   web:
@@ -42,7 +47,7 @@ services:
     security_opt:
       - no-new-privileges:true
 """)
-        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, off_services={"web"})
 
     def test_seccomp_runtime_default_accepted(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -647,6 +652,50 @@ services:
         with pytest.raises(ComposeSecurityError, match="substitution"):
             validate_user_compose(compose, paths)
 
+    # Audit F-5: embedded `$` (not just leading) must trigger rejection.
+    def test_embedded_bare_dollar_substitution_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - /foo$BAR:/dst
+""")
+        with pytest.raises(ComposeSecurityError, match="substitution"):
+            validate_user_compose(compose, paths)
+
+    def test_embedded_brace_substitution_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - /foo${BAR}/x:/dst
+""")
+        with pytest.raises(ComposeSecurityError, match="substitution"):
+            validate_user_compose(compose, paths)
+
+    def test_trailing_brace_substitution_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - /abc/${BAR}:/dst
+""")
+        with pytest.raises(ComposeSecurityError, match="substitution"):
+            validate_user_compose(compose, paths)
+
+    def test_literal_path_no_dollars_accepted(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - /literal/no/dollars:/dst
+""")
+        validate_user_compose(compose, paths)
+
 
 # ---------------------------------------------------------------------------
 # A-NEW-5 — `no-new-privileges:false` rejected as security_opt.
@@ -674,6 +723,95 @@ services:
 """)
         with pytest.raises(ComposeSecurityError, match="security_opt"):
             validate_user_compose(compose, paths)
+
+
+# ---------------------------------------------------------------------------
+# Wave 3 — Compose-merge dedupe defense-in-depth (Architecture audit Option C).
+#
+# User compose.yml + boxmunge overlay both declaring the same security_opt
+# entry produces a duplicate at merge time, which Compose v2 rejects. The
+# validator catches this up front with a targeted error rather than letting
+# the operator see a confusing docker-compose stack trace.
+# ---------------------------------------------------------------------------
+
+
+class TestRejectsOverlayDedupe:
+    def test_redeclared_no_new_privileges_true_default_profile_rejected(
+        self, tmp_path: Path, paths,
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    security_opt:
+      - no-new-privileges:true
+""")
+        with pytest.raises(ComposeSecurityError, match="redundant"):
+            validate_user_compose(compose, paths)
+
+    def test_redeclared_on_off_profile_permitted(
+        self, tmp_path: Path, paths,
+    ) -> None:
+        # Off services are out of overlay coverage; the redundancy check
+        # does not apply to them.
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    security_opt:
+      - no-new-privileges:true
+""")
+        validate_user_compose(compose, paths, off_services={"web"})
+
+    def test_unrelated_security_opt_entry_permitted(
+        self, tmp_path: Path, paths,
+    ) -> None:
+        # A custom seccomp profile is not in the overlay's emission set,
+        # so it must pass the dedupe gate even on a default-profile
+        # service. (The hostile-substring check still applies elsewhere
+        # — `seccomp=runtime/default` is benign.)
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    security_opt:
+      - seccomp=runtime/default
+""")
+        validate_user_compose(compose, paths)
+
+    def test_redeclared_no_new_privileges_false_still_hostile(
+        self, tmp_path: Path, paths,
+    ) -> None:
+        # Regression guard: the existing hostile-substring check (rejects
+        # `no-new-privileges:false`) fires BEFORE the overlay-dedupe
+        # check, so the operator-friendly hostile-key wording stays
+        # primary. (Order of precedence matters for the error message
+        # the operator sees first.)
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    security_opt:
+      - no-new-privileges:false
+""")
+        with pytest.raises(ComposeSecurityError, match="security_opt"):
+            validate_user_compose(compose, paths)
+
+    def test_redeclared_message_mentions_overlay(
+        self, tmp_path: Path, paths,
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    security_opt:
+      - no-new-privileges:true
+""")
+        with pytest.raises(ComposeSecurityError) as excinfo:
+            validate_user_compose(compose, paths)
+        msg = str(excinfo.value)
+        assert "boxmunge default-profile overlay" in msg
+        assert "no-new-privileges:true" in msg
 
 
 # ---------------------------------------------------------------------------

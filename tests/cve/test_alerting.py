@@ -533,6 +533,85 @@ def test_format_grace_heads_up_alert_includes_expires_time() -> None:
     assert "Enforcement begins" in alert.body
 
 
+# Audit F-7: at-risk-running cross-references `dangerously_by_project`.
+
+
+def test_grace_heads_up_at_risk_section_omitted_when_all_dangerously_false() -> None:
+    """All projects have dangerously_by_project=False → no At-risk section."""
+    fd = _disp(
+        "CVE-2026-1111", base=Severity.CRITICAL,
+        disposition=Disposition.QUARANTINE,
+    )
+    decision = _decision(fd, project="auth-svc", image="auth:1.0")
+    alert = format_grace_heads_up_alert(
+        expires_at=datetime(2026, 5, 7, 12, tzinfo=timezone.utc),
+        decisions_by_project={"auth-svc": decision},
+        posture_by_project={"auth-svc": "balanced"},
+        dangerously_by_project={"auth-svc": False},
+    )
+    assert "At-risk-running" not in alert.body
+
+
+def test_grace_heads_up_at_risk_omitted_when_no_quarantine_findings() -> None:
+    """dangerously_by_project says foo is set, but foo has zero
+    quarantine-disposition findings → not listed at-risk."""
+    info = _disp(
+        "CVE-2026-2222", base=Severity.LOW, effective=Severity.LOW,
+        disposition=Disposition.INFORMATIONAL,
+    )
+    decision = _decision(info, project="foo", image="foo:1.0")
+    alert = format_grace_heads_up_alert(
+        expires_at=datetime(2026, 5, 7, 12, tzinfo=timezone.utc),
+        decisions_by_project={"foo": decision},
+        posture_by_project={"foo": "balanced"},
+        dangerously_by_project={"foo": True},
+    )
+    # The flag is set but the project doesn't have any
+    # would-quarantine (STILL_RUNNING_AT_RISK) findings, so foo must
+    # NOT appear under the at-risk section.
+    assert "At-risk-running" not in alert.body
+    bullet_lines = [
+        line for line in alert.body.splitlines()
+        if line.strip().startswith("- foo")
+    ]
+    assert bullet_lines == []
+
+
+def test_grace_heads_up_at_risk_section_sorted_deterministically() -> None:
+    """Multiple at-risk projects appear sorted by name."""
+    fd_a = _disp(
+        "CVE-2026-AAAA", base=Severity.CRITICAL,
+        disposition=Disposition.STILL_RUNNING_AT_RISK,
+    )
+    fd_b = _disp(
+        "CVE-2026-BBBB", base=Severity.CRITICAL,
+        disposition=Disposition.STILL_RUNNING_AT_RISK,
+    )
+    fd_c = _disp(
+        "CVE-2026-CCCC", base=Severity.CRITICAL,
+        disposition=Disposition.STILL_RUNNING_AT_RISK,
+    )
+    alert = format_grace_heads_up_alert(
+        expires_at=datetime(2026, 5, 7, 12, tzinfo=timezone.utc),
+        decisions_by_project={
+            "zzz": _decision(fd_a, project="zzz", image="z:1"),
+            "aaa": _decision(fd_b, project="aaa", image="a:1"),
+            "mmm": _decision(fd_c, project="mmm", image="m:1"),
+        },
+        posture_by_project={
+            "zzz": "balanced", "aaa": "balanced", "mmm": "balanced",
+        },
+        dangerously_by_project={"zzz": True, "aaa": True, "mmm": True},
+    )
+    body = alert.body
+    aaa_idx = body.find("- aaa")
+    mmm_idx = body.find("- mmm")
+    zzz_idx = body.find("- zzz")
+    assert 0 <= aaa_idx < mmm_idx < zzz_idx, (
+        "at-risk-running entries must appear sorted by project name"
+    )
+
+
 def test_format_grace_heads_up_alert_priority_high() -> None:
     fd = _disp(
         "CVE-2026-5678", base=Severity.CRITICAL,

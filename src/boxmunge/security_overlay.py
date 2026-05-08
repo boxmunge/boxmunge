@@ -85,6 +85,17 @@ def _baseline_for_profile(profile: str) -> dict[str, Any]:
     raise ValueError(f"Unknown profile: {profile!r}")
 
 
+def overlay_security_opt_for_profile(profile: str) -> tuple[str, ...]:
+    """Return the `security_opt` list the overlay will emit for a profile.
+
+    Used by the compose validator to detect duplicate `security_opt`
+    entries between user compose.yml and the boxmunge overlay — Docker
+    Compose's list-merge rejects duplicate items at validation time.
+    Returns an empty tuple for profiles that don't emit any (PROFILE_OFF).
+    """
+    return tuple(_baseline_for_profile(profile).get("security_opt", []))
+
+
 _OVERRIDE_FIELDS = ("no_new_privileges", "init", "pids_limit", "cap_drop", "cap_add")
 
 
