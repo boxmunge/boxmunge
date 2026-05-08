@@ -63,6 +63,18 @@ the CVE — if anything changed upstream, the original reasoning may be stale.
 **This is the only judgment call that matters.** The scanner doesn't know
 context. You do (or you can find out).
 
+> **v0.7.1+ note:** the engine now reads CVSS Attack Vector from Trivy
+> output. Under non-paranoid postures (`relaxed` / `balanced` / `strict`),
+> AV:Local / Adjacent / Physical and AV-unknown findings are auto-routed
+> to informational — they aren't reachable from the network surface a
+> hardened web container exposes. So if you see a `QUARANTINE` row, the
+> AV is already known to be Network (or the project is on `paranoid`
+> posture). The AV:L "is this exploitable from network" branch of the
+> reasoning below is now handled automatically. Most "high but not
+> exploitable" suppressions written under v0.6 / v0.7.0 are no longer
+> needed for AV:L findings — operators MAY clean up moot suppressions
+> periodically; they're harmless if left in place.
+
 #### What to read
 
 For the headline finding, the `explanation` field tells you which package
@@ -75,8 +87,8 @@ Cross-check with what you know about the project:
 |---|---|
 | Package is a build-time tool (pip, npm, apt) | Runtime container probably doesn't invoke it. Often non-exploitable. |
 | Vulnerable code path requires user-initiated action | If your service has no such surface, often non-exploitable. |
-| Network attack vector + project not internet-exposed | Often non-exploitable. |
-| Local attack vector + container hardening intact | Hardening is the mitigation. Often acceptable. |
+| Network attack vector + project not internet-exposed | Often non-exploitable; suppress with reason citing the closed surface. |
+| Local attack vector (AV:L) | Already auto-informational under non-paranoid posture. Just keep an eye on it; no action needed. |
 | Critical RCE on a runtime-invoked dependency | Treat as exploitable. |
 | You can't tell | **Escalate.** See section 4. |
 
@@ -120,6 +132,13 @@ Escalation message template:
 ## Acting
 
 ### A. Suppress (not exploitable)
+
+> **v0.7.1+:** if the finding is AV:L / Adjacent / Physical and the project
+> is on a non-paranoid posture, it's already informational — no suppression
+> needed. Suppression is the right answer for **AV:N** findings that are
+> documented-not-exploitable in your specific config (closed endpoint,
+> non-default flag, parser path you don't reach). On `paranoid` posture,
+> suppression remains the answer for AV:L findings you've reviewed.
 
 ```
 security suppress <CVE-ID> --project <project> \

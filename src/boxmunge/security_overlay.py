@@ -23,7 +23,10 @@ RESERVED_PROFILES: set[str] = {"strict", "paranoid"}
 POSTURE_RELAXED = "relaxed"
 POSTURE_BALANCED = "balanced"
 POSTURE_STRICT = "strict"
-KNOWN_POSTURES: set[str] = {POSTURE_RELAXED, POSTURE_BALANCED, POSTURE_STRICT}
+POSTURE_PARANOID = "paranoid"
+KNOWN_POSTURES: set[str] = {
+    POSTURE_RELAXED, POSTURE_BALANCED, POSTURE_STRICT, POSTURE_PARANOID,
+}
 
 # Default `cap_drop` list. Capabilities in this list are NOT in Docker's
 # default deny set, but are dangerous and rarely needed by application code.

@@ -14,11 +14,20 @@ Posture tiers map to a quarantine threshold:
     relaxed  → quarantine at Critical
     balanced → quarantine at High (default)
     strict   → quarantine at Medium
+    paranoid → quarantine at Medium AND skip the Attack Vector filter
 
 Effective severity = base severity elevated by a hardening penalty (capped
 at Critical). The penalty captures deviations from the boxmunge overlay's
 hardened defaults — running with read_only disabled means a Medium CVE
 behaves more like a High one in practice, so the policy treats it as such.
+
+v0.7.1 Attack Vector filter (non-paranoid postures): a finding is only
+quarantine-eligible when its CVSS Attack Vector is Network. AV:Local /
+Adjacent / Physical and AV-unknown findings stay informational under
+relaxed/balanced/strict — most "High" CVEs in distro-base packages are
+AV:L and not reachable from a hardened web container's network surface,
+so taking sites down for them was wrong-calibrated. paranoid posture is
+the explicit opt-in to the v0.7.0 behavior (no AV filter).
 """
 
 from __future__ import annotations
@@ -28,7 +37,7 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Any
 
-from boxmunge.cve.scanner import Finding, ScanResult, Severity
+from boxmunge.cve.scanner import AttackVector, Finding, ScanResult, Severity
 from boxmunge.cve.suppressions import Suppression, find_active_suppression
 
 
@@ -41,6 +50,7 @@ class Posture(Enum):
     RELAXED = "relaxed"
     BALANCED = "balanced"
     STRICT = "strict"
+    PARANOID = "paranoid"
 
 
 class Disposition(Enum):
@@ -76,11 +86,13 @@ _RANK_TO_SEVERITY: dict[int, Severity] = {
 
 # Posture → minimum effective severity that triggers quarantine.
 # At-or-above the threshold quarantines (so balanced quarantines High AND
-# Critical, not just above-High).
+# Critical, not just above-High). PARANOID matches STRICT's Medium threshold
+# but also bypasses the Attack Vector filter (see evaluate_finding).
 _POSTURE_THRESHOLDS: dict[Posture, Severity] = {
     Posture.RELAXED: Severity.CRITICAL,
     Posture.BALANCED: Severity.HIGH,
     Posture.STRICT: Severity.MEDIUM,
+    Posture.PARANOID: Severity.MEDIUM,
 }
 
 # Human label for posture in explanation strings — lowercase for prose flow.
@@ -88,6 +100,7 @@ _POSTURE_LABEL: dict[Posture, str] = {
     Posture.RELAXED: "relaxed",
     Posture.BALANCED: "balanced",
     Posture.STRICT: "strict",
+    Posture.PARANOID: "paranoid",
 }
 
 _MAX_HARDENING_PENALTY = 2
@@ -211,6 +224,29 @@ def _format_severity(sev: Severity) -> str:
     return sev.value
 
 
+def _explain_av_filter(
+    attack_vector: AttackVector | None, posture: Posture,
+) -> str:
+    """Explanation for the v0.7.1 Attack Vector gate firing.
+
+    Operator-facing prose: tell the reader why a non-trivial CVE got
+    routed to informational, and how to opt back into the old behavior.
+    """
+    posture_label = _POSTURE_LABEL[posture]
+    if attack_vector is None:
+        return (
+            "Attack vector unspecified in scanner data — defaulting to "
+            f"informational under {posture_label} posture. Set posture: "
+            "paranoid to quarantine on unspecified-AV findings."
+        )
+    av_label = attack_vector.value
+    return (
+        f"AV:{av_label[0]} ({av_label} attack vector) — not reachable from "
+        f"network surface; informational under {posture_label} posture. To "
+        "quarantine on local-AV findings, set posture: paranoid."
+    )
+
+
 def _explain_threshold(
     base: Severity,
     effective: Severity,
@@ -264,7 +300,10 @@ def evaluate_finding(
     1. Upstream fix available  → IGNORED_FIXED.
     2. Active suppression for this CVE → SUPPRESSED.
     3. UNKNOWN severity → INFORMATIONAL (cannot act on unrecognized).
-    4. Effective severity vs. posture threshold:
+    4. v0.7.1 Attack Vector filter: under non-paranoid posture, only AV:N
+       findings are quarantine-eligible. AV:L/A/P and AV-unknown route to
+       INFORMATIONAL with an explanation noting the gate.
+    5. Effective severity vs. posture threshold:
        - At-or-above + dangerously disabled → STILL_RUNNING_AT_RISK
        - At-or-above otherwise              → QUARANTINE
        - Below threshold                    → INFORMATIONAL
@@ -317,7 +356,25 @@ def evaluate_finding(
             ),
         )
 
-    # 4. Threshold comparison.
+    # 4. v0.7.1 Attack Vector filter — non-paranoid postures only.
+    # AV:L/Adjacent/Physical and AV-unknown are treated as "not reachable
+    # from network surface" and routed to informational regardless of
+    # severity. Paranoid posture skips this gate (matches v0.7.0 behavior).
+    if (
+        posture is not Posture.PARANOID
+        and finding.attack_vector is not AttackVector.NETWORK
+    ):
+        return FindingDisposition(
+            finding=finding,
+            base_severity=base,
+            hardening_penalty=hardening_penalty,
+            effective_severity=effective,
+            disposition=Disposition.INFORMATIONAL,
+            suppression=None,
+            explanation=_explain_av_filter(finding.attack_vector, posture),
+        )
+
+    # 5. Threshold comparison.
     threshold = _POSTURE_THRESHOLDS[posture]
     over_threshold = _SEVERITY_RANK[effective] >= _SEVERITY_RANK[threshold]
 

@@ -950,7 +950,9 @@ def test_scan_quarantine_finding_triggers_quarantine_action(
     """A QUARANTINE-disposition finding should call quarantine_project."""
     from datetime import datetime, timezone
     from boxmunge.commands.security_actions import cmd_security_scan
-    from boxmunge.cve.scanner import Finding, ScanResult, Severity
+    from boxmunge.cve.scanner import (
+        AttackVector, Finding, ScanResult, Severity,
+    )
     paths = _scan_paths(tmp_path)
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
@@ -967,6 +969,7 @@ def test_scan_quarantine_finding_triggers_quarantine_action(
         fixed_version=None,
         title="bad",
         primary_url=None,
+        attack_vector=AttackVector.NETWORK,
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -1106,7 +1109,9 @@ def test_resume_blocked_when_finding_still_quarantines(
 ) -> None:
     from datetime import datetime, timezone
     from boxmunge.commands.security_actions import cmd_security_resume
-    from boxmunge.cve.scanner import Finding, ScanResult, Severity
+    from boxmunge.cve.scanner import (
+        AttackVector, Finding, ScanResult, Severity,
+    )
     paths = _scan_paths(tmp_path)
     qfile = paths.project_quarantine_state("demo")
     qfile.parent.mkdir(parents=True, exist_ok=True)
@@ -1133,6 +1138,7 @@ def test_resume_blocked_when_finding_still_quarantines(
         fixed_version=None,
         title="bad",
         primary_url=None,
+        attack_vector=AttackVector.NETWORK,
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -1164,7 +1170,9 @@ def test_scan_invokes_emit_scan_alerts_after_persist(
     emit_scan_alerts after persisting the new scan_state."""
     from datetime import datetime, timezone
     from boxmunge.commands.security_actions import cmd_security_scan
-    from boxmunge.cve.scanner import Finding, ScanResult, Severity
+    from boxmunge.cve.scanner import (
+        AttackVector, Finding, ScanResult, Severity,
+    )
     paths = _scan_paths(tmp_path)
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
@@ -1181,6 +1189,7 @@ def test_scan_invokes_emit_scan_alerts_after_persist(
         fixed_version=None,
         title="bad",
         primary_url=None,
+        attack_vector=AttackVector.NETWORK,
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -1223,7 +1232,9 @@ def test_scan_passes_prior_decision_on_second_scan(monkeypatch, tmp_path) -> Non
     deserialised decisions to emit_scan_alerts as `prior`."""
     from datetime import datetime, timezone
     from boxmunge.commands.security_actions import cmd_security_scan
-    from boxmunge.cve.scanner import Finding, ScanResult, Severity
+    from boxmunge.cve.scanner import (
+        AttackVector, Finding, ScanResult, Severity,
+    )
     paths = _scan_paths(tmp_path)
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
@@ -1240,6 +1251,7 @@ def test_scan_passes_prior_decision_on_second_scan(monkeypatch, tmp_path) -> Non
         fixed_version=None,
         title="bad",
         primary_url=None,
+        attack_vector=AttackVector.NETWORK,
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -1285,7 +1297,9 @@ def _grace_quarantine_scan(monkeypatch, paths) -> None:
     """Wire up scan-related stubs for grace tests: returns a Critical finding
     that would normally trigger quarantine."""
     from datetime import datetime, timezone
-    from boxmunge.cve.scanner import Finding, ScanResult, Severity
+    from boxmunge.cve.scanner import (
+        AttackVector, Finding, ScanResult, Severity,
+    )
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
@@ -1301,6 +1315,7 @@ def _grace_quarantine_scan(monkeypatch, paths) -> None:
         fixed_version=None,
         title="bad",
         primary_url=None,
+        attack_vector=AttackVector.NETWORK,
     )
     sr = ScanResult(
         image_ref="myapp:1.0",

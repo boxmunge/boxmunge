@@ -9,7 +9,14 @@ posture-based quarantine, suppression workflow, and recovery.
   03:00 system time (±30 min jitter); also on every deploy and image update.
 - **Posture per project (default `balanced`).** `relaxed` quarantines Critical
   only, `balanced` quarantines High and above, `strict` quarantines Medium
-  and above. Set in the manifest under `security.posture`.
+  and above, `paranoid` quarantines Medium and above AND skips the Attack
+  Vector filter. Set in the manifest under `security.posture`.
+- **Attack Vector filter (v0.7.1).** Under `relaxed` / `balanced` / `strict`,
+  only findings whose CVSS Attack Vector is `Network` are quarantine-eligible.
+  AV:Local / Adjacent / Physical and AV-unknown findings stay informational
+  regardless of severity — they aren't reachable from the network surface a
+  hardened web container exposes. Use `paranoid` to opt back into the v0.7.0
+  "every High quarantines" behavior.
 - **Auto-quarantine** when an unfixed CVE crosses the project's posture
   threshold: `compose stop` + maintenance page + critical Pushover alert.
 - **Suppress with operator review:**
@@ -39,25 +46,48 @@ For each finding from the scanner against a deployed image:
 | Condition | Action |
 |---|---|
 | CVE has upstream fix available | Auto-update path picks it up; no quarantine. |
+| Active suppression matches the CVE | Skip; revisit on suppression expiry. |
+| Severity reported as Unknown by scanner | Informational only — the engine never quarantines on a severity it can't rank. |
+| **(v0.7.1) Posture not `paranoid` and CVSS Attack Vector is not Network** | Informational only — finding is not reachable from the network surface. |
 | No fix; effective severity below posture threshold | Keep running; informational alert. |
 | No fix; effective severity at or above posture threshold | Quarantine (compose stop + maintenance page); critical alert. |
 | `dangerously_disable_quarantine: true` | Never quarantine; `[STILL RUNNING]` alert. |
-| Active suppression matches the CVE | Skip; revisit on suppression expiry. |
-| Severity reported as Unknown by scanner | Informational only — the engine never quarantines on a severity it can't rank. |
+
+The Attack Vector filter applies BEFORE the threshold/penalty comparison.
+A Critical AV:L finding stays informational under non-paranoid postures —
+the hardening penalty still elevates the recorded effective severity, but
+the gate routes it to informational regardless.
 
 ## Posture tiers
 
 Per-project, set in `manifest.yml` under `security.posture`. Default `balanced`.
 
-| Tier | Quarantines at effective severity |
-|---|---|
-| `relaxed` | Critical only |
-| `balanced` (default) | High and above |
-| `strict` | Medium and above |
+| Tier | Quarantines at effective severity | AV filter |
+|---|---|---|
+| `relaxed` | Critical only | Yes (only AV:N quarantines) |
+| `balanced` (default) | High and above | Yes (only AV:N quarantines) |
+| `strict` | Medium and above | Yes (only AV:N quarantines) |
+| `paranoid` (v0.7.1) | Medium and above | No (every above-threshold finding quarantines) |
 
 `Low` and below never quarantine on their own. They can only become
 quarantine-eligible by being elevated into a higher band via the
 hardening penalty (see next section).
+
+### When to use `paranoid` (v0.7.1)
+
+Use `paranoid` when you want the v0.7.0 behavior: every above-threshold
+finding quarantines regardless of attack vector. Suitable for:
+
+- Services running locally-attackable code paths exposed via privileged
+  guest invocation (e.g. the web container shells out into another pid
+  namespace where AV:L is genuinely reachable).
+- High-trust environments where you would rather over-quarantine than
+  miss an AV:L finding the operator hasn't yet reviewed.
+
+The expected default for typical web/api containers is `balanced` with
+the AV filter active. AV:L findings on hardened web surfaces are not
+reachable to a network attacker; quarantining on them takes services
+down for non-actionable findings.
 
 ## Effective severity = base + hardening penalty
 

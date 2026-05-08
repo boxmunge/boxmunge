@@ -63,6 +63,38 @@ class Severity(Enum):
         return _TRIVY_SEVERITY_MAP.get(raw.upper(), cls.UNKNOWN)
 
 
+class AttackVector(Enum):
+    """CVSS Attack Vector — where the attacker must be to exploit.
+
+    Reflects the AV: token in a CVSS v3/v4 vector string. v0.7.1 quarantine
+    decisions gate on AV:N (Network) under non-paranoid postures: AV:L/A/P
+    findings are reported as informational because they aren't reachable
+    from the network surface a hardened web container exposes.
+    """
+
+    NETWORK = "Network"
+    ADJACENT = "Adjacent"
+    LOCAL = "Local"
+    PHYSICAL = "Physical"
+
+
+# CVSS AV: token → AttackVector. Trivy reports the canonical single-letter
+# tokens; we tolerate the value being inside a longer vector string.
+_AV_TOKEN_MAP: dict[str, AttackVector] = {
+    "N": AttackVector.NETWORK,
+    "A": AttackVector.ADJACENT,
+    "L": AttackVector.LOCAL,
+    "P": AttackVector.PHYSICAL,
+}
+
+
+# Source priority for resolving disagreements when multiple feeds report a
+# CVE. NVD is preferred where present (most-curated), then redhat (good distro
+# coverage), then ghsa (active for ecosystem packages). Anything else is taken
+# in alphabetical order for determinism.
+_CVSS_SOURCE_PRIORITY: tuple[str, ...] = ("nvd", "redhat", "ghsa")
+
+
 # Sort priority: higher number = sorts earlier in descending sort.
 # UNKNOWN sorts last so unclassified findings don't crowd out real ones.
 _SEVERITY_RANK: dict[Severity, int] = {
@@ -96,6 +128,7 @@ class Finding:
     fixed_version: str | None
     title: str
     primary_url: str | None
+    attack_vector: AttackVector | None = None
 
     @property
     def fix_available(self) -> bool:
@@ -249,10 +282,58 @@ def _parse_findings(payload: dict[str, Any]) -> tuple[Finding, ...]:
                 fixed_version=vuln.get("FixedVersion") or None,
                 title=vuln.get("Title", ""),
                 primary_url=vuln.get("PrimaryURL") or None,
+                attack_vector=_parse_attack_vector(vuln.get("CVSS") or {}),
             ))
 
     findings.sort(key=lambda f: (-_SEVERITY_RANK[f.severity], f.cve_id))
     return tuple(findings)
+
+
+def _parse_attack_vector(cvss: dict[str, Any]) -> AttackVector | None:
+    """Extract the CVSS Attack Vector from a Trivy `CVSS` block.
+
+    Trivy emits one entry per data source (nvd, redhat, ghsa, ...), each with
+    optional V3Vector and/or V40Vector strings. We walk sources in a fixed
+    priority order (nvd, redhat, ghsa, then any others alphabetically) and
+    take the first parseable AV: token. V3 is preferred over V4 because the
+    Trivy DB still has wider V3 coverage in 2026.
+
+    Returns None when no source has a parseable vector — the caller treats
+    that as "AV unknown", which under non-paranoid posture defaults to
+    informational.
+    """
+    if not isinstance(cvss, dict) or not cvss:
+        return None
+
+    extras = sorted(k for k in cvss.keys() if k not in _CVSS_SOURCE_PRIORITY)
+    ordered_sources = (*_CVSS_SOURCE_PRIORITY, *extras)
+
+    for source in ordered_sources:
+        entry = cvss.get(source)
+        if not isinstance(entry, dict):
+            continue
+        for vector_key in ("V3Vector", "V40Vector"):
+            vector = entry.get(vector_key)
+            av = _extract_av_from_vector(vector)
+            if av is not None:
+                return av
+    return None
+
+
+def _extract_av_from_vector(vector: Any) -> AttackVector | None:
+    """Pull the AV: token out of a CVSS vector string.
+
+    Tolerant of either prefix (CVSS:3.1/, CVSS:4.0/) and any token order.
+    Returns None for non-strings, missing AV: token, or unrecognized values.
+    """
+    if not isinstance(vector, str) or not vector:
+        return None
+    for token in vector.split("/"):
+        if not token.startswith("AV:"):
+            continue
+        value = token[3:].strip().upper()
+        return _AV_TOKEN_MAP.get(value)
+    return None
 
 
 def _extract_db_version(payload: dict[str, Any]) -> str | None:

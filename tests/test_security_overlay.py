@@ -242,7 +242,9 @@ class TestReasonRequired:
 class TestPostureValidation:
     """v0.6.0 CVE policy: project-level `posture` field schema validation."""
 
-    @pytest.mark.parametrize("posture", ["relaxed", "balanced", "strict"])
+    @pytest.mark.parametrize(
+        "posture", ["relaxed", "balanced", "strict", "paranoid"],
+    )
     def test_valid_posture_accepted_at_project_level(self, posture: str) -> None:
         validate_security_block({"posture": posture}, context="project")
 
@@ -259,6 +261,7 @@ class TestPostureValidation:
         assert "balanced" in msg
         assert "relaxed" in msg
         assert "strict" in msg
+        assert "paranoid" in msg
 
     @pytest.mark.parametrize(
         "value",

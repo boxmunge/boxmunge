@@ -8,11 +8,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from boxmunge.cve.scanner import (
+    AttackVector,
     Finding,
     ScanResult,
     ScannerError,
     Severity,
     TrivyNotInstalledError,
+    _parse_attack_vector,
     refresh_db,
     scan_image,
 )
@@ -479,3 +481,200 @@ class TestStructuredLogging:
         detail = getattr(rec, "detail", None)
         assert isinstance(detail, dict)
         assert detail.get("raw_severity") == "FUNKY"
+
+
+# ---------- v0.7.1 CVSS Attack Vector parsing ----------
+
+
+class TestParseAttackVector:
+    """Parser walks per-source CVSS blocks and extracts the AV: token."""
+
+    def test_single_source_ghsa_v3_av_n(self) -> None:
+        cvss = {
+            "ghsa": {
+                "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                "V3Score": 9.8,
+            },
+        }
+        assert _parse_attack_vector(cvss) is AttackVector.NETWORK
+
+    def test_single_source_nvd_v3_av_l(self) -> None:
+        cvss = {
+            "nvd": {
+                "V3Vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:U/C:N/I:H/A:N",
+                "V3Score": 5.0,
+            },
+        }
+        assert _parse_attack_vector(cvss) is AttackVector.LOCAL
+
+    def test_multi_source_disagree_nvd_wins(self) -> None:
+        # nvd is highest priority; nvd:L should win over ghsa:N.
+        cvss = {
+            "ghsa": {"V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
+            "nvd": {"V3Vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:U/C:N/I:H/A:N"},
+        }
+        assert _parse_attack_vector(cvss) is AttackVector.LOCAL
+
+    def test_redhat_priority_above_ghsa(self) -> None:
+        cvss = {
+            "ghsa": {"V3Vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H"},
+            "redhat": {"V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
+        }
+        assert _parse_attack_vector(cvss) is AttackVector.NETWORK
+
+    def test_only_v40_vector_parses(self) -> None:
+        cvss = {
+            "ghsa": {
+                "V40Vector": "CVSS:4.0/AV:A/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+                "V40Score": 7.2,
+            },
+        }
+        assert _parse_attack_vector(cvss) is AttackVector.ADJACENT
+
+    def test_v3_preferred_over_v40_same_source(self) -> None:
+        # V3 wins per spec: more populated in the Trivy DB.
+        cvss = {
+            "ghsa": {
+                "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                "V40Vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+            },
+        }
+        assert _parse_attack_vector(cvss) is AttackVector.NETWORK
+
+    def test_unknown_source_falls_back_alphabetical(self) -> None:
+        # No nvd/redhat/ghsa — order alphabetically among extras.
+        cvss = {
+            "zzz_oss": {"V3Vector": "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
+            "aaa_oss": {"V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
+        }
+        # aaa_oss wins alphabetically.
+        assert _parse_attack_vector(cvss) is AttackVector.NETWORK
+
+    def test_priority_source_overrides_alphabetical(self) -> None:
+        cvss = {
+            "aaa_oss": {"V3Vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
+            "redhat": {"V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
+        }
+        assert _parse_attack_vector(cvss) is AttackVector.NETWORK
+
+    def test_empty_dict_returns_none(self) -> None:
+        assert _parse_attack_vector({}) is None
+
+    def test_no_cvss_at_all_returns_none(self) -> None:
+        # _parse_attack_vector tolerates {} (caller passes `vuln.get("CVSS") or {}`).
+        assert _parse_attack_vector({}) is None
+
+    def test_malformed_vector_string_returns_none(self) -> None:
+        cvss = {"nvd": {"V3Vector": "garbage-not-cvss"}}
+        assert _parse_attack_vector(cvss) is None
+
+    def test_unknown_av_token_returns_none(self) -> None:
+        cvss = {"nvd": {"V3Vector": "CVSS:3.1/AV:Z/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}}
+        assert _parse_attack_vector(cvss) is None
+
+    def test_skips_unparseable_source_tries_next(self) -> None:
+        cvss = {
+            "nvd": {"V3Vector": "garbage"},
+            "ghsa": {"V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
+        }
+        assert _parse_attack_vector(cvss) is AttackVector.NETWORK
+
+    def test_non_dict_entry_skipped(self) -> None:
+        cvss = {
+            "nvd": "not a dict",
+            "ghsa": {"V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
+        }
+        assert _parse_attack_vector(cvss) is AttackVector.NETWORK
+
+    def test_non_dict_input_returns_none(self) -> None:
+        # Defensive: the field could be anything if Trivy schema drifts.
+        assert _parse_attack_vector(None) is None  # type: ignore[arg-type]
+        assert _parse_attack_vector("string") is None  # type: ignore[arg-type]
+
+
+class TestParseFindingsAttackVector:
+    """_parse_findings propagates the attack vector to Finding."""
+
+    @patch("boxmunge.cve.scanner.subprocess.run")
+    def test_finding_with_av_n_propagates_to_finding(
+        self, mock_run: MagicMock,
+    ) -> None:
+        payload = {
+            "Results": [{
+                "Vulnerabilities": [{
+                    "VulnerabilityID": "CVE-2026-1111",
+                    "PkgName": "pkg", "InstalledVersion": "1",
+                    "Severity": "HIGH", "Title": "t",
+                    "CVSS": {
+                        "ghsa": {
+                            "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                        },
+                    },
+                }],
+            }],
+        }
+        mock_run.return_value = _make_completed(json.dumps(payload))
+        result = scan_image("img:tag")
+        assert result.findings[0].attack_vector is AttackVector.NETWORK
+
+    @patch("boxmunge.cve.scanner.subprocess.run")
+    def test_finding_with_av_l_propagates(self, mock_run: MagicMock) -> None:
+        payload = {
+            "Results": [{
+                "Vulnerabilities": [{
+                    "VulnerabilityID": "CVE-2026-2222",
+                    "PkgName": "pkg", "InstalledVersion": "1",
+                    "Severity": "HIGH", "Title": "t",
+                    "CVSS": {
+                        "nvd": {
+                            "V3Vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:U/C:N/I:H/A:N",
+                        },
+                    },
+                }],
+            }],
+        }
+        mock_run.return_value = _make_completed(json.dumps(payload))
+        result = scan_image("img:tag")
+        assert result.findings[0].attack_vector is AttackVector.LOCAL
+
+    @patch("boxmunge.cve.scanner.subprocess.run")
+    def test_finding_without_cvss_block_has_none_av(
+        self, mock_run: MagicMock,
+    ) -> None:
+        payload = {
+            "Results": [{
+                "Vulnerabilities": [{
+                    "VulnerabilityID": "CVE-2026-3333",
+                    "PkgName": "pkg", "InstalledVersion": "1",
+                    "Severity": "HIGH", "Title": "t",
+                    # No CVSS key at all.
+                }],
+            }],
+        }
+        mock_run.return_value = _make_completed(json.dumps(payload))
+        result = scan_image("img:tag")
+        assert result.findings[0].attack_vector is None
+
+    @patch("boxmunge.cve.scanner.subprocess.run")
+    def test_finding_severity_unaffected_by_av_parsing(
+        self, mock_run: MagicMock,
+    ) -> None:
+        """Regression guard: severity parsing path doesn't depend on CVSS."""
+        payload = {
+            "Results": [{
+                "Vulnerabilities": [{
+                    "VulnerabilityID": "CVE-2026-4444",
+                    "PkgName": "pkg", "InstalledVersion": "1",
+                    "Severity": "CRITICAL", "Title": "t",
+                    "CVSS": {
+                        "ghsa": {
+                            "V3Vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+                        },
+                    },
+                }],
+            }],
+        }
+        mock_run.return_value = _make_completed(json.dumps(payload))
+        result = scan_image("img:tag")
+        assert result.findings[0].severity is Severity.CRITICAL
+        assert result.findings[0].attack_vector is AttackVector.LOCAL

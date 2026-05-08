@@ -17,7 +17,7 @@ from boxmunge.cve.policy import (
     FindingDisposition,
     ProjectDecision,
 )
-from boxmunge.cve.scanner import Finding, Severity
+from boxmunge.cve.scanner import AttackVector, Finding, Severity
 from boxmunge.fileutil import atomic_write_text
 
 
@@ -41,6 +41,7 @@ def _serialize_disposition(d: Any) -> dict[str, Any]:
         "primary_url": f.primary_url,
         "title": f.title,
         "installed_version": f.installed_version,
+        "attack_vector": f.attack_vector.value if f.attack_vector else None,
     }
 
 
@@ -118,6 +119,23 @@ def _deserialize_severity(value: str) -> Severity:
     return Severity.UNKNOWN
 
 
+def _deserialize_attack_vector(value: Any) -> AttackVector | None:
+    """Map a stored attack_vector string back to the enum.
+
+    Accepts None or missing field for backward compatibility with scan_state
+    files written before v0.7.1 introduced the attack_vector field. Anything
+    else unrecognized also falls back to None — failing here would block the
+    operator from reading legacy state, and the caller treats None as
+    "AV unknown" already.
+    """
+    if value is None:
+        return None
+    for av in AttackVector:
+        if av.value == value:
+            return av
+    return None
+
+
 def _deserialize_disposition(value: str) -> Disposition:
     """Map a stored disposition tag back to the enum.
 
@@ -169,6 +187,9 @@ def decisions_from_scan_state(
                 fixed_version=raw.get("fixed_version"),
                 title=raw.get("title", "") or "",
                 primary_url=raw.get("primary_url"),
+                attack_vector=_deserialize_attack_vector(
+                    raw.get("attack_vector"),
+                ),
             )
             findings.append(
                 FindingDisposition(

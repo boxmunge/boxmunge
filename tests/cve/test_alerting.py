@@ -577,3 +577,122 @@ def test_decisions_from_scan_state_round_trips(tmp_path) -> None:
     assert rd.findings[0].finding.cve_id == "CVE-2026-9999"
     assert rd.findings[0].disposition == Disposition.QUARANTINE
     assert rd.quarantine_required is True
+
+
+def test_scan_state_round_trips_attack_vector(tmp_path) -> None:
+    """v0.7.1: Finding.attack_vector survives the JSON round-trip."""
+    from boxmunge.cve.scan_state import (
+        decisions_from_scan_state,
+        read_scan_state,
+        write_scan_state,
+    )
+    from boxmunge.cve.scanner import AttackVector, Finding
+
+    finding = Finding(
+        cve_id="CVE-2026-7777",
+        severity=Severity.HIGH,
+        package="libfoo",
+        installed_version="1.0",
+        fixed_version=None,
+        title="t",
+        primary_url=None,
+        attack_vector=AttackVector.LOCAL,
+    )
+    fd = FindingDisposition(
+        finding=finding,
+        base_severity=Severity.HIGH,
+        hardening_penalty=0,
+        effective_severity=Severity.HIGH,
+        disposition=Disposition.INFORMATIONAL,
+        suppression=None,
+        explanation="AV:L gated to informational.",
+    )
+    decision = _decision(fd, when=datetime(2026, 5, 6, tzinfo=timezone.utc))
+    state_path = tmp_path / "demo.json"
+    write_scan_state(state_path, decisions=(decision,),
+                     scanned_at=decision.scanned_at)
+    raw = read_scan_state(state_path)
+    assert raw is not None
+    # On-disk shape: attack_vector serialized as the enum value.
+    assert raw["decisions"][0]["findings"][0]["attack_vector"] == "Local"
+    rebuilt = decisions_from_scan_state(raw, project_name="demo")
+    assert rebuilt[0].findings[0].finding.attack_vector is AttackVector.LOCAL
+
+
+def test_scan_state_legacy_without_attack_vector_field(tmp_path) -> None:
+    """Backward-compat: scan_state files written by v0.7.0 lack the
+    attack_vector field. Deserialiser must default to None and not raise."""
+    import json as _json
+    from boxmunge.cve.scan_state import (
+        decisions_from_scan_state,
+        read_scan_state,
+    )
+
+    legacy = {
+        "scanned_at": "2026-05-06T12:00:00+00:00",
+        "decisions": [{
+            "image_ref": "myapp:1.0",
+            "findings": [{
+                "cve_id": "CVE-2026-9999",
+                "base_severity": "Critical",
+                "effective_severity": "Critical",
+                "hardening_penalty": 0,
+                "disposition": "quarantine",
+                "explanation": "Critical, exceeds threshold.",
+                "fix_available": False,
+                "fixed_version": None,
+                "package": "openssl",
+                "primary_url": None,
+                "title": "t",
+                "installed_version": "1",
+                # NOTE: no attack_vector key
+            }],
+        }],
+    }
+    state_path = tmp_path / "legacy.json"
+    state_path.write_text(_json.dumps(legacy))
+    raw = read_scan_state(state_path)
+    assert raw is not None
+    rebuilt = decisions_from_scan_state(raw, project_name="demo")
+    # Defaulted to None — no exception raised.
+    assert rebuilt[0].findings[0].finding.attack_vector is None
+
+
+def test_scan_state_round_trips_attack_vector_none(tmp_path) -> None:
+    """A finding scanned without a CVSS block (attack_vector=None) round-trips
+    cleanly — explicit None on serialisation, None on deserialisation."""
+    from boxmunge.cve.scan_state import (
+        decisions_from_scan_state,
+        read_scan_state,
+        write_scan_state,
+    )
+    from boxmunge.cve.scanner import Finding
+
+    finding = Finding(
+        cve_id="CVE-2026-8888",
+        severity=Severity.MEDIUM,
+        package="x",
+        installed_version="1",
+        fixed_version=None,
+        title="t",
+        primary_url=None,
+        attack_vector=None,
+    )
+    fd = FindingDisposition(
+        finding=finding,
+        base_severity=Severity.MEDIUM,
+        hardening_penalty=0,
+        effective_severity=Severity.MEDIUM,
+        disposition=Disposition.INFORMATIONAL,
+        suppression=None,
+        explanation="x",
+    )
+    decision = _decision(fd, when=datetime(2026, 5, 6, tzinfo=timezone.utc))
+    state_path = tmp_path / "demo.json"
+    write_scan_state(state_path, decisions=(decision,),
+                     scanned_at=decision.scanned_at)
+    raw = read_scan_state(state_path)
+    assert raw is not None
+    assert raw["decisions"][0]["findings"][0]["attack_vector"] is None
+    rebuilt = decisions_from_scan_state(raw, project_name="demo")
+    assert rebuilt[0].findings[0].finding.attack_vector is None

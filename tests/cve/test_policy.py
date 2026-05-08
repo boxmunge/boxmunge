@@ -4,7 +4,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from boxmunge.cve.scanner import Finding, ScanResult, Severity
+from boxmunge.cve.scanner import AttackVector, Finding, ScanResult, Severity
 from boxmunge.cve.suppressions import Suppression
 from boxmunge.cve.policy import (
     Disposition,
@@ -12,6 +12,7 @@ from boxmunge.cve.policy import (
     PolicyError,
     Posture,
     ProjectDecision,
+    _POSTURE_THRESHOLDS,
     calculate_hardening_penalty,
     elevate_severity,
     evaluate_finding,
@@ -35,7 +36,11 @@ def _finding(
     installed_version: str = "1.1.1k",
     title: str = "Some vulnerability",
     primary_url: str | None = None,
+    attack_vector: AttackVector | None = AttackVector.NETWORK,
 ) -> Finding:
+    # Default to AV:NETWORK so existing posture/threshold tests aren't gated
+    # out by the v0.7.1 AV filter. Tests that care about the AV filter set
+    # attack_vector explicitly.
     return Finding(
         cve_id=cve_id,
         severity=severity,
@@ -44,6 +49,7 @@ def _finding(
         fixed_version=fixed_version,
         title=title,
         primary_url=primary_url,
+        attack_vector=attack_vector,
     )
 
 
@@ -532,6 +538,146 @@ def test_project_with_hardening_profile_elevates_findings() -> None:
     assert decision.quarantine_required is True
 
 
+# ---------- v0.7.1 Attack Vector filter ----------
+
+
+@pytest.mark.parametrize(
+    "av, posture, severity, expected",
+    [
+        # AV:L under non-paranoid postures → INFORMATIONAL regardless of severity
+        (AttackVector.LOCAL, Posture.BALANCED, Severity.HIGH, Disposition.INFORMATIONAL),
+        (AttackVector.LOCAL, Posture.BALANCED, Severity.CRITICAL, Disposition.INFORMATIONAL),
+        (AttackVector.LOCAL, Posture.STRICT, Severity.MEDIUM, Disposition.INFORMATIONAL),
+        (AttackVector.LOCAL, Posture.RELAXED, Severity.CRITICAL, Disposition.INFORMATIONAL),
+        # AV:Adjacent and AV:Physical also gated out under non-paranoid
+        (AttackVector.ADJACENT, Posture.BALANCED, Severity.HIGH, Disposition.INFORMATIONAL),
+        (AttackVector.PHYSICAL, Posture.BALANCED, Severity.CRITICAL, Disposition.INFORMATIONAL),
+        # AV unknown (None) treated like AV:L under non-paranoid
+        (None, Posture.BALANCED, Severity.HIGH, Disposition.INFORMATIONAL),
+        (None, Posture.STRICT, Severity.MEDIUM, Disposition.INFORMATIONAL),
+        # AV:N under non-paranoid → goes through the threshold gate normally
+        (AttackVector.NETWORK, Posture.BALANCED, Severity.HIGH, Disposition.QUARANTINE),
+        (AttackVector.NETWORK, Posture.RELAXED, Severity.CRITICAL, Disposition.QUARANTINE),
+        (AttackVector.NETWORK, Posture.STRICT, Severity.MEDIUM, Disposition.QUARANTINE),
+        # PARANOID skips the AV filter — quarantines AV:L and AV-unknown
+        (AttackVector.LOCAL, Posture.PARANOID, Severity.HIGH, Disposition.QUARANTINE),
+        (None, Posture.PARANOID, Severity.HIGH, Disposition.QUARANTINE),
+        (AttackVector.LOCAL, Posture.PARANOID, Severity.MEDIUM, Disposition.QUARANTINE),
+    ],
+)
+def test_attack_vector_filter_matrix(
+    av: AttackVector | None,
+    posture: Posture,
+    severity: Severity,
+    expected: Disposition,
+) -> None:
+    finding = _finding(severity=severity, attack_vector=av)
+    decision = evaluate_finding(
+        finding,
+        posture=posture,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=_TODAY,
+    )
+    assert decision.disposition == expected
+
+
+def test_av_local_explanation_mentions_paranoid_opt_in() -> None:
+    finding = _finding(severity=Severity.HIGH, attack_vector=AttackVector.LOCAL)
+    decision = evaluate_finding(
+        finding,
+        posture=Posture.BALANCED,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=_TODAY,
+    )
+    assert "AV:L" in decision.explanation
+    assert "Local" in decision.explanation
+    assert "paranoid" in decision.explanation
+    assert "balanced" in decision.explanation
+
+
+def test_av_unknown_explanation_distinct_from_av_l() -> None:
+    finding = _finding(severity=Severity.HIGH, attack_vector=None)
+    decision = evaluate_finding(
+        finding,
+        posture=Posture.BALANCED,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=_TODAY,
+    )
+    assert "unspecified" in decision.explanation
+    assert "paranoid" in decision.explanation
+
+
+def test_av_filter_applies_before_hardening_penalty_elevation() -> None:
+    """AV:L finding with read_only=False should still go to informational —
+    the AV filter trumps elevation, since the elevation reflects local
+    container weakness rather than network reachability."""
+    finding = _finding(severity=Severity.MEDIUM, attack_vector=AttackVector.LOCAL)
+    decision = evaluate_finding(
+        finding,
+        posture=Posture.BALANCED,
+        hardening_penalty=2,  # would elevate Medium → Critical
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=_TODAY,
+    )
+    assert decision.disposition == Disposition.INFORMATIONAL
+    assert decision.effective_severity == Severity.CRITICAL  # still recorded
+
+
+def test_av_n_with_hardening_penalty_still_quarantines() -> None:
+    """AV:N findings still get the elevation behavior."""
+    finding = _finding(severity=Severity.MEDIUM, attack_vector=AttackVector.NETWORK)
+    decision = evaluate_finding(
+        finding,
+        posture=Posture.BALANCED,
+        hardening_penalty=1,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=_TODAY,
+    )
+    assert decision.disposition == Disposition.QUARANTINE
+    assert decision.effective_severity == Severity.HIGH
+
+
+def test_paranoid_threshold_matches_strict() -> None:
+    assert _POSTURE_THRESHOLDS[Posture.PARANOID] == Severity.MEDIUM
+
+
+def test_paranoid_explanation_mentions_paranoid_label() -> None:
+    finding = _finding(severity=Severity.HIGH, attack_vector=AttackVector.NETWORK)
+    decision = evaluate_finding(
+        finding,
+        posture=Posture.PARANOID,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=_TODAY,
+    )
+    assert decision.disposition == Disposition.QUARANTINE
+    assert "paranoid" in decision.explanation
+
+
+def test_paranoid_below_threshold_still_informational() -> None:
+    """Paranoid skips the AV filter but the threshold still applies — Low
+    is below the Medium threshold so it stays informational."""
+    finding = _finding(severity=Severity.LOW, attack_vector=AttackVector.LOCAL)
+    decision = evaluate_finding(
+        finding,
+        posture=Posture.PARANOID,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=_TODAY,
+    )
+    assert decision.disposition == Disposition.INFORMATIONAL
+
+
 # ---------- parse_posture ----------
 
 
@@ -549,6 +695,12 @@ def test_parse_posture_uppercase_strict() -> None:
 
 def test_parse_posture_mixed_case_relaxed() -> None:
     assert parse_posture("Relaxed") == Posture.RELAXED
+
+
+def test_parse_posture_paranoid_accepted() -> None:
+    assert parse_posture("paranoid") == Posture.PARANOID
+    assert parse_posture("PARANOID") == Posture.PARANOID
+    assert parse_posture("Paranoid") == Posture.PARANOID
 
 
 def test_parse_posture_unknown_raises() -> None:
