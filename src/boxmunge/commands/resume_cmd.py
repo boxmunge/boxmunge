@@ -15,12 +15,14 @@ from pathlib import Path
 
 import yaml
 
-from boxmunge.commands.deploy import prepare_caddy_config, prepare_compose_override
+from boxmunge.caddy import prepare_caddy_config
+from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
-from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker import (
     compose_pull, compose_up, caddy_reload, DockerError,
 )
+from boxmunge.health_checks.smoke import run_smoke
+from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import is_paused, clear_paused_state
@@ -47,28 +49,6 @@ def _has_image_services(project_dir: Path, compose_files: list[str]) -> bool:
     return False
 
 
-def run_smoke(project_name: str, paths: BoxPaths) -> tuple[bool, str]:
-    """Run the per-project smoke test inside the container.
-
-    Returns (passed, message). Imported lazily so tests can mock cleanly.
-    """
-    from boxmunge.commands.check import run_smoke_in_container
-    project_dir = paths.project_dir(project_name)
-    manifest = load_manifest(paths.project_manifest(project_name))
-    services = manifest.get("services", {})
-    has_smoke = any(svc.get("smoke") for svc in services.values())
-    if not has_smoke:
-        return True, "no smoke test configured"
-    compose_files = ["compose.yml"]
-    override = paths.project_compose_override(project_name)
-    if override.exists():
-        compose_files.append("compose.boxmunge.yml")
-    result = run_smoke_in_container(
-        project_dir, manifest, compose_files, project_name=project_name,
-    )
-    return result.status == "ok", result.message
-
-
 def run_resume(
     project_name: str,
     paths: BoxPaths,
@@ -81,22 +61,22 @@ def run_resume(
         print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
         return 1
 
+    # Pause-resume must NOT silently un-quarantine. Lifting CVE quarantine
+    # has its own dedicated command path (`boxmunge security resume`)
+    # which re-scans before lifting. is_blocked() returns QUARANTINED
+    # first if both states exist (quarantine wins), so the refuse
+    # message is the security one.
+    block = is_blocked(project_name, paths)
+    if block and block.reason is BlockReason.QUARANTINED:
+        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
+        return 1
+
+    # Positive precondition: this command can only be invoked when the
+    # project is paused. Note this is a different semantic from the
+    # is_blocked refuse path above.
     if not is_paused(project_name, paths):
         print(f"ERROR: Project '{project_name}' is not paused.",
               file=sys.stderr)
-        return 1
-
-    # Wave 1: pause-resume (this command) must NOT silently un-quarantine.
-    # Lifting CVE quarantine has its own dedicated command path
-    # (`boxmunge security resume`) which re-scans before lifting.
-    if is_quarantined(project_name, paths):
-        print(
-            f"ERROR: Project '{project_name}' is CVE-quarantined. "
-            f"Run `boxmunge security resume {project_name}` to restore.\n"
-            f"       (Resume re-scans first; if a quarantine-level finding "
-            f"remains, you must suppress or wait for upstream fix.)",
-            file=sys.stderr,
-        )
         return 1
 
     try:

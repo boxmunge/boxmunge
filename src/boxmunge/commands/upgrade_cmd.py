@@ -16,13 +16,14 @@ from typing import Any
 
 import yaml
 
-from boxmunge.commands.deploy import prepare_caddy_config, prepare_compose_override
+from boxmunge.caddy import prepare_caddy_config
+from boxmunge.compose import prepare_compose_override
 from boxmunge.commands.health_cmd import run_health
 from boxmunge.commands.self_test_cmd import run_self_test
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
-from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker import compose_up, caddy_reload, DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
+from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, validate_manifest, ManifestError, CURRENT_SCHEMA_VERSION
 from boxmunge.migration import migrate_manifest, MigrationError
@@ -112,14 +113,18 @@ def _regenerate_configs(paths: BoxPaths) -> list[str]:
 
         project_name = manifest.get("project", project_dir.name)
 
-        # Wave 1: a CVE-quarantined project must NOT have its normal Caddy
+        # A CVE-quarantined project must NOT have its normal Caddy
         # site fragment overwritten by a platform upgrade — that would
         # silently restore routing to a stopped (or about-to-be-restored)
         # project the operator deliberately took offline. Re-render the
         # maintenance fragment instead so the quarantine UX persists
         # through the upgrade. Compose overlay regen is skipped — the
         # containers stay stopped until `boxmunge security resume`.
-        if is_quarantined(project_name, paths):
+        # Pause is intentionally NOT short-circuited here: historical
+        # behavior is to regenerate normal configs for paused projects
+        # too. Pause's own Caddy fragment is written on resume.
+        block = is_blocked(project_name, paths)
+        if block and block.reason is BlockReason.QUARANTINED:
             hosts = manifest.get("hosts", [])
             if hosts:
                 try:
@@ -139,10 +144,7 @@ def _regenerate_configs(paths: BoxPaths) -> list[str]:
                         paths, project=project_name,
                     )
             log_operation(
-                "upgrade",
-                f"Skipped quarantined project '{project_name}' — kept "
-                f"maintenance Caddy fragment; use `boxmunge security "
-                f"resume` to lift",
+                "upgrade", block.skip_message,
                 paths, project=project_name,
             )
             continue
@@ -241,16 +243,19 @@ def _restart_projects(
 
         project_name = project_dir.name
 
-        # Wave 1: never restart a CVE-quarantined project. The quarantine
-        # action stopped the containers deliberately; bringing them back
-        # up here would silently undo the security action.
-        if is_quarantined(project_name, paths):
-            log_operation(
-                "upgrade",
-                f"Skipped quarantined project '{project_name}' — use "
-                f"`boxmunge security resume` to lift",
-                paths, project=project_name,
-            )
+        # Never restart a project that is intentionally not running.
+        # Quarantined: bringing containers back would silently undo a
+        # security action. Paused: same — operator deliberately offlined
+        # the project. Quarantine specifically gets a structured log
+        # entry so the operator sees the skip in the daily report;
+        # paused historically did not log here, so preserve that.
+        block = is_blocked(project_name, paths)
+        if block:
+            if block.reason is BlockReason.QUARANTINED:
+                log_operation(
+                    "upgrade", block.skip_message,
+                    paths, project=project_name,
+                )
             continue
 
         compose_files = ["compose.yml"]

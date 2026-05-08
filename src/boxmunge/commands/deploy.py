@@ -6,22 +6,18 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
-from boxmunge.caddy import generate_caddy_config
-from boxmunge.compose import generate_compose_override
+from boxmunge.caddy import prepare_caddy_config
+from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
-from boxmunge.config import load_config, ConfigError
-from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker import compose_up, caddy_reload, DockerError
-from boxmunge.fileutil import atomic_write_text, project_lock, LockError
+from boxmunge.fileutil import project_lock, LockError
+from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
 from boxmunge.paths import BoxPaths
-from boxmunge.pause import is_paused
 from boxmunge.probation import clear_probation_if_active
 from boxmunge.security_overlay import services_with_off_profile
-from boxmunge.security_warn import warn_off_services
 from boxmunge.state import read_state, write_state
 
 
@@ -58,55 +54,10 @@ def record_deploy_state(
     write_state(state_path, new_state)
 
 
-def prepare_caddy_config(paths: BoxPaths, manifest: dict[str, Any]) -> None:
-    """Generate or copy Caddy site config for a project."""
-    project_name = manifest["project"]
-    site_conf = paths.project_caddy_site(project_name)
-    site_conf.parent.mkdir(parents=True, exist_ok=True)
-
-    override = paths.project_caddy_override(project_name)
-    # mode=0o644: the Caddy container reads these as a host-mounted volume.
-    # The container's UID may not map to the host's deploy UID, so the files
-    # must be world-readable. They contain only routing config, no secrets.
-    if override.exists():
-        atomic_write_text(site_conf, override.read_text(), mode=0o644)
-        log_operation("deploy", f"Using custom Caddy config from {override.name}", paths, project=project_name)
-    else:
-        config = generate_caddy_config(manifest)
-        atomic_write_text(site_conf, config, mode=0o644)
-
-
-def prepare_compose_override(
-    paths: BoxPaths,
-    manifest: dict[str, Any],
-    component: str = "deploy",
-) -> None:
-    """Generate compose.boxmunge.yml for a project.
-
-    `component` labels the SECURITY OFF log entry so callers from upgrade /
-    resume don't misattribute the warning as "deploy".
-    """
-    project_name = manifest["project"]
-    override_path = paths.project_compose_override(project_name)
-    override_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Build env_files based on which files exist
-    env_files = {}
-    if paths.host_secrets.exists():
-        env_files["host_secrets"] = str(paths.host_secrets)
-    project_env = paths.project_dir(project_name) / "project.env"
-    if project_env.exists():
-        env_files["project_env"] = "./project.env"
-    project_secrets = paths.project_secrets(project_name)
-    if project_secrets.exists():
-        env_files["project_secrets"] = "./secrets.env"
-
-    content = generate_compose_override(manifest, env_files=env_files or None)
-    atomic_write_text(override_path, content)
-
-    # Deploy-time warning for any service resolving to profile: off.
-    # Repeated by design — see spec §"Deploy-time warning".
-    warn_off_services(paths, manifest, component=component)
+# prepare_caddy_config and prepare_compose_override moved to boxmunge.caddy
+# and boxmunge.compose respectively (audit A-2). They're re-imported above
+# so deploy.py callers continue to use the same names without the cross-
+# `commands/` lazy-import dance.
 
 
 def _run_deploy_inner(
@@ -376,19 +327,9 @@ def run_deploy(
     `component` labels the SECURITY OFF log entry so promote/rollback callers
     can attribute the warning to the correct CLI verb (default: "deploy").
     """
-    if is_paused(project_name, paths):
-        print(f"ERROR: Project '{project_name}' is paused. "
-              f"Run 'resume {project_name}' before deploying.",
-              file=sys.stderr)
-        return 1
-    if is_quarantined(project_name, paths):
-        print(
-            f"ERROR: Project '{project_name}' is CVE-quarantined. "
-            f"Run `boxmunge security resume {project_name}` to restore.\n"
-            f"       (Resume re-scans first; if a quarantine-level finding "
-            f"remains, you must suppress or wait for upstream fix.)",
-            file=sys.stderr,
-        )
+    block = is_blocked(project_name, paths)
+    if block:
+        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
         return 1
     clear_probation_if_active(paths, "deploy")
     from boxmunge.project_registry import is_registered

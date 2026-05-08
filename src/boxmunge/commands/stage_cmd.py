@@ -12,13 +12,12 @@ from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.bundle import extract_bundle as _extract_bundle, copy_project_files as _copy_project_files
 from boxmunge.compose import generate_staging_compose_base, generate_staging_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
-from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker import compose_up, caddy_reload, DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
 from boxmunge.identity import check_project_identity, register_project_identity
+from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
-from boxmunge.pause import is_paused
 from boxmunge.project_registry import is_registered
 from boxmunge.security_overlay import services_with_off_profile
 from boxmunge.security_warn import warn_off_services
@@ -258,19 +257,9 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
 def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
               dry_run: bool = False) -> int:
     """Stage a project. Returns 0 on success, 1 on failure."""
-    if is_paused(project_name, paths):
-        print(f"ERROR: Project '{project_name}' is paused. "
-              f"Run 'resume {project_name}' before staging.",
-              file=sys.stderr)
-        return 1
-    if is_quarantined(project_name, paths):
-        print(
-            f"ERROR: Project '{project_name}' is CVE-quarantined. "
-            f"Run `boxmunge security resume {project_name}` to restore.\n"
-            f"       (Resume re-scans first; if a quarantine-level finding "
-            f"remains, you must suppress or wait for upstream fix.)",
-            file=sys.stderr,
-        )
+    block = is_blocked(project_name, paths)
+    if block:
+        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
         return 1
     if not is_registered(project_name, paths):
         print(f"ERROR: Project '{project_name}' is not registered on this server. "

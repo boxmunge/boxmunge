@@ -4,10 +4,9 @@ import sys
 from typing import TYPE_CHECKING
 from boxmunge.commands.deploy import run_deploy
 from boxmunge.commands.unstage_cmd import run_unstage
-from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.fileutil import project_lock, LockError
+from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation
-from boxmunge.pause import is_paused
 from boxmunge.state import read_state
 
 if TYPE_CHECKING:
@@ -15,19 +14,9 @@ if TYPE_CHECKING:
 
 
 def run_promote(project_name: str, paths: BoxPaths, dry_run: bool = False) -> int:
-    if is_paused(project_name, paths):
-        print(f"ERROR: Project '{project_name}' is paused. "
-              f"Run 'resume {project_name}' before promoting.",
-              file=sys.stderr)
-        return 1
-    if is_quarantined(project_name, paths):
-        print(
-            f"ERROR: Project '{project_name}' is CVE-quarantined. "
-            f"Run `boxmunge security resume {project_name}` to restore.\n"
-            f"       (Resume re-scans first; if a quarantine-level finding "
-            f"remains, you must suppress or wait for upstream fix.)",
-            file=sys.stderr,
-        )
+    block = is_blocked(project_name, paths)
+    if block:
+        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
         return 1
     staging_state = read_state(paths.project_staging_state(project_name))
     if not staging_state.get("active"):

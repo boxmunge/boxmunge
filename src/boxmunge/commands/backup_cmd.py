@@ -12,12 +12,11 @@ from typing import Any
 import boxmunge.backup as _backup
 from boxmunge.backup import backup_filename, prune_backups, BackupError
 from boxmunge.config import load_config, ConfigError
-from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.fileutil import project_lock, LockError
+from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
-from boxmunge.pause import is_paused
 from boxmunge.probation import clear_probation_if_active
 
 # Total wall-clock budget for retrying lock-held projects in run_backup_all.
@@ -85,25 +84,28 @@ def list_snapshots(paths: BoxPaths, project_name: str) -> list[Path]:
 
 
 def run_backup(project_name: str, paths: BoxPaths, _lock_held: bool = False) -> int:
-    """Run backup for a project. Returns 0 on success, 1 on failure."""
-    if is_paused(project_name, paths):
-        print(
-            f"ERROR: Project '{project_name}' is paused. Resume first.",
-            file=sys.stderr,
-        )
+    """Run backup for a project. Returns 0 on success, 1 on failure.
+
+    Paused projects refuse with rc=1 (operator-driven backup against a
+    paused project is almost certainly wrong). Quarantined projects skip
+    cleanly with rc=0 (cron-driven backup-all should not fail just
+    because a project is offline for security reasons; volume-empty
+    warnings would be noise). Different rc shapes preserved by reason.
+    """
+    block = is_blocked(project_name, paths)
+    if block and block.reason is BlockReason.PAUSED:
+        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
         return 1
-    # Wave 1: backups of stopped (CVE-quarantined) services are pointless
-    # and would emit confusing "volume empty" warnings — skip cleanly with
-    # a structured log entry, returning 0 (no broader operation to fail).
-    if is_quarantined(project_name, paths):
+    if block and block.reason is BlockReason.QUARANTINED:
+        # Backups of stopped services are pointless and would emit
+        # confusing "volume empty" warnings — skip cleanly with a
+        # structured log entry, returning 0.
         print(
             f"{project_name}: skipping backup — CVE-quarantined "
             f"(use `boxmunge security resume` to lift)",
         )
         log_operation(
-            "backup",
-            f"Skipped quarantined project '{project_name}' — use "
-            f"`boxmunge security resume` to lift",
+            "backup", block.skip_message,
             paths, project=project_name,
         )
         return 0
@@ -288,17 +290,18 @@ def run_backup_all(paths: BoxPaths) -> int:
     failed: list[str] = []
     locked: list[str] = []
 
-    # First pass: try every non-paused, non-quarantined project once.
+    # First pass: try every unblocked project once. Skip paused/quarantined
+    # cleanly — quarantined gets a structured log entry; paused historically
+    # only printed (preserved).
     for name in projects:
-        if is_paused(name, paths):
+        block = is_blocked(name, paths)
+        if block and block.reason is BlockReason.PAUSED:
             print(f"  Skipping {name}: paused.")
             continue
-        if is_quarantined(name, paths):
+        if block and block.reason is BlockReason.QUARANTINED:
             print(f"  Skipping {name}: CVE-quarantined.")
             log_operation(
-                "backup",
-                f"Skipped quarantined project '{name}' — use "
-                f"`boxmunge security resume` to lift",
+                "backup", block.skip_message,
                 paths, project=name,
             )
             continue
