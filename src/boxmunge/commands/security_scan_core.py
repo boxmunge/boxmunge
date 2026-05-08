@@ -18,6 +18,7 @@ from typing import Any
 import yaml
 
 from boxmunge.cve.alerting import emit_scan_alerts
+from boxmunge.cve.grace import GraceError, init_grace_if_missing
 from boxmunge.cve.policy import (
     Disposition,
     ProjectDecision,
@@ -150,7 +151,9 @@ def _project_meta(
 
 
 def scan_one_project(
-    paths: BoxPaths, project: str, *, in_grace: bool = False,
+    paths: BoxPaths, project: str, *,
+    in_grace: bool | None = None,
+    audit_only: bool = False,
 ) -> tuple[
     ProjectDecision | None,
     list[ProjectDecision],
@@ -167,7 +170,21 @@ def scan_one_project(
 
     When ``in_grace`` is True, both quarantine actions and per-project
     transition alerts are suppressed. The scan_state is still written
-    so subsequent scans see correct prior state.
+    so subsequent scans see correct prior state. When ``in_grace`` is
+    None (the default for direct callers), this function lazily
+    bootstraps grace state if missing and derives ``in_grace`` from the
+    persisted state (audit F-2). The fleet scan entry-point
+    (``cmd_security_scan``) already does its own bootstrap and passes
+    the resolved value through explicitly.
+
+    When ``audit_only`` is True, the function evaluates findings for the
+    caller (so it can decide e.g. whether to lift quarantine) but does
+    NOT mutate persisted state: scan_state.json is not written, no
+    transition alerts are emitted, and no quarantine action fires. Used
+    by `cmd_security_resume` so a re-scan during the resume flow does
+    not clobber the prior scan_state context (audit A-3). Audit-only
+    callers DO NOT lazy-bootstrap grace either — the resume flow
+    inspects current findings and is not a scan-entry-point.
 
     Concurrency: this function holds the per-project lock for its full
     body — scan + quarantine action + scan_state write must be atomic
@@ -178,14 +195,33 @@ def scan_one_project(
             decides whether to skip-and-warn (fleet scan) or fail (resume).
         TrivyNotInstalledError: when the Trivy binary is missing.
         RuntimeError: on irrecoverable failures (manifest unreadable, all
-            images failed to scan, quarantine action raised).
+            images failed to scan, quarantine action raised, grace state
+            corrupt).
     """
+    if in_grace is None:
+        # Audit F-2: any direct caller of scan_one_project lazily
+        # bootstraps grace. audit_only callers (resume) deliberately
+        # skip the bootstrap — they observe findings without scanning.
+        if audit_only:
+            in_grace = False
+        else:
+            try:
+                grace = init_grace_if_missing(
+                    paths, now=datetime.now(timezone.utc),
+                )
+            except GraceError as e:
+                raise RuntimeError(
+                    f"CVE migration grace state is corrupt: {e}"
+                ) from e
+            in_grace = grace.is_active(now=datetime.now(timezone.utc))
     with project_lock(project, paths):
-        return _scan_one_project_locked(paths, project, in_grace=in_grace)
+        return _scan_one_project_locked(
+            paths, project, in_grace=in_grace, audit_only=audit_only,
+        )
 
 
 def _scan_one_project_locked(
-    paths: BoxPaths, project: str, *, in_grace: bool,
+    paths: BoxPaths, project: str, *, in_grace: bool, audit_only: bool = False,
 ) -> tuple[
     ProjectDecision | None,
     list[ProjectDecision],
@@ -237,7 +273,10 @@ def _scan_one_project_locked(
     images, warnings = _identify_images(manifest, compose, project)
     if not images:
         # Persist an empty scan-state so we don't wedge the per-project view.
-        write_scan_state(scan_state_path, decisions=())
+        # In audit-only mode (resume re-scan, audit A-3), leave the prior
+        # scan_state alone — the caller is just inspecting current findings.
+        if not audit_only:
+            write_scan_state(scan_state_path, decisions=())
         return None, [], warnings, posture_str, dangerously
 
     decisions: list[ProjectDecision] = []
@@ -320,8 +359,12 @@ def _scan_one_project_locked(
 
     # During grace we still compute the headline decision (so the heads-up
     # alert can summarise it) but never fire the quarantine action.
+    # In audit-only mode (resume re-scan, audit A-3) the caller is the
+    # quarantine-lift flow itself — firing a fresh quarantine on top of
+    # an in-progress resume would deadlock the operator path.
     if (
         not in_grace
+        and not audit_only
         and headline_decision
         and headline_disp
         and not is_quarantined(project, paths)
@@ -349,7 +392,13 @@ def _scan_one_project_locked(
     # Persist scan_state AFTER the quarantine action succeeded. If the
     # quarantine raised above, this write does not happen and the prior
     # scan_state stays in place — next scan re-fires the action (audit E-2).
-    write_scan_state(scan_state_path, decisions=tuple(decisions))
+    #
+    # Audit A-3: in audit-only mode (resume re-scan) we deliberately
+    # skip the write. The caller is verifying whether quarantine-level
+    # findings remain; mutating persisted scan_state on a read-only
+    # operation would create surprise deltas in the next normal scan.
+    if not audit_only:
+        write_scan_state(scan_state_path, decisions=tuple(decisions))
 
     # Emit Pushover alerts for state transitions (new quarantine, newly
     # at-risk-running, suppression expired, new sub-threshold finding).
@@ -358,7 +407,11 @@ def _scan_one_project_locked(
     #
     # During the migration grace window, transition alerts are suppressed:
     # the operator gets the single fleet-level heads-up alert instead.
-    if not in_grace:
+    # Audit A-3: audit-only callers (resume) likewise must not push
+    # transition alerts — the resume flow has its own success/failure
+    # signalling and operators don't expect "boxmunge security resume X"
+    # to push alerts about X.
+    if not in_grace and not audit_only:
         prior_by_image = {pd.image_ref: pd for pd in prior_decisions}
         for current_decision in decisions:
             prior_decision = prior_by_image.get(current_decision.image_ref)

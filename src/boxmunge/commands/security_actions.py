@@ -14,7 +14,9 @@ import sys
 import time
 from datetime import datetime, timezone
 
+from boxmunge.caddy import prepare_caddy_config
 from boxmunge.commands.security_scan_core import scan_one_project
+from boxmunge.compose import prepare_compose_override
 from boxmunge.cve.alerting import (
     format_grace_heads_up_alert,
     send_alerts,
@@ -33,6 +35,7 @@ from boxmunge.cve.quarantine import (
 )
 from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
 from boxmunge.fileutil import LockError, open_shared_lockfile, project_lock
+from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.log import log_warning
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.paths import BoxPaths, validate_project_name
@@ -329,8 +332,16 @@ def cmd_security_resume(args: list[str], paths: BoxPaths) -> int:
     # The pre-lift scan acquires its own per-project lock inside
     # scan_one_project (audit A-2). LockError surfaces as a clear "try
     # again" message rather than a hidden race.
+    #
+    # audit_only=True (audit A-3): resume's re-scan must NOT mutate
+    # scan_state.json or emit transition alerts. Operators don't expect
+    # `boxmunge security resume X` to push alerts about X, and clobbering
+    # scan_state would obscure the prior context the headline CVE was
+    # based on.
     try:
-        _, decisions, _, _, _ = scan_one_project(paths, project)
+        _, decisions, _, _, _ = scan_one_project(
+            paths, project, audit_only=True,
+        )
     except LockError:
         print(
             f"ERROR: Another operation is in progress for '{project}'. "
@@ -385,11 +396,7 @@ def cmd_security_resume(args: list[str], paths: BoxPaths) -> int:
 def _resume_lift(paths: BoxPaths, project: str) -> int:
     """Inner lift section. Caller MUST hold the per-project lock."""
     # Render normal Caddy site config + compose override using the
-    # deploy helpers (the resume_cmd flow does the same).
-    from boxmunge.commands.deploy import (
-        prepare_caddy_config,
-        prepare_compose_override,
-    )
+    # caddy/compose primitives (the resume_cmd flow does the same).
     try:
         manifest = load_manifest(paths.project_manifest(project))
     except ManifestError as e:
@@ -420,8 +427,7 @@ def _resume_lift(paths: BoxPaths, project: str) -> int:
         return 1
     print("  Containers started.")
 
-    # Smoke test (lazy import to ease tests).
-    from boxmunge.commands.resume_cmd import run_smoke
+    # Smoke test — shared with the pause/resume flow.
     smoke_ok, smoke_msg = run_smoke(project, paths)
     if smoke_ok:
         print("  Smoke test: OK")

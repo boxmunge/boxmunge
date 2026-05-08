@@ -125,7 +125,7 @@ class TestComposeOverrideEmitsOffWarning:
             captured.append(component)
 
         monkeypatch.setattr(
-            "boxmunge.commands.deploy.warn_off_services", fake_warn,
+            "boxmunge.compose.warn_off_services", fake_warn,
         )
 
         # Default

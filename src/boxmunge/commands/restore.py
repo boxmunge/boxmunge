@@ -11,6 +11,7 @@ from boxmunge.backup import decrypt_file, BackupError
 from boxmunge.commands.backup_cmd import list_snapshots
 from boxmunge.docker import compose_down, compose_up, DockerError
 from boxmunge.fileutil import project_lock, LockError
+from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
@@ -58,6 +59,15 @@ def run_restore(
     _lock_held: bool = False,
 ) -> int:
     """Restore a project from a backup snapshot. Returns 0 on success, 1 on failure."""
+    # Restore is operator-initiated and mutates compose state (it stops
+    # the project, runs the restore command, and brings the stack back
+    # up). REFUSE if the project is paused or CVE-quarantined — the
+    # operator must explicitly resume / security-resume first so the
+    # state-machine semantics stay consistent with deploy/stage/promote.
+    block = is_blocked(project_name, paths)
+    if block:
+        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
+        return 1
     clear_probation_if_active(paths, "restore")
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists():

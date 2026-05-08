@@ -1670,15 +1670,15 @@ def test_resume_lift_section_holds_project_lock(monkeypatch, tmp_path) -> None:
     paths.project_caddy_site("demo").parent.mkdir(parents=True, exist_ok=True)
     paths.project_caddy_site("demo").write_text("dummy")
     monkeypatch.setattr(
-        "boxmunge.commands.deploy.prepare_caddy_config",
+        "boxmunge.commands.security_actions.prepare_caddy_config",
         lambda p, m: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.deploy.prepare_compose_override",
+        "boxmunge.commands.security_actions.prepare_compose_override",
         lambda p, m, component=None: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.resume_cmd.run_smoke",
+        "boxmunge.commands.security_actions.run_smoke",
         lambda p, paths_: (True, "ok"),
     )
     lock_holds: list = []
@@ -1809,3 +1809,296 @@ def test_scan_exit_code_0_when_all_clean(monkeypatch, tmp_path, capsys) -> None:
     _wire_clean_scan(monkeypatch, paths)
     rc = cmd_security_scan([], paths)
     assert rc == 0
+
+
+# ---------- Wave 2: A-3 audit_only resume re-scan ----------
+
+
+def _seed_quarantine(paths, *, cve_id: str = "CVE-2026-9999") -> None:
+    """Write a quarantine state file for project 'demo'."""
+    qfile = paths.project_quarantine_state("demo")
+    qfile.parent.mkdir(parents=True, exist_ok=True)
+    qfile.write_text(json.dumps({
+        "quarantined_at": "2026-05-06T03:14:25+00:00",
+        "cve_id": cve_id,
+        "severity": "Critical",
+        "effective_severity": "Critical",
+        "explanation": "test",
+        "image_ref": "myapp:1.0",
+    }))
+
+
+def _wire_resume_lift_stubs(monkeypatch) -> None:
+    """Stub out the lift_quarantine + caddy/compose/smoke primitives so the
+    resume flow can run end-to-end without touching docker."""
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.lift_quarantine",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.prepare_caddy_config",
+        lambda p, m: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.prepare_compose_override",
+        lambda p, m, component=None: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.run_smoke",
+        lambda p, paths_: (True, "ok"),
+    )
+
+
+def test_resume_audit_only_does_not_write_scan_state(
+    monkeypatch, tmp_path,
+) -> None:
+    """Audit A-3: cmd_security_resume's pre-lift scan must NOT clobber
+    scan_state.json — the prior state preserves the headline-CVE context
+    that justified quarantine in the first place."""
+    from boxmunge.commands.security_actions import cmd_security_resume
+    paths = _scan_paths(tmp_path)
+    _seed_quarantine(paths)
+    _wire_clean_scan(monkeypatch, paths)
+    _wire_resume_lift_stubs(monkeypatch)
+
+    write_calls: list = []
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.write_scan_state",
+        lambda *a, **k: write_calls.append((a, k)),
+    )
+    pre_existing = paths.project_scan_state("demo")
+    assert not pre_existing.exists()
+
+    rc = cmd_security_resume(["demo"], paths)
+    assert rc == 0
+    assert write_calls == [], (
+        f"resume must not write scan_state; got {len(write_calls)} call(s)"
+    )
+
+
+def test_resume_audit_only_does_not_emit_scan_alerts(
+    monkeypatch, tmp_path,
+) -> None:
+    """Audit A-3: resume's pre-lift scan must NOT push transition alerts.
+    Operators don't expect `boxmunge security resume X` to push alerts
+    about X — the resume flow has its own success/failure signalling."""
+    from boxmunge.commands.security_actions import cmd_security_resume
+    paths = _scan_paths(tmp_path)
+    _seed_quarantine(paths)
+    _wire_clean_scan(monkeypatch, paths)
+    _wire_resume_lift_stubs(monkeypatch)
+
+    emit_calls: list = []
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.emit_scan_alerts",
+        lambda **kwargs: emit_calls.append(kwargs),
+    )
+    rc = cmd_security_resume(["demo"], paths)
+    assert rc == 0
+    assert emit_calls == [], (
+        f"resume must not emit scan alerts; got {len(emit_calls)} call(s)"
+    )
+
+
+def test_resume_audit_only_does_not_take_quarantine_action(
+    monkeypatch, tmp_path,
+) -> None:
+    """Audit A-3: even if a fresh CRITICAL surfaces during the resume
+    re-scan, audit_only=True must prevent quarantine_project from firing.
+    The blocking-finding check downstream is what stops the lift."""
+    from datetime import datetime, timezone
+    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.cve.scanner import (
+        AttackVector, Finding, ScanResult, Severity,
+    )
+    paths = _scan_paths(tmp_path)
+    _seed_quarantine(paths)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.container_image_digest",
+        lambda c: None,
+    )
+    finding = Finding(
+        cve_id="CVE-2026-9999",
+        severity=Severity.CRITICAL,
+        package="openssl",
+        installed_version="1.1.1",
+        fixed_version=None,
+        title="bad",
+        primary_url=None,
+        attack_vector=AttackVector.NETWORK,
+    )
+    sr = ScanResult(
+        image_ref="myapp:1.0",
+        findings=(finding,),
+        scanned_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+        db_version="2026-05-06",
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
+    )
+    quarantine_calls: list = []
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.quarantine_project",
+        lambda *a, **k: quarantine_calls.append((a, k)),
+    )
+    rc = cmd_security_resume(["demo"], paths)
+    # Resume blocks because the finding still quarantines.
+    assert rc == 1
+    # But quarantine_project must NOT have been called — we already
+    # ARE quarantined; firing it again would be a no-op at best and
+    # double-stop the project at worst.
+    assert quarantine_calls == [], (
+        f"resume's audit_only re-scan must not fire quarantine action; "
+        f"got {len(quarantine_calls)} call(s)"
+    )
+
+
+def test_resume_audit_only_still_detects_blocking_findings(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    """Audit A-3: audit_only=True must still surface quarantine-disposition
+    findings to the caller — the read-only check is what protects the
+    operator from lifting against an unresolved CVE."""
+    from datetime import datetime, timezone
+    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.cve.scanner import (
+        AttackVector, Finding, ScanResult, Severity,
+    )
+    paths = _scan_paths(tmp_path)
+    _seed_quarantine(paths, cve_id="CVE-2026-1111")
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.container_image_digest",
+        lambda c: None,
+    )
+    finding = Finding(
+        cve_id="CVE-2026-2222",
+        severity=Severity.CRITICAL,
+        package="openssl",
+        installed_version="1.1.1",
+        fixed_version=None,
+        title="another bad CVE",
+        primary_url=None,
+        attack_vector=AttackVector.NETWORK,
+    )
+    sr = ScanResult(
+        image_ref="myapp:1.0",
+        findings=(finding,),
+        scanned_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+        db_version="2026-05-06",
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.quarantine_project",
+        lambda *a, **k: None,
+    )
+    rc = cmd_security_resume(["demo"], paths)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "Cannot resume" in err
+    assert "CVE-2026-2222" in err
+
+
+# ---------- F-2: scan_one_project lazy grace bootstrap ----------
+
+
+def _scan_one_project_paths(tmp_path):
+    """Build a paths fixture with 'demo' project but NO grace marker.
+
+    Differs from _scan_paths in that grace state is NOT pre-created — used
+    by F-2 tests that exercise the lazy bootstrap inside scan_one_project.
+    """
+    paths = _make_paths(tmp_path)
+    proj = paths.projects / "demo"
+    proj.mkdir(parents=True)
+    manifest = {
+        "schema_version": 2,
+        "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+        "source": "bundle",
+        "project": "demo",
+        "hosts": ["demo.example.com"],
+        "services": {
+            "web": {"port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh"},
+        },
+    }
+    (proj / "manifest.yml").write_text(yaml.safe_dump(manifest))
+    (proj / "compose.yml").write_text(yaml.safe_dump({
+        "services": {
+            "web": {
+                "image": "myapp:1.0",
+                "read_only": True,
+                "security_opt": ["no-new-privileges:true"],
+            },
+        },
+    }))
+    (paths.state / "projects.txt").write_text("demo\n")
+    return paths
+
+
+def test_scan_one_project_direct_caller_bootstraps_grace(
+    monkeypatch, tmp_path,
+) -> None:
+    """Audit F-2: scan_one_project called fresh (no fleet entry-point,
+    no prior grace state) lazily creates the grace marker."""
+    from boxmunge.commands.security_scan_core import scan_one_project
+
+    paths = _scan_one_project_paths(tmp_path)
+    _grace_quarantine_scan(monkeypatch, paths)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.quarantine_project",
+        lambda *a, **k: None,
+    )
+    assert not paths.cve_grace_state.exists()
+    scan_one_project(paths, "demo")
+    assert paths.cve_grace_state.exists()
+    payload = json.loads(paths.cve_grace_state.read_text())
+    assert "installed_at" in payload
+    assert "expires_at" in payload
+    assert payload["heads_up_sent"] is False
+
+
+def test_scan_one_project_audit_only_skips_bootstrap(
+    monkeypatch, tmp_path,
+) -> None:
+    """Audit F-2 + Wave 2: audit_only=True must NOT lazy-bootstrap grace.
+    The resume pre-flight observes findings and is not a scan entry-point."""
+    from boxmunge.commands.security_scan_core import scan_one_project
+
+    paths = _scan_one_project_paths(tmp_path)
+    _grace_quarantine_scan(monkeypatch, paths)
+    # quarantine_project must not be called in audit_only mode either; stub
+    # defensively so a regression would surface as wrong-state, not raise.
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.quarantine_project",
+        lambda *a, **k: None,
+    )
+    assert not paths.cve_grace_state.exists()
+    scan_one_project(paths, "demo", audit_only=True)
+    assert not paths.cve_grace_state.exists()
+
+
+def test_scan_one_project_does_not_double_init_grace(
+    monkeypatch, tmp_path,
+) -> None:
+    """Audit F-2: when the fleet entry-point already wrote grace state,
+    a subsequent direct call must use the existing record (no overwrite)."""
+    from boxmunge.commands.security_scan_core import scan_one_project
+
+    paths = _scan_one_project_paths(tmp_path)
+    _seed_grace(paths, in_grace=True)
+    pre = paths.cve_grace_state.read_text()
+    _grace_quarantine_scan(monkeypatch, paths)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.quarantine_project",
+        lambda *a, **k: None,
+    )
+    scan_one_project(paths, "demo")
+    post = paths.cve_grace_state.read_text()
+    assert post == pre, "grace state must not be re-initialised"

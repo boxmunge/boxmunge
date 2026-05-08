@@ -6,10 +6,13 @@ from typing import Any
 
 import yaml
 
+from boxmunge.fileutil import atomic_write_text
+from boxmunge.paths import BoxPaths
 from boxmunge.security_overlay import (
     resolve_security,
     render_compose_security_fragment,
 )
+from boxmunge.security_warn import warn_off_services
 
 
 class ComposeError(ValueError):
@@ -113,6 +116,42 @@ def generate_compose_override(
         override["services"] = services
 
     return yaml.dump(override, default_flow_style=False, sort_keys=False)
+
+
+def prepare_compose_override(
+    paths: BoxPaths,
+    manifest: dict[str, Any],
+    component: str = "deploy",
+) -> None:
+    """Generate compose.boxmunge.yml for a project.
+
+    `component` labels the SECURITY OFF log entry so callers from upgrade /
+    resume don't misattribute the warning as "deploy". Lives at module
+    scope (boxmunge.compose) rather than commands/ so cross-command
+    coordination doesn't require a `commands/`-to-`commands/` import
+    (audit A-2).
+    """
+    project_name = manifest["project"]
+    override_path = paths.project_compose_override(project_name)
+    override_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Build env_files based on which files exist
+    env_files: dict[str, str] = {}
+    if paths.host_secrets.exists():
+        env_files["host_secrets"] = str(paths.host_secrets)
+    project_env = paths.project_dir(project_name) / "project.env"
+    if project_env.exists():
+        env_files["project_env"] = "./project.env"
+    project_secrets = paths.project_secrets(project_name)
+    if project_secrets.exists():
+        env_files["project_secrets"] = "./secrets.env"
+
+    content = generate_compose_override(manifest, env_files=env_files or None)
+    atomic_write_text(override_path, content)
+
+    # Deploy-time warning for any service resolving to profile: off.
+    # Repeated by design — see spec §"Deploy-time warning".
+    warn_off_services(paths, manifest, component=component)
 
 
 def is_bind_mount(volume_str: str) -> bool:
