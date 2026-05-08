@@ -411,6 +411,15 @@ class TestComposeSecurityHardening:
         assert "NET_ADMIN" in web["cap_drop"]
         assert "NET_RAW" in web["cap_drop"]
 
+    def test_default_injects_read_only_and_tmpfs_v08(self) -> None:
+        """v0.8: default profile makes read_only:true and tmpfs:['/tmp']
+        defaults of the silent-floor overlay."""
+        override = generate_compose_override(self._manifest())
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        assert web["read_only"] is True
+        assert web["tmpfs"] == ["/tmp"]
+
     def test_off_omits_hardening_fields(self) -> None:
         override = generate_compose_override(
             self._manifest(security={"profile": "off", "reason": "test"})
@@ -421,6 +430,9 @@ class TestComposeSecurityHardening:
         assert "init" not in web
         assert "pids_limit" not in web
         assert "cap_drop" not in web
+        # v0.8: off profile also omits read_only and tmpfs.
+        assert "read_only" not in web
+        assert "tmpfs" not in web
 
     def test_service_cap_add_subtracts_from_drop(self) -> None:
         override = generate_compose_override(
@@ -489,6 +501,201 @@ class TestComposeSecurityHardening:
         assert "pids_limit" not in web
         assert web["deploy"]["resources"]["limits"]["pids"] == 4096
         assert web["deploy"]["resources"]["limits"]["memory"] == "256m"
+
+
+class TestV08UserWinsOnExplicitDeclarations:
+    """v0.8: when the user has declared read_only or claimed /tmp on a
+    service, the overlay generator omits its own contribution for that
+    field. Compose merge then leaves the user value alone — no merge
+    conflict, no dedupe rejection rule needed.
+
+    Rationale: Compose merge of scalars (read_only) keeps the LATER
+    file's value (overlay would overwrite user); merge of lists (tmpfs)
+    concatenates (would clash). Both are wrong outcomes when the user
+    has expressed intent.
+    """
+
+    def _manifest(self) -> dict:
+        return {
+            "project": "demo",
+            "hosts": ["demo.example.com"],
+            "services": {
+                "web": {
+                    "type": "frontend",
+                    "port": 3000,
+                    "routes": [{"path": "/"}],
+                },
+            },
+        }
+
+    def test_no_user_compose_emits_v08_defaults(self) -> None:
+        override = generate_compose_override(self._manifest())
+        web = yaml.safe_load(override)["services"]["web"]
+        assert web["read_only"] is True
+        assert web["tmpfs"] == ["/tmp"]
+
+    def test_user_declared_read_only_true_omits_overlay_read_only(self) -> None:
+        """User redeclares read_only:true — overlay omits its addition.
+        Operationally identical to the v0.8 default; no error.
+        """
+        user_compose = {
+            "services": {"web": {"image": "nginx", "read_only": True}},
+        }
+        override = generate_compose_override(
+            self._manifest(), user_compose=user_compose,
+        )
+        web = yaml.safe_load(override)["services"]["web"]
+        assert "read_only" not in web
+
+    def test_user_declared_read_only_false_omits_overlay_read_only(self) -> None:
+        """User opts out of read-only rootfs — overlay omits its addition,
+        so compose merge respects the user's literal value.
+        """
+        user_compose = {
+            "services": {"web": {"image": "nginx", "read_only": False}},
+        }
+        override = generate_compose_override(
+            self._manifest(), user_compose=user_compose,
+        )
+        web = yaml.safe_load(override)["services"]["web"]
+        assert "read_only" not in web
+
+    def test_user_tmpfs_tmp_omits_overlay_tmpfs(self) -> None:
+        user_compose = {
+            "services": {
+                "web": {"image": "nginx", "tmpfs": ["/tmp:size=128m"]},
+            },
+        }
+        override = generate_compose_override(
+            self._manifest(), user_compose=user_compose,
+        )
+        web = yaml.safe_load(override)["services"]["web"]
+        assert "tmpfs" not in web
+
+    def test_user_tmpfs_other_path_does_not_omit_overlay_tmpfs(self) -> None:
+        """User has tmpfs but for a different path — overlay still emits
+        its /tmp tmpfs. Compose list-merge concatenates, both apply.
+        """
+        user_compose = {
+            "services": {
+                "web": {"image": "nginx", "tmpfs": ["/var/cache"]},
+            },
+        }
+        override = generate_compose_override(
+            self._manifest(), user_compose=user_compose,
+        )
+        web = yaml.safe_load(override)["services"]["web"]
+        assert web["tmpfs"] == ["/tmp"]
+
+    def test_user_volume_targets_tmp_omits_overlay_tmpfs(self) -> None:
+        """User has a volume mount whose target is /tmp — overlay omits
+        its tmpfs. Avoids overriding the user's explicit /tmp choice.
+        """
+        user_compose = {
+            "services": {
+                "web": {"image": "nginx", "volumes": ["./tmpdata:/tmp"]},
+            },
+        }
+        override = generate_compose_override(
+            self._manifest(), user_compose=user_compose,
+        )
+        web = yaml.safe_load(override)["services"]["web"]
+        assert "tmpfs" not in web
+
+    def test_user_long_syntax_volume_targets_tmp_omits_overlay_tmpfs(self) -> None:
+        user_compose = {
+            "services": {
+                "web": {
+                    "image": "nginx",
+                    "volumes": [
+                        {"type": "tmpfs", "target": "/tmp"},
+                    ],
+                },
+            },
+        }
+        override = generate_compose_override(
+            self._manifest(), user_compose=user_compose,
+        )
+        web = yaml.safe_load(override)["services"]["web"]
+        assert "tmpfs" not in web
+
+    def test_user_long_syntax_bind_volume_targets_tmp_omits_overlay_tmpfs(self) -> None:
+        user_compose = {
+            "services": {
+                "web": {
+                    "image": "nginx",
+                    "volumes": [
+                        {"type": "bind", "source": "./d", "target": "/tmp"},
+                    ],
+                },
+            },
+        }
+        override = generate_compose_override(
+            self._manifest(), user_compose=user_compose,
+        )
+        web = yaml.safe_load(override)["services"]["web"]
+        assert "tmpfs" not in web
+
+    def test_user_volume_with_options_targets_tmp_omits_overlay_tmpfs(self) -> None:
+        """`/tmp:/tmp:ro` — short syntax, target is /tmp."""
+        user_compose = {
+            "services": {
+                "web": {
+                    "image": "nginx",
+                    "volumes": ["/host/tmp:/tmp:ro"],
+                },
+            },
+        }
+        override = generate_compose_override(
+            self._manifest(), user_compose=user_compose,
+        )
+        web = yaml.safe_load(override)["services"]["web"]
+        assert "tmpfs" not in web
+
+    def test_per_service_omission_does_not_leak(self) -> None:
+        """Two services, only one declares read_only. Overlay omits on
+        that service only — the other still gets the v0.8 default."""
+        manifest = {
+            "project": "demo",
+            "hosts": ["demo.example.com"],
+            "services": {
+                "web": {"type": "frontend", "port": 3000, "routes": [{"path": "/"}]},
+                "worker": {"type": "backend", "port": 4000, "routes": []},
+            },
+        }
+        user_compose = {
+            "services": {
+                "web": {"image": "nginx", "read_only": False},
+                "worker": {"image": "alpine"},
+            },
+        }
+        override = generate_compose_override(
+            manifest, user_compose=user_compose,
+        )
+        parsed = yaml.safe_load(override)
+        assert "read_only" not in parsed["services"]["web"]
+        assert parsed["services"]["worker"]["read_only"] is True
+
+    def test_off_profile_service_does_not_get_v08_defaults(self) -> None:
+        """A service on profile: off gets nothing from the overlay,
+        regardless of user_compose declarations. The off path skips
+        the security fragment entirely so omission logic doesn't run.
+        """
+        manifest = {
+            "project": "demo",
+            "hosts": ["demo.example.com"],
+            "services": {
+                "web": {
+                    "type": "frontend", "port": 3000,
+                    "routes": [{"path": "/"}],
+                    "security": {"profile": "off", "reason": "test"},
+                },
+            },
+        }
+        override = generate_compose_override(manifest)
+        web = yaml.safe_load(override)["services"]["web"]
+        assert "read_only" not in web
+        assert "tmpfs" not in web
 
 
 class TestComposeShapeGuards:

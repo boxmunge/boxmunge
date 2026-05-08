@@ -225,8 +225,20 @@ boxmunge generates `compose.boxmunge.yml` alongside `compose.yml`. **Do not edit
 - **Proxy network** -- the `boxmunge-proxy` external network to every non-internal `web` service, with project-scoped network aliases (e.g., `myapp-frontend`, `myapp-backend`)
 - **Environment files** -- `env_file` entries for `project.env` and `secrets.env`, injecting both non-secret config and CLI-managed secrets into containers
 - **Resource limits** -- `deploy.resources.limits` for services declaring `limits` in the manifest, enforcing memory and CPU constraints
+- **Container hardening** -- under the `default` security profile (the silent floor): `security_opt: ["no-new-privileges:true"]`, `init: true`, `pids_limit: 512`, a curated `cap_drop` list, and (v0.8) `read_only: true` and `tmpfs: ['/tmp']`
 
 Services with `internal: true` are excluded from the proxy network.
+
+### v0.8 read-only rootfs default
+
+The default profile now applies `read_only: true` and `tmpfs: ['/tmp']` to every service. This was a behavioural change: pre-v0.8, missing `read_only` was penalised by the CVE policy without being enforced.
+
+If a service legitimately needs writable rootfs, declare `read_only: false` in the project's `compose.yml` for that service. Doing so:
+
+- Tells the overlay to omit its own `read_only` (your literal value wins via Compose merge — no merge conflict)
+- Incurs a +1 CVE hardening penalty (see CVE_POLICY.md)
+
+If a service needs writable paths under read-only rootfs, add per-service `tmpfs:` or `volumes:` entries in `compose.yml`. The overlay's `tmpfs: ['/tmp']` is omitted whenever your `compose.yml` already claims `/tmp` (via `tmpfs` or `volumes`).
 
 ---
 

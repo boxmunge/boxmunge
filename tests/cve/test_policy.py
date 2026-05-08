@@ -757,8 +757,11 @@ def test_hardening_profile_single_service_read_only_false() -> None:
     assert profile.no_new_privileges is True
 
 
-def test_hardening_profile_single_service_no_read_only_field() -> None:
-    """If `read_only` is not set explicitly, treat as not-read-only (False)."""
+def test_hardening_profile_single_service_no_read_only_field_overlay_applies() -> None:
+    """v0.8: when overlay applies (default profile, services_with_overlay
+    defaults to "all named services"), missing read_only means the
+    overlay's read_only:true default applies — profile is hardened.
+    """
     compose = {
         "services": {
             "web": {
@@ -767,6 +770,42 @@ def test_hardening_profile_single_service_no_read_only_field() -> None:
         },
     }
     profile = hardening_profile_from_compose(compose)
+    assert profile.read_only is True
+
+
+def test_hardening_profile_single_service_explicit_read_only_false_weakens() -> None:
+    """v0.8: explicit `read_only: false` in user compose still weakens the
+    project even when the overlay would otherwise apply read_only:true.
+    The overlay generator omits its read_only fragment when the user
+    declared anything, so the user's literal value wins.
+    """
+    compose = {
+        "services": {
+            "web": {
+                "read_only": False,
+                "security_opt": ["no-new-privileges:true"],
+            },
+        },
+    }
+    profile = hardening_profile_from_compose(compose)
+    assert profile.read_only is False
+
+
+def test_hardening_profile_off_service_no_read_only_field_weakens() -> None:
+    """v0.8: for off-profile services (no overlay), missing read_only
+    still weakens — there is no overlay to enforce it. Only an explicit
+    `read_only: true` counts.
+    """
+    compose = {
+        "services": {
+            "web": {
+                "security_opt": ["no-new-privileges:true"],
+            },
+        },
+    }
+    profile = hardening_profile_from_compose(
+        compose, services_with_overlay=set(),
+    )
     assert profile.read_only is False
 
 

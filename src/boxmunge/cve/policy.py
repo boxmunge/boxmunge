@@ -123,11 +123,12 @@ class HardeningProfile:
     """Compose-derived hardening posture for a project.
 
     Captures the user's deviations from the boxmunge overlay's hardened
-    baseline, after the overlay has been merged. The overlay enforces
-    read_only=true, no-new-privileges=true, and an empty cap_add by
-    default — fields here are True iff the *applied* config still meets
-    that baseline (read_only and no_new_privileges) or False if user
-    config overrode it (extra_caps_added, privileged).
+    baseline, after the overlay has been merged. v0.8 overlay enforces
+    read_only=true, no-new-privileges=true, tmpfs:['/tmp'], and an empty
+    cap_add by default — fields here are True iff the *applied* config
+    still meets that baseline (read_only and no_new_privileges) or False
+    if user config overrode it (extra_caps_added, privileged, or an
+    explicit read_only:false in user compose).
     """
 
     read_only: bool
@@ -477,20 +478,23 @@ def hardening_profile_from_compose(
 
     `services_with_overlay`: services where boxmunge's hardening overlay is
     active (every service whose effective profile is not "off"). For these
-    services we treat `no-new-privileges` as enforced by the overlay even if
-    the user's compose doesn't declare it explicitly — the overlay sets it,
-    `compose_validate` already rejects user attempts to flip it back via
-    `no-new-privileges:false`, so the runtime guarantee holds. If `None`
-    (default), assume every service has the overlay applied — backward-
-    compatible with callers that haven't been updated and matches the
-    common case for new deployments.
+    services we treat `no-new-privileges` AND `read_only` as enforced by the
+    overlay even if the user's compose doesn't declare them explicitly — the
+    overlay sets both (v0.8 made read_only a default), and `compose_validate`
+    rejects user attempts to flip no-new-privileges back via
+    `no-new-privileges:false`. If the user declares `read_only: false`
+    explicitly, that wins (the v0.8 overlay generator omits its own
+    read_only fragment for that service), so it correctly weakens the
+    profile here. If `None` (default), assume every service has the
+    overlay applied — backward-compatible with callers that haven't been
+    updated and matches the common case for new deployments.
 
-    `read_only` and `cap_add` are NOT in the default overlay (read_only is
-    only added by the strict profile; cap_add is always user-driven), so
-    they're judged on the literal compose declaration regardless of overlay.
+    `cap_add` is always user-driven and judged on the literal compose
+    declaration regardless of overlay.
 
     For each service:
-      - read_only: True iff `read_only: true` is explicitly set
+      - read_only: True iff overlay applies AND user did NOT declare
+        `read_only: false`, OR (no overlay) `read_only: true` is explicitly set
       - no_new_privileges: True iff overlay applies OR (`security_opt`
         contains "no-new-privileges:true" AND no entry contains
         "no-new-privileges:false")
@@ -527,9 +531,18 @@ def hardening_profile_from_compose(
         if not isinstance(svc, dict):
             continue
 
-        # read_only — must be explicitly True; anything else (missing or False)
-        # weakens the project. Overlay does NOT enforce this on default profile.
-        if svc.get("read_only") is not True:
+        # read_only — v0.8: overlay enforces read-only rootfs by default for
+        # non-off services. The only thing that weakens this is an explicit
+        # `read_only: false` in user compose (the overlay generator omits
+        # its read_only fragment when the user declared anything for that
+        # field, and Compose merge gives us the user's literal value).
+        # For off-profile services (no overlay), only an explicit
+        # `read_only: true` counts.
+        if svc_name in overlay_set:
+            svc_ro = svc.get("read_only") is not False
+        else:
+            svc_ro = svc.get("read_only") is True
+        if not svc_ro:
             project_read_only = False
 
         # no_new_privileges — overlay enforces it for non-off services.

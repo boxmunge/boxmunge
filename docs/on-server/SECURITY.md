@@ -49,9 +49,19 @@ cap_drop:
   - LEASE
   - NET_RAW
 cap_add: []
+read_only: true             # v0.8
+tmpfs: ["/tmp"]              # v0.8
 ```
 
 These caps are NOT in Docker's default deny list, but are dangerous and rarely needed by application code. `NET_RAW` is the only borderline drop — it powers `ping`, `traceroute`, and a few health-check scripts. If your app actually needs it, opt back in via `cap_add`.
+
+### v0.8 read-only rootfs default
+
+`read_only: true` and `tmpfs: ['/tmp']` were added to the default profile in v0.8. The CVE policy already treated missing `read_only` as a +1 hardening penalty; v0.8 closes the asymmetry by actually enforcing read-only rootfs at runtime so the platform delivers what it penalises operators for omitting.
+
+**User-wins on explicit declarations.** If your `compose.yml` declares `read_only` (true or false) on a service, the overlay omits its own `read_only` entry for that service. Compose merge then leaves your literal value alone — there's no merge conflict and no redundancy-rejection rule. The same rule applies to `tmpfs: ['/tmp']`: if you declare a `tmpfs` or `volumes` entry that targets `/tmp`, the overlay omits its `tmpfs` entry for that service.
+
+**Opting out.** Apps that legitimately need writable rootfs declare `read_only: false` in `compose.yml` and accept the +1 CVE hardening penalty consciously. Most apps just need `tmpfs:['/tmp']` (the v0.8 default) and possibly extra tmpfs entries for cache/log paths under read-only rootfs.
 
 ## Relaxing a single protection (preferred)
 
@@ -122,17 +132,18 @@ hosts:
 
 Without `allow_wildcard_hosts: true`, manifest validation refuses to deploy. With it set, you accept that any plain `foo.example.com` belonging to another project on the same host is at risk of being shadowed by the wildcard's routes. Don't enable it on a host where you intend to operate adjacent projects under the same parent domain.
 
-## What is NOT applied in v0.5 (and why)
+## What is NOT applied by default (and why)
 
 | Not applied | Reason | When |
 |---|---|---|
-| `read_only: true` rootfs | Breaks projects that write outside `data/`. | Tier 3 (`strict`). |
 | Non-root user enforcement | Many container images run as root. | Tier 3 (`strict`). |
 | `cap_drop: ALL` | We drop only the dangerous subset. Full drop breaks several apps. | Tier 3 (`strict`). |
 | Default memory/CPU caps | Existing `limits` field is the user's tool. | Never imposed by default. |
 | Egress allowlist | Default-deny outbound needs network design. | Tier 4. |
 | Custom seccomp profile | Docker's default seccomp already applies. | Tier 8 (`paranoid`). |
 | Image scanning, digest pinning | Detection-without-remediation is a UX trap. | Tier 2 (v0.6) with auto-remediation pipeline. |
+
+(`read_only: true` rootfs was on this list through v0.7; v0.8 promoted it to a default-profile baseline. See "What `default` applies" above.)
 
 See `agent-help architecture` and the on-server `TRUST_MODEL.md` for adjacent context (host hardening, restricted shell, platform container hardening).
 

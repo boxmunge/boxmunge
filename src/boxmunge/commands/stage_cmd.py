@@ -172,8 +172,13 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
     # mode=0o644: read by `docker compose` which runs in deploy/root contexts
     # but the file is also read inside the Caddy/compose toolchain — keep
     # consistent with the site config above.
+    # v0.8: thread the user compose through so the overlay can omit
+    # read_only/tmpfs defaults on services where the user already declared them.
+    from boxmunge.compose import load_user_compose
+    user_compose = load_user_compose(project_dir / "compose.yml")
     atomic_write_text(staging_override, generate_staging_compose_override(
-        manifest, env_files=staging_env_files or None
+        manifest, env_files=staging_env_files or None,
+        user_compose=user_compose,
     ), mode=0o644)
 
     # Deploy-time warning for any service resolving to profile: off.

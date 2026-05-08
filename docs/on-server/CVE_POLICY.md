@@ -98,7 +98,7 @@ posture threshold.
 
 | Hardening weakened | Penalty |
 |---|---|
-| `read_only: false` (writeable rootfs) | +1 |
+| `read_only: false` (writeable rootfs, **explicit user opt-out**) | +1 |
 | `no-new-privileges` removed or set to false | +1 |
 | `cap_add` beyond image defaults (any non-empty list) | +1 |
 | `privileged: true` | +2 (already rejected by validator) |
@@ -110,6 +110,27 @@ Medium CVE quarantined a project running on `strict` posture.
 Rationale: running with read-only rootfs disabled means a Medium CVE
 behaves more like a High one in practice — the policy treats it that way.
 
+### v0.8 hardening defaults
+
+As of v0.8, boxmunge's default-profile overlay applies `read_only: true`
+and `tmpfs: ['/tmp']` by default. Apps that legitimately need writable
+rootfs must declare `read_only: false` explicitly in their user
+`compose.yml`, which incurs the +1 penalty above. Missing the field
+means the overlay's `read_only: true` default applies — no penalty.
+
+This inverts the v0.7.x semantics where missing `read_only` was
+penalised even though the system never actually enforced it. v0.8 is
+the closing of that asymmetry: the platform now provides what it
+penalises operators for omitting.
+
+The overlay generator's user-wins rule: if your `compose.yml` declares
+`read_only` (true or false) on a service, the overlay omits its
+own `read_only` fragment for that service. Compose merge then leaves
+your literal value alone — no merge conflict, no need for a redundancy-
+rejection rule. The same rule applies to `tmpfs: ['/tmp']`: if you
+declare a `tmpfs` or `volumes` entry that targets `/tmp`, the overlay
+omits its own.
+
 ### Overlay-aware penalty (v0.6.2)
 
 boxmunge's default-profile overlay enforces `no-new-privileges` at
@@ -120,6 +141,11 @@ are NOT penalised for it — the overlay already protects them. (Re-
 declaring it in user compose would trigger a Compose merge duplicate-
 rejection error anyway; see the v0.6.3 dedupe note in
 "Recommendations" below.)
+
+The same overlay-aware logic applies to `read_only` from v0.8: a
+project that doesn't redeclare `read_only` in user compose is treated
+as fully hardened (the overlay provides it). Only an explicit
+`read_only: false` in user compose triggers the +1 penalty.
 
 ## Configuring posture (manifest.yml)
 

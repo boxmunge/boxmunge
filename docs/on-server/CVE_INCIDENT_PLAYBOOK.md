@@ -182,16 +182,19 @@ regenerates Caddy, restarts containers, runs smoke.
 
 ### B. Tighten hardening (exploitable, low impact, can drop penalty)
 
-Adding `read_only: true` to a service drops the hardening penalty by 1
-and can move the effective severity below the posture threshold.
-read_only is NOT in boxmunge's default overlay (it's a strict-profile
-feature), so the user must opt in by declaring it.
+As of v0.8, the read-only rootfs default is already in place. If your
+compose has an explicit `read_only: false` opt-out, removing that
+opt-out drops the hardening penalty by 1 and can move the effective
+severity below the posture threshold.
 
 Do not redeclare `security_opt: ["no-new-privileges:true"]` in user
 compose — the default-profile overlay already sets it, and Compose
 rejects duplicate list items at merge time. The CVE-policy penalty
 calc is overlay-aware (v0.6.2+), so relying on the overlay's
-no-new-privileges does not incur a penalty.
+no-new-privileges does not incur a penalty. The same overlay-aware
+logic applies to `read_only` from v0.8: the overlay provides
+`read_only: true` by default, so omitting the field from user compose
+does NOT incur a penalty (only an explicit `read_only: false` does).
 
 This is a manifest/compose change — you don't have file-edit authority
 in the deploy shell. Hand off:
@@ -199,9 +202,11 @@ in the deploy shell. Hand off:
 > Project `<name>` is quarantined on `<CVE>`. The CVE is exploitable but
 > low-impact, and the hardening penalty (+`<n>`) is what pushed effective
 > severity above threshold. Recommend: edit `services/<name>/compose.yml`
-> to add `read_only: true` (and a `tmpfs: ['/tmp']` if the app writes
-> there), rebundle, redeploy. Effective severity should drop to `<X>`,
-> below the `<posture>` threshold.
+> to remove the explicit `read_only: false` opt-out (the v0.8 overlay
+> default of `read_only: true` will then apply), rebundle, redeploy.
+> If the app needs writable paths under read-only rootfs, add
+> per-service `tmpfs:` entries for those paths. Effective severity
+> should drop to `<X>`, below the `<posture>` threshold.
 
 ### C. Accept the quarantine
 

@@ -17,6 +17,9 @@ class TestDefaultProfile:
         assert "NET_ADMIN" in result["cap_drop"]
         assert "NET_RAW" in result["cap_drop"]
         assert result["cap_add"] == []
+        # v0.8 defaults
+        assert result["read_only"] is True
+        assert result["tmpfs"] == ["/tmp"]
 
     def test_explicit_default_profile_yields_same_payload(self) -> None:
         result = resolve_security(
@@ -25,6 +28,8 @@ class TestDefaultProfile:
         )
         assert result["security_opt"] == ["no-new-privileges:true"]
         assert result["pids_limit"] == 512
+        assert result["read_only"] is True
+        assert result["tmpfs"] == ["/tmp"]
 
 
 class TestConstants:
@@ -525,12 +530,16 @@ class TestComposeFragment:
             "pids_limit": 512,
             "cap_drop": ["NET_RAW"],
             "cap_add": [],
+            "read_only": True,
+            "tmpfs": ["/tmp"],
         })
         assert fragment["security_opt"] == ["no-new-privileges:true"]
         assert fragment["init"] is True
         assert fragment["pids_limit"] == 512
         assert fragment["cap_drop"] == ["NET_RAW"]
         assert "cap_add" not in fragment
+        assert fragment["read_only"] is True
+        assert fragment["tmpfs"] == ["/tmp"]
 
     def test_off_yields_empty_fragment(self) -> None:
         fragment = render_compose_security_fragment({})
@@ -539,6 +548,15 @@ class TestComposeFragment:
     def test_empty_cap_drop_omitted(self) -> None:
         fragment = render_compose_security_fragment({"cap_drop": []})
         assert "cap_drop" not in fragment
+
+    def test_empty_tmpfs_omitted(self) -> None:
+        fragment = render_compose_security_fragment({"tmpfs": []})
+        assert "tmpfs" not in fragment
+
+    def test_read_only_false_renders(self) -> None:
+        # Edge case: if a future profile sets read_only to False, render it.
+        fragment = render_compose_security_fragment({"read_only": False})
+        assert fragment["read_only"] is False
 
 
 from boxmunge.security_overlay import format_off_warning

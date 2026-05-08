@@ -59,6 +59,7 @@ class TestComposeOverrideEmitsOffWarning:
         paths = BoxPaths()
         paths.host_secrets = tmp_path / "host_secrets.env"  # absent
         paths.project_compose_override = lambda name: proj / "compose.boxmunge.yml"
+        paths.project_compose = lambda name: proj / "compose.yml"
         paths.project_dir = lambda name: proj
         paths.project_secrets = lambda name: proj / "secrets.env"
 
@@ -86,6 +87,7 @@ class TestComposeOverrideEmitsOffWarning:
         paths = BoxPaths()
         paths.host_secrets = tmp_path / "host_secrets.env"
         paths.project_compose_override = lambda name: proj / "compose.boxmunge.yml"
+        paths.project_compose = lambda name: proj / "compose.yml"
         paths.project_dir = lambda name: proj
         paths.project_secrets = lambda name: proj / "secrets.env"
 
@@ -109,6 +111,7 @@ class TestComposeOverrideEmitsOffWarning:
         paths = BoxPaths()
         paths.host_secrets = tmp_path / "host_secrets.env"
         paths.project_compose_override = lambda name: proj / "compose.boxmunge.yml"
+        paths.project_compose = lambda name: proj / "compose.yml"
         paths.project_dir = lambda name: proj
         paths.project_secrets = lambda name: proj / "secrets.env"
 

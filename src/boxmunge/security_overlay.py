@@ -71,7 +71,16 @@ DEFAULT_PIDS_LIMIT = 512
 
 
 def _baseline_for_profile(profile: str) -> dict[str, Any]:
-    """Return the unmodified baseline dict for a named profile."""
+    """Return the unmodified baseline dict for a named profile.
+
+    v0.8: the default profile now enforces read-only rootfs and a writable
+    tmpfs at /tmp. The CVE policy already treated missing read_only as a
+    +1 hardening penalty, but the system never actually applied it. v0.8
+    closes that asymmetry — apps that legitimately need writable rootfs
+    declare `read_only: false` explicitly in their compose.yml and accept
+    the penalty consciously. tmpfs:['/tmp'] becomes a default since most
+    apps need writable /tmp under read-only rootfs.
+    """
     if profile == PROFILE_DEFAULT:
         return {
             "security_opt": ["no-new-privileges:true"],
@@ -79,6 +88,8 @@ def _baseline_for_profile(profile: str) -> dict[str, Any]:
             "pids_limit": DEFAULT_PIDS_LIMIT,
             "cap_drop": list(DEFAULT_CAP_DROP),
             "cap_add": [],
+            "read_only": True,
+            "tmpfs": ["/tmp"],
         }
     if profile == PROFILE_OFF:
         return {}
@@ -379,6 +390,11 @@ def render_compose_security_fragment(resolved: dict[str, Any]) -> dict[str, Any]
 
     Strips empty list/dict values so the rendered overlay stays clean.
     cap_add: [] is dropped (it's the default state); cap_drop: [] is dropped.
+
+    v0.8: emits `read_only` and `tmpfs` from the default profile baseline.
+    Per-service omission for these two (when the user already declared
+    them in compose.yml) is the responsibility of the overlay generator —
+    see `_build_service_override`.
     """
     out: dict[str, Any] = {}
     if resolved.get("security_opt"):
@@ -391,6 +407,10 @@ def render_compose_security_fragment(resolved: dict[str, Any]) -> dict[str, Any]
         out["cap_drop"] = list(resolved["cap_drop"])
     if resolved.get("cap_add"):
         out["cap_add"] = list(resolved["cap_add"])
+    if "read_only" in resolved:
+        out["read_only"] = bool(resolved["read_only"])
+    if resolved.get("tmpfs"):
+        out["tmpfs"] = list(resolved["tmpfs"])
     return out
 
 

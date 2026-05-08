@@ -95,7 +95,7 @@ def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
 
         if manifest:
             from boxmunge.caddy import generate_caddy_config
-            from boxmunge.compose import generate_compose_override
+            from boxmunge.compose import generate_compose_override, load_user_compose
 
             new_caddy = generate_caddy_config(manifest)
             current_caddy_path = paths.project_caddy_site(project_name)
@@ -107,7 +107,13 @@ def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
             else:
                 print("  Caddy config:     would be created")
 
-            new_compose = generate_compose_override(manifest)
+            # v0.8: pass the candidate compose.yml from the new bundle so
+            # the overlay omits read_only/tmpfs defaults consistently with
+            # what a real deploy of this bundle would produce.
+            candidate_user_compose = load_user_compose(extracted / "compose.yml")
+            new_compose = generate_compose_override(
+                manifest, user_compose=candidate_user_compose,
+            )
             current_compose_path = paths.project_compose_override(project_name)
             if current_compose_path.exists():
                 if new_compose != current_compose_path.read_text():
