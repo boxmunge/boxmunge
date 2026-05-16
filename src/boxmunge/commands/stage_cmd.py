@@ -20,7 +20,7 @@ from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
 from boxmunge.project_registry import is_registered
 from boxmunge.security_overlay import services_with_off_profile
-from boxmunge.security_warn import warn_off_services
+from boxmunge.security_warn import warn_off_services, warn_writable_state
 from boxmunge.source import resolve_bundle_source, SourceError
 from boxmunge.state import write_state
 
@@ -125,6 +125,7 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
             off_services=off_services,
             project_name=project_name,
             cve_policy=manifest.get("security"),
+            manifest_services=manifest.get("services"),
         )
     except ComposeSecurityError as e:
         # Exit code 3 reserved for compose hardening rejections (audit H-N2).
@@ -184,6 +185,8 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
     # Deploy-time warning for any service resolving to profile: off.
     # Repeated by design — see spec §"Deploy-time warning".
     warn_off_services(paths, manifest, component="stage")
+    # v0.9: writable surface visibility (read_only:false WARN, external INFO).
+    warn_writable_state(paths, manifest, user_compose, component="stage")
 
     # Generate staging base (compose.yml with ports stripped to avoid conflicts)
     staging_base = project_dir / "compose.staging-base.yml"

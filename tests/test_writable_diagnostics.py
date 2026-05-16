@@ -1,10 +1,13 @@
 """Tests for boxmunge.writable_diagnostics — log scanner + hint formatter."""
+from pathlib import Path
+
 import pytest
 
 from boxmunge.writable import WritableState
 from boxmunge.writable_diagnostics import (
     WritableError,
     format_hint,
+    run_post_deploy_diagnostics,
     scan_line,
     scan_logs,
 )
@@ -150,3 +153,185 @@ class TestHintFormatter:
         err = WritableError(path="/x", raw="...")
         hint = format_hint([err], "web", WritableState.DEFAULT)
         assert "[HINT]" in hint
+
+
+# ---------------------------------------------------------------------------
+# Post-deploy orchestration: sleep + per-service log scan + hint dict
+# ---------------------------------------------------------------------------
+
+
+class TestRunPostDeployDiagnostics:
+    """Verify the orchestrator: dependency injection, service filtering,
+    hint construction. The sleep_fn injection lets us run the suite at
+    full speed without real wall-clock waits."""
+
+    def _manifest(self, services: dict) -> dict:
+        return {"project": "demo", "services": services}
+
+    def test_no_services_returns_empty(self, tmp_path: Path) -> None:
+        manifest = self._manifest({})
+        result = run_post_deploy_diagnostics(
+            tmp_path, manifest, sleep_fn=lambda _: None,
+        )
+        assert result == {}
+
+    def test_logs_without_errors_returns_empty(self, tmp_path: Path) -> None:
+        manifest = self._manifest({"web": {"port": 80, "routes": [{"path": "/"}]}})
+        result = run_post_deploy_diagnostics(
+            tmp_path, manifest,
+            sleep_fn=lambda _: None,
+            log_fetcher=lambda svc: "INFO: starting up\n",
+        )
+        assert result == {}
+
+    def test_logs_with_read_only_error_returns_hint(self, tmp_path: Path) -> None:
+        manifest = self._manifest({"web": {"port": 80, "routes": [{"path": "/"}]}})
+        result = run_post_deploy_diagnostics(
+            tmp_path, manifest,
+            sleep_fn=lambda _: None,
+            log_fetcher=lambda svc: (
+                'nginx: [emerg] mkdir() "/var/cache/nginx/temp" failed '
+                '(30: Read-only file system)\n'
+            ),
+        )
+        assert "web" in result
+        hint = result["web"]
+        assert "[HINT]" in hint
+        assert "/var/cache/nginx" in hint
+        assert "services.web.writable.ephemeral" in hint
+
+    def test_external_service_skipped(self, tmp_path: Path) -> None:
+        manifest = self._manifest({
+            "web": {
+                "port": 80, "routes": [{"path": "/"}],
+                "writable": {"external": True},
+            },
+        })
+        # log_fetcher would never be called for skipped services. Make it
+        # error to prove it's not invoked.
+        def _no_fetch(svc):
+            raise AssertionError(f"unexpected fetch for {svc!r}")
+
+        result = run_post_deploy_diagnostics(
+            tmp_path, manifest,
+            sleep_fn=lambda _: None,
+            log_fetcher=_no_fetch,
+        )
+        assert result == {}
+
+    def test_managed_service_state_hint_points_at_manifest(
+        self, tmp_path: Path,
+    ) -> None:
+        manifest = self._manifest({
+            "web": {
+                "port": 80, "routes": [{"path": "/"}],
+                "writable": {"ephemeral": ["/some/other/path"]},
+            },
+        })
+        result = run_post_deploy_diagnostics(
+            tmp_path, manifest,
+            sleep_fn=lambda _: None,
+            log_fetcher=lambda svc: (
+                'nginx: [emerg] mkdir() "/var/cache/nginx/temp" failed '
+                '(30: Read-only file system)\n'
+            ),
+        )
+        assert "web" in result
+        # MANAGED still points at the manifest — operator extends the
+        # writable.ephemeral list with the new path.
+        assert "services.web.writable.ephemeral" in result["web"]
+
+    def test_off_profile_service_skipped(self, tmp_path: Path) -> None:
+        manifest = {
+            "project": "demo",
+            "services": {
+                "web": {
+                    "port": 80, "routes": [{"path": "/"}],
+                    "security": {"profile": "off", "reason": "x"},
+                },
+            },
+        }
+        def _no_fetch(svc):
+            raise AssertionError(f"unexpected fetch for {svc!r}")
+        result = run_post_deploy_diagnostics(
+            tmp_path, manifest,
+            sleep_fn=lambda _: None,
+            log_fetcher=_no_fetch,
+        )
+        assert result == {}
+
+    def test_project_off_profile_skips_all_services(self, tmp_path: Path) -> None:
+        manifest = {
+            "project": "demo",
+            "security": {"profile": "off", "reason": "x"},
+            "services": {"web": {"port": 80, "routes": [{"path": "/"}]}},
+        }
+        def _no_fetch(svc):
+            raise AssertionError(f"unexpected fetch for {svc!r}")
+        result = run_post_deploy_diagnostics(
+            tmp_path, manifest,
+            sleep_fn=lambda _: None,
+            log_fetcher=_no_fetch,
+        )
+        assert result == {}
+
+    def test_log_fetcher_exception_is_silent(self, tmp_path: Path) -> None:
+        manifest = self._manifest({"web": {"port": 80, "routes": [{"path": "/"}]}})
+
+        def _boom(svc):
+            raise RuntimeError("docker daemon unreachable")
+
+        # Must not raise — diagnostics are non-fatal.
+        result = run_post_deploy_diagnostics(
+            tmp_path, manifest,
+            sleep_fn=lambda _: None,
+            log_fetcher=_boom,
+        )
+        assert result == {}
+
+    def test_sleep_fn_called_with_sleep_seconds(self, tmp_path: Path) -> None:
+        manifest = self._manifest({"web": {"port": 80, "routes": [{"path": "/"}]}})
+        captured: list[float] = []
+        run_post_deploy_diagnostics(
+            tmp_path, manifest,
+            sleep_seconds=8,
+            sleep_fn=lambda s: captured.append(s),
+            log_fetcher=lambda svc: "",
+        )
+        assert captured == [8]
+
+    def test_sleep_skipped_when_no_targets(self, tmp_path: Path) -> None:
+        # All services skipped → no point sleeping.
+        manifest = self._manifest({
+            "web": {
+                "port": 80, "routes": [{"path": "/"}],
+                "writable": {"external": True},
+            },
+        })
+        captured: list[float] = []
+        run_post_deploy_diagnostics(
+            tmp_path, manifest,
+            sleep_fn=lambda s: captured.append(s),
+            log_fetcher=lambda svc: "",
+        )
+        assert captured == []
+
+    def test_multiple_services_independent(self, tmp_path: Path) -> None:
+        manifest = self._manifest({
+            "web": {"port": 80, "routes": [{"path": "/"}]},
+            "api": {"port": 8000, "routes": [{"path": "/api"}]},
+        })
+        def _fetch(svc):
+            if svc == "web":
+                return (
+                    'nginx: [emerg] mkdir() "/var/cache/nginx/x" failed '
+                    '(30: Read-only file system)\n'
+                )
+            return "INFO clean\n"
+        result = run_post_deploy_diagnostics(
+            tmp_path, manifest,
+            sleep_fn=lambda _: None,
+            log_fetcher=_fetch,
+        )
+        assert "web" in result
+        assert "api" not in result

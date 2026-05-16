@@ -20,9 +20,12 @@ useful) so callers can suggest the right entry under
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
 
-from boxmunge.writable import WritableState
+from boxmunge.writable import WritableState, classify_state
 
 
 @dataclass(frozen=True)
@@ -169,3 +172,109 @@ def format_hint(
         f"       (or .persistent if data should survive restart). "
         f"See: agent-help writable."
     )
+
+
+# Default 8s sleep — long enough for container startup to start emitting
+# real errors, short enough that operators don't lose focus on the deploy.
+DEFAULT_SCAN_DELAY_SECONDS = 8
+
+
+# Module-level sleep indirection. Production runs use time.sleep; the
+# conftest in tests/ patches this to a no-op via monkeypatch so the unit
+# suite doesn't burn 8s per real-deploy test.
+_sleep_fn: Callable[[float], None] = time.sleep
+
+
+def run_post_deploy_diagnostics(
+    project_dir: Path,
+    manifest: dict[str, Any],
+    *,
+    sleep_seconds: int = DEFAULT_SCAN_DELAY_SECONDS,
+    sleep_fn: Callable[[float], None] | None = None,
+    log_fetcher: Callable[[str], str] | None = None,
+) -> dict[str, str]:
+    """Sleep, fetch per-service logs, scan for read-only-fs errors,
+    return per-service hint blocks.
+
+    Returns {service_name: hint_string} for services with detected
+    errors. Empty dict if all-clear or if log fetching fails.
+
+    Dependencies are injectable:
+      - sleep_fn: defaults to time.sleep. Tests pass a no-op.
+      - log_fetcher: called with (service_name) -> log string. Defaults
+        to compose_logs_capture against the project_dir.
+
+    Never raises. Log-fetch failures are silently skipped on the
+    grounds that diagnostics must not block a deploy — the deploy
+    command keeps going regardless.
+    """
+    services = manifest.get("services", {}) or {}
+    if not isinstance(services, dict) or not services:
+        return {}
+
+    # Filter services we should NOT diagnose:
+    #   - EXTERNAL state (operator owns writability; hint would mislead)
+    #   - profile: off (no read_only baseline enforced)
+    targets: list[str] = []
+    project_security = manifest.get("security") or {}
+    project_off = (
+        isinstance(project_security, dict)
+        and project_security.get("profile") == "off"
+    )
+    for svc_name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        if classify_state(svc) is WritableState.EXTERNAL:
+            continue
+        svc_security = svc.get("security") or {}
+        svc_profile = (
+            svc_security.get("profile")
+            if isinstance(svc_security, dict) else None
+        )
+        # Service-level off wins over project-level. Default behaviour
+        # (no service profile) inherits project profile.
+        if svc_profile == "off":
+            continue
+        if svc_profile is None and project_off:
+            continue
+        targets.append(svc_name)
+
+    if not targets:
+        return {}
+
+    if sleep_fn is None:
+        sleep_fn = _sleep_fn
+    sleep_fn(sleep_seconds)
+
+    if log_fetcher is None:
+        # Lazy import — keeps writable_diagnostics importable in
+        # contexts where docker isn't installed (eg. CI unit tests).
+        from boxmunge.docker import compose_logs_capture
+
+        compose_files = ["compose.yml", "compose.boxmunge.yml"]
+
+        def _default_fetch(svc: str) -> str:
+            return compose_logs_capture(
+                project_dir, service=svc, tail=200,
+                compose_files=compose_files,
+            )
+
+        log_fetcher = _default_fetch
+
+    hints: dict[str, str] = {}
+    for svc_name in targets:
+        try:
+            logs = log_fetcher(svc_name)
+        except Exception:
+            continue
+        if not logs:
+            continue
+        errors = scan_logs(logs)
+        if not errors:
+            continue
+        svc_block = services[svc_name] if isinstance(services[svc_name], dict) else {}
+        state = classify_state(svc_block)
+        hint = format_hint(errors, service=svc_name, state=state)
+        if hint:
+            hints[svc_name] = hint
+    return hints

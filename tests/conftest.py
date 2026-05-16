@@ -6,6 +6,21 @@ from pathlib import Path
 from boxmunge.paths import BoxPaths
 
 
+@pytest.fixture(autouse=True)
+def _no_writable_diagnostic_sleep(monkeypatch):
+    """Skip the 8s post-deploy diagnostic sleep in unit tests.
+
+    Tests that explicitly pass `sleep_fn=...` to
+    `run_post_deploy_diagnostics` get their own injection; everything
+    else (including the deploy-command integration tests) takes the
+    no-op path via this module-level indirection.
+    """
+    monkeypatch.setattr(
+        "boxmunge.writable_diagnostics._sleep_fn",
+        lambda _: None,
+    )
+
+
 @pytest.fixture
 def tmp_root(tmp_path: Path) -> Path:
     """Create a temporary boxmunge root directory with standard structure."""

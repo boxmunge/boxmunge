@@ -246,6 +246,7 @@ def _run_deploy_inner(
             off_services=off_services,
             project_name=project_name,
             cve_policy=manifest.get("security"),
+            manifest_services=manifest.get("services"),
         )
     except ComposeSecurityError as e:
         # Exit code 3 reserved for compose hardening rejections (audit H-N2).
@@ -272,6 +273,28 @@ def _run_deploy_inner(
         print(f"  ERROR: {e}", file=sys.stderr)
         log_error("deploy", f"Deploy failed: container start: {e}", paths, project=project_name)
         return 1
+
+    # v0.9: 8-second post-up scan for read-only-fs errors. Non-fatal —
+    # the goal is operator visibility, not gating. Hints point operators
+    # at services.<svc>.writable.ephemeral when a missing declaration
+    # crashes the container.
+    try:
+        from boxmunge.writable_diagnostics import run_post_deploy_diagnostics
+        hints = run_post_deploy_diagnostics(project_dir, manifest)
+        for svc_name, hint in hints.items():
+            print(hint)
+            log_warning(
+                "deploy",
+                f"writable-fs error detected in {svc_name}",
+                paths, project=project_name,
+                detail={"event": "writable_diagnostic", "service": svc_name},
+            )
+    except Exception as e:
+        # Diagnostics MUST NOT break deploy. Log and move on.
+        log_warning(
+            "deploy", f"writable diagnostics raised: {e}",
+            paths, project=project_name,
+        )
 
     # Reload Caddy
     print(f"  Reloading Caddy...")

@@ -119,6 +119,7 @@ def run_resume(
             off_services=off_services,
             project_name=project_name,
             cve_policy=manifest.get("security"),
+            manifest_services=manifest.get("services"),
         )
     except ComposeSecurityError as e:
         # Exit code 3 reserved for compose hardening rejections (audit H-N2).

@@ -12,7 +12,7 @@ from boxmunge.security_overlay import (
     resolve_security,
     render_compose_security_fragment,
 )
-from boxmunge.security_warn import warn_off_services
+from boxmunge.security_warn import warn_off_services, warn_writable_state
 from boxmunge.writable import WritableState, classify_state
 
 
@@ -363,6 +363,10 @@ def prepare_compose_override(
     # Deploy-time warning for any service resolving to profile: off.
     # Repeated by design — see spec §"Deploy-time warning".
     warn_off_services(paths, manifest, component=component)
+    # v0.9: deploy-time visibility for writable surface choices —
+    # [WARNING] for read_only:false in user compose, [INFO] for
+    # writable.external in manifest. Both repeated every deploy.
+    warn_writable_state(paths, manifest, user_compose, component=component)
 
 
 def is_bind_mount(volume_str: str) -> bool:
