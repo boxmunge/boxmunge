@@ -1320,3 +1320,283 @@ services:
         validate_user_compose(
             compose, paths, off_services=None, project_name="demo",
         )
+
+
+# ---------------------------------------------------------------------------
+# v0.9 — writable: three-state conflict matrix
+#
+# Matrix from the v0.9 spec:
+#   State 1 (no writable block) — compose tmpfs/volumes both forbidden
+#   State 2 (manifest-managed) — compose tmpfs/volumes both forbidden
+#   State 3 (external)         — compose tmpfs/volumes accepted (warning only,
+#                                 not asserted here — handled by deploy command)
+# ---------------------------------------------------------------------------
+
+
+class TestWritableConflictMatrix:
+    def _manifest_services(self, writable=None):
+        svc = {"port": 3000, "routes": [{"path": "/"}]}
+        if writable is not None:
+            svc["writable"] = writable
+        return {"web": svc}
+
+    # --- State 1 (no writable block) -----------------------------------------
+
+    def test_state1_no_compose_decls_ok(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+""")
+        validate_user_compose(
+            compose, paths,
+            manifest_services=self._manifest_services(writable=None),
+        )
+
+    def test_state1_compose_tmpfs_rejected(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    tmpfs:
+      - /var/cache
+""")
+        with pytest.raises(ComposeSecurityError) as exc:
+            validate_user_compose(
+                compose, paths,
+                manifest_services=self._manifest_services(writable=None),
+            )
+        msg = str(exc.value)
+        assert "services.web.writable" in msg
+        assert "tmpfs" in msg
+
+    def test_state1_compose_named_volume_rejected(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+volumes:
+  dbdata:
+services:
+  web:
+    image: nginx
+    volumes:
+      - dbdata:/app/data
+""")
+        with pytest.raises(ComposeSecurityError) as exc:
+            validate_user_compose(
+                compose, paths,
+                manifest_services=self._manifest_services(writable=None),
+            )
+        msg = str(exc.value)
+        assert "services.web.writable" in msg
+        assert "volumes" in msg or "volume" in msg
+
+    def test_state1_compose_bind_mount_ok(
+        self, tmp_path: Path, paths
+    ) -> None:
+        """Bind mounts (./relative or /absolute paths) are NOT writable
+        declarations — they're code/asset mounts. State 1 + bind mount
+        is fine."""
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - ./code:/srv/www:ro
+""")
+        validate_user_compose(
+            compose, paths,
+            manifest_services=self._manifest_services(writable=None),
+        )
+
+    def test_state1_smoke_volume_ignored(self, tmp_path: Path, paths) -> None:
+        """boxmunge's own smoke-scripts mount must not trigger the rule."""
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    volumes:
+      - ./boxmunge-scripts:/boxmunge-scripts:ro
+""")
+        validate_user_compose(
+            compose, paths,
+            manifest_services=self._manifest_services(writable=None),
+        )
+
+    # --- State 2 (manifest-managed) ------------------------------------------
+
+    def test_state2_no_compose_decls_ok(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+""")
+        validate_user_compose(
+            compose, paths,
+            manifest_services=self._manifest_services(
+                writable={"ephemeral": ["/var/cache"]},
+            ),
+        )
+
+    def test_state2_compose_tmpfs_conflicts(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    tmpfs:
+      - /var/cache
+""")
+        with pytest.raises(ComposeSecurityError) as exc:
+            validate_user_compose(
+                compose, paths,
+                manifest_services=self._manifest_services(
+                    writable={"ephemeral": ["/var/cache"]},
+                ),
+            )
+        msg = str(exc.value)
+        assert "conflicts with writable" in msg or "writable" in msg
+        assert "tmpfs" in msg
+
+    def test_state2_compose_volumes_conflicts(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+volumes:
+  dbdata:
+services:
+  web:
+    image: nginx
+    volumes:
+      - dbdata:/x
+""")
+        with pytest.raises(ComposeSecurityError) as exc:
+            validate_user_compose(
+                compose, paths,
+                manifest_services=self._manifest_services(
+                    writable={"persistent": [{"name": "dbdata", "mount": "/x"}]},
+                ),
+            )
+        msg = str(exc.value)
+        assert "writable" in msg
+        assert "volume" in msg.lower()
+
+    # --- State 3 (external) --------------------------------------------------
+
+    def test_state3_compose_tmpfs_ok(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    tmpfs:
+      - /var/cache/nginx
+""")
+        # External services delegate writability to compose — no error.
+        validate_user_compose(
+            compose, paths,
+            manifest_services=self._manifest_services(
+                writable={"external": True},
+            ),
+        )
+
+    def test_state3_compose_volumes_ok(self, tmp_path: Path, paths) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+volumes:
+  data:
+services:
+  web:
+    image: nginx
+    volumes:
+      - data:/app/data
+""")
+        validate_user_compose(
+            compose, paths,
+            manifest_services=self._manifest_services(
+                writable={"external": True},
+            ),
+        )
+
+    # --- Backward-compat: signature stays optional ---------------------------
+
+    def test_signature_remains_compatible_without_manifest_services(
+        self, tmp_path: Path, paths
+    ) -> None:
+        # Existing callers that don't pass manifest_services keep working —
+        # the conflict check is skipped entirely (legacy path).
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    tmpfs:
+      - /var/cache
+""")
+        # Without manifest_services, tmpfs should not fire the conflict
+        # rule — it falls back to legacy validation only.
+        validate_user_compose(compose, paths)
+
+    # --- Error message quality ------------------------------------------------
+
+    def test_state1_error_includes_migration_text(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    tmpfs:
+      - /var/cache/nginx
+""")
+        with pytest.raises(ComposeSecurityError) as exc:
+            validate_user_compose(
+                compose, paths,
+                manifest_services=self._manifest_services(writable=None),
+            )
+        msg = str(exc.value)
+        # Operator needs to know how to fix this — three options listed.
+        assert "writable.ephemeral" in msg
+        assert "external" in msg
+
+    def test_state2_error_includes_specific_conflict(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+    tmpfs:
+      - /var/cache
+""")
+        with pytest.raises(ComposeSecurityError) as exc:
+            validate_user_compose(
+                compose, paths,
+                manifest_services=self._manifest_services(
+                    writable={"ephemeral": ["/var/cache"]},
+                ),
+            )
+        msg = str(exc.value)
+        # Migration text mentions where the truth lives.
+        assert "writable" in msg
+
+    def test_multiple_services_only_conflicting_one_errors(
+        self, tmp_path: Path, paths
+    ) -> None:
+        compose = _write(tmp_path / "compose.yml", """
+services:
+  web:
+    image: nginx
+  api:
+    image: my/api
+    tmpfs:
+      - /var/cache
+""")
+        with pytest.raises(ComposeSecurityError) as exc:
+            validate_user_compose(
+                compose, paths,
+                manifest_services={
+                    "web": {"port": 80, "routes": [{"path": "/"}]},
+                    "api": {"port": 8000, "routes": [{"path": "/api"}]},
+                },
+            )
+        msg = str(exc.value)
+        assert "services.api" in msg

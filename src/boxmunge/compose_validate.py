@@ -367,6 +367,103 @@ def _check_overlay_dedupe(
     return None
 
 
+def _is_bind_mount_source(src: str) -> bool:
+    """Source paths starting with `.`, `/`, or `~` are bind mounts —
+    code/asset mounts, not writable declarations."""
+    return src.startswith((".", "/", "~"))
+
+
+# Smoke-test mount injected by the overlay generator. Must be ignored
+# when classifying user-compose volume entries.
+_SMOKE_MOUNT_SOURCES: frozenset[str] = frozenset({"./boxmunge-scripts"})
+
+
+def _has_named_volume(volumes: Any) -> bool:
+    """True if the volumes list contains a named-volume reference
+    (not a bind mount, not the smoke-scripts mount)."""
+    if not isinstance(volumes, list):
+        return False
+    for entry in volumes:
+        if isinstance(entry, str):
+            if ":" not in entry:
+                # Anonymous volume target — counts as a writable volume
+                # declaration.
+                return True
+            src = entry.split(":", 1)[0]
+            if src in _SMOKE_MOUNT_SOURCES:
+                continue
+            if _is_bind_mount_source(src):
+                continue
+            return True
+        if isinstance(entry, dict):
+            mount_type = entry.get("type", "volume")
+            if mount_type == "volume":
+                return True
+    return False
+
+
+def _check_writable_conflict(
+    services: dict[str, Any],
+    manifest_services: dict[str, Any],
+) -> None:
+    """Enforce v0.9 three-state writable cutover.
+
+    For each service in the user compose, classify via the manifest's
+    writable: block:
+      EXTERNAL — compose tmpfs/volumes OK, skip
+      DEFAULT / MANAGED — compose tmpfs and named-volumes forbidden
+
+    Bind mounts (./code, /absolute, ~) and boxmunge's own smoke-scripts
+    mount don't count as writability declarations and pass through.
+
+    Raises ComposeSecurityError on the first conflict with migration
+    text pointing the operator at services.<svc>.writable.
+    """
+    # Lazy import keeps compose_validate independent of writable module
+    # ordering. (writable.py has no deps on compose_validate.)
+    from boxmunge.writable import WritableState, classify_state
+
+    for svc_name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        manifest_svc = manifest_services.get(svc_name)
+        if not isinstance(manifest_svc, dict):
+            # Service exists in compose but not in manifest — that's a
+            # separate concern (handled elsewhere). Skip writable check.
+            continue
+        state = classify_state(manifest_svc)
+        if state is WritableState.EXTERNAL:
+            continue
+
+        has_tmpfs = isinstance(svc.get("tmpfs"), list) and len(svc["tmpfs"]) > 0
+        has_named_vol = _has_named_volume(svc.get("volumes"))
+
+        if not has_tmpfs and not has_named_vol:
+            continue
+
+        kind = "tmpfs" if has_tmpfs else "volumes"
+        if state is WritableState.MANAGED:
+            raise ComposeSecurityError(
+                f"services.{svc_name}: compose.yml declares {kind} but the "
+                f"manifest declares services.{svc_name}.writable — that "
+                f"surface is owned by boxmunge. Remove the compose-side "
+                f"{kind} declaration, or restructure under "
+                f"services.{svc_name}.writable.ephemeral / .persistent, "
+                f"or set services.{svc_name}.writable.external: true to "
+                f"manage writability in compose.yml directly."
+            )
+        # DEFAULT (no writable block in manifest)
+        raise ComposeSecurityError(
+            f"services.{svc_name}: compose.yml declares {kind} but the "
+            f"manifest has no writable: block for this service. Boxmunge "
+            f"owns this surface by default. Declare paths in "
+            f"services.{svc_name}.writable.ephemeral (for tmpfs) or "
+            f"services.{svc_name}.writable.persistent (for named volumes), "
+            f"or set services.{svc_name}.writable.external: true to "
+            f"manage writability in compose.yml directly."
+        )
+
+
 def _enforce_cve_rule(
     services: dict[str, Any],
     off: set[str],
@@ -413,6 +510,7 @@ def validate_user_compose(
     off_services: set[str] | None = None,
     project_name: str | None = None,
     cve_policy: dict | None = None,
+    manifest_services: dict | None = None,
 ) -> None:
     """Parse compose.yml and reject hostile keys.
 
@@ -527,3 +625,10 @@ def validate_user_compose(
             rule_label="posture 'strict' requires read_only",
             check_fn=_check_strict_posture_requires_readonly,
         )
+
+    # v0.9: writable three-state conflict matrix. Skipped if the caller
+    # didn't pass manifest_services (legacy callers + tests that focus on
+    # other rules); active callers (deploy/stage/resume/upgrade) always
+    # pass it post-v0.9.
+    if manifest_services is not None and isinstance(manifest_services, dict):
+        _check_writable_conflict(services, manifest_services)
