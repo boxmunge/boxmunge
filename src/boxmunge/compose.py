@@ -13,6 +13,7 @@ from boxmunge.security_overlay import (
     render_compose_security_fragment,
 )
 from boxmunge.security_warn import warn_off_services
+from boxmunge.writable import WritableState, classify_state
 
 
 class ComposeError(ValueError):
@@ -172,8 +173,12 @@ def _build_service_override(
         if limits:
             svc_override["deploy"] = {"resources": {"limits": dict(limits)}}
 
+        # Collect service-level volumes here so smoke + persistent
+        # writable entries can coexist on one list (Compose merge with
+        # the user's compose.yml extends lists, never replaces).
+        svc_volumes: list[str] = []
         if svc.get("smoke"):
-            svc_override["volumes"] = ["./boxmunge-scripts:/boxmunge-scripts:ro"]
+            svc_volumes.append("./boxmunge-scripts:/boxmunge-scripts:ro")
 
         # Security hardening — silent defaults injected here.
         resolved = resolve_security(project_security, svc.get("security"))
@@ -189,6 +194,39 @@ def _build_service_override(
             if "tmpfs" in sec_fragment and _user_claims_tmp(user_svc):
                 sec_fragment.pop("tmpfs")
 
+        # v0.9: writable: block translation. Three states.
+        # See docs/superpowers/specs/2026-05-08-v0.9-writable-abstraction-design.md
+        state = classify_state(svc)
+        if state is WritableState.EXTERNAL:
+            # Operator owns writability entirely. Overlay emits no tmpfs
+            # (not even /tmp) and no volumes. read_only baseline is left
+            # alone — operator can still opt out separately via compose.
+            sec_fragment.pop("tmpfs", None)
+        elif state is WritableState.MANAGED:
+            writable_block = svc.get("writable") or {}
+            ephemeral = writable_block.get("ephemeral") or []
+            persistent = writable_block.get("persistent") or []
+            # Append ephemeral entries to the baseline tmpfs list, deduping
+            # the /tmp baseline if the operator declared /tmp explicitly.
+            baseline_tmpfs = list(sec_fragment.get("tmpfs", []))
+            for path in ephemeral:
+                if path not in baseline_tmpfs:
+                    baseline_tmpfs.append(path)
+            if baseline_tmpfs:
+                sec_fragment["tmpfs"] = baseline_tmpfs
+            # Translate persistent entries into named-volume references.
+            # Volume name is <project>_<svc>_<name> — collision-free by
+            # construction (project unique on host, svc unique in project,
+            # name unique in service per writable.py validation).
+            for entry in persistent:
+                if not isinstance(entry, dict):
+                    continue
+                vol_name = f"{project}_{svc_name}_{entry['name']}"
+                svc_volumes.append(f"{vol_name}:{entry['mount']}")
+
+        if svc_volumes:
+            svc_override["volumes"] = svc_volumes
+
         # Avoid Docker Compose's "can't set distinct values on 'pids_limit'
         # and 'deploy.resources.limits.pids'" error: when manifest limits
         # already created a deploy.resources.limits block, nest pids_limit
@@ -203,6 +241,34 @@ def _build_service_override(
             services[svc_name] = svc_override
 
     return services
+
+
+def _build_top_level_volumes(manifest: dict[str, Any]) -> dict[str, dict]:
+    """Build the top-level `volumes:` block declaring named volumes the
+    overlay emitted for State MANAGED services.
+
+    Each named volume gets an empty mapping — Docker auto-creates on
+    first deploy. Volume names follow the same `<project>_<svc>_<name>`
+    convention used in _build_service_override.
+    """
+    project = manifest.get("project", "")
+    out: dict[str, dict] = {}
+    services_block = manifest.get("services", {})
+    if not isinstance(services_block, dict):
+        return out
+    for svc_name, svc in services_block.items():
+        if not isinstance(svc, dict):
+            continue
+        if classify_state(svc) is not WritableState.MANAGED:
+            continue
+        writable_block = svc.get("writable") or {}
+        persistent = writable_block.get("persistent") or []
+        for entry in persistent:
+            if not isinstance(entry, dict):
+                continue
+            vol_name = f"{project}_{svc_name}_{entry['name']}"
+            out[vol_name] = {}
+    return out
 
 
 def generate_compose_override(
@@ -233,6 +299,10 @@ def generate_compose_override(
     }
     if services:
         override["services"] = services
+
+    top_level_volumes = _build_top_level_volumes(manifest)
+    if top_level_volumes:
+        override["volumes"] = top_level_volumes
 
     return yaml.dump(override, default_flow_style=False, sort_keys=False)
 
@@ -379,5 +449,9 @@ def generate_staging_compose_override(
     }
     if services:
         override["services"] = services
+
+    top_level_volumes = _build_top_level_volumes(manifest)
+    if top_level_volumes:
+        override["volumes"] = top_level_volumes
 
     return yaml.dump(override, default_flow_style=False, sort_keys=False)

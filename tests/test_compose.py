@@ -698,6 +698,189 @@ class TestV08UserWinsOnExplicitDeclarations:
         assert "tmpfs" not in web
 
 
+class TestWritableOverlay:
+    """v0.9: writable: block translates to overlay tmpfs/volumes.
+
+    Three states tested:
+      DEFAULT: no writable block — service emits v0.8 baseline only
+      MANAGED: writable.ephemeral / .persistent — overlay generates tmpfs/volumes
+      EXTERNAL: writable.external: true — overlay emits no tmpfs/volume entries
+    """
+
+    def _manifest(self, writable=None, with_limits=False):
+        m = {
+            "project": "demo",
+            "hosts": ["demo.example.com"],
+            "services": {
+                "web": {
+                    "type": "frontend",
+                    "port": 3000,
+                    "routes": [{"path": "/"}],
+                },
+            },
+        }
+        if writable is not None:
+            m["services"]["web"]["writable"] = writable
+        if with_limits:
+            m["services"]["web"]["limits"] = {"memory": "256m"}
+        return m
+
+    # --- State DEFAULT ----------------------------------------------------
+
+    def test_default_state_baseline_unchanged(self) -> None:
+        """Regression: service with no writable: block stays on v0.8 baseline."""
+        override = generate_compose_override(self._manifest())
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        assert web["read_only"] is True
+        assert web["tmpfs"] == ["/tmp"]
+        # Volumes are NOT introduced into State 1 services.
+        assert "volumes" not in web or web.get("volumes") == [
+            "./boxmunge-scripts:/boxmunge-scripts:ro"
+        ]
+
+    # --- State MANAGED ----------------------------------------------------
+
+    def test_ephemeral_appended_to_baseline_tmpfs(self) -> None:
+        override = generate_compose_override(self._manifest(writable={
+            "ephemeral": ["/var/cache/nginx", "/var/run"],
+        }))
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        # /tmp baseline is preserved; ephemeral entries appear after.
+        assert web["tmpfs"] == ["/tmp", "/var/cache/nginx", "/var/run"]
+        assert web["read_only"] is True
+
+    def test_ephemeral_with_explicit_tmp_dedupes(self) -> None:
+        override = generate_compose_override(self._manifest(writable={
+            "ephemeral": ["/tmp", "/var/run"],
+        }))
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        # /tmp appears exactly once.
+        assert web["tmpfs"].count("/tmp") == 1
+        assert "/var/run" in web["tmpfs"]
+
+    def test_persistent_emits_volume_reference(self) -> None:
+        override = generate_compose_override(self._manifest(writable={
+            "persistent": [{"name": "dbdata", "mount": "/app/data"}],
+        }))
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        vols = web["volumes"]
+        assert "demo_web_dbdata:/app/data" in vols
+
+    def test_persistent_emits_top_level_volumes_block(self) -> None:
+        override = generate_compose_override(self._manifest(writable={
+            "persistent": [{"name": "dbdata", "mount": "/app/data"}],
+        }))
+        parsed = yaml.safe_load(override)
+        # Top-level volumes: block declares the named volume.
+        assert "volumes" in parsed
+        assert "demo_web_dbdata" in parsed["volumes"]
+        # Value should be {} or None (Docker auto-creates).
+        assert parsed["volumes"]["demo_web_dbdata"] in (None, {})
+
+    def test_persistent_multiple_volumes(self) -> None:
+        override = generate_compose_override(self._manifest(writable={
+            "persistent": [
+                {"name": "dbdata", "mount": "/app/data"},
+                {"name": "uploads", "mount": "/app/uploads"},
+            ],
+        }))
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        assert "demo_web_dbdata:/app/data" in web["volumes"]
+        assert "demo_web_uploads:/app/uploads" in web["volumes"]
+        assert "demo_web_dbdata" in parsed["volumes"]
+        assert "demo_web_uploads" in parsed["volumes"]
+
+    def test_persistent_plus_smoke_volumes_coexist(self) -> None:
+        m = self._manifest(writable={
+            "persistent": [{"name": "dbdata", "mount": "/app/data"}],
+        })
+        m["services"]["web"]["smoke"] = "smoke.sh"
+        override = generate_compose_override(m)
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        # Smoke mount must still be present.
+        assert "./boxmunge-scripts:/boxmunge-scripts:ro" in web["volumes"]
+        # And the persistent volume too.
+        assert "demo_web_dbdata:/app/data" in web["volumes"]
+
+    def test_managed_both_ephemeral_and_persistent(self) -> None:
+        override = generate_compose_override(self._manifest(writable={
+            "ephemeral": ["/var/run"],
+            "persistent": [{"name": "dbdata", "mount": "/app/data"}],
+        }))
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        assert "/var/run" in web["tmpfs"]
+        assert "demo_web_dbdata:/app/data" in web["volumes"]
+
+    # --- State EXTERNAL ---------------------------------------------------
+
+    def test_external_suppresses_tmpfs_baseline(self) -> None:
+        override = generate_compose_override(self._manifest(writable={
+            "external": True,
+        }))
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        # Boxmunge emits NO tmpfs — not even /tmp.
+        assert "tmpfs" not in web
+
+    def test_external_suppresses_volumes(self) -> None:
+        # External services with smoke would still need the smoke mount.
+        # But without smoke, no volumes entry should appear.
+        override = generate_compose_override(self._manifest(writable={
+            "external": True,
+        }))
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        # No "volumes" key on the service — the operator owns this surface.
+        assert "volumes" not in web
+
+    def test_external_keeps_read_only(self) -> None:
+        """External writability is orthogonal to read_only. The default
+        baseline of read_only:true still applies — operator opts out
+        separately via compose."""
+        override = generate_compose_override(self._manifest(writable={
+            "external": True,
+        }))
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        assert web["read_only"] is True
+
+    def test_external_with_smoke_still_mounts_scripts(self) -> None:
+        """An external service still needs the smoke-scripts mount for
+        its smoke test. That's a boxmunge concern, not the operator's."""
+        m = self._manifest(writable={"external": True})
+        m["services"]["web"]["smoke"] = "smoke.sh"
+        override = generate_compose_override(m)
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        assert "./boxmunge-scripts:/boxmunge-scripts:ro" in web.get(
+            "volumes", []
+        )
+
+    # --- regression: existing user-wins-on-tmpfs still works in DEFAULT ---
+
+    def test_default_state_user_wins_on_tmpfs_unchanged(self) -> None:
+        """v0.8 rule: user compose tmpfs overrides overlay baseline.
+        This still applies in State DEFAULT (no writable block).
+        """
+        user_compose = {
+            "services": {"web": {"tmpfs": ["/tmp:size=128m"]}},
+        }
+        override = generate_compose_override(
+            self._manifest(), user_compose=user_compose,
+        )
+        parsed = yaml.safe_load(override)
+        web = parsed["services"]["web"]
+        # Overlay omits its /tmp baseline so user value wins via compose merge.
+        assert "tmpfs" not in web
+
+
 class TestComposeShapeGuards:
     """Audit Finding 11: defensive type guards on staging base compose."""
 
