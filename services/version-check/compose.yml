@@ -2,17 +2,13 @@ services:
   web:
     build: .
     restart: unless-stopped
-    volumes:
-      - check-data:/data
     # Hardening (read_only rootfs, /tmp tmpfs, no-new-privileges, init,
     # cap_drop, pids_limit) is provided automatically by boxmunge's
-    # default-profile overlay. Do not redeclare those here — the overlay
-    # generator omits its read_only/tmpfs additions when user compose
-    # already declares them, but redundant declarations clutter the
-    # source and risk merge-time conflicts on later additions.
+    # default-profile overlay.
     #
-    # To opt out of the read_only default: declare `read_only: false`
-    # explicitly (incurs +1 hardening penalty in CVE policy).
-
-volumes:
-  check-data:
+    # Persistent storage (the check-data volume at /data) is declared
+    # in manifest.yml under services.web.writable.persistent. boxmunge
+    # owns the volume name and the top-level volumes: block in the
+    # generated overlay. Do NOT add volumes: or tmpfs: here for v0.9+
+    # schema-3 projects — that is a deploy-time error. See:
+    # agent-help writable.

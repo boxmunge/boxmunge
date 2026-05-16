@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: 01VERSIONCHECK000000000000
 project: boxmunge-web
 source: bundle
@@ -11,6 +11,10 @@ services:
       - path: /
     health: /v1/check?v=0.0.0
     smoke: boxmunge-scripts/smoke.sh
+    writable:
+      persistent:
+        - name: check-data
+          mount: /data
 backup:
   type: volume
   # boxmunge captures the dump command's stdout into the encrypted snapshot,
