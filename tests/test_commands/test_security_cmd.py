@@ -45,6 +45,9 @@ def test_security_default_lists_full_payload(project_with_default) -> None:
     assert "no-new-privileges:true" in out
     assert "pids_limit" in out and "512" in out
     assert "NET_ADMIN" in out
+    # v0.9: writable state surfaced per service.
+    assert "writable:" in out
+    assert "default" in out  # state for service without writable block
 
 
 def test_security_json_returns_structured_data(project_with_default) -> None:
@@ -58,7 +61,77 @@ def test_security_json_returns_structured_data(project_with_default) -> None:
     web = payload["services"]["web"]
     assert web["pids_limit"] == 512
     assert "NET_ADMIN" in web["cap_drop"]
+    # v0.9: writable: state in JSON payload.
+    assert web["writable"] == {"state": "default"}
     assert payload["off_services"] == []
+
+
+def test_security_text_with_writable_block_shows_managed(
+    monkeypatch, tmp_path,
+) -> None:
+    """A service with writable.ephemeral/persistent shows manifest-managed
+    with the counts."""
+    paths = _make_paths(tmp_path)
+    proj = paths.projects / "demo"
+    proj.mkdir(parents=True)
+    (paths.state / "projects.txt").write_text("demo\n")
+    manifest = {
+        "schema_version": 3,
+        "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+        "source": "bundle",
+        "project": "demo",
+        "hosts": ["demo.example.com"],
+        "services": {
+            "web": {
+                "port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh",
+                "writable": {
+                    "ephemeral": ["/var/cache"],
+                    "persistent": [{"name": "dbdata", "mount": "/app/data"}],
+                },
+            },
+        },
+    }
+    (proj / "manifest.yml").write_text(yaml.safe_dump(manifest))
+    monkeypatch.setattr("boxmunge.commands.security_cmd._paths", lambda: paths)
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        cmd_security(["demo"])
+    out = buf.getvalue()
+    assert "manifest-managed" in out
+    assert "1 ephemeral" in out
+    assert "1 persistent" in out
+
+
+def test_security_json_with_writable_external(monkeypatch, tmp_path) -> None:
+    paths = _make_paths(tmp_path)
+    proj = paths.projects / "demo"
+    proj.mkdir(parents=True)
+    (paths.state / "projects.txt").write_text("demo\n")
+    manifest = {
+        "schema_version": 3,
+        "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+        "source": "bundle",
+        "project": "demo",
+        "hosts": ["demo.example.com"],
+        "services": {
+            "web": {
+                "port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh",
+                "writable": {"external": True},
+            },
+        },
+    }
+    (proj / "manifest.yml").write_text(yaml.safe_dump(manifest))
+    monkeypatch.setattr("boxmunge.commands.security_cmd._paths", lambda: paths)
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        cmd_security(["demo", "--json"])
+    payload = json.loads(buf.getvalue())
+    assert payload["services"]["web"]["writable"] == {
+        "state": "externally-managed",
+        "external": True,
+    }
 
 
 def test_security_json_flag_first(project_with_default) -> None:
@@ -169,7 +242,9 @@ def test_security_json_off_services(monkeypatch, tmp_path) -> None:
     payload = json.loads(buf.getvalue())
     assert payload["project_profile"] == "off"
     assert payload["off_services"] == [{"service": "web", "reason": "deliberate"}]
-    assert payload["services"]["web"] == {}
+    # v0.9: writable state is surfaced in services[svc] payload even for
+    # off-profile services. Hardening fragment is otherwise empty.
+    assert payload["services"]["web"] == {"writable": {"state": "default"}}
 
 
 def test_security_unknown_flag_exits_2(capsys) -> None:

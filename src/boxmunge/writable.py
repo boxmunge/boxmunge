@@ -74,6 +74,65 @@ def classify_state(svc: Any) -> WritableState:
     return WritableState.DEFAULT
 
 
+def describe_state(svc: Any) -> tuple[WritableState, str]:
+    """Return (state, human-readable description) for a service block.
+
+    Used by `boxmunge security` to surface writable state per service.
+    The description is short — meant for one line in tabular output.
+
+    Examples:
+        DEFAULT  -> "default (read-only rootfs, /tmp tmpfs)"
+        MANAGED  -> "manifest-managed (1 ephemeral, 1 persistent)"
+        EXTERNAL -> "externally-managed (operator owns)"
+    """
+    state = classify_state(svc)
+    if state is WritableState.DEFAULT:
+        return state, "default (read-only rootfs, /tmp tmpfs)"
+    if state is WritableState.EXTERNAL:
+        return state, "externally-managed (operator owns)"
+    # MANAGED — count entries.
+    block = (svc or {}).get("writable") or {}
+    eph_count = len(block.get("ephemeral") or [])
+    per_count = len(block.get("persistent") or [])
+    parts: list[str] = []
+    if eph_count:
+        parts.append(f"{eph_count} ephemeral")
+    if per_count:
+        parts.append(f"{per_count} persistent")
+    return state, f"manifest-managed ({', '.join(parts) or 'no entries'})"
+
+
+def writable_json(svc: Any) -> dict[str, Any]:
+    """Return the JSON-shape representation of a service's writable
+    state for `boxmunge security --json` consumers.
+
+    Always returns a mapping with `state` set; `ephemeral` and
+    `persistent` lists are included when populated; `external` flag
+    is included when true.
+    """
+    state = classify_state(svc)
+    out: dict[str, Any] = {"state": state.value}
+    if not isinstance(svc, dict):
+        return out
+    block = svc.get("writable")
+    if not isinstance(block, dict):
+        return out
+    if state is WritableState.EXTERNAL:
+        out["external"] = True
+        return out
+    eph = block.get("ephemeral")
+    if isinstance(eph, list) and eph:
+        out["ephemeral"] = list(eph)
+    per = block.get("persistent")
+    if isinstance(per, list) and per:
+        out["persistent"] = [
+            {"name": e.get("name"), "mount": e.get("mount")}
+            for e in per
+            if isinstance(e, dict)
+        ]
+    return out
+
+
 def _validate_path(path: Any, context: str) -> str:
     """Validate a single container path. Returns the path on success.
 

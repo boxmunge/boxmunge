@@ -19,6 +19,7 @@ from boxmunge.security_overlay import (
     resolve_security,
     services_with_off_profile,
 )
+from boxmunge.writable import describe_state, writable_json
 
 
 # ---------- per-project view ----------
@@ -141,6 +142,8 @@ def format_project_text(
             lines.append(f"    cap_drop:          {fragment['cap_drop']}")
         if fragment.get("cap_add"):
             lines.append(f"    cap_add:           {fragment['cap_add']}")
+        _, writable_desc = describe_state(svc)
+        lines.append(f"    writable:          {writable_desc}")
         lines.append("")
 
     # CVE section ---------------------------------------------------------
@@ -223,7 +226,12 @@ def format_project_json(
         ],
     }
     for svc_name, fragment in _resolved_for_each_service(manifest).items():
-        payload["services"][svc_name] = fragment
+        svc_block = manifest["services"][svc_name]
+        # Extend the hardening fragment with v0.9 writable: state for
+        # this service so JSON consumers see the surface choices.
+        enriched = dict(fragment)
+        enriched["writable"] = writable_json(svc_block)
+        payload["services"][svc_name] = enriched
 
     findings_payload: list[dict[str, Any]] = []
     if scan_state is not None:

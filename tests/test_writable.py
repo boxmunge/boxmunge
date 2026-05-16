@@ -9,7 +9,9 @@ from boxmunge.writable import (
     WritableState,
     WritableValidationError,
     classify_state,
+    describe_state,
     validate_writable_block,
+    writable_json,
 )
 
 
@@ -211,3 +213,85 @@ class TestClassifyState:
     def test_external_state(self) -> None:
         svc = {"writable": {"external": True}}
         assert classify_state(svc) is WritableState.EXTERNAL
+
+
+class TestDescribeState:
+    def test_default(self) -> None:
+        state, desc = describe_state({})
+        assert state is WritableState.DEFAULT
+        assert "default" in desc
+        assert "/tmp" in desc
+
+    def test_external(self) -> None:
+        state, desc = describe_state({"writable": {"external": True}})
+        assert state is WritableState.EXTERNAL
+        assert "externally-managed" in desc
+
+    def test_managed_ephemeral_only(self) -> None:
+        state, desc = describe_state({
+            "writable": {"ephemeral": ["/x", "/y"]},
+        })
+        assert state is WritableState.MANAGED
+        assert "2 ephemeral" in desc
+
+    def test_managed_persistent_only(self) -> None:
+        state, desc = describe_state({
+            "writable": {"persistent": [{"name": "d", "mount": "/m"}]},
+        })
+        assert state is WritableState.MANAGED
+        assert "1 persistent" in desc
+
+    def test_managed_both(self) -> None:
+        state, desc = describe_state({
+            "writable": {
+                "ephemeral": ["/x"],
+                "persistent": [{"name": "d", "mount": "/m"}],
+            },
+        })
+        assert state is WritableState.MANAGED
+        assert "1 ephemeral" in desc
+        assert "1 persistent" in desc
+
+
+class TestWritableJson:
+    def test_default_minimal(self) -> None:
+        assert writable_json({}) == {"state": "default"}
+
+    def test_external_includes_flag(self) -> None:
+        result = writable_json({"writable": {"external": True}})
+        assert result == {"state": "externally-managed", "external": True}
+
+    def test_managed_includes_ephemeral(self) -> None:
+        result = writable_json({
+            "writable": {"ephemeral": ["/var/cache", "/var/run"]},
+        })
+        assert result == {
+            "state": "manifest-managed",
+            "ephemeral": ["/var/cache", "/var/run"],
+        }
+
+    def test_managed_includes_persistent(self) -> None:
+        result = writable_json({
+            "writable": {"persistent": [
+                {"name": "dbdata", "mount": "/app/data"},
+            ]},
+        })
+        assert result == {
+            "state": "manifest-managed",
+            "persistent": [{"name": "dbdata", "mount": "/app/data"}],
+        }
+
+    def test_managed_includes_both(self) -> None:
+        result = writable_json({
+            "writable": {
+                "ephemeral": ["/var/run"],
+                "persistent": [{"name": "data", "mount": "/d"}],
+            },
+        })
+        assert result["state"] == "manifest-managed"
+        assert result["ephemeral"] == ["/var/run"]
+        assert result["persistent"] == [{"name": "data", "mount": "/d"}]
+
+    def test_garbage_svc_safe(self) -> None:
+        assert writable_json(None) == {"state": "default"}
+        assert writable_json("not a dict") == {"state": "default"}
