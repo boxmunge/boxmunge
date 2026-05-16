@@ -231,6 +231,37 @@ def validate_manifest(
             except WritableValidationError as e:
                 errors.append(str(e))
 
+        # Project-wide uniqueness: persistent volume names emit
+        # <project>_<name> docker volumes, so two services declaring the
+        # same `name` would alias to the same volume. Catch at manifest
+        # time rather than letting Compose silently share the mount.
+        seen_volume_names: dict[str, str] = {}
+        for svc_name, svc in services.items():
+            if not isinstance(svc, dict):
+                continue
+            writable_block = svc.get("writable")
+            if not isinstance(writable_block, dict):
+                continue
+            persistent = writable_block.get("persistent")
+            if not isinstance(persistent, list):
+                continue
+            for entry in persistent:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name")
+                if not isinstance(name, str):
+                    continue
+                prior_svc = seen_volume_names.get(name)
+                if prior_svc is not None and prior_svc != svc_name:
+                    errors.append(
+                        f"writable.persistent name {name!r} is declared "
+                        f"by both services.{prior_svc!r} and "
+                        f"services.{svc_name!r}. Names must be unique "
+                        f"project-wide because the generated docker "
+                        f"volume name is <project>_<name>."
+                    )
+                seen_volume_names[name] = svc_name
+
     # Backup
     backup = manifest.get("backup", {})
     if not isinstance(backup, dict):

@@ -215,13 +215,17 @@ def _build_service_override(
             if baseline_tmpfs:
                 sec_fragment["tmpfs"] = baseline_tmpfs
             # Translate persistent entries into named-volume references.
-            # Volume name is <project>_<svc>_<name> — collision-free by
-            # construction (project unique on host, svc unique in project,
-            # name unique in service per writable.py validation).
+            # Volume name is <project>_<name> — matches Docker Compose's
+            # default convention when a user declares a top-level
+            # `volumes: { foo: {} }` block. Existing volumes (from the
+            # pre-v0.9 compose-side world) keep their data on migration
+            # because the generated name matches Compose's previous
+            # default. Cross-service uniqueness of `name` is enforced at
+            # manifest validation time.
             for entry in persistent:
                 if not isinstance(entry, dict):
                     continue
-                vol_name = f"{project}_{svc_name}_{entry['name']}"
+                vol_name = f"{project}_{entry['name']}"
                 svc_volumes.append(f"{vol_name}:{entry['mount']}")
 
         if svc_volumes:
@@ -248,8 +252,9 @@ def _build_top_level_volumes(manifest: dict[str, Any]) -> dict[str, dict]:
     overlay emitted for State MANAGED services.
 
     Each named volume gets an empty mapping — Docker auto-creates on
-    first deploy. Volume names follow the same `<project>_<svc>_<name>`
-    convention used in _build_service_override.
+    first deploy. Volume names follow `<project>_<name>` to match
+    Docker Compose's default convention; existing data survives
+    migration from a pre-v0.9 `volumes: {<name>: {}}` declaration.
     """
     project = manifest.get("project", "")
     out: dict[str, dict] = {}
@@ -266,7 +271,7 @@ def _build_top_level_volumes(manifest: dict[str, Any]) -> dict[str, dict]:
         for entry in persistent:
             if not isinstance(entry, dict):
                 continue
-            vol_name = f"{project}_{svc_name}_{entry['name']}"
+            vol_name = f"{project}_{entry['name']}"
             out[vol_name] = {}
     return out
 

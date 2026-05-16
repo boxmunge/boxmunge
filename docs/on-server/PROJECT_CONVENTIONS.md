@@ -284,7 +284,7 @@ services:
 
 - All paths must be absolute, no `..`, max 256 chars.
 - `ephemeral` entries: list of strings, no duplicates within the list.
-- `persistent` entries: `{name, mount}` mappings. Names unique within the service; mounts unique within the service.
+- `persistent` entries: `{name, mount}` mappings. **Names must be unique project-wide** (across all services), not just within one service — the generated docker volume name is `<project>_<name>` to match Docker Compose's default convention, so two services declaring the same `name` would alias to the same physical volume. Mounts unique within the service.
 - A path cannot appear in both `ephemeral` and `persistent` for the same service.
 - A `persistent` mount cannot be nested under any `ephemeral` path (tmpfs would shadow the volume at runtime).
 - Reserved roots (`/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/boot`, `/proc`, `/sys`, `/dev`) cannot be used as persistent mounts.

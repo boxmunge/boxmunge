@@ -768,7 +768,7 @@ class TestWritableOverlay:
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         vols = web["volumes"]
-        assert "demo_web_dbdata:/app/data" in vols
+        assert "demo_dbdata:/app/data" in vols
 
     def test_persistent_emits_top_level_volumes_block(self) -> None:
         override = generate_compose_override(self._manifest(writable={
@@ -777,9 +777,9 @@ class TestWritableOverlay:
         parsed = yaml.safe_load(override)
         # Top-level volumes: block declares the named volume.
         assert "volumes" in parsed
-        assert "demo_web_dbdata" in parsed["volumes"]
+        assert "demo_dbdata" in parsed["volumes"]
         # Value should be {} or None (Docker auto-creates).
-        assert parsed["volumes"]["demo_web_dbdata"] in (None, {})
+        assert parsed["volumes"]["demo_dbdata"] in (None, {})
 
     def test_persistent_multiple_volumes(self) -> None:
         override = generate_compose_override(self._manifest(writable={
@@ -790,10 +790,10 @@ class TestWritableOverlay:
         }))
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
-        assert "demo_web_dbdata:/app/data" in web["volumes"]
-        assert "demo_web_uploads:/app/uploads" in web["volumes"]
-        assert "demo_web_dbdata" in parsed["volumes"]
-        assert "demo_web_uploads" in parsed["volumes"]
+        assert "demo_dbdata:/app/data" in web["volumes"]
+        assert "demo_uploads:/app/uploads" in web["volumes"]
+        assert "demo_dbdata" in parsed["volumes"]
+        assert "demo_uploads" in parsed["volumes"]
 
     def test_persistent_plus_smoke_volumes_coexist(self) -> None:
         m = self._manifest(writable={
@@ -806,7 +806,7 @@ class TestWritableOverlay:
         # Smoke mount must still be present.
         assert "./boxmunge-scripts:/boxmunge-scripts:ro" in web["volumes"]
         # And the persistent volume too.
-        assert "demo_web_dbdata:/app/data" in web["volumes"]
+        assert "demo_dbdata:/app/data" in web["volumes"]
 
     def test_managed_both_ephemeral_and_persistent(self) -> None:
         override = generate_compose_override(self._manifest(writable={
@@ -816,7 +816,7 @@ class TestWritableOverlay:
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         assert "/var/run" in web["tmpfs"]
-        assert "demo_web_dbdata:/app/data" in web["volumes"]
+        assert "demo_dbdata:/app/data" in web["volumes"]
 
     # --- State EXTERNAL ---------------------------------------------------
 

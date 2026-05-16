@@ -675,3 +675,38 @@ class TestWritableManifestIntegration:
         m["services"]["web"]["writable"] = "not a mapping"
         errors, _ = validate_manifest(m, expected_name="demo")
         assert any("writable" in e and "mapping" in e for e in errors)
+
+    def test_persistent_name_collision_across_services_errors(self) -> None:
+        """The emitted volume name is <project>_<name> to match Compose's
+        default convention — same name across two services in the same
+        manifest would alias to one docker volume. Catch at manifest
+        validation time."""
+        m = self._base()
+        m["services"]["web"]["writable"] = {
+            "persistent": [{"name": "shared", "mount": "/app/data"}],
+        }
+        m["services"]["api"] = {
+            "port": 8000, "routes": [{"path": "/api"}], "smoke": "y.sh",
+            "writable": {
+                "persistent": [{"name": "shared", "mount": "/api/data"}],
+            },
+        }
+        errors, _ = validate_manifest(m, expected_name="demo")
+        assert any(
+            "shared" in e and "unique" in e for e in errors
+        ), f"expected collision error, got: {errors}"
+
+    def test_persistent_name_unique_across_services_ok(self) -> None:
+        """Different names in different services are fine."""
+        m = self._base()
+        m["services"]["web"]["writable"] = {
+            "persistent": [{"name": "webdata", "mount": "/app/data"}],
+        }
+        m["services"]["api"] = {
+            "port": 8000, "routes": [{"path": "/api"}], "smoke": "y.sh",
+            "writable": {
+                "persistent": [{"name": "apidata", "mount": "/api/data"}],
+            },
+        }
+        errors, _ = validate_manifest(m, expected_name="demo")
+        assert all("unique" not in e for e in errors)
