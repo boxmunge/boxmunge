@@ -147,6 +147,26 @@ project that doesn't redeclare `read_only` in user compose is treated
 as fully hardened (the overlay provides it). Only an explicit
 `read_only: false` in user compose triggers the +1 penalty.
 
+### v0.9 writable: surface and the penalty
+
+The v0.9 `writable:` block (schema 3) is orthogonal to the read-only-
+rootfs penalty. Declaring `writable.ephemeral` and/or
+`writable.persistent` does NOT incur a CVE penalty — the service is
+still on a read-only rootfs, just with operator-declared writable
+sub-paths.
+
+`writable.external: true` (operator delegates writability to
+compose.yml entirely) also incurs no penalty by itself, provided
+`read_only: true` still applies. The deploy-time `[INFO]` warning is
+the visibility signal. Should the operator additionally declare
+`read_only: false` in compose.yml for an external service, the +1
+penalty for explicit read-only opt-out attaches as normal.
+
+The `boxmunge security <project>` output surfaces the per-service
+writable state (default / manifest-managed / externally-managed)
+alongside the hardening fragment for full visibility of the
+service's silent-floor posture.
+
 ## Configuring posture (manifest.yml)
 
 `posture` and `dangerously_disable_quarantine` live at the project level

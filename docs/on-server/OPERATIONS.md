@@ -441,6 +441,72 @@ Plain hostnames don't need the flag. See `SECURITY.md` for the routing-isolation
 
 ---
 
+### Container crash-loops with "Read-only file system" (v0.9+)
+
+v0.9 makes read-only rootfs an active default. If your container writes to a path outside `/tmp` (e.g. nginx writes `/var/cache/nginx/client_temp`, postgres writes `/var/lib/postgresql/data`, your app writes `/var/log/myapp/...`), the first write fails and the container exits with `Read-only file system`.
+
+Boxmunge surfaces this automatically. Three places to look:
+
+- **Deploy output** — an 8-second post-`compose up` scan emits a `[HINT]` block naming the offending path:
+
+  ```text
+  [HINT] services.web reports read-only filesystem errors for path(s) '/var/cache/nginx'.
+         Add the path(s) to manifest.yml at services.web.writable.ephemeral
+         (or .persistent if data should survive restart). See: agent-help writable.
+  ```
+
+- **Smoke-failure output** — when a smoke test fails and recent logs contain a read-only-fs error, the failure message is enriched with the same hint.
+- **`boxmunge logs <project>`** — non-follow mode appends a writable-hint postscript when the captured buffer contains read-only-fs errors.
+
+Fix it by declaring the write path under `services.<name>.writable` in the manifest:
+
+```yaml
+schema_version: 3
+services:
+  web:
+    writable:
+      ephemeral:           # tmpfs — wiped on container restart
+        - /var/cache/nginx
+        - /var/run
+      persistent:          # named docker volumes — survive restart
+        - name: dbdata
+          mount: /var/lib/postgresql/data
+```
+
+Then `deploy` (or `upgrade`) the project. The overlay generator regenerates `compose.boxmunge.yml` with the requested tmpfs/volumes, and the container starts cleanly.
+
+#### Externally-managed services
+
+If the app needs unusual writability that boxmunge's abstraction doesn't model (bind mounts, shared host paths, esoteric tmpfs options), opt out of manifest management for that service:
+
+```yaml
+services:
+  legacy:
+    writable:
+      external: true        # boxmunge defers all tmpfs/volumes to your compose.yml
+```
+
+This declares "I'll handle writability via compose.yml directly for this service." Boxmunge emits no tmpfs (not even `/tmp`) and no volumes. Compose-side `tmpfs:` and `volumes:` declarations are accepted as-is. An `[INFO]` warning fires every deploy as a visible reminder of the delegated state.
+
+`read_only: true` still applies under `external` — to opt out of read-only rootfs separately, declare `read_only: false` in compose.yml (which emits a `[WARNING]` every deploy and incurs a CVE hardening penalty).
+
+#### Conflict errors
+
+If compose.yml declares `tmpfs:` or named `volumes:` for a service while the manifest has no `writable:` block (or has `ephemeral/persistent` already), deploy fails:
+
+```
+ERROR: services.web: compose.yml declares tmpfs but the manifest has no writable: block for this service.
+Boxmunge owns this surface by default. Declare paths in services.web.writable.ephemeral (for tmpfs)
+or services.web.writable.persistent (for named volumes), or set services.web.writable.external: true
+to manage writability in compose.yml directly.
+```
+
+Pick one: declare in manifest, restructure the conflict away, or switch the service to `writable.external: true`.
+
+`boxmunge security <project>` shows the per-service writable state (default / manifest-managed (N ephemeral, M persistent) / externally-managed) at a glance.
+
+---
+
 ### Smoke script fails after upgrade with "permission denied" on `ping` or `traceroute`
 
 v0.5 hardening drops `NET_RAW` from every container by default — so `ping`, `traceroute`, and a handful of HTTP probe libraries that fall back to ICMP will fail with `Operation not permitted`. Most apps do not need `NET_RAW`; if your smoke script genuinely does, opt back in by adding to the project manifest:

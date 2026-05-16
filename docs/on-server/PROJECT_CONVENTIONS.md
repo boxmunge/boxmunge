@@ -231,14 +231,125 @@ Services with `internal: true` are excluded from the proxy network.
 
 ### v0.8 read-only rootfs default
 
-The default profile now applies `read_only: true` and `tmpfs: ['/tmp']` to every service. This was a behavioural change: pre-v0.8, missing `read_only` was penalised by the CVE policy without being enforced.
+The default profile applies `read_only: true` and `tmpfs: ['/tmp']` to every service. Pre-v0.8 the CVE policy penalised missing `read_only` without enforcing it; v0.8 closed that asymmetry.
 
 If a service legitimately needs writable rootfs, declare `read_only: false` in the project's `compose.yml` for that service. Doing so:
 
 - Tells the overlay to omit its own `read_only` (your literal value wins via Compose merge — no merge conflict)
 - Incurs a +1 CVE hardening penalty (see CVE_POLICY.md)
+- **(v0.9)** Emits a `[WARNING]` on every deploy naming the service — no more silent override
 
-If a service needs writable paths under read-only rootfs, add per-service `tmpfs:` or `volumes:` entries in `compose.yml`. The overlay's `tmpfs: ['/tmp']` is omitted whenever your `compose.yml` already claims `/tmp` (via `tmpfs` or `volumes`).
+---
+
+### v0.9 writable: abstraction (schema v3)
+
+Services that need writable paths beyond `/tmp` declare them in the manifest under `services.<name>.writable`. The technical translation into compose tmpfs/volumes happens inside boxmunge — operators describe *what their app needs to write to*, not *how docker should mount it*.
+
+Every service is in exactly one of three states:
+
+| State | Manifest shape | Behaviour |
+|---|---|---|
+| **default** | no `writable:` block | Read-only rootfs + tmpfs:/tmp baseline only. Compose-side `tmpfs:` or named-volumes for this service → deploy error. |
+| **manifest-managed** | `writable.ephemeral` and/or `writable.persistent` | boxmunge emits the compose tmpfs/volumes. Compose-side `tmpfs:` or named-volumes for this service → deploy error. |
+| **externally-managed** | `writable.external: true` | boxmunge emits **no** tmpfs (not even /tmp) and **no** volumes. Compose-side declarations accepted. `[INFO]` warning every deploy. Mutually exclusive with `ephemeral`/`persistent`. |
+
+`read_only: true` still applies in all three states. To opt out of read-only rootfs entirely, set `read_only: false` in compose.yml (orthogonal to `writable:`, separate penalty).
+
+#### Schema
+
+```yaml
+schema_version: 3
+services:
+  web:
+    writable:
+      ephemeral:                  # tmpfs paths, wiped on restart
+        - /var/cache/nginx
+        - /var/run
+        # /tmp is implicit (already in the baseline)
+      persistent:                 # named docker volumes (survive restart)
+        - name: dbdata            # ^[a-z0-9][a-z0-9-]{0,30}$, unique within service
+          mount: /app/data        # absolute path, no trailing slash
+```
+
+For services with delegated writability:
+
+```yaml
+services:
+  legacy:
+    writable:
+      external: true              # boxmunge stays out of tmpfs/volumes for this service
+```
+
+#### Validation rules
+
+- All paths must be absolute, no `..`, max 256 chars.
+- `ephemeral` entries: list of strings, no duplicates within the list.
+- `persistent` entries: `{name, mount}` mappings. Names unique within the service; mounts unique within the service.
+- A path cannot appear in both `ephemeral` and `persistent` for the same service.
+- A `persistent` mount cannot be nested under any `ephemeral` path (tmpfs would shadow the volume at runtime).
+- Reserved roots (`/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/boot`, `/proc`, `/sys`, `/dev`) cannot be used as persistent mounts.
+- `/tmp`, `/var/run`, `/run` declared as `persistent` → error ("did you mean ephemeral?").
+- `external: true` is mutually exclusive with `ephemeral` and `persistent`.
+- `external: false` is rejected — omit the field instead.
+
+#### Worked examples
+
+A simple static-asset service with no writability:
+
+```yaml
+services:
+  web:
+    port: 80
+    routes: [{path: /}]
+    # No writable: block — read-only rootfs + /tmp tmpfs baseline.
+```
+
+An nginx frontend needing cache + pid file:
+
+```yaml
+services:
+  frontend:
+    port: 80
+    routes: [{path: /}]
+    writable:
+      ephemeral:
+        - /var/cache/nginx
+        - /var/run
+```
+
+A database service with persistent storage:
+
+```yaml
+services:
+  web:
+    port: 8000
+    routes: [{path: /}]
+    writable:
+      persistent:
+        - name: dbdata
+          mount: /app/data
+```
+
+A legacy service the operator wants to keep managing in compose.yml directly:
+
+```yaml
+services:
+  legacy:
+    port: 9000
+    routes: [{path: /legacy}]
+    writable:
+      external: true
+```
+
+#### Diagnostics
+
+When a container hits a "Read-only file system" error after deploy, boxmunge surfaces a hint pointing the operator at the relevant `writable:` block:
+
+- **Deploy-time**: 8s post-`compose up` scan of each service's container logs. Matches surface as a `[HINT]` block in deploy output, with the offending path extracted.
+- **Smoke-failure path**: when a smoke test fails, the failure message is enriched with the same hint if recent logs contain a read-only-fs error.
+- **`boxmunge logs <project>`**: non-follow mode appends a one-block writable-hint postscript when the captured log buffer contains read-only-fs errors.
+
+For externally-managed services, hints point at compose.yml instead of the manifest.
 
 ---
 

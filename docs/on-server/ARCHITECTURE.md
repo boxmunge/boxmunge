@@ -324,6 +324,27 @@ Between step 5 ("Generate configs") and step 6 ("Start containers") in the deplo
 
 See `TRUST_MODEL.md` for the threat model and `agent-help security` for the runtime introspection command.
 
+### Writable surface abstraction (v0.9, schema v3)
+
+The v0.8 read-only-rootfs default left operators reaching into compose syntax (`tmpfs:`, `volumes:`, named-volume top-level blocks) whenever an app needed writable paths beyond `/tmp`. v0.9 lifts that into the manifest as a `writable:` block, so operators describe *what their app writes to* rather than *how docker should mount it*.
+
+Two new pure modules carry the logic:
+
+- `src/boxmunge/writable.py` — schema validation, three-state classification (`default` / `manifest-managed` / `externally-managed`), translation helpers, display helpers (`describe_state`, `writable_json`).
+- `src/boxmunge/writable_diagnostics.py` — read-only-fs log scanner + hint formatter + post-deploy orchestration (`run_post_deploy_diagnostics`, `enrich_failure_with_writable_hint`).
+
+Hard cutover, no coexistence layer. Compose-side `tmpfs:` or named-volume references for a non-external service are rejected at deploy time by `compose_validate` with a three-option migration message. The boxmunge overlay generator (`compose.py:_build_service_override`) reads the manifest's `writable:` block, translates to compose tmpfs/volumes, and emits top-level named-volume declarations.
+
+Three deploy-time visibility signals fire whenever relevant:
+
+- `[WARNING]` per service for `read_only: false` in user compose (no more silent v0.8 override)
+- `[INFO]` per service for `writable.external: true` in manifest
+- `[HINT]` per service for read-only-fs errors in the first 8s of container logs after `compose up`
+
+The 8s post-up scan runs from `commands/deploy.py` via a module-level `_sleep_fn` indirection that the test conftest replaces with a no-op to keep the unit suite fast. Smoke-failure messages are similarly enriched via `enrich_failure_with_writable_hint`. `boxmunge logs <project>` (non-follow) appends a one-block postscript when the captured buffer contains matching errors.
+
+See `agent-help writable` and `PROJECT_CONVENTIONS.md` for the schema reference.
+
 ## Platform Validation
 
 - `self-test` — deploys a canary project, exercises backup/restore, tears down. Proves the pipeline works.

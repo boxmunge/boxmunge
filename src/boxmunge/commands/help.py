@@ -135,6 +135,7 @@ For detailed documentation, run:
   agent-help security         Container security model and opt-outs
   agent-help cve              CVE policy reference (posture, suppressions, scan)
   agent-help cve-incident     Step-by-step playbook for handling a CVE alert
+  agent-help writable         writable: manifest block (v0.9 schema 3)
 """
 
 # Map topic names to on-server doc filenames
@@ -146,6 +147,8 @@ AGENT_HELP_TOPICS: dict[str, str] = {
     "security": "SECURITY.md",
     "cve": "CVE_POLICY.md",
     "cve-incident": "CVE_INCIDENT_PLAYBOOK.md",
+    # writable: shares the conventions doc — schema + worked examples live there
+    "writable": "PROJECT_CONVENTIONS.md",
 }
 
 
