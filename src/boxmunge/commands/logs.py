@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 from boxmunge.paths import BoxPaths
-from boxmunge.docker import compose_logs, DockerError
+from boxmunge.docker import compose_logs, compose_logs_capture, DockerError
 
 
 def cmd_logs(args: list[str]) -> None:
@@ -74,11 +74,46 @@ def cmd_logs(args: list[str]) -> None:
         compose_files.append("compose.boxmunge.yml")
 
     try:
-        compose_logs(project_dir, service=service, tail=tail, follow=follow,
-                     compose_files=compose_files)
+        if follow:
+            # Real-time streaming — pass through unchanged so terminal
+            # users get immediate output as docker emits it.
+            compose_logs(
+                project_dir, service=service, tail=tail, follow=follow,
+                compose_files=compose_files,
+            )
+            return
+        # Non-follow: capture, print, then append a writable hint
+        # postscript if read-only-fs errors are detected. The capture
+        # delay is bounded by `--tail=N` and is imperceptible at the
+        # default tail=100.
+        output = compose_logs_capture(
+            project_dir, service=service, tail=tail,
+            compose_files=compose_files,
+        )
+        print(output, end="" if output.endswith("\n") else "\n")
+        _append_writable_postscript(output)
     except DockerError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+def _append_writable_postscript(output: str) -> None:
+    """Append a v0.9 writable-hint postscript when read-only-fs errors
+    are visible in the captured log block. Stays silent on clean logs."""
+    from boxmunge.writable_diagnostics import scan_logs
+    errors = scan_logs(output)
+    if not errors:
+        return
+    paths_list = ", ".join(repr(e.path) for e in errors)
+    print(
+        f"\n[HINT] Read-only filesystem errors detected for path(s) "
+        f"{paths_list}.\n"
+        f"       Declare the path(s) in manifest.yml under the "
+        f"service's `writable.ephemeral`\n"
+        f"       (or `writable.persistent` for data that should "
+        f"survive restart). See: agent-help writable.",
+        file=sys.stderr,
+    )
 
 
 def _show_host_logs() -> None:
