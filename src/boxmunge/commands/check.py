@@ -96,6 +96,20 @@ def run_smoke_in_container(
             )
 
         if sr.status != "ok":
+            # v0.9: enrich the failure message with a writable hint when
+            # container logs show a read-only-fs error. Non-fatal — if
+            # enrichment fails, return the original message unchanged.
+            try:
+                from boxmunge.writable_diagnostics import (
+                    enrich_failure_with_writable_hint,
+                )
+                enriched = enrich_failure_with_writable_hint(
+                    sr.message, project_dir, manifest, svc_name,
+                )
+                if enriched != sr.message:
+                    sr = SmokeResult(status=sr.status, message=enriched)
+            except Exception:
+                pass
             return sr
 
     return SmokeResult(status="ok", message="")

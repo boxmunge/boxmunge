@@ -278,3 +278,64 @@ def run_post_deploy_diagnostics(
         if hint:
             hints[svc_name] = hint
     return hints
+
+
+def enrich_failure_with_writable_hint(
+    failure_message: str,
+    project_dir: Path,
+    manifest: dict[str, Any],
+    service: str,
+    *,
+    log_fetcher: Callable[[str], str] | None = None,
+    tail: int = 100,
+) -> str:
+    """Return failure_message with a writable-hint block appended IF
+    the named service's recent container logs show a read-only-fs error.
+    Otherwise return failure_message unchanged.
+
+    For the smoke-failure path: smoke usually surfaces runtime issues
+    that come AFTER the post-deploy 8s scan window. Re-scanning fresh
+    logs at smoke-failure time catches things the post-deploy scan
+    missed. Same scanner; same hint format.
+
+    Non-fatal: if log fetching errors, return the message unchanged.
+    """
+    services = manifest.get("services", {}) or {}
+    if not isinstance(services, dict):
+        return failure_message
+    svc_block = services.get(service)
+    if not isinstance(svc_block, dict):
+        return failure_message
+    # Operator owns writability — hint would mislead.
+    if classify_state(svc_block) is WritableState.EXTERNAL:
+        return failure_message
+
+    if log_fetcher is None:
+        from boxmunge.docker import compose_logs_capture
+
+        compose_files = ["compose.yml", "compose.boxmunge.yml"]
+
+        def _default_fetch(svc: str) -> str:
+            return compose_logs_capture(
+                project_dir, service=svc, tail=tail,
+                compose_files=compose_files,
+            )
+
+        log_fetcher = _default_fetch
+
+    try:
+        logs = log_fetcher(service)
+    except Exception:
+        return failure_message
+    if not logs:
+        return failure_message
+
+    errors = scan_logs(logs)
+    if not errors:
+        return failure_message
+
+    state = classify_state(svc_block)
+    hint = format_hint(errors, service=service, state=state)
+    if not hint:
+        return failure_message
+    return f"{failure_message}\n{hint}"

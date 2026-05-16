@@ -144,7 +144,9 @@ class TestRunSmokeInContainer:
     @patch("boxmunge.commands.check.subprocess.run")
     def test_stops_on_first_failure(self, mock_run: MagicMock, tmp_path: Path) -> None:
         """If the first service fails, don't run the rest."""
-        mock_run.return_value = MagicMock(returncode=1, stderr="Backend down\n")
+        mock_run.return_value = MagicMock(
+            returncode=1, stderr="Backend down\n", stdout="",
+        )
         manifest = {
             "project": "myapp",
             "services": {
@@ -160,7 +162,17 @@ class TestRunSmokeInContainer:
         }
         result = run_smoke_in_container(tmp_path, manifest, ["compose.yml"])
         assert result.status == "warning"
-        assert mock_run.call_count == 1
+        # Only one smoke command should fire (the failing web service's),
+        # not the api's. Filter by the docker-exec smoke shape because
+        # v0.9 enrichment may also invoke `docker compose logs` to scan
+        # for read-only-fs hints, which we ignore here.
+        smoke_calls = [
+            c for c in mock_run.call_args_list
+            if c[0][0][:2] == ["docker", "exec"]
+        ]
+        assert len(smoke_calls) == 1
+        # The single smoke call targets web, not api.
+        assert smoke_calls[0][0][0][2] == "myapp-web-1"
 
 
 class TestRunCheckPreRegistered:

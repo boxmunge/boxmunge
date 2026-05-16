@@ -6,6 +6,7 @@ import pytest
 from boxmunge.writable import WritableState
 from boxmunge.writable_diagnostics import (
     WritableError,
+    enrich_failure_with_writable_hint,
     format_hint,
     run_post_deploy_diagnostics,
     scan_line,
@@ -335,3 +336,98 @@ class TestRunPostDeployDiagnostics:
         )
         assert "web" in result
         assert "api" not in result
+
+
+# ---------------------------------------------------------------------------
+# enrich_failure_with_writable_hint — smoke-failure path
+# ---------------------------------------------------------------------------
+
+
+class TestEnrichFailureWithWritableHint:
+    def _manifest(self, writable=None):
+        svc = {"port": 80, "routes": [{"path": "/"}]}
+        if writable is not None:
+            svc["writable"] = writable
+        return {"project": "demo", "services": {"web": svc}}
+
+    def test_clean_logs_unchanged(self, tmp_path: Path) -> None:
+        result = enrich_failure_with_writable_hint(
+            "smoke timed out", tmp_path, self._manifest(), "web",
+            log_fetcher=lambda svc: "INFO ok\n",
+        )
+        assert result == "smoke timed out"
+
+    def test_read_only_error_appends_hint(self, tmp_path: Path) -> None:
+        logs = (
+            'nginx: [emerg] mkdir() "/var/cache/nginx/temp" failed '
+            '(30: Read-only file system)\n'
+        )
+        result = enrich_failure_with_writable_hint(
+            "Smoke test failed: connection refused",
+            tmp_path, self._manifest(), "web",
+            log_fetcher=lambda svc: logs,
+        )
+        assert "Smoke test failed: connection refused" in result
+        assert "[HINT]" in result
+        assert "/var/cache/nginx" in result
+        assert "services.web.writable.ephemeral" in result
+
+    def test_external_service_unchanged(self, tmp_path: Path) -> None:
+        """Operator owns writability — hint would mislead."""
+        logs = (
+            'nginx: [emerg] mkdir() "/x" failed '
+            '(30: Read-only file system)\n'
+        )
+        # log_fetcher should NEVER be called for external services.
+        def _fetch(svc):
+            raise AssertionError(f"unexpected fetch for {svc!r}")
+        result = enrich_failure_with_writable_hint(
+            "smoke failed", tmp_path,
+            self._manifest(writable={"external": True}),
+            "web",
+            log_fetcher=_fetch,
+        )
+        assert result == "smoke failed"
+
+    def test_managed_service_hint_points_at_manifest(
+        self, tmp_path: Path,
+    ) -> None:
+        logs = (
+            'nginx: [emerg] mkdir() "/new/path/temp" failed '
+            '(30: Read-only file system)\n'
+        )
+        result = enrich_failure_with_writable_hint(
+            "smoke failed", tmp_path,
+            self._manifest(writable={"ephemeral": ["/some/other"]}),
+            "web",
+            log_fetcher=lambda svc: logs,
+        )
+        assert "[HINT]" in result
+        assert "services.web.writable.ephemeral" in result
+
+    def test_unknown_service_unchanged(self, tmp_path: Path) -> None:
+        # Service not in manifest — should pass through silently.
+        result = enrich_failure_with_writable_hint(
+            "smoke failed", tmp_path,
+            self._manifest(), "nonexistent",
+            log_fetcher=lambda svc: "logs",
+        )
+        assert result == "smoke failed"
+
+    def test_log_fetcher_exception_unchanged(self, tmp_path: Path) -> None:
+        def _boom(svc):
+            raise RuntimeError("daemon down")
+        result = enrich_failure_with_writable_hint(
+            "smoke failed", tmp_path,
+            self._manifest(), "web",
+            log_fetcher=_boom,
+        )
+        assert result == "smoke failed"
+
+    def test_empty_logs_unchanged(self, tmp_path: Path) -> None:
+        result = enrich_failure_with_writable_hint(
+            "smoke failed", tmp_path,
+            self._manifest(), "web",
+            log_fetcher=lambda svc: "",
+        )
+        assert result == "smoke failed"
