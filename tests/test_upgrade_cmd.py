@@ -56,7 +56,11 @@ class TestMigratePostValidation:
 
         assert migrated == ["demo"]
         on_disk = yaml.safe_load(mf.read_text())
-        assert on_disk["schema_version"] == 2
+        # _migrate_project_manifests migrates to CURRENT_SCHEMA_VERSION, which
+        # rolls forward with every release. Pin against the manifest module to
+        # avoid this test needing edits on every schema bump.
+        from boxmunge.manifest import CURRENT_SCHEMA_VERSION
+        assert on_disk["schema_version"] == CURRENT_SCHEMA_VERSION
 
     def test_post_migration_validation_failure_raises(
         self, paths_stub

@@ -51,7 +51,7 @@ def _validate_host(entry: object) -> str | None:
     return "is not a valid hostname"
 
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 class ManifestError(Exception):
@@ -202,6 +202,34 @@ def validate_manifest(
             validate_security_block(svc_security, context=f"service:{svc_name}")
         except SecurityValidationError as e:
             errors.append(str(e))
+
+    # Writable: block — per-service, optional. Requires schema_version 3.
+    # Lazy import keeps writable as an independent module without circular dep.
+    from boxmunge.writable import (
+        WritableValidationError,
+        validate_writable_block,
+    )
+
+    has_any_writable_block = any(
+        isinstance(svc, dict) and svc.get("writable") is not None
+        for svc in services.values()
+    )
+    if has_any_writable_block and schema_version < 3:
+        errors.append(
+            f"manifest declares a 'writable:' block but schema_version is "
+            f"{schema_version}. The 'writable:' block requires schema_version: 3 "
+            f"(boxmunge 0.9.0+). Bump schema_version to 3 — manifests without a "
+            f"'writable:' block are unchanged by the bump."
+        )
+    else:
+        for svc_name, svc in services.items():
+            if not isinstance(svc, dict):
+                continue
+            writable_block = svc.get("writable")
+            try:
+                validate_writable_block(writable_block, service_name=svc_name)
+            except WritableValidationError as e:
+                errors.append(str(e))
 
     # Backup
     backup = manifest.get("backup", {})

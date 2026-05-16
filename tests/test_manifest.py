@@ -374,8 +374,8 @@ class TestSecurityValidation:
         m.update(extra)
         return m
 
-    def test_current_schema_is_2(self) -> None:
-        assert CURRENT_SCHEMA_VERSION == 2
+    def test_current_schema_is_3(self) -> None:
+        assert CURRENT_SCHEMA_VERSION == 3
 
     def test_no_security_block_passes(self) -> None:
         errors, _ = validate_manifest(self._base_manifest(), expected_name="demo")
@@ -577,3 +577,101 @@ class TestManifestShapeGuards:
         }
         errors, _ = validate_manifest(manifest, expected_name="demo")
         assert any("staging" in e and "mapping" in e for e in errors)
+
+
+class TestWritableManifestIntegration:
+    """v0.9: writable: block validation through validate_manifest."""
+
+    def _base(self, **extra) -> dict:
+        m = {
+            "schema_version": 3,
+            "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+            "source": "bundle",
+            "project": "demo",
+            "hosts": ["demo.example.com"],
+            "services": {
+                "web": {
+                    "port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh",
+                },
+            },
+        }
+        m.update(extra)
+        return m
+
+    def test_schema_v3_no_writable_block_passes(self) -> None:
+        errors, _ = validate_manifest(self._base(), expected_name="demo")
+        assert all("writable" not in e for e in errors)
+
+    def test_schema_v2_no_writable_block_still_loads(self) -> None:
+        m = self._base()
+        m["schema_version"] = 2
+        errors, _ = validate_manifest(m, expected_name="demo")
+        assert all("writable" not in e for e in errors)
+
+    def test_writable_block_on_schema_v2_errors(self) -> None:
+        m = self._base()
+        m["schema_version"] = 2
+        m["services"]["web"]["writable"] = {"ephemeral": ["/var/cache"]}
+        errors, _ = validate_manifest(m, expected_name="demo")
+        assert any(
+            "writable" in e and "schema_version" in e for e in errors
+        ), f"expected schema_version coherence error, got: {errors}"
+
+    def test_writable_block_on_schema_v1_errors(self) -> None:
+        m = self._base()
+        m["schema_version"] = 1
+        m["services"]["web"]["writable"] = {"ephemeral": ["/var/cache"]}
+        errors, _ = validate_manifest(m, expected_name="demo")
+        assert any(
+            "writable" in e and "schema_version" in e for e in errors
+        )
+
+    def test_writable_validation_errors_propagate(self) -> None:
+        m = self._base()
+        m["services"]["web"]["writable"] = {"ephemeral": ["relative/path"]}
+        errors, _ = validate_manifest(m, expected_name="demo")
+        assert any("absolute" in e for e in errors)
+
+    def test_writable_external_validation_propagates(self) -> None:
+        m = self._base()
+        m["services"]["web"]["writable"] = {
+            "external": True, "ephemeral": ["/x"],
+        }
+        errors, _ = validate_manifest(m, expected_name="demo")
+        assert any("mutually exclusive" in e for e in errors)
+
+    def test_writable_persistent_valid_accepts(self) -> None:
+        m = self._base()
+        m["services"]["web"]["writable"] = {
+            "persistent": [{"name": "data", "mount": "/app/data"}],
+        }
+        errors, _ = validate_manifest(m, expected_name="demo")
+        assert all("writable" not in e for e in errors)
+
+    def test_writable_error_includes_service_name(self) -> None:
+        m = self._base()
+        m["services"]["web"]["writable"] = {"ephemeral": ["bad"]}
+        errors, _ = validate_manifest(m, expected_name="demo")
+        assert any("services.web" in e for e in errors), errors
+
+    def test_per_service_writable_independent(self) -> None:
+        """Multiple services with different writable states all validate."""
+        m = self._base()
+        m["services"]["web"]["writable"] = {"ephemeral": ["/var/cache"]}
+        m["services"]["api"] = {
+            "port": 8000, "routes": [{"path": "/api"}], "smoke": "y.sh",
+            "writable": {"external": True},
+        }
+        m["services"]["worker"] = {
+            "port": 9000, "routes": [{"path": "/w"}], "internal": True,
+            "smoke": "z.sh",
+            # no writable block — DEFAULT
+        }
+        errors, _ = validate_manifest(m, expected_name="demo")
+        assert all("writable" not in e for e in errors), errors
+
+    def test_malformed_writable_block_errors_cleanly(self) -> None:
+        m = self._base()
+        m["services"]["web"]["writable"] = "not a mapping"
+        errors, _ = validate_manifest(m, expected_name="demo")
+        assert any("writable" in e and "mapping" in e for e in errors)

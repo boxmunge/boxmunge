@@ -147,8 +147,13 @@ class TestLockSkipPushoverNotification:
         import yaml
         pdir = paths.project_dir(name)
         pdir.mkdir(parents=True)
+        # Use CURRENT_SCHEMA_VERSION + a valid id so the upgrade flow's
+        # post-migration validation pass doesn't fail on the fixture.
+        # This test exercises lock semantics, not migration.
+        from boxmunge.manifest import CURRENT_SCHEMA_VERSION
         (pdir / "manifest.yml").write_text(yaml.dump({
-            "schema_version": 2, "project": name,
+            "schema_version": CURRENT_SCHEMA_VERSION, "project": name,
+            "id": f"01HZZZZZZZZZZZZZZZZZZZZZZZ",
             "source": "bundle", "hosts": [f"{name}.test"],
             "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
         }))

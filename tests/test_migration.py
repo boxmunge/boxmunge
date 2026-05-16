@@ -50,9 +50,11 @@ class TestMigrationPath:
         assert path == [(1, 2), (2, 3)]
 
     def test_missing_step_raises(self) -> None:
+        # Use a target version far beyond any real registration to guarantee
+        # a missing step regardless of which v0.x migrations are registered.
         register_migration(1, 2, lambda m: m)
         with pytest.raises(MigrationError, match="No migration path"):
-            get_migration_path(1, 3)
+            get_migration_path(1, 99)
 
     def test_downgrade_raises(self) -> None:
         with pytest.raises(MigrationError, match="Cannot downgrade"):

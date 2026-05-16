@@ -72,4 +72,19 @@ def _migrate_v1_to_v2(manifest: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _migrate_v2_to_v3(manifest: dict[str, Any]) -> dict[str, Any]:
+    """No-op migration: v2 -> v3.
+
+    v0.9 introduces the writable: block (per-service ephemeral/persistent
+    path declaration). It's optional — services without a writable: block
+    classify as DEFAULT and run on the v0.8 baseline (read-only rootfs +
+    tmpfs:/tmp). Existing v2 manifests need only their schema_version
+    bumped; behaviour is unchanged.
+    """
+    result = dict(manifest)
+    result["schema_version"] = 3
+    return result
+
+
 register_migration(1, 2, _migrate_v1_to_v2)
+register_migration(2, 3, _migrate_v2_to_v3)
