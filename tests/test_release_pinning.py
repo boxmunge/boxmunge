@@ -73,3 +73,29 @@ def test_requirements_file_uses_hashes(path: Path) -> None:
         + "\n  ".join(hashless)
         + "\nRun `make lock` to regenerate."
     )
+
+
+def test_release_workflow_uses_hash_pinned_installs() -> None:
+    """The release workflow must install via --require-hashes from the
+    checked-in requirements files. Any bare `pip install <package>` without
+    --require-hashes lets unhashed transitive deps in."""
+    workflow = REPO / ".github" / "workflows" / "release.yml"
+    content = workflow.read_text()
+
+    install_lines = [
+        line.strip() for line in content.splitlines()
+        if "pip install" in line and not line.lstrip().startswith("#")
+    ]
+    assert install_lines, "release.yml has no pip install lines"
+
+    for line in install_lines:
+        # Permitted forms:
+        #   pip install --require-hashes -r requirements.txt
+        #   pip install -e . --no-deps        (editable install of THIS package,
+        #                                     deps already installed via --require-hashes)
+        is_hash_pinned = "--require-hashes" in line
+        is_local_no_deps = "-e ." in line and "--no-deps" in line
+        is_pip_upgrade = re.match(r"^pip install --upgrade pip(==.*)?\s*$", line)
+        assert is_hash_pinned or is_local_no_deps or is_pip_upgrade, (
+            f"release.yml install line not hash-pinned: {line!r}"
+        )

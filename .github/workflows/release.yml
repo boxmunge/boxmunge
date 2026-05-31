@@ -20,19 +20,26 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Run tests
+      - name: Install pinned dependencies
         run: |
-          pip install -e '.[tui]'
-          pip install pytest
-          python -m pytest tests/ --ignore=tests/integration --ignore=tests/vm -v
+          # Hash-pinned transitive deps. --require-hashes refuses any package
+          # not exactly matching a checked-in hash, blocking resolution drift
+          # and unauthorised transitive bumps.
+          pip install --require-hashes -r requirements.txt
+          pip install --require-hashes -r requirements-tui.txt
+          pip install --require-hashes -r requirements-dev.txt
+          # Install boxmunge itself in editable mode without re-resolving deps
+          # (already installed above).
+          pip install -e . --no-deps
+
+      - name: Run tests
+        run: python -m pytest tests/ --ignore=tests/integration --ignore=tests/vm -v
 
       - name: Build installer
         run: make installer
 
       - name: Generate SBOM
-        run: |
-          pip install cyclonedx-bom
-          bash scripts/generate-sbom.sh
+        run: bash scripts/generate-sbom.sh
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
