@@ -327,7 +327,12 @@ cmd_run() {
     # 2. PRE-FLIGHT
     log "Running pre-flight checks..."
 
-    "$BOXMUNGE_ROOT/env-$standby/bin/python" -c "import boxmunge; print(boxmunge.__version__)" || {
+    # Pre-flight import test: verify the new venv can import boxmunge and
+    # report a non-empty version. v0.9.0 dropped the stale
+    # `boxmunge.__version__` constant (drift-prone, not actually the source
+    # of truth) — read from `boxmunge.version.get_build_version()` instead,
+    # which has been the canonical accessor since v0.5.
+    "$BOXMUNGE_ROOT/env-$standby/bin/python" -c "from boxmunge.version import get_build_version; print(get_build_version())" || {
         log "Pre-flight FAILED: import test"
         rm -rf "$BOXMUNGE_ROOT/env-$standby"
         add_blocklist "$version" "preflight_failed: import"
