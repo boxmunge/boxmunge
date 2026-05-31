@@ -138,3 +138,19 @@ def test_dependabot_covers_pinned_ecosystems() -> None:
     expected = {"pip", "github-actions", "docker"}
     missing = expected - ecosystems
     assert not missing, f"dependabot.yml missing ecosystems: {sorted(missing)}"
+
+
+def test_system_dockerfile_verifies_external_binaries() -> None:
+    """system/Dockerfile downloads age and rclone over the network. Each
+    download must verify SHA256 against a baked-in ARG before the binary
+    enters the build, defending against TLS-trust-only fetches."""
+    path = REPO / "system" / "Dockerfile"
+    content = path.read_text()
+    assert re.search(r"^ARG AGE_SHA256=[0-9a-f]{64}\s*$", content, re.MULTILINE), \
+        "system/Dockerfile must declare ARG AGE_SHA256=<64-hex>"
+    assert re.search(r"^ARG RCLONE_SHA256=[0-9a-f]{64}\s*$", content, re.MULTILINE), \
+        "system/Dockerfile must declare ARG RCLONE_SHA256=<64-hex>"
+    assert "echo \"${AGE_SHA256}" in content or "${AGE_SHA256}  " in content, \
+        "system/Dockerfile must verify age tarball against AGE_SHA256"
+    assert "echo \"${RCLONE_SHA256}" in content or "${RCLONE_SHA256}  " in content, \
+        "system/Dockerfile must verify rclone zip against RCLONE_SHA256"
