@@ -80,5 +80,5 @@ lock:
 	pip-compile --generate-hashes -o requirements.txt pyproject.toml
 	pip-compile --generate-hashes --extra=tui -o requirements-tui.txt pyproject.toml
 	pip-compile --generate-hashes --extra=mcp -o requirements-mcp.txt pyproject.toml
-	pip-compile --generate-hashes -o requirements-dev.txt requirements-dev.in
+	pip-compile --generate-hashes --allow-unsafe -o requirements-dev.txt requirements-dev.in
 	pip-compile --generate-hashes -o cli/requirements.txt cli/pyproject.toml
