@@ -2,7 +2,7 @@
 # boxmunge-system: lightweight container for age + rclone tooling
 # Provides blast-radius containment and reproducible tool versions.
 
-FROM alpine:3.21
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
 
 ARG AGE_VERSION=1.2.1
 ARG RCLONE_VERSION=1.68.2

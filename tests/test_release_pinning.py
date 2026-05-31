@@ -154,3 +154,29 @@ def test_system_dockerfile_verifies_external_binaries() -> None:
         "system/Dockerfile must verify age tarball against AGE_SHA256"
     assert "echo \"${RCLONE_SHA256}" in content or "${RCLONE_SHA256}  " in content, \
         "system/Dockerfile must verify rclone zip against RCLONE_SHA256"
+
+
+DOCKERFILES_REQUIRING_DIGEST_PIN = [
+    REPO / "system" / "Dockerfile",
+    REPO / "canary" / "Dockerfile",
+    REPO / "services" / "version-check" / "Dockerfile",
+    REPO / "sample-project" / "frontend" / "Dockerfile",
+    REPO / "sample-project" / "backend" / "Dockerfile",
+    REPO / "tests" / "integration" / "fixture_project" / "Dockerfile",
+]
+
+FROM_LINE_RE = re.compile(r"^FROM\s+(\S+)", re.MULTILINE | re.IGNORECASE)
+
+
+@pytest.mark.parametrize("path", DOCKERFILES_REQUIRING_DIGEST_PIN, ids=str)
+def test_dockerfile_base_image_is_digest_pinned(path: Path) -> None:
+    """Every internal Dockerfile must pin its base image by digest, not by
+    floating tag. Tag-takeover on a base image silently changes what we ship."""
+    assert path.exists(), f"{path} should exist"
+    for ref in FROM_LINE_RE.findall(path.read_text()):
+        if ref in ("scratch",) or ref.startswith("$"):
+            continue
+        assert "@sha256:" in ref, (
+            f"{path}: FROM {ref!r} is not digest-pinned. Resolve the digest "
+            f"and use FROM <image>:<tag>@sha256:<digest>."
+        )
