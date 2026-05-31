@@ -120,3 +120,21 @@ def test_release_workflow_actions_are_sha_pinned() -> None:
         f"release.yml has tag-pinned actions: {bad}. "
         "Resolve each tag to a commit SHA and replace inline."
     )
+
+
+def test_dependabot_covers_pinned_ecosystems() -> None:
+    """Dependabot must be configured for every ecosystem we pin in this
+    work: pip (requirements files), github-actions (release.yml), and
+    docker (base image digests). Without dependabot, the SHA pins become
+    stale-prone manual toil."""
+    import yaml as _yaml  # PyYAML is already a project dep
+
+    path = REPO / ".github" / "dependabot.yml"
+    assert path.exists(), ".github/dependabot.yml must exist"
+    cfg = _yaml.safe_load(path.read_text())
+    assert cfg.get("version") == 2, "dependabot.yml must be version 2"
+
+    ecosystems = {u["package-ecosystem"] for u in cfg.get("updates", [])}
+    expected = {"pip", "github-actions", "docker"}
+    missing = expected - ecosystems
+    assert not missing, f"dependabot.yml missing ecosystems: {sorted(missing)}"
