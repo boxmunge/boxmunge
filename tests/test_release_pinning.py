@@ -99,3 +99,24 @@ def test_release_workflow_uses_hash_pinned_installs() -> None:
         assert is_hash_pinned or is_local_no_deps or is_pip_upgrade, (
             f"release.yml install line not hash-pinned: {line!r}"
         )
+
+
+USES_RE = re.compile(r"^\s*-?\s*uses:\s*(.+?)\s*$", re.MULTILINE)
+SHA_PIN_RE = re.compile(
+    # owner/repo@<40-hex-sha>      (optional whitespace then # comment for legibility)
+    r"^[^/\s]+/[^/@\s]+(?:/[^@\s]+)?@[0-9a-f]{40}(\s+#.*)?$"
+)
+
+
+def test_release_workflow_actions_are_sha_pinned() -> None:
+    """Every `uses:` in release.yml must reference a 40-char commit SHA,
+    not a tag like @v5. Tag-takeover on any pinned action would compromise
+    the cosign release-signing trust root."""
+    workflow = REPO / ".github" / "workflows" / "release.yml"
+    matches = USES_RE.findall(workflow.read_text())
+    assert matches, "release.yml has no `uses:` lines"
+    bad = [m for m in matches if not SHA_PIN_RE.match(m)]
+    assert not bad, (
+        f"release.yml has tag-pinned actions: {bad}. "
+        "Resolve each tag to a commit SHA and replace inline."
+    )
