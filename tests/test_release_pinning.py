@@ -29,34 +29,44 @@ REQUIREMENTS_FILES = [
 HASH_LINE_RE = re.compile(r"--hash=sha256:[0-9a-f]{64}")
 
 
+# Top-of-block package declaration: starts at column 0, not a comment,
+# and is one of:
+#   name==version            (pip-compile's standard pinned form)
+#   name @ url               (PEP 508 direct URL reference)
+#   -e <url-or-path>          (editable install)
+PKG_DECL_RE = re.compile(
+    r"^(?:"
+    r"[A-Za-z][\w.\-]*\s*==\s*\S+"   # name==version
+    r"|[A-Za-z][\w.\-]*\s+@\s+\S+"    # name @ url
+    r"|-e\s+\S+"                      # -e <ref>
+    r")"
+)
+
+
 @pytest.mark.parametrize("path", REQUIREMENTS_FILES, ids=str)
 def test_requirements_file_uses_hashes(path: Path) -> None:
-    """Every pinned package must have at least one --hash entry in its
-    own stanza. pip-compile emits one stanza per package, separated by
-    blank lines, with the package pin on the first line and one or more
-    --hash=sha256:... continuations after it."""
+    """Every pinned package must have at least one --hash entry between
+    its declaration line and the start of the next package (or EOF).
+    pip-compile emits packages without blank-line separation, so per-package
+    coverage must be checked via the next-package-declaration boundary."""
     assert path.exists(), f"{path} should exist"
-    content = path.read_text()
+    lines = path.read_text().splitlines()
 
-    # Walk file as stanzas separated by blank lines. A stanza is "package
-    # related" if any line in it is a top-level package pin (==, @ url, or
-    # editable). Every such stanza must contain at least one hash.
-    stanzas = re.split(r"\n\s*\n", content)
-    package_pin_re = re.compile(
-        r"^(?!#)\S[^\s]*"        # starts with a non-comment, non-blank token
-        r"(==|\s@\s|^-e\s)",     # ==pin, @url ref, or editable install
-        re.MULTILINE,
-    )
+    # Find the file-line indices of every package declaration.
+    pkg_indices = [i for i, line in enumerate(lines) if PKG_DECL_RE.match(line)]
+    assert pkg_indices, f"{path} has no pinned package lines"
+
+    # For each package, check that at least one --hash= appears in the
+    # block from this declaration up to the next declaration (or EOF).
     hashless: list[str] = []
-    for stanza in stanzas:
-        # Skip stanzas that are clearly not package declarations (comments,
-        # pip flags like --index-url, etc.).
-        if not package_pin_re.search(stanza):
-            continue
-        if not HASH_LINE_RE.search(stanza):
-            # Capture the offending package name(s) for a useful failure.
-            first_line = stanza.strip().splitlines()[0]
-            hashless.append(first_line)
+    for slot, start in enumerate(pkg_indices):
+        end = pkg_indices[slot + 1] if slot + 1 < len(pkg_indices) else len(lines)
+        block = "\n".join(lines[start:end])
+        if not HASH_LINE_RE.search(block):
+            # Name the package for the failure message — strip continuation
+            # backslash and surrounding whitespace from the declaration line.
+            decl = lines[start].rstrip("\\").strip()
+            hashless.append(decl)
 
     assert not hashless, (
         f"{path}: {len(hashless)} package(s) missing --hash entries:\n  "
