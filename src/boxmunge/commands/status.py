@@ -4,6 +4,7 @@ import json
 import sys
 from datetime import datetime, timezone
 
+from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
 from boxmunge.paths import BoxPaths
 from boxmunge.pause import is_paused
 from boxmunge.state import read_state
@@ -46,6 +47,27 @@ def run_status(paths: BoxPaths, as_json: bool = False) -> int:
 
     rows = []
     for name in deployed:
+        # Quarantine takes precedence over pause if both markers exist
+        # (mirrors lifecycle.is_blocked ordering — the security action is
+        # the more specific one).
+        if is_quarantined(name, paths):
+            qstate = read_quarantine_state(name, paths) or {}
+            deploy = read_state(paths.project_deploy_state(name))
+            rows.append({
+                "project": name,
+                "status": "QUARANTINED",
+                "last_check": "-",
+                "deployed_at": deploy.get("deployed_at", "-"),
+                "raw_status": "quarantined",
+                "cve_id": qstate.get("cve_id", "-"),
+                "severity": (
+                    qstate.get("effective_severity")
+                    or qstate.get("severity", "-")
+                ),
+                "explanation": qstate.get("explanation", ""),
+                "quarantined_at": qstate.get("quarantined_at", "-"),
+            })
+            continue
         if is_paused(name, paths):
             deploy = read_state(paths.project_deploy_state(name))
             deployed_at = deploy.get("deployed_at", "-")
@@ -117,6 +139,24 @@ def run_status(paths: BoxPaths, as_json: bool = False) -> int:
                 f"{_short_ts(row['last_check']):<{col_ts}} "
                 f"{_short_ts(row['deployed_at']):<{col_ts}}"
             )
+
+        # Rationale block — a quarantine without its CVE rationale is
+        # actionably useless. Surface CVE id, severity, and explanation
+        # directly so operators don't have to round-trip through
+        # `security <project>` to find out why a site is offline.
+        quarantined = [r for r in rows if r["raw_status"] == "quarantined"]
+        if quarantined:
+            print()
+            print("Quarantined projects:")
+            for row in quarantined:
+                cve = row.get("cve_id", "-")
+                sev = row.get("severity", "-")
+                explanation = row.get("explanation", "") or ""
+                since = _short_ts(row.get("quarantined_at", "-"))
+                print(f"  {row['project']}: {cve} {sev} (since {since} UTC)")
+                if explanation:
+                    print(f"    reason: {explanation}")
+                print(f"    lift with: security resume {row['project']}")
 
     return 0
 

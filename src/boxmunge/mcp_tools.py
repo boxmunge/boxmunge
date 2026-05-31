@@ -158,6 +158,7 @@ def _run_health_checks(paths: BoxPaths) -> tuple[int, dict]:
         check_config_drift,
         check_docker_running,
         check_file_permissions,
+        check_lifecycle_blocked,
         check_project_containers,
         check_recent_errors,
         check_system_container,
@@ -169,6 +170,7 @@ def _run_health_checks(paths: BoxPaths) -> tuple[int, dict]:
     report.checks.append(check_file_permissions(paths))
     report.checks.append(check_age_key(paths))
     report.checks.append(check_project_containers(paths))
+    report.checks.append(check_lifecycle_blocked(paths))
     report.checks.append(check_config_drift(paths))
     report.checks.append(check_recent_errors(paths))
 

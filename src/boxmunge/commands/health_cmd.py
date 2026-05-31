@@ -11,7 +11,9 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
 from boxmunge.lifecycle import is_blocked
+from boxmunge.pause import is_paused
 from boxmunge.paths import BoxPaths
 
 
@@ -151,7 +153,16 @@ def check_age_key(paths: BoxPaths) -> HealthCheck:
 
 
 def check_project_containers(paths: BoxPaths) -> HealthCheck:
-    """Check if all deployed projects have running containers."""
+    """Check if all deployed projects have running containers.
+
+    Projects in operator/system-blocked lifecycle states (paused,
+    CVE-quarantined) are excluded from the container check itself —
+    surfacing them as "no running containers" would mis-attribute an
+    intentional offline state as a health failure. The OK message
+    distinguishes total deployed from actually-checked so the operator
+    can see at a glance whether the all-green claim covers everything.
+    The blocked projects themselves are reported by `lifecycle`.
+    """
     if not paths.projects.exists():
         return HealthCheck("project-containers", "ok", "No projects deployed")
 
@@ -163,12 +174,10 @@ def check_project_containers(paths: BoxPaths) -> HealthCheck:
         return HealthCheck("project-containers", "ok", "No projects deployed")
 
     down_projects = []
+    blocked_count = 0
     for name in projects:
-        # Skip projects that are intentionally not running (paused or
-        # CVE-quarantined). Surfacing them as "no running containers"
-        # would mis-attribute an operator-driven action as a health
-        # failure.
         if is_blocked(name, paths):
+            blocked_count += 1
             continue
         compose_cmd = ["docker", "compose", "-f", "compose.yml"]
         override = paths.project_compose_override(name)
@@ -188,10 +197,59 @@ def check_project_containers(paths: BoxPaths) -> HealthCheck:
             "project-containers", "warn",
             f"Projects with no running containers: {', '.join(down_projects)}",
         )
-    return HealthCheck(
-        "project-containers", "ok",
-        f"All {len(projects)} project(s) have running containers",
-    )
+    checked = len(projects) - blocked_count
+    if blocked_count:
+        detail = (
+            f"All {checked} checked project(s) have running containers "
+            f"({blocked_count} blocked — see `lifecycle`)"
+        )
+    else:
+        detail = f"All {checked} project(s) have running containers"
+    return HealthCheck("project-containers", "ok", detail)
+
+
+def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
+    """Surface projects in paused or CVE-quarantined states.
+
+    Quarantined projects warn — they're offline due to an unfixed CVE
+    and may surprise an operator who only glanced at the report.
+    Paused projects pass as OK with a note — that's an intentional
+    operator action, not a problem.
+
+    Without this check the broader health report says nothing about
+    blocked projects; `project-containers` excludes them by design, so
+    a quarantined site can be silently offline while the report reads
+    HEALTHY.
+    """
+    if not paths.projects.exists():
+        return HealthCheck("lifecycle", "ok", "No projects deployed")
+    paused: list[str] = []
+    quarantined: list[tuple[str, str]] = []
+    for proj_dir in sorted(paths.projects.iterdir()):
+        if not proj_dir.is_dir() or not (proj_dir / "manifest.yml").exists():
+            continue
+        name = proj_dir.name
+        # Mirrors lifecycle.is_blocked precedence: quarantine wins if
+        # both markers exist.
+        if is_quarantined(name, paths):
+            qstate = read_quarantine_state(name, paths) or {}
+            cve = qstate.get("cve_id", "?")
+            quarantined.append((name, cve))
+        elif is_paused(name, paths):
+            paused.append(name)
+    parts: list[str] = []
+    if quarantined:
+        parts.append(
+            "quarantined: "
+            + ", ".join(f"{n} ({c})" for n, c in quarantined)
+        )
+    if paused:
+        parts.append("paused: " + ", ".join(paused))
+    if quarantined:
+        return HealthCheck("lifecycle", "warn", "; ".join(parts))
+    if paused:
+        return HealthCheck("lifecycle", "ok", "; ".join(parts))
+    return HealthCheck("lifecycle", "ok", "No projects in blocked states")
 
 
 def check_config_drift(paths: BoxPaths) -> HealthCheck:
@@ -215,6 +273,12 @@ def check_config_drift(paths: BoxPaths) -> HealthCheck:
             continue
 
         project_name = manifest.get("project", project_dir.name)
+        # Skip blocked projects: when paused/quarantined the .conf
+        # intentionally holds the maintenance fragment, so comparing
+        # against generate_caddy_config produces a false-positive drift
+        # warning. The blocked state itself is reported by `lifecycle`.
+        if is_blocked(project_name, paths):
+            continue
         site_conf = paths.project_caddy_site(project_name)
         override = paths.project_caddy_override(project_name)
 
@@ -260,6 +324,7 @@ def run_health(paths: BoxPaths, *, as_json: bool = False) -> int:
     report.checks.append(check_file_permissions(paths))
     report.checks.append(check_age_key(paths))
     report.checks.append(check_project_containers(paths))
+    report.checks.append(check_lifecycle_blocked(paths))
     report.checks.append(check_config_drift(paths))
     report.checks.append(check_recent_errors(paths))
 

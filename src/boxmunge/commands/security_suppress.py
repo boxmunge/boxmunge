@@ -7,7 +7,10 @@ import os
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Any
 
+from boxmunge.cve.policy import Disposition
+from boxmunge.cve.scan_state import read_scan_state
 from boxmunge.cve.suppressions import (
     SuppressionsError,
     add_suppression,
@@ -19,6 +22,13 @@ from boxmunge.cve.suppressions import (
 from boxmunge.log import log_error, log_operation
 from boxmunge.paths import BoxPaths, validate_project_name
 from boxmunge.project_registry import is_registered
+
+# Severity rank for ordering --current suppression output (Critical first).
+# Mirrors policy._SEVERITY_RANK but uses the stored string values from
+# scan_state.json so we don't have to round-trip through the enum here.
+_SEVERITY_RANK = {
+    "Critical": 4, "High": 3, "Medium": 2, "Low": 1, "Unknown": 0,
+}
 
 
 def _project_suppressions_path(paths: BoxPaths, project: str) -> Path:
@@ -55,17 +65,76 @@ def _resolve_reviewer() -> str:
     return candidate
 
 
+def _current_quarantine_cves(
+    paths: BoxPaths, project: str,
+) -> list[dict[str, Any]]:
+    """Return findings (deduped by CVE id) currently at QUARANTINE disposition.
+
+    Reads scan_state for the project. Returns an empty list if no scan has
+    run or no findings are at QUARANTINE disposition. Within a duplicate
+    CVE id, the highest-severity entry wins (a CVE elevated in one image
+    keeps that severity in the output). Result ordered Critical → Unknown,
+    then by CVE id for stable display.
+    """
+    state = read_scan_state(paths.project_scan_state(project))
+    if not state:
+        return []
+    seen: dict[str, dict[str, Any]] = {}
+    for decision in state.get("decisions", []) or []:
+        for f in decision.get("findings", []) or []:
+            if f.get("disposition") != Disposition.QUARANTINE.value:
+                continue
+            cve = f.get("cve_id")
+            if not cve:
+                continue
+            existing = seen.get(cve)
+            rank_new = _SEVERITY_RANK.get(f.get("effective_severity"), 0)
+            rank_old = _SEVERITY_RANK.get(
+                existing.get("effective_severity") if existing else None, 0,
+            )
+            if existing is None or rank_new > rank_old:
+                seen[cve] = f
+    return sorted(
+        seen.values(),
+        key=lambda f: (
+            -_SEVERITY_RANK.get(f.get("effective_severity"), 0),
+            f.get("cve_id", ""),
+        ),
+    )
+
+
 def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
-    """boxmunge security suppress <CVE> --project <n> --until <d> --reason <t>."""
-    if not args or args[0].startswith("--"):
-        print(
-            "Usage: boxmunge security suppress <CVE> --project <name> "
-            "--until <YYYY-MM-DD> --reason <text>",
-            file=sys.stderr,
-        )
-        return 2
-    cve_id = args[0]
-    rest = args[1:]
+    """boxmunge security suppress <CVE>|--current --project <n> --until <d> --reason <t>.
+
+    `--current` suppresses every CVE currently at QUARANTINE disposition
+    for the project (read from the latest scan_state). Use this to unblock
+    a `security resume` without copy-pasting CVE ids.
+    """
+    use_current = "--current" in args
+    rest: list[str]
+    cve_id_positional: str | None
+    if use_current:
+        cve_id_positional = None
+        rest = [a for a in args if a != "--current"]
+        # Reject the ambiguous form `suppress CVE-X --current ...` — the
+        # operator must pick one or the other.
+        if rest and not rest[0].startswith("--"):
+            print(
+                "ERROR: --current cannot be combined with a positional CVE id.",
+                file=sys.stderr,
+            )
+            return 2
+    else:
+        if not args or args[0].startswith("--"):
+            print(
+                "Usage: boxmunge security suppress <CVE>|--current "
+                "--project <name> --until <YYYY-MM-DD> --reason <text>",
+                file=sys.stderr,
+            )
+            return 2
+        cve_id_positional = args[0]
+        rest = args[1:]
+
     project = _extract_flag(rest, "--project")
     until_str = _extract_flag(rest, "--until")
     reason = _extract_flag(rest, "--reason")
@@ -92,6 +161,9 @@ def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
         return 2
 
     if not is_registered(project, paths):
+        # cve_id is "-" in the audit detail when --current was used and the
+        # project gate rejected the call before we could enumerate findings.
+        cve_for_log = cve_id_positional or "-"
         print(
             f"ERROR: project '{project}' is not registered.",
             file=sys.stderr,
@@ -99,13 +171,16 @@ def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
         log_error(
             "cve-suppress",
             f"Suppression rejected: project '{project}' is not registered "
-            f"({cve_id})",
+            f"({cve_for_log})",
             paths, project=project,
-            detail={"cve_id": cve_id, "reason": "project_not_registered"},
+            detail={"cve_id": cve_for_log, "reason": "project_not_registered"},
         )
         return 1
 
     today = _today()
+    # Use a sentinel CVE id in audit log lines for failures that happen
+    # before per-CVE work begins (one entry covers --current and positional).
+    cve_for_log = cve_id_positional or "(current)"
     try:
         until = date.fromisoformat(until_str)
     except ValueError:
@@ -116,10 +191,10 @@ def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
         log_error(
             "cve-suppress",
             f"Suppression rejected: invalid --until {until_str!r} for "
-            f"{cve_id} in {project}",
+            f"{cve_for_log} in {project}",
             paths, project=project,
             detail={
-                "cve_id": cve_id, "until_raw": until_str,
+                "cve_id": cve_for_log, "until_raw": until_str,
                 "reason": "invalid_until_format",
             },
         )
@@ -133,10 +208,10 @@ def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
         log_error(
             "cve-suppress",
             f"Suppression rejected: --until {until.isoformat()} is not in "
-            f"the future for {cve_id} in {project}",
+            f"the future for {cve_for_log} in {project}",
             paths, project=project,
             detail={
-                "cve_id": cve_id, "until": until.isoformat(),
+                "cve_id": cve_for_log, "until": until.isoformat(),
                 "today": today.isoformat(), "reason": "until_not_future",
             },
         )
@@ -146,9 +221,10 @@ def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
         print("ERROR: --reason must be a non-empty string", file=sys.stderr)
         log_error(
             "cve-suppress",
-            f"Suppression rejected: empty --reason for {cve_id} in {project}",
+            f"Suppression rejected: empty --reason for {cve_for_log} in "
+            f"{project}",
             paths, project=project,
-            detail={"cve_id": cve_id, "reason": "empty_reason"},
+            detail={"cve_id": cve_for_log, "reason": "empty_reason"},
         )
         return 1
 
@@ -158,15 +234,78 @@ def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         log_error(
             "cve-suppress",
-            f"Suppression rejected: reviewer unresolved for {cve_id} in "
-            f"{project} ({e})",
+            f"Suppression rejected: reviewer unresolved for {cve_for_log} "
+            f"in {project} ({e})",
             paths, project=project,
-            detail={"cve_id": cve_id, "reason": "reviewer_unresolved"},
+            detail={"cve_id": cve_for_log, "reason": "reviewer_unresolved"},
         )
         return 1
 
     suppressions_path = _project_suppressions_path(paths, project)
 
+    # Resolve the target CVE list. For --current, refuse if scan_state is
+    # missing or shows no QUARANTINE findings — silently doing nothing
+    # would be the wrong UX (operator expected suppressions to happen).
+    if use_current:
+        findings = _current_quarantine_cves(paths, project)
+        if not findings:
+            print(
+                f"ERROR: no current quarantine-level findings for "
+                f"'{project}'. Run `security scan {project}` first, or "
+                f"specify a CVE id explicitly.",
+                file=sys.stderr,
+            )
+            log_error(
+                "cve-suppress",
+                f"--current rejected: no QUARANTINE findings in scan_state "
+                f"for {project}",
+                paths, project=project,
+                detail={"reason": "no_current_quarantine_findings"},
+            )
+            return 1
+        cve_ids = [f["cve_id"] for f in findings]
+        print(
+            f"Suppressing {len(cve_ids)} current quarantine-level "
+            f"finding{'s' if len(cve_ids) != 1 else ''} for {project}:"
+        )
+    else:
+        assert cve_id_positional is not None
+        cve_ids = [cve_id_positional]
+
+    for cve_id in cve_ids:
+        rc = _apply_single_suppression(
+            paths=paths,
+            project=project,
+            cve_id=cve_id,
+            until=until,
+            reason=reason,
+            reviewer=reviewer,
+            today=today,
+            suppressions_path=suppressions_path,
+        )
+        if rc != 0:
+            return rc
+    return 0
+
+
+def _apply_single_suppression(
+    *,
+    paths: BoxPaths,
+    project: str,
+    cve_id: str,
+    until: date,
+    reason: str,
+    reviewer: str,
+    today: date,
+    suppressions_path: Path,
+) -> int:
+    """Add one suppression entry. Returns 0 on success, 1 on failure.
+
+    Extracted so the positional `<CVE>` path and the `--current` bulk path
+    share the same per-CVE history check, add, audit log, and stdout
+    summary. Caller has already validated until/reason/reviewer and the
+    project gate.
+    """
     # D-2: detect silent extensions. If this CVE was unsuppressed in the
     # last 7 days for this project, flag the re-suppression so the audit
     # trail makes the extension visible.
@@ -186,7 +325,7 @@ def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
         return 1
 
     try:
-        new_entry = add_suppression(
+        _new_entry = add_suppression(
             suppressions_path,
             cve_id=cve_id,
             until=until,
@@ -240,9 +379,6 @@ def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
     print(f"  Until:        {until.isoformat()}")
     print(f"  Reason:       {reason}")
     print(f"  Reviewed by:  {reviewer}")
-    # ``new_entry`` is the freshly-added Suppression — kept for symmetry
-    # with cmd_security_unsuppress (and silences "unused variable" lint).
-    _ = new_entry
     return 0
 
 

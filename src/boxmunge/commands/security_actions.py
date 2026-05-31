@@ -322,7 +322,10 @@ def cmd_security_resume(args: list[str], paths: BoxPaths) -> int:
         )
         return 1
 
-    print(f"Resuming {project}...")
+    # Phrasing matters: this announces re-scan, not lift. Saying "Resuming X..."
+    # here and then bailing with "Cannot resume" reads as contradictory output.
+    # The actual "Resuming..." line is only emitted once the scan clears.
+    print(f"Re-scanning {project} before lift...")
     try:
         refresh_db()
     except TrivyNotInstalledError as e:
@@ -363,20 +366,54 @@ def cmd_security_resume(args: list[str], paths: BoxPaths) -> int:
                 blocking.append(f)
 
     if blocking:
+        # Dedupe by CVE id for the message — multiple findings can share
+        # one CVE across packages. List them so the operator sees what
+        # `--current` would suppress.
+        cve_seen: dict[str, str] = {}
+        for f in blocking:
+            cve_seen.setdefault(f.finding.cve_id, f.effective_severity.value)
         h = blocking[0]
         print(
             f"ERROR: Cannot resume — {h.finding.cve_id} "
             f"({h.effective_severity.value}) would still quarantine.",
             file=sys.stderr,
         )
+        if len(cve_seen) > 1:
+            others = [
+                f"{cve} ({sev})"
+                for cve, sev in cve_seen.items()
+                if cve != h.finding.cve_id
+            ]
+            print(
+                f"  Plus {len(others)} more quarantine-level "
+                f"finding{'s' if len(others) != 1 else ''}: "
+                f"{', '.join(others)}",
+                file=sys.stderr,
+            )
         print(
-            "  Either suppress it (boxmunge security suppress) or wait for "
-            "upstream fix.",
+            "  Options:",
+            file=sys.stderr,
+        )
+        print(
+            f"    - Suppress all current blockers: "
+            f"boxmunge security suppress --current --project {project} "
+            f"--until <YYYY-MM-DD> --reason <text>",
+            file=sys.stderr,
+        )
+        print(
+            f"    - Suppress one: boxmunge security suppress "
+            f"{h.finding.cve_id} --project {project} "
+            f"--until <YYYY-MM-DD> --reason <text>",
+            file=sys.stderr,
+        )
+        print(
+            "    - Wait for upstream fix and rescan.",
             file=sys.stderr,
         )
         return 1
 
     print("  Re-scan: clear (no quarantine-level findings)")
+    print(f"Resuming {project}...")
 
     # Audit A-2: lift section must hold the per-project lock so
     # config-regen + compose_up + state-clear cannot interleave with a

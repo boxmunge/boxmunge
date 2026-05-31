@@ -608,6 +608,142 @@ def test_suppress_writes_file(monkeypatch, tmp_path, capsys) -> None:
     assert "Suppression added" in out
 
 
+# ---------- suppress --current ----------
+
+
+def _write_quarantine_scan_state(
+    paths, project: str, cves: list[tuple[str, str]],
+) -> None:
+    """Write a minimal scan_state with given (cve_id, severity) pairs at
+    QUARANTINE disposition. Mirrors the shape produced by write_scan_state."""
+    import json as _json
+    path = paths.project_scan_state(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    findings = []
+    for cve, sev in cves:
+        findings.append({
+            "cve_id": cve,
+            "base_severity": sev,
+            "effective_severity": sev,
+            "hardening_penalty": 0,
+            "disposition": "quarantine",
+            "explanation": f"{sev}, no upstream fix",
+            "fix_available": False,
+            "fixed_version": None,
+            "package": "openssl",
+            "primary_url": None,
+            "title": "test",
+            "installed_version": "1.0",
+            "attack_vector": "Network",
+        })
+    state = {
+        "scanned_at": "2026-05-30T00:00:00+00:00",
+        "decisions": [{"image_ref": "demo:1.0", "findings": findings}],
+    }
+    path.write_text(_json.dumps(state))
+
+
+def test_suppress_current_suppresses_all_quarantine_findings(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    monkeypatch.setenv("USER", "jon")
+    paths = _suppress_paths(tmp_path)
+    _write_quarantine_scan_state(paths, "demo", [
+        ("CVE-2026-42496", "Critical"),
+        ("CVE-2026-8376", "Critical"),
+        ("CVE-2026-42497", "High"),
+    ])
+    rc = cmd_security_suppress(
+        ["--current", "--project", "demo",
+         "--until", "2099-01-01", "--reason", "Wait for upstream"],
+        paths,
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    sup_text = (paths.project_dir("demo") / "security"
+                / "suppressions.yml").read_text()
+    assert "CVE-2026-42496" in sup_text
+    assert "CVE-2026-8376" in sup_text
+    assert "CVE-2026-42497" in sup_text
+    # Header summary names the count.
+    assert "3 current quarantine-level" in out
+
+
+def test_suppress_current_no_quarantine_findings_rejected(
+    tmp_path, capsys,
+) -> None:
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    paths = _suppress_paths(tmp_path)
+    # scan_state exists but has no QUARANTINE-disposition findings.
+    _write_quarantine_scan_state(paths, "demo", [])
+    rc = cmd_security_suppress(
+        ["--current", "--project", "demo",
+         "--until", "2099-01-01", "--reason", "x"],
+        paths,
+    )
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "no current quarantine-level findings" in err
+
+
+def test_suppress_current_without_scan_state_rejected(
+    tmp_path, capsys,
+) -> None:
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    paths = _suppress_paths(tmp_path)
+    # No scan_state file at all.
+    rc = cmd_security_suppress(
+        ["--current", "--project", "demo",
+         "--until", "2099-01-01", "--reason", "x"],
+        paths,
+    )
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "no current quarantine-level findings" in err
+
+
+def test_suppress_current_with_positional_cve_rejected(
+    tmp_path, capsys,
+) -> None:
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    paths = _suppress_paths(tmp_path)
+    rc = cmd_security_suppress(
+        ["CVE-2026-1234", "--current", "--project", "demo",
+         "--until", "2099-01-01", "--reason", "x"],
+        paths,
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--current cannot be combined" in err
+
+
+def test_suppress_current_dedupes_repeated_cve(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    """A CVE appearing in multiple packages produces ONE suppression entry."""
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    monkeypatch.setenv("USER", "jon")
+    paths = _suppress_paths(tmp_path)
+    _write_quarantine_scan_state(paths, "demo", [
+        ("CVE-2026-1111", "Critical"),
+        ("CVE-2026-1111", "Critical"),
+        ("CVE-2026-2222", "High"),
+    ])
+    rc = cmd_security_suppress(
+        ["--current", "--project", "demo",
+         "--until", "2099-01-01", "--reason", "Wait"],
+        paths,
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    # The CVE list shown in the header summary should report 2, not 3.
+    assert "2 current quarantine-level" in out
+    sup_text = (paths.project_dir("demo") / "security"
+                / "suppressions.yml").read_text()
+    assert sup_text.count("CVE-2026-1111") == 1
+
+
 # ---------- unsuppress ----------
 
 
@@ -2075,10 +2211,17 @@ def test_resume_audit_only_still_detects_blocking_findings(
         lambda *a, **k: None,
     )
     rc = cmd_security_resume(["demo"], paths)
-    err = capsys.readouterr().err
+    captured = capsys.readouterr()
+    err = captured.err
+    out = captured.out
     assert rc == 1
     assert "Cannot resume" in err
     assert "CVE-2026-2222" in err
+    # The failure path must not announce "Resuming..." — that previously
+    # produced contradictory output reading as both "Resuming X" and
+    # "Cannot resume" in the same command run.
+    assert "Resuming demo" not in out
+    assert "Re-scanning demo before lift" in out
 
 
 # ---------- F-2: scan_one_project lazy grace bootstrap ----------

@@ -12,6 +12,7 @@ from boxmunge.commands.health_cmd import (
     check_age_key,
     check_config_drift,
     check_file_permissions,
+    check_lifecycle_blocked,
 )
 from boxmunge.paths import BoxPaths
 
@@ -140,6 +141,101 @@ class TestCheckConfigDrift:
         )
         check = check_config_drift(paths)
         assert check.status == "ok"
+
+
+class TestCheckConfigDriftSkipsBlocked:
+    """When a project is paused/quarantined its .conf intentionally holds
+    the maintenance fragment. Comparing that against generate_caddy_config
+    would warn 'drift' on an intentional state — false positive."""
+
+    def test_quarantined_project_does_not_warn_as_drift(
+        self, tmp_path: Path,
+    ) -> None:
+        paths = BoxPaths(root=tmp_path / "bm")
+        for d in ["config", "projects/myapp", "caddy/sites", "state/deploy"]:
+            (paths.root / d).mkdir(parents=True)
+        paths.project_manifest("myapp").write_text(yaml.dump({
+            "schema_version": 1, "id": "01TEST", "project": "myapp",
+            "source": "bundle", "hosts": ["myapp.test"],
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        }))
+        # Maintenance fragment, not generated proxy block.
+        paths.project_caddy_site("myapp").write_text(
+            "myapp.test {\n  handle {\n    root * /etc/caddy/maintenance\n  }\n}\n"
+        )
+        paths.project_quarantine_state("myapp").write_text("{}")
+        check = check_config_drift(paths)
+        assert check.status == "ok"
+        assert "myapp" not in check.detail
+
+
+class TestCheckLifecycleBlocked:
+    def _make_project(self, paths: BoxPaths, name: str) -> None:
+        for d in [f"projects/{name}", "state/deploy"]:
+            (paths.root / d).mkdir(parents=True, exist_ok=True)
+        paths.project_manifest(name).write_text(yaml.dump({
+            "schema_version": 1, "id": "01TEST", "project": name,
+            "source": "bundle", "hosts": [f"{name}.test"],
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        }))
+
+    def test_no_blocked_projects_is_ok(self, tmp_path: Path) -> None:
+        paths = BoxPaths(root=tmp_path / "bm")
+        paths.projects.mkdir(parents=True)
+        self._make_project(paths, "alpha")
+        check = check_lifecycle_blocked(paths)
+        assert check.status == "ok"
+        assert "No projects in blocked states" in check.detail
+
+    def test_paused_only_is_ok_with_note(self, tmp_path: Path) -> None:
+        paths = BoxPaths(root=tmp_path / "bm")
+        paths.projects.mkdir(parents=True)
+        self._make_project(paths, "alpha")
+        paths.project_paused_state("alpha").write_text(
+            '{"paused_at": "2026-05-30T00:00:00+00:00"}',
+        )
+        check = check_lifecycle_blocked(paths)
+        assert check.status == "ok"
+        assert "paused: alpha" in check.detail
+
+    def test_quarantined_warns_with_cve(self, tmp_path: Path) -> None:
+        paths = BoxPaths(root=tmp_path / "bm")
+        paths.projects.mkdir(parents=True)
+        self._make_project(paths, "alpha")
+        paths.project_quarantine_state("alpha").write_text(json.dumps({
+            "quarantined_at": "2026-05-28T03:11:49+00:00",
+            "cve_id": "CVE-2026-42496",
+            "severity": "Critical",
+            "effective_severity": "Critical",
+            "explanation": "Critical, no upstream fix",
+        }))
+        check = check_lifecycle_blocked(paths)
+        assert check.status == "warn"
+        assert "alpha" in check.detail
+        assert "CVE-2026-42496" in check.detail
+
+    def test_quarantine_takes_precedence_over_paused(
+        self, tmp_path: Path,
+    ) -> None:
+        paths = BoxPaths(root=tmp_path / "bm")
+        paths.projects.mkdir(parents=True)
+        self._make_project(paths, "alpha")
+        paths.project_paused_state("alpha").write_text(
+            '{"paused_at": "2026-05-30T00:00:00+00:00"}',
+        )
+        paths.project_quarantine_state("alpha").write_text(json.dumps({
+            "quarantined_at": "2026-05-28T03:11:49+00:00",
+            "cve_id": "CVE-2026-42496",
+            "effective_severity": "Critical",
+        }))
+        check = check_lifecycle_blocked(paths)
+        assert check.status == "warn"
+        # Mirrors lifecycle.is_blocked ordering: a project counted twice
+        # would be a bug.
+        assert "alpha" in check.detail
+        assert check.detail.count("alpha") == 1
+        # Listed under quarantined, not paused.
+        assert "paused:" not in check.detail
 
 
 class TestCheckProjectContainersSkipsQuarantined:
