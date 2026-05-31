@@ -52,7 +52,7 @@ $(BUNDLE): $(BUNDLE_DEPS)
 	        echo "ERROR: bundle staging missing declared file: $$f" >&2; exit 1; \
 	    fi; \
 	done
-	tar czf $@ -C dist/.stage boxmunge
+	python3 scripts/build-bundle.py $@ dist/.stage boxmunge
 	rm -rf dist/.stage
 	@echo "Built $@ ($$(du -h $@ | cut -f1))"
 	@echo "Bundle contains: $(BUNDLE_STAGED_DIRS) $(BUNDLE_TOP_FILES)"
