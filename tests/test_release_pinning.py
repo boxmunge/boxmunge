@@ -1,8 +1,13 @@
 """Lint tests guarding the reproducible release pipeline.
 
-Each test asserts a single discipline: action SHA pins, requirements
-hashes, Dockerfile digest pins, binary SHA256 ARGs. If any pin gets
-relaxed back to a floating reference, the relevant test fails loudly.
+This module accumulates a test per pinning discipline as the work
+in docs/superpowers/plans/2026-05-31-supply-chain-release-pipeline.md
+lands. Today: requirements file hash coverage. Later tasks will add
+release-workflow install lint, GitHub Action SHA pinning lint,
+Dependabot ecosystem-coverage lint, system-Dockerfile binary
+SHA256-verification lint, and per-Dockerfile base-image digest-pin
+lint. Every test asserts a single discipline so a regression on any
+one surface fails loudly without obscuring the others.
 """
 from __future__ import annotations
 
@@ -26,17 +31,35 @@ HASH_LINE_RE = re.compile(r"--hash=sha256:[0-9a-f]{64}")
 
 @pytest.mark.parametrize("path", REQUIREMENTS_FILES, ids=str)
 def test_requirements_file_uses_hashes(path: Path) -> None:
-    """Every non-comment, non-blank line referencing a package must carry --hash."""
+    """Every pinned package must have at least one --hash entry in its
+    own stanza. pip-compile emits one stanza per package, separated by
+    blank lines, with the package pin on the first line and one or more
+    --hash=sha256:... continuations after it."""
     assert path.exists(), f"{path} should exist"
     content = path.read_text()
-    package_lines = [
-        line for line in content.splitlines()
-        if line and not line.startswith(("#", "-", " "))
-        and "==" in line
-    ]
-    assert package_lines, f"{path} has no pinned package lines"
-    hash_count = len(HASH_LINE_RE.findall(content))
-    assert hash_count >= len(package_lines), (
-        f"{path}: found {len(package_lines)} pinned packages but only "
-        f"{hash_count} --hash entries. Run `make lock` to regenerate."
+
+    # Walk file as stanzas separated by blank lines. A stanza is "package
+    # related" if any line in it is a top-level package pin (==, @ url, or
+    # editable). Every such stanza must contain at least one hash.
+    stanzas = re.split(r"\n\s*\n", content)
+    package_pin_re = re.compile(
+        r"^(?!#)\S[^\s]*"        # starts with a non-comment, non-blank token
+        r"(==|\s@\s|^-e\s)",     # ==pin, @url ref, or editable install
+        re.MULTILINE,
+    )
+    hashless: list[str] = []
+    for stanza in stanzas:
+        # Skip stanzas that are clearly not package declarations (comments,
+        # pip flags like --index-url, etc.).
+        if not package_pin_re.search(stanza):
+            continue
+        if not HASH_LINE_RE.search(stanza):
+            # Capture the offending package name(s) for a useful failure.
+            first_line = stanza.strip().splitlines()[0]
+            hashless.append(first_line)
+
+    assert not hashless, (
+        f"{path}: {len(hashless)} package(s) missing --hash entries:\n  "
+        + "\n  ".join(hashless)
+        + "\nRun `make lock` to regenerate."
     )

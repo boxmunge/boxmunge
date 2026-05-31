@@ -77,8 +77,8 @@ clean:
 # changes. CI does not run this — it consumes the checked-in files.
 .PHONY: lock
 lock:
-	pip-compile --generate-hashes --resolver=backtracking -o requirements.txt pyproject.toml
-	pip-compile --generate-hashes --resolver=backtracking --extra=tui -o requirements-tui.txt pyproject.toml
-	pip-compile --generate-hashes --resolver=backtracking --extra=mcp -o requirements-mcp.txt pyproject.toml
-	pip-compile --generate-hashes --resolver=backtracking -o requirements-dev.txt requirements-dev.in
-	pip-compile --generate-hashes --resolver=backtracking -o cli/requirements.txt cli/pyproject.toml
+	pip-compile --generate-hashes -o requirements.txt pyproject.toml
+	pip-compile --generate-hashes --extra=tui -o requirements-tui.txt pyproject.toml
+	pip-compile --generate-hashes --extra=mcp -o requirements-mcp.txt pyproject.toml
+	pip-compile --generate-hashes -o requirements-dev.txt requirements-dev.in
+	pip-compile --generate-hashes -o cli/requirements.txt cli/pyproject.toml
