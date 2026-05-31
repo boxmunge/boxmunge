@@ -10,6 +10,7 @@ import pytest
 
 from boxmunge.fileutil import atomic_write_bytes, atomic_write_text
 from boxmunge.fileutil import open_shared_lockfile, project_lock, LockError
+from boxmunge.fileutil import _mkdir_p_deploy
 from boxmunge.paths import BoxPaths
 
 
@@ -61,6 +62,73 @@ class TestOpenSharedLockfile:
             assert os.read(fd, 1) == b"x"
         finally:
             os.close(fd)
+
+
+class TestMkdirPDeploy:
+    """The mkdir -p variant that chowns each newly-created dir to deploy.
+
+    Regression: a root-run code path created `<project>/security/` while
+    the file inside was atomically chowned to deploy; later
+    `security suppress` from the unprivileged deploy shell hit EACCES
+    trying to mkstemp under the root-owned dir.
+    """
+
+    def test_creates_full_chain(self, tmp_path: Path) -> None:
+        target = tmp_path / "a" / "b" / "c"
+        _mkdir_p_deploy(target)
+        assert target.is_dir()
+        assert (tmp_path / "a").is_dir()
+        assert (tmp_path / "a" / "b").is_dir()
+
+    def test_chowns_only_newly_created_dirs(self, tmp_path: Path) -> None:
+        # tmp_path/a exists already; tmp_path/a/b and tmp_path/a/b/c are new.
+        existing = tmp_path / "a"
+        existing.mkdir()
+        chowned: list[str] = []
+        with patch(
+            "boxmunge.fileutil._chown_deploy",
+            side_effect=lambda p: chowned.append(p),
+        ):
+            _mkdir_p_deploy(existing / "b" / "c")
+        assert str(existing) not in chowned, (
+            "pre-existing dir must not be chowned"
+        )
+        assert str(existing / "b") in chowned
+        assert str(existing / "b" / "c") in chowned
+
+    def test_existing_target_is_noop(self, tmp_path: Path) -> None:
+        target = tmp_path / "already-here"
+        target.mkdir()
+        chowned: list[str] = []
+        with patch(
+            "boxmunge.fileutil._chown_deploy",
+            side_effect=lambda p: chowned.append(p),
+        ):
+            _mkdir_p_deploy(target)
+        assert chowned == [], "nothing was created, nothing to chown"
+
+    def test_race_loser_does_not_chown(self, tmp_path: Path) -> None:
+        """If another process creates the dir between our exists() check
+        and mkdir(), we must not chown — ownership belongs to the winner."""
+        target = tmp_path / "race"
+        chowned: list[str] = []
+        real_mkdir = Path.mkdir
+
+        def racing_mkdir(self, *args, **kwargs):
+            # Simulate another process winning: create the dir, then let
+            # our mkdir raise FileExistsError as it would in production.
+            if str(self) == str(target):
+                real_mkdir(self, *args, **kwargs)
+                raise FileExistsError
+            return real_mkdir(self, *args, **kwargs)
+
+        with patch.object(Path, "mkdir", racing_mkdir), patch(
+            "boxmunge.fileutil._chown_deploy",
+            side_effect=lambda p: chowned.append(p),
+        ):
+            _mkdir_p_deploy(target)
+        assert target.is_dir()
+        assert chowned == []
 
 
 class TestAtomicWriteText:

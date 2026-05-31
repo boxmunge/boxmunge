@@ -45,6 +45,41 @@ def _chown_deploy(path: str) -> None:
         )
 
 
+def _mkdir_p_deploy(path: Path) -> None:
+    """mkdir -p, then chown each newly-created directory to deploy.
+
+    Plain ``Path.mkdir(parents=True, exist_ok=True)`` running as root leaves
+    every new intermediate directory owned by root. A subsequent atomic-write
+    from the unprivileged deploy shell then can't create a tempfile in the
+    new directory and fails with EACCES — observed when `security suppress`
+    tried to write the first entry into a root-owned `<project>/security/`
+    that an earlier root-run code path had created.
+
+    This helper creates the same chain but chowns each directory we
+    actually create to deploy. Pre-existing directories are intentionally
+    left untouched: we don't want to retroactively re-own legitimately
+    root-owned parents (e.g. /opt/boxmunge itself). Best-effort like
+    `_chown_deploy` — silent when not running as root or when the deploy
+    user does not yet exist.
+    """
+    to_create: list[Path] = []
+    cur = path
+    while not cur.exists():
+        to_create.append(cur)
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
+    for p in reversed(to_create):
+        try:
+            p.mkdir()
+        except FileExistsError:
+            # Race: another process created it between exists() and mkdir().
+            # Don't chown — ownership belongs to whoever won the race.
+            continue
+        _chown_deploy(str(p))
+
+
 def open_shared_lockfile(path: Path) -> int:
     """Open (or create) a lock file usable by both root and the deploy user.
 
@@ -63,7 +98,7 @@ def open_shared_lockfile(path: Path) -> int:
 
     Returns the fd. Caller is responsible for fcntl.flock and os.close.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_p_deploy(path.parent)
     fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o664)
     try:
         os.chmod(str(path), 0o664)
@@ -81,7 +116,7 @@ def atomic_write_text(path: Path, content: str, mode: int | None = None) -> None
     If mode is provided, the temp file is chmod'd before rename so
     the final file is never visible with wrong permissions.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_p_deploy(path.parent)
 
     fd, tmp_path = tempfile.mkstemp(
         dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp"
@@ -112,7 +147,7 @@ def atomic_write_bytes(path: Path, content: bytes, mode: int | None = None) -> N
     chmod'd before rename so the final file is never visible with wrong
     permissions.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_p_deploy(path.parent)
 
     fd, tmp_path = tempfile.mkstemp(
         dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp"
