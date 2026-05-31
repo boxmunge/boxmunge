@@ -71,3 +71,14 @@ test-vm:
 
 clean:
 	rm -rf dist/
+
+# Regenerate hash-pinned requirements files from pyproject.toml.
+# Run when pyproject.toml's [project.dependencies] or optional-dependencies
+# changes. CI does not run this — it consumes the checked-in files.
+.PHONY: lock
+lock:
+	pip-compile --generate-hashes --resolver=backtracking -o requirements.txt pyproject.toml
+	pip-compile --generate-hashes --resolver=backtracking --extra=tui -o requirements-tui.txt pyproject.toml
+	pip-compile --generate-hashes --resolver=backtracking --extra=mcp -o requirements-mcp.txt pyproject.toml
+	pip-compile --generate-hashes --resolver=backtracking -o requirements-dev.txt requirements-dev.in
+	pip-compile --generate-hashes --resolver=backtracking -o cli/requirements.txt cli/pyproject.toml
