@@ -29,7 +29,7 @@ RUN apk add --no-cache \
     && rm -rf /tmp/rclone* \
     && apk del curl unzip \
     && age --version \
-    && rclone --version | head -1
+    && env -u RCLONE_VERSION rclone version | head -1
 
 # Run as non-root by default
 RUN adduser -D -u 1000 boxmunge
