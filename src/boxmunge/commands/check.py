@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from boxmunge.commands.health_state import update_health_state
+from boxmunge.fileutil import project_lock, LockError
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation
 from boxmunge.manifest import load_manifest, ManifestError
@@ -347,34 +348,56 @@ def run_check_all(args: list[str], paths: BoxPaths) -> int:
                     paths, project=name,
                 )
             continue
-        result = run_check(name, paths)
 
-        if not read_only:
-            # Mutator path: also runs the smoke a second time to capture
-            # the failure message for Pushover. Skipped under --read-only
-            # because there is no state to update and no alert to send.
-            try:
-                manifest = load_manifest(paths.project_manifest(name))
-            except ManifestError:
-                manifest = {}
-            message = ""
-            if result != 0:
-                has_smoke = any(
-                    svc.get("smoke") for svc in manifest.get("services", {}).values()
-                )
-                if has_smoke:
-                    project_dir = paths.project_dir(name)
-                    compose_files = ["compose.yml", "compose.boxmunge.yml"]
-                    sr = run_smoke_in_container(
-                        project_dir, manifest, compose_files,
-                    )
-                    message = sr.message
-
-            update_health_state(name, result, message, paths)
-
-        worst = max(worst, result)
+        # Maintenance window: a deploy/stage/promote/restore in progress
+        # holds the project lock. Stage transiently stops the prod container
+        # to snapshot its data; a smoke run racing that transient state
+        # escalates to CRITICAL and calls compose_down, leaving production
+        # OFFLINE until the next promote. Hold the lock for the whole check
+        # so we either skip (op in progress) or run with no lifecycle op
+        # able to start underneath us — never act on a transient state.
+        try:
+            with project_lock(name, paths):
+                worst = max(worst, _check_one(name, paths, read_only))
+        except LockError:
+            log_operation(
+                "check-all",
+                "skipped — lifecycle operation in progress (lock held)",
+                paths, project=name,
+            )
+            continue
 
     return worst
+
+
+def _check_one(name: str, paths: BoxPaths, read_only: bool) -> int:
+    """Run a single project's check (caller holds the project lock)."""
+    result = run_check(name, paths)
+
+    if not read_only:
+        # Mutator path: also runs the smoke a second time to capture
+        # the failure message for Pushover. Skipped under --read-only
+        # because there is no state to update and no alert to send.
+        try:
+            manifest = load_manifest(paths.project_manifest(name))
+        except ManifestError:
+            manifest = {}
+        message = ""
+        if result != 0:
+            has_smoke = any(
+                svc.get("smoke") for svc in manifest.get("services", {}).values()
+            )
+            if has_smoke:
+                project_dir = paths.project_dir(name)
+                compose_files = ["compose.yml", "compose.boxmunge.yml"]
+                sr = run_smoke_in_container(
+                    project_dir, manifest, compose_files,
+                )
+                message = sr.message
+
+        update_health_state(name, result, message, paths)
+
+    return result
 
 
 def cmd_check_all(args: list[str]) -> None:

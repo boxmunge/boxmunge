@@ -412,6 +412,88 @@ class TestCheckAllSkipsQuarantined:
         assert len(skip_logs) == 1, mock_log.call_args_list
 
 
+class TestCheckAllSkipsLockedProject:
+    """A project mid-lifecycle (deploy/stage/promote/restore) holds its
+    project_lock. During stage, that operation transiently stops the prod
+    container to snapshot its data. If the timer-driven check-all races in,
+    runs smoke against the half-down container, and escalates to CRITICAL,
+    it calls compose_down and leaves PRODUCTION OFFLINE. The health monitor
+    must treat a held lock as a maintenance window: skip the project."""
+
+    def _write_project(self, paths: BoxPaths, name: str) -> None:
+        import yaml
+        paths.project_dir(name).mkdir(parents=True, exist_ok=True)
+        paths.project_manifest(name).write_text(yaml.dump({
+            "schema_version": 2, "id": "01TEST",
+            "project": name, "source": "bundle",
+            "hosts": [f"{name}.example.com"],
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        }))
+        paths.project_deploy_state(name).parent.mkdir(parents=True, exist_ok=True)
+        paths.project_deploy_state(name).write_text('{"current_ref": "main"}')
+
+    def test_locked_project_not_checked(self, paths: BoxPaths, monkeypatch) -> None:
+        from unittest.mock import patch
+        from boxmunge.commands import check as check_mod
+        from boxmunge.commands.check import run_check_all
+        from boxmunge.fileutil import project_lock
+
+        self._write_project(paths, "myapp")
+
+        run_calls: list[str] = []
+        monkeypatch.setattr(
+            check_mod, "run_check",
+            lambda name, paths, verbose=True: run_calls.append(name) or 0,
+        )
+
+        # Simulate a concurrent lifecycle op holding the lock.
+        with project_lock("myapp", paths):
+            with patch("boxmunge.commands.check.update_health_state") as mock_update:
+                rc = run_check_all([], paths)
+
+        # No smoke run, no health-state mutation (so no compose_down) while
+        # the lifecycle op holds the lock.
+        assert run_calls == []
+        mock_update.assert_not_called()
+        # A maintenance-window skip must not fail the whole check-all run.
+        assert rc == 0
+
+    def test_locked_skip_is_logged(self, paths: BoxPaths, monkeypatch) -> None:
+        from unittest.mock import patch
+        from boxmunge.commands import check as check_mod
+        from boxmunge.commands.check import run_check_all
+        from boxmunge.fileutil import project_lock
+
+        self._write_project(paths, "myapp")
+        monkeypatch.setattr(check_mod, "run_check", lambda *a, **kw: 0)
+
+        with project_lock("myapp", paths):
+            with patch("boxmunge.commands.check.log_operation") as mock_log:
+                run_check_all([], paths)
+
+        skip_logs = [
+            c for c in mock_log.call_args_list
+            if c.args[0] == "check-all"
+            and "progress" in c.args[1].lower()
+            and c.kwargs.get("project") == "myapp"
+        ]
+        assert len(skip_logs) == 1, mock_log.call_args_list
+
+    def test_unlocked_project_still_checked(self, paths: BoxPaths, monkeypatch) -> None:
+        """Sanity: with no lock held, the normal mutator path still runs."""
+        from unittest.mock import patch
+        from boxmunge.commands import check as check_mod
+        from boxmunge.commands.check import run_check_all
+
+        self._write_project(paths, "myapp")
+        monkeypatch.setattr(check_mod, "run_check", lambda *a, **kw: 0)
+
+        with patch("boxmunge.commands.check.update_health_state") as mock_update:
+            run_check_all([], paths)
+
+        mock_update.assert_called_once()
+
+
 class TestCheckJson:
     """Audit H-3: `boxmunge check <project> --json` for MCP/agent consumption."""
 
