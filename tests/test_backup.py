@@ -11,7 +11,44 @@ from boxmunge.backup import (
     decrypt_file,
     prune_backups,
     backup_filename,
+    resolve_backup_service,
+    BackupError,
 )
+
+
+class TestResolveBackupService:
+    """backup.service resolution — single source of truth shared by
+    backup and restore. The old default of 'web' silently targeted a
+    non-existent container for every project not named 'web'."""
+
+    def test_explicit_service_wins(self) -> None:
+        manifest = {
+            "services": {"web": {}, "db": {}},
+            "backup": {"service": "db"},
+        }
+        assert resolve_backup_service(manifest) == "db"
+
+    def test_single_service_inferred(self) -> None:
+        manifest = {"services": {"wwgs": {}}, "backup": {"type": "custom"}}
+        assert resolve_backup_service(manifest) == "wwgs"
+
+    def test_explicit_service_may_be_backend_absent_from_services(self) -> None:
+        """A db backend often lives only in compose.yml, not the manifest
+        services block (canary does exactly this). Resolution must not
+        cross-check against services."""
+        manifest = {
+            "services": {"web": {}},
+            "backup": {"service": "db"},
+        }
+        assert resolve_backup_service(manifest) == "db"
+
+    def test_ambiguous_multi_service_raises(self) -> None:
+        manifest = {
+            "services": {"web": {}, "worker": {}},
+            "backup": {"type": "custom"},
+        }
+        with pytest.raises(BackupError, match="backup.service is not set"):
+            resolve_backup_service(manifest)
 
 # Dummy age identity file content for tests
 AGE_IDENTITY = (

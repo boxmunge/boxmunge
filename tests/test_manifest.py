@@ -140,6 +140,31 @@ class TestValidateManifest:
         errors, warnings = validate_manifest(m, "myapp")
         assert any("restore_command" in e.lower() for e in errors)
 
+    def test_backup_multi_service_without_service_errors(self, tmp_path: Path) -> None:
+        """Backup configured + >1 service + no backup.service is ambiguous
+        and must fail validation rather than silently default to 'web'."""
+        content = VALID_MANIFEST.replace(
+            "  type: none",
+            "  type: db-dump\n  dump_command: dump.sh\n  restore_command: restore.sh",
+        )
+        p = tmp_path / "myapp"
+        _write_manifest(p, content)
+        m = load_manifest(p / "manifest.yml")
+        errors, warnings = validate_manifest(m, "myapp")
+        assert any("backup.service" in e for e in errors)
+
+    def test_backup_single_service_infers_service(self, tmp_path: Path) -> None:
+        """A single-service project may omit backup.service — it is inferred."""
+        content = MINIMAL_MANIFEST.replace(
+            "  type: none",
+            "  type: db-dump\n  dump_command: dump.sh\n  restore_command: restore.sh",
+        )
+        p = tmp_path / "tiny"
+        _write_manifest(p, content)
+        m = load_manifest(p / "manifest.yml")
+        errors, warnings = validate_manifest(m, "tiny")
+        assert not any("backup.service" in e for e in errors)
+
     def test_warns_if_no_smoke_test(self, tmp_path: Path) -> None:
         content = MINIMAL_MANIFEST.replace(
             "    smoke: boxmunge-scripts/smoke.sh\n",

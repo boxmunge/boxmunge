@@ -96,16 +96,21 @@ class TestRunRestore:
         captured = capsys.readouterr()
         assert "No backup configuration" in captured.err
 
-    def test_fails_loud_when_service_missing(
+    def test_fails_loud_when_service_ambiguous(
         self, paths: BoxPaths, capsys
     ) -> None:
+        """With >1 service and no explicit backup.service, restore can't
+        infer the target container — it must fail loudly rather than guess
+        (the old code silently defaulted to 'web')."""
         pdir = paths.project_dir("myapp")
         pdir.mkdir(parents=True)
         (pdir / "manifest.yml").write_text(
             "project: myapp\nrepo: \"\"\nref: main\n"
             "hosts:\n  - myapp.example.com\n"
-            "services:\n  web:\n    type: frontend\n    port: 3000\n"
+            "services:\n"
+            "  web:\n    type: frontend\n    port: 3000\n"
             "    routes:\n      - path: /\n"
+            "  db:\n    port: 5432\n"
             "backup:\n  type: db-dump\n"
             "  restore_command: ./restore.sh\n"
             "env_files: []\n"

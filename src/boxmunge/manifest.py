@@ -279,6 +279,18 @@ def validate_manifest(
                 f"Backup type is '{backup_type}' but 'restore_command' is missing. "
                 "No write-only backups — both dump and restore are required."
             )
+        # Service resolvability. An unset backup.service is only safe to
+        # infer when the manifest defines exactly one service; otherwise the
+        # backup would silently target the wrong (or a non-existent)
+        # container. Fail at deploy time rather than swallow it as a runtime
+        # warning that defeats pre-deploy snapshots.
+        if not backup.get("service") and len(services) != 1:
+            errors.append(
+                f"Backup is configured but 'backup.service' is not set and the "
+                f"manifest defines {len(services)} services. Set "
+                f"'backup.service' to the compose service the dump/restore "
+                f"command runs in."
+            )
 
     # Smoke tests — per-service
     has_any_smoke = any(

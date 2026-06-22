@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import Any
 
 import boxmunge.backup as _backup
-from boxmunge.backup import backup_filename, prune_backups, BackupError
+from boxmunge.backup import (
+    backup_filename, prune_backups, resolve_backup_service, BackupError,
+)
 from boxmunge.config import load_config, ConfigError
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.lifecycle import BlockReason, is_blocked
@@ -138,7 +140,11 @@ def run_backup(project_name: str, paths: BoxPaths, _lock_held: bool = False) -> 
         print(f"ERROR: backup type is '{backup_type}' but no dump_command defined", file=sys.stderr)
         return 1
 
-    service = backup_conf.get("service", "web")
+    try:
+        service = resolve_backup_service(manifest)
+    except BackupError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
     retention = backup_conf.get("retention", 7)
     key_path = paths.backup_key
 

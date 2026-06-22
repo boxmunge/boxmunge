@@ -13,12 +13,44 @@ import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 _BACKUP_CMD_TIMEOUT = 600  # 10 minutes for large database dumps
 
 
 class BackupError(Exception):
     """Raised when a backup operation fails."""
+
+
+def resolve_backup_service(manifest: dict[str, Any]) -> str:
+    """Resolve which compose service the backup dump/restore runs against.
+
+    Resolution order:
+      1. Explicit ``backup.service`` in the manifest.
+      2. The sole service, when the manifest defines exactly one.
+
+    Raises BackupError when neither applies — an ambiguous multi-service
+    project must name its backup service explicitly. The old code defaulted
+    to ``"web"``, which silently targeted a non-existent container for every
+    project whose service wasn't named ``web`` (and let the pre-deploy
+    snapshot fail to a swallowed warning).
+
+    The backup service is a *compose* service and may legitimately be a
+    backend (e.g. ``db``) that is absent from the manifest's ``services``
+    block, so this does NOT cross-check it against ``services``.
+    """
+    backup_conf = manifest.get("backup", {}) or {}
+    explicit = backup_conf.get("service")
+    if explicit:
+        return explicit
+    services = manifest.get("services", {}) or {}
+    if len(services) == 1:
+        return next(iter(services))
+    raise BackupError(
+        f"backup.service is not set and the manifest defines {len(services)} "
+        "services — set 'backup.service' to the compose service the "
+        "dump/restore command runs in."
+    )
 
 
 def _run_cmd(cmd: list[str], timeout: int = _BACKUP_CMD_TIMEOUT, **kwargs) -> subprocess.CompletedProcess:

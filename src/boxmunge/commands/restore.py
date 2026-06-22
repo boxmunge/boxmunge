@@ -5,9 +5,8 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
 
-from boxmunge.backup import decrypt_file, BackupError
+from boxmunge.backup import decrypt_file, resolve_backup_service, BackupError
 from boxmunge.commands.backup_cmd import list_snapshots
 from boxmunge.docker import compose_down, compose_up, DockerError
 from boxmunge.fileutil import project_lock, LockError
@@ -89,13 +88,10 @@ def run_restore(
             file=sys.stderr,
         )
         return 1
-    service = backup_conf.get("service")
-    if not service:
-        print(
-            f"ERROR: backup.service is missing from manifest for "
-            f"{project_name}.",
-            file=sys.stderr,
-        )
+    try:
+        service = resolve_backup_service(manifest)
+    except BackupError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
     restore_command = backup_conf.get("restore_command", "")
     if not restore_command:
