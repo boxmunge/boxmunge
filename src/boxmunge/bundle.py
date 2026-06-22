@@ -5,6 +5,8 @@ import shutil
 import tarfile
 from pathlib import Path
 
+import yaml
+
 
 def extract_bundle(bundle_path: Path, dest: Path) -> Path:
     """Extract a tar.gz bundle and return the project directory inside.
@@ -41,21 +43,80 @@ def extract_bundle(bundle_path: Path, dest: Path) -> Path:
     return top_entries[0]
 
 
+# Top-level project dirs boxmunge treats as persistent host-side state.
+# A bundle may legitimately ship a seed/placeholder copy (e.g.
+# ``data/.gitkeep``), but on an upgrade the live versions on disk hold the
+# project's real data — the database under ``data/``, encrypted snapshots
+# under ``backups/``. These must NEVER be clobbered by the bundle's copy;
+# doing so silently destroys production data on every redeploy.
+_PERSISTENT_DIRS = frozenset({"data", "backups"})
+
+
+def _persistent_dir_names(project_dir: Path) -> set[str]:
+    """Top-level project dir names that hold persistent host state.
+
+    Always includes boxmunge's owned dirs (``data/``, ``backups/``).
+    Additionally inspects the project's *existing* compose.yml and preserves
+    any relative bind-mount source dir (e.g. ``./uploads`` -> ``uploads``),
+    so user-declared persistent volumes survive upgrades too. Best-effort:
+    a missing or unparseable compose.yml falls back to the owned dirs.
+    """
+    names = set(_PERSISTENT_DIRS)
+    compose_path = project_dir / "compose.yml"
+    if not compose_path.exists():
+        return names
+    try:
+        from boxmunge.compose import is_bind_mount
+
+        compose = yaml.safe_load(compose_path.read_text()) or {}
+        for svc in (compose.get("services") or {}).values():
+            if not isinstance(svc, dict):
+                continue
+            for vol in svc.get("volumes", []) or []:
+                if not isinstance(vol, str) or not is_bind_mount(vol):
+                    continue
+                host = vol.split(":")[0]
+                if host.startswith("./"):
+                    top = host.removeprefix("./").split("/", 1)[0]
+                    if top:
+                        names.add(top)
+    except (yaml.YAMLError, OSError):
+        pass
+    return names
+
+
 def copy_project_files(src: Path, dest: Path, is_upgrade: bool) -> None:
     """Copy project files from extracted bundle to project directory.
 
-    On upgrade, preserves project.env (secrets).
+    On upgrade, preserves project.env (secrets) and never clobbers
+    persistent host-side directories (``data/``, ``backups/``, and any
+    bind-mount source declared in the live compose.yml).
     """
     existing_env = None
+    preserved: set[str] = set()
     if is_upgrade:
         env_path = dest / "project.env"
         if env_path.exists():
             existing_env = env_path.read_text()
+        preserved = _persistent_dir_names(dest)
 
     # Copy everything from bundle into project dir
     for item in src.iterdir():
         dest_item = dest / item.name
         if item.is_dir():
+            if item.name in preserved and dest_item.exists():
+                if any(dest_item.iterdir()):
+                    # Live persistent data present — never overwrite it.
+                    continue
+                # The persistent dir exists but is empty: the volume has
+                # never been used (typically a first real run). Seed it with
+                # the bundle's initial content. Once it holds anything, the
+                # branch above preserves it on every subsequent deploy. We
+                # seed only when LITERALLY empty — a non-overwriting merge
+                # would be confused by dev-only sentinel files.
+                shutil.rmtree(dest_item)
+                shutil.copytree(item, dest_item)
+                continue
             if dest_item.exists():
                 shutil.rmtree(dest_item)
             shutil.copytree(item, dest_item)
