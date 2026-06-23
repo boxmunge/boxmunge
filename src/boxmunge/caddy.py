@@ -8,6 +8,27 @@ from boxmunge.manifest import get_all_routes
 from boxmunge.paths import BoxPaths
 
 
+def _access_log_lines() -> list[str]:
+    """Caddy access-log directive lines for a site block.
+
+    Emits JSON to a shared host-mounted file (`/var/log/caddy/access.log`,
+    bind-mounted from `/opt/boxmunge/caddy/logs`) that the host's CrowdSec
+    `crowdsecurity/caddy` parser ingests for HTTP-layer detection. Every site
+    block writes to the same path; Caddy dedupes file writers by filename, so
+    this is safe. Caddy self-rotates the file (lumberjack), keeping rotation
+    out of logrotate — consistent with the rest of the box.
+    """
+    return [
+        "    log {",
+        "        output file /var/log/caddy/access.log {",
+        "            roll_size 50MiB",
+        "            roll_keep 5",
+        "        }",
+        "        format json",
+        "    }",
+    ]
+
+
 def generate_caddy_config(manifest: dict[str, Any]) -> str:
     """Generate a Caddy site block from a project manifest.
 
@@ -19,6 +40,7 @@ def generate_caddy_config(manifest: dict[str, Any]) -> str:
 
     host_line = ", ".join(hosts)
     lines = [f"{host_line} {{"]
+    lines.extend(_access_log_lines())
 
     for path, alias, port in routes:
         if path == "/":
@@ -85,6 +107,7 @@ def generate_staging_caddy_config(
     staging_hosts = [f"staging.{h}" for h in hosts]
     host_line = ", ".join(staging_hosts)
     lines = [f"{host_line} {{"]
+    lines.extend(_access_log_lines())
 
     if auth:
         username, password_hash = auth
