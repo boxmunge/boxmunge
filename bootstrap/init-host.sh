@@ -375,6 +375,13 @@ install -d -m 750 -o root -g "${DEPLOY_USER}" \
 install -d -m 775 -o root -g "${DEPLOY_USER}" \
     "${BOXMUNGE_ROOT}/caddy/sites"
 
+# caddy/logs holds Caddy's JSON access log (bind-mounted to /var/log/caddy in
+# the container). The Caddy container writes here as root; the host's CrowdSec
+# daemon (also root) reads it. Caddy writes the log file itself as 0600, so the
+# dir need not be world-readable.
+install -d -m 750 -o root -g root \
+    "${BOXMUNGE_ROOT}/caddy/logs"
+
 install -d -m 755 -o root -g root \
     "${BOXMUNGE_ROOT}/templates" \
     "${BOXMUNGE_ROOT}/templates/project" \
@@ -520,6 +527,10 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./sites:/etc/caddy/sites:ro
       - ./maintenance:/etc/caddy/maintenance:ro
+      # Writable bind mount (not a named volume) so the host's CrowdSec
+      # daemon can read access.log directly. read_only above locks only the
+      # container rootfs, not mounted volumes.
+      - ./logs:/var/log/caddy
       - caddy_data:/data
       - caddy_config:/config
     networks:

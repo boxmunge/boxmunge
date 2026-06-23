@@ -71,12 +71,26 @@ class TestGenerateCaddyConfig:
         config = generate_caddy_config(FULL_MANIFEST)
         assert "myapp-backend:8000" in config
 
+    def test_access_log_block_present(self) -> None:
+        # CrowdSec's caddy parser ingests these JSON access logs from the
+        # host-mounted file; without the directive there is no HTTP-layer
+        # detection on the proxy.
+        config = generate_caddy_config(SIMPLE_MANIFEST)
+        assert "log {" in config
+        assert "output file /var/log/caddy/access.log" in config
+        assert "format json" in config
+
 
 class TestStagingCaddyConfig:
     def test_no_auth_by_default(self) -> None:
         config = generate_staging_caddy_config(SIMPLE_MANIFEST)
         assert "basicauth" not in config
         assert "staging.myapp.example.com" in config
+
+    def test_access_log_block_present(self) -> None:
+        config = generate_staging_caddy_config(SIMPLE_MANIFEST)
+        assert "output file /var/log/caddy/access.log" in config
+        assert "format json" in config
 
     def test_auth_injected_when_provided(self) -> None:
         config = generate_staging_caddy_config(
