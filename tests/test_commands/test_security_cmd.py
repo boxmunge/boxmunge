@@ -744,6 +744,186 @@ def test_suppress_current_dedupes_repeated_cve(
     assert sup_text.count("CVE-2026-1111") == 1
 
 
+# ---------- suppress --host ----------
+
+
+def test_suppress_host_writes_host_file(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    """--host writes to /opt/boxmunge/config/suppressions.yml, not the project file."""
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    monkeypatch.setenv("USER", "jon")
+    paths = _suppress_paths(tmp_path)
+    paths.config.mkdir(parents=True, exist_ok=True)
+    rc = cmd_security_suppress(
+        ["CVE-2026-9999", "--host",
+         "--until", "2099-01-01", "--reason", "perl-base unused"],
+        paths,
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    # Host file written.
+    assert paths.host_suppressions.exists()
+    host_text = paths.host_suppressions.read_text()
+    assert "CVE-2026-9999" in host_text
+    # Project file untouched.
+    proj_file = paths.project_dir("demo") / "security" / "suppressions.yml"
+    assert not proj_file.exists() or "CVE-2026-9999" not in proj_file.read_text()
+    # Output labels scope.
+    assert "(host)" in out
+
+
+def test_suppress_host_and_project_mutually_exclusive(
+    tmp_path, capsys,
+) -> None:
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    paths = _suppress_paths(tmp_path)
+    rc = cmd_security_suppress(
+        ["CVE-2026-1234", "--host", "--project", "demo",
+         "--until", "2099-01-01", "--reason", "x"],
+        paths,
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "mutually exclusive" in err
+
+
+def test_suppress_neither_host_nor_project_rejected(
+    tmp_path, capsys,
+) -> None:
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    paths = _suppress_paths(tmp_path)
+    rc = cmd_security_suppress(
+        ["CVE-2026-1234", "--until", "2099-01-01", "--reason", "x"],
+        paths,
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "one of --project, --host" in err
+
+
+def test_suppress_current_host_unions_across_projects(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    """--current --host suppresses every QUARANTINE CVE across every project.
+
+    Two projects each with overlapping quarantine findings: the dedupe means
+    each CVE produces one host-level entry, regardless of how many projects
+    it currently quarantines.
+    """
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    monkeypatch.setenv("USER", "jon")
+    paths = _suppress_paths(tmp_path)
+    # Stand up a second project alongside the default 'demo'.
+    proj2 = paths.projects / "other"
+    proj2.mkdir(parents=True)
+    (proj2 / "manifest.yml").write_text(yaml.safe_dump({
+        "schema_version": 2,
+        "id": "01HZZZZZZZZZZZZZZZZZZZZZ02",
+        "source": "bundle",
+        "project": "other",
+        "hosts": ["other.example.com"],
+        "services": {"web": {"port": 3000, "routes": [{"path": "/"}],
+                              "smoke": "x.sh"}},
+    }))
+    # demo has CVE-A + CVE-B at quarantine; other has CVE-B + CVE-C.
+    _write_quarantine_scan_state(paths, "demo", [
+        ("CVE-2026-1001", "Critical"),
+        ("CVE-2026-1002", "High"),
+    ])
+    _write_quarantine_scan_state(paths, "other", [
+        ("CVE-2026-1002", "High"),
+        ("CVE-2026-1003", "Critical"),
+    ])
+    paths.config.mkdir(parents=True, exist_ok=True)
+    rc = cmd_security_suppress(
+        ["--current", "--host",
+         "--until", "2099-01-01", "--reason", "fleet-wide ack"],
+        paths,
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    # All three distinct CVEs land in the host file, deduped (CVE-1002 once).
+    host_text = paths.host_suppressions.read_text()
+    assert host_text.count("CVE-2026-1001") == 1
+    assert host_text.count("CVE-2026-1002") == 1
+    assert host_text.count("CVE-2026-1003") == 1
+    # Header explicitly says host-scoped.
+    assert "host-scoped" in out
+
+
+def test_suppress_current_host_no_quarantine_findings_rejected(
+    tmp_path, capsys,
+) -> None:
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    paths = _suppress_paths(tmp_path)
+    rc = cmd_security_suppress(
+        ["--current", "--host",
+         "--until", "2099-01-01", "--reason", "x"],
+        paths,
+    )
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "no current quarantine-level findings across any project" in err
+
+
+def test_unsuppress_host_removes_from_host_file(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    from boxmunge.commands.security_suppress import (
+        cmd_security_suppress, cmd_security_unsuppress,
+    )
+    monkeypatch.setenv("USER", "jon")
+    paths = _suppress_paths(tmp_path)
+    paths.config.mkdir(parents=True, exist_ok=True)
+    rc1 = cmd_security_suppress(
+        ["CVE-2026-9999", "--host",
+         "--until", "2099-01-01", "--reason", "x"],
+        paths,
+    )
+    capsys.readouterr()  # discard output from add
+    assert rc1 == 0
+    rc2 = cmd_security_unsuppress(["CVE-2026-9999", "--host"], paths)
+    assert rc2 == 0
+    out = capsys.readouterr().out
+    assert "(host)" in out
+    # Active list should no longer carry the CVE.
+    from boxmunge.cve.suppressions import load_suppressions
+    remaining = load_suppressions(paths.host_suppressions)
+    assert all(s.cve_id != "CVE-2026-9999" for s in remaining)
+
+
+def test_unsuppress_host_and_project_mutually_exclusive(
+    tmp_path, capsys,
+) -> None:
+    from boxmunge.commands.security_suppress import cmd_security_unsuppress
+    paths = _suppress_paths(tmp_path)
+    rc = cmd_security_unsuppress(
+        ["CVE-2026-1234", "--host", "--project", "demo"], paths,
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "mutually exclusive" in err
+
+
+def test_load_suppressions_stamps_scope_on_entries(tmp_path) -> None:
+    """load_suppressions(scope="host") tags every parsed entry as host scope."""
+    from boxmunge.cve.suppressions import load_suppressions
+    path = tmp_path / "suppressions.yml"
+    path.write_text(
+        "suppressions:\n"
+        "  - cve: CVE-2026-9999\n"
+        "    until: 2099-01-01\n"
+        "    reason: test\n"
+        "    reviewed_by: jon\n"
+        "    added: 2026-01-01\n"
+    )
+    project_loaded = load_suppressions(path)
+    host_loaded = load_suppressions(path, scope="host")
+    assert all(s.scope == "project" for s in project_loaded)
+    assert all(s.scope == "host" for s in host_loaded)
+
+
 # ---------- unsuppress ----------
 
 
@@ -2300,6 +2480,51 @@ def test_scan_one_project_audit_only_skips_bootstrap(
     assert not paths.cve_grace_state.exists()
     scan_one_project(paths, "demo", audit_only=True)
     assert not paths.cve_grace_state.exists()
+
+
+def test_host_suppression_applies_during_scan_disposition(
+    monkeypatch, tmp_path,
+) -> None:
+    """Integration: a host-level suppression silences a CVE that would
+    otherwise quarantine the project — proves the scan/policy pipeline
+    consults the host suppressions file."""
+    from boxmunge.commands.security_scan_core import scan_one_project
+
+    paths = _scan_one_project_paths(tmp_path)
+    _seed_grace(paths, in_grace=False)  # past grace so quarantine fires
+    _grace_quarantine_scan(monkeypatch, paths)  # returns Critical CVE-2026-9999
+    # Without a suppression this scan WOULD quarantine the project. Track
+    # whether quarantine_project is called — it must NOT be once the host
+    # suppression covers the CVE.
+    quarantine_calls: list[tuple] = []
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.quarantine_project",
+        lambda *a, **k: quarantine_calls.append((a, k)),
+    )
+
+    # Write a host-level suppression for the very CVE the scanner returns.
+    paths.config.mkdir(parents=True, exist_ok=True)
+    paths.host_suppressions.write_text(
+        "suppressions:\n"
+        "  - cve: CVE-2026-9999\n"
+        "    until: 2099-01-01\n"
+        "    reason: fleet-wide; not loaded\n"
+        "    reviewed_by: opstest\n"
+        "    added: 2026-01-01\n"
+    )
+
+    scan_one_project(paths, "demo")
+
+    # Quarantine must NOT have fired.
+    assert quarantine_calls == [], (
+        "host suppression should have prevented quarantine_project call"
+    )
+    # The persisted scan_state shows the finding at SUPPRESSED disposition.
+    import json as _json
+    state = _json.loads(paths.project_scan_state("demo").read_text())
+    findings = state["decisions"][0]["findings"]
+    f9999 = next(f for f in findings if f["cve_id"] == "CVE-2026-9999")
+    assert f9999["disposition"] == "suppressed"
 
 
 def test_scan_one_project_does_not_double_init_grace(

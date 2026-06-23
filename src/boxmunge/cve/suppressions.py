@@ -20,7 +20,7 @@ and this module.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -39,15 +39,28 @@ class SuppressionsError(Exception):
     """Suppression file is malformed or schema-invalid."""
 
 
+SCOPE_PROJECT = "project"
+SCOPE_HOST = "host"
+
+
 @dataclass(frozen=True)
 class Suppression:
-    """A single CVE suppression entry."""
+    """A single CVE suppression entry.
+
+    `scope` is implicit in the file the entry was loaded from — it is not
+    serialised to YAML — but the in-memory object carries it so the policy
+    pipeline can combine project + host entries while the views still label
+    each entry with its origin. Defaults to "project" so existing callers
+    that read per-project files don't have to thread scope through every
+    construction site.
+    """
 
     cve_id: str
     until: date
     reason: str
     reviewed_by: str
     added: date
+    scope: str = SCOPE_PROJECT
 
     def is_active(self, *, today: date) -> bool:
         """Active iff today < until.
@@ -143,7 +156,9 @@ def _parse_entry(raw: Any, index: int) -> Suppression:
 # ---------- public API ----------
 
 
-def load_suppressions(path: Path) -> tuple[Suppression, ...]:
+def load_suppressions(
+    path: Path, *, scope: str = SCOPE_PROJECT,
+) -> tuple[Suppression, ...]:
     """Read and parse the suppressions file.
 
     Missing file → empty tuple (not an error: no suppressions yet is the
@@ -151,6 +166,12 @@ def load_suppressions(path: Path) -> tuple[Suppression, ...]:
     Malformed YAML / schema violation / bad CVE / bad date → SuppressionsError
     with the offending entry index or field named in the message.
     Returns suppressions sorted by cve_id ascending for stable downstream order.
+
+    `scope` is stamped onto each parsed entry so downstream code can tell
+    project-level entries from host-level ones (both files share the same
+    YAML schema; the distinction is the file location). Defaults to
+    "project" — existing callers that read a per-project file get the
+    pre-existing behavior unchanged.
     """
     if not path.exists():
         return ()
@@ -196,6 +217,8 @@ def load_suppressions(path: Path) -> tuple[Suppression, ...]:
         )
 
     parsed = tuple(_parse_entry(raw, i) for i, raw in enumerate(raw_list))
+    if scope != SCOPE_PROJECT:
+        parsed = tuple(replace(s, scope=scope) for s in parsed)
     return tuple(sorted(parsed, key=lambda s: s.cve_id))
 
 

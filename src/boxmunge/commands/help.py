@@ -63,8 +63,10 @@ Container security & CVE policy:
   security <project>              Per-project view (hardening + CVE state)
   security scan [<project>]       Run Trivy scan now (no project = fleet)
   security suppress <CVE>         Add a CVE suppression with --until and --reason
-  security suppress --current     Suppress all currently-quarantining CVEs for --project
-  security unsuppress <CVE>       Remove a suppression
+  security suppress --current     Suppress all currently-quarantining CVEs
+                                  for --project, or --host (across all projects)
+  security suppress --host        Host-scope suppression (applies to every project on this box)
+  security unsuppress <CVE>       Remove a suppression (--project NAME or --host)
   security resume <project>       Lift a CVE quarantine (re-scans first)
 
 Platform updates:

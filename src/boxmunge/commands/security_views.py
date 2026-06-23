@@ -190,8 +190,12 @@ def format_project_text(
         lines.append("")
         lines.append("  Active suppressions:")
         for s in active_suppressions:
+            # Host-scoped suppressions apply to this project but live in
+            # the host config — label distinctly so an operator can tell
+            # which file to edit when they want to lift the suppression.
+            scope_tag = " [host]" if getattr(s, "scope", "project") == "host" else ""
             lines.append(
-                f"    {s.cve_id} (until {s.until.isoformat()}, "
+                f"    {s.cve_id}{scope_tag} (until {s.until.isoformat()}, "
                 f"by {s.reviewed_by}: {s.reason!r})"
             )
 
@@ -259,6 +263,7 @@ def format_project_json(
                 "reason": s.reason,
                 "reviewed_by": s.reviewed_by,
                 "added": s.added.isoformat(),
+                "scope": getattr(s, "scope", "project"),
             }
             for s in active_suppressions
         ],

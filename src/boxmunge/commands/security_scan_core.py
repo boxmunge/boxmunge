@@ -245,11 +245,24 @@ def _scan_one_project_locked(
     )
     suppressions_path = project_suppressions_path(paths, project)
     try:
-        supps = load_suppressions(suppressions_path)
+        project_supps = load_suppressions(suppressions_path)
     except SuppressionsError as e:
         raise RuntimeError(
             f"Failed to load suppressions for {project!r}: {e}"
         ) from e
+    # Host-scoped suppressions apply to every project on this box. Used to
+    # silence base-image CVEs whose vulnerable code path is never loaded by
+    # any deployed service (e.g. perl-base when no project runs Perl).
+    # Project entries are listed FIRST so they win precedence on collision —
+    # find_active_suppression returns the first match, and a project-level
+    # suppression is more specific than a host-level one.
+    try:
+        host_supps = load_suppressions(paths.host_suppressions, scope="host")
+    except SuppressionsError as e:
+        raise RuntimeError(
+            f"Failed to load host-scoped suppressions: {e}"
+        ) from e
+    supps = project_supps + host_supps
 
     # Load the prior scan_state BEFORE we overwrite it. Used by the alerting
     # path to detect transitions (new quarantine, expired suppression, ...).

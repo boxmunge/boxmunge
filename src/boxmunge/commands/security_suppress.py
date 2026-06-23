@@ -103,14 +103,60 @@ def _current_quarantine_cves(
     )
 
 
-def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
-    """boxmunge security suppress <CVE>|--current --project <n> --until <d> --reason <t>.
+def _all_currently_quarantining_cves(paths: BoxPaths) -> list[str]:
+    """Union of QUARANTINE-disposition CVE ids across every project on the box.
 
-    `--current` suppresses every CVE currently at QUARANTINE disposition
-    for the project (read from the latest scan_state). Use this to unblock
-    a `security resume` without copy-pasting CVE ids.
+    Used by `--current --host` to suppress every CVE currently blocking any
+    project in a single operation. Deduped by CVE id (a CVE quarantining
+    multiple projects becomes one suppression). Order: severity rank
+    descending, then CVE id ascending — matches per-project --current
+    ordering for consistent operator UX.
+    """
+    if not paths.projects.exists():
+        return []
+    seen: dict[str, dict[str, Any]] = {}
+    for proj_dir in sorted(paths.projects.iterdir()):
+        if not proj_dir.is_dir() or not (proj_dir / "manifest.yml").exists():
+            continue
+        for f in _current_quarantine_cves(paths, proj_dir.name):
+            cve = f["cve_id"]
+            existing = seen.get(cve)
+            sev_new = f.get("effective_severity") or ""
+            sev_old = (
+                existing.get("effective_severity") or "" if existing else ""
+            )
+            rank_new = _SEVERITY_RANK.get(sev_new, 0)
+            rank_old = _SEVERITY_RANK.get(sev_old, 0)
+            if existing is None or rank_new > rank_old:
+                seen[cve] = f
+    return [
+        f["cve_id"]
+        for f in sorted(
+            seen.values(),
+            key=lambda f: (
+                -_SEVERITY_RANK.get(f.get("effective_severity") or "", 0),
+                f.get("cve_id", ""),
+            ),
+        )
+    ]
+
+
+def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
+    """boxmunge security suppress <CVE>|--current (--project <n>|--host) --until <d> --reason <t>.
+
+    Two scopes. `--project` writes to the project's suppressions.yml
+    (per-project scope). `--host` writes to /opt/boxmunge/config/suppressions.yml
+    (applies across every project on the box — e.g. silencing base-image
+    CVEs whose vulnerable code path no deployed service loads). Project
+    entries win precedence over host entries on collision.
+
+    `--current` suppresses every CVE currently at QUARANTINE disposition.
+    With `--project P` that means findings for P; with `--host` it means
+    the union of findings across every project on the box. Removes the
+    need to copy-paste CVE ids.
     """
     use_current = "--current" in args
+    use_host = "--host" in args
     rest: list[str]
     cve_id_positional: str | None
     if use_current:
@@ -128,20 +174,35 @@ def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
         if not args or args[0].startswith("--"):
             print(
                 "Usage: boxmunge security suppress <CVE>|--current "
-                "--project <name> --until <YYYY-MM-DD> --reason <text>",
+                "(--project <name>|--host) --until <YYYY-MM-DD> --reason <text>",
                 file=sys.stderr,
             )
             return 2
         cve_id_positional = args[0]
         rest = args[1:]
 
+    if use_host:
+        rest = [a for a in rest if a != "--host"]
     project = _extract_flag(rest, "--project")
     until_str = _extract_flag(rest, "--until")
     reason = _extract_flag(rest, "--reason")
 
+    # Scope must be exactly one of --project or --host.
+    if use_host and project is not None:
+        print(
+            "ERROR: --host and --project are mutually exclusive.",
+            file=sys.stderr,
+        )
+        return 2
+    if not use_host and project is None:
+        print(
+            "ERROR: missing required flag(s): one of --project, --host",
+            file=sys.stderr,
+        )
+        return 2
+
     missing = [
         n for n, v in [
-            ("--project", project),
             ("--until", until_str),
             ("--reason", reason),
         ] if not v
@@ -153,29 +214,39 @@ def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
         )
         return 2
 
-    assert project is not None and until_str is not None and reason is not None
-    try:
-        validate_project_name(project)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 2
+    assert until_str is not None and reason is not None
 
-    if not is_registered(project, paths):
-        # cve_id is "-" in the audit detail when --current was used and the
-        # project gate rejected the call before we could enumerate findings.
-        cve_for_log = cve_id_positional or "-"
-        print(
-            f"ERROR: project '{project}' is not registered.",
-            file=sys.stderr,
-        )
-        log_error(
-            "cve-suppress",
-            f"Suppression rejected: project '{project}' is not registered "
-            f"({cve_for_log})",
-            paths, project=project,
-            detail={"cve_id": cve_for_log, "reason": "project_not_registered"},
-        )
-        return 1
+    if use_host:
+        # Host scope: no project to validate; suppressions_path is the
+        # config-level file. The audit log writes use project="(host)" as
+        # a sentinel so log queries can filter on it.
+        suppressions_path = paths.host_suppressions
+        log_project = "(host)"
+        scope_label = "host"
+    else:
+        assert project is not None
+        try:
+            validate_project_name(project)
+        except ValueError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
+        if not is_registered(project, paths):
+            cve_for_log = cve_id_positional or "-"
+            print(
+                f"ERROR: project '{project}' is not registered.",
+                file=sys.stderr,
+            )
+            log_error(
+                "cve-suppress",
+                f"Suppression rejected: project '{project}' is not registered "
+                f"({cve_for_log})",
+                paths, project=project,
+                detail={"cve_id": cve_for_log, "reason": "project_not_registered"},
+            )
+            return 1
+        suppressions_path = _project_suppressions_path(paths, project)
+        log_project = project
+        scope_label = f"project {project}"
 
     today = _today()
     # Use a sentinel CVE id in audit log lines for failures that happen
@@ -241,33 +312,56 @@ def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
         )
         return 1
 
-    suppressions_path = _project_suppressions_path(paths, project)
-
-    # Resolve the target CVE list. For --current, refuse if scan_state is
-    # missing or shows no QUARANTINE findings — silently doing nothing
-    # would be the wrong UX (operator expected suppressions to happen).
+    # suppressions_path was set above per scope (--host vs --project).
+    # Resolve the target CVE list. For --current, refuse if no QUARANTINE
+    # findings exist — silently doing nothing would be the wrong UX
+    # (operator expected suppressions to happen).
     if use_current:
-        findings = _current_quarantine_cves(paths, project)
-        if not findings:
+        if use_host:
+            cve_ids = _all_currently_quarantining_cves(paths)
+            if not cve_ids:
+                print(
+                    "ERROR: no current quarantine-level findings across any "
+                    "project on this box. Run `security scan` first, or "
+                    "specify a CVE id explicitly.",
+                    file=sys.stderr,
+                )
+                log_error(
+                    "cve-suppress",
+                    "--current --host rejected: no QUARANTINE findings in "
+                    "any project's scan_state",
+                    paths, project=log_project,
+                    detail={"reason": "no_current_quarantine_findings"},
+                )
+                return 1
             print(
-                f"ERROR: no current quarantine-level findings for "
-                f"'{project}'. Run `security scan {project}` first, or "
-                f"specify a CVE id explicitly.",
-                file=sys.stderr,
+                f"Suppressing {len(cve_ids)} current quarantine-level "
+                f"finding{'s' if len(cve_ids) != 1 else ''} "
+                f"(host-scoped, applies across all projects):"
             )
-            log_error(
-                "cve-suppress",
-                f"--current rejected: no QUARANTINE findings in scan_state "
-                f"for {project}",
-                paths, project=project,
-                detail={"reason": "no_current_quarantine_findings"},
+        else:
+            assert project is not None
+            findings = _current_quarantine_cves(paths, project)
+            if not findings:
+                print(
+                    f"ERROR: no current quarantine-level findings for "
+                    f"'{project}'. Run `security scan {project}` first, or "
+                    f"specify a CVE id explicitly.",
+                    file=sys.stderr,
+                )
+                log_error(
+                    "cve-suppress",
+                    f"--current rejected: no QUARANTINE findings in scan_state "
+                    f"for {project}",
+                    paths, project=project,
+                    detail={"reason": "no_current_quarantine_findings"},
+                )
+                return 1
+            cve_ids = [f["cve_id"] for f in findings]
+            print(
+                f"Suppressing {len(cve_ids)} current quarantine-level "
+                f"finding{'s' if len(cve_ids) != 1 else ''} for {project}:"
             )
-            return 1
-        cve_ids = [f["cve_id"] for f in findings]
-        print(
-            f"Suppressing {len(cve_ids)} current quarantine-level "
-            f"finding{'s' if len(cve_ids) != 1 else ''} for {project}:"
-        )
     else:
         assert cve_id_positional is not None
         cve_ids = [cve_id_positional]
@@ -275,7 +369,8 @@ def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
     for cve_id in cve_ids:
         rc = _apply_single_suppression(
             paths=paths,
-            project=project,
+            project=log_project,
+            scope_label=scope_label,
             cve_id=cve_id,
             until=until,
             reason=reason,
@@ -292,6 +387,7 @@ def _apply_single_suppression(
     *,
     paths: BoxPaths,
     project: str,
+    scope_label: str,
     cve_id: str,
     until: date,
     reason: str,
@@ -375,7 +471,8 @@ def _apply_single_suppression(
         detail=log_detail,
     )
 
-    print(f"Suppression added for {cve_id} in project {project}")
+    log_detail["scope"] = scope_label
+    print(f"Suppression added for {cve_id} ({scope_label})")
     print(f"  Until:        {until.isoformat()}")
     print(f"  Reason:       {reason}")
     print(f"  Reviewed by:  {reviewer}")
@@ -383,37 +480,61 @@ def _apply_single_suppression(
 
 
 def cmd_security_unsuppress(args: list[str], paths: BoxPaths) -> int:
+    """boxmunge security unsuppress <CVE> (--project <name>|--host)."""
     if not args or args[0].startswith("--"):
         print(
-            "Usage: boxmunge security unsuppress <CVE> --project <name>",
+            "Usage: boxmunge security unsuppress <CVE> "
+            "(--project <name>|--host)",
             file=sys.stderr,
         )
         return 2
     cve_id = args[0]
-    project = _extract_flag(args[1:], "--project")
-    if not project:
-        print("ERROR: missing required flag: --project", file=sys.stderr)
-        return 2
-    try:
-        validate_project_name(project)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 2
-    if not is_registered(project, paths):
+    rest = args[1:]
+    use_host = "--host" in rest
+    if use_host:
+        rest = [a for a in rest if a != "--host"]
+    project = _extract_flag(rest, "--project")
+
+    if use_host and project is not None:
         print(
-            f"ERROR: project '{project}' is not registered.",
+            "ERROR: --host and --project are mutually exclusive.",
             file=sys.stderr,
         )
-        log_error(
-            "cve-suppress",
-            f"Unsuppress rejected: project '{project}' is not registered "
-            f"({cve_id})",
-            paths, project=project,
-            detail={"cve_id": cve_id, "reason": "project_not_registered"},
+        return 2
+    if not use_host and project is None:
+        print(
+            "ERROR: missing required flag(s): one of --project, --host",
+            file=sys.stderr,
         )
-        return 1
+        return 2
 
-    suppressions_path = _project_suppressions_path(paths, project)
+    if use_host:
+        suppressions_path = paths.host_suppressions
+        log_project = "(host)"
+        scope_label = "host"
+    else:
+        assert project is not None
+        try:
+            validate_project_name(project)
+        except ValueError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
+        if not is_registered(project, paths):
+            print(
+                f"ERROR: project '{project}' is not registered.",
+                file=sys.stderr,
+            )
+            log_error(
+                "cve-suppress",
+                f"Unsuppress rejected: project '{project}' is not registered "
+                f"({cve_id})",
+                paths, project=project,
+                detail={"cve_id": cve_id, "reason": "project_not_registered"},
+            )
+            return 1
+        suppressions_path = _project_suppressions_path(paths, project)
+        log_project = project
+        scope_label = f"project {project}"
 
     # Load the entry BEFORE removal so we can record it to history and
     # populate the audit log detail.
@@ -423,9 +544,9 @@ def cmd_security_unsuppress(args: list[str], paths: BoxPaths) -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         log_error(
             "cve-suppress",
-            f"Unsuppress rejected: cannot load suppressions for {project} "
-            f"({e})",
-            paths, project=project,
+            f"Unsuppress rejected: cannot load suppressions for "
+            f"{scope_label} ({e})",
+            paths, project=log_project,
             detail={"cve_id": cve_id, "reason": "load_failed"},
         )
         return 1
@@ -438,7 +559,7 @@ def cmd_security_unsuppress(args: list[str], paths: BoxPaths) -> int:
         log_error(
             "cve-suppress",
             f"Unsuppress rejected: {e}",
-            paths, project=project,
+            paths, project=log_project,
             detail={"cve_id": cve_id, "reason": "remove_failed"},
         )
         return 1
@@ -456,15 +577,16 @@ def cmd_security_unsuppress(args: list[str], paths: BoxPaths) -> int:
         )
         log_error(
             "cve-suppress",
-            f"Suppression removed for {cve_id} in {project}, BUT history "
-            f"write failed: {e}",
-            paths, project=project,
+            f"Suppression removed for {cve_id} from {scope_label}, BUT "
+            f"history write failed: {e}",
+            paths, project=log_project,
             detail={"cve_id": cve_id, "reason": "history_write_failed"},
         )
         return 1
 
     detail: dict[str, object] = {
         "cve_id": cve_id,
+        "scope": scope_label,
         "previous_until": removed.until.isoformat(),
         "previous_added": removed.added.isoformat(),
     }
@@ -474,7 +596,7 @@ def cmd_security_unsuppress(args: list[str], paths: BoxPaths) -> int:
     log_operation(
         "cve-suppress",
         f"Suppression removed: {cve_id}",
-        paths, project=project, detail=detail,
+        paths, project=log_project, detail=detail,
     )
-    print(f"Suppression removed for {cve_id} in project {project}")
+    print(f"Suppression removed for {cve_id} ({scope_label})")
     return 0

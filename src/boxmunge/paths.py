@@ -53,6 +53,13 @@ class BoxPaths:
         self.inbox_tmp = self.inbox / ".tmp"
         self.inbox_consumed = self.inbox / ".consumed"
         self.host_secrets = self.config / "secrets.env"
+        # Host-scoped CVE suppressions — applied across every project on
+        # the box. Per-project files at <project>/security/suppressions.yml
+        # remain authoritative for project-specific entries and take
+        # precedence; this file is for fleet-wide noise such as base-image
+        # CVEs whose vulnerable code path is never loaded by any deployed
+        # service. Same YAML schema as the per-project file.
+        self.host_suppressions = self.config / "suppressions.yml"
         self.stashes = root / "stashes"
         self.canary = root / "canary"
         self.upgrade_state = root / "upgrade-state"
