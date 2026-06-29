@@ -50,9 +50,14 @@ def check_ufw(ssh_port: int = 922) -> HealthCheck:
     root-context health timer / upgrade shim, which run as root.
     """
     if os.geteuid() != 0:
+        # Not a problem with the system — we simply lack the privilege to
+        # inspect UFW. Report a neutral SKIP (exit-code-neutral) rather than
+        # a WARN, so running 'health' from the non-root deploy shell doesn't
+        # land in WARNINGS for a non-issue. The root health timer/upgrade
+        # shim run as root and give the authoritative UFW verdict.
         return HealthCheck(
-            "ufw", "warn",
-            "not verifiable without root (the scheduled health timer checks UFW)",
+            "ufw", "skip",
+            "requires root; verified by the scheduled health timer",
         )
     try:
         result = _run(["ufw", "status"], timeout=10)

@@ -20,7 +20,10 @@ from boxmunge.paths import BoxPaths
 @dataclass
 class HealthCheck:
     name: str
-    status: str  # "ok", "warn", "error"
+    # "ok" | "warn" | "error" | "skip". "skip" means the check could not be
+    # performed (e.g. it needs root and health was run as a non-root user);
+    # it is informational and never affects the exit code.
+    status: str
     detail: str
 
 
@@ -39,7 +42,9 @@ class HealthReport:
     def format_text(self) -> str:
         lines = ["boxmunge health report:", ""]
         for check in self.checks:
-            icon = {"ok": "OK", "warn": "WARN", "error": "ERR"}[check.status]
+            icon = {
+                "ok": "OK", "warn": "WARN", "error": "ERR", "skip": "SKIP",
+            }[check.status]
             line = f"  {icon:4s} {check.name}"
             if check.detail:
                 line += f" -- {check.detail}"

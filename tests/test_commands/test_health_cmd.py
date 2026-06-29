@@ -39,6 +39,18 @@ class TestHealthReport:
         ])
         assert report.exit_code == 2
 
+    def test_skip_is_exit_code_neutral(self) -> None:
+        """A 'skip' (couldn't-check, e.g. needs root) must not affect the
+        exit code — health stays HEALTHY when everything else is ok."""
+        report = HealthReport(checks=[
+            HealthCheck("docker", "ok", "Running"),
+            HealthCheck("ufw", "skip", "requires root"),
+        ])
+        assert report.exit_code == 0
+        text = report.format_text()
+        assert "SKIP" in text
+        assert "HEALTHY" in text
+
     def test_json_output(self) -> None:
         report = HealthReport(checks=[
             HealthCheck("docker", "ok", "Running"),

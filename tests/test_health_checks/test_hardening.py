@@ -76,16 +76,17 @@ class TestCheckUFW:
 
     @patch("boxmunge.health_checks.hardening.os.geteuid", return_value=1000)
     @patch("boxmunge.health_checks.hardening.subprocess.run")
-    def test_non_root_degrades_to_warn_not_critical(
+    def test_non_root_skips_not_warns_or_errors(
         self, mock_run: MagicMock, _euid,
     ) -> None:
         """Regression: from a non-root caller (deploy restricted shell),
-        `ufw status` fails with 'need to be root'. The check must NOT report
-        a CRITICAL error (which escalated health to exit 2 and looked like a
-        firewall outage) — it cannot verify, so it warns. The root health
-        timer remains authoritative."""
+        `ufw status` fails with 'need to be root'. The check must report a
+        neutral SKIP — not an error (which escalated health to exit 2 and
+        looked like a firewall outage) and not even a warn (which still made
+        health 'land in warnings by default' for a non-issue). The root
+        health timer remains authoritative."""
         check = check_ufw(ssh_port=922)
-        assert check.status == "warn"
+        assert check.status == "skip"
         assert "root" in check.detail.lower()
         # Must not even attempt to run ufw as non-root.
         mock_run.assert_not_called()
