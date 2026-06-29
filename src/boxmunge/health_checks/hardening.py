@@ -40,7 +40,20 @@ def _run(args: list[str], timeout: int) -> subprocess.CompletedProcess:
 
 
 def check_ufw(ssh_port: int = 922) -> HealthCheck:
-    """Check if UFW firewall is active with expected rules."""
+    """Check if UFW firewall is active with expected rules.
+
+    ``ufw status`` requires root. When health runs as a non-root user — e.g.
+    the deploy restricted shell, whose PATH also lacks sbin — we cannot
+    inspect UFW. Report an indeterminate WARN rather than a misleading
+    "error" that escalates the whole health run to CRITICAL (exit 2) and
+    reads as a firewall outage. The authoritative UFW verdict comes from the
+    root-context health timer / upgrade shim, which run as root.
+    """
+    if os.geteuid() != 0:
+        return HealthCheck(
+            "ufw", "warn",
+            "not verifiable without root (the scheduled health timer checks UFW)",
+        )
     try:
         result = _run(["ufw", "status"], timeout=10)
         if result.returncode != 0:

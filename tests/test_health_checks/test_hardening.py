@@ -16,8 +16,12 @@ from boxmunge.health_checks.hardening import (
 
 
 class TestCheckUFW:
+    # ufw status requires root, so the command-evaluation path only runs as
+    # root. Simulate that here so these tests are deterministic regardless of
+    # the (usually non-root) test/CI user.
+    @patch("boxmunge.health_checks.hardening.os.geteuid", return_value=0)
     @patch("boxmunge.health_checks.hardening.subprocess.run")
-    def test_active_and_correct(self, mock_run: MagicMock) -> None:
+    def test_active_and_correct(self, mock_run: MagicMock, _euid) -> None:
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout=(
@@ -28,23 +32,26 @@ class TestCheckUFW:
         check = check_ufw(ssh_port=922)
         assert check.status == "ok"
 
+    @patch("boxmunge.health_checks.hardening.os.geteuid", return_value=0)
     @patch("boxmunge.health_checks.hardening.subprocess.run")
-    def test_inactive(self, mock_run: MagicMock) -> None:
+    def test_inactive(self, mock_run: MagicMock, _euid) -> None:
         mock_run.return_value = MagicMock(
             returncode=0, stdout="Status: inactive\n",
         )
         check = check_ufw(ssh_port=922)
         assert check.status == "error"
 
+    @patch("boxmunge.health_checks.hardening.os.geteuid", return_value=0)
     @patch("boxmunge.health_checks.hardening.subprocess.run")
-    def test_not_installed(self, mock_run: MagicMock) -> None:
+    def test_not_installed(self, mock_run: MagicMock, _euid) -> None:
         mock_run.side_effect = FileNotFoundError()
         check = check_ufw(ssh_port=922)
         assert check.status == "error"
 
+    @patch("boxmunge.health_checks.hardening.os.geteuid", return_value=0)
     @patch("boxmunge.health_checks.hardening.subprocess.run")
     def test_resolves_ufw_via_sbin_even_without_sbin_on_caller_path(
-        self, mock_run: MagicMock, monkeypatch,
+        self, mock_run: MagicMock, _euid, monkeypatch,
     ) -> None:
         """Regression: ufw lives in sbin. When the caller's PATH lacks sbin
         (e.g. the deploy restricted shell), the check must still find ufw by
@@ -66,6 +73,22 @@ class TestCheckUFW:
         assert "/usr/sbin" in path_dirs
         assert "/sbin" in path_dirs
         assert check.status == "ok"
+
+    @patch("boxmunge.health_checks.hardening.os.geteuid", return_value=1000)
+    @patch("boxmunge.health_checks.hardening.subprocess.run")
+    def test_non_root_degrades_to_warn_not_critical(
+        self, mock_run: MagicMock, _euid,
+    ) -> None:
+        """Regression: from a non-root caller (deploy restricted shell),
+        `ufw status` fails with 'need to be root'. The check must NOT report
+        a CRITICAL error (which escalated health to exit 2 and looked like a
+        firewall outage) — it cannot verify, so it warns. The root health
+        timer remains authoritative."""
+        check = check_ufw(ssh_port=922)
+        assert check.status == "warn"
+        assert "root" in check.detail.lower()
+        # Must not even attempt to run ufw as non-root.
+        mock_run.assert_not_called()
 
 
 class TestCheckCrowdSec:
