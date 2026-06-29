@@ -39,6 +39,28 @@ class TestHealthReport:
         ])
         assert report.exit_code == 2
 
+    def test_health_does_not_crash_when_a_hardening_check_raises(
+        self, tmp_path: Path, monkeypatch, capsys,
+    ) -> None:
+        """A hardening check that raises (e.g. PermissionError as non-root)
+        must be caught and surfaced as SKIP — never crash the whole health
+        command."""
+        from boxmunge.commands import health_cmd
+        from boxmunge.health_checks import hardening
+
+        def boom(*a, **k):
+            raise PermissionError(13, "Permission denied")
+
+        # Make one hardening probe explode.
+        monkeypatch.setattr(hardening, "check_aide_status", boom)
+
+        paths = BoxPaths(root=tmp_path / "bm")
+        # Should return an int exit code, not raise.
+        rc = health_cmd.run_health(paths)
+        assert isinstance(rc, int)
+        out = capsys.readouterr().out
+        assert "SKIP" in out
+
     def test_skip_is_exit_code_neutral(self) -> None:
         """A 'skip' (couldn't-check, e.g. needs root) must not affect the
         exit code — health stays HEALTHY when everything else is ok."""

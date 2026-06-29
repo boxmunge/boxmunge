@@ -102,21 +102,35 @@ def check_crowdsec() -> HealthCheck:
 
 
 def check_aide_status() -> HealthCheck:
-    """Check if AIDE is installed and the database exists."""
+    """Check if AIDE is installed and the database exists.
+
+    The AIDE database lives under /var/lib/aide, which is root-only (0700).
+    A non-root caller (the deploy restricted shell) can tell aide is
+    installed but cannot stat the database — Path.exists() raises
+    PermissionError. Report SKIP rather than crashing the whole health
+    command or warning about a database we simply can't see. The root
+    health timer gives the authoritative verdict.
+    """
     try:
         result = _run(["which", "aide"], timeout=5)
         if result.returncode != 0:
             return HealthCheck("aide", "warn", "AIDE not installed")
         from pathlib import Path
 
-        for db_path in [
-            Path("/var/lib/aide/aide.db"),
-            Path("/var/lib/aide/aide.db.new"),
-        ]:
-            if db_path.exists():
-                return HealthCheck(
-                    "aide", "ok", "AIDE installed with database",
-                )
+        try:
+            for db_path in [
+                Path("/var/lib/aide/aide.db"),
+                Path("/var/lib/aide/aide.db.new"),
+            ]:
+                if db_path.exists():
+                    return HealthCheck(
+                        "aide", "ok", "AIDE installed with database",
+                    )
+        except PermissionError:
+            return HealthCheck(
+                "aide", "skip",
+                "installed; database not verifiable without root",
+            )
         return HealthCheck(
             "aide", "warn", "AIDE installed but database not initialised",
         )

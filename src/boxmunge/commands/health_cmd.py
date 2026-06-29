@@ -364,13 +364,24 @@ def run_health(paths: BoxPaths, *, as_json: bool = False) -> int:
         )
         ssh_port = 922
 
-    report.checks.append(check_ufw(ssh_port=ssh_port))
-    report.checks.append(check_crowdsec())
-    report.checks.append(check_aide_status())
-    report.checks.append(check_auditd())
-    report.checks.append(check_unattended_upgrades())
-    report.checks.append(check_sysctl_hardening())
-    report.checks.append(check_systemd_timers())
+    # Host-hardening probes shell out to system tools and read root-owned
+    # paths, so they are the most likely to raise from a non-root caller
+    # (e.g. the deploy shell). Guard each one: a single check that raises
+    # must never crash the whole health command — surface it as a neutral
+    # SKIP carrying the error instead.
+    def _safe(name: str, fn) -> "HealthCheck":
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 — robustness over precision here
+            return HealthCheck(name, "skip", f"check could not run: {e}")
+
+    report.checks.append(_safe("ufw", lambda: check_ufw(ssh_port=ssh_port)))
+    report.checks.append(_safe("crowdsec", check_crowdsec))
+    report.checks.append(_safe("aide", check_aide_status))
+    report.checks.append(_safe("auditd", check_auditd))
+    report.checks.append(_safe("auto-updates", check_unattended_upgrades))
+    report.checks.append(_safe("sysctl", check_sysctl_hardening))
+    report.checks.append(_safe("timers", check_systemd_timers))
 
     if as_json:
         print(report.format_json())

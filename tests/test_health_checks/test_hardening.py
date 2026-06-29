@@ -92,6 +92,23 @@ class TestCheckUFW:
         mock_run.assert_not_called()
 
 
+class TestCheckAideNonRoot:
+    @patch("pathlib.Path.exists")
+    @patch("boxmunge.health_checks.hardening.subprocess.run")
+    def test_permission_error_on_db_skips_not_crashes(
+        self, mock_run: MagicMock, mock_exists: MagicMock,
+    ) -> None:
+        """Regression: AIDE's db dir is root-only; from the deploy shell
+        Path.exists() raises PermissionError. The check must SKIP, not let
+        the exception crash the whole health command."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="/usr/bin/aide\n")
+        mock_exists.side_effect = PermissionError(13, "Permission denied")
+
+        check = check_aide_status()
+        assert check.status == "skip"
+        assert "root" in check.detail.lower()
+
+
 class TestCheckCrowdSec:
     @patch("boxmunge.health_checks.hardening.subprocess.run")
     def test_running(self, mock_run: MagicMock) -> None:
