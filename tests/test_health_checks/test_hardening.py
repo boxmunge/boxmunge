@@ -42,6 +42,31 @@ class TestCheckUFW:
         check = check_ufw(ssh_port=922)
         assert check.status == "error"
 
+    @patch("boxmunge.health_checks.hardening.subprocess.run")
+    def test_resolves_ufw_via_sbin_even_without_sbin_on_caller_path(
+        self, mock_run: MagicMock, monkeypatch,
+    ) -> None:
+        """Regression: ufw lives in sbin. When the caller's PATH lacks sbin
+        (e.g. the deploy restricted shell), the check must still find ufw by
+        augmenting PATH — not report a false 'not installed' (which escalates
+        health to exit 2)."""
+        # Simulate the deploy shell's sbin-free PATH.
+        monkeypatch.setenv(
+            "PATH", "/usr/local/bin:/usr/bin:/bin:/opt/boxmunge/bin",
+        )
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="Status: active\n922/tcp\n80/tcp\n443/tcp\n",
+        )
+        check = check_ufw(ssh_port=922)
+
+        # The subprocess must have been invoked with sbin appended to PATH.
+        env = mock_run.call_args.kwargs["env"]
+        path_dirs = env["PATH"].split(":")
+        assert "/usr/sbin" in path_dirs
+        assert "/sbin" in path_dirs
+        assert check.status == "ok"
+
 
 class TestCheckCrowdSec:
     @patch("boxmunge.health_checks.hardening.subprocess.run")
