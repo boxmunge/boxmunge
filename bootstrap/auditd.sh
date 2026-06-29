@@ -26,8 +26,11 @@ cat > /etc/audit/rules.d/boxmunge.rules <<'EOF'
 -w /etc/sudoers -p wa -k sudoers
 -w /etc/sudoers.d/ -p wa -k sudoers
 
-# SSH key changes
--w /home/ -p wa -k ssh_keys -F name=authorized_keys
+# SSH key changes. NOTE: -F filters (e.g. name=) are NOT valid on watch
+# (-w) rules — auditctl rejects them with "-F unknown field", which fails
+# augenrules --load, fails audit-rules.service, and (since auditd Requires
+# it) prevents auditd from starting at all. Watch the directories instead.
+-w /home/ -p wa -k ssh_keys
 -w /root/.ssh/ -p wa -k ssh_keys
 
 # boxmunge control plane changes
