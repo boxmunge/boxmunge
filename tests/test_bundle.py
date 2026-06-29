@@ -31,6 +31,10 @@ REQUIRED_BUNDLE_DIRS = [
     # for it. Without this, self-test errors with "Canary project not found"
     # on every real install (regression caught during v0.5.4 fleet test).
     "canary",
+    # system/ ships so install.sh can build + run the boxmunge-system
+    # container (age/rclone isolation). Excluding it meant the container could
+    # never be provisioned on a real install — only the host fallback ran.
+    "system",
 ]
 
 REQUIRED_BUNDLE_FILES = [
@@ -92,7 +96,6 @@ def test_bundle_excludes_dev_only_dirs(bundle_path: Path):
         "boxmunge/cli/",
         "boxmunge/sample-project/",
         "boxmunge/services/",
-        "boxmunge/system/",
         "boxmunge/build/",
         "boxmunge/dist/",
         "boxmunge/.git/",

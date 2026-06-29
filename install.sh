@@ -263,6 +263,29 @@ if [[ -f "${SCRIPT_DIR}/caddy/compose.yml" ]]; then
     fi
 fi
 
+# Build + (re)start the boxmunge-system container — isolation for age/rclone
+# (blast-radius containment). Best-effort: the platform falls back to host-level
+# age/rclone when the container is absent, so a transient build/network failure
+# must NOT fail the install or block an upgrade. Rebuild only when the
+# definition changed or the container isn't running, mirroring the caddy block.
+if [[ -d "${SCRIPT_DIR}/system" ]]; then
+    SYSTEM_CHANGED=0
+    mkdir -p "${BOXMUNGE_ROOT}/system"
+    for f in Dockerfile compose.yml; do
+        if ! cmp -s "${SCRIPT_DIR}/system/$f" "${BOXMUNGE_ROOT}/system/$f" 2>/dev/null; then
+            SYSTEM_CHANGED=1
+        fi
+        cp "${SCRIPT_DIR}/system/$f" "${BOXMUNGE_ROOT}/system/$f"
+    done
+    chown -R root:root "${BOXMUNGE_ROOT}/system"
+    if [[ "${SYSTEM_CHANGED}" -eq 1 ]] || ! docker inspect boxmunge-system >/dev/null 2>&1; then
+        if ! docker compose -f "${BOXMUNGE_ROOT}/system/compose.yml" up -d --build; then
+            echo "WARNING: boxmunge-system container build failed; the platform" \
+                 "will use host-level age/rclone. Re-run install.sh to retry." >&2
+        fi
+    fi
+fi
+
 # Ensure stashes dir exists and is writable by deploy (group). Stash files
 # are created by deploy during upgrade flows; the dir itself is root-owned
 # so deploy cannot rename/delete the dir, only files inside.
