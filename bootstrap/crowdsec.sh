@@ -24,16 +24,27 @@ else
         -o /tmp/crowdsec-repo.sh
     bash /tmp/crowdsec-repo.sh
     rm -f /tmp/crowdsec-repo.sh
-    apt-get install -y -qq crowdsec crowdsec-firewall-bouncer-iptables
+    # Debian 13 (trixie) ships the unified bouncer as `crowdsec-firewall-bouncer`
+    # (it autodetects iptables/nftables). The old `-iptables` package name does
+    # NOT exist on trixie — installing it aborts the whole apt transaction, so
+    # neither crowdsec nor the bouncer get installed. The unified package is in
+    # Debian main, so this resolves even where the packagecloud repo lacks trixie.
+    apt-get install -y -qq crowdsec crowdsec-firewall-bouncer
 fi
 
-cscli collections install crowdsecurity/linux 2>/dev/null || true
-cscli collections install crowdsecurity/sshd 2>/dev/null || true
+# Refresh the hub index before installing collections. On Debian 13 the crowdsec
+# package ships an offline hub and pre-enables some collections; without an
+# update, `cscli collections install` fails with "Downloaded version doesn't
+# match index". --force re-enables collections the package already symlinked
+# (otherwise install aborts on "tainted, won't enable unless --force").
+cscli hub update 2>/dev/null || true
+cscli collections install crowdsecurity/linux --force 2>/dev/null || true
+cscli collections install crowdsecurity/sshd --force 2>/dev/null || true
 # Parses boxmunge-caddy's JSON access log (see acquisition below). Purpose-built
 # for Caddy's native JSON format — replaces the old nginx collection, which was
 # installed on the assumption Caddy emitted nginx-compatible CLF but was never
 # actually fed any logs.
-cscli collections install crowdsecurity/caddy 2>/dev/null || true
+cscli collections install crowdsecurity/caddy --force 2>/dev/null || true
 
 if [[ -f /etc/crowdsec/acquis.yaml ]]; then
     if ! grep -q "journalctl" /etc/crowdsec/acquis.yaml; then
