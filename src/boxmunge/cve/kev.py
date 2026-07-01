@@ -81,11 +81,16 @@ def load_kev(paths: BoxPaths) -> KevCatalog:
         )
         if fetched_at is not None and fetched_at.tzinfo is None:
             fetched_at = fetched_at.replace(tzinfo=timezone.utc)
-        cve_ids = frozenset(
-            c for c in (data.get("cve_ids") or []) if isinstance(c, str)
-        )
+        raw_ids = data.get("cve_ids")
+        # A well-formed document has cve_ids as a list. A truthy non-list
+        # (e.g. cve_ids: 42) is a corrupt document, not a partial one:
+        # trusting its timestamp would let a fresh-but-broken cache be
+        # treated as authoritative. Fail safe — discard the whole document.
+        if not isinstance(raw_ids, list):
+            raise ValueError(f"cve_ids is not a list: {type(raw_ids).__name__}")
+        cve_ids = frozenset(c for c in raw_ids if isinstance(c, str))
         return KevCatalog(cve_ids=cve_ids, fetched_at=fetched_at)
-    except (ValueError, OSError) as e:
+    except (ValueError, TypeError, OSError, AttributeError) as e:
         # A corrupt cache must not wedge the scan; treat as "no catalog".
         _LOGGER.warning(
             "KEV catalog cache unreadable (%s) — treating as empty", e,
@@ -114,7 +119,16 @@ def refresh_kev(paths: BoxPaths) -> None:
         )
         return
 
-    vulns = payload.get("vulnerabilities") or []
+    # The feed may return valid JSON that is not an object (e.g. [] or null
+    # from an error page). Treat any non-dict payload as "no vulnerabilities"
+    # rather than letting AttributeError escape this best-effort refresh.
+    vulns = payload.get("vulnerabilities") if isinstance(payload, dict) else None
+    if not isinstance(vulns, list):
+        _LOGGER.warning(
+            "KEV feed payload malformed — continuing with cached catalog",
+            extra=_extra(detail={"payload_type": type(payload).__name__}),
+        )
+        return
     cve_ids = sorted(
         v["cveID"] for v in vulns
         if isinstance(v, dict) and isinstance(v.get("cveID"), str)
