@@ -39,6 +39,7 @@ from typing import Any
 
 from boxmunge.cve.scanner import AttackVector, Finding, ScanResult, Severity
 from boxmunge.cve.suppressions import Suppression, find_active_suppression
+from boxmunge.cve.policy_explain import explain_av_filter, explain_threshold
 
 
 # ---------- enums and constants ----------
@@ -220,72 +221,6 @@ def parse_posture(value: str | None) -> Posture:
 # ---------- evaluation ----------
 
 
-def _format_severity(sev: Severity) -> str:
-    """Human label for severities — capitalized for readability in prose."""
-    return sev.value
-
-
-def _explain_av_filter(
-    attack_vector: AttackVector | None, posture: Posture,
-) -> str:
-    """Explanation for the v0.7.1 Attack Vector gate firing.
-
-    Operator-facing prose: tell the reader why a non-trivial CVE got
-    routed to informational, and how to opt back into the old behavior.
-    """
-    posture_label = _POSTURE_LABEL[posture]
-    if attack_vector is None:
-        return (
-            "Attack vector unspecified in scanner data — defaulting to "
-            f"informational under {posture_label} posture. Set posture: "
-            "paranoid to quarantine on unspecified-AV findings."
-        )
-    av_label = attack_vector.value
-    return (
-        f"AV:{av_label[0]} ({av_label} attack vector) — not reachable from "
-        f"network surface; informational under {posture_label} posture. To "
-        "quarantine on local-AV findings, set posture: paranoid."
-    )
-
-
-def _explain_threshold(
-    base: Severity,
-    effective: Severity,
-    penalty: int,
-    posture: Posture,
-    *,
-    over_threshold: bool,
-    dangerously_disabled: bool,
-) -> str:
-    """One-line explanation for posture-threshold dispositions."""
-    posture_label = _POSTURE_LABEL[posture]
-    threshold_label = _format_severity(_POSTURE_THRESHOLDS[posture])
-
-    if base == effective:
-        head = f"{_format_severity(base)}, no upstream fix"
-    else:
-        head = (
-            f"{_format_severity(base)} → effective {_format_severity(effective)} "
-            f"(hardening penalty: +{penalty}), no upstream fix"
-        )
-
-    if over_threshold and dangerously_disabled:
-        return (
-            f"{head}. Meets {posture_label} threshold ({threshold_label}) — would "
-            f"quarantine but dangerously_disable_quarantine: true. Read-only "
-            f"rootfs is the remaining defense."
-        )
-    if over_threshold:
-        return (
-            f"{head}. Meets {posture_label} threshold ({threshold_label}) — "
-            f"quarantine."
-        )
-    return (
-        f"{head}. Below {posture_label} threshold ({threshold_label}) — "
-        f"informational."
-    )
-
-
 def evaluate_finding(
     finding: Finding,
     *,
@@ -372,7 +307,7 @@ def evaluate_finding(
             effective_severity=effective,
             disposition=Disposition.INFORMATIONAL,
             suppression=None,
-            explanation=_explain_av_filter(finding.attack_vector, posture),
+            explanation=explain_av_filter(finding.attack_vector, _POSTURE_LABEL[posture]),
         )
 
     # 5. Threshold comparison.
@@ -393,8 +328,9 @@ def evaluate_finding(
         effective_severity=effective,
         disposition=disposition,
         suppression=None,
-        explanation=_explain_threshold(
-            base, effective, hardening_penalty, posture,
+        explanation=explain_threshold(
+            base, effective, hardening_penalty, _POSTURE_LABEL[posture],
+            _POSTURE_THRESHOLDS[posture].value,
             over_threshold=over_threshold,
             dangerously_disabled=dangerously_disable_quarantine,
         ),
