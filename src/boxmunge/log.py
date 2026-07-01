@@ -108,12 +108,16 @@ def get_logger(paths: BoxPaths) -> logging.Logger:
     logger = logging.getLogger("boxmunge")
     logger.propagate = False
     logger.setLevel(logging.DEBUG)
-    # Remove only handlers this factory previously installed (stderr stream
-    # and the rotating file handler). Foreign handlers — e.g. a test's own
-    # capture handler attached before the first get_logger call — are left in
-    # place so we don't silently swallow their records.
+    # On a cold build, drop only the stderr/file handlers this factory owns
+    # (both are StreamHandler subclasses) rather than every handler. A test
+    # that attaches its own non-StreamHandler capture handler before calling
+    # get_logger (see _capture_log_records in the security-cmd tests) must not
+    # have it silently stripped. NB: this does NOT protect a pytest caplog
+    # handler — LogCaptureHandler IS a StreamHandler; caplog isolation instead
+    # comes from the _reset_boxmunge_logger conftest fixture (restores
+    # propagate=True and drops this module's cache between tests).
     for handler in list(logger.handlers):
-        if isinstance(handler, (logging.StreamHandler, _SharedTimedRotatingFileHandler)):
+        if isinstance(handler, logging.StreamHandler):
             logger.removeHandler(handler)
 
     # stderr handler (always, human-readable)
