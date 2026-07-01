@@ -38,8 +38,10 @@ def format_quarantine_alert(
     title = f"[boxmunge:{project}] QUARANTINED — {cve} ({severity})"
     body = (
         f"Project: {project}\n"
-        f"CVE: {cve} ({severity}, no upstream fix)\n"
+        f"CVE: {cve} ({severity})\n"
         f"Image: {image_ref}\n"
+        f"\n"
+        f"{finding.explanation}\n"
         f"\n"
         f"Service stopped, maintenance page active.\n"
         f"\n"
@@ -101,7 +103,7 @@ def format_informational_alert(
         f"{sev_line}\n"
         f"Image: {image_ref}\n"
         f"\n"
-        f"Below quarantine threshold ({posture} posture). Monitoring only."
+        f"{finding.explanation}"
     )
     return Alert(kind="informational", title=title, body=body, priority=0)
 

@@ -116,8 +116,10 @@ def test_format_quarantine_alert_shape() -> None:
     assert alert.priority == 1
     assert alert.title == "[boxmunge:demo] QUARANTINED — CVE-2026-1111 (Critical)"
     assert "Project: demo" in alert.body
-    assert "CVE-2026-1111 (Critical, no upstream fix)" in alert.body
+    assert "CVE-2026-1111 (Critical)" in alert.body
     assert "Image: myapp:1.0" in alert.body
+    # explanation is surfaced in body (the _disp helper sets explanation="explained")
+    assert "explained" in alert.body
     assert "Service stopped, maintenance page active." in alert.body
     assert "boxmunge security resume demo" in alert.body
 
@@ -144,7 +146,9 @@ def test_format_informational_alert_shape_no_penalty() -> None:
     assert alert.priority == 0
     assert alert.title == "[boxmunge:demo] CVE-2026-3333 (Low)"
     assert "Severity: Low" in alert.body
-    assert "Below quarantine threshold (balanced posture)" in alert.body
+    # explanation is surfaced instead of old hard-coded "Below quarantine threshold" line
+    assert "explained" in alert.body
+    assert "Below quarantine threshold" not in alert.body
     # No elevation: no arrow
     assert "→" not in alert.body
 
@@ -155,7 +159,9 @@ def test_format_informational_alert_shape_with_penalty() -> None:
     pd = _decision(fd)
     alert = format_informational_alert(pd, fd, posture="strict")
     assert "Severity: Low → effective Medium via penalty +1" in alert.body
-    assert "Below quarantine threshold (strict posture)" in alert.body
+    # explanation is surfaced instead of old hard-coded "Below quarantine threshold" line
+    assert "explained" in alert.body
+    assert "Below quarantine threshold" not in alert.body
 
 
 def test_format_suppression_expired_alert_shape() -> None:
