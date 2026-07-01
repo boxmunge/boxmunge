@@ -184,7 +184,7 @@ def test_first_scan_quarantine_finding_emits_quarantine_alert() -> None:
     fd = _disp(disposition=Disposition.QUARANTINE)
     current = _decision(fd)
     alerts = detect_transitions(
-        project_name="demo", posture="balanced",
+        project_name="demo",
         current=current, prior=None, suppressions=(),
     )
     assert len(alerts) == 1
@@ -195,7 +195,7 @@ def test_first_scan_at_risk_finding_emits_still_running_alert() -> None:
     fd = _disp(disposition=Disposition.STILL_RUNNING_AT_RISK)
     current = _decision(fd)
     alerts = detect_transitions(
-        project_name="demo", posture="balanced",
+        project_name="demo",
         current=current, prior=None, suppressions=(),
     )
     assert len(alerts) == 1
@@ -207,7 +207,7 @@ def test_first_scan_informational_emits_informational_alert() -> None:
                disposition=Disposition.INFORMATIONAL)
     current = _decision(fd)
     alerts = detect_transitions(
-        project_name="demo", posture="balanced",
+        project_name="demo",
         current=current, prior=None, suppressions=(),
     )
     assert len(alerts) == 1
@@ -219,7 +219,7 @@ def test_persisting_quarantine_no_alert() -> None:
     prior = _decision(fd, when=datetime(2026, 5, 5, tzinfo=timezone.utc))
     current = _decision(fd, when=datetime(2026, 5, 6, tzinfo=timezone.utc))
     alerts = detect_transitions(
-        project_name="demo", posture="balanced",
+        project_name="demo",
         current=current, prior=prior, suppressions=(),
     )
     assert alerts == ()
@@ -231,7 +231,7 @@ def test_persisting_informational_no_alert() -> None:
     prior = _decision(fd, when=datetime(2026, 5, 5, tzinfo=timezone.utc))
     current = _decision(fd, when=datetime(2026, 5, 6, tzinfo=timezone.utc))
     alerts = detect_transitions(
-        project_name="demo", posture="balanced",
+        project_name="demo",
         current=current, prior=prior, suppressions=(),
     )
     assert alerts == ()
@@ -244,7 +244,7 @@ def test_at_risk_to_quarantine_emits_quarantine_alert() -> None:
     prior = _decision(prior_fd, when=datetime(2026, 5, 5, tzinfo=timezone.utc))
     current = _decision(current_fd, when=datetime(2026, 5, 6, tzinfo=timezone.utc))
     alerts = detect_transitions(
-        project_name="demo", posture="balanced",
+        project_name="demo",
         current=current, prior=prior, suppressions=(),
     )
     assert len(alerts) == 1
@@ -258,7 +258,7 @@ def test_quarantine_to_at_risk_emits_still_running_alert() -> None:
     prior = _decision(prior_fd, when=datetime(2026, 5, 5, tzinfo=timezone.utc))
     current = _decision(current_fd, when=datetime(2026, 5, 6, tzinfo=timezone.utc))
     alerts = detect_transitions(
-        project_name="demo", posture="balanced",
+        project_name="demo",
         current=current, prior=prior, suppressions=(),
     )
     assert len(alerts) == 1
@@ -271,7 +271,7 @@ def test_resolved_finding_no_alert() -> None:
     prior = _decision(prior_fd, when=datetime(2026, 5, 5, tzinfo=timezone.utc))
     current = _decision(when=datetime(2026, 5, 6, tzinfo=timezone.utc))
     alerts = detect_transitions(
-        project_name="demo", posture="balanced",
+        project_name="demo",
         current=current, prior=prior, suppressions=(),
     )
     assert alerts == ()
@@ -285,7 +285,7 @@ def test_new_finding_quarantine_emits_alert() -> None:
     current = _decision(current_old, current_new,
                         when=datetime(2026, 5, 6, tzinfo=timezone.utc))
     alerts = detect_transitions(
-        project_name="demo", posture="balanced",
+        project_name="demo",
         current=current, prior=prior, suppressions=(),
     )
     assert len(alerts) == 1
@@ -300,7 +300,7 @@ def test_suppression_expired_between_scans() -> None:
     prior = _decision(fd, when=datetime(2026, 7, 31, tzinfo=timezone.utc))
     current = _decision(fd, when=datetime(2026, 8, 2, tzinfo=timezone.utc))
     alerts = detect_transitions(
-        project_name="demo", posture="balanced",
+        project_name="demo",
         current=current, prior=prior, suppressions=(sup,),
     )
     expired = [a for a in alerts if a.kind == "suppression_expired"]
@@ -315,7 +315,7 @@ def test_suppression_active_no_alert() -> None:
     prior = _decision(fd, when=datetime(2026, 7, 31, tzinfo=timezone.utc))
     current = _decision(fd, when=datetime(2026, 8, 2, tzinfo=timezone.utc))
     alerts = detect_transitions(
-        project_name="demo", posture="balanced",
+        project_name="demo",
         current=current, prior=prior, suppressions=(sup,),
     )
     expired = [a for a in alerts if a.kind == "suppression_expired"]
@@ -336,7 +336,7 @@ def test_multiple_alerts_ordering_quarantine_first() -> None:
                         when=datetime(2026, 8, 2, tzinfo=timezone.utc))
     prior = _decision(when=datetime(2026, 7, 31, tzinfo=timezone.utc))
     alerts = detect_transitions(
-        project_name="demo", posture="balanced",
+        project_name="demo",
         current=current, prior=prior, suppressions=(sup,),
     )
     kinds = [a.kind for a in alerts]
@@ -450,7 +450,7 @@ def test_emit_scan_alerts_integration(monkeypatch, tmp_path) -> None:
                disposition=Disposition.QUARANTINE)
     current = _decision(fd, when=datetime(2026, 5, 6, tzinfo=timezone.utc))
     sent = emit_scan_alerts(
-        project_name="demo", posture="balanced",
+        project_name="demo",
         current=current, prior=None, suppressions=(),
         paths=paths,
     )

@@ -98,7 +98,6 @@ def _dispositions_by_cve(
 def detect_transitions(
     *,
     project_name: str,
-    posture: str,
     current: ProjectDecision,
     prior: ProjectDecision | None,
     suppressions: tuple[Suppression, ...],
@@ -252,7 +251,6 @@ def send_alerts(alerts: tuple[Alert, ...], paths: BoxPaths) -> int:
 def emit_scan_alerts(
     *,
     project_name: str,
-    posture: str,
     current: ProjectDecision,
     prior: ProjectDecision | None,
     suppressions: tuple[Suppression, ...],
@@ -261,7 +259,6 @@ def emit_scan_alerts(
     """detect_transitions + send_alerts in one call. Returns count sent."""
     alerts = detect_transitions(
         project_name=project_name,
-        posture=posture,
         current=current,
         prior=prior,
         suppressions=suppressions,

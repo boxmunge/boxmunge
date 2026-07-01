@@ -1614,7 +1614,6 @@ def test_scan_invokes_emit_scan_alerts_after_persist(
     assert paths.project_scan_state("demo").exists()
     # emit_scan_alerts received this scan's current decision and no prior.
     assert captured.get("project_name") == "demo"
-    assert captured.get("posture") == "balanced"
     assert captured.get("prior") is None
     current = captured.get("current")
     assert current is not None

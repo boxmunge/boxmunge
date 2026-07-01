@@ -442,7 +442,6 @@ def _scan_one_project_locked(
             try:
                 emit_scan_alerts(
                     project_name=project,
-                    posture=posture_str,
                     current=current_decision,
                     prior=prior_decision,
                     suppressions=supps,
