@@ -1,24 +1,27 @@
 # boxmunge CVE Policy
 
 How boxmunge handles CVEs published against deployed images: daily scanning,
-posture-based quarantine, suppression workflow, and recovery.
+the trust ladder, CISA KEV integration, posture-based quarantine, suppression
+workflow, and recovery.
 
 ## TL;DR for agents
 
 - **Daily scan via Trivy.** Every project's deployed images are scanned at
   03:00 system time (±30 min jitter); also on every deploy and image update.
-- **Posture per project (default `balanced`).** `relaxed` quarantines Critical
-  only, `balanced` quarantines High and above, `strict` quarantines Medium
-  and above, `paranoid` quarantines Medium and above AND skips the Attack
-  Vector filter. Set in the manifest under `security.posture`.
-- **Attack Vector filter (v0.7.1).** Under `relaxed` / `balanced` / `strict`,
-  only findings whose CVSS Attack Vector is `Network` are quarantine-eligible.
-  AV:Local / Adjacent / Physical and AV-unknown findings stay informational
-  regardless of severity — they aren't reachable from the network surface a
-  hardened web container exposes. Use `paranoid` to opt back into the v0.7.0
-  "every High quarantines" behavior.
-- **Auto-quarantine** when an unfixed CVE crosses the project's posture
-  threshold: `compose stop` + maintenance page + critical Pushover alert.
+- **Posture per project (default `balanced`).** Four tiers form a trust ladder
+  — `relaxed` quarantines only on CISA KEV, `balanced` (default) quarantines
+  on KEV or a distro-acknowledged High + AV:N finding, `strict` extends that
+  net to Medium, `paranoid` uses NVD severity with no distro trust.
+  Set in the manifest under `security.posture`.
+- **Trust the distro.** Below `paranoid`, the engine treats the distro's own
+  triage as authoritative. A CVE the distro marked `will_not_fix`,
+  `fix_deferred`, `not_affected`, or `under_investigation` is informational
+  regardless of NVD severity — the distro already judged it.
+- **KEV is an override.** A finding on CISA's Known Exploited Vulnerabilities
+  catalog quarantines immediately under every posture. The AV filter, distro
+  status, and severity threshold do not apply.
+- **Auto-quarantine** when a finding crosses the project's quarantine gate:
+  `compose stop` + maintenance page + critical Pushover alert.
 - **Suppress with operator review:**
   `boxmunge security suppress <CVE> --project <name> --until <YYYY-MM-DD> --reason <text>`.
 - **Inspect state:** `boxmunge security` (fleet) or `boxmunge security <project>`
@@ -39,55 +42,147 @@ reasoning. The policy is rule-based and deterministic. Operators encode
 context once, in the manifest (posture) and in suppressions (per-CVE
 review notes); the engine reapplies those rules on every scan.
 
-## Decision matrix
+## The trust ladder
 
-For each finding from the scanner against a deployed image:
+The four postures form a trust ladder, not just severity thresholds. The
+governing insight: for every posture below `paranoid`, the distro's own
+triage is a first-class, authoritative input. Debian triages CVEs against
+its actual packaged versions and marks findings it judges low-risk as
+`will_not_fix` or `no-dsa` — taking a site offline for those would override
+the distro's own verdict without additional evidence.
 
-| Condition | Action |
-|---|---|
-| CVE has upstream fix available | Auto-update path picks it up; no quarantine. |
-| Active suppression matches the CVE | Skip; revisit on suppression expiry. |
-| Severity reported as Unknown by scanner | Informational only — the engine never quarantines on a severity it can't rank. |
-| **(v0.7.1) Posture not `paranoid` and CVSS Attack Vector is not Network** | Informational only — finding is not reachable from the network surface. |
-| No fix; effective severity below posture threshold | Keep running; informational alert. |
-| No fix; effective severity at or above posture threshold | Quarantine (compose stop + maintenance page); critical alert. |
-| `dangerously_disable_quarantine: true` | Never quarantine; `[STILL RUNNING]` alert. |
+`relaxed` is the strongest expression of that trust: the site only goes dark
+for active exploitation. `paranoid` is the opposite: it behaves like the
+pre-trust-ladder engine, using NVD severity with no distro trust and no AV
+filter.
 
-The Attack Vector filter applies BEFORE the threshold/penalty comparison.
-A Critical AV:L finding stays informational under non-paranoid postures —
-the hardening penalty still elevates the recorded effective severity, but
-the gate routes it to informational regardless.
-
-## Posture tiers
-
-Per-project, set in `manifest.yml` under `security.posture`. Default `balanced`.
-
-| Tier | Quarantines at effective severity | AV filter |
+| Posture | Quarantines when (no fix, not suppressed) | Severity source |
 |---|---|---|
-| `relaxed` | Critical only | Yes (only AV:N quarantines) |
-| `balanced` (default) | High and above | Yes (only AV:N quarantines) |
-| `strict` | Medium and above | Yes (only AV:N quarantines) |
-| `paranoid` (v0.7.1) | Medium and above | No (every above-threshold finding quarantines) |
+| **relaxed** | CVE is on **CISA KEV** — nothing else. Pure last resort. | — |
+| **balanced** *(default)* | On **KEV** OR distro `Status: affected` + **distro** severity ≥ High + `AV:N` | Debian/vendor |
+| **strict** | On **KEV** OR distro `Status: affected` + **distro** severity ≥ Medium + `AV:N` | Debian/vendor |
+| **paranoid** | Anything ≥ Medium over threshold — no AV filter, no distro trust, NVD severity (pre-trust-ladder behavior). KEV can still escalate. | NVD |
 
-`Low` and below never quarantine on their own. They can only become
-quarantine-eligible by being elevated into a higher band via the
-hardening penalty (see next section).
+`balanced` stays the out-of-the-box default. The residual net it keeps
+(distro-acknowledged High, AV:N, no fix) is genuine: Debian issues a DSA
+quickly for those, so catching them is meaningful — and rare enough not to
+create the false-quarantine problem that motivated this design.
 
-### When to use `paranoid` (v0.7.1)
+`relaxed` and `balanced` differ meaningfully. A distro-acknowledged, High,
+unpatched, network-reachable CVE takes a `balanced` site down but not a
+`relaxed` one. If that distinction matters for a project, choose consciously.
 
-Use `paranoid` when you want the v0.7.0 behavior: every above-threshold
-finding quarantines regardless of attack vector. Suitable for:
+### When to use `paranoid`
+
+Use `paranoid` when you want the pre-trust-ladder behavior: every
+above-threshold finding quarantines regardless of attack vector or distro
+verdict. Suitable for:
 
 - Services running locally-attackable code paths exposed via privileged
   guest invocation (e.g. the web container shells out into another pid
   namespace where AV:L is genuinely reachable).
 - High-trust environments where you would rather over-quarantine than
-  miss an AV:L finding the operator hasn't yet reviewed.
+  miss any above-threshold finding the operator hasn't yet reviewed.
 
 The expected default for typical web/api containers is `balanced` with
-the AV filter active. AV:L findings on hardened web surfaces are not
-reachable to a network attacker; quarantining on them takes services
-down for non-actionable findings.
+the distro trust active. AV:L findings and distro-deprioritized findings
+on hardened web surfaces are not worth taking services down for.
+
+## Per-finding decision order
+
+For every finding, `evaluate_finding` runs these gates in order:
+
+1. **Fix available** → `IGNORED_FIXED`. Deferred to the auto-update path.
+2. **Active suppression** → `SUPPRESSED`. Skipped until suppression expiry.
+3. **On CISA KEV** → `QUARANTINE`. KEV is an override: active exploitation
+   bypasses the AV filter, distro-status routing, and the severity threshold.
+   Applies to every posture. (A KEV finding can still be suppressed via step 2
+   if the operator has reviewed it.)
+4. **Unknown severity** → `INFORMATIONAL`. The engine cannot reason about a
+   severity it does not recognize; reporting only.
+5. **Paranoid short-circuit** — under `paranoid`, skip steps 6–8 and compare
+   the NVD severity directly against the Medium threshold with no AV filter.
+   This is the pre-trust-ladder behavior, unchanged.
+6. **Distro deprioritized** (non-paranoid) — `Status ∈ {will_not_fix,
+   fix_deferred, not_affected, under_investigation}` → `INFORMATIONAL` with a
+   loud alert. The distro already judged the finding low-risk; the site stays
+   up. The alert quotes the distro status and severity so the operator can see
+   exactly why.
+7. **No distro verdict** (non-paranoid) — `distro_severity(finding) is None`
+   (only NVD/GHSA data; the distro issued no rating) → `INFORMATIONAL`. Below
+   `paranoid`, the engine does not quarantine on an NVD rating the distro never
+   echoed. Language-level vendored findings that the OS package tracker never
+   touched fall here.
+8. **AV filter** (non-paranoid) — CVSS Attack Vector is not Network → `INFORMATIONAL`.
+   Retained from v0.7.1. By this step the distro verdict and severity are
+   already authoritative noise gates; the AV filter is a secondary reducer for
+   findings that passed distro triage but are not network-reachable.
+9. **Threshold comparison** against the distro severity (elevated by the
+   hardening penalty, using the posture threshold from the trust ladder table)
+   → `QUARANTINE` / `STILL_RUNNING_AT_RISK` / `INFORMATIONAL`. Only
+   `Status ∈ {affected, end_of_life}` findings with a distro severity reach
+   this step.
+
+### Decision matrix summary
+
+| Condition | Outcome |
+|---|---|
+| Fix available upstream | `IGNORED_FIXED` — auto-update path |
+| Active suppression matches the CVE | `SUPPRESSED` — skip until expiry |
+| CVE is on CISA KEV | `QUARANTINE` — override; no further checks |
+| Severity unknown | `INFORMATIONAL` |
+| Posture is `paranoid` | NVD threshold gate (step 5 above) |
+| Distro marked `will_not_fix` / `fix_deferred` / `not_affected` / `under_investigation` | `INFORMATIONAL` — distro deprioritized |
+| No distro rating (NVD/GHSA only) | `INFORMATIONAL` — no distro verdict |
+| CVSS Attack Vector is not Network | `INFORMATIONAL` — not network-reachable |
+| Distro severity (+ hardening penalty) ≥ threshold | `QUARANTINE` (or `STILL_RUNNING_AT_RISK` if quarantine disabled) |
+| Distro severity (+ hardening penalty) < threshold | `INFORMATIONAL` |
+| `dangerously_disable_quarantine: true` | `STILL_RUNNING_AT_RISK` instead of `QUARANTINE` |
+
+### `end_of_life` status
+
+A finding with `Status: end_of_life` is **not** in the distro-deprioritized
+bucket. EOL means the distro will never ship a fix — that is a more dangerous
+signal, not less. On Debian 13 stable it should not appear; if it does, it
+falls through to step 9 (the threshold gate) alongside `Status: affected`.
+
+## CISA KEV feed
+
+### Source and refresh
+
+The KEV feed is CISA's Known Exploited Vulnerabilities catalog:
+
+```
+https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+```
+
+`refresh_kev()` is called once per scan run alongside `refresh_db()` (the
+Trivy DB refresh), so the KEV catalog stays as fresh as the scan that consumes
+it. There is no dedicated timer in v1; the daily scan cadence is sufficient.
+
+After refresh, the catalog is loaded and a single `kev_lookup` predicate is
+threaded into every project's `evaluate_finding` call for that run — the
+exploitation signal is consistent fleet-wide within a scan run.
+
+### Staleness and fail-safe
+
+The catalog is considered stale when its `fetched_at` timestamp is older than
+`KEV_MAX_AGE_DAYS` (currently 8 days — a week of fetch failures before the
+gate degrades).
+
+**Fail-safe: toward uptime, never toward quarantine.** When the catalog is
+missing or stale, `is_known_exploited` returns `False`. The site is not taken
+down on an exploitation signal that cannot currently be verified.
+
+Staleness is never silent. When a scan run detects a stale or missing catalog,
+it:
+1. Logs a WARNING with the last fetch timestamp (if any).
+2. Fires a single priority-1 Pushover alert per run:
+   `KEV feed stale — exploitation-based quarantine is degraded`.
+
+This alert fires once per scan run, not once per finding, to avoid alert
+storms. The degradation must not go unnoticed — the `relaxed` tier's only
+quarantine protection depends on the KEV feed.
 
 ## Effective severity = base + hardening penalty
 
@@ -106,6 +201,9 @@ posture threshold.
 Penalty is capped at +2 total. The audit ledger and per-finding
 explanation show the elevation reason explicitly so you can see why a
 Medium CVE quarantined a project running on `strict` posture.
+
+For non-paranoid postures, the penalty applies to the **distro** severity
+at step 9. For `paranoid`, the penalty applies to the **NVD** severity.
 
 Rationale: running with read-only rootfs disabled means a Medium CVE
 behaves more like a High one in practice — the policy treats it that way.
@@ -187,7 +285,7 @@ The compose validator rejects:
   the read-only rootfs is the price.
 - `posture: strict` on a project where any service does not set
   `read_only: true`. Strict posture without read-only rootfs is incoherent.
-- Any `posture` value other than `relaxed`, `balanced`, or `strict`.
+- Any `posture` value other than `relaxed`, `balanced`, `strict`, or `paranoid`.
 
 These cross-validators run on every entry point that materialises a
 project from its manifest+compose: `prod-deploy`, `stage`, `promote`,
@@ -209,14 +307,14 @@ secrets, no user data, no auth. You'd rather be exploited than offline.
 
 The trade is explicit and signed off in the manifest:
 
-- You accept that a Critical CVE on this project will not stop the
+- You accept that a quarantine-level CVE on this project will not stop the
   service.
 - In exchange, you must run with `read_only: true` on every service —
   any post-exploit persistence has nowhere to land.
 - Pushover alerts for findings on this project are prefixed
   `[STILL RUNNING — quarantine disabled by config]`.
 - The fleet `--json` view always shows the project under
-  `at_risk_running` while it has at-or-above-threshold findings.
+  `at_risk_running` while it has quarantine-level findings.
 
 Example manifest:
 
@@ -318,8 +416,11 @@ audit trail.
   boxmunge security scan <project>    # one project
   ```
 
-The Trivy DB refreshes before each scan. DB-refresh failure is non-fatal:
-the existing (possibly stale) DB still scans and a warning is logged.
+The Trivy DB and the CISA KEV catalog are both refreshed before each scan
+run (one call each, best-effort). DB-refresh and KEV-refresh failures are
+non-fatal: the scan proceeds against whatever cache exists and a warning is
+logged. A stale KEV catalog fires a priority-1 alert (see "CISA KEV feed"
+above).
 
 Idempotency: the daily cron does not re-fire informational alerts for
 unchanged dispositions. Only state transitions (new finding, transition
@@ -364,15 +465,17 @@ top-level `grace` field.
 
 ## Alerts you'll see (Pushover)
 
-Five categories. Titles only — bodies are self-explanatory.
+Six categories. Titles only — bodies are self-explanatory.
 
 | Title | Priority |
 |---|---|
 | `[boxmunge:<project>] QUARANTINED — <CVE> (<severity>)` | high |
+| `[boxmunge:<project>] QUARANTINED — <CVE> (actively exploited — CISA KEV)` | high |
 | `[boxmunge:<project>] [STILL RUNNING — quarantine disabled by config]` | high |
-| `[boxmunge:<project>] <CVE> (<severity>)` (informational, sub-threshold) | normal |
+| `[boxmunge:<project>] <CVE> (<severity>)` (informational, sub-threshold or distro-deprioritized) | normal |
 | `[boxmunge:<project>] Suppression for <CVE> expired` | high |
 | `[boxmunge] CVE policy enforcement begins in <N>h` (one-time) | normal |
+| `[boxmunge] KEV feed stale — exploitation-based quarantine is degraded` | priority-1 |
 
 Alerting is best-effort. The durable record is the on-disk scan state
 under `<project>/.cve/scan_state.json`. If Pushover isn't configured, or
@@ -504,5 +607,7 @@ These are deferred to later releases:
 - CVSS-based numeric scoring (categorical Low/Medium/High/Critical only).
 - Auto-suppression heuristics (e.g., "Linux kernel CVE against Alpine,
   known not applicable").
+- EPSS scoring (an interface seam is reserved; EPSS can layer onto the KEV
+  predicate without changing the policy engine's shape).
 - Pluggable scanner interface; v0.6.0 is Trivy only.
 - Trivy DB mirroring / offline support.
