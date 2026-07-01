@@ -62,6 +62,9 @@ class TestComposeOverrideEmitsOffWarning:
         paths.project_compose = lambda name: proj / "compose.yml"
         paths.project_dir = lambda name: proj
         paths.project_secrets = lambda name: proj / "secrets.env"
+        # get_logger reads paths.logs; the deploy warning path logs, and
+        # a pristine logger (no warm cache) triggers a cold build.
+        paths.logs = tmp_path / "logs"
 
         manifest = {
             "project": "demo",
@@ -90,6 +93,9 @@ class TestComposeOverrideEmitsOffWarning:
         paths.project_compose = lambda name: proj / "compose.yml"
         paths.project_dir = lambda name: proj
         paths.project_secrets = lambda name: proj / "secrets.env"
+        # get_logger reads paths.logs; the deploy warning path logs, and
+        # a pristine logger (no warm cache) triggers a cold build.
+        paths.logs = tmp_path / "logs"
 
         manifest = {
             "project": "demo",
@@ -114,6 +120,9 @@ class TestComposeOverrideEmitsOffWarning:
         paths.project_compose = lambda name: proj / "compose.yml"
         paths.project_dir = lambda name: proj
         paths.project_secrets = lambda name: proj / "secrets.env"
+        # get_logger reads paths.logs; the deploy warning path logs, and
+        # a pristine logger (no warm cache) triggers a cold build.
+        paths.logs = tmp_path / "logs"
 
         manifest = {
             "project": "demo",

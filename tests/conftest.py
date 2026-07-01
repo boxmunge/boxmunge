@@ -1,9 +1,42 @@
 """Shared test fixtures for boxmunge tests."""
 
+import logging
+
 import pytest
 from pathlib import Path
 
 from boxmunge.paths import BoxPaths
+
+
+@pytest.fixture(autouse=True)
+def _reset_boxmunge_logger():
+    """Reset the cached "boxmunge" logger between tests.
+
+    `boxmunge.log.get_logger` caches its logger (and its rotating file
+    handler) in a module global and sets propagate=False. A test that logs
+    through a handler rooted at its own tmp_path leaves that handler attached
+    after the tmp_path is torn down; a later test that logs on the "boxmunge"
+    logger then writes to a dead stream (a "Logging error"), and because
+    propagate stays False, caplog captures nothing.
+
+    On teardown we detach the factory-owned handlers, restore propagation,
+    and drop the module cache so the next test starts from a pristine logger.
+    `get_logger` now leaves foreign handlers (a test's own capture handler)
+    in place, so a cold rebuild no longer wipes them.
+    """
+    yield
+    import boxmunge.log as _log
+
+    logger = logging.getLogger("boxmunge")
+    for handler in list(logger.handlers):
+        if isinstance(handler, logging.StreamHandler):
+            logger.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:  # noqa: BLE001 — best-effort teardown
+                pass
+    logger.propagate = True
+    _log._logger = None
 
 
 @pytest.fixture(autouse=True)

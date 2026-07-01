@@ -7,7 +7,38 @@ label strings (not the Posture enum) so it imports nothing from policy.py.
 """
 from __future__ import annotations
 
-from boxmunge.cve.scanner import AttackVector, Severity
+from boxmunge.cve.scanner import AttackVector, Severity, VulnStatus
+
+
+def explain_kev_quarantine(cve_id: str) -> str:
+    """Explanation for a KEV-override quarantine (actively exploited)."""
+    return (
+        f"{cve_id} is on the CISA Known Exploited Vulnerabilities (KEV) "
+        "catalog — actively exploited in the wild; quarantined regardless "
+        "of posture, distro status, attack vector, or severity threshold."
+    )
+
+
+def explain_distro_deprioritized(
+    status: VulnStatus, distro_sev: Severity | None,
+) -> str:
+    """Explanation for a distro-deprioritized status routed to informational."""
+    sev = distro_sev.value if distro_sev is not None else "unrated"
+    return (
+        f"Distro status: {status.value} (distro severity: {sev}) — the "
+        "distribution does not treat this as an actionable, urgent fix. "
+        "Informational; site stays up. Set posture: paranoid to quarantine "
+        "on it anyway."
+    )
+
+
+def explain_no_distro_verdict(finding_sev: Severity) -> str:
+    """Explanation for a finding with no OS-distro severity (only NVD/GHSA)."""
+    return (
+        f"No distro verdict (only upstream feeds rate this {finding_sev.value}). "
+        "Below paranoid posture, quarantine requires the distribution's own "
+        "assessment or CISA KEV membership. Informational."
+    )
 
 
 def explain_av_filter(

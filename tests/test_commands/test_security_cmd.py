@@ -1342,7 +1342,7 @@ def test_scan_quarantine_finding_triggers_quarantine_action(
     from datetime import datetime, timezone
     from boxmunge.commands.security_actions import cmd_security_scan
     from boxmunge.cve.scanner import (
-        AttackVector, Finding, ScanResult, Severity,
+        AttackVector, Finding, ScanResult, Severity, VulnStatus,
     )
     paths = _scan_paths(tmp_path)
     monkeypatch.setattr(
@@ -1361,6 +1361,8 @@ def test_scan_quarantine_finding_triggers_quarantine_action(
         title="bad",
         primary_url=None,
         attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -1501,7 +1503,7 @@ def test_resume_blocked_when_finding_still_quarantines(
     from datetime import datetime, timezone
     from boxmunge.commands.security_actions import cmd_security_resume
     from boxmunge.cve.scanner import (
-        AttackVector, Finding, ScanResult, Severity,
+        AttackVector, Finding, ScanResult, Severity, VulnStatus,
     )
     paths = _scan_paths(tmp_path)
     qfile = paths.project_quarantine_state("demo")
@@ -1530,6 +1532,8 @@ def test_resume_blocked_when_finding_still_quarantines(
         title="bad",
         primary_url=None,
         attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -1562,7 +1566,7 @@ def test_scan_invokes_emit_scan_alerts_after_persist(
     from datetime import datetime, timezone
     from boxmunge.commands.security_actions import cmd_security_scan
     from boxmunge.cve.scanner import (
-        AttackVector, Finding, ScanResult, Severity,
+        AttackVector, Finding, ScanResult, Severity, VulnStatus,
     )
     paths = _scan_paths(tmp_path)
     monkeypatch.setattr(
@@ -1581,6 +1585,8 @@ def test_scan_invokes_emit_scan_alerts_after_persist(
         title="bad",
         primary_url=None,
         attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -1624,7 +1630,7 @@ def test_scan_passes_prior_decision_on_second_scan(monkeypatch, tmp_path) -> Non
     from datetime import datetime, timezone
     from boxmunge.commands.security_actions import cmd_security_scan
     from boxmunge.cve.scanner import (
-        AttackVector, Finding, ScanResult, Severity,
+        AttackVector, Finding, ScanResult, Severity, VulnStatus,
     )
     paths = _scan_paths(tmp_path)
     monkeypatch.setattr(
@@ -1643,6 +1649,8 @@ def test_scan_passes_prior_decision_on_second_scan(monkeypatch, tmp_path) -> Non
         title="bad",
         primary_url=None,
         attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -1689,7 +1697,7 @@ def _grace_quarantine_scan(monkeypatch, paths) -> None:
     that would normally trigger quarantine."""
     from datetime import datetime, timezone
     from boxmunge.cve.scanner import (
-        AttackVector, Finding, ScanResult, Severity,
+        AttackVector, Finding, ScanResult, Severity, VulnStatus,
     )
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
@@ -1707,6 +1715,8 @@ def _grace_quarantine_scan(monkeypatch, paths) -> None:
         title="bad",
         primary_url=None,
         attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -2300,7 +2310,7 @@ def test_resume_audit_only_does_not_take_quarantine_action(
     from datetime import datetime, timezone
     from boxmunge.commands.security_actions import cmd_security_resume
     from boxmunge.cve.scanner import (
-        AttackVector, Finding, ScanResult, Severity,
+        AttackVector, Finding, ScanResult, Severity, VulnStatus,
     )
     paths = _scan_paths(tmp_path)
     _seed_quarantine(paths)
@@ -2320,6 +2330,8 @@ def test_resume_audit_only_does_not_take_quarantine_action(
         title="bad",
         primary_url=None,
         attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -2356,7 +2368,7 @@ def test_resume_audit_only_still_detects_blocking_findings(
     from datetime import datetime, timezone
     from boxmunge.commands.security_actions import cmd_security_resume
     from boxmunge.cve.scanner import (
-        AttackVector, Finding, ScanResult, Severity,
+        AttackVector, Finding, ScanResult, Severity, VulnStatus,
     )
     paths = _scan_paths(tmp_path)
     _seed_quarantine(paths, cve_id="CVE-2026-1111")
@@ -2376,6 +2388,8 @@ def test_resume_audit_only_still_detects_blocking_findings(
         title="another bad CVE",
         primary_url=None,
         attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
     )
     sr = ScanResult(
         image_ref="myapp:1.0",

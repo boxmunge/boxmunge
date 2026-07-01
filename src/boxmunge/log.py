@@ -108,8 +108,13 @@ def get_logger(paths: BoxPaths) -> logging.Logger:
     logger = logging.getLogger("boxmunge")
     logger.propagate = False
     logger.setLevel(logging.DEBUG)
-    # Remove any pre-existing handlers (e.g. from other test runs)
-    logger.handlers.clear()
+    # Remove only handlers this factory previously installed (stderr stream
+    # and the rotating file handler). Foreign handlers — e.g. a test's own
+    # capture handler attached before the first get_logger call — are left in
+    # place so we don't silently swallow their records.
+    for handler in list(logger.handlers):
+        if isinstance(handler, (logging.StreamHandler, _SharedTimedRotatingFileHandler)):
+            logger.removeHandler(handler)
 
     # stderr handler (always, human-readable)
     stderr_handler = logging.StreamHandler(sys.stderr)

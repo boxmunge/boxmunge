@@ -4,7 +4,13 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from boxmunge.cve.scanner import AttackVector, Finding, ScanResult, Severity
+from boxmunge.cve.scanner import (
+    AttackVector,
+    Finding,
+    ScanResult,
+    Severity,
+    VulnStatus,
+)
 from boxmunge.cve.suppressions import Suppression
 from boxmunge.cve.policy import (
     Disposition,
@@ -37,10 +43,22 @@ def _finding(
     title: str = "Some vulnerability",
     primary_url: str | None = None,
     attack_vector: AttackVector | None = AttackVector.NETWORK,
+    status: VulnStatus = VulnStatus.AFFECTED,
+    vendor_severities: dict[str, Severity] | None = None,
 ) -> Finding:
     # Default to AV:NETWORK so existing posture/threshold tests aren't gated
     # out by the v0.7.1 AV filter. Tests that care about the AV filter set
     # attack_vector explicitly.
+    #
+    # Under the trust ladder (Task 5), a non-paranoid quarantine requires a
+    # distro verdict (status=affected) AND a distro severity. The default
+    # finding is therefore "distro-acknowledged, distro-rated at `severity`"
+    # so existing threshold/penalty tests keep exercising the threshold path
+    # via the distro severity (== severity). `vendor_severities=None` mirrors
+    # the severity arg into {"debian": severity}; pass an explicit dict (e.g.
+    # {"nvd": ...}) to model a finding with no distro verdict.
+    if vendor_severities is None:
+        vendor_severities = {"debian": severity}
     return Finding(
         cve_id=cve_id,
         severity=severity,
@@ -50,6 +68,8 @@ def _finding(
         title=title,
         primary_url=primary_url,
         attack_vector=attack_vector,
+        status=status,
+        vendor_severities=vendor_severities,
     )
 
 
@@ -676,6 +696,158 @@ def test_paranoid_below_threshold_still_informational() -> None:
         today=_TODAY,
     )
     assert decision.disposition == Disposition.INFORMATIONAL
+
+
+# ---------- trust ladder: KEV, distro-verdict routing (Task 5) ----------
+
+
+def _eval_ladder(f, posture, *, kev=False, penalty=0):
+    """Evaluate a finding through the trust ladder with an explicit KEV lookup."""
+    return evaluate_finding(
+        f,
+        posture=posture,
+        hardening_penalty=penalty,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=_TODAY,
+        kev_lookup=(lambda _c: kev),
+    )
+
+
+# --- The minizip regression: will_not_fix / no distro verdict / AV:N / NVD High
+def test_minizip_not_affected_is_informational_below_paranoid() -> None:
+    f = _finding(
+        status=VulnStatus.WILL_NOT_FIX,
+        vendor_severities={"nvd": Severity.HIGH},  # no distro verdict
+    )
+    for posture in (Posture.RELAXED, Posture.BALANCED, Posture.STRICT):
+        assert _eval_ladder(f, posture).disposition is Disposition.INFORMATIONAL
+
+
+def test_minizip_quarantines_under_paranoid() -> None:
+    f = _finding(
+        status=VulnStatus.WILL_NOT_FIX,
+        vendor_severities={"nvd": Severity.HIGH},
+    )
+    assert _eval_ladder(f, Posture.PARANOID).disposition is Disposition.QUARANTINE
+
+
+# --- No distro verdict (only NVD) stays informational below paranoid ---
+def test_no_distro_verdict_informational_below_paranoid() -> None:
+    f = _finding(
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"nvd": Severity.HIGH},
+    )
+    d = _eval_ladder(f, Posture.BALANCED)
+    assert d.disposition is Disposition.INFORMATIONAL
+    assert "distro" in d.explanation.lower()
+
+
+# --- Residual net: distro-affected High + AV:N quarantines balanced ---
+def test_distro_affected_high_quarantines_balanced() -> None:
+    f = _finding(
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.HIGH},
+    )
+    assert _eval_ladder(f, Posture.BALANCED).disposition is Disposition.QUARANTINE
+    # relaxed does NOT quarantine on it (KEV-only floor):
+    assert _eval_ladder(f, Posture.RELAXED).disposition is Disposition.INFORMATIONAL
+
+
+# --- KEV override beats every de-escalation (even not_affected + AV:L) ---
+def test_kev_override_quarantines_even_not_affected_relaxed() -> None:
+    f = _finding(
+        status=VulnStatus.NOT_AFFECTED,
+        vendor_severities={"nvd": Severity.HIGH},
+        attack_vector=AttackVector.LOCAL,
+    )
+    d = _eval_ladder(f, Posture.RELAXED, kev=True)
+    assert d.disposition is Disposition.QUARANTINE
+    assert "KEV" in d.explanation or "Known Exploited" in d.explanation
+
+
+def test_kev_override_applies_across_all_postures() -> None:
+    f = _finding(
+        status=VulnStatus.NOT_AFFECTED,
+        vendor_severities={"nvd": Severity.LOW},
+        attack_vector=AttackVector.LOCAL,
+    )
+    for posture in Posture:
+        d = _eval_ladder(f, posture, kev=True)
+        assert d.disposition is Disposition.QUARANTINE
+
+
+# --- Distro-deprioritized statuses → informational below paranoid ---
+@pytest.mark.parametrize(
+    "status",
+    [
+        VulnStatus.WILL_NOT_FIX,
+        VulnStatus.FIX_DEFERRED,
+        VulnStatus.NOT_AFFECTED,
+        VulnStatus.UNDER_INVESTIGATION,
+    ],
+)
+def test_distro_deprioritized_status_informational_balanced(status) -> None:
+    # Even with a distro-rated High severity, a deprioritized status stays up.
+    f = _finding(status=status, vendor_severities={"debian": Severity.HIGH})
+    d = _eval_ladder(f, Posture.BALANCED)
+    assert d.disposition is Disposition.INFORMATIONAL
+    assert status.value in d.explanation
+
+
+def test_end_of_life_is_not_deprioritized_reaches_threshold() -> None:
+    # END_OF_LIFE deliberately excluded from the deprioritized bucket — a
+    # distro-High EOL finding with AV:N still quarantines under balanced.
+    f = _finding(
+        status=VulnStatus.END_OF_LIFE,
+        vendor_severities={"debian": Severity.HIGH},
+    )
+    assert _eval_ladder(f, Posture.BALANCED).disposition is Disposition.QUARANTINE
+
+
+# --- fix available still defers regardless of KEV path ordering ---
+def test_fix_available_defers_even_with_kev() -> None:
+    f = _finding(fixed_version="1.2")
+    d = _eval_ladder(f, Posture.BALANCED, kev=True)
+    assert d.disposition is Disposition.IGNORED_FIXED
+
+
+# --- KEV lookup defaults to never (existing callers unaffected) ---
+def test_kev_lookup_defaults_to_never() -> None:
+    f = _finding(
+        status=VulnStatus.NOT_AFFECTED,
+        vendor_severities={"nvd": Severity.HIGH},
+    )
+    # No kev_lookup passed → default _kev_never → routes to deprioritized info.
+    d = evaluate_finding(
+        f,
+        posture=Posture.BALANCED,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=_TODAY,
+    )
+    assert d.disposition is Disposition.INFORMATIONAL
+
+
+def test_evaluate_project_threads_kev_lookup() -> None:
+    f = _finding(
+        status=VulnStatus.NOT_AFFECTED,
+        vendor_severities={"nvd": Severity.LOW},
+        attack_vector=AttackVector.LOCAL,
+    )
+    decision = evaluate_project(
+        "myproj",
+        _scan_result((f,)),
+        posture=Posture.RELAXED,
+        hardening_profile=_profile(),
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=_TODAY,
+        kev_lookup=lambda _c: True,
+    )
+    assert decision.quarantine_required is True
+    assert decision.findings[0].disposition is Disposition.QUARANTINE
 
 
 # ---------- parse_posture ----------

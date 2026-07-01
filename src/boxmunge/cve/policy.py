@@ -10,24 +10,28 @@ audit-log append). The split keeps the decision logic deterministic and
 unit-testable, and lets the same engine drive scheduled scans and
 ad-hoc CLI inspection from one source of truth.
 
-Posture tiers map to a quarantine threshold:
-    relaxed  → quarantine at Critical
-    balanced → quarantine at High (default)
-    strict   → quarantine at Medium
-    paranoid → quarantine at Medium AND skip the Attack Vector filter
+The trust ladder (non-paranoid postures trust the distro's own triage):
+    relaxed  → quarantine only on CISA KEV (actively exploited).
+    balanced → KEV OR distro status:affected + distro severity ≥ High + AV:N.
+    strict   → KEV OR distro status:affected + distro severity ≥ Medium + AV:N.
+    paranoid → anything ≥ Medium over threshold; no distro trust, no AV
+               filter, NVD severity (the pre-trust-ladder behavior). KEV can
+               still escalate.
 
-Effective severity = base severity elevated by a hardening penalty (capped
-at Critical). The penalty captures deviations from the boxmunge overlay's
-hardened defaults — running with read_only disabled means a Medium CVE
-behaves more like a High one in practice, so the policy treats it as such.
+KEV is an override applied first (after fix/suppression): an actively
+exploited CVE quarantines regardless of posture, distro status, attack
+vector, or threshold. Below paranoid, a finding is otherwise routed to
+INFORMATIONAL when the distro deprioritized it (status will_not_fix /
+fix_deferred / not_affected / under_investigation), when there is no distro
+verdict at all (only NVD/GHSA rated it), or when it fails the v0.7.1 Attack
+Vector filter. Only the remaining distro-acknowledged, network-reachable
+findings reach the severity threshold — compared against the *distro*
+severity, elevated by the hardening penalty.
 
-v0.7.1 Attack Vector filter (non-paranoid postures): a finding is only
-quarantine-eligible when its CVSS Attack Vector is Network. AV:Local /
-Adjacent / Physical and AV-unknown findings stay informational under
-relaxed/balanced/strict — most "High" CVEs in distro-base packages are
-AV:L and not reachable from a hardened web container's network surface,
-so taking sites down for them was wrong-calibrated. paranoid posture is
-the explicit opt-in to the v0.7.0 behavior (no AV filter).
+Effective severity = the severity the decision was made on, elevated by a
+hardening penalty (capped at Critical). The penalty captures deviations from
+the boxmunge overlay's hardened defaults — running with read_only disabled
+means a Medium CVE behaves more like a High one in practice.
 """
 
 from __future__ import annotations
@@ -35,11 +39,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
-from boxmunge.cve.scanner import AttackVector, Finding, ScanResult, Severity
+from boxmunge.cve.scanner import (
+    AttackVector,
+    Finding,
+    ScanResult,
+    Severity,
+    VulnStatus,
+    distro_severity,
+)
 from boxmunge.cve.suppressions import Suppression, find_active_suppression
-from boxmunge.cve.policy_explain import explain_av_filter, explain_threshold
+from boxmunge.cve.policy_explain import (
+    explain_av_filter,
+    explain_distro_deprioritized,
+    explain_kev_quarantine,
+    explain_no_distro_verdict,
+    explain_threshold,
+)
 
 
 # ---------- enums and constants ----------
@@ -105,6 +122,29 @@ _POSTURE_LABEL: dict[Posture, str] = {
 }
 
 _MAX_HARDENING_PENALTY = 2
+
+
+def _kev_never(_cve: str) -> bool:
+    """Default KEV predicate: nothing is known-exploited.
+
+    Keeps existing callers/tests total — the trust ladder degrades to the
+    distro-verdict routing when no KEV catalog is threaded in.
+    """
+    return False
+
+
+# Distro statuses that mean "not an actionable/urgent fix" → informational
+# below paranoid. END_OF_LIFE is deliberately excluded (more dangerous, not
+# less — no fix will ever come), so it falls through to the threshold like
+# AFFECTED.
+_DEPRIORITIZED_STATUS: frozenset[VulnStatus] = frozenset(
+    {
+        VulnStatus.WILL_NOT_FIX,
+        VulnStatus.FIX_DEFERRED,
+        VulnStatus.NOT_AFFECTED,
+        VulnStatus.UNDER_INVESTIGATION,
+    }
+)
 
 
 # ---------- exceptions ----------
@@ -221,6 +261,68 @@ def parse_posture(value: str | None) -> Posture:
 # ---------- evaluation ----------
 
 
+def _informational(
+    finding: Finding,
+    base: Severity,
+    penalty: int,
+    effective: Severity,
+    explanation: str,
+) -> FindingDisposition:
+    """Construct an INFORMATIONAL disposition (DRYs the repeated boilerplate)."""
+    return FindingDisposition(
+        finding=finding,
+        base_severity=base,
+        hardening_penalty=penalty,
+        effective_severity=effective,
+        disposition=Disposition.INFORMATIONAL,
+        suppression=None,
+        explanation=explanation,
+    )
+
+
+def _threshold_disposition(
+    finding: Finding,
+    base: Severity,
+    effective: Severity,
+    penalty: int,
+    posture: Posture,
+    *,
+    compare_sev: Severity,
+    dangerously_disable_quarantine: bool,
+) -> FindingDisposition:
+    """Compare `compare_sev` against the posture threshold and dispose.
+
+    `effective` is what the operator sees on the disposition (the severity the
+    decision was made on): NVD-effective under paranoid, distro-effective on a
+    non-paranoid quarantine. `compare_sev` is the value actually compared.
+    """
+    threshold = _POSTURE_THRESHOLDS[posture]
+    over = _SEVERITY_RANK[compare_sev] >= _SEVERITY_RANK[threshold]
+    if over and dangerously_disable_quarantine:
+        disposition = Disposition.STILL_RUNNING_AT_RISK
+    elif over:
+        disposition = Disposition.QUARANTINE
+    else:
+        disposition = Disposition.INFORMATIONAL
+    return FindingDisposition(
+        finding=finding,
+        base_severity=base,
+        hardening_penalty=penalty,
+        effective_severity=effective,
+        disposition=disposition,
+        suppression=None,
+        explanation=explain_threshold(
+            base,
+            effective,
+            penalty,
+            _POSTURE_LABEL[posture],
+            threshold.value,
+            over_threshold=over,
+            dangerously_disabled=dangerously_disable_quarantine,
+        ),
+    )
+
+
 def evaluate_finding(
     finding: Finding,
     *,
@@ -229,20 +331,16 @@ def evaluate_finding(
     dangerously_disable_quarantine: bool,
     suppressions: tuple[Suppression, ...],
     today: date,
+    kev_lookup: Callable[[str], bool] = _kev_never,
 ) -> FindingDisposition:
-    """Decide the disposition for a single finding.
+    """Decide the disposition for a single finding (the trust ladder).
 
-    Order of checks:
-    1. Upstream fix available  → IGNORED_FIXED.
-    2. Active suppression for this CVE → SUPPRESSED.
-    3. UNKNOWN severity → INFORMATIONAL (cannot act on unrecognized).
-    4. v0.7.1 Attack Vector filter: under non-paranoid posture, only AV:N
-       findings are quarantine-eligible. AV:L/A/P and AV-unknown route to
-       INFORMATIONAL with an explanation noting the gate.
-    5. Effective severity vs. posture threshold:
-       - At-or-above + dangerously disabled → STILL_RUNNING_AT_RISK
-       - At-or-above otherwise              → QUARANTINE
-       - Below threshold                    → INFORMATIONAL
+    Order of checks (see the module docstring for the rationale of each):
+    fix → IGNORED_FIXED; suppression → SUPPRESSED; KEV override → QUARANTINE;
+    UNKNOWN severity → INFORMATIONAL; paranoid → NVD threshold; else
+    distro-deprioritized / no-distro-verdict / non-network AV → INFORMATIONAL;
+    else distro-severity threshold → QUARANTINE / STILL_RUNNING_AT_RISK /
+    INFORMATIONAL.
     """
     base = finding.severity
     effective = elevate_severity(base, hardening_penalty)
@@ -278,62 +376,86 @@ def evaluate_finding(
             ),
         )
 
-    # 3. Unknown severity — report only.
+    # 3. KEV override — actively exploited, quarantine regardless of posture,
+    # distro status, attack vector, or threshold.
+    if kev_lookup(finding.cve_id):
+        return FindingDisposition(
+            finding=finding,
+            base_severity=base,
+            hardening_penalty=hardening_penalty,
+            effective_severity=effective,
+            disposition=Disposition.QUARANTINE,
+            suppression=None,
+            explanation=explain_kev_quarantine(finding.cve_id),
+        )
+
+    # 4. Unknown severity — report only.
     if base == Severity.UNKNOWN:
-        return FindingDisposition(
-            finding=finding,
-            base_severity=base,
-            hardening_penalty=hardening_penalty,
-            effective_severity=effective,
-            disposition=Disposition.INFORMATIONAL,
-            suppression=None,
-            explanation=(
-                "Unknown severity from scanner; reporting only."
-            ),
+        return _informational(
+            finding,
+            base,
+            hardening_penalty,
+            effective,
+            "Unknown severity from scanner; reporting only.",
         )
 
-    # 4. v0.7.1 Attack Vector filter — non-paranoid postures only.
-    # AV:L/Adjacent/Physical and AV-unknown are treated as "not reachable
-    # from network surface" and routed to informational regardless of
-    # severity. Paranoid posture skips this gate (matches v0.7.0 behavior).
-    if (
-        posture is not Posture.PARANOID
-        and finding.attack_vector is not AttackVector.NETWORK
-    ):
-        return FindingDisposition(
-            finding=finding,
-            base_severity=base,
-            hardening_penalty=hardening_penalty,
-            effective_severity=effective,
-            disposition=Disposition.INFORMATIONAL,
-            suppression=None,
-            explanation=explain_av_filter(finding.attack_vector, _POSTURE_LABEL[posture]),
+    # 5. Paranoid: no distro trust, no AV filter — NVD severity vs. threshold
+    # (byte-for-byte today's behavior).
+    if posture is Posture.PARANOID:
+        return _threshold_disposition(
+            finding,
+            base,
+            effective,
+            hardening_penalty,
+            posture,
+            compare_sev=effective,
+            dangerously_disable_quarantine=dangerously_disable_quarantine,
         )
 
-    # 5. Threshold comparison.
-    threshold = _POSTURE_THRESHOLDS[posture]
-    over_threshold = _SEVERITY_RANK[effective] >= _SEVERITY_RANK[threshold]
+    # 6. Distro deprioritized → informational (the minizip fix).
+    if finding.status in _DEPRIORITIZED_STATUS:
+        return _informational(
+            finding,
+            base,
+            hardening_penalty,
+            effective,
+            explain_distro_deprioritized(finding.status, distro_severity(finding)),
+        )
 
-    if over_threshold and dangerously_disable_quarantine:
-        disposition = Disposition.STILL_RUNNING_AT_RISK
-    elif over_threshold:
-        disposition = Disposition.QUARANTINE
-    else:
-        disposition = Disposition.INFORMATIONAL
+    # 7. No distro verdict (only NVD/GHSA) → informational.
+    distro_sev = distro_severity(finding)
+    if distro_sev is None:
+        return _informational(
+            finding,
+            base,
+            hardening_penalty,
+            effective,
+            explain_no_distro_verdict(base),
+        )
 
-    return FindingDisposition(
-        finding=finding,
-        base_severity=base,
-        hardening_penalty=hardening_penalty,
-        effective_severity=effective,
-        disposition=disposition,
-        suppression=None,
-        explanation=explain_threshold(
-            base, effective, hardening_penalty, _POSTURE_LABEL[posture],
-            _POSTURE_THRESHOLDS[posture].value,
-            over_threshold=over_threshold,
-            dangerously_disabled=dangerously_disable_quarantine,
-        ),
+    # 8. v0.7.1 Attack Vector filter (retained) — non-paranoid, non-network.
+    if finding.attack_vector is not AttackVector.NETWORK:
+        return _informational(
+            finding,
+            base,
+            hardening_penalty,
+            effective,
+            explain_av_filter(finding.attack_vector, _POSTURE_LABEL[posture]),
+        )
+
+    # 9. Threshold comparison against the DISTRO severity (elevated by the
+    # hardening penalty). effective_severity now reflects the distro severity
+    # the decision was actually made on. Only status ∈ {AFFECTED, END_OF_LIFE}
+    # with a distro severity reach here.
+    distro_effective = elevate_severity(distro_sev, hardening_penalty)
+    return _threshold_disposition(
+        finding,
+        base,
+        distro_effective,
+        hardening_penalty,
+        posture,
+        compare_sev=distro_effective,
+        dangerously_disable_quarantine=dangerously_disable_quarantine,
     )
 
 
@@ -346,6 +468,7 @@ def evaluate_project(
     dangerously_disable_quarantine: bool,
     suppressions: tuple[Suppression, ...],
     today: date,
+    kev_lookup: Callable[[str], bool] = _kev_never,
 ) -> ProjectDecision:
     """Aggregate per-finding decisions into a project-level decision.
 
@@ -364,6 +487,7 @@ def evaluate_project(
             dangerously_disable_quarantine=dangerously_disable_quarantine,
             suppressions=suppressions,
             today=today,
+            kev_lookup=kev_lookup,
         )
         for f in scan_result.findings
     )
