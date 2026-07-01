@@ -128,7 +128,7 @@ def test_informational_alert_includes_distro_reason() -> None:
         explanation=distro_expl,
     )
     pd = _make_decision(fd)
-    alert = format_informational_alert(pd, fd, posture="balanced")
+    alert = format_informational_alert(pd, fd)
     assert distro_expl in alert.body
     assert "Below quarantine threshold" not in alert.body
 

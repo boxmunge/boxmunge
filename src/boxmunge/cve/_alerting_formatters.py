@@ -81,9 +81,13 @@ def format_still_running_alert(
 
 
 def format_informational_alert(
-    decision: ProjectDecision, finding: FindingDisposition, posture: str,
+    decision: ProjectDecision, finding: FindingDisposition,
 ) -> Alert:
-    """Format a sub-threshold informational alert. Priority 0."""
+    """Format an informational (non-quarantined) alert. Priority 0.
+
+    The body's reason line comes from ``finding.explanation`` (sub-threshold,
+    distro-deprioritized, no-distro-verdict, or AV-filtered), so no posture
+    argument is needed here."""
     project = decision.project_name
     cve = finding.finding.cve_id
     image_ref = decision.image_ref

@@ -150,7 +150,7 @@ def detect_transitions(
             # all). A finding that simply persisted as INFORMATIONAL is silent.
             if prior_disp is None:
                 informational_alerts.append(
-                    format_informational_alert(current, fd, posture),
+                    format_informational_alert(current, fd),
                 )
 
     # Suppression-expired transitions: a suppression that was active at the

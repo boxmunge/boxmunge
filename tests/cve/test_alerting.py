@@ -141,7 +141,7 @@ def test_format_informational_alert_shape_no_penalty() -> None:
     fd = _disp("CVE-2026-3333", base=Severity.LOW, effective=Severity.LOW,
                disposition=Disposition.INFORMATIONAL, penalty=0)
     pd = _decision(fd)
-    alert = format_informational_alert(pd, fd, posture="balanced")
+    alert = format_informational_alert(pd, fd)
     assert alert.kind == "informational"
     assert alert.priority == 0
     assert alert.title == "[boxmunge:demo] CVE-2026-3333 (Low)"
@@ -157,7 +157,7 @@ def test_format_informational_alert_shape_with_penalty() -> None:
     fd = _disp("CVE-2026-3334", base=Severity.LOW, effective=Severity.MEDIUM,
                disposition=Disposition.INFORMATIONAL, penalty=1)
     pd = _decision(fd)
-    alert = format_informational_alert(pd, fd, posture="strict")
+    alert = format_informational_alert(pd, fd)
     assert "Severity: Low → effective Medium via penalty +1" in alert.body
     # explanation is surfaced instead of old hard-coded "Below quarantine threshold" line
     assert "explained" in alert.body
