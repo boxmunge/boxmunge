@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -88,6 +88,43 @@ _AV_TOKEN_MAP: dict[str, AttackVector] = {
 }
 
 
+class VulnStatus(Enum):
+    """Distro/vendor triage status for a CVE, from Trivy's `Status` field.
+
+    The distro's own verdict on a finding. `will_not_fix` / `fix_deferred` /
+    `not_affected` / `under_investigation` are the "not a big deal / not
+    urgent" signals the quarantine policy trusts below paranoid posture.
+    """
+
+    AFFECTED = "affected"
+    FIXED = "fixed"
+    UNDER_INVESTIGATION = "under_investigation"
+    WILL_NOT_FIX = "will_not_fix"
+    FIX_DEFERRED = "fix_deferred"
+    END_OF_LIFE = "end_of_life"
+    NOT_AFFECTED = "not_affected"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def from_trivy_string(cls, raw: str | None) -> "VulnStatus":
+        if not raw:
+            return cls.UNKNOWN
+        return _TRIVY_STATUS_MAP.get(raw.strip().lower(), cls.UNKNOWN)
+
+
+_TRIVY_STATUS_MAP: dict[str, VulnStatus] = {
+    s.value: s for s in VulnStatus if s is not VulnStatus.UNKNOWN
+}
+
+# OS-distro vendor source ids, in preference order. distro_severity() walks
+# these to find the distro's own severity, ignoring NVD/GHSA (upstream feeds
+# that don't reflect distro triage).
+_DISTRO_SOURCES: tuple[str, ...] = (
+    "debian", "ubuntu", "redhat", "alpine", "amazon",
+    "oracle", "photon", "suse", "rocky", "alma",
+)
+
+
 # Source priority for resolving disagreements when multiple feeds report a
 # CVE. NVD is preferred where present (most-curated), then redhat (good distro
 # coverage), then ghsa (active for ecosystem packages). Anything else is taken
@@ -129,6 +166,9 @@ class Finding:
     title: str
     primary_url: str | None
     attack_vector: AttackVector | None = None
+    status: VulnStatus = VulnStatus.UNKNOWN
+    vendor_severities: dict[str, Severity] = field(default_factory=dict)
+    severity_source: str | None = None
 
     @property
     def fix_available(self) -> bool:
@@ -283,10 +323,58 @@ def _parse_findings(payload: dict[str, Any]) -> tuple[Finding, ...]:
                 title=vuln.get("Title", ""),
                 primary_url=vuln.get("PrimaryURL") or None,
                 attack_vector=_parse_attack_vector(vuln.get("CVSS") or {}),
+                status=VulnStatus.from_trivy_string(vuln.get("Status")),
+                vendor_severities=_parse_vendor_severities(
+                    vuln.get("VendorSeverity") or {},
+                ),
+                severity_source=vuln.get("SeveritySource") or None,
             ))
 
     findings.sort(key=lambda f: (-_SEVERITY_RANK[f.severity], f.cve_id))
     return tuple(findings)
+
+
+# Trivy VendorSeverity encodes severity as an int 0-4.
+_VENDOR_SEVERITY_RANK_TO_ENUM: dict[int, Severity] = {
+    0: Severity.UNKNOWN,
+    1: Severity.LOW,
+    2: Severity.MEDIUM,
+    3: Severity.HIGH,
+    4: Severity.CRITICAL,
+}
+
+
+def _parse_vendor_severities(raw: Any) -> dict[str, Severity]:
+    """Map Trivy's VendorSeverity {source: int} to {source: Severity}.
+
+    Trivy emits integer levels 0-4 per source. Unrecognised keys/values are
+    skipped rather than raising — a malformed entry shouldn't drop the scan.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Severity] = {}
+    for source, level in raw.items():
+        if not isinstance(source, str):
+            continue
+        sev = _VENDOR_SEVERITY_RANK_TO_ENUM.get(level)
+        if sev is not None:
+            out[source] = sev
+    return out
+
+
+def distro_severity(finding: Finding) -> Severity | None:
+    """Return the OS-distro vendor's severity for this finding, or None.
+
+    Walks _DISTRO_SOURCES in order and returns the first present, non-UNKNOWN
+    vendor severity. None means "no distro verdict" — only upstream feeds
+    (NVD/GHSA) rated this CVE, so the policy engine has no distro opinion to
+    quarantine on below paranoid posture.
+    """
+    for source in _DISTRO_SOURCES:
+        sev = finding.vendor_severities.get(source)
+        if sev is not None and sev is not Severity.UNKNOWN:
+            return sev
+    return None
 
 
 def _parse_attack_vector(cvss: dict[str, Any]) -> AttackVector | None:

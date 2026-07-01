@@ -14,7 +14,10 @@ from boxmunge.cve.scanner import (
     ScannerError,
     Severity,
     TrivyNotInstalledError,
+    VulnStatus,
     _parse_attack_vector,
+    _parse_findings,
+    distro_severity,
     refresh_db,
     scan_image,
 )
@@ -678,3 +681,58 @@ class TestParseFindingsAttackVector:
         result = scan_image("img:tag")
         assert result.findings[0].severity is Severity.CRITICAL
         assert result.findings[0].attack_vector is AttackVector.LOCAL
+
+
+# ---------- VulnStatus, vendor severities, distro_severity ----------
+
+
+def test_vuln_status_from_trivy_string_case_insensitive():
+    assert VulnStatus.from_trivy_string("will_not_fix") is VulnStatus.WILL_NOT_FIX
+    assert VulnStatus.from_trivy_string("AFFECTED") is VulnStatus.AFFECTED
+    assert VulnStatus.from_trivy_string(None) is VulnStatus.UNKNOWN
+    assert VulnStatus.from_trivy_string("bogus") is VulnStatus.UNKNOWN
+
+
+def test_parse_findings_captures_status_and_vendor_severity():
+    payload = {
+        "Results": [
+            {
+                "Vulnerabilities": [
+                    {
+                        "VulnerabilityID": "CVE-2023-45853",
+                        "Severity": "HIGH",
+                        "SeveritySource": "nvd",
+                        "Status": "will_not_fix",
+                        "PkgName": "libminizip",
+                        "InstalledVersion": "1.1",
+                        "VendorSeverity": {"nvd": 3, "debian": 1},
+                        "CVSS": {},
+                    }
+                ]
+            }
+        ]
+    }
+    findings = _parse_findings(payload)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.status is VulnStatus.WILL_NOT_FIX
+    assert f.severity_source == "nvd"
+    assert f.vendor_severities == {"nvd": Severity.HIGH, "debian": Severity.LOW}
+
+
+def test_distro_severity_prefers_os_vendor_over_nvd():
+    f = Finding(
+        cve_id="CVE-1", severity=Severity.HIGH, package="p",
+        installed_version="1", fixed_version=None, title="t", primary_url=None,
+        vendor_severities={"nvd": Severity.HIGH, "debian": Severity.LOW},
+    )
+    assert distro_severity(f) is Severity.LOW
+
+
+def test_distro_severity_none_when_only_nvd():
+    f = Finding(
+        cve_id="CVE-2", severity=Severity.HIGH, package="p",
+        installed_version="1", fixed_version=None, title="t", primary_url=None,
+        vendor_severities={"nvd": Severity.HIGH, "ghsa": Severity.HIGH},
+    )
+    assert distro_severity(f) is None
