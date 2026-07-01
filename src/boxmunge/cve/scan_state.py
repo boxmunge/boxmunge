@@ -17,7 +17,7 @@ from boxmunge.cve.policy import (
     FindingDisposition,
     ProjectDecision,
 )
-from boxmunge.cve.scanner import AttackVector, Finding, Severity
+from boxmunge.cve.scanner import AttackVector, Finding, Severity, VulnStatus
 from boxmunge.fileutil import atomic_write_text
 
 
@@ -42,6 +42,7 @@ def _serialize_disposition(d: Any) -> dict[str, Any]:
         "title": f.title,
         "installed_version": f.installed_version,
         "attack_vector": f.attack_vector.value if f.attack_vector else None,
+        "status": f.status.value,
     }
 
 
@@ -119,6 +120,20 @@ def _deserialize_severity(value: str) -> Severity:
     return Severity.UNKNOWN
 
 
+def _deserialize_status(value: Any) -> VulnStatus:
+    """Map a stored status string back to VulnStatus.
+
+    Missing/None (legacy pre-rebalance files) or unrecognized → UNKNOWN,
+    matching the backward-compat posture of _deserialize_attack_vector.
+    """
+    if value is None:
+        return VulnStatus.UNKNOWN
+    for s in VulnStatus:
+        if s.value == value:
+            return s
+    return VulnStatus.UNKNOWN
+
+
 def _deserialize_attack_vector(value: Any) -> AttackVector | None:
     """Map a stored attack_vector string back to the enum.
 
@@ -190,6 +205,7 @@ def decisions_from_scan_state(
                 attack_vector=_deserialize_attack_vector(
                     raw.get("attack_vector"),
                 ),
+                status=_deserialize_status(raw.get("status")),
             )
             findings.append(
                 FindingDisposition(
