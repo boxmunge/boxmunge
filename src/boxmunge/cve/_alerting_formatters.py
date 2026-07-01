@@ -295,3 +295,27 @@ def format_grace_heads_up_alert(
     return Alert(
         kind="grace_heads_up", title=title, body=body, priority=1,
     )
+
+
+# ---------- KEV stale-feed alert ----------
+
+
+def format_kev_stale_alert(fetched_at: "datetime | None") -> Alert:
+    """Fleet-level alert: the CISA KEV catalog is stale/missing.
+
+    Priority 1 because a stale KEV feed silently disables the lowest tier's
+    only quarantine trigger — the operator must know the exploitation-signal
+    protection is degraded.
+    """
+    when = fetched_at.isoformat() if fetched_at else "never fetched"
+    title = "[boxmunge] CISA KEV feed stale — exploitation defense degraded"
+    body = (
+        "The CISA Known Exploited Vulnerabilities catalog could not be "
+        "refreshed and is stale or missing.\n"
+        f"Last fetched: {when}\n"
+        "\n"
+        "KEV-based quarantine is fail-safe (sites stay up), so actively-"
+        "exploited CVEs will NOT be auto-quarantined until the feed "
+        "refreshes. Check egress to cisa.gov and the cve-scan log."
+    )
+    return Alert(kind="kev_stale", title=title, body=body, priority=1)

@@ -2559,3 +2559,75 @@ def test_scan_one_project_does_not_double_init_grace(
     scan_one_project(paths, "demo")
     post = paths.cve_grace_state.read_text()
     assert post == pre, "grace state must not be re-initialised"
+
+
+# ---------- Task 6: KEV integration ----------
+
+
+def test_kev_listed_cve_quarantines_via_scan_flow(
+    monkeypatch, tmp_path,
+) -> None:
+    """A KEV-listed CVE must quarantine under balanced posture even when the
+    finding would otherwise be informational (NOT_AFFECTED, AV:N, no fix).
+
+    Drives the scan flow with a fresh KevCatalog containing the CVE passed
+    via the new kev= param — no network calls, fully isolated.
+    """
+    from datetime import datetime, timezone
+    from boxmunge.commands.security_scan_core import scan_one_project
+    from boxmunge.cve.kev import KevCatalog
+    from boxmunge.cve.scanner import (
+        AttackVector, Finding, ScanResult, Severity, VulnStatus,
+    )
+
+    paths = _scan_one_project_paths(tmp_path)
+    _seed_grace(paths, in_grace=False)  # past grace so quarantine fires
+
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.container_image_digest",
+        lambda c: None,
+    )
+
+    # A finding that would be INFORMATIONAL without the KEV signal:
+    # NOT_AFFECTED status, network-reachable, no fix, vendor says LOW.
+    finding = Finding(
+        cve_id="CVE-2023-45853",
+        severity=Severity.HIGH,
+        package="zlib",
+        installed_version="1.2.11",
+        fixed_version=None,
+        title="zlib heap buffer overflow",
+        primary_url=None,
+        attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.NOT_AFFECTED,
+        vendor_severities={"nvd": Severity.HIGH},
+    )
+    sr = ScanResult(
+        image_ref="myapp:1.0",
+        findings=(finding,),
+        scanned_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        db_version="2026-07-01",
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
+    )
+
+    quarantine_calls: list[tuple] = []
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.quarantine_project",
+        lambda *a, **k: quarantine_calls.append((a, k)),
+    )
+
+    # Build a fresh KevCatalog with this CVE and pass it directly — no
+    # refresh_kev(), no network access.
+    kev = KevCatalog(
+        cve_ids=frozenset({"CVE-2023-45853"}),
+        fetched_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+
+    headline, *_ = scan_one_project(paths, "demo", in_grace=False, kev=kev)
+
+    assert headline is not None, (
+        "KEV-listed CVE should quarantine even when otherwise informational"
+    )
+    assert quarantine_calls, "quarantine_project should have been called"

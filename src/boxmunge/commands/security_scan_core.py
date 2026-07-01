@@ -19,6 +19,7 @@ import yaml
 
 from boxmunge.cve.alerting import emit_scan_alerts
 from boxmunge.cve.grace import GraceError, init_grace_if_missing
+from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.policy import (
     Disposition,
     ProjectDecision,
@@ -154,6 +155,7 @@ def scan_one_project(
     paths: BoxPaths, project: str, *,
     in_grace: bool | None = None,
     audit_only: bool = False,
+    kev: KevCatalog | None = None,
 ) -> tuple[
     ProjectDecision | None,
     list[ProjectDecision],
@@ -214,14 +216,22 @@ def scan_one_project(
                     f"CVE migration grace state is corrupt: {e}"
                 ) from e
             in_grace = grace.is_active(now=datetime.now(timezone.utc))
+    # Lazily load the KEV catalog when not provided by the fleet entry-point.
+    # Direct callers (deploy, container-update, resume) benefit from the cached
+    # catalog without triggering a refresh (no network call here).
+    if kev is None:
+        kev = load_kev(paths)
     with project_lock(project, paths):
         return _scan_one_project_locked(
-            paths, project, in_grace=in_grace, audit_only=audit_only,
+            paths, project, in_grace=in_grace, audit_only=audit_only, kev=kev,
         )
 
 
 def _scan_one_project_locked(
-    paths: BoxPaths, project: str, *, in_grace: bool, audit_only: bool = False,
+    paths: BoxPaths, project: str, *,
+    in_grace: bool,
+    audit_only: bool = False,
+    kev: KevCatalog | None = None,
 ) -> tuple[
     ProjectDecision | None,
     list[ProjectDecision],
@@ -346,6 +356,7 @@ def _scan_one_project_locked(
             dangerously_disable_quarantine=dangerously,
             suppressions=supps,
             today=today,
+            kev_lookup=lambda cid: kev.is_known_exploited(cid, today=today),
         )
         decisions.append(decision)
 

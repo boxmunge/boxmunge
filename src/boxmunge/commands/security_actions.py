@@ -17,10 +17,12 @@ from datetime import datetime, timezone
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.commands.security_scan_core import scan_one_project
 from boxmunge.compose import prepare_compose_override
+from boxmunge.cve._alerting_formatters import format_kev_stale_alert
 from boxmunge.cve.alerting import (
     format_grace_heads_up_alert,
     send_alerts,
 )
+from boxmunge.cve.kev import load_kev, refresh_kev
 from boxmunge.cve.grace import (
     GraceError,
     init_grace_if_missing,
@@ -171,12 +173,37 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
+    now = datetime.now(timezone.utc)
+
+    # Refresh the CISA KEV catalog best-effort (one call per scan run,
+    # mirrors refresh_db). Load it once and thread it into every project scan
+    # so the exploitation-signal is consistent fleet-wide. Fail-safe: a stale
+    # catalog never quarantines, but we fire ONE priority-1 alert per run so
+    # the degradation is never silent.
+    refresh_kev(paths)
+    kev = load_kev(paths)
+    if kev.is_stale(now.date()):
+        log_warning(
+            "cve-scan",
+            "CISA KEV catalog stale/missing — exploitation-based quarantine "
+            "degraded",
+            paths, project=None,
+            detail={"kev_fetched_at":
+                    kev.fetched_at.isoformat() if kev.fetched_at else None},
+        )
+        try:
+            send_alerts((format_kev_stale_alert(kev.fetched_at),), paths)
+        except Exception as e:  # noqa: BLE001 — alerting must never block scan
+            log_warning(
+                "cve-scan", f"KEV stale-alert emission failed: {e}",
+                paths, project=None,
+            )
+
     # Migration grace window — bootstrap lazily on first scan after upgrade.
     # If grace state is corrupt we abort the scan rather than silently
     # proceeding with full enforcement: the operator might believe they
     # are in grace when they are not. (Per-project scans use the same
     # bootstrap so the in_grace flag is consistent across entry-points.)
-    now = datetime.now(timezone.utc)
     is_fleet_scan = project is None
     try:
         grace = init_grace_if_missing(paths, now=now)
@@ -201,7 +228,7 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
     for name in targets:
         try:
             headline, decisions, warnings, posture_str, dangerously = (
-                scan_one_project(paths, name, in_grace=in_grace)
+                scan_one_project(paths, name, in_grace=in_grace, kev=kev)
             )
         except LockError:
             # Audit A-2: another operation holds the project lock. Skip and

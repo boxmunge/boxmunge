@@ -54,6 +54,42 @@ def _no_writable_diagnostic_sleep(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_kev_network(monkeypatch):
+    """Prevent any test from hitting the CISA KEV feed over the network.
+
+    refresh_kev() makes a real HTTP request; calling it in tests would cause
+    non-deterministic failures (no network in CI, slow on dev machines).
+    This autouse fixture stubs it to a no-op fleet-wide and also stubs
+    load_kev to return a fresh, empty catalog so tests that don't explicitly
+    exercise KEV staleness don't trigger the stale-feed alert path.
+
+    Tests that need to exercise KEV behavior can override by constructing
+    a KevCatalog directly and passing it via the kev= parameter, or by
+    monkeypatching load_kev after this fixture runs.
+    """
+    from datetime import datetime, timezone
+    from boxmunge.cve.kev import KevCatalog
+
+    _fresh_empty = KevCatalog(
+        cve_ids=frozenset(),
+        fetched_at=datetime.now(timezone.utc),
+    )
+
+    monkeypatch.setattr(
+        "boxmunge.cve.kev.refresh_kev", lambda paths: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.refresh_kev", lambda paths: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.load_kev", lambda paths: _fresh_empty,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.load_kev", lambda paths: _fresh_empty,
+    )
+
+
 @pytest.fixture
 def tmp_root(tmp_path: Path) -> Path:
     """Create a temporary boxmunge root directory with standard structure."""
