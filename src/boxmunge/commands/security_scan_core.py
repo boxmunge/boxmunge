@@ -230,8 +230,8 @@ def scan_one_project(
 def _scan_one_project_locked(
     paths: BoxPaths, project: str, *,
     in_grace: bool,
+    kev: KevCatalog,
     audit_only: bool = False,
-    kev: KevCatalog | None = None,
 ) -> tuple[
     ProjectDecision | None,
     list[ProjectDecision],
