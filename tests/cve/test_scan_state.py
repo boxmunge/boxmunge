@@ -4,8 +4,6 @@
 import json
 from datetime import datetime, timezone
 
-import pytest
-
 from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision
 from boxmunge.cve.scanner import AttackVector, Finding, Severity, VulnStatus
 
@@ -66,6 +64,7 @@ def test_scan_state_roundtrips_status(tmp_path):
     path = tmp_path / "state.json"
     write_scan_state(path, decisions=(decision,))
     state = read_scan_state(path)
+    assert state is not None
     restored = decisions_from_scan_state(state, project_name="p")
     assert restored[0].findings[0].finding.status is VulnStatus.WILL_NOT_FIX
 
@@ -92,5 +91,6 @@ def test_scan_state_legacy_file_without_status_defaults_unknown(tmp_path):
     path = tmp_path / "legacy.json"
     path.write_text(json.dumps(legacy))
     state = read_scan_state(path)
+    assert state is not None
     restored = decisions_from_scan_state(state, project_name="p")
     assert restored[0].findings[0].finding.status is VulnStatus.UNKNOWN

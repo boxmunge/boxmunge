@@ -287,7 +287,7 @@ def format_grace_heads_up_alert(
     lines.append("")
     lines.append("Configure per-project posture in manifest.yml:")
     lines.append("  security:")
-    lines.append("    posture: relaxed | balanced (default) | strict")
+    lines.append("    posture: relaxed | balanced (default) | strict | paranoid")
     lines.append("")
     lines.append("Suppress a specific CVE (with operator review):")
     lines.append(

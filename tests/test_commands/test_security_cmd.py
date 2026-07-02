@@ -2630,3 +2630,71 @@ def test_kev_listed_cve_quarantines_via_scan_flow(
         "KEV-listed CVE should quarantine even when otherwise informational"
     )
     assert quarantine_calls, "quarantine_project should have been called"
+
+
+def test_fleet_scan_fires_priority1_kev_stale_alert(
+    monkeypatch, tmp_path,
+) -> None:
+    """When load_kev returns a STALE catalog during a fleet scan, cmd_security_scan
+    fires exactly one priority-1 KEV-stale alert before scanning projects.
+
+    The _no_kev_network autouse fixture stubs load_kev to return a fresh catalog;
+    this test overrides it with a stale one to exercise the degraded-feed path.
+    """
+    from datetime import datetime, timezone
+
+    from boxmunge.commands.security_actions import cmd_security_scan
+    from boxmunge.cve.kev import KevCatalog
+
+    paths = _scan_paths(tmp_path)
+
+    # Override load_kev to return a catalog that is definitely stale (fetched
+    # in 2020 — far outside any freshness window).
+    stale_kev = KevCatalog(
+        cve_ids=frozenset(),
+        fetched_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.load_kev",
+        lambda paths: stale_kev,
+    )
+
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.container_image_digest",
+        lambda c: None,
+    )
+    # Return a clean scan so the project doesn't quarantine — we only care
+    # about the KEV-stale alert path.
+    from boxmunge.cve.scanner import ScanResult
+    sr = ScanResult(
+        image_ref="myapp:1.0",
+        findings=(),
+        scanned_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+        db_version="2026-05-06",
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
+    )
+
+    # Capture every alert batch handed to send_alerts.
+    all_alerts: list = []
+    def fake_send_alerts(alerts, p):
+        all_alerts.extend(alerts)
+        return len(alerts)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.send_alerts", fake_send_alerts,
+    )
+
+    rc = cmd_security_scan([], paths)
+    assert rc == 0
+
+    kev_alerts = [a for a in all_alerts if "KEV" in a.title]
+    assert len(kev_alerts) == 1, (
+        f"expected exactly 1 KEV-stale alert, got {len(kev_alerts)}: {kev_alerts}"
+    )
+    assert kev_alerts[0].priority == 1, (
+        f"KEV-stale alert must be priority 1, got {kev_alerts[0].priority}"
+    )
