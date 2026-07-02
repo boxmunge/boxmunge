@@ -10,6 +10,16 @@ from __future__ import annotations
 from boxmunge.cve.scanner import AttackVector, Severity, VulnStatus
 
 
+def explain_relaxed_kev_only() -> str:
+    """Explanation for a non-KEV finding held informational under relaxed."""
+    return (
+        "relaxed posture: only actively-exploited (CISA KEV) findings "
+        "quarantine; everything else is informational regardless of distro "
+        "severity. Raise the posture to balanced or strict for "
+        "distro-severity-based quarantine."
+    )
+
+
 def explain_kev_quarantine(cve_id: str) -> str:
     """Explanation for a KEV-override quarantine (actively exploited)."""
     return (

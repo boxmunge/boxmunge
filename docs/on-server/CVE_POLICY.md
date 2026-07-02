@@ -100,28 +100,33 @@ For every finding, `evaluate_finding` runs these gates in order:
    if the operator has reviewed it.)
 4. **Unknown severity** → `INFORMATIONAL`. The engine cannot reason about a
    severity it does not recognize; reporting only.
-5. **Paranoid short-circuit** — under `paranoid`, skip steps 6–8 and compare
+5. **Paranoid short-circuit** — under `paranoid`, skip steps 6–9 and compare
    the NVD severity directly against the Medium threshold with no AV filter.
    This is the pre-trust-ladder behavior, unchanged.
-6. **Distro deprioritized** (non-paranoid) — `Status ∈ {will_not_fix,
+6. **Relaxed short-circuit** — under `relaxed`, quarantine is KEV-only (already
+   handled at step 3). Every non-KEV finding is `INFORMATIONAL` regardless of
+   distro severity — the most hands-off tier, for operators who accept
+   severity-based risk. Raise the posture to `balanced`/`strict` for
+   distro-severity-based quarantine.
+7. **Distro deprioritized** (balanced/strict) — `Status ∈ {will_not_fix,
    fix_deferred, not_affected, under_investigation}` → `INFORMATIONAL` with a
    loud alert. The distro already judged the finding low-risk; the site stays
    up. The alert quotes the distro status and severity so the operator can see
    exactly why.
-7. **No distro verdict** (non-paranoid) — `distro_severity(finding) is None`
+8. **No distro verdict** (balanced/strict) — `distro_severity(finding) is None`
    (only NVD/GHSA data; the distro issued no rating) → `INFORMATIONAL`. Below
    `paranoid`, the engine does not quarantine on an NVD rating the distro never
    echoed. Language-level vendored findings that the OS package tracker never
    touched fall here.
-8. **AV filter** (non-paranoid) — CVSS Attack Vector is not Network → `INFORMATIONAL`.
+9. **AV filter** (balanced/strict) — CVSS Attack Vector is not Network → `INFORMATIONAL`.
    Retained from v0.7.1. By this step the distro verdict and severity are
    already authoritative noise gates; the AV filter is a secondary reducer for
    findings that passed distro triage but are not network-reachable.
-9. **Threshold comparison** against the distro severity (elevated by the
+10. **Threshold comparison** against the distro severity (elevated by the
    hardening penalty, using the posture threshold from the trust ladder table)
-   → `QUARANTINE` / `STILL_RUNNING_AT_RISK` / `INFORMATIONAL`. Only
-   `Status ∈ {affected, end_of_life}` findings with a distro severity reach
-   this step.
+   → `QUARANTINE` / `STILL_RUNNING_AT_RISK` / `INFORMATIONAL`. Reached only by
+   `balanced`/`strict` with `Status ∈ {affected, end_of_life}` and a distro
+   severity.
 
 ### Decision matrix summary
 
@@ -132,6 +137,7 @@ For every finding, `evaluate_finding` runs these gates in order:
 | CVE is on CISA KEV | `QUARANTINE` — override; no further checks |
 | Severity unknown | `INFORMATIONAL` |
 | Posture is `paranoid` | NVD threshold gate (step 5 above) |
+| Posture is `relaxed` (non-KEV finding) | `INFORMATIONAL` — relaxed is KEV-only |
 | Distro marked `will_not_fix` / `fix_deferred` / `not_affected` / `under_investigation` | `INFORMATIONAL` — distro deprioritized |
 | No distro rating (NVD/GHSA only) | `INFORMATIONAL` — no distro verdict |
 | CVSS Attack Vector is not Network | `INFORMATIONAL` — not network-reachable |
@@ -465,7 +471,7 @@ top-level `grace` field.
 
 ## Alerts you'll see (Pushover)
 
-Six categories. Titles only — bodies are self-explanatory.
+Seven categories. Titles only — bodies are self-explanatory.
 
 | Title | Priority |
 |---|---|

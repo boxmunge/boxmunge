@@ -256,8 +256,9 @@ def test_unknown_severity_is_informational() -> None:
 @pytest.mark.parametrize(
     "posture, severity, expected",
     [
-        # RELAXED: only Critical quarantines
-        (Posture.RELAXED, Severity.CRITICAL, Disposition.QUARANTINE),
+        # RELAXED: KEV-only — no non-KEV finding quarantines regardless of
+        # severity (the default kev_lookup here is never-KEV).
+        (Posture.RELAXED, Severity.CRITICAL, Disposition.INFORMATIONAL),
         (Posture.RELAXED, Severity.HIGH, Disposition.INFORMATIONAL),
         (Posture.RELAXED, Severity.MEDIUM, Disposition.INFORMATIONAL),
         (Posture.RELAXED, Severity.LOW, Disposition.INFORMATIONAL),
@@ -575,10 +576,12 @@ def test_project_with_hardening_profile_elevates_findings() -> None:
         # AV unknown (None) treated like AV:L under non-paranoid
         (None, Posture.BALANCED, Severity.HIGH, Disposition.INFORMATIONAL),
         (None, Posture.STRICT, Severity.MEDIUM, Disposition.INFORMATIONAL),
-        # AV:N under non-paranoid → goes through the threshold gate normally
+        # AV:N under balanced/strict → goes through the threshold gate normally
         (AttackVector.NETWORK, Posture.BALANCED, Severity.HIGH, Disposition.QUARANTINE),
-        (AttackVector.NETWORK, Posture.RELAXED, Severity.CRITICAL, Disposition.QUARANTINE),
         (AttackVector.NETWORK, Posture.STRICT, Severity.MEDIUM, Disposition.QUARANTINE),
+        # AV:N under relaxed → still INFORMATIONAL: relaxed is KEV-only and
+        # short-circuits before the AV filter / threshold (no KEV here).
+        (AttackVector.NETWORK, Posture.RELAXED, Severity.CRITICAL, Disposition.INFORMATIONAL),
         # PARANOID skips the AV filter — quarantines AV:L and AV-unknown
         (AttackVector.LOCAL, Posture.PARANOID, Severity.HIGH, Disposition.QUARANTINE),
         (None, Posture.PARANOID, Severity.HIGH, Disposition.QUARANTINE),
@@ -775,6 +778,24 @@ def test_kev_override_applies_across_all_postures() -> None:
     for posture in Posture:
         d = _eval_ladder(f, posture, kev=True)
         assert d.disposition is Disposition.QUARANTINE
+
+
+# --- Relaxed is strictly KEV-only (distro-CRITICAL does NOT quarantine) ---
+def test_relaxed_is_kev_only_distro_critical_informational() -> None:
+    # Distro verdict = CRITICAL, AV:N, no-fix, status=AFFECTED. Under the old
+    # CRITICAL-threshold backstop this quarantined; relaxed is now KEV-only.
+    f = _finding(
+        severity=Severity.CRITICAL,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
+        attack_vector=AttackVector.NETWORK,
+    )
+    assert _eval_ladder(f, Posture.RELAXED).disposition is Disposition.INFORMATIONAL
+    # KEV still fires under relaxed:
+    assert _eval_ladder(f, Posture.RELAXED, kev=True).disposition is Disposition.QUARANTINE
+    # Sanity: the same distro-CRITICAL finding still quarantines under balanced
+    # (its High threshold catches a Critical) — balanced is unchanged.
+    assert _eval_ladder(f, Posture.BALANCED).disposition is Disposition.QUARANTINE
 
 
 # --- Distro-deprioritized statuses → informational below paranoid ---

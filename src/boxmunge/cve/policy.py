@@ -55,6 +55,7 @@ from boxmunge.cve.policy_explain import (
     explain_distro_deprioritized,
     explain_kev_quarantine,
     explain_no_distro_verdict,
+    explain_relaxed_kev_only,
     explain_threshold,
 )
 
@@ -125,11 +126,7 @@ _MAX_HARDENING_PENALTY = 2
 
 
 def _kev_never(_cve: str) -> bool:
-    """Default KEV predicate: nothing is known-exploited.
-
-    Keeps existing callers/tests total — the trust ladder degrades to the
-    distro-verdict routing when no KEV catalog is threaded in.
-    """
+    """Default KEV predicate — nothing is known-exploited (keeps callers total)."""
     return False
 
 
@@ -137,14 +134,10 @@ def _kev_never(_cve: str) -> bool:
 # below paranoid. END_OF_LIFE is deliberately excluded (more dangerous, not
 # less — no fix will ever come), so it falls through to the threshold like
 # AFFECTED.
-_DEPRIORITIZED_STATUS: frozenset[VulnStatus] = frozenset(
-    {
-        VulnStatus.WILL_NOT_FIX,
-        VulnStatus.FIX_DEFERRED,
-        VulnStatus.NOT_AFFECTED,
-        VulnStatus.UNDER_INVESTIGATION,
-    }
-)
+_DEPRIORITIZED_STATUS: frozenset[VulnStatus] = frozenset({
+    VulnStatus.WILL_NOT_FIX, VulnStatus.FIX_DEFERRED,
+    VulnStatus.NOT_AFFECTED, VulnStatus.UNDER_INVESTIGATION,
+})
 
 
 # ---------- exceptions ----------
@@ -337,7 +330,8 @@ def evaluate_finding(
 
     Order of checks (see the module docstring for the rationale of each):
     fix → IGNORED_FIXED; suppression → SUPPRESSED; KEV override → QUARANTINE;
-    UNKNOWN severity → INFORMATIONAL; paranoid → NVD threshold; else
+    UNKNOWN severity → INFORMATIONAL; paranoid → NVD threshold; relaxed →
+    INFORMATIONAL (KEV-only, handled above); else (balanced/strict)
     distro-deprioritized / no-distro-verdict / non-network AV → INFORMATIONAL;
     else distro-severity threshold → QUARANTINE / STILL_RUNNING_AT_RISK /
     INFORMATIONAL.
@@ -412,7 +406,20 @@ def evaluate_finding(
             dangerously_disable_quarantine=dangerously_disable_quarantine,
         )
 
-    # 6. Distro deprioritized → informational (the minizip fix).
+    # 6. Relaxed: KEV is the ONLY quarantine trigger (already handled at step
+    # 3). Every non-KEV finding is informational regardless of distro
+    # severity — the most hands-off tier, for operators who accept
+    # severity-based risk.
+    if posture is Posture.RELAXED:
+        return _informational(
+            finding,
+            base,
+            hardening_penalty,
+            effective,
+            explain_relaxed_kev_only(),
+        )
+
+    # 7. Distro deprioritized → informational (the minizip fix).
     if finding.status in _DEPRIORITIZED_STATUS:
         return _informational(
             finding,
@@ -422,7 +429,7 @@ def evaluate_finding(
             explain_distro_deprioritized(finding.status, distro_severity(finding)),
         )
 
-    # 7. No distro verdict (only NVD/GHSA) → informational.
+    # 8. No distro verdict (only NVD/GHSA) → informational.
     distro_sev = distro_severity(finding)
     if distro_sev is None:
         return _informational(
@@ -433,7 +440,7 @@ def evaluate_finding(
             explain_no_distro_verdict(base),
         )
 
-    # 8. v0.7.1 Attack Vector filter (retained) — non-paranoid, non-network.
+    # 9. v0.7.1 Attack Vector filter (retained) — non-paranoid, non-network.
     if finding.attack_vector is not AttackVector.NETWORK:
         return _informational(
             finding,
@@ -443,10 +450,10 @@ def evaluate_finding(
             explain_av_filter(finding.attack_vector, _POSTURE_LABEL[posture]),
         )
 
-    # 9. Threshold comparison against the DISTRO severity (elevated by the
+    # 10. Threshold comparison against the DISTRO severity (elevated by the
     # hardening penalty). effective_severity now reflects the distro severity
-    # the decision was actually made on. Only status ∈ {AFFECTED, END_OF_LIFE}
-    # with a distro severity reach here.
+    # the decision was actually made on. Reached only by balanced/strict with
+    # status ∈ {AFFECTED, END_OF_LIFE} and a distro severity.
     distro_effective = elevate_severity(distro_sev, hardening_penalty)
     return _threshold_disposition(
         finding,
