@@ -368,6 +368,23 @@ def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
             result["status"] = block.reason.value
             return result
 
+    # Build-only projects (no image: services) have nothing to pull or
+    # update. A `docker compose pull` on them errors ("no image to pull"),
+    # which previously recorded the run as `failed` and surfaced a misleading
+    # container-updates health warning. Record no_change with a fresh
+    # timestamp — neither failed nor stale — and skip the pull/recreate. The
+    # Caddy target always has an image: service, so it never short-circuits.
+    if not _services_with_image(target):
+        result["status"] = "no_change"
+        result["current_digests"] = {}
+        log_operation(
+            "container-update",
+            f"No image: services in {target.name} (build-only) — nothing to pull",
+            paths, project=target.name,
+        )
+        _persist_result(paths, target, result, before={})
+        return result
+
     # Step 1: Pre-update backup (if applicable)
     if target.has_backup:
         rc = run_backup(target.name, paths)

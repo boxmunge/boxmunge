@@ -189,6 +189,38 @@ class TestUpdateTarget:
         assert result["status"] == "failed"
         assert "pull" in result.get("reason", "").lower()
 
+    @patch(
+        "boxmunge.container_update.compose_pull",
+        side_effect=__import__("boxmunge.docker", fromlist=["DockerError"]).DockerError(
+            "no image to pull"
+        ),
+    )
+    @patch("boxmunge.container_update._services_with_image", return_value={})
+    def test_build_only_project_skips_pull_and_is_no_change(
+        self, mock_swi, mock_pull, paths
+    ):
+        """A build-only project (no image: services) has nothing to pull.
+
+        Regression: previously `docker compose pull` on a build-only project
+        errored ("no image to pull") and the run was recorded as `failed`,
+        surfacing a misleading container-updates health warning. It must be
+        recorded `no_change` (fresh timestamp — neither failed nor stale) and
+        must NOT attempt a pull.
+        """
+        from boxmunge.container_update import (
+            update_target, UpdateTarget, read_target_state,
+        )
+        target = UpdateTarget(
+            name="buildonly", project_dir=paths.projects / "buildonly",
+            compose_files=["compose.yml"], strategy="leave_broken",
+            has_backup=False, is_caddy=False,
+        )
+        result = update_target(paths, target)
+        assert result["status"] == "no_change"
+        mock_pull.assert_not_called()
+        # State persisted as no_change (self-heals a prior 'failed' state).
+        assert read_target_state(paths, "buildonly")["last_status"] == "no_change"
+
     @patch("boxmunge.container_update.image_digest", return_value="sha256:new")
     @patch("boxmunge.container_update.compose_pull")
     @patch("boxmunge.container_update.compose_up")

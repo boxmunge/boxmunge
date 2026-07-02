@@ -20,9 +20,14 @@ def _dry_run_target(paths: BoxPaths, target: UpdateTarget) -> dict[str, Any]:
     Returns a result dict with status='would_change' or 'no_change' or 'failed'.
     """
     from boxmunge.container_update import (
-        _capture_service_digests, _detect_image_changes,
+        _capture_service_digests, _detect_image_changes, _services_with_image,
     )
     from boxmunge.docker import compose_pull, DockerError
+    # Build-only projects have no image: services to pull — a pull would
+    # error. Report no_change without attempting it (mirrors update_target).
+    if not _services_with_image(target):
+        return {"name": target.name, "status": "no_change",
+                "previous_digests": {}, "current_digests": {}}
     before = _capture_service_digests(target)
     try:
         compose_pull(target.project_dir, compose_files=target.compose_files)
