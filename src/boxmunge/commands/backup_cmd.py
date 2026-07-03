@@ -51,6 +51,10 @@ def _execute_dump(
     )
     os.close(fd)
     raw_path = Path(raw_path_str)
+    # The dump is later read by age in the system container (a fixed uid).
+    # Align ownership so a root-invoked backup's 0600 dump is readable to it.
+    from boxmunge.backup import _match_dir_ownership
+    _match_dir_ownership(raw_path)
 
     cmd = [
         "docker", "compose",

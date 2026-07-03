@@ -94,6 +94,55 @@ class TestEncryptFile:
             encrypt_file(input_file, tmp_path / "out.age", tmp_path / "nokey")
 
 
+class TestMatchDirOwnership:
+    """Backup temp files (mkstemp, mode 0600, owned by the invoking user) must
+    be readable by the system container's age process (a fixed uid). When a
+    backup is invoked as root (e.g. the container-update pre-deploy backup),
+    the temp is root-owned and age (uid 1000) gets 'permission denied'. The
+    helper aligns the temp's ownership with its backups dir so age can access
+    it regardless of the invoking user, without changing the 0600 mode.
+    """
+
+    def _stat_with(self, uid: int, gid: int):
+        m = MagicMock()
+        m.st_uid, m.st_gid = uid, gid
+        return m
+
+    def test_chowns_temp_to_dir_owner_when_mismatched(
+        self, tmp_path: Path
+    ) -> None:
+        from boxmunge import backup
+        f = tmp_path / ".dump-x.tar.gz"
+        f.write_text("x")
+
+        def fake_stat(p):
+            # backups dir owned 1000:1000; the root-invoked temp is 0:0
+            return self._stat_with(1000, 1000) if str(p) == str(tmp_path) \
+                else self._stat_with(0, 0)
+
+        chown_calls = []
+        with patch("boxmunge.backup.os.stat", side_effect=fake_stat), \
+             patch("boxmunge.backup.os.chown",
+                   side_effect=lambda p, u, g: chown_calls.append((str(p), u, g))):
+            backup._match_dir_ownership(f)
+        assert chown_calls == [(str(f), 1000, 1000)]
+
+    def test_no_chown_when_ownership_already_aligned(
+        self, tmp_path: Path
+    ) -> None:
+        from boxmunge import backup
+        f = tmp_path / ".dump-y.tar.gz"
+        f.write_text("y")
+
+        chown_calls = []
+        with patch("boxmunge.backup.os.stat",
+                   side_effect=lambda p: self._stat_with(1000, 1000)), \
+             patch("boxmunge.backup.os.chown",
+                   side_effect=lambda *a: chown_calls.append(a)):
+            backup._match_dir_ownership(f)
+        assert chown_calls == []  # daily (deploy/1000) path: already aligned
+
+
 class TestDecryptFile:
     def test_decrypt_calls_age(self, tmp_path: Path) -> None:
         key_file = tmp_path / "backup.key"

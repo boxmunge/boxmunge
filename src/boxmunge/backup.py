@@ -118,6 +118,27 @@ def _resolve_path(host_path: Path, use_container: bool) -> str:
     return str(host_path)
 
 
+def _match_dir_ownership(path: Path) -> None:
+    """Align a freshly-created backup temp file's ownership with its directory.
+
+    Backup dump/encrypt temp files are created via mkstemp (mode 0600) as the
+    invoking user — root for the container-update pre-deploy backup, deploy
+    for the daily timer. The ``age`` process runs inside the system container
+    as a fixed uid; a root-owned 0600 temp is unreadable to it ("permission
+    denied"). Chown the temp to its backups directory's owner (the platform
+    user the container also runs as) so age can read/write it regardless of
+    the invoking user. The mode is unchanged — the temp stays owner-only 0600,
+    never world-readable. A no-op when ownership already matches (the common
+    daily deploy path), so the working path is never touched.
+    """
+    dir_stat = os.stat(path.parent)
+    file_stat = os.stat(path)
+    if (file_stat.st_uid == dir_stat.st_uid
+            and file_stat.st_gid == dir_stat.st_gid):
+        return
+    os.chown(path, dir_stat.st_uid, dir_stat.st_gid)
+
+
 def _read_recipient(key_path: Path) -> str:
     """Extract the public key (recipient) from an age identity file."""
     for line in key_path.read_text().splitlines():
@@ -150,6 +171,9 @@ def encrypt_file(input_path: Path, output_path: Path, key_path: Path) -> None:
     )
     os.close(fd)
     tmp_path = Path(tmp_path_str)
+    # age (in the system container, a fixed uid) writes this temp via -o;
+    # align its ownership so a root-invoked backup's temp stays writable to it.
+    _match_dir_ownership(tmp_path)
 
     try:
         recipient = _read_recipient(key_path)
