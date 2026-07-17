@@ -149,5 +149,39 @@ def test_upgrade_updates_non_persistent_dirs(tmp_path: Path) -> None:
     copy_project_files(src, dest, is_upgrade=True)
 
     assert (dest / "boxmunge-scripts" / "smoke.sh").read_text() == "new"
-    # rmtree semantics preserved for non-persistent dirs: stale file gone.
+    # Content is refreshed in place: stale file gone.
     assert not (dest / "boxmunge-scripts" / "stale.sh").exists()
+
+
+def test_upgrade_preserves_bind_mount_dir_inode(tmp_path: Path) -> None:
+    """A live prod container bind-mounts ./boxmunge-scripts by inode.
+
+    Docker resolves a bind mount to the host directory's inode at container
+    start. Replacing the directory with rmtree+copytree gives it a NEW inode,
+    so the still-running prod container's mount keeps pointing at the deleted
+    original — smoke.sh vanishes inside the container, the smoke check fails
+    critical, and the health monitor stops prod. `stage` (which upgrade-copies
+    over the shared project dir while prod keeps running) triggered exactly
+    this. Upgrade must refresh directory CONTENTS in place, preserving the
+    top-level directory inode so live bind mounts keep resolving.
+    """
+    src = tmp_path / "bundle"
+    dest = tmp_path / "project"
+    _make_bundle(src)
+    (src / "boxmunge-scripts").mkdir()
+    (src / "boxmunge-scripts" / "smoke.sh").write_text("new")
+
+    dest.mkdir()
+    (dest / "compose.yml").write_text("services: {}\n")
+    (dest / "boxmunge-scripts").mkdir()
+    (dest / "boxmunge-scripts" / "smoke.sh").write_text("old")
+
+    inode_before = (dest / "boxmunge-scripts").stat().st_ino
+    copy_project_files(src, dest, is_upgrade=True)
+    inode_after = (dest / "boxmunge-scripts").stat().st_ino
+
+    assert inode_after == inode_before, (
+        "boxmunge-scripts inode changed — a live prod container's bind mount "
+        "would be severed, taking prod offline"
+    )
+    assert (dest / "boxmunge-scripts" / "smoke.sh").read_text() == "new"

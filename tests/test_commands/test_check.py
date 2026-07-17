@@ -53,6 +53,32 @@ class TestInterpretSmokeResult:
         result = interpret_smoke_result(127, "command not found\n")
         assert result.status == "warning"
 
+    def test_script_not_openable_is_not_critical(self) -> None:
+        """`sh` exits 2 when it cannot open the smoke script — the same exit
+        code an app uses to signal a genuine critical. That collision let a
+        severed bind mount (script missing inside a still-running prod
+        container) escalate to CRITICAL and stop prod. A can't-open-script
+        failure is a harness problem, never app-critical."""
+        result = interpret_smoke_result(
+            2, "sh: 0: cannot open /boxmunge-scripts/smoke.sh: No such file\n",
+        )
+        assert result.status != "critical"
+        assert result.status == "warning"
+
+    def test_container_gone_is_not_critical(self) -> None:
+        """A missing/renamed container while a stage is active is expected —
+        it means the smoke could not be run, not that the app is unhealthy."""
+        result = interpret_smoke_result(
+            1, "Error response from daemon: No such container: engine-engine-1\n",
+        )
+        assert result.status == "warning"
+
+    def test_real_app_critical_still_critical(self) -> None:
+        """A genuine app-reported critical (exit 2, app's own message) must
+        still escalate — the harness guard must not mask real failures."""
+        result = interpret_smoke_result(2, "Security breach detected\n")
+        assert result.status == "critical"
+
 
 class TestRunSmokeInContainer:
     MANIFEST = {

@@ -85,6 +85,29 @@ def _persistent_dir_names(project_dir: Path) -> set[str]:
     return names
 
 
+def _refresh_dir_in_place(src_dir: Path, dest_dir: Path) -> None:
+    """Mirror ``src_dir`` into an existing ``dest_dir``, preserving its inode.
+
+    Deletes children of ``dest_dir`` that are not being replaced, then copies
+    the bundle's children in. The top-level ``dest_dir`` inode is never
+    recreated, so a live container bind-mounting it keeps resolving the mount
+    (see the caller's note on the stage/health-monitor prod outage). Nested
+    entries are not bind-mount roots, so they are replaced wholesale.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for child in dest_dir.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+    for child in src_dir.iterdir():
+        target = dest_dir / child.name
+        if child.is_dir():
+            shutil.copytree(child, target)
+        else:
+            shutil.copy2(child, target)
+
+
 def copy_project_files(src: Path, dest: Path, is_upgrade: bool) -> None:
     """Copy project files from extracted bundle to project directory.
 
@@ -114,12 +137,20 @@ def copy_project_files(src: Path, dest: Path, is_upgrade: bool) -> None:
                 # branch above preserves it on every subsequent deploy. We
                 # seed only when LITERALLY empty — a non-overwriting merge
                 # would be confused by dev-only sentinel files.
-                shutil.rmtree(dest_item)
-                shutil.copytree(item, dest_item)
+                _refresh_dir_in_place(item, dest_item)
                 continue
             if dest_item.exists():
-                shutil.rmtree(dest_item)
-            shutil.copytree(item, dest_item)
+                # Refresh contents in place rather than rmtree+copytree: a
+                # still-running container (e.g. prod during a `stage`) may
+                # bind-mount this dir, and Docker resolves a bind mount to the
+                # directory inode at container start. Replacing the directory
+                # gives it a new inode and severs the live mount — the classic
+                # symptom being boxmunge-scripts/smoke.sh vanishing inside the
+                # running prod container, failing its smoke check, and the
+                # health monitor stopping prod. Preserve the inode.
+                _refresh_dir_in_place(item, dest_item)
+            else:
+                shutil.copytree(item, dest_item)
         else:
             shutil.copy2(item, dest_item)
 
