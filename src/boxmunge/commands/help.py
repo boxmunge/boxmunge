@@ -27,6 +27,7 @@ Project lifecycle:
   rollback <project>      Restore previous deployment
   pause <project>         Take offline with a styled maintenance page
   resume <project>        Bring back online (pulls latest images first)
+  recover <project>       Un-stop a health-monitor-stopped prod (same build)
   diff <project>          Preview what a deploy would change
   project-add <name>      Register a project name in the allowlist
   project-list            List registered project names

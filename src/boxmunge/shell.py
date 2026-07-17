@@ -21,7 +21,7 @@ ALLOWED_COMMANDS: set[str] = {
     "add-git-project", "stage", "promote", "unstage",
     "prod-deploy", "rollback", "project-delete", "diff",
     "project-add", "project-list",
-    "pause", "resume",
+    "pause", "resume", "recover",
     # Inbox
     "inbox",
     # Secrets
