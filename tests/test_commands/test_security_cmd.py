@@ -2572,7 +2572,7 @@ def test_kev_listed_cve_quarantines_via_scan_flow(
     Drives the scan flow with a fresh KevCatalog containing the CVE passed
     via the new kev= param — no network calls, fully isolated.
     """
-    from datetime import datetime, timezone
+    from datetime import date, datetime, timezone
     from boxmunge.commands.security_scan_core import scan_one_project
     from boxmunge.cve.kev import KevCatalog
     from boxmunge.cve.scanner import (
@@ -2622,6 +2622,15 @@ def test_kev_listed_cve_quarantines_via_scan_flow(
     kev = KevCatalog(
         cve_ids=frozenset({"CVE-2023-45853"}),
         fetched_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+
+    # Pin the scan's notion of "today" to the catalog's fetch date so the KEV
+    # freshness check is deterministic. Otherwise scan_one_project reads the
+    # wall clock (_today) and the fixed 2026-07-01 catalog reads as stale once
+    # real time passes KEV_MAX_AGE_DAYS, silently disabling the KEV path.
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core._today",
+        lambda: date(2026, 7, 1),
     )
 
     headline, *_ = scan_one_project(paths, "demo", in_grace=False, kev=kev)

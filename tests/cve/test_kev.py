@@ -13,8 +13,15 @@ def _catalog(cve_ids, fetched_at):
 
 def test_is_known_exploited_true_when_present_and_fresh():
     cat = _catalog({"CVE-2021-44228"}, datetime(2026, 7, 1, tzinfo=timezone.utc))
-    assert cat.is_known_exploited("CVE-2021-44228") is True
-    assert cat.is_known_exploited("CVE-2000-0001") is False
+    # Pin `today` to the fetch date so freshness is deterministic — without it
+    # the check reads the wall clock and the test rots once real time passes
+    # KEV_MAX_AGE_DAYS beyond the hard-coded fetched_at.
+    assert cat.is_known_exploited(
+        "CVE-2021-44228", today=date(2026, 7, 1),
+    ) is True
+    assert cat.is_known_exploited(
+        "CVE-2000-0001", today=date(2026, 7, 1),
+    ) is False
 
 
 def test_is_known_exploited_fail_safe_when_stale():
