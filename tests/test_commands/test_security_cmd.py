@@ -2707,3 +2707,74 @@ def test_fleet_scan_fires_priority1_kev_stale_alert(
     assert kev_alerts[0].priority == 1, (
         f"KEV-stale alert must be priority 1, got {kev_alerts[0].priority}"
     )
+
+
+# ---------- host-scope suppression visibility in the fleet summary ----------
+
+
+def _host_suppression_paths(tmp_path, monkeypatch, entries):
+    """Fleet with one project and a host-scope suppressions file."""
+    paths = _suppress_paths(tmp_path)
+    paths.config.mkdir(parents=True, exist_ok=True)
+    paths.host_suppressions.write_text(yaml.safe_dump({"suppressions": entries}))
+    monkeypatch.setattr("boxmunge.commands.security_cmd._paths", lambda: paths)
+    return paths
+
+
+def test_fleet_summary_counts_host_scope_suppressions(monkeypatch, tmp_path) -> None:
+    """A host-scope suppression must appear in the fleet count.
+
+    Regression: _fleet_summary only ever read per-project suppression files,
+    so a host suppression covering every project reported as 0 — hiding it
+    from the review workflow it is supposed to surface before expiry.
+    """
+    _host_suppression_paths(tmp_path, monkeypatch, [
+        {"cve": "CVE-2026-13221", "until": "2099-11-11",
+         "reason": "perl-base unused", "reviewed_by": "root",
+         "added": "2026-08-11"},
+    ])
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        cmd_security(["--json"])
+    payload = json.loads(buf.getvalue())
+    assert payload["active_suppressions_host"] == 1
+    assert payload["active_suppressions_count"] == 1
+
+
+def test_fleet_summary_lists_host_suppressions_with_expiry(
+    monkeypatch, tmp_path,
+) -> None:
+    """The text view names each host suppression and when it lapses."""
+    _host_suppression_paths(tmp_path, monkeypatch, [
+        {"cve": "CVE-2026-13221", "until": "2099-11-11",
+         "reason": "perl-base unused", "reviewed_by": "root",
+         "added": "2026-08-11"},
+        {"cve": "CVE-2026-57433", "until": "2099-11-21",
+         "reason": "perl Storable unreachable", "reviewed_by": "root",
+         "added": "2026-08-23"},
+    ])
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        cmd_security([])
+    out = buf.getvalue()
+    assert "CVE-2026-13221" in out
+    assert "2099-11-11" in out
+    assert "CVE-2026-57433" in out
+    assert "2099-11-21" in out
+
+
+def test_fleet_summary_excludes_expired_host_suppressions(
+    monkeypatch, tmp_path,
+) -> None:
+    """An expired host suppression is no longer active and must not be counted."""
+    _host_suppression_paths(tmp_path, monkeypatch, [
+        {"cve": "CVE-2026-13221", "until": "2020-01-01",
+         "reason": "long lapsed", "reviewed_by": "root",
+         "added": "2019-01-01"},
+    ])
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        cmd_security(["--json"])
+    payload = json.loads(buf.getvalue())
+    assert payload["active_suppressions_host"] == 0
+    assert payload["active_suppressions_count"] == 0

@@ -322,9 +322,17 @@ def format_fleet_text(summary: dict[str, Any]) -> str:
     lines.append("")
     proj_count = summary.get("active_suppressions_projects", 0)
     n_supps = summary.get("active_suppressions_count", 0)
-    lines.append(
-        f"Active suppressions: {n_supps} (across {proj_count} projects)"
-    )
+    n_host = summary.get("active_suppressions_host", 0)
+    scope_parts = []
+    if n_host:
+        scope_parts.append(f"{n_host} host-wide")
+    if proj_count or not n_host:
+        scope_parts.append(f"across {proj_count} projects")
+    lines.append(f"Active suppressions: {n_supps} ({', '.join(scope_parts)})")
+    # Name each host suppression and its expiry: these apply fleet-wide, and
+    # when one lapses every project it covered becomes quarantinable again.
+    for supp in summary.get("host_suppressions") or []:
+        lines.append(f"  - {supp['cve_id']} (host) — until {supp['until']}")
     lines.append("")
     last = summary.get("last_fleet_scan")
     lines.append(f"Last fleet scan: {_format_iso_compact(last)}")
