@@ -11,19 +11,21 @@ from boxmunge.cve.scanner import (
     Severity,
     VulnStatus,
 )
+from boxmunge.cve.hardening import (
+    HardeningProfile,
+    calculate_hardening_penalty,
+    hardening_profile_from_compose,
+)
 from boxmunge.cve.suppressions import Suppression
 from boxmunge.cve.policy import (
     Disposition,
-    HardeningProfile,
     PolicyError,
     Posture,
     ProjectDecision,
     _POSTURE_THRESHOLDS,
-    calculate_hardening_penalty,
     elevate_severity,
     evaluate_finding,
     evaluate_project,
-    hardening_profile_from_compose,
     parse_posture,
 )
 

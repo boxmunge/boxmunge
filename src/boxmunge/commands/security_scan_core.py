@@ -19,12 +19,12 @@ import yaml
 
 from boxmunge.cve.alerting import emit_scan_alerts
 from boxmunge.cve.grace import GraceError, init_grace_if_missing
+from boxmunge.cve.hardening import hardening_profile_from_compose
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.policy import (
     Disposition,
     ProjectDecision,
     evaluate_project,
-    hardening_profile_from_compose,
     parse_posture,
 )
 from boxmunge.cve.quarantine import (
