@@ -7,6 +7,7 @@ import pytest
 from boxmunge.cve.scanner import (
     AttackVector,
     Finding,
+    PkgClass,
     ScanResult,
     Severity,
     VulnStatus,
@@ -1164,3 +1165,121 @@ def test_hardening_profile_no_new_privileges_false_takes_precedence() -> None:
         compose, services_with_overlay=set(),
     )
     assert profile.no_new_privileges is False
+
+
+# ---------- Task 6: irrelevant-runtime de-escalation gate ----------
+
+
+def _perl_finding():
+    return Finding(
+        cve_id="CVE-2026-13221",
+        severity=Severity.CRITICAL,
+        package="perl-base",
+        installed_version="5.40.1-6",
+        fixed_version=None,
+        title="Perl regex",
+        primary_url=None,
+        attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
+        pkg_class=PkgClass.OS,
+        pkg_type="debian",
+    )
+
+
+@pytest.mark.parametrize("posture", [Posture.RELAXED, Posture.BALANCED, Posture.STRICT])
+def test_irrelevant_runtime_is_informational(posture):
+    """The CVE-2026-13221 incident: perl-base on a Python project."""
+    d = evaluate_finding(
+        _perl_finding(),
+        posture=posture,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=date(2026, 8, 24),
+        runtimes=frozenset({"python"}),
+    )
+    assert d.disposition is Disposition.INFORMATIONAL
+
+
+def test_irrelevant_runtime_still_quarantines_under_paranoid():
+    d = evaluate_finding(
+        _perl_finding(),
+        posture=Posture.PARANOID,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=date(2026, 8, 24),
+        runtimes=frozenset({"python"}),
+    )
+    assert d.disposition is Disposition.QUARANTINE
+
+
+def test_kev_override_beats_relevance():
+    """Actively exploited wins even if the package is unused."""
+    d = evaluate_finding(
+        _perl_finding(),
+        posture=Posture.BALANCED,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=date(2026, 8, 24),
+        runtimes=frozenset({"python"}),
+        kev_lookup=lambda cid: True,
+    )
+    assert d.disposition is Disposition.QUARANTINE
+
+
+def test_relevant_runtime_still_quarantines():
+    """Declaring perl puts the finding back on the threshold path."""
+    d = evaluate_finding(
+        _perl_finding(),
+        posture=Posture.BALANCED,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=date(2026, 8, 24),
+        runtimes=frozenset({"python", "perl"}),
+    )
+    assert d.disposition is Disposition.QUARANTINE
+
+
+def test_runtimes_none_disables_the_gate():
+    """Existing callers that pass no runtimes get today's behaviour."""
+    d = evaluate_finding(
+        _perl_finding(),
+        posture=Posture.BALANCED,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=date(2026, 8, 24),
+    )
+    assert d.disposition is Disposition.QUARANTINE
+
+
+def test_openssl_still_quarantines_on_python_project():
+    """The over-exemption guard, at policy level."""
+    finding = Finding(
+        cve_id="CVE-2026-9001",
+        severity=Severity.CRITICAL,
+        package="openssl",
+        installed_version="3.0.1",
+        fixed_version=None,
+        title="TLS bug",
+        primary_url=None,
+        attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
+        pkg_class=PkgClass.OS,
+        pkg_type="debian",
+    )
+    d = evaluate_finding(
+        finding,
+        posture=Posture.BALANCED,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=date(2026, 8, 24),
+        runtimes=frozenset({"python"}),
+    )
+    assert d.disposition is Disposition.QUARANTINE

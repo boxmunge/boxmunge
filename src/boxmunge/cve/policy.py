@@ -20,7 +20,15 @@ The trust ladder (non-paranoid postures trust the distro's own triage):
 
 KEV is an override applied first (after fix/suppression): an actively
 exploited CVE quarantines regardless of posture, distro status, attack
-vector, or threshold. Below paranoid, a finding is otherwise routed to
+vector, or threshold.
+
+Below paranoid, a finding is also routed to INFORMATIONAL when its package
+belongs to a language runtime the project does not use (a Perl bug cannot
+run in a Python-only image). This gate consults only positively-identified
+runtime families, so ordinary system libraries such as openssl remain
+quarantinable.
+
+Below paranoid, a finding is otherwise routed to
 INFORMATIONAL when the distro deprioritized it (status will_not_fix /
 fix_deferred / not_affected / under_investigation), when there is no distro
 verdict at all (only NVD/GHSA rated it), or when it fails the v0.7.1 Attack
@@ -42,6 +50,7 @@ from enum import Enum
 from typing import Callable
 
 from boxmunge.cve.hardening import HardeningProfile, calculate_hardening_penalty
+from boxmunge.cve.relevance import ecosystem_for_package, is_irrelevant_to_project
 from boxmunge.cve.scanner import (
     AttackVector,
     Finding,
@@ -54,6 +63,7 @@ from boxmunge.cve.suppressions import Suppression, find_active_suppression
 from boxmunge.cve.policy_explain import (
     explain_av_filter,
     explain_distro_deprioritized,
+    explain_irrelevant_runtime,
     explain_kev_quarantine,
     explain_no_distro_verdict,
     explain_relaxed_kev_only,
@@ -284,6 +294,7 @@ def evaluate_finding(
     suppressions: tuple[Suppression, ...],
     today: date,
     kev_lookup: Callable[[str], bool] = _kev_never,
+    runtimes: frozenset[str] | None = None,
 ) -> FindingDisposition:
     """Decide the disposition for a single finding (the trust ladder).
 
@@ -291,9 +302,9 @@ def evaluate_finding(
     fix → IGNORED_FIXED; suppression → SUPPRESSED; KEV override → QUARANTINE;
     UNKNOWN severity → INFORMATIONAL; paranoid → NVD threshold; relaxed →
     INFORMATIONAL (KEV-only, handled above); else (balanced/strict)
-    distro-deprioritized / no-distro-verdict / non-network AV → INFORMATIONAL;
-    else distro-severity threshold → QUARANTINE / STILL_RUNNING_AT_RISK /
-    INFORMATIONAL.
+    irrelevant-runtime / distro-deprioritized / no-distro-verdict /
+    non-network AV → INFORMATIONAL; else distro-severity threshold →
+    QUARANTINE / STILL_RUNNING_AT_RISK / INFORMATIONAL.
     """
     base = finding.severity
     effective = elevate_severity(base, hardening_penalty)
@@ -378,7 +389,28 @@ def evaluate_finding(
             explain_relaxed_kev_only(),
         )
 
-    # 7. Distro deprioritized → informational (the minizip fix).
+    # 7. Package belongs to a language runtime this project never invokes.
+    # Placed ahead of the distro-status gates: all produce INFORMATIONAL, so
+    # ordering is behaviourally inert, but this reason is the most useful one
+    # and — unlike the distro routes — it does not expire when Debian updates
+    # its tracker. `None` means the caller opted out; the gate is skipped.
+    if runtimes is not None:
+        ecosystem = ecosystem_for_package(finding.package)
+        if ecosystem is not None and is_irrelevant_to_project(
+            finding, runtimes=runtimes,
+        ):
+            return _informational(
+                finding,
+                base,
+                hardening_penalty,
+                effective,
+                explain_irrelevant_runtime(
+                    finding.package, ecosystem, runtimes,
+                    _POSTURE_LABEL[posture],
+                ),
+            )
+
+    # 8. Distro deprioritized → informational (the minizip fix).
     if finding.status in _DEPRIORITIZED_STATUS:
         return _informational(
             finding,
@@ -388,7 +420,7 @@ def evaluate_finding(
             explain_distro_deprioritized(finding.status, distro_severity(finding)),
         )
 
-    # 8. No distro verdict (only NVD/GHSA) → informational.
+    # 9. No distro verdict (only NVD/GHSA) → informational.
     distro_sev = distro_severity(finding)
     if distro_sev is None:
         return _informational(
@@ -399,7 +431,7 @@ def evaluate_finding(
             explain_no_distro_verdict(base),
         )
 
-    # 9. v0.7.1 Attack Vector filter (retained) — non-paranoid, non-network.
+    # 10. v0.7.1 Attack Vector filter (retained) — non-paranoid, non-network.
     if finding.attack_vector is not AttackVector.NETWORK:
         return _informational(
             finding,
@@ -409,7 +441,7 @@ def evaluate_finding(
             explain_av_filter(finding.attack_vector, _POSTURE_LABEL[posture]),
         )
 
-    # 10. Threshold comparison against the DISTRO severity (elevated by the
+    # 11. Threshold comparison against the DISTRO severity (elevated by the
     # hardening penalty). effective_severity now reflects the distro severity
     # the decision was actually made on. Reached only by balanced/strict with
     # status ∈ {AFFECTED, END_OF_LIFE} and a distro severity.
@@ -435,6 +467,7 @@ def evaluate_project(
     suppressions: tuple[Suppression, ...],
     today: date,
     kev_lookup: Callable[[str], bool] = _kev_never,
+    runtimes: frozenset[str] | None = None,
 ) -> ProjectDecision:
     """Aggregate per-finding decisions into a project-level decision.
 
@@ -454,6 +487,7 @@ def evaluate_project(
             suppressions=suppressions,
             today=today,
             kev_lookup=kev_lookup,
+            runtimes=runtimes,
         )
         for f in scan_result.findings
     )
