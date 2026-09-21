@@ -32,6 +32,7 @@ from boxmunge.cve.quarantine import (
     is_quarantined,
     quarantine_project,
 )
+from boxmunge.cve.relevance import effective_runtimes
 from boxmunge.cve.scan_state import (
     decisions_from_scan_state,
     read_scan_state,
@@ -141,14 +142,14 @@ def _identify_images(
 
 def _project_meta(
     paths: BoxPaths, project: str,
-) -> tuple[dict[str, Any], dict[str, Any], str, bool]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str, bool]:
     """Load manifest + compose, derive posture and dangerously_disable flag."""
     manifest = load_manifest(paths.project_manifest(project))
     compose = _load_compose(paths.project_dir(project))
     sec_block = manifest.get("security") or {}
     posture = sec_block.get("posture") or "balanced"
     dangerously = bool(sec_block.get("dangerously_disable_quarantine", False))
-    return manifest, compose, posture, dangerously
+    return manifest, compose, sec_block, posture, dangerously
 
 
 def scan_one_project(
@@ -240,7 +241,9 @@ def _scan_one_project_locked(
     bool,
 ]:
     """Inner scan body. Caller MUST hold the per-project lock."""
-    manifest, compose, posture_str, dangerously = _project_meta(paths, project)
+    manifest, compose, sec_block, posture_str, dangerously = _project_meta(
+        paths, project,
+    )
     posture = parse_posture(posture_str)
     # Services with profile != off get boxmunge's hardening overlay applied
     # at runtime. Pass the overlay set through so the policy doesn't penalise
@@ -349,6 +352,13 @@ def _scan_one_project_locked(
             failed.append(image_ref)
             warnings.append(f"image {image_ref}: scan failed ({e})")
             continue
+        declared = (sec_block or {}).get("runtimes")
+        try:
+            runtimes = effective_runtimes(sr.lang_types, declared=declared)
+        except ValueError as e:
+            raise RuntimeError(
+                f"project {project!r}: invalid security.runtimes in manifest: {e}"
+            ) from e
         decision = evaluate_project(
             project, sr,
             posture=posture,
@@ -357,6 +367,7 @@ def _scan_one_project_locked(
             suppressions=supps,
             today=today,
             kev_lookup=lambda cid: kev.is_known_exploited(cid, today=today),
+            runtimes=runtimes,
         )
         decisions.append(decision)
 

@@ -1385,6 +1385,76 @@ def test_scan_quarantine_finding_triggers_quarantine_action(
     assert "q" in called
 
 
+def test_scan_does_not_quarantine_unused_runtime_package(
+    monkeypatch, tmp_path,
+) -> None:
+    """End-to-end guard for the CVE-2026-13221 incident.
+
+    A Critical, distro-affected, network-reachable, unfixed perl-base CVE on
+    a Python project must not quarantine: the project cannot execute Perl.
+    """
+    from datetime import datetime, timezone
+    from boxmunge.commands.security_actions import cmd_security_scan
+    from boxmunge.cve.scanner import (
+        AttackVector, Finding, PkgClass, ScanResult, Severity, VulnStatus,
+    )
+    paths = _scan_paths(tmp_path)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.container_image_digest",
+        lambda c: None,
+    )
+    perl = Finding(
+        cve_id="CVE-2026-13221",
+        severity=Severity.CRITICAL,
+        package="perl-base",
+        installed_version="5.40.1-6",
+        fixed_version=None,
+        title="Perl regex",
+        primary_url=None,
+        attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
+        pkg_class=PkgClass.OS,
+        pkg_type="debian",
+    )
+    app_dep = Finding(
+        cve_id="CVE-2025-0002",
+        severity=Severity.LOW,
+        package="python-multipart",
+        installed_version="0.0.9",
+        fixed_version=None,
+        title="app dep",
+        primary_url=None,
+        attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={},
+        pkg_class=PkgClass.LANG,
+        pkg_type="python-pkg",
+    )
+    sr = ScanResult(
+        image_ref="myapp:1.0",
+        findings=(perl, app_dep),
+        scanned_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+        db_version="2026-05-06",
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
+    )
+    called = {}
+    def fake_quarantine(*args, **kwargs):
+        called["q"] = (args, kwargs)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.quarantine_project",
+        fake_quarantine,
+    )
+    rc = cmd_security_scan([], paths)
+    assert rc == 0
+    assert "q" not in called, "perl-base must not quarantine a Python project"
+
+
 def test_scan_per_project_budget_skips_remaining_images(
     monkeypatch, tmp_path, capsys,
 ) -> None:
