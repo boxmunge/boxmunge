@@ -1515,6 +1515,158 @@ def test_scan_quarantines_runtime_the_project_actually_uses(
     assert "q" in called, "python3 must still quarantine a Python project"
 
 
+def test_scan_invalid_declared_runtimes_fails_loudly(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    """Final-review Fix 4: the hoisted scan-time validation of a manifest's
+    security.runtimes had no test exercising it through the scan path.
+
+    An invalid declaration (unknown ecosystem name) must fail the scan for
+    that project loudly (ERROR + non-zero exit), never be silently ignored
+    or silently treated as "no declaration -- infer instead".
+    """
+    from boxmunge.commands.security_actions import cmd_security_scan
+    paths = _scan_paths(tmp_path)
+    manifest_path = paths.projects / "demo" / "manifest.yml"
+    manifest = yaml.safe_load(manifest_path.read_text())
+    manifest["security"] = {"runtimes": ["fortran"]}
+    manifest_path.write_text(yaml.safe_dump(manifest))
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.container_image_digest",
+        lambda c: None,
+    )
+    scan_called = {"n": 0}
+    def fake_scan_image(*args, **kwargs):
+        scan_called["n"] += 1
+        raise AssertionError("scan_image must not run for an invalid manifest")
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.scan_image", fake_scan_image,
+    )
+    rc = cmd_security_scan([], paths)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "demo: ERROR" in out
+    assert "runtimes" in out
+    assert scan_called["n"] == 0, (
+        "invalid security.runtimes must fail before any Trivy scan runs"
+    )
+
+
+def test_scan_logs_unrecognised_lang_type_once(monkeypatch, tmp_path) -> None:
+    """Final-review Fix 2: a Trivy lang-pkgs Type absent from the ecosystem
+    mapping table is dropped by inference (shrinking the runtime set) with
+    no visibility. The scan orchestrator must log it once per scan."""
+    from datetime import datetime, timezone
+    from boxmunge.commands.security_actions import cmd_security_scan
+    from boxmunge.cve.scanner import ScanResult
+    paths = _scan_paths(tmp_path)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.container_image_digest",
+        lambda c: None,
+    )
+    sr = ScanResult(
+        image_ref="myapp:1.0",
+        findings=(),
+        scanned_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+        db_version="2026-05-06",
+        lang_types=frozenset({"conda-pkg"}),
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
+    )
+    records, detach = _capture_log_records()
+    try:
+        rc = cmd_security_scan([], paths)
+    finally:
+        detach()
+    assert rc == 0
+    matching = [
+        r for r in records
+        if getattr(r, "component", None) == "cve-scan"
+        and "conda-pkg" in getattr(r, "msg", "")
+    ]
+    assert len(matching) == 1, "must log the dropped lang type exactly once"
+    assert getattr(matching[0], "project", None) == "demo"
+    detail = getattr(matching[0], "detail", None)
+    assert detail == {"lang_types": ["conda-pkg"]}
+
+
+def test_scan_warns_on_empty_inferred_runtime_deescalation(
+    monkeypatch, tmp_path,
+) -> None:
+    """Final-review Fix 3: an empty runtime set is legitimate for a static
+    site, but is indistinguishable from "runtime installed with no
+    Trivy-visible lang-pkgs manifest" (apt-only Python, conda, PHP without
+    composer.lock). When the gate de-escalates an OS-class runtime package
+    under those exact conditions (declared is None, inferred set empty), a
+    warning must fire so the operator can declare security.runtimes."""
+    from datetime import datetime, timezone
+    from boxmunge.commands.security_actions import cmd_security_scan
+    from boxmunge.cve.scanner import (
+        AttackVector, Finding, PkgClass, ScanResult, Severity, VulnStatus,
+    )
+    paths = _scan_paths(tmp_path)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.container_image_digest",
+        lambda c: None,
+    )
+    python_os_pkg = Finding(
+        cve_id="CVE-2026-13333",
+        severity=Severity.CRITICAL,
+        package="python3",
+        installed_version="3.13.0-1",
+        fixed_version=None,
+        title="CPython bug",
+        primary_url=None,
+        attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
+        pkg_class=PkgClass.OS,
+        pkg_type="debian",
+    )
+    sr = ScanResult(
+        image_ref="myapp:1.0",
+        findings=(python_os_pkg,),
+        scanned_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+        db_version="2026-05-06",
+        lang_types=frozenset(),  # apt-only image: no lang-pkgs manifest seen
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
+    )
+    called = {}
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.quarantine_project",
+        lambda *a, **kw: called.setdefault("q", True),
+    )
+    records, detach = _capture_log_records()
+    try:
+        rc = cmd_security_scan([], paths)
+    finally:
+        detach()
+    assert rc == 0
+    assert "q" not in called, (
+        "reproduces the exemption: empty-inferred runtimes de-escalate "
+        "the project's own python3 package"
+    )
+    matching = [
+        r for r in records
+        if getattr(r, "component", None) == "cve-scan"
+        and "python3" in getattr(r, "detail", {}).get("packages", [])
+    ]
+    assert len(matching) == 1, "must warn exactly once per project scan"
+    assert getattr(matching[0], "project", None) == "demo"
+
+
 def test_scan_per_project_budget_skips_remaining_images(
     monkeypatch, tmp_path, capsys,
 ) -> None:
