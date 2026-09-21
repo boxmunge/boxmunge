@@ -209,6 +209,23 @@ class TestRuntimesValidation:
         with pytest.raises(SecurityValidationError, match="must be a list"):
             validate_security_block({"runtimes": "python"}, context="project")
 
+    def test_runtimes_at_service_level_rejected(self) -> None:
+        """`runtimes` is project-only, mirroring `posture` and
+        `dangerously_disable_quarantine`. A service-level declaration must
+        be rejected, not silently ignored at scan time (it would otherwise
+        be discarded by _project_meta, which only ever reads the
+        project-level block — see security_scan_core._project_meta)."""
+        with pytest.raises(SecurityValidationError) as exc:
+            validate_security_block(
+                {"runtimes": ["python"]}, context="service:web"
+            )
+        msg = str(exc.value)
+        assert "runtimes" in msg
+        assert "project level" in msg
+
+    def test_runtimes_still_accepted_at_project_level(self) -> None:
+        validate_security_block({"runtimes": ["python"]}, context="project")
+
 
 class TestYamlBooleanTrap:
     """Audit Finding 4: PyYAML parses unquoted `off` as YAML 1.1 boolean False.

@@ -298,6 +298,12 @@ def validate_security_block(
             )
 
     if "runtimes" in block:
+        if context != "project":
+            raise SecurityValidationError(
+                f"{context}: 'runtimes' is only valid at the project level "
+                f"(manifest top-level security: block), not per-service. "
+                f"CVE posture applies to the whole project."
+            )
         from boxmunge.cve.relevance import VALID_ECOSYSTEMS
 
         runtimes = block["runtimes"]
