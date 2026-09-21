@@ -22,19 +22,19 @@ KEV is an override applied first (after fix/suppression): an actively
 exploited CVE quarantines regardless of posture, distro status, attack
 vector, or threshold.
 
-Below paranoid, a finding is also routed to INFORMATIONAL when its package
-belongs to a language runtime the project does not use (a Perl bug cannot
-run in a Python-only image). This gate consults only positively-identified
-runtime families, so ordinary system libraries such as openssl remain
-quarantinable.
+Below paranoid, a finding is otherwise routed to INFORMATIONAL when the
+distro deprioritized it (status will_not_fix / fix_deferred / not_affected /
+under_investigation), when there is no distro verdict at all (only NVD/GHSA
+rated it), or when it fails the v0.7.1 Attack Vector filter. Only the
+remaining distro-acknowledged, network-reachable findings reach the severity
+threshold — compared against the *distro* severity, elevated by the
+hardening penalty.
 
-Below paranoid, a finding is otherwise routed to
-INFORMATIONAL when the distro deprioritized it (status will_not_fix /
-fix_deferred / not_affected / under_investigation), when there is no distro
-verdict at all (only NVD/GHSA rated it), or when it fails the v0.7.1 Attack
-Vector filter. Only the remaining distro-acknowledged, network-reachable
-findings reach the severity threshold — compared against the *distro*
-severity, elevated by the hardening penalty.
+A finding is also routed to INFORMATIONAL — below paranoid — when its
+package belongs to a language runtime the project does not use (a Perl bug
+cannot run in a Python-only image). This gate consults only
+positively-identified runtime families, so ordinary system libraries such
+as openssl remain quarantinable.
 
 Effective severity = the severity the decision was made on, elevated by a
 hardening penalty (capped at Critical). The penalty captures deviations from
@@ -50,10 +50,11 @@ from enum import Enum
 from typing import Callable
 
 from boxmunge.cve.hardening import HardeningProfile, calculate_hardening_penalty
-from boxmunge.cve.relevance import ecosystem_for_package, is_irrelevant_to_project
+from boxmunge.cve.relevance import ecosystem_for_package
 from boxmunge.cve.scanner import (
     AttackVector,
     Finding,
+    PkgClass,
     ScanResult,
     Severity,
     VulnStatus,
@@ -394,11 +395,16 @@ def evaluate_finding(
     # ordering is behaviourally inert, but this reason is the most useful one
     # and — unlike the distro routes — it does not expire when Debian updates
     # its tracker. `None` means the caller opted out; the gate is skipped.
-    if runtimes is not None:
+    #
+    # Mirrors relevance.is_irrelevant_to_project's three conditions (OS
+    # package, recognised runtime family, family not declared) rather than
+    # calling it directly: the ecosystem lookup is resolved exactly once
+    # here and reused for both the decision and the explanation, instead of
+    # being re-derived a second time inside that helper on every OS package
+    # that matches a runtime family.
+    if runtimes is not None and finding.pkg_class is PkgClass.OS:
         ecosystem = ecosystem_for_package(finding.package)
-        if ecosystem is not None and is_irrelevant_to_project(
-            finding, runtimes=runtimes,
-        ):
+        if ecosystem is not None and ecosystem not in runtimes:
             return _informational(
                 finding,
                 base,
