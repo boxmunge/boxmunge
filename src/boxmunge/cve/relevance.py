@@ -125,16 +125,30 @@ def effective_runtimes(
     return infer_runtimes(lang_types)
 
 
+def irrelevant_ecosystem(
+    finding: Finding, *, runtimes: frozenset[str],
+) -> str | None:
+    """The foreign runtime ecosystem this finding belongs to, or None.
+
+    None means the finding is relevant — keep today's behaviour. Returning
+    the ecosystem rather than a bool lets the policy engine reuse it in the
+    operator explanation without a second lookup, so the decision and the
+    message cannot disagree.
+
+    All three conditions must hold; any doubt returns None (relevant).
+    """
+    if finding.pkg_class is not PkgClass.OS:
+        return None
+    ecosystem = ecosystem_for_package(finding.package)
+    if ecosystem is None:
+        return None
+    if ecosystem in runtimes:
+        return None
+    return ecosystem
+
+
 def is_irrelevant_to_project(
     finding: Finding, *, runtimes: frozenset[str],
 ) -> bool:
-    """True iff this finding's package is a runtime the project never invokes.
-
-    All three conditions must hold; any doubt returns False (relevant).
-    """
-    if finding.pkg_class is not PkgClass.OS:
-        return False
-    ecosystem = ecosystem_for_package(finding.package)
-    if ecosystem is None:
-        return False
-    return ecosystem not in runtimes
+    """True iff this finding's package is a runtime the project never invokes."""
+    return irrelevant_ecosystem(finding, runtimes=runtimes) is not None

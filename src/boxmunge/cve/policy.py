@@ -50,11 +50,10 @@ from enum import Enum
 from typing import Callable
 
 from boxmunge.cve.hardening import HardeningProfile, calculate_hardening_penalty
-from boxmunge.cve.relevance import ecosystem_for_package
+from boxmunge.cve.relevance import irrelevant_ecosystem
 from boxmunge.cve.scanner import (
     AttackVector,
     Finding,
-    PkgClass,
     ScanResult,
     Severity,
     VulnStatus,
@@ -395,16 +394,9 @@ def evaluate_finding(
     # ordering is behaviourally inert, but this reason is the most useful one
     # and — unlike the distro routes — it does not expire when Debian updates
     # its tracker. `None` means the caller opted out; the gate is skipped.
-    #
-    # Mirrors relevance.is_irrelevant_to_project's three conditions (OS
-    # package, recognised runtime family, family not declared) rather than
-    # calling it directly: the ecosystem lookup is resolved exactly once
-    # here and reused for both the decision and the explanation, instead of
-    # being re-derived a second time inside that helper on every OS package
-    # that matches a runtime family.
-    if runtimes is not None and finding.pkg_class is PkgClass.OS:
-        ecosystem = ecosystem_for_package(finding.package)
-        if ecosystem is not None and ecosystem not in runtimes:
+    if runtimes is not None:
+        ecosystem = irrelevant_ecosystem(finding, runtimes=runtimes)
+        if ecosystem is not None:
             return _informational(
                 finding,
                 base,
