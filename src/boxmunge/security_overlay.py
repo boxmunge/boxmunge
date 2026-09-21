@@ -297,6 +297,29 @@ def validate_security_block(
                 f"boolean (true or false), got {type(v).__name__}: {v!r}"
             )
 
+    if "runtimes" in block:
+        from boxmunge.cve.relevance import VALID_ECOSYSTEMS
+
+        runtimes = block["runtimes"]
+        if not isinstance(runtimes, list):
+            raise SecurityValidationError(
+                f"{context}: runtimes must be a list, "
+                f"got {type(runtimes).__name__}"
+            )
+        if not runtimes:
+            raise SecurityValidationError(
+                f"{context}: runtimes must be non-empty. An empty list would "
+                f"mark every language runtime as foreign to this project and "
+                f"silently exempt all of them from quarantine. Omit the key "
+                f"entirely to use automatic inference."
+            )
+        for eco in runtimes:
+            if not isinstance(eco, str) or eco not in VALID_ECOSYSTEMS:
+                raise SecurityValidationError(
+                    f"{context}: Unknown runtime {eco!r}. "
+                    f"Valid runtimes: {sorted(VALID_ECOSYSTEMS)}."
+                )
+
 
 def _effective_profile(
     project_security: dict[str, Any] | None,

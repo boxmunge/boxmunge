@@ -190,6 +190,26 @@ class TestValidation:
             validate_security_block({"pids_limit": "many"}, context="project")
 
 
+class TestRuntimesValidation:
+    """v0.10 CVE relevance gate: optional `security.runtimes` override."""
+
+    def test_security_block_accepts_valid_runtimes(self) -> None:
+        validate_security_block({"runtimes": ["python", "perl"]}, context="project")
+
+    def test_security_block_rejects_empty_runtimes(self) -> None:
+        """runtimes: [] would make every family foreign and exempt everything."""
+        with pytest.raises(SecurityValidationError, match="non-empty"):
+            validate_security_block({"runtimes": []}, context="project")
+
+    def test_security_block_rejects_unknown_ecosystem(self) -> None:
+        with pytest.raises(SecurityValidationError, match="Unknown runtime"):
+            validate_security_block({"runtimes": ["cobol"]}, context="project")
+
+    def test_security_block_rejects_non_list_runtimes(self) -> None:
+        with pytest.raises(SecurityValidationError, match="must be a list"):
+            validate_security_block({"runtimes": "python"}, context="project")
+
+
 class TestYamlBooleanTrap:
     """Audit Finding 4: PyYAML parses unquoted `off` as YAML 1.1 boolean False.
 
