@@ -190,6 +190,43 @@ class TestValidation:
             validate_security_block({"pids_limit": "many"}, context="project")
 
 
+class TestRuntimesValidation:
+    """v0.10 CVE relevance gate: optional `security.runtimes` override."""
+
+    def test_security_block_accepts_valid_runtimes(self) -> None:
+        validate_security_block({"runtimes": ["python", "perl"]}, context="project")
+
+    def test_security_block_rejects_empty_runtimes(self) -> None:
+        """runtimes: [] would make every family foreign and exempt everything."""
+        with pytest.raises(SecurityValidationError, match="non-empty"):
+            validate_security_block({"runtimes": []}, context="project")
+
+    def test_security_block_rejects_unknown_ecosystem(self) -> None:
+        with pytest.raises(SecurityValidationError, match="Unknown runtime"):
+            validate_security_block({"runtimes": ["cobol"]}, context="project")
+
+    def test_security_block_rejects_non_list_runtimes(self) -> None:
+        with pytest.raises(SecurityValidationError, match="must be a list"):
+            validate_security_block({"runtimes": "python"}, context="project")
+
+    def test_runtimes_at_service_level_rejected(self) -> None:
+        """`runtimes` is project-only, mirroring `posture` and
+        `dangerously_disable_quarantine`. A service-level declaration must
+        be rejected, not silently ignored at scan time (it would otherwise
+        be discarded by _project_meta, which only ever reads the
+        project-level block — see security_scan_core._project_meta)."""
+        with pytest.raises(SecurityValidationError) as exc:
+            validate_security_block(
+                {"runtimes": ["python"]}, context="service:web"
+            )
+        msg = str(exc.value)
+        assert "runtimes" in msg
+        assert "project level" in msg
+
+    def test_runtimes_still_accepted_at_project_level(self) -> None:
+        validate_security_block({"runtimes": ["python"]}, context="project")
+
+
 class TestYamlBooleanTrap:
     """Audit Finding 4: PyYAML parses unquoted `off` as YAML 1.1 boolean False.
 

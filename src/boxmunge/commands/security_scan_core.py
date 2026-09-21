@@ -19,18 +19,25 @@ import yaml
 
 from boxmunge.cve.alerting import emit_scan_alerts
 from boxmunge.cve.grace import GraceError, init_grace_if_missing
+from boxmunge.cve.hardening import hardening_profile_from_compose
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.policy import (
     Disposition,
+    Posture,
     ProjectDecision,
+    evaluate_finding,
     evaluate_project,
-    hardening_profile_from_compose,
     parse_posture,
 )
 from boxmunge.cve.quarantine import (
     QuarantineError,
     is_quarantined,
     quarantine_project,
+)
+from boxmunge.cve.relevance import (
+    ecosystem_for_package,
+    effective_runtimes,
+    unrecognised_lang_types,
 )
 from boxmunge.cve.scan_state import (
     decisions_from_scan_state,
@@ -39,6 +46,7 @@ from boxmunge.cve.scan_state import (
 )
 from boxmunge.cve.scanner import (
     _DEFAULT_TIMEOUT,
+    PkgClass,
     ScanResult,
     ScannerError,
     TrivyNotInstalledError,
@@ -141,14 +149,14 @@ def _identify_images(
 
 def _project_meta(
     paths: BoxPaths, project: str,
-) -> tuple[dict[str, Any], dict[str, Any], str, bool]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str, bool]:
     """Load manifest + compose, derive posture and dangerously_disable flag."""
     manifest = load_manifest(paths.project_manifest(project))
     compose = _load_compose(paths.project_dir(project))
     sec_block = manifest.get("security") or {}
     posture = sec_block.get("posture") or "balanced"
     dangerously = bool(sec_block.get("dangerously_disable_quarantine", False))
-    return manifest, compose, posture, dangerously
+    return manifest, compose, sec_block, posture, dangerously
 
 
 def scan_one_project(
@@ -240,8 +248,29 @@ def _scan_one_project_locked(
     bool,
 ]:
     """Inner scan body. Caller MUST hold the per-project lock."""
-    manifest, compose, posture_str, dangerously = _project_meta(paths, project)
+    manifest, compose, sec_block, posture_str, dangerously = _project_meta(
+        paths, project,
+    )
     posture = parse_posture(posture_str)
+    # `declared` is loop-invariant (one manifest, many images), so validate
+    # it once here rather than inside the per-image loop below. Doing this
+    # before any Trivy scan runs means a malformed security.runtimes fails
+    # in milliseconds, not after minutes of scanning, and it means the
+    # `if not images:` early-return and the budget-exhausted `break` below
+    # can no longer skip validation and report success for a manifest that
+    # a hand-edit (load_manifest does not validate the security: block —
+    # only validate_manifest at deploy time does) left broken. The per-image
+    # inference call using ``sr.lang_types`` stays in the loop below: that
+    # part genuinely varies per image.
+    declared = sec_block.get("runtimes")
+    if declared is not None:
+        try:
+            effective_runtimes((), declared=declared)
+        except (ValueError, TypeError) as e:
+            raise RuntimeError(
+                f"project {project!r}: invalid security.runtimes in "
+                f"manifest: {e}"
+            ) from e
     # Services with profile != off get boxmunge's hardening overlay applied
     # at runtime. Pass the overlay set through so the policy doesn't penalise
     # a project for relying on overlay defaults (e.g. no-new-privileges) it
@@ -260,9 +289,12 @@ def _scan_one_project_locked(
         raise RuntimeError(
             f"Failed to load suppressions for {project!r}: {e}"
         ) from e
-    # Host-scoped suppressions apply to every project on this box. Used to
-    # silence base-image CVEs whose vulnerable code path is never loaded by
-    # any deployed service (e.g. perl-base when no project runs Perl).
+    # Host-scoped suppressions apply to every project on this box. Used for
+    # CVEs an operator has reviewed and accepted the risk of — the relevance
+    # gate (see cve/relevance.py) now handles the "base-image package the
+    # project never invokes" case (e.g. perl-base with no Perl anywhere in
+    # the project) automatically, so this is for everything else: reviewed
+    # false positives, accepted-risk findings pending a fix, and the like.
     # Project entries are listed FIRST so they win precedence on collision —
     # find_active_suppression returns the first match, and a project-level
     # suppression is more specific than a host-level one.
@@ -306,6 +338,11 @@ def _scan_one_project_locked(
     failed: list[str] = []
     today = _today()
     project_start = time.monotonic()
+    # Fix-2 and Fix-3 visibility gaps (final-review wave): both are collected
+    # across every image but logged at most once per project scan, not once
+    # per finding/image — see the two log_warning calls after this loop.
+    dropped_lang_types: set[str] = set()
+    empty_runtime_exempted: set[str] = set()
     for index, image_ref in enumerate(images):
         # Per-project aggregate budget: if the cumulative elapsed time for
         # this project's scans has eaten the budget, skip the rest. The
@@ -349,6 +386,16 @@ def _scan_one_project_locked(
             failed.append(image_ref)
             warnings.append(f"image {image_ref}: scan failed ({e})")
             continue
+        # `declared` was already validated once above; this call only
+        # performs the per-image inference from ``sr.lang_types`` and cannot
+        # raise for a `declared` that passed validation.
+        runtimes = effective_runtimes(sr.lang_types, declared=declared)
+        if declared is None:
+            # Fix 2: an unmapped Trivy lang-pkgs Type is dropped by
+            # infer_runtimes rather than raising — see relevance.py's module
+            # docstring for why that biases toward OVER-exemption. Surface it
+            # here since relevance.py stays pure and cannot log it itself.
+            dropped_lang_types |= unrecognised_lang_types(sr.lang_types)
         decision = evaluate_project(
             project, sr,
             posture=posture,
@@ -357,8 +404,84 @@ def _scan_one_project_locked(
             suppressions=supps,
             today=today,
             kev_lookup=lambda cid: kev.is_known_exploited(cid, today=today),
+            runtimes=runtimes,
         )
         decisions.append(decision)
+
+        # Fix 3: an empty INFERRED runtime set is legitimate for a static
+        # site, but it's indistinguishable from "the image installs its
+        # runtime without a Trivy-visible lang-pkgs manifest" (apt-only
+        # Python, conda, PHP without composer.lock) — the gate then exempts
+        # the project's OWN runtime. `declared is None` restricts this to
+        # inference (a declared empty set is rejected by validation, so it
+        # cannot occur); the posture check restricts it to postures where the
+        # relevance gate actually runs (paranoid bypasses it entirely,
+        # relaxed's KEV-only rule returns INFORMATIONAL before reaching it).
+        if (
+            declared is None
+            and not runtimes
+            and posture in (Posture.BALANCED, Posture.STRICT)
+        ):
+            for disp in decision.findings:
+                f = disp.finding
+                if (
+                    disp.disposition != Disposition.INFORMATIONAL
+                    or f.pkg_class is not PkgClass.OS
+                    or ecosystem_for_package(f.package) is None
+                ):
+                    continue
+                # But-for check: distro-deprioritized / no-distro-verdict /
+                # AV-filter / below-threshold (steps 8-11 in
+                # evaluate_finding, all AFTER the relevance gate) also yield
+                # INFORMATIONAL. The gate merely intercepts those findings
+                # first without changing the outcome, so which route fired
+                # is not enough to attribute the disposition to the gate —
+                # only a disposition that actually DIFFERS with the gate off
+                # (runtimes=None) proves the gate was the cause. Every other
+                # argument must match the real evaluate_project call above
+                # (same hardening_penalty via disp, same suppressions,
+                # today, kev_lookup) or the comparison is meaningless.
+                # evaluate_finding is a pure function, so re-running it here
+                # is safe and side-effect free.
+                but_for = evaluate_finding(
+                    f,
+                    posture=posture,
+                    hardening_penalty=disp.hardening_penalty,
+                    dangerously_disable_quarantine=dangerously,
+                    suppressions=supps,
+                    today=today,
+                    kev_lookup=lambda cid: kev.is_known_exploited(cid, today=today),
+                    runtimes=None,
+                )
+                if but_for.disposition != disp.disposition:
+                    empty_runtime_exempted.add(f.package)
+
+    if dropped_lang_types:
+        log_warning(
+            "cve-scan",
+            f"project {project}: unrecognised Trivy lang-pkgs type(s) "
+            f"{sorted(dropped_lang_types)} were ignored during runtime "
+            f"inference (they contribute no ecosystem); this can shrink the "
+            f"inferred runtime set and make more findings look foreign — "
+            f"extend relevance._TRIVY_TYPE_TO_ECOSYSTEM or declare "
+            f"security.runtimes to compensate",
+            paths, project=project,
+            detail={"lang_types": sorted(dropped_lang_types)},
+        )
+
+    if empty_runtime_exempted:
+        log_warning(
+            "cve-scan",
+            f"project {project}: relevance gate de-escalated OS package(s) "
+            f"{sorted(empty_runtime_exempted)} because no runtime was "
+            f"declared and none was inferred from a Trivy lang-pkgs "
+            f"manifest — if this image installs its runtime without one "
+            f"(apt-installed python3, conda, PHP without composer.lock), "
+            f"the gate is exempting the project's OWN runtime; declare "
+            f"security.runtimes to fix",
+            paths, project=project,
+            detail={"packages": sorted(empty_runtime_exempted)},
+        )
 
     if failed and not decisions:
         raise RuntimeError(

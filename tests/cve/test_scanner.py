@@ -10,6 +10,7 @@ import pytest
 from boxmunge.cve.scanner import (
     AttackVector,
     Finding,
+    PkgClass,
     ScanResult,
     ScannerError,
     Severity,
@@ -17,6 +18,7 @@ from boxmunge.cve.scanner import (
     VulnStatus,
     _parse_attack_vector,
     _parse_findings,
+    _parse_lang_types,
     distro_severity,
     refresh_db,
     scan_image,
@@ -736,3 +738,154 @@ def test_distro_severity_none_when_only_nvd():
         vendor_severities={"nvd": Severity.HIGH, "ghsa": Severity.HIGH},
     )
     assert distro_severity(f) is None
+
+
+def test_parse_findings_captures_os_pkg_class():
+    payload = {
+        "Results": [{
+            "Class": "os-pkgs",
+            "Type": "debian",
+            "Vulnerabilities": [{
+                "VulnerabilityID": "CVE-2026-13221",
+                "Severity": "CRITICAL",
+                "PkgName": "perl-base",
+                "InstalledVersion": "5.40.1-6",
+            }],
+        }],
+    }
+    findings = _parse_findings(payload)
+    assert findings[0].pkg_class is PkgClass.OS
+    assert findings[0].pkg_type == "debian"
+
+
+def test_parse_findings_captures_lang_pkg_class():
+    payload = {
+        "Results": [{
+            "Class": "lang-pkgs",
+            "Type": "python-pkg",
+            "Vulnerabilities": [{
+                "VulnerabilityID": "CVE-2025-1234",
+                "Severity": "HIGH",
+                "PkgName": "python-multipart",
+                "InstalledVersion": "0.0.9",
+            }],
+        }],
+    }
+    findings = _parse_findings(payload)
+    assert findings[0].pkg_class is PkgClass.LANG
+    assert findings[0].pkg_type == "python-pkg"
+
+
+def test_parse_findings_missing_class_is_unknown():
+    """A result with no Class must not be assumed to be an OS package."""
+    payload = {
+        "Results": [{
+            "Vulnerabilities": [{
+                "VulnerabilityID": "CVE-2025-9999",
+                "Severity": "LOW",
+                "PkgName": "mystery",
+                "InstalledVersion": "1.0",
+            }],
+        }],
+    }
+    findings = _parse_findings(payload)
+    assert findings[0].pkg_class is PkgClass.UNKNOWN
+    assert findings[0].pkg_type is None
+
+
+def test_pkg_class_from_trivy_string_unrecognised_is_unknown():
+    assert PkgClass.from_trivy_string("something-else") is PkgClass.UNKNOWN
+
+
+# ---------- _parse_lang_types / ScanResult.lang_types ----------
+#
+# A project with fully patched dependencies has zero lang-pkgs *findings*
+# (Trivy only emits a Vulnerabilities entry for a package with a known CVE)
+# but Trivy still emits the lang-pkgs *Result* row for the manifest it
+# scanned. That row is the only signal such a project runs a given
+# language runtime at all, so it must survive independently of finding
+# extraction — see boxmunge.cve.relevance.infer_runtimes.
+
+def test_parse_lang_types_reads_result_with_no_vulnerabilities():
+    """A clean (fully-patched) lang-pkgs result still reports its Type."""
+    payload = {
+        "Results": [{
+            "Class": "lang-pkgs",
+            "Type": "node-pkg",
+            "Vulnerabilities": [],
+        }],
+    }
+    assert _parse_lang_types(payload) == frozenset({"node-pkg"})
+
+
+def test_parse_lang_types_reads_result_with_missing_vulnerabilities_key():
+    payload = {
+        "Results": [{"Class": "lang-pkgs", "Type": "python-pkg"}],
+    }
+    assert _parse_lang_types(payload) == frozenset({"python-pkg"})
+
+
+def test_parse_lang_types_ignores_os_pkgs():
+    payload = {
+        "Results": [{
+            "Class": "os-pkgs",
+            "Type": "debian",
+            "Vulnerabilities": [{
+                "VulnerabilityID": "CVE-2026-13221",
+                "Severity": "CRITICAL",
+                "PkgName": "perl-base",
+                "InstalledVersion": "5.40.1-6",
+            }],
+        }],
+    }
+    assert _parse_lang_types(payload) == frozenset()
+
+
+def test_parse_lang_types_unions_multiple_results():
+    payload = {
+        "Results": [
+            {"Class": "lang-pkgs", "Type": "node-pkg"},
+            {"Class": "lang-pkgs", "Type": "python-pkg"},
+            {"Class": "os-pkgs", "Type": "debian"},
+        ],
+    }
+    assert _parse_lang_types(payload) == frozenset({"node-pkg", "python-pkg"})
+
+
+def test_parse_lang_types_missing_results_is_empty():
+    assert _parse_lang_types({}) == frozenset()
+
+
+@patch("boxmunge.cve.scanner.subprocess.run")
+def test_scan_image_populates_lang_types_for_clean_dependencies(
+    mock_run: MagicMock,
+) -> None:
+    """The exact regression scenario: dependencies fully patched, so no
+    lang-pkgs findings, but lang_types must still show the app runs Node.
+    """
+    payload = {
+        "Results": [{
+            "Class": "lang-pkgs",
+            "Type": "node-pkg",
+            "Vulnerabilities": [],
+        }],
+    }
+    mock_run.return_value = _make_completed(json.dumps(payload))
+
+    result = scan_image("myapp:tag")
+
+    assert result.findings == ()
+    assert result.lang_types == frozenset({"node-pkg"})
+
+
+@patch("boxmunge.cve.scanner.subprocess.run")
+def test_scan_image_lang_types_defaults_empty_when_no_results(
+    mock_run: MagicMock,
+) -> None:
+    mock_run.return_value = _make_completed(json.dumps({"Results": []}))
+
+    result = scan_image("scratch:tag")
+
+    assert result.lang_types == frozenset()
+    assert PkgClass.from_trivy_string(None) is PkgClass.UNKNOWN
+    assert PkgClass.from_trivy_string("OS-PKGS") is PkgClass.OS

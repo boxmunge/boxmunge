@@ -1385,6 +1385,476 @@ def test_scan_quarantine_finding_triggers_quarantine_action(
     assert "q" in called
 
 
+def test_scan_does_not_quarantine_unused_runtime_package(
+    monkeypatch, tmp_path,
+) -> None:
+    """End-to-end guard for the CVE-2026-13221 incident.
+
+    A Critical, distro-affected, network-reachable, unfixed perl-base CVE on
+    a Python project must not quarantine: the project cannot execute Perl.
+    """
+    from datetime import datetime, timezone
+    from boxmunge.commands.security_actions import cmd_security_scan
+    from boxmunge.cve.scanner import (
+        AttackVector, Finding, PkgClass, ScanResult, Severity, VulnStatus,
+    )
+    paths = _scan_paths(tmp_path)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.container_image_digest",
+        lambda c: None,
+    )
+    perl = Finding(
+        cve_id="CVE-2026-13221",
+        severity=Severity.CRITICAL,
+        package="perl-base",
+        installed_version="5.40.1-6",
+        fixed_version=None,
+        title="Perl regex",
+        primary_url=None,
+        attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
+        pkg_class=PkgClass.OS,
+        pkg_type="debian",
+    )
+    app_dep = Finding(
+        cve_id="CVE-2025-0002",
+        severity=Severity.LOW,
+        package="python-multipart",
+        installed_version="0.0.9",
+        fixed_version=None,
+        title="app dep",
+        primary_url=None,
+        attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={},
+        pkg_class=PkgClass.LANG,
+        pkg_type="python-pkg",
+    )
+    sr = ScanResult(
+        image_ref="myapp:1.0",
+        findings=(perl, app_dep),
+        scanned_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+        db_version="2026-05-06",
+        lang_types=frozenset({"python-pkg"}),
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
+    )
+    called = {}
+    def fake_quarantine(*args, **kwargs):
+        called["q"] = (args, kwargs)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.quarantine_project",
+        fake_quarantine,
+    )
+    rc = cmd_security_scan([], paths)
+    assert rc == 0
+    assert "q" not in called, "perl-base must not quarantine a Python project"
+
+
+def test_scan_quarantines_runtime_the_project_actually_uses(
+    monkeypatch, tmp_path,
+) -> None:
+    """Negative control for the relevance gate.
+
+    Mirrors test_scan_does_not_quarantine_unused_runtime_package, but the
+    OS-package CVE here (python3) belongs to a runtime the project's own
+    ``lang_types`` says it uses. The gate must discriminate, not exempt
+    everything: this must still quarantine.
+    """
+    from datetime import datetime, timezone
+    from boxmunge.commands.security_actions import cmd_security_scan
+    from boxmunge.cve.scanner import (
+        AttackVector, Finding, PkgClass, ScanResult, Severity, VulnStatus,
+    )
+    paths = _scan_paths(tmp_path)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.container_image_digest",
+        lambda c: None,
+    )
+    python_os_pkg = Finding(
+        cve_id="CVE-2026-13222",
+        severity=Severity.CRITICAL,
+        package="python3",
+        installed_version="3.11.2-1",
+        fixed_version=None,
+        title="CPython bug",
+        primary_url=None,
+        attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
+        pkg_class=PkgClass.OS,
+        pkg_type="debian",
+    )
+    sr = ScanResult(
+        image_ref="myapp:1.0",
+        findings=(python_os_pkg,),
+        scanned_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+        db_version="2026-05-06",
+        lang_types=frozenset({"python-pkg"}),
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
+    )
+    called = {}
+    def fake_quarantine(*args, **kwargs):
+        called["q"] = (args, kwargs)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.quarantine_project",
+        fake_quarantine,
+    )
+    rc = cmd_security_scan([], paths)
+    assert rc == 0
+    assert "q" in called, "python3 must still quarantine a Python project"
+
+
+def test_scan_invalid_declared_runtimes_fails_loudly(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    """Final-review Fix 4: the hoisted scan-time validation of a manifest's
+    security.runtimes had no test exercising it through the scan path.
+
+    An invalid declaration (unknown ecosystem name) must fail the scan for
+    that project loudly (ERROR + non-zero exit), never be silently ignored
+    or silently treated as "no declaration -- infer instead".
+    """
+    from boxmunge.commands.security_actions import cmd_security_scan
+    paths = _scan_paths(tmp_path)
+    manifest_path = paths.projects / "demo" / "manifest.yml"
+    manifest = yaml.safe_load(manifest_path.read_text())
+    manifest["security"] = {"runtimes": ["fortran"]}
+    manifest_path.write_text(yaml.safe_dump(manifest))
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.container_image_digest",
+        lambda c: None,
+    )
+    scan_called = {"n": 0}
+    def fake_scan_image(*args, **kwargs):
+        scan_called["n"] += 1
+        raise AssertionError("scan_image must not run for an invalid manifest")
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.scan_image", fake_scan_image,
+    )
+    rc = cmd_security_scan([], paths)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "demo: ERROR" in out
+    assert "runtimes" in out
+    assert scan_called["n"] == 0, (
+        "invalid security.runtimes must fail before any Trivy scan runs"
+    )
+
+
+def test_scan_logs_unrecognised_lang_type_once(monkeypatch, tmp_path) -> None:
+    """Final-review Fix 2: a Trivy lang-pkgs Type absent from the ecosystem
+    mapping table is dropped by inference (shrinking the runtime set) with
+    no visibility. The scan orchestrator must log it once per scan."""
+    from datetime import datetime, timezone
+    from boxmunge.commands.security_actions import cmd_security_scan
+    from boxmunge.cve.scanner import ScanResult
+    paths = _scan_paths(tmp_path)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.container_image_digest",
+        lambda c: None,
+    )
+    sr = ScanResult(
+        image_ref="myapp:1.0",
+        findings=(),
+        scanned_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+        db_version="2026-05-06",
+        lang_types=frozenset({"conda-pkg"}),
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
+    )
+    records, detach = _capture_log_records()
+    try:
+        rc = cmd_security_scan([], paths)
+    finally:
+        detach()
+    assert rc == 0
+    matching = [
+        r for r in records
+        if getattr(r, "component", None) == "cve-scan"
+        and "conda-pkg" in getattr(r, "msg", "")
+    ]
+    assert len(matching) == 1, "must log the dropped lang type exactly once"
+    assert getattr(matching[0], "project", None) == "demo"
+    detail = getattr(matching[0], "detail", None)
+    assert detail == {"lang_types": ["conda-pkg"]}
+
+
+def test_scan_warns_on_empty_inferred_runtime_deescalation(
+    monkeypatch, tmp_path,
+) -> None:
+    """Final-review Fix 3: an empty runtime set is legitimate for a static
+    site, but is indistinguishable from "runtime installed with no
+    Trivy-visible lang-pkgs manifest" (apt-only Python, conda, PHP without
+    composer.lock). When the gate de-escalates an OS-class runtime package
+    under those exact conditions (declared is None, inferred set empty), a
+    warning must fire so the operator can declare security.runtimes."""
+    from datetime import datetime, timezone
+    from boxmunge.commands.security_actions import cmd_security_scan
+    from boxmunge.cve.scanner import (
+        AttackVector, Finding, PkgClass, ScanResult, Severity, VulnStatus,
+    )
+    paths = _scan_paths(tmp_path)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.container_image_digest",
+        lambda c: None,
+    )
+    python_os_pkg = Finding(
+        cve_id="CVE-2026-13333",
+        severity=Severity.CRITICAL,
+        package="python3",
+        installed_version="3.13.0-1",
+        fixed_version=None,
+        title="CPython bug",
+        primary_url=None,
+        attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
+        pkg_class=PkgClass.OS,
+        pkg_type="debian",
+    )
+    sr = ScanResult(
+        image_ref="myapp:1.0",
+        findings=(python_os_pkg,),
+        scanned_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+        db_version="2026-05-06",
+        lang_types=frozenset(),  # apt-only image: no lang-pkgs manifest seen
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
+    )
+    called = {}
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.quarantine_project",
+        lambda *a, **kw: called.setdefault("q", True),
+    )
+    records, detach = _capture_log_records()
+    try:
+        rc = cmd_security_scan([], paths)
+    finally:
+        detach()
+    assert rc == 0
+    assert "q" not in called, (
+        "reproduces the exemption: empty-inferred runtimes de-escalate "
+        "the project's own python3 package"
+    )
+    matching = [
+        r for r in records
+        if getattr(r, "component", None) == "cve-scan"
+        and "python3" in getattr(r, "detail", {}).get("packages", [])
+    ]
+    assert len(matching) == 1, "must warn exactly once per project scan"
+    assert getattr(matching[0], "project", None) == "demo"
+
+
+def _empty_runtime_warning_records(records) -> list:
+    return [
+        r for r in records
+        if getattr(r, "component", None) == "cve-scan"
+        and "packages" in getattr(r, "detail", {})
+    ]
+
+
+def test_scan_does_not_warn_when_deescalation_is_over_determined(
+    monkeypatch, tmp_path,
+) -> None:
+    """Negative case for Fix 3's but-for check.
+
+    perl-base with distro status will_not_fix is INFORMATIONAL via the
+    distro-deprioritized route (step 8) regardless of whether the relevance
+    gate ever ran: with the gate off (runtimes=None) it is STILL
+    INFORMATIONAL via that same route. The empty inferred runtime set
+    merely intercepts it first at step 7 without changing the outcome, so
+    the gate is not the cause and the warning must stay silent -- the
+    canonical case being a static nginx-on-Debian site, whose perl-base
+    CVEs are overwhelmingly will_not_fix and which legitimately infers no
+    runtime at all.
+    """
+    from datetime import datetime, timezone
+    from boxmunge.commands.security_actions import cmd_security_scan
+    from boxmunge.cve.scanner import (
+        Finding, PkgClass, ScanResult, Severity, VulnStatus,
+    )
+    paths = _scan_paths(tmp_path)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.container_image_digest",
+        lambda c: None,
+    )
+    perl_will_not_fix = Finding(
+        cve_id="CVE-2026-13334",
+        severity=Severity.CRITICAL,
+        package="perl-base",
+        installed_version="5.40.1-6",
+        fixed_version=None,
+        title="Perl regex",
+        primary_url=None,
+        status=VulnStatus.WILL_NOT_FIX,
+        vendor_severities={"debian": Severity.CRITICAL},
+        pkg_class=PkgClass.OS,
+        pkg_type="debian",
+    )
+    sr = ScanResult(
+        image_ref="myapp:1.0",
+        findings=(perl_will_not_fix,),
+        scanned_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+        db_version="2026-05-06",
+        lang_types=frozenset(),  # static site: no lang-pkgs manifest at all
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
+    )
+    records, detach = _capture_log_records()
+    try:
+        rc = cmd_security_scan([], paths)
+    finally:
+        detach()
+    assert rc == 0
+    assert _empty_runtime_warning_records(records) == [], (
+        "will_not_fix is over-determined -- the gate off (runtimes=None) "
+        "yields the same INFORMATIONAL disposition via the "
+        "distro-deprioritized route, so the gate did not cause it"
+    )
+
+
+def test_scan_does_not_warn_when_runtimes_declared(
+    monkeypatch, tmp_path,
+) -> None:
+    """Negative case: `declared is not None` must never warn, even though a
+    foreign-looking OS package is still de-escalated -- that's the operator's
+    explicit declaration doing its job, not an inference gap."""
+    from datetime import datetime, timezone
+    from boxmunge.commands.security_actions import cmd_security_scan
+    from boxmunge.cve.scanner import (
+        AttackVector, Finding, PkgClass, ScanResult, Severity, VulnStatus,
+    )
+    paths = _scan_paths(tmp_path)
+    manifest_path = paths.projects / "demo" / "manifest.yml"
+    manifest = yaml.safe_load(manifest_path.read_text())
+    manifest["security"] = {"runtimes": ["ruby"]}
+    manifest_path.write_text(yaml.safe_dump(manifest))
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.container_image_digest",
+        lambda c: None,
+    )
+    python_os_pkg = Finding(
+        cve_id="CVE-2026-13335",
+        severity=Severity.CRITICAL,
+        package="python3",
+        installed_version="3.13.0-1",
+        fixed_version=None,
+        title="CPython bug",
+        primary_url=None,
+        attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
+        pkg_class=PkgClass.OS,
+        pkg_type="debian",
+    )
+    sr = ScanResult(
+        image_ref="myapp:1.0",
+        findings=(python_os_pkg,),
+        scanned_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+        db_version="2026-05-06",
+        lang_types=frozenset(),
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
+    )
+    records, detach = _capture_log_records()
+    try:
+        rc = cmd_security_scan([], paths)
+    finally:
+        detach()
+    assert rc == 0
+    assert _empty_runtime_warning_records(records) == [], (
+        "declared is not None -- an empty declaration is rejected by "
+        "validation and cannot occur, so this must never fire"
+    )
+
+
+def test_scan_does_not_warn_under_paranoid_posture(
+    monkeypatch, tmp_path,
+) -> None:
+    """Negative case: paranoid never consults the relevance gate at all
+    (it short-circuits before the gate in evaluate_finding), so the
+    empty-inferred-runtime warning must stay silent regardless of outcome."""
+    from datetime import datetime, timezone
+    from boxmunge.commands.security_actions import cmd_security_scan
+    from boxmunge.cve.scanner import (
+        AttackVector, Finding, PkgClass, ScanResult, Severity, VulnStatus,
+    )
+    paths = _scan_paths(tmp_path)
+    manifest_path = paths.projects / "demo" / "manifest.yml"
+    manifest = yaml.safe_load(manifest_path.read_text())
+    manifest["security"] = {"posture": "paranoid"}
+    manifest_path.write_text(yaml.safe_dump(manifest))
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.container_image_digest",
+        lambda c: None,
+    )
+    python_os_pkg = Finding(
+        cve_id="CVE-2026-13336",
+        severity=Severity.CRITICAL,
+        package="python3",
+        installed_version="3.13.0-1",
+        fixed_version=None,
+        title="CPython bug",
+        primary_url=None,
+        attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
+        pkg_class=PkgClass.OS,
+        pkg_type="debian",
+    )
+    sr = ScanResult(
+        image_ref="myapp:1.0",
+        findings=(python_os_pkg,),
+        scanned_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+        db_version="2026-05-06",
+        lang_types=frozenset(),
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
+    )
+    records, detach = _capture_log_records()
+    try:
+        cmd_security_scan([], paths)
+    finally:
+        detach()
+    assert _empty_runtime_warning_records(records) == [], (
+        "paranoid bypasses the relevance gate entirely -- never warn"
+    )
+
+
 def test_scan_per_project_budget_skips_remaining_images(
     monkeypatch, tmp_path, capsys,
 ) -> None:

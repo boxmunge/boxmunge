@@ -73,6 +73,24 @@ def explain_av_filter(
     )
 
 
+def explain_irrelevant_runtime(
+    package: str,
+    ecosystem: str,
+    runtimes: frozenset[str],
+    posture_label: str,
+) -> str:
+    """Explanation for a finding de-escalated because the runtime is unused."""
+    if runtimes:
+        runs = ", ".join(sorted(runtimes))
+        tail = f"this project's runtime is {runs}"
+    else:
+        tail = "this project runs no language runtime"
+    return (
+        f"{package} is a {ecosystem} runtime package; {tail} — not on any "
+        f"execution path. Informational under {posture_label} posture."
+    )
+
+
 def explain_threshold(
     base: Severity,
     effective: Severity,

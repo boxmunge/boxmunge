@@ -17,7 +17,7 @@ from boxmunge.cve.policy import (
     FindingDisposition,
     ProjectDecision,
 )
-from boxmunge.cve.scanner import AttackVector, Finding, Severity, VulnStatus
+from boxmunge.cve.scanner import AttackVector, Finding, PkgClass, Severity, VulnStatus
 from boxmunge.fileutil import atomic_write_text
 
 
@@ -43,6 +43,8 @@ def _serialize_disposition(d: Any) -> dict[str, Any]:
         "installed_version": f.installed_version,
         "attack_vector": f.attack_vector.value if f.attack_vector else None,
         "status": f.status.value,
+        "pkg_class": f.pkg_class.value,
+        "pkg_type": f.pkg_type,
     }
 
 
@@ -134,6 +136,18 @@ def _deserialize_status(value: Any) -> VulnStatus:
     return VulnStatus.UNKNOWN
 
 
+def _deserialize_pkg_class(value: Any) -> PkgClass:
+    """Map a stored pkg_class string back to the enum.
+
+    Missing/unrecognised → UNKNOWN, matching the backward-compat posture of
+    _deserialize_attack_vector. State written before the relevance gate has
+    no pkg_class; UNKNOWN keeps such findings out of the gate entirely.
+    """
+    if not isinstance(value, str):
+        return PkgClass.UNKNOWN
+    return PkgClass.from_trivy_string(value)
+
+
 def _deserialize_attack_vector(value: Any) -> AttackVector | None:
     """Map a stored attack_vector string back to the enum.
 
@@ -206,6 +220,8 @@ def decisions_from_scan_state(
                     raw.get("attack_vector"),
                 ),
                 status=_deserialize_status(raw.get("status")),
+                pkg_class=_deserialize_pkg_class(raw.get("pkg_class")),
+                pkg_type=raw.get("pkg_type"),
             )
             findings.append(
                 FindingDisposition(

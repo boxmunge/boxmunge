@@ -116,6 +116,31 @@ _TRIVY_STATUS_MAP: dict[str, VulnStatus] = {
     s.value: s for s in VulnStatus if s is not VulnStatus.UNKNOWN
 }
 
+
+class PkgClass(Enum):
+    """Which layer of the image a finding's package came from.
+
+    Trivy reports this per *result*, not per vulnerability: `os-pkgs` are
+    base-image distro packages, `lang-pkgs` are the application's own
+    dependencies. The relevance gate uses this to tell "the base image ships
+    perl" from "this app depends on perl".
+    """
+
+    OS = "os-pkgs"
+    LANG = "lang-pkgs"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def from_trivy_string(cls, raw: str | None) -> "PkgClass":
+        if not raw:
+            return cls.UNKNOWN
+        return _TRIVY_CLASS_MAP.get(raw.strip().lower(), cls.UNKNOWN)
+
+
+_TRIVY_CLASS_MAP: dict[str, PkgClass] = {
+    c.value: c for c in PkgClass if c is not PkgClass.UNKNOWN
+}
+
 # OS-distro vendor source ids, in preference order. distro_severity() walks
 # these to find the distro's own severity, ignoring NVD/GHSA (upstream feeds
 # that don't reflect distro triage).
@@ -169,6 +194,13 @@ class Finding:
     status: VulnStatus = VulnStatus.UNKNOWN
     vendor_severities: dict[str, Severity] = field(default_factory=dict)
     severity_source: str | None = None
+    pkg_class: PkgClass = PkgClass.UNKNOWN
+    # Trivy's raw `Type` (e.g. "debian", "python-pkg"). Not read by any
+    # decision path today — pkg_class is the field the relevance gate and
+    # policy engine act on — but it's spec-mandated diagnostic payload
+    # (finer-grained than pkg_class) kept for future triage/debugging. Do
+    # not delete as unused.
+    pkg_type: str | None = None
 
     @property
     def fix_available(self) -> bool:
@@ -183,6 +215,7 @@ class ScanResult:
     findings: tuple[Finding, ...]
     scanned_at: datetime
     db_version: str | None
+    lang_types: frozenset[str] = frozenset()
 
 
 class ScannerError(Exception):
@@ -278,12 +311,14 @@ def scan_image(image_ref: str, *, timeout: int = _DEFAULT_TIMEOUT) -> ScanResult
         ) from e
 
     findings = _parse_findings(payload)
+    lang_types = _parse_lang_types(payload)
     db_version = _extract_db_version(payload)
     return ScanResult(
         image_ref=image_ref,
         findings=findings,
         scanned_at=datetime.now(timezone.utc),
         db_version=db_version,
+        lang_types=lang_types,
     )
 
 
@@ -299,6 +334,9 @@ def _parse_findings(payload: dict[str, Any]) -> tuple[Finding, ...]:
     unknown_severity_logged = False
 
     for result in results:
+        pkg_class = PkgClass.from_trivy_string(result.get("Class"))
+        pkg_type = result.get("Type") or None
+
         for vuln in result.get("Vulnerabilities") or []:
             raw_sev = vuln.get("Severity")
             severity = Severity.from_trivy_string(raw_sev)
@@ -328,10 +366,33 @@ def _parse_findings(payload: dict[str, Any]) -> tuple[Finding, ...]:
                     vuln.get("VendorSeverity") or {},
                 ),
                 severity_source=vuln.get("SeveritySource") or None,
+                pkg_class=pkg_class,
+                pkg_type=pkg_type,
             ))
 
     findings.sort(key=lambda f: (-_SEVERITY_RANK[f.severity], f.cve_id))
     return tuple(findings)
+
+
+def _parse_lang_types(payload: dict[str, Any]) -> frozenset[str]:
+    """Every distinct Trivy `Type` reported for a lang-pkgs result.
+
+    Trivy only emits a `Vulnerabilities` entry for packages with a known
+    CVE, so a project whose dependencies are fully patched produces zero
+    lang-pkgs *findings* — but Trivy still emits the lang-pkgs *Result* row
+    itself (Type set, Vulnerabilities empty or absent) whenever it detected
+    a manifest for that ecosystem. That row, not the findings, is the
+    signal that the project runs a given language runtime at all: relying
+    on findings alone would mean patching your dependencies strips the
+    relevance gate's protection for your own runtime.
+    """
+    results = payload.get("Results") or []
+    return frozenset(
+        result["Type"]
+        for result in results
+        if PkgClass.from_trivy_string(result.get("Class")) is PkgClass.LANG
+        and result.get("Type")
+    )
 
 
 # Trivy VendorSeverity encodes severity as an int 0-4.

@@ -20,6 +20,13 @@ workflow, and recovery.
 - **KEV is an override.** A finding on CISA's Known Exploited Vulnerabilities
   catalog quarantines immediately under every posture. The AV filter, distro
   status, and severity threshold do not apply.
+- **Runtime relevance gate (balanced/strict).** A finding against an OS
+  package that belongs to a language runtime (`perl`, `ruby`, `php`,
+  `python`, `node`, `tcl`, `lua` — the ecosystem names accepted by
+  `security.runtimes`, not the OS package names) the project never invokes
+  is informational, regardless of distro severity — a Python app cannot run
+  a Perl regex bug. Inferred automatically from the image's own dependency
+  scan; `paranoid` does not consult it, and KEV still overrides it.
 - **Auto-quarantine** when a finding crosses the project's quarantine gate:
   `compose stop` + maintenance page + critical Pushover alert.
 - **Suppress with operator review:**
@@ -100,7 +107,7 @@ For every finding, `evaluate_finding` runs these gates in order:
    if the operator has reviewed it.)
 4. **Unknown severity** → `INFORMATIONAL`. The engine cannot reason about a
    severity it does not recognize; reporting only.
-5. **Paranoid short-circuit** — under `paranoid`, skip steps 6–9 and compare
+5. **Paranoid short-circuit** — under `paranoid`, skip steps 6–10 and compare
    the NVD severity directly against the Medium threshold with no AV filter.
    This is the pre-trust-ladder behavior, unchanged.
 6. **Relaxed short-circuit** — under `relaxed`, quarantine is KEV-only (already
@@ -108,21 +115,27 @@ For every finding, `evaluate_finding` runs these gates in order:
    distro severity — the most hands-off tier, for operators who accept
    severity-based risk. Raise the posture to `balanced`/`strict` for
    distro-severity-based quarantine.
-7. **Distro deprioritized** (balanced/strict) — `Status ∈ {will_not_fix,
+7. **Irrelevant runtime** (balanced/strict) — the package belongs to a
+   language runtime the project never invokes → `INFORMATIONAL`. Placed
+   ahead of the distro-status gates below: all of them produce
+   `INFORMATIONAL` too, so the ordering doesn't change the outcome, but this
+   reason is the most informative one to surface. See "Runtime relevance
+   gate" below.
+8. **Distro deprioritized** (balanced/strict) — `Status ∈ {will_not_fix,
    fix_deferred, not_affected, under_investigation}` → `INFORMATIONAL` with a
    loud alert. The distro already judged the finding low-risk; the site stays
    up. The alert quotes the distro status and severity so the operator can see
    exactly why.
-8. **No distro verdict** (balanced/strict) — `distro_severity(finding) is None`
+9. **No distro verdict** (balanced/strict) — `distro_severity(finding) is None`
    (only NVD/GHSA data; the distro issued no rating) → `INFORMATIONAL`. Below
    `paranoid`, the engine does not quarantine on an NVD rating the distro never
    echoed. Language-level vendored findings that the OS package tracker never
    touched fall here.
-9. **AV filter** (balanced/strict) — CVSS Attack Vector is not Network → `INFORMATIONAL`.
+10. **AV filter** (balanced/strict) — CVSS Attack Vector is not Network → `INFORMATIONAL`.
    Retained from v0.7.1. By this step the distro verdict and severity are
    already authoritative noise gates; the AV filter is a secondary reducer for
    findings that passed distro triage but are not network-reachable.
-10. **Threshold comparison** against the distro severity (elevated by the
+11. **Threshold comparison** against the distro severity (elevated by the
    hardening penalty, using the posture threshold from the trust ladder table)
    → `QUARANTINE` / `STILL_RUNNING_AT_RISK` / `INFORMATIONAL`. Reached only by
    `balanced`/`strict` with `Status ∈ {affected, end_of_life}` and a distro
@@ -138,6 +151,7 @@ For every finding, `evaluate_finding` runs these gates in order:
 | Severity unknown | `INFORMATIONAL` |
 | Posture is `paranoid` | NVD threshold gate (step 5 above) |
 | Posture is `relaxed` (non-KEV finding) | `INFORMATIONAL` — relaxed is KEV-only |
+| Package is a language runtime this project never invokes | `INFORMATIONAL` — irrelevant runtime |
 | Distro marked `will_not_fix` / `fix_deferred` / `not_affected` / `under_investigation` | `INFORMATIONAL` — distro deprioritized |
 | No distro rating (NVD/GHSA only) | `INFORMATIONAL` — no distro verdict |
 | CVSS Attack Vector is not Network | `INFORMATIONAL` — not network-reachable |
@@ -189,6 +203,142 @@ it:
 This alert fires once per scan run, not once per finding, to avoid alert
 storms. The degradation must not go unnoticed — the `relaxed` tier's only
 quarantine protection depends on the KEV feed.
+
+## Runtime relevance gate
+
+The trust ladder grades how bad a CVE is. Until this gate, it never asked
+whether the project could even run the affected code. Two production
+outages made the gap concrete: a Python/FastAPI project got quarantined —
+`compose stop`, maintenance page, critical alert — over a Critical CVE in
+`perl-base`. The project has no Perl anywhere in its request path; the
+package was there because it ships in the base image. A Python app cannot
+execute a Perl regex bug, however Critical Debian rates it. Below
+`paranoid`, a finding against an OS package that belongs to a language
+runtime the project never invokes is now `INFORMATIONAL` instead of
+threshold-compared (step 7 in the decision order above).
+
+### What counts as "a language runtime"
+
+The gate matches against a narrow, hand-picked table of **standalone
+interpreter packages** — not every package a language ecosystem ever
+touches:
+
+| Runtime | OS package patterns |
+|---|---|
+| perl | `perl`, `perl-base`, `perl-modules-*` |
+| ruby | `ruby`, `ruby[0-9]*` |
+| php | `php`, `php[0-9]*`, `php-*` |
+| python | `python3`, `python3.*`, `python3-*` |
+| node | `nodejs` |
+| tcl | `tcl`, `tcl[0-9]*` |
+| lua | `lua`, `lua[0-9]*` |
+
+Two classes of package are deliberately left out, for opposite reasons:
+
+- **Embeddable interpreter libraries** — `libperl*`, `liblua*`, `libtcl*`,
+  `libpython3*`, and friends — are absent on purpose, not by oversight.
+  `redis-server`, `haproxy`, and `nginx-extras` link `liblua`; `mod_perl`
+  links `libperl`. A CVE in one of those libraries *is* reachable from a
+  project written in an entirely different language, so exempting them
+  would create exactly the silent-exemption hazard this gate exists to
+  avoid. If a future change ever adds these to the table, it must also
+  prove those consumers don't link them.
+- **Ordinary system libraries** — `openssl`, `libc6`, `zlib1g`,
+  `libexpat1`, and so on — are absent because they aren't a language
+  runtime at all. A CVE in `openssl` keeps today's quarantine behaviour
+  regardless of what the project is written in.
+
+Anything the gate doesn't recognise — an unknown package, a package that
+isn't OS-class, a family not in the table — is treated as **relevant**,
+i.e. still quarantinable. Drift here causes a missed de-escalation (a
+nuisance, fixed by extending the table), never a silent exemption (a
+hazard).
+
+### Automatic inference, and the `security.runtimes` override
+
+By default, the project's runtime set is inferred automatically from that
+image's own dependency scan: every Trivy `lang-pkgs` **result** type present
+(a Python image reports a `python-pkg`/`pip` result, a Node image reports
+`npm`/`node-pkg`, and so on) maps to a runtime. This is read from the scan
+*result*, not from *findings* — Trivy still emits the lang-pkgs result row
+even when a project's own dependencies carry zero vulnerabilities, so a
+fully-patched project infers its runtime correctly instead of losing the
+gate's protection the moment its dependencies are clean.
+
+An operator can override inference with an optional manifest key:
+
+```yaml
+security:
+  runtimes: [python]
+```
+
+`runtimes` must be a non-empty list drawn from: `python`, `node`, `go`,
+`ruby`, `php`, `java`, `rust`, `dotnet`, `perl`, `tcl`, `lua`. A declaration
+**replaces** inference rather than adding to it — the project's runtime set
+is exactly what you listed, nothing more. An empty list is rejected at
+manifest-validation time rather than silently accepted: `runtimes: []`
+would mark every runtime as foreign to the project and exempt all of them,
+which is almost certainly a manifest mistake (a stray empty list, an unset
+templating variable) rather than an intentional "trust nothing" statement.
+A non-list value — a bare string, a mapping, a bool, an int — is rejected
+the same way, because several of those shapes would otherwise be silently
+misinterpreted (a string iterates into individual characters; a mapping
+iterates into its keys).
+
+**Caveat for multi-image projects.** The runtime set above is computed
+*per image*, but `security.runtimes` is declared *per project*. On a
+project with more than one image — say a Python `web` service and a Node
+`worker` service — declaring `runtimes: [python]` replaces inference for
+**both** images, silently exempting `nodejs` CVEs in the worker that
+inference alone would have caught. Declaring can therefore make a
+heterogeneous project *less* safe than declaring nothing at all. Prefer
+omitting `security.runtimes` and relying on per-image inference; if you do
+declare it, list every runtime used anywhere in the project, not just the
+one you're thinking about.
+
+**An empty inferred set can mean "no runtime" or "no visible manifest" —
+inference cannot tell them apart.** A static site served by nginx
+legitimately infers zero runtimes: every language family is genuinely
+foreign to it. But an image that installs its runtime WITHOUT a
+Trivy-visible lang-pkgs manifest lands in that exact same bucket —
+`apt-get install python3 python3-flask` with no pip layer, a PHP image with
+no `composer.lock`, a conda environment (Trivy's `conda-pkg` type isn't
+mapped to an ecosystem at all; see below) — and inference has no way to
+distinguish "runs nothing" from "runs something Trivy couldn't see." When
+that happens, the gate exempts the project's OWN runtime: a Critical,
+distro-affected `python3` finding would be de-escalated exactly like a
+genuinely-foreign `perl-base` finding would be. boxmunge logs a warning
+(component `cve-scan`) when it detects this — a de-escalation against an
+OS-class runtime package with an empty, *inferred* (not declared) runtime
+set — but the remedy is on the operator: declare `security.runtimes`
+explicitly for any image whose runtime isn't installed through a
+Trivy-recognised language package manager.
+
+Relatedly, an unrecognised Trivy lang-pkgs `Type` (one absent from
+`relevance._TRIVY_TYPE_TO_ECOSYSTEM` — `conda-pkg`, `pipenv`, and `uv` are
+current examples) contributes no ecosystem to inference, which *shrinks*
+the inferred runtime set rather than growing it. This is the opposite bias
+from an unrecognised OS package family (which safely defaults to
+"relevant"), so boxmunge logs a warning when a scan encounters one. Extend
+the mapping table, or declare `security.runtimes`, to close the gap.
+
+### Interaction with the rest of the trust ladder
+
+- **KEV still overrides.** A finding on CISA's KEV catalog quarantines
+  regardless of runtime relevance — active exploitation bypasses this gate
+  the same way it bypasses the AV filter and distro-status routing.
+- **`paranoid` does not consult it at all.** The paranoid short-circuit
+  (step 5) runs before this gate; paranoid stays byte-for-byte its
+  pre-relevance-gate behavior.
+- **The gate only ever de-escalates.** It has exactly one output,
+  `INFORMATIONAL`; it can never turn a finding that would otherwise be
+  informational into a quarantine.
+- **The verdict doesn't expire.** Every other informational route in this
+  document — distro-deprioritized, no-distro-verdict — is a live read of
+  the distro's tracker and can flip to `QUARANTINE` the day Debian revises
+  its verdict. Runtime relevance isn't: it's a property of what the
+  project runs, not of anyone's triage, so it holds until the project's own
+  dependency footprint changes.
 
 ## Effective severity = base + hardening penalty
 
@@ -274,12 +424,15 @@ service's silent-floor posture.
 ## Configuring posture (manifest.yml)
 
 `posture` and `dangerously_disable_quarantine` live at the project level
-only — they are not per-service settings.
+only — they are not per-service settings. So does `runtimes` — see
+"Runtime relevance gate" above for what it does and its multi-image caveat;
+omit it unless you have a specific reason to override inference.
 
 ```yaml
 security:
   posture: balanced                       # default if absent
   dangerously_disable_quarantine: false   # default if absent
+  # runtimes: [python]                    # optional; overrides inference
 ```
 
 The compose validator rejects:

@@ -7,23 +7,26 @@ import pytest
 from boxmunge.cve.scanner import (
     AttackVector,
     Finding,
+    PkgClass,
     ScanResult,
     Severity,
     VulnStatus,
 )
+from boxmunge.cve.hardening import (
+    HardeningProfile,
+    calculate_hardening_penalty,
+    hardening_profile_from_compose,
+)
 from boxmunge.cve.suppressions import Suppression
 from boxmunge.cve.policy import (
     Disposition,
-    HardeningProfile,
     PolicyError,
     Posture,
     ProjectDecision,
     _POSTURE_THRESHOLDS,
-    calculate_hardening_penalty,
     elevate_severity,
     evaluate_finding,
     evaluate_project,
-    hardening_profile_from_compose,
     parse_posture,
 )
 
@@ -1162,3 +1165,193 @@ def test_hardening_profile_no_new_privileges_false_takes_precedence() -> None:
         compose, services_with_overlay=set(),
     )
     assert profile.no_new_privileges is False
+
+
+# ---------- Task 6: irrelevant-runtime de-escalation gate ----------
+
+
+def _perl_finding():
+    return Finding(
+        cve_id="CVE-2026-13221",
+        severity=Severity.CRITICAL,
+        package="perl-base",
+        installed_version="5.40.1-6",
+        fixed_version=None,
+        title="Perl regex",
+        primary_url=None,
+        attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
+        pkg_class=PkgClass.OS,
+        pkg_type="debian",
+    )
+
+
+@pytest.mark.parametrize("posture", [Posture.RELAXED, Posture.BALANCED, Posture.STRICT])
+def test_irrelevant_runtime_is_informational(posture):
+    """The CVE-2026-13221 incident: perl-base on a Python project.
+
+    RELAXED passes for a different reason than BALANCED/STRICT: it never
+    reaches the relevance gate at all — it short-circuits at step 6
+    (`explain_relaxed_kev_only`) because relaxed is KEV-only regardless of
+    runtime relevance. Only BALANCED and STRICT actually exercise the gate
+    added in this step. RELAXED is kept in the parametrization because the
+    outcome (INFORMATIONAL) is still the contractually correct one for that
+    posture, but it is not evidence the gate fired.
+    """
+    d = evaluate_finding(
+        _perl_finding(),
+        posture=posture,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=date(2026, 8, 24),
+        runtimes=frozenset({"python"}),
+    )
+    assert d.disposition is Disposition.INFORMATIONAL
+
+
+def test_irrelevant_runtime_still_quarantines_under_paranoid():
+    d = evaluate_finding(
+        _perl_finding(),
+        posture=Posture.PARANOID,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=date(2026, 8, 24),
+        runtimes=frozenset({"python"}),
+    )
+    assert d.disposition is Disposition.QUARANTINE
+
+
+def test_kev_override_beats_relevance():
+    """Actively exploited wins even if the package is unused."""
+    d = evaluate_finding(
+        _perl_finding(),
+        posture=Posture.BALANCED,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=date(2026, 8, 24),
+        runtimes=frozenset({"python"}),
+        kev_lookup=lambda cid: True,
+    )
+    assert d.disposition is Disposition.QUARANTINE
+
+
+def test_relevant_runtime_still_quarantines():
+    """Declaring perl puts the finding back on the threshold path."""
+    d = evaluate_finding(
+        _perl_finding(),
+        posture=Posture.BALANCED,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=date(2026, 8, 24),
+        runtimes=frozenset({"python", "perl"}),
+    )
+    assert d.disposition is Disposition.QUARANTINE
+
+
+def test_runtimes_none_disables_the_gate():
+    """Existing callers that pass no runtimes get today's behaviour."""
+    d = evaluate_finding(
+        _perl_finding(),
+        posture=Posture.BALANCED,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=date(2026, 8, 24),
+    )
+    assert d.disposition is Disposition.QUARANTINE
+
+
+def test_openssl_still_quarantines_on_python_project():
+    """The over-exemption guard, at policy level."""
+    finding = Finding(
+        cve_id="CVE-2026-9001",
+        severity=Severity.CRITICAL,
+        package="openssl",
+        installed_version="3.0.1",
+        fixed_version=None,
+        title="TLS bug",
+        primary_url=None,
+        attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
+        pkg_class=PkgClass.OS,
+        pkg_type="debian",
+    )
+    d = evaluate_finding(
+        finding,
+        posture=Posture.BALANCED,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=date(2026, 8, 24),
+        runtimes=frozenset({"python"}),
+    )
+    assert d.disposition is Disposition.QUARANTINE
+
+
+def test_irrelevant_runtime_empty_runtimes_still_de_escalates():
+    """`runtimes=frozenset()` (a static site with no language runtime at
+    all) must still de-escalate — it is the legitimately inferred value for
+    such a project (relevance.py: "an empty set is a valid answer, not a
+    failure"), not a sentinel for "gate disabled". Only `None` disables the
+    gate; pins the distinction against a mutation of
+    `if runtimes is not None:` to `if runtimes:`, which would otherwise pass
+    the whole suite while silently turning the gate off for exactly these
+    projects.
+    """
+    d = evaluate_finding(
+        _perl_finding(),
+        posture=Posture.BALANCED,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=date(2026, 8, 24),
+        runtimes=frozenset(),
+    )
+    assert d.disposition is Disposition.INFORMATIONAL
+
+
+def test_explain_irrelevant_runtime_names_package_ecosystem_and_runtimes():
+    """The explanation for a non-empty runtime set names the package, its
+    ecosystem, and the project's declared/inferred runtimes — not just
+    generic boilerplate. Content-based assertions (not a verbatim string
+    match) so the test survives harmless rewording."""
+    d = evaluate_finding(
+        _perl_finding(),
+        posture=Posture.BALANCED,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=date(2026, 8, 24),
+        runtimes=frozenset({"python"}),
+    )
+    assert d.disposition is Disposition.INFORMATIONAL
+    assert "perl-base" in d.explanation
+    assert "perl" in d.explanation
+    assert "python" in d.explanation
+    assert "balanced" in d.explanation
+
+
+def test_explain_irrelevant_runtime_empty_runtimes_uses_no_runtime_wording():
+    """The empty-runtimes branch of the explainer ("this project runs no
+    language runtime") is distinct wording from the non-empty branch —
+    exercised here so a regression that dropped or swapped that branch
+    would be caught."""
+    d = evaluate_finding(
+        _perl_finding(),
+        posture=Posture.STRICT,
+        hardening_penalty=0,
+        dangerously_disable_quarantine=False,
+        suppressions=(),
+        today=date(2026, 8, 24),
+        runtimes=frozenset(),
+    )
+    assert d.disposition is Disposition.INFORMATIONAL
+    assert "perl-base" in d.explanation
+    assert "no language runtime" in d.explanation
+    assert "strict" in d.explanation
