@@ -23,6 +23,7 @@ from boxmunge.cve.hardening import hardening_profile_from_compose
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.policy import (
     Disposition,
+    Posture,
     ProjectDecision,
     evaluate_project,
     parse_posture,
@@ -32,7 +33,11 @@ from boxmunge.cve.quarantine import (
     is_quarantined,
     quarantine_project,
 )
-from boxmunge.cve.relevance import effective_runtimes
+from boxmunge.cve.relevance import (
+    ecosystem_for_package,
+    effective_runtimes,
+    unrecognised_lang_types,
+)
 from boxmunge.cve.scan_state import (
     decisions_from_scan_state,
     read_scan_state,
@@ -40,8 +45,10 @@ from boxmunge.cve.scan_state import (
 )
 from boxmunge.cve.scanner import (
     _DEFAULT_TIMEOUT,
+    PkgClass,
     ScanResult,
     ScannerError,
+    Severity,
     TrivyNotInstalledError,
     scan_image,
 )
@@ -282,9 +289,12 @@ def _scan_one_project_locked(
         raise RuntimeError(
             f"Failed to load suppressions for {project!r}: {e}"
         ) from e
-    # Host-scoped suppressions apply to every project on this box. Used to
-    # silence base-image CVEs whose vulnerable code path is never loaded by
-    # any deployed service (e.g. perl-base when no project runs Perl).
+    # Host-scoped suppressions apply to every project on this box. Used for
+    # CVEs an operator has reviewed and accepted the risk of — the relevance
+    # gate (see cve/relevance.py) now handles the "base-image package the
+    # project never invokes" case (e.g. perl-base with no Perl anywhere in
+    # the project) automatically, so this is for everything else: reviewed
+    # false positives, accepted-risk findings pending a fix, and the like.
     # Project entries are listed FIRST so they win precedence on collision —
     # find_active_suppression returns the first match, and a project-level
     # suppression is more specific than a host-level one.
@@ -328,6 +338,11 @@ def _scan_one_project_locked(
     failed: list[str] = []
     today = _today()
     project_start = time.monotonic()
+    # Fix-2 and Fix-3 visibility gaps (final-review wave): both are collected
+    # across every image but logged at most once per project scan, not once
+    # per finding/image — see the two log_warning calls after this loop.
+    dropped_lang_types: set[str] = set()
+    empty_runtime_exempted: set[str] = set()
     for index, image_ref in enumerate(images):
         # Per-project aggregate budget: if the cumulative elapsed time for
         # this project's scans has eaten the budget, skip the rest. The
@@ -375,6 +390,12 @@ def _scan_one_project_locked(
         # performs the per-image inference from ``sr.lang_types`` and cannot
         # raise for a `declared` that passed validation.
         runtimes = effective_runtimes(sr.lang_types, declared=declared)
+        if declared is None:
+            # Fix 2: an unmapped Trivy lang-pkgs Type is dropped by
+            # infer_runtimes rather than raising — see relevance.py's module
+            # docstring for why that biases toward OVER-exemption. Surface it
+            # here since relevance.py stays pure and cannot log it itself.
+            dropped_lang_types |= unrecognised_lang_types(sr.lang_types)
         decision = evaluate_project(
             project, sr,
             posture=posture,
@@ -386,6 +407,59 @@ def _scan_one_project_locked(
             runtimes=runtimes,
         )
         decisions.append(decision)
+
+        # Fix 3: an empty INFERRED runtime set is legitimate for a static
+        # site, but it's indistinguishable from "the image installs its
+        # runtime without a Trivy-visible lang-pkgs manifest" (apt-only
+        # Python, conda, PHP without composer.lock) — the gate then exempts
+        # the project's OWN runtime. `declared is None` restricts this to
+        # inference (a declared empty set is rejected by validation, so it
+        # cannot occur); the posture check restricts it to postures where the
+        # relevance gate actually runs (paranoid bypasses it entirely,
+        # relaxed's KEV-only rule returns INFORMATIONAL before reaching it);
+        # excluding UNKNOWN severity avoids attributing findings already
+        # routed to INFORMATIONAL by the unrelated unknown-severity rule.
+        if (
+            declared is None
+            and not runtimes
+            and posture in (Posture.BALANCED, Posture.STRICT)
+        ):
+            for disp in decision.findings:
+                f = disp.finding
+                if (
+                    disp.disposition == Disposition.INFORMATIONAL
+                    and f.severity is not Severity.UNKNOWN
+                    and f.pkg_class is PkgClass.OS
+                    and ecosystem_for_package(f.package) is not None
+                ):
+                    empty_runtime_exempted.add(f.package)
+
+    if dropped_lang_types:
+        log_warning(
+            "cve-scan",
+            f"project {project}: unrecognised Trivy lang-pkgs type(s) "
+            f"{sorted(dropped_lang_types)} were ignored during runtime "
+            f"inference (they contribute no ecosystem); this can shrink the "
+            f"inferred runtime set and make more findings look foreign — "
+            f"extend relevance._TRIVY_TYPE_TO_ECOSYSTEM or declare "
+            f"security.runtimes to compensate",
+            paths, project=project,
+            detail={"lang_types": sorted(dropped_lang_types)},
+        )
+
+    if empty_runtime_exempted:
+        log_warning(
+            "cve-scan",
+            f"project {project}: relevance gate de-escalated OS package(s) "
+            f"{sorted(empty_runtime_exempted)} because no runtime was "
+            f"declared and none was inferred from a Trivy lang-pkgs "
+            f"manifest — if this image installs its runtime without one "
+            f"(apt-installed python3, conda, PHP without composer.lock), "
+            f"the gate is exempting the project's OWN runtime; declare "
+            f"security.runtimes to fix",
+            paths, project=project,
+            detail={"packages": sorted(empty_runtime_exempted)},
+        )
 
     if failed and not decisions:
         raise RuntimeError(

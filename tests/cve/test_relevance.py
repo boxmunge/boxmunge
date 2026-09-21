@@ -7,6 +7,7 @@ from boxmunge.cve.relevance import (
     effective_runtimes,
     infer_runtimes,
     is_irrelevant_to_project,
+    unrecognised_lang_types,
 )
 from boxmunge.cve.scanner import Finding, PkgClass, Severity
 
@@ -46,6 +47,43 @@ def test_infer_runtimes_ignores_unrecognised_type():
 
 def test_infer_runtimes_static_site_has_no_runtimes():
     assert infer_runtimes([]) == frozenset()
+
+
+# ---- unrecognised lang types (final-review Fix 2) ----
+#
+# infer_runtimes silently drops any Trivy lang-pkgs Type absent from
+# _TRIVY_TYPE_TO_ECOSYSTEM. That biases toward OVER-exemption (it shrinks the
+# runtime set), the opposite of an unlisted _RUNTIME_FAMILIES entry — so the
+# drop must be reportable to a caller that can log it (relevance.py itself
+# stays pure/I/O-free).
+
+@pytest.mark.parametrize("lang_type,expected", [
+    ("conda-pkg", frozenset({"conda-pkg"})),
+    ("pipenv", frozenset({"pipenv"})),
+    ("uv", frozenset({"uv"})),
+    ("python-pkg", frozenset()),
+])
+def test_unrecognised_lang_types_reports_unmapped_types(lang_type, expected):
+    assert unrecognised_lang_types([lang_type]) == expected
+
+
+def test_unrecognised_lang_types_mixed_input():
+    assert unrecognised_lang_types(["python-pkg", "conda-pkg", "uv"]) == (
+        frozenset({"conda-pkg", "uv"})
+    )
+
+
+def test_unrecognised_lang_types_empty_for_no_input():
+    assert unrecognised_lang_types([]) == frozenset()
+
+
+def test_infer_runtimes_shrinks_silently_on_conda_only_image():
+    """Reproduces the failure scenario directly: a conda-based Python image
+    reports only the conda-pkg lang type, which infer_runtimes cannot map to
+    any ecosystem — the inferred set is empty even though the image plainly
+    runs Python."""
+    assert infer_runtimes(["conda-pkg"]) == frozenset()
+    assert unrecognised_lang_types(["conda-pkg"]) == frozenset({"conda-pkg"})
 
 
 def test_own_runtime_stays_relevant_even_when_dependencies_are_clean():

@@ -21,11 +21,12 @@ workflow, and recovery.
   catalog quarantines immediately under every posture. The AV filter, distro
   status, and severity threshold do not apply.
 - **Runtime relevance gate (balanced/strict).** A finding against an OS
-  package that belongs to a language runtime (perl, ruby, php, python3,
-  nodejs, tcl, lua) the project never invokes is informational, regardless
-  of distro severity — a Python app cannot run a Perl regex bug. Inferred
-  automatically from the image's own dependency scan; `paranoid` does not
-  consult it, and KEV still overrides it.
+  package that belongs to a language runtime (`perl`, `ruby`, `php`,
+  `python`, `node`, `tcl`, `lua` — the ecosystem names accepted by
+  `security.runtimes`, not the OS package names) the project never invokes
+  is informational, regardless of distro severity — a Python app cannot run
+  a Perl regex bug. Inferred automatically from the image's own dependency
+  scan; `paranoid` does not consult it, and KEV still overrides it.
 - **Auto-quarantine** when a finding crosses the project's quarantine gate:
   `compose stop` + maintenance page + critical Pushover alert.
 - **Suppress with operator review:**
@@ -294,6 +295,32 @@ heterogeneous project *less* safe than declaring nothing at all. Prefer
 omitting `security.runtimes` and relying on per-image inference; if you do
 declare it, list every runtime used anywhere in the project, not just the
 one you're thinking about.
+
+**An empty inferred set can mean "no runtime" or "no visible manifest" —
+inference cannot tell them apart.** A static site served by nginx
+legitimately infers zero runtimes: every language family is genuinely
+foreign to it. But an image that installs its runtime WITHOUT a
+Trivy-visible lang-pkgs manifest lands in that exact same bucket —
+`apt-get install python3 python3-flask` with no pip layer, a PHP image with
+no `composer.lock`, a conda environment (Trivy's `conda-pkg` type isn't
+mapped to an ecosystem at all; see below) — and inference has no way to
+distinguish "runs nothing" from "runs something Trivy couldn't see." When
+that happens, the gate exempts the project's OWN runtime: a Critical,
+distro-affected `python3` finding would be de-escalated exactly like a
+genuinely-foreign `perl-base` finding would be. boxmunge logs a warning
+(component `cve-scan`) when it detects this — a de-escalation against an
+OS-class runtime package with an empty, *inferred* (not declared) runtime
+set — but the remedy is on the operator: declare `security.runtimes`
+explicitly for any image whose runtime isn't installed through a
+Trivy-recognised language package manager.
+
+Relatedly, an unrecognised Trivy lang-pkgs `Type` (one absent from
+`relevance._TRIVY_TYPE_TO_ECOSYSTEM` — `conda-pkg`, `pipenv`, and `uv` are
+current examples) contributes no ecosystem to inference, which *shrinks*
+the inferred runtime set rather than growing it. This is the opposite bias
+from an unrecognised OS package family (which safely defaults to
+"relevant"), so boxmunge logs a warning when a scan encounters one. Extend
+the mapping table, or declare `security.runtimes`, to close the gap.
 
 ### Interaction with the rest of the trust ladder
 

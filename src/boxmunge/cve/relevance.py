@@ -10,6 +10,16 @@ language runtime are eligible for de-escalation. Anything unrecognised —
 unknown package, unknown class, unlisted family — is treated as relevant and
 keeps today's behaviour. Drift causes missed de-escalation (a nuisance),
 never silent exemption (a hazard).
+
+That guarantee holds for `_RUNTIME_FAMILIES`: an unlisted family means
+`ecosystem_for_package` returns None, which `irrelevant_ecosystem` treats as
+relevant. It does NOT hold for `_TRIVY_TYPE_TO_ECOSYSTEM`, which has the
+opposite bias: a Trivy lang-pkgs `Type` this table doesn't recognise
+contributes no ecosystem to `infer_runtimes`, which *shrinks* the inferred
+runtime set, which makes *more* families look foreign, which de-escalates
+*more* findings. An unmapped lang type is therefore a silent-exemption risk,
+not a nuisance — see `unrecognised_lang_types`, which callers use to log the
+drop (this module stays I/O-free, so it cannot log the drop itself).
 """
 from __future__ import annotations
 
@@ -76,6 +86,22 @@ def infer_runtimes(lang_types: Iterable[str]) -> frozenset[str]:
         for lang_type in lang_types
         for eco in (_TRIVY_TYPE_TO_ECOSYSTEM.get(lang_type),)
         if eco is not None
+    )
+
+
+def unrecognised_lang_types(lang_types: Iterable[str]) -> frozenset[str]:
+    """Trivy lang-pkgs `Type` values that `infer_runtimes` silently drops.
+
+    Unlike an unlisted `_RUNTIME_FAMILIES` entry, a dropped lang type biases
+    TOWARD over-exemption (see module docstring): it shrinks the inferred
+    runtime set rather than shrinking the set of packages eligible for
+    de-escalation. This module is pure and does no logging itself — callers
+    (the scan orchestrator) use this to log the drop once per scan.
+    """
+    return frozenset(
+        lang_type
+        for lang_type in lang_types
+        if lang_type not in _TRIVY_TYPE_TO_ECOSYSTEM
     )
 
 
