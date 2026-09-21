@@ -195,6 +195,11 @@ class Finding:
     vendor_severities: dict[str, Severity] = field(default_factory=dict)
     severity_source: str | None = None
     pkg_class: PkgClass = PkgClass.UNKNOWN
+    # Trivy's raw `Type` (e.g. "debian", "python-pkg"). Not read by any
+    # decision path today — pkg_class is the field the relevance gate and
+    # policy engine act on — but it's spec-mandated diagnostic payload
+    # (finer-grained than pkg_class) kept for future triage/debugging. Do
+    # not delete as unused.
     pkg_type: str | None = None
 
     @property

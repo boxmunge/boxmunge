@@ -133,6 +133,7 @@ _POSTURE_LABEL: dict[Posture, str] = {
     Posture.PARANOID: "paranoid",
 }
 
+
 def _kev_never(_cve: str) -> bool:
     """Default KEV predicate — nothing is known-exploited (keeps callers total)."""
     return False
