@@ -26,33 +26,43 @@ def _finding(package, *, pkg_class=PkgClass.OS, pkg_type="debian"):
 
 
 # ---- inference ----
+#
+# infer_runtimes takes lang-pkgs Result *types* (as scanner._parse_lang_types
+# collects them), not Finding objects: Trivy only emits a finding for a
+# package with a known CVE, so a project with fully patched dependencies has
+# zero lang-pkgs findings but still has the lang-pkgs result itself.
 
 def test_infer_runtimes_from_python_lang_pkgs():
-    findings = [_finding("fastapi", pkg_class=PkgClass.LANG, pkg_type="python-pkg")]
-    assert infer_runtimes(findings) == frozenset({"python"})
+    assert infer_runtimes(["python-pkg"]) == frozenset({"python"})
 
 
 def test_infer_runtimes_unions_multiple_ecosystems():
-    findings = [
-        _finding("fastapi", pkg_class=PkgClass.LANG, pkg_type="python-pkg"),
-        _finding("express", pkg_class=PkgClass.LANG, pkg_type="node-pkg"),
-    ]
-    assert infer_runtimes(findings) == frozenset({"python", "node"})
-
-
-def test_infer_runtimes_ignores_os_pkgs():
-    """OS packages say nothing about what the app runs."""
-    findings = [_finding("perl-base")]
-    assert infer_runtimes(findings) == frozenset()
+    assert infer_runtimes(["python-pkg", "node-pkg"]) == frozenset({"python", "node"})
 
 
 def test_infer_runtimes_ignores_unrecognised_type():
-    findings = [_finding("x", pkg_class=PkgClass.LANG, pkg_type="cobol-pkg")]
-    assert infer_runtimes(findings) == frozenset()
+    assert infer_runtimes(["cobol-pkg"]) == frozenset()
 
 
 def test_infer_runtimes_static_site_has_no_runtimes():
     assert infer_runtimes([]) == frozenset()
+
+
+def test_own_runtime_stays_relevant_even_when_dependencies_are_clean():
+    """Regression: patching your deps must not strip protection for your
+    own runtime.
+
+    A Node app whose npm dependencies are fully patched produces zero
+    lang-pkgs findings, but Trivy still reports the lang-pkgs Result row
+    for the manifest it scanned (Type "node-pkg", empty Vulnerabilities).
+    infer_runtimes must read that row, not the (empty) findings — otherwise
+    a Critical CVE in the base image's own nodejs OS package would be
+    wrongly judged irrelevant to a project that plainly runs Node.
+    """
+    lang_types = ["node-pkg"]  # lang-pkgs result present; no vulnerable npm pkgs
+    runtimes = effective_runtimes(lang_types)
+    finding = _finding("nodejs")  # Critical CVE in the base image's nodejs OS pkg
+    assert is_irrelevant_to_project(finding, runtimes=runtimes) is False
 
 
 # ---- family matching ----
@@ -61,11 +71,9 @@ def test_infer_runtimes_static_site_has_no_runtimes():
     ("perl-base", "perl"),
     ("perl", "perl"),
     ("perl-modules-5.40", "perl"),
-    ("libperl5.40", "perl"),
     ("ruby3.1", "ruby"),
     ("php8.2", "php"),
     ("python3.11", "python"),
-    ("libpython3.11-stdlib", "python"),
     ("nodejs", "node"),
     ("tcl8.6", "tcl"),
     ("lua5.4", "lua"),
@@ -76,6 +84,17 @@ def test_ecosystem_for_package_matches_families(package, expected):
 
 @pytest.mark.parametrize("package", [
     "openssl", "libc6", "zlib1g", "libexpat1", "libssl3", "curl", "",
+    # Embeddable interpreter libraries: linked into other-language processes
+    # (redis/haproxy/nginx-extras link liblua, mod_perl links libperl, mod_wsgi
+    # / embedding apps link libpython3), so a CVE there IS reachable from a
+    # project written in another language and must never be exempted.
+    "libperl5.40", "liblua5.1-0", "libluajit-5.1-2", "libtcl8.6",
+    "libpython3.11-stdlib",
+    # Mutation-testing guards: names that a loosened glob (e.g. "perl*",
+    # "python*", "node*") would wrongly match.
+    "libapache2-mod-php", "perl-openssl", "ruby-openssl", "rubygems",
+    "nodejs-doc", "node-tar", "luajit", "phpunit", "python-is-python3",
+    "py3-cryptography", "python2.7",
 ])
 def test_ecosystem_for_package_returns_none_for_non_runtime(package):
     """The over-exemption guard: ordinary OS libs are not runtime families."""
@@ -110,9 +129,14 @@ def test_python_os_package_is_relevant_to_python_project():
 
 
 def test_lang_pkg_is_never_irrelevant():
-    """An app's own dependency is by definition used by the app."""
+    """An app's own dependency is by definition used by the app.
+
+    Uses "perl-base" — a name that *does* match the perl family — so this
+    actually exercises the pkg_class guard rather than passing merely
+    because the package name is unrecognised.
+    """
     assert is_irrelevant_to_project(
-        _finding("some-perl-gem", pkg_class=PkgClass.LANG, pkg_type="python-pkg"),
+        _finding("perl-base", pkg_class=PkgClass.LANG, pkg_type="python-pkg"),
         runtimes=frozenset({"python"}),
     ) is False
 
@@ -128,16 +152,29 @@ def test_unknown_pkg_class_is_never_irrelevant():
 # ---- effective runtimes ----
 
 def test_effective_runtimes_declared_replaces_inference():
-    findings = [_finding("fastapi", pkg_class=PkgClass.LANG, pkg_type="python-pkg")]
-    assert effective_runtimes(findings, declared=["perl"]) == frozenset({"perl"})
+    assert effective_runtimes(["python-pkg"], declared=["perl"]) == frozenset({"perl"})
 
 
 def test_effective_runtimes_falls_back_to_inference():
-    findings = [_finding("fastapi", pkg_class=PkgClass.LANG, pkg_type="python-pkg")]
-    assert effective_runtimes(findings, declared=None) == frozenset({"python"})
+    assert effective_runtimes(["python-pkg"], declared=None) == frozenset({"python"})
+
+
+def test_effective_runtimes_empty_declared_raises():
+    """declared=[] is not "no runtimes" — it's almost certainly a manifest
+    mistake, and silently falling back to inference would hide it."""
+    with pytest.raises(ValueError):
+        effective_runtimes(["python-pkg"], declared=[])
+
+
+def test_effective_runtimes_unknown_declared_raises():
+    """A typo'd runtime name must fail loudly, not silently grant the typo
+    maximal exemption power."""
+    with pytest.raises(ValueError):
+        effective_runtimes(["python-pkg"], declared=["pyhton"])
 
 
 def test_valid_ecosystems_covers_every_family_and_inferred_name():
-    from boxmunge.cve.relevance import _RUNTIME_FAMILIES, _TRIVY_TYPE_TO_ECOSYSTEM
-    assert set(_RUNTIME_FAMILIES) <= VALID_ECOSYSTEMS
-    assert set(_TRIVY_TYPE_TO_ECOSYSTEM.values()) <= VALID_ECOSYSTEMS
+    assert VALID_ECOSYSTEMS == frozenset({
+        "python", "node", "go", "ruby", "php", "java", "rust", "dotnet",
+        "perl", "tcl", "lua",
+    })

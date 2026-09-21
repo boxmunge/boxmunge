@@ -33,14 +33,20 @@ _TRIVY_TYPE_TO_ECOSYSTEM: dict[str, str] = {
 
 # Ecosystem → OS package-name glob patterns. Deliberately narrow: openssl,
 # libc, zlib and friends are absent by design and so keep today's behaviour.
+#
+# Standalone interpreters ONLY. Embeddable interpreter libraries
+# (libperl*, liblua*, libtcl*, ...) are deliberately absent: redis,
+# haproxy and nginx-extras link liblua, mod_perl links libperl, so a CVE
+# there IS reachable from a project written in another language. Matching
+# them would exempt a genuinely reachable bug.
 _RUNTIME_FAMILIES: dict[str, tuple[str, ...]] = {
-    "perl": ("perl", "perl-base", "perl-modules-*", "libperl*"),
-    "ruby": ("ruby", "ruby[0-9]*", "libruby*"),
-    "php": ("php", "php[0-9]*", "php-*", "libphp*"),
-    "python": ("python3", "python3.*", "python3-*", "libpython3*"),
-    "node": ("nodejs", "libnode*"),
-    "tcl": ("tcl", "tcl[0-9]*", "libtcl*"),
-    "lua": ("lua", "lua[0-9]*", "liblua*"),
+    "perl": ("perl", "perl-base", "perl-modules-*"),
+    "ruby": ("ruby", "ruby[0-9]*"),
+    "php": ("php", "php[0-9]*", "php-*"),
+    "python": ("python3", "python3.*", "python3-*"),
+    "node": ("nodejs",),
+    "tcl": ("tcl", "tcl[0-9]*"),
+    "lua": ("lua", "lua[0-9]*"),
 }
 
 # The vocabulary accepted in a manifest's security.runtimes. The union of
@@ -52,17 +58,23 @@ VALID_ECOSYSTEMS: frozenset[str] = frozenset(
 )
 
 
-def infer_runtimes(findings: Iterable[Finding]) -> frozenset[str]:
-    """Ecosystems this project runs, inferred from its lang-pkgs findings.
+def infer_runtimes(lang_types: Iterable[str]) -> frozenset[str]:
+    """Ecosystems this project runs, inferred from its lang-pkgs Result types.
+
+    Takes the Trivy `Type` values of lang-pkgs *results*, not findings:
+    Trivy only emits a finding for a package with a known CVE, so a project
+    whose dependencies are fully patched has zero lang-pkgs findings but
+    still has a lang-pkgs result (empty Vulnerabilities). Inferring from
+    findings would mean patching your dependencies strips the relevance
+    gate's protection for your own runtime — see ScanResult.lang_types.
 
     An empty set is a valid answer, not a failure: a static site served by
     nginx runs no language runtime, so every family is foreign to it.
     """
     return frozenset(
         eco
-        for f in findings
-        if f.pkg_class is PkgClass.LANG and f.pkg_type
-        for eco in (_TRIVY_TYPE_TO_ECOSYSTEM.get(f.pkg_type),)
+        for lang_type in lang_types
+        for eco in (_TRIVY_TYPE_TO_ECOSYSTEM.get(lang_type),)
         if eco is not None
     )
 
@@ -82,16 +94,35 @@ def ecosystem_for_package(package: str) -> str | None:
 
 
 def effective_runtimes(
-    findings: Iterable[Finding], *, declared: Sequence[str] | None = None,
+    lang_types: Iterable[str], *, declared: Sequence[str] | None = None,
 ) -> frozenset[str]:
     """Declared runtimes if the manifest specifies them, else inferred.
 
     Explicit beats inferred: a declaration replaces inference rather than
     adding to it, so an operator who declares the set gets exactly that set.
+
+    `declared=None` means "no declaration — infer instead". `declared=[]`
+    is not a way to say "no runtimes": it's almost certainly a manifest
+    mistake (an empty list, an unset env var), and silently falling back to
+    inference would hide that mistake. Likewise a typo'd runtime name must
+    fail loudly rather than silently granting the typo maximal exemption
+    power, so both are raised rather than absorbed.
+
+    Raises:
+        ValueError: `declared` is an empty sequence, or contains a name
+            outside VALID_ECOSYSTEMS.
     """
-    if declared:
-        return frozenset(declared)
-    return infer_runtimes(findings)
+    if declared is not None:
+        declared_set = frozenset(declared)
+        if not declared_set:
+            raise ValueError("declared runtimes must not be empty")
+        unknown = declared_set - VALID_ECOSYSTEMS
+        if unknown:
+            raise ValueError(
+                f"declared runtime(s) not recognised: {sorted(unknown)}"
+            )
+        return declared_set
+    return infer_runtimes(lang_types)
 
 
 def is_irrelevant_to_project(

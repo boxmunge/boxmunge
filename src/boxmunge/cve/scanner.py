@@ -210,6 +210,7 @@ class ScanResult:
     findings: tuple[Finding, ...]
     scanned_at: datetime
     db_version: str | None
+    lang_types: frozenset[str] = frozenset()
 
 
 class ScannerError(Exception):
@@ -305,12 +306,14 @@ def scan_image(image_ref: str, *, timeout: int = _DEFAULT_TIMEOUT) -> ScanResult
         ) from e
 
     findings = _parse_findings(payload)
+    lang_types = _parse_lang_types(payload)
     db_version = _extract_db_version(payload)
     return ScanResult(
         image_ref=image_ref,
         findings=findings,
         scanned_at=datetime.now(timezone.utc),
         db_version=db_version,
+        lang_types=lang_types,
     )
 
 
@@ -364,6 +367,27 @@ def _parse_findings(payload: dict[str, Any]) -> tuple[Finding, ...]:
 
     findings.sort(key=lambda f: (-_SEVERITY_RANK[f.severity], f.cve_id))
     return tuple(findings)
+
+
+def _parse_lang_types(payload: dict[str, Any]) -> frozenset[str]:
+    """Every distinct Trivy `Type` reported for a lang-pkgs result.
+
+    Trivy only emits a `Vulnerabilities` entry for packages with a known
+    CVE, so a project whose dependencies are fully patched produces zero
+    lang-pkgs *findings* — but Trivy still emits the lang-pkgs *Result* row
+    itself (Type set, Vulnerabilities empty or absent) whenever it detected
+    a manifest for that ecosystem. That row, not the findings, is the
+    signal that the project runs a given language runtime at all: relying
+    on findings alone would mean patching your dependencies strips the
+    relevance gate's protection for your own runtime.
+    """
+    results = payload.get("Results") or []
+    return frozenset(
+        result["Type"]
+        for result in results
+        if PkgClass.from_trivy_string(result.get("Class")) is PkgClass.LANG
+        and result.get("Type")
+    )
 
 
 # Trivy VendorSeverity encodes severity as an int 0-4.
