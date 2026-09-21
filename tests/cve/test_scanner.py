@@ -10,6 +10,7 @@ import pytest
 from boxmunge.cve.scanner import (
     AttackVector,
     Finding,
+    PkgClass,
     ScanResult,
     ScannerError,
     Severity,
@@ -736,3 +737,62 @@ def test_distro_severity_none_when_only_nvd():
         vendor_severities={"nvd": Severity.HIGH, "ghsa": Severity.HIGH},
     )
     assert distro_severity(f) is None
+
+
+def test_parse_findings_captures_os_pkg_class():
+    payload = {
+        "Results": [{
+            "Class": "os-pkgs",
+            "Type": "debian",
+            "Vulnerabilities": [{
+                "VulnerabilityID": "CVE-2026-13221",
+                "Severity": "CRITICAL",
+                "PkgName": "perl-base",
+                "InstalledVersion": "5.40.1-6",
+            }],
+        }],
+    }
+    findings = _parse_findings(payload)
+    assert findings[0].pkg_class is PkgClass.OS
+    assert findings[0].pkg_type == "debian"
+
+
+def test_parse_findings_captures_lang_pkg_class():
+    payload = {
+        "Results": [{
+            "Class": "lang-pkgs",
+            "Type": "python-pkg",
+            "Vulnerabilities": [{
+                "VulnerabilityID": "CVE-2025-1234",
+                "Severity": "HIGH",
+                "PkgName": "python-multipart",
+                "InstalledVersion": "0.0.9",
+            }],
+        }],
+    }
+    findings = _parse_findings(payload)
+    assert findings[0].pkg_class is PkgClass.LANG
+    assert findings[0].pkg_type == "python-pkg"
+
+
+def test_parse_findings_missing_class_is_unknown():
+    """A result with no Class must not be assumed to be an OS package."""
+    payload = {
+        "Results": [{
+            "Vulnerabilities": [{
+                "VulnerabilityID": "CVE-2025-9999",
+                "Severity": "LOW",
+                "PkgName": "mystery",
+                "InstalledVersion": "1.0",
+            }],
+        }],
+    }
+    findings = _parse_findings(payload)
+    assert findings[0].pkg_class is PkgClass.UNKNOWN
+    assert findings[0].pkg_type is None
+
+
+def test_pkg_class_from_trivy_string_unrecognised_is_unknown():
+    assert PkgClass.from_trivy_string("something-else") is PkgClass.UNKNOWN
+    assert PkgClass.from_trivy_string(None) is PkgClass.UNKNOWN
+    assert PkgClass.from_trivy_string("OS-PKGS") is PkgClass.OS
