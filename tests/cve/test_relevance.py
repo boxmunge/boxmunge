@@ -173,6 +173,35 @@ def test_effective_runtimes_unknown_declared_raises():
         effective_runtimes(["python-pkg"], declared=["pyhton"])
 
 
+def test_effective_runtimes_bare_string_declared_raises():
+    """A bare string is a Sequence[str] too — without a type check it would
+    silently shred into single characters (frozenset("python") -> six
+    single-letter "runtimes") instead of failing loudly."""
+    with pytest.raises(ValueError):
+        effective_runtimes(["python-pkg"], declared="python")
+
+
+def test_effective_runtimes_mapping_declared_raises():
+    """A mapping iterates over its keys and would otherwise be silently
+    accepted as a runtime set — exactly the fallback-that-hides-a-mistake
+    this project's rules forbid."""
+    with pytest.raises(ValueError):
+        effective_runtimes(["python-pkg"], declared={"python": True})
+
+
+def test_effective_runtimes_bool_declared_raises():
+    """bool isn't iterable; must fail as ValueError, not an uncaught
+    TypeError that would escape the caller's except clause."""
+    with pytest.raises(ValueError):
+        effective_runtimes(["python-pkg"], declared=True)
+
+
+def test_effective_runtimes_int_declared_raises():
+    """int isn't iterable either — same requirement as the bool case."""
+    with pytest.raises(ValueError):
+        effective_runtimes(["python-pkg"], declared=5)
+
+
 def test_valid_ecosystems_covers_every_family_and_inferred_name():
     assert VALID_ECOSYSTEMS == frozenset({
         "python", "node", "go", "ruby", "php", "java", "rust", "dotnet",

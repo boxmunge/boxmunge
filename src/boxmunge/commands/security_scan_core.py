@@ -245,6 +245,25 @@ def _scan_one_project_locked(
         paths, project,
     )
     posture = parse_posture(posture_str)
+    # `declared` is loop-invariant (one manifest, many images), so validate
+    # it once here rather than inside the per-image loop below. Doing this
+    # before any Trivy scan runs means a malformed security.runtimes fails
+    # in milliseconds, not after minutes of scanning, and it means the
+    # `if not images:` early-return and the budget-exhausted `break` below
+    # can no longer skip validation and report success for a manifest that
+    # a hand-edit (load_manifest does not validate the security: block —
+    # only validate_manifest at deploy time does) left broken. The per-image
+    # inference call using ``sr.lang_types`` stays in the loop below: that
+    # part genuinely varies per image.
+    declared = sec_block.get("runtimes")
+    if declared is not None:
+        try:
+            effective_runtimes((), declared=declared)
+        except (ValueError, TypeError) as e:
+            raise RuntimeError(
+                f"project {project!r}: invalid security.runtimes in "
+                f"manifest: {e}"
+            ) from e
     # Services with profile != off get boxmunge's hardening overlay applied
     # at runtime. Pass the overlay set through so the policy doesn't penalise
     # a project for relying on overlay defaults (e.g. no-new-privileges) it
@@ -352,13 +371,10 @@ def _scan_one_project_locked(
             failed.append(image_ref)
             warnings.append(f"image {image_ref}: scan failed ({e})")
             continue
-        declared = (sec_block or {}).get("runtimes")
-        try:
-            runtimes = effective_runtimes(sr.lang_types, declared=declared)
-        except ValueError as e:
-            raise RuntimeError(
-                f"project {project!r}: invalid security.runtimes in manifest: {e}"
-            ) from e
+        # `declared` was already validated once above; this call only
+        # performs the per-image inference from ``sr.lang_types`` and cannot
+        # raise for a `declared` that passed validation.
+        runtimes = effective_runtimes(sr.lang_types, declared=declared)
         decision = evaluate_project(
             project, sr,
             posture=posture,

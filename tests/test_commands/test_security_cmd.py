@@ -1439,6 +1439,7 @@ def test_scan_does_not_quarantine_unused_runtime_package(
         findings=(perl, app_dep),
         scanned_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
         db_version="2026-05-06",
+        lang_types=frozenset({"python-pkg"}),
     )
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
@@ -1453,6 +1454,65 @@ def test_scan_does_not_quarantine_unused_runtime_package(
     rc = cmd_security_scan([], paths)
     assert rc == 0
     assert "q" not in called, "perl-base must not quarantine a Python project"
+
+
+def test_scan_quarantines_runtime_the_project_actually_uses(
+    monkeypatch, tmp_path,
+) -> None:
+    """Negative control for the relevance gate.
+
+    Mirrors test_scan_does_not_quarantine_unused_runtime_package, but the
+    OS-package CVE here (python3) belongs to a runtime the project's own
+    ``lang_types`` says it uses. The gate must discriminate, not exempt
+    everything: this must still quarantine.
+    """
+    from datetime import datetime, timezone
+    from boxmunge.commands.security_actions import cmd_security_scan
+    from boxmunge.cve.scanner import (
+        AttackVector, Finding, PkgClass, ScanResult, Severity, VulnStatus,
+    )
+    paths = _scan_paths(tmp_path)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.container_image_digest",
+        lambda c: None,
+    )
+    python_os_pkg = Finding(
+        cve_id="CVE-2026-13222",
+        severity=Severity.CRITICAL,
+        package="python3",
+        installed_version="3.11.2-1",
+        fixed_version=None,
+        title="CPython bug",
+        primary_url=None,
+        attack_vector=AttackVector.NETWORK,
+        status=VulnStatus.AFFECTED,
+        vendor_severities={"debian": Severity.CRITICAL},
+        pkg_class=PkgClass.OS,
+        pkg_type="debian",
+    )
+    sr = ScanResult(
+        image_ref="myapp:1.0",
+        findings=(python_os_pkg,),
+        scanned_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+        db_version="2026-05-06",
+        lang_types=frozenset({"python-pkg"}),
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
+    )
+    called = {}
+    def fake_quarantine(*args, **kwargs):
+        called["q"] = (args, kwargs)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_core.quarantine_project",
+        fake_quarantine,
+    )
+    rc = cmd_security_scan([], paths)
+    assert rc == 0
+    assert "q" in called, "python3 must still quarantine a Python project"
 
 
 def test_scan_per_project_budget_skips_remaining_images(

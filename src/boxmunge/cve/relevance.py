@@ -109,10 +109,23 @@ def effective_runtimes(
     power, so both are raised rather than absorbed.
 
     Raises:
-        ValueError: `declared` is an empty sequence, or contains a name
-            outside VALID_ECOSYSTEMS.
+        ValueError: `declared` is not a list/tuple, is an empty sequence, or
+            contains a name outside VALID_ECOSYSTEMS.
     """
     if declared is not None:
+        # A YAML `security.runtimes:` value that isn't a list is a manifest
+        # mistake, not a variant spelling. Restrict to list/tuple explicitly
+        # rather than trusting `Sequence` duck-typing: a bare string is a
+        # Sequence[str] too and would silently shred into single characters
+        # (frozenset("python") -> {'p','y',...}), and a mapping iterates
+        # over its keys and would be silently accepted as a runtime set.
+        # bool/int aren't iterable at all and would otherwise surface as an
+        # uncaught TypeError from `frozenset(...)` below.
+        if not isinstance(declared, (list, tuple)):
+            raise ValueError(
+                "declared runtimes must be a list, got "
+                f"{type(declared).__name__}: {declared!r}"
+            )
         declared_set = frozenset(declared)
         if not declared_set:
             raise ValueError("declared runtimes must not be empty")
