@@ -25,6 +25,7 @@ from boxmunge.cve.policy import (
     Disposition,
     Posture,
     ProjectDecision,
+    evaluate_finding,
     evaluate_project,
     parse_posture,
 )
@@ -48,7 +49,6 @@ from boxmunge.cve.scanner import (
     PkgClass,
     ScanResult,
     ScannerError,
-    Severity,
     TrivyNotInstalledError,
     scan_image,
 )
@@ -416,9 +416,7 @@ def _scan_one_project_locked(
         # inference (a declared empty set is rejected by validation, so it
         # cannot occur); the posture check restricts it to postures where the
         # relevance gate actually runs (paranoid bypasses it entirely,
-        # relaxed's KEV-only rule returns INFORMATIONAL before reaching it);
-        # excluding UNKNOWN severity avoids attributing findings already
-        # routed to INFORMATIONAL by the unrelated unknown-severity rule.
+        # relaxed's KEV-only rule returns INFORMATIONAL before reaching it).
         if (
             declared is None
             and not runtimes
@@ -427,11 +425,35 @@ def _scan_one_project_locked(
             for disp in decision.findings:
                 f = disp.finding
                 if (
-                    disp.disposition == Disposition.INFORMATIONAL
-                    and f.severity is not Severity.UNKNOWN
-                    and f.pkg_class is PkgClass.OS
-                    and ecosystem_for_package(f.package) is not None
+                    disp.disposition != Disposition.INFORMATIONAL
+                    or f.pkg_class is not PkgClass.OS
+                    or ecosystem_for_package(f.package) is None
                 ):
+                    continue
+                # But-for check: distro-deprioritized / no-distro-verdict /
+                # AV-filter / below-threshold (steps 8-11 in
+                # evaluate_finding, all AFTER the relevance gate) also yield
+                # INFORMATIONAL. The gate merely intercepts those findings
+                # first without changing the outcome, so which route fired
+                # is not enough to attribute the disposition to the gate —
+                # only a disposition that actually DIFFERS with the gate off
+                # (runtimes=None) proves the gate was the cause. Every other
+                # argument must match the real evaluate_project call above
+                # (same hardening_penalty via disp, same suppressions,
+                # today, kev_lookup) or the comparison is meaningless.
+                # evaluate_finding is a pure function, so re-running it here
+                # is safe and side-effect free.
+                but_for = evaluate_finding(
+                    f,
+                    posture=posture,
+                    hardening_penalty=disp.hardening_penalty,
+                    dangerously_disable_quarantine=dangerously,
+                    suppressions=supps,
+                    today=today,
+                    kev_lookup=lambda cid: kev.is_known_exploited(cid, today=today),
+                    runtimes=None,
+                )
+                if but_for.disposition != disp.disposition:
                     empty_runtime_exempted.add(f.package)
 
     if dropped_lang_types:
