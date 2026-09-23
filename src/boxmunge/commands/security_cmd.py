@@ -34,6 +34,7 @@ from boxmunge.cve.grace import GraceError, read_grace_state
 from boxmunge.cve.scan_state import read_scan_state
 from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
 from boxmunge.cve.suppressions import (
+    SCOPE_HOST,
     SuppressionsError,
     active_suppressions,
     load_suppressions,
@@ -174,13 +175,28 @@ def _fleet_summary(paths: BoxPaths) -> dict:
 
     grace_payload = _grace_payload(paths, now=datetime.now(timezone.utc))
 
+    # Host-scope suppressions apply to every project on the box, so they live
+    # in one file rather than per-project ones. Counting only the per-project
+    # files above would report an active host suppression as 0 — hiding it
+    # from the review workflow that is meant to catch it before it lapses.
+    try:
+        host_supps = load_suppressions(paths.host_suppressions, scope=SCOPE_HOST)
+    except SuppressionsError:
+        host_supps = ()
+    active_host = active_suppressions(host_supps, today=today)
+
     return {
         "projects_count": len(projects),
         "posture_distribution": posture_dist,
         "quarantined": quarantined_list,
         "at_risk_running": at_risk,
-        "active_suppressions_count": active_supps_count,
+        "active_suppressions_count": active_supps_count + len(active_host),
         "active_suppressions_projects": projects_with_supps,
+        "active_suppressions_host": len(active_host),
+        "host_suppressions": [
+            {"cve_id": s.cve_id, "until": s.until.isoformat(), "reason": s.reason}
+            for s in active_host
+        ],
         "last_fleet_scan": max(last_scans) if last_scans else None,
         "grace": grace_payload,
     }
