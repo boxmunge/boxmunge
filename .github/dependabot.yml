@@ -1,0 +1,73 @@
+# Dependabot config for boxmunge's reproducible-release pipeline.
+#
+# Ecosystems covered (each must stay covered — see tests/test_release_pinning.py):
+#   - pip:           hash-pinned requirements files at repo root + cli/
+#   - github-actions: SHA-pinned actions in workflow files
+#   - docker:        digest-pinned base images in every Dockerfile
+#
+# Dependabot is the ONLY path that updates these pins. Manual edits are
+# allowed but should be rare and flagged in code review.
+
+version: 2
+updates:
+  # Python deps in the server package
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - python
+
+  # Python deps in the CLI package
+  - package-ecosystem: pip
+    directory: "/cli"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - python
+
+  # GitHub Actions (SHA pins in workflow files)
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+
+  # Container base images (digest pins in Dockerfiles)
+  - package-ecosystem: docker
+    directory: "/system"
+    schedule:
+      interval: weekly
+    labels: [dependencies, docker]
+  - package-ecosystem: docker
+    directory: "/canary"
+    schedule:
+      interval: weekly
+    labels: [dependencies, docker]
+  - package-ecosystem: docker
+    directory: "/services/version-check"
+    schedule:
+      interval: weekly
+    labels: [dependencies, docker]
+  - package-ecosystem: docker
+    directory: "/sample-project/frontend"
+    schedule:
+      interval: weekly
+    labels: [dependencies, docker]
+  - package-ecosystem: docker
+    directory: "/sample-project/backend"
+    schedule:
+      interval: weekly
+    labels: [dependencies, docker]
+  - package-ecosystem: docker
+    directory: "/tests/integration/fixture_project"
+    schedule:
+      interval: weekly
+    labels: [dependencies, docker]

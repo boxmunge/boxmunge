@@ -52,7 +52,7 @@ $(BUNDLE): $(BUNDLE_DEPS)
 	        echo "ERROR: bundle staging missing declared file: $$f" >&2; exit 1; \
 	    fi; \
 	done
-	tar czf $@ -C dist/.stage boxmunge
+	python3 scripts/build-bundle.py $@ dist/.stage boxmunge
 	rm -rf dist/.stage
 	@echo "Built $@ ($$(du -h $@ | cut -f1))"
 	@echo "Bundle contains: $(BUNDLE_STAGED_DIRS) $(BUNDLE_TOP_FILES)"
@@ -71,3 +71,14 @@ test-vm:
 
 clean:
 	rm -rf dist/
+
+# Regenerate hash-pinned requirements files from pyproject.toml.
+# Run when pyproject.toml's [project.dependencies] or optional-dependencies
+# changes. CI does not run this — it consumes the checked-in files.
+.PHONY: lock
+lock:
+	pip-compile --generate-hashes -o requirements.txt pyproject.toml
+	pip-compile --generate-hashes --extra=tui -o requirements-tui.txt pyproject.toml
+	pip-compile --generate-hashes --extra=mcp -o requirements-mcp.txt pyproject.toml
+	pip-compile --generate-hashes --allow-unsafe -o requirements-dev.txt requirements-dev.in
+	pip-compile --generate-hashes -o cli/requirements.txt cli/pyproject.toml

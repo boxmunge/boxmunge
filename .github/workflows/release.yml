@@ -13,29 +13,41 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: '3.13'
 
-      - name: Run tests
+      - name: Install pinned dependencies
         run: |
-          pip install -e '.[tui]'
-          pip install pytest
-          python -m pytest tests/ --ignore=tests/integration --ignore=tests/vm -v
+          # Hash-pinned transitive deps. --require-hashes refuses any package
+          # not exactly matching a checked-in hash, blocking resolution drift
+          # and unauthorised transitive bumps.
+          pip install --require-hashes -r requirements.txt
+          pip install --require-hashes -r requirements-tui.txt
+          pip install --require-hashes -r requirements-dev.txt
+          # requirements-mcp.txt is intentionally not installed: the mcp
+          # extra is for runtime users who run `boxmunge-server` as an MCP
+          # server. CI does not import the third-party `mcp` package
+          # (test_mcp_server.py only exercises in-tree boxmunge.mcp_tools).
+          # If a future test does import mcp, add the install above.
+          # Install boxmunge itself in editable mode without re-resolving deps
+          # (already installed above).
+          pip install -e . --no-deps
+
+      - name: Run tests
+        run: python -m pytest tests/ --ignore=tests/integration --ignore=tests/vm -v
 
       - name: Build installer
         run: make installer
 
       - name: Generate SBOM
-        run: |
-          pip install cyclonedx-bom
-          bash scripts/generate-sbom.sh
+        run: bash scripts/generate-sbom.sh
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
         continue-on-error: true
         id: cosign
 
@@ -69,7 +81,7 @@ jobs:
           (cd dist && sha256sum boxmunge-install.sh boxmunge-*.tar.gz > SHA256SUMS)
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
         with:
           files: |
             dist/boxmunge-install.sh
