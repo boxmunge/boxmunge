@@ -1,5 +1,5 @@
 # Build + test tooling used by the release workflow.
 # Regenerate with: make lock
 pytest>=8.0
-cyclonedx-bom>=4.5
+cyclonedx-bom>=7.4.0
 pip-tools>=7.4
