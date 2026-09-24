@@ -731,4 +731,12 @@ Configure your AI agent (Claude Code, Cursor, etc.) to use boxmunge via MCP:
 
 The agent will discover all available tools automatically. Available tools include: prod-deploy, stage, promote, backup, restore, rollback, health, log, secrets, and more.
 
-Requires the `mcp` package on the server: `pip install boxmunge[mcp]`
+Requires the `mcp` package on the server. It is not installed by default — add it
+to the server's environment with:
+
+```
+/opt/boxmunge/env-active/bin/pip install 'mcp>=1.0'
+```
+
+Note: `boxmunge` on PyPI is the *client* CLI. The server package is
+`boxmunge-server` and is installed from GitHub releases, not PyPI.

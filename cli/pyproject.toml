@@ -1,11 +1,33 @@
 [project]
 name = "boxmunge"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local CLI for boxmunge — deploy to your VPS in one command"
+readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "boxmunge" }]
+keywords = ["deployment", "vps", "docker", "compose", "caddy", "self-hosting"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Internet :: WWW/HTTP :: Site Management",
+    "Topic :: System :: Installation/Setup",
+    "Topic :: System :: Systems Administration",
+]
+
 dependencies = [
     "PyYAML>=6.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/boxmunge/boxmunge"
+Source = "https://github.com/boxmunge/boxmunge"
+Issues = "https://github.com/boxmunge/boxmunge/issues"
 
 [project.scripts]
 boxmunge = "boxmunge_cli.cli:main"
