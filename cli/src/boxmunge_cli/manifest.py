@@ -10,7 +10,13 @@ import yaml
 _VALID_SERVICE_NAME = re.compile(r'^[a-z0-9][a-z0-9\-]{0,62}$')
 
 
-CURRENT_SCHEMA_VERSION = 1
+# Highest manifest schema this client has been taught about. The client
+# validates only schema-independent basics (project/hosts/services/port/
+# routes/id/source) and never inspects schema-gated blocks such as
+# `security:` (schema 2) or `writable:` (schema 3) — the server owns those
+# and re-validates on receive and deploy. So this is a "what I know about"
+# marker for warnings, NOT an upper bound on what may be bundled.
+CURRENT_SCHEMA_VERSION = 3
 
 
 class ManifestError(Exception):
@@ -46,13 +52,37 @@ def validate_manifest(
 
     # Schema version check
     schema_version = manifest.get("schema_version", 1)
-    if not isinstance(schema_version, int) or schema_version < 1 or schema_version > CURRENT_SCHEMA_VERSION:
+    # YAML 1.1 boolean trap: unquoted `yes`/`on`/`true` parse as booleans, and
+    # isinstance(True, int) is True in Python — so an unguarded check would
+    # silently accept `schema_version: yes` as schema 1 and validate the
+    # manifest against the wrong schema. Reject booleans explicitly.
+    if isinstance(schema_version, bool):
         errors.append(
-            f"Unsupported schema_version {schema_version!r}. "
-            f"This boxmunge supports schema_version up to {CURRENT_SCHEMA_VERSION}. "
-            f"Upgrade boxmunge to use this manifest."
+            f"schema_version parsed as boolean {schema_version} — it must be "
+            f"an integer, e.g. schema_version: 3. YAML parses unquoted "
+            f"yes/no/on/off/true/false as booleans."
         )
         return errors, warnings  # Can't validate further
+    if not isinstance(schema_version, int) or schema_version < 1:
+        errors.append(
+            f"Invalid schema_version {schema_version!r}: "
+            f"expected an integer >= 1."
+        )
+        return errors, warnings  # Can't validate further
+
+    if schema_version > CURRENT_SCHEMA_VERSION:
+        # Newer than this client knows about. Not an error: the client cannot
+        # assess schema-specific validity at all, so failing here would be a
+        # false claim of competence and would block a manifest the server
+        # accepts. Warn, keep validating the basics, and let the server — the
+        # authority on the schema — reject it if it really is unsupported.
+        warnings.append(
+            f"Manifest declares schema_version {schema_version}, newer than "
+            f"this CLI knows about (up to {CURRENT_SCHEMA_VERSION}). "
+            f"Local validation is best-effort; the server validates the "
+            f"schema authoritatively on deploy. Upgrade the CLI if it "
+            f"rejects fields your server supports."
+        )
 
     # Project name
     project = manifest.get("project", "")
