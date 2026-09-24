@@ -18,7 +18,8 @@ def cmd_mcp_serve(args: list[str]) -> None:
     except ImportError:
         print(
             "ERROR: MCP support requires the 'mcp' package.\n"
-            "Install with: pip install boxmunge[mcp]",
+            "Install it into the server's environment with:\n"
+            "  /opt/boxmunge/env-active/bin/pip install 'mcp>=1.0'",
             file=sys.stderr,
         )
         sys.exit(1)

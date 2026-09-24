@@ -24,7 +24,10 @@ class TestCLI:
                 main()
             assert exc.value.code == 0
         output = capsys.readouterr().out
-        assert "0.1.0" in output
+        # Assert against the package version rather than a literal, so a
+        # version bump does not require editing this test.
+        import boxmunge_cli
+        assert boxmunge_cli.__version__ in output
 
     def test_unknown_command_exits_2(self) -> None:
         from boxmunge_cli.cli import main
