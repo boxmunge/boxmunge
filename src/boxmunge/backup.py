@@ -10,7 +10,11 @@ run `boxmunge doctor` to migrate the key.
 """
 
 import os
+import shutil
 import subprocess
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -102,7 +106,7 @@ def _container_path(host_path: Path) -> str:
     if "/projects/" in path_str:
         idx = path_str.index("/projects/")
         return path_str[idx:]
-    raise ValueError(f"Cannot translate path to container path: {host_path}")
+    raise BackupError(f"Cannot translate path to container path: {host_path}")
 
 
 def _use_container() -> bool:
@@ -165,8 +169,7 @@ def encrypt_file(input_path: Path, output_path: Path, key_path: Path) -> None:
     if not key_path.exists():
         raise FileNotFoundError(f"Backup encryption key not found: {key_path}")
 
-    import tempfile as _tempfile
-    fd, tmp_path_str = _tempfile.mkstemp(
+    fd, tmp_path_str = tempfile.mkstemp(
         dir=output_path.parent, prefix=".encrypt-", suffix=".tmp"
     )
     os.close(fd)
@@ -200,6 +203,25 @@ def decrypt_file(input_path: Path, output_path: Path, key_path: Path) -> None:
         "-o", _resolve_path(output_path, container),
         _resolve_path(input_path, container),
     ])
+
+
+@contextmanager
+def decrypted_snapshot(snapshot_path: Path, key_path: Path) -> Iterator[Path]:
+    """Decrypt a snapshot into a private temp dir beside it; yield the plaintext.
+
+    The temp dir lives in the project's backups directory (mounted into the
+    system container, unlike /tmp) so age's -o path translates. It is 0700,
+    chowned to the backups dir owner so age's fixed container uid can write
+    into it, dot-prefixed so prune/sync globs ignore it, and always removed.
+    """
+    tmpdir = Path(tempfile.mkdtemp(dir=snapshot_path.parent, prefix=".restore-"))
+    try:
+        _match_dir_ownership(tmpdir)
+        output = tmpdir / snapshot_path.stem  # strips .age
+        decrypt_file(snapshot_path, output, key_path)
+        yield output
+    finally:
+        shutil.rmtree(tmpdir)
 
 
 def prune_backups(

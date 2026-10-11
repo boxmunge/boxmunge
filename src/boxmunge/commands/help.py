@@ -55,7 +55,7 @@ Project operations:
   backup-all              Backup all configured projects
   backup-sync [project]   Sync encrypted backups to off-box remote
   restore <project>       Restore from a backup snapshot
-  test-restore <project>  Verify backup restores into throwaway container
+  test-restore <project>  Verify latest backup decrypts (no restore run)
   caddy-status            Show Caddy sites and certificate expiry
   console                 Open the boxmunge TUI
 
