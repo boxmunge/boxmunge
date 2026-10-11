@@ -2,11 +2,10 @@
 
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
-from boxmunge.backup import decrypt_file, resolve_backup_service, BackupError
+from boxmunge.backup import decrypted_snapshot, resolve_backup_service, BackupError
 from boxmunge.commands.backup_cmd import list_snapshots
 from boxmunge.docker import compose_down, compose_up, DockerError
 from boxmunge.fileutil import project_lock, LockError
@@ -21,12 +20,9 @@ def _restore_snapshot(
     snapshot_path: Path, project_dir: Path, key_path: Path,
     restore_command: str, project_name: str, service: str,
 ) -> bool:
-    """Decrypt snapshot into a temp directory and run the restore command."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        decrypted = Path(tmpdir) / snapshot_path.stem  # strips .age, lands in tmpdir
-        try:
-            decrypt_file(snapshot_path, decrypted, key_path)
-
+    """Decrypt snapshot into a private temp directory and run the restore command."""
+    try:
+        with decrypted_snapshot(snapshot_path, key_path) as decrypted:
             cmd = [
                 "docker", "compose",
                 "-f", "compose.yml",
@@ -40,13 +36,13 @@ def _restore_snapshot(
                     cmd, cwd=project_dir,
                     stdin=inf, capture_output=True, text=True,
                 )
-            if result.returncode != 0:
-                print(f"  ERROR: Restore command failed: {result.stderr}", file=sys.stderr)
-                return False
-        except (BackupError, FileNotFoundError) as e:
-            print(f"  ERROR: Decryption failed: {e}", file=sys.stderr)
-            return False
+    except (BackupError, FileNotFoundError) as e:
+        print(f"  ERROR: Decryption failed: {e}", file=sys.stderr)
+        return False
 
+    if result.returncode != 0:
+        print(f"  ERROR: Restore command failed: {result.stderr}", file=sys.stderr)
+        return False
     return True
 
 
@@ -213,18 +209,26 @@ def _run_restore_inner(
         project_name, service,
     ):
         log_error("restore", "Restore failed", paths, project=project_name)
+        print("  Restarting all services on existing data...")
+        _start_all(project_dir, compose_files)
         return 1
 
     print("  Starting all services...")
-    try:
-        compose_up(project_dir, compose_files=compose_files)
-    except DockerError as e:
-        print(f"  ERROR: Start failed: {e}", file=sys.stderr)
+    if not _start_all(project_dir, compose_files):
         return 1
 
     log_operation("restore", f"Restored from {snapshot_path.name}", paths, project=project_name)
     print(f"{project_name}: restore complete")
     return 0
+
+
+def _start_all(project_dir: Path, compose_files: list[str]) -> bool:
+    try:
+        compose_up(project_dir, compose_files=compose_files)
+    except DockerError as e:
+        print(f"  ERROR: Start failed: {e}", file=sys.stderr)
+        return False
+    return True
 
 
 def cmd_restore(args: list[str]) -> None:
