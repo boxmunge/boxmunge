@@ -9,7 +9,7 @@
 set -u
 
 service=${1:-web}
-url="http://127.0.0.1:8080/"
+url="http://127.0.0.1:8080/healthz"
 
 if command -v wget >/dev/null 2>&1; then
     wget -q -O /dev/null -T 5 "$url" 2>/dev/null && exit 0

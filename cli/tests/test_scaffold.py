@@ -24,7 +24,7 @@ def scaffold(tmp_path: Path) -> Path:
 
 
 def test_scaffold_files(scaffold: Path) -> None:
-    for rel in ["manifest.yml", "compose.yml", "Dockerfile", "site/index.html",
+    for rel in ["manifest.yml", "compose.yml", "Dockerfile", "app.py", "requirements.txt",
                 "project.env", "boxmunge-scripts/smoke.sh"]:
         assert (scaffold / rel).is_file(), rel
     assert not (scaffold / ".env.example").exists()
@@ -39,8 +39,21 @@ def test_compose_builds_from_files_that_exist(scaffold: Path) -> None:
     assert web["restart"] == "unless-stopped"
     dockerfile = (scaffold / "Dockerfile").read_text()
     for line in dockerfile.splitlines():
-        if line.startswith("COPY "):
+        if line.startswith("COPY ") and "--from=" not in line:
             assert (scaffold / line.split()[1]).exists(), line
+
+
+def test_dockerfile_models_the_image_guidance(scaffold: Path) -> None:
+    text = (scaffold / "Dockerfile").read_text()
+    froms = [ln.split()[1] for ln in text.splitlines() if ln.startswith("FROM ")]
+    assert len(froms) == 2, "multi-stage: a build stage and a runtime stage"
+    assert all(f.startswith("python:") and "-slim" in f for f in froms)
+    assert "sha256:<digest>" in text and "agent-help images" in text  # pin instructions
+    assert "sha256:" not in " ".join(froms), "never invent a digest"
+    runtime = text[text.rindex("FROM "):]
+    assert "COPY --from=build" in runtime and "pip install" not in runtime
+    user = next(ln.split()[1] for ln in runtime.splitlines() if ln.startswith("USER "))
+    assert user.split(":")[0] not in ("0", "root")
 
 
 def test_manifest_is_current_schema(scaffold: Path) -> None:

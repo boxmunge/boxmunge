@@ -1,0 +1,3 @@
+# Runtime dependencies, installed in the Dockerfile's build stage with
+# --require-hashes. Generate hashed pins with, for example:
+#   pip-compile --generate-hashes requirements.in

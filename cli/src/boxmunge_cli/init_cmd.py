@@ -22,7 +22,8 @@ _SCAFFOLD_FILES = {
     "manifest.yml": ("manifest.yml", 0o644),
     "compose.yml": ("compose.yml", 0o644),
     "Dockerfile": ("Dockerfile", 0o644),
-    "site/index.html": ("index.html", 0o644),
+    "app.py": ("app.py", 0o644),
+    "requirements.txt": ("requirements.txt", 0o644),
     "project.env": ("project.env", 0o644),
     "boxmunge-scripts/smoke.sh": ("smoke.sh", 0o755),
 }
