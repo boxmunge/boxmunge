@@ -48,7 +48,7 @@ would give deploy read and write access to every file deploy can reach (secrets,
 the shell and the `boxmunge-sftp` subsystem wrapper refuse it. Clients upload with
 `scp -O`, the legacy protocol.
 
-**Compose files** are confined to their own project. A project's `compose.yml` cannot set the compose project name, join or declare another project's networks (or `boxmunge-proxy`), claim a network alias outside its `<project>-` prefix, use another project's named volumes, bind-mount or read files outside its own directory, or join another container's namespaces. See SECURITY.md, "What `compose.yml` may not do".
+**Compose files** are confined to their own project. A project's `compose.yml` cannot set the compose project name, join or declare another project's networks (or `boxmunge-proxy`, so it cannot claim an alias there), use another project's named volumes, bind-mount or read files outside its own directory, or join another container's namespaces. See SECURITY.md, "What `compose.yml` may not do".
 
 **Logs and state** are per-project by default. The `boxmunge log` command scopes to a single project unless `--all` is passed. This prevents agent context pollution, not security isolation.
 

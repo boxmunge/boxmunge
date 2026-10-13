@@ -3,8 +3,9 @@
 
 Every project's compose file runs on the same Docker daemon. These rules
 keep one project's compose file from reaching another project: it may
-declare and join only its own networks, give its containers only aliases
-under its own `<project>-` prefix, use only its own named volumes, and
+declare and join only its own networks (any alias is fine there: a
+project-local network cannot collide with another project's), use only
+its own named volumes, and
 read host files (secrets, configs, build contexts) only from inside its
 own directory. It may not publish ports on the host either; a port that
 must be published is declared in the manifest (see `published_ports`). The shared `boxmunge-proxy` network is attached by
@@ -13,7 +14,7 @@ itself.
 
 Unlike the hardening rules, these are not relaxed by `security.profile:
 off`: opting a service out of container hardening does not entitle it to
-another project's network, alias, or data.
+another project's network or data.
 """
 from __future__ import annotations
 
@@ -128,26 +129,20 @@ def _service_networks(svc: dict[str, Any]) -> dict[str, Any]:
 
 
 def _check_service(
-    svc_name: str, svc: dict[str, Any], declared: set[str], project: str,
+    svc_name: str, svc: dict[str, Any], declared: set[str],
     base_dir: Path, roots: tuple[Path, ...],
 ) -> list[str]:
     problems: list[str] = []
-    prefix = f"{project}-"
-    for net, conf in _service_networks(svc).items():
+    # Declared networks are all project-local (_check_networks refuses
+    # external ones), so a service joining only those, with any aliases,
+    # cannot place a name on a network another project shares.
+    for net in _service_networks(svc):
         if net != "default" and net not in declared:
             problems.append(
                 f"service {svc_name}: joins network {net!r}, which this "
-                f"compose file does not declare. Use the project's own networks."
+                f"compose file does not declare, so it may be shared with other "
+                f"projects. Use the project's own networks."
             )
-        aliases = conf.get("aliases") if isinstance(conf, dict) else None
-        for alias in aliases or []:
-            if not (isinstance(alias, str) and alias.startswith(prefix) and len(alias) > len(prefix)):
-                problems.append(
-                    f"service {svc_name}: network alias {alias!r} is outside "
-                    f"this project's namespace. Aliases must start with "
-                    f"{prefix!r} (for example {prefix}{svc_name}), or reach the "
-                    f"service by its service name instead."
-                )
     if svc.get("ports"):
         problems.append(
             f"service {svc_name}: ports: publishes on the host directly, "
@@ -192,5 +187,5 @@ def isolation_problems(
     services = doc.get("services") or {}
     for svc_name, svc in services.items():
         if isinstance(svc, dict):
-            problems += _check_service(svc_name, svc, declared, project, base_dir, roots)
+            problems += _check_service(svc_name, svc, declared, base_dir, roots)
     return problems

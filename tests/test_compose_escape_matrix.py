@@ -281,10 +281,9 @@ F09_REJECTED = {
         {"networks": ["lan"]}, {"networks": {"lan": {"driver": "macvlan"}}}, "driver",
     ),
     "undeclared network": ({"networks": ["projb_default"]}, None, "does not declare"),
-    "alias in another project's namespace": (
-        {"networks": {"default": {"aliases": ["projb-web"]}}}, None, "alias",
+    "alias on an undeclared network": (
+        {"networks": {"projb_default": {"aliases": ["projb-web"]}}}, None, "does not declare",
     ),
-    "unprefixed alias": ({"networks": {"default": {"aliases": ["db"]}}}, None, "alias"),
     "external volume": (
         {"volumes": ["data:/d"]}, {"volumes": {"data": {"external": True, "name": "projb_data"}}},
         "external",
@@ -333,6 +332,11 @@ def test_f09_cross_project_reach_rejected(
 
 F09_ACCEPTED = {
     "prefixed alias": ({"networks": {"default": {"aliases": ["myapp-db"]}}}, None),
+    "short alias on default network": ({"networks": {"default": {"aliases": ["db"]}}}, None),
+    "any alias on own network": (
+        {"networks": {"backend": {"aliases": ["projb-web"]}}},
+        {"networks": {"backend": {"internal": True}}},
+    ),
     "own internal network": (
         {"networks": ["backend"]}, {"networks": {"backend": {"internal": True}}},
     ),
@@ -377,6 +381,6 @@ def test_f09_profile_off_relaxes_bind_confinement_with_warning(paths: BoxPaths) 
     _validate_off(paths, {"volumes": ["/srv/media:/m"]})
 
 
-def test_f09_profile_off_does_not_relax_alias_namespace(paths: BoxPaths) -> None:
-    with pytest.raises(ComposeSecurityError, match="alias"):
-        _validate_off(paths, {"networks": {"default": {"aliases": ["projb-web"]}}})
+def test_f09_profile_off_does_not_relax_network_confinement(paths: BoxPaths) -> None:
+    with pytest.raises(ComposeSecurityError, match="does not declare"):
+        _validate_off(paths, {"networks": {"projb_default": {"aliases": ["projb-web"]}}})

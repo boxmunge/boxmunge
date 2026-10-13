@@ -219,8 +219,7 @@ They apply to every service and are **not** relaxed by `profile: "off"`.
 | An `external: true` network, including `boxmunge-proxy` | Remove it. boxmunge attaches routed services to `boxmunge-proxy` itself; declare only the project's own networks. |
 | A top-level network or volume with a `name:` other than Compose's default (`<project>_<key>`) | Remove the `name:` line. |
 | A network with a `driver` other than `bridge` (`macvlan`, `ipvlan`, ...) | Remove the `driver:` line. |
-| A service joining a network the file does not declare | Declare it, or use `default`. |
-| A network alias that does not start with `<project>-` | Use `<project>-<name>`, or reach the service by its service name. |
+| A service joining a network the file does not declare | Declare it, or use `default`. Any alias is fine on the project's own networks; they cannot collide with another project's. |
 | An `external: true` volume, or a volume with `driver`/`driver_opts` | Use a plain named volume (`data: {}`) or a bind mount inside the project. |
 | `external_links`, or `volumes_from: [container:<name>]` | Reach services in the same file by service name; name a service in `volumes_from`. |
 | A `secrets`/`configs` `file:` or a `build` context outside the project directory | Keep the file or context inside the project. Secret values belong in `secrets set`. |
