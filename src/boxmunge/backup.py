@@ -9,7 +9,9 @@ The backup key at /opt/boxmunge/config/backup.key must be an age identity file
 run `boxmunge doctor` to migrate the key.
 """
 
+import enum
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Iterator
@@ -104,10 +106,56 @@ def _read_recipient(tools: SystemTools) -> str:
     return result.stdout.strip()
 
 
-def backup_filename(project_name: str) -> str:
-    """Generate a timestamped backup filename."""
+class BackupKind(enum.Enum):
+    """Why a snapshot was taken. Retention is counted separately per kind."""
+
+    NIGHTLY = "nightly"        # backup-all (the 02:00 timer)
+    PREDEPLOY = "predeploy"    # prod-deploy's snapshot before it changes anything
+    PREUPDATE = "preupdate"    # container-update, before recreating changed images
+    MANUAL = "manual"          # `backup <project>`, MCP, console, self-test
+
+
+# Snapshots kept per project for each kind other than NIGHTLY, whose count is
+# the manifest's backup.retention.
+SNAPSHOT_RETENTION = {
+    BackupKind.PREDEPLOY: 5,
+    BackupKind.PREUPDATE: 3,
+    BackupKind.MANUAL: 5,
+}
+
+_TIMESTAMP = r"\d{4}-\d{2}-\d{2}T\d{6}"
+
+
+def backup_filename(project_name: str, kind: BackupKind) -> str:
+    """Generate a timestamped, kind-tagged backup filename."""
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S")
-    return f"{project_name}-{ts}.tar.gz.age"
+    return f"{project_name}-{ts}-{kind.value}.tar.gz.age"
+
+
+def _parse_snapshot(path: Path, project_name: str) -> tuple[str, BackupKind] | None:
+    """(timestamp, kind) of a snapshot name, or None if it is not one.
+
+    Archives written before kinds existed (``<project>-<ts>.tar.gz.age``) count
+    as nightly, so they age out as new nightly backups arrive.
+    """
+    m = re.fullmatch(
+        rf"{re.escape(project_name)}-({_TIMESTAMP})(?:-([a-z]+))?\.tar\.gz\.age",
+        path.name,
+    )
+    if not m:
+        return None
+    if m.group(2) is None:
+        return m.group(1), BackupKind.NIGHTLY
+    try:
+        return m.group(1), BackupKind(m.group(2))
+    except ValueError:
+        return None
+
+
+def snapshot_kind(path: Path, project_name: str) -> BackupKind | None:
+    """The kind of a snapshot file, or None if the name is not a snapshot."""
+    parsed = _parse_snapshot(path, project_name)
+    return parsed[1] if parsed else None
 
 
 def encrypt_file(input_path: Path, output_path: Path, paths: BoxPaths) -> None:
@@ -176,14 +224,23 @@ def decrypted_snapshot(snapshot_path: Path, paths: BoxPaths) -> Iterator[Path]:
 
 
 def prune_backups(
-    backups_dir: Path, project_name: str, retention: int
+    backups_dir: Path, project_name: str, kind: BackupKind, retention: int,
 ) -> list[Path]:
-    """Remove oldest backups beyond the retention count."""
-    pattern = f"{project_name}-*.tar.gz.age"
-    files = sorted(backups_dir.glob(pattern), key=lambda f: f.stat().st_mtime)
+    """Remove the oldest snapshots of one kind beyond ``retention``.
 
-    to_prune = files[:-retention] if retention > 0 else files
+    Only files whose names parse as this project's snapshots of this kind are
+    counted or removed; anything else in the directory is left alone.
+    """
+    if retention < 1:
+        raise BackupError(
+            f"Backup retention for {kind.value} snapshots must be at least 1, "
+            f"got {retention}."
+        )
+    snapshots = sorted(
+        (parsed[0], f) for f in backups_dir.iterdir()
+        if (parsed := _parse_snapshot(f, project_name)) and parsed[1] is kind
+    )
+    to_prune = [f for _, f in snapshots[:-retention]]
     for f in to_prune:
         f.unlink()
-
     return to_prune

@@ -51,6 +51,7 @@ def run_project_delete(
         print(f"This will permanently delete project '{project_name}':")
         print("  - Stop and remove all containers (production and staging)")
         print(f"  - Delete {project_dir}, including its local backups")
+        print("    (off-site copies made by backup-sync are kept; backup-sync never deletes)")
         print("  - Remove Caddy site config")
         print("  - Remove health, deploy, pause, quarantine, scan, and update state")
         print("  - Deregister from project allowlist")

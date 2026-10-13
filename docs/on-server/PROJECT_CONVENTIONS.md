@@ -127,7 +127,9 @@ backup:
   # REQUIRED if type != none. Command run inside the container via `sh -c`.
   restore_command: "psql -U $POSTGRES_USER $POSTGRES_DB"
 
-  # Number of daily backups to retain. Defaults to 7.
+  # Number of nightly backups to keep (whole number, at least 1). Defaults to 7.
+  # Pre-deploy, pre-update and manual snapshots have their own counts
+  # (see OPERATIONS.md, "Snapshot kinds and retention").
   retention: 7
 
 # Deploy behaviour.

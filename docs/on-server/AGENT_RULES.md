@@ -89,7 +89,7 @@ These commands prompt for confirmation before executing. Use `--yes` only when y
 
 - `rollback <project>` -- rolls back to the previous deployment
 - `restore <project>` -- restores from a backup
-- `project-delete <project>` -- destructively deletes a project (containers, files, registry entry)
+- `project-delete <project>` -- destructively deletes a project (containers, files including local backups, registry entry); off-site backup copies are kept
 - `pause <project>` -- takes the site offline with a maintenance page
 - `resume <project> --skip-security-checks` -- DANGEROUS: brings up potentially vulnerable images without pulling fresh
 

@@ -287,17 +287,35 @@ Back up a single project (dump, compress, encrypt, store locally):
 backup myapp
 ```
 
-Back up all configured projects:
+Back up all configured projects (this is what the 02:00 timer runs):
 
 ```
 backup-all
 ```
 
-Sync all local encrypted backups to the configured off-box remote:
+Copy all local encrypted backups to the configured off-box remote (the 03:00 timer runs this), or one project's:
 
 ```
 backup-sync
+backup-sync myapp
 ```
+
+### Snapshot kinds and retention
+
+Every snapshot is named `<project>-<UTC timestamp>-<kind>.tar.gz.age`, for example `myapp-2026-03-30T020000-nightly.tar.gz.age`. Retention is counted separately for each kind, per project, so one kind never evicts another:
+
+| Kind | Taken by | Local copies kept |
+|---|---|---|
+| `nightly` | `backup-all` (the 02:00 timer) | `backup.retention` in the manifest (default 7) |
+| `predeploy` | `prod-deploy`'s pre-deploy snapshot (`deploy.snapshot_before_deploy`) | 5 |
+| `preupdate` | the container-update timer, only when a pulled image changed and the project is about to be recreated | 3 |
+| `manual` | `backup <project>`, the MCP `backup` tool, the console, `self-test` | 5 |
+
+After each backup, the oldest snapshots of that kind beyond its count are deleted. Archives from before kinds existed (`<project>-<timestamp>.tar.gz.age`) count as `nightly` and age out as new nightly backups arrive. Other files in `backups/` are never touched. `backup.retention` must be a whole number of at least 1; anything else fails the backup before it dumps.
+
+### Off-site copies
+
+`backup-sync` uses `rclone copy`, not `rclone sync`. The remote is an archive, not a mirror: a local prune never deletes an off-site copy, and neither does `project-delete`. boxmunge never deletes anything off-site, so bound the remote's size with a lifecycle rule on the bucket (for example, expire objects after 90 days). The layout on the remote is `<backup_remote>/<project>/backups/<snapshot>`, for both the full sync and `backup-sync <project>`.
 
 `backup-sync` needs `backup_remote` in `boxmunge.yml` (for example `offsite:my-bucket/boxmunge`). A named remote such as `offsite` is defined in `/opt/boxmunge/config/rclone/rclone.conf`, which `install.sh` creates empty (`root:deploy`, mode 0640). Edit it as root, for example:
 
@@ -327,7 +345,7 @@ restore myapp
 Restore from a specific snapshot:
 
 ```
-restore myapp myapp-2026-03-30T020000.tar.gz.age
+restore myapp myapp-2026-03-30T020000-nightly.tar.gz.age
 ```
 
 Before `restore` stops anything, it decrypts the snapshot and checks that it unpacks: it must be
@@ -442,7 +460,7 @@ Containers are stopped via `docker compose stop`, so state is preserved on disk 
 
 - Health checks, scheduled backups, and container-update sweeps skip the project
 - `prod-deploy`, `stage`, and `promote` refuse to run against it
-- `backup-sync` continues (off-box copies of existing snapshots are unaffected)
+- `backup-sync` continues (it only copies; existing off-box snapshots are never removed)
 
 To bring it back:
 

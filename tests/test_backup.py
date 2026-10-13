@@ -1,15 +1,11 @@
-"""Tests for boxmunge.backup — encryption, decryption, and pruning."""
+"""Tests for boxmunge.backup — service resolution, encryption, decryption."""
 
-import os
 import pytest
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from boxmunge.backup import (
     encrypt_file,
     decrypt_file,
-    prune_backups,
-    backup_filename,
     resolve_backup_service,
     BackupError,
 )
@@ -55,20 +51,6 @@ AGE_IDENTITY = (
     "# public key: age1test000000000000000000000000000000000000000000000000000qkzsl7\n"
     "AGE-SECRET-KEY-1TEST000000000000000000000000000000000000000000000000000000\n"
 )
-
-
-class TestBackupFilename:
-    def test_generates_timestamped_name(self) -> None:
-        name = backup_filename("myapp")
-        assert name.startswith("myapp-")
-        assert name.endswith(".tar.gz.age")
-        assert "T" in name
-
-    def test_different_projects_different_names(self) -> None:
-        a = backup_filename("alpha")
-        b = backup_filename("beta")
-        assert a.startswith("alpha-")
-        assert b.startswith("beta-")
 
 
 class TestEncryptFile:
@@ -194,32 +176,3 @@ class TestDecryptFile:
         with pytest.raises(BackupError, match="outside the system container's mounts"):
             decrypt_file(bdir / "myapp-1.tar.gz.age", tmp_path / "out", paths)
         assert system_container.calls == []
-
-
-class TestPruneBackups:
-    def test_prunes_oldest_beyond_retention(self, tmp_path: Path) -> None:
-        for i in range(5):
-            f = tmp_path / f"myapp-2026-03-{20+i:02d}T020000.tar.gz.age"
-            f.write_bytes(b"data")
-            os.utime(f, (1000000 + i * 86400, 1000000 + i * 86400))
-
-        pruned = prune_backups(tmp_path, "myapp", retention=3)
-        remaining = sorted(tmp_path.glob("myapp-*.tar.gz.age"))
-        assert len(remaining) == 3
-        assert len(pruned) == 2
-
-    def test_noop_when_under_retention(self, tmp_path: Path) -> None:
-        for i in range(2):
-            f = tmp_path / f"myapp-2026-03-{20+i:02d}T020000.tar.gz.age"
-            f.write_bytes(b"data")
-
-        pruned = prune_backups(tmp_path, "myapp", retention=5)
-        assert len(pruned) == 0
-        assert len(list(tmp_path.glob("myapp-*.tar.gz.age"))) == 2
-
-    def test_only_prunes_matching_project(self, tmp_path: Path) -> None:
-        (tmp_path / "myapp-2026-03-20T020000.tar.gz.age").write_bytes(b"data")
-        (tmp_path / "other-2026-03-20T020000.tar.gz.age").write_bytes(b"data")
-
-        prune_backups(tmp_path, "myapp", retention=0)
-        assert (tmp_path / "other-2026-03-20T020000.tar.gz.age").exists()

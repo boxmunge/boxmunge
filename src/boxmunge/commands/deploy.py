@@ -213,8 +213,10 @@ def _run_deploy_inner(
     backup_type = manifest.get("backup", {}).get("type", "none")
     if snapshot_enabled and not no_snapshot and backup_type != "none":
         print(f"  Taking pre-deploy snapshot...")
+        from boxmunge.backup import BackupKind
         from boxmunge.commands.backup_cmd import run_backup
-        backup_result = run_backup(project_name, paths, _lock_held=True)
+        backup_result = run_backup(project_name, paths, _lock_held=True,
+                                   kind=BackupKind.PREDEPLOY)
         if backup_result != 0:
             print(f"  WARN: Pre-deploy backup failed — continuing deploy")
         else:

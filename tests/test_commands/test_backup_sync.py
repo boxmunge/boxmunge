@@ -61,11 +61,23 @@ class TestBackupSync:
         assert cmd[cmd.index("--config") + 1] == "/config/rclone/rclone.conf"
         assert "/projects" in cmd
 
-    def test_single_project_source_is_translated(self, configured, system_container) -> None:
+    def test_copies_and_never_mirrors_deletions(self, configured, system_container) -> None:
+        """C-10: `rclone sync` deleted every off-site copy that a local prune
+        or project-delete had removed. The remote is an archive."""
+        system_container.handler = _ok
+        assert run_backup_sync(configured) == 0
+        [cmd] = system_container.calls
+        assert cmd[:4] == ["rclone", "copy", "/projects", "offsite:bucket"]
+        assert "sync" not in cmd
+        assert cmd[cmd.index("--include") + 1] == "/*/backups/*.tar.gz.age"
+
+    def test_single_project_uses_the_same_remote_layout(self, configured, system_container) -> None:
         system_container.handler = _ok
         assert run_backup_sync(configured, "myapp") == 0
         [cmd] = system_container.calls
-        assert "/projects/myapp/backups" in cmd
+        assert cmd[:4] == ["rclone", "copy", "/projects/myapp/backups",
+                           "offsite:bucket/myapp/backups"]
+        assert cmd[cmd.index("--include") + 1] == "/*.tar.gz.age"
 
     def test_missing_container_fails_without_host_rclone(
         self, configured, monkeypatch, capsys,

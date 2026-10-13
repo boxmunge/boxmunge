@@ -281,7 +281,7 @@ class TestBackupAllLockSkip:
         Pushover lock-skip alert must NOT fire for ordinary backup failures."""
         self._setup_two_projects(paths)
         # alpha "fails" with rc=1 (e.g. dump error); beta succeeds.
-        def side(name, paths_, _lock_held=False):
+        def side(name, paths_, _lock_held=False, kind=None):
             return 1 if name == "alpha" else 0
         mock_backup.side_effect = side
 

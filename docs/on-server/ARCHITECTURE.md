@@ -236,11 +236,11 @@ Backup flow:
 1. Run the dump command from the manifest
 2. Tar and compress the output
 3. Encrypt with age using the backup key
-4. Write atomically to `<project>/backups/<project>-<ISO8601>.tar.gz.age`
-5. Prune local archives beyond the configured retention count
+4. Write atomically to `<project>/backups/<project>-<ISO8601>-<kind>.tar.gz.age`, where kind is `nightly`, `predeploy`, `preupdate` or `manual`
+5. Prune local archives of the same kind beyond that kind's retention count (see OPERATIONS.md)
 6. Log the backup
 
-Off-box sync uses rclone to push encrypted archives to the configured remote. Since archives are encrypted before leaving the box, the remote is untrusted storage.
+Off-box sync uses `rclone copy` to push encrypted archives to the configured remote. It never deletes off-site copies, so the remote is an archive rather than a mirror of local retention. Since archives are encrypted before leaving the box, the remote is untrusted storage.
 
 ---
 
