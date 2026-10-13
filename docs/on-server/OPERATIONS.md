@@ -589,6 +589,8 @@ If deeper Caddy investigation is needed (container logs, config file inspection)
 
 This state means the smoke test exited with code 2 -- a critical failure that caused boxmunge to stop the project containers. The project will not restart automatically.
 
+The stop is sticky. Later 5-minute health checks do not run smoke against the stopped project, do not change its recorded failure reason, and do not send more alerts. `check-all` reports it as `CRITICAL (stopped by the health monitor ...)`, and `health` lists it under `lifecycle` as `monitor-stopped`. The stop stays in place until you run `recover`, or until a later deploy, rollback, or resume starts the project successfully.
+
 Check the dashboard to confirm the state:
 
 ```
@@ -601,7 +603,13 @@ Check logs from just before the containers were stopped:
 logs myapp --tail 200
 ```
 
-Once you have identified and fixed the underlying issue, redeploy:
+Once you have identified and fixed the underlying issue, restart the same build with `recover` (no image pull, no rebuild; it restores routing and runs the smoke test):
+
+```
+recover myapp
+```
+
+Or, if the fix needs new code, redeploy:
 
 ```
 prod-deploy myapp
