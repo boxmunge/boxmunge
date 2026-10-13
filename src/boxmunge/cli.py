@@ -4,6 +4,8 @@
 import sys
 from typing import Callable
 
+from boxmunge.commands.argv import HELP_FLAGS
+from boxmunge.commands.usage import usage_for
 from boxmunge.commands.add_git_project_cmd import cmd_add_git_project
 from boxmunge.commands.inbox_cmd import cmd_inbox
 from boxmunge.commands.console import cmd_console
@@ -12,7 +14,7 @@ from boxmunge.commands.caddy_status import cmd_caddy_status
 from boxmunge.commands.check import cmd_check, cmd_check_all
 from boxmunge.commands.deploy import cmd_deploy
 from boxmunge.commands.doctor import cmd_doctor
-from boxmunge.commands.help import cmd_help, cmd_agent_help
+from boxmunge.commands.help import cmd_help, cmd_agent_help, cmd_init_host
 from boxmunge.commands.log_cmd import cmd_log
 from boxmunge.commands.logs import cmd_logs
 from boxmunge.commands.promote_cmd import cmd_promote
@@ -48,7 +50,7 @@ from boxmunge.commands.version_cmd import cmd_version
 COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "help": cmd_help,
     "agent-help": cmd_agent_help,
-    "init-host": cmd_help,  # placeholder — init-host is the shell bootstrap
+    "init-host": cmd_init_host,  # explains that init-host is the shell bootstrap
     "doctor": cmd_doctor,
     "status": cmd_status,
     "test-alert": cmd_test_alert,
@@ -98,7 +100,7 @@ def main() -> None:
     """Main entry point for the boxmunge CLI."""
     args = sys.argv[1:]
 
-    if not args:
+    if not args or args[0] in HELP_FLAGS:
         cmd_help([])
         return
 
@@ -112,8 +114,14 @@ def main() -> None:
 
     handler = COMMANDS.get(command)
     if handler is None:
-        print(f"boxmunge: unknown command '{command}'", file=sys.stderr)
+        print(f"ERROR: unknown command '{command}'", file=sys.stderr)
         print("Run 'boxmunge help' for usage.", file=sys.stderr)
         sys.exit(2)
+
+    # -h/--help anywhere prints usage and exits before the handler runs, so
+    # asking for help can never execute the command (audit D-17).
+    if HELP_FLAGS.intersection(command_args):
+        print(usage_for(command))
+        sys.exit(0)
 
     handler(command_args)

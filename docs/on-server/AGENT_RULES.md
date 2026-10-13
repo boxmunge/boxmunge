@@ -10,7 +10,7 @@ The deploy shell is a **restricted shell** that dispatches commands directly -- 
 
 Run these commands in order:
 
-1. `help` -- see all available commands
+1. `help` -- see all available commands (`help <command>` shows one command's usage; it never runs the command)
 2. `status` -- check the current state of all projects
 3. `agent-help <topic>` -- read documentation (architecture, operations, conventions, rules)
 
@@ -90,6 +90,15 @@ These commands prompt for confirmation before executing. Use `--yes` only when y
 - `resume <project> --skip-security-checks` -- DANGEROUS: brings up potentially vulnerable images without pulling fresh
 
 Do not pass `--yes` reflexively. Confirm the target project and the effect before proceeding.
+
+### Flags are strict
+
+- `help <command>` or `<command> --help` shows a command's usage. Neither runs the command.
+- A flag a command does not implement is an error (exit 2) and nothing runs. Read the usage
+  rather than guessing flags.
+- `--dry-run` exists only on `prod-deploy`, `stage`, `promote`, `unstage`, `upgrade` and
+  `container-update`. Other commands, including `project-delete`, `rollback`, `restore` and
+  `pause`, reject it. There is no way to preview those; confirm the target before running them.
 
 ---
 

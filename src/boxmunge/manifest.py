@@ -61,13 +61,19 @@ class ManifestError(Exception):
 def load_manifest(path: Path) -> dict[str, Any]:
     """Load a manifest.yml file and return its contents as a dict.
 
-    Raises ManifestError if the file doesn't exist or can't be parsed.
+    Raises ManifestError, naming the file, if it doesn't exist, can't be
+    read, or can't be parsed.
     """
     if not path.exists():
         raise ManifestError(f"Manifest not found: {path}")
 
-    with open(path) as f:
-        data = yaml.safe_load(f)
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        raise ManifestError(f"Manifest is not valid YAML: {path}: {e}") from e
+    except (OSError, UnicodeDecodeError) as e:
+        raise ManifestError(f"Cannot read manifest {path}: {e}") from e
 
     if not isinstance(data, dict):
         raise ManifestError(f"Manifest is not a YAML mapping: {path}")

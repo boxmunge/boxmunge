@@ -11,6 +11,7 @@ import sys
 from dataclasses import dataclass, field
 
 from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
+from boxmunge.fleet import PROJECT_INPUT_ERRORS
 from boxmunge.lifecycle import is_blocked
 from boxmunge.pause import is_paused
 from boxmunge.paths import BoxPaths
@@ -178,9 +179,15 @@ def check_project_containers(paths: BoxPaths) -> HealthCheck:
         return HealthCheck("project-containers", "ok", "No projects deployed")
 
     down_projects = []
+    unreadable: list[str] = []
     blocked_count = 0
     for name in projects:
-        if is_blocked(name, paths):
+        try:
+            blocked = is_blocked(name, paths)
+        except PROJECT_INPUT_ERRORS as e:
+            unreadable.append(f"{name} ({e})")
+            continue
+        if blocked:
             blocked_count += 1
             continue
         compose_cmd = ["docker", "compose", "-f", "compose.yml"]
@@ -196,6 +203,11 @@ def check_project_containers(paths: BoxPaths) -> HealthCheck:
         if result.returncode != 0 or not result.stdout.strip():
             down_projects.append(name)
 
+    if unreadable:
+        return HealthCheck(
+            "project-containers", "error",
+            f"Could not read project state: {'; '.join(unreadable)}",
+        )
     if down_projects:
         return HealthCheck(
             "project-containers", "warn",
@@ -229,6 +241,7 @@ def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
         return HealthCheck("lifecycle", "ok", "No projects deployed")
     paused: list[str] = []
     quarantined: list[tuple[str, str]] = []
+    unreadable: list[str] = []
     for proj_dir in sorted(paths.projects.iterdir()):
         if not proj_dir.is_dir() or not (proj_dir / "manifest.yml").exists():
             continue
@@ -236,12 +249,18 @@ def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
         # Mirrors lifecycle.is_blocked precedence: quarantine wins if
         # both markers exist.
         if is_quarantined(name, paths):
-            qstate = read_quarantine_state(name, paths) or {}
+            try:
+                qstate = read_quarantine_state(name, paths) or {}
+            except PROJECT_INPUT_ERRORS as e:
+                unreadable.append(f"{name} ({e})")
+                continue
             cve = qstate.get("cve_id", "?")
             quarantined.append((name, cve))
         elif is_paused(name, paths):
             paused.append(name)
     parts: list[str] = []
+    if unreadable:
+        parts.append("unreadable state: " + "; ".join(unreadable))
     if quarantined:
         parts.append(
             "quarantined: "
@@ -249,6 +268,8 @@ def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
         )
     if paused:
         parts.append("paused: " + ", ".join(paused))
+    if unreadable:
+        return HealthCheck("lifecycle", "error", "; ".join(parts))
     if quarantined:
         return HealthCheck("lifecycle", "warn", "; ".join(parts))
     if paused:
@@ -259,12 +280,13 @@ def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
 def check_config_drift(paths: BoxPaths) -> HealthCheck:
     """Check if generated configs match what they should be."""
     from boxmunge.caddy import generate_caddy_config
-    from boxmunge.manifest import ManifestError, load_manifest
+    from boxmunge.manifest import load_manifest
 
     if not paths.projects.exists():
         return HealthCheck("config-drift", "ok", "No projects to check")
 
     drifted = []
+    unreadable: list[str] = []
     for project_dir in sorted(paths.projects.iterdir()):
         if not project_dir.is_dir():
             continue
@@ -273,15 +295,16 @@ def check_config_drift(paths: BoxPaths) -> HealthCheck:
             continue
         try:
             manifest = load_manifest(manifest_path)
-        except ManifestError:
+            project_name = manifest.get("project", project_dir.name)
+            # Skip blocked projects: when paused/quarantined the .conf
+            # intentionally holds the maintenance fragment, so comparing
+            # against generate_caddy_config produces a false-positive drift
+            # warning. The blocked state itself is reported by `lifecycle`.
+            blocked = is_blocked(project_name, paths)
+        except PROJECT_INPUT_ERRORS as e:
+            unreadable.append(f"{project_dir.name} ({e})")
             continue
-
-        project_name = manifest.get("project", project_dir.name)
-        # Skip blocked projects: when paused/quarantined the .conf
-        # intentionally holds the maintenance fragment, so comparing
-        # against generate_caddy_config produces a false-positive drift
-        # warning. The blocked state itself is reported by `lifecycle`.
-        if is_blocked(project_name, paths):
+        if blocked:
             continue
         site_conf = paths.project_caddy_site(project_name)
         override = paths.project_caddy_override(project_name)
@@ -291,6 +314,11 @@ def check_config_drift(paths: BoxPaths) -> HealthCheck:
             if site_conf.read_text() != expected:
                 drifted.append(project_name)
 
+    if unreadable:
+        return HealthCheck(
+            "config-drift", "error",
+            f"Could not check: {'; '.join(unreadable)}",
+        )
     if drifted:
         return HealthCheck(
             "config-drift", "warn",
@@ -392,6 +420,7 @@ def run_health(paths: BoxPaths, *, as_json: bool = False) -> int:
 
 def cmd_health(args: list[str]) -> None:
     """CLI entry point for health command."""
-    as_json = "--json" in args
+    from boxmunge.commands.argv import parse_args
+    parsed = parse_args("health", args, flags={"--json"})
     paths = BoxPaths()
-    sys.exit(run_health(paths, as_json=as_json))
+    sys.exit(run_health(paths, as_json=parsed.has("--json")))

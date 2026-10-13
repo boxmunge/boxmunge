@@ -78,19 +78,11 @@ def run_unstage(project_name: str, paths: BoxPaths, dry_run: bool = False,
 
 
 def cmd_unstage(args: list[str]) -> None:
+    from boxmunge.commands.argv import parse_args, require_project_name
     from boxmunge.paths import BoxPaths
-    if not args:
-        print("Usage: boxmunge unstage <project> [--dry-run]", file=sys.stderr)
-        sys.exit(2)
-    dry_run = "--dry-run" in args
-    project = [a for a in args if not a.startswith("--")][0]
-
-    from boxmunge.paths import validate_project_name
-    try:
-        validate_project_name(project)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(2)
-
+    parsed = parse_args(
+        "unstage", args, flags={"--dry-run"}, min_positional=1, max_positional=1,
+    )
+    project = require_project_name("unstage", parsed.positional[0])
     paths = BoxPaths()
-    sys.exit(run_unstage(project, paths, dry_run=dry_run))
+    sys.exit(run_unstage(project, paths, dry_run=parsed.has("--dry-run")))

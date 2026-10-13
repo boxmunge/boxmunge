@@ -26,7 +26,7 @@ from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import is_paused, clear_paused_state
-from boxmunge.paths import BoxPaths, validate_project_name
+from boxmunge.paths import BoxPaths
 from boxmunge.pushover import send_notification
 from boxmunge.security_overlay import services_with_off_profile
 from boxmunge.state import read_state, write_state
@@ -210,20 +210,14 @@ def run_resume(
 
 
 def cmd_resume(args: list[str]) -> None:
-    if not args:
-        print("Usage: boxmunge resume <project> [--skip-security-checks] [--yes]",
-              file=sys.stderr)
-        sys.exit(2)
-
-    project = args[0]
-    try:
-        validate_project_name(project)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(2)
-
-    yes = "--yes" in args
-    skip_security_checks = "--skip-security-checks" in args
+    from boxmunge.commands.argv import parse_args, require_project_name
+    parsed = parse_args(
+        "resume", args, flags={"--yes", "--skip-security-checks"},
+        min_positional=1, max_positional=1,
+    )
+    project = require_project_name("resume", parsed.positional[0])
+    yes = parsed.has("--yes")
+    skip_security_checks = parsed.has("--skip-security-checks")
 
     paths = BoxPaths()
     sys.exit(run_resume(project, paths, yes=yes,

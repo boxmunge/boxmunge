@@ -4,7 +4,9 @@ import json
 import sys
 from datetime import datetime, timezone
 
+from boxmunge.commands.argv import parse_args
 from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
+from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.paths import BoxPaths
 from boxmunge.pause import is_paused
 from boxmunge.state import read_state
@@ -26,7 +28,12 @@ def _short_ts(raw: str) -> str:
 
 
 def run_status(paths: BoxPaths, as_json: bool = False) -> int:
-    """Show status dashboard for all projects."""
+    """Show status dashboard for all projects.
+
+    A project whose state files cannot be read gets an ERROR row (and an
+    ERROR line on stderr); the rest of the dashboard still renders. Returns
+    1 if any project failed, else 0.
+    """
     projects_dir = paths.projects
     if not projects_dir.exists():
         print("No projects directory found.")
@@ -46,62 +53,21 @@ def run_status(paths: BoxPaths, as_json: bool = False) -> int:
         return 0
 
     rows = []
+    failed = False
     for name in deployed:
-        # Quarantine takes precedence over pause if both markers exist
-        # (mirrors lifecycle.is_blocked ordering — the security action is
-        # the more specific one).
-        if is_quarantined(name, paths):
-            qstate = read_quarantine_state(name, paths) or {}
-            deploy = read_state(paths.project_deploy_state(name))
+        try:
+            rows.append(_project_row(name, paths))
+        except PROJECT_INPUT_ERRORS as e:
+            report_project_failure("status", name, e, paths)
+            failed = True
             rows.append({
                 "project": name,
-                "status": "QUARANTINED",
+                "status": "ERROR",
                 "last_check": "-",
-                "deployed_at": deploy.get("deployed_at", "-"),
-                "raw_status": "quarantined",
-                "cve_id": qstate.get("cve_id", "-"),
-                "severity": (
-                    qstate.get("effective_severity")
-                    or qstate.get("severity", "-")
-                ),
-                "explanation": qstate.get("explanation", ""),
-                "quarantined_at": qstate.get("quarantined_at", "-"),
+                "deployed_at": "-",
+                "raw_status": "error",
+                "error": f"{name}: {e}",
             })
-            continue
-        if is_paused(name, paths):
-            deploy = read_state(paths.project_deploy_state(name))
-            deployed_at = deploy.get("deployed_at", "-")
-            rows.append({
-                "project": name,
-                "status": "PAUSED",
-                "last_check": "-",
-                "deployed_at": deployed_at,
-                "raw_status": "paused",
-            })
-            continue
-        health = read_state(paths.project_health_state(name))
-        deploy = read_state(paths.project_deploy_state(name))
-
-        status = health.get("status", "unknown")
-        last_check = health.get("last_check", "-")
-        deployed_at = deploy.get("deployed_at", "-")
-
-        if status == "ok":
-            display_status = "OK"
-        elif status == "critical_stopped":
-            display_status = "CRITICAL (stopped)"
-        elif status == "failing":
-            display_status = "FAILING"
-        else:
-            display_status = status.upper()
-
-        rows.append({
-            "project": name,
-            "status": display_status,
-            "last_check": last_check,
-            "deployed_at": deployed_at,
-            "raw_status": status,
-        })
 
     for name in pre_registered:
         rows.append({
@@ -116,53 +82,111 @@ def run_status(paths: BoxPaths, as_json: bool = False) -> int:
         # JSON output keeps full-precision timestamps for machine consumption.
         print(json.dumps(rows, indent=2))
     else:
-        # Human-readable: trim timestamps to the second; widen STATUS to fit
-        # "CRITICAL (stopped)" (18 chars) and "PRE-REGISTERED" (14 chars).
-        col_project = 25
-        col_status = 20
-        col_ts = 19  # "YYYY-MM-DD HH:MM:SS"
-        header = (
-            f"{'PROJECT':<{col_project}} "
-            f"{'STATUS':<{col_status}} "
-            f"{'LAST CHECK (UTC)':<{col_ts}} "
-            f"{'DEPLOYED (UTC)':<{col_ts}}"
-        )
-        print(header)
+        _print_table(rows)
+
+    return 1 if failed else 0
+
+
+def _project_row(name: str, paths: BoxPaths) -> dict[str, str]:
+    """Build one deployed project's dashboard row from its state files."""
+    # Quarantine takes precedence over pause if both markers exist
+    # (mirrors lifecycle.is_blocked ordering — the security action is
+    # the more specific one).
+    if is_quarantined(name, paths):
+        qstate = read_quarantine_state(name, paths) or {}
+        deploy = read_state(paths.project_deploy_state(name))
+        return {
+            "project": name,
+            "status": "QUARANTINED",
+            "last_check": "-",
+            "deployed_at": deploy.get("deployed_at", "-"),
+            "raw_status": "quarantined",
+            "cve_id": qstate.get("cve_id", "-"),
+            "severity": (
+                qstate.get("effective_severity")
+                or qstate.get("severity", "-")
+            ),
+            "explanation": qstate.get("explanation", ""),
+            "quarantined_at": qstate.get("quarantined_at", "-"),
+        }
+    if is_paused(name, paths):
+        deploy = read_state(paths.project_deploy_state(name))
+        return {
+            "project": name,
+            "status": "PAUSED",
+            "last_check": "-",
+            "deployed_at": deploy.get("deployed_at", "-"),
+            "raw_status": "paused",
+        }
+    health = read_state(paths.project_health_state(name))
+    deploy = read_state(paths.project_deploy_state(name))
+
+    status = health.get("status", "unknown")
+    if status == "ok":
+        display_status = "OK"
+    elif status == "critical_stopped":
+        display_status = "CRITICAL (stopped)"
+    elif status == "failing":
+        display_status = "FAILING"
+    else:
+        display_status = status.upper()
+
+    return {
+        "project": name,
+        "status": display_status,
+        "last_check": health.get("last_check", "-"),
+        "deployed_at": deploy.get("deployed_at", "-"),
+        "raw_status": status,
+    }
+
+
+def _print_table(rows: list[dict[str, str]]) -> None:
+    """Human-readable dashboard."""
+    # Trim timestamps to the second; widen STATUS to fit
+    # "CRITICAL (stopped)" (18 chars) and "PRE-REGISTERED" (14 chars).
+    col_project = 25
+    col_status = 20
+    col_ts = 19  # "YYYY-MM-DD HH:MM:SS"
+    header = (
+        f"{'PROJECT':<{col_project}} "
+        f"{'STATUS':<{col_status}} "
+        f"{'LAST CHECK (UTC)':<{col_ts}} "
+        f"{'DEPLOYED (UTC)':<{col_ts}}"
+    )
+    print(header)
+    print(
+        f"{'-'*col_project} {'-'*col_status} "
+        f"{'-'*col_ts} {'-'*col_ts}"
+    )
+    for row in rows:
         print(
-            f"{'-'*col_project} {'-'*col_status} "
-            f"{'-'*col_ts} {'-'*col_ts}"
+            f"{row['project']:<{col_project}} "
+            f"{row['status']:<{col_status}} "
+            f"{_short_ts(row['last_check']):<{col_ts}} "
+            f"{_short_ts(row['deployed_at']):<{col_ts}}"
         )
-        for row in rows:
-            print(
-                f"{row['project']:<{col_project}} "
-                f"{row['status']:<{col_status}} "
-                f"{_short_ts(row['last_check']):<{col_ts}} "
-                f"{_short_ts(row['deployed_at']):<{col_ts}}"
-            )
 
-        # Rationale block — a quarantine without its CVE rationale is
-        # actionably useless. Surface CVE id, severity, and explanation
-        # directly so operators don't have to round-trip through
-        # `security <project>` to find out why a site is offline.
-        quarantined = [r for r in rows if r["raw_status"] == "quarantined"]
-        if quarantined:
-            print()
-            print("Quarantined projects:")
-            for row in quarantined:
-                cve = row.get("cve_id", "-")
-                sev = row.get("severity", "-")
-                explanation = row.get("explanation", "") or ""
-                since = _short_ts(row.get("quarantined_at", "-"))
-                print(f"  {row['project']}: {cve} {sev} (since {since} UTC)")
-                if explanation:
-                    print(f"    reason: {explanation}")
-                print(f"    lift with: security resume {row['project']}")
-
-    return 0
+    # Rationale block — a quarantine without its CVE rationale is
+    # actionably useless. Surface CVE id, severity, and explanation
+    # directly so operators don't have to round-trip through
+    # `security <project>` to find out why a site is offline.
+    quarantined = [r for r in rows if r["raw_status"] == "quarantined"]
+    if quarantined:
+        print()
+        print("Quarantined projects:")
+        for row in quarantined:
+            cve = row.get("cve_id", "-")
+            sev = row.get("severity", "-")
+            explanation = row.get("explanation", "") or ""
+            since = _short_ts(row.get("quarantined_at", "-"))
+            print(f"  {row['project']}: {cve} {sev} (since {since} UTC)")
+            if explanation:
+                print(f"    reason: {explanation}")
+            print(f"    lift with: security resume {row['project']}")
 
 
 def cmd_status(args: list[str]) -> None:
     """CLI entry point for status command."""
+    as_json = parse_args("status", args, flags={"--json"}).has("--json")
     paths = BoxPaths()
-    as_json = "--json" in args
     sys.exit(run_status(paths, as_json=as_json))

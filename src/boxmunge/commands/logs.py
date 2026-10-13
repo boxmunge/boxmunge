@@ -14,55 +14,34 @@ from boxmunge.docker import compose_logs, compose_logs_capture, DockerError
 
 def cmd_logs(args: list[str]) -> None:
     """CLI entry point for logs command."""
-    paths = BoxPaths()
-
-    if "--host" in args:
-        _show_host_logs()
-        return
-
-    if "--boxmunge" in args:
-        _show_boxmunge_logs(paths)
-        return
-
-    if not args:
-        print("Usage: boxmunge logs <project> [service] [--tail N] [--follow]",
-              file=sys.stderr)
-        print("       boxmunge logs --host", file=sys.stderr)
-        print("       boxmunge logs --boxmunge", file=sys.stderr)
-        sys.exit(2)
-
-    project = args[0]
-
-    from boxmunge.paths import validate_project_name
-    try:
-        validate_project_name(project)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(2)
-
-    service = None
-    tail = 100
-    follow = False
-
-    remaining = args[1:]
-    positional_consumed = False
-    i = 0
-    while i < len(remaining):
-        arg = remaining[i]
-        if arg == "--tail" and i + 1 < len(remaining):
-            tail = int(remaining[i + 1])
-            i += 2
-        elif arg == "--follow":
-            follow = True
-            i += 1
-        elif not arg.startswith("--") and not positional_consumed:
-            service = arg
-            positional_consumed = True
-            i += 1
+    from boxmunge.commands.argv import (
+        parse_args, require_project_name, usage_error,
+    )
+    if args in (["--host"], ["--boxmunge"]):
+        paths = BoxPaths()
+        if args == ["--host"]:
+            _show_host_logs()
         else:
-            print(f"ERROR: unknown argument: {arg}", file=sys.stderr)
-            sys.exit(2)
+            _show_boxmunge_logs(paths)
+        return
+    if "--host" in args or "--boxmunge" in args:
+        usage_error("logs", "--host and --boxmunge take no other arguments")
 
+    parsed = parse_args(
+        "logs", args, flags={"--follow"}, options={"--tail"},
+        min_positional=1, max_positional=2,
+    )
+    project = require_project_name("logs", parsed.positional[0])
+    service = parsed.positional[1] if len(parsed.positional) > 1 else None
+    follow = parsed.has("--follow")
+    tail = 100
+    raw_tail = parsed.get("--tail")
+    if raw_tail is not None:
+        if not raw_tail.isdigit():
+            usage_error("logs", f"--tail must be a whole number, got {raw_tail!r}")
+        tail = int(raw_tail)
+
+    paths = BoxPaths()
     project_dir = paths.project_dir(project)
     if not project_dir.exists():
         print(f"ERROR: Project not found: {project}", file=sys.stderr)

@@ -104,20 +104,12 @@ def _run_rollback_inner(
 
 
 def cmd_rollback(args: list[str]) -> None:
-    if not args:
-        print("Usage: boxmunge rollback <project> [--yes]", file=sys.stderr)
-        sys.exit(2)
-
-    project = args[0]
-
-    from boxmunge.paths import validate_project_name
-    try:
-        validate_project_name(project)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(2)
-
-    yes = "--yes" in args
+    from boxmunge.commands.argv import parse_args, require_project_name
+    parsed = parse_args(
+        "rollback", args, flags={"--yes"}, min_positional=1, max_positional=1,
+    )
+    project = require_project_name("rollback", parsed.positional[0])
+    yes = parsed.has("--yes")
 
     paths = BoxPaths()
     sys.exit(run_rollback(project, paths, yes=yes))

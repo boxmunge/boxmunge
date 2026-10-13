@@ -7,10 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from boxmunge.commands.argv import parse_args, require_project_name
 from boxmunge.commands.health_state import update_health_state
+from boxmunge.config import ConfigError, load_config
 from boxmunge.fileutil import project_lock, LockError
+from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.lifecycle import BlockReason, is_blocked
-from boxmunge.log import log_operation
+from boxmunge.log import log_error, log_operation
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 
@@ -303,57 +306,38 @@ def _run_check_json(project_name: str, paths: BoxPaths) -> int:
 
 def cmd_check(args: list[str]) -> None:
     """CLI entry point for check command."""
-    known_flags = {"--json"}
-    unknown = [a for a in args if a.startswith("--") and a not in known_flags]
-    if unknown:
-        print(
-            f"ERROR: unknown argument(s): {' '.join(unknown)}",
-            file=sys.stderr,
-        )
-        print("Usage: boxmunge check <project> [--json]", file=sys.stderr)
-        sys.exit(2)
-
-    as_json = "--json" in args
-    positional = [a for a in args if not a.startswith("--")]
-    if not positional:
-        print("Usage: boxmunge check <project> [--json]", file=sys.stderr)
-        sys.exit(2)
-    if len(positional) > 1:
-        print(
-            f"ERROR: unknown argument(s): {' '.join(positional[1:])}",
-            file=sys.stderr,
-        )
-        print("Usage: boxmunge check <project> [--json]", file=sys.stderr)
-        sys.exit(2)
-
-    from boxmunge.paths import validate_project_name
-    try:
-        validate_project_name(positional[0])
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(2)
-
+    parsed = parse_args(
+        "check", args, flags={"--json"}, min_positional=1, max_positional=1,
+    )
+    project = require_project_name("check", parsed.positional[0])
     paths = BoxPaths()
-    if as_json:
-        sys.exit(_run_check_json(positional[0], paths))
-    sys.exit(run_check(positional[0], paths))
+    if parsed.has("--json"):
+        sys.exit(_run_check_json(project, paths))
+    sys.exit(run_check(project, paths))
 
 
-def run_check_all(args: list[str], paths: BoxPaths) -> int:
+def run_check_all(paths: BoxPaths, *, read_only: bool) -> int:
     """Run health checks across every project.
 
     Default mode (mutator): writes health state, may call ``compose_down``
     on critical results, and emits Pushover notifications. This is the
     form the systemd timer drives.
 
-    ``--read-only``: run the same per-project checks and print the report,
+    ``read_only``: run the same per-project checks and print the report,
     but skip every side effect — no state writes, no container stops,
     no notifications. The exit code still reflects the worst severity.
 
-    Returns the worst per-project status (0 ok, 1 warning, 2 critical).
+    A project whose inputs cannot be read (manifest, state files) is
+    reported on stderr and in the log, and the loop carries on with the
+    rest. An unusable host config is reported the same way.
+
+    Returns the worst per-project status (0 ok, 1 warning, 2 critical),
+    and at least 1 if any project could not be checked.
     """
-    read_only = "--read-only" in args
     worst = 0
+    failed: list[str] = []
+    if not read_only and not _host_config_usable(paths):
+        worst = 1
     projects_dir = paths.projects
     if not projects_dir.exists():
         print("No projects directory.")
@@ -366,57 +350,93 @@ def run_check_all(args: list[str], paths: BoxPaths) -> int:
 
     if not projects:
         print("No projects to check.")
-        return 0
+        return worst
 
     for name in projects:
-        # A blocked (paused or CVE-quarantined) project is intentionally
-        # stopped. Running smoke (which depends on a live container)
-        # would fail, escalate to alerts via update_health_state, and
-        # possibly call compose_down on an already-stopped project.
-        # Quarantine adds a structured log entry; paused historically
-        # did not (preserved).
-        block = is_blocked(name, paths)
-        if block:
-            if block.reason is BlockReason.QUARANTINED:
-                log_operation(
-                    "check-all", block.skip_message,
-                    paths, project=name,
-                )
-            continue
-
-        # Maintenance window: a deploy/stage/promote/restore in progress
-        # holds the project lock. Stage transiently stops the prod container
-        # to snapshot its data; a smoke run racing that transient state
-        # escalates to CRITICAL and calls compose_down, leaving production
-        # OFFLINE until the next promote. Hold the lock for the whole check
-        # so we either skip (op in progress) or run with no lifecycle op
-        # able to start underneath us — never act on a transient state.
         try:
-            with project_lock(name, paths):
-                worst = max(worst, _check_one(name, paths, read_only))
-        except LockError:
-            log_operation(
-                "check-all",
-                "skipped — lifecycle operation in progress (lock held)",
-                paths, project=name,
-            )
-            continue
+            worst = max(worst, _check_project(name, paths, read_only))
+        except PROJECT_INPUT_ERRORS as e:
+            report_project_failure("check-all", name, e, paths)
+            failed.append(name)
 
+    if failed:
+        print(
+            f"ERROR: check-all: {len(failed)} project(s) could not be "
+            f"checked: {', '.join(failed)}",
+            file=sys.stderr,
+        )
+        worst = max(worst, 1)
     return worst
 
 
+def _host_config_usable(paths: BoxPaths) -> bool:
+    """Report an unusable host config loudly. Alerts depend on it."""
+    try:
+        load_config(paths)
+    except ConfigError as e:
+        print(f"ERROR: check-all: alerts cannot be sent: {e}", file=sys.stderr)
+        log_error("check-all", f"alerts cannot be sent: {e}", paths)
+        return False
+    return True
+
+
+def _check_project(name: str, paths: BoxPaths, read_only: bool) -> int:
+    """Check one project unless it is blocked or locked. Returns its status."""
+    # A blocked (paused or CVE-quarantined) project is intentionally
+    # stopped. Running smoke (which depends on a live container)
+    # would fail, escalate to alerts via update_health_state, and
+    # possibly call compose_down on an already-stopped project.
+    # Quarantine adds a structured log entry; paused historically
+    # did not (preserved).
+    block = is_blocked(name, paths)
+    if block:
+        if block.reason is BlockReason.QUARANTINED:
+            log_operation(
+                "check-all", block.skip_message,
+                paths, project=name,
+            )
+        return 0
+
+    # Maintenance window: a deploy/stage/promote/restore in progress
+    # holds the project lock. Stage transiently stops the prod container
+    # to snapshot its data; a smoke run racing that transient state
+    # escalates to CRITICAL and calls compose_down, leaving production
+    # OFFLINE until the next promote. Hold the lock for the whole check
+    # so we either skip (op in progress) or run with no lifecycle op
+    # able to start underneath us — never act on a transient state.
+    try:
+        with project_lock(name, paths):
+            return _check_one(name, paths, read_only)
+    except LockError:
+        log_operation(
+            "check-all",
+            "skipped — lifecycle operation in progress (lock held)",
+            paths, project=name,
+        )
+        return 0
+
+
 def _check_one(name: str, paths: BoxPaths, read_only: bool) -> int:
-    """Run a single project's check (caller holds the project lock)."""
+    """Run a single project's check (caller holds the project lock).
+
+    An unreadable manifest is fed to the health state machine as a
+    warning carrying the cause (so the normal threshold alert fires
+    instead of the project silently dropping out of monitoring), then
+    re-raised for the fleet loop to report.
+    """
+    try:
+        manifest = load_manifest(paths.project_manifest(name))
+    except ManifestError as e:
+        if not read_only:
+            update_health_state(name, 1, str(e), paths)
+        raise
+
     result = run_check(name, paths)
 
     if not read_only:
         # Mutator path: also runs the smoke a second time to capture
         # the failure message for Pushover. Skipped under --read-only
         # because there is no state to update and no alert to send.
-        try:
-            manifest = load_manifest(paths.project_manifest(name))
-        except ManifestError:
-            manifest = {}
         message = ""
         if result != 0:
             has_smoke = any(
@@ -441,7 +461,9 @@ def cmd_check_all(args: list[str]) -> None:
     Without --read-only this is the timer-driven mutator: it writes per-
     project health state, can call compose_down on critical results, and
     emits Pushover notifications. With --read-only it only prints the
-    report; no side effects.
+    report; no side effects. Any other argument is a usage error, so a
+    mistyped --read-only can never fall through to the mutator (audit D-04).
     """
+    parsed = parse_args("check-all", args, flags={"--read-only"})
     paths = BoxPaths()
-    sys.exit(run_check_all(args, paths))
+    sys.exit(run_check_all(paths, read_only=parsed.has("--read-only")))

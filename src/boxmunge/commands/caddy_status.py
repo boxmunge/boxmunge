@@ -52,5 +52,7 @@ def run_caddy_status(paths: BoxPaths) -> int:
 
 
 def cmd_caddy_status(args: list[str]) -> None:
+    from boxmunge.commands.argv import parse_args
+    parse_args("caddy-status", args)
     paths = BoxPaths()
     sys.exit(run_caddy_status(paths))

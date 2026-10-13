@@ -11,7 +11,7 @@ from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import (
     is_paused, write_paused_state, render_maintenance_caddy_config,
 )
-from boxmunge.paths import BoxPaths, validate_project_name
+from boxmunge.paths import BoxPaths
 
 
 def run_pause(
@@ -91,26 +91,14 @@ def run_pause(
 
 
 def cmd_pause(args: list[str]) -> None:
-    if not args:
-        print("Usage: boxmunge pause <project> [--reason \"text\"] [--yes]",
-              file=sys.stderr)
-        sys.exit(2)
-
-    project = args[0]
-    try:
-        validate_project_name(project)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(2)
-
-    yes = "--yes" in args
-    reason: str | None = None
-    if "--reason" in args:
-        i = args.index("--reason")
-        if i + 1 >= len(args):
-            print("ERROR: --reason requires a value", file=sys.stderr)
-            sys.exit(2)
-        reason = args[i + 1]
+    from boxmunge.commands.argv import parse_args, require_project_name
+    parsed = parse_args(
+        "pause", args, flags={"--yes"}, options={"--reason"},
+        min_positional=1, max_positional=1,
+    )
+    project = require_project_name("pause", parsed.positional[0])
+    yes = parsed.has("--yes")
+    reason = parsed.get("--reason")
 
     paths = BoxPaths()
     sys.exit(run_pause(project, paths, yes=yes, reason=reason))

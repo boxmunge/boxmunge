@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from boxmunge.config import load_config, ConfigError
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
-from boxmunge.state import read_state
+from boxmunge.state import StateError, read_state
 
 
 @dataclass
@@ -85,8 +85,17 @@ def load_all_project_status(paths: BoxPaths) -> list[ProjectStatus]:
             continue
 
         name = pdir.name
-        health = read_state(paths.project_health_state(name))
-        deploy = read_state(paths.project_deploy_state(name))
+        try:
+            health = read_state(paths.project_health_state(name))
+            deploy = read_state(paths.project_deploy_state(name))
+        except StateError as e:
+            # Show the broken project as an error row rather than letting
+            # one corrupt file take down the whole console.
+            results.append(ProjectStatus(
+                name=name, status="error", last_check="", deployed_at="",
+                current_ref="", failure_reason=str(e),
+            ))
+            continue
 
         results.append(ProjectStatus(
             name=name,

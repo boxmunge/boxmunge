@@ -426,27 +426,25 @@ def run_backup_sync(paths: BoxPaths, project_name: str | None = None) -> int:
 
 
 def cmd_backup(args: list[str]) -> None:
-    if not args:
-        print("Usage: boxmunge backup <project>", file=sys.stderr)
-        sys.exit(2)
-
-    from boxmunge.paths import validate_project_name
-    try:
-        validate_project_name(args[0])
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(2)
-
+    from boxmunge.commands.argv import parse_args, require_project_name
+    parsed = parse_args("backup", args, min_positional=1, max_positional=1)
+    project = require_project_name("backup", parsed.positional[0])
     paths = BoxPaths()
-    sys.exit(run_backup(args[0], paths))
+    sys.exit(run_backup(project, paths))
 
 
 def cmd_backup_all(args: list[str]) -> None:
+    from boxmunge.commands.argv import parse_args
+    parse_args("backup-all", args)
     paths = BoxPaths()
     sys.exit(run_backup_all(paths))
 
 
 def cmd_backup_sync(args: list[str]) -> None:
+    from boxmunge.commands.argv import parse_args, require_project_name
+    parsed = parse_args("backup-sync", args, max_positional=1)
+    project = None
+    if parsed.positional:
+        project = require_project_name("backup-sync", parsed.positional[0])
     paths = BoxPaths()
-    project = args[0] if args else None
     sys.exit(run_backup_sync(paths, project))

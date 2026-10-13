@@ -232,26 +232,13 @@ def _start_all(project_dir: Path, compose_files: list[str]) -> bool:
 
 
 def cmd_restore(args: list[str]) -> None:
-    if not args:
-        print("Usage: boxmunge restore <project> [snapshot] [--yes]", file=sys.stderr)
-        sys.exit(2)
-
-    project = args[0]
-
-    from boxmunge.paths import validate_project_name
-    try:
-        validate_project_name(project)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(2)
-
-    snapshot = None
-    yes = "--yes" in args
-
-    for arg in args[1:]:
-        if not arg.startswith("--"):
-            snapshot = arg
-            break
+    from boxmunge.commands.argv import parse_args, require_project_name
+    parsed = parse_args(
+        "restore", args, flags={"--yes"}, min_positional=1, max_positional=2,
+    )
+    project = require_project_name("restore", parsed.positional[0])
+    snapshot = parsed.positional[1] if len(parsed.positional) > 1 else None
+    yes = parsed.has("--yes")
 
     paths = BoxPaths()
     sys.exit(run_restore(project, paths, snapshot=snapshot, yes=yes))

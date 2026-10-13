@@ -69,18 +69,13 @@ def run_project_delete(project_name: str, paths: BoxPaths, yes: bool = False) ->
 
 
 def cmd_project_delete(args: list[str]) -> None:
-    if not args:
-        print("Usage: boxmunge project-delete <project> [--yes]", file=sys.stderr)
-        sys.exit(2)
-    project = args[0]
-
-    from boxmunge.paths import validate_project_name
-    try:
-        validate_project_name(project)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(2)
-
-    yes = "--yes" in args
+    # Strict: `project-delete foo --dry-run --yes` used to delete (audit
+    # D-03). Any flag other than --yes, including --dry-run, is rejected.
+    from boxmunge.commands.argv import parse_args, require_project_name
+    parsed = parse_args(
+        "project-delete", args, flags={"--yes"},
+        min_positional=1, max_positional=1,
+    )
+    project = require_project_name("project-delete", parsed.positional[0])
     paths = BoxPaths()
-    sys.exit(run_project_delete(project, paths, yes=yes))
+    sys.exit(run_project_delete(project, paths, yes=parsed.has("--yes")))

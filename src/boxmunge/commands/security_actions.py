@@ -40,7 +40,7 @@ from boxmunge.fileutil import LockError, open_shared_lockfile, project_lock
 from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.log import log_warning
 from boxmunge.manifest import ManifestError, load_manifest
-from boxmunge.paths import BoxPaths, validate_project_name
+from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import is_registered, load_registered_projects
 
 
@@ -140,17 +140,11 @@ def _summarise_decisions(decisions: list[ProjectDecision]) -> str:
 
 def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
     """boxmunge security scan [project] — scan one or all projects."""
+    from boxmunge.commands.argv import parse_args, require_project_name
+    parsed = parse_args("security", args, max_positional=1)
     project: str | None = None
-    if args:
-        if args[0].startswith("--"):
-            print(f"ERROR: unknown argument: {args[0]}", file=sys.stderr)
-            return 2
-        project = args[0]
-        try:
-            validate_project_name(project)
-        except ValueError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
-            return 2
+    if parsed.positional:
+        project = require_project_name("security", parsed.positional[0])
 
     if project is not None:
         if not is_registered(project, paths):
@@ -330,17 +324,9 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
 
 
 def cmd_security_resume(args: list[str], paths: BoxPaths) -> int:
-    if not args:
-        print(
-            "Usage: boxmunge security resume <project>", file=sys.stderr,
-        )
-        return 2
-    project = args[0]
-    try:
-        validate_project_name(project)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 2
+    from boxmunge.commands.argv import parse_args, require_project_name
+    parsed = parse_args("security", args, min_positional=1, max_positional=1)
+    project = require_project_name("security", parsed.positional[0])
 
     if not is_quarantined(project, paths):
         print(

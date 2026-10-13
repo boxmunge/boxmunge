@@ -130,20 +130,11 @@ def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
 
 
 def cmd_diff(args: list[str]) -> None:
+    from boxmunge.commands.argv import parse_args, require_project_name
     from boxmunge.paths import BoxPaths
-    if not args:
-        print("Usage: boxmunge diff <project> [--ref REF]", file=sys.stderr)
-        sys.exit(2)
-    project = args[0]
-    ref = None
-    remaining = args[1:]
-    i = 0
-    while i < len(remaining):
-        if remaining[i] == "--ref" and i + 1 < len(remaining):
-            ref = remaining[i + 1]
-            i += 2
-        else:
-            print(f"ERROR: unknown argument: {remaining[i]}", file=sys.stderr)
-            sys.exit(2)
+    parsed = parse_args(
+        "diff", args, options={"--ref"}, min_positional=1, max_positional=1,
+    )
+    project = require_project_name("diff", parsed.positional[0])
     paths = BoxPaths()
-    sys.exit(run_diff(project, paths, ref=ref))
+    sys.exit(run_diff(project, paths, ref=parsed.get("--ref")))

@@ -17,13 +17,28 @@ def write_state(path: Path, data: dict[str, Any]) -> None:
     atomic_write_text(path, content)
 
 
+class StateError(Exception):
+    """Raised when a state file exists but cannot be read or parsed."""
+
+
 def read_state(path: Path, default: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Read a JSON state file. Returns default (empty dict) if file doesn't exist."""
+    """Read a JSON state file. Returns default (empty dict) if file doesn't exist.
+
+    Raises StateError, naming the file, if it exists but is unreadable,
+    empty, corrupt, or not a JSON object. A missing file is a normal state
+    (first run); a corrupt one is not, and must never pass for "no state".
+    """
     if default is None:
         default = {}
 
     if not path.exists():
         return dict(default)
 
-    with open(path) as f:
-        return json.load(f)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:  # ValueError covers JSONDecodeError
+        raise StateError(f"Cannot read state file {path}: {e}") from e
+    if not isinstance(data, dict):
+        raise StateError(f"State file {path} is not a JSON object")
+    return data

@@ -51,6 +51,27 @@ logging:
         with pytest.raises(ConfigError, match="hostname"):
             load_config(BoxPaths(root=tmp_root))
 
+    def test_malformed_yaml_raises_config_error(self, tmp_root: Path) -> None:
+        """Audit D-02: a YAML parse error must not escape as yaml.YAMLError."""
+        config_file = _write_config(tmp_root, "hostname: [\n")
+        from boxmunge.paths import BoxPaths
+        with pytest.raises(ConfigError, match="not valid YAML") as exc:
+            load_config(BoxPaths(root=tmp_root))
+        assert str(config_file) in str(exc.value)
+
+    def test_non_mapping_raises_config_error(self, tmp_root: Path) -> None:
+        _write_config(tmp_root, "- just\n- a list\n")
+        from boxmunge.paths import BoxPaths
+        with pytest.raises(ConfigError, match="not a YAML mapping"):
+            load_config(BoxPaths(root=tmp_root))
+
+    def test_unreadable_config_raises_config_error(self, tmp_root: Path) -> None:
+        """An OSError (here: the path is a directory) becomes ConfigError."""
+        (tmp_root / "config" / "boxmunge.yml").mkdir(parents=True)
+        from boxmunge.paths import BoxPaths
+        with pytest.raises(ConfigError, match="Cannot read config"):
+            load_config(BoxPaths(root=tmp_root))
+
     def test_defaults_applied(self, tmp_root: Path) -> None:
         _write_config(tmp_root, """
 hostname: box01.example.com

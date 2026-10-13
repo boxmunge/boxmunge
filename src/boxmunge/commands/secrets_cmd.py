@@ -96,28 +96,53 @@ _SUBCOMMANDS = {
     "unset": _cmd_unset,
 }
 
+# Arguments each subcommand takes after the subcommand name: the scope
+# (<project> or --host), then KEY=VALUE or KEY where applicable.
+_ARITY = {"set": 2, "get": 2, "list": 1, "unset": 2}
+
+
+def secrets_usage_problem(args: list[str]) -> str | None:
+    """Return why ``args`` is not a valid secrets invocation, or None.
+
+    Every token is accounted for: an unknown subcommand, a missing or
+    surplus argument, or any flag other than a leading ``--host`` scope is
+    a usage error. Unknown flags such as --dry-run must never be ignored
+    while the secret is written anyway (audit D-03).
+    """
+    if not args:
+        return "missing subcommand (set, get, list, unset)"
+    subcommand, rest = args[0], args[1:]
+    if subcommand not in _ARITY:
+        return f"Unknown subcommand '{subcommand}'"
+    for i, token in enumerate(rest):
+        if token == "--dry-run":
+            return "'secrets' does not support --dry-run; nothing was done"
+        if token.startswith("-") and not (i == 0 and token == "--host"):
+            return f"unknown argument: {token}"
+    if len(rest) != _ARITY[subcommand]:
+        return f"'secrets {subcommand}' takes {_ARITY[subcommand]} argument(s), got {len(rest)}"
+    return None
+
 
 def run_secrets(args: list[str], paths: BoxPaths) -> int:
     """Dispatch secrets subcommands.
 
-    Returns 0 on success, 2 on usage errors (no/unknown subcommand),
-    1 on operational failures (missing key, etc.).
+    Returns 0 on success, 2 on usage errors, 1 on operational failures
+    (missing key, etc.).
     """
-    if not args:
-        print(
-            "Usage: boxmunge secrets <set|get|list|unset> [--host | <project>] ...",
-            file=sys.stderr,
-        )
+    from boxmunge.commands.argv import print_usage_error
+    problem = secrets_usage_problem(args)
+    if problem is not None:
+        print_usage_error("secrets", problem)
         return 2
-    subcommand = args[0]
-    handler = _SUBCOMMANDS.get(subcommand)
-    if handler is None:
-        print(f"ERROR: Unknown subcommand '{subcommand}'", file=sys.stderr)
-        return 2
-    return handler(args[1:], paths)
+    return _SUBCOMMANDS[args[0]](args[1:], paths)
 
 
 def cmd_secrets(args: list[str]) -> None:
     """CLI entry point for secrets command."""
+    from boxmunge.commands.argv import usage_error
+    problem = secrets_usage_problem(args)
+    if problem is not None:
+        usage_error("secrets", problem)
     paths = BoxPaths()
     sys.exit(run_secrets(args, paths))

@@ -24,4 +24,6 @@ def run_handshake() -> dict:
 
 def cmd_handshake(args: list[str]) -> None:
     """Print handshake JSON to stdout."""
+    from boxmunge.commands.argv import parse_args
+    parse_args("handshake", args)
     print(json.dumps(run_handshake()))

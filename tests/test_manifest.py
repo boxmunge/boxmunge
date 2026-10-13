@@ -86,6 +86,25 @@ class TestLoadManifest:
         with pytest.raises(ManifestError, match="not found"):
             load_manifest(tmp_path / "nope" / "manifest.yml")
 
+    def test_malformed_yaml_raises_manifest_error_naming_file(
+        self, tmp_path: Path,
+    ) -> None:
+        """Audit D-02: a YAML parse error must not escape as yaml.YAMLError."""
+        path = _write_manifest(tmp_path / "bad", "services: [\n")
+        with pytest.raises(ManifestError, match="not valid YAML") as exc:
+            load_manifest(path)
+        assert str(path) in str(exc.value)
+
+    def test_unreadable_manifest_raises_manifest_error(
+        self, tmp_path: Path,
+    ) -> None:
+        """An OSError (here: the path is a directory) becomes ManifestError."""
+        path = tmp_path / "proj" / "manifest.yml"
+        path.mkdir(parents=True)
+        with pytest.raises(ManifestError, match="Cannot read manifest") as exc:
+            load_manifest(path)
+        assert str(path) in str(exc.value)
+
 
 class TestValidateManifest:
     def test_valid_manifest_passes(self, tmp_path: Path) -> None:

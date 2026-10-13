@@ -2,6 +2,8 @@
 
 import sys
 
+from boxmunge.commands.usage import USAGE
+
 HELP_TEXT = """\
 boxmunge — minimalist, agent-friendly VPS hosting framework
 
@@ -77,10 +79,15 @@ Platform updates:
   container-update        Pull and recreate Caddy and project image: containers
   mcp-serve               Run MCP server (stdio) for AI agent integration
 
-Options:
-  --dry-run               Show what would happen without doing it
-  --yes                   Skip confirmation prompts
+Options (run 'help <command>' to see exactly which a command accepts):
+  -h, --help              Show a command's usage; never runs the command
+  --dry-run               Preview without changing anything. Only prod-deploy,
+                          stage, promote, unstage, upgrade and container-update
+                          support it; every other command rejects it
+  --yes                   Skip confirmation prompts (where the command asks)
   --json                  Machine-readable JSON output (where supported)
+
+An unknown or unsupported flag is an error (exit 2); nothing is run.
 
 Upload bundles with: scp bundle.tar.gz deploy@<host>:
 
@@ -96,7 +103,12 @@ Only boxmunge commands are available — there is no general shell access.
 
 Key principles:
   - Use the commands listed in 'help'. There are no other commands.
-  - Use --dry-run before destructive commands you're unsure about.
+  - Run 'help <command>' (or '<command> --help') to see its usage. It never
+    runs the command.
+  - Where a command supports --dry-run (prod-deploy, stage, promote, unstage,
+    upgrade, container-update), use it first if unsure. Commands without
+    --dry-run reject it (exit 2) rather than ignoring it.
+  - An unknown flag is always an error (exit 2) and nothing is run.
   - Use 'validate <project>' before deploying new/modified projects.
   - Check 'status' before and after making changes.
 
@@ -129,7 +141,8 @@ First moves:
   inbox               — see uploaded bundles
   log --tail 50       — recent ops audit (deploys, checks, rollbacks)
 
-When in doubt, use --dry-run first.
+When in doubt, check 'help <command>' first, and use --dry-run where the
+command supports it.
 
 For detailed documentation, run:
   agent-help architecture     How the system is structured
@@ -173,23 +186,41 @@ def _substitute_hostname(text: str) -> str:
 
 
 def cmd_help(args: list[str]) -> None:
-    """Show help text, or per-command help if a command name is given."""
+    """Show the overview, or one command's usage. Never runs the command.
+
+    Usage comes from the static table in ``commands.usage``. Calling a
+    handler to make it print its usage would execute every command that
+    takes no required argument (audit D-01).
+    """
+    if len(args) > 1:
+        print(f"ERROR: unexpected argument(s): {' '.join(args[1:])}",
+              file=sys.stderr)
+        print(USAGE["help"], file=sys.stderr)
+        sys.exit(2)
     if args:
-        # Delegate to the command with no args — most commands print usage
-        from boxmunge.cli import COMMANDS
-        handler = COMMANDS.get(args[0])
-        if handler:
-            handler([])
-        else:
-            print(f"Unknown command '{args[0]}'.", file=sys.stderr)
+        if args[0] not in USAGE:
+            print(f"ERROR: Unknown command '{args[0]}'. "
+                  "Run 'help' for the command list.", file=sys.stderr)
             sys.exit(2)
-        return
+        print(USAGE[args[0]])
+        sys.exit(0)
     print(_substitute_hostname(HELP_TEXT))
     sys.exit(0)
 
 
+def cmd_init_host(args: list[str]) -> None:
+    """init-host is the root bootstrap script, not a server command."""
+    print(f"ERROR: {USAGE['init-host']}", file=sys.stderr)
+    sys.exit(2)
+
+
 def cmd_agent_help(args: list[str]) -> None:
     """Show agent-specific orientation, or a detailed topic."""
+    if len(args) > 1:
+        print(f"ERROR: unexpected argument(s): {' '.join(args[1:])}",
+              file=sys.stderr)
+        print(USAGE["agent-help"], file=sys.stderr)
+        sys.exit(2)
 
     if args:
         topic = args[0].lower()
@@ -204,7 +235,8 @@ def cmd_agent_help(args: list[str]) -> None:
             print(doc_file.read_text())
             sys.exit(0)
         else:
-            print(f"Unknown topic '{topic}'. Available topics:", file=sys.stderr)
+            print(f"ERROR: Unknown topic '{topic}'. Available topics:",
+                  file=sys.stderr)
             for name in sorted(AGENT_HELP_TOPICS):
                 print(f"  {name}", file=sys.stderr)
             sys.exit(2)

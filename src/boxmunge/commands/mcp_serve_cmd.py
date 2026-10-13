@@ -13,6 +13,8 @@ import sys
 
 def cmd_mcp_serve(args: list[str]) -> None:
     """CLI entry point for mcp-serve command."""
+    from boxmunge.commands.argv import parse_args
+    parse_args("mcp-serve", args)
     try:
         from boxmunge.mcp_server import create_mcp_server
     except ImportError:

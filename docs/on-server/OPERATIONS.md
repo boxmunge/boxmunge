@@ -2,7 +2,8 @@
 
 Step-by-step instructions for common tasks on a boxmunge-managed server.
 
-All operations use boxmunge commands. For detailed help on any command, run `help <command>`.
+All operations use boxmunge commands. For detailed help on any command, run `help <command>`. It
+prints that command's usage and never runs the command.
 
 ---
 
@@ -229,6 +230,14 @@ status --json
 ```
 
 Health checks also run automatically every 5 minutes via a systemd timer. Failures trigger Pushover alerts after the configured threshold.
+
+A project whose manifest or state files cannot be read does not stop the others being checked.
+`check-all`, `status` and `health` print an `ERROR:` line naming the project and the file, write
+an error entry to the operational log, and carry on with the rest of the fleet. `status` shows the
+project as `ERROR` (`"raw_status": "error"` with an `error` field in `--json`) and exits 1.
+`check-all` exits at least 1, and records an unreadable manifest in the project's health state so
+the normal threshold alert fires with the cause. `check-all` also reports an unreadable host
+config (`boxmunge.yml`), since alerts cannot be sent without it, and still runs the checks.
 
 ---
 
@@ -620,6 +629,13 @@ The boxmunge CLI uses these conventions across mutating commands
 - `0` — success
 - `1` — generic operational failure (image pull, smoke test, Caddy reload, etc.)
 - `2` — usage error (unknown flag, missing argument) or critical health (`check`)
+
+Every command rejects a flag it does not implement with exit 2, `ERROR:` and its usage on
+stderr, and runs nothing. That includes `--dry-run`: only `prod-deploy`, `stage`, `promote`,
+`unstage`, `upgrade` and `container-update` support it, and every other command (for example
+`project-delete`, `rollback`, `restore`, `pause`, `secrets set`) refuses it instead of acting.
+`check-all` accepts only `--read-only`; a typo such as `--raed-only` is an error, not a run of
+the mutator. `-h` or `--help` on any command prints its usage, exits 0, and never runs it.
 - `3` — compose hardening rejection (validate_user_compose found a
   policy-violating key in the project's `compose.yml`; the deploy/stage/
   promote/resume aborted before touching containers)
