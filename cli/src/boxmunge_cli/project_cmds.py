@@ -52,23 +52,17 @@ def _cmd_secrets(args: argparse.Namespace) -> int:
         print("ERROR: secrets list takes no KEY.", file=sys.stderr)
         return 2
     config = connect()
-    if config is None:
-        return 1
     action, *rest = server_args
     return run_ssh(config, "secrets", action, config["project"], *rest)
 
 
 def _cmd_rollback(args: argparse.Namespace) -> int:
     config = connect()
-    if config is None:
-        return 1
     return run_ssh(config, "rollback", config["project"], *(["--yes"] if args.yes else []))
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
     config = connect()
-    if config is None:
-        return 1
     return run_ssh(config, "validate", config["project"], *(["--json"] if args.json else []))
 
 
@@ -81,8 +75,6 @@ def _cmd_remote(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 2
     config = connect()
-    if config is None:
-        return 1
     return run_ssh(config, command[0], *command[1:])
 
 

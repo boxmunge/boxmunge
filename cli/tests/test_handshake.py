@@ -127,6 +127,23 @@ def test_every_server_command_handshakes_first(project, fake_remote, argv) -> No
 
 def test_incompatible_server_stops_before_upload(project, fake_remote, capsys) -> None:
     _reply(fake_remote, schema_version=2)
-    assert _run(["prod-deploy"]) == 1
+    assert _run(["prod-deploy"]) == 3
     assert fake_remote.calls("scp") == []
     assert "schema_version 3" in capsys.readouterr().err
+
+
+def test_unreachable_server_exits_4(project, fake_remote, capsys) -> None:
+    fake_remote.respond("ssh", "handshake", stderr="ssh: connect to host box.example.com "
+                        "port 922: Connection refused\n", rc=255)
+    assert _run(["promote"]) == 4
+    assert "ERROR:" in capsys.readouterr().err
+
+
+def test_ssh_failure_after_handshake_exits_4(project, fake_remote) -> None:
+    fake_remote.respond("ssh", "status", rc=255)
+    assert _run(["status"]) == 4
+
+
+def test_server_command_exit_code_passes_through(project, fake_remote) -> None:
+    fake_remote.respond("ssh", "status", rc=2)
+    assert _run(["status"]) == 2

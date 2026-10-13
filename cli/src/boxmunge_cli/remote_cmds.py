@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from boxmunge_cli.exitcodes import FAILURE, USAGE, CliExit
 from boxmunge_cli.config import (
     ConfigError,
     discover_config,
@@ -18,32 +19,28 @@ from boxmunge_cli.config import (
 )
 
 
-def _load_project_config() -> tuple[dict[str, Any], Path] | None:
+def _load_project_config() -> tuple[dict[str, Any], Path]:
     try:
         config_path = discover_config(Path.cwd())
         return load_config(config_path), config_path
     except ConfigError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return None
+        raise CliExit(FAILURE, str(e)) from e
 
 
 def _handshake(config: dict[str, Any], manifest_schema: int | None = None,
-               batch: bool = False) -> bool:
+               batch: bool = False) -> None:
     from boxmunge_cli.handshake import HandshakeError, check_server_compatibility
     try:
         check_server_compatibility(config, manifest_schema, batch=batch)
     except HandshakeError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return False
-    return True
+        raise CliExit(e.exit_code, str(e)) from e
 
 
-def connect() -> dict[str, Any] | None:
-    """Load .boxmunge and confirm the server is compatible."""
-    loaded = _load_project_config()
-    if loaded is None or not _handshake(loaded[0]):
-        return None
-    return loaded[0]
+def connect() -> dict[str, Any]:
+    """Load .boxmunge and confirm the server is compatible (CliExit if not)."""
+    config, _ = _load_project_config()
+    _handshake(config)
+    return config
 
 
 def _manifest_schema(project_dir: Path) -> int:
@@ -57,10 +54,7 @@ def _bundle_upload_and_run(command: str, server_flags: list[str]) -> int:
     from boxmunge_cli.bundle_cmd import run_bundle
     from boxmunge_cli.ssh import run_scp, run_ssh
 
-    loaded = _load_project_config()
-    if loaded is None:
-        return 1
-    config, config_path = loaded
+    config, config_path = _load_project_config()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         exit_code = run_bundle(str(config_path.parent), output=tmpdir,
@@ -72,8 +66,7 @@ def _bundle_upload_and_run(command: str, server_flags: list[str]) -> int:
             print("ERROR: Bundle was not created.", file=sys.stderr)
             return 1
 
-        if not _handshake(config, _manifest_schema(config_path.parent)):
-            return 1
+        _handshake(config, _manifest_schema(config_path.parent))
 
         print(f"Uploading {bundles[0].name} to {config['user']}@{config['server']}:"
               f"{config['port']} ...", file=sys.stderr)
@@ -101,8 +94,6 @@ def _cmd_prod_deploy(args: argparse.Namespace) -> int:
 def _cmd_promote(args: argparse.Namespace) -> int:
     from boxmunge_cli.ssh import run_ssh
     config = connect()
-    if config is None:
-        return 1
     return run_ssh(config, "promote", config["project"],
                    *(["--dry-run"] if args.dry_run else []))
 
@@ -110,16 +101,12 @@ def _cmd_promote(args: argparse.Namespace) -> int:
 def _cmd_status(args: argparse.Namespace) -> int:
     from boxmunge_cli.ssh import run_ssh
     config = connect()
-    if config is None:
-        return 1
     return run_ssh(config, "status", *(["--json"] if args.json else []))
 
 
 def _cmd_logs(args: argparse.Namespace) -> int:
     from boxmunge_cli.ssh import run_ssh
     config = connect()
-    if config is None:
-        return 1
     server_args = [config["project"]]
     if args.service:
         server_args.append(args.service)
@@ -130,29 +117,26 @@ def _cmd_logs(args: argparse.Namespace) -> int:
     return run_ssh(config, "logs", *server_args)
 
 
-def _mcp_config(args: argparse.Namespace) -> dict[str, Any] | None:
+def _mcp_config(args: argparse.Namespace) -> dict[str, Any]:
     """Connection for mcp-serve: --server flags, --config PATH, or the nearest .boxmunge."""
+    if not args.server and (args.port or args.user):
+        raise CliExit(USAGE, "--port and --user need --server.")
     try:
         if args.server:
             config = {"server": args.server, "port": args.port or 922,
                       "user": args.user or "deploy"}
             validate_connection(config)
             return config
-        if args.port or args.user:
-            print("ERROR: --port and --user need --server.", file=sys.stderr)
-            return None
         path = Path(args.config) if args.config else discover_config(Path.cwd())
         return load_config(path)
     except ConfigError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return None
+        raise CliExit(FAILURE, str(e)) from e
 
 
 def _cmd_mcp_serve(args: argparse.Namespace) -> int:
     from boxmunge_cli.mcp_proxy import run_mcp_proxy
     config = _mcp_config(args)
-    if config is None or not _handshake(config, batch=True):
-        return 1
+    _handshake(config, batch=True)
     return run_mcp_proxy(config)
 
 

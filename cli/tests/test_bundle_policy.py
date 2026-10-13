@@ -209,3 +209,24 @@ def test_list_prints_the_plan_and_writes_nothing(tmp_path: Path, capsys) -> None
     captured = capsys.readouterr()
     assert "app.py" in captured.out
     assert ".env" in captured.err
+
+
+def test_json_result(tmp_path: Path, capsys) -> None:
+    import json
+    project = _project(tmp_path)
+    _touch(project, ".env")
+    out = tmp_path / "out"
+    out.mkdir()
+    assert run_bundle(str(project), output=str(out), as_json=True) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert Path(result["bundle"]).is_file() and result["project"] == "myapp"
+    assert result["id"] == "01TESTULID0000000000000000" and result["size_bytes"] > 0
+    assert {"path": ".env", "reason": result["excluded"][0]["reason"]} in result["excluded"]
+
+
+def test_json_list(tmp_path: Path, capsys) -> None:
+    import json
+    project = _project(tmp_path)
+    assert run_bundle(str(project), list_only=True, as_json=True) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert "manifest.yml" in result["shipped"]

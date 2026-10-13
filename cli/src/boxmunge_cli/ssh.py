@@ -14,6 +14,8 @@ import shlex
 import subprocess
 from typing import Any
 
+from boxmunge_cli.exitcodes import CONNECTION, SSH_CONNECTION_FAILED
+
 
 def build_ssh_cmd(config: dict[str, Any], command: str, *args: str,
                   batch: bool = False) -> list[str]:
@@ -49,15 +51,18 @@ def build_scp_cmd(config: dict[str, Any], local_path: str) -> list[str]:
     ]
 
 
+def _exit_code(returncode: int) -> int:
+    """ssh's own failure (255) becomes CONNECTION; anything else is the remote's."""
+    return CONNECTION if returncode == SSH_CONNECTION_FAILED else returncode
+
+
 def run_ssh(config: dict[str, Any], command: str, *args: str) -> int:
-    """Execute an SSH command. Returns the exit code."""
-    cmd = build_ssh_cmd(config, command, *args)
-    result = subprocess.run(cmd, check=False)
-    return result.returncode
+    """Execute an SSH command. Returns the remote exit code (4 if ssh failed)."""
+    result = subprocess.run(build_ssh_cmd(config, command, *args), check=False)
+    return _exit_code(result.returncode)
 
 
 def run_scp(config: dict[str, Any], local_path: str) -> int:
     """Upload a file via SCP. Returns the exit code."""
-    cmd = build_scp_cmd(config, local_path)
-    result = subprocess.run(cmd, check=False)
-    return result.returncode
+    result = subprocess.run(build_scp_cmd(config, local_path), check=False)
+    return _exit_code(result.returncode)

@@ -2,6 +2,7 @@
 """boxmunge bundle [project-dir]: build a validated, ready-to-upload bundle."""
 from __future__ import annotations
 import argparse
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -109,7 +110,7 @@ def _report_plan(plan: BundlePlan) -> None:
 
 def run_bundle(project_dir_str: str, output: str | None = None,
                validate_only: bool = False, list_only: bool = False,
-               upload_hint: bool = True) -> int:
+               upload_hint: bool = True, as_json: bool = False) -> int:
     project_dir = Path(project_dir_str).resolve()
     if not project_dir.is_dir():
         _err(f"Not a directory: {project_dir}")
@@ -186,13 +187,23 @@ def run_bundle(project_dir_str: str, output: str | None = None,
             print(f"  {rel}: {reason}", file=sys.stderr)
         return 1
 
+    excluded = [{"path": rel, "reason": reason} for rel, reason in plan.excluded]
     if list_only:
-        for rel in plan.shipped:
-            print(rel)
+        if as_json:
+            print(json.dumps({"project": project_name, "shipped": plan.shipped,
+                              "excluded": excluded}, indent=2))
+        else:
+            for rel in plan.shipped:
+                print(rel)
         return 0
 
     write_bundle(plan, project_name, bundle_path)
 
+    if as_json:
+        print(json.dumps({"bundle": str(bundle_path), "project": project_name,
+                          "id": manifest["id"], "size_bytes": bundle_path.stat().st_size,
+                          "files": len(plan.shipped), "excluded": excluded}, indent=2))
+        return 0
     size_mb = bundle_path.stat().st_size / (1024 * 1024)
     print(f"Bundle created: {bundle_path}")
     print(f"  Size: {size_mb:.1f} MB")
@@ -212,7 +223,8 @@ def _print_upload_hint(project_dir: Path, project_name: str, bundle_path: Path) 
 
 def _cmd_bundle(args: argparse.Namespace) -> int:
     return run_bundle(args.project_dir, output=args.output,
-                      validate_only=args.validate, list_only=args.list)
+                      validate_only=args.validate, list_only=args.list,
+                      as_json=args.json)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -229,4 +241,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                       help="Validate only; write nothing")
     mode.add_argument("--list", action="store_true",
                       help="Print what would ship (stdout) and what is left out (stderr)")
+    p.add_argument("--json", action="store_true",
+                   help="Print the result (bundle path, id, size, exclusions; or the "
+                        "--list plan) as JSON on stdout")
     p.set_defaults(func=_cmd_bundle)

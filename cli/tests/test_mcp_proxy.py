@@ -48,7 +48,7 @@ def test_failed_handshake_never_starts_the_pipe(tmp_path, monkeypatch, fake_remo
                                                 capfd) -> None:
     monkeypatch.chdir(tmp_path)
     fake_remote.respond("ssh", "handshake", stderr="Permission denied (publickey).\n", rc=255)
-    assert run_cli(["mcp-serve", "--server", "box.example.com"]) == 1
+    assert run_cli(["mcp-serve", "--server", "box.example.com"]) == 4
     assert [c[-1] for c in fake_remote.calls("ssh")] == ["handshake"]
     captured = capfd.readouterr()
     assert captured.out == "" and "Permission denied" in captured.err

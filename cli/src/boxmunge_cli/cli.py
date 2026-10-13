@@ -12,6 +12,7 @@ import sys
 
 from boxmunge_cli import __version__
 from boxmunge_cli import bundle_cmd, init_cmd, project_cmds, remote_cmds
+from boxmunge_cli.exitcodes import CliExit
 from boxmunge_cli.server_setup import args as server_setup_args
 
 DESCRIPTION = "boxmunge: deploy to your VPS in one command"
@@ -20,6 +21,10 @@ EPILOG = """\
 Run 'boxmunge <command> --help' for a command's options.
 Commands that talk to the server read connection details from the nearest
 .boxmunge file (created by 'boxmunge init').
+
+Exit codes: 0 success, 1 failure, 2 usage error, 3 client and server
+incompatible, 4 server unreachable. Commands that run a server command
+exit with its code. Errors go to stderr and start with 'ERROR:'.
 """
 
 
@@ -45,4 +50,9 @@ def main(argv: list[str] | None = None) -> None:
     if not hasattr(args, "func"):
         parser.print_help()
         sys.exit(0)
-    sys.exit(args.func(args))
+    try:
+        code = args.func(args)
+    except CliExit as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        code = e.code
+    sys.exit(code)

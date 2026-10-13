@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from boxmunge_cli import __version__
+from boxmunge_cli.exitcodes import CONNECTION, INCOMPATIBLE, SSH_CONNECTION_FAILED
 from boxmunge_cli.ssh import build_ssh_cmd
 from boxmunge_cli.version import parse_version
 
@@ -29,6 +30,10 @@ MIN_SERVER_VERSION = "0.10.0"
 
 class HandshakeError(Exception):
     """Raised when the server handshake fails or versions are incompatible."""
+
+    def __init__(self, message: str, exit_code: int = INCOMPATIBLE) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
 
 
 @dataclass(frozen=True)
@@ -81,7 +86,8 @@ def check_server_compatibility(config: dict[str, Any],
         detail = result.stderr.strip() or f"ssh exited with {result.returncode}"
         raise HandshakeError(
             f"Handshake with {config['user']}@{config['server']}:{config['port']} "
-            f"failed: {detail}"
+            f"failed: {detail}",
+            CONNECTION if result.returncode == SSH_CONNECTION_FAILED else INCOMPATIBLE,
         )
     info = _parse_response(result.stdout)
 
