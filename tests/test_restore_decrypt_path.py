@@ -99,24 +99,27 @@ class TestRestore:
              patch("boxmunge.commands.restore.compose_up") as up, \
              patch("boxmunge.commands.restore.time.sleep"), \
              patch("boxmunge.commands.restore.subprocess.run") as run:
-            run.return_value = subprocess.CompletedProcess([], 0, stdout="healthy", stderr="")
+            run.return_value = subprocess.CompletedProcess([], 0, stdout="running healthy", stderr="")
             assert project_dir.exists()
             yield up, run
 
     def test_restore_decrypts_into_mounted_private_dir(self, project, fake_age, env) -> None:
         up, run = env
-        assert run_restore(PROJECT, project, snapshot=SNAPSHOT, yes=True) == 0
+        assert run_restore(PROJECT, project, snapshot=SNAPSHOT, yes=True,
+                           safety_snapshot=False) == 0
         assert fake_age.output_dir_mode == 0o700
         restore_calls = [c for c in run.call_args_list if "exec" in c.args[0]]
         assert len(restore_calls) == 1
         assert _leftovers(project) == []
         up.assert_called_once()
 
-    def test_failed_decrypt_brings_project_back_up(self, project, env) -> None:
+    def test_failed_decrypt_never_stops_the_project(self, project, env) -> None:
         up, _ = env
         with patch("boxmunge.backup._use_container", return_value=True), \
              patch("boxmunge.backup._run_age_cmd",
-                   side_effect=BackupError("age failed")):
+                   side_effect=BackupError("age failed")), \
+             patch("boxmunge.commands.restore.compose_down") as down:
             assert run_restore(PROJECT, project, snapshot=SNAPSHOT, yes=True) == 1
-        up.assert_called_once()
+        down.assert_not_called()
+        up.assert_not_called()
         assert _leftovers(project) == []

@@ -170,46 +170,25 @@ class TestSkipSecurityChecks:
     @patch("boxmunge.commands.resume_cmd.compose_up")
     @patch("boxmunge.commands.resume_cmd.caddy_reload")
     @patch("boxmunge.commands.resume_cmd.run_smoke")
-    @patch("boxmunge.commands.resume_cmd.send_notification")
-    def test_pushover_send_failures_logged_not_swallowed(
+    @patch("boxmunge.notify.send_notification", return_value=False)
+    def test_undelivered_smoke_alert_is_logged(
         self, mock_send, mock_smoke, _reload, _up, _pull,
         _caddy, _override, tmp_path,
     ):
-        """ConfigError / OSError / KeyError during the post-smoke-fail
-        Pushover path must be logged via log_warning. AttributeError
-        (programming error) must propagate."""
+        """A smoke-failure alert Pushover did not accept is logged as an
+        error; the resume itself still succeeds."""
         from boxmunge.commands.resume_cmd import run_resume
-        from boxmunge.config import ConfigError
-        import pytest
-
-        from boxmunge.pause import write_paused_state
-
         paths, name = _setup_paused(tmp_path)
+        paths.config_file.write_text(
+            "hostname: t\nadmin_email: a@b\n"
+            "pushover:\n  user_key: u\n  app_token: a\n"
+        )
         mock_smoke.return_value = (False, "smoke went wrong")
-
-        for exc in (ConfigError("bad"), OSError("disk"), KeyError("x")):
-            write_paused_state(name, paths)
-            mock_send.reset_mock()
-            mock_send.side_effect = exc
-            with patch("boxmunge.commands.resume_cmd.log_warning") as mw:
-                rc = run_resume(name, paths, yes=True,
-                                skip_security_checks=True)
-                assert rc == 0
-                pushover_logs = [
-                    c for c in mw.call_args_list
-                    if "Pushover" in c.args[1]
-                ]
-                assert len(pushover_logs) == 1, (
-                    f"expected log_warning for Pushover failure "
-                    f"({type(exc).__name__}); got {mw.call_args_list}"
-                )
-
-        # AttributeError must propagate.
-        write_paused_state(name, paths)
-        mock_send.reset_mock()
-        mock_send.side_effect = AttributeError("typo")
-        with pytest.raises(AttributeError):
-            run_resume(name, paths, yes=True, skip_security_checks=True)
+        with patch("boxmunge.notify.log_error") as mock_err:
+            rc = run_resume(name, paths, yes=True, skip_security_checks=True)
+        assert rc == 0
+        mock_send.assert_called_once()
+        assert any("Alert not sent" in c.args[1] for c in mock_err.call_args_list)
 
     def test_cmd_resume_parses_skip_flag(self, tmp_path, monkeypatch):
         from boxmunge.commands.resume_cmd import cmd_resume

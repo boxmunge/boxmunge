@@ -2,7 +2,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 from boxmunge.paths import BoxPaths
-from boxmunge.container_update import (
+from boxmunge.container_update_targets import (
     UpdateTarget, build_targets, resolve_strategy,
 )
 
@@ -106,11 +106,11 @@ class TestBuildTargets:
 
 class TestTargetState:
     def test_read_missing_returns_none(self, paths):
-        from boxmunge.container_update import read_target_state
+        from boxmunge.container_update_targets import read_target_state
         assert read_target_state(paths, "nope") is None
 
     def test_write_then_read(self, paths):
-        from boxmunge.container_update import write_target_state, read_target_state
+        from boxmunge.container_update_targets import write_target_state, read_target_state
         paths.container_update_state.mkdir(parents=True)
         state = {
             "last_check": "2026-05-04T03:00:00Z",
@@ -123,7 +123,7 @@ class TestTargetState:
         assert read_target_state(paths, "caddy") == state
 
     def test_write_creates_state_dir(self, paths):
-        from boxmunge.container_update import write_target_state
+        from boxmunge.container_update_targets import write_target_state
         # state dir does NOT exist yet
         assert not paths.container_update_state.exists()
         write_target_state(paths, "caddy", {"last_status": "succeeded"})
@@ -206,9 +206,8 @@ class TestUpdateTarget:
         recorded `no_change` (fresh timestamp — neither failed nor stale) and
         must NOT attempt a pull.
         """
-        from boxmunge.container_update import (
-            update_target, read_target_state,
-        )
+        from boxmunge.container_update import update_target
+        from boxmunge.container_update_targets import read_target_state
         target = UpdateTarget(
             name="buildonly", project_dir=paths.projects / "buildonly",
             compose_files=["compose.yml"], strategy="leave_broken",
@@ -293,7 +292,7 @@ class TestUpdateTarget:
         mock_capture.return_value = {"web": "sha256:old"}
         mock_backup.return_value = 0
         update_target(paths, target)
-        mock_backup.assert_called_once_with("stateful", paths)
+        mock_backup.assert_called_once_with("stateful", paths, _lock_held=True)
 
     @patch("boxmunge.container_update.run_backup", return_value=1)
     @patch("boxmunge.container_update.compose_pull")
@@ -333,7 +332,7 @@ class TestTargetStateErrors:
     def test_read_target_state_raises_on_corrupt(self, paths):
         import json
         import pytest
-        from boxmunge.container_update import read_target_state
+        from boxmunge.container_update_targets import read_target_state
         paths.container_update_state.mkdir(parents=True)
         paths.container_update_target_state("caddy").write_text("not json {")
         with pytest.raises(json.JSONDecodeError):
@@ -401,7 +400,7 @@ class TestUpdateTargetSkipsQuarantined:
 
 class TestPersistResult:
     def test_persist_no_change_preserves_previous_digests(self, paths):
-        from boxmunge.container_update import _persist_result, write_target_state, read_target_state
+        from boxmunge.container_update_targets import persist_result, write_target_state, read_target_state
         paths.container_update_state.mkdir(parents=True)
         # Existing state has a genuine previous_digests from an earlier update
         write_target_state(paths, "caddy", {
@@ -422,7 +421,7 @@ class TestPersistResult:
             "rollback_attempted": False, "rollback_succeeded": None,
             "current_digests": {"caddy": "sha256:current"},
         }
-        _persist_result(paths, target, result, before={"caddy": "sha256:current"})
+        persist_result(paths, target, result, before={"caddy": "sha256:current"})
         state = read_target_state(paths, "caddy")
         # previous_digests must NOT be overwritten with the no-change "before"
         assert state["previous_digests"] == {"caddy": "sha256:original"}

@@ -239,6 +239,8 @@ project as `ERROR` (`"raw_status": "error"` with an `error` field in `--json`) a
 the normal threshold alert fires with the cause. `check-all` also reports an unreadable host
 config (`boxmunge.yml`), since alerts cannot be sent without it, and still runs the checks.
 
+An alert counts as sent only when Pushover accepts it. If it is not delivered, the health check logs why (an `error` entry when the config cannot be read or the Pushover request fails, a `warn` entry when Pushover is not configured) and tries again on the next 5-minute tick until it gets through. The same applies to the critical alert for a stopped project and to the RECOVERED notice. Find these entries with `log --component health`.
+
 ---
 
 ## Reading Logs
@@ -309,6 +311,28 @@ Restore from a specific snapshot:
 restore myapp myapp-2026-03-30T020000.tar.gz.age
 ```
 
+Before `restore` stops anything, it decrypts the snapshot and checks that it unpacks: it must be
+non-empty, a gzip stream must decompress to the end, and a tar archive must list. It then takes a
+safety snapshot of the current data, named `myapp-pre-restore-<timestamp>.tar.gz.age`. If either
+step fails, production is left running and untouched. Only then does it stop the project, restore
+the data (the `restore_command` is limited to 10 minutes), and start every service again. The
+services are started again whether the restore succeeded or failed. When it fails, the error names
+the safety snapshot so you can put the previous data back:
+
+```
+restore myapp myapp-pre-restore-2026-10-13T120000.tar.gz.age
+```
+
+The safety snapshot needs the backup service to be running and `backup.dump_command` to be set. If
+it cannot be taken (for example, the database is down, which is why you are restoring), the restore
+stops with an error. To restore anyway, without a safety snapshot:
+
+```
+restore myapp myapp-2026-03-30T020000.tar.gz.age --no-safety-snapshot
+```
+
+Safety snapshots sit alongside the nightly backups and are pruned by the same retention.
+
 Verify that a backup restores successfully (non-destructive):
 
 ```
@@ -326,6 +350,62 @@ rollback myapp
 ```
 
 You will be shown what snapshot will be restored and asked to confirm before anything changes.
+
+---
+
+## Deleting a Project
+
+```
+project-delete myapp
+```
+
+This removes the production and staging containers, the project directory (including its local
+backups), the Caddy site configs, and every piece of per-project state: health, deploy, pause and
+quarantine markers, CVE scan state, staging state, and container-update state. It then removes the
+name from the allowlist. A project later created with the same name starts clean, not paused or
+quarantined.
+
+The containers are removed first. If that fails, `project-delete` stops with an error and deletes
+nothing, so the compose files are still there for a retry. Fix the cause (usually Docker) and run it
+again. If the containers are already gone and the error persists, delete anyway with:
+
+```
+project-delete myapp --force
+```
+
+`--force` warns that containers named `myapp-*` may still be running. Check with `docker ps` as the
+supervisor user.
+
+---
+
+## Concurrent Operations
+
+Every command that changes a project holds that project's lock while it works: `prod-deploy`,
+`stage`, `promote`, `unstage`, `rollback`, `restore`, `backup`, `pause`, `resume`, `recover`,
+`project-delete`, the daily `container-update` (for the whole backup, pull, recreate, and rollback
+sequence), the CVE scan, and the 5-minute health check. Only one of them runs against a project at a
+time.
+
+If another operation holds the lock, an operator command fails at once and changes nothing:
+
+```text
+ERROR: Another operation is in progress for 'myapp'. Try again shortly.
+```
+
+Confirmation prompts are answered before the lock is taken, and the checks that decide whether the
+command may act (paused, CVE-quarantined, monitor-stopped) are repeated once the lock is held. A
+quarantine that lands while you are answering the prompt therefore still wins.
+
+Timers treat a held lock as routine, not as a failure. The 5-minute health check skips the project
+for that tick. `container-update` logs a warning (`Skipped myapp: project lock held by another
+operation`), tries the project once more after the other targets, and otherwise leaves it for the
+next day's run. A skip does not fail the run or send a Pushover alert. Nothing is recorded for a
+skipped project, so one that is skipped day after day shows up as stale in `health`
+(`container-updates`).
+
+Webhook POSTs and the `resume` smoke-failure alert are sent without holding the project lock, so a
+slow or unreachable endpoint cannot block other operations. A failed webhook delivery is logged as a
+warning (scheme and host only, never the URL path) and does not fail the command.
 
 ---
 
@@ -558,6 +638,8 @@ If deeper Caddy investigation is needed (container logs, config file inspection)
 
 This state means the smoke test exited with code 2 -- a critical failure that caused boxmunge to stop the project containers. The project will not restart automatically.
 
+The stop is sticky. Later 5-minute health checks do not run smoke against the stopped project, do not change its recorded failure reason, and do not send more alerts. `check-all` reports it as `CRITICAL (stopped by the health monitor ...)`, and `health` lists it under `lifecycle` as `monitor-stopped`. The stop stays in place until you run `recover`, or until a later deploy, rollback, or resume starts the project successfully.
+
 Check the dashboard to confirm the state:
 
 ```
@@ -570,7 +652,13 @@ Check logs from just before the containers were stopped:
 logs myapp --tail 200
 ```
 
-Once you have identified and fixed the underlying issue, redeploy:
+Once you have identified and fixed the underlying issue, restart the same build with `recover` (no image pull, no rebuild; it restores routing and runs the smoke test):
+
+```
+recover myapp
+```
+
+Or, if the fix needs new code, redeploy:
 
 ```
 prod-deploy myapp

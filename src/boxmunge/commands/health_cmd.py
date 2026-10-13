@@ -10,6 +10,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 
+from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
 from boxmunge.fleet import PROJECT_INPUT_ERRORS
 from boxmunge.lifecycle import is_blocked
@@ -161,7 +162,7 @@ def check_project_containers(paths: BoxPaths) -> HealthCheck:
     """Check if all deployed projects have running containers.
 
     Projects in operator/system-blocked lifecycle states (paused,
-    CVE-quarantined) are excluded from the container check itself —
+    CVE-quarantined, monitor-stopped) are excluded from the container check itself —
     surfacing them as "no running containers" would mis-attribute an
     intentional offline state as a health failure. The OK message
     distinguishes total deployed from actually-checked so the operator
@@ -183,7 +184,7 @@ def check_project_containers(paths: BoxPaths) -> HealthCheck:
     blocked_count = 0
     for name in projects:
         try:
-            blocked = is_blocked(name, paths)
+            blocked = is_blocked(name, paths) or is_monitor_stopped(name, paths)
         except PROJECT_INPUT_ERRORS as e:
             unreadable.append(f"{name} ({e})")
             continue
@@ -225,7 +226,7 @@ def check_project_containers(paths: BoxPaths) -> HealthCheck:
 
 
 def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
-    """Surface projects in paused or CVE-quarantined states.
+    """Surface projects in paused, CVE-quarantined, or monitor-stopped states.
 
     Quarantined projects warn — they're offline due to an unfixed CVE
     and may surprise an operator who only glanced at the report.
@@ -242,6 +243,7 @@ def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
     paused: list[str] = []
     quarantined: list[tuple[str, str]] = []
     unreadable: list[str] = []
+    stopped: list[str] = []
     for proj_dir in sorted(paths.projects.iterdir()):
         if not proj_dir.is_dir() or not (proj_dir / "manifest.yml").exists():
             continue
@@ -258,6 +260,8 @@ def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
             quarantined.append((name, cve))
         elif is_paused(name, paths):
             paused.append(name)
+        elif is_monitor_stopped(name, paths):
+            stopped.append(name)
     parts: list[str] = []
     if unreadable:
         parts.append("unreadable state: " + "; ".join(unreadable))
@@ -266,11 +270,18 @@ def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
             "quarantined: "
             + ", ".join(f"{n} ({c})" for n, c in quarantined)
         )
+    if stopped:
+        parts.append(
+            "monitor-stopped: " + ", ".join(stopped)
+            + " (run `recover <project>` once fixed)"
+        )
     if paused:
         parts.append("paused: " + ", ".join(paused))
     if unreadable:
         return HealthCheck("lifecycle", "error", "; ".join(parts))
-    if quarantined:
+    # Warn, never error: an app's critical stop is not a platform failure,
+    # and `health` exit 2 rolls back a platform upgrade in probation.
+    if quarantined or stopped:
         return HealthCheck("lifecycle", "warn", "; ".join(parts))
     if paused:
         return HealthCheck("lifecycle", "ok", "; ".join(parts))

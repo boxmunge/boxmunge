@@ -6,11 +6,11 @@ import sys
 from typing import Any
 
 from boxmunge.config import load_config, ConfigError
-from boxmunge.container_update import (
-    UpdateTarget, build_targets, update_target,
-)
+from boxmunge.container_update import SKIPPED_LOCKED, update_target
+from boxmunge.container_update_targets import UpdateTarget, build_targets
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error
+from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 
 
@@ -45,32 +45,50 @@ def _dry_run_target(paths: BoxPaths, target: UpdateTarget) -> dict[str, Any]:
 def _send_summary_alert(paths: BoxPaths, results: list[dict[str, Any]]) -> None:
     """Send a single Pushover alert summarizing failed targets.
 
-    Pushover is the operator's only out-of-band signal. If sending fails
-    (config missing, network issue, etc.), log it loudly so the failure
-    surfaces in the operational log and the next health run.
+    Pushover is the operator's only out-of-band signal; ``notify`` logs
+    any non-delivery so it surfaces in the log and the next health run.
     """
     failed = [r for r in results if r["status"] == "failed"]
     if not failed:
         return
+    names = ", ".join(r["name"] for r in failed)
+    details = "; ".join(f"{r['name']}: {r.get('reason', 'failed')}" for r in failed)
+    notify(
+        paths, "boxmunge container-update FAILURES",
+        f"Failed targets: {names}\n\n{details}",
+        component="container-update",
+    )
+
+
+def _update_one(paths: BoxPaths, target: UpdateTarget, dry_run: bool) -> dict[str, Any]:
     try:
-        from boxmunge.config import load_config
-        from boxmunge.pushover import send_notification
-        cfg = load_config(paths)
-        po = cfg.get("pushover", {})
-        names = ", ".join(r["name"] for r in failed)
-        details = "; ".join(
-            f"{r['name']}: {r.get('reason', 'failed')}" for r in failed
-        )
-        send_notification(
-            po.get("user_key", ""), po.get("app_token", ""),
-            "boxmunge container-update FAILURES",
-            f"Failed targets: {names}\n\n{details}",
-        )
+        if dry_run:
+            return _dry_run_target(paths, target)
+        return update_target(paths, target)
     except Exception as e:
-        log_error(
-            "container-update", f"Pushover summary alert failed: {e}", paths,
-            detail={"failed": [r["name"] for r in failed]},
-        )
+        # Should not happen — update_target catches its own errors
+        # but defense in depth: don't let one project crash the loop.
+        log_error("container-update", f"Unhandled exception updating {target.name}: {e}",
+                  paths, project=target.name)
+        return {"name": target.name, "status": "failed", "reason": f"exception: {e}"}
+
+
+def _retry_locked(
+    paths: BoxPaths, targets: list[UpdateTarget], results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Retry each lock-skipped project once; report any still busy."""
+    by_name = {t.name: t for t in targets}
+    retried: list[dict[str, Any]] = []
+    for result in results:
+        if result["status"] == SKIPPED_LOCKED:
+            result = _update_one(paths, by_name[result["name"]], dry_run=False)
+            if result["status"] == SKIPPED_LOCKED:
+                print(
+                    f"Skipped {result['name']}: another operation holds its "
+                    f"project lock. It will be updated on the next run."
+                )
+        retried.append(result)
+    return retried
 
 
 def run_container_update(
@@ -190,28 +208,28 @@ def run_container_update(
                     detail={"pending_services": pending},
                 )
                 continue
-            try:
-                if dry_run:
-                    results.append(_dry_run_target(paths, target))
-                else:
-                    results.append(update_target(paths, target))
-            except Exception as e:
-                # Should not happen — update_target catches its own errors
-                # but defense in depth: don't let one project crash the loop.
-                log_error("container-update", f"Unhandled exception updating {target.name}: {e}", paths, project=target.name)
-                results.append({"name": target.name, "status": "failed", "reason": f"exception: {e}"})
+            results.append(_update_one(paths, target, dry_run))
+
+        # Step 5b: a project whose lock was held (a deploy, scan, or health
+        # tick in progress) gets one more try now the others are done.
+        results = _retry_locked(paths, targets, results)
 
         # Step 6: Summary
         succeeded = [r["name"] for r in results if r["status"] == "succeeded"]
         failed = [r["name"] for r in results if r["status"] == "failed"]
         no_change = [r["name"] for r in results if r["status"] == "no_change"]
+        skipped = [r["name"] for r in results if r["status"] == SKIPPED_LOCKED]
         log_operation(
             "container-update", "Run complete", paths,
-            detail={"succeeded": succeeded, "failed": failed, "no_change": no_change},
+            detail={"succeeded": succeeded, "failed": failed,
+                    "no_change": no_change, "skipped_locked": skipped},
         )
         if failed:
             _send_summary_alert(paths, results)
-        print(f"\nSummary: {len(succeeded)} succeeded, {len(failed)} failed, {len(no_change)} no-change")
+        print(
+            f"\nSummary: {len(succeeded)} succeeded, {len(failed)} failed, "
+            f"{len(no_change)} no-change, {len(skipped)} skipped (busy)"
+        )
         return 0 if not failed else 1
 
     finally:

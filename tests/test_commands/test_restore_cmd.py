@@ -1,26 +1,10 @@
 """Tests for boxmunge restore command logic."""
 
-import shutil
-import subprocess
-from unittest.mock import patch, MagicMock
-
 import pytest
 
 from boxmunge.commands.restore import run_restore
 from boxmunge.paths import BoxPaths
 from boxmunge.pause import write_paused_state
-
-
-def _docker_available() -> bool:
-    """True iff a real Docker daemon is reachable on this host."""
-    if shutil.which("docker") is None:
-        return False
-    try:
-        return subprocess.run(
-            ["docker", "info"], capture_output=True, timeout=5, check=False,
-        ).returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
 
 
 MANIFEST = """\
@@ -138,37 +122,6 @@ class TestRunRestore:
         exit_code = run_restore("myapp", paths, snapshot=None, yes=True)
         assert exit_code == 1
         assert "backup.restore_command" in capsys.readouterr().err
-
-    @pytest.mark.integration
-    @pytest.mark.skipif(
-        not _docker_available(),
-        reason=(
-            "test_restore_with_named_snapshot exercises _run_restore_inner "
-            "which calls `docker compose up` and `docker inspect` via direct "
-            "subprocess (restore.py:180-209). Those bypass the @patch'd "
-            "compose_up wrapper, so the test requires a real Docker daemon. "
-            "Wave 3: marked integration; flagged as a follow-up to refactor "
-            "the start-backup-service block to use compose_up."
-        ),
-    )
-    @patch("boxmunge.commands.restore._restore_snapshot")
-    @patch("boxmunge.commands.restore.compose_down")
-    @patch("boxmunge.commands.restore.compose_up")
-    def test_restore_with_named_snapshot(
-        self, mock_up: MagicMock, mock_down: MagicMock,
-        mock_restore: MagicMock, paths: BoxPaths
-    ) -> None:
-        _setup_project(paths)
-        mock_restore.return_value = True
-        exit_code = run_restore(
-            "myapp", paths,
-            snapshot="myapp-2026-03-29T020000.tar.gz.age",
-            yes=True,
-        )
-        assert exit_code == 0
-        mock_down.assert_called_once()
-        mock_restore.assert_called_once()
-        mock_up.assert_called_once()
 
     def test_refuses_when_paused(
         self, paths: BoxPaths, capsys: pytest.CaptureFixture[str],

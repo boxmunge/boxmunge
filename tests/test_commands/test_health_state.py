@@ -146,7 +146,7 @@ class TestCriticalCleanup:
 
         with patch("boxmunge.commands.health_state.compose_down",
                    side_effect=DockerError("daemon gone")), \
-             patch("boxmunge.commands.health_state.send_notification"), \
+             patch("boxmunge.notify.send_notification"), \
              patch("boxmunge.commands.health_state.log_error") as mock_err:
             update_health_state(
                 "myapp", check_result=2, message="hard failure", paths=paths,
@@ -169,9 +169,9 @@ class TestCriticalCleanup:
         # No pushover config: write a minimal config that omits keys.
         paths.config_file.write_text("hostname: t\nadmin_email: t@t\n")
 
-        with patch("boxmunge.commands.health_state.send_notification") as mock_send, \
+        with patch("boxmunge.notify.send_notification") as mock_send, \
              patch("boxmunge.commands.health_state.compose_down"), \
-             patch("boxmunge.commands.health_state.log_error") as mock_err:
+             patch("boxmunge.notify.log_warning") as mock_warn:
             update_health_state(
                 "myapp", check_result=2, message="hard failure", paths=paths,
             )
@@ -179,9 +179,12 @@ class TestCriticalCleanup:
         # send_notification must NOT be called with empty creds.
         mock_send.assert_not_called()
         dropped_calls = [
-            c for c in mock_err.call_args_list
-            if "Pushover not configured" in c.args[1] and "alert dropped" in c.args[1]
+            c for c in mock_warn.call_args_list
+            if "Pushover is not configured" in c.args[1] and "Alert not sent" in c.args[1]
         ]
         assert len(dropped_calls) == 1, (
-            f"expected alert-dropped log; got {mock_err.call_args_list}"
+            f"expected alert-not-sent log; got {mock_warn.call_args_list}"
         )
+        # Not delivered, so not recorded as sent (retried next tick).
+        from boxmunge.state import read_state
+        assert read_state(paths.project_health_state("myapp"))["alerted"] is False

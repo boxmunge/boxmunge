@@ -21,13 +21,14 @@ from boxmunge.compose_validate import validate_user_compose, ComposeSecurityErro
 from boxmunge.docker import (
     compose_pull, compose_up, caddy_reload, DockerError,
 )
+from boxmunge.fileutil import LockError, project_lock
 from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import is_paused, clear_paused_state
+from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
-from boxmunge.pushover import send_notification
 from boxmunge.security_overlay import services_with_off_profile
 from boxmunge.state import read_state, write_state
 
@@ -49,18 +50,8 @@ def _has_image_services(project_dir: Path, compose_files: list[str]) -> bool:
     return False
 
 
-def run_resume(
-    project_name: str,
-    paths: BoxPaths,
-    yes: bool = False,
-    skip_security_checks: bool = False,
-) -> int:
-    """Resume a paused project. Returns 0 on success, 1 on failure."""
-    project_dir = paths.project_dir(project_name)
-    if not project_dir.exists() or not (project_dir / "manifest.yml").exists():
-        print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
-        return 1
-
+def _refuse_unless_resumable(project_name: str, paths: BoxPaths) -> bool:
+    """Print why and return False unless the project is paused, not quarantined."""
     # Pause-resume must NOT silently un-quarantine. Lifting CVE quarantine
     # has its own dedicated command path (`boxmunge security resume`)
     # which re-scans before lifting. is_blocked() returns QUARANTINED
@@ -69,30 +60,47 @@ def run_resume(
     block = is_blocked(project_name, paths)
     if block and block.reason is BlockReason.QUARANTINED:
         print(f"ERROR: {block.refuse_message}", file=sys.stderr)
-        return 1
-
+        return False
     # Positive precondition: this command can only be invoked when the
-    # project is paused. Note this is a different semantic from the
-    # is_blocked refuse path above.
+    # project is paused.
     if not is_paused(project_name, paths):
         print(f"ERROR: Project '{project_name}' is not paused.",
               file=sys.stderr)
-        return 1
+        return False
+    return True
 
-    try:
-        manifest = load_manifest(paths.project_manifest(project_name))
-    except ManifestError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
 
+def _compose_files(project_name: str, paths: BoxPaths) -> list[str]:
     compose_files = ["compose.yml"]
-    override = paths.project_compose_override(project_name)
-    if override.exists():
+    if paths.project_compose_override(project_name).exists():
         compose_files.append("compose.boxmunge.yml")
+    return compose_files
 
-    pull_image_services = _has_image_services(project_dir, compose_files)
+
+def run_resume(
+    project_name: str,
+    paths: BoxPaths,
+    yes: bool = False,
+    skip_security_checks: bool = False,
+) -> int:
+    """Resume a paused project. Returns 0 on success, 1 on failure.
+
+    Preconditions are checked before the confirmation prompt (so the
+    operator is not asked to confirm something that cannot happen) and
+    again under the project lock, which the resume itself holds: a
+    quarantine landing while the operator answered the prompt wins.
+    """
+    project_dir = paths.project_dir(project_name)
+    if not project_dir.exists() or not (project_dir / "manifest.yml").exists():
+        print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
+        return 1
+    if not _refuse_unless_resumable(project_name, paths):
+        return 1
 
     if not yes:
+        pull_image_services = _has_image_services(
+            project_dir, _compose_files(project_name, paths),
+        )
         print(f"This will resume '{project_name}':")
         if skip_security_checks:
             print("  - SKIPPING image pull (--skip-security-checks set)")
@@ -106,6 +114,39 @@ def run_resume(
         if response.lower() != "y":
             print("Aborted.")
             return 1
+
+    try:
+        with project_lock(project_name, paths):
+            rc, smoke_failure = _resume_locked(
+                project_name, paths, skip_security_checks,
+            )
+    except LockError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    # Alert after releasing the lock: Pushover is a network call.
+    if smoke_failure is not None:
+        _alert_smoke_failed(project_name, paths, smoke_failure)
+    return rc
+
+
+def _resume_locked(
+    project_name: str, paths: BoxPaths, skip_security_checks: bool,
+) -> tuple[int, str | None]:
+    """Bring the project back online. Caller holds the project lock.
+
+    Returns the exit code and, if the post-resume smoke test failed, its
+    message, so the caller can alert after releasing the lock.
+    """
+    if not _refuse_unless_resumable(project_name, paths):
+        return 1, None
+    project_dir = paths.project_dir(project_name)
+    try:
+        manifest = load_manifest(paths.project_manifest(project_name))
+    except ManifestError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1, None
+    compose_files = _compose_files(project_name, paths)
+    pull_image_services = _has_image_services(project_dir, compose_files)
 
     # Validate user compose.yml against silent-floor-defeating keys BEFORE
     # any container action. A hostile compose.yml introduced while the
@@ -126,7 +167,7 @@ def run_resume(
         print(f"ERROR: {e}", file=sys.stderr)
         log_error("resume", f"Compose validation rejected: {e}",
                   paths, project=project_name)
-        return 3
+        return 3, None
 
     # Pull images (unless overridden or no image: services).
     if pull_image_services and not skip_security_checks:
@@ -141,7 +182,7 @@ def run_resume(
                   file=sys.stderr)
             log_error("resume", f"Image pull failed: {e}", paths,
                       project=project_name)
-            return 1
+            return 1, None
 
     # Start containers.
     print("  Starting containers...")
@@ -151,7 +192,7 @@ def run_resume(
         print(f"ERROR: compose up failed: {e}", file=sys.stderr)
         log_error("resume", f"compose up failed: {e}", paths,
                   project=project_name)
-        return 1
+        return 1, None
 
     # Restore Caddy site config from manifest (regenerated).
     print("  Restoring Caddy routing...")
@@ -163,7 +204,7 @@ def run_resume(
         print(f"ERROR: Caddy restore failed: {e}", file=sys.stderr)
         log_error("resume", f"Caddy restore failed: {e}", paths,
                   project=project_name)
-        return 1
+        return 1, None
 
     # Smoke test.
     print("  Running smoke test...")
@@ -173,18 +214,6 @@ def run_resume(
         print(f"  WARN: Smoke test failed: {smoke_msg}")
         log_warning("resume", f"Smoke failed after resume: {smoke_msg}",
                     paths, project=project_name)
-        try:
-            from boxmunge.config import ConfigError, load_config
-            cfg = load_config(paths)
-            po = cfg.get("pushover", {})
-            send_notification(
-                po.get("user_key", ""), po.get("app_token", ""),
-                "boxmunge resume: smoke failed",
-                f"{project_name} resumed but smoke test failed: {smoke_msg}",
-            )
-        except (ConfigError, OSError, KeyError) as e:
-            log_warning("resume", f"could not send Pushover: {e}",
-                        paths, project=project_name)
 
     # Clear paused state (regardless of smoke outcome — project is
     # no longer paused, just possibly unhealthy).
@@ -206,7 +235,15 @@ def run_resume(
     print(f"Project '{project_name}' resumed.")
     suffix = f" — {smoke_msg}" if not smoke_ok else ""
     print(f"  Smoke: {'PASS' if smoke_ok else 'FAIL'}{suffix}")
-    return 0
+    return 0, (None if smoke_ok else smoke_msg)
+
+
+def _alert_smoke_failed(project_name: str, paths: BoxPaths, smoke_msg: str) -> None:
+    notify(
+        paths, "boxmunge resume: smoke failed",
+        f"{project_name} resumed but smoke test failed: {smoke_msg}",
+        component="resume", project=project_name,
+    )
 
 
 def cmd_resume(args: list[str]) -> None:

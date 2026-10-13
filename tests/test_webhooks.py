@@ -100,10 +100,13 @@ class TestWebhookSafe:
                 webhook_safe("deploy", "myapp", paths)
 
     def test_calls_fire_webhook_with_details(self, paths):
-        with patch("boxmunge.webhooks.load_config",
-                   return_value={"webhooks": [], "hostname": "h"}):
-            with patch("boxmunge.webhooks.fire_webhook") as mock_fire:
-                webhook_safe("deploy", "myapp", paths, details={"ref": "abc"})
+        config = {"hostname": "h", "webhooks": [
+            {"url": "https://hooks.example.com/x", "events": ["deploy"]},
+        ]}
+        with patch("boxmunge.webhooks.load_config", return_value=config):
+            with patch("boxmunge.webhooks.fire_webhook", return_value=[]) as mock_fire:
+                thread = webhook_safe("deploy", "myapp", paths, details={"ref": "abc"})
+                thread.join(5)
                 mock_fire.assert_called_once()
                 kwargs = mock_fire.call_args.kwargs
                 assert kwargs["details"] == {"ref": "abc"}
