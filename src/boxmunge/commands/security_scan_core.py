@@ -110,8 +110,8 @@ class ProjectScan:
         out = [f"image {ref}: scan failed" for ref in self.failed_images]
         out += [f"image {ref}: skipped (scan budget exhausted)"
                 for ref in self.skipped_images]
-        out += [f"service {svc!r}: no image could be identified (no container "
-                f"digest and no image: in compose.yml)"
+        out += [f"service {svc!r}: no image could be identified (no container, "
+                f"no built image, and no image: in compose.yml)"
                 for svc in self.unidentified_services]
         return out
 
@@ -282,11 +282,15 @@ def _scan_one_project_locked(
     scan_state_path = paths.project_scan_state(project)
     prior_decisions = _prior_decisions(paths, project)
 
-    targets, unidentified = identify_images(meta.manifest, meta.compose, project)
+    inventory = identify_images(meta.manifest, meta.compose, project)
+    targets, unidentified = inventory.targets, inventory.unidentified
     warnings = [
-        f"service {svc!r}: no running container and no image declared "
-        f"in compose (build-only) — skipping"
+        f"service {svc!r}: no container, no built image and no image: in "
+        f"compose — cannot be scanned"
         for svc in unidentified
+    ] + [
+        f"service {svc!r}: compose-profile service not running — nothing to scan"
+        for svc in inventory.not_started
     ]
     if not targets:
         # Persist an empty scan-state so we don't wedge the per-project view.

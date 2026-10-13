@@ -626,6 +626,22 @@ entry includes `previously_suppressed=true` in its detail. The
 combination makes silent extension-of-suppression visible in the
 audit trail.
 
+## What is scanned
+
+Every service in the project's `compose.yml` is scanned — not only the
+services the manifest lists, so databases, caches and sidecars are covered
+too. For each service the scanner uses the most exact identity it can find:
+
+1. the container's image pinned by registry digest (`repo@sha256:…`);
+2. the container's local image ID (`sha256:…`), which is exactly what is
+   running and the only identity a locally built (`build:`) image has;
+3. the `image:` declared in `compose.yml`;
+4. the image compose built for the service (`<project>-<service>`).
+
+A stopped container (paused or quarantined project) still identifies its
+image. A compose service behind `profiles:` that is not running is not
+scanned and not counted as a failure: nothing of it is deployed.
+
 ## Scan cadence
 
 - **Daily** at 03:00 system time via systemd timer `boxmunge-cve-scan.timer`,
@@ -688,10 +704,10 @@ worst case while still letting normal scans complete in seconds.
 An image that is not scanned is not covered by quarantine, so a scan that
 did not cover everything is never reported as success. A project's scan is
 **incomplete** when an image fails to scan (Trivy error, registry or DB
-unreachable), the budget skips an image, or a manifest service has no
-identifiable image (no container to read a digest from and no `image:` in
-`compose.yml` — declare `image:` alongside `build:` so the scanner can
-find a locally built image). A project **fails** outright when one of its
+unreachable), the budget skips an image, or a service has no identifiable
+image at all (no container, no image built for it, and no `image:` in
+`compose.yml` — in practice a build-only service that was never built). A
+project **fails** outright when one of its
 inputs is malformed: an unparseable manifest or `compose.yml`, an unknown
 `security.posture`, a non-boolean `dangerously_disable_quarantine`, a broken
 suppressions file, or a quarantine action that could not complete.
@@ -915,9 +931,8 @@ closed (see "Recovering a quarantined project" below).
    - any image failed to scan (Trivy DB or registry unreachable, for
      example), or every image did;
    - the per-project scan budget ran out before every image was scanned;
-   - a service's image cannot be identified (no container to read a digest
-     from and no `image:` in `compose.yml`). Declare `image:` alongside
-     `build:` for build-only services so the scanner can find them.
+   - a service's image cannot be identified (no container, no image built
+     for it, and no `image:` in `compose.yml`).
 
    The error lists each image or service that was not covered. Fix the
    cause and retry; an incomplete re-scan is never treated as clean.

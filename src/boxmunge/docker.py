@@ -370,3 +370,35 @@ def set_restart_policy(container_names: list[str], policy: str) -> None:
     """Run docker update --restart=<policy> on the named containers."""
     if container_names:
         _run(["docker", "update", f"--restart={policy}", *container_names])
+
+
+def container_image_id(container_name: str) -> str | None:
+    """The local image ID ("sha256:...") a container was created from.
+
+    Unlike container_image_digest this needs no registry digest, so it
+    identifies locally built images too. None if there is no such container.
+    """
+    try:
+        result = _run(
+            ["docker", "inspect", "--format", "{{.Image}}", container_name],
+            capture=True,
+            check=False,
+        )
+    except DockerError:
+        return None
+    image_id = result.stdout.strip()
+    return image_id if image_id.startswith("sha256:") else None
+
+
+def local_image_id(image_ref: str) -> str | None:
+    """The local image ID for an image name, or None if it is not present."""
+    try:
+        result = _run(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", image_ref],
+            capture=True,
+            check=False,
+        )
+    except DockerError:
+        return None
+    image_id = result.stdout.strip()
+    return image_id if image_id.startswith("sha256:") else None

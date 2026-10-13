@@ -18,7 +18,7 @@ import yaml
 from boxmunge.cve.hardening import HardeningProfile, hardening_profile_from_compose
 from boxmunge.cve.policy import PolicyError, Posture, parse_posture
 from boxmunge.cve.suppressions import Suppression, SuppressionsError, load_suppressions
-from boxmunge.docker import container_image_digest
+from boxmunge.docker import container_image_digest, container_image_id, local_image_id
 from boxmunge.manifest import load_manifest
 from boxmunge.paths import BoxPaths
 from boxmunge.security_overlay import services_with_off_profile
@@ -145,32 +145,64 @@ def load_all_suppressions(paths: BoxPaths, project: str) -> tuple[Suppression, .
     return project_supps + host_supps
 
 
+def _strip_tag(ref: str) -> str:
+    """Drop a :tag from an image reference, keeping a registry :port."""
+    name, sep, tag = ref.rpartition(":")
+    return name if sep and "/" not in tag else ref
+
+
+@dataclass(frozen=True)
+class ImageInventory:
+    """What to scan for one project, and what could not be scanned."""
+
+    targets: list[ScanTarget]
+    # No container, no local image, no image: in compose — cannot be scanned.
+    unidentified: list[str]
+    # Compose-profile services that are not running: nothing deployed to scan.
+    not_started: list[str]
+
+
+def _image_for(project: str, service: str, svc_compose: dict[str, Any]) -> str | None:
+    """The image to scan for one service, most exact first.
+
+    1. The container's image pinned by registry digest (repo@sha256:...).
+    2. The container's local image ID — what is actually running, and the
+       only identity a locally built image has (audit B-10).
+    3. The compose-declared image tag.
+    4. The image compose builds for the service (<project>-<service>).
+    """
+    cname = container_name(project, service)
+    base_ref = svc_compose.get("image")
+    digest = container_image_digest(cname)
+    if digest and base_ref and "@" not in base_ref:
+        return f"{_strip_tag(base_ref)}@{digest}"
+    return (
+        container_image_id(cname)
+        or base_ref
+        or local_image_id(f"{project}-{service}")
+    )
+
+
 def identify_images(
     manifest: dict[str, Any], compose: dict[str, Any], project: str,
-) -> tuple[list[ScanTarget], list[str]]:
-    """Return (targets, unidentified service names).
+) -> ImageInventory:
+    """Find the image of every service the project runs.
 
-    For each manifest service: prefer the running (or stopped) container's
-    image digest; fall back to the compose-declared image. A service with
-    neither cannot be scanned and is reported as unidentified.
+    Every compose service is scanned, not only those the manifest lists:
+    databases, caches and sidecars run too (audit B-10).
     """
-    targets: list[ScanTarget] = []
-    unidentified: list[str] = []
     compose_services = compose.get("services") or {}
-
-    for svc_name in (manifest.get("services") or {}).keys():
-        svc_compose = compose_services.get(svc_name, {})
-        base_ref = svc_compose.get("image") if isinstance(svc_compose, dict) else None
-        digest = container_image_digest(container_name(project, svc_name))
-        if digest:
-            if base_ref and "@" not in base_ref:
-                # Strip any tag and pin to digest.
-                short = base_ref.split(":", 1)[0]
-                targets.append(ScanTarget(svc_name, f"{short}@{digest}"))
-            else:
-                targets.append(ScanTarget(svc_name, digest))
-        elif base_ref:
-            targets.append(ScanTarget(svc_name, base_ref))
+    names = list(manifest.get("services") or {})
+    names += [n for n in compose_services if n not in names]
+    inventory = ImageInventory([], [], [])
+    for service in names:
+        svc_compose = compose_services.get(service)
+        svc_compose = svc_compose if isinstance(svc_compose, dict) else {}
+        image = _image_for(project, service, svc_compose)
+        if image:
+            inventory.targets.append(ScanTarget(service, image))
+        elif svc_compose.get("profiles"):
+            inventory.not_started.append(service)
         else:
-            unidentified.append(svc_name)
-    return targets, unidentified
+            inventory.unidentified.append(service)
+    return inventory
