@@ -209,9 +209,11 @@ def test_format_suppression_expired_alert_shape() -> None:
 # ---------- detect_transitions ----------
 
 
-def test_first_scan_quarantine_finding_emits_quarantine_alert() -> None:
+def test_quarantine_dispositions_are_not_transition_alerts() -> None:
+    """Audit B-17: the QUARANTINED alert belongs to the action, which the
+    enforcement step announces, not to a disposition change."""
     alerts = _alerts(_decision(_disp(disposition=Disposition.QUARANTINE)))
-    assert [a.kind for a in alerts] == ["quarantine"]
+    assert alerts == ()
 
 
 def test_first_scan_at_risk_finding_emits_still_running_alert() -> None:
@@ -261,7 +263,7 @@ def test_mixed_dispositions_for_one_cve_do_not_repeat() -> None:
               disposition=Disposition.INFORMATIONAL)
     day1 = _decision(q, i, when=_DAY1)
     first = _alerts(day1)
-    assert [a.kind for a in first] == ["quarantine", "informational"]
+    assert [a.kind for a in first] == ["informational"]
     for when in (_DAY2, datetime(2026, 5, 7, tzinfo=timezone.utc)):
         assert _alerts(_decision(q, i, when=when), day1) == ()
 
@@ -274,11 +276,6 @@ def test_findings_are_compared_across_all_images() -> None:
     assert _alerts(current, prior) == ()
 
 
-def test_at_risk_to_quarantine_emits_quarantine_alert() -> None:
-    """Operator turned off dangerously_disable_quarantine."""
-    prior = _decision(_disp(disposition=Disposition.STILL_RUNNING_AT_RISK), when=_DAY1)
-    current = _decision(_disp(disposition=Disposition.QUARANTINE), when=_DAY2)
-    assert [a.kind for a in _alerts(current, prior)] == ["quarantine"]
 
 
 def test_quarantine_to_at_risk_emits_still_running_alert() -> None:
@@ -293,10 +290,12 @@ def test_resolved_finding_no_alert() -> None:
     assert _alerts(_decision(when=_DAY2), prior) == ()
 
 
-def test_new_quarantine_findings_are_one_alert() -> None:
-    prior = _decision(_disp("CVE-2026-0001"), when=_DAY1)
-    current = _decision(_disp("CVE-2026-0001"), _disp("CVE-2026-0002"),
-                        _disp("CVE-2026-0003"), when=_DAY2)
+def test_new_at_risk_findings_are_one_alert() -> None:
+    sr = Disposition.STILL_RUNNING_AT_RISK
+    prior = _decision(_disp("CVE-2026-0001", disposition=sr), when=_DAY1)
+    current = _decision(_disp("CVE-2026-0001", disposition=sr),
+                        _disp("CVE-2026-0002", disposition=sr),
+                        _disp("CVE-2026-0003", disposition=sr), when=_DAY2)
     alerts = _alerts(current, prior)
     assert len(alerts) == 1
     assert "CVE-2026-0002" in alerts[0].title and "(+1 more)" in alerts[0].title
@@ -331,8 +330,8 @@ def test_suppression_active_no_alert() -> None:
     assert [a for a in _alerts(current, prior, (sup,)) if a.kind == "suppression_expired"] == []
 
 
-def test_multiple_alerts_ordering_quarantine_first() -> None:
-    """Mix of all categories emits in order: quarantine, still_running,
+def test_multiple_alerts_ordering() -> None:
+    """Mix of all categories emits in order: still_running,
     suppression_expired, informational."""
     sup = _suppression("CVE-2026-9999")
     current = _decision(
@@ -343,7 +342,7 @@ def test_multiple_alerts_ordering_quarantine_first() -> None:
     )
     prior = _decision(when=datetime(2026, 7, 31, tzinfo=timezone.utc))
     assert [a.kind for a in _alerts(current, prior, (sup,))] == [
-        "quarantine", "still_running", "suppression_expired", "informational",
+        "still_running", "suppression_expired", "informational",
     ]
 
 
@@ -449,7 +448,7 @@ def test_emit_scan_alerts_integration(monkeypatch, tmp_path) -> None:
 
     fd = _disp("CVE-2026-9999", base=Severity.CRITICAL,
                effective=Severity.CRITICAL,
-               disposition=Disposition.QUARANTINE)
+               disposition=Disposition.STILL_RUNNING_AT_RISK)
     current = _decision(fd, when=datetime(2026, 5, 6, tzinfo=timezone.utc))
     host_expired = emit_scan_alerts(
         project_name="demo",

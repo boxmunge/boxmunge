@@ -20,6 +20,12 @@ from boxmunge.commands.security_scan_inputs import (
     load_all_suppressions,
     load_project_meta,
 )
+from boxmunge.commands.security_enforce import (
+    Enforcement,
+    announce_quarantine,
+    enforce,
+    raise_enforcement_error,
+)
 from boxmunge.cve.alerting import emit_scan_alerts
 from boxmunge.cve.grace import GraceError, init_grace_if_missing
 from boxmunge.cve.kev import KevCatalog, load_kev
@@ -30,12 +36,6 @@ from boxmunge.cve.policy import (
     ProjectDecision,
     evaluate_finding,
     evaluate_project,
-)
-from boxmunge.cve.quarantine import (
-    QuarantineError,
-    is_quarantined,
-    quarantine_project,
-    reassert_quarantine,
 )
 from boxmunge.cve.relevance import (
     ecosystem_for_package,
@@ -294,9 +294,9 @@ def _scan_one_project_locked(
         # Persist an empty scan-state so we don't wedge the per-project view.
         # Audit-only (resume re-scan, audit A-3) leaves the prior alone.
         if not audit_only:
-            enforce_error = _enforce(paths, project, meta, None, in_grace=in_grace)
+            outcome = _enforce(paths, project, meta, None, in_grace=in_grace)
             write_scan_state(scan_state_path, decisions=())
-            _raise_enforce_error(project, enforce_error)
+            raise_enforcement_error(outcome.error)
         return ProjectScan(
             project=project, posture=meta.posture_str, dangerously=dangerously,
             decisions=(), warnings=tuple(warnings),
@@ -346,12 +346,12 @@ def _scan_one_project_locked(
     # Audit-only callers (resume re-scan, audit A-3) are the lift flow
     # itself and never act. Everyone else enforces: an existing quarantine
     # is re-asserted on every scan (B-03), a new one fires outside grace.
-    enforce_error = None
+    outcome = Enforcement()
     if not audit_only:
-        enforce_error = _enforce(paths, project, meta, headline, in_grace=in_grace)
+        outcome = _enforce(paths, project, meta, headline, in_grace=in_grace)
 
     if failed and not decisions:
-        detail = f"; {enforce_error}" if enforce_error else ""
+        detail = f"; {outcome.error}" if outcome.error else ""
         raise RuntimeError(
             f"All images failed to scan for project {project!r}{detail}"
         )
@@ -364,10 +364,12 @@ def _scan_one_project_locked(
     # must not push alerts.
     host_expired: tuple[Suppression, ...] = ()
     if not in_grace and not audit_only:
+        if outcome.landed:
+            announce_quarantine(paths, project, decisions)
         host_expired = _emit_transition_alerts(
             paths, project, decisions, prior_decisions, supps,
         )
-    _raise_enforce_error(project, enforce_error)
+    raise_enforcement_error(outcome.error)
 
     return ProjectScan(
         project=project,
@@ -387,35 +389,11 @@ def _enforce(
     paths: BoxPaths, project: str, meta: ProjectMeta,
     headline: tuple[ProjectDecision, FindingDisposition] | None,
     *, in_grace: bool,
-) -> str | None:
-    """Take or re-assert the quarantine action. Returns an error or None.
-
-    An existing quarantine record is re-asserted whatever this scan found,
-    so a partially failed action converges (audit B-03). During grace no
-    NEW quarantine fires; the heads-up alert summarises what would.
-    """
-    project_dir = paths.project_dir(project)
-    try:
-        if is_quarantined(project, paths):
-            reassert_quarantine(
-                project, paths, project_dir=project_dir,
-                hosts=meta.hosts, compose_files=meta.compose_files,
-            )
-        elif headline is not None and not in_grace:
-            quarantine_project(
-                project, paths, project_dir=project_dir,
-                hosts=meta.hosts, compose_files=meta.compose_files,
-                headline=headline[1], image_ref=headline[0].image_ref,
-            )
-    except QuarantineError as e:
-        return f"quarantine action failed for {project!r}: {e}"
-    return None
-
-
-def _raise_enforce_error(project: str, error: str | None) -> None:
-    """Fail the project scan loudly once its state has been persisted."""
-    if error is not None:
-        raise RuntimeError(f"{error} (the next scan retries it)")
+) -> Enforcement:
+    return enforce(
+        paths, project, hosts=meta.hosts, compose_files=meta.compose_files,
+        headline=headline, in_grace=in_grace,
+    )
 
 
 def _headline(

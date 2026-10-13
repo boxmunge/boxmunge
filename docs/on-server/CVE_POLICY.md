@@ -625,11 +625,18 @@ all of the project's images — never by image digest — so an image rebuild
 or container update with the same findings alerts nothing, and one CVE
 that quarantines in `libperl5.36` but is informational in `perl-base` is
 two stable findings, not one that flaps every day. Only transitions (a new
-finding, a change of disposition, a suppression expiring, a new
-quarantine) alert, and each kind of transition is **one alert per project
+finding, a change of disposition, a suppression expiring) alert, and each kind of transition is **one alert per project
 per scan** listing every finding involved — a project's first scan sends
 one informational digest, not one push per finding. Host-scope
 suppression expiry is alerted once per fleet scan, not once per project.
+
+The `QUARANTINED` alert belongs to the quarantine **action**, not to a
+change in a finding's disposition: it is sent once, when the maintenance
+page and the stop have both landed (a new quarantine, or an earlier
+partial one completing). A project that stays quarantined is not
+re-alerted, and the first enforcing scan after the migration grace window
+alerts even though its dispositions were already `QUARANTINE` while in
+grace.
 
 ### Per-project scan budget (v0.7.0)
 
@@ -685,7 +692,8 @@ install — you cannot dodge enforcement by repeatedly upgrading.
 - Per-project transition alerts (new findings, suppression expiry, etc.)
   are silenced during grace — the heads-up is the one alert in this
   window.
-- After 24 hours, full enforcement begins on the next scan.
+- After 24 hours, full enforcement begins on the next scan, and every
+  project quarantined then gets its own `QUARANTINED` alert.
 
 The grace state is visible in `boxmunge security --json` under the
 top-level `grace` field.

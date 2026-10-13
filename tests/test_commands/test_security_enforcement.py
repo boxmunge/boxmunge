@@ -15,6 +15,7 @@ from boxmunge.cve.scanner import ScannerError
 from tests.test_commands.cve_helpers import (
     CRIT,
     Docker,
+    Pushover,
     make_box,
     scan_result,
     seed_quarantine,
@@ -124,3 +125,44 @@ def test_grace_reasserts_existing_quarantine_but_fires_no_new_one(
     scan_one_project(paths, "bbb", in_grace=True)
     assert q.quarantine_action_complete("aaa", paths)
     assert not q.is_quarantined("bbb", paths)
+
+
+# ---------- B-17: the QUARANTINED alert follows the action ----------
+
+
+def _quarantined_alerts(pushover: Pushover) -> list[tuple[str, str, int]]:
+    return [s for s in pushover.sent if "QUARANTINED" in s[0]]
+
+
+def test_first_enforcing_scan_after_grace_alerts(tmp_path, monkeypatch, docker):
+    """Audit B-17: grace persisted QUARANTINE dispositions, so the first
+    enforcing scan saw no disposition change and stopped the site silently."""
+    paths = make_box(tmp_path)
+    pushover = Pushover(monkeypatch, paths)
+    _scan_returns(monkeypatch, [CRIT])
+    scan_one_project(paths, "demo", in_grace=True)
+    assert pushover.sent == [] and not q.is_quarantined("demo", paths)
+
+    scan_one_project(paths, "demo", in_grace=False)
+    assert q.is_quarantined("demo", paths)
+    [(title, body, priority)] = _quarantined_alerts(pushover)
+    assert priority == 1
+    assert "CVE-2026-0001" in title
+    assert "Service stopped" in body
+
+
+def test_completing_a_partial_quarantine_alerts_once(tmp_path, monkeypatch, docker):
+    paths = make_box(tmp_path)
+    pushover = Pushover(monkeypatch, paths)
+    _scan_returns(monkeypatch, [CRIT])
+    docker.fail["compose_stop"] = 1
+    with pytest.raises(RuntimeError):
+        scan_one_project(paths, "demo", in_grace=False)
+    assert _quarantined_alerts(pushover) == []
+
+    scan_one_project(paths, "demo", in_grace=False)
+    assert len(_quarantined_alerts(pushover)) == 1
+    pushover.clear()
+    scan_one_project(paths, "demo", in_grace=False)
+    assert pushover.sent == []
+

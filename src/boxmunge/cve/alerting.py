@@ -142,19 +142,23 @@ def detect_transitions(
     disposition changed. Suppression expiry is detected by replaying the
     suppression list against the prior and current scan dates.
 
-    Order: quarantine, still_running, suppression_expired, informational.
+    QUARANTINE dispositions are not alerted here: the QUARANTINED alert is
+    tied to the quarantine action landing (audit B-17), which the
+    enforcement step announces.
+
+    Order: still_running, suppression_expired, informational.
     """
     before = findings_by_key(prior)
     now = findings_by_key(current)
-    newly: dict[Disposition, list[Hit]] = {
-        Disposition.QUARANTINE: [], Disposition.STILL_RUNNING_AT_RISK: [],
-    }
+    new_at_risk: list[Hit] = []
     new_info: list[Hit] = []
     for key, hit in now.items():
         disp = hit.disposition.disposition
         old = before.get(key)
-        if disp in newly and (old is None or old.disposition.disposition != disp):
-            newly[disp].append(hit)
+        if disp == Disposition.STILL_RUNNING_AT_RISK and (
+            old is None or old.disposition.disposition != disp
+        ):
+            new_at_risk.append(hit)
         elif disp == Disposition.INFORMATIONAL and old is None:
             new_info.append(hit)
 
@@ -167,12 +171,8 @@ def detect_transitions(
                 (host_expired if sup.scope == SCOPE_HOST else project_expired).append(sup)
 
     alerts: list[Alert] = []
-    if newly[Disposition.QUARANTINE]:
-        alerts.append(format_quarantine_alert(project_name, newly[Disposition.QUARANTINE]))
-    if newly[Disposition.STILL_RUNNING_AT_RISK]:
-        alerts.append(format_still_running_alert(
-            project_name, newly[Disposition.STILL_RUNNING_AT_RISK],
-        ))
+    if new_at_risk:
+        alerts.append(format_still_running_alert(project_name, new_at_risk))
     if project_expired:
         alerts.append(format_suppression_expired_alert(project_name, project_expired))
     if new_info:

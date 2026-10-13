@@ -1377,7 +1377,7 @@ def test_scan_quarantine_finding_triggers_quarantine_action(
     def fake_quarantine(*args, **kwargs):
         called["q"] = (args, kwargs)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         fake_quarantine,
     )
     rc = cmd_security_scan([], paths)
@@ -1448,7 +1448,7 @@ def test_scan_does_not_quarantine_unused_runtime_package(
     def fake_quarantine(*args, **kwargs):
         called["q"] = (args, kwargs)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         fake_quarantine,
     )
     rc = cmd_security_scan([], paths)
@@ -1507,7 +1507,7 @@ def test_scan_quarantines_runtime_the_project_actually_uses(
     def fake_quarantine(*args, **kwargs):
         called["q"] = (args, kwargs)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         fake_quarantine,
     )
     rc = cmd_security_scan([], paths)
@@ -1645,7 +1645,7 @@ def test_scan_warns_on_empty_inferred_runtime_deescalation(
     )
     called = {}
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **kw: called.setdefault("q", True),
     )
     records, detach = _capture_log_records()
@@ -2017,7 +2017,7 @@ def test_resume_blocked_when_finding_still_quarantines(
         "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     rc = cmd_security_resume(["demo"], paths)
@@ -2070,7 +2070,7 @@ def test_scan_invokes_emit_scan_alerts_after_persist(
         "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     captured: dict = {}
@@ -2132,7 +2132,7 @@ def test_scan_passes_prior_decision_on_second_scan(monkeypatch, tmp_path) -> Non
         "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
 
@@ -2223,7 +2223,7 @@ def test_scan_all_initializes_grace_on_first_run(monkeypatch, tmp_path) -> None:
     assert not paths.cve_grace_state.exists()
     _grace_quarantine_scan(monkeypatch, paths)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     rc = cmd_security_scan([], paths)
@@ -2246,7 +2246,7 @@ def test_scan_all_during_grace_does_not_quarantine(
     def fake_quarantine(*a, **k):
         called["q"] = True
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         fake_quarantine,
     )
     rc = cmd_security_scan([], paths)
@@ -2262,7 +2262,7 @@ def test_scan_all_during_grace_fires_heads_up_once(
     paths = _scan_paths(tmp_path, in_grace=True)
     _grace_quarantine_scan(monkeypatch, paths)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     sends: list = []
@@ -2291,7 +2291,7 @@ def test_scan_all_during_grace_does_not_fire_heads_up_again(
     _seed_grace(paths, in_grace=True, heads_up_sent=True)
     _grace_quarantine_scan(monkeypatch, paths)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     sends: list = []
@@ -2312,7 +2312,7 @@ def test_scan_all_during_grace_skips_normal_transition_alerts(
     paths = _scan_paths(tmp_path, in_grace=True)
     _grace_quarantine_scan(monkeypatch, paths)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     captured: list = []
@@ -2338,7 +2338,7 @@ def test_scan_all_after_grace_quarantines_normally(
     _grace_quarantine_scan(monkeypatch, paths)
     quarantine_called: list = []
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: quarantine_called.append((a, k)),
     )
     emit_called: list = []
@@ -2361,7 +2361,7 @@ def test_scan_per_project_during_grace_does_not_quarantine(
     _grace_quarantine_scan(monkeypatch, paths)
     quarantine_called: list = []
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: quarantine_called.append(True),
     )
     sends: list = []
@@ -2643,7 +2643,7 @@ def test_scan_exit_code_2_when_project_quarantined(
         qf.parent.mkdir(parents=True, exist_ok=True)
         qf.write_text("{}")
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         fake_quarantine,
     )
     rc = cmd_security_scan([], paths)
@@ -2794,7 +2794,7 @@ def test_resume_audit_only_does_not_take_quarantine_action(
     )
     quarantine_calls: list = []
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: quarantine_calls.append((a, k)),
     )
     rc = cmd_security_resume(["demo"], paths)
@@ -2851,7 +2851,7 @@ def test_resume_audit_only_still_detects_blocking_findings(
         "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     rc = cmd_security_resume(["demo"], paths)
@@ -2914,7 +2914,7 @@ def test_scan_one_project_direct_caller_bootstraps_grace(
     paths = _scan_one_project_paths(tmp_path)
     _grace_quarantine_scan(monkeypatch, paths)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     assert not paths.cve_grace_state.exists()
@@ -2938,7 +2938,7 @@ def test_scan_one_project_audit_only_skips_bootstrap(
     # quarantine_project must not be called in audit_only mode either; stub
     # defensively so a regression would surface as wrong-state, not raise.
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     assert not paths.cve_grace_state.exists()
@@ -2962,7 +2962,7 @@ def test_host_suppression_applies_during_scan_disposition(
     # suppression covers the CVE.
     quarantine_calls: list[tuple] = []
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: quarantine_calls.append((a, k)),
     )
 
@@ -3003,7 +3003,7 @@ def test_scan_one_project_does_not_double_init_grace(
     pre = paths.cve_grace_state.read_text()
     _grace_quarantine_scan(monkeypatch, paths)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     scan_one_project(paths, "demo")
@@ -3064,7 +3064,7 @@ def test_kev_listed_cve_quarantines_via_scan_flow(
 
     quarantine_calls: list[tuple] = []
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: quarantine_calls.append((a, k)),
     )
 
