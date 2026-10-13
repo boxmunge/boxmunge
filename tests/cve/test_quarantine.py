@@ -26,6 +26,14 @@ from boxmunge.docker import DockerError
 from boxmunge.paths import BoxPaths
 
 
+
+@pytest.fixture(autouse=True)
+def _no_restart_policy_docker(monkeypatch):
+    """Restart-policy pinning (B-19) talks to Docker; these tests cover the
+    other steps, so the project has no containers to pin."""
+    monkeypatch.setattr("boxmunge.cve.quarantine.project_restart_policies", lambda p: {})
+    monkeypatch.setattr("boxmunge.cve.quarantine.set_restart_policy", lambda n, p: None)
+
 # ---------- helpers ----------
 
 

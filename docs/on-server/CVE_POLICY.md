@@ -28,7 +28,8 @@ workflow, and recovery.
   a Perl regex bug. Inferred automatically from the image's own dependency
   scan; `paranoid` does not consult it, and KEV still overrides it.
 - **Auto-quarantine** when a finding crosses the project's quarantine gate:
-  `compose stop` + maintenance page + critical Pushover alert.
+  maintenance page + `compose stop` (restart policies held at `no`) +
+  priority-1 Pushover alert.
 - **Suppress with operator review:**
   `boxmunge security suppress <CVE> --project <name> --until <YYYY-MM-DD> --reason <text>`.
 - **Inspect state:** `boxmunge security` (fleet) or `boxmunge security <project>`
@@ -753,7 +754,8 @@ is no other path back.
 The quarantine record (`state/deploy/<project>.quarantined.json`) says
 `action_complete: false` until the maintenance page is routed **and** the
 containers are stopped. Every scan of a quarantined project re-asserts the
-action — maintenance page, Caddy reload, stop — whatever the scan finds,
+action — maintenance page, Caddy reload, stop, restart policies — whatever
+the scan finds,
 so a step that failed (a Caddy reload timeout, a hung `compose stop`) is
 retried on the next scan until it completes, and a container started
 behind the maintenance page is stopped again. A failed re-assert is a scan
@@ -838,8 +840,14 @@ closed (see "Recovering a quarantined project" below).
    cause and retry; an incomplete re-scan is never treated as clean.
 
 This is distinct from `boxmunge resume` (which lifts a manual `pause`).
-Quarantine state is separate from pause state — `boxmunge up` does not
-auto-resume CVE-quarantined projects across reboot.
+
+**Quarantine holds across a reboot.** Docker restarts a stopped
+`restart: always` container whenever the daemon starts (a reboot, a
+`docker-ce` upgrade). So the quarantine action also sets every project
+container's restart policy to `no` with `docker update`, saving each
+original policy in the quarantine record; `security resume` restores them
+before starting the containers. Nothing else restarts a quarantined
+project.
 
 ## Recommendations
 

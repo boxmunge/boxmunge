@@ -19,7 +19,8 @@ swap Caddy BEFORE stopping containers so visitors never see "504 Bad
 Gateway" between container stop and Caddy reload.
 
 The record carries ``action_complete``: false until the maintenance page
-is routed AND the containers are stopped. Every scan of a quarantined
+is routed AND the containers are stopped with their restart policies set
+to "no" (the originals are saved in the record and restored on lift). Every scan of a quarantined
 project calls ``reassert_quarantine``, so a partially failed action is
 retried until it completes (audit B-03) and drift (a container someone
 started) is undone.
@@ -33,7 +34,14 @@ from pathlib import Path
 from typing import Any
 
 from boxmunge.cve.policy import FindingDisposition
-from boxmunge.docker import DockerError, caddy_reload, compose_stop, compose_up
+from boxmunge.docker import (
+    DockerError,
+    caddy_reload,
+    compose_stop,
+    compose_up,
+    project_restart_policies,
+    set_restart_policy,
+)
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.pause import render_maintenance_caddy_config
 from boxmunge.paths import BoxPaths
@@ -257,13 +265,61 @@ def _complete_action(
             f"Failed to stop containers for {project_name!r}: {e}",
         ) from e
 
+    # 5. Hold the stop across a Docker daemon restart or reboot (B-19).
+    state = _pin_restart_policies(project_name, state)
+
     if state.get("action_complete") is not True:
-        _write_record(project_name, paths, {**state, "action_complete": True})
+        state = {**state, "action_complete": True}
+    _write_record(project_name, paths, state)
     _LOGGER.info(
         "quarantine: %s offline behind maintenance page",
         project_name,
         extra=_extra(project=project_name),
     )
+
+
+def _pin_restart_policies(project_name: str, state: dict[str, Any]) -> dict[str, Any]:
+    """Set every project container's restart policy to "no"; return the
+    record with each container's ORIGINAL policy saved for the lift.
+
+    `compose stop` alone is not enough: Docker restarts a stopped
+    `restart: always` container when the daemon starts (a reboot, a
+    docker-ce upgrade), which would bring workers and cron services back
+    while the maintenance page still shows. A policy saved by an earlier
+    attempt is kept — re-asserting must not overwrite "always" with "no".
+    """
+    try:
+        current = project_restart_policies(project_name)
+        set_restart_policy(sorted(n for n, p in current.items() if p != "no"), "no")
+    except DockerError as e:
+        raise QuarantineError(
+            f"Failed to disable restart policies for {project_name!r}: {e}",
+        ) from e
+    saved = dict(state.get("restart_policies") or {})
+    for name, policy in current.items():
+        saved.setdefault(name, policy)
+    return {**state, "restart_policies": saved}
+
+
+def _restore_restart_policies(project_name: str, state: dict[str, Any]) -> None:
+    """Give each still-existing container back its pre-quarantine policy.
+
+    A container that no longer exists is recreated by `compose up` from the
+    compose file, with the compose file's policy.
+    """
+    saved = state.get("restart_policies") or {}
+    try:
+        present = project_restart_policies(project_name)
+        by_policy: dict[str, list[str]] = {}
+        for name, policy in saved.items():
+            if name in present and policy != present[name]:
+                by_policy.setdefault(policy, []).append(name)
+        for policy, names in sorted(by_policy.items()):
+            set_restart_policy(sorted(names), policy)
+    except DockerError as e:
+        raise QuarantineError(
+            f"Failed to restore restart policies for {project_name!r}: {e}",
+        ) from e
 
 
 def lift_quarantine(
@@ -329,7 +385,8 @@ def lift_quarantine(
             f"for {project_name!r}: {e}",
         ) from e
 
-    # 3. Restart containers.
+    # 3. Restart containers, with their own restart policies back.
+    _restore_restart_policies(project_name, read_quarantine_state(project_name, paths) or {})
     try:
         compose_up(project_dir, compose_files=compose_files)
     except DockerError as e:

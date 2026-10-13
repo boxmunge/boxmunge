@@ -130,8 +130,18 @@ class Docker:
     def __init__(self, monkeypatch) -> None:
         self.calls: list[str] = []
         self.fail: dict[str, int] = {}
-        for name in ("caddy_reload", "compose_stop"):
+        # Restart policy of each project container, as `docker update` sets it.
+        self.policies: dict[str, str] = {}
+        for name in ("caddy_reload", "compose_stop", "compose_up"):
             monkeypatch.setattr(f"boxmunge.cve.quarantine.{name}", self._recorder(name))
+        monkeypatch.setattr("boxmunge.cve.quarantine.project_restart_policies",
+                            lambda project: {n: p for n, p in self.policies.items()
+                                             if n.startswith(f"{project}-")})
+        monkeypatch.setattr("boxmunge.cve.quarantine.set_restart_policy", self._set_policy)
+
+    def _set_policy(self, names, policy) -> None:
+        for name in names:
+            self.policies[name] = policy
 
     def _recorder(self, name: str):
         def call(*args, **kwargs):
