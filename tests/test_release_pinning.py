@@ -106,8 +106,13 @@ def test_workflow_uses_hash_pinned_installs(workflow: Path) -> None:
         #       repo's package; deps already installed via --require-hashes)
         is_hash_pinned = "--require-hashes" in line
         is_local_no_deps = "-e ." in line and "--no-deps" in line
+        # A wheel this workflow just built, installed without resolving deps
+        # (its deps come from a --require-hashes install on the line before).
+        is_local_wheel = (
+            "--no-deps" in line and re.search(r"\sdist/\S*\.whl\b", line) is not None
+        )
         is_pip_upgrade = re.match(r"^pip install --upgrade pip(==.*)?\s*$", line)
-        assert is_hash_pinned or is_local_no_deps or is_pip_upgrade, (
+        assert is_hash_pinned or is_local_no_deps or is_local_wheel or is_pip_upgrade, (
             f"{workflow.name} install line not hash-pinned: {line!r}"
         )
 

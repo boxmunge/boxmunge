@@ -62,10 +62,13 @@ jobs:
           pip install -e ./cli --no-deps
       - name: Client tests
         run: cd cli && python -m pytest tests -q
-      - name: Build and check the distribution
+      - name: Build the distribution and smoke-test the wheel
         run: |
           python -m build --no-isolation cli/ --outdir dist/
-          twine check --strict dist/*
+          python -m venv /tmp/wheel-smoke
+          /tmp/wheel-smoke/bin/pip install --require-hashes -r cli/requirements.txt
+          /tmp/wheel-smoke/bin/pip install --no-deps dist/*.whl
+          /tmp/wheel-smoke/bin/boxmunge --version
 
   integration:
     runs-on: ubuntu-latest

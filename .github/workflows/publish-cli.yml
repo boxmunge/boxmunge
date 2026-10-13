@@ -57,8 +57,12 @@ jobs:
         # than an unpinned setuptools fetched into an isolated build env.
         run: python -m build --no-isolation cli/ --outdir dist/
 
-      - name: Check distribution metadata
-        run: twine check --strict dist/*
+      - name: Smoke-test the built wheel
+        run: |
+          python -m venv /tmp/wheel-smoke
+          /tmp/wheel-smoke/bin/pip install --require-hashes -r cli/requirements.txt
+          /tmp/wheel-smoke/bin/pip install --no-deps dist/*.whl
+          /tmp/wheel-smoke/bin/boxmunge --version
 
       - name: Publish to PyPI (Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
