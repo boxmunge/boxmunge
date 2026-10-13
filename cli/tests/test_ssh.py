@@ -1,7 +1,5 @@
 """Tests for SSH command building and execution."""
 
-from unittest.mock import patch, MagicMock
-
 from boxmunge_cli.ssh import build_ssh_cmd, build_scp_cmd, run_ssh, run_scp
 
 
@@ -51,33 +49,24 @@ class TestBuildScpCmd:
         assert build_ssh_cmd(config, "status")[-2] == "deploy@2001:db8::1"
 
 
-class TestRunSsh:
-    @patch("boxmunge_cli.ssh.subprocess.run")
-    def test_passes_args_as_list(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(returncode=0)
-        config = {"server": "box.example.com", "port": 922, "user": "deploy", "project": "myapp"}
-        code = run_ssh(config, "status", "myapp")
-        call_args = mock_run.call_args[0][0]
-        assert call_args == ["ssh", "-p", "922", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
-                              "deploy@box.example.com", "status myapp"]
-        assert code == 0
+CONFIG = {"server": "box.example.com", "port": 922, "user": "deploy", "project": "myapp"}
 
-    @patch("boxmunge_cli.ssh.subprocess.run")
-    def test_shell_is_false(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(returncode=0)
-        config = {"server": "box.example.com", "port": 922, "user": "deploy", "project": "myapp"}
-        run_ssh(config, "status", "myapp")
-        _, kwargs = mock_run.call_args
-        assert kwargs.get("shell", False) is False
+
+class TestRunSsh:
+    def test_runs_ssh_with_the_built_argv(self, fake_remote) -> None:
+        assert run_ssh(CONFIG, "status", "myapp") == 0
+        assert fake_remote.calls("ssh") == [build_ssh_cmd(CONFIG, "status", "myapp")[1:]]
+
+    def test_returns_the_remote_exit_code(self, fake_remote) -> None:
+        fake_remote.respond("ssh", "status", rc=2)
+        assert run_ssh(CONFIG, "status") == 2
+
+    def test_ssh_connection_failure_is_exit_4(self, fake_remote) -> None:
+        fake_remote.respond("ssh", "status", rc=255)
+        assert run_ssh(CONFIG, "status") == 4
 
 
 class TestRunScp:
-    @patch("boxmunge_cli.ssh.subprocess.run")
-    def test_uploads_file(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(returncode=0)
-        config = {"server": "box.example.com", "port": 922, "user": "deploy", "project": "myapp"}
-        code = run_scp(config, "/tmp/bundle.tar.gz")
-        call_args = mock_run.call_args[0][0]
-        assert call_args == ["scp", "-P", "922", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
-                              "/tmp/bundle.tar.gz", "deploy@box.example.com:"]
-        assert code == 0
+    def test_uploads_file(self, fake_remote) -> None:
+        assert run_scp(CONFIG, "/tmp/bundle.tar.gz") == 0
+        assert fake_remote.calls("scp") == [build_scp_cmd(CONFIG, "/tmp/bundle.tar.gz")[1:]]
