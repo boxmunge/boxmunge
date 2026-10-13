@@ -1,17 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Health check: container hardening profile status across projects.
+"""Health checks: container hardening profiles and CVE scan freshness.
 
-Surfaces any service whose effective security profile is `off` so the
-operator sees the un-hardened surface during routine `boxmunge health`
-runs (not only at deploy time).
+`security-profiles` surfaces any service whose effective security profile
+is `off`, so the operator sees the un-hardened surface during routine
+`boxmunge health` runs (not only at deploy time).
+
+`cve-scan` warns when a project has not been scanned recently or its last
+scan did not cover every image: a project the nightly scan keeps missing
+is not protected by quarantine (audit B-11).
 """
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from boxmunge.commands.health_cmd import HealthCheck
 from boxmunge.manifest import ManifestError, load_manifest
+from boxmunge.project_registry import load_registered_projects
+
+# The scan runs daily (03:00-03:30); 36h tolerates one late or missed run's
+# worth of jitter without crying wolf, and catches a second missed night.
+SCAN_MAX_AGE = timedelta(hours=36)
 from boxmunge.security_overlay import (
     services_with_off_profile,
     services_with_overrides,
@@ -72,3 +83,42 @@ def check_security_profiles(paths: BoxPaths) -> HealthCheck:
         name="security-profiles", status="ok",
         detail="all services on default profile",
     )
+
+
+def _scan_problem(paths: BoxPaths, project: str, now: datetime) -> str | None:
+    path = paths.project_scan_state(project)
+    if not path.exists():
+        return f"{project}: never scanned"
+    try:
+        state = json.loads(path.read_text())
+        scanned_at = datetime.fromisoformat(state["scanned_at"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return f"{project}: scan state unreadable ({e})"
+    if scanned_at.tzinfo is None:
+        scanned_at = scanned_at.replace(tzinfo=timezone.utc)
+    age = now - scanned_at
+    if age > SCAN_MAX_AGE:
+        return f"{project}: last scanned {age.days}d {age.seconds // 3600}h ago"
+    unscanned = state.get("unscanned") or []
+    if unscanned:
+        return f"{project}: last scan incomplete ({'; '.join(unscanned)})"
+    return None
+
+
+def check_cve_scan_freshness(paths: BoxPaths, *, now: datetime | None = None) -> HealthCheck:
+    """Warn when any registered project's CVE scan is stale or incomplete."""
+    now = now or datetime.now(timezone.utc)
+    projects = sorted(load_registered_projects(paths))
+    if not projects:
+        return HealthCheck(name="cve-scan", status="ok", detail="no projects registered")
+    problems = [p for p in (_scan_problem(paths, name, now) for name in projects) if p]
+    if problems:
+        return HealthCheck(
+            name="cve-scan", status="warn",
+            detail="unprotected by CVE quarantine until scanned -- " + "; ".join(problems),
+        )
+    return HealthCheck(
+        name="cve-scan", status="ok",
+        detail=f"all {len(projects)} projects scanned within {int(SCAN_MAX_AGE.total_seconds() // 3600)}h",
+    )
+

@@ -16,20 +16,18 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timezone
 
-from boxmunge.commands.security_actions import (
-    cmd_security_resume,
-    cmd_security_scan,
-)
-from boxmunge.commands.security_suppress import (
-    cmd_security_suppress,
-    cmd_security_unsuppress,
-)
+from boxmunge.commands.security_actions import cmd_security_scan
+from boxmunge.commands.security_resume import cmd_security_resume
+from boxmunge.commands.security_suppress import cmd_security_suppress
+from boxmunge.commands.security_unsuppress import cmd_security_unsuppress
 from boxmunge.commands.security_views import (
     format_fleet_json,
     format_fleet_text,
     format_project_json,
     format_project_text,
 )
+from boxmunge.cve.breaker import BreakerError, read_held
+from boxmunge.cve.policy import Disposition
 from boxmunge.cve.grace import GraceError, read_grace_state
 from boxmunge.cve.scan_state import read_scan_state
 from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
@@ -50,6 +48,7 @@ Usage:
   boxmunge security --json                             Fleet-wide JSON
   boxmunge security <project> [--json]                 Per-project view
   boxmunge security scan [project]                     Scan all/one project(s)
+  boxmunge security scan --apply-held                  Apply breaker-held quarantines (operator)
   boxmunge security suppress <CVE> --project <name> --until <YYYY-MM-DD> --reason <text>
   boxmunge security unsuppress <CVE> --project <name>
   boxmunge security resume <project>                   Lift CVE quarantine
@@ -129,7 +128,7 @@ def _per_project_view(project: str, as_json: bool, paths: BoxPaths) -> int:
 def _fleet_summary(paths: BoxPaths) -> dict:
     """Aggregate state across all registered projects."""
     projects = sorted(load_registered_projects(paths))
-    posture_dist = {"balanced": 0, "strict": 0, "relaxed": 0}
+    posture_dist = {"relaxed": 0, "balanced": 0, "strict": 0, "paranoid": 0}
     quarantined_list: list[dict] = []
     at_risk: list[str] = []
     active_supps_count = 0
@@ -157,10 +156,16 @@ def _fleet_summary(paths: BoxPaths) -> dict:
                 "since": qstate.get("quarantined_at"),
             })
 
-        if bool(sec_block.get("dangerously_disable_quarantine", False)):
+        scan_state = read_scan_state(paths.project_scan_state(name))
+        # At risk = opted out of quarantine AND carrying findings that would
+        # otherwise quarantine, not merely opted out.
+        if bool(sec_block.get("dangerously_disable_quarantine", False)) and any(
+            f.get("disposition") == Disposition.STILL_RUNNING_AT_RISK.value
+            for d in (scan_state or {}).get("decisions", [])
+            for f in d.get("findings", [])
+        ):
             at_risk.append(name)
 
-        scan_state = read_scan_state(paths.project_scan_state(name))
         if scan_state and scan_state.get("scanned_at"):
             last_scans.append(scan_state["scanned_at"])
 
@@ -199,7 +204,17 @@ def _fleet_summary(paths: BoxPaths) -> dict:
         ],
         "last_fleet_scan": max(last_scans) if last_scans else None,
         "grace": grace_payload,
+        "held_by_breaker": _held_payload(paths),
     }
+
+
+def _held_payload(paths: BoxPaths) -> dict:
+    """Projects whose new quarantine the circuit breaker is holding."""
+    try:
+        held = read_held(paths)
+    except BreakerError as e:
+        return {"error": [str(e)]}
+    return {name: sorted(cves) for name, cves in sorted(held.items())}
 
 
 def _grace_payload(paths: BoxPaths, *, now: datetime) -> dict | None:
@@ -278,7 +293,9 @@ def cmd_security(args: list[str]) -> None:
             if as_json:
                 print(format_fleet_json({
                     "projects_count": 0,
-                    "posture_distribution": {"balanced": 0, "strict": 0, "relaxed": 0},
+                    "posture_distribution": {
+                        "relaxed": 0, "balanced": 0, "strict": 0, "paranoid": 0,
+                    },
                     "quarantined": [],
                     "at_risk_running": [],
                     "active_suppressions_count": 0,

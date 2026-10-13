@@ -3,17 +3,17 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import date, datetime, timezone
 from typing import Any
 
 
 from boxmunge.cve.alerting import (
     Alert,
+    Hit,
     detect_transitions,
     emit_scan_alerts,
     format_grace_heads_up_alert,
-    format_informational_alert,
+    format_new_findings_alert,
     format_quarantine_alert,
     format_still_running_alert,
     format_suppression_expired_alert,
@@ -25,7 +25,7 @@ from boxmunge.cve.policy import (
     ProjectDecision,
 )
 from boxmunge.cve.scanner import Finding, Severity
-from boxmunge.cve.suppressions import Suppression
+from boxmunge.cve.suppressions import SCOPE_HOST, Suppression
 from boxmunge.paths import BoxPaths
 
 
@@ -36,11 +36,12 @@ def _finding(
     cve_id: str = "CVE-2026-0001",
     severity: Severity = Severity.HIGH,
     fixed_version: str | None = None,
+    package: str = "openssl",
 ) -> Finding:
     return Finding(
         cve_id=cve_id,
         severity=severity,
-        package="openssl",
+        package=package,
         installed_version="1.1.1k",
         fixed_version=fixed_version,
         title="Title",
@@ -55,16 +56,19 @@ def _disp(
     effective: Severity | None = None,
     disposition: Disposition = Disposition.QUARANTINE,
     penalty: int = 0,
+    package: str = "openssl",
+    kev: bool = False,
 ) -> FindingDisposition:
     eff = effective if effective is not None else base
     return FindingDisposition(
-        finding=_finding(cve_id=cve_id, severity=base),
+        finding=_finding(cve_id=cve_id, severity=base, package=package),
         base_severity=base,
         hardening_penalty=penalty,
         effective_severity=eff,
         disposition=disposition,
         suppression=None,
         explanation="explained",
+        kev_listed=kev,
     )
 
 
@@ -93,6 +97,7 @@ def _suppression(
     cve_id: str = "CVE-2026-0001",
     until: date = date(2026, 8, 1),
     added: date = date(2026, 5, 6),
+    scope: str = "project",
 ) -> Suppression:
     return Suppression(
         cve_id=cve_id,
@@ -100,7 +105,21 @@ def _suppression(
         reason="reviewed",
         reviewed_by="ops",
         added=added,
+        scope=scope,
     )
+
+
+_DAY1 = datetime(2026, 5, 5, tzinfo=timezone.utc)
+_DAY2 = datetime(2026, 5, 6, tzinfo=timezone.utc)
+
+
+def _alerts(current, prior=(), suppressions=()) -> tuple[Alert, ...]:
+    current = current if isinstance(current, tuple) else (current,)
+    prior = prior if isinstance(prior, tuple) else (prior,)
+    return detect_transitions(
+        project_name="demo", current=current, prior=prior,
+        suppressions=suppressions,
+    ).alerts
 
 
 # ---------- formatters ----------
@@ -109,238 +128,220 @@ def _suppression(
 def test_format_quarantine_alert_shape() -> None:
     fd = _disp("CVE-2026-1111", base=Severity.CRITICAL,
                disposition=Disposition.QUARANTINE)
-    pd = _decision(fd)
-    alert = format_quarantine_alert(pd, fd)
+    alert = format_quarantine_alert("demo", [Hit(fd, "myapp:1.0")])
     assert alert.kind == "quarantine"
     assert alert.priority == 1
     assert alert.title == "[boxmunge:demo] QUARANTINED — CVE-2026-1111 (Critical)"
     assert "Project: demo" in alert.body
-    assert "CVE-2026-1111 (Critical)" in alert.body
-    assert "Image: myapp:1.0" in alert.body
-    # explanation is surfaced in body (the _disp helper sets explanation="explained")
+    assert "CVE-2026-1111 (Critical) in openssl — myapp:1.0" in alert.body
     assert "explained" in alert.body
     assert "Service stopped, maintenance page active." in alert.body
     assert "boxmunge security resume demo" in alert.body
 
 
+def test_format_quarantine_alert_kev_title() -> None:
+    fd = _disp("CVE-2026-1111", kev=True)
+    alert = format_quarantine_alert("demo", [Hit(fd, "myapp:1.0")])
+    assert alert.title == (
+        "[boxmunge:demo] QUARANTINED — CVE-2026-1111 (actively exploited — CISA KEV)"
+    )
+
+
+def test_format_quarantine_alert_aggregates_and_counts_distinct_cves() -> None:
+    hits = [
+        Hit(_disp("CVE-2026-0002", base=Severity.HIGH), "a:1"),
+        Hit(_disp("CVE-2026-0001", base=Severity.CRITICAL), "a:1"),
+        Hit(_disp("CVE-2026-0001", base=Severity.CRITICAL, package="libssl3"), "a:1"),
+    ]
+    alert = format_quarantine_alert("demo", hits)
+    # Worst first in the title; two distinct CVEs → "+1 more".
+    assert alert.title.endswith("CVE-2026-0001 (Critical) (+1 more)")
+    assert alert.body.count("\n- CVE-") == 3
+
+
 def test_format_still_running_alert_shape() -> None:
     fd = _disp("CVE-2026-2222", base=Severity.HIGH,
                disposition=Disposition.STILL_RUNNING_AT_RISK)
-    pd = _decision(fd)
-    alert = format_still_running_alert(pd, fd)
+    alert = format_still_running_alert("demo", [Hit(fd, "myapp:1.0")])
     assert alert.kind == "still_running"
     assert alert.priority == 1
-    assert alert.title == "[boxmunge:demo] [STILL RUNNING] CVE-2026-2222 (High)"
+    assert alert.title == (
+        "[boxmunge:demo] [STILL RUNNING — quarantine disabled by config] "
+        "CVE-2026-2222 (High)"
+    )
     assert "QUARANTINE DISABLED BY CONFIG" in alert.body
     assert "dangerously_disable_quarantine" in alert.body
     assert "boxmunge security suppress CVE-2026-2222" in alert.body
 
 
-def test_format_informational_alert_shape_no_penalty() -> None:
-    fd = _disp("CVE-2026-3333", base=Severity.LOW, effective=Severity.LOW,
-               disposition=Disposition.INFORMATIONAL, penalty=0)
-    pd = _decision(fd)
-    alert = format_informational_alert(pd, fd)
+def test_format_new_findings_alert_is_one_digest() -> None:
+    hits = [Hit(_disp(f"CVE-2026-{i:04d}", base=Severity.LOW,
+                      disposition=Disposition.INFORMATIONAL), "myapp:1.0")
+            for i in range(40)]
+    alert = format_new_findings_alert("demo", hits)
     assert alert.kind == "informational"
     assert alert.priority == 0
-    assert alert.title == "[boxmunge:demo] CVE-2026-3333 (Low)"
-    assert "Severity: Low" in alert.body
-    # explanation is surfaced instead of old hard-coded "Below quarantine threshold" line
-    assert "explained" in alert.body
-    assert "Below quarantine threshold" not in alert.body
-    # No elevation: no arrow
-    assert "→" not in alert.body
+    assert alert.title == "[boxmunge:demo] 40 new CVE findings (informational)"
+    assert alert.body.count("\n- CVE-") == 5
+    assert "boxmunge security demo" in alert.body
 
 
-def test_format_informational_alert_shape_with_penalty() -> None:
+def test_format_new_findings_alert_shows_penalty() -> None:
     fd = _disp("CVE-2026-3334", base=Severity.LOW, effective=Severity.MEDIUM,
                disposition=Disposition.INFORMATIONAL, penalty=1)
-    pd = _decision(fd)
-    alert = format_informational_alert(pd, fd)
-    assert "Severity: Low → effective Medium via penalty +1" in alert.body
-    # explanation is surfaced instead of old hard-coded "Below quarantine threshold" line
+    alert = format_new_findings_alert("demo", [Hit(fd, "myapp:1.0")])
+    assert "Low → effective Medium via penalty +1" in alert.body
     assert "explained" in alert.body
-    assert "Below quarantine threshold" not in alert.body
 
 
 def test_format_suppression_expired_alert_shape() -> None:
     sup = _suppression("CVE-2026-7777", until=date(2026, 8, 1),
                        added=date(2026, 5, 1))
-    alert = format_suppression_expired_alert("demo", sup)
+    alert = format_suppression_expired_alert("demo", [sup])
     assert alert.kind == "suppression_expired"
     assert alert.priority == 1
     assert alert.title == "[boxmunge:demo] Suppression expired — CVE-2026-7777"
-    assert "Suppression added: 2026-05-01" in alert.body
-    assert "Suppression expired: 2026-08-01" in alert.body
-    assert "Quarantine queued for next scan." in alert.body
-    assert "boxmunge security suppress CVE-2026-7777 --project demo" in alert.body
+    assert "CVE-2026-7777: added 2026-05-01, expired 2026-08-01" in alert.body
+    assert "--project demo" in alert.body
 
 
 # ---------- detect_transitions ----------
 
 
-def test_first_scan_quarantine_finding_emits_quarantine_alert() -> None:
-    fd = _disp(disposition=Disposition.QUARANTINE)
-    current = _decision(fd)
-    alerts = detect_transitions(
-        project_name="demo",
-        current=current, prior=None, suppressions=(),
-    )
-    assert len(alerts) == 1
-    assert alerts[0].kind == "quarantine"
+def test_quarantine_dispositions_are_not_transition_alerts() -> None:
+    """Audit B-17: the QUARANTINED alert belongs to the action, which the
+    enforcement step announces, not to a disposition change."""
+    alerts = _alerts(_decision(_disp(disposition=Disposition.QUARANTINE)))
+    assert alerts == ()
 
 
 def test_first_scan_at_risk_finding_emits_still_running_alert() -> None:
-    fd = _disp(disposition=Disposition.STILL_RUNNING_AT_RISK)
-    current = _decision(fd)
-    alerts = detect_transitions(
-        project_name="demo",
-        current=current, prior=None, suppressions=(),
-    )
-    assert len(alerts) == 1
-    assert alerts[0].kind == "still_running"
+    alerts = _alerts(_decision(_disp(disposition=Disposition.STILL_RUNNING_AT_RISK)))
+    assert [a.kind for a in alerts] == ["still_running"]
 
 
-def test_first_scan_informational_emits_informational_alert() -> None:
-    fd = _disp(base=Severity.LOW, effective=Severity.LOW,
-               disposition=Disposition.INFORMATIONAL)
-    current = _decision(fd)
-    alerts = detect_transitions(
-        project_name="demo",
-        current=current, prior=None, suppressions=(),
-    )
-    assert len(alerts) == 1
-    assert alerts[0].kind == "informational"
+def test_first_scan_informational_emits_one_digest() -> None:
+    findings = [_disp(f"CVE-2026-1{i:04d}", base=Severity.LOW,
+                      disposition=Disposition.INFORMATIONAL) for i in range(164)]
+    alerts = _alerts(_decision(*findings))
+    assert [a.kind for a in alerts] == ["informational"]
 
 
 def test_persisting_quarantine_no_alert() -> None:
     fd = _disp(disposition=Disposition.QUARANTINE)
-    prior = _decision(fd, when=datetime(2026, 5, 5, tzinfo=timezone.utc))
-    current = _decision(fd, when=datetime(2026, 5, 6, tzinfo=timezone.utc))
-    alerts = detect_transitions(
-        project_name="demo",
-        current=current, prior=prior, suppressions=(),
-    )
-    assert alerts == ()
+    assert _alerts(_decision(fd, when=_DAY2), _decision(fd, when=_DAY1)) == ()
 
 
 def test_persisting_informational_no_alert() -> None:
-    fd = _disp(base=Severity.LOW, effective=Severity.LOW,
-               disposition=Disposition.INFORMATIONAL)
-    prior = _decision(fd, when=datetime(2026, 5, 5, tzinfo=timezone.utc))
-    current = _decision(fd, when=datetime(2026, 5, 6, tzinfo=timezone.utc))
-    alerts = detect_transitions(
-        project_name="demo",
-        current=current, prior=prior, suppressions=(),
-    )
-    assert alerts == ()
+    fd = _disp(base=Severity.LOW, disposition=Disposition.INFORMATIONAL)
+    assert _alerts(_decision(fd, when=_DAY2), _decision(fd, when=_DAY1)) == ()
 
 
-def test_at_risk_to_quarantine_emits_quarantine_alert() -> None:
-    """Operator turned off dangerously_disable_quarantine."""
-    prior_fd = _disp(disposition=Disposition.STILL_RUNNING_AT_RISK)
-    current_fd = _disp(disposition=Disposition.QUARANTINE)
-    prior = _decision(prior_fd, when=datetime(2026, 5, 5, tzinfo=timezone.utc))
-    current = _decision(current_fd, when=datetime(2026, 5, 6, tzinfo=timezone.utc))
-    alerts = detect_transitions(
-        project_name="demo",
-        current=current, prior=prior, suppressions=(),
-    )
-    assert len(alerts) == 1
-    assert alerts[0].kind == "quarantine"
+def test_image_digest_change_with_unchanged_findings_is_silent() -> None:
+    """Audit B-14: a container-update gives a new digest, not new findings."""
+    findings = [_disp(f"CVE-2026-1{i:04d}", base=Severity.LOW,
+                      disposition=Disposition.INFORMATIONAL) for i in range(40)]
+    prior = _decision(*findings, image="app@sha256:old", when=_DAY1)
+    current = _decision(*findings, image="app@sha256:new", when=_DAY2)
+    assert _alerts(current, prior) == ()
+
+
+def test_container_removed_tag_fallback_is_silent() -> None:
+    fd = _disp(disposition=Disposition.QUARANTINE)
+    prior = _decision(fd, image="app@sha256:abc", when=_DAY1)
+    current = _decision(fd, image="app:1.2", when=_DAY2)
+    assert _alerts(current, prior) == ()
+
+
+def test_mixed_dispositions_for_one_cve_do_not_repeat() -> None:
+    """Audit B-13: the same CVE gated in perl-base but relevant in libperl
+    must not re-fire a priority-1 quarantine alert on every scan."""
+    q = _disp("CVE-2026-57433", package="libperl5.36",
+              disposition=Disposition.QUARANTINE)
+    i = _disp("CVE-2026-57433", package="perl-base",
+              disposition=Disposition.INFORMATIONAL)
+    day1 = _decision(q, i, when=_DAY1)
+    first = _alerts(day1)
+    assert [a.kind for a in first] == ["informational"]
+    for when in (_DAY2, datetime(2026, 5, 7, tzinfo=timezone.utc)):
+        assert _alerts(_decision(q, i, when=when), day1) == ()
+
+
+def test_findings_are_compared_across_all_images() -> None:
+    """A finding that moved between images is not new."""
+    fd = _disp(base=Severity.LOW, disposition=Disposition.INFORMATIONAL)
+    prior = (_decision(fd, image="web:1", when=_DAY1), _decision(image="worker:1", when=_DAY1))
+    current = (_decision(image="web:2", when=_DAY2), _decision(fd, image="worker:2", when=_DAY2))
+    assert _alerts(current, prior) == ()
+
+
 
 
 def test_quarantine_to_at_risk_emits_still_running_alert() -> None:
     """Operator enabled dangerously_disable_quarantine."""
-    prior_fd = _disp(disposition=Disposition.QUARANTINE)
-    current_fd = _disp(disposition=Disposition.STILL_RUNNING_AT_RISK)
-    prior = _decision(prior_fd, when=datetime(2026, 5, 5, tzinfo=timezone.utc))
-    current = _decision(current_fd, when=datetime(2026, 5, 6, tzinfo=timezone.utc))
-    alerts = detect_transitions(
-        project_name="demo",
-        current=current, prior=prior, suppressions=(),
-    )
-    assert len(alerts) == 1
-    assert alerts[0].kind == "still_running"
+    prior = _decision(_disp(disposition=Disposition.QUARANTINE), when=_DAY1)
+    current = _decision(_disp(disposition=Disposition.STILL_RUNNING_AT_RISK), when=_DAY2)
+    assert [a.kind for a in _alerts(current, prior)] == ["still_running"]
 
 
 def test_resolved_finding_no_alert() -> None:
-    """Finding QUARANTINE in prior, gone in current → 0 alerts (good news)."""
-    prior_fd = _disp("CVE-2026-9999", disposition=Disposition.QUARANTINE)
-    prior = _decision(prior_fd, when=datetime(2026, 5, 5, tzinfo=timezone.utc))
-    current = _decision(when=datetime(2026, 5, 6, tzinfo=timezone.utc))
-    alerts = detect_transitions(
-        project_name="demo",
-        current=current, prior=prior, suppressions=(),
-    )
-    assert alerts == ()
+    prior = _decision(_disp("CVE-2026-9999"), when=_DAY1)
+    assert _alerts(_decision(when=_DAY2), prior) == ()
 
 
-def test_new_finding_quarantine_emits_alert() -> None:
-    prior_fd = _disp("CVE-2026-0001", disposition=Disposition.QUARANTINE)
-    current_old = _disp("CVE-2026-0001", disposition=Disposition.QUARANTINE)
-    current_new = _disp("CVE-2026-0002", disposition=Disposition.QUARANTINE)
-    prior = _decision(prior_fd, when=datetime(2026, 5, 5, tzinfo=timezone.utc))
-    current = _decision(current_old, current_new,
-                        when=datetime(2026, 5, 6, tzinfo=timezone.utc))
-    alerts = detect_transitions(
-        project_name="demo",
-        current=current, prior=prior, suppressions=(),
-    )
+def test_new_at_risk_findings_are_one_alert() -> None:
+    sr = Disposition.STILL_RUNNING_AT_RISK
+    prior = _decision(_disp("CVE-2026-0001", disposition=sr), when=_DAY1)
+    current = _decision(_disp("CVE-2026-0001", disposition=sr),
+                        _disp("CVE-2026-0002", disposition=sr),
+                        _disp("CVE-2026-0003", disposition=sr), when=_DAY2)
+    alerts = _alerts(current, prior)
     assert len(alerts) == 1
-    assert alerts[0].kind == "quarantine"
-    assert "CVE-2026-0002" in alerts[0].title
+    assert "CVE-2026-0002" in alerts[0].title and "(+1 more)" in alerts[0].title
 
 
 def test_suppression_expired_between_scans() -> None:
-    sup = _suppression("CVE-2026-5555", until=date(2026, 8, 1),
-                       added=date(2026, 5, 1))
-    fd = _disp("CVE-2026-OTHER", disposition=Disposition.QUARANTINE)
+    sups = (_suppression("CVE-2026-5555"), _suppression("CVE-2026-5556"))
+    fd = _disp("CVE-2026-0042")
     prior = _decision(fd, when=datetime(2026, 7, 31, tzinfo=timezone.utc))
     current = _decision(fd, when=datetime(2026, 8, 2, tzinfo=timezone.utc))
-    alerts = detect_transitions(
-        project_name="demo",
-        current=current, prior=prior, suppressions=(sup,),
-    )
-    expired = [a for a in alerts if a.kind == "suppression_expired"]
+    expired = [a for a in _alerts(current, prior, sups) if a.kind == "suppression_expired"]
     assert len(expired) == 1
-    assert "CVE-2026-5555" in expired[0].title
+    assert "CVE-2026-5555" in expired[0].title and "(+1 more)" in expired[0].title
+
+
+def test_host_suppression_expiry_is_returned_not_alerted() -> None:
+    """Audit B-14: the fleet alerts host expiry once, not every project."""
+    sup = _suppression("CVE-2026-5555", scope=SCOPE_HOST)
+    prior = _decision(when=datetime(2026, 7, 31, tzinfo=timezone.utc))
+    current = _decision(when=datetime(2026, 8, 2, tzinfo=timezone.utc))
+    result = detect_transitions(project_name="demo", current=(current,),
+                                prior=(prior,), suppressions=(sup,))
+    assert result.alerts == ()
+    assert result.host_expired == (sup,)
 
 
 def test_suppression_active_no_alert() -> None:
-    sup = _suppression("CVE-2026-5555", until=date(2027, 1, 1),
-                       added=date(2026, 5, 1))
-    fd = _disp("CVE-2026-OTHER", disposition=Disposition.QUARANTINE)
+    sup = _suppression("CVE-2026-5555", until=date(2027, 1, 1))
+    fd = _disp("CVE-2026-0042")
     prior = _decision(fd, when=datetime(2026, 7, 31, tzinfo=timezone.utc))
     current = _decision(fd, when=datetime(2026, 8, 2, tzinfo=timezone.utc))
-    alerts = detect_transitions(
-        project_name="demo",
-        current=current, prior=prior, suppressions=(sup,),
-    )
-    expired = [a for a in alerts if a.kind == "suppression_expired"]
-    assert expired == []
+    assert [a for a in _alerts(current, prior, (sup,)) if a.kind == "suppression_expired"] == []
 
 
-def test_multiple_alerts_ordering_quarantine_first() -> None:
-    """Mix of all categories emits in order: quarantine, still_running,
+def test_multiple_alerts_ordering() -> None:
+    """Mix of all categories emits in order: still_running,
     suppression_expired, informational."""
-    sup = _suppression("CVE-2026-9999", until=date(2026, 8, 1),
-                       added=date(2026, 5, 1))
-    quarantine_fd = _disp("CVE-2026-AAAA", disposition=Disposition.QUARANTINE)
-    at_risk_fd = _disp("CVE-2026-BBBB",
-                       disposition=Disposition.STILL_RUNNING_AT_RISK)
-    info_fd = _disp("CVE-2026-CCCC", base=Severity.LOW, effective=Severity.LOW,
-                    disposition=Disposition.INFORMATIONAL)
-    current = _decision(quarantine_fd, at_risk_fd, info_fd,
-                        when=datetime(2026, 8, 2, tzinfo=timezone.utc))
-    prior = _decision(when=datetime(2026, 7, 31, tzinfo=timezone.utc))
-    alerts = detect_transitions(
-        project_name="demo",
-        current=current, prior=prior, suppressions=(sup,),
+    sup = _suppression("CVE-2026-9999")
+    current = _decision(
+        _disp("CVE-2026-0001", disposition=Disposition.QUARANTINE),
+        _disp("CVE-2026-0002", disposition=Disposition.STILL_RUNNING_AT_RISK),
+        _disp("CVE-2026-0003", base=Severity.LOW, disposition=Disposition.INFORMATIONAL),
+        when=datetime(2026, 8, 2, tzinfo=timezone.utc),
     )
-    kinds = [a.kind for a in alerts]
-    assert kinds == [
-        "quarantine", "still_running", "suppression_expired", "informational",
+    prior = _decision(when=datetime(2026, 7, 31, tzinfo=timezone.utc))
+    assert [a.kind for a in _alerts(current, prior, (sup,))] == [
+        "still_running", "suppression_expired", "informational",
     ]
 
 
@@ -364,24 +365,19 @@ def _write_config(paths: BoxPaths, *, user_key: str, app_token: str) -> None:
 
 
 def test_send_alerts_no_pushover_config_logs_warning_returns_zero(
-    tmp_path, caplog,
+    tmp_path, capsys,
 ) -> None:
+    """Delivery goes through boxmunge.notify, which logs every non-delivery
+    under the caller's component."""
     paths = _fresh_paths(tmp_path)
     _write_config(paths, user_key="", app_token="")
     alert = Alert(
         kind="quarantine", title="t", body="b", priority=1,
     )
-    caplog.set_level(logging.WARNING, logger="boxmunge")
     sent = send_alerts((alert,), paths)
     assert sent == 0
-    assert "alerts skipped, pushover not configured" in caplog.text
-    # Wave 3 / audit A-1: warnings carry component='cve-alert' so
-    # `boxmunge log --component cve-alert` finds them.
-    matching = [
-        r for r in caplog.records
-        if getattr(r, "component", None) == "cve-alert"
-    ]
-    assert matching, "expected at least one record with component='cve-alert'"
+    err = capsys.readouterr().err
+    assert "cve-alert" in err and "Alert not sent (t): Pushover is not configured" in err
 
 
 def test_send_alerts_calls_send_notification_per_alert(
@@ -393,7 +389,7 @@ def test_send_alerts_calls_send_notification_per_alert(
     def fake_send(user, token, title, message, priority=0):
         calls.append((user, token, title, message, priority))
         return True
-    monkeypatch.setattr("boxmunge.cve.alerting.send_notification", fake_send)
+    monkeypatch.setattr("boxmunge.notify.send_notification", fake_send)
     alerts = (
         Alert(kind="quarantine", title="t1", body="b1", priority=1),
         Alert(kind="still_running", title="t2", body="b2", priority=1),
@@ -406,30 +402,22 @@ def test_send_alerts_calls_send_notification_per_alert(
     assert calls[2] == ("u", "a", "t3", "b3", 0)
 
 
-def test_send_alerts_continues_on_failure(monkeypatch, tmp_path, caplog) -> None:
+def test_send_alerts_continues_on_failure(monkeypatch, tmp_path, capsys) -> None:
     paths = _fresh_paths(tmp_path)
     _write_config(paths, user_key="u", app_token="a")
     seq = iter([True, False, True])
     def fake_send(*args, **kwargs):
         return next(seq)
-    monkeypatch.setattr("boxmunge.cve.alerting.send_notification", fake_send)
+    monkeypatch.setattr("boxmunge.notify.send_notification", fake_send)
     alerts = (
         Alert(kind="quarantine", title="t1", body="b1", priority=1),
         Alert(kind="quarantine", title="t2", body="b2", priority=1),
         Alert(kind="quarantine", title="t3", body="b3", priority=1),
     )
-    caplog.set_level(logging.WARNING, logger="boxmunge")
     sent = send_alerts(alerts, paths)
     assert sent == 2
-    assert "pushover send failed" in caplog.text
-    assert "t2" in caplog.text
-    # Wave 3 / audit A-1: send-failure warnings carry component='cve-alert'.
-    matching = [
-        r for r in caplog.records
-        if getattr(r, "component", None) == "cve-alert"
-        and "pushover send failed" in r.getMessage()
-    ]
-    assert matching, "expected pushover-send-failed record with cve-alert"
+    err = capsys.readouterr().err
+    assert "cve-alert" in err and "Alert not sent (t2): Pushover request failed" in err
 
 
 # ---------- emit_scan_alerts ----------
@@ -442,18 +430,19 @@ def test_emit_scan_alerts_integration(monkeypatch, tmp_path) -> None:
     def fake_send(user, token, title, message, priority=0):
         sent_titles.append(title)
         return True
-    monkeypatch.setattr("boxmunge.cve.alerting.send_notification", fake_send)
+    monkeypatch.setattr("boxmunge.notify.send_notification", fake_send)
 
     fd = _disp("CVE-2026-9999", base=Severity.CRITICAL,
                effective=Severity.CRITICAL,
-               disposition=Disposition.QUARANTINE)
+               disposition=Disposition.STILL_RUNNING_AT_RISK)
     current = _decision(fd, when=datetime(2026, 5, 6, tzinfo=timezone.utc))
-    sent = emit_scan_alerts(
+    host_expired = emit_scan_alerts(
         project_name="demo",
-        current=current, prior=None, suppressions=(),
+        current=(current,), prior=(), suppressions=(),
         paths=paths,
     )
-    assert sent == 1
+    assert host_expired == ()
+    assert len(sent_titles) == 1
     assert any("CVE-2026-9999" in t for t in sent_titles)
 
 

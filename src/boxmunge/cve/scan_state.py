@@ -45,6 +45,8 @@ def _serialize_disposition(d: Any) -> dict[str, Any]:
         "status": f.status.value,
         "pkg_class": f.pkg_class.value,
         "pkg_type": f.pkg_type,
+        "kev_listed": d.kev_listed,
+        "fix_would_quarantine": d.fix_would_quarantine,
     }
 
 
@@ -60,17 +62,20 @@ def write_scan_state(
     *,
     decisions: tuple[ProjectDecision, ...],
     scanned_at: datetime | None = None,
+    unscanned: tuple[str, ...] = (),
 ) -> None:
     """Persist the result of a project scan.
 
     `decisions` is one ProjectDecision per scanned image (most projects have
     one image, multi-service projects can have several). `scanned_at`
-    defaults to "now" when omitted.
+    defaults to "now" when omitted. `unscanned` names each image or service
+    the scan did not cover, for the scan-freshness health check.
     """
     when = scanned_at or datetime.now(timezone.utc)
     data: dict[str, Any] = {
         "scanned_at": when.isoformat(),
         "decisions": [_serialize_decision(d) for d in decisions],
+        "unscanned": list(unscanned),
     }
     atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
@@ -232,6 +237,8 @@ def decisions_from_scan_state(
                     disposition=disposition,
                     suppression=None,
                     explanation=raw.get("explanation", "") or "",
+                    kev_listed=raw.get("kev_listed") is True,
+                    fix_would_quarantine=raw.get("fix_would_quarantine") is True,
                 ),
             )
             if disposition == Disposition.QUARANTINE:

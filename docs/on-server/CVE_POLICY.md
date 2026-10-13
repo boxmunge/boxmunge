@@ -6,8 +6,10 @@ workflow, and recovery.
 
 ## TL;DR for agents
 
-- **Daily scan via Trivy.** Every project's deployed images are scanned at
-  03:00 system time (±30 min jitter); also on every deploy and image update.
+- **Daily scan via Trivy.** Every project's deployed images are scanned
+  daily between 03:00 and 03:30 system time, and on demand with
+  `security scan`. There is no scan at deploy or image-update time yet: a
+  newly deployed image is first scanned by the next daily run.
 - **Posture per project (default `balanced`).** Four tiers form a trust ladder
   — `relaxed` quarantines only on CISA KEV, `balanced` (default) quarantines
   on KEV or a distro-acknowledged High + AV:N finding, `strict` extends that
@@ -19,7 +21,9 @@ workflow, and recovery.
   regardless of NVD severity — the distro already judged it.
 - **KEV is an override.** A finding on CISA's Known Exploited Vulnerabilities
   catalog quarantines immediately under every posture. The AV filter, distro
-  status, and severity threshold do not apply.
+  status, severity threshold, suppressions, and a fix that is not yet
+  running do not apply (under `relaxed`, a fixable KEV finding alerts every
+  scan instead of quarantining).
 - **Runtime relevance gate (balanced/strict).** A finding against an OS
   package that belongs to a language runtime (`perl`, `ruby`, `php`,
   `python`, `node`, `tcl`, `lua` — the ecosystem names accepted by
@@ -28,7 +32,8 @@ workflow, and recovery.
   a Perl regex bug. Inferred automatically from the image's own dependency
   scan; `paranoid` does not consult it, and KEV still overrides it.
 - **Auto-quarantine** when a finding crosses the project's quarantine gate:
-  `compose stop` + maintenance page + critical Pushover alert.
+  maintenance page + `compose stop` (restart policies held at `no`) +
+  priority-1 Pushover alert.
 - **Suppress with operator review:**
   `boxmunge security suppress <CVE> --project <name> --until <YYYY-MM-DD> --reason <text>`.
 - **Inspect state:** `boxmunge security` (fleet) or `boxmunge security <project>`
@@ -99,12 +104,30 @@ on hardened web surfaces are not worth taking services down for.
 
 For every finding, `evaluate_finding` runs these gates in order:
 
-1. **Fix available** → `IGNORED_FIXED`. Deferred to the auto-update path.
-2. **Active suppression** → `SUPPRESSED`. Skipped until suppression expiry.
-3. **On CISA KEV** → `QUARANTINE`. KEV is an override: active exploitation
-   bypasses the AV filter, distro-status routing, and the severity threshold.
-   Applies to every posture. (A KEV finding can still be suppressed via step 2
-   if the operator has reviewed it.)
+1. **On CISA KEV** → `QUARANTINE`. KEV is the floor: active exploitation
+   bypasses the AV filter, distro-status routing, the severity threshold,
+   any suppression, and an upstream fix the image is not yet running. A
+   suppression never hides a KEV-listed CVE: a CVE reviewed and suppressed
+   before CISA listed it is re-activated the day it appears on KEV, and the
+   project is quarantined with a priority-1 alert that names the overridden
+   suppression. A fix only helps once it is actually running: a fixable KEV
+   finding quarantines under `balanced`, `strict` and `paranoid`, and the
+   alert says a fix exists — rebuild, redeploy, then `security resume`.
+   **Exception, `relaxed`:** a fixable KEV finding does not quarantine;
+   instead a priority-1 alert naming the CVE and the unapplied fix is sent
+   on **every scan** while it is live (`IGNORED_FIXED`).
+   **Exception, `dangerously_disable_quarantine: true`:** the opt-out is
+   honoured — `STILL_RUNNING_AT_RISK`, never quarantined — and a
+   priority-1 alert naming the CVE and the opt-out is sent on every scan
+   while it is live. When the KEV finding is also fixable the opt-out wins
+   and the alert names the unapplied fix too.
+2. **Fix available** (not KEV) → `IGNORED_FIXED`. boxmunge does not rebuild
+   images, so "fixed upstream" is not "fixed here". When the finding would
+   otherwise meet the posture's quarantine gate, it is flagged and a
+   `fix_available` alert lists it once (rebuild and redeploy to apply the
+   fix); otherwise it is reported in the new-findings digest. Either way it
+   is never silent.
+3. **Active suppression** → `SUPPRESSED`. Skipped until suppression expiry.
 4. **Unknown severity** → `INFORMATIONAL`. The engine cannot reason about a
    severity it does not recognize; reporting only.
 5. **Paranoid short-circuit** — under `paranoid`, skip steps 6–10 and compare
@@ -138,16 +161,20 @@ For every finding, `evaluate_finding` runs these gates in order:
 11. **Threshold comparison** against the distro severity (elevated by the
    hardening penalty, using the posture threshold from the trust ladder table)
    → `QUARANTINE` / `STILL_RUNNING_AT_RISK` / `INFORMATIONAL`. Reached only by
-   `balanced`/`strict` with `Status ∈ {affected, end_of_life}` and a distro
-   severity.
+   `balanced`/`strict` with a distro severity and a `Status` that is not one
+   of the deprioritized statuses in step 8: `affected`, `end_of_life`, or a
+   missing/unrecognised status. A missing status is not a distro verdict that
+   the finding is low-risk, so it fails closed and is threshold-compared like
+   `affected`.
 
 ### Decision matrix summary
 
 | Condition | Outcome |
 |---|---|
-| Fix available upstream | `IGNORED_FIXED` — auto-update path |
+| CVE is on CISA KEV | `QUARANTINE` — override, beats suppressions and an unapplied fix; no further checks |
+| CVE is on CISA KEV, fix available, posture `relaxed` | `IGNORED_FIXED` — priority-1 alert every scan |
+| Fix available upstream (not KEV) | `IGNORED_FIXED` — alerted once (rebuild to apply) |
 | Active suppression matches the CVE | `SUPPRESSED` — skip until expiry |
-| CVE is on CISA KEV | `QUARANTINE` — override; no further checks |
 | Severity unknown | `INFORMATIONAL` |
 | Posture is `paranoid` | NVD threshold gate (step 5 above) |
 | Posture is `relaxed` (non-KEV finding) | `INFORMATIONAL` — relaxed is KEV-only |
@@ -157,14 +184,14 @@ For every finding, `evaluate_finding` runs these gates in order:
 | CVSS Attack Vector is not Network | `INFORMATIONAL` — not network-reachable |
 | Distro severity (+ hardening penalty) ≥ threshold | `QUARANTINE` (or `STILL_RUNNING_AT_RISK` if quarantine disabled) |
 | Distro severity (+ hardening penalty) < threshold | `INFORMATIONAL` |
-| `dangerously_disable_quarantine: true` | `STILL_RUNNING_AT_RISK` instead of `QUARANTINE` |
+| `dangerously_disable_quarantine: true` | `STILL_RUNNING_AT_RISK` instead of `QUARANTINE`, KEV included (alerted every scan for KEV) |
 
 ### `end_of_life` status
 
 A finding with `Status: end_of_life` is **not** in the distro-deprioritized
 bucket. EOL means the distro will never ship a fix — that is a more dangerous
 signal, not less. On Debian 13 stable it should not appear; if it does, it
-falls through to step 9 (the threshold gate) alongside `Status: affected`.
+falls through to step 11 (the threshold gate) alongside `Status: affected`.
 
 ## CISA KEV feed
 
@@ -188,7 +215,22 @@ exploitation signal is consistent fleet-wide within a scan run.
 
 The catalog is considered stale when its `fetched_at` timestamp is older than
 `KEV_MAX_AGE_DAYS` (currently 8 days — a week of fetch failures before the
-gate degrades).
+gate degrades), or more than a day in the future (clock skew when the cache
+was written).
+
+### Refresh sanity floor
+
+CISA's catalog only grows. A refresh is **rejected** — the previous cache
+is kept untouched — when the feed's payload is malformed, when it holds
+fewer than `KEV_MIN_ENTRIES` (1,000) CVEs, or when it would shrink the
+cached catalog by more than `KEV_MAX_SHRINK` (5%). An empty or truncated
+feed (an error page, a CDN serving a partial file) would otherwise be
+accepted as a fresh catalog and switch the exploitation gate off without
+ever going stale. A rejected refresh fires the priority-1 KEV alert for
+that run (title `CISA KEV refresh rejected — previous catalog kept`, with
+the reason), even while the kept cache is still fresh. A plain network
+failure is not a rejection: the cache ages normally and the staleness
+alert below takes over after `KEV_MAX_AGE_DAYS`.
 
 **Fail-safe: toward uptime, never toward quarantine.** When the catalog is
 missing or stale, `is_known_exploited` returns `False`. The site is not taken
@@ -198,7 +240,7 @@ Staleness is never silent. When a scan run detects a stale or missing catalog,
 it:
 1. Logs a WARNING with the last fetch timestamp (if any).
 2. Fires a single priority-1 Pushover alert per run:
-   `KEV feed stale — exploitation-based quarantine is degraded`.
+   `CISA KEV feed stale — exploitation defense degraded`.
 
 This alert fires once per scan run, not once per finding, to avoid alert
 storms. The degradation must not go unnoticed — the `relaxed` tier's only
@@ -359,7 +401,7 @@ explanation show the elevation reason explicitly so you can see why a
 Medium CVE quarantined a project running on `strict` posture.
 
 For non-paranoid postures, the penalty applies to the **distro** severity
-at step 9. For `paranoid`, the penalty applies to the **NVD** severity.
+at step 11. For `paranoid`, the penalty applies to the **NVD** severity.
 
 Rationale: running with read-only rootfs disabled means a Medium CVE
 behaves more like a High one in practice — the policy treats it that way.
@@ -467,7 +509,12 @@ secrets, no user data, no auth. You'd rather be exploited than offline.
 The trade is explicit and signed off in the manifest:
 
 - You accept that a quarantine-level CVE on this project will not stop the
-  service.
+  service — **including a CVE on CISA KEV** (actively exploited), with or
+  without a fix available. The opt-out is honoured for KEV, but never
+  quietly: every scan with a live KEV finding sends a priority-1
+  `[STILL RUNNING — quarantine disabled by config] ACTIVELY EXPLOITED <CVE>
+  (CISA KEV)` alert naming the CVE and the opt-out (and the fix, if one
+  exists but is not running).
 - In exchange, you must run with `read_only: true` on every service —
   any post-exploit persistence has nowhere to land.
 - Pushover alerts for findings on this project are prefixed
@@ -526,12 +573,24 @@ All five fields are required. Dates are ISO `YYYY-MM-DD`.
 CLI:
 
 ```
-boxmunge security suppress <CVE> --project <name> --until <YYYY-MM-DD> --reason <text>
+boxmunge security suppress <CVE>|--current --project <name> --until <YYYY-MM-DD> --reason <text>
 boxmunge security unsuppress <CVE> --project <name>
+boxmunge security suppress <CVE>|--current --host --until <YYYY-MM-DD> --reason <text>   # operator only
+boxmunge security unsuppress <CVE> --host                                              # operator only
 ```
 
 The `suppress` command writes the entry, sets `reviewed_by` from `$USER`,
-and sets `added` to today. `--until` must be a future date.
+and sets `added` to today. `--reason` and `--until` are required, and
+`--until` must be a future date **at most 90 days ahead**
+(`MAX_SUPPRESSION_DAYS`). A suppression is a review note, not a permanent
+exemption: when it expires, re-review the CVE and suppress it again.
+
+**Host scope is operator-only.** `--host` writes
+`/opt/boxmunge/config/suppressions.yml`, which applies to every project on
+the box, so the restricted deploy shell refuses `suppress --host` and
+`unsuppress --host`; run them as the supervisor account. Project-scope
+suppressions remain available to the deploy shell. There is no MCP tool
+that creates suppressions.
 
 Rules:
 
@@ -543,6 +602,10 @@ Rules:
   This is deliberate — silent overwrites would erase audit-trail entries.
 - A suppression is active while `today < until`. So `until: 2026-08-01`
   applies through 2026-07-31 and expires on 2026-08-01.
+- A suppression never applies to a CVE on the CISA KEV catalog. `suppress`
+  refuses a KEV-listed CVE, and `suppress --current` skips KEV-listed CVEs
+  with a `NOTE:`. An existing suppression whose CVE is later added to KEV
+  stops applying on the next scan (see the decision order above).
 
 ### Audit trail (v0.7.0)
 
@@ -563,13 +626,30 @@ entry includes `previously_suppressed=true` in its detail. The
 combination makes silent extension-of-suppression visible in the
 audit trail.
 
+## What is scanned
+
+Every service in the project's `compose.yml` is scanned — not only the
+services the manifest lists, so databases, caches and sidecars are covered
+too. For each service the scanner uses the most exact identity it can find:
+
+1. the container's image pinned by registry digest (`repo@sha256:…`);
+2. the container's local image ID (`sha256:…`), which is exactly what is
+   running and the only identity a locally built (`build:`) image has;
+3. the `image:` declared in `compose.yml`;
+4. the image compose built for the service (`<project>-<service>`).
+
+A stopped container (paused or quarantined project) still identifies its
+image. A compose service behind `profiles:` that is not running is not
+scanned and not counted as a failure: nothing of it is deployed.
+
 ## Scan cadence
 
 - **Daily** at 03:00 system time via systemd timer `boxmunge-cve-scan.timer`,
-  with up to 30 minutes of randomized jitter.
-- **On every deploy** and **on every image update**. If a new image would
-  immediately quarantine under current posture, the deploy is rejected with
-  an error pointing to suppress/posture options.
+  with up to 30 minutes of randomized delay (03:00 to 03:30).
+- **Not yet at deploy or image-update time.** `prod-deploy`, `stage`,
+  `promote` and `container-update` do not scan, and no deploy is rejected
+  for CVEs: a new image runs unscanned until the next daily scan. Run
+  `boxmunge security scan <project>` after a deploy to check it at once.
 - **Ad-hoc:**
 
   ```
@@ -578,24 +658,38 @@ audit trail.
   ```
 
 The Trivy DB and the CISA KEV catalog are both refreshed before each scan
-run (one call each, best-effort). DB-refresh and KEV-refresh failures are
-non-fatal: the scan proceeds against whatever cache exists and a warning is
-logged. A stale KEV catalog fires a priority-1 alert (see "CISA KEV feed"
-above).
+run (one call each). DB-refresh and KEV-refresh failures are non-fatal:
+the scan proceeds against whatever cache exists and a warning is logged. A
+stale KEV catalog, or a KEV refresh rejected by the sanity floor, fires a
+priority-1 alert (see "CISA KEV feed" above).
 
-Idempotency: the daily cron does not re-fire informational alerts for
-unchanged dispositions. Only state transitions (new finding, transition
-across threshold, suppression expiry, new quarantine, resume) produce
-alerts.
+Idempotency: the daily cron does not re-fire alerts for unchanged
+dispositions. A finding is identified by its CVE **and package**, across
+all of the project's images — never by image digest — so an image rebuild
+or container update with the same findings alerts nothing, and one CVE
+that quarantines in `libperl5.36` but is informational in `perl-base` is
+two stable findings, not one that flaps every day. Only transitions (a new
+finding, a change of disposition, a suppression expiring) alert, and each kind of transition is **one alert per project
+per scan** listing every finding involved — a project's first scan sends
+one informational digest, not one push per finding. Host-scope
+suppression expiry is alerted once per fleet scan, not once per project.
+
+The `QUARANTINED` alert belongs to the quarantine **action**, not to a
+change in a finding's disposition: it is sent once, when the maintenance
+page and the stop have both landed (a new quarantine, or an earlier
+partial one completing). A project that stays quarantined is not
+re-alerted, and the first enforcing scan after the migration grace window
+alerts even though its dispositions were already `QUARANTINE` while in
+grace.
 
 ### Per-project scan budget (v0.7.0)
 
 Each project gets a **600-second (10-minute) wall-clock budget** for the
 sum of its image scans. If a project exhausts the budget, remaining
 images for the current scan are skipped and the project resumes on the
-next cron tick. The skip is logged at WARNING with the elapsed time and
-the count of skipped images, so a project that consistently overflows
-becomes visible in the audit log:
+next cron tick. A skip makes the scan incomplete (see "Scan failures"
+below): it is alerted and the scan exits 1. It is also logged at WARNING
+with the elapsed time and the count of skipped images:
 
 ```
 boxmunge log --component cve-scan --level warning
@@ -604,6 +698,81 @@ boxmunge log --component cve-scan --level warning
 Rationale: an unbounded scan on a fleet of misbehaving images would
 starve the rest of the cron-driven workload. The budget bounds the
 worst case while still letting normal scans complete in seconds.
+
+### Scan failures
+
+An image that is not scanned is not covered by quarantine, so a scan that
+did not cover everything is never reported as success. A project's scan is
+**incomplete** when an image fails to scan (Trivy error, registry or DB
+unreachable), the budget skips an image, or a service has no identifiable
+image at all (no container, no image built for it, and no `image:` in
+`compose.yml` — in practice a build-only service that was never built). A
+project **fails** outright when one of its
+inputs is malformed: an unparseable manifest or `compose.yml`, an unknown
+`security.posture`, a non-boolean `dangerously_disable_quarantine`, a broken
+suppressions file, or a quarantine action that could not complete.
+
+- One bad project never stops the others: the fleet scan reports it and
+  carries on. A corrupt prior scan state (`state/scans/<project>.json`) is
+  logged and treated as "no prior scan"; this scan overwrites it.
+- Every run with an incomplete or failed project sends **one** priority-1
+  alert, `[boxmunge] CVE scan incomplete — N projects not fully scanned`,
+  listing each project and image. Single-project scans alert too.
+- `boxmunge health` has a `cve-scan` check that warns when any project
+  has not been scanned in 36 hours, has never been scanned, or whose last
+  scan was incomplete (each listed), so a project the nightly run keeps
+  missing shows up even if an alert was lost.
+- `security scan` exits `1` when any project failed or was incomplete,
+  otherwise `2` when any project is quarantined or at-risk-running, and
+  `0` when everything is clean.
+
+## Fleet circuit breaker
+
+Base images are shared, so one CVE, one Trivy DB update, or one feed change
+can hit every project in the same scan. The circuit breaker looks at the
+fleet as a whole before stopping anything.
+
+Each `security scan` run first scans every project (re-asserting existing
+quarantines), then decides the run's **new** quarantines together. With N
+projects scanned, the breaker **trips** when either
+
+- a single non-KEV CVE would newly quarantine at least
+  `max(2, ceil(0.34 × N))` projects, or
+- the run's new non-KEV quarantines, all CVEs together, reach that same
+  number (the shape of a poisoned or regressed Trivy DB).
+
+When it trips, every new non-KEV quarantine in the run is **held**: the
+projects keep running, their scan state still records the `QUARANTINE`
+dispositions, and **one** priority-1 alert (`[boxmunge] Circuit breaker
+held <N> quarantines`) lists the held projects by CVE. The held set is
+kept in `state/cve-breaker.json`, shown by `boxmunge security` (and
+`held_by_breaker` in `--json`), and makes `security scan` exit 2. Later
+scans — including `security scan <project>`, which scans one project and so
+can never trip by count — keep holding a project whose quarantine-level
+CVEs are all held. A project with a quarantine-level CVE that is not held
+is quarantined normally. A hold is alerted once, when it starts; it is not
+re-alerted every night.
+
+To resolve a hold, review the findings (`boxmunge security <project>`),
+then either:
+
+- apply the held quarantines: `boxmunge security scan --apply-held`
+  (operator only; refused by the deploy shell). It acts on the persisted
+  scan decisions, without a re-scan, and clears the held set; or
+- after review, suppress the CVE for every project:
+  `boxmunge security suppress <CVE> --host ...` (operator only). The next
+  scan finds nothing to quarantine and drops the hold.
+
+**KEV is never held.** A project with a KEV-listed quarantine-level finding
+is quarantined at once, whatever else is happening: active exploitation is
+exactly when blast radius is acceptable. A broken KEV feed is guarded
+earlier, by the refresh sanity floor (see "CISA KEV feed").
+
+A single-project box never trips (the threshold is at least 2). On a
+two-project box both projects quarantining for new findings in the same
+run trips it. An unreadable `state/cve-breaker.json` fails loudly: no new
+quarantine is applied that run, the scan exits 1 and the scan-failure
+alert names the file.
 
 ## Migration grace
 
@@ -619,29 +788,42 @@ install — you cannot dodge enforcement by repeatedly upgrading.
 - Per-project transition alerts (new findings, suppression expiry, etc.)
   are silenced during grace — the heads-up is the one alert in this
   window.
-- After 24 hours, full enforcement begins on the next scan.
+- After 24 hours, full enforcement begins on the next scan, and every
+  project quarantined then gets its own `QUARANTINED` alert.
 
 The grace state is visible in `boxmunge security --json` under the
 top-level `grace` field.
 
 ## Alerts you'll see (Pushover)
 
-Seven categories. Titles only — bodies are self-explanatory.
+Titles only — bodies list every finding involved and what to do. Where
+several findings are involved the title names the worst and adds
+`(+N more)`. Priority 1 bypasses the recipient's quiet hours.
 
 | Title | Priority |
 |---|---|
-| `[boxmunge:<project>] QUARANTINED — <CVE> (<severity>)` | high |
-| `[boxmunge:<project>] QUARANTINED — <CVE> (actively exploited — CISA KEV)` | high |
-| `[boxmunge:<project>] [STILL RUNNING — quarantine disabled by config]` | high |
-| `[boxmunge:<project>] <CVE> (<severity>)` (informational, sub-threshold or distro-deprioritized) | normal |
-| `[boxmunge:<project>] Suppression for <CVE> expired` | high |
-| `[boxmunge] CVE policy enforcement begins in <N>h` (one-time) | normal |
-| `[boxmunge] KEV feed stale — exploitation-based quarantine is degraded` | priority-1 |
+| `[boxmunge:<project>] QUARANTINED — <CVE> (<severity>)` | priority-1 |
+| `[boxmunge:<project>] QUARANTINED — <CVE> (actively exploited — CISA KEV)` | priority-1 |
+| `[boxmunge:<project>] [STILL RUNNING — quarantine disabled by config] <CVE> (<severity>)` | priority-1 |
+| `[boxmunge:<project>] [STILL RUNNING — quarantine disabled by config] ACTIVELY EXPLOITED <CVE> (CISA KEV)` (every scan) | priority-1 |
+| `[boxmunge:<project>] ACTIVELY EXPLOITED — <CVE> fix available but not running (CISA KEV)` (`relaxed`, every scan) | priority-1 |
+| `[boxmunge:<project>] <N> fixable CVE findings over the quarantine gate — rebuild to apply the fix` | normal |
+| `[boxmunge:<project>] <N> new CVE findings (informational)` (digest, top 5 listed) | normal |
+| `[boxmunge:<project>] Suppression expired — <CVE>` | priority-1 |
+| `[boxmunge] Host suppression expired — <CVE>` (once per fleet scan) | priority-1 |
+| `[boxmunge] CVE policy enforcement begins in <N>h` (one-time) | priority-1 |
+| `[boxmunge] CISA KEV feed stale — exploitation defense degraded` | priority-1 |
+| `[boxmunge] CISA KEV refresh rejected — previous catalog kept` | priority-1 |
+| `[boxmunge] CVE scan incomplete — <N> projects not fully scanned` | priority-1 |
 
 Alerting is best-effort. The durable record is the on-disk scan state
-under `<project>/.cve/scan_state.json`. If Pushover isn't configured, or
+under `state/scans/<project>.json`. If Pushover isn't configured, or
 the API call fails, the scan still runs, the quarantine still happens,
-and the state file is still written — you just won't get a push.
+and the state file is still written — you just won't get a push. Every
+alert that was not delivered is logged (component `cve-alert`). The two
+alerts that record "sent" state — the grace heads-up and a circuit-breaker
+hold — record it only once Pushover accepted them, so an undelivered one
+is retried by the next scan.
 
 ## CLI reference
 
@@ -652,6 +834,7 @@ boxmunge security <project>                             Per-project view
 boxmunge security <project> --json                      Per-project JSON
 boxmunge security scan                                  Scan all projects
 boxmunge security scan <project>                        Scan one project
+boxmunge security scan --apply-held                     Apply breaker-held quarantines (operator only)
 boxmunge security suppress <CVE> --project <name> --until <YYYY-MM-DD> --reason <text>
 boxmunge security unsuppress <CVE> --project <name>
 boxmunge security resume <project>                      Lift CVE quarantine
@@ -669,7 +852,19 @@ project's active suppressions.
 
 Once a project is quarantined, every operational entry point honours
 that state until `boxmunge security resume <project>` lifts it. There
-is no other path back. The behaviour splits into two camps:
+is no other path back.
+
+The quarantine record (`state/deploy/<project>.quarantined.json`) says
+`action_complete: false` until the maintenance page is routed **and** the
+containers are stopped. Every scan of a quarantined project re-asserts the
+action — maintenance page, Caddy reload, stop, restart policies — whatever
+the scan finds,
+so a step that failed (a Caddy reload timeout, a hung `compose stop`) is
+retried on the next scan until it completes, and a container started
+behind the maintenance page is stopped again. A failed re-assert is a scan
+failure for that project: it is reported and the scan exits non-zero.
+
+The behaviour splits into two camps:
 
 **Refuse with exit 1 (operator-initiated mutations):**
 
@@ -698,8 +893,8 @@ resume <project>` and abort before touching containers or configs.
 
 In both camps the skip is recorded via `log_operation` and visible in
 `boxmunge log --component <component>`. Only `boxmunge security
-resume <project>` lifts the quarantine; it re-scans first and refuses
-to lift if a quarantine-level finding still applies.
+resume <project>` lifts the quarantine; it re-scans first and fails
+closed (see "Recovering a quarantined project" below).
 
 ## Recovering a quarantined project
 
@@ -725,21 +920,45 @@ to lift if a quarantine-level finding still applies.
    boxmunge security resume <project>
    ```
 
-   `resume` re-scans the image, regenerates the project's Caddy config,
-   restarts the containers, and runs the smoke test. It refuses to lift
-   the quarantine if any finding still meets the project's posture
-   threshold:
+   `resume` re-scans every one of the project's current images,
+   regenerates the project's Caddy config, restarts the containers, and
+   runs the smoke test. It **fails closed**: the quarantine is lifted only
+   when the re-scan covered every image and found no quarantine-level
+   finding. It refuses, keeps the quarantine, and exits 1 when:
 
-   ```
-   ERROR: Cannot resume — CVE-2026-5678 (Critical) would still quarantine.
-     Either suppress it (boxmunge security suppress) or wait for upstream fix.
-   ```
+   - any finding still meets the project's posture threshold:
 
-   Surface and address the remaining finding before retrying.
+     ```
+     ERROR: Cannot resume — CVE-2026-5678 (Critical) would still quarantine.
+     ```
+
+   - any image failed to scan (Trivy DB or registry unreachable, for
+     example), or every image did;
+   - the per-project scan budget ran out before every image was scanned;
+   - a service's image cannot be identified (no container, no image built
+     for it, and no `image:` in `compose.yml`).
+
+   The error lists each image or service that was not covered. Fix the
+   cause and retry; an incomplete re-scan is never treated as clean.
+
+The lift starts the containers **without rebuilding** (`compose up` with
+no `--build`), so the images that come back are the ones the re-scan just
+cleared.
 
 This is distinct from `boxmunge resume` (which lifts a manual `pause`).
-Quarantine state is separate from pause state — `boxmunge up` does not
-auto-resume CVE-quarantined projects across reboot.
+The two are independent: if the project is also paused, `security resume`
+lifts only the quarantine. The maintenance page stays up and the
+containers stay stopped until `boxmunge resume <project>` lifts the pause.
+
+**Quarantine holds across a reboot.** Docker restarts a stopped
+`restart: always` container whenever the daemon starts (a reboot, a
+`docker-ce` upgrade). So the quarantine action also sets every project
+container's restart policy to `no` with `docker update`, saving each
+original policy in the quarantine record; `security resume` restores them
+before starting the containers. Nothing else restarts a quarantined
+project. `pause` holds restart policies the same way; when a quarantine
+is lifted from a project that is still paused, the pause record takes over
+the saved policies and `boxmunge resume` restores them.
 
 ## Recommendations
 

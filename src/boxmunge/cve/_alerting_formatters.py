@@ -1,327 +1,210 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Alert-body formatters for CVE policy state transitions.
+"""Per-project alert formatters for CVE policy state transitions.
 
-Extracted from ``cve/alerting.py`` to keep that module under the 500-line
-budget. Pure functions: take in-memory values, return ``Alert`` instances.
-No I/O, no logging.
+One alert per project per kind of transition, never one per finding
+(audit B-14): a project's first scan, or an image rebuild, can surface
+dozens of findings at once, and a storm of pushes trains operators to
+ignore the channel that carries quarantine alerts.
 
-The public ``Alert`` / ``AlertKind`` symbols and the dispatch logic
-(``detect_transitions``, ``send_alerts``, ``emit_scan_alerts``) live in
-``alerting.py``; consumers should keep importing from there.
+Pure functions: take in-memory values, return ``Alert`` instances. No I/O,
+no logging. Fleet-level formatters (grace heads-up, KEV, scan failure)
+live in ``_alerting_fleet``; consumers import from ``boxmunge.cve.alerting``.
 """
 
 from __future__ import annotations
 
-import math
-from datetime import datetime, timezone
+from collections.abc import Sequence
 
-from boxmunge.cve._alerting_types import Alert
-from boxmunge.cve.policy import (
-    Disposition,
-    FindingDisposition,
-    ProjectDecision,
-)
+from boxmunge.cve._alerting_types import Alert, Hit
+from boxmunge.cve.policy import FindingDisposition
+from boxmunge.cve.scanner import Severity
 from boxmunge.cve.suppressions import Suppression
 
+# Lines listed in an aggregated alert body before "... and N more".
+_MAX_LISTED = 10
+# Findings named in the informational digest.
+_DIGEST_TOP = 5
 
-# ---------- per-disposition formatters ----------
+_RANK = {Severity.CRITICAL: 4, Severity.HIGH: 3, Severity.MEDIUM: 2,
+         Severity.LOW: 1, Severity.UNKNOWN: 0}
 
 
-def format_quarantine_alert(
-    decision: ProjectDecision, finding: FindingDisposition,
-) -> Alert:
-    """Format a "newly quarantined" alert. Priority 1."""
-    project = decision.project_name
-    cve = finding.finding.cve_id
-    severity = finding.effective_severity.value
-    image_ref = decision.image_ref
-    title = f"[boxmunge:{project}] QUARANTINED — {cve} ({severity})"
-    body = (
-        f"Project: {project}\n"
-        f"CVE: {cve} ({severity})\n"
-        f"Image: {image_ref}\n"
-        f"\n"
-        f"{finding.explanation}\n"
-        f"\n"
-        f"Service stopped, maintenance page active.\n"
-        f"\n"
-        f"To resume: boxmunge security resume {project}\n"
-        f"(after the CVE is fixed upstream or you add a suppression)"
-    )
+def _ordered(hits: Sequence[Hit]) -> list[Hit]:
+    """Most severe first, then by CVE id, for stable titles and bodies."""
+    return sorted(hits, key=lambda h: (-_RANK[h.disposition.effective_severity],
+                                       h.disposition.finding.cve_id,
+                                       h.disposition.finding.package))
+
+
+def _sev(fd: FindingDisposition) -> str:
+    base, eff = fd.base_severity.value, fd.effective_severity.value
+    if fd.hardening_penalty > 0 and base != eff:
+        return f"{base} → effective {eff} via penalty +{fd.hardening_penalty}"
+    return eff
+
+
+def _line(hit: Hit) -> str:
+    fd = hit.disposition
+    kev = ", CISA KEV" if fd.kev_listed else ""
+    return (f"- {fd.finding.cve_id} ({_sev(fd)}{kev}) in "
+            f"{fd.finding.package or '?'} — {hit.image_ref}")
+
+
+def _listing(hits: Sequence[Hit], limit: int = _MAX_LISTED) -> list[str]:
+    lines = [_line(h) for h in hits[:limit]]
+    if len(hits) > limit:
+        lines.append(f"... and {len(hits) - limit} more")
+    return lines
+
+
+def _more(n: int) -> str:
+    return f" (+{n} more)" if n else ""
+
+
+def _cve_count(hits: Sequence[Hit]) -> int:
+    return len({h.disposition.finding.cve_id for h in hits})
+
+
+def format_quarantine_alert(project: str, hits: Sequence[Hit]) -> Alert:
+    """The project was quarantined. Priority 1. Names the worst finding."""
+    hits = _ordered(hits)
+    head = hits[0].disposition
+    cve = head.finding.cve_id
+    why = ("actively exploited — CISA KEV" if head.kev_listed
+           else head.effective_severity.value)
+    title = (f"[boxmunge:{project}] QUARANTINED — {cve} ({why})"
+             f"{_more(_cve_count(hits) - 1)}")
+    body = "\n".join([
+        f"Project: {project}",
+        "Quarantine-level findings:",
+        *_listing(hits),
+        "",
+        head.explanation,
+        "",
+        "Service stopped, maintenance page active.",
+        "",
+        f"To resume: boxmunge security resume {project}",
+        "(after the CVE is fixed upstream or you add a suppression)",
+    ])
     return Alert(kind="quarantine", title=title, body=body, priority=1)
 
 
-def format_still_running_alert(
-    decision: ProjectDecision, finding: FindingDisposition,
-) -> Alert:
-    """Format a "still running at risk" alert. Priority 1.
-
-    Fires when a finding would quarantine but the project's manifest has
-    `dangerously_disable_quarantine: true`.
-    """
-    project = decision.project_name
-    cve = finding.finding.cve_id
-    severity = finding.effective_severity.value
-    image_ref = decision.image_ref
-    title = f"[boxmunge:{project}] [STILL RUNNING] {cve} ({severity})"
-    body = (
-        f"Project: {project} — QUARANTINE DISABLED BY CONFIG\n"
-        f"CVE: {cve} ({severity}, no upstream fix)\n"
-        f"Image: {image_ref}\n"
-        f"\n"
-        f"Project is still running because dangerously_disable_quarantine is true.\n"
-        f"Read-only rootfs is the only remaining post-exploit defense.\n"
-        f"\n"
-        f"To remove the exemption: drop dangerously_disable_quarantine from the\n"
-        f"manifest's security: block. To suppress this specific CVE:\n"
-        f"  boxmunge security suppress {cve} --project {project} \\\n"
-        f"      --until <date> --reason <text>"
-    )
+def format_still_running_alert(project: str, hits: Sequence[Hit]) -> Alert:
+    """Quarantine-level findings on a project that opted out. Priority 1."""
+    hits = _ordered(hits)
+    head = hits[0].disposition
+    title = (f"[boxmunge:{project}] [STILL RUNNING — quarantine disabled by config] "
+             f"{head.finding.cve_id} ({head.effective_severity.value})"
+             f"{_more(_cve_count(hits) - 1)}")
+    body = "\n".join([
+        f"Project: {project} — QUARANTINE DISABLED BY CONFIG",
+        "Findings that would otherwise quarantine:",
+        *_listing(hits),
+        "",
+        head.explanation,
+        "",
+        "Project is still running because dangerously_disable_quarantine is true.",
+        "Read-only rootfs is the only remaining post-exploit defense.",
+        "",
+        "To remove the exemption: drop dangerously_disable_quarantine from the",
+        "manifest's security: block. To suppress a reviewed CVE:",
+        f"  boxmunge security suppress {head.finding.cve_id} --project {project} \\",
+        "      --until <date> --reason <text>",
+    ])
     return Alert(kind="still_running", title=title, body=body, priority=1)
 
 
-def format_informational_alert(
-    decision: ProjectDecision, finding: FindingDisposition,
-) -> Alert:
-    """Format an informational (non-quarantined) alert. Priority 0.
+def format_kev_fix_pending_alert(project: str, hits: Sequence[Hit]) -> Alert:
+    """An actively exploited CVE with a fix the image is not running, on a
+    posture that does not quarantine it (relaxed). Priority 1, every scan."""
+    hits = _ordered(hits)
+    head = hits[0].disposition
+    title = (f"[boxmunge:{project}] ACTIVELY EXPLOITED — {head.finding.cve_id} "
+             f"fix available but not running (CISA KEV){_more(_cve_count(hits) - 1)}")
+    body = "\n".join([
+        f"Project: {project} — still running",
+        *_listing(hits),
+        "",
+        head.explanation,
+        "",
+        "Rebuild the image (pull the fixed base image or package) and",
+        "redeploy. This alert repeats on every scan until the fix is running.",
+    ])
+    return Alert(kind="kev_fix_pending", title=title, body=body, priority=1)
 
-    The body's reason line comes from ``finding.explanation`` (sub-threshold,
-    distro-deprioritized, no-distro-verdict, or AV-filtered), so no posture
-    argument is needed here."""
-    project = decision.project_name
-    cve = finding.finding.cve_id
-    image_ref = decision.image_ref
-    base = finding.base_severity.value
-    effective = finding.effective_severity.value
-    title = f"[boxmunge:{project}] {cve} ({effective})"
-    if finding.hardening_penalty > 0 and base != effective:
-        sev_line = (
-            f"Severity: {base} → effective {effective} via penalty "
-            f"+{finding.hardening_penalty}"
-        )
-    else:
-        sev_line = f"Severity: {base}"
-    body = (
-        f"Project: {project}\n"
-        f"CVE: {cve}\n"
-        f"{sev_line}\n"
-        f"Image: {image_ref}\n"
-        f"\n"
-        f"{finding.explanation}"
-    )
-    return Alert(kind="informational", title=title, body=body, priority=0)
+
+def format_kev_at_risk_alert(project: str, hits: Sequence[Hit]) -> Alert:
+    """An actively exploited CVE on a project that opted out of quarantine.
+    Priority 1, every scan, naming the CVE and the opt-out."""
+    hits = _ordered(hits)
+    head = hits[0].disposition
+    title = (f"[boxmunge:{project}] [STILL RUNNING — quarantine disabled by config] "
+             f"ACTIVELY EXPLOITED {head.finding.cve_id} (CISA KEV)"
+             f"{_more(_cve_count(hits) - 1)}")
+    body = "\n".join([
+        f"Project: {project} — dangerously_disable_quarantine: true",
+        *_listing(hits),
+        "",
+        head.explanation,
+        "",
+        "To let boxmunge quarantine it: drop dangerously_disable_quarantine",
+        "from the manifest's security: block and redeploy. This alert repeats",
+        "on every scan while the finding is live.",
+    ])
+    return Alert(kind="kev_at_risk", title=title, body=body, priority=1)
+
+
+def format_fixable_alert(project: str, hits: Sequence[Hit]) -> Alert:
+    """Findings over the quarantine gate whose fix the image is not running.
+    Not quarantined (the fix is the remedy), never silent. Priority 0."""
+    hits = _ordered(hits)
+    n = len(hits)
+    title = (f"[boxmunge:{project}] {n} fixable CVE finding{'s' if n != 1 else ''} "
+             f"over the quarantine gate — rebuild to apply the fix")
+    body = "\n".join([
+        f"Project: {project}",
+        "A fix exists for each of these, but the running image predates it:",
+        *_listing(hits),
+        "",
+        "boxmunge does not rebuild images. Rebuild (pull the base image) and",
+        "redeploy to pick up the fixes.",
+    ])
+    return Alert(kind="fix_available", title=title, body=body, priority=0)
+
+
+def format_new_findings_alert(project: str, hits: Sequence[Hit]) -> Alert:
+    """Digest of findings first seen this scan that do not quarantine. Priority 0."""
+    hits = _ordered(hits)
+    n = len(hits)
+    title = (f"[boxmunge:{project}] {n} new CVE finding{'s' if n != 1 else ''} "
+             f"(informational)")
+    lines = [f"Project: {project}",
+             f"{n} new finding{'s' if n != 1 else ''} below the quarantine gate. "
+             f"Top {min(n, _DIGEST_TOP)}:"]
+    for hit in hits[:_DIGEST_TOP]:
+        lines.append(_line(hit))
+        lines.append(f"    {hit.disposition.explanation}")
+    lines += ["", f"All findings: boxmunge security {project}"]
+    return Alert(kind="informational", title=title, body="\n".join(lines), priority=0)
 
 
 def format_suppression_expired_alert(
-    project_name: str, suppression: Suppression,
+    project: str, suppressions: Sequence[Suppression],
 ) -> Alert:
-    """Format a "suppression expired between scans" alert. Priority 1."""
-    title = (
-        f"[boxmunge:{project_name}] Suppression expired — {suppression.cve_id}"
-    )
-    body = (
-        f"Project: {project_name}\n"
-        f"CVE: {suppression.cve_id}\n"
-        f"Suppression added: {suppression.added.isoformat()}\n"
-        f"Suppression expired: {suppression.until.isoformat()}\n"
-        f"\n"
-        f"This is now an active finding. Quarantine queued for next scan.\n"
-        f"To extend the suppression:\n"
-        f"  boxmunge security suppress {suppression.cve_id} "
-        f"--project {project_name} \\\n"
-        f"      --until <date> --reason <text>"
-    )
-    return Alert(
-        kind="suppression_expired", title=title, body=body, priority=1,
-    )
-
-
-# ---------- grace heads-up helpers ----------
-
-
-def _quarantine_findings(
-    decision: ProjectDecision,
-) -> tuple[FindingDisposition, ...]:
-    return tuple(
-        d for d in decision.findings if d.disposition == Disposition.QUARANTINE
-    )
-
-
-def _at_risk_findings(
-    decision: ProjectDecision,
-) -> tuple[FindingDisposition, ...]:
-    return tuple(
-        d for d in decision.findings
-        if d.disposition == Disposition.STILL_RUNNING_AT_RISK
-    )
-
-
-def _format_finding_summary(fd: FindingDisposition) -> str:
-    """Compact 'CVE-... (Severity, ...)' clause used in heads-up bullets.
-
-    Mirrors the explanation prefix used elsewhere so the operator sees
-    consistent severity wording across alert kinds.
-    """
-    cve = fd.finding.cve_id
-    base = fd.base_severity.value
-    eff = fd.effective_severity.value
-    if base != eff and fd.hardening_penalty > 0:
-        return (
-            f"{cve} ({base} → effective {eff} via hardening penalty, "
-            f"no upstream fix)"
-        )
-    return f"{cve} ({eff}, no upstream fix)"
-
-
-def format_grace_heads_up_alert(
-    *,
-    expires_at: datetime,
-    decisions_by_project: dict[str, ProjectDecision],
-    posture_by_project: dict[str, str],
-    dangerously_by_project: dict[str, bool],
-) -> Alert:
-    """One-time fleet-level "heads-up" alert for the migration grace window.
-
-    Lists projects that *would* quarantine at grace expiry and projects
-    running with ``dangerously_disable_quarantine`` that hit a finding
-    over their posture threshold. Includes posture pointers and the
-    suppression command syntax so the operator can configure before
-    enforcement bites.
-
-    Empty sections are omitted entirely (no "none." line).
-    """
-    # Compute "hours remaining" relative to "now" — clamped >=1 so the
-    # title always reads sensibly even if the window is on the edge.
-    now = datetime.now(timezone.utc)
-    delta = expires_at - now
-    hours_remaining = max(1, math.ceil(delta.total_seconds() / 3600))
-    title = (
-        f"[boxmunge] CVE policy enforcement begins in {hours_remaining}h"
-    )
-
-    # Bucket projects.
-    #
-    # Audit F-7: the at-risk-running section is populated by intersecting
-    # `dangerously_by_project` (the operator-declared exemption) with the
-    # set of projects that have would-quarantine findings. A project with
-    # the dangerously flag set but no findings over its posture threshold
-    # is NOT at-risk-running and must not be listed; conversely, a project
-    # without the flag whose findings are STILL_RUNNING_AT_RISK has no
-    # way to land that disposition without the flag — so the two
-    # signals are equivalent in practice today, but we read the explicit
-    # dict so the alert body matches the source-of-truth signal the
-    # caller supplies (rather than a derived view of it).
-    would_quarantine: list[tuple[str, FindingDisposition]] = []
-    at_risk: list[tuple[str, FindingDisposition]] = []
-    other_projects: list[str] = []
-    for name in sorted(decisions_by_project.keys()):
-        decision = decisions_by_project[name]
-        q_findings = _quarantine_findings(decision)
-        r_findings = _at_risk_findings(decision)
-        if q_findings:
-            # One representative finding per project — most-severe first
-            # is already the convention from policy.evaluate_project.
-            would_quarantine.append((name, q_findings[0]))
-        elif r_findings and dangerously_by_project.get(name) is True:
-            at_risk.append((name, r_findings[0]))
-        else:
-            other_projects.append(name)
-
-    n_projects = len(decisions_by_project)
-    n_quar = len(would_quarantine)
-    n_risk = len(at_risk)
-    n_other = len(other_projects)
-
-    expires_display = expires_at.astimezone(timezone.utc).strftime(
-        "%Y-%m-%d %H:%M",
-    )
-
-    lines: list[str] = []
-    lines.append(
-        "boxmunge v0.6.0 introduces CVE policy. After a 24-hour grace "
-        "window, projects",
-    )
-    lines.append(
-        "with unpatched high-severity CVEs will be quarantined "
-        "automatically.",
-    )
-    lines.append("")
-    lines.append(f"First scan results across {n_projects} projects:")
-    lines.append("")
-
-    # Would-quarantine section.
-    if would_quarantine:
-        lines.append(
-            f"Would quarantine after grace ends ({n_quar} projects):",
-        )
-        # Align project names for readability — width ~12 unless longer.
-        name_width = max(len(name) for name, _ in would_quarantine)
-        for name, fd in would_quarantine:
-            posture = posture_by_project.get(name, "balanced")
-            summary = _format_finding_summary(fd)
-            lines.append(
-                f"  - {name:<{name_width}}  {summary} — posture: {posture}",
-            )
-    else:
-        lines.append(
-            "Would quarantine after grace ends: No projects would be "
-            "quarantined.",
-        )
-    lines.append("")
-
-    # At-risk-running section. Audit F-7: omit entirely when empty
-    # (matches the "don't show empty bullet lists" pattern; the prior
-    # "none." line was an exception that the audit flagged for cleanup).
-    if at_risk:
-        lines.append(
-            f"At-risk-running (dangerously_disable_quarantine={n_risk} "
-            f"projects):",
-        )
-        name_width = max(len(name) for name, _ in at_risk)
-        for name, fd in at_risk:
-            summary = _format_finding_summary(fd)
-            lines.append(f"  - {name:<{name_width}}  {summary}")
-        lines.append("")
-
-    lines.append(f"Other projects ({n_other}): clean or sub-threshold findings only.")
-    lines.append("")
-    lines.append("Configure per-project posture in manifest.yml:")
-    lines.append("  security:")
-    lines.append("    posture: relaxed | balanced (default) | strict | paranoid")
-    lines.append("")
-    lines.append("Suppress a specific CVE (with operator review):")
-    lines.append(
-        "  boxmunge security suppress <CVE> --project <name> \\",
-    )
-    lines.append("      --until <date> --reason <text>")
-    lines.append("")
-    lines.append(f"Enforcement begins: {expires_display} UTC")
-
-    body = "\n".join(lines)
-    return Alert(
-        kind="grace_heads_up", title=title, body=body, priority=1,
-    )
-
-
-# ---------- KEV stale-feed alert ----------
-
-
-def format_kev_stale_alert(fetched_at: "datetime | None") -> Alert:
-    """Fleet-level alert: the CISA KEV catalog is stale/missing.
-
-    Priority 1 because a stale KEV feed silently disables the lowest tier's
-    only quarantine trigger — the operator must know the exploitation-signal
-    protection is degraded.
-    """
-    when = fetched_at.isoformat() if fetched_at else "never fetched"
-    title = "[boxmunge] CISA KEV feed stale — exploitation defense degraded"
-    body = (
-        "The CISA Known Exploited Vulnerabilities catalog could not be "
-        "refreshed and is stale or missing.\n"
-        f"Last fetched: {when}\n"
-        "\n"
-        "KEV-based quarantine is fail-safe (sites stay up), so actively-"
-        "exploited CVEs will NOT be auto-quarantined until the feed "
-        "refreshes. Check egress to cisa.gov and the cve-scan log."
-    )
-    return Alert(kind="kev_stale", title=title, body=body, priority=1)
+    """Project-scope suppressions that expired between scans. Priority 1."""
+    sups = sorted(suppressions, key=lambda s: s.cve_id)
+    first = sups[0]
+    title = (f"[boxmunge:{project}] Suppression expired — {first.cve_id}"
+             f"{_more(len(sups) - 1)}")
+    lines = [f"Project: {project}"]
+    for s in sups:
+        lines.append(f"- {s.cve_id}: added {s.added.isoformat()}, "
+                     f"expired {s.until.isoformat()}")
+    lines += [
+        "",
+        "These are active findings again; any that meet the posture threshold",
+        "quarantine on this or the next scan. To re-review and extend:",
+        f"  boxmunge security suppress <CVE> --project {project} \\",
+        "      --until <date> --reason <text>",
+    ]
+    return Alert(kind="suppression_expired", title=title, body="\n".join(lines), priority=1)

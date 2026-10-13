@@ -10,14 +10,14 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision
+    from boxmunge.cve.policy import Disposition, FindingDisposition
     from boxmunge.cve.scanner import Finding, Severity
 
 
 def test_kev_stale_alert_is_priority_one_and_names_the_feed() -> None:
     """format_kev_stale_alert(None) must return a priority-1 Alert whose
     title references the KEV feed so the operator knows what degraded."""
-    from boxmunge.cve._alerting_formatters import format_kev_stale_alert
+    from boxmunge.cve._alerting_fleet import format_kev_stale_alert
 
     alert = format_kev_stale_alert(None)
     assert alert.priority == 1
@@ -27,7 +27,7 @@ def test_kev_stale_alert_is_priority_one_and_names_the_feed() -> None:
 def test_kev_stale_alert_with_fetched_at_includes_timestamp() -> None:
     """When fetched_at is provided, the body must include the ISO timestamp
     so operators can see when the feed was last successfully fetched."""
-    from boxmunge.cve._alerting_formatters import format_kev_stale_alert
+    from boxmunge.cve._alerting_fleet import format_kev_stale_alert
 
     ts = datetime(2026, 6, 10, 12, 0, 0, tzinfo=timezone.utc)
     alert = format_kev_stale_alert(ts)
@@ -39,7 +39,7 @@ def test_kev_stale_alert_with_fetched_at_includes_timestamp() -> None:
 def test_kev_stale_alert_body_mentions_never_fetched_when_none() -> None:
     """When fetched_at is None, the body should indicate the feed was never
     fetched so the operator knows this is a fresh/unconfigured state."""
-    from boxmunge.cve._alerting_formatters import format_kev_stale_alert
+    from boxmunge.cve._alerting_fleet import format_kev_stale_alert
 
     alert = format_kev_stale_alert(None)
     assert "never fetched" in alert.body
@@ -47,7 +47,7 @@ def test_kev_stale_alert_body_mentions_never_fetched_when_none() -> None:
 
 def test_kev_stale_alert_kind() -> None:
     """The alert kind must be 'kev_stale' for correct routing/filtering."""
-    from boxmunge.cve._alerting_formatters import format_kev_stale_alert
+    from boxmunge.cve._alerting_fleet import format_kev_stale_alert
 
     alert = format_kev_stale_alert(None)
     assert alert.kind == "kev_stale"
@@ -99,30 +99,15 @@ def _make_fd(
     )
 
 
-def _make_decision(fd: "FindingDisposition", project: str = "demo") -> "ProjectDecision":
-    from datetime import datetime, timezone
-
-    from boxmunge.cve.policy import Disposition, ProjectDecision
-
-    quarantine = fd.disposition == Disposition.QUARANTINE
-    return ProjectDecision(
-        project_name=project,
-        image_ref="myapp:1.0",
-        findings=(fd,),
-        quarantine_required=quarantine,
-        at_risk_running=False,
-        scanned_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
-    )
-
-
-# ---------- format_informational_alert ----------
+# ---------- format_new_findings_alert ----------
 
 
 def test_informational_alert_includes_distro_reason() -> None:
     """Body must surface finding.explanation, replacing the old hard-coded
     'Below quarantine threshold' line, so the operator sees the real reason
     (e.g. distro-deprioritized) instead of an always-wrong boilerplate."""
-    from boxmunge.cve._alerting_formatters import format_informational_alert
+    from boxmunge.cve._alerting_formatters import format_new_findings_alert
+    from boxmunge.cve._alerting_types import Hit
     from boxmunge.cve.policy import Disposition
     from boxmunge.cve.policy_explain import explain_distro_deprioritized
     from boxmunge.cve.scanner import Severity, VulnStatus
@@ -132,8 +117,7 @@ def test_informational_alert_includes_distro_reason() -> None:
         disposition=Disposition.INFORMATIONAL,
         explanation=distro_expl,
     )
-    pd = _make_decision(fd)
-    alert = format_informational_alert(pd, fd)
+    alert = format_new_findings_alert("demo", [Hit(fd, "myapp:1.0")])
     assert distro_expl in alert.body
     assert "Below quarantine threshold" not in alert.body
 
@@ -145,6 +129,7 @@ def test_quarantine_alert_includes_explanation() -> None:
     """Body must include finding.explanation so the operator sees WHY the
     project was quarantined (threshold, KEV, etc.)."""
     from boxmunge.cve._alerting_formatters import format_quarantine_alert
+    from boxmunge.cve._alerting_types import Hit
     from boxmunge.cve.policy import Disposition
     from boxmunge.cve.policy_explain import explain_kev_quarantine
 
@@ -154,8 +139,7 @@ def test_quarantine_alert_includes_explanation() -> None:
         disposition=Disposition.QUARANTINE,
         explanation=kev_expl,
     )
-    pd = _make_decision(fd)
-    alert = format_quarantine_alert(pd, fd)
+    alert = format_quarantine_alert("demo", [Hit(fd, "myapp:1.0")])
     assert "Known Exploited" in alert.body
     assert kev_expl in alert.body
 
@@ -166,6 +150,7 @@ def test_quarantine_alert_kev_unknown_severity_reads_sensibly() -> None:
     Vulnerabilities') provides the real justification.  The (Unknown) severity
     tag in the title is not confusing when the body names KEV."""
     from boxmunge.cve._alerting_formatters import format_quarantine_alert
+    from boxmunge.cve._alerting_types import Hit
     from boxmunge.cve.policy import Disposition
     from boxmunge.cve.policy_explain import explain_kev_quarantine
     from boxmunge.cve.scanner import Severity
@@ -178,8 +163,7 @@ def test_quarantine_alert_kev_unknown_severity_reads_sensibly() -> None:
         disposition=Disposition.QUARANTINE,
         explanation=kev_expl,
     )
-    pd = _make_decision(fd)
-    alert = format_quarantine_alert(pd, fd)
+    alert = format_quarantine_alert("demo", [Hit(fd, "myapp:1.0")])
     # Title carries (Unknown) — that's OK
     assert "Unknown" in alert.title
     # Body must name KEV so the operator understands the quarantine rationale

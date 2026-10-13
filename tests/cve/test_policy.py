@@ -829,11 +829,34 @@ def test_end_of_life_is_not_deprioritized_reaches_threshold() -> None:
     assert _eval_ladder(f, Posture.BALANCED).disposition is Disposition.QUARANTINE
 
 
-# --- fix available still defers regardless of KEV path ordering ---
-def test_fix_available_defers_even_with_kev() -> None:
+# --- B-01: a fix that is not running does not escape the KEV floor ---
+def test_fixable_kev_quarantines_at_balanced() -> None:
     f = _finding(fixed_version="1.2")
     d = _eval_ladder(f, Posture.BALANCED, kev=True)
+    assert d.disposition is Disposition.QUARANTINE
+    assert d.kev_listed is True
+    assert "fix is available (1.2)" in d.explanation
+
+
+def test_fixable_kev_under_relaxed_stays_up_flagged() -> None:
+    f = _finding(fixed_version="1.2")
+    d = _eval_ladder(f, Posture.RELAXED, kev=True)
     assert d.disposition is Disposition.IGNORED_FIXED
+    assert d.kev_listed is True
+    assert "every scan" in d.explanation
+
+
+def test_fixable_over_threshold_is_flagged_not_silent() -> None:
+    d = _eval_ladder(_finding(fixed_version="1.2"), Posture.BALANCED)
+    assert d.disposition is Disposition.IGNORED_FIXED
+    assert d.fix_would_quarantine is True
+    assert "meets the balanced quarantine gate" in d.explanation
+
+
+def test_fixable_below_threshold_is_not_flagged() -> None:
+    d = _eval_ladder(_finding(fixed_version="1.2", severity=Severity.LOW), Posture.BALANCED)
+    assert d.disposition is Disposition.IGNORED_FIXED
+    assert d.fix_would_quarantine is False
 
 
 # --- KEV lookup defaults to never (existing callers unaffected) ---

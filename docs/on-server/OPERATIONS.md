@@ -514,6 +514,7 @@ Containers are stopped via `docker compose stop`, so state is preserved on disk 
 - `prod-deploy`, `stage`, and `promote` refuse to run against it
 - `backup-sync` continues (it only copies; existing off-box snapshots are never removed)
 - Platform upgrades keep it paused: the maintenance page stays in place and the containers stay stopped
+- A Docker restart or reboot keeps it stopped: pause sets each container's restart policy to `no` (saving the original), and `resume` restores the originals before starting the containers
 
 To bring it back:
 
@@ -939,13 +940,16 @@ judged not exploitable.
 
 Scan cadence:
 
-- Daily at 03:00 (±30 min jitter) via `boxmunge-cve-scan.timer`
-- On every `prod-deploy`, `stage`, `promote`, `resume`, and image update
+- Daily between 03:00 and 03:30 via `boxmunge-cve-scan.timer`
+- Not yet at deploy or image-update time: run `security scan <project>`
+  after a deploy to check a new image at once
 - Ad-hoc:
 
   ```
   boxmunge security scan              # all projects
   boxmunge security scan myapp        # one project
+  # exit 0 clean, 2 quarantined/at-risk, 1 a project failed or was only
+  # partly scanned (also sent as one priority-1 alert per run)
   ```
 
 Inspect state:
@@ -973,7 +977,7 @@ boxmunge security resume myapp
 ```
 
 `security resume` re-scans first and refuses to lift if a quarantine-
-level finding still applies.
+level finding still applies or if any image could not be scanned.
 
 Audit trails for the CVE machinery live in the structured log:
 

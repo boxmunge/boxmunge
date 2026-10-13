@@ -329,3 +329,76 @@ def container_running(container_name: str) -> bool:
     except DockerError:
         return False
     return result.stdout.strip() == "true"
+
+
+def project_restart_policies(project_name: str) -> dict[str, str]:
+    """Map each container of a compose project to its restart policy.
+
+    Policies use `docker update --restart` syntax: "no", "always",
+    "unless-stopped", "on-failure" or "on-failure:<max retries>".
+    """
+    listed = _run(
+        ["docker", "ps", "-a", "--filter",
+         f"label=com.docker.compose.project={project_name}",
+         "--format", "{{.Names}}"],
+        capture=True,
+    )
+    names = sorted(n for n in listed.stdout.split() if n)
+    if not names:
+        return {}
+    inspected = _run(
+        ["docker", "inspect", "--format",
+         "{{.Name}}|{{.HostConfig.RestartPolicy.Name}}|"
+         "{{.HostConfig.RestartPolicy.MaximumRetryCount}}", *names],
+        capture=True,
+    )
+    policies: dict[str, str] = {}
+    for line in inspected.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.strip().split("|")
+        if len(parts) != 3:
+            raise DockerError(f"unexpected docker inspect output: {line!r}")
+        name, policy, retries = parts[0].lstrip("/"), parts[1] or "no", parts[2]
+        if policy == "on-failure" and retries not in ("", "0"):
+            policy = f"on-failure:{retries}"
+        policies[name] = policy
+    return policies
+
+
+def set_restart_policy(container_names: list[str], policy: str) -> None:
+    """Run docker update --restart=<policy> on the named containers."""
+    if container_names:
+        _run(["docker", "update", f"--restart={policy}", *container_names])
+
+
+def container_image_id(container_name: str) -> str | None:
+    """The local image ID ("sha256:...") a container was created from.
+
+    Unlike container_image_digest this needs no registry digest, so it
+    identifies locally built images too. None if there is no such container.
+    """
+    try:
+        result = _run(
+            ["docker", "inspect", "--format", "{{.Image}}", container_name],
+            capture=True,
+            check=False,
+        )
+    except DockerError:
+        return None
+    image_id = result.stdout.strip()
+    return image_id if image_id.startswith("sha256:") else None
+
+
+def local_image_id(image_ref: str) -> str | None:
+    """The local image ID for an image name, or None if it is not present."""
+    try:
+        result = _run(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", image_ref],
+            capture=True,
+            check=False,
+        )
+    except DockerError:
+        return None
+    image_id = result.stdout.strip()
+    return image_id if image_id.startswith("sha256:") else None

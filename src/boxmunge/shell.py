@@ -28,6 +28,8 @@ ALLOWED_COMMANDS: set[str] = {
     # Container security & CVE policy.
     # - `security` (no args / <project>): introspection
     # - `security scan|suppress|unsuppress|resume`: mutating
+    # Operator-only forms (host-scope suppressions, scan --apply-held) are
+    # refused by operator_only_reason below.
     "security",
     # Project operations.
     # `check` is read-only. `check-all` is the timer-driven mutator: it
@@ -53,6 +55,27 @@ ALLOWED_COMMANDS: set[str] = {
     # MCP server
     "mcp-serve",
 }
+
+def operator_only_reason(command: str, args: list[str]) -> str | None:
+    """Why this form of an allowed command is refused here, or None.
+
+    Some forms of an allowed command reach beyond one project and stay
+    operator-only: run them as the supervisor account, not through the
+    deploy shell.
+    """
+    if command == "security" and args[:1] in (["suppress"], ["unsuppress"]) \
+            and "--host" in args:
+        return (
+            "host-scope suppressions apply to every project on the box and "
+            "are operator-only"
+        )
+    if command == "security" and args[:1] == ["scan"] and "--apply-held" in args:
+        return (
+            "applying quarantines held by the CVE circuit breaker is "
+            "operator-only"
+        )
+    return None
+
 
 def _shell_banner() -> str:
     """Build the interactive-shell banner including the installed version."""
@@ -180,6 +203,15 @@ def run_command(command: str, args: list[str]) -> int:
         print(
             f"ERROR: Unknown command '{command}'. "
             "Run 'help' for available commands.",
+            file=sys.stderr,
+        )
+        return 1
+
+    denied = operator_only_reason(command, args)
+    if denied is not None:
+        print(
+            f"ERROR: Not available in the deploy shell: {denied}. "
+            "Ask the operator to run it as the supervisor account.",
             file=sys.stderr,
         )
         return 1

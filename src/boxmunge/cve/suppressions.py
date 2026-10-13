@@ -34,6 +34,10 @@ _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _REQUIRED_FIELDS = ("cve", "until", "reason", "reviewed_by", "added")
 
+# A suppression is a review note that must be revisited: `security
+# suppress` refuses an --until further out than this (audit B-15).
+MAX_SUPPRESSION_DAYS = 90
+
 
 class SuppressionsError(Exception):
     """Suppression file is malformed or schema-invalid."""

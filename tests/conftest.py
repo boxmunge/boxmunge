@@ -58,6 +58,26 @@ def _no_writable_diagnostic_sleep(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_docker_image_lookups(monkeypatch):
+    """Keep CVE image identification and restart-policy holds off the real
+    Docker daemon.
+
+    Tests stub container_image_digest themselves; the image-ID lookups
+    default to "no container, no local image" unless a test overrides them.
+    """
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_inputs.container_image_id", lambda c: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_inputs.local_image_id", lambda r: None,
+    )
+    # Quarantine and pause hold restart policies through boxmunge.restart_hold;
+    # by default the project has no containers to hold.
+    monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies", lambda p: {})
+    monkeypatch.setattr("boxmunge.restart_hold.set_restart_policy", lambda n, p: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_kev_network(monkeypatch):
     """Prevent any test from hitting the CISA KEV feed over the network.
 
@@ -82,8 +102,11 @@ def _no_kev_network(monkeypatch):
     monkeypatch.setattr(
         "boxmunge.cve.kev.refresh_kev", lambda paths: None,
     )
+    from boxmunge.cve.kev import KevRefresh
+
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.refresh_kev", lambda paths: None,
+        "boxmunge.commands.security_actions.refresh_kev",
+        lambda paths: KevRefresh(updated=False),
     )
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.load_kev", lambda paths: _fresh_empty,

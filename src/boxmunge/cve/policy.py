@@ -18,9 +18,13 @@ The trust ladder (non-paranoid postures trust the distro's own triage):
                filter, NVD severity (the pre-trust-ladder behavior). KEV can
                still escalate.
 
-KEV is an override applied first (after fix/suppression): an actively
-exploited CVE quarantines regardless of posture, distro status, attack
-vector, or threshold.
+KEV is the first gate: an actively exploited CVE quarantines regardless of
+posture, distro status, attack vector, threshold, an operator suppression
+(a suppression reviewed before the CVE was known to be exploited must not
+keep hiding it — audit B-07), or an upstream fix the image is not running
+(audit B-01). Under relaxed a fixable KEV finding stays up and is alerted
+on every scan instead. dangerously_disable_quarantine is honoured for KEV
+too (STILL_RUNNING_AT_RISK, alerted every scan — audit B-09).
 
 Below paranoid, a finding is otherwise routed to INFORMATIONAL when the
 distro deprioritized it (status will_not_fix / fix_deferred / not_affected /
@@ -44,9 +48,8 @@ means a Medium CVE behaves more like a High one in practice.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime
-from enum import Enum
+from dataclasses import replace
+from datetime import date
 from typing import Callable
 
 from boxmunge.cve.hardening import HardeningProfile, calculate_hardening_penalty
@@ -59,10 +62,25 @@ from boxmunge.cve.scanner import (
     VulnStatus,
     distro_severity,
 )
+from boxmunge.cve.policy_types import (
+    _POSTURE_LABEL,
+    _POSTURE_THRESHOLDS,
+    _SEVERITY_RANK,
+    Disposition,
+    FindingDisposition,
+    PolicyError,
+    Posture,
+    ProjectDecision,
+    elevate_severity,
+    parse_posture,
+)
 from boxmunge.cve.suppressions import Suppression, find_active_suppression
 from boxmunge.cve.policy_explain import (
     explain_av_filter,
     explain_distro_deprioritized,
+    explain_fix_available,
+    explain_kev_fix_not_running,
+    explain_kev_opted_out,
     explain_irrelevant_runtime,
     explain_kev_quarantine,
     explain_no_distro_verdict,
@@ -70,68 +88,17 @@ from boxmunge.cve.policy_explain import (
     explain_threshold,
 )
 
-
-# ---------- enums and constants ----------
-
-
-class Posture(Enum):
-    """Operator-chosen security posture for a project."""
-
-    RELAXED = "relaxed"
-    BALANCED = "balanced"
-    STRICT = "strict"
-    PARANOID = "paranoid"
-
-
-class Disposition(Enum):
-    """Per-finding decision outcome."""
-
-    IGNORED_FIXED = "ignored_fixed"
-    SUPPRESSED = "suppressed"
-    INFORMATIONAL = "informational"
-    QUARANTINE = "quarantine"
-    STILL_RUNNING_AT_RISK = "still_running_at_risk"
-
-
-# Severity ordering for threshold comparison and penalty elevation.
-# Re-declared here (rather than imported from scanner) so policy.py is
-# decoupled from scanner internals — five entries, not worth coupling.
-# UNKNOWN = 0 sorts last and is a no-op for elevation: we cannot raise
-# something we don't recognize.
-_SEVERITY_RANK: dict[Severity, int] = {
-    Severity.UNKNOWN: 0,
-    Severity.LOW: 1,
-    Severity.MEDIUM: 2,
-    Severity.HIGH: 3,
-    Severity.CRITICAL: 4,
-}
-
-# Inverse: rank-to-severity for elevation (skips UNKNOWN, which is a no-op).
-_RANK_TO_SEVERITY: dict[int, Severity] = {
-    1: Severity.LOW,
-    2: Severity.MEDIUM,
-    3: Severity.HIGH,
-    4: Severity.CRITICAL,
-}
-
-# Posture → minimum effective severity that triggers quarantine.
-# At-or-above the threshold quarantines (so balanced quarantines High AND
-# Critical, not just above-High). PARANOID matches STRICT's Medium threshold
-# but also bypasses the Attack Vector filter (see evaluate_finding).
-_POSTURE_THRESHOLDS: dict[Posture, Severity] = {
-    Posture.RELAXED: Severity.CRITICAL,
-    Posture.BALANCED: Severity.HIGH,
-    Posture.STRICT: Severity.MEDIUM,
-    Posture.PARANOID: Severity.MEDIUM,
-}
-
-# Human label for posture in explanation strings — lowercase for prose flow.
-_POSTURE_LABEL: dict[Posture, str] = {
-    Posture.RELAXED: "relaxed",
-    Posture.BALANCED: "balanced",
-    Posture.STRICT: "strict",
-    Posture.PARANOID: "paranoid",
-}
+__all__ = [
+    "Disposition",
+    "FindingDisposition",
+    "PolicyError",
+    "Posture",
+    "ProjectDecision",
+    "elevate_severity",
+    "evaluate_finding",
+    "evaluate_project",
+    "parse_posture",
+]
 
 
 def _kev_never(_cve: str) -> bool:
@@ -147,78 +114,6 @@ _DEPRIORITIZED_STATUS: frozenset[VulnStatus] = frozenset({
     VulnStatus.WILL_NOT_FIX, VulnStatus.FIX_DEFERRED,
     VulnStatus.NOT_AFFECTED, VulnStatus.UNDER_INVESTIGATION,
 })
-
-
-# ---------- exceptions ----------
-
-
-# Inherits ValueError so callers that catch ValueError on bad config
-# (the conventional Python boundary error) also catch this.
-class PolicyError(ValueError):
-    """Policy input is invalid (typically a bad posture string)."""
-
-
-# ---------- value types ----------
-
-
-@dataclass(frozen=True)
-class FindingDisposition:
-    """Per-finding decision."""
-
-    finding: Finding
-    base_severity: Severity
-    hardening_penalty: int
-    effective_severity: Severity
-    disposition: Disposition
-    suppression: Suppression | None
-    explanation: str
-
-
-@dataclass(frozen=True)
-class ProjectDecision:
-    """Project-wide decision aggregated from per-finding dispositions."""
-
-    project_name: str
-    image_ref: str
-    findings: tuple[FindingDisposition, ...]
-    quarantine_required: bool
-    at_risk_running: bool
-    scanned_at: datetime
-
-
-# ---------- pure helpers ----------
-
-
-def elevate_severity(base: Severity, penalty: int) -> Severity:
-    """Apply `penalty` steps of elevation to `base`, capped at CRITICAL.
-
-    UNKNOWN is a no-op: the engine has no confident floor to elevate from.
-    """
-    if base == Severity.UNKNOWN:
-        return Severity.UNKNOWN
-    elevated_rank = min(_SEVERITY_RANK[base] + penalty, _SEVERITY_RANK[Severity.CRITICAL])
-    return _RANK_TO_SEVERITY[elevated_rank]
-
-
-def parse_posture(value: str | None) -> Posture:
-    """Parse a posture string (case-insensitive). None → BALANCED.
-
-    This is a defensive boundary: schema validation has already happened
-    upstream by the time policy.py sees the value. Internal callers
-    construct Posture enums directly.
-
-    Raises PolicyError (a ValueError subclass) on unrecognized values.
-    """
-    if value is None:
-        return Posture.BALANCED
-    if not isinstance(value, str) or not value.strip():
-        raise PolicyError(f"posture must be a non-empty string, got {value!r}")
-    normalized = value.strip().lower()
-    for posture in Posture:
-        if posture.value == normalized:
-            return posture
-    valid = ", ".join(p.value for p in Posture)
-    raise PolicyError(f"unknown posture {value!r}; expected one of: {valid}")
 
 
 # ---------- evaluation ----------
@@ -300,7 +195,8 @@ def evaluate_finding(
     """Decide the disposition for a single finding (the trust ladder).
 
     Order of checks (see the module docstring for the rationale of each):
-    fix → IGNORED_FIXED; suppression → SUPPRESSED; KEV override → QUARANTINE;
+    KEV override → QUARANTINE (fixable KEV under relaxed → IGNORED_FIXED);
+    fix → IGNORED_FIXED; suppression → SUPPRESSED;
     UNKNOWN severity → INFORMATIONAL; paranoid → NVD threshold; relaxed →
     INFORMATIONAL (KEV-only, handled above); else (balanced/strict)
     irrelevant-runtime / distro-deprioritized / no-distro-verdict /
@@ -310,8 +206,59 @@ def evaluate_finding(
     base = finding.severity
     effective = elevate_severity(base, hardening_penalty)
 
-    # 1. Upstream fix.
+    suppression = find_active_suppression(suppressions, finding.cve_id, today=today)
+
+    # 1. KEV override — actively exploited, quarantine regardless of posture,
+    # distro status, attack vector, threshold, suppression (B-07), or a fix
+    # that exists but is not running (B-01). Relaxed is the one exception
+    # for a fixable KEV finding: it stays up and is alerted every scan.
+    if kev_lookup(finding.cve_id):
+        fix = finding.fixed_version if finding.fix_available else None
+        if dangerously_disable_quarantine:
+            # The documented opt-out is honoured for KEV too (B-09); it is
+            # never silent: the at-risk KEV alert repeats every scan.
+            return FindingDisposition(
+                finding=finding, base_severity=base,
+                hardening_penalty=hardening_penalty, effective_severity=effective,
+                disposition=Disposition.STILL_RUNNING_AT_RISK, suppression=None,
+                explanation=explain_kev_opted_out(finding.cve_id, fix),
+                kev_listed=True,
+            )
+        if fix is not None and posture is Posture.RELAXED:
+            return FindingDisposition(
+                finding=finding, base_severity=base,
+                hardening_penalty=hardening_penalty, effective_severity=effective,
+                disposition=Disposition.IGNORED_FIXED, suppression=None,
+                explanation=explain_kev_fix_not_running(finding.cve_id, fix),
+                kev_listed=True,
+            )
+        return FindingDisposition(
+            finding=finding,
+            base_severity=base,
+            hardening_penalty=hardening_penalty,
+            effective_severity=effective,
+            disposition=Disposition.QUARANTINE,
+            suppression=None,
+            explanation=explain_kev_quarantine(
+                finding.cve_id,
+                suppression.until.isoformat() if suppression else None,
+                fix,
+            ),
+            kev_listed=True,
+        )
+
+    # 2. Upstream fix (not KEV): IGNORED_FIXED, flagged when the finding
+    # would otherwise meet the gate so it is alerted, never silently
+    # ignored (B-01). The but-for evaluation is the same pure function.
     if finding.fix_available:
+        but_for = evaluate_finding(
+            replace(finding, fixed_version=None), posture=posture,
+            hardening_penalty=hardening_penalty,
+            dangerously_disable_quarantine=dangerously_disable_quarantine,
+            suppressions=suppressions, today=today, kev_lookup=kev_lookup,
+            runtimes=runtimes,
+        ).disposition
+        would = but_for in (Disposition.QUARANTINE, Disposition.STILL_RUNNING_AT_RISK)
         return FindingDisposition(
             finding=finding,
             base_severity=base,
@@ -319,14 +266,14 @@ def evaluate_finding(
             effective_severity=effective,
             disposition=Disposition.IGNORED_FIXED,
             suppression=None,
-            explanation=(
-                f"Fix available upstream ({finding.fixed_version}); "
-                f"deferred to auto-update."
+            explanation=explain_fix_available(
+                finding.fixed_version, would_quarantine=would,
+                posture_label=_POSTURE_LABEL[posture],
             ),
+            fix_would_quarantine=would,
         )
 
-    # 2. Active suppression.
-    suppression = find_active_suppression(suppressions, finding.cve_id, today=today)
+    # 3. Active suppression.
     if suppression is not None:
         return FindingDisposition(
             finding=finding,
@@ -339,19 +286,6 @@ def evaluate_finding(
                 f"Suppressed by operator (until {suppression.until.isoformat()}, "
                 f"reason: {suppression.reason})."
             ),
-        )
-
-    # 3. KEV override — actively exploited, quarantine regardless of posture,
-    # distro status, attack vector, or threshold.
-    if kev_lookup(finding.cve_id):
-        return FindingDisposition(
-            finding=finding,
-            base_severity=base,
-            hardening_penalty=hardening_penalty,
-            effective_severity=effective,
-            disposition=Disposition.QUARANTINE,
-            suppression=None,
-            explanation=explain_kev_quarantine(finding.cve_id),
         )
 
     # 4. Unknown severity — report only.
@@ -443,7 +377,8 @@ def evaluate_finding(
     # 11. Threshold comparison against the DISTRO severity (elevated by the
     # hardening penalty). effective_severity now reflects the distro severity
     # the decision was actually made on. Reached only by balanced/strict with
-    # status ∈ {AFFECTED, END_OF_LIFE} and a distro severity.
+    # a distro severity and a status outside _DEPRIORITIZED_STATUS (AFFECTED,
+    # END_OF_LIFE, or UNKNOWN — a missing status fails closed).
     distro_effective = elevate_severity(distro_sev, hardening_penalty)
     return _threshold_disposition(
         finding,

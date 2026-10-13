@@ -26,6 +26,14 @@ from boxmunge.docker import DockerError
 from boxmunge.paths import BoxPaths
 
 
+
+@pytest.fixture(autouse=True)
+def _no_restart_policy_docker(monkeypatch):
+    """Restart-policy pinning (B-19) talks to Docker; these tests cover the
+    other steps, so the project has no containers to pin."""
+    monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies", lambda p: {})
+    monkeypatch.setattr("boxmunge.restart_hold.set_restart_policy", lambda n, p: None)
+
 # ---------- helpers ----------
 
 
@@ -207,8 +215,10 @@ class TestQuarantineProjectHappyPath:
                 image_ref="myapp:1.2.3",
             )
 
+        # The record is written first (incomplete) and again last, marked
+        # action_complete only once the page is routed and the stop landed.
         assert call_order == [
-            "state", "caddy_site", "caddy_reload", "compose_stop",
+            "state", "caddy_site", "caddy_reload", "compose_stop", "state",
         ]
 
     def test_caddy_site_is_maintenance_html(self, tmp_path: Path) -> None:

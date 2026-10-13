@@ -299,7 +299,7 @@ def format_fleet_text(summary: dict[str, Any]) -> str:
     lines.append(f"Projects: {summary['projects_count']}")
     lines.append("")
     lines.append("Posture distribution:")
-    for posture in ("balanced", "strict", "relaxed"):
+    for posture in ("relaxed", "balanced", "strict", "paranoid"):
         n = summary["posture_distribution"].get(posture, 0)
         lines.append(f"  {posture}: {n}")
     lines.append("")
@@ -311,6 +311,13 @@ def format_fleet_text(summary: dict[str, Any]) -> str:
             f"  - {q['project']} — {q['cve_id']} {q['severity']} (since {when})"
         )
     lines.append("")
+    held = summary.get("held_by_breaker")
+    if held:
+        lines.append(f"Held by the CVE circuit breaker (still running): {len(held)}")
+        for name, cves in sorted(held.items()):
+            lines.append(f"  - {name} — {', '.join(cves)}")
+        lines.append("  Apply (operator only): boxmunge security scan --apply-held")
+        lines.append("")
     at_risk = summary.get("at_risk_running") or []
     lines.append(
         f"At-risk running (dangerously_disable_quarantine): {len(at_risk)}"

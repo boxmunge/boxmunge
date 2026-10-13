@@ -26,7 +26,7 @@ from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
-from boxmunge.pause import is_paused, clear_paused_state
+from boxmunge.pause import clear_paused_state, is_paused, release_restart_policies
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 from boxmunge.security_overlay import services_with_off_profile
@@ -184,9 +184,10 @@ def _resume_locked(
                       project=project_name)
             return 1, None
 
-    # Start containers.
+    # Start containers, with the restart policies the pause held back.
     print("  Starting containers...")
     try:
+        release_restart_policies(project_name, paths)
         compose_up(project_dir, compose_files=compose_files)
     except DockerError as e:
         print(f"ERROR: compose up failed: {e}", file=sys.stderr)

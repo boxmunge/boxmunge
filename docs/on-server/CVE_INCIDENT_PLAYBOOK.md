@@ -12,14 +12,17 @@ matrix, suppression file format), see `agent-help cve`.
 
 ## Triage
 
-The five things that produce a CVE alert:
+The things that produce a CVE alert:
 
 | Alert title prefix | What it means |
 |---|---|
-| `[boxmunge:<p>] QUARANTINED — <CVE>` | Project taken offline by policy. Maintenance page is being served. |
-| `[boxmunge:<p>] [STILL RUNNING]` | Would have quarantined but `dangerously_disable_quarantine: true`. Project is up at known risk. |
-| `[boxmunge:<p>] <CVE>` (no severity prefix) | Sub-threshold finding. Informational only. |
-| `[boxmunge:<p>] Suppression expired` | A previously-suppressed CVE is now an active finding. Quarantine queued for next scan. |
+| `[boxmunge:<p>] QUARANTINED — <CVE>` | Project taken offline by policy. Maintenance page is being served. `(+N more)` means several CVEs. |
+| `[boxmunge:<p>] [STILL RUNNING — quarantine disabled by config]` | Would have quarantined but `dangerously_disable_quarantine: true`. Project is up at known risk. With `ACTIVELY EXPLOITED … (CISA KEV)` it repeats every scan: escalate. |
+| `[boxmunge:<p>] ACTIVELY EXPLOITED — <CVE> fix available but not running` | `relaxed` project with a fixable KEV CVE. Still up. Repeats every scan until the image is rebuilt. Escalate the rebuild. |
+| `[boxmunge:<p>] <N> new CVE findings (informational)` | New findings below the quarantine gate. One digest per scan. |
+| `[boxmunge:<p>] Suppression expired` / `[boxmunge] Host suppression expired` | A previously-suppressed CVE is an active finding again. |
+| `[boxmunge] CVE scan incomplete` | Some images were not scanned. They are unprotected until a scan succeeds. |
+| `[boxmunge] Circuit breaker held <N> quarantines` | Many projects would have quarantined at once for the same CVE(s). They are still running. Escalate: applying (`security scan --apply-held`) or host-suppressing is an operator decision. |
 | `[boxmunge] CVE policy enforcement begins in <N>h` | One-time migration grace heads-up after upgrade. Affects the whole fleet. |
 
 If you got an alert, run these two commands first — they tell you everything.
@@ -48,17 +51,29 @@ For every finding marked `QUARANTINE` or `STILL_RUNNING_AT_RISK`:
 
 ### 1. Is there an upstream fix?
 
-If `disposition == IGNORED_FIXED`, the auto-update path picks it up on
-next image rebuild. No action. Move on.
+If `disposition == IGNORED_FIXED`, a fixed package exists but the running
+image predates it. boxmunge does not rebuild images, and `container-update`
+only re-pulls `image:` tags, so nothing applies it for you: the project
+needs a rebuild (pull the fixed base image) and a redeploy. Hand that off.
+If the CVE is also on CISA KEV, the project is quarantined until the fix is
+running (under `relaxed` it keeps running and alerts every scan).
 
-### 2. Is it already suppressed?
+### 2. Is it on CISA KEV?
+
+If the explanation says the CVE is on the CISA Known Exploited
+Vulnerabilities catalog, it is being exploited in the wild. Suppressions do
+not apply to it — `security suppress` refuses it, and an older suppression
+was overridden when CISA listed it. The only ways forward are a fixed
+image or accepting the quarantine. Escalate if no fix is available.
+
+### 3. Is it already suppressed?
 
 If `disposition == SUPPRESSED` but `until` is approaching, decide whether to
 extend. To extend: `security unsuppress` then `security suppress` with a new
 date and a freshly-reviewed reason. Don't blanket-extend without re-reading
 the CVE — if anything changed upstream, the original reasoning may be stale.
 
-### 3. Is it actually exploitable in our deployed config?
+### 4. Is it actually exploitable in our deployed config?
 
 **This is the only judgment call that matters.** The scanner doesn't know
 context. You do (or you can find out).
@@ -90,7 +105,7 @@ Cross-check with what you know about the project:
 | Network attack vector + project not internet-exposed | Often non-exploitable; suppress with reason citing the closed surface. |
 | Local attack vector (AV:L) | Already auto-informational under non-paranoid posture. Just keep an eye on it; no action needed. |
 | Critical RCE on a runtime-invoked dependency | Treat as exploitable. |
-| You can't tell | **Escalate.** See section 4. |
+| You can't tell | **Escalate.** See section 5. |
 
 What you can interrogate to inform the decision:
 
@@ -105,7 +120,7 @@ What you cannot interrogate (no shell access): the package source, the
 running process tree, network connections. If those would change your
 decision, escalate.
 
-### 4. When to escalate
+### 5. When to escalate
 
 Stop and write the operator a clear message if any of these hold:
 
@@ -169,6 +184,8 @@ hold:
 
 Choose `--until` as the deadline by which you'd reasonably re-check upstream
 for a fix. 30-90 days for low-impact CVEs; 14-30 for higher-severity.
+`suppress` refuses an `--until` more than 90 days ahead. Host-scope
+suppressions (`--host`) are operator-only and refused by the deploy shell.
 
 After suppressing a finding that was QUARANTINE-disposition: bring the
 project back online.
@@ -177,8 +194,10 @@ project back online.
 security resume <project>
 ```
 
-`resume` re-scans, refuses if any quarantine-level finding remains,
-regenerates Caddy, restarts containers, runs smoke.
+`resume` re-scans every image, refuses if any quarantine-level finding
+remains or if any image could not be scanned (it fails closed and lists
+what was not covered), then regenerates Caddy, restarts containers, and
+runs smoke.
 
 ### B. Tighten hardening (exploitable, low impact, can drop penalty)
 
@@ -219,7 +238,7 @@ upstream fix:
 security <project>
 ```
 
-Once a fix lands (auto-update will pick it up on next image build), resume.
+Once a fix lands, rebuild and redeploy the image, then resume.
 
 ### D. dangerously_disable_quarantine
 

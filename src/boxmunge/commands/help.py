@@ -71,6 +71,7 @@ Container security & CVE policy:
   security suppress --host        Host-scope suppression (applies to every project on this box)
   security unsuppress <CVE>       Remove a suppression (--project NAME or --host)
   security resume <project>       Lift a CVE quarantine (re-scans first)
+  security scan --apply-held      Apply quarantines the circuit breaker held (operator)
 
 Platform updates:
   upgrade                 Upgrade boxmunge platform from latest release

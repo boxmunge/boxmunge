@@ -1,12 +1,17 @@
 """Tests for the `boxmunge security <project>` introspection command."""
 import io
 import json
+from datetime import date, timedelta
 from contextlib import redirect_stdout
 
 import pytest
 import yaml
 
 from boxmunge.commands.security_cmd import cmd_security
+
+# Suppressions created through the CLI are capped at 90 days (B-15).
+_SOON = (date.today() + timedelta(days=30)).isoformat()
+_LATER = (date.today() + timedelta(days=60)).isoformat()
 
 
 @pytest.fixture
@@ -581,7 +586,7 @@ def test_suppress_unregistered_project_rejected(tmp_path, capsys) -> None:
     (paths.state / "projects.txt").write_text("")
     rc = cmd_security_suppress(
         ["CVE-2026-1234", "--project", "nope",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     assert rc == 1
@@ -595,7 +600,7 @@ def test_suppress_writes_file(monkeypatch, tmp_path, capsys) -> None:
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_suppress(
         ["CVE-2026-1234", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "Endpoint not exposed"],
+         "--until", _SOON, "--reason", "Endpoint not exposed"],
         paths,
     )
     out = capsys.readouterr().out
@@ -656,7 +661,7 @@ def test_suppress_current_suppresses_all_quarantine_findings(
     ])
     rc = cmd_security_suppress(
         ["--current", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "Wait for upstream"],
+         "--until", _SOON, "--reason", "Wait for upstream"],
         paths,
     )
     out = capsys.readouterr().out
@@ -679,7 +684,7 @@ def test_suppress_current_no_quarantine_findings_rejected(
     _write_quarantine_scan_state(paths, "demo", [])
     rc = cmd_security_suppress(
         ["--current", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     err = capsys.readouterr().err
@@ -695,7 +700,7 @@ def test_suppress_current_without_scan_state_rejected(
     # No scan_state file at all.
     rc = cmd_security_suppress(
         ["--current", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     err = capsys.readouterr().err
@@ -710,7 +715,7 @@ def test_suppress_current_with_positional_cve_rejected(
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_suppress(
         ["CVE-2026-1234", "--current", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     err = capsys.readouterr().err
@@ -732,7 +737,7 @@ def test_suppress_current_dedupes_repeated_cve(
     ])
     rc = cmd_security_suppress(
         ["--current", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "Wait"],
+         "--until", _SOON, "--reason", "Wait"],
         paths,
     )
     out = capsys.readouterr().out
@@ -757,7 +762,7 @@ def test_suppress_host_writes_host_file(
     paths.config.mkdir(parents=True, exist_ok=True)
     rc = cmd_security_suppress(
         ["CVE-2026-9999", "--host",
-         "--until", "2099-01-01", "--reason", "perl-base unused"],
+         "--until", _SOON, "--reason", "perl-base unused"],
         paths,
     )
     out = capsys.readouterr().out
@@ -780,7 +785,7 @@ def test_suppress_host_and_project_mutually_exclusive(
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_suppress(
         ["CVE-2026-1234", "--host", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     err = capsys.readouterr().err
@@ -794,7 +799,7 @@ def test_suppress_neither_host_nor_project_rejected(
     from boxmunge.commands.security_suppress import cmd_security_suppress
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_suppress(
-        ["CVE-2026-1234", "--until", "2099-01-01", "--reason", "x"],
+        ["CVE-2026-1234", "--until", _SOON, "--reason", "x"],
         paths,
     )
     err = capsys.readouterr().err
@@ -838,7 +843,7 @@ def test_suppress_current_host_unions_across_projects(
     paths.config.mkdir(parents=True, exist_ok=True)
     rc = cmd_security_suppress(
         ["--current", "--host",
-         "--until", "2099-01-01", "--reason", "fleet-wide ack"],
+         "--until", _SOON, "--reason", "fleet-wide ack"],
         paths,
     )
     out = capsys.readouterr().out
@@ -859,7 +864,7 @@ def test_suppress_current_host_no_quarantine_findings_rejected(
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_suppress(
         ["--current", "--host",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     err = capsys.readouterr().err
@@ -870,15 +875,14 @@ def test_suppress_current_host_no_quarantine_findings_rejected(
 def test_unsuppress_host_removes_from_host_file(
     monkeypatch, tmp_path, capsys,
 ) -> None:
-    from boxmunge.commands.security_suppress import (
-        cmd_security_suppress, cmd_security_unsuppress,
-    )
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    from boxmunge.commands.security_unsuppress import cmd_security_unsuppress
     monkeypatch.setenv("USER", "jon")
     paths = _suppress_paths(tmp_path)
     paths.config.mkdir(parents=True, exist_ok=True)
     rc1 = cmd_security_suppress(
         ["CVE-2026-9999", "--host",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     capsys.readouterr()  # discard output from add
@@ -896,7 +900,7 @@ def test_unsuppress_host_removes_from_host_file(
 def test_unsuppress_host_and_project_mutually_exclusive(
     tmp_path, capsys,
 ) -> None:
-    from boxmunge.commands.security_suppress import cmd_security_unsuppress
+    from boxmunge.commands.security_unsuppress import cmd_security_unsuppress
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_unsuppress(
         ["CVE-2026-1234", "--host", "--project", "demo"], paths,
@@ -928,7 +932,7 @@ def test_load_suppressions_stamps_scope_on_entries(tmp_path) -> None:
 
 
 def test_unsuppress_missing_project_flag_exits_2(tmp_path, capsys) -> None:
-    from boxmunge.commands.security_suppress import cmd_security_unsuppress
+    from boxmunge.commands.security_unsuppress import cmd_security_unsuppress
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_unsuppress(["CVE-2026-1234"], paths)
     assert rc == 2
@@ -937,7 +941,7 @@ def test_unsuppress_missing_project_flag_exits_2(tmp_path, capsys) -> None:
 
 
 def test_unsuppress_no_existing_entry_exits_1(tmp_path, capsys) -> None:
-    from boxmunge.commands.security_suppress import cmd_security_unsuppress
+    from boxmunge.commands.security_unsuppress import cmd_security_unsuppress
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_unsuppress(
         ["CVE-2026-1234", "--project", "demo"], paths,
@@ -948,14 +952,13 @@ def test_unsuppress_no_existing_entry_exits_1(tmp_path, capsys) -> None:
 
 
 def test_unsuppress_removes_entry(monkeypatch, tmp_path, capsys) -> None:
-    from boxmunge.commands.security_suppress import (
-        cmd_security_suppress, cmd_security_unsuppress,
-    )
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    from boxmunge.commands.security_unsuppress import cmd_security_unsuppress
     monkeypatch.setenv("USER", "jon")
     paths = _suppress_paths(tmp_path)
     rc1 = cmd_security_suppress(
         ["CVE-2026-1234", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     capsys.readouterr()  # discard
@@ -1009,7 +1012,7 @@ def test_suppress_emits_log_operation(monkeypatch, tmp_path, capsys) -> None:
     try:
         rc = cmd_security_suppress(
             ["CVE-2026-1234", "--project", "demo",
-             "--until", "2099-01-01", "--reason", "Endpoint not exposed"],
+             "--until", _SOON, "--reason", "Endpoint not exposed"],
             paths,
         )
     finally:
@@ -1026,7 +1029,7 @@ def test_suppress_emits_log_operation(monkeypatch, tmp_path, capsys) -> None:
     detail = getattr(rec, "detail", None)
     assert isinstance(detail, dict)
     assert detail["cve_id"] == "CVE-2026-1234"
-    assert detail["until"] == "2099-01-01"
+    assert detail["until"] == _SOON
     assert detail["reason"] == "Endpoint not exposed"
     assert detail["reviewed_by"] == "jon"
     assert detail["previously_suppressed"] is False
@@ -1034,15 +1037,14 @@ def test_suppress_emits_log_operation(monkeypatch, tmp_path, capsys) -> None:
 
 def test_unsuppress_emits_log_operation(monkeypatch, tmp_path, capsys) -> None:
     """Audit D-1: unsuppress emits a structured log_operation."""
-    from boxmunge.commands.security_suppress import (
-        cmd_security_suppress, cmd_security_unsuppress,
-    )
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    from boxmunge.commands.security_unsuppress import cmd_security_unsuppress
     monkeypatch.setenv("USER", "jon")
     paths = _suppress_paths(tmp_path)
     paths.logs.mkdir(parents=True, exist_ok=True)
     rc1 = cmd_security_suppress(
         ["CVE-2026-1234", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     capsys.readouterr()
@@ -1077,16 +1079,15 @@ def test_resuppress_within_window_flags_silent_extension(
 ) -> None:
     """Audit D-2: unsuppress + suppress within 7 days warns AND records
     previously_suppressed=true in the audit log detail."""
-    from boxmunge.commands.security_suppress import (
-        cmd_security_suppress, cmd_security_unsuppress,
-    )
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    from boxmunge.commands.security_unsuppress import cmd_security_unsuppress
     monkeypatch.setenv("USER", "jon")
     paths = _suppress_paths(tmp_path)
     paths.logs.mkdir(parents=True, exist_ok=True)
     # Initial suppress.
     rc = cmd_security_suppress(
         ["CVE-2026-1234", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "first"],
+         "--until", _SOON, "--reason", "first"],
         paths,
     )
     capsys.readouterr()
@@ -1104,7 +1105,7 @@ def test_resuppress_within_window_flags_silent_extension(
     try:
         rc = cmd_security_suppress(
             ["CVE-2026-1234", "--project", "demo",
-             "--until", "2099-12-31", "--reason", "second"],
+             "--until", _LATER, "--reason", "second"],
             paths,
         )
     finally:
@@ -1135,16 +1136,15 @@ def test_resuppress_after_window_treated_as_fresh(
 ) -> None:
     """Audit D-2: re-suppress beyond the 7-day window is treated as a fresh
     decision — no NOTE, previously_suppressed=false."""
-    from boxmunge.commands.security_suppress import (
-        cmd_security_suppress, cmd_security_unsuppress,
-    )
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    from boxmunge.commands.security_unsuppress import cmd_security_unsuppress
     from boxmunge.cve.suppressions import history_path_for
     monkeypatch.setenv("USER", "jon")
     paths = _suppress_paths(tmp_path)
     paths.logs.mkdir(parents=True, exist_ok=True)
     rc = cmd_security_suppress(
         ["CVE-2026-1234", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "first"],
+         "--until", _SOON, "--reason", "first"],
         paths,
     )
     capsys.readouterr()
@@ -1172,7 +1172,7 @@ def test_resuppress_after_window_treated_as_fresh(
     try:
         rc = cmd_security_suppress(
             ["CVE-2026-1234", "--project", "demo",
-             "--until", "2099-12-31", "--reason", "second"],
+             "--until", _LATER, "--reason", "second"],
             paths,
         )
     finally:
@@ -1315,7 +1315,7 @@ def test_scan_clean_image_persists_state(monkeypatch, tmp_path, capsys) -> None:
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     sr = ScanResult(
@@ -1349,7 +1349,7 @@ def test_scan_quarantine_finding_triggers_quarantine_action(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     finding = Finding(
@@ -1377,7 +1377,7 @@ def test_scan_quarantine_finding_triggers_quarantine_action(
     def fake_quarantine(*args, **kwargs):
         called["q"] = (args, kwargs)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         fake_quarantine,
     )
     rc = cmd_security_scan([], paths)
@@ -1403,7 +1403,7 @@ def test_scan_does_not_quarantine_unused_runtime_package(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     perl = Finding(
@@ -1448,7 +1448,7 @@ def test_scan_does_not_quarantine_unused_runtime_package(
     def fake_quarantine(*args, **kwargs):
         called["q"] = (args, kwargs)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         fake_quarantine,
     )
     rc = cmd_security_scan([], paths)
@@ -1476,7 +1476,7 @@ def test_scan_quarantines_runtime_the_project_actually_uses(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     python_os_pkg = Finding(
@@ -1507,7 +1507,7 @@ def test_scan_quarantines_runtime_the_project_actually_uses(
     def fake_quarantine(*args, **kwargs):
         called["q"] = (args, kwargs)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         fake_quarantine,
     )
     rc = cmd_security_scan([], paths)
@@ -1535,7 +1535,7 @@ def test_scan_invalid_declared_runtimes_fails_loudly(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     scan_called = {"n": 0}
@@ -1567,7 +1567,7 @@ def test_scan_logs_unrecognised_lang_type_once(monkeypatch, tmp_path) -> None:
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     sr = ScanResult(
@@ -1616,7 +1616,7 @@ def test_scan_warns_on_empty_inferred_runtime_deescalation(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     python_os_pkg = Finding(
@@ -1645,7 +1645,7 @@ def test_scan_warns_on_empty_inferred_runtime_deescalation(
     )
     called = {}
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **kw: called.setdefault("q", True),
     )
     records, detach = _capture_log_records()
@@ -1700,7 +1700,7 @@ def test_scan_does_not_warn_when_deescalation_is_over_determined(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     perl_will_not_fix = Finding(
@@ -1759,7 +1759,7 @@ def test_scan_does_not_warn_when_runtimes_declared(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     python_os_pkg = Finding(
@@ -1818,7 +1818,7 @@ def test_scan_does_not_warn_under_paranoid_posture(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     python_os_pkg = Finding(
@@ -1902,7 +1902,7 @@ def test_scan_per_project_budget_skips_remaining_images(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
 
@@ -1951,15 +1951,17 @@ def test_scan_per_project_budget_skips_remaining_images(
     )
     # The user-visible warning surfaced through the per-project warnings list.
     assert "budget exceeded" in out.lower()
-    # rc=0 because no failures, no quarantine — just a partial scan.
-    assert rc == 0
+    # Audit B-11: a partial scan is a failure — the skipped images are
+    # unprotected — so the scan exits 1.
+    assert rc == 1
+    assert "INCOMPLETE" in out
 
 
 # ---------- resume ----------
 
 
 def test_resume_not_quarantined_exits_1(tmp_path, capsys) -> None:
-    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.commands.security_resume import cmd_security_resume
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_resume(["demo"], paths)
     err = capsys.readouterr().err
@@ -1971,7 +1973,7 @@ def test_resume_blocked_when_finding_still_quarantines(
     monkeypatch, tmp_path, capsys,
 ) -> None:
     from datetime import datetime, timezone
-    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.commands.security_resume import cmd_security_resume
     from boxmunge.cve.scanner import (
         AttackVector, Finding, ScanResult, Severity, VulnStatus,
     )
@@ -1987,10 +1989,10 @@ def test_resume_blocked_when_finding_still_quarantines(
         "image_ref": "myapp:1.0",
     }))
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+        "boxmunge.commands.security_resume.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     finding = Finding(
@@ -2015,7 +2017,7 @@ def test_resume_blocked_when_finding_still_quarantines(
         "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     rc = cmd_security_resume(["demo"], paths)
@@ -2043,7 +2045,7 @@ def test_scan_invokes_emit_scan_alerts_after_persist(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     finding = Finding(
@@ -2068,13 +2070,13 @@ def test_scan_invokes_emit_scan_alerts_after_persist(
         "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     captured: dict = {}
     def fake_emit(**kwargs):
         captured.update(kwargs)
-        return 0
+        return ()
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.emit_scan_alerts", fake_emit,
     )
@@ -2084,9 +2086,8 @@ def test_scan_invokes_emit_scan_alerts_after_persist(
     assert paths.project_scan_state("demo").exists()
     # emit_scan_alerts received this scan's current decision and no prior.
     assert captured.get("project_name") == "demo"
-    assert captured.get("prior") is None
-    current = captured.get("current")
-    assert current is not None
+    assert captured.get("prior") == ()
+    [current] = captured.get("current")
     assert current.image_ref == "myapp:1.0"
     assert any(
         d.finding.cve_id == "CVE-2026-9999" for d in current.findings
@@ -2106,7 +2107,7 @@ def test_scan_passes_prior_decision_on_second_scan(monkeypatch, tmp_path) -> Non
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     finding = Finding(
@@ -2131,14 +2132,14 @@ def test_scan_passes_prior_decision_on_second_scan(monkeypatch, tmp_path) -> Non
         "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
 
     captured_runs: list[dict] = []
     def fake_emit(**kwargs):
         captured_runs.append(kwargs)
-        return 0
+        return ()
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.emit_scan_alerts", fake_emit,
     )
@@ -2149,9 +2150,8 @@ def test_scan_passes_prior_decision_on_second_scan(monkeypatch, tmp_path) -> Non
     rc = cmd_security_scan([], paths)
     assert rc == 0
     assert len(captured_runs) == 2
-    assert captured_runs[0]["prior"] is None
-    second_prior = captured_runs[1]["prior"]
-    assert second_prior is not None
+    assert captured_runs[0]["prior"] == ()
+    [second_prior] = captured_runs[1]["prior"]
     assert second_prior.image_ref == "myapp:1.0"
     assert any(
         d.finding.cve_id == "CVE-2026-9999" for d in second_prior.findings
@@ -2172,7 +2172,7 @@ def _grace_quarantine_scan(monkeypatch, paths) -> None:
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     finding = Finding(
@@ -2223,7 +2223,7 @@ def test_scan_all_initializes_grace_on_first_run(monkeypatch, tmp_path) -> None:
     assert not paths.cve_grace_state.exists()
     _grace_quarantine_scan(monkeypatch, paths)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     rc = cmd_security_scan([], paths)
@@ -2246,7 +2246,7 @@ def test_scan_all_during_grace_does_not_quarantine(
     def fake_quarantine(*a, **k):
         called["q"] = True
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         fake_quarantine,
     )
     rc = cmd_security_scan([], paths)
@@ -2262,7 +2262,7 @@ def test_scan_all_during_grace_fires_heads_up_once(
     paths = _scan_paths(tmp_path, in_grace=True)
     _grace_quarantine_scan(monkeypatch, paths)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     sends: list = []
@@ -2291,7 +2291,7 @@ def test_scan_all_during_grace_does_not_fire_heads_up_again(
     _seed_grace(paths, in_grace=True, heads_up_sent=True)
     _grace_quarantine_scan(monkeypatch, paths)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     sends: list = []
@@ -2312,13 +2312,13 @@ def test_scan_all_during_grace_skips_normal_transition_alerts(
     paths = _scan_paths(tmp_path, in_grace=True)
     _grace_quarantine_scan(monkeypatch, paths)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     captured: list = []
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.emit_scan_alerts",
-        lambda **kw: captured.append(kw) or 0,
+        lambda **kw: captured.append(kw) or (),
     )
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.send_alerts",
@@ -2338,13 +2338,13 @@ def test_scan_all_after_grace_quarantines_normally(
     _grace_quarantine_scan(monkeypatch, paths)
     quarantine_called: list = []
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: quarantine_called.append((a, k)),
     )
     emit_called: list = []
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.emit_scan_alerts",
-        lambda **kw: emit_called.append(kw) or 0,
+        lambda **kw: emit_called.append(kw) or (),
     )
     rc = cmd_security_scan([], paths)
     assert rc == 0
@@ -2361,7 +2361,7 @@ def test_scan_per_project_during_grace_does_not_quarantine(
     _grace_quarantine_scan(monkeypatch, paths)
     quarantine_called: list = []
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: quarantine_called.append(True),
     )
     sends: list = []
@@ -2436,7 +2436,10 @@ def _wire_clean_scan(monkeypatch, paths) -> None:
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_resume.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     sr = ScanResult(
@@ -2481,7 +2484,7 @@ def test_resume_returns_lock_error_when_held(monkeypatch, tmp_path, capsys) -> N
     'try again' message rather than racing the holder."""
     import fcntl
     import json as _json
-    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.commands.security_resume import cmd_security_resume
     from boxmunge.fileutil import open_shared_lockfile
     paths = _scan_paths(tmp_path)
     # Mark the project as quarantined first so the resume gets past the
@@ -2497,7 +2500,7 @@ def test_resume_returns_lock_error_when_held(monkeypatch, tmp_path, capsys) -> N
         "image_ref": "myapp:1.0",
     }))
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+        "boxmunge.commands.security_resume.refresh_db", lambda: None,
     )
     lock_path = paths.project_lock_file("demo")
     fd = open_shared_lockfile(lock_path)
@@ -2522,7 +2525,7 @@ def test_resume_lift_section_holds_project_lock(monkeypatch, tmp_path) -> None:
     import fcntl as _fcntl
     import json as _json
     import os as _os
-    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.commands.security_resume import cmd_security_resume
     from boxmunge.fileutil import open_shared_lockfile
     paths = _scan_paths(tmp_path)
     qfile = paths.project_quarantine_state("demo")
@@ -2540,15 +2543,15 @@ def test_resume_lift_section_holds_project_lock(monkeypatch, tmp_path) -> None:
     paths.project_caddy_site("demo").parent.mkdir(parents=True, exist_ok=True)
     paths.project_caddy_site("demo").write_text("dummy")
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.prepare_caddy_config",
+        "boxmunge.commands.security_resume.prepare_caddy_config",
         lambda p, m: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.prepare_compose_override",
+        "boxmunge.commands.security_resume.prepare_compose_override",
         lambda p, m, component=None: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.run_smoke",
+        "boxmunge.commands.security_resume.run_smoke",
         lambda p, paths_: (True, "ok"),
     )
     lock_holds: list = []
@@ -2565,7 +2568,7 @@ def test_resume_lift_section_holds_project_lock(monkeypatch, tmp_path) -> None:
         finally:
             _os.close(fd)
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.lift_quarantine",
+        "boxmunge.commands.security_resume.lift_quarantine",
         assert_lock_held,
     )
     rc = cmd_security_resume(["demo"], paths)
@@ -2627,29 +2630,6 @@ def test_grace_heads_up_only_fires_once_under_concurrent_callers(
     )
 
 
-def test_scan_state_not_written_when_quarantine_raises(
-    monkeypatch, tmp_path, capsys,
-) -> None:
-    """Audit E-2: if quarantine_project raises, scan_state must NOT be
-    written — next scan re-evaluates and re-fires."""
-    from boxmunge.commands.security_actions import cmd_security_scan
-    from boxmunge.cve.quarantine import QuarantineError
-    paths = _scan_paths(tmp_path)
-    _grace_quarantine_scan(monkeypatch, paths)
-    def boom(*args, **kwargs):
-        raise QuarantineError("compose_stop failed")
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project", boom,
-    )
-    rc = cmd_security_scan([], paths)
-    captured = capsys.readouterr()
-    # Failure surfaces in the per-project loop as ERROR — exit code 1.
-    assert rc == 1
-    assert "compose_stop failed" in captured.out + captured.err
-    # Critical: scan_state was NOT written, so a re-run will retry.
-    assert not paths.project_scan_state("demo").exists()
-
-
 def test_scan_exit_code_2_when_project_quarantined(
     monkeypatch, tmp_path, capsys,
 ) -> None:
@@ -2663,7 +2643,7 @@ def test_scan_exit_code_2_when_project_quarantined(
         qf.parent.mkdir(parents=True, exist_ok=True)
         qf.write_text("{}")
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         fake_quarantine,
     )
     rc = cmd_security_scan([], paths)
@@ -2703,19 +2683,19 @@ def _wire_resume_lift_stubs(monkeypatch) -> None:
     """Stub out the lift_quarantine + caddy/compose/smoke primitives so the
     resume flow can run end-to-end without touching docker."""
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.lift_quarantine",
+        "boxmunge.commands.security_resume.lift_quarantine",
         lambda *a, **k: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.prepare_caddy_config",
+        "boxmunge.commands.security_resume.prepare_caddy_config",
         lambda p, m: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.prepare_compose_override",
+        "boxmunge.commands.security_resume.prepare_compose_override",
         lambda p, m, component=None: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.run_smoke",
+        "boxmunge.commands.security_resume.run_smoke",
         lambda p, paths_: (True, "ok"),
     )
 
@@ -2726,7 +2706,7 @@ def test_resume_audit_only_does_not_write_scan_state(
     """Audit A-3: cmd_security_resume's pre-lift scan must NOT clobber
     scan_state.json — the prior state preserves the headline-CVE context
     that justified quarantine in the first place."""
-    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.commands.security_resume import cmd_security_resume
     paths = _scan_paths(tmp_path)
     _seed_quarantine(paths)
     _wire_clean_scan(monkeypatch, paths)
@@ -2753,7 +2733,7 @@ def test_resume_audit_only_does_not_emit_scan_alerts(
     """Audit A-3: resume's pre-lift scan must NOT push transition alerts.
     Operators don't expect `boxmunge security resume X` to push alerts
     about X — the resume flow has its own success/failure signalling."""
-    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.commands.security_resume import cmd_security_resume
     paths = _scan_paths(tmp_path)
     _seed_quarantine(paths)
     _wire_clean_scan(monkeypatch, paths)
@@ -2778,17 +2758,17 @@ def test_resume_audit_only_does_not_take_quarantine_action(
     re-scan, audit_only=True must prevent quarantine_project from firing.
     The blocking-finding check downstream is what stops the lift."""
     from datetime import datetime, timezone
-    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.commands.security_resume import cmd_security_resume
     from boxmunge.cve.scanner import (
         AttackVector, Finding, ScanResult, Severity, VulnStatus,
     )
     paths = _scan_paths(tmp_path)
     _seed_quarantine(paths)
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+        "boxmunge.commands.security_resume.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     finding = Finding(
@@ -2814,7 +2794,7 @@ def test_resume_audit_only_does_not_take_quarantine_action(
     )
     quarantine_calls: list = []
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: quarantine_calls.append((a, k)),
     )
     rc = cmd_security_resume(["demo"], paths)
@@ -2836,17 +2816,17 @@ def test_resume_audit_only_still_detects_blocking_findings(
     findings to the caller — the read-only check is what protects the
     operator from lifting against an unresolved CVE."""
     from datetime import datetime, timezone
-    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.commands.security_resume import cmd_security_resume
     from boxmunge.cve.scanner import (
         AttackVector, Finding, ScanResult, Severity, VulnStatus,
     )
     paths = _scan_paths(tmp_path)
     _seed_quarantine(paths, cve_id="CVE-2026-1111")
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+        "boxmunge.commands.security_resume.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     finding = Finding(
@@ -2871,7 +2851,7 @@ def test_resume_audit_only_still_detects_blocking_findings(
         "boxmunge.commands.security_scan_core.scan_image", lambda r, **kw: sr,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     rc = cmd_security_resume(["demo"], paths)
@@ -2934,7 +2914,7 @@ def test_scan_one_project_direct_caller_bootstraps_grace(
     paths = _scan_one_project_paths(tmp_path)
     _grace_quarantine_scan(monkeypatch, paths)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     assert not paths.cve_grace_state.exists()
@@ -2958,7 +2938,7 @@ def test_scan_one_project_audit_only_skips_bootstrap(
     # quarantine_project must not be called in audit_only mode either; stub
     # defensively so a regression would surface as wrong-state, not raise.
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     assert not paths.cve_grace_state.exists()
@@ -2982,7 +2962,7 @@ def test_host_suppression_applies_during_scan_disposition(
     # suppression covers the CVE.
     quarantine_calls: list[tuple] = []
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: quarantine_calls.append((a, k)),
     )
 
@@ -3023,7 +3003,7 @@ def test_scan_one_project_does_not_double_init_grace(
     pre = paths.cve_grace_state.read_text()
     _grace_quarantine_scan(monkeypatch, paths)
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: None,
     )
     scan_one_project(paths, "demo")
@@ -3054,7 +3034,7 @@ def test_kev_listed_cve_quarantines_via_scan_flow(
     _seed_grace(paths, in_grace=False)  # past grace so quarantine fires
 
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
 
@@ -3084,7 +3064,7 @@ def test_kev_listed_cve_quarantines_via_scan_flow(
 
     quarantine_calls: list[tuple] = []
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project",
+        "boxmunge.commands.security_enforce.quarantine_project",
         lambda *a, **k: quarantine_calls.append((a, k)),
     )
 
@@ -3104,7 +3084,7 @@ def test_kev_listed_cve_quarantines_via_scan_flow(
         lambda: date(2026, 7, 1),
     )
 
-    headline, *_ = scan_one_project(paths, "demo", in_grace=False, kev=kev)
+    headline = scan_one_project(paths, "demo", in_grace=False, kev=kev).headline
 
     assert headline is not None, (
         "KEV-listed CVE should quarantine even when otherwise informational"
@@ -3143,7 +3123,7 @@ def test_fleet_scan_fires_priority1_kev_stale_alert(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     # Return a clean scan so the project doesn't quarantine — we only care
@@ -3249,3 +3229,23 @@ def test_fleet_summary_excludes_expired_host_suppressions(
     payload = json.loads(buf.getvalue())
     assert payload["active_suppressions_host"] == 0
     assert payload["active_suppressions_count"] == 0
+
+
+def test_undelivered_grace_heads_up_is_not_marked_sent(monkeypatch, tmp_path) -> None:
+    """The heads-up is recorded as sent only once Pushover accepted it, so
+    an undelivered one is retried by the next scan in the window."""
+    from boxmunge.commands.security_actions import cmd_security_scan
+    from boxmunge.cve.grace import read_grace_state
+    paths = _scan_paths(tmp_path, in_grace=True)
+    _grace_quarantine_scan(monkeypatch, paths)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.send_alerts", lambda alerts, p: 0,
+    )
+    cmd_security_scan([], paths)
+    assert read_grace_state(paths).heads_up_sent is False
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.send_alerts", lambda alerts, p: len(alerts),
+    )
+    cmd_security_scan([], paths)
+    assert read_grace_state(paths).heads_up_sent is True
+
