@@ -1,25 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Parse server-setup target: [user@]host with IP detection."""
+"""Parse server-setup target: [user@]host."""
 
 from __future__ import annotations
 
-import re
+from boxmunge_cli.server_setup.validate import is_ip_address, login_user, ssh_host
 
-_IPV4 = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
+__all__ = ["is_ip_address", "parse_target"]
 
 
 def parse_target(target: str) -> tuple[str, str]:
-    """Parse [user@]host into (user, host). Default user is root."""
-    if "@" in target:
-        user, host = target.split("@", 1)
-        return user, host
-    return "root", target
+    """Parse [user@]host into (user, host). Default user is root.
 
-
-def is_ip_address(host: str) -> bool:
-    """Check if host looks like an IP address rather than a hostname."""
-    if _IPV4.match(host):
-        return True
-    if ":" in host:
-        return True
-    return False
+    Raises ValueError for an invalid user or host.
+    """
+    user, host = target.split("@", 1) if "@" in target else ("root", target)
+    return login_user(user), ssh_host(host)

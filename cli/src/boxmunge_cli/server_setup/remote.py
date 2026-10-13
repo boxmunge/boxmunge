@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -23,20 +24,21 @@ class Target:
                 "-o", f"UserKnownHostsFile={self.known_hosts}",
                 "-o", "ConnectTimeout=15"]
 
-    def ssh(self, command: str, sudo: bool = False) -> list[str]:
-        remote = f"sudo bash -c {_shell_quote(command)}" if sudo else command
-        return ["ssh", "-p", str(self.port), *self.options(),
-                f"{self.user}@{self.host}", remote]
+    def ssh(self, argv: list[str], sudo: bool = False) -> list[str]:
+        """ssh argv that runs argv on the server, every element quoted.
+
+        ssh sends the remote command as one string that the login shell
+        parses, so it is built with shlex.join: no value can break out of
+        its argument, whatever it contains.
+        """
+        remote = ["sudo", "-n", *argv] if sudo else argv
+        return ["ssh", "-p", str(self.port), *self.options(), "--",
+                f"{self.user}@{self.host}", shlex.join(remote)]
 
     def scp(self, local: str, remote_path: str) -> list[str]:
-        return ["scp", "-P", str(self.port), *self.options(),
+        return ["scp", "-P", str(self.port), *self.options(), "--",
                 local, f"{self.user}@{self.host}:{remote_path}"]
 
     def at_port(self, port: int) -> Target:
         return replace(self, port=port)
 
-
-def _shell_quote(s: str) -> str:
-    """Quote a string for embedding in a shell command using $'...' syntax."""
-    escaped = s.replace("\\", "\\\\").replace("'", "\\'")
-    return f"$'{escaped}'"

@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from dataclasses import dataclass
 
+from boxmunge_cli.server_setup import validate
 from boxmunge_cli.server_setup.target import is_ip_address, parse_target
 
 DESCRIPTION = """\
@@ -62,11 +64,22 @@ def _fingerprint(value: str) -> str:
     return value
 
 
+def _checked(check):
+    def convert(value: str):
+        try:
+            return check(value)
+        except ValueError as e:
+            raise argparse.ArgumentTypeError(str(e))
+    convert.__name__ = check.__name__
+    return convert
+
+
 def add_arguments(p: argparse.ArgumentParser) -> None:
-    p.add_argument("target", metavar="[user@]host", help="Server to set up")
+    p.add_argument("target", metavar="[user@]host", type=_checked(parse_target),
+                   help="Server to set up")
     p.add_argument("-p", "--port", type=_port, default=22,
                    help="Current SSH port of the server (default: 22)")
-    p.add_argument("--email", required=True,
+    p.add_argument("--email", required=True, type=_checked(validate.email),
                    help="Contact address for Let's Encrypt (never collected by boxmunge)")
     p.add_argument("--ssh-key", dest="ssh_key_arg", metavar="KEY",
                    help="Public key (file or inline) for the deploy and supervisor "
@@ -95,10 +108,13 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
 
 
 def from_namespace(ns: argparse.Namespace) -> ServerSetupArgs:
-    user, host = parse_target(ns.target)
+    """Build the setup arguments. Raises ValueError for an unusable hostname."""
+    user, host = ns.target
     hostname = ns.hostname
     if hostname is None and not is_ip_address(host):
         hostname = host
+    if hostname is not None:
+        validate.dns_hostname(hostname, public=not ns.self_signed_tls)
     return ServerSetupArgs(
         user=user, host=host, port=ns.port, email=ns.email,
         ssh_key_arg=ns.ssh_key_arg, hostname=hostname,
@@ -114,12 +130,20 @@ def parse_args(argv: list[str]) -> ServerSetupArgs:
     """Parse server-setup arguments on their own (exits 2 on a usage error)."""
     p = argparse.ArgumentParser(prog="boxmunge server-setup", description=DESCRIPTION)
     add_arguments(p)
-    return from_namespace(p.parse_args(argv))
+    try:
+        return from_namespace(p.parse_args(argv))
+    except ValueError as e:
+        p.error(str(e))
 
 
 def _cmd_server_setup(ns: argparse.Namespace) -> int:
     from boxmunge_cli.server_setup.command import run_server_setup
-    return run_server_setup(from_namespace(ns))
+    try:
+        setup_args = from_namespace(ns)
+    except ValueError as e:
+        print(f"boxmunge server-setup: error: {e}", file=sys.stderr)
+        return 2
+    return run_server_setup(setup_args)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:

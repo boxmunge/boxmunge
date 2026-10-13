@@ -39,12 +39,25 @@ def _confirm(prompt: str) -> bool:
 
 def _resolve_hostname(target: Target, needs_sudo: bool) -> str:
     """Query the server's FQDN when target was an IP."""
-    result = subprocess.run(target.ssh("hostname -f", needs_sudo),
+    result = subprocess.run(target.ssh(["hostname", "-f"], needs_sudo),
                             capture_output=True, text=True, check=False)
     fqdn = result.stdout.strip()
     if result.returncode != 0 or not fqdn:
         return target.host  # fall back to the IP
     return fqdn
+
+
+def installer_args(setup_args: ServerSetupArgs, hostname: str, ssh_key: str) -> list[str]:
+    """install.sh arguments, one argv element per value (never shell text)."""
+    args = ["--hostname", hostname, "--email", setup_args.email,
+            "--ssh-key", ssh_key, "--ssh-port", str(setup_args.boxmunge_ssh_port)]
+    for flag, enabled in (("--no-aide", setup_args.no_aide),
+                          ("--no-crowdsec", setup_args.no_crowdsec),
+                          ("--no-auto-updates", setup_args.no_auto_updates),
+                          ("--self-signed-tls", setup_args.self_signed_tls)):
+        if enabled:
+            args.append(flag)
+    return args
 
 
 def _run_install(target: Target, needs_sudo: bool, setup_args: ServerSetupArgs,
@@ -55,35 +68,18 @@ def _run_install(target: Target, needs_sudo: bool, setup_args: ServerSetupArgs,
         if installer is None:
             assert setup_args.local_bundle is not None
             print(f"Uploading local bundle: {setup_args.local_bundle}")
-            workdir, run_prefix = upload_local_bundle(target.ssh, target.scp,
-                                                      setup_args.local_bundle)
+            run_prefix = upload_local_bundle(target, setup_args.local_bundle)
         else:
             print(f"Uploading verified installer ({installer.tag})...")
-            workdir, run_prefix = upload_verified_installer(target.ssh, target.scp, installer)
+            run_prefix = upload_verified_installer(target, installer)
     except InstallError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
     # The installer runs install.sh, which bootstraps the host (init-host.sh)
     # and installs the package, wrapper scripts and systemd units.
-    init_cmd_parts = [
-        run_prefix,
-        f"--hostname {hostname}",
-        f"--email {setup_args.email}",
-        f"--ssh-key '{ssh_key}'",
-        f"--ssh-port {setup_args.boxmunge_ssh_port}",
-    ]
-    if setup_args.no_aide:
-        init_cmd_parts.append("--no-aide")
-    if setup_args.no_crowdsec:
-        init_cmd_parts.append("--no-crowdsec")
-    if setup_args.no_auto_updates:
-        init_cmd_parts.append("--no-auto-updates")
-    if setup_args.self_signed_tls:
-        init_cmd_parts.append("--self-signed-tls")
-
-    remote_cmd = " ".join(init_cmd_parts) + f"; rc=$?; rm -rf {workdir}; exit $rc"
-    return run_with_progress(target.ssh(remote_cmd, needs_sudo))
+    argv = run_prefix + installer_args(setup_args, hostname, ssh_key)
+    return run_with_progress(target.ssh(argv, needs_sudo))
 
 
 def _fetch_installer(setup_args: ServerSetupArgs, workdir: Path) -> VerifiedInstaller | None:

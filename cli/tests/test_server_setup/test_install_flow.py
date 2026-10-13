@@ -2,6 +2,7 @@
 """The install step: what server-setup actually sends to the server."""
 
 import hashlib
+import shlex
 from pathlib import Path
 
 from boxmunge_cli.server_setup.args import parse_args
@@ -41,7 +42,7 @@ def test_uploads_the_verified_installer_and_rechecks_it(tmp_path: Path, fake_rem
     run = fake_remote.calls("ssh")[-1][-1]
     assert f"{installer.sha256}" in run and "sha256sum -c" in run
     assert "bash boxmunge-install.sh" in run
-    assert f"rm -rf {WORKDIR}" in run
+    assert WORKDIR in shlex.split(run) and 'rm -rf "$dir"' in run
     every_call = " ".join(" ".join(c) for c in fake_remote.calls())
     assert "curl" not in every_call and "api.github.com" not in every_call
     assert "tarball_url" not in every_call

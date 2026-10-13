@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pre-flight checks for server-setup — run over SSH before installation."""
+"""Pre-flight checks for server-setup, run over SSH before installation.
+
+Every remote command is an argv list; values such as the login user are
+passed as separate arguments (or as positional parameters to a constant
+`sh -c` script), never spliced into shell text.
+"""
 
 from __future__ import annotations
 
@@ -12,15 +17,16 @@ class PreflightError(Exception):
     """Raised when a pre-flight check fails."""
 
 
-def _run_check(target: Target, command: str, needs_sudo: bool = False) -> subprocess.CompletedProcess:
-    """Run a command over SSH with captured output."""
-    remote = f"sudo {command}" if needs_sudo else command
-    return subprocess.run(target.ssh(remote), capture_output=True, text=True, check=False)
+def _run_check(target: Target, argv: list[str],
+               needs_sudo: bool = False) -> subprocess.CompletedProcess:
+    """Run argv over SSH with captured output."""
+    return subprocess.run(target.ssh(argv, needs_sudo), capture_output=True,
+                          text=True, check=False)
 
 
 def check_ssh_access(target: Target) -> None:
     """Verify we can SSH into the server."""
-    result = _run_check(target, "echo ok")
+    result = _run_check(target, ["echo", "ok"])
     if result.returncode != 0:
         raise PreflightError(
             f"SSH connection failed to {target.user}@{target.host}:{target.port}. "
@@ -30,7 +36,7 @@ def check_ssh_access(target: Target) -> None:
 
 def check_is_debian(target: Target) -> None:
     """Verify the server is running Debian."""
-    result = _run_check(target, "cat /etc/os-release")
+    result = _run_check(target, ["cat", "/etc/os-release"])
     if result.returncode != 0:
         raise PreflightError("Could not read /etc/os-release.")
 
@@ -50,11 +56,11 @@ def check_is_debian(target: Target) -> None:
 
 def check_privileges(target: Target) -> bool:
     """Verify root access. Returns True if sudo is needed, False if already root."""
-    result = _run_check(target, "id -u")
+    result = _run_check(target, ["id", "-u"])
     if result.returncode == 0 and result.stdout.strip() == "0":
         return False
 
-    result = _run_check(target, "sudo -n id -u")
+    result = _run_check(target, ["id", "-u"], needs_sudo=True)
     if result.returncode == 0 and result.stdout.strip() == "0":
         return True
 
@@ -67,7 +73,7 @@ def check_privileges(target: Target) -> bool:
 
 def check_not_installed(target: Target, needs_sudo: bool) -> None:
     """Verify boxmunge is not already installed."""
-    result = _run_check(target, "test -d /opt/boxmunge", needs_sudo)
+    result = _run_check(target, ["test", "-d", "/opt/boxmunge"], needs_sudo)
     if result.returncode == 0:
         raise PreflightError(
             "boxmunge is already installed on this server. "
@@ -75,40 +81,33 @@ def check_not_installed(target: Target, needs_sudo: bool) -> None:
         )
 
 
+# Constant scripts; the login user arrives as $1.
+_OTHER_USERS = 'awk -F: -v me="$1" \'$3 >= 1000 && $1 != "nobody" && $1 != me {print $1}\' /etc/passwd'
+_LISTENERS = "ss -tlnp 2>/dev/null | grep -E ':80 |:443 '"
+_HOME_DATA = 'find /home /var/www -mindepth 1 -maxdepth 1 ! -name "$1" 2>/dev/null | head -5'
+
+
 def check_freshness(target: Target, needs_sudo: bool) -> list[str]:
     """Scan for signs this isn't a fresh box. Returns list of warning strings."""
     warnings: list[str] = []
 
-    # Exclude the login user — providers often create a default non-root user
-    result = _run_check(
-        target,
-        f"awk -F: '$3 >= 1000 && $1 != \"nobody\" && $1 != \"{target.user}\" {{print $1}}' /etc/passwd",
-        needs_sudo,
-    )
+    # Exclude the login user: providers often create a default non-root user.
+    result = _run_check(target, ["sh", "-c", _OTHER_USERS, "sh", target.user], needs_sudo)
     if result.returncode == 0 and result.stdout.strip():
         users = result.stdout.strip().split("\n")
         warnings.append(f"Non-system users found: {', '.join(users)}")
 
-    result = _run_check(target, "docker ps -q 2>/dev/null", needs_sudo)
+    result = _run_check(target, ["sh", "-c", "docker ps -q 2>/dev/null"], needs_sudo)
     if result.returncode == 0 and result.stdout.strip():
         count = len(result.stdout.strip().split("\n"))
         warnings.append(f"Docker is running with {count} active container(s)")
 
-    result = _run_check(
-        target,
-        "ss -tlnp 2>/dev/null | grep -E ':80 |:443 '",
-        needs_sudo,
-    )
+    result = _run_check(target, ["sh", "-c", _LISTENERS], needs_sudo)
     if result.returncode == 0 and result.stdout.strip():
         warnings.append("Services already listening on port 80 and/or 443")
 
-    # Exclude the login user's home dir — it's expected on provider images
-    result = _run_check(
-        target,
-        f"find /home /var/www -mindepth 1 -maxdepth 1 "
-        f"! -name '{target.user}' 2>/dev/null | head -5",
-        needs_sudo,
-    )
+    # Exclude the login user's home dir: it's expected on provider images.
+    result = _run_check(target, ["sh", "-c", _HOME_DATA, "sh", target.user], needs_sudo)
     if result.returncode == 0 and result.stdout.strip():
         warnings.append("Data found in /home or /var/www")
 
