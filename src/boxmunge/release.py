@@ -263,6 +263,9 @@ def keep_previous_release(
         "replaced_at": datetime.now(timezone.utc).isoformat(),
         "replaced_by": replaced_by,
     }
+    # Drop the old metadata first: a crash mid-swap then leaves no previous
+    # release (rollback refuses) rather than old metadata on a new tree.
+    _remove(_previous_meta(paths, project_name))
     target = previous_dir(paths, project_name)
     _remove(target)
     building.rename(target)
@@ -352,6 +355,7 @@ def prestage_to_previous(paths: BoxPaths, project_name: str,
         _remove(prestage_dir(paths, project_name))
         meta_path.unlink()
         return
+    _remove(_previous_meta(paths, project_name))
     target = previous_dir(paths, project_name)
     _remove(target)
     prestage_dir(paths, project_name).rename(target)
