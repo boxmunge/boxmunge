@@ -26,7 +26,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from boxmunge.bind_mounts import BindMountError, bind_mounted_dirs
-from boxmunge.bundle import BOX_OWNED_ENTRIES, BOXMUNGE_ENTRIES, BundleError
+from boxmunge.bundle import (
+    BOX_OWNED_ENTRIES, BOXMUNGE_ENTRIES, BundleError, is_placeholder,
+)
 from boxmunge.fileutil import atomic_write_text
 
 if TYPE_CHECKING:
@@ -80,14 +82,64 @@ def _bind_dirs(compose_path: Path, project_dir: Path) -> dict[str, bool]:
         ) from e
 
 
+def _data_dirs(project_dir: Path, release_tree: Path | None) -> tuple[set[str], set[str]]:
+    """(live, release) top-level dirs bind-mounted read-write: data dirs.
+
+    Read-only bind mounts are code or config the release ships.
+    """
+    live = {d for d, rw in _bind_dirs(project_dir / "compose.yml", project_dir).items() if rw}
+    release: set[str] = set()
+    if release_tree is not None:
+        release = {d for d, rw in
+                   _bind_dirs(release_tree / "compose.yml", project_dir).items() if rw}
+    return live, release
+
+
 def _box_state_names(project_dir: Path, release_tree: Path | None) -> set[str]:
     """Names of live entries that are box state, never release code."""
-    live_binds = set(_bind_dirs(project_dir / "compose.yml", project_dir))
-    tops = set(live_binds)
+    tops = set(_bind_dirs(project_dir / "compose.yml", project_dir))
     if release_tree is not None:
         tops |= set(_bind_dirs(release_tree / "compose.yml", project_dir))
+    live_data, release_data = _data_dirs(project_dir, release_tree)
     staging_copies = {f"{t}-staging" for t in tops}
-    return set(BOX_OWNED_ENTRIES) | set(BOXMUNGE_ENTRIES) | live_binds | staging_copies
+    return (set(BOX_OWNED_ENTRIES) | set(BOXMUNGE_ENTRIES) | live_data
+            | release_data | staging_copies)
+
+
+def _has_content(path: Path) -> bool:
+    return path.is_dir() and not path.is_symlink() and any(path.iterdir())
+
+
+def check_install(tree: Path, project_dir: Path) -> None:
+    """Refuse a release that would overwrite or seed a data directory.
+
+    A directory bind-mounted read-write holds what the app writes. Content
+    the release ships for it is ambiguous (seed data? code mounted without
+    :ro?), so it is refused rather than silently skipped or installed. An
+    empty placeholder is fine. Changes nothing; raises BundleError, or
+    ReleaseStateError if a compose file cannot be classified.
+    """
+    forbidden = sorted(
+        e.name for e in tree.iterdir()
+        if e.name in BOX_OWNED_ENTRIES or e.name in BOXMUNGE_ENTRIES
+    )
+    if forbidden:
+        raise BundleError(f"Release tree carries box-owned entries: {forbidden}")
+    live_data, release_data = _data_dirs(project_dir, tree)
+    ambiguous = sorted(
+        item.name for item in tree.iterdir()
+        if not is_placeholder(item) and (
+            item.name in release_data
+            or (item.name in live_data and _has_content(project_dir / item.name)))
+    )
+    if ambiguous:
+        names = ", ".join(f"{n}/" for n in ambiguous)
+        raise BundleError(
+            f"The release ships content for {names}, which compose.yml "
+            f"bind-mounts read-write, so it holds data the app writes. If it "
+            f"is code or config, mount it read-only (':ro', or read_only: "
+            f"true); if it is data, remove it from the bundle."
+        )
 
 
 def _remove(path: Path) -> None:
@@ -164,21 +216,15 @@ def live_code_entries(project_dir: Path, release_tree: Path | None = None) -> li
 def install_release(tree: Path, project_dir: Path) -> None:
     """Make the project's release code exactly ``tree``; keep box state.
 
-    Box-owned entries (secrets.env, security/, data/, backups/) are never
-    written: a tree carrying one raises BundleError before anything changes.
-    A user bind-mount dir (``./uploads``) that already holds live data is
-    kept and the release's copy is skipped with a note.
+    check_install runs first, so a refused release changes nothing. A data
+    directory (read-write bind mount) that holds live data is kept when the
+    release ships only an empty placeholder for it.
     """
-    forbidden = sorted(
-        e.name for e in tree.iterdir()
-        if e.name in BOX_OWNED_ENTRIES or e.name in BOXMUNGE_ENTRIES
-    )
-    if forbidden:
-        raise BundleError(f"Release tree carries box-owned entries: {forbidden}")
+    check_install(tree, project_dir)
 
     # Classify everything before changing anything.
     shipped = {e.name for e in tree.iterdir()}
-    live_binds = set(_bind_dirs(project_dir / "compose.yml", project_dir))
+    live_data, _ = _data_dirs(project_dir, tree)
     stale_entries = [e for e in live_code_entries(project_dir, tree)
                      if e.name not in shipped]
 
@@ -189,12 +235,10 @@ def install_release(tree: Path, project_dir: Path) -> None:
     installed: list[Path] = []
     for item in tree.iterdir():
         dest_item = project_dir / item.name
-        if item.name in live_binds and dest_item.is_dir() \
-                and not dest_item.is_symlink() and any(dest_item.iterdir()):
-            # Live persistent data present — never overwrite it. An empty
-            # dir has never held data, so it is seeded like any other.
+        if item.name in live_data and _has_content(dest_item):
+            # check_install allowed this only for an empty placeholder.
             print(f"  NOTE: kept the server's {item.name}/ (it holds live "
-                  f"data); the release's {item.name}/ was not installed")
+                  f"data); the release ships only an empty placeholder")
             continue
         _install_entry(item, dest_item)
         installed.append(dest_item)

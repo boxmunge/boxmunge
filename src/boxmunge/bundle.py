@@ -174,7 +174,7 @@ _PLACEHOLDER_DIRS = frozenset({"data", "backups", "security"})
 _PLACEHOLDER_FILES = frozenset({".gitkeep", ".keep"})
 
 
-def _is_placeholder(path: Path) -> bool:
+def is_placeholder(path: Path) -> bool:
     """True for a real dir holding only dirs and empty .gitkeep/.keep files."""
     if path.is_symlink() or not path.is_dir():
         return False
@@ -201,7 +201,7 @@ def check_bundle_contents(tree: Path) -> list[str]:
         reason = BOX_OWNED_ENTRIES.get(name) or BOXMUNGE_ENTRIES.get(name)
         if reason is None:
             continue
-        if name in _PLACEHOLDER_DIRS and _is_placeholder(entry):
+        if name in _PLACEHOLDER_DIRS and is_placeholder(entry):
             shutil.rmtree(entry)
             notes.append(f"NOTE: ignoring the bundle's empty placeholder {name}/ "
                          f"(the server's {name}/ is kept)")

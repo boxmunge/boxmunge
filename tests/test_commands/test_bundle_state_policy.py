@@ -103,3 +103,44 @@ def test_bind_mounted_data_survives_a_deploy_that_does_not_ship_it(paths, form) 
         assert run_deploy("myapp", paths) == 0
     assert (pdir / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
     assert not (pdir / ".releases" / "previous" / "uploads").exists()
+
+
+BIND_COMPOSE = ("services:\n  web:\n    image: nginx\n    volumes:\n"
+                "      - ./static:/usr/share/nginx/html:ro\n"
+                "      - ./uploads:/srv/uploads\n")
+
+
+def test_read_only_bind_dir_is_updated_by_a_deploy(paths) -> None:
+    """Review finding: bind-mounted code was silently never updated."""
+    add_project("myapp", paths)
+    pdir = paths.project_dir("myapp")
+    with patch("boxmunge.commands.deploy.compose_up"), \
+            patch("boxmunge.commands.deploy.caddy_reload"):
+        place_bundle(paths, timestamp="2026-10-13T090000000000",
+                     files={"compose.yml": BIND_COMPOSE, "static/index.html": "v1"})
+        assert run_deploy("myapp", paths) == 0
+        place_bundle(paths, timestamp="2026-10-13T100000000000",
+                     files={"compose.yml": BIND_COMPOSE, "static/index.html": "v2"})
+        assert run_deploy("myapp", paths) == 0
+    assert (pdir / "static" / "index.html").read_text() == "v2"
+
+
+def test_content_for_a_read_write_bind_dir_is_refused(paths, capsys) -> None:
+    add_project("myapp", paths)
+    pdir = paths.project_dir("myapp")
+    with patch("boxmunge.commands.deploy.compose_up") as up, \
+            patch("boxmunge.commands.deploy.caddy_reload"):
+        place_bundle(paths, timestamp="2026-10-13T090000000000",
+                     files={"compose.yml": BIND_COMPOSE})
+        assert run_deploy("myapp", paths) == 0
+        (pdir / "uploads").mkdir(exist_ok=True)
+        (pdir / "uploads" / "photo.jpg").write_text("USER UPLOAD")
+        before = tree_snapshot(pdir)
+        up.reset_mock()
+        place_bundle(paths, timestamp="2026-10-13T100000000000",
+                     files={"compose.yml": BIND_COMPOSE, "uploads/seed.png": "x"})
+        assert run_deploy("myapp", paths) == 1
+    up.assert_not_called()
+    assert tree_snapshot(pdir) == before
+    err = capsys.readouterr().err
+    assert "uploads/" in err and ":ro" in err

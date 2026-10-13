@@ -16,8 +16,8 @@ from boxmunge.docker import compose_up, caddy_reload, DockerError
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.identity import register_project_identity
 from boxmunge.intake import (
-    IntakeError, extract_candidate, incoming_workspace, report_refusal,
-    validate_release_tree,
+    IntakeError, check_installable, extract_candidate, incoming_workspace,
+    report_refusal, validate_release_tree,
 )
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_error
@@ -89,6 +89,7 @@ def _deploy_bundle(
         with incoming_workspace(paths, project_name) as workspace:
             tree = extract_candidate(bundle_path, workspace)
             manifest = validate_release_tree(tree, project_name, paths, component)
+            check_installable(tree, paths.project_dir(project_name))
             if dry_run:
                 print(f"[DRY RUN] Bundle {bundle_path.name} is valid")
                 print(f"[DRY RUN] Would install it and deploy '{project_name}'")

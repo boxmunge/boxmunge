@@ -130,6 +130,15 @@ def validate_release_tree(
     return manifest
 
 
+def check_installable(tree: Path, project_dir: Path) -> None:
+    """Refuse, before anything changes, a release install_release would refuse."""
+    from boxmunge.release import check_install
+    try:
+        check_install(tree, project_dir)
+    except ValueError as e:
+        raise IntakeError(str(e)) from e
+
+
 def report_refusal(e: IntakeError) -> int:
     """Print an intake refusal to stderr and return its exit code."""
     print(f"ERROR: {e}", file=sys.stderr)

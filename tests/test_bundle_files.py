@@ -122,31 +122,17 @@ class TestInstall:
         assert (dest / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
         assert (dest / "manifest.yml").read_text() == "project: app\n"
 
-    def test_skipping_live_bind_dir_is_reported(self, tmp_path: Path, capsys) -> None:
+    def test_placeholder_for_live_data_dir_is_kept_with_note(
+        self, tmp_path: Path, capsys,
+    ) -> None:
         src = tmp_path / "bundle"
         dest = tmp_path / "project"
-        _make_bundle(src)
-        (src / "uploads" / "default.png").write_text("SEED")
+        _make_bundle(src)  # ships uploads/.gitkeep only
         _live_project(dest)
-
         install_release(src, dest)
-
-        assert not (dest / "uploads" / "default.png").exists()
+        assert (dest / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
+        assert not (dest / "uploads" / ".gitkeep").exists()
         assert "uploads" in capsys.readouterr().out
-
-    def test_upgrade_seeds_empty_bind_mount_dir(self, tmp_path: Path) -> None:
-        """A user bind-mount dir that exists but is empty has never held data:
-        the bundle's seed content is copied in."""
-        src = tmp_path / "bundle"
-        dest = tmp_path / "project"
-        _make_bundle(src)
-        (src / "uploads" / "default.png").write_text("SEED")
-        _live_project(dest)
-        (dest / "uploads" / "photo.jpg").unlink()
-
-        install_release(src, dest)
-
-        assert (dest / "uploads" / "default.png").read_text() == "SEED"
 
     def test_project_env_comes_from_the_bundle(self, tmp_path: Path) -> None:
         """PROJECT_CONVENTIONS: project.env ships with the bundle and is
@@ -312,3 +298,71 @@ class TestEveryBindMountFormProtectsData:
             install_release(src, dest)
         assert (dest / "old.txt").exists()
         assert (dest / "uploads" / "photo.jpg").exists()
+
+
+RO = ("services:\n  app:\n    volumes:\n"
+      "      - ./static:/usr/share/nginx/html:ro\n"
+      "      - type: bind\n        source: ./config\n        target: /etc/app\n"
+      "        read_only: true\n"
+      "      - ./uploads:/u\n")
+
+
+class TestOnlyReadWriteBindsAreData:
+    """Review finding: a non-empty bind-mounted code/config dir was silently
+    never updated, and deploy exited 0 running old code."""
+
+    def _live(self, dest: Path) -> None:
+        dest.mkdir()
+        (dest / "compose.yml").write_text(RO)
+        for d in ("static", "config", "uploads"):
+            (dest / d).mkdir()
+        (dest / "static" / "index.html").write_text("old page")
+        (dest / "config" / "app.conf").write_text("old conf")
+        (dest / "uploads" / "photo.jpg").write_text("USER UPLOAD")
+
+    def test_read_only_bind_dirs_are_release_code(self, tmp_path: Path) -> None:
+        from boxmunge.release import live_code_entries
+        dest = tmp_path / "project"
+        self._live(dest)
+        src = tmp_path / "bundle"
+        _release(src, RO)
+        (src / "static").mkdir()
+        (src / "static" / "index.html").write_text("new page")
+        (src / "config").mkdir()
+        (src / "config" / "app.conf").write_text("new conf")
+
+        assert {e.name for e in live_code_entries(dest, src)} >= {"static", "config"}
+        install_release(src, dest)
+
+        assert (dest / "static" / "index.html").read_text() == "new page"
+        assert (dest / "config" / "app.conf").read_text() == "new conf"
+        assert (dest / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
+
+    def test_content_for_a_read_write_bind_dir_is_refused_untouched(
+        self, tmp_path: Path,
+    ) -> None:
+        dest = tmp_path / "project"
+        self._live(dest)
+        src = tmp_path / "bundle"
+        _release(src, RO)
+        (src / "uploads").mkdir()
+        (src / "uploads" / "default.png").write_text("SEED")
+        (dest / "stale.txt").write_text("stale")
+        with pytest.raises(BundleError, match="uploads.*read-write"):
+            install_release(src, dest)
+        assert (dest / "stale.txt").exists()
+        assert not (dest / "uploads" / "default.png").exists()
+
+    def test_first_install_refuses_content_for_its_own_read_write_bind(
+        self, tmp_path: Path,
+    ) -> None:
+        """Consistent from the first deploy: otherwise the seeded dir would
+        make every later deploy of the same bundle fail."""
+        dest = tmp_path / "project"
+        dest.mkdir()
+        src = tmp_path / "bundle"
+        _release(src, RO)
+        (src / "uploads").mkdir()
+        (src / "uploads" / "default.png").write_text("SEED")
+        with pytest.raises(BundleError, match="uploads"):
+            install_release(src, dest)

@@ -34,8 +34,9 @@ A bundle carries the project's code and configuration: `manifest.yml`, `compose.
 Each bundle deploy makes the project's code exactly the bundle: a file or directory the previous
 release had but the new bundle does not is removed (it stays in the previous-release copy that
 `rollback` restores). So anything the project needs on the server, including `project.env` and
-`caddy.override.conf`, must ship in every bundle. Server-owned entries (below), user bind-mount
-directories holding data, and `-staging` copies of them are never touched by a deploy.
+`caddy.override.conf`, must ship in every bundle. Server-owned entries (below), read-write
+bind-mounted data directories, and `-staging` copies of bind-mounted directories are never touched
+by a deploy.
 
 Some entries belong to the server, and a bundle that carries any of them is refused before anything
 on the server changes (`ERROR:` naming each entry, exit 1):
@@ -56,9 +57,17 @@ anywhere but at the start of its target (`sub/../x`), or a device or FIFO entry 
 `ERROR:` naming the entry. Links are installed as links and are never followed.
 
 An empty `data/`, `backups/` or `security/` directory (or one holding only empty `.gitkeep` / `.keep`
-files) carries nothing; it is ignored with a `NOTE`. A user bind-mount directory declared in the
-live `compose.yml` (for example `./uploads`) that already holds data is kept as it is; the bundle's
-copy of it is skipped with a `NOTE`.
+files) carries nothing; it is ignored with a `NOTE`.
+
+**Bind-mounted directories.** A project directory that `compose.yml` bind-mounts **read-write** is a
+data directory: `./uploads:/srv/uploads`, a long-syntax `type: bind` mount without
+`read_only: true`, or an absolute source inside the project directory. A deploy never removes a data
+directory or copies it into the previous release, and a bundle that ships content for one is
+refused, because boxmunge cannot tell seed data from code that was mounted without `:ro`. Ship at
+most an empty placeholder for it. A directory bind-mounted **read-only** (`:ro`, or
+`read_only: true`) is code or config: it ships in the bundle and is updated on every deploy like any
+other file. If boxmunge cannot read the live `compose.yml` well enough to tell which directories
+hold data, the deploy is refused before anything changes.
 
 ---
 

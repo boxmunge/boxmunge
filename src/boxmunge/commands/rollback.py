@@ -15,7 +15,9 @@ from boxmunge.commands.deploy import redeploy_installed, run_deploy
 from boxmunge.commands.restore import run_restore
 from boxmunge.compose import prepare_compose_override
 from boxmunge.fileutil import project_lock, LockError
-from boxmunge.intake import IntakeError, report_refusal, validate_release_tree
+from boxmunge.intake import (
+    IntakeError, check_installable, report_refusal, validate_release_tree,
+)
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_error, log_operation
 from boxmunge.manifest import ManifestError, load_manifest
@@ -196,6 +198,7 @@ def _roll_back_release(project_name: str, paths: BoxPaths,
     print("\n--- Checking the previous release ---")
     try:
         manifest = validate_release_tree(tree, project_name, paths, "rollback")
+        check_installable(tree, paths.project_dir(project_name))
     except IntakeError as e:
         return report_refusal(e)
 

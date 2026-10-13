@@ -12,8 +12,8 @@ from boxmunge.docker import compose_up, caddy_reload, DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
 from boxmunge.identity import register_project_identity
 from boxmunge.intake import (
-    IntakeError, extract_candidate, incoming_workspace, report_refusal,
-    validate_release_tree,
+    IntakeError, check_installable, extract_candidate, incoming_workspace,
+    report_refusal, validate_release_tree,
 )
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_error
@@ -44,6 +44,7 @@ def _intake_bundle(project_name: str, paths: BoxPaths, ref: str | None,
         with incoming_workspace(paths, project_name) as workspace:
             tree = extract_candidate(bundle_path, workspace)
             manifest = validate_release_tree(tree, project_name, paths, "stage")
+            check_installable(tree, project_dir)
             if dry_run:
                 print(f"[DRY RUN] Would stage '{project_name}'")
                 return 0
