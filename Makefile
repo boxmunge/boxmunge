@@ -58,13 +58,13 @@ $(BUNDLE): $(BUNDLE_DEPS)
 	@echo "Bundle contains: $(BUNDLE_STAGED_DIRS) $(BUNDLE_TOP_FILES)"
 
 test:
-	python3 -m pytest tests/ -v --ignore=tests/integration
+	python3 -m pytest tests/ -v --ignore=tests/integration --ignore=tests/vm -m 'not integration'
 
 test-cli:
 	cd cli && python3 -m pytest tests -v
 
 test-integration:
-	python3 -m pytest tests/integration/ -v
+	python3 -m pytest tests/ -v --ignore=tests/vm -m integration
 
 lint:
 	ruff check src tests cli/src cli/tests

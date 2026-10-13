@@ -47,7 +47,7 @@ jobs:
           pip install --require-hashes -r requirements-dev.txt
           pip install -e . --no-deps
       - name: Server unit tests (includes pinning, file-length, and DCO-script lints)
-        run: python -m pytest tests/ --ignore=tests/integration --ignore=tests/vm -q
+        run: python -m pytest tests/ --ignore=tests/integration --ignore=tests/vm -m 'not integration' -q
 
   cli:
     runs-on: ubuntu-latest
@@ -88,7 +88,8 @@ jobs:
         env:
           # Turn "prerequisite missing" into a failure instead of a silent skip.
           BOXMUNGE_REQUIRE_INTEGRATION: '1'
-        run: python -m pytest tests/integration -q
+        # Selects every test marked `integration`, wherever it lives.
+        run: python -m pytest tests/ --ignore=tests/vm -m integration -q
 
   dco:
     if: github.event_name == 'pull_request'

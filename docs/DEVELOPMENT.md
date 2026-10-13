@@ -117,7 +117,8 @@ Three tiers, fastest first.
 | Integration | `make test-integration` | Docker, `age` | Real compose deploys, Caddy, backup and restore round-trips, MCP |
 | Full system | `make test-vm` | QEMU, `mkisofs`, the client | Boots Debian 13, runs `server-setup`, deploys, backs up, restores (see `tests/vm/README.md`) |
 
-Integration tests skip when Docker or `age` is missing. CI sets `BOXMUNGE_REQUIRE_INTEGRATION=1`,
+Tests that need Docker carry the `integration` marker, wherever they live; `make test` deselects
+them and `make test-integration` selects them. Integration tests skip when Docker or `age` is missing. CI sets `BOXMUNGE_REQUIRE_INTEGRATION=1`,
 which turns a missing prerequisite into a failure, so a green CI run means they actually ran.
 
 Prefer tests that exercise real behaviour. A test that mocks `subprocess.run` for the very code
