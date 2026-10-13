@@ -8,7 +8,9 @@ BUNDLE  := dist/boxmunge-$(VERSION).tar.gz
 # BUNDLE_RENAMED_DIRS: dirs copied with a different staged name. Format src=dest.
 #                      Used because install.sh expects on-server/ at the bundle
 #                      root, not docs/on-server/.
-# BUNDLE_TOP_FILES:    files copied to the bundle root.
+# BUNDLE_TOP_FILES:    files copied to the bundle root. The requirements files
+#                      are what on-box installs use (pip --require-hashes);
+#                      SHA256SUMS signs the bundle, so they arrive signed.
 #
 # To add a top-level dir to releases: append it to BUNDLE_DIRS. The verify
 # step below fails the build if a declared entry is missing from staging,
@@ -16,7 +18,7 @@ BUNDLE  := dist/boxmunge-$(VERSION).tar.gz
 # ---------------------------------------------------------------------------
 BUNDLE_DIRS         := bootstrap src systemd config scripts caddy canary system
 BUNDLE_RENAMED_DIRS := docs/on-server=on-server
-BUNDLE_TOP_FILES    := install.sh pyproject.toml
+BUNDLE_TOP_FILES    := install.sh pyproject.toml requirements-tui.txt requirements-build.txt
 
 # Names as they appear in the staged bundle (used by the verify step).
 BUNDLE_STAGED_DIRS  := $(BUNDLE_DIRS) $(foreach pair,$(BUNDLE_RENAMED_DIRS),$(word 2,$(subst =, ,$(pair))))
@@ -87,5 +89,6 @@ lock:
 	pip-compile --generate-hashes --extra=tui -o requirements-tui.txt pyproject.toml
 	pip-compile --generate-hashes --extra=mcp -o requirements-mcp.txt pyproject.toml
 	pip-compile --generate-hashes --allow-unsafe -o requirements-dev.txt requirements-dev.in
+	pip-compile --generate-hashes --allow-unsafe -o requirements-build.txt requirements-build.in
 	pip-compile --generate-hashes -o cli/requirements.txt cli/pyproject.toml
 	pip-compile --generate-hashes --strip-extras --allow-unsafe -o cli/requirements-publish.txt cli/requirements-publish.in

@@ -3,6 +3,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Shared stand-ins for flock/timeout/visudo on hosts that lack them.
+# shellcheck source=tests/shim/lib.sh
+source "$SCRIPT_DIR/shim/lib.sh"
 SHIM="$SCRIPT_DIR/../scripts/boxmunge-upgrade"
 
 PASS=0
@@ -289,4 +292,5 @@ fi
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
+rm -rf "$FAKEBIN" "$FAILVISUDO" "$BUSYLOCK"
 [[ "$FAIL" -eq 0 ]] || exit 1

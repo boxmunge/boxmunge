@@ -296,15 +296,22 @@ compromise of any single one cannot silently propagate.
     the signed `SHA256SUMS` to confirm the tarball's contents.
 
 13. **Installation.** Only after both signature and checksum verify does
-    the shim extract and `pip install` the bundle into the standby
-    venv.
+    the shim extract the bundle and install it into the standby venv.
+    Dependencies come only from the hash-pinned `requirements-tui.txt`
+    and `requirements-build.txt` inside the bundle (so covered by the
+    signed `SHA256SUMS`), installed with `pip install --require-hashes`;
+    the package itself is installed with `--no-deps --no-build-isolation`,
+    so pip resolves and downloads nothing else. The venv's pip is not
+    self-upgraded. `install.sh` installs the same way. A bundle without
+    the pinned requirements files is refused.
 
 A compromise of any single step is contained: a malicious Action
 release does not pass step 3 (SHA pin); a poisoned PyPI mirror does not
 pass step 4 (hash pin); a tampered upstream age binary does not pass
 step 5 (SHA256 ARG); a hijacked Docker Hub tag does not pass step 6
 (digest pin); a forged release does not pass step 11 (Fulcio identity
-pin); a tampered bundle does not pass step 12 (signed checksum).
+pin); a tampered bundle does not pass step 12 (signed checksum);
+a poisoned PyPI package does not pass step 13 on the box either (hash pin).
 
 ## CVE Policy as a Defensive Layer
 

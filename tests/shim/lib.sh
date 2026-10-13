@@ -66,6 +66,11 @@ FAILVISUDO="$(mktemp -d)"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$FAILVISUDO/visudo"
 chmod +x "$FAILVISUDO/visudo"
 
+# BUSYLOCK: prepend to PATH to make every flock report the lock as held.
+BUSYLOCK="$(mktemp -d)"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$BUSYLOCK/flock"
+chmod +x "$BUSYLOCK/flock"
+
 # new_root [slot]: fresh BOXMUNGE_ROOT whose active slot is <slot> (default a),
 # with a mock boxmunge-server and python in both slots and a consistent
 # active-slot file and env-active symlink.
@@ -101,7 +106,7 @@ write_probation() {
 drop_root() { rm -rf "$BOXMUNGE_ROOT"; unset BOXMUNGE_ROOT; }
 
 finish() {
-    rm -rf "$FAKEBIN" "$FAILVISUDO"
+    rm -rf "$FAKEBIN" "$FAILVISUDO" "$BUSYLOCK"
     echo ""
     echo "Results: $PASS passed, $FAIL failed"
     [[ "$FAIL" -eq 0 ]]

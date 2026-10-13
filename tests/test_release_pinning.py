@@ -23,6 +23,7 @@ REQUIREMENTS_FILES = [
     REPO / "requirements-tui.txt",
     REPO / "requirements-mcp.txt",
     REPO / "requirements-dev.txt",
+    REPO / "requirements-build.txt",
     REPO / "cli" / "requirements.txt",
     REPO / "cli" / "requirements-publish.txt",
 ]

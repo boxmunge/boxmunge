@@ -2,7 +2,7 @@
 # tests/shim/test_upgrade_policy.sh — A-06: deploy's sudo rule and what each
 # shim entry point may install.
 # pass() always returns 0, so "cond && pass || fail" is a safe if/else here.
-# shellcheck disable=SC2015
+# shellcheck disable=SC2015,SC2016  # SC2016: mock bodies are literal bash
 set -euo pipefail
 # shellcheck source=tests/shim/lib.sh
 source "$(dirname "$0")/lib.sh"
@@ -109,7 +109,6 @@ drop_root
 
 new_root a
 echo "1.4.0" > "$BOXMUNGE_ROOT/config/version"
-# shellcheck disable=SC2016  # the $(id) must reach the shim unexpanded
 run_shim run '1.5.0$(id)' https://example.com/x
 expect 1 "Invalid version" "run requires semver"
 blocklist 1.5.0
@@ -129,6 +128,11 @@ run_shim auto
 expect 1 "Invalid version" "auto refuses a malformed discovered version"
 run_shim clear-blocklist "1.0.0' or '1"
 expect 1 "Invalid version" "clear-blocklist requires semver"
+mock_server a 'echo "$*" >> "$BOXMUNGE_ROOT/calls"; echo "{\"action\": \"up_to_date\"}"'
+PATH="$BUSYLOCK:$PATH" run_shim auto
+expect 1 "Another upgrade is in progress" "auto refuses while upgrade.lock is held"
+[[ ! -e "$BOXMUNGE_ROOT/calls" ]] && pass "auto takes upgrade.lock before discovery" \
+    || fail "auto ran discovery without the lock"
 drop_root
 
 # --- install.sh delegates to the shim ------------------------------------

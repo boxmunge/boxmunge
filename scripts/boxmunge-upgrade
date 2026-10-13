@@ -524,9 +524,6 @@ upgrade_to() {
 
     rm -rf "$BOXMUNGE_ROOT/env-$standby"
     python3 -m venv "$BOXMUNGE_ROOT/env-$standby"
-    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --upgrade pip \
-        || preflight_fail "$version" "$from_version" "preflight_failed: pip_upgrade" \
-            "Failed to upgrade pip in standby venv"
 
     # Download bundle from GitHub release
     local tmp_download
@@ -596,7 +593,19 @@ upgrade_to() {
 
     # Extract and pip install
     tar xzf "$tmp_download/boxmunge-${version}.tar.gz" -C "$tmp_download"
-    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet "$tmp_download/boxmunge[tui]" \
+    # Dependencies only from the bundle's hash-pinned requirements (covered by
+    # the signed SHA256SUMS); the package itself with no further resolution,
+    # built by the hash-pinned backend. No pip self-upgrade: one more
+    # unpinned download.
+    local bundle="$tmp_download/boxmunge"
+    [[ -f "$bundle/requirements-tui.txt" && -f "$bundle/requirements-build.txt" ]] \
+        || preflight_fail "$version" "$from_version" "preflight_failed: no_pinned_requirements" \
+            "Bundle has no hash-pinned requirements files; refusing an unpinned install"
+    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --require-hashes \
+        -r "$bundle/requirements-build.txt" -r "$bundle/requirements-tui.txt" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: pip_install_deps" \
+            "Failed to install hash-pinned dependencies from bundle"
+    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --no-deps --no-build-isolation "$bundle" \
         || preflight_fail "$version" "$from_version" "preflight_failed: pip_install" \
             "Failed to install boxmunge from bundle"
     compgen -G "$tmp_download/boxmunge/on-server/*.md" >/dev/null \
@@ -716,7 +725,7 @@ upgrade_to() {
             log "install.sh changed (current=${current_hash:0:8}, new=${new_hash:0:8}); running system upgrade..."
             bm_log info upgrade "system upgrade started" "{\"new_hash\": \"${new_hash:0:16}\", \"prev_hash\": \"${current_hash:0:16}\"}"
             local sysup_exit=0
-            bash "$new_install_sh" || sysup_exit=$?
+            bash "$new_install_sh" --upgrade-shim || sysup_exit=$?
             if [[ "$sysup_exit" -eq 0 ]]; then
                 bm_log info upgrade "system upgrade completed" "{\"hash\": \"${new_hash:0:16}\"}"
             else
@@ -828,6 +837,7 @@ cmd_check_probation() {
 cmd_auto() {
     local result action version msg
     load_active_slot
+    acquire_lock  # before discovery, and held through the upgrade itself
     result="$("$(active_venv)/bin/boxmunge-server" _discover-update --json 2>/dev/null)" || \
         die "Discovery failed (boxmunge-server _discover-update returned non-zero)"
 

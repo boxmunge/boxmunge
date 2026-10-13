@@ -7,11 +7,24 @@
 #
 # Upgrade (SSH in as deploy user, elevate with sudo):
 #   sudo bash install.sh
+#
+# From the upgrade shim (system pieces only; the shim installs the package
+# into the standby venv and records the version itself):
+#   bash install.sh --upgrade-shim
 
 set -euo pipefail
 
 BOXMUNGE_ROOT="/opt/boxmunge"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# During an upgrade env-active is still the PREVIOUS release's venv, the one a
+# rollback returns to. Installing the new package into it would leave nothing
+# to roll back to, so the shim passes --upgrade-shim and keeps venvs to itself.
+FROM_UPGRADE_SHIM=0
+if [[ "${1:-}" == "--upgrade-shim" ]]; then
+    FROM_UPGRADE_SHIM=1
+    shift
+fi
 
 # ---------------------------------------------------------------------------
 # Cosign — pinned version + checksum.
@@ -325,8 +338,16 @@ if [[ -f "${BOXMUNGE_ROOT}/config/backup.key" ]]; then
     chown root:deploy "${BOXMUNGE_ROOT}/config/backup.key"
     chmod 640 "${BOXMUNGE_ROOT}/config/backup.key"
 fi
-"${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --upgrade pip
-"${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet "${SCRIPT_DIR}[tui]"
+# Dependencies come only from the hash-pinned requirements files in the signed
+# bundle; the package itself installs without resolving anything further and
+# builds with the hash-pinned backend already in the venv. The venv's own pip
+# (from the distro's python3-venv) is used as is: upgrading it would be one
+# more unpinned download.
+if [[ "${FROM_UPGRADE_SHIM}" -eq 0 ]]; then
+    "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --require-hashes \
+        -r "${SCRIPT_DIR}/requirements-build.txt" -r "${SCRIPT_DIR}/requirements-tui.txt"
+    "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --no-deps --no-build-isolation "${SCRIPT_DIR}"
+fi
 
 # pip install as root leaves root-owned build artifacts in the source directory.
 # Clean them up so the deploy user can rm the extraction dir on future upgrades.
@@ -454,7 +475,7 @@ systemctl enable --now \
 INSTALLED_VERSION="$("${BOXMUNGE_ROOT}/env-active/bin/pip" show boxmunge-server 2>/dev/null \
     | grep '^Version:' | cut -d' ' -f2 || echo "unknown")"
 
-if [[ "${INSTALLED_VERSION}" != "unknown" ]]; then
+if [[ "${INSTALLED_VERSION}" != "unknown" && "${FROM_UPGRADE_SHIM}" -eq 0 ]]; then
     echo "${INSTALLED_VERSION}" > "${BOXMUNGE_ROOT}/config/version"
 fi
 
