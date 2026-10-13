@@ -68,7 +68,7 @@ boxmunge hardens the VPS as part of installation:
 - **Auditd** — kernel audit logging for privilege escalation and sensitive file changes
 - **AppArmor** — tightened profiles for Caddy and system containers
 - **Unattended upgrades** — automatic OS security patches
-- **Automatic security updates** — boxmunge checks for its own security releases every 6 hours
+- **Automatic security and break-fix updates** — every 6 hours boxmunge checks for its own releases and applies security releases, plus break-fix releases unless `auto_update.breakfix` is `false`
 
 ## Per-Project Container Hardening
 
@@ -134,9 +134,25 @@ failures, and emits Pushover notifications. That form is what the systemd
 health timer drives. Use `--read-only` for an introspection-only run that
 prints the same report with no side effects.
 
-## Security Releases
+## Security and Break-fix Releases
 
-Security-tagged releases are applied automatically within 12 hours. The `boxmunge upgrade` flow handles stashing, migration, and validation automatically. Release `SHA256SUMS` files are keyless-signed by the GitHub Actions release workflow (Sigstore Fulcio + Rekor), and the upgrade shim hard-requires a valid signature pinned to this repo's release workflow on a `vX.Y.Z` tag — an unsigned release is refused.
+Every release has a class recorded in the version-check service's
+`releases.json`: `security`, `breakfix` (a critical non-security fix), or
+`feature`. Security releases are applied automatically within 12 hours.
+Break-fix releases are applied the same way unless the box sets
+`auto_update.breakfix: false` in `boxmunge.yml`. Feature releases are never
+applied automatically. Automatic updates stay on the box's `major.minor`
+line, and the version-check circuit breaker can hold a broken security or
+break-fix release fleet-wide.
+
+The class is decided from `releases.json` alone. The release workflow
+refuses to build a tag that is not listed there with a valid class, writes
+the matching `[security]` or `[breakfix]` marker into the GitHub release
+title and notes (which boxes read when the version-check service is
+unreachable), and publishes only after checking the release text classifies
+exactly as `releases.json` says.
+
+The `boxmunge upgrade` flow handles stashing, migration, and validation automatically. Release `SHA256SUMS` files are keyless-signed by the GitHub Actions release workflow (Sigstore Fulcio + Rekor), and the upgrade shim hard-requires a valid signature pinned to this repo's release workflow on a `vX.Y.Z` tag — an unsigned release is refused.
 
 ## Release trust chain (end-to-end)
 
@@ -151,7 +167,13 @@ compromise of any single one cannot silently propagate.
 2. **CI workers (GitHub-hosted runners).** GitHub-managed compute. We
    accept the integrity of the runner pool as given — the trust-model
    note on supply-chain compromise of the platform release covers the
-   downstream defence (signature verification on the box).
+   downstream defence (signature verification on the box). The workflow
+   runs as two jobs: a read-only `build` job (tests, installer, SBOM),
+   which is where third-party packages are installed and run, and a
+   `publish` job that alone holds the release-write and OIDC signing
+   tokens and installs no Python packages. A dependency compromised in
+   `build` therefore cannot sign or publish by itself, although it can
+   still tamper with the files `build` hands to `publish`.
 
 3. **GitHub Actions used by the workflow.** Every `uses:` in
    `release.yml` is pinned to a 40-character commit SHA, not a version
@@ -189,11 +211,15 @@ compromise of any single one cannot silently propagate.
    Fulcio certificate proving the signature was produced by this exact
    workflow on this exact tag, with the OIDC issuer being GitHub
    Actions. The signature is published as `SHA256SUMS.sig` +
-   `SHA256SUMS.cert`.
+   `SHA256SUMS.cert`. Signing has no fallback: if cosign cannot be
+   installed or signing fails, the workflow fails and nothing is
+   published.
 
 9. **Release publication.** `softprops/action-gh-release` (SHA-pinned)
    attaches the install script, the tarball(s), `SHA256SUMS`, the
-   cosign signature and cert, and the SBOM to the GitHub release.
+   cosign signature and cert, and the SBOM to a draft GitHub release
+   (every file is required). The draft's title and notes are checked
+   against the release's class in `releases.json`, then it is published.
 
 10. **Download (on the operator's box).** `scripts/boxmunge-upgrade`
     downloads the bundle, `SHA256SUMS`, `SHA256SUMS.sig`, and

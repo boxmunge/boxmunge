@@ -136,17 +136,29 @@ either rule is broken. To change a dependency, edit the matching `.in` file or `
 
 ## How a release reaches a server
 
-1. A maintainer bumps `version` in `pyproject.toml`, records the release, and whether it is a security release, in
-   `services/version-check/releases.json`, and tags `vX.Y.Z`.
-2. `.github/workflows/release.yml` runs the tests, builds the installer and bundle, generates an
-   SBOM, and signs `SHA256SUMS` with cosign (keyless, tied to this workflow and tag).
-3. Servers discover new releases through the version-check service, with GitHub as the fallback.
+1. A maintainer bumps `version` in `pyproject.toml`, records the release and its class in
+   `services/version-check/releases.json` (`"class": "feature"`, `"breakfix"` or `"security"`), and
+   tags `vX.Y.Z`. A unit test fails if the `pyproject.toml` version is not listed.
+2. `.github/workflows/release.yml` checks the tag with `scripts/release-lint.py` (listed in
+   `releases.json` with a valid class, matching `pyproject.toml`), then, in a read-only job, runs
+   the tests, builds the installer and bundle, and generates an SBOM. A separate job holding the
+   write and signing tokens signs `SHA256SUMS` with cosign (keyless, tied to this workflow and
+   tag), creates a draft release whose title and notes carry the class marker generated from
+   `releases.json`, verifies the draft classifies as listed, and publishes it. Any failure,
+   including signing, fails the workflow.
+3. Once the release is published, the maintainer redeploys the version-check service so it serves
+   the new `releases.json`. Do not redeploy it before then: it would offer a release boxes cannot
+   download yet. Servers discover new releases through that service, with the GitHub releases
+   list (and its `[security]` / `[breakfix]` markers) as the fallback.
 4. `scripts/boxmunge-upgrade` downloads the release, verifies the cosign signature against this
    repository's release workflow identity, checks the checksums, installs into the standby venv,
    swaps, and watches a probation window. A release that fails probation is rolled back and
    blocklisted.
 
-Security releases apply automatically. Feature releases wait for the operator to run `upgrade`.
+Security releases apply automatically. Break-fix releases (critical non-security fixes) apply
+automatically unless the box sets `auto_update.breakfix: false` in `boxmunge.yml`. Feature releases
+wait for the operator to run `upgrade`. Use `breakfix` only for a fix that cannot wait for the
+operator; a fix for a vulnerability is always `security`.
 The full trust chain is in `docs/on-server/TRUST_MODEL.md`.
 
 The client is published to PyPI by `.github/workflows/publish-cli.yml` on a `cli-v*` tag, using
