@@ -391,7 +391,7 @@ posture threshold.
 
 | Hardening weakened | Penalty |
 |---|---|
-| `read_only: false` (writeable rootfs, **explicit user opt-out**) | +1 |
+| `read_only: false` (writeable rootfs, **explicit user opt-out**), or a compose-only service without `read_only: true` | +1 |
 | `no-new-privileges` removed or set to false | +1 |
 | `cap_add` beyond image defaults (any non-empty list) | +1 |
 | `privileged: true` | +2 (already rejected by validator) |
@@ -413,6 +413,12 @@ and `tmpfs: ['/tmp']` by default. Apps that legitimately need writable
 rootfs must declare `read_only: false` explicitly in their user
 `compose.yml`, which incurs the +1 penalty above. Missing the field
 means the overlay's `read_only: true` default applies — no penalty.
+
+That default covers **manifest-declared services only**. A compose-only
+service (one `compose.yml` defines but the manifest does not list, such
+as a database or cache) gets the overlay's other hardening but keeps a
+writable rootfs, so it carries the +1 read-only penalty unless its
+`compose.yml` entry sets `read_only: true` itself.
 
 This inverts the v0.7.x semantics where missing `read_only` was
 penalised even though the system never actually enforced it. v0.8 is

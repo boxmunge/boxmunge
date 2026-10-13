@@ -122,11 +122,16 @@ def hardening_profile(meta: ProjectMeta) -> HardeningProfile:
     Services with profile != off get boxmunge's hardening overlay applied at
     runtime, so the policy does not penalise a project for relying on overlay
     defaults (e.g. no-new-privileges) it did not redeclare in compose.yml.
+    The overlay's read-only rootfs applies only to manifest-declared
+    services: compose-only services keep a writable rootfs, so they carry
+    the read_only penalty unless compose.yml sets read_only: true.
     """
     off_services = {svc for svc, _ in services_with_off_profile(meta.manifest)}
     overlay_services = set((meta.compose.get("services") or {}).keys()) - off_services
+    declared = set(meta.manifest.get("services") or {})
     return hardening_profile_from_compose(
         meta.compose, services_with_overlay=overlay_services,
+        services_with_read_only_overlay=overlay_services & declared,
     )
 
 

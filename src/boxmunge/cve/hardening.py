@@ -56,6 +56,7 @@ def hardening_profile_from_compose(
     compose: dict[str, Any],
     *,
     services_with_overlay: set[str] | None = None,
+    services_with_read_only_overlay: set[str] | None = None,
 ) -> HardeningProfile:
     """Extract the project's effective hardening profile from a parsed compose.yml.
 
@@ -81,12 +82,19 @@ def hardening_profile_from_compose(
     overlay applied — backward-compatible with callers that haven't been
     updated and matches the common case for new deployments.
 
+    `services_with_read_only_overlay`: the subset of those where the overlay
+    also sets a read-only root filesystem. The overlay hardens compose-only
+    (undeclared) services but deliberately leaves their rootfs writable, so
+    callers pass only the manifest-declared services here. A service outside
+    it counts as read-only only if compose.yml sets `read_only: true`
+    itself. If `None`, it equals `services_with_overlay`.
+
     `cap_add` is always user-driven and judged on the literal compose
     declaration regardless of overlay.
 
     For each service:
-      - read_only: True iff overlay applies AND user did NOT declare
-        `read_only: false`, OR (no overlay) `read_only: true` is explicitly set
+      - read_only: True iff the read-only overlay applies AND user did NOT
+        declare `read_only: false`, OR `read_only: true` is explicitly set
       - no_new_privileges: True iff overlay applies OR (`security_opt`
         contains "no-new-privileges:true" AND no entry contains
         "no-new-privileges:false")
@@ -113,6 +121,11 @@ def hardening_profile_from_compose(
         if services_with_overlay is not None
         else set(services.keys())
     )
+    read_only_set: set[str] = (
+        services_with_read_only_overlay
+        if services_with_read_only_overlay is not None
+        else overlay_set
+    )
 
     project_read_only = True
     project_no_new_privileges = True
@@ -128,9 +141,9 @@ def hardening_profile_from_compose(
         # `read_only: false` in user compose (the overlay generator omits
         # its read_only fragment when the user declared anything for that
         # field, and Compose merge gives us the user's literal value).
-        # For off-profile services (no overlay), only an explicit
-        # `read_only: true` counts.
-        if svc_name in overlay_set:
+        # For off-profile and compose-only services (no read-only overlay),
+        # only an explicit `read_only: true` counts.
+        if svc_name in read_only_set:
             svc_ro = svc.get("read_only") is not False
         else:
             svc_ro = svc.get("read_only") is True
