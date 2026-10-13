@@ -183,7 +183,7 @@ class TestResumeAlertOutsideLock:
              patch.object(resume_cmd, "prepare_compose_override"), \
              patch.object(resume_cmd, "validate_user_compose"), \
              patch.object(resume_cmd, "run_smoke", return_value=(False, "boom")), \
-             patch.object(resume_cmd, "send_notification", fake_send):
+             patch("boxmunge.notify.send_notification", fake_send):
             rc = resume_cmd.run_resume("app", paths, yes=True)
         assert rc == 0
         assert sent == [False]

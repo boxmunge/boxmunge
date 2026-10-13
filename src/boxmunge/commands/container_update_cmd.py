@@ -10,6 +10,7 @@ from boxmunge.container_update import SKIPPED_LOCKED, update_target
 from boxmunge.container_update_targets import UpdateTarget, build_targets
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error
+from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 
 
@@ -44,32 +45,19 @@ def _dry_run_target(paths: BoxPaths, target: UpdateTarget) -> dict[str, Any]:
 def _send_summary_alert(paths: BoxPaths, results: list[dict[str, Any]]) -> None:
     """Send a single Pushover alert summarizing failed targets.
 
-    Pushover is the operator's only out-of-band signal. If sending fails
-    (config missing, network issue, etc.), log it loudly so the failure
-    surfaces in the operational log and the next health run.
+    Pushover is the operator's only out-of-band signal; ``notify`` logs
+    any non-delivery so it surfaces in the log and the next health run.
     """
     failed = [r for r in results if r["status"] == "failed"]
     if not failed:
         return
-    try:
-        from boxmunge.config import load_config
-        from boxmunge.pushover import send_notification
-        cfg = load_config(paths)
-        po = cfg.get("pushover", {})
-        names = ", ".join(r["name"] for r in failed)
-        details = "; ".join(
-            f"{r['name']}: {r.get('reason', 'failed')}" for r in failed
-        )
-        send_notification(
-            po.get("user_key", ""), po.get("app_token", ""),
-            "boxmunge container-update FAILURES",
-            f"Failed targets: {names}\n\n{details}",
-        )
-    except Exception as e:
-        log_error(
-            "container-update", f"Pushover summary alert failed: {e}", paths,
-            detail={"failed": [r["name"] for r in failed]},
-        )
+    names = ", ".join(r["name"] for r in failed)
+    details = "; ".join(f"{r['name']}: {r.get('reason', 'failed')}" for r in failed)
+    notify(
+        paths, "boxmunge container-update FAILURES",
+        f"Failed targets: {names}\n\n{details}",
+        component="container-update",
+    )
 
 
 def _update_one(paths: BoxPaths, target: UpdateTarget, dry_run: bool) -> dict[str, Any]:

@@ -239,6 +239,8 @@ project as `ERROR` (`"raw_status": "error"` with an `error` field in `--json`) a
 the normal threshold alert fires with the cause. `check-all` also reports an unreadable host
 config (`boxmunge.yml`), since alerts cannot be sent without it, and still runs the checks.
 
+An alert counts as sent only when Pushover accepts it. If it is not delivered, the health check logs why (an `error` entry when the config cannot be read or the Pushover request fails, a `warn` entry when Pushover is not configured) and tries again on the next 5-minute tick until it gets through. The same applies to the critical alert for a stopped project and to the RECOVERED notice. Find these entries with `log --component health`.
+
 ---
 
 ## Reading Logs

@@ -3,21 +3,28 @@
 Uses urllib (stdlib) to POST to the Pushover API. No external HTTP library needed.
 """
 
+import logging
 import urllib.request
 import urllib.error
 import urllib.parse
+
+_LOGGER = logging.getLogger("boxmunge")
 
 PUSHOVER_API_URL = "https://api.pushover.net/1/messages.json"
 
 
 def _post_pushover(data: dict) -> bool:
-    """POST to the Pushover API. Returns True on success."""
+    """POST to the Pushover API. Returns True on success; logs why not."""
     try:
         encoded = urllib.parse.urlencode(data).encode("utf-8")
         req = urllib.request.Request(PUSHOVER_API_URL, data=encoded)
         with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status == 200
-    except (urllib.error.URLError, OSError):
+            if resp.status == 200:
+                return True
+            _LOGGER.warning("Pushover API returned HTTP %s", resp.status)
+            return False
+    except (urllib.error.URLError, OSError) as e:
+        _LOGGER.warning("Pushover API request failed: %s", e)
         return False
 
 

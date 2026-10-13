@@ -27,8 +27,8 @@ from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import is_paused, clear_paused_state
+from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
-from boxmunge.pushover import send_notification
 from boxmunge.security_overlay import services_with_off_profile
 from boxmunge.state import read_state, write_state
 
@@ -239,18 +239,11 @@ def _resume_locked(
 
 
 def _alert_smoke_failed(project_name: str, paths: BoxPaths, smoke_msg: str) -> None:
-    try:
-        from boxmunge.config import ConfigError, load_config
-        cfg = load_config(paths)
-        po = cfg.get("pushover", {})
-        send_notification(
-            po.get("user_key", ""), po.get("app_token", ""),
-            "boxmunge resume: smoke failed",
-            f"{project_name} resumed but smoke test failed: {smoke_msg}",
-        )
-    except (ConfigError, OSError, KeyError) as e:
-        log_warning("resume", f"could not send Pushover: {e}",
-                    paths, project=project_name)
+    notify(
+        paths, "boxmunge resume: smoke failed",
+        f"{project_name} resumed but smoke test failed: {smoke_msg}",
+        component="resume", project=project_name,
+    )
 
 
 def cmd_resume(args: list[str]) -> None:

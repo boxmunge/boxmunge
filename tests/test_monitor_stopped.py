@@ -64,7 +64,7 @@ def _tick(paths: BoxPaths, smoke: _Smoke, down, push) -> int:
     from boxmunge.commands.check import run_check_all
     with patch("boxmunge.commands.check.subprocess.run", smoke), \
          patch("boxmunge.commands.health_state.compose_down", down), \
-         patch("boxmunge.commands.health_state.send_notification", push):
+         patch("boxmunge.notify.send_notification", push):
         return run_check_all([], paths)
 
 
@@ -127,7 +127,7 @@ class TestStickyCriticalStop:
         from boxmunge.commands.health_state import update_health_state
         down, push = MagicMock(), MagicMock(return_value=True)
         with patch("boxmunge.commands.health_state.compose_down", down), \
-             patch("boxmunge.commands.health_state.send_notification", push):
+             patch("boxmunge.notify.send_notification", push):
             update_health_state(NAME, 2, "db unreachable", paths)
             for result, msg in [(1, "smoke could not run"), (0, ""), (2, "other")]:
                 update_health_state(NAME, result, msg, paths)
