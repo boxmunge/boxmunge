@@ -1,6 +1,5 @@
 """Tests for the MCP stdio proxy."""
 
-import pytest
 from unittest.mock import patch, MagicMock
 
 from boxmunge_cli.mcp_proxy import run_mcp_proxy

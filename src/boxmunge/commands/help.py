@@ -190,7 +190,6 @@ def cmd_help(args: list[str]) -> None:
 
 def cmd_agent_help(args: list[str]) -> None:
     """Show agent-specific orientation, or a detailed topic."""
-    from pathlib import Path
 
     if args:
         topic = args[0].lower()

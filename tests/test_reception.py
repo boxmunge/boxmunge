@@ -135,7 +135,7 @@ class TestInboxOrdering:
         import time
 
         bundle1 = _make_bundle(tmp_path / "b1", name="testapp")
-        dest1 = receive_bundle(bundle1, paths)
+        receive_bundle(bundle1, paths)
         time.sleep(0.01)
 
         bundle2_staging = tmp_path / "b2" / "staging" / "testapp"

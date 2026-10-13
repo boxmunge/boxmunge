@@ -1,6 +1,5 @@
 """Tests for SSH command building and execution."""
 
-import pytest
 from unittest.mock import patch, MagicMock
 
 from boxmunge_cli.ssh import build_ssh_cmd, build_scp_cmd, run_ssh, run_scp

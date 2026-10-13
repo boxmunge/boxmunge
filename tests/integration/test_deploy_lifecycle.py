@@ -5,7 +5,6 @@ import urllib.request
 
 import pytest
 
-from boxmunge.state import read_state
 
 
 pytestmark = [pytest.mark.integration]

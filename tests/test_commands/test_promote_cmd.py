@@ -2,7 +2,6 @@
 import pytest
 from unittest.mock import patch, MagicMock
 from boxmunge.commands.promote_cmd import run_promote
-from boxmunge.paths import BoxPaths
 from boxmunge.state import write_state
 from boxmunge.project_registry import add_project
 
@@ -174,7 +173,6 @@ class TestPromoteUnknownArg:
     """Audit H-N1: cmd_promote rejects unknown flags."""
 
     def test_unknown_flag_exits_2(self, capsys) -> None:
-        import pytest
         from boxmunge.commands.promote_cmd import cmd_promote
         with pytest.raises(SystemExit) as exc:
             cmd_promote(["myapp", "--not-a-flag"])

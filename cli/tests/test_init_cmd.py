@@ -1,6 +1,5 @@
 """Tests for boxmunge init command."""
 
-import pytest
 import yaml
 from pathlib import Path
 

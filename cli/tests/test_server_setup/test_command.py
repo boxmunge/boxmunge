@@ -2,10 +2,8 @@
 """Tests for the server-setup command orchestrator."""
 
 import pytest
-from unittest.mock import patch, MagicMock
-from io import StringIO
 
-from boxmunge_cli.server_setup.command import parse_args, ServerSetupArgs
+from boxmunge_cli.server_setup.command import parse_args
 
 
 class TestParseArgs:

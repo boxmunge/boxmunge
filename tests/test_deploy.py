@@ -2,11 +2,8 @@
 
 import io
 from contextlib import redirect_stdout
-from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-import yaml
 
 from boxmunge.commands.deploy import run_deploy, prepare_compose_override
 from boxmunge.paths import BoxPaths
@@ -49,7 +46,6 @@ class TestDeployEnvFiles:
 class TestComposeOverrideEmitsOffWarning:
     def test_warning_printed_when_off(self, tmp_path, monkeypatch) -> None:
         # Build a paths-like with a real project_compose_override target.
-        from boxmunge.paths import BoxPaths
         proj = tmp_path / "projects" / "demo"
         proj.mkdir(parents=True)
         (proj / "project.env").write_text("X=1\n")
@@ -83,7 +79,6 @@ class TestComposeOverrideEmitsOffWarning:
         assert "test" in out
 
     def test_no_warning_when_default(self, tmp_path, monkeypatch) -> None:
-        from boxmunge.paths import BoxPaths
         proj = tmp_path / "projects" / "demo"
         proj.mkdir(parents=True)
         monkeypatch.setattr(BoxPaths, "__init__", lambda self: None)
@@ -110,7 +105,6 @@ class TestComposeOverrideEmitsOffWarning:
     def test_component_param_threads_through(self, tmp_path, monkeypatch) -> None:
         """`component=` is forwarded to warn_off_services so upgrade/resume
         don't get misattributed as 'deploy' in the structured log."""
-        from boxmunge.paths import BoxPaths
         proj = tmp_path / "projects" / "demo"
         proj.mkdir(parents=True)
         monkeypatch.setattr(BoxPaths, "__init__", lambda self: None)

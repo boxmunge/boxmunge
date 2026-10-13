@@ -1,6 +1,5 @@
 """Tests for boxmunge.pushover — Pushover notification sending."""
 
-import pytest
 from unittest.mock import patch, MagicMock
 
 from boxmunge.pushover import format_alert, format_recovery, send_notification

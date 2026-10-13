@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
-from datetime import datetime, timezone
-from pathlib import Path
 import pytest
 from boxmunge.paths import BoxPaths
 from boxmunge.upgrade_state import (

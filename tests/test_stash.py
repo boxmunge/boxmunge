@@ -163,7 +163,7 @@ class TestRestoreStash:
         create_stash(paths)  # older
         import time; time.sleep(0.1)
         paths.config_file.write_text("hostname: latest\nadmin_email: t@t\n")
-        latest = create_stash(paths)  # newer
+        create_stash(paths)  # newer
 
         paths.config_file.write_text("hostname: corrupted\n")
         restore_stash(paths)  # no archive arg = latest

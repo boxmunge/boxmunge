@@ -5,7 +5,7 @@ from pathlib import Path
 
 from boxmunge.log import log_operation
 from boxmunge.paths import BoxPaths
-from boxmunge.secrets import get_key, list_keys, read_dotenv, set_key, unset_key
+from boxmunge.secrets import get_key, list_keys, set_key, unset_key
 
 
 def _resolve_secrets_path(

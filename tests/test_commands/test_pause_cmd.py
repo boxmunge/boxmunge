@@ -1,7 +1,6 @@
 """Tests for boxmunge pause."""
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-import pytest
+from unittest.mock import patch
 import yaml
 
 from boxmunge.paths import BoxPaths

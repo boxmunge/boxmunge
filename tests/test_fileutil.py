@@ -1,6 +1,5 @@
 """Tests for boxmunge.fileutil — atomic writes and project locking."""
 
-import fcntl
 import logging
 import os
 from pathlib import Path

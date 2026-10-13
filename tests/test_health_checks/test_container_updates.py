@@ -1,6 +1,5 @@
 import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 import pytest
 from boxmunge.paths import BoxPaths
 from boxmunge.health_checks.container_updates import check_container_updates

@@ -9,7 +9,6 @@ from boxmunge.tui.data import (
     load_host_info,
     relative_time,
 )
-from boxmunge.tui.widgets import KeyBar
 from boxmunge.paths import BoxPaths
 
 

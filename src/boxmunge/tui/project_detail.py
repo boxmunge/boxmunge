@@ -1,13 +1,12 @@
 """Project detail screen — tabbed view with Overview, Logs, Backups, Config."""
 
 import asyncio
-from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.screen import Screen
 from textual.widgets import (
-    DataTable, Footer, Header, Label, RichLog, Static,
+    DataTable, Footer, Header, RichLog, Static,
     TabbedContent, TabPane,
 )
 
@@ -19,7 +18,6 @@ from boxmunge.tui.data import (
     load_project_services,
     relative_time,
 )
-from boxmunge.tui.widgets import StatusIndicator
 
 
 STATUS_DISPLAY = {

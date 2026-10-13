@@ -3,7 +3,6 @@ import json
 from unittest.mock import patch, MagicMock
 from urllib.error import URLError
 
-import pytest
 
 from boxmunge.paths import BoxPaths
 from boxmunge.version import write_installed_version

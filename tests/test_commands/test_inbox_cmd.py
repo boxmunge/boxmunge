@@ -3,7 +3,6 @@
 import json
 import pytest
 from pathlib import Path
-from unittest.mock import patch
 
 from boxmunge.commands.inbox_cmd import (
     cmd_inbox, run_inbox_list, run_inbox_clean,
@@ -132,7 +131,6 @@ class TestInboxJson:
     ) -> None:
         _place_bundle(paths, "alpha", "2026-04-01T100000000000")
         _place_bundle(paths, "beta", "2026-04-02T100000000000")
-        from boxmunge.commands import inbox_cmd as inbox_mod
         # Inbox imports BoxPaths lazily inside cmd_inbox; patch the source.
         monkeypatch.setattr("boxmunge.paths.BoxPaths", lambda: paths)
         with pytest.raises(SystemExit) as exc:

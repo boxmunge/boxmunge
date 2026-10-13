@@ -104,7 +104,6 @@ class TestContainerUpdatePaths:
 class TestProjectPausedState:
     def test_paused_state_path(self) -> None:
         from boxmunge.paths import BoxPaths
-        from pathlib import Path
         paths = BoxPaths(root=Path("/tmp/test-bm"))
         assert paths.project_paused_state("myapp") == \
             Path("/tmp/test-bm/state/deploy/myapp.paused.json")
@@ -113,7 +112,6 @@ class TestProjectPausedState:
 class TestProjectQuarantineState:
     def test_quarantine_state_path(self) -> None:
         from boxmunge.paths import BoxPaths
-        from pathlib import Path
         paths = BoxPaths(root=Path("/tmp/test-bm"))
         assert paths.project_quarantine_state("myapp") == \
             Path("/tmp/test-bm/state/deploy/myapp.quarantined.json")

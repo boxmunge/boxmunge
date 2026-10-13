@@ -4,7 +4,7 @@ import json
 import subprocess
 import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 
 from boxmunge.commands.check import (
     parse_smoke_stderr,

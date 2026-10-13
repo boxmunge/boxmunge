@@ -12,7 +12,6 @@ Dispatch modes:
 """
 
 import sys
-from typing import Any
 
 import yaml
 

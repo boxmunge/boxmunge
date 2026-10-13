@@ -1,7 +1,5 @@
 """Tests for boxmunge bundle command."""
 import tarfile
-import pytest
-from pathlib import Path
 import yaml
 from boxmunge.commands.bundle_cmd import run_bundle
 

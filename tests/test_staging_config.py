@@ -2,7 +2,6 @@
 import io
 from contextlib import redirect_stdout
 
-import pytest
 import yaml
 from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.compose import generate_staging_compose_base, generate_staging_compose_override

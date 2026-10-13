@@ -7,7 +7,6 @@ import logging
 from datetime import date, datetime, timezone
 from typing import Any
 
-import pytest
 
 from boxmunge.cve.alerting import (
     Alert,

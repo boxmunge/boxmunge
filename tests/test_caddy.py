@@ -1,6 +1,5 @@
 """Tests for boxmunge.caddy — Caddy config generation from manifests."""
 
-import pytest
 
 from boxmunge.caddy import generate_caddy_config, generate_staging_caddy_config
 

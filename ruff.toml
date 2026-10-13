@@ -1,0 +1,18 @@
+# Lint configuration for boxmunge (server, CLI client, tests).
+#
+# The rule set is deliberately small: pyflakes-class errors that indicate a
+# real defect or dead code. It is enforced in CI (.github/workflows/ci.yml).
+# Widen it deliberately, in its own PR, with the cleanup in the same change.
+target-version = "py310"
+extend-exclude = ["build", "dist", ".cache"]
+
+[lint]
+select = [
+    "E9",    # syntax errors
+    "F63",   # invalid comparisons
+    "F7",    # statement in the wrong place (return outside function, etc.)
+    "F82",   # undefined names
+    "F401",  # unused imports
+    "F811",  # redefinition of an unused name
+    "F841",  # unused local variable
+]

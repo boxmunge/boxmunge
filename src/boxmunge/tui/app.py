@@ -1,9 +1,8 @@
 """BoxmungeApp — main Textual application."""
 
 import asyncio
-from pathlib import Path
 
-from textual.app import App, ComposeResult
+from textual.app import App
 
 from boxmunge.paths import BoxPaths
 from boxmunge.tui.dashboard import DashboardScreen

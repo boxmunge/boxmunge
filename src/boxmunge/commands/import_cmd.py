@@ -1,6 +1,5 @@
 """boxmunge import <bundle.tar.gz> — import and deploy a project from a bundle."""
 
-import os
 import shutil
 import sys
 import tempfile

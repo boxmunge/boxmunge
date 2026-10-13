@@ -1,13 +1,11 @@
 """Integration tests for backup/restore round-trip."""
 
 import json
-import os
 import subprocess
 import urllib.request
 
 import pytest
 
-from boxmunge.paths import BoxPaths
 
 
 pytestmark = [pytest.mark.integration]

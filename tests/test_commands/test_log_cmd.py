@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from boxmunge.commands.log_cmd import _parse_since, filter_log_entries, parse_log_file
-from boxmunge.paths import BoxPaths
 
 
 def _write_log_entries(log_file: Path, entries: list[dict]) -> None:

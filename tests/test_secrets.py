@@ -1,5 +1,4 @@
 """Tests for secrets dotenv file operations."""
-import pytest
 from pathlib import Path
 from boxmunge.secrets import read_dotenv, write_dotenv, set_key, get_key, unset_key, list_keys
 
