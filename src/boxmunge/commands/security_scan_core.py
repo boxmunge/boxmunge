@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
 from boxmunge.commands.security_scan_inputs import (
+    ProjectMeta,
     ScanTarget,
     hardening_profile,
     identify_images,
@@ -34,6 +35,7 @@ from boxmunge.cve.quarantine import (
     QuarantineError,
     is_quarantined,
     quarantine_project,
+    reassert_quarantine,
 )
 from boxmunge.cve.relevance import (
     ecosystem_for_package,
@@ -285,7 +287,9 @@ def _scan_one_project_locked(
         # Persist an empty scan-state so we don't wedge the per-project view.
         # Audit-only (resume re-scan, audit A-3) leaves the prior alone.
         if not audit_only:
+            enforce_error = _enforce(paths, project, meta, None, in_grace=in_grace)
             write_scan_state(scan_state_path, decisions=())
+            _raise_enforce_error(project, enforce_error)
         return ProjectScan(
             project=project, posture=meta.posture_str, dangerously=dangerously,
             decisions=(), warnings=tuple(warnings),
@@ -331,35 +335,19 @@ def _scan_one_project_locked(
 
     _log_relevance_gaps(paths, project, dropped_lang_types, empty_runtime_exempted)
 
-    if failed and not decisions:
-        raise RuntimeError(
-            f"All images failed to scan for project {project!r}"
-        )
-
     headline = _headline(decisions)
-    # During grace we still compute the headline decision (so the heads-up
-    # alert can summarise it) but never fire the quarantine action. In
-    # audit-only mode (resume re-scan, audit A-3) the caller is the
-    # quarantine-lift flow itself.
-    if (
-        not in_grace
-        and not audit_only
-        and headline is not None
-        and not is_quarantined(project, paths)
-    ):
-        try:
-            quarantine_project(
-                project, paths,
-                project_dir=paths.project_dir(project),
-                hosts=meta.hosts,
-                compose_files=meta.compose_files,
-                headline=headline[1],
-                image_ref=headline[0].image_ref,
-            )
-        except QuarantineError as e:
-            raise RuntimeError(
-                f"quarantine action failed for {project!r}: {e}"
-            ) from e
+    # Audit-only callers (resume re-scan, audit A-3) are the lift flow
+    # itself and never act. Everyone else enforces: an existing quarantine
+    # is re-asserted on every scan (B-03), a new one fires outside grace.
+    enforce_error = None
+    if not audit_only:
+        enforce_error = _enforce(paths, project, meta, headline, in_grace=in_grace)
+
+    if failed and not decisions:
+        detail = f"; {enforce_error}" if enforce_error else ""
+        raise RuntimeError(
+            f"All images failed to scan for project {project!r}{detail}"
+        )
 
     if not audit_only:
         write_scan_state(scan_state_path, decisions=tuple(decisions))
@@ -369,6 +357,7 @@ def _scan_one_project_locked(
     # must not push alerts.
     if not in_grace and not audit_only:
         _emit_transition_alerts(paths, project, decisions, prior_decisions, supps)
+    _raise_enforce_error(project, enforce_error)
 
     return ProjectScan(
         project=project,
@@ -381,6 +370,41 @@ def _scan_one_project_locked(
         unidentified_services=tuple(unidentified),
         headline=headline,
     )
+
+
+def _enforce(
+    paths: BoxPaths, project: str, meta: ProjectMeta,
+    headline: tuple[ProjectDecision, FindingDisposition] | None,
+    *, in_grace: bool,
+) -> str | None:
+    """Take or re-assert the quarantine action. Returns an error or None.
+
+    An existing quarantine record is re-asserted whatever this scan found,
+    so a partially failed action converges (audit B-03). During grace no
+    NEW quarantine fires; the heads-up alert summarises what would.
+    """
+    project_dir = paths.project_dir(project)
+    try:
+        if is_quarantined(project, paths):
+            reassert_quarantine(
+                project, paths, project_dir=project_dir,
+                hosts=meta.hosts, compose_files=meta.compose_files,
+            )
+        elif headline is not None and not in_grace:
+            quarantine_project(
+                project, paths, project_dir=project_dir,
+                hosts=meta.hosts, compose_files=meta.compose_files,
+                headline=headline[1], image_ref=headline[0].image_ref,
+            )
+    except QuarantineError as e:
+        return f"quarantine action failed for {project!r}: {e}"
+    return None
+
+
+def _raise_enforce_error(project: str, error: str | None) -> None:
+    """Fail the project scan loudly once its state has been persisted."""
+    if error is not None:
+        raise RuntimeError(f"{error} (the next scan retries it)")
 
 
 def _headline(

@@ -17,6 +17,12 @@ Order of operations matches pause: write state FIRST so any subsequent
 failure leaves the project marked quarantined and a retry can converge;
 swap Caddy BEFORE stopping containers so visitors never see "504 Bad
 Gateway" between container stop and Caddy reload.
+
+The record carries ``action_complete``: false until the maintenance page
+is routed AND the containers are stopped. Every scan of a quarantined
+project calls ``reassert_quarantine``, so a partially failed action is
+retried until it completes (audit B-03) and drift (a container someone
+started) is undone.
 """
 from __future__ import annotations
 
@@ -69,27 +75,7 @@ def read_quarantine_state(
         ) from e
 
 
-def write_quarantine_state(
-    project_name: str,
-    paths: BoxPaths,
-    *,
-    headline: FindingDisposition,
-    image_ref: str,
-) -> None:
-    """Record quarantine state. UTC timestamp set to now.
-
-    `headline` is the most-severe FindingDisposition that triggered the
-    quarantine. Idempotent: overwrites existing state with the new
-    headline if called again.
-    """
-    data: dict[str, Any] = {
-        "quarantined_at": datetime.now(timezone.utc).isoformat(),
-        "cve_id": headline.finding.cve_id,
-        "severity": headline.base_severity.value,
-        "effective_severity": headline.effective_severity.value,
-        "explanation": headline.explanation,
-        "image_ref": image_ref,
-    }
+def _write_record(project_name: str, paths: BoxPaths, data: dict[str, Any]) -> None:
     state_path = paths.project_quarantine_state(project_name)
     try:
         state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,6 +84,42 @@ def write_quarantine_state(
         raise QuarantineError(
             f"Failed to write quarantine state for {project_name!r}: {e}",
         ) from e
+
+
+def write_quarantine_state(
+    project_name: str,
+    paths: BoxPaths,
+    *,
+    headline: FindingDisposition,
+    image_ref: str,
+) -> dict[str, Any]:
+    """Record quarantine state with ``action_complete: false``; return it.
+
+    `headline` is the most-severe FindingDisposition that triggered the
+    quarantine. Overwrites existing state with the new headline if called
+    again; the action is then incomplete until re-asserted.
+    """
+    data: dict[str, Any] = {
+        "quarantined_at": datetime.now(timezone.utc).isoformat(),
+        "cve_id": headline.finding.cve_id,
+        "severity": headline.base_severity.value,
+        "effective_severity": headline.effective_severity.value,
+        "explanation": headline.explanation,
+        "image_ref": image_ref,
+        "action_complete": False,
+    }
+    _write_record(project_name, paths, data)
+    return data
+
+
+def quarantine_action_complete(project_name: str, paths: BoxPaths) -> bool:
+    """True iff the record says the maintenance page and stop both landed.
+
+    A record without the field predates it and is treated as incomplete,
+    so the next scan re-asserts it.
+    """
+    state = read_quarantine_state(project_name, paths)
+    return bool(state and state.get("action_complete") is True)
 
 
 def clear_quarantine_state(project_name: str, paths: BoxPaths) -> None:
@@ -120,22 +142,14 @@ def quarantine_project(
 ) -> None:
     """Perform the full quarantine action.
 
-    Order (matches pause flow — visitors should never see "504 Bad Gateway"):
-    1. Write quarantine state file FIRST so any subsequent failure leaves
-       the project marked quarantined and cron will retry the compose_stop
-       / Caddy swap.
-    2. Render maintenance Caddyfile fragment, atomic-write to
-       project_caddy_site.
-    3. caddy_reload (uses the global lock from docker.py).
-    4. compose_stop the project.
-
-    Idempotent: if already quarantined, updates state with the new headline,
-    re-asserts the maintenance Caddy config (in case it drifted), and
-    ensures containers are stopped. Safe to call repeatedly.
+    1. Write the quarantine record FIRST (``action_complete: false``) so any
+       later failure leaves the project marked quarantined; the next scan
+       re-asserts it (see ``reassert_quarantine``).
+    2-4. ``reassert_quarantine``: maintenance page, Caddy reload, stop.
 
     On any step failure after step 1, raises QuarantineError but leaves
-    the state file in place — the project is best treated as
-    quarantined-with-issues rather than not-quarantined.
+    the record in place — the project is quarantined-with-issues, never
+    silently not-quarantined.
     """
     already = is_quarantined(project_name, paths)
     if already:
@@ -167,12 +181,53 @@ def quarantine_project(
         )
 
     # 1. State file FIRST.
-    write_quarantine_state(
+    state = write_quarantine_state(
         project_name, paths,
         headline=headline,
         image_ref=image_ref,
     )
+    _complete_action(
+        project_name, paths, state,
+        project_dir=project_dir, hosts=hosts, compose_files=compose_files,
+    )
 
+
+def reassert_quarantine(
+    project_name: str,
+    paths: BoxPaths,
+    *,
+    project_dir: Path,
+    hosts: list[str],
+    compose_files: list[str],
+) -> None:
+    """Bring an existing quarantine record's action to completion.
+
+    Order (matches pause flow — visitors should never see "504 Bad Gateway"):
+    route the maintenance page, reload Caddy, then stop the containers.
+    Idempotent and safe to call on every scan. Marks the record
+    ``action_complete: true`` only once every step succeeded.
+    """
+    state = read_quarantine_state(project_name, paths)
+    if state is None:
+        raise QuarantineError(
+            f"cannot re-assert quarantine for {project_name!r}: no record",
+        )
+    _complete_action(
+        project_name, paths, state,
+        project_dir=project_dir, hosts=hosts, compose_files=compose_files,
+    )
+
+
+def _complete_action(
+    project_name: str,
+    paths: BoxPaths,
+    state: dict[str, Any],
+    *,
+    project_dir: Path,
+    hosts: list[str],
+    compose_files: list[str],
+) -> None:
+    """Steps 2-4 of the action, then mark the record complete."""
     # 2. Render maintenance Caddy site config and write atomically.
     try:
         site_conf = render_maintenance_caddy_config(hosts)
@@ -202,8 +257,10 @@ def quarantine_project(
             f"Failed to stop containers for {project_name!r}: {e}",
         ) from e
 
+    if state.get("action_complete") is not True:
+        _write_record(project_name, paths, {**state, "action_complete": True})
     _LOGGER.info(
-        "quarantine: %s now offline behind maintenance page",
+        "quarantine: %s offline behind maintenance page",
         project_name,
         extra=_extra(project=project_name),
     )

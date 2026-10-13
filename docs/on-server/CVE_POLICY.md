@@ -672,7 +672,18 @@ project's active suppressions.
 
 Once a project is quarantined, every operational entry point honours
 that state until `boxmunge security resume <project>` lifts it. There
-is no other path back. The behaviour splits into two camps:
+is no other path back.
+
+The quarantine record (`state/deploy/<project>.quarantined.json`) says
+`action_complete: false` until the maintenance page is routed **and** the
+containers are stopped. Every scan of a quarantined project re-asserts the
+action — maintenance page, Caddy reload, stop — whatever the scan finds,
+so a step that failed (a Caddy reload timeout, a hung `compose stop`) is
+retried on the next scan until it completes, and a container started
+behind the maintenance page is stopped again. A failed re-assert is a scan
+failure for that project: it is reported and the scan exits non-zero.
+
+The behaviour splits into two camps:
 
 **Refuse with exit 1 (operator-initiated mutations):**
 

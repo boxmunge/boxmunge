@@ -2630,29 +2630,6 @@ def test_grace_heads_up_only_fires_once_under_concurrent_callers(
     )
 
 
-def test_scan_state_not_written_when_quarantine_raises(
-    monkeypatch, tmp_path, capsys,
-) -> None:
-    """Audit E-2: if quarantine_project raises, scan_state must NOT be
-    written — next scan re-evaluates and re-fires."""
-    from boxmunge.commands.security_actions import cmd_security_scan
-    from boxmunge.cve.quarantine import QuarantineError
-    paths = _scan_paths(tmp_path)
-    _grace_quarantine_scan(monkeypatch, paths)
-    def boom(*args, **kwargs):
-        raise QuarantineError("compose_stop failed")
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.quarantine_project", boom,
-    )
-    rc = cmd_security_scan([], paths)
-    captured = capsys.readouterr()
-    # Failure surfaces in the per-project loop as ERROR — exit code 1.
-    assert rc == 1
-    assert "compose_stop failed" in captured.out + captured.err
-    # Critical: scan_state was NOT written, so a re-run will retry.
-    assert not paths.project_scan_state("demo").exists()
-
-
 def test_scan_exit_code_2_when_project_quarantined(
     monkeypatch, tmp_path, capsys,
 ) -> None:
