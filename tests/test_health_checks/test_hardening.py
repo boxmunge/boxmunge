@@ -2,7 +2,6 @@
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from boxmunge.health_checks.hardening import (
     check_aide_status,

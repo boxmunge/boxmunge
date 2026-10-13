@@ -1,9 +1,7 @@
 """Tests for boxmunge rollback command logic."""
 
-import pytest
-from pathlib import Path
 
-from boxmunge.commands.rollback import find_rollback_target, RollbackTarget
+from boxmunge.commands.rollback import find_rollback_target
 from boxmunge.paths import BoxPaths
 from boxmunge.state import write_state
 

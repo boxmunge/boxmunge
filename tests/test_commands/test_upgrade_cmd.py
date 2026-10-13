@@ -95,7 +95,6 @@ class TestRestartRespectsLock:
         self, mock_up, tmp_path
     ) -> None:
         from boxmunge.commands.upgrade_cmd import _restart_projects
-        from boxmunge.fileutil import project_lock
 
         paths = _setup_paths(tmp_path)
         self._make_project(paths, "alpha")

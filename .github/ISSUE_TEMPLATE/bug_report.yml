@@ -16,7 +16,7 @@ body:
       label: Steps to reproduce
       description: Minimal steps to trigger the issue.
       placeholder: |
-        1. Run `boxmunge deploy myapp`
+        1. Run `prod-deploy myapp`
         2. Observe error...
     validations:
       required: true
@@ -25,8 +25,8 @@ body:
     id: version
     attributes:
       label: boxmunge version
-      description: Output of `boxmunge --version`
-      placeholder: "0.2.0+abc1234"
+      description: Server version (`version` in the deploy shell) and, if relevant, client version (`boxmunge --version`)
+      placeholder: "server 0.10.1, client 0.2.0"
     validations:
       required: true
 

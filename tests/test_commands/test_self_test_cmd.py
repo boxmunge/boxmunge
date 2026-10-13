@@ -1,9 +1,7 @@
 """Tests for boxmunge self-test command (unit tests, no Docker)."""
 
 import json
-from pathlib import Path
 
-import pytest
 
 from boxmunge.commands.self_test_cmd import SelfTestStep, SelfTestReport, _canary_project_path
 

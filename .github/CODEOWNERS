@@ -1,0 +1,43 @@
+# Security-sensitive paths require review from a maintainer before merge.
+# Branch protection enforces this ("Require review from Code Owners").
+# See CONTRIBUTING.md, "Paths that need maintainer review".
+
+# Restricted shell, bundle and SFTP reception, MCP entry points
+/src/boxmunge/shell.py                @jdlondon
+/src/boxmunge/sftp_receive.py         @jdlondon
+/src/boxmunge/reception.py            @jdlondon
+/src/boxmunge/bundle.py               @jdlondon
+/src/boxmunge/stash.py                @jdlondon
+/src/boxmunge/mcp_server.py           @jdlondon
+/src/boxmunge/mcp_tools.py            @jdlondon
+/src/boxmunge/paths.py                @jdlondon
+
+# Secrets, container hardening, compose validation, CVE policy
+/src/boxmunge/secrets.py              @jdlondon
+/src/boxmunge/security_overlay.py     @jdlondon
+/src/boxmunge/compose_validate.py     @jdlondon
+/src/boxmunge/compose.py              @jdlondon
+/src/boxmunge/writable.py             @jdlondon
+/src/boxmunge/cve/                    @jdlondon
+
+# Upgrade and release trust chain
+/src/boxmunge/upgrade_discovery.py    @jdlondon
+/scripts/                             @jdlondon
+/install.sh                           @jdlondon
+/bootstrap/                           @jdlondon
+/system/                              @jdlondon
+/systemd/                             @jdlondon
+/.github/                             @jdlondon
+/requirements*.txt                    @jdlondon
+/requirements*.in                     @jdlondon
+/cli/requirements*.txt                @jdlondon
+/cli/requirements*.in                 @jdlondon
+
+# Trust and security documentation (claims operators rely on)
+/SECURITY.md                          @jdlondon
+/docs/on-server/TRUST_MODEL.md        @jdlondon
+/docs/on-server/SECURITY.md           @jdlondon
+/docs/on-server/CVE_POLICY.md         @jdlondon
+
+# The public version-check service (internet-facing)
+/services/version-check/              @jdlondon

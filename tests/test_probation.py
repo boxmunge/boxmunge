@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for probation promotion on user interaction."""
 
-from pathlib import Path
 import pytest
 from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active

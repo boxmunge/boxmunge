@@ -3,7 +3,6 @@
 import json
 from pathlib import Path
 
-import pytest
 import yaml
 
 from boxmunge.commands.health_cmd import (

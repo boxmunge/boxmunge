@@ -1,5 +1,4 @@
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import pytest
 import yaml
 from boxmunge.paths import BoxPaths
@@ -33,6 +32,7 @@ class TestProbationGate:
         with patch("boxmunge.commands.container_update_cmd.update_target") as mock_update:
             mock_update.return_value = {"name": "caddy", "status": "succeeded"}
             rc = run_container_update(paths)
+        assert rc == 0
         # Update was called at least once (for caddy)
         assert mock_update.called
 

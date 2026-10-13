@@ -6,7 +6,6 @@ import threading
 import time
 
 import pytest
-from pathlib import Path
 
 from boxmunge.paths import BoxPaths
 

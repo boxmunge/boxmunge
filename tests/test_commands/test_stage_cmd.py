@@ -1,9 +1,8 @@
 """Tests for boxmunge stage command."""
 import os
 import tarfile
-import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from boxmunge.commands.stage_cmd import run_stage
 from boxmunge.paths import BoxPaths

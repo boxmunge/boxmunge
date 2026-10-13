@@ -1,13 +1,8 @@
 """Tests for boxmunge.tui.data — TUI data loading functions."""
 
-import pytest
-from pathlib import Path
 from datetime import datetime, timezone
 
 from boxmunge.tui.data import (
-    ProjectStatus,
-    HostInfo,
-    BackupInfo,
     load_all_project_status,
     load_host_info,
     load_project_backups,

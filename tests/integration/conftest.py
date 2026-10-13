@@ -23,6 +23,15 @@ def _docker_available() -> bool:
         return False
 
 
+# CI sets BOXMUNGE_REQUIRE_INTEGRATION=1 so a missing prerequisite fails the
+# run instead of silently skipping every test and reporting green.
+REQUIRE_INTEGRATION = os.environ.get("BOXMUNGE_REQUIRE_INTEGRATION") == "1"
+
+if REQUIRE_INTEGRATION and not _docker_available():
+    raise RuntimeError(
+        "BOXMUNGE_REQUIRE_INTEGRATION=1 but the Docker daemon is not reachable"
+    )
+
 skip_no_docker = pytest.mark.skipif(
     not _docker_available(), reason="Docker not available"
 )
@@ -52,6 +61,8 @@ def integration_root(tmp_path_factory) -> Path:
         (root / "config" / "backup.key").write_text(result.stdout)
         (root / "config" / "backup.key").chmod(0o600)
     except (FileNotFoundError, subprocess.CalledProcessError):
+        if REQUIRE_INTEGRATION:
+            pytest.fail("BOXMUNGE_REQUIRE_INTEGRATION=1 but age-keygen is not available")
         pytest.skip("age-keygen not available")
 
     # Write minimal config

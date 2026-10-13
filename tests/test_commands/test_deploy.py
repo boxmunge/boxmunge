@@ -4,7 +4,6 @@ import tarfile
 from unittest.mock import patch
 
 import pytest
-from pathlib import Path
 
 from boxmunge.commands.deploy import (
     cmd_deploy,

@@ -2,8 +2,6 @@
 
 import json
 import pytest
-from pathlib import Path
-from unittest.mock import patch
 
 from boxmunge.commands.validate import run_validate, cmd_validate
 from boxmunge.paths import BoxPaths

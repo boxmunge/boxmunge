@@ -1,6 +1,5 @@
 """Tests for server-setup target parsing."""
 
-import pytest
 
 from boxmunge_cli.server_setup.target import parse_target, is_ip_address
 

@@ -1,0 +1,9 @@
+# Tooling for .github/workflows/publish-cli.yml: test and build the client
+# distribution. Metadata is verified by pypa/gh-action-pypi-publish itself, so
+# twine (and its platform-specific keyring dependencies) is deliberately absent.
+# The build runs with --no-isolation so setuptools comes from this hash-pinned
+# set rather than an unpinned isolated build env.
+# Regenerate with: make lock
+pytest>=8.0
+build>=1.2
+setuptools>=70.1

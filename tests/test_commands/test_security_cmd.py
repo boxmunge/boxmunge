@@ -2642,9 +2642,10 @@ def test_scan_state_not_written_when_quarantine_raises(
         "boxmunge.commands.security_scan_core.quarantine_project", boom,
     )
     rc = cmd_security_scan([], paths)
-    err_out = capsys.readouterr()
+    captured = capsys.readouterr()
     # Failure surfaces in the per-project loop as ERROR — exit code 1.
     assert rc == 1
+    assert "compose_stop failed" in captured.out + captured.err
     # Critical: scan_state was NOT written, so a re-run will retry.
     assert not paths.project_scan_state("demo").exists()
 

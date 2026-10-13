@@ -1,8 +1,6 @@
 """Tests for boxmunge unstage command."""
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from boxmunge.commands.unstage_cmd import run_unstage
-from boxmunge.paths import BoxPaths
 from boxmunge.state import write_state, read_state
 
 class TestRunUnstage:

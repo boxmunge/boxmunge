@@ -7,6 +7,11 @@ contracts: priority level, required keywords in title/body, no exceptions.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision
+    from boxmunge.cve.scanner import Finding, Severity
 
 
 def test_kev_stale_alert_is_priority_one_and_names_the_feed() -> None:

@@ -12,7 +12,7 @@ import subprocess
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Iterator
 
 from boxmunge.fileutil import open_shared_lockfile
 

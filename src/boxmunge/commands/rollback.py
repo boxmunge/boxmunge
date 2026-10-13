@@ -2,7 +2,6 @@
 
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 
 from boxmunge.commands.restore import run_restore
 from boxmunge.commands.deploy import run_deploy

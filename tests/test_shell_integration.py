@@ -4,7 +4,7 @@ import os
 import pytest
 from unittest.mock import patch, MagicMock
 
-from boxmunge.shell import main, parse_shell_command, dispatch_command, run_command, ALLOWED_COMMANDS
+from boxmunge.shell import main, run_command, ALLOWED_COMMANDS
 
 
 class TestShellMain:

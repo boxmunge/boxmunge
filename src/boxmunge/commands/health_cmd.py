@@ -9,7 +9,6 @@ import json
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
 from boxmunge.lifecycle import is_blocked

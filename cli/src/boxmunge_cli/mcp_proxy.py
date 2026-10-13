@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import signal
 import subprocess
-import sys
 from typing import Any
 
 from boxmunge_cli.ssh import build_ssh_cmd

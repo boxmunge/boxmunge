@@ -1,7 +1,6 @@
 """Tests for boxmunge.state — atomic JSON state file management."""
 
 import json
-import pytest
 from pathlib import Path
 
 from boxmunge.state import read_state, write_state

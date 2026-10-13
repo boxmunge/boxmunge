@@ -12,10 +12,8 @@ from datetime import datetime
 from typing import Any
 
 from boxmunge.cve.policy import Disposition
-from boxmunge.cve.scan_state import headline_from_scan_state
 from boxmunge.security_overlay import (
     PROFILE_DEFAULT,
-    POSTURE_BALANCED,
     resolve_security,
     services_with_off_profile,
 )

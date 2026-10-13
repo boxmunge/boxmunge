@@ -1,0 +1,104 @@
+name: CI
+
+# Runs on every pull request and on every push to main. Branch protection
+# requires these jobs before a PR can merge (see CONTRIBUTING.md).
+#
+# Security notes for maintainers reviewing changes to this file:
+# - Trigger is `pull_request`, never `pull_request_target`: fork PRs run with a
+#   read-only token and no secrets.
+# - Every `uses:` is pinned to a commit SHA and every pip install is
+#   hash-pinned; tests/test_release_pinning.py enforces both.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.13'
+      - name: Install pinned tooling
+        run: pip install --require-hashes -r requirements-dev.txt
+      - name: Ruff
+        run: ruff check src tests cli/src cli/tests
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.13'
+      - name: Install pinned dependencies
+        run: |
+          pip install --require-hashes -r requirements.txt
+          pip install --require-hashes -r requirements-tui.txt
+          pip install --require-hashes -r requirements-dev.txt
+          pip install -e . --no-deps
+      - name: Server unit tests (includes pinning, file-length, and DCO-script lints)
+        run: python -m pytest tests/ --ignore=tests/integration --ignore=tests/vm -q
+
+  cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.13'
+      - name: Install pinned client and tooling
+        run: |
+          pip install --require-hashes -r cli/requirements.txt -r cli/requirements-publish.txt
+          pip install -e ./cli --no-deps
+      - name: Client tests
+        run: cd cli && python -m pytest tests -q
+      - name: Build the distribution and smoke-test the wheel
+        run: |
+          python -m build --no-isolation cli/ --outdir dist/
+          python -m venv /tmp/wheel-smoke
+          /tmp/wheel-smoke/bin/pip install --require-hashes -r cli/requirements.txt
+          /tmp/wheel-smoke/bin/pip install --no-deps dist/*.whl
+          /tmp/wheel-smoke/bin/boxmunge --version
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.13'
+      - name: Install age
+        run: sudo apt-get update && sudo apt-get install -y age
+      - name: Install pinned dependencies
+        run: |
+          pip install --require-hashes -r requirements.txt
+          pip install --require-hashes -r requirements-dev.txt
+          pip install -e . --no-deps
+      - name: Integration tests (real Docker)
+        env:
+          # Turn "prerequisite missing" into a failure instead of a silent skip.
+          BOXMUNGE_REQUIRE_INTEGRATION: '1'
+        run: python -m pytest tests/integration -q
+
+  dco:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+      - name: Every commit is signed off (git commit -s)
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/check-dco.sh "$BASE" "$HEAD"

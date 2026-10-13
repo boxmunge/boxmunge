@@ -2,8 +2,6 @@
 
 import fcntl
 import os
-import pytest
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import boxmunge.commands.backup_cmd as backup_cmd

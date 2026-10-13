@@ -28,10 +28,18 @@ This policy covers:
 - The system container (Dockerfile, compose)
 - The restricted shell and SFTP handler
 - The MCP server
+- The `boxmunge` client published on PyPI (`cli/`)
+- The public update-discovery service (`services/version-check/`)
 
 Out of scope:
 - Third-party dependencies (report to their maintainers, but let us know if it affects boxmunge)
 - Vulnerabilities in user-authored application code or its dependencies. boxmunge applies container-level hardening by default; see `docs/on-server/SECURITY.md` for the model.
+
+## Contributions and the security floor
+
+boxmunge does not merge changes that lower its default security posture. Capabilities that add
+attack surface are offered as explicit opt-in choices or plugins instead. See the principles in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Supported Versions
 

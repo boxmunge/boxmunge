@@ -1,6 +1,5 @@
 """Tests for progress marker parsing and rendering."""
 
-import pytest
 
 from boxmunge_cli.server_setup.progress import parse_marker, render_progress_bar
 

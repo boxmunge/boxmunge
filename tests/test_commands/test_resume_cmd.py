@@ -1,6 +1,6 @@
 """Tests for boxmunge resume."""
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import yaml
 
 from boxmunge.paths import BoxPaths

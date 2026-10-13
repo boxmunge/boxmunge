@@ -24,7 +24,7 @@ BUNDLE_STAGED_DIRS  := $(BUNDLE_DIRS) $(foreach pair,$(BUNDLE_RENAMED_DIRS),$(wo
 BUNDLE_SRC_DIRS     := $(BUNDLE_DIRS) $(foreach pair,$(BUNDLE_RENAMED_DIRS),$(word 1,$(subst =, ,$(pair))))
 BUNDLE_DEPS         := $(shell find $(BUNDLE_SRC_DIRS) -type f 2>/dev/null) $(BUNDLE_TOP_FILES)
 
-.PHONY: bundle installer test test-integration test-all clean
+.PHONY: bundle installer test test-cli test-integration test-all lint clean
 
 bundle: $(BUNDLE)
 
@@ -60,8 +60,14 @@ $(BUNDLE): $(BUNDLE_DEPS)
 test:
 	python3 -m pytest tests/ -v --ignore=tests/integration
 
+test-cli:
+	cd cli && python3 -m pytest tests -v
+
 test-integration:
 	python3 -m pytest tests/integration/ -v
+
+lint:
+	ruff check src tests cli/src cli/tests
 
 test-all:
 	python3 -m pytest tests/ -v
@@ -82,3 +88,4 @@ lock:
 	pip-compile --generate-hashes --extra=mcp -o requirements-mcp.txt pyproject.toml
 	pip-compile --generate-hashes --allow-unsafe -o requirements-dev.txt requirements-dev.in
 	pip-compile --generate-hashes -o cli/requirements.txt cli/pyproject.toml
+	pip-compile --generate-hashes --strip-extras --allow-unsafe -o cli/requirements-publish.txt cli/requirements-publish.in

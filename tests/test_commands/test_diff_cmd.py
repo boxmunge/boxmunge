@@ -1,9 +1,6 @@
 """Tests for boxmunge diff command."""
 import tarfile
-import pytest
-from pathlib import Path
 from boxmunge.commands.diff_cmd import run_diff
-from boxmunge.paths import BoxPaths
 
 MANIFEST_V1 = """\
 id: 01TEST

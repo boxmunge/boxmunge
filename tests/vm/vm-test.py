@@ -534,7 +534,6 @@ def phase_2_deploy_v1(work_dir: Path):
                           key=lambda f: f.stat().st_mtime)
     if not bundle_files:
         # Check temp dirs
-        import glob
         bundle_files = sorted(Path(tempfile.gettempdir()).glob("*/boxmunge-canary-*.tar.gz"),
                               key=lambda f: f.stat().st_mtime)
     if not bundle_files:

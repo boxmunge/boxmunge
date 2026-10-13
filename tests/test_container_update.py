@@ -1,5 +1,4 @@
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import pytest
 import yaml
 from boxmunge.paths import BoxPaths
@@ -140,7 +139,7 @@ class TestUpdateTarget:
     def test_no_change_when_digests_unchanged(
         self, mock_wait, mock_capture, mock_up, mock_pull, mock_image_digest, paths
     ):
-        from boxmunge.container_update import update_target, UpdateTarget
+        from boxmunge.container_update import update_target
         target = UpdateTarget(
             name="caddy", project_dir=paths.caddy,
             compose_files=["compose.yml"], strategy="leave_broken",
@@ -160,7 +159,7 @@ class TestUpdateTarget:
     def test_succeeds_on_digest_change_and_healthy(
         self, mock_wait, mock_capture, mock_up, mock_pull, mock_image_digest, paths
     ):
-        from boxmunge.container_update import update_target, UpdateTarget
+        from boxmunge.container_update import update_target
         target = UpdateTarget(
             name="caddy", project_dir=paths.caddy,
             compose_files=["compose.yml"], strategy="leave_broken",
@@ -178,7 +177,7 @@ class TestUpdateTarget:
     @patch("boxmunge.container_update.compose_pull", side_effect=__import__("boxmunge.docker", fromlist=["DockerError"]).DockerError("network"))
     @patch("boxmunge.container_update._capture_service_digests")
     def test_failed_when_pull_fails(self, mock_capture, mock_pull, paths):
-        from boxmunge.container_update import update_target, UpdateTarget
+        from boxmunge.container_update import update_target
         target = UpdateTarget(
             name="caddy", project_dir=paths.caddy,
             compose_files=["compose.yml"], strategy="leave_broken",
@@ -208,7 +207,7 @@ class TestUpdateTarget:
         must NOT attempt a pull.
         """
         from boxmunge.container_update import (
-            update_target, UpdateTarget, read_target_state,
+            update_target, read_target_state,
         )
         target = UpdateTarget(
             name="buildonly", project_dir=paths.projects / "buildonly",
@@ -229,7 +228,7 @@ class TestUpdateTarget:
     def test_leave_broken_strategy_does_not_rollback(
         self, mock_wait, mock_capture, mock_up, mock_pull, mock_image_digest, paths
     ):
-        from boxmunge.container_update import update_target, UpdateTarget
+        from boxmunge.container_update import update_target
         target = UpdateTarget(
             name="caddy", project_dir=paths.caddy,
             compose_files=["compose.yml"], strategy="leave_broken",
@@ -255,7 +254,7 @@ class TestUpdateTarget:
     def test_rollback_strategy_retags_and_recreates(
         self, mock_wait, mock_capture, mock_up, mock_pull, mock_tag, mock_image_digest, paths
     ):
-        from boxmunge.container_update import update_target, UpdateTarget
+        from boxmunge.container_update import update_target
         target = UpdateTarget(
             name="caddy", project_dir=paths.caddy,
             compose_files=["compose.yml"], strategy="rollback_to_previous",
@@ -283,7 +282,7 @@ class TestUpdateTarget:
     def test_backup_runs_first_when_target_has_backup(
         self, mock_capture, mock_pull, mock_backup, mock_image_digest, paths
     ):
-        from boxmunge.container_update import update_target, UpdateTarget
+        from boxmunge.container_update import update_target
         _write_project(paths, "stateful", with_backup=True)
         target = UpdateTarget(
             name="stateful", project_dir=paths.project_dir("stateful"),
@@ -299,7 +298,7 @@ class TestUpdateTarget:
     @patch("boxmunge.container_update.run_backup", return_value=1)
     @patch("boxmunge.container_update.compose_pull")
     def test_aborts_when_backup_fails(self, mock_pull, mock_backup, paths):
-        from boxmunge.container_update import update_target, UpdateTarget
+        from boxmunge.container_update import update_target
         _write_project(paths, "stateful", with_backup=True)
         target = UpdateTarget(
             name="stateful", project_dir=paths.project_dir("stateful"),
@@ -314,7 +313,7 @@ class TestUpdateTarget:
 
 class TestContainerNameFallback:
     def test_uses_hyphens_for_compose_v2(self, paths):
-        from boxmunge.container_update import _services_with_image, UpdateTarget
+        from boxmunge.container_update import _services_with_image
         pdir = paths.project_dir("myapp")
         pdir.mkdir(parents=True)
         (pdir / "compose.yml").write_text(
@@ -352,7 +351,7 @@ class TestUpdateTargetSkipsQuarantined:
     def test_quarantined_project_returns_quarantined_status(
         self, mock_backup, mock_up, mock_pull, paths,
     ):
-        from boxmunge.container_update import update_target, UpdateTarget
+        from boxmunge.container_update import update_target
         _write_project(paths, "quar-app")
         # Mark CVE-quarantined.
         paths.project_quarantine_state("quar-app").parent.mkdir(
@@ -382,7 +381,7 @@ class TestUpdateTargetSkipsQuarantined:
     ):
         """Caddy targets must continue updating regardless — quarantine state
         applies to user projects only."""
-        from boxmunge.container_update import update_target, UpdateTarget
+        from boxmunge.container_update import update_target
         target = UpdateTarget(
             name="caddy", project_dir=paths.caddy,
             compose_files=["compose.yml"], strategy="leave_broken",
@@ -402,7 +401,7 @@ class TestUpdateTargetSkipsQuarantined:
 
 class TestPersistResult:
     def test_persist_no_change_preserves_previous_digests(self, paths):
-        from boxmunge.container_update import _persist_result, UpdateTarget, write_target_state, read_target_state
+        from boxmunge.container_update import _persist_result, write_target_state, read_target_state
         paths.container_update_state.mkdir(parents=True)
         # Existing state has a genuine previous_digests from an earlier update
         write_target_state(paths, "caddy", {

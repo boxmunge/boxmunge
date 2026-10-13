@@ -2,7 +2,6 @@
 
 import json
 import sys
-from pathlib import Path
 
 from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
 from boxmunge.paths import BoxPaths

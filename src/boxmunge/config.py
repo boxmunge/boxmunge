@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Load and validate the host configuration file (boxmunge.yml)."""
 
-from pathlib import Path
 from typing import Any
 
 import yaml

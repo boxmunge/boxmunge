@@ -1,7 +1,6 @@
 """Tests for boxmunge.writable_diagnostics — log scanner + hint formatter."""
 from pathlib import Path
 
-import pytest
 
 from boxmunge.writable import WritableState
 from boxmunge.writable_diagnostics import (
@@ -374,10 +373,6 @@ class TestEnrichFailureWithWritableHint:
 
     def test_external_service_unchanged(self, tmp_path: Path) -> None:
         """Operator owns writability — hint would mislead."""
-        logs = (
-            'nginx: [emerg] mkdir() "/x" failed '
-            '(30: Read-only file system)\n'
-        )
         # log_fetcher should NEVER be called for external services.
         def _fetch(svc):
             raise AssertionError(f"unexpected fetch for {svc!r}")

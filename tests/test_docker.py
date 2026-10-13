@@ -5,9 +5,8 @@ import os
 import threading
 import time
 from pathlib import Path
-from unittest.mock import patch, call, MagicMock
+from unittest.mock import patch, MagicMock
 
-import pytest
 
 from boxmunge.docker import (
     compose_stop,
