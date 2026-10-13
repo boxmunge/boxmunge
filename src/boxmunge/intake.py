@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from boxmunge.bundle import extract_bundle
+from boxmunge.bundle import check_bundle_contents, extract_bundle
 from boxmunge.compose_validate import ComposeSecurityError, validate_user_compose
 from boxmunge.identity import check_project_identity
 from boxmunge.log import log_error
@@ -66,11 +66,19 @@ def incoming_workspace(paths: BoxPaths, project_name: str) -> Iterator[Path]:
 
 
 def extract_candidate(bundle_path: Path, workspace: Path) -> Path:
-    """Extract a bundle into the workspace and return its project tree."""
+    """Extract a bundle into the workspace and apply the content policy.
+
+    Returns the project tree. A bundle carrying box-owned state
+    (secrets.env, security/, data/, backups/) is refused here.
+    """
     try:
-        return extract_bundle(bundle_path, workspace)
+        tree = extract_bundle(bundle_path, workspace)
+        notes = check_bundle_contents(tree)
     except ValueError as e:
         raise IntakeError(str(e)) from e
+    for note in notes:
+        print(f"  {note}")
+    return tree
 
 
 def validate_release_tree(

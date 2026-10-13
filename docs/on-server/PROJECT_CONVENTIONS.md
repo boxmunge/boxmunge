@@ -26,6 +26,28 @@ Each project lives at `/opt/boxmunge/projects/<project-name>/`. The directory st
   repo/                        # Git clone (source: git projects only)
 ```
 
+### What a bundle may contain
+
+A bundle carries the project's code and configuration: `manifest.yml`, `compose.yml`, `project.env`,
+`caddy.override.conf`, `boxmunge-scripts/`, build contexts, and anything else the project needs.
+
+Some entries belong to the server, and a bundle that carries any of them is refused before anything
+on the server changes (`ERROR:` naming each entry, exit 1):
+
+| Entry | Why the server owns it |
+|---|---|
+| `secrets.env` | Secrets are managed on the server with `secrets set` |
+| `security/` | CVE suppressions and their audit history, managed with `security suppress` / `unsuppress` |
+| `data/` | The project's live data |
+| `backups/` | Encrypted snapshots |
+| `repo/` | The clone of a git-sourced project |
+| `.releases/`, `compose.boxmunge*.yml`, `compose.staging-base.yml` | Written by boxmunge itself |
+
+An empty `data/`, `backups/` or `security/` directory (or one holding only empty `.gitkeep` / `.keep`
+files) carries nothing; it is ignored with a `NOTE`. A user bind-mount directory declared in the
+live `compose.yml` (for example `./uploads`) that already holds data is kept as it is; the bundle's
+copy of it is skipped with a `NOTE`.
+
 ---
 
 ## Manifest Format
@@ -468,10 +490,12 @@ If the project has any operator-reviewed CVE suppressions, they live in:
 <project>/security/suppressions.yml
 ```
 
-The file ships with the project bundle so the disposition trail travels
-with the project — every suppression carries its `cve`, `until`,
-`reason`, `reviewed_by`, and `added` fields. Schema and field
-requirements are defined in CVE_POLICY.md (`agent-help cve`).
+The file is server-side state, next to its history file
+(`suppressions.history.yml`). Every suppression carries its `cve`,
+`until`, `reason`, `reviewed_by`, and `added` fields. Schema and field
+requirements are defined in CVE_POLICY.md (`agent-help cve`). A bundle
+that carries a `security/` directory is refused, so a redeploy can never
+replace the server's suppressions or erase their history.
 
 **Do not edit `suppressions.yml` manually.** It is managed exclusively
 by:
