@@ -5,7 +5,7 @@ Flow: stash -> migrate manifests -> regenerate configs -> reload Caddy ->
 restart projects -> self-test -> health -> report.
 
 Dispatch modes:
-  --dry-run   validate manifests + config regeneration; no writes to state
+  --dry-run   render migrated manifests + configs in memory; writes nothing
   --apply     migrate/regen/reload/restart/version-write only (shim handles
               stash, health, rollback externally)
   (default)   full six-step flow with stash, self-test, and health check
@@ -16,6 +16,7 @@ import sys
 from boxmunge.commands.health_cmd import run_health
 from boxmunge.commands.self_test_cmd import run_self_test
 from boxmunge.commands.upgrade_steps import (
+    check_upgrade,
     migrate_project_manifests,
     notify_locked_skips,
     regenerate_configs,
@@ -23,56 +24,25 @@ from boxmunge.commands.upgrade_steps import (
 )
 from boxmunge.docker import caddy_reload, DockerError
 from boxmunge.log import log_operation, log_error
-from boxmunge.manifest import load_manifest, ManifestError, CURRENT_SCHEMA_VERSION
-from boxmunge.migration import migrate_manifest, MigrationError
 from boxmunge.paths import BoxPaths
 from boxmunge.stash import create_stash, prune_stashes
 from boxmunge.version import read_installed_version, write_installed_version, get_build_version, parse_version_string
 
 
 def _run_dry(paths: BoxPaths) -> int:
-    """Validate manifest migrations and config regeneration without touching state.
-
-    Config files (Caddy/compose) are generated files; writing them here is safe
-    because the real upgrade will regenerate them anyway.
-    Returns 0 if no exceptions, 1 on error.
-    """
+    """Pre-flight for the shim: render every project's migrated manifest and
+    configs in memory. Writes, locks and logs nothing. Returns 0 if --apply
+    would get through migration and regeneration, 1 otherwise."""
     print("boxmunge upgrade --dry-run")
     print("==========================\n")
-
-    print("[1/2] Validating manifest migrations...")
-    if paths.projects.exists():
-        for project_dir in sorted(paths.projects.iterdir()):
-            if not project_dir.is_dir():
-                continue
-            manifest_path = project_dir / "manifest.yml"
-            if not manifest_path.exists():
-                continue
-            try:
-                manifest = load_manifest(manifest_path)
-            except ManifestError:
-                continue
-            source_version = manifest.get("schema_version", 1)
-            if source_version == CURRENT_SCHEMA_VERSION:
-                print(f"  {project_dir.name}: up to date")
-                continue
-            try:
-                migrate_manifest(manifest, CURRENT_SCHEMA_VERSION)
-                print(f"  {project_dir.name}: migration OK (schema v{source_version} -> v{CURRENT_SCHEMA_VERSION})")
-            except MigrationError as e:
-                print(f"  {project_dir.name}: ERROR: {e}")
-                return 1
-    print("  OK")
-
-    print("[2/2] Validating config regeneration...")
     try:
-        regenerate_configs(paths)
-        print("  OK")
+        report = check_upgrade(paths)
     except Exception as e:
         print(f"  ERROR: {e}", file=sys.stderr)
         return 1
-
-    print("\nDry-run complete. No state was modified.")
+    for line in report:
+        print(f"  {line}")
+    print("\nDry-run complete. Nothing was written.")
     return 0
 
 
@@ -263,8 +233,8 @@ routed through the root-context bash shim which handles stash + venv swap +
 probation. The flags below are for the shim and direct invocations only.
 
 Flags:
-  --dry-run         Validate manifest migrations and config regeneration
-                    without modifying state. Used for pre-flight checks.
+  --dry-run         Render manifest migrations and configs in memory and
+                    report; writes nothing. The shim's pre-flight check.
   --apply           Migrate/regen/reload/restart only. The shim calls this
                     after creating its own stash; do not use directly.
   --skip-self-test  Skip the post-upgrade self-test step.

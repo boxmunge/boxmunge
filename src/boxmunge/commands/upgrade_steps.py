@@ -2,23 +2,59 @@
 """Per-project steps of a platform upgrade.
 
 migrate manifests -> regenerate configs -> (Caddy reload) -> restart projects.
-upgrade_cmd sequences these for --dry-run, --apply and the full flow.
+upgrade_cmd sequences these for --apply and the full flow; check_upgrade is
+the write-nothing rendering behind --dry-run.
 """
+
+from pathlib import Path
+from typing import Any, Iterator
 
 import yaml
 
-from boxmunge.caddy import prepare_caddy_config
-from boxmunge.compose import prepare_compose_override
+from boxmunge.caddy import generate_caddy_config, prepare_caddy_config
+from boxmunge.compose import generate_compose_override, load_user_compose, prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.docker import compose_up, DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
-from boxmunge.manifest import load_manifest, validate_manifest, ManifestError, CURRENT_SCHEMA_VERSION
+from boxmunge.manifest import load_manifest, validate_manifest, CURRENT_SCHEMA_VERSION
 from boxmunge.migration import migrate_manifest, MigrationError
 from boxmunge.pause import render_maintenance_caddy_config
 from boxmunge.paths import BoxPaths
 from boxmunge.security_overlay import services_with_off_profile
+
+
+def _project_manifests(paths: BoxPaths) -> Iterator[tuple[Path, dict[str, Any]]]:
+    """Yield (project_dir, manifest) for every project that has a manifest.
+
+    ManifestError propagates. A corrupted manifest means the project never
+    gets its schema bumped or overlay regenerated; skipping it would let the
+    upgrade report success over a stale project. The shim rolls back instead.
+    """
+    if not paths.projects.exists():
+        return
+    for project_dir in sorted(paths.projects.iterdir()):
+        manifest_path = project_dir / "manifest.yml"
+        if project_dir.is_dir() and manifest_path.exists():
+            yield project_dir, load_manifest(manifest_path)
+
+
+def _migrated(project_dir: Path, manifest: dict[str, Any]) -> dict[str, Any] | None:
+    """The manifest migrated to the current schema and validated, or None if
+    it is already current. Raises MigrationError if the result is invalid:
+    a migration that produces a malformed manifest is a bug, and persisting
+    it would only move the failure to the next deploy."""
+    if manifest.get("schema_version", 1) == CURRENT_SCHEMA_VERSION:
+        return None
+    migrated = migrate_manifest(manifest, CURRENT_SCHEMA_VERSION)
+    errors, _ = validate_manifest(migrated, expected_name=project_dir.name)
+    if errors:
+        raise MigrationError(
+            f"Migrated manifest for {project_dir.name} failed validation. "
+            f"Errors: {'; '.join(errors)}"
+        )
+    return migrated
 
 
 def migrate_project_manifests(paths: BoxPaths) -> list[str]:
@@ -26,148 +62,138 @@ def migrate_project_manifests(paths: BoxPaths) -> list[str]:
 
     Returns list of project names that were migrated.
     """
-    migrated = []
-    if not paths.projects.exists():
-        return migrated
-
-    for project_dir in sorted(paths.projects.iterdir()):
-        if not project_dir.is_dir():
+    migrated_names = []
+    for project_dir, manifest in _project_manifests(paths):
+        try:
+            migrated = _migrated(project_dir, manifest)
+        except MigrationError as e:
+            log_error("upgrade", f"{e}. Original manifest left in place.",
+                      paths, project=project_dir.name)
+            raise
+        if migrated is None:
             continue
-        manifest_path = project_dir / "manifest.yml"
-        if not manifest_path.exists():
-            continue
-
-        # ManifestError and MigrationError both propagate. A corrupted manifest
-        # means this project never gets its schema bumped or overlay regenerated;
-        # silently skipping would let the upgrade report success while leaving
-        # the project in a stale/broken state. Raise instead — the shim will
-        # roll back to the previous slot.
-        manifest = load_manifest(manifest_path)
-
-        source_version = manifest.get("schema_version", 1)
-        if source_version == CURRENT_SCHEMA_VERSION:
-            continue
-
-        migrated_manifest = migrate_manifest(manifest, CURRENT_SCHEMA_VERSION)
-
-        # Validate the migrated manifest BEFORE writing it.
-        # A migration that produces invalid output is a real bug — fail noisily
-        # rather than persisting a malformed manifest the operator will hit
-        # later at deploy time.
-        errors, _ = validate_manifest(migrated_manifest, expected_name=project_dir.name)
-        if errors:
-            log_error(
-                "upgrade",
-                f"Migrated manifest for {project_dir.name} failed validation: "
-                f"{'; '.join(errors)}. Original manifest left in place.",
-                paths, project=project_dir.name,
-            )
-            raise MigrationError(
-                f"Migrated manifest for {project_dir.name} failed validation. "
-                f"Errors: {'; '.join(errors)}"
-            )
-
         atomic_write_text(
-            manifest_path,
-            yaml.dump(migrated_manifest, default_flow_style=False, sort_keys=False),
+            project_dir / "manifest.yml",
+            yaml.dump(migrated, default_flow_style=False, sort_keys=False),
         )
-        migrated.append(project_dir.name)
+        migrated_names.append(project_dir.name)
+    return migrated_names
 
-    return migrated
+
+def _compose_accepted(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> bool:
+    """Validate the user compose.yml against silent-floor-defeating keys.
+
+    A hostile compose.yml that slipped in before validation must not get a
+    fresh overlay from an upgrade; the project keeps its existing configs.
+    """
+    off_services = {svc for svc, _ in services_with_off_profile(manifest)}
+    try:
+        validate_user_compose(
+            paths.project_compose(name), paths,
+            off_services=off_services,
+            project_name=name,
+            cve_policy=manifest.get("security"),
+            manifest_services=manifest.get("services"),
+        )
+    except ComposeSecurityError as e:
+        log_error("upgrade", f"Compose validation rejected during regen: {e}",
+                  paths, project=name)
+        return False
+    return True
+
+
+def _write_maintenance_site(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> None:
+    hosts = manifest.get("hosts", [])
+    if not hosts:
+        return
+    try:
+        atomic_write_text(paths.project_caddy_site(name),
+                          render_maintenance_caddy_config(hosts), mode=0o644)
+    except (OSError, ValueError) as e:
+        log_warning(
+            "upgrade",
+            f"Failed to re-render maintenance Caddy config for {name}: {e}",
+            paths, project=name,
+        )
+
+
+def _regenerate_project(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> bool:
+    """Write one project's Caddy site config and compose overlay. Returns
+    True if live configs were regenerated."""
+    # A paused or CVE-quarantined project is deliberately offline. Its Caddy
+    # fragment must stay the maintenance page: regenerating live routing
+    # would send visitors to stopped upstreams (502) instead of the page the
+    # operator chose. Re-render the maintenance page (so a template change
+    # still reaches it) and leave the overlay alone; resume and security
+    # resume regenerate both when the project comes back.
+    block = is_blocked(name, paths)
+    if block:
+        _write_maintenance_site(paths, name, manifest)
+        log_operation("upgrade", block.skip_message, paths, project=name)
+        return False
+    if not _compose_accepted(paths, name, manifest):
+        return False
+    try:
+        prepare_caddy_config(paths, manifest)
+        prepare_compose_override(paths, manifest, component="upgrade")
+        return True
+    except Exception as e:
+        log_warning(
+            "upgrade", f"Failed to regenerate configs for {name}: {e}",
+            paths, project=name,
+        )
+        return False
 
 
 def regenerate_configs(paths: BoxPaths) -> list[str]:
-    """Re-generate Caddy and compose overlay configs for all projects.
+    """Re-generate Caddy and compose overlay configs for all projects, each
+    under its project lock. A project whose lock is held is left alone: the
+    operation holding it (a deploy, say) writes its own configs.
 
-    Returns list of project names processed.
+    Returns list of project names whose live configs were regenerated.
     """
     processed = []
-    if not paths.projects.exists():
-        return processed
-
-    for project_dir in sorted(paths.projects.iterdir()):
-        if not project_dir.is_dir():
-            continue
-        manifest_path = project_dir / "manifest.yml"
-        if not manifest_path.exists():
-            continue
-
+    for project_dir, manifest in _project_manifests(paths):
+        name = manifest.get("project", project_dir.name)
         try:
-            manifest = load_manifest(manifest_path)
-        except ManifestError:
-            continue
-
-        project_name = manifest.get("project", project_dir.name)
-
-        # A CVE-quarantined project must NOT have its normal Caddy
-        # site fragment overwritten by a platform upgrade — that would
-        # silently restore routing to a stopped (or about-to-be-restored)
-        # project the operator deliberately took offline. Re-render the
-        # maintenance fragment instead so the quarantine UX persists
-        # through the upgrade. Compose overlay regen is skipped — the
-        # containers stay stopped until `boxmunge security resume`.
-        # Pause is intentionally NOT short-circuited here: historical
-        # behavior is to regenerate normal configs for paused projects
-        # too. Pause's own Caddy fragment is written on resume.
-        block = is_blocked(project_name, paths)
-        if block and block.reason is BlockReason.QUARANTINED:
-            hosts = manifest.get("hosts", [])
-            if hosts:
-                try:
-                    site_conf = render_maintenance_caddy_config(hosts)
-                    paths.project_caddy_site(project_name).parent.mkdir(
-                        parents=True, exist_ok=True,
-                    )
-                    atomic_write_text(
-                        paths.project_caddy_site(project_name),
-                        site_conf, mode=0o644,
-                    )
-                except (OSError, ValueError) as e:
-                    log_warning(
-                        "upgrade",
-                        f"Failed to re-render maintenance Caddy config "
-                        f"for quarantined {project_name}: {e}",
-                        paths, project=project_name,
-                    )
-            log_operation(
-                "upgrade", block.skip_message,
-                paths, project=project_name,
-            )
-            continue
-
-        # Validate user compose.yml against silent-floor-defeating keys
-        # BEFORE regenerating the overlay. A hostile compose.yml that
-        # slipped in pre-validation must not survive an upgrade.
-        off_services = {svc for svc, _ in services_with_off_profile(manifest)}
-        try:
-            validate_user_compose(
-                paths.project_compose(project_name), paths,
-                off_services=off_services,
-                project_name=project_name,
-                cve_policy=manifest.get("security"),
-                manifest_services=manifest.get("services"),
-            )
-        except ComposeSecurityError as e:
-            log_error(
-                "upgrade",
-                f"Compose validation rejected during regen: {e}",
-                paths, project=project_name,
-            )
-            # Skip this project's regen — leave its existing configs in
-            # place. Upgrade should not silently produce a fresh overlay
-            # over a hostile user compose.yml.
-            continue
-        try:
-            prepare_caddy_config(paths, manifest)
-            prepare_compose_override(paths, manifest, component="upgrade")
-            processed.append(project_name)
-        except Exception as e:
+            with project_lock(name, paths):
+                if _regenerate_project(paths, name, manifest):
+                    processed.append(name)
+        except LockError:
             log_warning(
-                "upgrade", f"Failed to regenerate configs for {project_name}: {e}",
-                paths, project=project_name,
+                "upgrade",
+                f"Skipped config regeneration for {name} — held by another "
+                f"operation, which writes its own configs",
+                paths, project=name,
             )
-
     return processed
+
+
+def check_upgrade(paths: BoxPaths) -> list[str]:
+    """Dry run of migrate + regenerate: everything is rendered in memory and
+    nothing is written, locked or logged. Raises on anything that would make
+    --apply fail. Returns one report line per project."""
+    report = []
+    for project_dir, manifest in _project_manifests(paths):
+        name = manifest.get("project", project_dir.name)
+        migrated = _migrated(project_dir, manifest)
+        if migrated is not None:
+            report.append(f"{name}: migration OK (schema v{manifest.get('schema_version', 1)} "
+                          f"-> v{CURRENT_SCHEMA_VERSION})")
+            manifest = migrated
+        block = is_blocked(name, paths)
+        if block:
+            if manifest.get("hosts"):
+                render_maintenance_caddy_config(manifest["hosts"])
+            report.append(f"{name}: {block.reason.value}; keeps its maintenance page")
+            continue
+        if not paths.project_caddy_override(name).exists():
+            generate_caddy_config(manifest)
+        generate_compose_override(
+            manifest, user_compose=load_user_compose(paths.project_compose(name)),
+        )
+        report.append(f"{name}: configs render OK")
+    return report
 
 
 def notify_locked_skips(paths: BoxPaths, skipped_locked: list[str]) -> None:

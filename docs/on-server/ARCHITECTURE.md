@@ -353,7 +353,9 @@ See `agent-help writable` and `PROJECT_CONVENTIONS.md` for the schema reference.
 
 - `self-test` — deploys a canary project, exercises backup/restore, tears down. Proves the pipeline works.
 - `health` — non-destructive audit of Docker, Caddy, containers, permissions, config drift, hardening state, and recent errors.
-- `upgrade` — stash current state, migrate manifests, regenerate configs, restart, self-test, health check.
+- `upgrade` — stash current state, migrate manifests, regenerate configs (paused and quarantined projects keep
+  their maintenance page), restart, self-test, health check. `upgrade --dry-run` renders all of this in memory
+  and writes nothing.
 
 ## CVE Policy Module
 

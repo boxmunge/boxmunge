@@ -474,6 +474,7 @@ Containers are stopped via `docker compose stop`, so state is preserved on disk 
 - Health checks, scheduled backups, and container-update sweeps skip the project
 - `prod-deploy`, `stage`, and `promote` refuse to run against it
 - `backup-sync` continues (it only copies; existing off-box snapshots are never removed)
+- Platform upgrades keep it paused: the maintenance page stays in place and the containers stay stopped
 
 To bring it back:
 
@@ -847,6 +848,10 @@ sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist 0.11.1  # forget a faile
 ```
 
 Neither is available from the deploy shell or MCP.
+
+`upgrade --dry-run` renders every project's migrated manifest and configs in memory and
+reports what the upgrade would do. It writes nothing; the upgrade shim runs it as a
+pre-flight check against the new release before touching anything.
 
 ## Querying Logs
 
