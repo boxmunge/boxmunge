@@ -96,3 +96,19 @@ class TestRunDiff:
         assert result == 0
         output = capsys.readouterr().out
         assert "no changes" in output.lower() or "identical" in output.lower()
+
+
+class TestDiffIgnoresBoxState:
+    def test_release_workspace_and_suppressions_not_listed(self, paths, capsys):
+        from boxmunge.commands.diff_cmd import _compare_dirs
+        current = paths.root / "current"
+        incoming = paths.root / "incoming"
+        for d in (current, incoming):
+            d.mkdir()
+            (d / "manifest.yml").write_text("x")
+        (current / ".releases" / "previous").mkdir(parents=True)
+        (current / ".releases" / "previous" / "manifest.yml").write_text("old")
+        (current / "security").mkdir()
+        (current / "security" / "suppressions.yml").write_text("s")
+        changed, added, removed = _compare_dirs(current, incoming)
+        assert removed == []

@@ -399,13 +399,33 @@ test-restore myapp
 
 ## Rolling Back
 
-Undo the last deploy -- restore the pre-deploy snapshot and redeploy the previous state:
+Undo the last deploy -- put back the previous release's code and the data snapshot taken just
+before the deploy replaced it:
 
 ```
 rollback myapp
 ```
 
-You will be shown what snapshot will be restored and asked to confirm before anything changes.
+You will be shown the release and the snapshot that will be restored, and asked to confirm before
+anything changes (`--yes` skips the prompt).
+
+How it works for a bundle project: every deploy that replaces a release keeps the outgoing code in
+`projects/<project>/.releases/previous/`, with `previous.json` recording its bundle name and the
+pre-deploy data snapshot. Rollback validates that release again (manifest, identity, compose
+hardening), installs it, restores the snapshot, and starts it. Secrets, suppressions, `data/` and
+`backups/` are never part of a release, so they are not rolled back. For a promoted staging
+release, the previous release is the production release that `stage` displaced. A git project
+restores the snapshot and checks out the previous ref.
+
+Rollback refuses, with the reason, instead of doing half a rollback:
+
+- after a first deploy, or once a rollback has used the previous release (there is no older release
+  to go back to; deploy a known-good bundle instead);
+- when the project has backups configured but no snapshot was taken before the last deploy (the
+  backup failed or `--no-snapshot` was used), or that snapshot is no longer in `backups/`;
+- while a staged release is installed (`promote` or `unstage` first).
+
+A project with `backup.type: none` rolls back its code only.
 
 ---
 

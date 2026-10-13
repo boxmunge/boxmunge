@@ -1,4 +1,7 @@
-"""Shared bundle extraction, content policy, and file-copy helpers."""
+"""Bundle extraction and the bundle content policy.
+
+Installing a checked tree into a project lives in boxmunge.release.
+"""
 from __future__ import annotations
 
 import posixpath
@@ -6,7 +9,6 @@ import shutil
 import tarfile
 from pathlib import Path
 
-import yaml
 
 
 class BundleError(ValueError):
@@ -165,135 +167,3 @@ def check_bundle_contents(tree: Path) -> list[str]:
             + "\nRemove them from the bundle and upload it again."
         )
     return notes
-
-
-def _bind_mount_dir_names(project_dir: Path) -> set[str]:
-    """Top-level dirs the live compose.yml bind-mounts (``./uploads`` -> uploads).
-
-    These hold the project's own persistent data, so an install never
-    clobbers their live content. Best-effort: a missing or unparseable
-    compose.yml yields no names (the bundle's compose has already passed
-    validation; the live one is only consulted to protect its data).
-    """
-    names: set[str] = set()
-    compose_path = project_dir / "compose.yml"
-    if not compose_path.exists():
-        return names
-    try:
-        from boxmunge.compose import is_bind_mount
-
-        compose = yaml.safe_load(compose_path.read_text()) or {}
-        for svc in (compose.get("services") or {}).values():
-            if not isinstance(svc, dict):
-                continue
-            for vol in svc.get("volumes", []) or []:
-                if not isinstance(vol, str) or not is_bind_mount(vol):
-                    continue
-                host = vol.split(":")[0]
-                if host.startswith("./"):
-                    top = host.removeprefix("./").split("/", 1)[0]
-                    if top:
-                        names.add(top)
-    except (yaml.YAMLError, OSError):
-        pass
-    return names
-
-
-def _remove(path: Path) -> None:
-    """Remove a file, link or directory without following links."""
-    if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
-    elif path.exists() or path.is_symlink():
-        path.unlink()
-
-
-def _copy_entry(src: Path, dest: Path) -> None:
-    """Copy one entry, keeping links as links. dest must not exist."""
-    if src.is_dir() and not src.is_symlink():
-        shutil.copytree(src, dest, symlinks=True)
-    else:
-        shutil.copy2(src, dest, follow_symlinks=False)
-
-
-def _refresh_dir_in_place(src_dir: Path, dest_dir: Path) -> None:
-    """Mirror ``src_dir`` into an existing real ``dest_dir``, preserving its inode.
-
-    Deletes children of ``dest_dir`` that are not being replaced, then copies
-    the bundle's children in. The top-level ``dest_dir`` inode is never
-    recreated, so a live container bind-mounting it keeps resolving the mount
-    (see the caller's note on the stage/health-monitor prod outage). Nested
-    entries are not bind-mount roots, so they are replaced wholesale.
-    """
-    for child in dest_dir.iterdir():
-        _remove(child)
-    for child in src_dir.iterdir():
-        _copy_entry(child, dest_dir / child.name)
-
-
-def install_entry(item: Path, dest_item: Path) -> None:
-    """Install one top-level release entry over whatever is at dest_item.
-
-    Links are never followed, on either side: a link in the old release is
-    replaced, not written through, and a link in the release is installed as
-    a link (the bundle check guarantees it stays inside the project).
-    """
-    if item.is_dir() and not item.is_symlink() \
-            and dest_item.is_dir() and not dest_item.is_symlink():
-        # Refresh contents in place rather than rmtree+copytree: a
-        # still-running container (e.g. prod during a `stage`) may
-        # bind-mount this dir, and Docker resolves a bind mount to the
-        # directory inode at container start. Replacing the directory
-        # gives it a new inode and severs the live mount — the classic
-        # symptom being boxmunge-scripts/smoke.sh vanishing inside the
-        # running prod container, failing its smoke check, and the
-        # health monitor stopping prod. Preserve the inode.
-        _refresh_dir_in_place(item, dest_item)
-        return
-    _remove(dest_item)
-    _copy_entry(item, dest_item)
-
-
-def make_scripts_executable(entries: list[Path]) -> None:
-    """chmod +x every real ``*.sh`` file in the given installed entries."""
-    for entry in entries:
-        if entry.is_symlink():
-            continue
-        scripts = entry.rglob("*.sh") if entry.is_dir() else [entry]
-        for sh_file in scripts:
-            if sh_file.suffix == ".sh" and sh_file.is_file() and not sh_file.is_symlink():
-                sh_file.chmod(sh_file.stat().st_mode | 0o755)
-
-
-def copy_project_files(src: Path, dest: Path, is_upgrade: bool) -> None:
-    """Copy a checked release tree into the project directory.
-
-    Box-owned entries (secrets.env, security/, data/, backups/) are never
-    written: a tree carrying one raises BundleError before anything is
-    copied. On upgrade, a user bind-mount dir (``./uploads``) that already
-    holds live data is kept and the bundle's copy is skipped with a note.
-    """
-    forbidden = sorted(
-        e.name for e in src.iterdir()
-        if e.name in BOX_OWNED_ENTRIES or e.name in BOXMUNGE_ENTRIES
-    )
-    if forbidden:
-        raise BundleError(f"Release tree carries box-owned entries: {forbidden}")
-    preserved = _bind_mount_dir_names(dest) if is_upgrade else set()
-
-    installed: list[Path] = []
-    for item in src.iterdir():
-        dest_item = dest / item.name
-        if item.name in preserved and dest_item.is_dir() \
-                and not dest_item.is_symlink() and any(dest_item.iterdir()):
-            # Live persistent data present — never overwrite it. An empty
-            # dir has never held data, so it is seeded like any other.
-            print(f"  NOTE: kept the server's {item.name}/ (it holds live "
-                  f"data); the bundle's {item.name}/ was not installed")
-            continue
-        install_entry(item, dest_item)
-        installed.append(dest_item)
-
-    # Ensure required subdirectories exist
-    (dest / "backups").mkdir(exist_ok=True)
-    (dest / "data").mkdir(exist_ok=True)
-    make_scripts_executable(installed)

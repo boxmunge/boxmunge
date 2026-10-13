@@ -31,6 +31,12 @@ Each project lives at `/opt/boxmunge/projects/<project-name>/`. The directory st
 A bundle carries the project's code and configuration: `manifest.yml`, `compose.yml`, `project.env`,
 `caddy.override.conf`, `boxmunge-scripts/`, build contexts, and anything else the project needs.
 
+Each bundle deploy makes the project's code exactly the bundle: a file or directory the previous
+release had but the new bundle does not is removed (it stays in the previous-release copy that
+`rollback` restores). So anything the project needs on the server, including `project.env` and
+`caddy.override.conf`, must ship in every bundle. Server-owned entries (below), user bind-mount
+directories holding data, and `-staging` copies of them are never touched by a deploy.
+
 Some entries belong to the server, and a bundle that carries any of them is refused before anything
 on the server changes (`ERROR:` naming each entry, exit 1):
 

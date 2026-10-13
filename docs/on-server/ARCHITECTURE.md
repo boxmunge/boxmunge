@@ -51,6 +51,12 @@ Key features:
       backups/                # encrypted local backup archives
       data/                   # persistent volume mounts
       repo/                   # git clone (source: git projects only)
+      .releases/              # release workspace (managed by boxmunge)
+        incoming/             # a bundle being validated (transient)
+        previous/             # code of the release the last deploy replaced (rollback target)
+        previous.json         # its bundle name and pre-deploy data snapshot
+        prestage/             # production code displaced by `stage`, until promote/unstage
+        live.json             # bundle name of the installed release
   inbox/                      # uploaded bundles awaiting deployment
   state/                      # operational state (deploy:deploy 755)
     health/                   # per-project health state JSON
@@ -216,7 +222,7 @@ Secrets are never edited manually. The CLI handles file creation, permissions, a
 Operational state is stored as JSON files under `/opt/boxmunge/state/`:
 
 - `state/health/<project>.json` -- last check time, status, consecutive failure count, alert state, failure reason
-- `state/deploy/<project>.json` -- current ref/bundle, deploy timestamp, pre-deploy snapshot filename, recent history
+- `state/deploy/<project>.json` -- current ref (the bundle name, e.g. `myapp-2026-10-13T101500123456`, or the git commit), deploy timestamp, pre-deploy snapshot filename, recent history
 - `state/staging/<project>/` -- staging environment state
 
 All state writes are atomic: the new content is written to a temporary file in the same directory, then renamed into place with `os.rename()`. This prevents partial reads if a check or deploy runs concurrently.

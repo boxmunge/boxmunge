@@ -28,6 +28,8 @@ def manifest_text(project: str = "myapp", ulid: str = ULID, backup: str = "none"
         "      - path: /\n"
         "backup:\n"
         f"  type: {backup}\n"
+        + ("" if backup == "none" else
+           "  dump_command: dump.sh\n  restore_command: restore.sh\n")
     )
 
 

@@ -13,7 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from boxmunge.bundle import BundleError, check_bundle_contents, copy_project_files
+from boxmunge.bundle import BundleError, check_bundle_contents
+from boxmunge.release import install_release
 
 
 def _make_bundle(src: Path) -> None:
@@ -104,7 +105,7 @@ class TestBoxOwnedEntriesRefused:
         _live_project(dest)
         (dest / "secrets.env").write_text("REAL=secret\n")
         with pytest.raises(BundleError):
-            copy_project_files(src, dest, is_upgrade=True)
+            install_release(src, dest)
         assert (dest / "secrets.env").read_text() == "REAL=secret\n"
 
 
@@ -115,7 +116,7 @@ class TestInstall:
         _make_bundle(src)
         _live_project(dest)
 
-        copy_project_files(src, dest, is_upgrade=True)
+        install_release(src, dest)
 
         assert (dest / "data" / "app.db").read_text() == "PRODUCTION DATA"
         assert (dest / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
@@ -128,7 +129,7 @@ class TestInstall:
         (src / "uploads" / "default.png").write_text("SEED")
         _live_project(dest)
 
-        copy_project_files(src, dest, is_upgrade=True)
+        install_release(src, dest)
 
         assert not (dest / "uploads" / "default.png").exists()
         assert "uploads" in capsys.readouterr().out
@@ -143,7 +144,7 @@ class TestInstall:
         _live_project(dest)
         (dest / "uploads" / "photo.jpg").unlink()
 
-        copy_project_files(src, dest, is_upgrade=True)
+        install_release(src, dest)
 
         assert (dest / "uploads" / "default.png").read_text() == "SEED"
 
@@ -157,7 +158,7 @@ class TestInstall:
         _live_project(dest)
         (dest / "project.env").write_text("LOG_LEVEL=info\n")
 
-        copy_project_files(src, dest, is_upgrade=True)
+        install_release(src, dest)
 
         assert (dest / "project.env").read_text() == "LOG_LEVEL=debug\n"
 
@@ -167,7 +168,7 @@ class TestInstall:
         _make_bundle(src)
         dest.mkdir()
 
-        copy_project_files(src, dest, is_upgrade=False)
+        install_release(src, dest)
 
         assert (dest / "data").is_dir()
         assert (dest / "backups").is_dir()
@@ -187,7 +188,7 @@ class TestInstall:
         (dest / "boxmunge-scripts" / "smoke.sh").write_text("old")
         (dest / "boxmunge-scripts" / "stale.sh").write_text("stale")
 
-        copy_project_files(src, dest, is_upgrade=True)
+        install_release(src, dest)
 
         assert (dest / "boxmunge-scripts" / "smoke.sh").read_text() == "new"
         assert not (dest / "boxmunge-scripts" / "stale.sh").exists()
@@ -214,7 +215,7 @@ class TestInstall:
         (dest / "boxmunge-scripts" / "smoke.sh").write_text("old")
 
         inode_before = (dest / "boxmunge-scripts").stat().st_ino
-        copy_project_files(src, dest, is_upgrade=True)
+        install_release(src, dest)
         inode_after = (dest / "boxmunge-scripts").stat().st_ino
 
         assert inode_after == inode_before
@@ -228,7 +229,7 @@ class TestLinksAreNeverFollowed:
         _make_bundle(src)
         (src / "loop").symlink_to(".")
         dest.mkdir()
-        copy_project_files(src, dest, is_upgrade=False)
+        install_release(src, dest)
         assert (dest / "loop").is_symlink()
 
     def test_live_link_is_replaced_not_written_through(self, tmp_path: Path) -> None:
@@ -244,7 +245,7 @@ class TestLinksAreNeverFollowed:
         (dest / "scripts").symlink_to("data")
         (dest / "config.txt").symlink_to("data/app.db")
 
-        copy_project_files(src, dest, is_upgrade=True)
+        install_release(src, dest)
 
         assert (dest / "data" / "app.db").read_text() == "PRODUCTION DATA"
         assert not (dest / "scripts").is_symlink()

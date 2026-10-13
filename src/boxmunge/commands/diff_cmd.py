@@ -40,7 +40,7 @@ def _compare_dirs(current: Path, incoming: Path) -> tuple[list[str], list[str], 
         added.append(rel)
 
     # Skip boxmunge-generated files in removed list
-    skip_prefixes = ("backups/", "data/", "compose.boxmunge")
+    skip_prefixes = ("backups/", "data/", "security/", ".releases/", "compose.boxmunge")
     skip_exact = {"secrets.env"}
     for rel in sorted(current_files - incoming_files):
         if rel in skip_exact or any(rel.startswith(p) for p in skip_prefixes):

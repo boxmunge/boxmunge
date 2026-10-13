@@ -6,7 +6,6 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 from boxmunge.caddy import generate_staging_caddy_config
-from boxmunge.bundle import copy_project_files as _copy_project_files
 from boxmunge.compose import generate_staging_compose_base, generate_staging_compose_override
 from boxmunge.docker import compose_up, caddy_reload, DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
@@ -19,7 +18,8 @@ from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_error
 from boxmunge.project_registry import is_registered
 from boxmunge.security_warn import warn_off_services, warn_writable_state
-from boxmunge.source import SourceError, consume_bundle, resolve_bundle_source
+from boxmunge.release import install_release, keep_prestage_release, live_ref, mark_live
+from boxmunge.source import SourceError, bundle_ref, consume_bundle, resolve_bundle_source
 from boxmunge.state import write_state
 
 if TYPE_CHECKING:
@@ -48,8 +48,22 @@ def _intake_bundle(project_name: str, paths: BoxPaths, ref: str | None,
                 return 0
             if is_new:
                 print(f"Creating new project '{project_name}'")
-            project_dir.mkdir(parents=True, exist_ok=True)
-            _copy_project_files(tree, project_dir, is_upgrade=not is_new)
+            try:
+                # The production release stays recoverable: promote turns it
+                # into the previous release, unstage puts it back.
+                keep_prestage_release(paths, project_name, tree)
+            except (OSError, ValueError) as e:
+                print(f"ERROR: Keeping the production release failed: {e}. "
+                      f"Nothing was changed.", file=sys.stderr)
+                return 1
+            try:
+                install_release(tree, project_dir)
+                mark_live(paths, project_name, bundle_ref(bundle_path))
+            except (OSError, ValueError) as e:
+                print(f"ERROR: Installing the staged release failed: {e}. Run "
+                      f"'unstage {project_name}' to put production back.",
+                      file=sys.stderr)
+                return 1
     except IntakeError as e:
         return report_refusal(e)
 
@@ -206,9 +220,10 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
             print(f"  WARN: Smoke test {smoke_result.status}: {smoke_result.message}")
 
     # Record staging state
+    staged_ref = ref if (project_dir / "repo").exists() else live_ref(paths, project_name)
     write_state(paths.project_staging_state(project_name), {
         "active": True,
-        "ref": ref or "latest",
+        "ref": staged_ref or "latest",
     })
 
     staging_hosts = [f"staging.{h}" for h in manifest.get("hosts", [])]
@@ -220,7 +235,7 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
     log_operation("stage", "Staged", paths, project=project_name)
 
     from boxmunge.webhooks import webhook_safe
-    webhook_safe("stage", project_name, paths, details={"ref": ref or "latest"})
+    webhook_safe("stage", project_name, paths, details={"ref": staged_ref or "latest"})
 
     return 0
 

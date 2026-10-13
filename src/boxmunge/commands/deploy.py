@@ -4,11 +4,13 @@
 import shlex
 import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
-from boxmunge.bundle import copy_project_files
 from boxmunge.caddy import prepare_caddy_config
+from boxmunge.commands.deploy_steps import (
+    post_deploy_diagnostics, record_deploy_state, smoke_ok,
+    snapshot_live_release, take_pre_deploy_snapshot, update_repo,
+)
 from boxmunge.compose import prepare_compose_override
 from boxmunge.docker import compose_up, caddy_reload, DockerError
 from boxmunge.fileutil import project_lock, LockError
@@ -18,47 +20,17 @@ from boxmunge.intake import (
     validate_release_tree,
 )
 from boxmunge.lifecycle import is_blocked
-from boxmunge.log import log_operation, log_error, log_warning
+from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
+from boxmunge.release import (
+    ReleaseStateError, has_prestage, install_release, keep_previous_release,
+    live_ref, mark_live, prestage_to_previous,
+)
 from boxmunge.source import (
     SourceError, bundle_ref, consume_bundle, resolve_bundle_source,
 )
-from boxmunge.state import read_state, write_state
-
-
-def record_deploy_state(
-    paths: BoxPaths,
-    project_name: str,
-    ref: str,
-    snapshot: str | None,
-) -> None:
-    """Record a deploy in the state file, pushing previous to history."""
-    state_path = paths.project_deploy_state(project_name)
-    current = read_state(state_path)
-
-    history = current.get("history", [])
-    if "current_ref" in current:
-        history.insert(0, {
-            "ref": current["current_ref"],
-            "deployed_at": current.get("deployed_at", ""),
-            "snapshot": current.get("pre_deploy_snapshot", ""),
-        })
-        history = history[:10]
-
-    now_iso = datetime.now(timezone.utc).isoformat()
-    new_state = {
-        "current_ref": ref,
-        "deployed_at": now_iso,
-        # Drives the health-check grace window in health_state.update_health_state.
-        # Updated on resume too; spurious mid-startup smoke flakes get masked.
-        "last_started_at": now_iso,
-        "pre_deploy_snapshot": snapshot or "",
-        "history": history,
-    }
-
-    write_state(state_path, new_state)
 
 
 def _run_deploy_inner(
@@ -68,6 +40,7 @@ def _run_deploy_inner(
     no_snapshot: bool = False,
     dry_run: bool = False,
     component: str = "deploy",
+    staged: bool = False,
 ) -> int:
     """Inner deploy logic — caller must hold the project lock."""
     project_dir = paths.project_dir(project_name)
@@ -76,22 +49,42 @@ def _run_deploy_inner(
     # Git projects have a repo/ dir and pull their code in place. Bundle
     # projects take a release from the inbox.
     if not is_new and (project_dir / "repo").exists():
-        return _deploy_on_disk(project_name, paths, ref, no_snapshot,
-                               dry_run, component)
+        return _deploy_repo(project_name, paths, ref, no_snapshot, dry_run, component)
+
+    if staged:
+        return _promote_staged(project_name, paths, no_snapshot, dry_run, component)
+    if has_prestage(paths, project_name):
+        print(f"ERROR: '{project_name}' has a staged release installed. Run "
+              f"'promote {project_name}' to deploy it, or 'unstage "
+              f"{project_name}' to discard it, first.", file=sys.stderr)
+        return 1
 
     try:
         bundle_path = resolve_bundle_source(project_name, paths, ref=ref)
     except SourceError as e:
-        if is_new:
+        if is_new or ref:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
         print(f"No new bundle for '{project_name}' in the inbox; "
               f"redeploying the release already on disk.")
-        return _deploy_on_disk(project_name, paths, None, no_snapshot,
-                               dry_run, component)
+        return redeploy_installed(project_name, paths, None, no_snapshot,
+                                  dry_run, component)
+    return _deploy_bundle(project_name, paths, bundle_path, is_new,
+                          no_snapshot, dry_run, component)
 
-    # Unpack and validate in .releases/incoming/; the live tree is only
-    # touched once every check has passed (audit C-01).
+
+def _deploy_bundle(
+    project_name: str, paths: BoxPaths, bundle_path: Path, is_new: bool,
+    no_snapshot: bool, dry_run: bool, component: str,
+) -> int:
+    """Validate a bundle in .releases/incoming/, then install and start it.
+
+    The live tree is only touched once every check has passed (audit C-01).
+    On an upgrade the outgoing release and a snapshot of its data are kept
+    for `rollback` (audit C-02).
+    """
+    new_ref = bundle_ref(bundle_path)
+    snapshot_name = None
     try:
         with incoming_workspace(paths, project_name) as workspace:
             tree = extract_candidate(bundle_path, workspace)
@@ -102,18 +95,79 @@ def _run_deploy_inner(
                 return 0
             action = "Creating" if is_new else "Updating"
             print(f"{action} project '{project_name}' from {bundle_path.name}...")
-            project_dir.mkdir(parents=True, exist_ok=True)
-            copy_project_files(tree, project_dir, is_upgrade=not is_new)
+            if not is_new:
+                snapshot_name = snapshot_live_release(project_name, paths, no_snapshot)
+                try:
+                    keep_previous_release(paths, project_name, snapshot_name,
+                                          new_ref, release_tree=tree)
+                except (OSError, ReleaseStateError) as e:
+                    return _install_failed(project_name, paths, e, changed=False)
+            try:
+                install_release(tree, paths.project_dir(project_name))
+                mark_live(paths, project_name, new_ref)
+            except (OSError, ValueError) as e:
+                return _install_failed(project_name, paths, e, changed=True)
     except IntakeError as e:
         return report_refusal(e)
 
     register_project_identity(project_name, manifest.get("id", ""), paths)
     consume_bundle(bundle_path, project_name, paths)
-    return _start_release(project_name, paths, manifest,
-                          bundle_ref(bundle_path), no_snapshot, component)
+    return _start_release(project_name, paths, manifest, new_ref,
+                          snapshot_name, component)
 
 
-def _deploy_on_disk(
+def _install_failed(project_name: str, paths: BoxPaths, error: Exception,
+                    changed: bool) -> int:
+    print(f"ERROR: Installing the release failed: {error}", file=sys.stderr)
+    if changed:
+        print(f"  The project files may be partly updated. 'rollback "
+              f"{project_name}' restores the previous release.", file=sys.stderr)
+    else:
+        print("  Nothing in the project was changed.", file=sys.stderr)
+    log_error("deploy", f"Release install failed: {error}", paths, project=project_name)
+    return 1
+
+
+def _promote_staged(
+    project_name: str, paths: BoxPaths, no_snapshot: bool, dry_run: bool,
+    component: str,
+) -> int:
+    """Deploy the release `stage` installed; the production release it
+    displaced becomes the previous release once the deploy succeeds."""
+    if not has_prestage(paths, project_name):
+        print(f"ERROR: No staged release is installed for '{project_name}'.",
+              file=sys.stderr)
+        return 1
+    try:
+        manifest = validate_release_tree(paths.project_dir(project_name),
+                                         project_name, paths, component)
+        staged_ref = live_ref(paths, project_name)
+    except IntakeError as e:
+        return report_refusal(e)
+    except ReleaseStateError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    if dry_run:
+        print(f"[DRY RUN] Would deploy the staged release {staged_ref}")
+        return 0
+    snapshot_name = take_pre_deploy_snapshot(project_name, paths, manifest, no_snapshot)
+    rc = _start_release(project_name, paths, manifest, staged_ref,
+                        snapshot_name, component)
+    if rc != 0:
+        return rc
+    try:
+        prestage_to_previous(paths, project_name, snapshot_name, staged_ref)
+    except (OSError, ReleaseStateError) as e:
+        print(f"ERROR: {staged_ref} is live, but keeping the release it "
+              f"replaced failed: {e}. 'rollback {project_name}' will not be "
+              f"available for this deploy.", file=sys.stderr)
+        log_error("deploy", f"Keeping the previous release failed: {e}",
+                  paths, project=project_name)
+        return 1
+    return 0
+
+
+def redeploy_installed(
     project_name: str,
     paths: BoxPaths,
     ref: str | None,
@@ -121,86 +175,57 @@ def _deploy_on_disk(
     dry_run: bool,
     component: str,
 ) -> int:
-    """Deploy the code already in the project dir (pulling first for git)."""
-    project_dir = paths.project_dir(project_name)
-    repo_dir = project_dir / "repo"
-    if repo_dir.exists():
-        try:
-            manifest = load_manifest(paths.project_manifest(project_name))
-        except ManifestError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
-            return 1
-        deploy_ref = ref or manifest.get("ref", "main")
-        if dry_run:
-            print(f"[DRY RUN] Would deploy {project_name} at ref {deploy_ref}")
-            return 0
-        actual_ref = _git_update(repo_dir, deploy_ref, manifest)
-        if actual_ref is None:
-            return 1
-    else:
-        current = read_state(paths.project_deploy_state(project_name))
-        actual_ref = current.get("current_ref", "on-disk")
+    """Validate and start the bundle release already in the project dir.
 
+    `ref` labels the release in deploy state; None keeps the installed
+    release's own ref. Caller holds the project lock.
+    """
+    project_dir = paths.project_dir(project_name)
+    if not project_dir.exists():
+        print(f"ERROR: Project not found: {project_dir}", file=sys.stderr)
+        return 1
     try:
         manifest = validate_release_tree(project_dir, project_name, paths, component)
+        actual_ref = ref or live_ref(paths, project_name)
     except IntakeError as e:
         return report_refusal(e)
-
+    except ReleaseStateError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
     if dry_run:
         print(f"[DRY RUN] Would redeploy {project_name} (ref: {actual_ref})")
         return 0
+    snapshot_name = take_pre_deploy_snapshot(project_name, paths, manifest, no_snapshot)
     return _start_release(project_name, paths, manifest, actual_ref,
-                          no_snapshot, component)
+                          snapshot_name, component)
 
 
-def _git_update(repo_dir: Path, deploy_ref: str, manifest: dict) -> str | None:
-    """Fetch and check out deploy_ref; return the short HEAD sha, None on error."""
-    if manifest.get("repo", ""):
-        print(f"  Pulling {deploy_ref}...")
-        try:
-            subprocess.run(
-                ["git", "fetch", "origin"], cwd=repo_dir, check=True,
-                capture_output=True, text=True,
-            )
-            subprocess.run(
-                ["git", "checkout", deploy_ref], cwd=repo_dir, check=True,
-                capture_output=True, text=True,
-            )
-            subprocess.run(
-                ["git", "pull", "--ff-only", "origin", deploy_ref],
-                cwd=repo_dir, check=False, capture_output=True, text=True,
-            )
-        except subprocess.CalledProcessError as e:
-            print(f"  ERROR: Git pull failed: {e.stderr}", file=sys.stderr)
-            return None
+def _deploy_repo(
+    project_name: str, paths: BoxPaths, ref: str | None,
+    no_snapshot: bool, dry_run: bool, component: str,
+) -> int:
+    """Check out the requested ref of a git-sourced project and start it."""
+    repo_dir = paths.project_dir(project_name) / "repo"
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=repo_dir, capture_output=True, text=True, check=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        print(f"  ERROR: Cannot read the deployed git ref: {e}", file=sys.stderr)
-        return None
-    return result.stdout.strip()
-
-
-def _take_pre_deploy_snapshot(
-    project_name: str, paths: BoxPaths, manifest: dict, no_snapshot: bool,
-) -> str | None:
-    """Back up project data before the new release starts. Returns its name."""
-    snapshot_enabled = manifest.get("deploy", {}).get("snapshot_before_deploy", True)
-    backup_type = manifest.get("backup", {}).get("type", "none")
-    if not snapshot_enabled or no_snapshot or backup_type == "none":
-        return None
-    print("  Taking pre-deploy snapshot...")
-    from boxmunge.backup import BackupKind
-    from boxmunge.commands.backup_cmd import list_snapshots, run_backup
-    if run_backup(project_name, paths, _lock_held=True,
-                  kind=BackupKind.PREDEPLOY) != 0:
-        print("  WARN: Pre-deploy backup failed — continuing deploy")
-        return None
-    snaps = list_snapshots(paths, project_name)
-    return snaps[0].name if snaps else None
+        manifest = load_manifest(paths.project_manifest(project_name))
+    except ManifestError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    deploy_ref = ref or manifest.get("ref", "main")
+    if dry_run:
+        print(f"[DRY RUN] Would deploy {project_name} at ref {deploy_ref}")
+        return 0
+    actual_ref = update_repo(repo_dir, deploy_ref, manifest)
+    if actual_ref is None:
+        return 1
+    try:
+        manifest = validate_release_tree(paths.project_dir(project_name),
+                                         project_name, paths, component)
+    except IntakeError as e:
+        return report_refusal(e)
+    snapshot_name = take_pre_deploy_snapshot(project_name, paths, manifest, no_snapshot)
+    return _start_release(project_name, paths, manifest, actual_ref,
+                          snapshot_name, component)
 
 
 def _start_release(
@@ -208,17 +233,16 @@ def _start_release(
     paths: BoxPaths,
     manifest: dict,
     actual_ref: str,
-    no_snapshot: bool,
+    snapshot_name: str | None,
     component: str,
 ) -> int:
-    """Snapshot, run pre-deploy, generate config, start, smoke-test, record.
+    """Run pre-deploy, generate config, start, smoke-test, record.
 
-    The release on disk has already passed validate_release_tree.
+    The release on disk has already passed validate_release_tree and its
+    pre-deploy snapshot (if any) has been taken.
     """
     project_dir = paths.project_dir(project_name)
     print(f"Deploying {project_name} (ref: {actual_ref})...")
-
-    snapshot_name = _take_pre_deploy_snapshot(project_name, paths, manifest, no_snapshot)
 
     pre_deploy = manifest.get("deploy", {}).get("pre_deploy", "")
     if pre_deploy:
@@ -247,7 +271,7 @@ def _start_release(
         log_error("deploy", f"Deploy failed: container start: {e}", paths, project=project_name)
         return 1
 
-    _post_deploy_diagnostics(project_name, paths, project_dir, manifest)
+    post_deploy_diagnostics(project_name, paths, project_dir, manifest)
 
     print("  Reloading Caddy...")
     try:
@@ -255,7 +279,7 @@ def _start_release(
     except DockerError as e:
         print(f"  WARN: Caddy reload failed: {e}")
 
-    if not _smoke_ok(project_name, paths, project_dir, manifest, compose_files):
+    if not smoke_ok(project_name, paths, project_dir, manifest, compose_files):
         return 1
 
     record_deploy_state(paths, project_name, actual_ref, snapshot_name)
@@ -270,61 +294,6 @@ def _start_release(
     return 0
 
 
-def _post_deploy_diagnostics(
-    project_name: str, paths: BoxPaths, project_dir: Path, manifest: dict,
-) -> None:
-    """v0.9: 8-second post-up scan for read-only-fs errors.
-
-    Best-effort by design: the goal is operator visibility, not gating. Hints
-    point operators at services.<svc>.writable.ephemeral when a missing
-    declaration crashes the container. Failures are logged, never raised.
-    """
-    try:
-        from boxmunge.writable_diagnostics import run_post_deploy_diagnostics
-        hints = run_post_deploy_diagnostics(project_dir, manifest)
-        for svc_name, hint in hints.items():
-            print(hint)
-            log_warning(
-                "deploy",
-                f"writable-fs error detected in {svc_name}",
-                paths, project=project_name,
-                detail={"event": "writable_diagnostic", "service": svc_name},
-            )
-    except Exception as e:
-        log_warning(
-            "deploy", f"writable diagnostics raised: {e}",
-            paths, project=project_name,
-        )
-
-
-def _smoke_ok(
-    project_name: str, paths: BoxPaths, project_dir: Path, manifest: dict,
-    compose_files: list[str],
-) -> bool:
-    """Run per-service smoke tests inside the containers. False on failure."""
-    has_smoke = any(svc.get("smoke") for svc in manifest.get("services", {}).values())
-    if not has_smoke:
-        return True
-    print("  Running smoke tests in containers...")
-    from boxmunge.commands.check import run_smoke_in_container, should_downgrade_smoke_failure
-    smoke_result = run_smoke_in_container(project_dir, manifest, compose_files)
-    if smoke_result.status == "ok":
-        print("  Smoke tests passed.")
-        return True
-    if should_downgrade_smoke_failure(project_name, paths):
-        print(f"  WARN: Smoke test {smoke_result.status} (first deploy — "
-              f"downgraded to warning): {smoke_result.message}")
-        log_warning("deploy", f"First deploy smoke {smoke_result.status} "
-                    f"downgraded: {smoke_result.message}",
-                    paths, project=project_name)
-        return True
-    print(f"  ERROR: Smoke test {smoke_result.status}: {smoke_result.message}",
-          file=sys.stderr)
-    log_error("deploy", f"Smoke test {smoke_result.status}: {smoke_result.message}",
-              paths, project=project_name)
-    return False
-
-
 def run_deploy(
     project_name: str,
     paths: BoxPaths,
@@ -333,11 +302,15 @@ def run_deploy(
     dry_run: bool = False,
     _lock_held: bool = False,
     component: str = "deploy",
+    staged: bool = False,
 ) -> int:
-    """Execute the full deploy flow. Returns 0 on success, 1 on failure.
+    """Execute the full deploy flow. Returns 0 on success, 1 on failure,
+    3 for a compose hardening rejection.
 
     `component` labels the SECURITY OFF log entry so promote/rollback callers
     can attribute the warning to the correct CLI verb (default: "deploy").
+    `staged=True` (promote) deploys the release `stage` installed instead of
+    taking one from the inbox.
     """
     block = is_blocked(project_name, paths)
     if block:
@@ -355,13 +328,14 @@ def run_deploy(
             with project_lock(project_name, paths):
                 return _run_deploy_inner(
                     project_name, paths, ref, no_snapshot, dry_run,
-                    component=component,
+                    component=component, staged=staged,
                 )
         except LockError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
     return _run_deploy_inner(
         project_name, paths, ref, no_snapshot, dry_run, component=component,
+        staged=staged,
     )
 
 
