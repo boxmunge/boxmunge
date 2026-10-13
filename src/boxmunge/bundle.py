@@ -1,168 +1,220 @@
-"""Shared bundle extraction and file-copy helpers."""
+"""Bundle extraction and the bundle content policy.
+
+Installing a checked tree into a project lives in boxmunge.release.
+"""
 from __future__ import annotations
 
+import os
+import posixpath
 import shutil
 import tarfile
 from pathlib import Path
 
-import yaml
+
+class BundleError(ValueError):
+    """A bundle is malformed or carries content a deploy must not install."""
+
+
+def _member_parts(name: str) -> list[str]:
+    return [p for p in name.split("/") if p not in ("", ".")]
+
+
+def _within(path: str, top: str) -> bool:
+    return path == top or path.startswith(top + "/")
+
+
+def _climbs_after_name(target: str) -> bool:
+    """True if a link target has a `..` after a real name (``s/..``).
+
+    Such a target is only safe if every name before the `..` is a real
+    directory; when one is itself a link, a chain of individually harmless
+    links climbs out of the project. Leading `..` segments are fine.
+    """
+    seen_name = False
+    for part in target.split("/"):
+        if part == "..":
+            if seen_name:
+                return True
+        elif part not in ("", "."):
+            seen_name = True
+    return False
+
+
+def _escaping_link(m: tarfile.TarInfo, target: str) -> BundleError:
+    return BundleError(
+        f"Bundle entry '{m.name}' is a link to '{target}', outside the "
+        f"project directory; bundles may only contain links that stay "
+        f"inside the project"
+    )
+
+
+def _check_members(members: list[tarfile.TarInfo]) -> str:
+    """Validate archive members before anything is written; return the top dir.
+
+    Every member must live under one top-level directory, be a regular file,
+    directory or link, and every link must resolve inside that directory.
+    """
+    tops: set[str] = set()
+    for m in members:
+        if m.name.startswith("/") or ".." in m.name.split("/"):
+            raise BundleError(f"Unsafe path in bundle: {m.name}")
+        parts = _member_parts(m.name)
+        if not parts:
+            continue
+        tops.add(parts[0])
+        if not (m.isfile() or m.isdir() or m.issym() or m.islnk()):
+            raise BundleError(
+                f"Bundle entry '{m.name}' is a device, FIFO or other special "
+                f"file; bundles may only contain files, directories and links"
+            )
+    if len(tops) != 1:
+        raise BundleError(
+            f"Bundle must contain exactly one top-level directory, "
+            f"found: {sorted(tops)}"
+        )
+    top = tops.pop()
+    for m in members:
+        if not (m.issym() or m.islnk()):
+            continue
+        name = "/".join(_member_parts(m.name))
+        target = m.linkname
+        if m.issym():
+            if _climbs_after_name(target):
+                raise _escaping_link(m, target)
+            resolved = posixpath.normpath(
+                posixpath.join(posixpath.dirname(name), target))
+        else:
+            if ".." in target.split("/"):
+                raise _escaping_link(m, target)
+            resolved = posixpath.normpath("/".join(_member_parts(target)))
+        if target.startswith("/") or not _within(resolved, top):
+            raise _escaping_link(m, target)
+    return top
+
+
+def check_extracted_links(project: Path) -> None:
+    """Resolve every link in an extracted project on disk; all must stay inside.
+
+    The member checks reason about each link lexically. This walks the real
+    tree, where links can chain, and requires ``realpath`` of every link to
+    land inside the project.
+    """
+    root = os.path.realpath(project)
+    for dirpath, dirnames, filenames in os.walk(project):
+        for name in dirnames + filenames:
+            path = os.path.join(dirpath, name)
+            if not os.path.islink(path):
+                continue
+            real = os.path.realpath(path)
+            if real != root and not real.startswith(root + os.sep):
+                rel = os.path.relpath(path, project)
+                raise BundleError(
+                    f"Bundle entry '{rel}' is a link that resolves outside the "
+                    f"project directory; bundles may only contain links that "
+                    f"stay inside the project"
+                )
 
 
 def extract_bundle(bundle_path: Path, dest: Path) -> Path:
-    """Extract a tar.gz bundle and return the project directory inside.
+    """Extract a tar.gz bundle into dest and return the project directory.
 
-    Raises ValueError if the archive doesn't contain exactly one top-level dir.
+    Raises BundleError (a ValueError) for anything unsafe or malformed: a
+    corrupt archive, members outside a single top-level directory, special
+    files, or links that resolve outside the project.
     """
     if not bundle_path.exists():
-        raise ValueError(f"Bundle not found: {bundle_path}")
-
-    if not tarfile.is_tarfile(bundle_path):
-        raise ValueError(f"Not a valid tar.gz file: {bundle_path}")
-
-    with tarfile.open(bundle_path, "r:gz") as tar:
-        # Security: reject paths that escape the extraction dir
-        for member in tar.getmembers():
-            if member.name.startswith("/") or ".." in member.name:
-                raise ValueError(
-                    f"Unsafe path in archive: {member.name}"
-                )
-        tar.extractall(path=dest, filter="data")
-
-    # Find the single top-level directory
-    top_entries = [
-        e for e in dest.iterdir()
-        if e.is_dir() and not e.name.startswith(".")
-    ]
-    if len(top_entries) != 1:
-        names = [e.name for e in top_entries]
-        raise ValueError(
-            f"Bundle must contain exactly one top-level directory, "
-            f"found: {names}"
-        )
-
-    return top_entries[0]
-
-
-# Top-level project dirs boxmunge treats as persistent host-side state.
-# A bundle may legitimately ship a seed/placeholder copy (e.g.
-# ``data/.gitkeep``), but on an upgrade the live versions on disk hold the
-# project's real data — the database under ``data/``, encrypted snapshots
-# under ``backups/``. These must NEVER be clobbered by the bundle's copy;
-# doing so silently destroys production data on every redeploy.
-_PERSISTENT_DIRS = frozenset({"data", "backups"})
-
-
-def _persistent_dir_names(project_dir: Path) -> set[str]:
-    """Top-level project dir names that hold persistent host state.
-
-    Always includes boxmunge's owned dirs (``data/``, ``backups/``).
-    Additionally inspects the project's *existing* compose.yml and preserves
-    any relative bind-mount source dir (e.g. ``./uploads`` -> ``uploads``),
-    so user-declared persistent volumes survive upgrades too. Best-effort:
-    a missing or unparseable compose.yml falls back to the owned dirs.
-    """
-    names = set(_PERSISTENT_DIRS)
-    compose_path = project_dir / "compose.yml"
-    if not compose_path.exists():
-        return names
+        raise BundleError(f"Bundle not found: {bundle_path}")
     try:
-        from boxmunge.compose import is_bind_mount
+        with tarfile.open(bundle_path, "r:gz") as tar:
+            top = _check_members(tar.getmembers())
+            # The "data" filter re-checks links against the real filesystem
+            # as it extracts: defence in depth behind _check_members.
+            tar.extractall(path=dest, filter="data")
+    except BundleError:
+        raise
+    except (tarfile.TarError, EOFError, OSError) as e:
+        raise BundleError(f"Not a valid tar.gz bundle: {bundle_path.name}: {e}") from e
 
-        compose = yaml.safe_load(compose_path.read_text()) or {}
-        for svc in (compose.get("services") or {}).values():
-            if not isinstance(svc, dict):
-                continue
-            for vol in svc.get("volumes", []) or []:
-                if not isinstance(vol, str) or not is_bind_mount(vol):
-                    continue
-                host = vol.split(":")[0]
-                if host.startswith("./"):
-                    top = host.removeprefix("./").split("/", 1)[0]
-                    if top:
-                        names.add(top)
-    except (yaml.YAMLError, OSError):
-        pass
-    return names
+    project = dest / top
+    if project.is_symlink() or not project.is_dir():
+        raise BundleError(
+            f"Bundle must contain exactly one top-level directory; "
+            f"'{top}' is not a directory"
+        )
+    check_extracted_links(project)
+    return project
 
 
-def _refresh_dir_in_place(src_dir: Path, dest_dir: Path) -> None:
-    """Mirror ``src_dir`` into an existing ``dest_dir``, preserving its inode.
+# Top-level project entries owned by the box, never by a bundle. Each maps to
+# the reason shown when a bundle carries it. A deploy that installed them
+# would silently replace live secrets, CVE suppressions and their audit
+# history (B-15), production data, or encrypted snapshots.
+BOX_OWNED_ENTRIES: dict[str, str] = {
+    "secrets.env": "secrets are managed on the server with "
+                   "'secrets set <project> KEY=VALUE'",
+    "security": "CVE suppressions and their audit history are managed on the "
+                "server with 'security suppress' and 'security unsuppress'",
+    "data": "the project's live data lives here on the server",
+    "backups": "the server's encrypted snapshots live here",
+    "caddy.override.conf": "it replaces the generated Caddy config verbatim, so "
+                           "only an operator may place it, directly on the "
+                           "server",
+}
 
-    Deletes children of ``dest_dir`` that are not being replaced, then copies
-    the bundle's children in. The top-level ``dest_dir`` inode is never
-    recreated, so a live container bind-mounting it keeps resolving the mount
-    (see the caller's note on the stage/health-monitor prod outage). Nested
-    entries are not bind-mount roots, so they are replaced wholesale.
+# Entries boxmunge itself creates in a project directory.
+BOXMUNGE_ENTRIES: dict[str, str] = {
+    "repo": "repo/ is the clone of a git-sourced project; a bundle must not "
+            "ship one",
+    ".releases": "boxmunge's release workspace",
+    "compose.boxmunge.yml": "generated by boxmunge at deploy time",
+    "compose.boxmunge-staging.yml": "generated by boxmunge at stage time",
+    "compose.staging-base.yml": "generated by boxmunge at stage time",
+}
+
+# Directories that may ship as empty placeholders (data/.gitkeep is a common
+# repo convention). They carry nothing, so they are dropped with a note.
+_PLACEHOLDER_DIRS = frozenset({"data", "backups", "security"})
+_PLACEHOLDER_FILES = frozenset({".gitkeep", ".keep"})
+
+
+def is_placeholder(path: Path) -> bool:
+    """True for a real dir holding only dirs and empty .gitkeep/.keep files."""
+    if path.is_symlink() or not path.is_dir():
+        return False
+    for p in path.rglob("*"):
+        if p.is_symlink():
+            return False
+        if p.is_dir():
+            continue
+        if p.name not in _PLACEHOLDER_FILES or p.stat().st_size != 0:
+            return False
+    return True
+
+
+def check_bundle_contents(tree: Path) -> list[str]:
+    """Enforce the bundle content policy on an extracted tree.
+
+    Drops empty placeholder dirs (returning a note for each) and raises
+    BundleError naming every entry the bundle may not carry.
     """
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    for child in dest_dir.iterdir():
-        if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
-    for child in src_dir.iterdir():
-        target = dest_dir / child.name
-        if child.is_dir():
-            shutil.copytree(child, target)
-        else:
-            shutil.copy2(child, target)
-
-
-def copy_project_files(src: Path, dest: Path, is_upgrade: bool) -> None:
-    """Copy project files from extracted bundle to project directory.
-
-    On upgrade, preserves project.env (secrets) and never clobbers
-    persistent host-side directories (``data/``, ``backups/``, and any
-    bind-mount source declared in the live compose.yml).
-    """
-    existing_env = None
-    preserved: set[str] = set()
-    if is_upgrade:
-        env_path = dest / "project.env"
-        if env_path.exists():
-            existing_env = env_path.read_text()
-        preserved = _persistent_dir_names(dest)
-
-    # Copy everything from bundle into project dir
-    for item in src.iterdir():
-        dest_item = dest / item.name
-        if item.is_dir():
-            if item.name in preserved and dest_item.exists():
-                if any(dest_item.iterdir()):
-                    # Live persistent data present — never overwrite it.
-                    continue
-                # The persistent dir exists but is empty: the volume has
-                # never been used (typically a first real run). Seed it with
-                # the bundle's initial content. Once it holds anything, the
-                # branch above preserves it on every subsequent deploy. We
-                # seed only when LITERALLY empty — a non-overwriting merge
-                # would be confused by dev-only sentinel files.
-                _refresh_dir_in_place(item, dest_item)
-                continue
-            if dest_item.exists():
-                # Refresh contents in place rather than rmtree+copytree: a
-                # still-running container (e.g. prod during a `stage`) may
-                # bind-mount this dir, and Docker resolves a bind mount to the
-                # directory inode at container start. Replacing the directory
-                # gives it a new inode and severs the live mount — the classic
-                # symptom being boxmunge-scripts/smoke.sh vanishing inside the
-                # running prod container, failing its smoke check, and the
-                # health monitor stopping prod. Preserve the inode.
-                _refresh_dir_in_place(item, dest_item)
-            else:
-                shutil.copytree(item, dest_item)
-        else:
-            shutil.copy2(item, dest_item)
-
-    # Restore preserved env file on upgrade
-    if is_upgrade and existing_env is not None:
-        from boxmunge.fileutil import atomic_write_text
-        atomic_write_text(dest / "project.env", existing_env, mode=0o600)
-
-    # Ensure required subdirectories exist
-    (dest / "backups").mkdir(exist_ok=True)
-    (dest / "data").mkdir(exist_ok=True)
-
-    # Make scripts executable
-    for sh_file in dest.rglob("*.sh"):
-        sh_file.chmod(sh_file.stat().st_mode | 0o755)
+    notes: list[str] = []
+    refused: list[str] = []
+    for entry in sorted(tree.iterdir(), key=lambda p: p.name):
+        name = entry.name
+        reason = BOX_OWNED_ENTRIES.get(name) or BOXMUNGE_ENTRIES.get(name)
+        if reason is None:
+            continue
+        if name in _PLACEHOLDER_DIRS and is_placeholder(entry):
+            shutil.rmtree(entry)
+            notes.append(f"NOTE: ignoring the bundle's empty placeholder {name}/ "
+                         f"(the server's {name}/ is kept)")
+            continue
+        label = f"{name}/" if entry.is_dir() and not entry.is_symlink() else name
+        refused.append(f"  {label}: {reason}")
+    if refused:
+        raise BundleError(
+            "Bundle contains entries a deploy must never overwrite:\n"
+            + "\n".join(refused)
+            + "\nRemove them from the bundle and upload it again."
+        )
+    return notes

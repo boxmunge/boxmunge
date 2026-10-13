@@ -118,6 +118,19 @@ After verifying the staging environment:
   unstage myapp
   ```
 
+Staging runs from the project directory, so `stage` installs the staged release there and keeps the
+production release aside in `.releases/prestage/`. Production's running containers are not touched.
+`promote` deploys the staged release (never a newer bundle that arrived in the inbox meanwhile) and
+keeps the displaced production release as the `rollback` target. `unstage` puts the production
+release's files back. While a release is staged, `prod-deploy` and `rollback` refuse: promote or
+unstage first.
+
+A stage that fails after installing its release (staging containers fail to start, the staging data
+copy fails) cleans up after itself: staging containers, the staging Caddy site and compose files are
+removed and the production release's files are put back. `unstage` removes whatever a stage left
+behind even if that stage never got as far as recording itself active, so it can always be used to
+clean up; with nothing staged it reports `No staging found` and exits 1.
+
 Staging is useful for:
 - Verifying a new bundle before it goes live
 - Testing configuration changes in a production-like environment
@@ -197,9 +210,15 @@ secrets unset --host OLD_KEY
 
 ## Managing the Inbox
 
-Bundles uploaded via scp land in the inbox automatically. Use the legacy scp protocol
-(`scp -O`): SFTP, which OpenSSH 9+ uses for plain `scp`, is disabled for the deploy user
-because sftp-server cannot be confined to the inbox.
+Bundles uploaded via scp land in the inbox automatically, renamed to
+`<project>-<timestamp>.tar.gz`. Use the legacy scp protocol (`scp -O`): SFTP, which OpenSSH 9+ uses
+for plain `scp`, is disabled for the deploy user because sftp-server cannot be confined to the inbox.
+
+`prod-deploy` and `stage` take the project's newest bundle, or the one named with `--ref` (the full
+bundle name, or a prefix of its timestamp that matches exactly one bundle). A bundle belongs to a
+project only when its name is exactly `<project>-<timestamp>.tar.gz`, so deploying `foo` never picks
+up a `foo-bar` bundle. Once a bundle is deployed it moves to `inbox/.consumed/`, together with that
+project's older bundles. A bundle that fails validation stays in the inbox.
 
 List bundles in the inbox:
 
@@ -393,13 +412,33 @@ test-restore myapp
 
 ## Rolling Back
 
-Undo the last deploy -- restore the pre-deploy snapshot and redeploy the previous state:
+Undo the last deploy -- put back the previous release's code and the data snapshot taken just
+before the deploy replaced it:
 
 ```
 rollback myapp
 ```
 
-You will be shown what snapshot will be restored and asked to confirm before anything changes.
+You will be shown the release and the snapshot that will be restored, and asked to confirm before
+anything changes (`--yes` skips the prompt).
+
+How it works for a bundle project: every deploy that replaces a release keeps the outgoing code in
+`projects/<project>/.releases/previous/`, with `previous.json` recording its bundle name and the
+pre-deploy data snapshot. Rollback validates that release again (manifest, identity, compose
+hardening), installs it, restores the snapshot, and starts it. Secrets, suppressions, `data/` and
+`backups/` are never part of a release, so they are not rolled back. For a promoted staging
+release, the previous release is the production release that `stage` displaced. A git project
+restores the snapshot and checks out the previous ref.
+
+Rollback refuses, with the reason, instead of doing half a rollback:
+
+- after a first deploy, or once a rollback has used the previous release (there is no older release
+  to go back to; deploy a known-good bundle instead);
+- when the project has backups configured but no snapshot was taken before the last deploy (the
+  backup failed or `--no-snapshot` was used), or that snapshot is no longer in `backups/`;
+- while a staged release is installed (`promote` or `unstage` first).
+
+A project with `backup.type: none` rolls back its code only.
 
 ---
 

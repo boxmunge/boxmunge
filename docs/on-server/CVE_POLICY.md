@@ -501,8 +501,10 @@ A suppression is an operator's signed-off declaration that a CVE has
 been reviewed and judged not exploitable in the deployed config. It
 skips the policy gate for that one CVE until its `until` date.
 
-The file lives in the project's deploy bundle so the disposition trail
-travels with the project (audit history, not platform state):
+The file is server-side state in the project directory, written only by
+`security suppress` / `security unsuppress`. A bundle that carries a
+`security/` directory is refused, so a redeploy cannot replace the
+suppressions or erase their history:
 
 ```
 <project>/security/suppressions.yml

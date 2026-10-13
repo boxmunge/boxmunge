@@ -210,7 +210,7 @@ class TestCvePolicyValidatorWiring:
         add_project("testapp", paths)
         self._bundle_with_security(paths)
         with patch(
-            "boxmunge.commands.deploy.validate_user_compose",
+            "boxmunge.intake.validate_user_compose",
         ) as mock_validate:
             run_deploy("testapp", paths)
         # Caller MUST pass cve_policy={'posture': 'strict'} — the manifest's
@@ -244,7 +244,7 @@ class TestDeployComposeRejectionExit3:
         # mock validate_user_compose to raise ComposeSecurityError directly.
         from boxmunge.compose_validate import ComposeSecurityError
         with patch(
-            "boxmunge.commands.deploy.validate_user_compose",
+            "boxmunge.intake.validate_user_compose",
             side_effect=ComposeSecurityError("simulated hostile key: privileged"),
         ):
             with patch("boxmunge.commands.deploy.compose_up"):

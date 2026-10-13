@@ -217,7 +217,7 @@ class TestStageComposeRejectionExit3:
         add_project("testapp", paths)
         _place_real_bundle(paths)
         with patch(
-            "boxmunge.commands.stage_cmd.validate_user_compose",
+            "boxmunge.intake.validate_user_compose",
             side_effect=ComposeSecurityError("simulated hostile key: privileged"),
         ):
             rc = run_stage("testapp", paths)
@@ -266,7 +266,7 @@ class TestCvePolicyValidatorWiring:
         add_project("testapp", paths)
         self._bundle_with_security(paths)
         with patch(
-            "boxmunge.commands.stage_cmd.validate_user_compose",
+            "boxmunge.intake.validate_user_compose",
         ) as mock_validate:
             run_stage("testapp", paths)
         kwargs = mock_validate.call_args.kwargs

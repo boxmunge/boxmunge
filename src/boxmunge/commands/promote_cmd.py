@@ -50,9 +50,11 @@ def _run_promote_inner(
 
     # Deploy to production FIRST — staging stays live as fallback
     print("  Deploying to production...")
+    # staged=True: deploy the release `stage` installed, never a newer
+    # inbox bundle. The ref only matters for git-sourced projects.
     deploy_result = run_deploy(
         project_name, paths, ref=ref_arg, _lock_held=True,
-        component="promote",
+        component="promote", staged=True,
     )
     if deploy_result != 0:
         print("ERROR: Production deploy failed. Staging is still live.", file=sys.stderr)

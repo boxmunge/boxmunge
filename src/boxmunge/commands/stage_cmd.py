@@ -1,140 +1,140 @@
 """boxmunge stage <project> — stage from latest source alongside production."""
 from __future__ import annotations
 
-import shutil
 import subprocess
 import sys
-import tempfile
-from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from boxmunge.caddy import generate_staging_caddy_config
-from boxmunge.bundle import extract_bundle as _extract_bundle, copy_project_files as _copy_project_files
+from boxmunge.commands.unstage_cmd import teardown_staging
 from boxmunge.compose import generate_staging_compose_base, generate_staging_compose_override
-from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.docker import compose_up, caddy_reload, DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
-from boxmunge.identity import check_project_identity, register_project_identity
+from boxmunge.identity import register_project_identity
+from boxmunge.intake import (
+    IntakeError, check_installable, extract_candidate, incoming_workspace,
+    report_refusal, validate_release_tree,
+)
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_error
-from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
 from boxmunge.project_registry import is_registered
-from boxmunge.security_overlay import services_with_off_profile
+from boxmunge.release import install_release, keep_prestage_release, live_ref, mark_live
 from boxmunge.security_warn import warn_off_services, warn_writable_state
-from boxmunge.source import resolve_bundle_source, SourceError
+from boxmunge.source import SourceError, bundle_ref, consume_bundle, resolve_bundle_source
 from boxmunge.state import write_state
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 
+def _intake_bundle(project_name: str, paths: BoxPaths, ref: str | None,
+                   dry_run: bool) -> dict[str, Any] | int:
+    """Validate the inbox bundle, then install it. Returns manifest or exit code."""
+    project_dir = paths.project_dir(project_name)
+    is_new = not (project_dir / "manifest.yml").exists()
+    try:
+        bundle_path = resolve_bundle_source(project_name, paths, ref=ref)
+    except SourceError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+    # Unpack and validate in .releases/incoming/ before anything in the
+    # project dir changes (audit C-01).
+    try:
+        with incoming_workspace(paths, project_name) as workspace:
+            tree = extract_candidate(bundle_path, workspace)
+            manifest = validate_release_tree(tree, project_name, paths, "stage")
+            check_installable(tree, project_dir)
+            if dry_run:
+                print(f"[DRY RUN] Would stage '{project_name}'")
+                return 0
+            if is_new:
+                print(f"Creating new project '{project_name}'")
+            try:
+                # The production release stays recoverable: promote turns it
+                # into the previous release, unstage puts it back.
+                keep_prestage_release(paths, project_name, tree)
+            except (OSError, ValueError) as e:
+                print(f"ERROR: Keeping the production release failed: {e}. "
+                      f"Nothing was changed.", file=sys.stderr)
+                return 1
+            try:
+                install_release(tree, project_dir)
+                mark_live(paths, project_name, bundle_ref(bundle_path))
+            except (OSError, ValueError) as e:
+                print(f"ERROR: Installing the staged release failed: {e}",
+                      file=sys.stderr)
+                if not teardown_staging(project_name, paths):
+                    print(f"ERROR: Putting production back was incomplete; "
+                          f"run 'unstage {project_name}'.", file=sys.stderr)
+                return 1
+    except IntakeError as e:
+        return report_refusal(e)
+
+    register_project_identity(project_name, manifest.get("id", ""), paths)
+    consume_bundle(bundle_path, project_name, paths)
+    return manifest
+
+
+def _checkout_repo(project_name: str, paths: BoxPaths, ref: str | None,
+                   dry_run: bool) -> dict[str, Any] | int:
+    """Repo-sourced project: check out ref, validate on disk. Manifest or exit code."""
+    project_dir = paths.project_dir(project_name)
+    repo_dir = project_dir / "repo"
+    if ref:
+        print(f"  Fetching ref {ref}...")
+        try:
+            subprocess.run(["git", "fetch", "origin"], cwd=repo_dir,
+                           check=True, capture_output=True, text=True)
+            subprocess.run(["git", "checkout", ref], cwd=repo_dir,
+                           check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            print(f"ERROR: Git checkout failed: {e.stderr}", file=sys.stderr)
+            return 1
+    try:
+        manifest = validate_release_tree(project_dir, project_name, paths, "stage")
+    except IntakeError as e:
+        return report_refusal(e)
+    if dry_run:
+        print(f"[DRY RUN] Would stage '{project_name}'")
+        return 0
+    return manifest
+
+
 def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
                      dry_run: bool = False) -> int:
     """Inner stage logic — caller must hold the project lock."""
     project_dir = paths.project_dir(project_name)
-    is_new = not project_dir.exists() or not (project_dir / "manifest.yml").exists()
+    is_new = not (project_dir / "manifest.yml").exists()
 
-    # Resolve source for bundle projects (new or no repo)
     if is_new or not (project_dir / "repo").exists():
-        try:
-            bundle_path = resolve_bundle_source(project_name, paths, ref=ref)
-        except SourceError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
-            return 1
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            try:
-                extracted = _extract_bundle(bundle_path, Path(tmpdir))
-            except ValueError as e:
-                print(f"ERROR: {e}", file=sys.stderr)
-                return 1
-
-            manifest_path = extracted / "manifest.yml"
-            if not manifest_path.exists():
-                print("ERROR: Bundle missing manifest.yml", file=sys.stderr)
-                return 1
-
-            try:
-                manifest = load_manifest(manifest_path)
-            except ManifestError as e:
-                print(f"ERROR: {e}", file=sys.stderr)
-                return 1
-
-            errors, warnings = validate_manifest(manifest, project_name)
-            if errors:
-                print("ERROR: Manifest validation failed:", file=sys.stderr)
-                for e in errors:
-                    print(f"  {e}")
-                return 1
-            for w in warnings:
-                print(f"  WARN: {w}")
-
-            manifest_id = manifest.get("id", "")
-            try:
-                check_project_identity(project_name, manifest_id, paths)
-            except ValueError as e:
-                print(f"ERROR: {e}", file=sys.stderr)
-                return 1
-
-            if dry_run:
-                print(f"[DRY RUN] Would stage '{project_name}'")
-                return 0
-
-            if is_new:
-                print(f"Creating new project '{project_name}'")
-                project_dir.mkdir(parents=True, exist_ok=True)
-
-            _copy_project_files(extracted, project_dir, is_upgrade=not is_new)
-
-        register_project_identity(project_name, manifest_id, paths)
-
-        # Move bundle to consumed
-        paths.inbox_consumed.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(bundle_path), str(paths.inbox_consumed / bundle_path.name))
+        result = _intake_bundle(project_name, paths, ref, dry_run)
     else:
-        # Git-based or existing project — load manifest from project dir
-        try:
-            manifest = load_manifest(paths.project_manifest(project_name))
-        except ManifestError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
-            return 1
+        result = _checkout_repo(project_name, paths, ref, dry_run)
+    if isinstance(result, int):
+        return result
 
-        # For git projects, fetch and checkout the requested ref
-        repo_dir = project_dir / "repo"
-        if repo_dir.exists() and ref:
-            print(f"  Fetching ref {ref}...")
-            try:
-                subprocess.run(["git", "fetch", "origin"], cwd=repo_dir,
-                               check=True, capture_output=True, text=True)
-                subprocess.run(["git", "checkout", ref], cwd=repo_dir,
-                               check=True, capture_output=True, text=True)
-            except subprocess.CalledProcessError as e:
-                print(f"ERROR: Git checkout failed: {e.stderr}", file=sys.stderr)
-                return 1
-
-        if dry_run:
-            print(f"[DRY RUN] Would stage '{project_name}'")
-            return 0
-
-    # Validate user compose.yml against silent-floor-defeating keys BEFORE
-    # we generate the staging base + overlay. Same rationale as in deploy.
-    off_services = {svc for svc, _ in services_with_off_profile(manifest)}
+    # From here on the staged release is installed: any failure tears the
+    # stage down again and puts production's release back (audit C-13).
+    succeeded = False
     try:
-        validate_user_compose(
-            project_dir / "compose.yml", paths,
-            off_services=off_services,
-            project_name=project_name,
-            cve_policy=manifest.get("security"),
-            manifest_services=manifest.get("services"),
-        )
-    except ComposeSecurityError as e:
-        # Exit code 3 reserved for compose hardening rejections (audit H-N2).
-        print(f"ERROR: {e}", file=sys.stderr)
-        log_error("stage", f"Compose validation rejected: {e}",
-                  paths, project=project_name)
-        return 3
+        rc = _bring_up_staging(project_name, paths, result, ref)
+        succeeded = rc == 0
+        return rc
+    finally:
+        if not succeeded:
+            print("  Stage failed; cleaning up...")
+            if teardown_staging(project_name, paths):
+                print(f"  Staging for '{project_name}' cleaned up.")
+            else:
+                print(f"ERROR: Cleanup after the failed stage was incomplete; "
+                      f"run 'unstage {project_name}'.", file=sys.stderr)
 
-    # Generate staging configs
+
+def _bring_up_staging(project_name: str, paths: BoxPaths,
+                      manifest: dict[str, Any], ref: str | None) -> int:
+    """Write staging config, start staging containers, smoke-test, record."""
+    project_dir = paths.project_dir(project_name)
     print(f"Staging {project_name}...")
     # Staging auth — inject basicauth if secrets are set
     staging_auth = None
@@ -209,7 +209,7 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
             return 1
 
     # Start staging containers with separate project name
-    print(f"  Starting staging containers...")
+    print("  Starting staging containers...")
     staging_project_name = f"{project_name}-staging"
     compose_files = ["compose.staging-base.yml", "compose.boxmunge-staging.yml"]
     try:
@@ -221,7 +221,7 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
         return 1
 
     # Reload Caddy
-    print(f"  Reloading Caddy...")
+    print("  Reloading Caddy...")
     try:
         caddy_reload(paths.caddy, paths.state)
     except DockerError as e:
@@ -230,7 +230,7 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
     # Per-service smoke tests — exec inside staging containers
     has_smoke = any(svc.get("smoke") for svc in manifest.get("services", {}).values())
     if has_smoke:
-        print(f"  Running smoke tests in containers...")
+        print("  Running smoke tests in containers...")
         from boxmunge.commands.check import run_smoke_in_container
         staging_compose_files = ["compose.staging-base.yml", "compose.boxmunge-staging.yml"]
         smoke_result = run_smoke_in_container(
@@ -238,18 +238,19 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
             project_name=staging_project_name,
         )
         if smoke_result.status == "ok":
-            print(f"  Smoke tests passed.")
+            print("  Smoke tests passed.")
         else:
             print(f"  WARN: Smoke test {smoke_result.status}: {smoke_result.message}")
 
     # Record staging state
+    staged_ref = ref if (project_dir / "repo").exists() else live_ref(paths, project_name)
     write_state(paths.project_staging_state(project_name), {
         "active": True,
-        "ref": ref or "latest",
+        "ref": staged_ref or "latest",
     })
 
     staging_hosts = [f"staging.{h}" for h in manifest.get("hosts", [])]
-    print(f"  Staged at:")
+    print("  Staged at:")
     for h in staging_hosts:
         print(f"    https://{h}")
     print(f"  Run 'promote {project_name}' to go live, or 'unstage {project_name}' to tear down.")
@@ -257,7 +258,7 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
     log_operation("stage", "Staged", paths, project=project_name)
 
     from boxmunge.webhooks import webhook_safe
-    webhook_safe("stage", project_name, paths, details={"ref": ref or "latest"})
+    webhook_safe("stage", project_name, paths, details={"ref": staged_ref or "latest"})
 
     return 0
 
@@ -283,32 +284,12 @@ def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
 
 
 def cmd_stage(args: list[str]) -> None:
+    from boxmunge.commands.argv import parse_args, require_project_name
     from boxmunge.paths import BoxPaths
-    if not args:
-        print("Usage: boxmunge stage <project> [--ref REF] [--dry-run]", file=sys.stderr)
-        sys.exit(2)
-    project = args[0]
-
-    from boxmunge.paths import validate_project_name
-    try:
-        validate_project_name(project)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(2)
-
-    ref = None
-    dry_run = False
-    remaining = args[1:]
-    i = 0
-    while i < len(remaining):
-        if remaining[i] == "--ref" and i + 1 < len(remaining):
-            ref = remaining[i + 1]
-            i += 2
-        elif remaining[i] == "--dry-run":
-            dry_run = True
-            i += 1
-        else:
-            print(f"ERROR: unknown argument: {remaining[i]}", file=sys.stderr)
-            sys.exit(2)
-    paths = BoxPaths()
-    sys.exit(run_stage(project, paths, ref=ref, dry_run=dry_run))
+    parsed = parse_args(
+        "stage", args, flags={"--dry-run"}, options={"--ref"},
+        min_positional=1, max_positional=1,
+    )
+    project = require_project_name("stage", parsed.positional[0])
+    sys.exit(run_stage(project, BoxPaths(), ref=parsed.get("--ref"),
+                       dry_run=parsed.has("--dry-run")))

@@ -35,6 +35,9 @@ class TestDeployEnvFiles:
         (pdir / "manifest.yml").write_text(BUNDLE_MANIFEST)
         (pdir / "compose.yml").write_text("services:\n  web:\n    image: nginx\n")
         (pdir / "secrets.env").write_text("SECRET=value\n")
+        # A previously recorded deploy: the release already on disk.
+        from boxmunge.state import write_state
+        write_state(paths.project_deploy_state("testapp"), {"current_ref": "testapp-1"})
         paths.host_secrets.write_text("HOST_TOKEN=abc\n")
 
         run_deploy("testapp", paths)

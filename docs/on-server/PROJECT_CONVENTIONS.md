@@ -15,7 +15,7 @@ Each project lives at `/opt/boxmunge/projects/<project-name>/`. The directory st
   compose.boxmunge.yml         # Auto-generated overlay (do not edit)
   project.env                  # Non-secret config (ships with bundle)
   secrets.env                  # CLI-managed secrets (boxmunge secrets)
-  caddy.override.conf          # Optional: manual Caddy config override
+  caddy.override.conf          # Optional: operator-placed Caddy config override
   boxmunge-scripts/
     smoke.sh                   # Health check (strongly recommended; 755)
     backup.sh                  # Backup to stdout (required if backup.type != none)
@@ -25,6 +25,50 @@ Each project lives at `/opt/boxmunge/projects/<project-name>/`. The directory st
   data/                        # Persistent volumes (managed by project)
   repo/                        # Git clone (source: git projects only)
 ```
+
+### What a bundle may contain
+
+A bundle carries the project's code and configuration: `manifest.yml`, `compose.yml`, `project.env`,
+`boxmunge-scripts/`, build contexts, and anything else the project needs.
+
+Each bundle deploy makes the project's code exactly the bundle: a file or directory the previous
+release had but the new bundle does not is removed (it stays in the previous-release copy that
+`rollback` restores). So anything the project needs on the server, including `project.env`, must
+ship in every bundle. Server-owned entries (below), read-write
+bind-mounted data directories, and `-staging` copies of bind-mounted directories are never touched
+by a deploy.
+
+Some entries belong to the server, and a bundle that carries any of them is refused before anything
+on the server changes (`ERROR:` naming each entry, exit 1):
+
+| Entry | Why the server owns it |
+|---|---|
+| `secrets.env` | Secrets are managed on the server with `secrets set` |
+| `security/` | CVE suppressions and their audit history, managed with `security suppress` / `unsuppress` |
+| `data/` | The project's live data |
+| `backups/` | Encrypted snapshots |
+| `caddy.override.conf` | Used verbatim as the project's Caddy config, so only an operator places it, on the server |
+| `repo/` | The clone of a git-sourced project |
+| `.releases/`, `compose.boxmunge*.yml`, `compose.staging-base.yml` | Written by boxmunge itself |
+
+The archive itself must hold exactly one top-level directory (the project), and only regular files,
+directories and links. A link must resolve inside the project directory: a bundle with an absolute
+link, a link that climbs out of the project (also through a chain of other links), a link with `..`
+anywhere but at the start of its target (`sub/../x`), or a device or FIFO entry is refused with an
+`ERROR:` naming the entry. Links are installed as links and are never followed.
+
+An empty `data/`, `backups/` or `security/` directory (or one holding only empty `.gitkeep` / `.keep`
+files) carries nothing; it is ignored with a `NOTE`.
+
+**Bind-mounted directories.** A project directory that `compose.yml` bind-mounts **read-write** is a
+data directory: `./uploads:/srv/uploads`, a long-syntax `type: bind` mount without
+`read_only: true`, or an absolute source inside the project directory. A deploy never removes a data
+directory or copies it into the previous release, and a bundle that ships content for one is
+refused, because boxmunge cannot tell seed data from code that was mounted without `:ro`. Ship at
+most an empty placeholder for it. A directory bind-mounted **read-only** (`:ro`, or
+`read_only: true`) is code or config: it ships in the bundle and is updated on every deploy like any
+other file. If boxmunge cannot read the live `compose.yml` well enough to tell which directories
+hold data, the deploy is refused before anything changes.
 
 ---
 
@@ -468,10 +512,12 @@ If the project has any operator-reviewed CVE suppressions, they live in:
 <project>/security/suppressions.yml
 ```
 
-The file ships with the project bundle so the disposition trail travels
-with the project — every suppression carries its `cve`, `until`,
-`reason`, `reviewed_by`, and `added` fields. Schema and field
-requirements are defined in CVE_POLICY.md (`agent-help cve`).
+The file is server-side state, next to its history file
+(`suppressions.history.yml`). Every suppression carries its `cve`,
+`until`, `reason`, `reviewed_by`, and `added` fields. Schema and field
+requirements are defined in CVE_POLICY.md (`agent-help cve`). A bundle
+that carries a `security/` directory is refused, so a redeploy can never
+replace the server's suppressions or erase their history.
 
 **Do not edit `suppressions.yml` manually.** It is managed exclusively
 by:
@@ -490,6 +536,8 @@ bypass the audit trail and risk breaking the schema.
 ## Caddy Override
 
 `caddy.override.conf` is an escape hatch for projects with routing requirements that boxmunge's generated Caddy config cannot express. If this file is present, boxmunge uses it **verbatim** in place of the generated Caddy configuration for the project's hosts.
+
+Because it is raw proxy configuration, it is operator-only: an operator places it in `/opt/boxmunge/projects/<project>/` on the server. A bundle that carries `caddy.override.conf` is refused, and deploys and rollbacks never remove or replace it.
 
 Use this only when necessary. Projects using `caddy.override.conf`:
 

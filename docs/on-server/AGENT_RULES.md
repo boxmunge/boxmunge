@@ -87,7 +87,7 @@ secrets set --host PUSHOVER_TOKEN=abc123
 
 These commands prompt for confirmation before executing. Use `--yes` only when you are certain the operation is correct and intentional:
 
-- `rollback <project>` -- rolls back to the previous deployment
+- `rollback <project>` -- puts back the previous release's code and its pre-deploy data snapshot (refuses, with the reason, if either is unavailable)
 - `restore <project>` -- restores from a backup
 - `project-delete <project>` -- destructively deletes a project (containers, files including local backups, registry entry); off-site backup copies are kept
 - `pause <project>` -- takes the site offline with a maintenance page

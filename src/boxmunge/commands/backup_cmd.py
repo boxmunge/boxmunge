@@ -95,11 +95,16 @@ def list_snapshots(paths: BoxPaths, project_name: str) -> list[Path]:
 def run_backup(
     project_name: str, paths: BoxPaths, _lock_held: bool = False,
     kind: BackupKind = BackupKind.MANUAL,
+    manifest: dict | None = None,
 ) -> int:
     """Run backup for a project. Returns 0 on success, 1 on failure.
 
     ``kind`` tags the snapshot and selects its retention: the manifest's
     ``backup.retention`` for nightly backups, SNAPSHOT_RETENTION otherwise.
+
+    ``manifest`` overrides the one on disk: promote backs up production data
+    with the production release's backup config while the staged release's
+    files are on disk.
 
     Paused projects refuse with rc=1 (operator-driven backup against a
     paused project is almost certainly wrong). Quarantined projects skip
@@ -134,11 +139,12 @@ def run_backup(
               f"not yet deployed. Deploy first with: boxmunge deploy {project_name}", file=sys.stderr)
         return 1
 
-    try:
-        manifest = load_manifest(paths.project_manifest(project_name))
-    except ManifestError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
+    if manifest is None:
+        try:
+            manifest = load_manifest(paths.project_manifest(project_name))
+        except ManifestError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
 
     backup_conf = manifest.get("backup", {})
     backup_type = backup_conf.get("type", "none")

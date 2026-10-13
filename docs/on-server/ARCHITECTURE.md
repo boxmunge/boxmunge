@@ -42,7 +42,7 @@ Key features:
       compose.boxmunge.yml    # generated overlay (networking, env, limits)
       project.env             # ships with bundle (non-secret config)
       secrets.env             # CLI-managed secrets (boxmunge secrets)
-      caddy.override.conf     # optional: verbatim Caddy config escape hatch
+      caddy.override.conf     # optional: verbatim Caddy config escape hatch (operator-placed)
       boxmunge-scripts/       # project's integration scripts
         smoke.sh
         backup.sh
@@ -51,6 +51,12 @@ Key features:
       backups/                # encrypted local backup archives
       data/                   # persistent volume mounts
       repo/                   # git clone (source: git projects only)
+      .releases/              # release workspace (managed by boxmunge)
+        incoming/             # a bundle being validated (transient)
+        previous/             # code of the release the last deploy replaced (rollback target)
+        previous.json         # its bundle name and pre-deploy data snapshot
+        prestage/             # production code displaced by `stage`, until promote/unstage
+        live.json             # bundle name of the installed release
   inbox/                      # uploaded bundles awaiting deployment
   state/                      # operational state (deploy:deploy 755)
     health/                   # per-project health state JSON
@@ -106,7 +112,7 @@ When a project is staged, its containers run alongside production on a separate 
 
 The project's own `compose.yml` does not need to reference boxmunge networking at all. The overlay is the platform's concern.
 
-If a project contains `caddy.override.conf`, boxmunge uses it verbatim instead of generating config. A notice is logged when this escape hatch is active.
+If a project contains `caddy.override.conf`, boxmunge uses it verbatim instead of generating config. A notice is logged when this escape hatch is active. Only an operator places it, directly on the server: a bundle that carries one is refused, and deploys never remove it.
 
 ---
 
@@ -170,16 +176,21 @@ boxmunge supports two project sources, declared in `manifest.yml` via the `sourc
 
 `deploy <project>` executes these steps in order:
 
-1. Resolve source -- locate bundle in inbox or pull from git repo
-2. Validate manifest -- schema check, required fields (`id`, `source`, `project`, `hosts`, services), backup/restore pairing
-3. Pre-deploy snapshot -- encrypted backup of current state (unless `--no-snapshot`)
-4. Pre-deploy command -- run `deploy.pre_deploy` from manifest if defined (e.g., migrations)
-5. Generate configs -- write Caddy site config and compose overlay (networking, env_files, resource limits)
-6. Start containers -- `docker compose up -d` with overlay
-7. Reload Caddy -- graceful, zero-downtime
-8. Smoke test -- run `boxmunge-scripts/smoke.sh`, interpret exit code
-9. Record state -- write deploy state JSON atomically
-10. Log the deployment -- append to boxmunge operational log
+1. Resolve source -- locate the bundle in the inbox, or pull from the git repo
+2. Unpack -- a bundle is extracted into `projects/<project>/.releases/incoming/`, not over the live project
+3. Validate -- manifest schema and required fields (`id`, `source`, `project`, `hosts`, services), project identity (ULID), the user `compose.yml` against the hardening floor, and the bundle's contents against the server's data directories. For a bundle all of this runs on the unpacked copy: a rejected bundle never touches the live project files, so no later timer or restart can start it
+4. Pre-deploy snapshot -- encrypted backup of the current data, taken with the outgoing release's own backup configuration (unless `--no-snapshot`)
+5. Keep the outgoing release -- its code is copied to `.releases/previous/` and paired with that snapshot, for `rollback`
+6. Install -- only a release that passed every check replaces the live project files
+7. Pre-deploy command -- run `deploy.pre_deploy` from manifest if defined (e.g., migrations)
+8. Generate configs -- write Caddy site config and compose overlay (networking, env_files, resource limits)
+9. Start containers -- `docker compose up -d` with overlay
+10. Reload Caddy -- graceful, zero-downtime
+11. Smoke test -- run `boxmunge-scripts/smoke.sh`, interpret exit code
+12. Record state -- write deploy state JSON atomically
+13. Log the deployment -- append to boxmunge operational log
+
+A bundle that fails validation stays in the inbox (it is not moved to `.consumed/`) and the command exits non-zero: 3 for a compose hardening rejection, 1 otherwise. `stage` uses the same unpack-validate-install path, but keeps the production release in `.releases/prestage/` instead of step 5 and takes no snapshot.
 
 If any step fails, the deploy stops and reports the failure. No automatic rollback -- the operator or agent decides what to do next.
 
@@ -187,10 +198,13 @@ If any step fails, the deploy stops and reports the failure. No automatic rollba
 
 `stage <project>` follows the same steps but deploys to the staging environment at `staging.<hostname>`. After verification:
 
-- `promote <project>` -- tears down staging, deploys to production
-- `unstage <project>` -- tears down staging, production unchanged
+- `promote <project>` -- deploys the staged release to production, then tears down staging
+- `unstage <project>` -- tears down staging and puts the production release's files back
 
-Staging state is tracked under `state/staging/`.
+The staged release is installed in the project directory (staging containers run from it); the
+production release it displaces is kept in `.releases/prestage/` until promote or unstage. A stage
+that fails after installing cleans up the same way unstage does. Staging state is tracked under
+`state/staging/`.
 
 ---
 
@@ -212,7 +226,7 @@ Secrets are never edited manually. The CLI handles file creation, permissions, a
 Operational state is stored as JSON files under `/opt/boxmunge/state/`:
 
 - `state/health/<project>.json` -- last check time, status, consecutive failure count, alert state, failure reason
-- `state/deploy/<project>.json` -- current ref/bundle, deploy timestamp, pre-deploy snapshot filename, recent history
+- `state/deploy/<project>.json` -- current ref (the bundle name, e.g. `myapp-2026-10-13T101500123456`, or the git commit), deploy timestamp, pre-deploy snapshot filename, recent history
 - `state/staging/<project>/` -- staging environment state
 
 All state writes are atomic: the new content is written to a temporary file in the same directory, then renamed into place with `os.rename()`. This prevents partial reads if a check or deploy runs concurrently.
