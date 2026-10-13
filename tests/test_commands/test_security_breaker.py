@@ -138,6 +138,15 @@ def test_fleet_view_shows_held_projects(fleet, monkeypatch, capsys):
     assert "Held by the CVE circuit breaker (still running): 3" in capsys.readouterr().out
 
 
+def test_apply_held_is_in_the_usage_and_help_text():
+    from boxmunge.commands.help import HELP_TEXT
+    from boxmunge.commands.security_cmd import USAGE
+    from boxmunge.commands.usage import usage_for
+
+    for text in (usage_for("security"), HELP_TEXT, USAGE):
+        assert "security scan --apply-held" in text
+
+
 def test_deploy_shell_refuses_apply_held(capsys):
     assert run_command("security", ["scan", "--apply-held"]) == 1
     assert "operator-only" in capsys.readouterr().err

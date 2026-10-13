@@ -185,13 +185,16 @@ Open the boxmunge terminal UI.""",
 Usage: boxmunge security [--json]
        boxmunge security <project> [--json]
        boxmunge security scan [project]
+       boxmunge security scan --apply-held
        boxmunge security suppress <CVE>|--current (--project <name>|--host)
                                   --until <YYYY-MM-DD> --reason <text>
        boxmunge security unsuppress <CVE> (--project <name>|--host)
        boxmunge security resume <project>
 
 Container security and CVE policy: fleet or per-project view, scan,
-suppressions, and lifting a quarantine.""",
+suppressions, and lifting a quarantine. --until is at most 90 days ahead.
+Operator only (refused by the deploy shell): --host suppressions, and
+scan --apply-held, which applies quarantines the CVE circuit breaker held.""",
     "bundle": """\
 Usage: boxmunge bundle <project-dir> [--output PATH] [--validate]
 
