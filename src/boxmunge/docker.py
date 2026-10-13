@@ -206,6 +206,24 @@ def compose_ps(
     return result.stdout
 
 
+def compose_config(
+    project_dir: Path,
+    compose_files: list[str] | None = None,
+    *,
+    project_name: str,
+) -> str:
+    """Return `docker compose config --format json` output.
+
+    The fully resolved model Compose will run: variables interpolated from
+    the project's `.env` and the environment, `extends`/`include` merged,
+    and paths made absolute. Client-side only; needs no daemon.
+    """
+    cmd = compose_command(project_name, compose_files)
+    cmd.extend(["config", "--format", "json"])
+    result = _run(cmd, cwd=project_dir, capture=True)
+    return result.stdout
+
+
 def container_health(container_name: str) -> str | None:
     """Get the health status of a container. Returns None if no healthcheck."""
     result = _run(

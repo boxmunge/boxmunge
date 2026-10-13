@@ -189,7 +189,7 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
         if not paths.project_caddy_override(name).exists():
             generate_caddy_config(manifest)
         generate_compose_override(
-            manifest, user_compose=load_user_compose(paths.project_compose(name)),
+            manifest, user_compose=load_user_compose(paths.project_compose(name), name),
         )
         report.append(f"{name}: configs render OK")
     return report

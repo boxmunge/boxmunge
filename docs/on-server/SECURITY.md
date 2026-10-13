@@ -147,6 +147,12 @@ that would undo the hardening. Values are normalised before they are compared:
 letter case, surrounding spaces, a `CAP_` prefix, and `=` versus `:` in
 `security_opt` make no difference.
 
+The checks run on the configuration Compose will actually start: the output of
+`docker compose -p <project> config`, with `${VAR}` interpolated from the
+project's `.env` and the environment, and `extends:` and `include:` files
+merged in. A value hidden behind a variable or in an included file is checked
+like any other.
+
 | Rejected | Why |
 |---|---|
 | `privileged: true` | Full host access. |
@@ -193,6 +199,7 @@ They apply to every service and are **not** relaxed by `profile: "off"`.
 | An `external: true` volume, or a volume with `driver`/`driver_opts` | Use a plain named volume (`data: {}`) or a bind mount inside the project. |
 | `external_links`, or `volumes_from: [container:<name>]` | Reach services in the same file by service name; name a service in `volumes_from`. |
 | A `secrets`/`configs` `file:` or a `build` context outside the project directory | Keep the file or context inside the project. Secret values belong in `secrets set`. |
+| An `include:`, `extends: file:`, or `env_file:` path outside the project directory (followed through nested includes), remote, or written with `${VAR}` | Keep every compose, extends, include, and env file inside the project, and write the path literally. |
 
 ## Wildcard hosts and routing isolation
 

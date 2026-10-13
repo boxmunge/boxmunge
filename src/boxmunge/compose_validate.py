@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from boxmunge import compose_resolve
 from boxmunge.compose_isolation import isolation_problems
 from boxmunge.compose_mounts import has_named_volume
 from boxmunge.compose_service_rules import service_findings
@@ -272,8 +273,14 @@ def validate_user_compose(
     Off services log a warning instead of raising. Rule A (disable
     quarantine) runs before Rule B (strict posture) — first rejection wins.
 
+    The literal file is checked for a top-level `name:` and for
+    include/extends/env_file references leaving the project; every other
+    rule runs on the fully resolved model from `docker compose config`
+    (interpolation, `.env`, extends and include applied), so nothing the
+    literal file hides reaches the containers unchecked.
+
     Raises ComposeSecurityError on the first hostile key in a non-off
-    service, or if the file cannot be read/parsed.
+    service, or if the file cannot be read, parsed, or resolved.
     """
     off = off_services or set()
     base_dir = compose_path.parent
@@ -308,12 +315,22 @@ def validate_user_compose(
             f"the top-level name: line."
         )
 
-    services = doc.get("services") or {}
-    if not isinstance(services, dict):
+    if not isinstance(doc.get("services") or {}, dict):
         raise ComposeSecurityError(
             f"could not parse compose.yml: 'services' must be a mapping, "
-            f"got {type(services).__name__}"
+            f"got {type(doc['services']).__name__}"
         )
+
+    # include/extends/env_file references only exist in the literal files;
+    # everything else is checked on the model Compose will actually run.
+    references = compose_resolve.reference_problems(compose_path, roots)
+    if references:
+        raise ComposeSecurityError(references[0])
+    try:
+        doc = compose_resolve.resolve_compose_config(compose_path, project_name)
+    except compose_resolve.ComposeResolveError as e:
+        raise ComposeSecurityError(f"could not resolve compose.yml: {e}") from e
+    services = doc.get("services") or {}
 
     isolation = isolation_problems(doc, project_name, base_dir, roots)
     if isolation:

@@ -110,7 +110,7 @@ def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
             # v0.8: pass the candidate compose.yml from the new bundle so
             # the overlay omits read_only/tmpfs defaults consistently with
             # what a real deploy of this bundle would produce.
-            candidate_user_compose = load_user_compose(extracted / "compose.yml")
+            candidate_user_compose = load_user_compose(extracted / "compose.yml", project_name)
             new_compose = generate_compose_override(
                 manifest, user_compose=candidate_user_compose,
             )

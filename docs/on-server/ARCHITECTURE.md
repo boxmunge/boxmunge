@@ -332,7 +332,7 @@ A last-resort `profile: "off"` requires a non-empty `reason` and triggers repeat
 
 ### compose_validate
 
-Before configs are written, `compose_validate.py` (added in v0.5) inspects the project's user-authored `compose.yml` and rejects any keys that would defeat the hardening floor — e.g. `privileged: true`, `cap_add: [SYS_ADMIN]`, `security_opt` overrides that re-enable privilege escalation. This runs at validate, stage, and deploy time, so the floor cannot be silently sidestepped from the user side.
+Before configs are written, `compose_validate.py` (added in v0.5) inspects the project's user-authored `compose.yml` and rejects any keys that would defeat the hardening floor — e.g. `privileged: true`, `cap_add: [SYS_ADMIN]`, `security_opt` overrides that re-enable privilege escalation — or reach another project. It checks the resolved model from `docker compose -p <project> config` (interpolation, `.env`, `extends`, `include` applied), and the literal files for `include`/`extends`/`env_file` paths leaving the project. This runs at stage, deploy, resume, and upgrade time, so the floor cannot be silently sidestepped from the user side. The overlay generator reads the same resolved model, so services that arrive through `include:` are hardened too.
 
 ### Where it fits in the deploy flow
 
