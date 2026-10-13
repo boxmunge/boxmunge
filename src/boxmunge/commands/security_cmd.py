@@ -16,10 +16,8 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timezone
 
-from boxmunge.commands.security_actions import (
-    cmd_security_resume,
-    cmd_security_scan,
-)
+from boxmunge.commands.security_actions import cmd_security_scan
+from boxmunge.commands.security_resume import cmd_security_resume
 from boxmunge.commands.security_suppress import (
     cmd_security_suppress,
     cmd_security_unsuppress,

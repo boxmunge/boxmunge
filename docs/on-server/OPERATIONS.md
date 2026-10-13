@@ -973,7 +973,7 @@ boxmunge security resume myapp
 ```
 
 `security resume` re-scans first and refuses to lift if a quarantine-
-level finding still applies.
+level finding still applies or if any image could not be scanned.
 
 Audit trails for the CVE machinery live in the structured log:
 

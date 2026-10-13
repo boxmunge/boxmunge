@@ -177,8 +177,10 @@ project back online.
 security resume <project>
 ```
 
-`resume` re-scans, refuses if any quarantine-level finding remains,
-regenerates Caddy, restarts containers, runs smoke.
+`resume` re-scans every image, refuses if any quarantine-level finding
+remains or if any image could not be scanned (it fails closed and lists
+what was not covered), then regenerates Caddy, restarts containers, and
+runs smoke.
 
 ### B. Tighten hardening (exploitable, low impact, can drop penalty)
 

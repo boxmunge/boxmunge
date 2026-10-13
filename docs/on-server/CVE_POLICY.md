@@ -701,8 +701,8 @@ resume <project>` and abort before touching containers or configs.
 
 In both camps the skip is recorded via `log_operation` and visible in
 `boxmunge log --component <component>`. Only `boxmunge security
-resume <project>` lifts the quarantine; it re-scans first and refuses
-to lift if a quarantine-level finding still applies.
+resume <project>` lifts the quarantine; it re-scans first and fails
+closed (see "Recovering a quarantined project" below).
 
 ## Recovering a quarantined project
 
@@ -728,17 +728,27 @@ to lift if a quarantine-level finding still applies.
    boxmunge security resume <project>
    ```
 
-   `resume` re-scans the image, regenerates the project's Caddy config,
-   restarts the containers, and runs the smoke test. It refuses to lift
-   the quarantine if any finding still meets the project's posture
-   threshold:
+   `resume` re-scans every one of the project's current images,
+   regenerates the project's Caddy config, restarts the containers, and
+   runs the smoke test. It **fails closed**: the quarantine is lifted only
+   when the re-scan covered every image and found no quarantine-level
+   finding. It refuses, keeps the quarantine, and exits 1 when:
 
-   ```
-   ERROR: Cannot resume — CVE-2026-5678 (Critical) would still quarantine.
-     Either suppress it (boxmunge security suppress) or wait for upstream fix.
-   ```
+   - any finding still meets the project's posture threshold:
 
-   Surface and address the remaining finding before retrying.
+     ```
+     ERROR: Cannot resume — CVE-2026-5678 (Critical) would still quarantine.
+     ```
+
+   - any image failed to scan (Trivy DB or registry unreachable, for
+     example), or every image did;
+   - the per-project scan budget ran out before every image was scanned;
+   - a service's image cannot be identified (no container to read a digest
+     from and no `image:` in `compose.yml`). Declare `image:` alongside
+     `build:` for build-only services so the scanner can find them.
+
+   The error lists each image or service that was not covered. Fix the
+   cause and retry; an incomplete re-scan is never treated as clean.
 
 This is distinct from `boxmunge resume` (which lifts a manual `pause`).
 Quarantine state is separate from pause state — `boxmunge up` does not

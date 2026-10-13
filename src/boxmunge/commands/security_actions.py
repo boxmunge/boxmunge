@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Action handlers for `boxmunge security` subcommands: scan and resume.
+"""Fleet orchestration for `boxmunge security scan`.
 
-The suppress/unsuppress handlers live in security_suppress.py — they share
-no internals beyond the suppressions-path helper. The per-project scan
-mechanics live in security_scan_core.py — keep this file focused on
-fleet orchestration (grace heads-up, exit codes, lock-skip handling).
+Resume lives in security_resume.py and suppress/unsuppress in
+security_suppress.py. The per-project scan mechanics live in
+security_scan_core.py — keep this file focused on fleet orchestration
+(grace heads-up, exit codes, lock-skip handling).
 """
 from __future__ import annotations
 
@@ -14,9 +14,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from boxmunge.caddy import prepare_caddy_config
 from boxmunge.commands.security_scan_core import scan_one_project
-from boxmunge.compose import prepare_compose_override
 from boxmunge.cve._alerting_formatters import format_kev_stale_alert
 from boxmunge.cve.alerting import (
     format_grace_heads_up_alert,
@@ -30,16 +28,11 @@ from boxmunge.cve.grace import (
     read_grace_state,
 )
 from boxmunge.cve.policy import Disposition, ProjectDecision
-from boxmunge.cve.quarantine import (
-    QuarantineError,
-    is_quarantined,
-    lift_quarantine,
-)
+from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
-from boxmunge.fileutil import LockError, open_shared_lockfile, project_lock
-from boxmunge.health_checks.smoke import run_smoke
+from boxmunge.fileutil import LockError, open_shared_lockfile
 from boxmunge.log import log_warning
-from boxmunge.manifest import ManifestError, load_manifest
+from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import is_registered, load_registered_projects
 
@@ -316,170 +309,4 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
             )
         print(f"Attention required: {'; '.join(bits)}. Exit code 2.")
         return 2
-    return 0
-
-
-# ---------- subcommand: resume ----------
-
-
-def cmd_security_resume(args: list[str], paths: BoxPaths) -> int:
-    from boxmunge.commands.argv import parse_args, require_project_name
-    parsed = parse_args("security", args, min_positional=1, max_positional=1)
-    project = require_project_name("security", parsed.positional[0])
-
-    if not is_quarantined(project, paths):
-        print(
-            f"ERROR: project '{project}' is not quarantined.",
-            file=sys.stderr,
-        )
-        return 1
-
-    # Phrasing matters: this announces re-scan, not lift. Saying "Resuming X..."
-    # here and then bailing with "Cannot resume" reads as contradictory output.
-    # The actual "Resuming..." line is only emitted once the scan clears.
-    print(f"Re-scanning {project} before lift...")
-    try:
-        refresh_db()
-    except TrivyNotInstalledError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
-
-    # The pre-lift scan acquires its own per-project lock inside
-    # scan_one_project (audit A-2). LockError surfaces as a clear "try
-    # again" message rather than a hidden race.
-    #
-    # audit_only=True (audit A-3): resume's re-scan must NOT mutate
-    # scan_state.json or emit transition alerts. Operators don't expect
-    # `boxmunge security resume X` to push alerts about X, and clobbering
-    # scan_state would obscure the prior context the headline CVE was
-    # based on.
-    try:
-        decisions = scan_one_project(paths, project, audit_only=True).decisions
-    except LockError:
-        print(
-            f"ERROR: Another operation is in progress for '{project}'. "
-            f"Try again shortly.",
-            file=sys.stderr,
-        )
-        return 1
-    except TrivyNotInstalledError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
-    except (RuntimeError, ManifestError) as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
-
-    blocking = []
-    for d in decisions:
-        for f in d.findings:
-            if f.disposition == Disposition.QUARANTINE:
-                blocking.append(f)
-
-    if blocking:
-        # Dedupe by CVE id for the message — multiple findings can share
-        # one CVE across packages. List them so the operator sees what
-        # `--current` would suppress.
-        cve_seen: dict[str, str] = {}
-        for f in blocking:
-            cve_seen.setdefault(f.finding.cve_id, f.effective_severity.value)
-        h = blocking[0]
-        print(
-            f"ERROR: Cannot resume — {h.finding.cve_id} "
-            f"({h.effective_severity.value}) would still quarantine.",
-            file=sys.stderr,
-        )
-        if len(cve_seen) > 1:
-            others = [
-                f"{cve} ({sev})"
-                for cve, sev in cve_seen.items()
-                if cve != h.finding.cve_id
-            ]
-            print(
-                f"  Plus {len(others)} more quarantine-level "
-                f"finding{'s' if len(others) != 1 else ''}: "
-                f"{', '.join(others)}",
-                file=sys.stderr,
-            )
-        print(
-            "  Options:",
-            file=sys.stderr,
-        )
-        print(
-            f"    - Suppress all current blockers: "
-            f"boxmunge security suppress --current --project {project} "
-            f"--until <YYYY-MM-DD> --reason <text>",
-            file=sys.stderr,
-        )
-        print(
-            f"    - Suppress one: boxmunge security suppress "
-            f"{h.finding.cve_id} --project {project} "
-            f"--until <YYYY-MM-DD> --reason <text>",
-            file=sys.stderr,
-        )
-        print(
-            "    - Wait for upstream fix and rescan.",
-            file=sys.stderr,
-        )
-        return 1
-
-    print("  Re-scan: clear (no quarantine-level findings)")
-    print(f"Resuming {project}...")
-
-    # Audit A-2: lift section must hold the per-project lock so
-    # config-regen + compose_up + state-clear cannot interleave with a
-    # concurrent deploy/promote/container-update.
-    try:
-        with project_lock(project, paths):
-            return _resume_lift(paths, project)
-    except LockError:
-        print(
-            f"ERROR: Another operation is in progress for '{project}'. "
-            f"Try again shortly.",
-            file=sys.stderr,
-        )
-        return 1
-
-
-def _resume_lift(paths: BoxPaths, project: str) -> int:
-    """Inner lift section. Caller MUST hold the per-project lock."""
-    # Render normal Caddy site config + compose override using the
-    # caddy/compose primitives (the resume_cmd flow does the same).
-    try:
-        manifest = load_manifest(paths.project_manifest(project))
-    except ManifestError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
-    try:
-        prepare_caddy_config(paths, manifest)
-        prepare_compose_override(paths, manifest, component="security-resume")
-    except (OSError, ValueError) as e:
-        print(f"ERROR: Failed to render Caddy/compose: {e}", file=sys.stderr)
-        return 1
-    print("  Caddy config restored.")
-
-    site_path = paths.project_caddy_site(project)
-    site_content = site_path.read_text() if site_path.exists() else ""
-    compose_files = ["compose.yml"]
-    if paths.project_compose_override(project).exists():
-        compose_files.append("compose.boxmunge.yml")
-    try:
-        lift_quarantine(
-            project, paths,
-            project_dir=paths.project_dir(project),
-            project_caddy_site_content=site_content,
-            compose_files=compose_files,
-        )
-    except QuarantineError as e:
-        print(f"ERROR: lift_quarantine failed: {e}", file=sys.stderr)
-        return 1
-    print("  Containers started.")
-
-    # Smoke test — shared with the pause/resume flow.
-    smoke_ok, smoke_msg = run_smoke(project, paths)
-    if smoke_ok:
-        print("  Smoke test: OK")
-    else:
-        print(f"  Smoke test: FAIL — {smoke_msg}")
-
-    print(f"Project '{project}' resumed.")
     return 0

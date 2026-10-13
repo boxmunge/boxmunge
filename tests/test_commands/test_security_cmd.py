@@ -1959,7 +1959,7 @@ def test_scan_per_project_budget_skips_remaining_images(
 
 
 def test_resume_not_quarantined_exits_1(tmp_path, capsys) -> None:
-    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.commands.security_resume import cmd_security_resume
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_resume(["demo"], paths)
     err = capsys.readouterr().err
@@ -1971,7 +1971,7 @@ def test_resume_blocked_when_finding_still_quarantines(
     monkeypatch, tmp_path, capsys,
 ) -> None:
     from datetime import datetime, timezone
-    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.commands.security_resume import cmd_security_resume
     from boxmunge.cve.scanner import (
         AttackVector, Finding, ScanResult, Severity, VulnStatus,
     )
@@ -1987,7 +1987,7 @@ def test_resume_blocked_when_finding_still_quarantines(
         "image_ref": "myapp:1.0",
     }))
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+        "boxmunge.commands.security_resume.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_inputs.container_image_digest",
@@ -2436,6 +2436,9 @@ def _wire_clean_scan(monkeypatch, paths) -> None:
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
+        "boxmunge.commands.security_resume.refresh_db", lambda: None,
+    )
+    monkeypatch.setattr(
         "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
@@ -2481,7 +2484,7 @@ def test_resume_returns_lock_error_when_held(monkeypatch, tmp_path, capsys) -> N
     'try again' message rather than racing the holder."""
     import fcntl
     import json as _json
-    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.commands.security_resume import cmd_security_resume
     from boxmunge.fileutil import open_shared_lockfile
     paths = _scan_paths(tmp_path)
     # Mark the project as quarantined first so the resume gets past the
@@ -2497,7 +2500,7 @@ def test_resume_returns_lock_error_when_held(monkeypatch, tmp_path, capsys) -> N
         "image_ref": "myapp:1.0",
     }))
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+        "boxmunge.commands.security_resume.refresh_db", lambda: None,
     )
     lock_path = paths.project_lock_file("demo")
     fd = open_shared_lockfile(lock_path)
@@ -2522,7 +2525,7 @@ def test_resume_lift_section_holds_project_lock(monkeypatch, tmp_path) -> None:
     import fcntl as _fcntl
     import json as _json
     import os as _os
-    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.commands.security_resume import cmd_security_resume
     from boxmunge.fileutil import open_shared_lockfile
     paths = _scan_paths(tmp_path)
     qfile = paths.project_quarantine_state("demo")
@@ -2540,15 +2543,15 @@ def test_resume_lift_section_holds_project_lock(monkeypatch, tmp_path) -> None:
     paths.project_caddy_site("demo").parent.mkdir(parents=True, exist_ok=True)
     paths.project_caddy_site("demo").write_text("dummy")
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.prepare_caddy_config",
+        "boxmunge.commands.security_resume.prepare_caddy_config",
         lambda p, m: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.prepare_compose_override",
+        "boxmunge.commands.security_resume.prepare_compose_override",
         lambda p, m, component=None: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.run_smoke",
+        "boxmunge.commands.security_resume.run_smoke",
         lambda p, paths_: (True, "ok"),
     )
     lock_holds: list = []
@@ -2565,7 +2568,7 @@ def test_resume_lift_section_holds_project_lock(monkeypatch, tmp_path) -> None:
         finally:
             _os.close(fd)
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.lift_quarantine",
+        "boxmunge.commands.security_resume.lift_quarantine",
         assert_lock_held,
     )
     rc = cmd_security_resume(["demo"], paths)
@@ -2703,19 +2706,19 @@ def _wire_resume_lift_stubs(monkeypatch) -> None:
     """Stub out the lift_quarantine + caddy/compose/smoke primitives so the
     resume flow can run end-to-end without touching docker."""
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.lift_quarantine",
+        "boxmunge.commands.security_resume.lift_quarantine",
         lambda *a, **k: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.prepare_caddy_config",
+        "boxmunge.commands.security_resume.prepare_caddy_config",
         lambda p, m: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.prepare_compose_override",
+        "boxmunge.commands.security_resume.prepare_compose_override",
         lambda p, m, component=None: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.run_smoke",
+        "boxmunge.commands.security_resume.run_smoke",
         lambda p, paths_: (True, "ok"),
     )
 
@@ -2726,7 +2729,7 @@ def test_resume_audit_only_does_not_write_scan_state(
     """Audit A-3: cmd_security_resume's pre-lift scan must NOT clobber
     scan_state.json — the prior state preserves the headline-CVE context
     that justified quarantine in the first place."""
-    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.commands.security_resume import cmd_security_resume
     paths = _scan_paths(tmp_path)
     _seed_quarantine(paths)
     _wire_clean_scan(monkeypatch, paths)
@@ -2753,7 +2756,7 @@ def test_resume_audit_only_does_not_emit_scan_alerts(
     """Audit A-3: resume's pre-lift scan must NOT push transition alerts.
     Operators don't expect `boxmunge security resume X` to push alerts
     about X — the resume flow has its own success/failure signalling."""
-    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.commands.security_resume import cmd_security_resume
     paths = _scan_paths(tmp_path)
     _seed_quarantine(paths)
     _wire_clean_scan(monkeypatch, paths)
@@ -2778,14 +2781,14 @@ def test_resume_audit_only_does_not_take_quarantine_action(
     re-scan, audit_only=True must prevent quarantine_project from firing.
     The blocking-finding check downstream is what stops the lift."""
     from datetime import datetime, timezone
-    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.commands.security_resume import cmd_security_resume
     from boxmunge.cve.scanner import (
         AttackVector, Finding, ScanResult, Severity, VulnStatus,
     )
     paths = _scan_paths(tmp_path)
     _seed_quarantine(paths)
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+        "boxmunge.commands.security_resume.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_inputs.container_image_digest",
@@ -2836,14 +2839,14 @@ def test_resume_audit_only_still_detects_blocking_findings(
     findings to the caller — the read-only check is what protects the
     operator from lifting against an unresolved CVE."""
     from datetime import datetime, timezone
-    from boxmunge.commands.security_actions import cmd_security_resume
+    from boxmunge.commands.security_resume import cmd_security_resume
     from boxmunge.cve.scanner import (
         AttackVector, Finding, ScanResult, Severity, VulnStatus,
     )
     paths = _scan_paths(tmp_path)
     _seed_quarantine(paths, cve_id="CVE-2026-1111")
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.refresh_db", lambda: None,
+        "boxmunge.commands.security_resume.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_inputs.container_image_digest",
