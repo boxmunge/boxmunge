@@ -8,6 +8,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from boxmunge.capabilities import (
+    DENIED_CAPS,
+    VALID_CAP_NAMES,
+    normalise_cap,
+)
+
 # Profile names. v0.5 ships `default` and `off`. Future tiers add `strict` and
 # `paranoid`; their names are reserved now so a manifest setting them today
 # fails validation rather than silently doing nothing.
@@ -47,25 +53,6 @@ DEFAULT_CAP_DROP: list[str] = [
     "LEASE",
     "NET_RAW",
 ]
-
-# Whitelist of cap names accepted in user-supplied cap_drop / cap_add fields.
-# Validation rejects anything outside this set.
-VALID_CAP_NAMES: set[str] = {
-    "AUDIT_CONTROL", "AUDIT_READ", "AUDIT_WRITE",
-    "BLOCK_SUSPEND", "BPF",
-    "CHOWN", "DAC_OVERRIDE", "DAC_READ_SEARCH",
-    "FOWNER", "FSETID",
-    "IPC_LOCK", "IPC_OWNER",
-    "KILL", "LEASE", "LINUX_IMMUTABLE",
-    "MAC_ADMIN", "MAC_OVERRIDE", "MKNOD",
-    "NET_ADMIN", "NET_BIND_SERVICE", "NET_BROADCAST", "NET_RAW",
-    "PERFMON",
-    "SETFCAP", "SETGID", "SETPCAP", "SETUID",
-    "SYS_ADMIN", "SYS_BOOT", "SYS_CHROOT", "SYS_MODULE",
-    "SYS_NICE", "SYS_PACCT", "SYS_PTRACE", "SYS_RAWIO",
-    "SYS_RESOURCE", "SYS_TIME", "SYS_TTY_CONFIG",
-    "SYSLOG", "WAKE_ALARM",
-}
 
 DEFAULT_PIDS_LIMIT = 512
 
@@ -181,6 +168,38 @@ class SecurityValidationError(ValueError):
     """Raised when a security: block is malformed."""
 
 
+def _validate_cap(cap: Any, cap_field: str, context: str) -> None:
+    """Reject a manifest capability that is unknown, misspelt, or denied.
+
+    Manifest entries must use the canonical spelling (upper case, no
+    `CAP_` prefix) so the rendered overlay and the CVE hardening report
+    agree on names. `cap_add` additionally refuses the shared denylist
+    that compose validation enforces.
+    """
+    if not isinstance(cap, str):
+        raise SecurityValidationError(
+            f"{context}: capability {cap!r} in {cap_field} must be a string."
+        )
+    canonical = normalise_cap(cap)
+    if cap_field == "cap_add" and canonical in DENIED_CAPS:
+        raise SecurityValidationError(
+            f"{context}: cap_add {cap!r} is never allowed under the default "
+            f"profile (it lets a container reach the host). Remove it; a "
+            f"service that truly needs it must use profile: \"off\" with a "
+            f"reason. Denied: {sorted(DENIED_CAPS)}."
+        )
+    if canonical not in VALID_CAP_NAMES:
+        raise SecurityValidationError(
+            f"{context}: Unknown capability {cap!r} in {cap_field}. "
+            f"Run `agent-help security` for the valid list."
+        )
+    if cap != canonical:
+        raise SecurityValidationError(
+            f"{context}: write capability {cap!r} in {cap_field} as "
+            f"{canonical!r} (upper case, no CAP_ prefix)."
+        )
+
+
 def validate_security_block(
     block: dict[str, Any] | None, context: str
 ) -> None:
@@ -238,11 +257,7 @@ def validate_security_block(
                 f"{context}: {cap_field} must be a list, got {type(caps).__name__}"
             )
         for cap in caps:
-            if not isinstance(cap, str) or cap not in VALID_CAP_NAMES:
-                raise SecurityValidationError(
-                    f"{context}: Unknown capability {cap!r} in {cap_field}. "
-                    f"Run `agent-help security` for the valid list."
-                )
+            _validate_cap(cap, cap_field, context)
 
     if "pids_limit" in block:
         v = block["pids_limit"]

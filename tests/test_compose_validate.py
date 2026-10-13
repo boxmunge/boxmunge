@@ -601,7 +601,9 @@ services:
         with pytest.raises(ComposeSecurityError, match="volumes"):
             validate_user_compose(compose, paths)
 
-    def test_benign_home_path_accepted(self, tmp_path: Path, paths) -> None:
+    def test_home_path_rejected(self, tmp_path: Path, paths) -> None:
+        # F-01: /home holds the deploy user's ~/.ssh; a writable mount
+        # there is a persistence path onto the host.
         compose = _write(tmp_path / "compose.yml", """
 services:
   web:
@@ -609,7 +611,8 @@ services:
     volumes:
       - /home/deploy/foo:/foo
 """)
-        validate_user_compose(compose, paths)
+        with pytest.raises(ComposeSecurityError, match="volumes"):
+            validate_user_compose(compose, paths)
 
 
 # ---------------------------------------------------------------------------

@@ -120,6 +120,43 @@ Two invariants:
 - **Absence inherits.** Omitting a field never disables a protection.
 - **Disabling is explicit.** Set `no_new_privileges: false`, `pids_limit: 0`, etc.
 
+## What `compose.yml` may not do
+
+Your `compose.yml` is merged with the generated overlay, and Compose lets some
+user keys win over it. So every deploy, stage, resume, and upgrade checks
+`compose.yml` first and refuses to proceed (exit code 3) when it finds a key
+that would undo the hardening. Values are normalised before they are compared:
+letter case, surrounding spaces, a `CAP_` prefix, and `=` versus `:` in
+`security_opt` make no difference.
+
+| Rejected | Why |
+|---|---|
+| `privileged: true` | Full host access. |
+| `privileged`, `read_only`, or `init` given as anything but an unquoted `true`/`false` | A quoted `"true"` is not checked as a boolean. Write the bare value. |
+| `pid`, `ipc`, `network_mode`, `uts`, `userns_mode`, `cgroupns_mode` set to `host` | Shares a host namespace. |
+| `pid`, `ipc`, `network_mode` set to `container:<name>` | Joins another container's namespace, which may be another project's. Use `service:<name>` for a service in the same file. |
+| `cap_add` of a denied capability | See the denylist below. |
+| `security_opt` with `unconfined`, `label:disable`, `no-new-privileges:false`, or a custom `seccomp` profile file | Disables a kernel confinement layer. `seccomp=runtime/default` is fine. |
+| `devices`, `device_cgroup_rules` | Exposes host devices. |
+| `cgroup_parent` that is absolute or contains `..` | Escapes the container cgroup. |
+| A bind mount of a protected host path, anything inside one, or any parent of one | Protected: the Docker and containerd sockets and state, `/proc`, `/sys`, `/dev`, `/etc`, `/boot`, `/root`, `/home`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, and the boxmunge root outside `projects/`. Paths are compared after `~` expansion, joining relative paths to the project directory, collapsing `..` and `//`, and resolving symlinks, so `/run` (the parent of `/run/docker.sock`), `/tmp/../etc`, and `../../config` are all refused. |
+| `${VAR}` or `$VAR` inside a bind-mount source | The path cannot be verified. Write it literally. |
+
+### Capability denylist
+
+These capabilities let a container reach the host, so neither `compose.yml`
+`cap_add` nor the manifest's `security.cap_add` may grant them under the
+default profile: `ALL`, `SYS_ADMIN`, `DAC_READ_SEARCH`, `BPF`, `PERFMON`,
+`SYS_RESOURCE`, `SYS_MODULE`, `SYS_RAWIO`, `SYS_BOOT`, `MAC_ADMIN`,
+`MAC_OVERRIDE`. A service that truly needs one must use `profile: "off"` with a
+reason. Capabilities that are dropped by default but have real uses
+(`NET_RAW`, `NET_ADMIN`, `SYS_PTRACE`, and the rest of the default `cap_drop`
+list) can be added back. In the manifest, write capability names in canonical
+form: upper case, no `CAP_` prefix (`NET_RAW`, not `cap_net_raw`).
+
+Services on `profile: "off"` get a logged warning for each of these instead
+of a rejection.
+
 ## Wildcard hosts and routing isolation
 
 boxmunge rejects wildcard host entries (e.g. `*.example.com`) by default. On a single Caddy instance shared between projects, a wildcard on one project can capture traffic intended for adjacent projects whose plain hostnames happen to fall under that wildcard. boxmunge runs single-tenant — every project on a host is owned by the same operator — so this is a footgun, not a multi-tenant breach. We still gate it behind an explicit opt-in:

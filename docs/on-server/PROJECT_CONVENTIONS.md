@@ -218,7 +218,7 @@ the `default` profile silently — most projects need nothing here.
 | `init` | bool | `true` | Set `false` to disable Tini. |
 | `pids_limit` | int | `512` | Set `0` to disable. |
 | `cap_drop` | list[str] | dangerous-cap list | If specified, REPLACES the default list. |
-| `cap_add` | list[str] | `[]` | Capabilities to keep; subtracted from `cap_drop`. |
+| `cap_add` | list[str] | `[]` | Capabilities to keep; subtracted from `cap_drop`. Canonical names only (`NET_RAW`). The denylist in SECURITY.md (`SYS_ADMIN`, `SYS_MODULE`, `ALL`, ...) is rejected. |
 
 ### Per-service `security:`
 

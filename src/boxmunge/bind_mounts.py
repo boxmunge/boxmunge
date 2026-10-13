@@ -14,7 +14,7 @@ from typing import Any
 
 import yaml
 
-from boxmunge.compose_validate import _bind_source
+from boxmunge.compose_mounts import volume_source
 
 
 class BindMountError(ValueError):
@@ -80,7 +80,7 @@ def bind_mounted_dirs(compose_path: Path, project_dir: Path) -> dict[str, bool]:
         return {}
     dirs: dict[str, bool] = {}
     for entry in _entries(compose_path):
-        source = _bind_source(entry)
+        source = volume_source(entry)
         if source is None:
             continue
         if isinstance(entry, str) and not source.startswith((".", "/", "~")):

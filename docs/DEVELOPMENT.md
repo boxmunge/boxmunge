@@ -31,7 +31,8 @@ src/boxmunge/            server package
   manifest.py            manifest loading and validation; migration.py upgrades old schemas
   compose.py             generates the compose overlay (networking, env, limits)
   security_overlay.py    per-service container hardening
-  compose_validate.py    rejects unsafe user compose files
+  compose_validate.py    rejects unsafe user compose files (rules in compose_service_rules.py,
+                         compose_mounts.py; shared capability denylist in capabilities.py)
   caddy.py               generates per-project Caddy site config
   backup.py              age encryption, run inside the system container
   fileutil.py            atomic writes and the advisory locks every mutation uses
