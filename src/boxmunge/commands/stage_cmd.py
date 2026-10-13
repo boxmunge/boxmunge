@@ -284,32 +284,12 @@ def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
 
 
 def cmd_stage(args: list[str]) -> None:
+    from boxmunge.commands.argv import parse_args, require_project_name
     from boxmunge.paths import BoxPaths
-    if not args:
-        print("Usage: boxmunge stage <project> [--ref REF] [--dry-run]", file=sys.stderr)
-        sys.exit(2)
-    project = args[0]
-
-    from boxmunge.paths import validate_project_name
-    try:
-        validate_project_name(project)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(2)
-
-    ref = None
-    dry_run = False
-    remaining = args[1:]
-    i = 0
-    while i < len(remaining):
-        if remaining[i] == "--ref" and i + 1 < len(remaining):
-            ref = remaining[i + 1]
-            i += 2
-        elif remaining[i] == "--dry-run":
-            dry_run = True
-            i += 1
-        else:
-            print(f"ERROR: unknown argument: {remaining[i]}", file=sys.stderr)
-            sys.exit(2)
-    paths = BoxPaths()
-    sys.exit(run_stage(project, paths, ref=ref, dry_run=dry_run))
+    parsed = parse_args(
+        "stage", args, flags={"--dry-run"}, options={"--ref"},
+        min_positional=1, max_positional=1,
+    )
+    project = require_project_name("stage", parsed.positional[0])
+    sys.exit(run_stage(project, BoxPaths(), ref=parsed.get("--ref"),
+                       dry_run=parsed.has("--dry-run")))

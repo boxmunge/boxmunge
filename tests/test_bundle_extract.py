@@ -171,3 +171,8 @@ def test_extracted_tree_check_resolves_links_on_disk(tmp_path: Path) -> None:
     (project / "l").symlink_to("s/..")
     with pytest.raises(BundleError, match="l"):
         check_extracted_links(project)
+
+
+def test_missing_bundle_is_a_bundle_error(tmp_path: Path) -> None:
+    with pytest.raises(BundleError, match="not found"):
+        extract_bundle(tmp_path / "nope.tar.gz", tmp_path)

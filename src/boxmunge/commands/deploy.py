@@ -342,41 +342,12 @@ def run_deploy(
 
 def cmd_deploy(args: list[str]) -> None:
     """CLI entry point for prod-deploy command."""
-    if not args:
-        print("Usage: prod-deploy <project> [--ref REF] [--no-snapshot] [--dry-run]",
-              file=sys.stderr)
-        sys.exit(2)
-
-    project = args[0]
-
-    from boxmunge.paths import validate_project_name
-    try:
-        validate_project_name(project)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(2)
-
-    ref = None
-    no_snapshot = False
-    dry_run = False
-
-    remaining = args[1:]
-    i = 0
-    while i < len(remaining):
-        if remaining[i] == "--ref" and i + 1 < len(remaining):
-            ref = remaining[i + 1]
-            i += 2
-        elif remaining[i] == "--no-snapshot":
-            no_snapshot = True
-            i += 1
-        elif remaining[i] == "--dry-run":
-            dry_run = True
-            i += 1
-        else:
-            print(f"ERROR: unknown argument: {remaining[i]}", file=sys.stderr)
-            sys.exit(2)
-
-    paths = BoxPaths()
-    exit_code = run_deploy(project, paths, ref=ref, no_snapshot=no_snapshot,
-                           dry_run=dry_run)
-    sys.exit(exit_code)
+    from boxmunge.commands.argv import parse_args, require_project_name
+    parsed = parse_args(
+        "prod-deploy", args, flags={"--no-snapshot", "--dry-run"},
+        options={"--ref"}, min_positional=1, max_positional=1,
+    )
+    project = require_project_name("prod-deploy", parsed.positional[0])
+    sys.exit(run_deploy(project, BoxPaths(), ref=parsed.get("--ref"),
+                        no_snapshot=parsed.has("--no-snapshot"),
+                        dry_run=parsed.has("--dry-run")))
