@@ -62,5 +62,6 @@ Access documentation via `agent-help`:
 |---|---|
 | System architecture | `agent-help architecture` |
 | Operations guide | `agent-help operations` |
+| Choosing a base image | `agent-help images` |
 | Project conventions | `agent-help conventions` |
 | Agent rules | `agent-help rules` |

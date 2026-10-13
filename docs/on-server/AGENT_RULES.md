@@ -14,6 +14,10 @@ Run these commands in order:
 2. `status` -- check the current state of all projects
 3. `agent-help <topic>` -- read documentation (architecture, operations, conventions, rules)
 
+**Before you write or change a Dockerfile, read `agent-help images`.** Use the smallest official
+image for your stack, pinned by digest, with a multi-stage build. Every OS package in the image can
+trigger a CVE quarantine, including packages your app never uses.
+
 ---
 
 ## What You Can Do
