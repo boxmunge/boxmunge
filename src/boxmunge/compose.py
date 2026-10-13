@@ -159,14 +159,13 @@ def _build_service_override(
     Every service, whether the manifest declares it or it exists only in
     compose.yml (a database, cache, or sidecar), gets the container
     hardening fragment for its effective profile. Compose-only services
-    resolve against the project-level `security:` block. Manifest
-    services add routing on top: network aliases for routable services,
-    env_files, resource limits, the smoke-script mount, and the
-    writable: translation.
+    resolve against the project-level `security:` block and, for now, do
+    not get the read-only rootfs or its /tmp tmpfs. Manifest services add
+    routing on top: network aliases for routable services, env_files,
+    resource limits, the smoke-script mount, and the writable: translation.
 
-    `user_compose`: the parsed user compose.yml dict. Supplies the names
-    of compose-only services and lets the overlay omit its v0.8 default
-    for `read_only` / `tmpfs` where the user already declared them.
+    `user_compose` (the resolved compose model) supplies the compose-only
+    services and the user's own read_only / tmpfs declarations.
     """
     project = manifest["project"]
     prefix = alias_prefix or project
@@ -266,12 +265,14 @@ def _build_service_override(
         for svc_name, ports in overlay_ports(project_security).items():
             services.setdefault(svc_name, {})["ports"] = ports
 
-    # Compose-only services (databases, caches, sidecars) get the same
-    # hardening floor. They carry no routing, env_files, or limits.
+    # Compose-only services get every flag but read_only/tmpfs, which would break
+    # existing databases on the next regen (see security_warn.undeclared_services).
     for svc_name, user_svc in user_services.items():
         if svc_name in manifest_services:
             continue
         fragment = _hardening_fragment(project_security, None, user_svc)
+        fragment.pop("read_only", None)
+        fragment.pop("tmpfs", None)
         if fragment:
             services[svc_name] = {**services.get(svc_name, {}), **fragment}
 

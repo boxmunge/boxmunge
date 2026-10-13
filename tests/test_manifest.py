@@ -765,3 +765,38 @@ class TestWritableManifestIntegration:
         }
         errors, _ = validate_manifest(m, expected_name="demo")
         assert all("unique" not in e for e in errors)
+
+
+class TestRoutelessInternalService:
+    BASE = {
+        "id": "01TEST", "project": "testapp", "source": "bundle",
+        "hosts": ["testapp.example.com"],
+    }
+
+    def test_internal_service_needs_no_port_or_routes(self) -> None:
+        manifest = {**self.BASE, "services": {
+            "web": {"port": 8080, "routes": [{"path": "/"}]},
+            "db": {"internal": True, "writable": {"external": True}},
+        }, "schema_version": 3}
+        errors, _ = validate_manifest(manifest, "testapp")
+        assert errors == []
+
+    def test_non_internal_service_still_needs_a_route(self) -> None:
+        manifest = {**self.BASE, "services": {"db": {"port": 5432}}}
+        errors, _ = validate_manifest(manifest, "testapp")
+        assert any("internal: true" in e for e in errors)
+
+    def test_internal_must_be_boolean(self) -> None:
+        manifest = {**self.BASE, "services": {"db": {"internal": "yes"}}}
+        errors, _ = validate_manifest(manifest, "testapp")
+        assert any("internal must be true or false" in e for e in errors)
+
+    def test_routeless_service_left_out_of_caddy(self) -> None:
+        from boxmunge.caddy import generate_caddy_config
+        manifest = {**self.BASE, "services": {
+            "web": {"port": 8080, "routes": [{"path": "/"}]},
+            "db": {"internal": True},
+        }}
+        config = generate_caddy_config(manifest)
+        assert "testapp-web:8080" in config
+        assert "testapp-db" not in config

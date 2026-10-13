@@ -195,17 +195,24 @@ def validate_manifest(
             if not isinstance(svc, dict):
                 errors.append(f"Service '{svc_name}' must be a mapping.")
                 continue
-            if "port" not in svc:
-                errors.append(f"Service '{svc_name}' is missing 'port'.")
-            else:
+            routes = svc.get("routes", [])
+            if "internal" in svc and not isinstance(svc["internal"], bool):
+                errors.append(f"Service '{svc_name}' internal must be true or false.")
+            # An internal service (database, cache, worker) may be declared only
+            # to give it a read-only rootfs and writable: paths; it needs no route.
+            routeless = svc.get("internal") is True and not routes
+            if "port" in svc:
                 problem = _port_problem(svc["port"])
                 if problem:
                     errors.append(f"Service '{svc_name}' port {problem}.")
-            routes = svc.get("routes", [])
+            elif not routeless:
+                errors.append(f"Service '{svc_name}' is missing 'port'.")
             if not routes:
-                errors.append(
-                    f"Service '{svc_name}' must have at least one route."
-                )
+                if not routeless:
+                    errors.append(
+                        f"Service '{svc_name}' must have at least one route, or "
+                        f"set internal: true for a service Caddy does not route to."
+                    )
             elif not isinstance(routes, list):
                 errors.append(f"Service '{svc_name}' routes must be a list.")
             else:
@@ -435,6 +442,8 @@ def get_all_routes(
     routes = []
     for svc_name, svc in manifest.get("services", {}).items():
         alias = f"{project}-{svc_name}"
+        if not svc.get("routes"):
+            continue  # an internal service declared without routes
         port = svc["port"]
         for route in svc.get("routes", []):
             if isinstance(route, dict):

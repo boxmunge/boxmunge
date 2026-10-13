@@ -163,8 +163,25 @@ def test_f03_compose_only_services_get_default_hardening() -> None:
     assert db["init"] is True
     assert db["pids_limit"] == 512
     assert "SYS_PTRACE" in db["cap_drop"]
+
+
+def test_f03_compose_only_services_not_yet_read_only() -> None:
+    # Rollout: a platform upgrade regenerates every overlay, so a read-only
+    # rootfs here would break existing databases fleet-wide. Undeclared
+    # services get a loud warning instead (see test_security_warn).
+    db = _overlay(_MANIFEST, _USER_COMPOSE)["services"]["db"]
+    assert "read_only" not in db
+    assert "tmpfs" not in db
+
+
+def test_f03_declared_internal_service_gets_read_only_rootfs() -> None:
+    manifest = {**_MANIFEST, "services": {
+        **_MANIFEST["services"],
+        "db": {"internal": True, "writable": {"external": True}},
+    }}
+    db = _overlay(manifest, _USER_COMPOSE)["services"]["db"]
     assert db["read_only"] is True
-    assert db["tmpfs"] == ["/tmp"]
+    assert "networks" not in db
 
 
 def test_f03_compose_only_services_get_no_routing_or_env() -> None:

@@ -130,15 +130,12 @@ class TestWarnWritableState:
             )
         assert buf.getvalue() == ""
 
-    def test_read_only_false_on_compose_only_service_warns(self, fake_paths) -> None:
-        # F-03: compose-only services are hardened too, so opting one out
-        # of read-only rootfs is as visible as for a manifest service.
+    def test_undeclared_compose_service_warns_every_deploy(self, fake_paths) -> None:
+        # F-03 rollout: services only in compose.yml run without a read-only
+        # rootfs; say so loudly and say how to opt in.
         manifest = {"project": "demo", "services": {"web": {"port": 3000}}}
         user_compose = {
-            "services": {
-                "web": {"image": "nginx"},
-                "db": {"image": "postgres", "read_only": False},
-            },
+            "services": {"web": {"image": "nginx"}, "db": {"image": "postgres"}},
         }
         buf = io.StringIO()
         with redirect_stdout(buf):
@@ -146,8 +143,11 @@ class TestWarnWritableState:
                 fake_paths, manifest, user_compose, component="deploy",
             )
         out = buf.getvalue()
-        assert "demo/db" in out
-        assert "`tmpfs:` entries in compose.yml" in out
+        assert "[WARNING] demo/db is in compose.yml but not declared" in out
+        assert "WITHOUT a read-only root filesystem" in out
+        assert "internal: true" in out and "writable:" in out
+        assert "future boxmunge release" in out
+        assert "demo/web" not in out
 
     def test_read_only_false_emits_warning(self, fake_paths) -> None:
         manifest = {

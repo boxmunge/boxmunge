@@ -53,8 +53,26 @@ def _gather_validation(
     compose_path = paths.project_compose(project_name)
     if not compose_path.exists():
         warnings.append(f"Compose file missing: {compose_path.name}")
+    else:
+        warnings.extend(_undeclared_service_warnings(project_name, manifest, compose_path))
 
     return errors, warnings
+
+
+def _undeclared_service_warnings(project_name: str, manifest: dict, compose_path) -> list[str]:
+    """Warn for each compose service the manifest does not declare: it runs
+    without a read-only root filesystem (same warning as deploy and stage)."""
+    from boxmunge.compose import ComposeError, load_user_compose
+    from boxmunge.security_warn import undeclared_service_warning, undeclared_services
+
+    try:
+        user_compose = load_user_compose(compose_path, project_name)
+    except ComposeError as e:
+        return [f"Cannot resolve compose.yml: {e}"]
+    return [
+        undeclared_service_warning(project_name, svc).removeprefix("[WARNING] ")
+        for svc in undeclared_services(manifest, user_compose)
+    ]
 
 
 def run_validate(project_name: str, paths: BoxPaths) -> int:

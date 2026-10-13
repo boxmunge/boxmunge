@@ -13,6 +13,30 @@ from boxmunge.published_ports import declared_ports, describe, is_widened
 from boxmunge.security_overlay import services_with_off_profile, format_off_warning
 
 
+def undeclared_services(manifest: dict[str, Any], user_compose: Any) -> list[str]:
+    """Return compose services the manifest does not declare, in compose order."""
+    declared = manifest.get("services") or {}
+    services = user_compose.get("services") if isinstance(user_compose, dict) else None
+    return [name for name in (services or {}) if name not in declared]
+
+
+def undeclared_service_warning(project: str, svc_name: str) -> str:
+    """The deploy/stage/validate warning for one undeclared compose service."""
+    return (
+        f"[WARNING] {project}/{svc_name} is in compose.yml but not declared in "
+        f"manifest.yml, so it runs WITHOUT a read-only root filesystem (it still "
+        f"gets no-new-privileges, init, the process limit and the capability "
+        f"drops). To make its root filesystem read-only, declare it in "
+        f"manifest.yml under services: with `internal: true` (no port or routes "
+        f"needed) and a `writable:` block: `ephemeral:` for the paths it writes "
+        f"if it keeps no data in compose.yml volumes, or `external: true` to keep "
+        f"its compose.yml volumes and add the paths it writes as compose `tmpfs:` "
+        f"entries (PostgreSQL needs /tmp and /var/run/postgresql). "
+        f"A future boxmunge release will make a read-only root filesystem the "
+        f"default for undeclared services too."
+    )
+
+
 def warn_off_services(paths: Any, manifest: dict[str, Any], component: str) -> None:
     """Emit a SECURITY OFF warning to stdout and the operational log.
 
@@ -69,26 +93,30 @@ def warn_writable_state(
         if isinstance(raw, dict):
             user_services = raw
 
-    # 1. read_only: false in user compose — per-service warning, for
-    #    manifest services and compose-only services alike.
-    for svc_name in list(services) + [n for n in user_services if n not in services]:
+    # 0. Services only in compose.yml run without a read-only rootfs.
+    for svc_name in undeclared_services(manifest, user_compose):
+        print(undeclared_service_warning(project, svc_name))
+        log_warning(
+            component, f"undeclared service, no read-only rootfs: {project}/{svc_name}",
+            paths, project=project,
+            detail={"event": "undeclared_service", "service": svc_name},
+        )
+
+    # 1. read_only: false in user compose — per-service warning.
+    for svc_name in services:
         user_svc = user_services.get(svc_name)
         if not isinstance(user_svc, dict):
             continue
         # bool is a subtype of int — check explicitly for False to avoid
         # accidentally matching `read_only: 0`.
         if user_svc.get("read_only") is False:
-            remedy = (
-                f"`services.{svc_name}.writable` in manifest.yml"
-                if svc_name in services
-                else "`tmpfs:` entries in compose.yml for the paths it writes"
-            )
             print(
                 f"[WARNING] {project}/{svc_name} declares "
                 f"`read_only: false` in compose.yml, opting out of the "
                 f"read-only rootfs default. CVE hardening penalty "
                 f"applies. If your app needs specific writable paths "
-                f"under a read-only rootfs, prefer {remedy} instead."
+                f"under a read-only rootfs, prefer "
+                f"`services.{svc_name}.writable` in manifest.yml instead."
             )
             log_warning(
                 component,

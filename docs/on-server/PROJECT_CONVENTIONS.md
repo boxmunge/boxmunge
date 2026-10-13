@@ -197,7 +197,7 @@ boxmunge validates `manifest.yml` on every deploy and rejects invalid manifests 
 4. **`source` is required** and must be `bundle` or `git`.
 5. **`repo` is required if `source: git`**. The `ref` field defaults to `main` if omitted.
 6. **`hosts` is required** and must contain at least one hostname. Wildcard hosts (e.g. `*.example.com`) are rejected unless the manifest top level sets `allow_wildcard_hosts: true` — see SECURITY.md for the trade-off.
-7. **Each `web` service must have `port`** and **at least one entry in `routes`**. Routes must be dicts with a `path` key. Both values are written into the Caddy config, so they are checked strictly: `port` is an unquoted integer from 1 to 65535, and `path` starts with `/` and contains only letters, digits, `.`, `_`, `~`, `-`, and `/`, with an optional trailing `*` (`/`, `/api/*`, `/static*`). Spaces, braces, quotes, and wildcards in the middle of a path are rejected.
+7. **Each `web` service must have `port`** and **at least one entry in `routes`**, unless it sets `internal: true` (a service Caddy does not route to, declared to give it a read-only root filesystem and `writable:` paths), which may omit both. `internal` must be `true` or `false`. Routes must be dicts with a `path` key. Both values are written into the Caddy config, so they are checked strictly: `port` is an unquoted integer from 1 to 65535, and `path` starts with `/` and contains only letters, digits, `.`, `_`, `~`, `-`, and `/`, with an optional trailing `*` (`/`, `/api/*`, `/static*`). Spaces, braces, quotes, and wildcards in the middle of a path are rejected.
 8. **`limits`** fields are optional per service. `limits.memory` accepts Docker memory format (e.g., `256m`, `1g`). `limits.cpus` accepts a numeric string (e.g., `"0.5"`, `"2.0"`).
 9. **If `backup.type` is not `none`**, both `dump_command` and `restore_command` are mandatory. A backup you cannot restore is not a backup.
 10. **Per-service `smoke` is strongly recommended.** Each service can declare a `smoke: boxmunge-scripts/smoke.sh` field. The script is exec'd inside the running container, so `localhost:PORT` naturally works. boxmunge warns if no services have a smoke test.
@@ -276,13 +276,13 @@ boxmunge generates `compose.boxmunge.yml` alongside `compose.yml`. **Do not edit
 - **Proxy network** -- the `boxmunge-proxy` external network to every non-internal `web` service, with project-scoped network aliases (e.g., `myapp-frontend`, `myapp-backend`)
 - **Environment files** -- `env_file` entries for `project.env` and `secrets.env`, injecting both non-secret config and CLI-managed secrets into containers
 - **Resource limits** -- `deploy.resources.limits` for services declaring `limits` in the manifest, enforcing memory and CPU constraints
-- **Container hardening** -- under the `default` security profile (the silent floor): `security_opt: ["no-new-privileges:true"]`, `init: true`, `pids_limit: 512`, a curated `cap_drop` list, and (v0.8) `read_only: true` and `tmpfs: ['/tmp']`. This applies to every service in `compose.yml`, including services the manifest does not list (databases, caches, sidecars), which resolve against the project-level `security:` block. Give those services writable paths with `tmpfs:` or named volumes in `compose.yml`; PostgreSQL needs `tmpfs: [/var/run/postgresql]`.
+- **Container hardening** -- under the `default` security profile (the silent floor): `security_opt: ["no-new-privileges:true"]`, `init: true`, `pids_limit: 512`, a curated `cap_drop` list, and (v0.8) `read_only: true` and `tmpfs: ['/tmp']`. Services the manifest does not list (databases, caches, sidecars) get the same flags, resolved against the project-level `security:` block, **except** `read_only` and the `/tmp` tmpfs. Every deploy, stage, and validate warns about each undeclared service; a future release will make read-only the default for them too. To give one a read-only root filesystem now, declare it under `services:` with `internal: true` (no `port` or `routes` needed) and a `writable:` block, as shown in SECURITY.md ("Services that are not in the manifest").
 
 Services with `internal: true` are excluded from the proxy network.
 
 ### v0.8 read-only rootfs default
 
-The default profile applies `read_only: true` and `tmpfs: ['/tmp']` to every service. Pre-v0.8 the CVE policy penalised missing `read_only` without enforcing it; v0.8 closed that asymmetry.
+The default profile applies `read_only: true` and `tmpfs: ['/tmp']` to every service declared in the manifest (services only in `compose.yml` do not get them yet; see the overlay section above). Pre-v0.8 the CVE policy penalised missing `read_only` without enforcing it; v0.8 closed that asymmetry.
 
 If a service legitimately needs writable rootfs, declare `read_only: false` in the project's `compose.yml` for that service. Doing so:
 

@@ -31,9 +31,10 @@ services:
   #   restart: unless-stopped
   #   env_file:
   #     - project.env
-  #   # boxmunge runs every service with a read-only root filesystem;
-  #   # postgres needs its socket directory writable.
+  #   # Declare db in manifest.yml (internal: true, writable: {external: true})
+  #   # to give it a read-only root filesystem; postgres then needs these.
   #   tmpfs:
+  #     - /tmp
   #     - /var/run/postgresql
   #   volumes:
   #     - ./data/postgres:/var/lib/postgresql/data

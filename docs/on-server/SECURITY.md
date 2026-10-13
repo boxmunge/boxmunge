@@ -6,11 +6,12 @@ when you must, and what's coming in future tiers.
 ## TL;DR for agents
 
 - **Defaults are silent.** Every service deployed via boxmunge runs with
-  `no-new-privileges`, Tini init, a 512-process ceiling, a read-only root
-  filesystem, and a list of dangerous Linux capabilities dropped. That
-  includes services that appear only in `compose.yml` (databases, caches,
-  sidecars), not just the ones the manifest routes to. You do nothing to get
-  this.
+  `no-new-privileges`, Tini init, a 512-process ceiling, and a list of
+  dangerous Linux capabilities dropped. That includes services that appear
+  only in `compose.yml` (databases, caches, sidecars). Services declared in
+  the manifest also get a read-only root filesystem; undeclared ones do not
+  yet, and every deploy, stage, and validate warns about each of them. You do
+  nothing to get this.
 - **Don't disable hardening to "ship faster".** If a specific protection
   is in your way, relax that one field. Setting `profile: off` requires
   a reason and triggers a repeated deploy-time warning on every operation.
@@ -65,19 +66,43 @@ These caps are NOT in Docker's default deny list, but are dangerous and rarely n
 **User-wins on explicit declarations.** If your `compose.yml` declares `read_only` (true or false) on a service, the overlay omits its own `read_only` entry for that service. Compose merge then leaves your literal value alone — there's no merge conflict and no redundancy-rejection rule. The same rule applies to `tmpfs: ['/tmp']`: if you declare a `tmpfs` or `volumes` entry that targets `/tmp`, the overlay omits its `tmpfs` entry for that service.
 
 **Services that are not in the manifest.** A service that exists only in
-`compose.yml` (typically a database or cache) gets the same hardening,
-resolved against the project-level `security:` block (a project-level
-`profile: "off"` covers it too). It has no manifest entry, so give it writable
-paths in `compose.yml` itself: `tmpfs:` for scratch paths and named volumes for
-data. PostgreSQL images need their socket directory writable:
+`compose.yml` (typically a database or cache) gets `no-new-privileges`, init,
+the process limit, and the capability drops, resolved against the
+project-level `security:` block (a project-level `profile: "off"` covers it
+too). It does **not** get `read_only: true` or the `/tmp` tmpfs yet: a platform
+upgrade regenerates every overlay, so turning read-only on for these services
+would break existing databases across the fleet at the next upgrade. Every
+`deploy`, `stage`, and `validate` prints a `[WARNING]` naming each undeclared
+service. A future release will make a read-only root filesystem the default for
+undeclared services too, so opt in now.
+
+To opt in, declare the service in the manifest. A service with `internal: true`
+needs no `port` or `routes`; give it a `writable:` block. Use `ephemeral:` for
+the paths it writes if it keeps no data in `compose.yml` volumes. For a
+database whose data already lives in a `compose.yml` volume, use
+`external: true` and list the paths it writes as `tmpfs:` in `compose.yml`
+(this keeps the existing volume and its data):
 
 ```yaml
+# manifest.yml
+services:
+  db:
+    internal: true
+    writable:
+      external: true
+```
+
+```yaml
+# compose.yml
 services:
   db:
     image: postgres:16-alpine
-    tmpfs: [/var/run/postgresql]
+    tmpfs: [/tmp, /var/run/postgresql]
     volumes: [pgdata:/var/lib/postgresql/data]
 ```
+
+A declared service is treated like any manifest service: it also receives the
+project's `env_files` and `secrets.env`.
 
 **Opting out.** Apps that legitimately need writable rootfs declare `read_only: false` in `compose.yml` and accept the +1 CVE hardening penalty consciously. Most apps just need `tmpfs:['/tmp']` (the v0.8 default) and possibly extra tmpfs entries for cache/log paths under read-only rootfs.
 
