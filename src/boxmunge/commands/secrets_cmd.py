@@ -46,7 +46,11 @@ def _cmd_set(args: list[str], paths: BoxPaths) -> int:
         print(f"ERROR: Expected KEY=VALUE, got: {assignment!r}", file=sys.stderr)
         return 1
     key, _, value = assignment.partition("=")
-    set_key(secrets_path, key, value)
+    try:
+        set_key(secrets_path, key, value)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
     log_operation("secrets", f"set {key}", paths, project=project)
     return 0
 

@@ -170,6 +170,16 @@ secrets unset myapp OLD_KEY
 
 Project secrets are stored in `secrets.env` and injected into the project's containers.
 
+Keys must be environment-variable names (letters, digits and underscores, not starting
+with a digit). Values may contain spaces, tabs, `=` and any printable text, but not
+newlines or other control characters, which would add lines to the env file. Either
+violation is refused with an `ERROR:` and nothing is written. Store a multi-line value
+(a PEM key, say) base64-encoded and decode it in the app.
+
+The deploy shell parses each command with shell-style quoting. A command with an
+unbalanced quote is rejected (`ERROR: cannot parse command`) rather than guessed at, so
+quote a value containing spaces as a whole: `secrets set myapp 'GREETING=hello world'`.
+
 ### Host-level secrets
 
 Shared across all projects on the host:

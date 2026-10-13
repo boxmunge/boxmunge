@@ -33,6 +33,19 @@ class TestSecretsSet:
         assert not paths.project_manifest("newapp").exists()
 
 
+    def test_set_rejects_newline_injection(self, paths: BoxPaths, capsys) -> None:
+        paths.project_dir("myapp").mkdir(parents=True)
+        result = run_secrets(["set", "myapp", "KEY=ok\nADMIN=1"], paths)
+        assert result == 1
+        assert "ERROR:" in capsys.readouterr().err
+        assert not paths.project_secrets("myapp").exists()
+
+    def test_set_rejects_bad_key(self, paths: BoxPaths, capsys) -> None:
+        result = run_secrets(["set", "--host", "BAD KEY=v"], paths)
+        assert result == 1
+        assert "ERROR:" in capsys.readouterr().err
+
+
 class TestSecretsGet:
     def test_get_project_secret(self, paths, capsys) -> None:
         paths.project_dir("myapp").mkdir(parents=True)

@@ -55,6 +55,42 @@ class TestParseShellCommand:
         assert args == ["-f", "/some/path"]
 
 
+class TestParseErrors:
+    """A-12: an unparseable command is rejected, never re-split naively."""
+
+    @pytest.mark.parametrize("line", [
+        "secrets set myapp 'KEY=unterminated",
+        'prod-deploy "myapp',
+        "stage myapp \\",
+    ])
+    def test_unbalanced_quoting_raises(self, line: str) -> None:
+        with pytest.raises(ValueError):
+            parse_shell_command(line)
+
+    @patch("boxmunge.shell.subprocess.run")
+    def test_main_rejects_unparseable_command(
+        self, mock_run: MagicMock, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from boxmunge.shell import main
+        with patch("sys.argv", ["boxmunge-shell", "-c", "secrets set myapp 'K=v"]):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 2
+        mock_run.assert_not_called()
+        assert "ERROR: cannot parse command" in capsys.readouterr().err
+
+    @patch("boxmunge.shell.subprocess.run")
+    def test_interactive_loop_reports_and_continues(
+        self, mock_run: MagicMock, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from boxmunge.shell import interactive_loop
+        with patch("builtins.input", side_effect=['stage "myapp', EOFError]), \
+             patch("boxmunge.shell._shell_banner", return_value="banner"):
+            interactive_loop()
+        mock_run.assert_not_called()
+        assert "ERROR: cannot parse command" in capsys.readouterr().err
+
+
 class TestAllowedCommands:
     def test_known_commands_are_allowed(self) -> None:
         for cmd in ["help", "status", "version", "prod-deploy", "stage", "promote",

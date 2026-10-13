@@ -85,15 +85,16 @@ def parse_shell_command(command_string: str) -> tuple[str, list[str]]:
     Returns ("scp", args) for scp protocol commands.
     Silently strips a leading 'boxmunge' prefix so that
     'boxmunge help' and 'help' are equivalent.
+
+    Raises ValueError when the quoting is unbalanced. Guessing (for example
+    by splitting on whitespace) would run a command with arguments the
+    caller did not write.
     """
     stripped = command_string.strip()
     if not stripped:
         return "", []
 
-    try:
-        parts = shlex.split(stripped)
-    except ValueError:
-        parts = stripped.split()
+    parts = shlex.split(stripped)
 
     # Strip leading 'boxmunge' so agents/users can type either form
     if parts and parts[0] == "boxmunge":
@@ -249,7 +250,11 @@ def interactive_loop() -> None:
         except (EOFError, KeyboardInterrupt):
             print()
             break
-        command, args = parse_shell_command(line)
+        try:
+            command, args = parse_shell_command(line)
+        except ValueError as e:
+            _report_parse_error(e)
+            continue
         if not command:
             continue
         cmd_base = os.path.basename(command) if "/" in command else command
@@ -257,6 +262,20 @@ def interactive_loop() -> None:
             print("ERROR: This command is not available in interactive mode.", file=sys.stderr)
             continue
         run_command(command, args)
+
+
+def _report_parse_error(error: ValueError) -> None:
+    print(f"ERROR: cannot parse command ({error}). Check the quoting and retry.",
+          file=sys.stderr)
+
+
+def _dispatch_string(command_string: str) -> None:
+    try:
+        command, args = parse_shell_command(command_string)
+    except ValueError as e:
+        _report_parse_error(e)
+        sys.exit(2)
+    dispatch_command(command, args)
 
 
 def main() -> None:
@@ -268,16 +287,13 @@ def main() -> None:
     """
     # SSH passes the command via -c when used as a login shell
     if len(sys.argv) >= 3 and sys.argv[1] == "-c":
-        command_string = sys.argv[2]
-        command, args = parse_shell_command(command_string)
-        dispatch_command(command, args)
+        _dispatch_string(sys.argv[2])
         return
 
     # ForceCommand mode
     command_string = os.environ.get("SSH_ORIGINAL_COMMAND", "")
     if command_string:
-        command, args = parse_shell_command(command_string)
-        dispatch_command(command, args)
+        _dispatch_string(command_string)
         return
 
     # No command — interactive session
