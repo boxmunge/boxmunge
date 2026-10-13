@@ -10,7 +10,12 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from boxmunge_cli.config import ConfigError, discover_config, load_config
+from boxmunge_cli.config import (
+    ConfigError,
+    discover_config,
+    load_config,
+    validate_connection,
+)
 
 
 def _load_project_config() -> tuple[dict[str, Any], Path] | None:
@@ -22,10 +27,11 @@ def _load_project_config() -> tuple[dict[str, Any], Path] | None:
         return None
 
 
-def _handshake(config: dict[str, Any], manifest_schema: int | None = None) -> bool:
+def _handshake(config: dict[str, Any], manifest_schema: int | None = None,
+               batch: bool = False) -> bool:
     from boxmunge_cli.handshake import HandshakeError, check_server_compatibility
     try:
-        check_server_compatibility(config, manifest_schema)
+        check_server_compatibility(config, manifest_schema, batch=batch)
     except HandshakeError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return False
@@ -122,10 +128,28 @@ def _cmd_logs(args: argparse.Namespace) -> int:
     return run_ssh(config, "logs", *server_args)
 
 
+def _mcp_config(args: argparse.Namespace) -> dict[str, Any] | None:
+    """Connection for mcp-serve: --server flags, --config PATH, or the nearest .boxmunge."""
+    try:
+        if args.server:
+            config = {"server": args.server, "port": args.port or 922,
+                      "user": args.user or "deploy"}
+            validate_connection(config)
+            return config
+        if args.port or args.user:
+            print("ERROR: --port and --user need --server.", file=sys.stderr)
+            return None
+        path = Path(args.config) if args.config else discover_config(Path.cwd())
+        return load_config(path)
+    except ConfigError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return None
+
+
 def _cmd_mcp_serve(args: argparse.Namespace) -> int:
     from boxmunge_cli.mcp_proxy import run_mcp_proxy
-    config = connect()
-    if config is None:
+    config = _mcp_config(args)
+    if config is None or not _handshake(config, batch=True):
         return 1
     return run_mcp_proxy(config)
 
@@ -181,5 +205,14 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "mcp-serve", help="Run an MCP stdio proxy to the server",
         description="Pipe stdin/stdout to the server's 'mcp-serve' over SSH, "
-                    "for use as an MCP server command in an agent host.")
+                    "for use as an MCP server command in an agent host. The server's "
+                    "MCP is server-wide, so no project is needed: pass --server (or "
+                    "--config) because hosts usually start it outside the project.")
+    where = p.add_mutually_exclusive_group()
+    where.add_argument("--server", metavar="HOST",
+                       help="Server to connect to (instead of a .boxmunge file)")
+    where.add_argument("--config", metavar="PATH",
+                       help="A .boxmunge file to read (default: the nearest one)")
+    p.add_argument("--port", type=_positive_int, help="SSH port with --server (default 922)")
+    p.add_argument("--user", help="SSH user with --server (default deploy)")
     p.set_defaults(func=_cmd_mcp_serve)

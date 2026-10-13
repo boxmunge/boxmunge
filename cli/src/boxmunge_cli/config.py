@@ -50,6 +50,17 @@ def load_config(path: Path) -> dict[str, Any]:
 
 def validate_config(config: dict[str, Any]) -> None:
     """Validate config values. Raises ConfigError on invalid input."""
+    validate_connection(config)
+    project = config.get("project", "")
+    if not isinstance(project, str) or not _VALID_PROJECT.match(project):
+        raise ConfigError(
+            f"Invalid 'project': {project!r}. Must be lowercase "
+            "alphanumeric with hyphens, 1-63 chars."
+        )
+
+
+def validate_connection(config: dict[str, Any]) -> None:
+    """Validate server, port and user. Raises ConfigError on invalid input."""
     server = config.get("server", "")
     if not isinstance(server, str) or not _VALID_SERVER.match(server):
         raise ConfigError(
@@ -65,13 +76,6 @@ def validate_config(config: dict[str, Any]) -> None:
     user = config.get("user", "")
     if not isinstance(user, str) or not _VALID_USER.match(user):
         raise ConfigError(f"Invalid 'user': {user!r}. Must be a valid POSIX username.")
-
-    project = config.get("project", "")
-    if not isinstance(project, str) or not _VALID_PROJECT.match(project):
-        raise ConfigError(
-            f"Invalid 'project': {project!r}. Must be lowercase "
-            "alphanumeric with hyphens, 1-63 chars."
-        )
 
 
 def discover_config(start: Path) -> Path:

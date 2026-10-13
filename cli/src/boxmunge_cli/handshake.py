@@ -67,13 +67,15 @@ def _parse_response(stdout: str) -> ServerInfo:
 
 
 def check_server_compatibility(config: dict[str, Any],
-                               manifest_schema: int | None = None) -> ServerInfo:
+                               manifest_schema: int | None = None,
+                               batch: bool = False) -> ServerInfo:
     """Run the server's handshake and refuse incompatible combinations.
 
     manifest_schema: the schema_version of the manifest about to be
-    uploaded, checked against what the server understands.
+    uploaded, checked against what the server understands. batch: never
+    prompt (no person at a terminal).
     """
-    result = subprocess.run(build_ssh_cmd(config, "handshake"),
+    result = subprocess.run(build_ssh_cmd(config, "handshake", batch=batch),
                             capture_output=True, text=True, check=False)
     if result.returncode != 0:
         detail = result.stderr.strip() or f"ssh exited with {result.returncode}"

@@ -15,17 +15,21 @@ import subprocess
 from typing import Any
 
 
-def build_ssh_cmd(config: dict[str, Any], command: str, *args: str) -> list[str]:
-    """Build an SSH command list from config and arguments."""
-    cmd = [
+def build_ssh_cmd(config: dict[str, Any], command: str, *args: str,
+                  batch: bool = False) -> list[str]:
+    """Build an SSH command list from config and arguments.
+
+    batch: never prompt (for callers with no person at a terminal).
+    """
+    return [
         "ssh",
         "-p", str(config["port"]),
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "ConnectTimeout=15",
+        *(["-o", "BatchMode=yes"] if batch else []),
         f"{config['user']}@{config['server']}",
         shlex.join([command, *args]),
     ]
-    return cmd
 
 
 def build_scp_cmd(config: dict[str, Any], local_path: str) -> list[str]:
