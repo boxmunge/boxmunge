@@ -117,24 +117,34 @@ def run_resume(
 
     try:
         with project_lock(project_name, paths):
-            return _resume_locked(project_name, paths, skip_security_checks)
+            rc, smoke_failure = _resume_locked(
+                project_name, paths, skip_security_checks,
+            )
     except LockError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
+    # Alert after releasing the lock: Pushover is a network call.
+    if smoke_failure is not None:
+        _alert_smoke_failed(project_name, paths, smoke_failure)
+    return rc
 
 
 def _resume_locked(
     project_name: str, paths: BoxPaths, skip_security_checks: bool,
-) -> int:
-    """Bring the project back online. Caller holds the project lock."""
+) -> tuple[int, str | None]:
+    """Bring the project back online. Caller holds the project lock.
+
+    Returns the exit code and, if the post-resume smoke test failed, its
+    message, so the caller can alert after releasing the lock.
+    """
     if not _refuse_unless_resumable(project_name, paths):
-        return 1
+        return 1, None
     project_dir = paths.project_dir(project_name)
     try:
         manifest = load_manifest(paths.project_manifest(project_name))
     except ManifestError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        return 1
+        return 1, None
     compose_files = _compose_files(project_name, paths)
     pull_image_services = _has_image_services(project_dir, compose_files)
 
@@ -157,7 +167,7 @@ def _resume_locked(
         print(f"ERROR: {e}", file=sys.stderr)
         log_error("resume", f"Compose validation rejected: {e}",
                   paths, project=project_name)
-        return 3
+        return 3, None
 
     # Pull images (unless overridden or no image: services).
     if pull_image_services and not skip_security_checks:
@@ -172,7 +182,7 @@ def _resume_locked(
                   file=sys.stderr)
             log_error("resume", f"Image pull failed: {e}", paths,
                       project=project_name)
-            return 1
+            return 1, None
 
     # Start containers.
     print("  Starting containers...")
@@ -182,7 +192,7 @@ def _resume_locked(
         print(f"ERROR: compose up failed: {e}", file=sys.stderr)
         log_error("resume", f"compose up failed: {e}", paths,
                   project=project_name)
-        return 1
+        return 1, None
 
     # Restore Caddy site config from manifest (regenerated).
     print("  Restoring Caddy routing...")
@@ -194,7 +204,7 @@ def _resume_locked(
         print(f"ERROR: Caddy restore failed: {e}", file=sys.stderr)
         log_error("resume", f"Caddy restore failed: {e}", paths,
                   project=project_name)
-        return 1
+        return 1, None
 
     # Smoke test.
     print("  Running smoke test...")
@@ -204,18 +214,6 @@ def _resume_locked(
         print(f"  WARN: Smoke test failed: {smoke_msg}")
         log_warning("resume", f"Smoke failed after resume: {smoke_msg}",
                     paths, project=project_name)
-        try:
-            from boxmunge.config import ConfigError, load_config
-            cfg = load_config(paths)
-            po = cfg.get("pushover", {})
-            send_notification(
-                po.get("user_key", ""), po.get("app_token", ""),
-                "boxmunge resume: smoke failed",
-                f"{project_name} resumed but smoke test failed: {smoke_msg}",
-            )
-        except (ConfigError, OSError, KeyError) as e:
-            log_warning("resume", f"could not send Pushover: {e}",
-                        paths, project=project_name)
 
     # Clear paused state (regardless of smoke outcome — project is
     # no longer paused, just possibly unhealthy).
@@ -237,7 +235,22 @@ def _resume_locked(
     print(f"Project '{project_name}' resumed.")
     suffix = f" — {smoke_msg}" if not smoke_ok else ""
     print(f"  Smoke: {'PASS' if smoke_ok else 'FAIL'}{suffix}")
-    return 0
+    return 0, (None if smoke_ok else smoke_msg)
+
+
+def _alert_smoke_failed(project_name: str, paths: BoxPaths, smoke_msg: str) -> None:
+    try:
+        from boxmunge.config import ConfigError, load_config
+        cfg = load_config(paths)
+        po = cfg.get("pushover", {})
+        send_notification(
+            po.get("user_key", ""), po.get("app_token", ""),
+            "boxmunge resume: smoke failed",
+            f"{project_name} resumed but smoke test failed: {smoke_msg}",
+        )
+    except (ConfigError, OSError, KeyError) as e:
+        log_warning("resume", f"could not send Pushover: {e}",
+                    paths, project=project_name)
 
 
 def cmd_resume(args: list[str]) -> None:

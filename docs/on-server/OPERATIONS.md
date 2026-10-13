@@ -347,6 +347,17 @@ Confirmation prompts are answered before the lock is taken, and the checks that 
 command may act (paused, CVE-quarantined, monitor-stopped) are repeated once the lock is held. A
 quarantine that lands while you are answering the prompt therefore still wins.
 
+Timers treat a held lock as routine, not as a failure. The 5-minute health check skips the project
+for that tick. `container-update` logs a warning (`Skipped myapp: project lock held by another
+operation`), tries the project once more after the other targets, and otherwise leaves it for the
+next day's run. A skip does not fail the run or send a Pushover alert. Nothing is recorded for a
+skipped project, so one that is skipped day after day shows up as stale in `health`
+(`container-updates`).
+
+Webhook POSTs and the `resume` smoke-failure alert are sent without holding the project lock, so a
+slow or unreachable endpoint cannot block other operations. A failed webhook delivery is logged as a
+warning (scheme and host only, never the URL path) and does not fail the command.
+
 ---
 
 ## Pause and Resume

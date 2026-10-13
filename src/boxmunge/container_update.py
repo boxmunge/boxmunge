@@ -32,6 +32,9 @@ if TYPE_CHECKING:
 # Per-target update flow
 # ---------------------------------------------------------------------------
 
+# Result status for a user project whose project lock was held.
+SKIPPED_LOCKED = "skipped_locked"
+
 _HEALTHCHECK_TIMEOUT_SEC = 90
 _HEALTHCHECK_POLL_INTERVAL_SEC = 3
 _NO_HEALTHCHECK_GRACE_SEC = 30
@@ -226,10 +229,14 @@ def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
         if not target.is_caddy:
             try:
                 stack.enter_context(project_lock(target.name, paths))
-            except LockError as e:
-                result["status"] = "failed"
-                result["reason"] = f"project_locked: {e}"
-                log_error(
+            except LockError:
+                # Contention with a deploy, scan, or health tick is routine
+                # on a busy box, not a failure: skip (the caller retries
+                # once) and record nothing, so a project skipped day after
+                # day goes stale in the container-updates health check.
+                result["status"] = SKIPPED_LOCKED
+                result["reason"] = "project lock held by another operation"
+                log_warning(
                     "container-update",
                     f"Skipped {target.name}: project lock held by another operation",
                     paths, project=target.name,
