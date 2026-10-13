@@ -17,7 +17,8 @@ The things that produce a CVE alert:
 | Alert title prefix | What it means |
 |---|---|
 | `[boxmunge:<p>] QUARANTINED — <CVE>` | Project taken offline by policy. Maintenance page is being served. `(+N more)` means several CVEs. |
-| `[boxmunge:<p>] [STILL RUNNING — quarantine disabled by config]` | Would have quarantined but `dangerously_disable_quarantine: true`. Project is up at known risk. |
+| `[boxmunge:<p>] [STILL RUNNING — quarantine disabled by config]` | Would have quarantined but `dangerously_disable_quarantine: true`. Project is up at known risk. With `ACTIVELY EXPLOITED … (CISA KEV)` it repeats every scan: escalate. |
+| `[boxmunge:<p>] ACTIVELY EXPLOITED — <CVE> fix available but not running` | `relaxed` project with a fixable KEV CVE. Still up. Repeats every scan until the image is rebuilt. Escalate the rebuild. |
 | `[boxmunge:<p>] <N> new CVE findings (informational)` | New findings below the quarantine gate. One digest per scan. |
 | `[boxmunge:<p>] Suppression expired` / `[boxmunge] Host suppression expired` | A previously-suppressed CVE is an active finding again. |
 | `[boxmunge] CVE scan incomplete` | Some images were not scanned. They are unprotected until a scan succeeds. |

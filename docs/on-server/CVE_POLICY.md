@@ -114,6 +114,11 @@ For every finding, `evaluate_finding` runs these gates in order:
    **Exception, `relaxed`:** a fixable KEV finding does not quarantine;
    instead a priority-1 alert naming the CVE and the unapplied fix is sent
    on **every scan** while it is live (`IGNORED_FIXED`).
+   **Exception, `dangerously_disable_quarantine: true`:** the opt-out is
+   honoured — `STILL_RUNNING_AT_RISK`, never quarantined — and a
+   priority-1 alert naming the CVE and the opt-out is sent on every scan
+   while it is live. When the KEV finding is also fixable the opt-out wins
+   and the alert names the unapplied fix too.
 2. **Fix available** (not KEV) → `IGNORED_FIXED`. boxmunge does not rebuild
    images, so "fixed upstream" is not "fixed here". When the finding would
    otherwise meet the posture's quarantine gate, it is flagged and a
@@ -177,7 +182,7 @@ For every finding, `evaluate_finding` runs these gates in order:
 | CVSS Attack Vector is not Network | `INFORMATIONAL` — not network-reachable |
 | Distro severity (+ hardening penalty) ≥ threshold | `QUARANTINE` (or `STILL_RUNNING_AT_RISK` if quarantine disabled) |
 | Distro severity (+ hardening penalty) < threshold | `INFORMATIONAL` |
-| `dangerously_disable_quarantine: true` | `STILL_RUNNING_AT_RISK` instead of `QUARANTINE` |
+| `dangerously_disable_quarantine: true` | `STILL_RUNNING_AT_RISK` instead of `QUARANTINE`, KEV included (alerted every scan for KEV) |
 
 ### `end_of_life` status
 
@@ -502,7 +507,12 @@ secrets, no user data, no auth. You'd rather be exploited than offline.
 The trade is explicit and signed off in the manifest:
 
 - You accept that a quarantine-level CVE on this project will not stop the
-  service.
+  service — **including a CVE on CISA KEV** (actively exploited), with or
+  without a fix available. The opt-out is honoured for KEV, but never
+  quietly: every scan with a live KEV finding sends a priority-1
+  `[STILL RUNNING — quarantine disabled by config] ACTIVELY EXPLOITED <CVE>
+  (CISA KEV)` alert naming the CVE and the opt-out (and the fix, if one
+  exists but is not running).
 - In exchange, you must run with `read_only: true` on every service —
   any post-exploit persistence has nowhere to land.
 - Pushover alerts for findings on this project are prefixed
@@ -772,6 +782,7 @@ several findings are involved the title names the worst and adds
 | `[boxmunge:<project>] QUARANTINED — <CVE> (<severity>)` | priority-1 |
 | `[boxmunge:<project>] QUARANTINED — <CVE> (actively exploited — CISA KEV)` | priority-1 |
 | `[boxmunge:<project>] [STILL RUNNING — quarantine disabled by config] <CVE> (<severity>)` | priority-1 |
+| `[boxmunge:<project>] [STILL RUNNING — quarantine disabled by config] ACTIVELY EXPLOITED <CVE> (CISA KEV)` (every scan) | priority-1 |
 | `[boxmunge:<project>] ACTIVELY EXPLOITED — <CVE> fix available but not running (CISA KEV)` (`relaxed`, every scan) | priority-1 |
 | `[boxmunge:<project>] <N> fixable CVE findings over the quarantine gate — rebuild to apply the fix` | normal |
 | `[boxmunge:<project>] <N> new CVE findings (informational)` (digest, top 5 listed) | normal |

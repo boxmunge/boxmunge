@@ -23,7 +23,8 @@ posture, distro status, attack vector, threshold, an operator suppression
 (a suppression reviewed before the CVE was known to be exploited must not
 keep hiding it — audit B-07), or an upstream fix the image is not running
 (audit B-01). Under relaxed a fixable KEV finding stays up and is alerted
-on every scan instead.
+on every scan instead. dangerously_disable_quarantine is honoured for KEV
+too (STILL_RUNNING_AT_RISK, alerted every scan — audit B-09).
 
 Below paranoid, a finding is otherwise routed to INFORMATIONAL when the
 distro deprioritized it (status will_not_fix / fix_deferred / not_affected /
@@ -79,6 +80,7 @@ from boxmunge.cve.policy_explain import (
     explain_distro_deprioritized,
     explain_fix_available,
     explain_kev_fix_not_running,
+    explain_kev_opted_out,
     explain_irrelevant_runtime,
     explain_kev_quarantine,
     explain_no_distro_verdict,
@@ -212,6 +214,16 @@ def evaluate_finding(
     # for a fixable KEV finding: it stays up and is alerted every scan.
     if kev_lookup(finding.cve_id):
         fix = finding.fixed_version if finding.fix_available else None
+        if dangerously_disable_quarantine:
+            # The documented opt-out is honoured for KEV too (B-09); it is
+            # never silent: the at-risk KEV alert repeats every scan.
+            return FindingDisposition(
+                finding=finding, base_severity=base,
+                hardening_penalty=hardening_penalty, effective_severity=effective,
+                disposition=Disposition.STILL_RUNNING_AT_RISK, suppression=None,
+                explanation=explain_kev_opted_out(finding.cve_id, fix),
+                kev_listed=True,
+            )
         if fix is not None and posture is Posture.RELAXED:
             return FindingDisposition(
                 finding=finding, base_severity=base,

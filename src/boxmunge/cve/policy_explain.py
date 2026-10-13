@@ -48,6 +48,21 @@ def explain_kev_quarantine(
     return text
 
 
+def explain_kev_opted_out(cve_id: str, fixed_version: str | None) -> str:
+    """Explanation for a KEV finding on a project with quarantine disabled."""
+    text = (
+        f"{cve_id} is on the CISA Known Exploited Vulnerabilities (KEV) "
+        "catalog — actively exploited in the wild — but this project sets "
+        "dangerously_disable_quarantine: true, so it keeps running."
+    )
+    if fixed_version is not None:
+        text += (
+            f" A fix is available ({fixed_version}) but this image is not "
+            "running it: rebuild the image and redeploy."
+        )
+    return text + " Alerted on every scan while the finding is live."
+
+
 def explain_kev_fix_not_running(cve_id: str, fixed_version: str | None) -> str:
     """Explanation for a fixable KEV finding under relaxed posture."""
     return (

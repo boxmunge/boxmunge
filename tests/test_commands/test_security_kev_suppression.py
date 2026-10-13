@@ -121,3 +121,60 @@ def test_suppress_current_skips_kev_listed_and_suppresses_the_rest(
     assert f"NOTE: {_CVE} is on the CISA Known" in capsys.readouterr().err
     text = (box.project_dir("demo") / "security" / "suppressions.yml").read_text()
     assert "CVE-2026-0002" in text and _CVE not in text
+
+
+# ---------- B-09: the opt-out is honoured for KEV, loudly ----------
+
+
+@pytest.mark.parametrize("fix", [None, "5.6.1-2"])
+def test_kev_on_opted_out_project_keeps_running_and_alerts_every_scan(
+    tmp_path, monkeypatch, fix,
+):
+    from boxmunge.commands import security_scan_core as core
+    from tests.test_commands.cve_helpers import finding
+
+    paths = make_box(tmp_path, security={"dangerously_disable_quarantine": True})
+    monkeypatch.setattr(security_scan_inputs, "container_image_digest", lambda c: None)
+    monkeypatch.setattr(core, "scan_image",
+                        lambda ref, timeout: scan_result(ref, [finding(_CVE, fix=fix)]))
+    docker = Docker(monkeypatch)
+    pushover = Pushover(monkeypatch, paths)
+    for _ in range(2):
+        pushover.clear()
+        scan = scan_one_project(paths, "demo", in_grace=False, kev=_kev(_CVE))
+        fd = scan.decisions[0].findings[0]
+        assert fd.disposition is Disposition.STILL_RUNNING_AT_RISK and fd.kev_listed
+        assert not is_quarantined("demo", paths) and docker.calls == []
+        [(title, body, priority)] = pushover.sent
+        assert priority == 1
+        assert "STILL RUNNING" in title and "ACTIVELY EXPLOITED" in title and _CVE in title
+        assert "dangerously_disable_quarantine" in body
+        assert ("fix is available (5.6.1-2)" in body) is (fix is not None)
+
+
+def test_fleet_view_lists_at_risk_only_with_findings(tmp_path, monkeypatch, capsys):
+    """CVE_POLICY ledger #37: at_risk_running means opted out AND exposed."""
+    import json
+
+    from boxmunge.commands import security_actions
+    from boxmunge.commands.security_actions import cmd_security_scan
+    from boxmunge.commands.security_cmd import cmd_security
+    from tests.test_commands.cve_helpers import write_project
+
+    paths = make_box(tmp_path, projects=("exposed",),
+                     security={"dangerously_disable_quarantine": True})
+    write_project(paths, "quiet", security={"dangerously_disable_quarantine": True})
+    (paths.state / "projects.txt").write_text("exposed\nquiet\n")
+    monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
+    monkeypatch.setattr(security_scan_inputs, "container_image_digest", lambda c: None)
+    monkeypatch.setattr(
+        security_scan_core, "scan_image",
+        lambda ref, timeout: scan_result(ref, [CRIT] if ref.startswith("exposed") else []),
+    )
+    Pushover(monkeypatch, paths)
+    assert cmd_security_scan([], paths) == 2
+    capsys.readouterr()
+    monkeypatch.setattr("boxmunge.commands.security_cmd._paths", lambda: paths)
+    cmd_security(["--json"])
+    assert json.loads(capsys.readouterr().out)["at_risk_running"] == ["exposed"]
+

@@ -58,6 +58,9 @@ _ROWS: list[tuple[str, Finding, dict, dict[Posture, Disposition]]] = [
      _f(sev=Severity.LOW, av=AV.LOCAL, status=VS.WILL_NOT_FIX), {"kev": True},
      {R: Q, B: Q, S: Q, P: Q}),
     ("kev+ddq", _f(), {"kev": True, "ddq": True}, {R: SR, B: SR, S: SR, P: SR}),
+    # Both apply: the opt-out wins (the alert names the fix as well).
+    ("fix-available+kev+ddq", _f(fix="2"), {"kev": True, "ddq": True},
+     {R: SR, B: SR, S: SR, P: SR}),
     ("unknown-severity", _f(sev=Severity.UNKNOWN, vendor={}), {}, {R: I, B: I, S: I, P: I}),
     ("high-avn-affected", _f(), {}, {R: I, B: Q, S: Q, P: Q}),
     ("medium-avn-affected", _f(sev=Severity.MEDIUM), {}, {R: I, B: I, S: Q, P: Q}),
@@ -94,7 +97,6 @@ _ROWS: list[tuple[str, Finding, dict, dict[Posture, Disposition]]] = [
 # (row id, posture) → audit finding ID. Remove an entry in the commit that
 # fixes it; strict xfail turns an unexpected pass into a failure.
 _KNOWN_WRONG: dict[tuple[str, Posture], str] = {
-    **{("kev+ddq", p): "B-09: KEV ignores dangerously_disable_quarantine" for p in Posture},
     ("trivy-low-nvd-critical", P): "B-08: paranoid compares Trivy's resolved severity, not NVD",
 }
 

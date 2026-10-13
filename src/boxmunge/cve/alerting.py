@@ -47,6 +47,7 @@ from boxmunge.cve._alerting_fleet import (
 )
 from boxmunge.cve._alerting_formatters import (
     format_fixable_alert,
+    format_kev_at_risk_alert,
     format_kev_fix_pending_alert,
     format_new_findings_alert,
     format_quarantine_alert,
@@ -68,6 +69,7 @@ __all__ = [
     "format_still_running_alert",
     "format_new_findings_alert",
     "format_kev_fix_pending_alert",
+    "format_kev_at_risk_alert",
     "format_fixable_alert",
     "format_suppression_expired_alert",
     "format_host_suppression_expired_alert",
@@ -152,10 +154,11 @@ def detect_transitions(
     tied to the quarantine action landing (audit B-17), which the
     enforcement step announces.
 
-    A fixable KEV finding left running (relaxed) is alerted on EVERY scan,
-    not only on a transition (audit B-01).
+    A KEV finding left running — opted out of quarantine (B-09), or
+    fixable under relaxed (B-01) — is alerted on EVERY scan, not only on a
+    transition.
 
-    Order: kev_fix_pending, still_running, suppression_expired,
+    Order: kev_at_risk, kev_fix_pending, still_running, suppression_expired,
     fix_available, informational.
     """
     before = findings_by_key(prior)
@@ -163,8 +166,9 @@ def detect_transitions(
     new_at_risk: list[Hit] = []
     new_info: list[Hit] = []
     new_fixable: list[Hit] = []
-    # Standing, not transitions: alerted on every scan while live (B-01).
+    # Standing, not transitions: alerted on every scan while live (B-01, B-09).
     kev_fix_pending: list[Hit] = []
+    kev_at_risk: list[Hit] = []
     for key, hit in now.items():
         fd = hit.disposition
         disp = fd.disposition
@@ -172,6 +176,8 @@ def detect_transitions(
         changed = old is None or old.disposition.disposition != disp
         if disp == Disposition.IGNORED_FIXED and fd.kev_listed:
             kev_fix_pending.append(hit)
+        elif disp == Disposition.STILL_RUNNING_AT_RISK and fd.kev_listed:
+            kev_at_risk.append(hit)
         elif disp == Disposition.IGNORED_FIXED and fd.fix_would_quarantine and (
             changed or not old.disposition.fix_would_quarantine
         ):
@@ -191,6 +197,8 @@ def detect_transitions(
                 (host_expired if sup.scope == SCOPE_HOST else project_expired).append(sup)
 
     alerts: list[Alert] = []
+    if kev_at_risk:
+        alerts.append(format_kev_at_risk_alert(project_name, kev_at_risk))
     if kev_fix_pending:
         alerts.append(format_kev_fix_pending_alert(project_name, kev_fix_pending))
     if new_at_risk:

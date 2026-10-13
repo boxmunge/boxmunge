@@ -27,6 +27,7 @@ from boxmunge.commands.security_views import (
     format_project_text,
 )
 from boxmunge.cve.breaker import BreakerError, read_held
+from boxmunge.cve.policy import Disposition
 from boxmunge.cve.grace import GraceError, read_grace_state
 from boxmunge.cve.scan_state import read_scan_state
 from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
@@ -155,10 +156,16 @@ def _fleet_summary(paths: BoxPaths) -> dict:
                 "since": qstate.get("quarantined_at"),
             })
 
-        if bool(sec_block.get("dangerously_disable_quarantine", False)):
+        scan_state = read_scan_state(paths.project_scan_state(name))
+        # At risk = opted out of quarantine AND carrying findings that would
+        # otherwise quarantine, not merely opted out.
+        if bool(sec_block.get("dangerously_disable_quarantine", False)) and any(
+            f.get("disposition") == Disposition.STILL_RUNNING_AT_RISK.value
+            for d in (scan_state or {}).get("decisions", [])
+            for f in d.get("findings", [])
+        ):
             at_risk.append(name)
 
-        scan_state = read_scan_state(paths.project_scan_state(name))
         if scan_state and scan_state.get("scanned_at"):
             last_scans.append(scan_state["scanned_at"])
 

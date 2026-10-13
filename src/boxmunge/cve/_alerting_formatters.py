@@ -133,6 +133,27 @@ def format_kev_fix_pending_alert(project: str, hits: Sequence[Hit]) -> Alert:
     return Alert(kind="kev_fix_pending", title=title, body=body, priority=1)
 
 
+def format_kev_at_risk_alert(project: str, hits: Sequence[Hit]) -> Alert:
+    """An actively exploited CVE on a project that opted out of quarantine.
+    Priority 1, every scan, naming the CVE and the opt-out."""
+    hits = _ordered(hits)
+    head = hits[0].disposition
+    title = (f"[boxmunge:{project}] [STILL RUNNING — quarantine disabled by config] "
+             f"ACTIVELY EXPLOITED {head.finding.cve_id} (CISA KEV)"
+             f"{_more(_cve_count(hits) - 1)}")
+    body = "\n".join([
+        f"Project: {project} — dangerously_disable_quarantine: true",
+        *_listing(hits),
+        "",
+        head.explanation,
+        "",
+        "To let boxmunge quarantine it: drop dangerously_disable_quarantine",
+        "from the manifest's security: block and redeploy. This alert repeats",
+        "on every scan while the finding is live.",
+    ])
+    return Alert(kind="kev_at_risk", title=title, body=body, priority=1)
+
+
 def format_fixable_alert(project: str, hits: Sequence[Hit]) -> Alert:
     """Findings over the quarantine gate whose fix the image is not running.
     Not quarantined (the fix is the remedy), never silent. Priority 0."""
