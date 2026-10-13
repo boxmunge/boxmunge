@@ -24,33 +24,57 @@ def _run_check(target: Target, argv: list[str],
                           text=True, check=False)
 
 
+# Debian releases boxmunge is built and tested on, and the CPU it installs for
+# (install.sh downloads an amd64 cosign).
+SUPPORTED_DEBIAN = ("13",)
+SUPPORTED_ARCH = ("x86_64",)
+
+
 def check_ssh_access(target: Target) -> None:
     """Verify we can SSH into the server."""
     result = _run_check(target, ["echo", "ok"])
     if result.returncode != 0:
         raise PreflightError(
-            f"SSH connection failed to {target.user}@{target.host}:{target.port}. "
-            f"Check hostname, port, and SSH key. ({result.stderr.strip()})"
+            f"SSH connection failed to {target.user}@{target.host}:{target.port}: "
+            f"{result.stderr.strip()}\nCheck hostname, port and SSH key. If an earlier "
+            "server-setup got past SSH hardening, sshd now listens on port 922 and "
+            f"root login is off: inspect with 'ssh -p 922 supervisor@{target.host}'."
         )
 
 
+def _os_release(text: str) -> dict[str, str]:
+    fields = {}
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            fields[key.strip()] = value.strip().strip('"')
+    return fields
+
+
 def check_is_debian(target: Target) -> None:
-    """Verify the server is running Debian."""
+    """Verify the server runs a supported Debian release on a supported CPU."""
     result = _run_check(target, ["cat", "/etc/os-release"])
     if result.returncode != 0:
         raise PreflightError("Could not read /etc/os-release.")
-
-    os_id = ""
-    for line in result.stdout.splitlines():
-        if line.startswith("ID="):
-            os_id = line.split("=", 1)[1].strip().strip('"')
-            break
-
+    fields = _os_release(result.stdout)
+    os_id = fields.get("ID", "")
     if os_id != "debian":
-        distro = os_id or "unknown"
         raise PreflightError(
-            f"boxmunge requires Debian. This server is running '{distro}'. "
+            f"boxmunge requires Debian. This server is running '{os_id or 'unknown'}'. "
             "See docs for supported platforms."
+        )
+    version = fields.get("VERSION_ID", "")
+    if version not in SUPPORTED_DEBIAN:
+        raise PreflightError(
+            f"boxmunge supports Debian {', '.join(SUPPORTED_DEBIAN)}; this server runs "
+            f"Debian {version or 'unknown'}. Reinstall the VPS with a supported release."
+        )
+    arch = _run_check(target, ["uname", "-m"])
+    machine = arch.stdout.strip()
+    if arch.returncode != 0 or machine not in SUPPORTED_ARCH:
+        raise PreflightError(
+            f"boxmunge installs for {', '.join(SUPPORTED_ARCH)}; this server is "
+            f"'{machine or 'unknown'}'."
         )
 
 
@@ -72,12 +96,21 @@ def check_privileges(target: Target) -> bool:
 
 
 def check_not_installed(target: Target, needs_sudo: bool) -> None:
-    """Verify boxmunge is not already installed."""
-    result = _run_check(target, ["test", "-d", "/opt/boxmunge"], needs_sudo)
-    if result.returncode == 0:
+    """Verify boxmunge is not installed, fully or partly."""
+    done = _run_check(target, ["test", "-f", "/opt/boxmunge/config/boxmunge.yml"], needs_sudo)
+    if done.returncode == 0:
         raise PreflightError(
-            "boxmunge is already installed on this server. "
-            "Use 'boxmunge-server upgrade' to update."
+            "boxmunge is already installed on this server. Upgrade it on the server "
+            "with 'upgrade' (as deploy or supervisor), not with server-setup."
+        )
+    partial = _run_check(target, ["test", "-d", "/opt/boxmunge"], needs_sudo)
+    if partial.returncode == 0:
+        raise PreflightError(
+            "A partial boxmunge install was found (/opt/boxmunge exists, but no "
+            "config/boxmunge.yml): an earlier server-setup stopped part-way. The "
+            "safest recovery is to reinstall the VPS from its image and run "
+            "server-setup again. To inspect first, read the install output above "
+            "or log in and look at /opt/boxmunge."
         )
 
 

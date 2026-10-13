@@ -120,6 +120,8 @@ def _installer(tmp_path: Path) -> VerifiedInstaller:
 def _healthy_debian(fake_remote) -> None:
     fake_remote.respond("ssh", "echo ok", stdout="ok\n")
     fake_remote.respond("ssh", "cat /etc/os-release", stdout='ID=debian\nVERSION_ID="13"\n')
+    fake_remote.respond("ssh", "uname -m", stdout="x86_64\n")
+    fake_remote.respond("ssh", "test -f /opt/boxmunge", rc=1)
     fake_remote.respond("ssh", "id -u", stdout="0\n")
     fake_remote.respond("ssh", "test -d /opt/boxmunge", rc=1)
     fake_remote.respond("ssh", "mktemp -d", stdout="/tmp/boxmunge-setup.AbC123xy\n")

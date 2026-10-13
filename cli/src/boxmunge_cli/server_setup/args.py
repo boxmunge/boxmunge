@@ -35,7 +35,7 @@ class ServerSetupArgs:
     port: int
     email: str
     ssh_key_arg: str | None = None
-    hostname: str | None = None
+    hostname: str = ""
     boxmunge_ssh_port: int = 922
     no_aide: bool = False
     no_crowdsec: bool = False
@@ -84,8 +84,8 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--ssh-key", dest="ssh_key_arg", metavar="KEY",
                    help="Public key (file or inline) for the deploy and supervisor "
                         "users (default: from ssh-agent or ~/.ssh/*.pub)")
-    p.add_argument("--hostname", help="Server's public hostname (default: the target "
-                                      "when it is a name)")
+    p.add_argument("--hostname", help="Server's public DNS name (default: the target "
+                                      "when it is a name; required when it is an IP)")
     p.add_argument("--boxmunge-ssh-port", type=_port, default=922,
                    help="SSH port after setup (default: 922)")
     p.add_argument("--no-aide", action="store_true", help="Skip AIDE file integrity")
@@ -111,10 +111,13 @@ def from_namespace(ns: argparse.Namespace) -> ServerSetupArgs:
     """Build the setup arguments. Raises ValueError for an unusable hostname."""
     user, host = ns.target
     hostname = ns.hostname
-    if hostname is None and not is_ip_address(host):
+    if hostname is None:
+        if is_ip_address(host):
+            raise ValueError(
+                f"{host} is an IP address: pass --hostname with the server's public "
+                "DNS name (used for its TLS certificate).")
         hostname = host
-    if hostname is not None:
-        validate.dns_hostname(hostname, public=not ns.self_signed_tls)
+    validate.dns_hostname(hostname, public=not ns.self_signed_tls)
     return ServerSetupArgs(
         user=user, host=host, port=ns.port, email=ns.email,
         ssh_key_arg=ns.ssh_key_arg, hostname=hostname,

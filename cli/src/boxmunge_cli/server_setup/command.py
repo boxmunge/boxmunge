@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -37,16 +36,6 @@ def _confirm(prompt: str) -> bool:
     return input(prompt).strip().lower() == "y"
 
 
-def _resolve_hostname(target: Target, needs_sudo: bool) -> str:
-    """Query the server's FQDN when target was an IP."""
-    result = subprocess.run(target.ssh(["hostname", "-f"], needs_sudo),
-                            capture_output=True, text=True, check=False)
-    fqdn = result.stdout.strip()
-    if result.returncode != 0 or not fqdn:
-        return target.host  # fall back to the IP
-    return fqdn
-
-
 def installer_args(setup_args: ServerSetupArgs, hostname: str, ssh_key: str) -> list[str]:
     """install.sh arguments, one argv element per value (never shell text)."""
     args = ["--hostname", hostname, "--email", setup_args.email,
@@ -63,7 +52,7 @@ def installer_args(setup_args: ServerSetupArgs, hostname: str, ssh_key: str) -> 
 def _run_install(target: Target, needs_sudo: bool, setup_args: ServerSetupArgs,
                  ssh_key: str, installer: VerifiedInstaller | None) -> int:
     """Upload the release to the server and run it with progress tracking."""
-    hostname = setup_args.hostname or target.host
+    hostname = setup_args.hostname
     try:
         if installer is None:
             assert setup_args.local_bundle is not None
@@ -176,9 +165,6 @@ def _preflight_and_install(target: Target, setup_args: ServerSetupArgs, ssh_key:
         return 1
     if needs_sudo is None:
         return 1
-
-    if setup_args.hostname is None:
-        setup_args.hostname = _resolve_hostname(target, needs_sudo)
 
     print(f"\nInstalling boxmunge on {setup_args.hostname}...")
     exit_code = _run_install(target, needs_sudo, setup_args, ssh_key, installer)

@@ -39,7 +39,19 @@ class TestCheckSshAccess:
 class TestCheckIsDebian:
     def test_debian_passes(self, target, fake_remote) -> None:
         fake_remote.respond("ssh", "os-release", stdout='ID=debian\nVERSION_ID="13"\n')
+        fake_remote.respond("ssh", "uname -m", stdout="x86_64\n")
         check_is_debian(target)
+
+    def test_old_debian_fails(self, target, fake_remote) -> None:
+        fake_remote.respond("ssh", "os-release", stdout='ID=debian\nVERSION_ID="12"\n')
+        with pytest.raises(PreflightError, match="Debian 13"):
+            check_is_debian(target)
+
+    def test_arm_fails(self, target, fake_remote) -> None:
+        fake_remote.respond("ssh", "os-release", stdout='ID=debian\nVERSION_ID="13"\n')
+        fake_remote.respond("ssh", "uname -m", stdout="aarch64\n")
+        with pytest.raises(PreflightError, match="aarch64"):
+            check_is_debian(target)
 
     def test_ubuntu_fails(self, target, fake_remote) -> None:
         fake_remote.respond("ssh", "os-release", stdout='ID=ubuntu\nVERSION_ID="24.04"\n')
@@ -66,12 +78,19 @@ class TestCheckPrivileges:
 
 class TestCheckNotInstalled:
     def test_clean_box_passes(self, target, fake_remote) -> None:
+        fake_remote.respond("ssh", "test -f /opt/boxmunge", rc=1)
         fake_remote.respond("ssh", "test -d /opt/boxmunge", rc=1)
         check_not_installed(target, False)
 
     def test_installed_fails(self, target, fake_remote) -> None:
-        fake_remote.respond("ssh", "test -d /opt/boxmunge", rc=0)
+        fake_remote.respond("ssh", "test -f /opt/boxmunge", rc=0)
         with pytest.raises(PreflightError, match="already installed"):
+            check_not_installed(target, False)
+
+    def test_partial_install_is_explained(self, target, fake_remote) -> None:
+        fake_remote.respond("ssh", "test -f /opt/boxmunge", rc=1)
+        fake_remote.respond("ssh", "test -d /opt/boxmunge", rc=0)
+        with pytest.raises(PreflightError, match="partial"):
             check_not_installed(target, False)
 
 

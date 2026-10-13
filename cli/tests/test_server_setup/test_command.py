@@ -50,9 +50,11 @@ class TestParseArgs:
         args = parse_args(["myserver.example.com", "--email", "a@b.com"])
         assert args.hostname == "myserver.example.com"
 
-    def test_hostname_from_ip_is_none(self) -> None:
-        args = parse_args(["203.0.113.50", "--email", "a@b.com"])
-        assert args.hostname is None
+    def test_ip_target_requires_hostname(self, capsys) -> None:
+        with pytest.raises(SystemExit) as exc:
+            parse_args(["203.0.113.50", "--email", "a@b.com"])
+        assert exc.value.code == 2
+        assert "--hostname" in capsys.readouterr().err
 
     def test_self_signed_tls_flag(self) -> None:
         args = parse_args([
