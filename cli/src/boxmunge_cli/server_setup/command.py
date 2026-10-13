@@ -190,7 +190,13 @@ def _preflight_and_install(target: Target, setup_args: ServerSetupArgs, ssh_key:
     record_for_port(target, bsp)
     print("\nServer setup complete.")
     print(f"  Host key for [{target.host}]:{bsp} recorded in {target.known_hosts}.")
-    print(f"  SSH (deploy): ssh -p {bsp} deploy@{hn}")
-    print(f"  SSH (admin):  ssh -p {bsp} supervisor@{hn}")
-    print(f"  Next: cd your-project && boxmunge init --server {hn}")
+    print(next_steps(hn, bsp))
     return 0
+
+
+def next_steps(hostname: str, ssh_port: int) -> str:
+    port_flag = "" if ssh_port == 922 else f" --port {ssh_port}"
+    return (f"  SSH (deploy): ssh -p {ssh_port} deploy@{hostname}\n"
+            f"  SSH (admin):  ssh -p {ssh_port} supervisor@{hostname}\n"
+            f"  Next: cd your-project && boxmunge init --server {hostname}{port_flag} "
+            "--host <your-app-hostname>")

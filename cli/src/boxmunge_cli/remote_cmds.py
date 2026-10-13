@@ -57,7 +57,8 @@ def _bundle_upload_and_run(command: str, server_flags: list[str]) -> int:
     config, config_path = loaded
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        exit_code = run_bundle(str(config_path.parent), output=tmpdir)
+        exit_code = run_bundle(str(config_path.parent), output=tmpdir,
+                               upload_hint=False)
         if exit_code != 0:
             return exit_code
         bundles = list(Path(tmpdir).glob("*.tar.gz"))
