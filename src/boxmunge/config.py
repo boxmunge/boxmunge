@@ -23,7 +23,12 @@ DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "strategy": "leave_broken",
     },
+    # Platform auto-update. Security releases always apply; break-fix
+    # releases (critical non-security fixes) apply unless disabled here.
+    "auto_update": {"breakfix": True},
 }
+
+AUTO_UPDATE_KEYS = frozenset({"breakfix"})
 
 REQUIRED_FIELDS = ["hostname", "admin_email"]
 
@@ -59,4 +64,31 @@ def load_config(paths: BoxPaths) -> dict[str, Any]:
                 f"Required field '{field}' missing from {config_file}"
             )
 
+    _validate_auto_update(config, config_file)
     return config
+
+
+def _validate_auto_update(config: dict[str, Any], config_file: object) -> None:
+    """auto_update must be a mapping of known keys; breakfix must be a boolean."""
+    block = config["auto_update"]
+    if not isinstance(block, dict):
+        raise ConfigError(
+            f"'auto_update' in {config_file} must be a mapping, e.g. "
+            f"'auto_update: {{breakfix: true}}'"
+        )
+    unknown = sorted(set(block) - AUTO_UPDATE_KEYS)
+    if unknown:
+        raise ConfigError(
+            f"Unknown key(s) under 'auto_update' in {config_file}: "
+            f"{', '.join(map(str, unknown))} (allowed: {', '.join(sorted(AUTO_UPDATE_KEYS))})"
+        )
+    if not isinstance(block["breakfix"], bool):
+        raise ConfigError(
+            f"'auto_update.breakfix' in {config_file} must be true or false, "
+            f"got {block['breakfix']!r}"
+        )
+
+
+def auto_update_breakfix_enabled(config: dict[str, Any]) -> bool:
+    """True if this box auto-applies break-fix releases (validated by load_config)."""
+    return config["auto_update"]["breakfix"]

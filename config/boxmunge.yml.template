@@ -22,3 +22,11 @@ reboot:
 logging:
   docker_max_size: "50m"
   docker_max_file: 5
+
+# Platform auto-update (the auto-update timer, every 6 hours).
+# Security releases are always applied automatically. Break-fix releases
+# (critical non-security fixes) are applied automatically unless breakfix
+# is false. Feature releases are never auto-applied; run `upgrade`.
+# breakfix must be true or false.
+auto_update:
+  breakfix: true
