@@ -73,8 +73,9 @@ command means touching several places, listed below.
    a comment saying why. A test fails until you choose.
 4. If agents should call it over MCP, add a tool to `_TOOL_DEFS` in `src/boxmunge/mcp_server.py`
    and a handler in `src/boxmunge/mcp_tools.py`.
-5. Add it to `HELP_TEXT` in `src/boxmunge/commands/help.py`, and document it in
-   `docs/on-server/OPERATIONS.md`.
+5. Add it to `HELP_TEXT` in `src/boxmunge/commands/help.py`, give it a usage entry in
+   `USAGE` in `src/boxmunge/commands/usage.py` (what `help <command>` prints; a test fails until
+   every registered command has one), and document it in `docs/on-server/OPERATIONS.md`.
 6. If it only reads state, give it `--json`.
 7. Validate every project name with `boxmunge.paths.validate_project_name` before use.
    `BoxPaths` also validates names when it builds a project path, so an invalid name raises rather

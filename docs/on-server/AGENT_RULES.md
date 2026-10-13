@@ -10,7 +10,7 @@ The deploy shell is a **restricted shell** that dispatches commands directly -- 
 
 Run these commands in order:
 
-1. `help` -- see all available commands
+1. `help` -- see all available commands (`help <command>` shows one command's usage; it never runs the command)
 2. `status` -- check the current state of all projects
 3. `agent-help <topic>` -- read documentation (architecture, operations, conventions, rules)
 

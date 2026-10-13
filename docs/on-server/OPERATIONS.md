@@ -2,7 +2,8 @@
 
 Step-by-step instructions for common tasks on a boxmunge-managed server.
 
-All operations use boxmunge commands. For detailed help on any command, run `help <command>`.
+All operations use boxmunge commands. For detailed help on any command, run `help <command>`. It
+prints that command's usage and never runs the command.
 
 ---
 

@@ -2,6 +2,8 @@
 
 import sys
 
+from boxmunge.commands.usage import USAGE
+
 HELP_TEXT = """\
 boxmunge — minimalist, agent-friendly VPS hosting framework
 
@@ -173,17 +175,24 @@ def _substitute_hostname(text: str) -> str:
 
 
 def cmd_help(args: list[str]) -> None:
-    """Show help text, or per-command help if a command name is given."""
+    """Show the overview, or one command's usage. Never runs the command.
+
+    Usage comes from the static table in ``commands.usage``. Calling a
+    handler to make it print its usage would execute every command that
+    takes no required argument (audit D-01).
+    """
+    if len(args) > 1:
+        print(f"ERROR: unexpected argument(s): {' '.join(args[1:])}",
+              file=sys.stderr)
+        print(USAGE["help"], file=sys.stderr)
+        sys.exit(2)
     if args:
-        # Delegate to the command with no args — most commands print usage
-        from boxmunge.cli import COMMANDS
-        handler = COMMANDS.get(args[0])
-        if handler:
-            handler([])
-        else:
-            print(f"Unknown command '{args[0]}'.", file=sys.stderr)
+        if args[0] not in USAGE:
+            print(f"ERROR: Unknown command '{args[0]}'. "
+                  "Run 'help' for the command list.", file=sys.stderr)
             sys.exit(2)
-        return
+        print(USAGE[args[0]])
+        sys.exit(0)
     print(_substitute_hostname(HELP_TEXT))
     sys.exit(0)
 
