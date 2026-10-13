@@ -42,40 +42,47 @@ ssh root@your-server.example.com "bash boxmunge-install.sh \
     --ssh-key '${SSH_KEY}'"
 ```
 
-That's it. The installer carries the entire boxmunge bundle inside it — installs Docker, hardens the OS, sets up Caddy as a reverse proxy in a container, creates the `deploy` and `supervisor` users, and lays down the boxmunge CLI on the server. Takes a few minutes. See [INSTALL.md](INSTALL.md) for the local CLI install (used to build bundles before upload).
+That's it. The installer carries the entire boxmunge bundle inside it — installs Docker, hardens the OS, sets up Caddy as a reverse proxy in a container, creates the `deploy` and `supervisor` users, and lays down the boxmunge CLI on the server. Takes a few minutes.
+
+Or let the client do it from your machine: `pipx install boxmunge`, then
+`boxmunge server-setup root@your-server.example.com --email you@example.com`. It verifies the
+release's cosign signature and checksums locally and the server's SSH host key before installing
+anything. See [INSTALL.md](INSTALL.md).
 
 ### 2. Ship a project
 
-Add a `manifest.yml` to your project — it tells boxmunge what you're running and how to back it up. Or better yet, get your AI agent to do it for you.
+Install the client and scaffold a project. `boxmunge init` writes `.boxmunge` (which server to deploy
+to) and, in a directory without a manifest, a project that deploys as-is: a `manifest.yml` that tells
+boxmunge what you're running, a `compose.yml`, a hardened `Dockerfile`, and a smoke test. Or get your
+AI agent to adapt it to your app.
+
+```bash
+pipx install boxmunge                         # see INSTALL.md
+cd myapp
+boxmunge init --server your-server.example.com --host myapp.example.com
+boxmunge remote project-add myapp            # once: register the project on the server
+boxmunge stage                                # bundle, upload, deploy to staging.<hostname>
+boxmunge promote                              # swap staging into production
+```
+
+A manifest looks like this (`init` writes one with a project id):
 
 ```yaml
+schema_version: 3
+id: 01JQXYZ1234567890ABCDEFGHJ
 project: myapp
 source: bundle
 hosts:
   - myapp.example.com
 services:
   web:
-    port: 3000
+    port: 8080
     routes:
       - path: /
 backup:
   type: postgres
   dump_command: "pg_dump -U myuser mydb"
   restore_command: "psql -U myuser mydb"
-```
-
-Build a bundle locally, upload it to the server, then stage and promote from inside the deploy user's restricted shell (no `boxmunge` prefix needed there):
-
-```bash
-# Locally
-pip install boxmunge                          # see INSTALL.md
-boxmunge bundle ./myapp                       # produces myapp-<ts>.tar.gz
-scp -O -P 922 myapp-*.tar.gz deploy@your-server.example.com:
-
-# On the server (ssh into the deploy user's restricted shell)
-ssh -p 922 deploy@your-server.example.com
-> stage myapp                                 # deploys to staging.<hostname>
-> promote myapp                               # swap staging into production
 ```
 
 Your project is live at `https://myapp.example.com` with TLS, reverse proxy, and backups configured.
@@ -89,13 +96,13 @@ Add boxmunge to your AI agent's MCP configuration:
   "mcpServers": {
     "boxmunge": {
       "command": "boxmunge",
-      "args": ["mcp-serve"]
+      "args": ["mcp-serve", "--server", "your-server.example.com"]
     }
   }
 }
 ```
 
-The local CLI reads your project's `.boxmunge` config to find the right server automatically — no hardcoded hosts, no risk of deploying to the wrong box. Now "deploy it" is a conversation, not a context switch.
+Inside a project, the client's other commands read `.boxmunge` to find the server, and refuse to deploy if it names a different project than `manifest.yml`. Now "deploy it" is a conversation, not a context switch.
 
 ## Commands
 
@@ -118,7 +125,7 @@ SSH into the deploy user and run commands directly — no `boxmunge` prefix need
 
 ## Documentation
 
-- [Local install](INSTALL.md) — installing the boxmunge CLI on your workstation for bundling
+- [Client install](INSTALL.md) — installing the `boxmunge` client on your workstation ([commands](cli/README.md))
 - [Architecture](docs/on-server/ARCHITECTURE.md) — system design and components
 - [Operations](docs/on-server/OPERATIONS.md) — step-by-step guides
 - [Project Conventions](docs/on-server/PROJECT_CONVENTIONS.md) — manifest format
