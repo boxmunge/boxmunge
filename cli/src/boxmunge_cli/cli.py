@@ -11,7 +11,7 @@ import argparse
 import sys
 
 from boxmunge_cli import __version__
-from boxmunge_cli import bundle_cmd, init_cmd, remote_cmds
+from boxmunge_cli import bundle_cmd, init_cmd, project_cmds, remote_cmds
 from boxmunge_cli.server_setup import args as server_setup_args
 
 DESCRIPTION = "boxmunge: deploy to your VPS in one command"
@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_cmd.register(subparsers)
     bundle_cmd.register(subparsers)
     remote_cmds.register(subparsers)
+    project_cmds.register(subparsers)
     server_setup_args.register(subparsers)
     return parser
 

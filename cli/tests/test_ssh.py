@@ -10,25 +10,31 @@ class TestBuildSshCmd:
         config = {"server": "box.example.com", "port": 922, "user": "deploy", "project": "myapp"}
         cmd = build_ssh_cmd(config, "stage", "myapp")
         assert cmd == ["ssh", "-p", "922", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
-                       "deploy@box.example.com", "stage", "myapp"]
+                       "deploy@box.example.com", "stage myapp"]
 
     def test_extra_args(self) -> None:
         config = {"server": "box.example.com", "port": 922, "user": "deploy", "project": "myapp"}
         cmd = build_ssh_cmd(config, "prod-deploy", "myapp", "--dry-run")
         assert cmd == ["ssh", "-p", "922", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
-                       "deploy@box.example.com", "prod-deploy", "myapp", "--dry-run"]
+                       "deploy@box.example.com", "prod-deploy myapp --dry-run"]
 
     def test_custom_port_and_user(self) -> None:
         config = {"server": "10.0.0.1", "port": 2222, "user": "admin", "project": "myapp"}
         cmd = build_ssh_cmd(config, "status", "myapp")
         assert cmd == ["ssh", "-p", "2222", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
-                       "admin@10.0.0.1", "status", "myapp"]
+                       "admin@10.0.0.1", "status myapp"]
 
     def test_no_project_arg(self) -> None:
         config = {"server": "box.example.com", "port": 922, "user": "deploy", "project": "myapp"}
         cmd = build_ssh_cmd(config, "handshake")
         assert cmd == ["ssh", "-p", "922", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
                        "deploy@box.example.com", "handshake"]
+
+
+    def test_arguments_are_quoted_for_the_remote_shell(self) -> None:
+        config = {"server": "box.example.com", "port": 922, "user": "deploy", "project": "myapp"}
+        cmd = build_ssh_cmd(config, "logs", "myapp", "a b", "$(id)")
+        assert cmd[-1] == "logs myapp 'a b' '$(id)'"
 
 
 class TestBuildScpCmd:
@@ -47,7 +53,7 @@ class TestRunSsh:
         code = run_ssh(config, "status", "myapp")
         call_args = mock_run.call_args[0][0]
         assert call_args == ["ssh", "-p", "922", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
-                              "deploy@box.example.com", "status", "myapp"]
+                              "deploy@box.example.com", "status myapp"]
         assert code == 0
 
     @patch("boxmunge_cli.ssh.subprocess.run")

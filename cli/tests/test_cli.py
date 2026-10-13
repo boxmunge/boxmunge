@@ -43,7 +43,8 @@ class TestCLI:
         sub = next(a for a in build_parser()._actions
                    if isinstance(a, argparse._SubParsersAction))
         expected = {"init", "bundle", "stage", "promote", "prod-deploy",
-                    "status", "logs", "mcp-serve", "server-setup"}
+                    "status", "logs", "mcp-serve", "server-setup",
+                    "secrets", "rollback", "validate", "remote"}
         assert expected == set(sub.choices)
 
     def test_help_shows_only_local_commands(self, capsys) -> None:

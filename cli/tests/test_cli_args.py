@@ -9,7 +9,8 @@ from boxmunge_cli.cli import main
 from boxmunge_cli.init_cmd import run_init
 
 COMMANDS = ["init", "bundle", "stage", "promote", "prod-deploy", "status",
-            "logs", "mcp-serve", "server-setup"]
+            "logs", "mcp-serve", "server-setup", "secrets", "rollback", "validate",
+            "remote"]
 
 
 def run_cli(argv: list[str]) -> int:
@@ -40,7 +41,7 @@ def test_help_runs_nothing(project: Path, fake_remote, command: str, flag: str,
 @pytest.mark.parametrize("command", COMMANDS)
 def test_unknown_flag_is_a_usage_error(project: Path, fake_remote, command: str,
                                        capsys) -> None:
-    required = {"init": ["--server", "box.example.com"],
+    required = {"init": ["--server", "box.example.com"], "secrets": ["list"],
                 "server-setup": ["root@box.example.com", "--email", "a@example.com"]}
     assert run_cli([command, *required.get(command, []), "--no-such-flag"]) == 2
     assert fake_remote.calls() == []

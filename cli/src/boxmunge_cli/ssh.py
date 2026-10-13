@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """SSH and SCP command building and execution.
 
-All commands are built as explicit lists and executed with shell=False
-to prevent injection from untrusted .boxmunge config values.
+Commands run locally with shell=False. ssh sends the remote command to the
+server as one string that the server parses again, so the command and its
+arguments are joined with shlex.join: an argument with spaces or quotes
+reaches the server as one argument. The deploy user's restricted shell then
+splits it with shlex and runs only allowlisted commands.
 """
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from typing import Any
 
@@ -19,9 +23,8 @@ def build_ssh_cmd(config: dict[str, Any], command: str, *args: str) -> list[str]
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "ConnectTimeout=15",
         f"{config['user']}@{config['server']}",
-        command,
+        shlex.join([command, *args]),
     ]
-    cmd.extend(args)
     return cmd
 
 

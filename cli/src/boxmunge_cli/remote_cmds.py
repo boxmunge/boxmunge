@@ -32,7 +32,7 @@ def _handshake(config: dict[str, Any], manifest_schema: int | None = None) -> bo
     return True
 
 
-def _connect() -> dict[str, Any] | None:
+def connect() -> dict[str, Any] | None:
     """Load .boxmunge and confirm the server is compatible."""
     loaded = _load_project_config()
     if loaded is None or not _handshake(loaded[0]):
@@ -92,7 +92,7 @@ def _cmd_prod_deploy(args: argparse.Namespace) -> int:
 
 def _cmd_promote(args: argparse.Namespace) -> int:
     from boxmunge_cli.ssh import run_ssh
-    config = _connect()
+    config = connect()
     if config is None:
         return 1
     return run_ssh(config, "promote", config["project"],
@@ -101,7 +101,7 @@ def _cmd_promote(args: argparse.Namespace) -> int:
 
 def _cmd_status(args: argparse.Namespace) -> int:
     from boxmunge_cli.ssh import run_ssh
-    config = _connect()
+    config = connect()
     if config is None:
         return 1
     return run_ssh(config, "status", *(["--json"] if args.json else []))
@@ -109,7 +109,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
 def _cmd_logs(args: argparse.Namespace) -> int:
     from boxmunge_cli.ssh import run_ssh
-    config = _connect()
+    config = connect()
     if config is None:
         return 1
     server_args = [config["project"]]
@@ -124,7 +124,7 @@ def _cmd_logs(args: argparse.Namespace) -> int:
 
 def _cmd_mcp_serve(args: argparse.Namespace) -> int:
     from boxmunge_cli.mcp_proxy import run_mcp_proxy
-    config = _connect()
+    config = connect()
     if config is None:
         return 1
     return run_mcp_proxy(config)
