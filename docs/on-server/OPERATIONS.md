@@ -197,9 +197,15 @@ secrets unset --host OLD_KEY
 
 ## Managing the Inbox
 
-Bundles uploaded via scp land in the inbox automatically. Use the legacy scp protocol
-(`scp -O`): SFTP, which OpenSSH 9+ uses for plain `scp`, is disabled for the deploy user
-because sftp-server cannot be confined to the inbox.
+Bundles uploaded via scp land in the inbox automatically, renamed to
+`<project>-<timestamp>.tar.gz`. Use the legacy scp protocol (`scp -O`): SFTP, which OpenSSH 9+ uses
+for plain `scp`, is disabled for the deploy user because sftp-server cannot be confined to the inbox.
+
+`prod-deploy` and `stage` take the project's newest bundle, or the one named with `--ref` (the full
+bundle name, or a prefix of its timestamp that matches exactly one bundle). A bundle belongs to a
+project only when its name is exactly `<project>-<timestamp>.tar.gz`, so deploying `foo` never picks
+up a `foo-bar` bundle. Once a bundle is deployed it moves to `inbox/.consumed/`, together with that
+project's older bundles. A bundle that fails validation stays in the inbox.
 
 List bundles in the inbox:
 

@@ -108,7 +108,7 @@ def _run_deploy_inner(
         return report_refusal(e)
 
     register_project_identity(project_name, manifest.get("id", ""), paths)
-    consume_bundle(bundle_path, paths)
+    consume_bundle(bundle_path, project_name, paths)
     return _start_release(project_name, paths, manifest,
                           bundle_ref(bundle_path), no_snapshot, component)
 

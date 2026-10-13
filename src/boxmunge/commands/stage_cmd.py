@@ -54,7 +54,7 @@ def _intake_bundle(project_name: str, paths: BoxPaths, ref: str | None,
         return report_refusal(e)
 
     register_project_identity(project_name, manifest.get("id", ""), paths)
-    consume_bundle(bundle_path, paths)
+    consume_bundle(bundle_path, project_name, paths)
     return manifest
 
 
