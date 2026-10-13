@@ -153,3 +153,11 @@ class TestFixtureOrderIndependence:
             "Migration registry leaked from a previous test — fixture is "
             "not order-independent."
         )
+
+
+@pytest.mark.parametrize("value", [True, False, "1", 1.0, None])
+def test_non_integer_schema_version_refused(value) -> None:
+    from boxmunge.migration import MigrationError, migrate_manifest
+
+    with pytest.raises(MigrationError, match="unquoted integer"):
+        migrate_manifest({"schema_version": value, "project": "x"}, 3)
