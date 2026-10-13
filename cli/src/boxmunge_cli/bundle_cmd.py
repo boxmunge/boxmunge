@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import yaml
 from boxmunge_cli.manifest import load_manifest, validate_manifest, ManifestError
-from boxmunge_cli.ulid import generate_ulid
+from boxmunge_cli.manifest_id import add_manifest_id, ManifestIdError
 
 
 BUNDLE_HELP = """\
@@ -24,8 +24,8 @@ The project directory must contain:
   manifest.yml     Project manifest (see below)
   compose.yml      Docker Compose file for the project's services
 
-A ULID (unique project ID) is generated and written into manifest.yml
-automatically if not already present.
+'boxmunge init' writes the project id (a ULID). If manifest.yml has none,
+bundle adds a single 'id:' line and leaves the rest of the file untouched.
 
 Manifest format (manifest.yml):
 
@@ -84,12 +84,14 @@ def run_bundle(project_dir_str: str, output: str | None = None,
 
     project_name = manifest.get("project", project_dir.name)
 
-    if not manifest.get("id"):
-        ulid = generate_ulid()
-        # Insert id at the top of the manifest (convention: id is first field)
-        manifest = {"id": ulid, **manifest}
-        manifest_path.write_text(yaml.dump(manifest, default_flow_style=False, sort_keys=False))
-        print(f"  Generated ULID: {ulid}")
+    if not manifest.get("id") and not validate_only:
+        try:
+            manifest["id"] = add_manifest_id(manifest_path)
+        except ManifestIdError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        print(f"  Added project id {manifest['id']} to manifest.yml. Commit this change:"
+              " the id is the project's identity on the server.", file=sys.stderr)
 
     errors, warnings = validate_manifest(manifest, project_name)
     if errors:

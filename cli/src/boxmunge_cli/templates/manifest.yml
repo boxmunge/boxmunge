@@ -1,5 +1,5 @@
 # TODO: Update hosts, services, and backup config for your project.
-id: null
+id: {ulid}
 project: {project}
 source: bundle
 hosts:

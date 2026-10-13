@@ -159,7 +159,7 @@ def validate_manifest(
     if not project_id:
         errors.append(
             "Required field 'id' is missing. "
-            "Use 'boxmunge bundle' to generate a ULID automatically."
+            "Run 'boxmunge bundle' without --validate to add one."
         )
 
     # Source type — mandatory

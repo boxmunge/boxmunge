@@ -10,6 +10,8 @@ from pathlib import Path
 
 import yaml
 
+from boxmunge_cli.ulid import generate_ulid
+
 _VALID_PROJECT = re.compile(r'^[a-z0-9][a-z0-9\-]{0,62}$')
 
 _SCAFFOLD_FILES = {
@@ -33,7 +35,11 @@ def _scaffold(target_dir: Path, project_name: str) -> None:
         if dest.exists():
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
-        content = _load_template(template_name).replace("{project}", project_name)
+        content = (
+            _load_template(template_name)
+            .replace("{project}", project_name)
+            .replace("{ulid}", generate_ulid())
+        )
         dest.write_text(content)
 
 
