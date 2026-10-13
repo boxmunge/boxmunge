@@ -132,6 +132,11 @@ class BoxPaths:
         name = _checked(name)
         return self.projects / name / "data"
 
+    def project_releases(self, name: str) -> Path:
+        """Release workspace: incoming bundle trees and code snapshots."""
+        name = _checked(name)
+        return self.projects / name / ".releases"
+
     def project_health_state(self, name: str) -> Path:
         name = _checked(name)
         return self.health_state / f"{name}.json"

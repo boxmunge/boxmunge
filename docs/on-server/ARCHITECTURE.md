@@ -170,16 +170,20 @@ boxmunge supports two project sources, declared in `manifest.yml` via the `sourc
 
 `deploy <project>` executes these steps in order:
 
-1. Resolve source -- locate bundle in inbox or pull from git repo
-2. Validate manifest -- schema check, required fields (`id`, `source`, `project`, `hosts`, services), backup/restore pairing
-3. Pre-deploy snapshot -- encrypted backup of current state (unless `--no-snapshot`)
-4. Pre-deploy command -- run `deploy.pre_deploy` from manifest if defined (e.g., migrations)
-5. Generate configs -- write Caddy site config and compose overlay (networking, env_files, resource limits)
-6. Start containers -- `docker compose up -d` with overlay
-7. Reload Caddy -- graceful, zero-downtime
-8. Smoke test -- run `boxmunge-scripts/smoke.sh`, interpret exit code
-9. Record state -- write deploy state JSON atomically
-10. Log the deployment -- append to boxmunge operational log
+1. Resolve source -- locate the bundle in the inbox, or pull from the git repo
+2. Unpack -- a bundle is extracted into `projects/<project>/.releases/incoming/`, not over the live project
+3. Validate -- manifest schema and required fields (`id`, `source`, `project`, `hosts`, services), project identity (ULID), and the user `compose.yml` against the hardening floor. For a bundle all of this runs on the unpacked copy: a rejected bundle never touches the live project files, so no later timer or restart can start it
+4. Install -- only a release that passed every check replaces the live project files
+5. Pre-deploy snapshot -- encrypted backup of current state (unless `--no-snapshot`)
+6. Pre-deploy command -- run `deploy.pre_deploy` from manifest if defined (e.g., migrations)
+7. Generate configs -- write Caddy site config and compose overlay (networking, env_files, resource limits)
+8. Start containers -- `docker compose up -d` with overlay
+9. Reload Caddy -- graceful, zero-downtime
+10. Smoke test -- run `boxmunge-scripts/smoke.sh`, interpret exit code
+11. Record state -- write deploy state JSON atomically
+12. Log the deployment -- append to boxmunge operational log
+
+A bundle that fails validation stays in the inbox (it is not moved to `.consumed/`) and the command exits non-zero: 3 for a compose hardening rejection, 1 otherwise. `stage` and `import` use the same unpack-validate-install path.
 
 If any step fails, the deploy stops and reports the failure. No automatic rollback -- the operator or agent decides what to do next.
 

@@ -59,3 +59,15 @@ def resolve_bundle_source(project_name: str, paths: BoxPaths, ref: str | None = 
             except (FileNotFoundError, OSError):
                 pass  # already consumed by another process
     return bundles[0]
+
+
+def bundle_ref(bundle_path: Path) -> str:
+    """The deploy ref recorded for a bundle: its inbox name without .tar.gz."""
+    return bundle_path.name.removesuffix(".tar.gz")
+
+
+def consume_bundle(bundle_path: Path, paths: BoxPaths) -> None:
+    """Move a bundle that has been installed into ``inbox/.consumed/``."""
+    import shutil
+    paths.inbox_consumed.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(bundle_path), str(paths.inbox_consumed / bundle_path.name))

@@ -7,17 +7,24 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from boxmunge.bundle import copy_project_files
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.compose import prepare_compose_override
-from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.docker import compose_up, caddy_reload, DockerError
 from boxmunge.fileutil import project_lock, LockError
+from boxmunge.identity import register_project_identity
+from boxmunge.intake import (
+    IntakeError, extract_candidate, incoming_workspace, report_refusal,
+    validate_release_tree,
+)
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
-from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
+from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
-from boxmunge.security_overlay import services_with_off_profile
+from boxmunge.source import (
+    SourceError, bundle_ref, consume_bundle, resolve_bundle_source,
+)
 from boxmunge.state import read_state, write_state
 
 
@@ -54,12 +61,6 @@ def record_deploy_state(
     write_state(state_path, new_state)
 
 
-# prepare_caddy_config and prepare_compose_override moved to boxmunge.caddy
-# and boxmunge.compose respectively (audit A-2). They're re-imported above
-# so deploy.py callers continue to use the same names without the cross-
-# `commands/` lazy-import dance.
-
-
 def _run_deploy_inner(
     project_name: str,
     paths: BoxPaths,
@@ -70,114 +71,91 @@ def _run_deploy_inner(
 ) -> int:
     """Inner deploy logic — caller must hold the project lock."""
     project_dir = paths.project_dir(project_name)
+    is_new = not (project_dir / "manifest.yml").exists()
 
-    # Resolve from inbox for new projects and bundle-source upgrades.
-    # Git projects have a repo/ dir; bundle projects don't — so for bundles
-    # we always check the inbox for a newer upload.
-    is_new = not project_dir.exists() or not (project_dir / "manifest.yml").exists()
-    is_bundle_project = is_new or not (project_dir / "repo").exists()
+    # Git projects have a repo/ dir and pull their code in place. Bundle
+    # projects take a release from the inbox.
+    if not is_new and (project_dir / "repo").exists():
+        return _deploy_on_disk(project_name, paths, ref, no_snapshot,
+                               dry_run, component)
 
-    if is_bundle_project:
-        from boxmunge.source import resolve_bundle_source, SourceError
-        from boxmunge.bundle import extract_bundle as _extract_bundle, copy_project_files as _copy_project_files
-        from boxmunge.identity import check_project_identity, register_project_identity
-        import tempfile
-        import shutil as _shutil
-
-        try:
-            bundle_path = resolve_bundle_source(project_name, paths, ref=ref)
-        except SourceError:
-            if is_new:
-                print(f"ERROR: No bundles for '{project_name}' in inbox and no existing project.", file=sys.stderr)
-                return 1
-            # Existing project, no new bundle — redeploy what's on disk
-            bundle_path = None
-
-        if bundle_path is not None:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                try:
-                    extracted = _extract_bundle(bundle_path, Path(tmpdir))
-                except ValueError as e:
-                    print(f"ERROR: {e}", file=sys.stderr)
-                    return 1
-
-                manifest_path_extracted = extracted / "manifest.yml"
-                if not manifest_path_extracted.exists():
-                    print("ERROR: Bundle missing manifest.yml", file=sys.stderr)
-                    return 1
-
-                try:
-                    manifest_data = load_manifest(manifest_path_extracted)
-                except ManifestError as e:
-                    print(f"ERROR: {e}", file=sys.stderr)
-                    return 1
-
-                errors_check, warnings_check = validate_manifest(manifest_data, project_name)
-                if errors_check:
-                    print("ERROR: Manifest validation failed:", file=sys.stderr)
-                    for err in errors_check:
-                        print(f"  {err}")
-                    return 1
-
-                manifest_id = manifest_data.get("id", "")
-                try:
-                    check_project_identity(project_name, manifest_id, paths)
-                except ValueError as e:
-                    print(f"ERROR: {e}", file=sys.stderr)
-                    return 1
-
-                if dry_run:
-                    print(f"[DRY RUN] Would deploy '{project_name}' from bundle")
-                    return 0
-
-                action = "Creating" if is_new else "Updating"
-                print(f"{action} project '{project_name}' from bundle...")
-                project_dir.mkdir(parents=True, exist_ok=True)
-                _copy_project_files(extracted, project_dir, is_upgrade=not is_new)
-
-            register_project_identity(project_name, manifest_id, paths)
-
-            # Move bundle to consumed
-            paths.inbox_consumed.mkdir(parents=True, exist_ok=True)
-            _shutil.move(str(bundle_path), str(paths.inbox_consumed / bundle_path.name))
-
-            # Clear ref since we already resolved the source
-            ref = None
-
-    if not project_dir.exists():
-        print(f"ERROR: Project not found: {project_dir}", file=sys.stderr)
-        return 1
-
-    manifest_path = paths.project_manifest(project_name)
     try:
-        manifest = load_manifest(manifest_path)
-    except ManifestError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
+        bundle_path = resolve_bundle_source(project_name, paths, ref=ref)
+    except SourceError as e:
+        if is_new:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        print(f"No new bundle for '{project_name}' in the inbox; "
+              f"redeploying the release already on disk.")
+        return _deploy_on_disk(project_name, paths, None, no_snapshot,
+                               dry_run, component)
 
-    errors, warnings = validate_manifest(manifest, project_name)
-    if errors:
-        print(f"ERROR: Manifest validation failed:", file=sys.stderr)
-        for e in errors:
-            print(f"  {e}")
-        return 1
-    for w in warnings:
-        print(f"  WARN: {w}")
+    # Unpack and validate in .releases/incoming/; the live tree is only
+    # touched once every check has passed (audit C-01).
+    try:
+        with incoming_workspace(paths, project_name) as workspace:
+            tree = extract_candidate(bundle_path, workspace)
+            manifest = validate_release_tree(tree, project_name, paths, component)
+            if dry_run:
+                print(f"[DRY RUN] Bundle {bundle_path.name} is valid")
+                print(f"[DRY RUN] Would install it and deploy '{project_name}'")
+                return 0
+            action = "Creating" if is_new else "Updating"
+            print(f"{action} project '{project_name}' from {bundle_path.name}...")
+            project_dir.mkdir(parents=True, exist_ok=True)
+            copy_project_files(tree, project_dir, is_upgrade=not is_new)
+    except IntakeError as e:
+        return report_refusal(e)
 
-    deploy_ref = ref or manifest.get("ref", "main")
+    register_project_identity(project_name, manifest.get("id", ""), paths)
+    consume_bundle(bundle_path, paths)
+    return _start_release(project_name, paths, manifest,
+                          bundle_ref(bundle_path), no_snapshot, component)
+
+
+def _deploy_on_disk(
+    project_name: str,
+    paths: BoxPaths,
+    ref: str | None,
+    no_snapshot: bool,
+    dry_run: bool,
+    component: str,
+) -> int:
+    """Deploy the code already in the project dir (pulling first for git)."""
+    project_dir = paths.project_dir(project_name)
+    repo_dir = project_dir / "repo"
+    if repo_dir.exists():
+        try:
+            manifest = load_manifest(paths.project_manifest(project_name))
+        except ManifestError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        deploy_ref = ref or manifest.get("ref", "main")
+        if dry_run:
+            print(f"[DRY RUN] Would deploy {project_name} at ref {deploy_ref}")
+            return 0
+        actual_ref = _git_update(repo_dir, deploy_ref, manifest)
+        if actual_ref is None:
+            return 1
+    else:
+        current = read_state(paths.project_deploy_state(project_name))
+        actual_ref = current.get("current_ref", "on-disk")
+
+    try:
+        manifest = validate_release_tree(project_dir, project_name, paths, component)
+    except IntakeError as e:
+        return report_refusal(e)
 
     if dry_run:
-        print(f"[DRY RUN] Would deploy {project_name} at ref {deploy_ref}")
-        print(f"[DRY RUN] Would generate Caddy config and compose override")
-        print(f"[DRY RUN] Would start containers and reload Caddy")
+        print(f"[DRY RUN] Would redeploy {project_name} (ref: {actual_ref})")
         return 0
+    return _start_release(project_name, paths, manifest, actual_ref,
+                          no_snapshot, component)
 
-    print(f"Deploying {project_name} (ref: {deploy_ref})...")
 
-    # Pull code
-    repo_dir = project_dir / "repo"
-    repo_url = manifest.get("repo", "")
-    if repo_url and repo_dir.exists():
+def _git_update(repo_dir: Path, deploy_ref: str, manifest: dict) -> str | None:
+    """Fetch and check out deploy_ref; return the short HEAD sha, None on error."""
+    if manifest.get("repo", ""):
         print(f"  Pulling {deploy_ref}...")
         try:
             subprocess.run(
@@ -194,38 +172,54 @@ def _run_deploy_inner(
             )
         except subprocess.CalledProcessError as e:
             print(f"  ERROR: Git pull failed: {e.stderr}", file=sys.stderr)
-            return 1
-
-    # Get current ref
+            return None
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
-            cwd=repo_dir if repo_dir.exists() else project_dir,
-            capture_output=True, text=True, check=True,
+            cwd=repo_dir, capture_output=True, text=True, check=True,
         )
-        actual_ref = result.stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        actual_ref = deploy_ref
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"  ERROR: Cannot read the deployed git ref: {e}", file=sys.stderr)
+        return None
+    return result.stdout.strip()
 
-    # Pre-deploy snapshot
-    snapshot_name = None
+
+def _take_pre_deploy_snapshot(
+    project_name: str, paths: BoxPaths, manifest: dict, no_snapshot: bool,
+) -> str | None:
+    """Back up project data before the new release starts. Returns its name."""
     snapshot_enabled = manifest.get("deploy", {}).get("snapshot_before_deploy", True)
     backup_type = manifest.get("backup", {}).get("type", "none")
-    if snapshot_enabled and not no_snapshot and backup_type != "none":
-        print(f"  Taking pre-deploy snapshot...")
-        from boxmunge.backup import BackupKind
-        from boxmunge.commands.backup_cmd import run_backup
-        backup_result = run_backup(project_name, paths, _lock_held=True,
-                                   kind=BackupKind.PREDEPLOY)
-        if backup_result != 0:
-            print(f"  WARN: Pre-deploy backup failed — continuing deploy")
-        else:
-            from boxmunge.commands.backup_cmd import list_snapshots
-            snaps = list_snapshots(paths, project_name)
-            if snaps:
-                snapshot_name = snaps[0].name
+    if not snapshot_enabled or no_snapshot or backup_type == "none":
+        return None
+    print("  Taking pre-deploy snapshot...")
+    from boxmunge.backup import BackupKind
+    from boxmunge.commands.backup_cmd import list_snapshots, run_backup
+    if run_backup(project_name, paths, _lock_held=True,
+                  kind=BackupKind.PREDEPLOY) != 0:
+        print("  WARN: Pre-deploy backup failed — continuing deploy")
+        return None
+    snaps = list_snapshots(paths, project_name)
+    return snaps[0].name if snaps else None
 
-    # Pre-deploy command
+
+def _start_release(
+    project_name: str,
+    paths: BoxPaths,
+    manifest: dict,
+    actual_ref: str,
+    no_snapshot: bool,
+    component: str,
+) -> int:
+    """Snapshot, run pre-deploy, generate config, start, smoke-test, record.
+
+    The release on disk has already passed validate_release_tree.
+    """
+    project_dir = paths.project_dir(project_name)
+    print(f"Deploying {project_name} (ref: {actual_ref})...")
+
+    snapshot_name = _take_pre_deploy_snapshot(project_name, paths, manifest, no_snapshot)
+
     pre_deploy = manifest.get("deploy", {}).get("pre_deploy", "")
     if pre_deploy:
         print(f"  Running pre-deploy: {pre_deploy}")
@@ -238,36 +232,13 @@ def _run_deploy_inner(
             print(f"  ERROR: Pre-deploy failed: {e.stderr}", file=sys.stderr)
             return 1
 
-    # Validate user compose.yml against silent-floor-defeating keys BEFORE
-    # we generate the overlay. Compose's multi-file merge would otherwise
-    # let user-side `privileged: true` etc. win over the boxmunge baseline.
-    off_services = {svc for svc, _ in services_with_off_profile(manifest)}
-    try:
-        validate_user_compose(
-            paths.project_compose(project_name), paths,
-            off_services=off_services,
-            project_name=project_name,
-            cve_policy=manifest.get("security"),
-            manifest_services=manifest.get("services"),
-        )
-    except ComposeSecurityError as e:
-        # Exit code 3 reserved for compose hardening rejections (audit H-N2).
-        # Distinguishes operator-actionable security policy violations from
-        # generic operational failures (which return 1).
-        print(f"ERROR: {e}", file=sys.stderr)
-        log_error("deploy", f"Compose validation rejected: {e}",
-                  paths, project=project_name)
-        return 3
-
-    # Generate configs
-    print(f"  Generating Caddy config...")
+    print("  Generating Caddy config...")
     prepare_caddy_config(paths, manifest)
 
-    print(f"  Generating compose overlay...")
+    print("  Generating compose overlay...")
     prepare_compose_override(paths, manifest, component=component)
 
-    # Start containers
-    print(f"  Starting containers...")
+    print("  Starting containers...")
     compose_files = ["compose.yml", "compose.boxmunge.yml"]
     try:
         compose_up(project_dir, compose_files=compose_files)
@@ -276,10 +247,38 @@ def _run_deploy_inner(
         log_error("deploy", f"Deploy failed: container start: {e}", paths, project=project_name)
         return 1
 
-    # v0.9: 8-second post-up scan for read-only-fs errors. Non-fatal —
-    # the goal is operator visibility, not gating. Hints point operators
-    # at services.<svc>.writable.ephemeral when a missing declaration
-    # crashes the container.
+    _post_deploy_diagnostics(project_name, paths, project_dir, manifest)
+
+    print("  Reloading Caddy...")
+    try:
+        caddy_reload(paths.caddy, paths.state)
+    except DockerError as e:
+        print(f"  WARN: Caddy reload failed: {e}")
+
+    if not _smoke_ok(project_name, paths, project_dir, manifest, compose_files):
+        return 1
+
+    record_deploy_state(paths, project_name, actual_ref, snapshot_name)
+
+    log_operation("deploy", f"Deploy completed ref={actual_ref}", paths,
+                  project=project_name, detail={"ref": actual_ref})
+    print(f"{project_name}: deployed successfully (ref: {actual_ref})")
+
+    from boxmunge.webhooks import webhook_safe
+    webhook_safe("deploy", project_name, paths, details={"ref": actual_ref})
+
+    return 0
+
+
+def _post_deploy_diagnostics(
+    project_name: str, paths: BoxPaths, project_dir: Path, manifest: dict,
+) -> None:
+    """v0.9: 8-second post-up scan for read-only-fs errors.
+
+    Best-effort by design: the goal is operator visibility, not gating. Hints
+    point operators at services.<svc>.writable.ephemeral when a missing
+    declaration crashes the container. Failures are logged, never raised.
+    """
     try:
         from boxmunge.writable_diagnostics import run_post_deploy_diagnostics
         hints = run_post_deploy_diagnostics(project_dir, manifest)
@@ -292,50 +291,38 @@ def _run_deploy_inner(
                 detail={"event": "writable_diagnostic", "service": svc_name},
             )
     except Exception as e:
-        # Diagnostics MUST NOT break deploy. Log and move on.
         log_warning(
             "deploy", f"writable diagnostics raised: {e}",
             paths, project=project_name,
         )
 
-    # Reload Caddy
-    print(f"  Reloading Caddy...")
-    try:
-        caddy_reload(paths.caddy, paths.state)
-    except DockerError as e:
-        print(f"  WARN: Caddy reload failed: {e}")
 
-    # Per-service smoke tests — exec inside each container
+def _smoke_ok(
+    project_name: str, paths: BoxPaths, project_dir: Path, manifest: dict,
+    compose_files: list[str],
+) -> bool:
+    """Run per-service smoke tests inside the containers. False on failure."""
     has_smoke = any(svc.get("smoke") for svc in manifest.get("services", {}).values())
-    if has_smoke:
-        print(f"  Running smoke tests in containers...")
-        from boxmunge.commands.check import run_smoke_in_container, should_downgrade_smoke_failure
-        smoke_result = run_smoke_in_container(
-            project_dir, manifest, compose_files,
-        )
-        if smoke_result.status == "ok":
-            print(f"  Smoke tests passed.")
-        elif should_downgrade_smoke_failure(project_name, paths):
-            print(f"  WARN: Smoke test {smoke_result.status} (first deploy — downgraded to warning): {smoke_result.message}")
-            log_warning("deploy", f"First deploy smoke {smoke_result.status} downgraded: {smoke_result.message}",
-                        paths, project=project_name)
-        else:
-            print(f"  ERROR: Smoke test {smoke_result.status}: {smoke_result.message}", file=sys.stderr)
-            log_error("deploy", f"Smoke test {smoke_result.status}: {smoke_result.message}",
-                      paths, project=project_name)
-            return 1
-
-    # Record state
-    record_deploy_state(paths, project_name, actual_ref, snapshot_name)
-
-    # Log
-    log_operation("deploy", f"Deploy completed ref={actual_ref}", paths, project=project_name, detail={"ref": actual_ref})
-    print(f"{project_name}: deployed successfully (ref: {actual_ref})")
-
-    from boxmunge.webhooks import webhook_safe
-    webhook_safe("deploy", project_name, paths, details={"ref": actual_ref})
-
-    return 0
+    if not has_smoke:
+        return True
+    print("  Running smoke tests in containers...")
+    from boxmunge.commands.check import run_smoke_in_container, should_downgrade_smoke_failure
+    smoke_result = run_smoke_in_container(project_dir, manifest, compose_files)
+    if smoke_result.status == "ok":
+        print("  Smoke tests passed.")
+        return True
+    if should_downgrade_smoke_failure(project_name, paths):
+        print(f"  WARN: Smoke test {smoke_result.status} (first deploy — "
+              f"downgraded to warning): {smoke_result.message}")
+        log_warning("deploy", f"First deploy smoke {smoke_result.status} "
+                    f"downgraded: {smoke_result.message}",
+                    paths, project=project_name)
+        return True
+    print(f"  ERROR: Smoke test {smoke_result.status}: {smoke_result.message}",
+          file=sys.stderr)
+    log_error("deploy", f"Smoke test {smoke_result.status}: {smoke_result.message}",
+              paths, project=project_name)
+    return False
 
 
 def run_deploy(

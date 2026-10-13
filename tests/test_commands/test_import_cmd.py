@@ -3,11 +3,12 @@
 import tarfile
 import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from boxmunge.bundle import extract_bundle
 from boxmunge.commands.import_cmd import run_import
 from boxmunge.paths import BoxPaths
+from boxmunge.project_registry import add_project
 
 
 VALID_MANIFEST = """\
@@ -31,14 +32,18 @@ env_files:
 """
 
 
+HOSTILE = "services:\n  web:\n    image: nginx\n    privileged: true\n"
+
+
 def _make_bundle(tmp_path: Path, name: str = "testapp",
                  manifest: str = VALID_MANIFEST,
-                 include_env: bool = True) -> Path:
+                 include_env: bool = True,
+                 compose: str = "services:\n  web:\n    image: nginx\n") -> Path:
     """Create a valid project bundle tar.gz."""
     project_dir = tmp_path / "staging" / name
     project_dir.mkdir(parents=True)
     (project_dir / "manifest.yml").write_text(manifest)
-    (project_dir / "compose.yml").write_text("services:\n  web:\n    image: nginx\n")
+    (project_dir / "compose.yml").write_text(compose)
     if include_env:
         (project_dir / "project.env").write_text("KEY=value\n")
     else:
@@ -82,47 +87,46 @@ class TestExtractBundle:
             extract_bundle(bundle, dest)
 
 
+def _deploy_patches():
+    return (patch("boxmunge.commands.deploy.compose_up"),
+            patch("boxmunge.commands.deploy.caddy_reload"))
+
+
 class TestRunImport:
-    @patch("boxmunge.commands.import_cmd.run_deploy")
-    def test_new_project_import(self, mock_deploy: MagicMock, paths: BoxPaths,
-                                tmp_path: Path) -> None:
+    def test_new_project_import(self, paths: BoxPaths, tmp_path: Path) -> None:
+        add_project("testapp", paths)
         bundle = _make_bundle(tmp_path)
-        mock_deploy.return_value = 0
-        result = run_import(str(bundle), paths, yes=True)
+        up, reload = _deploy_patches()
+        with up as mock_up, reload:
+            result = run_import(str(bundle), paths, yes=True)
         assert result == 0
-        assert paths.project_dir("testapp").exists()
         assert (paths.project_dir("testapp") / "manifest.yml").exists()
-        mock_deploy.assert_called_once_with("testapp", paths, _lock_held=True)
+        mock_up.assert_called_once()
+        # The operator's file is copied, not moved; the filed copy is consumed.
+        assert bundle.exists()
+        assert len(list(paths.inbox_consumed.iterdir())) == 1
 
-    @patch("boxmunge.commands.import_cmd.run_deploy")
-    def test_upgrade_preserves_env(self, mock_deploy: MagicMock, paths: BoxPaths,
-                                   tmp_path: Path) -> None:
-        # Set up existing project with a secret
-        pdir = paths.project_dir("testapp")
-        pdir.mkdir(parents=True)
-        (pdir / "manifest.yml").write_text(VALID_MANIFEST)
-        (pdir / "project.env").write_text("SECRET=real_secret\n")
+    def test_hostile_compose_never_reaches_disk(self, paths: BoxPaths,
+                                                tmp_path: Path) -> None:
+        """C-01: import goes through the same validate-before-install path."""
+        add_project("testapp", paths)
+        bundle = _make_bundle(tmp_path, compose=HOSTILE)
+        up, reload = _deploy_patches()
+        with up as mock_up, reload:
+            result = run_import(str(bundle), paths, yes=True)
+        assert result == 3
+        mock_up.assert_not_called()
+        assert not paths.project_dir("testapp").exists()
 
-        # Bundle has a different project.env
+    def test_unregistered_project_rejected(self, paths: BoxPaths,
+                                           tmp_path: Path, capsys) -> None:
         bundle = _make_bundle(tmp_path)
-        mock_deploy.return_value = 0
-        result = run_import(str(bundle), paths, yes=True)
-        assert result == 0
-        # Secret should be preserved, not overwritten
-        assert (pdir / "project.env").read_text() == "SECRET=real_secret\n"
-
-    @patch("boxmunge.commands.import_cmd.run_deploy")
-    def test_new_project_copies_env_example(self, mock_deploy: MagicMock,
-                                            paths: BoxPaths,
-                                            tmp_path: Path) -> None:
-        bundle = _make_bundle(tmp_path, include_env=False)
-        mock_deploy.return_value = 0
-        result = run_import(str(bundle), paths, yes=True)
-        assert result == 0
-        # project.env.example should have been copied to project.env
-        assert (paths.project_dir("testapp") / "project.env").exists()
+        assert run_import(str(bundle), paths, yes=True) == 1
+        assert "not registered" in capsys.readouterr().err
+        assert not paths.project_dir("testapp").exists()
 
     def test_invalid_manifest_rejects(self, paths: BoxPaths, tmp_path: Path) -> None:
+        add_project("testapp", paths)
         bad_manifest = "project: testapp\nhosts: []\nservices: {}\n"
         bundle = _make_bundle(tmp_path, manifest=bad_manifest)
         result = run_import(str(bundle), paths, yes=True)
@@ -131,12 +135,15 @@ class TestRunImport:
         assert not paths.project_dir("testapp").exists()
 
     def test_dry_run_doesnt_modify(self, paths: BoxPaths, tmp_path: Path) -> None:
+        add_project("testapp", paths)
         bundle = _make_bundle(tmp_path)
         result = run_import(str(bundle), paths, yes=True, dry_run=True)
         assert result == 0
         assert not paths.project_dir("testapp").exists()
+        assert not any(p.is_file() for p in paths.inbox.iterdir())
 
     def test_missing_compose_rejects(self, paths: BoxPaths, tmp_path: Path) -> None:
+        add_project("testapp", paths)
         # Make a bundle without compose.yml
         project_dir = tmp_path / "staging" / "testapp"
         project_dir.mkdir(parents=True)
