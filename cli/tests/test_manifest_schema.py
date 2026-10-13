@@ -31,7 +31,7 @@ class TestSupportedSchemaVersions:
     @pytest.mark.parametrize("version", [1, 2, 3])
     def test_current_schemas_validate(self, version: int) -> None:
         """Schemas the server actually emits must not be rejected."""
-        errors, _ = validate_manifest(_manifest(version), "testapp")
+        errors, _ = validate_manifest(_manifest(version))
         assert errors == []
 
     def test_client_knows_about_schema_3(self) -> None:
@@ -44,14 +44,14 @@ class TestSupportedSchemaVersions:
         manifest["services"]["web"]["writable"] = {
             "persistent": [{"name": "dbdata"}],
         }
-        errors, _ = validate_manifest(manifest, "testapp")
+        errors, _ = validate_manifest(manifest)
         assert errors == []
 
     def test_schema_2_security_block_is_accepted(self) -> None:
         """A real schema-2 feature the client does not interpret."""
         manifest = _manifest(2)
         manifest["security"] = {"posture": "balanced"}
-        errors, _ = validate_manifest(manifest, "testapp")
+        errors, _ = validate_manifest(manifest)
         assert errors == []
 
 
@@ -63,19 +63,19 @@ class TestNewerSchemaIsWarnedNotRejected:
         error would be a false claim of competence. The server re-validates
         and is the authority.
         """
-        errors, _ = validate_manifest(_manifest(CURRENT_SCHEMA_VERSION + 1), "testapp")
+        errors, _ = validate_manifest(_manifest(CURRENT_SCHEMA_VERSION + 1))
         assert errors == []
 
     def test_newer_schema_warns(self) -> None:
         errors, warnings = validate_manifest(
-            _manifest(CURRENT_SCHEMA_VERSION + 1), "testapp",
+            _manifest(CURRENT_SCHEMA_VERSION + 1),
         )
         assert any("schema_version" in w for w in warnings), warnings
 
     def test_newer_schema_warning_names_the_authority(self) -> None:
         """The warning must tell the operator who actually decides."""
         _, warnings = validate_manifest(
-            _manifest(CURRENT_SCHEMA_VERSION + 1), "testapp",
+            _manifest(CURRENT_SCHEMA_VERSION + 1),
         )
         text = " ".join(warnings).lower()
         assert "server" in text
@@ -88,7 +88,7 @@ class TestNewerSchemaIsWarnedNotRejected:
         """
         manifest = _manifest(CURRENT_SCHEMA_VERSION + 1)
         del manifest["project"]
-        errors, _ = validate_manifest(manifest, "testapp")
+        errors, _ = validate_manifest(manifest)
         assert any("project" in e for e in errors), errors
 
 
@@ -96,12 +96,12 @@ class TestInvalidSchemaVersionsStillFail:
     @pytest.mark.parametrize("version", [0, -1])
     def test_below_one_is_an_error(self, version: int) -> None:
         """Not 'newer than I know' — genuinely invalid."""
-        errors, _ = validate_manifest(_manifest(version), "testapp")
+        errors, _ = validate_manifest(_manifest(version))
         assert any("schema_version" in e for e in errors), errors
 
     @pytest.mark.parametrize("version", ["3", 3.0, None, [3]])
     def test_non_integer_is_an_error(self, version) -> None:
-        errors, _ = validate_manifest(_manifest(version), "testapp")
+        errors, _ = validate_manifest(_manifest(version))
         assert any("schema_version" in e for e in errors), errors
 
 
@@ -115,5 +115,5 @@ class TestYamlBooleanTrap:
 
     @pytest.mark.parametrize("version", [True, False])
     def test_boolean_schema_version_is_an_error(self, version: bool) -> None:
-        errors, _ = validate_manifest(_manifest(version), "testapp")
+        errors, _ = validate_manifest(_manifest(version))
         assert any("schema_version" in e for e in errors), errors

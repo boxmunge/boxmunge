@@ -6,6 +6,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 import yaml
+from boxmunge_cli.config import ConfigError, load_config
 from boxmunge_cli.manifest import load_manifest, validate_manifest, ManifestError
 from boxmunge_cli.bundle_filter import IGNORE_FILE, BundlePlan, plan_bundle, write_bundle
 from boxmunge_cli.ignore_rules import IgnoreFileError
@@ -88,6 +89,23 @@ def _resolve_bundle_path(project_dir: Path, project_name: str,
     return output_path
 
 
+def _config_mismatch(project_dir: Path, project_name: str) -> str | None:
+    """Error text if the project's .boxmunge names a different project."""
+    config_path = project_dir / ".boxmunge"
+    if not config_path.is_file():
+        return None
+    try:
+        config = load_config(config_path)
+    except ConfigError as e:
+        return str(e)
+    if config["project"] != project_name:
+        return (f"{config_path} deploys project '{config['project']}' but manifest.yml "
+                f"declares '{project_name}'. Make them agree before deploying: the "
+                "server files the bundle under the manifest's name and runs the "
+                ".boxmunge project.")
+    return None
+
+
 def _report_plan(plan: BundlePlan) -> None:
     for rel, reason in plan.excluded:
         print(f"  excluded: {rel}  ({reason})", file=sys.stderr)
@@ -111,7 +129,17 @@ def run_bundle(project_dir_str: str, output: str | None = None,
         _err(str(e))
         return 1
 
-    project_name = manifest.get("project", project_dir.name)
+    project_name = manifest.get("project")
+    errors, warnings = validate_manifest(manifest, require_id=validate_only)
+    if errors:
+        _err("Manifest validation failed:")
+        for e in errors:
+            print(f"  {e}", file=sys.stderr)
+        return 1
+    mismatch = _config_mismatch(project_dir, project_name)
+    if mismatch:
+        _err(mismatch)
+        return 1
 
     if not manifest.get("id") and not (validate_only or list_only):
         try:
@@ -122,12 +150,6 @@ def run_bundle(project_dir_str: str, output: str | None = None,
         print(f"  Added project id {manifest['id']} to manifest.yml. Commit this change:"
               " the id is the project's identity on the server.", file=sys.stderr)
 
-    errors, warnings = validate_manifest(manifest, project_name)
-    if errors and not list_only:
-        _err("Manifest validation failed:")
-        for e in errors:
-            print(f"  {e}", file=sys.stderr)
-        return 1
     for w in warnings:
         print(f"  WARN: {w}", file=sys.stderr)
 

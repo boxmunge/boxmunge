@@ -8,6 +8,8 @@ from typing import Any
 import yaml
 
 _VALID_SERVICE_NAME = re.compile(r'^[a-z0-9][a-z0-9\-]{0,62}$')
+# The server's project-name rule (src/boxmunge/paths.py); used with fullmatch.
+_VALID_PROJECT_NAME = re.compile(r'[a-z0-9][a-z0-9\-]{0,62}')
 
 
 # Highest manifest schema this client has been taught about. The client
@@ -41,9 +43,14 @@ def load_manifest(path: Path) -> dict[str, Any]:
 
 
 def validate_manifest(
-    manifest: dict[str, Any], expected_name: str
+    manifest: dict[str, Any], require_id: bool = True
 ) -> tuple[list[str], list[str]]:
     """Validate a parsed manifest against the boxmunge project conventions.
+
+    The project name is checked against the client's .boxmunge by the caller;
+    the local directory name is irrelevant (the server names the project
+    directory after the deployed project). require_id=False when the caller
+    is about to add a missing id.
 
     Returns (errors, warnings). errors is empty if the manifest is valid.
     """
@@ -88,10 +95,10 @@ def validate_manifest(
     project = manifest.get("project", "")
     if not project:
         errors.append("Required field 'project' is missing.")
-    elif project != expected_name:
+    elif not isinstance(project, str) or not _VALID_PROJECT_NAME.fullmatch(project):
         errors.append(
-            f"Project name '{project}' does not match directory name "
-            f"'{expected_name}'."
+            f"Invalid 'project' {project!r}: must be lowercase alphanumeric with "
+            "hyphens, 1-63 chars."
         )
 
     # Hosts
@@ -156,7 +163,7 @@ def validate_manifest(
 
     # Project ID (ULID) — mandatory
     project_id = manifest.get("id", "")
-    if not project_id:
+    if require_id and not project_id:
         errors.append(
             "Required field 'id' is missing. "
             "Run 'boxmunge bundle' without --validate to add one."

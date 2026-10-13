@@ -51,13 +51,14 @@ def test_junk_never_ships(tmp_path: Path) -> None:
     project = _project(tmp_path)
     for rel in [
         ".git/config", ".hg/store", ".svn/entries",
-        ".env", ".env.production", ".boxmunge",
+        ".env", ".env.production",
         ".venv/bin/python", "venv/lib/x.py", "node_modules/x/i.js",
         "__pycache__/a.pyc", "src/__pycache__/b.pyc", "src/c.pyc", ".DS_Store",
         "data/db.sqlite", "backups/old.age",
         "myapp-2026-01-01T000000.tar.gz",
     ]:
         _touch(project, rel)
+    _touch(project, ".boxmunge", "server: box.example.com\nproject: myapp\n")
     for rel in [".env.example", "project.env", "app.py", "src/main.py",
                 "boxmunge-scripts/smoke.sh", "assets/data/seed.json"]:
         _touch(project, rel)
