@@ -50,8 +50,12 @@ For every finding marked `QUARANTINE` or `STILL_RUNNING_AT_RISK`:
 
 ### 1. Is there an upstream fix?
 
-If `disposition == IGNORED_FIXED`, the auto-update path picks it up on
-next image rebuild. No action. Move on.
+If `disposition == IGNORED_FIXED`, a fixed package exists but the running
+image predates it. boxmunge does not rebuild images, and `container-update`
+only re-pulls `image:` tags, so nothing applies it for you: the project
+needs a rebuild (pull the fixed base image) and a redeploy. Hand that off.
+If the CVE is also on CISA KEV, the project is quarantined until the fix is
+running (under `relaxed` it keeps running and alerts every scan).
 
 ### 2. Is it on CISA KEV?
 
@@ -233,7 +237,7 @@ upstream fix:
 security <project>
 ```
 
-Once a fix lands (auto-update will pick it up on next image build), resume.
+Once a fix lands, rebuild and redeploy the image, then resume.
 
 ### D. dangerously_disable_quarantine
 

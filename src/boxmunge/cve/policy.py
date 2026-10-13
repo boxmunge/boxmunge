@@ -18,11 +18,12 @@ The trust ladder (non-paranoid postures trust the distro's own triage):
                filter, NVD severity (the pre-trust-ladder behavior). KEV can
                still escalate.
 
-KEV is an override applied right after the fix check and BEFORE
-suppressions: an actively exploited CVE quarantines regardless of posture,
-distro status, attack vector, threshold, or an operator suppression (a
-suppression reviewed before the CVE was known to be exploited must not
-keep hiding it — audit B-07).
+KEV is the first gate: an actively exploited CVE quarantines regardless of
+posture, distro status, attack vector, threshold, an operator suppression
+(a suppression reviewed before the CVE was known to be exploited must not
+keep hiding it — audit B-07), or an upstream fix the image is not running
+(audit B-01). Under relaxed a fixable KEV finding stays up and is alerted
+on every scan instead.
 
 Below paranoid, a finding is otherwise routed to INFORMATIONAL when the
 distro deprioritized it (status will_not_fix / fix_deferred / not_affected /
@@ -46,6 +47,7 @@ means a Medium CVE behaves more like a High one in practice.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from typing import Callable
 
@@ -75,6 +77,8 @@ from boxmunge.cve.suppressions import Suppression, find_active_suppression
 from boxmunge.cve.policy_explain import (
     explain_av_filter,
     explain_distro_deprioritized,
+    explain_fix_available,
+    explain_kev_fix_not_running,
     explain_irrelevant_runtime,
     explain_kev_quarantine,
     explain_no_distro_verdict,
@@ -189,7 +193,8 @@ def evaluate_finding(
     """Decide the disposition for a single finding (the trust ladder).
 
     Order of checks (see the module docstring for the rationale of each):
-    fix → IGNORED_FIXED; KEV override → QUARANTINE; suppression → SUPPRESSED;
+    KEV override → QUARANTINE (fixable KEV under relaxed → IGNORED_FIXED);
+    fix → IGNORED_FIXED; suppression → SUPPRESSED;
     UNKNOWN severity → INFORMATIONAL; paranoid → NVD threshold; relaxed →
     INFORMATIONAL (KEV-only, handled above); else (balanced/strict)
     irrelevant-runtime / distro-deprioritized / no-distro-verdict /
@@ -199,26 +204,22 @@ def evaluate_finding(
     base = finding.severity
     effective = elevate_severity(base, hardening_penalty)
 
-    # 1. Upstream fix.
-    if finding.fix_available:
-        return FindingDisposition(
-            finding=finding,
-            base_severity=base,
-            hardening_penalty=hardening_penalty,
-            effective_severity=effective,
-            disposition=Disposition.IGNORED_FIXED,
-            suppression=None,
-            explanation=(
-                f"Fix available upstream ({finding.fixed_version}); "
-                f"deferred to auto-update."
-            ),
-        )
-
     suppression = find_active_suppression(suppressions, finding.cve_id, today=today)
 
-    # 2. KEV override — actively exploited, quarantine regardless of posture,
-    # distro status, attack vector, threshold, or suppression (B-07).
+    # 1. KEV override — actively exploited, quarantine regardless of posture,
+    # distro status, attack vector, threshold, suppression (B-07), or a fix
+    # that exists but is not running (B-01). Relaxed is the one exception
+    # for a fixable KEV finding: it stays up and is alerted every scan.
     if kev_lookup(finding.cve_id):
+        fix = finding.fixed_version if finding.fix_available else None
+        if fix is not None and posture is Posture.RELAXED:
+            return FindingDisposition(
+                finding=finding, base_severity=base,
+                hardening_penalty=hardening_penalty, effective_severity=effective,
+                disposition=Disposition.IGNORED_FIXED, suppression=None,
+                explanation=explain_kev_fix_not_running(finding.cve_id, fix),
+                kev_listed=True,
+            )
         return FindingDisposition(
             finding=finding,
             base_severity=base,
@@ -229,8 +230,35 @@ def evaluate_finding(
             explanation=explain_kev_quarantine(
                 finding.cve_id,
                 suppression.until.isoformat() if suppression else None,
+                fix,
             ),
             kev_listed=True,
+        )
+
+    # 2. Upstream fix (not KEV): IGNORED_FIXED, flagged when the finding
+    # would otherwise meet the gate so it is alerted, never silently
+    # ignored (B-01). The but-for evaluation is the same pure function.
+    if finding.fix_available:
+        but_for = evaluate_finding(
+            replace(finding, fixed_version=None), posture=posture,
+            hardening_penalty=hardening_penalty,
+            dangerously_disable_quarantine=dangerously_disable_quarantine,
+            suppressions=suppressions, today=today, kev_lookup=kev_lookup,
+            runtimes=runtimes,
+        ).disposition
+        would = but_for in (Disposition.QUARANTINE, Disposition.STILL_RUNNING_AT_RISK)
+        return FindingDisposition(
+            finding=finding,
+            base_severity=base,
+            hardening_penalty=hardening_penalty,
+            effective_severity=effective,
+            disposition=Disposition.IGNORED_FIXED,
+            suppression=None,
+            explanation=explain_fix_available(
+                finding.fixed_version, would_quarantine=would,
+                posture_label=_POSTURE_LABEL[posture],
+            ),
+            fix_would_quarantine=would,
         )
 
     # 3. Active suppression.

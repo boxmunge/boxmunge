@@ -19,7 +19,9 @@ workflow, and recovery.
   regardless of NVD severity — the distro already judged it.
 - **KEV is an override.** A finding on CISA's Known Exploited Vulnerabilities
   catalog quarantines immediately under every posture. The AV filter, distro
-  status, severity threshold, and suppressions do not apply.
+  status, severity threshold, suppressions, and a fix that is not yet
+  running do not apply (under `relaxed`, a fixable KEV finding alerts every
+  scan instead of quarantining).
 - **Runtime relevance gate (balanced/strict).** A finding against an OS
   package that belongs to a language runtime (`perl`, `ruby`, `php`,
   `python`, `node`, `tcl`, `lua` — the ecosystem names accepted by
@@ -100,13 +102,24 @@ on hardened web surfaces are not worth taking services down for.
 
 For every finding, `evaluate_finding` runs these gates in order:
 
-1. **Fix available** → `IGNORED_FIXED`. Deferred to the auto-update path.
-2. **On CISA KEV** → `QUARANTINE`. KEV is an override: active exploitation
+1. **On CISA KEV** → `QUARANTINE`. KEV is the floor: active exploitation
    bypasses the AV filter, distro-status routing, the severity threshold,
-   and any suppression. Applies to every posture. A suppression never hides
-   a KEV-listed CVE: a CVE reviewed and suppressed before CISA listed it is
-   re-activated the day it appears on KEV, and the project is quarantined
-   with a priority-1 alert that names the overridden suppression.
+   any suppression, and an upstream fix the image is not yet running. A
+   suppression never hides a KEV-listed CVE: a CVE reviewed and suppressed
+   before CISA listed it is re-activated the day it appears on KEV, and the
+   project is quarantined with a priority-1 alert that names the overridden
+   suppression. A fix only helps once it is actually running: a fixable KEV
+   finding quarantines under `balanced`, `strict` and `paranoid`, and the
+   alert says a fix exists — rebuild, redeploy, then `security resume`.
+   **Exception, `relaxed`:** a fixable KEV finding does not quarantine;
+   instead a priority-1 alert naming the CVE and the unapplied fix is sent
+   on **every scan** while it is live (`IGNORED_FIXED`).
+2. **Fix available** (not KEV) → `IGNORED_FIXED`. boxmunge does not rebuild
+   images, so "fixed upstream" is not "fixed here". When the finding would
+   otherwise meet the posture's quarantine gate, it is flagged and a
+   `fix_available` alert lists it once (rebuild and redeploy to apply the
+   fix); otherwise it is reported in the new-findings digest. Either way it
+   is never silent.
 3. **Active suppression** → `SUPPRESSED`. Skipped until suppression expiry.
 4. **Unknown severity** → `INFORMATIONAL`. The engine cannot reason about a
    severity it does not recognize; reporting only.
@@ -151,8 +164,9 @@ For every finding, `evaluate_finding` runs these gates in order:
 
 | Condition | Outcome |
 |---|---|
-| Fix available upstream | `IGNORED_FIXED` — auto-update path |
-| CVE is on CISA KEV | `QUARANTINE` — override, beats suppressions; no further checks |
+| CVE is on CISA KEV | `QUARANTINE` — override, beats suppressions and an unapplied fix; no further checks |
+| CVE is on CISA KEV, fix available, posture `relaxed` | `IGNORED_FIXED` — priority-1 alert every scan |
+| Fix available upstream (not KEV) | `IGNORED_FIXED` — alerted once (rebuild to apply) |
 | Active suppression matches the CVE | `SUPPRESSED` — skip until expiry |
 | Severity unknown | `INFORMATIONAL` |
 | Posture is `paranoid` | NVD threshold gate (step 5 above) |
@@ -758,6 +772,8 @@ several findings are involved the title names the worst and adds
 | `[boxmunge:<project>] QUARANTINED — <CVE> (<severity>)` | priority-1 |
 | `[boxmunge:<project>] QUARANTINED — <CVE> (actively exploited — CISA KEV)` | priority-1 |
 | `[boxmunge:<project>] [STILL RUNNING — quarantine disabled by config] <CVE> (<severity>)` | priority-1 |
+| `[boxmunge:<project>] ACTIVELY EXPLOITED — <CVE> fix available but not running (CISA KEV)` (`relaxed`, every scan) | priority-1 |
+| `[boxmunge:<project>] <N> fixable CVE findings over the quarantine gate — rebuild to apply the fix` | normal |
 | `[boxmunge:<project>] <N> new CVE findings (informational)` (digest, top 5 listed) | normal |
 | `[boxmunge:<project>] Suppression expired — <CVE>` | priority-1 |
 | `[boxmunge] Host suppression expired — <CVE>` (once per fleet scan) | priority-1 |

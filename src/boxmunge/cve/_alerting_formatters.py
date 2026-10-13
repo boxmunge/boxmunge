@@ -114,6 +114,43 @@ def format_still_running_alert(project: str, hits: Sequence[Hit]) -> Alert:
     return Alert(kind="still_running", title=title, body=body, priority=1)
 
 
+def format_kev_fix_pending_alert(project: str, hits: Sequence[Hit]) -> Alert:
+    """An actively exploited CVE with a fix the image is not running, on a
+    posture that does not quarantine it (relaxed). Priority 1, every scan."""
+    hits = _ordered(hits)
+    head = hits[0].disposition
+    title = (f"[boxmunge:{project}] ACTIVELY EXPLOITED — {head.finding.cve_id} "
+             f"fix available but not running (CISA KEV){_more(_cve_count(hits) - 1)}")
+    body = "\n".join([
+        f"Project: {project} — still running",
+        *_listing(hits),
+        "",
+        head.explanation,
+        "",
+        "Rebuild the image (pull the fixed base image or package) and",
+        "redeploy. This alert repeats on every scan until the fix is running.",
+    ])
+    return Alert(kind="kev_fix_pending", title=title, body=body, priority=1)
+
+
+def format_fixable_alert(project: str, hits: Sequence[Hit]) -> Alert:
+    """Findings over the quarantine gate whose fix the image is not running.
+    Not quarantined (the fix is the remedy), never silent. Priority 0."""
+    hits = _ordered(hits)
+    n = len(hits)
+    title = (f"[boxmunge:{project}] {n} fixable CVE finding{'s' if n != 1 else ''} "
+             f"over the quarantine gate — rebuild to apply the fix")
+    body = "\n".join([
+        f"Project: {project}",
+        "A fix exists for each of these, but the running image predates it:",
+        *_listing(hits),
+        "",
+        "boxmunge does not rebuild images. Rebuild (pull the base image) and",
+        "redeploy to pick up the fixes.",
+    ])
+    return Alert(kind="fix_available", title=title, body=body, priority=0)
+
+
 def format_new_findings_alert(project: str, hits: Sequence[Hit]) -> Alert:
     """Digest of findings first seen this scan that do not quarantine. Priority 0."""
     hits = _ordered(hits)

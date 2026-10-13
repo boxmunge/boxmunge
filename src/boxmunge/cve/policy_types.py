@@ -102,6 +102,9 @@ class FindingDisposition:
     explanation: str
     # The CVE was on a fresh CISA KEV catalog when this finding was judged.
     kev_listed: bool = False
+    # IGNORED_FIXED only: without the (not yet running) fix, this finding
+    # would quarantine or run at risk under the project's posture.
+    fix_would_quarantine: bool = False
 
 
 @dataclass(frozen=True)

@@ -46,6 +46,8 @@ from boxmunge.cve._alerting_fleet import (
     format_scan_failure_alert,
 )
 from boxmunge.cve._alerting_formatters import (
+    format_fixable_alert,
+    format_kev_fix_pending_alert,
     format_new_findings_alert,
     format_quarantine_alert,
     format_still_running_alert,
@@ -65,6 +67,8 @@ __all__ = [
     "format_quarantine_alert",
     "format_still_running_alert",
     "format_new_findings_alert",
+    "format_kev_fix_pending_alert",
+    "format_fixable_alert",
     "format_suppression_expired_alert",
     "format_host_suppression_expired_alert",
     "format_grace_heads_up_alert",
@@ -148,20 +152,34 @@ def detect_transitions(
     tied to the quarantine action landing (audit B-17), which the
     enforcement step announces.
 
-    Order: still_running, suppression_expired, informational.
+    A fixable KEV finding left running (relaxed) is alerted on EVERY scan,
+    not only on a transition (audit B-01).
+
+    Order: kev_fix_pending, still_running, suppression_expired,
+    fix_available, informational.
     """
     before = findings_by_key(prior)
     now = findings_by_key(current)
     new_at_risk: list[Hit] = []
     new_info: list[Hit] = []
+    new_fixable: list[Hit] = []
+    # Standing, not transitions: alerted on every scan while live (B-01).
+    kev_fix_pending: list[Hit] = []
     for key, hit in now.items():
-        disp = hit.disposition.disposition
+        fd = hit.disposition
+        disp = fd.disposition
         old = before.get(key)
-        if disp == Disposition.STILL_RUNNING_AT_RISK and (
-            old is None or old.disposition.disposition != disp
+        changed = old is None or old.disposition.disposition != disp
+        if disp == Disposition.IGNORED_FIXED and fd.kev_listed:
+            kev_fix_pending.append(hit)
+        elif disp == Disposition.IGNORED_FIXED and fd.fix_would_quarantine and (
+            changed or not old.disposition.fix_would_quarantine
         ):
+            new_fixable.append(hit)
+        elif disp == Disposition.STILL_RUNNING_AT_RISK and changed:
             new_at_risk.append(hit)
-        elif disp == Disposition.INFORMATIONAL and old is None:
+        elif disp in (Disposition.INFORMATIONAL, Disposition.IGNORED_FIXED) and old is None:
+            # A new below-gate finding, fixable or not, is still reported.
             new_info.append(hit)
 
     project_expired: list[Suppression] = []
@@ -173,10 +191,14 @@ def detect_transitions(
                 (host_expired if sup.scope == SCOPE_HOST else project_expired).append(sup)
 
     alerts: list[Alert] = []
+    if kev_fix_pending:
+        alerts.append(format_kev_fix_pending_alert(project_name, kev_fix_pending))
     if new_at_risk:
         alerts.append(format_still_running_alert(project_name, new_at_risk))
     if project_expired:
         alerts.append(format_suppression_expired_alert(project_name, project_expired))
+    if new_fixable:
+        alerts.append(format_fixable_alert(project_name, new_fixable))
     if new_info:
         alerts.append(format_new_findings_alert(project_name, new_info))
     return Transitions(alerts=tuple(alerts), host_expired=tuple(host_expired))

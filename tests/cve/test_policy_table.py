@@ -48,7 +48,10 @@ def _f(
 
 # (row id, finding, evaluate kwargs, {posture: documented disposition})
 _ROWS: list[tuple[str, Finding, dict, dict[Posture, Disposition]]] = [
-    ("fix-available+kev", _f(fix="2"), {"kev": True}, {R: X, B: X, S: X, P: X}),
+    # B-01: KEV is the floor a fix that is not running does not escape,
+    # except at the lowered posture (relaxed), which alerts every scan.
+    ("fix-available+kev", _f(fix="2"), {"kev": True}, {R: X, B: Q, S: Q, P: Q}),
+    ("fix-available-high", _f(fix="2"), {}, {R: X, B: X, S: X, P: X}),
     ("suppressed", _f(), {"sup": _SUP}, {R: SU, B: SU, S: SU, P: SU}),
     ("suppressed+kev", _f(), {"kev": True, "sup": _SUP}, {R: Q, B: Q, S: Q, P: Q}),
     ("kev-low-avl-will-not-fix",
