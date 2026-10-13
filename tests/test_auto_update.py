@@ -104,3 +104,62 @@ class TestDispatch:
     def test_unknown_action_returns_one(self, mock_discover, box) -> None:
         mock_discover.return_value = {"action": "wat"}
         assert run_auto_update(box) == 1
+
+
+class TestUpgradeLock:
+    """C-21: discovery runs under upgrade.lock."""
+
+    def _hold(self, paths: BoxPaths) -> int:
+        import fcntl
+        import os
+        paths.upgrade_state.mkdir(parents=True, exist_ok=True)
+        fd = os.open(paths.upgrade_lock, os.O_CREAT | os.O_WRONLY)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd
+
+    @patch("os.execvp")
+    @patch("boxmunge.upgrade_discovery.discover_update")
+    def test_skips_discovery_while_an_upgrade_runs(self, mock_discover, mock_exec, box) -> None:
+        import os
+        fd = self._hold(box)
+        try:
+            assert run_auto_update(box) == 0
+        finally:
+            os.close(fd)
+        mock_discover.assert_not_called()
+        mock_exec.assert_not_called()
+
+    @patch("boxmunge.upgrade_discovery.discover_update")
+    def test_discovery_holds_the_lock_and_releases_it_before_exec(self, mock_discover, box) -> None:
+        from boxmunge.upgrade_state import UpgradeInProgress, upgrade_lock
+        held_during_discovery = []
+
+        def discover(*_a, **_k):
+            try:
+                with upgrade_lock(box):
+                    held_during_discovery.append(False)
+            except UpgradeInProgress:
+                held_during_discovery.append(True)
+            return _upgrade("security")
+
+        mock_discover.side_effect = discover
+
+        def exec_shim(*_a):
+            with upgrade_lock(box):  # raises if still held
+                pass
+
+        with patch("os.execvp", side_effect=exec_shim):
+            run_auto_update(box)
+        assert held_during_discovery == [True]
+
+    def test_symlinked_lock_is_refused(self, paths, tmp_path) -> None:
+        import pytest
+        from boxmunge.upgrade_state import upgrade_lock
+        paths.upgrade_state.mkdir(parents=True, exist_ok=True)
+        victim = tmp_path / "victim"
+        victim.write_text("keep")
+        paths.upgrade_lock.symlink_to(victim)
+        with pytest.raises(OSError):
+            with upgrade_lock(paths):
+                pass
+        assert victim.read_text() == "keep"

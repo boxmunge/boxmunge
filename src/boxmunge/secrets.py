@@ -1,5 +1,27 @@
 """Dotenv file operations for secrets management."""
+import re
 from pathlib import Path
+
+# A key is an environment-variable name. A value may hold anything printable
+# (tabs included) but no other control character: a newline would start a
+# new KEY=VALUE line in the env file, and CR, NUL or escapes corrupt it.
+_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_FORBIDDEN_IN_VALUE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
+
+
+def validate_secret(key: str, value: str) -> None:
+    """Raise ValueError unless key and value are safe to write as one line."""
+    if not _KEY_RE.fullmatch(key):
+        raise ValueError(
+            f"invalid secret key {key!r}: use letters, digits and underscores, "
+            "not starting with a digit"
+        )
+    bad = _FORBIDDEN_IN_VALUE.search(value)
+    if bad:
+        raise ValueError(
+            f"invalid secret value for {key}: contains control character "
+            f"{bad.group()!r}; newlines and other control characters are not allowed"
+        )
 
 
 def read_dotenv(path: Path) -> dict[str, str]:
@@ -26,6 +48,7 @@ def write_dotenv(path: Path, data: dict[str, str]) -> None:
 
 
 def set_key(path: Path, key: str, value: str) -> None:
+    validate_secret(key, value)
     data = read_dotenv(path)
     data[key] = value
     write_dotenv(path, data)

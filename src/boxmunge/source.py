@@ -31,7 +31,7 @@ def resolve_bundle_source(project_name: str, paths: BoxPaths, ref: str | None = 
     if not bundles:
         raise SourceError(
             f"No bundles for project '{project_name}' in inbox. "
-            f"Upload with: scp bundle.tar.gz deploy@<host>:"
+            f"Upload with: scp -O bundle.tar.gz deploy@<host>:"
         )
     if ref:
         for bundle in bundles:

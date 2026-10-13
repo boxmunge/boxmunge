@@ -6,7 +6,9 @@ All boxmunge operational output goes to stderr.
 """
 
 import json
-from typing import Any, Callable
+import os
+import sys
+from typing import Any, BinaryIO, Callable
 
 from boxmunge.mcp_tools import (
     _tool_agent_help,
@@ -94,13 +96,14 @@ _TOOL_DEFS: list[dict[str, Any]] = [
     },
     {
         "name": "rollback",
-        "description": "Rollback a project to the previous deployment.",
+        "description": "Rollback a project to the previous deployment. Destructive: requires confirm=true.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "project": {"type": "string", "description": "Project name"},
+                "confirm": {"type": "boolean", "description": "Must be true; rollback replaces the running deployment"},
             },
-            "required": ["project"],
+            "required": ["project", "confirm"],
         },
         "handler": _tool_rollback,
     },
@@ -131,14 +134,15 @@ _TOOL_DEFS: list[dict[str, Any]] = [
     },
     {
         "name": "restore",
-        "description": "Restore a project from a backup snapshot.",
+        "description": "Restore a project from a backup snapshot. Destructive: requires confirm=true.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "project": {"type": "string", "description": "Project name"},
                 "snapshot": {"type": "string", "description": "Snapshot filename to restore"},
+                "confirm": {"type": "boolean", "description": "Must be true; restore overwrites the project's data"},
             },
-            "required": ["project"],
+            "required": ["project", "confirm"],
         },
         "handler": _tool_restore,
     },
@@ -172,11 +176,16 @@ _TOOL_DEFS: list[dict[str, Any]] = [
     },
     {
         "name": "upgrade",
-        "description": "Upgrade the boxmunge platform.",
+        "description": (
+            "Upgrade the boxmunge platform through the root upgrade shim (signature check, "
+            "venv swap, probation with automatic rollback). Without a version, installs the "
+            "latest release; with one, that release, which must not be older than the installed "
+            "version or blocklisted."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "skip_self_test": {"type": "boolean", "description": "Skip post-upgrade self-test"},
+                "version": {"type": "string", "description": "Release to install, e.g. 0.11.2"},
             },
         },
         "handler": _tool_upgrade,
@@ -291,6 +300,42 @@ _TOOL_DEFS: list[dict[str, Any]] = [
         "handler": _tool_handshake,
     },
 ]
+
+# ---------------------------------------------------------------------------
+# Protocol stream isolation
+# ---------------------------------------------------------------------------
+
+def isolate_protocol_streams() -> tuple[BinaryIO, BinaryIO]:
+    """Move the MCP protocol off fds 0 and 1 and return private handles to it.
+
+    Tools run in-process and start subprocesses (docker compose, git). Any of
+    them could read fd 0 or write fd 1, which are the JSON-RPC stream. After
+    this call fd 0 is /dev/null and fd 1 is a copy of stderr, for this process
+    and every child it starts; only the returned handles reach the client.
+    """
+    sys.stdout.flush()
+    proto_in = os.fdopen(os.dup(0), "rb")
+    proto_out = os.fdopen(os.dup(1), "wb")
+    devnull = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(devnull, 0)
+    os.close(devnull)
+    os.dup2(2, 1)
+    return proto_in, proto_out
+
+
+async def serve_stdio(server: Any) -> None:
+    """Run the MCP server over the original stdin/stdout, isolated from tools."""
+    from io import TextIOWrapper
+
+    import anyio
+    from mcp.server.stdio import stdio_server
+
+    proto_in, proto_out = isolate_protocol_streams()
+    stdin = anyio.wrap_file(TextIOWrapper(proto_in, encoding="utf-8", errors="replace"))
+    stdout = anyio.wrap_file(TextIOWrapper(proto_out, encoding="utf-8"))
+    async with stdio_server(stdin=stdin, stdout=stdout) as (read_stream, write_stream):
+        await server.run(read_stream, write_stream, server.create_initialization_options())
+
 
 # ---------------------------------------------------------------------------
 # MCP server factory (requires `mcp` package)

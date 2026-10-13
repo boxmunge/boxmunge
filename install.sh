@@ -7,11 +7,24 @@
 #
 # Upgrade (SSH in as deploy user, elevate with sudo):
 #   sudo bash install.sh
+#
+# From the upgrade shim (system pieces only; the shim installs the package
+# into the standby venv and records the version itself):
+#   bash install.sh --upgrade-shim
 
 set -euo pipefail
 
 BOXMUNGE_ROOT="/opt/boxmunge"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# During an upgrade env-active is still the PREVIOUS release's venv, the one a
+# rollback returns to. Installing the new package into it would leave nothing
+# to roll back to, so the shim passes --upgrade-shim and keeps venvs to itself.
+FROM_UPGRADE_SHIM=0
+if [[ "${1:-}" == "--upgrade-shim" ]]; then
+    FROM_UPGRADE_SHIM=1
+    shift
+fi
 
 # ---------------------------------------------------------------------------
 # Cosign — pinned version + checksum.
@@ -325,8 +338,16 @@ if [[ -f "${BOXMUNGE_ROOT}/config/backup.key" ]]; then
     chown root:deploy "${BOXMUNGE_ROOT}/config/backup.key"
     chmod 640 "${BOXMUNGE_ROOT}/config/backup.key"
 fi
-"${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --upgrade pip
-"${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet "${SCRIPT_DIR}[tui]"
+# Dependencies come only from the hash-pinned requirements files in the signed
+# bundle; the package itself installs without resolving anything further and
+# builds with the hash-pinned backend already in the venv. The venv's own pip
+# (from the distro's python3-venv) is used as is: upgrading it would be one
+# more unpinned download.
+if [[ "${FROM_UPGRADE_SHIM}" -eq 0 ]]; then
+    "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --require-hashes \
+        -r "${SCRIPT_DIR}/requirements-build.txt" -r "${SCRIPT_DIR}/requirements-tui.txt"
+    "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --no-deps --no-build-isolation "${SCRIPT_DIR}"
+fi
 
 # pip install as root leaves root-owned build artifacts in the source directory.
 # Clean them up so the deploy user can rm the extraction dir on future upgrades.
@@ -365,10 +386,12 @@ chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-sftp"
 # ---------------------------------------------------------------------------
 # Wire sshd's SFTP subsystem to boxmunge-sftp.
 #
-# Modern OpenSSH (9+) routes scp through the SFTP protocol, so the Subsystem
-# directive — not the login shell — decides where uploads go. The wrapper
-# only runs uploads through reception if sshd actually invokes it. This step
-# is idempotent and runs on every install/upgrade so the wiring cannot drift.
+# The wrapper refuses SFTP for deploy (sftp-server cannot be confined to the
+# inbox without chrooting every deploy session, and unconfined it exposes
+# everything deploy can read and write) and execs the real sftp-server for
+# everyone else. deploy uploads with legacy scp (`scp -O`), which the
+# restricted shell receives through `scp -t`. Idempotent; runs on every
+# install/upgrade so the wiring cannot drift.
 # ---------------------------------------------------------------------------
 SSHD_CONFIG="/etc/ssh/sshd_config"
 SFTP_SUBSYSTEM_LINE="Subsystem sftp ${BOXMUNGE_ROOT}/bin/boxmunge-sftp"
@@ -398,11 +421,10 @@ ln -sf "${BOXMUNGE_ROOT}/bin/boxmunge-server" /usr/local/bin/boxmunge-server
 # ---------------------------------------------------------------------------
 # On-server documentation
 # ---------------------------------------------------------------------------
-if [[ -d "${SCRIPT_DIR}/on-server" ]]; then
-    mkdir -p "${BOXMUNGE_ROOT}/docs"
-    cp "${SCRIPT_DIR}/on-server/"*.md "${BOXMUNGE_ROOT}/docs/"
-    chmod 644 "${BOXMUNGE_ROOT}/docs/"*.md
-fi
+# The shim replaces docs/ as a whole (atomic symlink swap), so docs removed
+# from the release disappear. Every upgrade does the same from the release
+# it installs, and a rollback restores the previous release's docs.
+"${BOXMUNGE_ROOT}/bin/boxmunge-upgrade" install-docs "${SCRIPT_DIR}/on-server"
 
 # ---------------------------------------------------------------------------
 # Canary project template (used by `boxmunge self-test`)
@@ -437,23 +459,14 @@ systemctl enable --now \
     boxmunge-cve-scan.timer
 
 # ---------------------------------------------------------------------------
-# Sudoers: allow deploy to invoke the upgrade shim (single binary scope).
-# This lets `boxmunge upgrade` from the deploy shell route to the root-context
-# shim that handles stash + venv swap + probation properly. Same root of trust
-# as supervisor (deploy and supervisor share SSH keys).
+# Sudoers: deploy may run exactly `boxmunge-upgrade auto` and
+# `boxmunge-upgrade target <version>` as root, so `upgrade` from the deploy
+# shell reaches the shim that handles stash + venv swap + probation. The rule
+# text lives in the shim (install-sudoers), which validates it with visudo
+# before replacing /etc/sudoers.d/boxmunge-deploy. Every upgrade rewrites it
+# too, so a box carrying an older, wider rule is tightened on upgrade.
 # ---------------------------------------------------------------------------
-SUDOERS_FILE="/etc/sudoers.d/boxmunge-deploy"
-SUDOERS_RULE="deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade"
-if [[ ! -f "${SUDOERS_FILE}" ]] || ! grep -qF "${SUDOERS_RULE}" "${SUDOERS_FILE}"; then
-    echo "${SUDOERS_RULE}" > "${SUDOERS_FILE}"
-    chmod 440 "${SUDOERS_FILE}"
-    chown root:root "${SUDOERS_FILE}"
-    visudo -cqf "${SUDOERS_FILE}" || {
-        rm -f "${SUDOERS_FILE}"
-        echo "ERROR: sudoers rule failed validation; not installed" >&2
-        exit 1
-    }
-fi
+"${BOXMUNGE_ROOT}/bin/boxmunge-upgrade" install-sudoers
 
 # ---------------------------------------------------------------------------
 # Record installed version (read by boxmunge auto-update to decide if a
@@ -462,7 +475,7 @@ fi
 INSTALLED_VERSION="$("${BOXMUNGE_ROOT}/env-active/bin/pip" show boxmunge-server 2>/dev/null \
     | grep '^Version:' | cut -d' ' -f2 || echo "unknown")"
 
-if [[ "${INSTALLED_VERSION}" != "unknown" ]]; then
+if [[ "${INSTALLED_VERSION}" != "unknown" && "${FROM_UPGRADE_SHIM}" -eq 0 ]]; then
     echo "${INSTALLED_VERSION}" > "${BOXMUNGE_ROOT}/config/version"
 fi
 

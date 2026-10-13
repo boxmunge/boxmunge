@@ -144,6 +144,8 @@ Lint with `make lint` (ruff, configured in `ruff.toml`).
 ## Dependencies are hash-pinned
 
 Every install in CI uses `pip install --require-hashes` against checked-in requirements files, and
+so do on-box installs: `install.sh` and the upgrade shim install from the `requirements-tui.txt` and
+`requirements-build.txt` (the setuptools build backend) shipped in the signed bundle. Likewise,
 every GitHub Action is pinned to a commit SHA. `tests/test_release_pinning.py` fails the build if
 either rule is broken. To change a dependency, edit the matching `.in` file or `pyproject.toml`, run
 `make lock`, and commit the regenerated `.txt` files. Dependabot proposes routine bumps.

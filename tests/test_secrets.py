@@ -1,5 +1,8 @@
 """Tests for secrets dotenv file operations."""
 from pathlib import Path
+
+import pytest
+
 from boxmunge.secrets import read_dotenv, write_dotenv, set_key, get_key, unset_key, list_keys
 
 
@@ -108,3 +111,35 @@ class TestListKeys:
 
     def test_returns_empty_for_missing_file(self, tmp_path: Path) -> None:
         assert list_keys(tmp_path / "nope.env") == []
+
+
+class TestSetKeyRejectsInjection:
+    """A-09: a key or value that would add or corrupt env-file lines is refused."""
+
+    @pytest.mark.parametrize("key", [
+        "", "1KEY", "MY-KEY", "KEY=X", "KEY NAME", "KEY\nEVIL", "K\u00e9Y", " KEY",
+    ])
+    def test_rejects_bad_keys(self, tmp_path: Path, key: str) -> None:
+        env_file = tmp_path / "test.env"
+        with pytest.raises(ValueError, match="key"):
+            set_key(env_file, key, "v")
+        assert not env_file.exists()
+
+    @pytest.mark.parametrize("value", [
+        "line1\nINJECTED=1", "a\rb", "nul\x00byte", "esc\x1b[2J", "del\x7f",
+    ])
+    def test_rejects_control_characters_in_values(self, tmp_path: Path, value: str) -> None:
+        env_file = tmp_path / "test.env"
+        set_key(env_file, "SAFE", "kept")
+        with pytest.raises(ValueError, match="value"):
+            set_key(env_file, "KEY", value)
+        assert read_dotenv(env_file) == {"SAFE": "kept"}
+
+    @pytest.mark.parametrize("key,value", [
+        ("_PRIVATE", "x"), ("DB_URL", "postgres://u:p@h/db?a=1&b=2"),
+        ("TABBED", "a\tb"), ("SPACED", "hello world"), ("EMPTY", ""), ("UNICODE", "caf\u00e9"),
+    ])
+    def test_accepts_ordinary_secrets(self, tmp_path: Path, key: str, value: str) -> None:
+        env_file = tmp_path / "test.env"
+        set_key(env_file, key, value)
+        assert get_key(env_file, key) == value

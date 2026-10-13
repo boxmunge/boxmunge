@@ -1,0 +1,4 @@
+# Build backend for installing boxmunge-server from its source bundle on the
+# box with --no-build-isolation (pip would otherwise fetch it unhashed).
+# Keep in step with [build-system] requires in pyproject.toml.
+setuptools>=68.0

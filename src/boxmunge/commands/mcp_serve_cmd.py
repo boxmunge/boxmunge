@@ -26,16 +26,10 @@ def cmd_mcp_serve(args: list[str]) -> None:
         )
         sys.exit(1)
 
-    server = create_mcp_server()
-
     import asyncio
-    from mcp.server.stdio import stdio_server
+    from boxmunge.mcp_server import serve_stdio
 
-    async def run():
-        async with stdio_server() as (read_stream, write_stream):
-            await server.run(read_stream, write_stream, server.create_initialization_options())
-
-    asyncio.run(run())
+    asyncio.run(serve_stdio(create_mcp_server()))
 
 
 if __name__ == "__main__":

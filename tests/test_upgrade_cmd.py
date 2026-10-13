@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for boxmunge.commands.upgrade_cmd internals."""
+"""Tests for boxmunge.commands.upgrade_steps internals."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from boxmunge.commands.upgrade_cmd import _migrate_project_manifests
+from boxmunge.commands.upgrade_steps import migrate_project_manifests
 from boxmunge.manifest import ManifestError
 from boxmunge.migration import (
     MigrationError, register_migration, _MIGRATIONS,
@@ -52,11 +52,11 @@ class TestMigratePostValidation:
         }
         mf = _write_manifest(paths_stub, "demo", v1)
 
-        migrated = _migrate_project_manifests(paths_stub)
+        migrated = migrate_project_manifests(paths_stub)
 
         assert migrated == ["demo"]
         on_disk = yaml.safe_load(mf.read_text())
-        # _migrate_project_manifests migrates to CURRENT_SCHEMA_VERSION, which
+        # migrate_project_manifests migrates to CURRENT_SCHEMA_VERSION, which
         # rolls forward with every release. Pin against the manifest module to
         # avoid this test needing edits on every schema bump.
         from boxmunge.manifest import CURRENT_SCHEMA_VERSION
@@ -65,7 +65,7 @@ class TestMigratePostValidation:
     def test_post_migration_validation_failure_raises(
         self, paths_stub
     ) -> None:
-        """If a migration produces an invalid manifest, _migrate_project_manifests
+        """If a migration produces an invalid manifest, migrate_project_manifests
         must raise MigrationError and leave the original manifest on disk."""
 
         # Inject a bad migration that produces an invalid manifest
@@ -94,7 +94,7 @@ class TestMigratePostValidation:
             mf = _write_manifest(paths_stub, "demo", v1)
 
             with pytest.raises(MigrationError, match="failed validation"):
-                _migrate_project_manifests(paths_stub)
+                migrate_project_manifests(paths_stub)
 
             # On-disk manifest must be unchanged.
             assert mf.read_text() == original_text
@@ -114,7 +114,7 @@ class TestMigrateFailLoud:
 
     def test_corrupted_manifest_raises_manifest_error(self, paths_stub) -> None:
         """A project whose manifest is not a YAML mapping must cause
-        _migrate_project_manifests to raise ManifestError (was: silently
+        migrate_project_manifests to raise ManifestError (was: silently
         skipped)."""
         proj = paths_stub.projects / "broken"
         proj.mkdir(parents=True)
@@ -122,7 +122,7 @@ class TestMigrateFailLoud:
         (proj / "manifest.yml").write_text("- just\n- a\n- list\n")
 
         with pytest.raises(ManifestError, match="not a YAML mapping"):
-            _migrate_project_manifests(paths_stub)
+            migrate_project_manifests(paths_stub)
 
     def test_migrate_manifest_failure_raises(self, paths_stub) -> None:
         """A project where migrate_manifest itself raises must propagate the
@@ -147,7 +147,7 @@ class TestMigrateFailLoud:
             _write_manifest(paths_stub, "demo", v1)
 
             with pytest.raises(MigrationError, match="simulated migration failure"):
-                _migrate_project_manifests(paths_stub)
+                migrate_project_manifests(paths_stub)
         finally:
             if original_v1_to_v2 is not None:
                 register_migration(1, 2, original_v1_to_v2)

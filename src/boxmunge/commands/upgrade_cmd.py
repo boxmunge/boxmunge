@@ -5,7 +5,7 @@ Flow: stash -> migrate manifests -> regenerate configs -> reload Caddy ->
 restart projects -> self-test -> health -> report.
 
 Dispatch modes:
-  --dry-run   validate manifests + config regeneration; no writes to state
+  --dry-run   render migrated manifests + configs in memory; writes nothing
   --apply     migrate/regen/reload/restart/version-write only (shim handles
               stash, health, rollback externally)
   (default)   full six-step flow with stash, self-test, and health check
@@ -13,375 +13,89 @@ Dispatch modes:
 
 import sys
 
-import yaml
-
-from boxmunge.caddy import prepare_caddy_config
-from boxmunge.compose import prepare_compose_override
 from boxmunge.commands.health_cmd import run_health
 from boxmunge.commands.self_test_cmd import run_self_test
-from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
-from boxmunge.docker import compose_up, caddy_reload, DockerError
-from boxmunge.fileutil import atomic_write_text, project_lock, LockError
-from boxmunge.lifecycle import BlockReason, is_blocked
-from boxmunge.log import log_operation, log_error, log_warning
-from boxmunge.manifest import load_manifest, validate_manifest, ManifestError, CURRENT_SCHEMA_VERSION
-from boxmunge.migration import migrate_manifest, MigrationError
-from boxmunge.pause import render_maintenance_caddy_config
+from boxmunge.commands.upgrade_steps import (
+    UpgradeGateError,
+    check_upgrade,
+    migrate_project_manifests,
+    notify_locked_skips,
+    regenerate_configs,
+    restart_projects,
+)
+from boxmunge.docker import caddy_reload, DockerError
+from boxmunge.log import log_operation, log_error
+from boxmunge.manifest import ManifestError
+from boxmunge.migration import MigrationError
 from boxmunge.paths import BoxPaths
-from boxmunge.security_overlay import services_with_off_profile
 from boxmunge.stash import create_stash, prune_stashes
 from boxmunge.version import read_installed_version, write_installed_version, get_build_version, parse_version_string
 
 
-def _migrate_project_manifests(paths: BoxPaths) -> list[str]:
-    """Migrate all project manifests to the current schema version.
-
-    Returns list of project names that were migrated.
-    """
-    migrated = []
-    if not paths.projects.exists():
-        return migrated
-
-    for project_dir in sorted(paths.projects.iterdir()):
-        if not project_dir.is_dir():
-            continue
-        manifest_path = project_dir / "manifest.yml"
-        if not manifest_path.exists():
-            continue
-
-        # ManifestError and MigrationError both propagate. A corrupted manifest
-        # means this project never gets its schema bumped or overlay regenerated;
-        # silently skipping would let the upgrade report success while leaving
-        # the project in a stale/broken state. Raise instead — the shim will
-        # roll back to the previous slot.
-        manifest = load_manifest(manifest_path)
-
-        source_version = manifest.get("schema_version", 1)
-        if source_version == CURRENT_SCHEMA_VERSION:
-            continue
-
-        migrated_manifest = migrate_manifest(manifest, CURRENT_SCHEMA_VERSION)
-
-        # Validate the migrated manifest BEFORE writing it.
-        # A migration that produces invalid output is a real bug — fail noisily
-        # rather than persisting a malformed manifest the operator will hit
-        # later at deploy time.
-        errors, _ = validate_manifest(migrated_manifest, expected_name=project_dir.name)
-        if errors:
-            log_error(
-                "upgrade",
-                f"Migrated manifest for {project_dir.name} failed validation: "
-                f"{'; '.join(errors)}. Original manifest left in place.",
-                paths, project=project_dir.name,
-            )
-            raise MigrationError(
-                f"Migrated manifest for {project_dir.name} failed validation. "
-                f"Errors: {'; '.join(errors)}"
-            )
-
-        from boxmunge.fileutil import atomic_write_text
-        atomic_write_text(
-            manifest_path,
-            yaml.dump(migrated_manifest, default_flow_style=False, sort_keys=False),
-        )
-        migrated.append(project_dir.name)
-
-    return migrated
-
-
-def _regenerate_configs(paths: BoxPaths) -> list[str]:
-    """Re-generate Caddy and compose overlay configs for all projects.
-
-    Returns list of project names processed.
-    """
-    processed = []
-    if not paths.projects.exists():
-        return processed
-
-    for project_dir in sorted(paths.projects.iterdir()):
-        if not project_dir.is_dir():
-            continue
-        manifest_path = project_dir / "manifest.yml"
-        if not manifest_path.exists():
-            continue
-
-        try:
-            manifest = load_manifest(manifest_path)
-        except ManifestError:
-            continue
-
-        project_name = manifest.get("project", project_dir.name)
-
-        # A CVE-quarantined project must NOT have its normal Caddy
-        # site fragment overwritten by a platform upgrade — that would
-        # silently restore routing to a stopped (or about-to-be-restored)
-        # project the operator deliberately took offline. Re-render the
-        # maintenance fragment instead so the quarantine UX persists
-        # through the upgrade. Compose overlay regen is skipped — the
-        # containers stay stopped until `boxmunge security resume`.
-        # Pause is intentionally NOT short-circuited here: historical
-        # behavior is to regenerate normal configs for paused projects
-        # too. Pause's own Caddy fragment is written on resume.
-        block = is_blocked(project_name, paths)
-        if block and block.reason is BlockReason.QUARANTINED:
-            hosts = manifest.get("hosts", [])
-            if hosts:
-                try:
-                    site_conf = render_maintenance_caddy_config(hosts)
-                    paths.project_caddy_site(project_name).parent.mkdir(
-                        parents=True, exist_ok=True,
-                    )
-                    atomic_write_text(
-                        paths.project_caddy_site(project_name),
-                        site_conf, mode=0o644,
-                    )
-                except (OSError, ValueError) as e:
-                    log_warning(
-                        "upgrade",
-                        f"Failed to re-render maintenance Caddy config "
-                        f"for quarantined {project_name}: {e}",
-                        paths, project=project_name,
-                    )
-            log_operation(
-                "upgrade", block.skip_message,
-                paths, project=project_name,
-            )
-            continue
-
-        # Validate user compose.yml against silent-floor-defeating keys
-        # BEFORE regenerating the overlay. A hostile compose.yml that
-        # slipped in pre-validation must not survive an upgrade.
-        off_services = {svc for svc, _ in services_with_off_profile(manifest)}
-        try:
-            validate_user_compose(
-                paths.project_compose(project_name), paths,
-                off_services=off_services,
-                project_name=project_name,
-                cve_policy=manifest.get("security"),
-                manifest_services=manifest.get("services"),
-            )
-        except ComposeSecurityError as e:
-            log_error(
-                "upgrade",
-                f"Compose validation rejected during regen: {e}",
-                paths, project=project_name,
-            )
-            # Skip this project's regen — leave its existing configs in
-            # place. Upgrade should not silently produce a fresh overlay
-            # over a hostile user compose.yml.
-            continue
-        try:
-            prepare_caddy_config(paths, manifest)
-            prepare_compose_override(paths, manifest, component="upgrade")
-            processed.append(project_name)
-        except Exception as e:
-            log_warning(
-                "upgrade", f"Failed to regenerate configs for {project_name}: {e}",
-                paths, project=project_name,
-            )
-
-    return processed
-
-
-def _notify_locked_skips(paths: BoxPaths, skipped_locked: list[str]) -> None:
-    """Send a Pushover summary when _restart_projects skipped any projects.
-
-    The lock-skip is logged but, in non-interactive contexts (cron timer,
-    auto-update path), the operator never sees the warning. This raises
-    the visibility to the same channel as other upgrade-time alerts.
-    Pushover failures degrade gracefully to log_error — same I-2b pattern
-    as container_update_cmd._send_summary_alert.
-    """
-    if not skipped_locked:
-        return
-    title = "boxmunge upgrade — projects skipped restart"
-    names = ", ".join(skipped_locked)
-    body = (
-        f"Upgrade applied but {len(skipped_locked)} project(s) skipped "
-        f"restart (locked): {names}. They will pick up new config on next "
-        f"deploy."
-    )
-    try:
-        from boxmunge.config import load_config
-        from boxmunge.pushover import send_notification
-        cfg = load_config(paths)
-        po = cfg.get("pushover", {})
-        send_notification(
-            po.get("user_key", ""), po.get("app_token", ""),
-            title, body,
-        )
-    except Exception as e:
-        log_error(
-            "upgrade", f"Pushover lock-skip alert failed: {e}", paths,
-            detail={"skipped_locked": skipped_locked},
-        )
-
-
-def _restart_projects(
-    paths: BoxPaths,
-) -> tuple[list[str], list[str], list[str]]:
-    """Restart all deployed projects under per-project locks.
-
-    Returns (succeeded, failed, skipped_locked) lists. A project whose
-    project_lock is held by another operation is skipped (logged as a
-    warning), not retried and not raised — the v0.4 concurrency contract
-    is that all mutating compose ops hold project_lock; an upgrade that
-    races a deploy must defer to the deploy.
-    """
-    succeeded: list[str] = []
-    failed: list[str] = []
-    skipped_locked: list[str] = []
-    if not paths.projects.exists():
-        return succeeded, failed, skipped_locked
-
-    for project_dir in sorted(paths.projects.iterdir()):
-        if not project_dir.is_dir():
-            continue
-        manifest_path = project_dir / "manifest.yml"
-        if not manifest_path.exists():
-            continue
-
-        project_name = project_dir.name
-
-        # Never restart a project that is intentionally not running.
-        # Quarantined: bringing containers back would silently undo a
-        # security action. Paused: same — operator deliberately offlined
-        # the project. Quarantine specifically gets a structured log
-        # entry so the operator sees the skip in the daily report;
-        # paused historically did not log here, so preserve that.
-        block = is_blocked(project_name, paths)
-        if block:
-            if block.reason is BlockReason.QUARANTINED:
-                log_operation(
-                    "upgrade", block.skip_message,
-                    paths, project=project_name,
-                )
-            continue
-
-        compose_files = ["compose.yml"]
-        override = paths.project_compose_override(project_name)
-        if override.exists():
-            compose_files.append("compose.boxmunge.yml")
-
-        try:
-            with project_lock(project_name, paths):
-                try:
-                    compose_up(project_dir, compose_files=compose_files)
-                    succeeded.append(project_name)
-                except DockerError as e:
-                    failed.append(project_name)
-                    log_error(
-                        "upgrade", f"Failed to restart {project_name}: {e}",
-                        paths, project=project_name,
-                    )
-        except LockError:
-            skipped_locked.append(project_name)
-            log_warning(
-                "upgrade",
-                f"Skipped restart of project {project_name} — held by another "
-                f"operation; will be picked up on next deploy or container-update",
-                paths, project=project_name,
-            )
-
-    return succeeded, failed, skipped_locked
-
-
 def _run_dry(paths: BoxPaths) -> int:
-    """Validate manifest migrations and config regeneration without touching state.
-
-    Config files (Caddy/compose) are generated files; writing them here is safe
-    because the real upgrade will regenerate them anyway.
-    Returns 0 if no exceptions, 1 on error.
-    """
+    """Pre-flight for the shim: render every project's migrated manifest and
+    configs in memory. Writes, locks and logs nothing. Returns 0 if --apply
+    would get through migration and regeneration, 1 otherwise."""
     print("boxmunge upgrade --dry-run")
     print("==========================\n")
-
-    print("[1/2] Validating manifest migrations...")
-    if paths.projects.exists():
-        for project_dir in sorted(paths.projects.iterdir()):
-            if not project_dir.is_dir():
-                continue
-            manifest_path = project_dir / "manifest.yml"
-            if not manifest_path.exists():
-                continue
-            try:
-                manifest = load_manifest(manifest_path)
-            except ManifestError:
-                continue
-            source_version = manifest.get("schema_version", 1)
-            if source_version == CURRENT_SCHEMA_VERSION:
-                print(f"  {project_dir.name}: up to date")
-                continue
-            try:
-                migrate_manifest(manifest, CURRENT_SCHEMA_VERSION)
-                print(f"  {project_dir.name}: migration OK (schema v{source_version} -> v{CURRENT_SCHEMA_VERSION})")
-            except MigrationError as e:
-                print(f"  {project_dir.name}: ERROR: {e}")
-                return 1
-    print("  OK")
-
-    print("[2/2] Validating config regeneration...")
     try:
-        _regenerate_configs(paths)
-        print("  OK")
+        report = check_upgrade(paths)
     except Exception as e:
         print(f"  ERROR: {e}", file=sys.stderr)
         return 1
-
-    print("\nDry-run complete. No state was modified.")
+    for line in report:
+        print(f"  {line}")
+    print("\nDry-run complete. Nothing was written.")
     return 0
 
 
-def _run_apply(paths: BoxPaths, current_version: str, new_version: str) -> int:
-    """Run migrate/regen/reload/restart/version-write only.
+def _gate_failed(paths: BoxPaths, error: Exception) -> int:
+    """Report a failed upgrade gate. Non-zero makes the shim roll back."""
+    print(f"ERROR: upgrade failed: {error}", file=sys.stderr)
+    log_error("upgrade", f"Upgrade failed: {error}", paths)
+    return 1
 
-    The upgrade shim handles stash creation, health checks, and rollback
-    externally, so we skip those here.
-    Returns 0 on success, 1 if any project failed to restart.
-    """
-    print("boxmunge upgrade --apply")
-    print("========================\n")
-    print(f"  Current: {current_version}")
-    print(f"  New:     {new_version}\n")
 
-    # Step 1: Migrate manifests
-    print("[1/4] Migrating manifests...")
-    migrated = _migrate_project_manifests(paths)
-    if migrated:
-        print(f"  Migrated: {', '.join(migrated)}")
-    else:
-        print("  No migrations needed.")
+def _migrate_regenerate_reload(paths: BoxPaths, step: int, total: int) -> list[str]:
+    """Steps shared by --apply and the full flow. Any failure raises: a
+    project left on stale configs, or a Caddy that did not take the new
+    ones, is not an upgrade that should report success."""
+    print(f"[{step}/{total}] Migrating manifests...")
+    migrated = migrate_project_manifests(paths)
+    print(f"  Migrated: {', '.join(migrated)}" if migrated else "  No migrations needed.")
 
-    # Step 2: Regenerate configs
-    print("[2/4] Regenerating configs...")
-    processed = _regenerate_configs(paths)
+    print(f"[{step + 1}/{total}] Regenerating configs...")
+    processed = regenerate_configs(paths)
     print(f"  Processed: {len(processed)} project(s)")
 
-    # Step 3: Reload Caddy
-    print("[3/4] Reloading Caddy...")
+    print(f"[{step + 2}/{total}] Reloading Caddy...")
     try:
         caddy_reload(paths.caddy, paths.state)
-        print("  Caddy reloaded.")
     except DockerError as e:
-        print(f"  WARN: Caddy reload failed: {e}")
+        raise UpgradeGateError(f"Caddy reload failed: {e}") from e
+    print("  Caddy reloaded.")
+    return migrated
 
-    # Step 4: Restart projects
-    print("[4/4] Restarting projects...")
-    succeeded, failed_projects, skipped_locked = _restart_projects(paths)
+
+def _restart(paths: BoxPaths, step: int, total: int) -> tuple[list[str], list[str], list[str]]:
+    print(f"[{step}/{total}] Restarting projects...")
+    succeeded, failed_projects, skipped_locked = restart_projects(paths)
     if succeeded:
         print(f"  Restarted: {', '.join(succeeded)}")
     if skipped_locked:
         print(f"  Skipped (locked): {', '.join(skipped_locked)}")
-    _notify_locked_skips(paths, skipped_locked)
+    notify_locked_skips(paths, skipped_locked)
     if failed_projects:
-        print(f"  FAILED: {', '.join(failed_projects)}")
+        print(f"  FAILED: {', '.join(failed_projects)}", file=sys.stderr)
+    return succeeded, failed_projects, skipped_locked
 
-    # Write version
-    semver, commit = parse_version_string(new_version)
-    write_installed_version(paths, semver, commit)
 
+def _finish(paths: BoxPaths, label: str, migrated: list[str],
+            restart: tuple[list[str], list[str], list[str]], new_version: str) -> int:
+    """Record the new version, but only when every project restarted."""
+    succeeded, failed_projects, skipped_locked = restart
     log_operation(
-        "upgrade", f"Apply {current_version} -> {new_version}", paths,
+        "upgrade", label, paths,
         detail={
             "migrated": migrated,
             "restarted": succeeded,
@@ -389,10 +103,32 @@ def _run_apply(paths: BoxPaths, current_version: str, new_version: str) -> int:
             "failed": failed_projects,
         },
     )
-
     if failed_projects:
-        return 1
+        return _gate_failed(paths, UpgradeGateError(
+            f"projects failed to restart: {', '.join(failed_projects)}"))
+    semver, commit = parse_version_string(new_version)
+    write_installed_version(paths, semver, commit)
     return 0
+
+
+def _run_apply(paths: BoxPaths, current_version: str, new_version: str) -> int:
+    """Run migrate/regen/reload/restart/version-write only.
+
+    The upgrade shim handles stash creation, health checks, and rollback
+    externally, so we skip those here. Returns 0 on success and 1 if any
+    step failed, which makes the shim roll back.
+    """
+    print("boxmunge upgrade --apply")
+    print("========================\n")
+    print(f"  Current: {current_version}")
+    print(f"  New:     {new_version}\n")
+    try:
+        migrated = _migrate_regenerate_reload(paths, 1, 4)
+    except (ManifestError, MigrationError, UpgradeGateError) as e:
+        return _gate_failed(paths, e)
+    restart = _restart(paths, 4, 4)
+    return _finish(paths, f"Apply {current_version} -> {new_version}",
+                   migrated, restart, new_version)
 
 
 def _run_full(
@@ -402,7 +138,6 @@ def _run_full(
     skip_self_test: bool,
 ) -> int:
     """Run the complete six-step upgrade flow."""
-    # Step 1: Stash
     print("[1/6] Creating stash...")
     try:
         archive = create_stash(paths)
@@ -412,78 +147,30 @@ def _run_full(
         log_error("upgrade", f"Stash failed: {e}", paths)
         return 1
 
-    # Step 2: Migrate manifests
-    print("[2/6] Migrating manifests...")
-    migrated = _migrate_project_manifests(paths)
-    if migrated:
-        print(f"  Migrated: {', '.join(migrated)}")
-    else:
-        print("  No migrations needed.")
-
-    # Step 3: Regenerate configs
-    print("[3/6] Regenerating configs...")
-    processed = _regenerate_configs(paths)
-    print(f"  Processed: {len(processed)} project(s)")
-
-    # Step 4: Reload Caddy
-    print("[4/6] Reloading Caddy...")
     try:
-        caddy_reload(paths.caddy, paths.state)
-        print("  Caddy reloaded.")
-    except DockerError as e:
-        print(f"  WARN: Caddy reload failed: {e}")
-
-    # Step 5: Restart projects
-    print("[5/6] Restarting projects...")
-    succeeded, failed_projects, skipped_locked = _restart_projects(paths)
-    if succeeded:
-        print(f"  Restarted: {', '.join(succeeded)}")
-    if skipped_locked:
-        print(f"  Skipped (locked): {', '.join(skipped_locked)}")
-    _notify_locked_skips(paths, skipped_locked)
-    if failed_projects:
-        print(f"  FAILED: {', '.join(failed_projects)}")
-
-    # Prune old stashes
+        migrated = _migrate_regenerate_reload(paths, 2, 6)
+    except (ManifestError, MigrationError, UpgradeGateError) as e:
+        return _gate_failed(paths, e)
+    restart = _restart(paths, 5, 6)
     prune_stashes(paths, keep=5)
 
-    # Post-upgrade validation
-    print("\n[Post-upgrade validation]")
-
-    if not skip_self_test:
-        print("\nRunning self-test...")
-        self_test_result = run_self_test(paths)
-        if self_test_result != 0:
-            print("  WARN: Self-test failed (platform may still be functional)")
-    else:
+    print("\n[6/6] Post-upgrade validation")
+    if skip_self_test:
         print("  Self-test skipped.")
+    else:
+        print("\nRunning self-test...")
+        if run_self_test(paths) != 0:
+            return _gate_failed(paths, UpgradeGateError("self-test failed"))
 
     print("\nRunning health check...")
-    health_result = run_health(paths)
+    if run_health(paths) == 2:
+        return _gate_failed(paths, UpgradeGateError("health check found critical issues"))
 
-    if health_result == 2:
-        print("  Health check found issues requiring attention.")
-        return 1
-
-    # Only write version after health check passes
-    semver, commit = parse_version_string(new_version)
-    write_installed_version(paths, semver, commit)
-
-    print(f"\nUpgrade complete: {current_version} -> {new_version}")
-
-    log_operation(
-        "upgrade", f"Upgrade {current_version} -> {new_version}", paths,
-        detail={
-            "migrated": migrated,
-            "restarted": succeeded,
-            "skipped_locked": skipped_locked,
-            "failed": failed_projects,
-        },
-    )
-
-    if failed_projects:
-        return 1
-    return 0
+    rc = _finish(paths, f"Upgrade {current_version} -> {new_version}",
+                 migrated, restart, new_version)
+    if rc == 0:
+        print(f"\nUpgrade complete: {current_version} -> {new_version}")
+    return rc
 
 
 def run_upgrade(
@@ -519,8 +206,8 @@ routed through the root-context bash shim which handles stash + venv swap +
 probation. The flags below are for the shim and direct invocations only.
 
 Flags:
-  --dry-run         Validate manifest migrations and config regeneration
-                    without modifying state. Used for pre-flight checks.
+  --dry-run         Render manifest migrations and configs in memory and
+                    report; writes nothing. The shim's pre-flight check.
   --apply           Migrate/regen/reload/restart only. The shim calls this
                     after creating its own stash; do not use directly.
   --skip-self-test  Skip the post-upgrade self-test step.

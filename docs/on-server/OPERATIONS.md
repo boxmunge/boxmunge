@@ -20,7 +20,7 @@ The standard workflow for deploying a project from a bundle.
 2. Upload the bundle to the server:
 
    ```
-   scp -P 922 myapp.tar.gz deploy@<host>:
+   scp -O -P 922 myapp.tar.gz deploy@<host>:
    ```
 
    Bundles land in the inbox automatically.
@@ -130,7 +130,7 @@ Staging is useful for:
 Upload a new bundle and stage or deploy:
 
 ```
-scp -P 922 myapp-v2.tar.gz deploy@<host>:
+scp -O -P 922 myapp-v2.tar.gz deploy@<host>:
 stage myapp
 promote myapp
 ```
@@ -170,6 +170,16 @@ secrets unset myapp OLD_KEY
 
 Project secrets are stored in `secrets.env` and injected into the project's containers.
 
+Keys must be environment-variable names (letters, digits and underscores, not starting
+with a digit). Values may contain spaces, tabs, `=` and any printable text, but not
+newlines or other control characters, which would add lines to the env file. Either
+violation is refused with an `ERROR:` and nothing is written. Store a multi-line value
+(a PEM key, say) base64-encoded and decode it in the app.
+
+The deploy shell parses each command with shell-style quoting. A command with an
+unbalanced quote is rejected (`ERROR: cannot parse command`) rather than guessed at, so
+quote a value containing spaces as a whole: `secrets set myapp 'GREETING=hello world'`.
+
 ### Host-level secrets
 
 Shared across all projects on the host:
@@ -187,7 +197,9 @@ secrets unset --host OLD_KEY
 
 ## Managing the Inbox
 
-Bundles uploaded via scp land in the inbox automatically.
+Bundles uploaded via scp land in the inbox automatically. Use the legacy scp protocol
+(`scp -O`): SFTP, which OpenSSH 9+ uses for plain `scp`, is disabled for the deploy user
+because sftp-server cannot be confined to the inbox.
 
 List bundles in the inbox:
 
@@ -462,6 +474,7 @@ Containers are stopped via `docker compose stop`, so state is preserved on disk 
 - Health checks, scheduled backups, and container-update sweeps skip the project
 - `prod-deploy`, `stage`, and `promote` refuse to run against it
 - `backup-sync` continues (it only copies; existing off-box snapshots are never removed)
+- Platform upgrades keep it paused: the maintenance page stays in place and the containers stay stopped
 
 To bring it back:
 
@@ -818,6 +831,56 @@ If it is unreachable or answers in an unexpected shape, auto-update falls
 back to the GitHub releases list (a release marked `[security]` or
 `[breakfix]` in its title or notes) and logs a warning.
 
+Pin to a specific release (for example to roll forward past a bad one):
+
+```
+upgrade --target 0.11.2
+```
+
+`--target` only moves forward. It refuses a version below the installed one and a
+version blocklisted on this box (one that failed an earlier upgrade and was rolled
+back). To install such a version deliberately, an operator runs the shim directly
+as `supervisor`:
+
+```bash
+sudo /opt/boxmunge/bin/boxmunge-upgrade force-target 0.11.1   # ignore blocklist and floor
+sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist 0.11.1  # forget a failed version
+```
+
+Neither is available from the deploy shell or MCP.
+
+How an upgrade is applied and undone:
+
+1. The new release is downloaded, its signature and checksum verified, and it is installed
+   into the standby venv. `upgrade --dry-run` runs against it as a pre-flight.
+2. Platform state is stashed: config, deploy state, and each project's manifest, compose file,
+   env files and `boxmunge-scripts/`, with their modes and owners.
+3. The venvs swap and `upgrade --apply` migrates manifests, regenerates every project's Caddy
+   site and compose overlay, reloads Caddy and restarts projects. A failure in any of these
+   (a project whose configs cannot be regenerated, a Caddy reload, a project that does not
+   restart) fails the upgrade and triggers a rollback.
+4. A health check runs, then a 6-hour probation. A critical health result during probation
+   rolls back.
+
+A rollback swaps the venvs back, restores the stash, and re-runs `upgrade --apply` with the
+previous release, so its overlays and Caddy sites are regenerated and projects restarted on
+them. Pause and quarantine markers are not restored from the stash: a project you resumed after
+the upgrade stays resumed. If either the restore or the re-apply fails, you get a "ROLLBACK
+PARTIAL" alert and the shim exits 2; inspect the box as `supervisor`.
+
+Probation ends early, promoting the upgrade, when you deploy, roll back, restore, or run
+`backup` yourself. Timer-driven work (the nightly `backup-all`, container-update's
+pre-update backup, self-test) does not end it, so container-update keeps waiting until
+probation is over.
+
+The docs served by `agent-help` (`/opt/boxmunge/docs`) are replaced with the installed
+release's on every upgrade, and put back to the previous release's on a rollback, so they
+always describe the code that is running.
+
+`upgrade --dry-run` renders every project's migrated manifest and configs in memory and
+reports what the upgrade would do. It writes nothing; the upgrade shim runs it as a
+pre-flight check against the new release before touching anything.
+
 ## Querying Logs
 
 ```
@@ -901,7 +964,12 @@ Configure your AI agent (Claude Code, Cursor, etc.) to use boxmunge via MCP:
 }
 ```
 
-The agent will discover all available tools automatically. Available tools include: prod-deploy, stage, promote, backup, restore, rollback, health, log, secrets, and more.
+The agent will discover all available tools automatically. Available tools include: prod-deploy, stage, promote, backup, restore, rollback, health, log, secrets, upgrade, and more.
+
+`restore` and `rollback` replace a project's running state, so they only run when called with
+`confirm: true`. `upgrade` goes through the same root upgrade shim as the shell's `upgrade`
+(optionally with `version` for `upgrade --target`). Each result's `messages` carries the
+command's stdout and stderr.
 
 Requires the `mcp` package on the server. It is not installed by default — add it
 to the server's environment with:

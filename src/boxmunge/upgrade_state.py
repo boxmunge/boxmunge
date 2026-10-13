@@ -6,10 +6,13 @@ Used by the bash shim (via CLI wrappers) and Python commands.
 """
 from __future__ import annotations
 
+import fcntl
 import json
+import os
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, Iterator, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -77,3 +80,30 @@ def write_probation(paths: BoxPaths, version: str, previous_slot: str, *, hours:
 def clear_probation(paths: BoxPaths) -> None:
     if paths.probation.exists():
         paths.probation.unlink()
+
+
+# --- Upgrade lock ---
+
+class UpgradeInProgress(Exception):
+    """upgrade.lock is held: the upgrade shim is running."""
+
+
+@contextmanager
+def upgrade_lock(paths: BoxPaths) -> Iterator[None]:
+    """Hold upgrade.lock, the flock the upgrade shim takes, without waiting.
+
+    Raises UpgradeInProgress if it is held. The directory is deploy-writable,
+    so the file is opened with O_NOFOLLOW: a planted symlink fails loudly
+    instead of making root create or open some other file.
+    """
+    paths.upgrade_state.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(paths.upgrade_lock, flags, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as e:
+            raise UpgradeInProgress("an upgrade is in progress") from e
+        yield
+    finally:
+        os.close(fd)

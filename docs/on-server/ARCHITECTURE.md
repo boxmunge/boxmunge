@@ -120,7 +120,9 @@ The `deploy` user runs a restricted boxmunge shell. Agents connect as `deploy`.
 
 - Can **only** run `boxmunge` commands -- no `ls`, `cat`, `cd`, `docker`, or any other shell command
 - Cannot browse the filesystem or read files directly
-- Cannot run `sudo`
+- Cannot run `sudo` itself. The shell's `upgrade` and `upgrade --target <version>` commands
+  reach the root upgrade shim through a sudo rule that permits exactly
+  `boxmunge-upgrade auto` and `boxmunge-upgrade target <version>`, nothing else
 - Documentation is accessed via `agent-help <topic>`, not by reading files
 
 This is the complete interface for agents. There is nothing else.
@@ -351,7 +353,11 @@ See `agent-help writable` and `PROJECT_CONVENTIONS.md` for the schema reference.
 
 - `self-test` — deploys a canary project, exercises backup/restore, tears down. Proves the pipeline works.
 - `health` — non-destructive audit of Docker, Caddy, containers, permissions, config drift, hardening state, and recent errors.
-- `upgrade` — stash current state, migrate manifests, regenerate configs, restart, self-test, health check.
+- `upgrade` — stash current state, migrate manifests, regenerate configs (paused and quarantined projects keep
+  their maintenance page), restart, self-test, health check. `upgrade --dry-run` renders all of this in memory
+  and writes nothing.
+  A failed gate (config regeneration, Caddy reload, restart, self-test) fails the upgrade; it is never reported
+  as a warning followed by "Upgrade complete".
 
 ## CVE Policy Module
 
@@ -368,9 +374,16 @@ See `agent-help cve` (CVE_POLICY.md) for posture tiers, hardening penalty, suppr
 
 ## MCP Server
 
-boxmunge exposes its full command set via the Model Context Protocol (MCP) over SSH stdio transport. AI agents connect by running `mcp-serve` via SSH and speak the MCP protocol over stdin/stdout.
+boxmunge exposes a subset of its command set via the Model Context Protocol (MCP) over SSH stdio transport. AI agents connect by running `mcp-serve` via SSH and speak the MCP protocol over stdin/stdout.
 
 - One server process per SSH connection (no shared state)
-- Same permissions as the restricted shell — MCP can only do what the CLI can do
-- Structured JSON responses with success/exit_code/data/messages
+- Runs as deploy, like the restricted shell. Every tool corresponds to an allowlisted shell command
+- `upgrade` takes the shell's path: `sudo -n boxmunge-upgrade auto` (or `target <version>`), so it gets
+  the same signature check, venv swap, probation and rollback. It never upgrades in-process
+- Destructive tools `restore` and `rollback` refuse to run unless called with `confirm: true`
+- Structured JSON responses with success/exit_code/data/messages. `messages` holds the command's
+  stdout and stderr in order, so `ERROR:` lines reach the agent
+- The protocol uses private copies of the original stdin/stdout. Inside the server, fd 0 is
+  `/dev/null` and fd 1 is stderr, so nothing a tool runs (docker, git, a stray prompt) can read
+  from or write into the JSON-RPC stream
 - No additional network ports or attack surface

@@ -58,7 +58,7 @@ Several commands accept a `--json` flag for machine-readable output, useful when
 ### Deploying a project (standard workflow)
 
 1. Build a bundle locally: `boxmunge bundle ./myapp`
-2. Upload: `scp -P 922 myapp.tar.gz deploy@<host>:`
+2. Upload: `scp -O -P 922 myapp.tar.gz deploy@<host>:`
 3. Verify arrival: `inbox`
 4. Stage: `stage myapp`
 5. Verify staging works, then promote: `promote myapp`

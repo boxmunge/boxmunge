@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from boxmunge.shell import parse_shell_command, run_command, dispatch_command, ALLOWED_COMMANDS
@@ -54,6 +53,42 @@ class TestParseShellCommand:
         cmd, args = parse_shell_command("scp -f /some/path")
         assert cmd == "scp"
         assert args == ["-f", "/some/path"]
+
+
+class TestParseErrors:
+    """A-12: an unparseable command is rejected, never re-split naively."""
+
+    @pytest.mark.parametrize("line", [
+        "secrets set myapp 'KEY=unterminated",
+        'prod-deploy "myapp',
+        "stage myapp \\",
+    ])
+    def test_unbalanced_quoting_raises(self, line: str) -> None:
+        with pytest.raises(ValueError):
+            parse_shell_command(line)
+
+    @patch("boxmunge.shell.subprocess.run")
+    def test_main_rejects_unparseable_command(
+        self, mock_run: MagicMock, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from boxmunge.shell import main
+        with patch("sys.argv", ["boxmunge-shell", "-c", "secrets set myapp 'K=v"]):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 2
+        mock_run.assert_not_called()
+        assert "ERROR: cannot parse command" in capsys.readouterr().err
+
+    @patch("boxmunge.shell.subprocess.run")
+    def test_interactive_loop_reports_and_continues(
+        self, mock_run: MagicMock, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from boxmunge.shell import interactive_loop
+        with patch("builtins.input", side_effect=['stage "myapp', EOFError]), \
+             patch("boxmunge.shell._shell_banner", return_value="banner"):
+            interactive_loop()
+        mock_run.assert_not_called()
+        assert "ERROR: cannot parse command" in capsys.readouterr().err
 
 
 class TestAllowedCommands:
@@ -148,6 +183,27 @@ class TestDispatchCommand:
         assert rc != 0
         mock_run.assert_not_called()
 
+    @pytest.mark.parametrize("args", [
+        ["--apply"], ["--skip-self-test"], ["--dry-run", "--apply"],
+        ["--target", "0.3.5", "--force"], ["force-target", "0.3.5"],
+    ])
+    @patch("boxmunge.shell.subprocess.run")
+    def test_upgrade_shim_internal_flags_are_refused(
+        self, mock_run: MagicMock, args: list[str], capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """`--apply` and friends would run the upgrade in-process as deploy,
+        skipping the shim's signature check, venv swap and probation."""
+        rc = run_command("upgrade", args)
+        assert rc == 2
+        mock_run.assert_not_called()
+        assert "ERROR:" in capsys.readouterr().err
+
+    @patch("boxmunge.shell.subprocess.run")
+    def test_upgrade_help_is_allowed(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = MagicMock(returncode=0)
+        run_command("upgrade", ["--help"])
+        mock_run.assert_called_once_with(["boxmunge-server", "upgrade", "--help"])
+
     @patch("boxmunge.shell.subprocess.run")
     def test_dispatches_with_args(self, mock_run: MagicMock) -> None:
         mock_run.return_value = MagicMock(returncode=0)
@@ -174,24 +230,22 @@ class TestDispatchCommand:
             dispatch_command("", [])
         assert exc_info.value.code == 0
 
+    @pytest.mark.parametrize("command", [
+        "/usr/lib/openssh/sftp-server",
+        "/opt/boxmunge/bin/boxmunge-sftp",
+        "sftp-server",
+    ])
     @patch("boxmunge.shell.subprocess.run")
-    def test_handles_sftp_direct(self, mock_run: MagicMock) -> None:
-        """SFTP subsystem via direct sftp-server path."""
-        mock_run.return_value = MagicMock(returncode=0)
-        with patch("boxmunge.shell.Path.home", return_value=Path("/tmp/fakehome")):
-            result = run_command("/usr/lib/openssh/sftp-server", [])
-        assert result == 0
-        mock_run.assert_called_once_with(["/usr/lib/openssh/sftp-server"], check=False)
-
-    @patch("boxmunge.shell.subprocess.run")
-    def test_handles_boxmunge_sftp(self, mock_run: MagicMock) -> None:
-        """SFTP subsystem via boxmunge-sftp wrapper (the normal case)."""
-        mock_run.return_value = MagicMock(returncode=0)
-        with patch("boxmunge.shell.Path.home", return_value=Path("/tmp/fakehome")):
-            result = run_command("/opt/boxmunge/bin/boxmunge-sftp", [])
-        assert result == 0
-        # Should delegate to the real sftp-server, not boxmunge-sftp
-        mock_run.assert_called_once_with(["/usr/lib/openssh/sftp-server"], check=False)
+    def test_sftp_is_refused(
+        self, mock_run: MagicMock, command: str, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A-04: sftp-server would run with deploy's full filesystem access,
+        outside the allowlist. Uploads use legacy scp (scp -O) instead."""
+        assert run_command(command, []) == 1
+        mock_run.assert_not_called()
+        err = capsys.readouterr().err
+        assert "SFTP is disabled" in err
+        assert "scp -O" in err
 
 
 class TestPauseResumeAllowed:

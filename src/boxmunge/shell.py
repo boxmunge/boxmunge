@@ -11,7 +11,6 @@ import os
 import shlex
 import subprocess
 import sys
-from pathlib import Path
 
 # Every command the deploy shell accepts. This is the complete allowlist.
 ALLOWED_COMMANDS: set[str] = {
@@ -73,7 +72,7 @@ This is a restricted shell. Available commands:
   inbox               List uploaded bundles
   secrets             Manage secrets
 
-Upload bundles with: scp bundle.tar.gz deploy@<host>:
+Upload bundles with: scp -O bundle.tar.gz deploy@<host>:
 
 Run 'help' for the full command list.
 """
@@ -86,15 +85,16 @@ def parse_shell_command(command_string: str) -> tuple[str, list[str]]:
     Returns ("scp", args) for scp protocol commands.
     Silently strips a leading 'boxmunge' prefix so that
     'boxmunge help' and 'help' are equivalent.
+
+    Raises ValueError when the quoting is unbalanced. Guessing (for example
+    by splitting on whitespace) would run a command with arguments the
+    caller did not write.
     """
     stripped = command_string.strip()
     if not stripped:
         return "", []
 
-    try:
-        parts = shlex.split(stripped)
-    except ValueError:
-        parts = stripped.split()
+    parts = shlex.split(stripped)
 
     # Strip leading 'boxmunge' so agents/users can type either form
     if parts and parts[0] == "boxmunge":
@@ -148,44 +148,6 @@ def handle_scp_upload(args: list[str]) -> None:
             leftover.unlink(missing_ok=True)
 
 
-def _handle_sftp(command: str, args: list[str]) -> int:
-    """Handle SFTP subsystem — run sftp-server, then post-process uploads.
-
-    sshd invokes the login shell with: -c "/usr/lib/openssh/sftp-server"
-    We run the real sftp-server, then process any new files in $HOME into
-    the inbox. This is a fallback — normally sftp_receive.py handles this
-    via the sshd Subsystem directive.
-    """
-    from boxmunge.paths import BoxPaths
-    from boxmunge.reception import receive_bundle
-
-    paths = BoxPaths()
-    deploy_home = Path.home()
-
-    # Snapshot files before sftp
-    before = set(f.name for f in deploy_home.iterdir() if f.is_file()) \
-        if deploy_home.exists() else set()
-
-    # Run the real sftp-server — it inherits stdin/stdout for the protocol
-    result = subprocess.run([command] + args, check=False)
-
-    # Find and process new files
-    after = set(f.name for f in deploy_home.iterdir() if f.is_file()) \
-        if deploy_home.exists() else set()
-
-    for fname in sorted(after - before):
-        fpath = deploy_home / fname
-        if not fpath.exists():
-            continue
-        try:
-            dest = receive_bundle(fpath, paths)
-            print(f"Received: {dest.name}", file=sys.stderr)
-        except ValueError:
-            fpath.unlink(missing_ok=True)
-
-    return result.returncode
-
-
 def run_command(command: str, args: list[str]) -> int:
     """Run a single boxmunge command. Returns exit code.
 
@@ -205,11 +167,14 @@ def run_command(command: str, args: list[str]) -> int:
 
     # SFTP subsystem — sshd routes this through the login shell as:
     #   boxmunge-shell -c "/opt/boxmunge/bin/boxmunge-sftp"
-    # (or the real sftp-server path if the Subsystem directive changes).
-    # Run sftp-server, then post-process any new uploads via home-dir snapshot.
+    # deploy gets no SFTP: sftp-server would run with deploy's full
+    # filesystem access, outside this allowlist (A-04). Uploads use legacy
+    # scp (`scp -O`), received above through `scp -t`.
     cmd_base = os.path.basename(command) if "/" in command else command
     if cmd_base in ("sftp-server", "boxmunge-sftp"):
-        return _handle_sftp("/usr/lib/openssh/sftp-server", args)
+        from boxmunge.sftp_receive import SFTP_REFUSAL
+        print(SFTP_REFUSAL, file=sys.stderr)
+        return 1
 
     if command not in ALLOWED_COMMANDS:
         print(
@@ -219,33 +184,50 @@ def run_command(command: str, args: list[str]) -> int:
         )
         return 1
 
-    # `upgrade` needs root context (stash reads root-owned config + secrets,
-    # then swaps the env-active symlink). Route it through the bash shim,
-    # which is invokable by deploy via a scoped sudoers rule.
-    if command == "upgrade" and not args:
-        result = subprocess.run(
-            ["sudo", "-n", "/opt/boxmunge/bin/boxmunge-upgrade", "auto"]
-        )
-        return result.returncode
+    if command == "upgrade":
+        return _run_upgrade(args)
 
-    # `upgrade --target VERSION` lets an operator pin to a specific older
-    # build (e.g. roll forward to a known-good version after a bad release).
-    # Same privileged path as `upgrade auto`, just with discovery bypassed.
-    if command == "upgrade" and args[:1] == ["--target"]:
+    result = subprocess.run(["boxmunge-server", command] + args)
+    return result.returncode
+
+
+# `upgrade` forms deploy may use. --dry-run and --help run in-process and
+# write nothing; everything else needs root and goes through the shim.
+_UPGRADE_IN_PROCESS = (["--dry-run"], ["-h"], ["--help"])
+
+
+def _run_upgrade(args: list[str]) -> int:
+    """Route `upgrade` the same way MCP does: through the sudo shim.
+
+    The shim (root, via a sudo rule scoped to `auto` and `target <version>`)
+    verifies the release signature, swaps venvs and runs probation. The
+    shim-internal `--apply` would do none of that if run here as deploy, so
+    it is refused, as is anything else this function does not recognise.
+    """
+    from boxmunge.paths import BoxPaths
+    from boxmunge.upgrade_shim import shim_command
+
+    if not args:
+        argv = shim_command(BoxPaths())
+    elif args[0] == "--target":
         if len(args) != 2 or not args[1]:
             print(
-                "ERROR: --target requires a version argument "
+                "ERROR: --target takes exactly one version "
                 "(e.g. `upgrade --target 0.3.5`)",
                 file=sys.stderr,
             )
             return 2
-        result = subprocess.run(
-            ["sudo", "-n", "/opt/boxmunge/bin/boxmunge-upgrade", "target", args[1]]
+        argv = shim_command(BoxPaths(), target=args[1])
+    elif args in _UPGRADE_IN_PROCESS:
+        argv = ["boxmunge-server", "upgrade", *args]
+    else:
+        print(
+            f"ERROR: `upgrade {' '.join(args)}` is not available from the deploy shell. "
+            "Use `upgrade`, `upgrade --target <version>` or `upgrade --dry-run`.",
+            file=sys.stderr,
         )
-        return result.returncode
-
-    result = subprocess.run(["boxmunge-server", command] + args)
-    return result.returncode
+        return 2
+    return subprocess.run(argv).returncode
 
 
 def dispatch_command(command: str, args: list[str]) -> None:
@@ -268,7 +250,11 @@ def interactive_loop() -> None:
         except (EOFError, KeyboardInterrupt):
             print()
             break
-        command, args = parse_shell_command(line)
+        try:
+            command, args = parse_shell_command(line)
+        except ValueError as e:
+            _report_parse_error(e)
+            continue
         if not command:
             continue
         cmd_base = os.path.basename(command) if "/" in command else command
@@ -276,6 +262,20 @@ def interactive_loop() -> None:
             print("ERROR: This command is not available in interactive mode.", file=sys.stderr)
             continue
         run_command(command, args)
+
+
+def _report_parse_error(error: ValueError) -> None:
+    print(f"ERROR: cannot parse command ({error}). Check the quoting and retry.",
+          file=sys.stderr)
+
+
+def _dispatch_string(command_string: str) -> None:
+    try:
+        command, args = parse_shell_command(command_string)
+    except ValueError as e:
+        _report_parse_error(e)
+        sys.exit(2)
+    dispatch_command(command, args)
 
 
 def main() -> None:
@@ -287,16 +287,13 @@ def main() -> None:
     """
     # SSH passes the command via -c when used as a login shell
     if len(sys.argv) >= 3 and sys.argv[1] == "-c":
-        command_string = sys.argv[2]
-        command, args = parse_shell_command(command_string)
-        dispatch_command(command, args)
+        _dispatch_string(sys.argv[2])
         return
 
     # ForceCommand mode
     command_string = os.environ.get("SSH_ORIGINAL_COMMAND", "")
     if command_string:
-        command, args = parse_shell_command(command_string)
-        dispatch_command(command, args)
+        _dispatch_string(command_string)
         return
 
     # No command — interactive session

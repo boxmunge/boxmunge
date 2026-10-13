@@ -3,6 +3,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Shared stand-ins for flock/timeout/visudo on hosts that lack them.
+# shellcheck source=tests/shim/lib.sh
+source "$SCRIPT_DIR/shim/lib.sh"
 SHIM="$SCRIPT_DIR/../scripts/boxmunge-upgrade"
 
 PASS=0
@@ -42,6 +45,7 @@ fi
 BOXMUNGE_ROOT="$(mktemp -d)"
 export BOXMUNGE_ROOT
 mkdir -p "$BOXMUNGE_ROOT/upgrade-state"
+echo "a" > "$BOXMUNGE_ROOT/upgrade-state/active-slot"
 assert_exit 0 "check-probation exits 0 with no probation file" bash "$SHIM" check-probation
 rm -rf "$BOXMUNGE_ROOT"
 
@@ -74,6 +78,7 @@ fi
 test_dir="$(mktemp -d)"
 export BOXMUNGE_ROOT="$test_dir"
 mkdir -p "$BOXMUNGE_ROOT/upgrade-state" "$BOXMUNGE_ROOT/env-a/bin"
+echo "a" > "$BOXMUNGE_ROOT/upgrade-state/active-slot"
 
 # Helper: install a mock boxmunge-server that returns canned JSON for
 # _discover-update and short-circuits cmd_run by exiting 0.
@@ -171,6 +176,7 @@ done
 test_dir="$(mktemp -d)"
 export BOXMUNGE_ROOT="$test_dir"
 mkdir -p "$BOXMUNGE_ROOT/upgrade-state" "$BOXMUNGE_ROOT/env-a/bin"
+echo "a" > "$BOXMUNGE_ROOT/upgrade-state/active-slot"
 
 # Mock boxmunge-server so --version probe in cmd_run doesn't fail
 cat > "$BOXMUNGE_ROOT/env-a/bin/boxmunge-server" <<'EOF'
@@ -286,4 +292,5 @@ fi
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
+rm -rf "$FAKEBIN" "$FAILVISUDO" "$BUSYLOCK"
 [[ "$FAIL" -eq 0 ]] || exit 1

@@ -55,7 +55,7 @@ Manifest format (manifest.yml):
 
 After building:
 
-  scp -P 922 <bundle>.tar.gz deploy@<host>:
+  scp -O -P 922 <bundle>.tar.gz deploy@<host>:
   ssh -p 922 deploy@<host> "stage <project>"
   ssh -p 922 deploy@<host> "promote <project>"
 
@@ -133,7 +133,7 @@ def run_bundle(project_dir_str: str, output: str | None = None,
     size_mb = bundle_path.stat().st_size / (1024 * 1024)
     print(f"Bundle created: {bundle_path}")
     print(f"  Size: {size_mb:.1f} MB")
-    print(f"  Upload with: scp -P 922 {bundle_path.name} deploy@<host>:")
+    print(f"  Upload with: scp -O -P 922 {bundle_path.name} deploy@<host>:")
     return 0
 
 def cmd_bundle(args: list[str]) -> None:

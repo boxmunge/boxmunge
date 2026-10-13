@@ -5,7 +5,8 @@ These are consumed by mcp_server.py which registers them as MCP tools.
 """
 
 import io
-from contextlib import redirect_stdout
+import subprocess
+from contextlib import redirect_stderr, redirect_stdout
 from typing import Any, Callable
 
 from boxmunge.paths import BoxPaths
@@ -15,7 +16,11 @@ def capture_tool_call(
     func: Callable[[], int],
     data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Execute a function, capturing its stdout and exit code.
+    """Execute a function, capturing its stdout, stderr and exit code.
+
+    stdout and stderr share one buffer so messages keep their order, and
+    errors (printed to stderr as `ERROR: ...`) reach the caller. stdin is
+    empty for the duration, so a stray input() fails instead of waiting.
 
     Returns a standardised result dict:
     {
@@ -27,7 +32,7 @@ def capture_tool_call(
     """
     captured = io.StringIO()
     try:
-        with redirect_stdout(captured):
+        with redirect_stdout(captured), redirect_stderr(captured), _empty_stdin():
             exit_code = func()
     except Exception as e:
         return {
@@ -42,6 +47,48 @@ def capture_tool_call(
         "exit_code": exit_code,
         "data": data or {},
         "messages": captured.getvalue().splitlines(),
+    }
+
+
+class _empty_stdin:
+    """Swap sys.stdin for an empty stream; input() then raises EOFError."""
+
+    def __enter__(self) -> None:
+        import sys
+        self._saved = sys.stdin
+        sys.stdin = io.StringIO("")
+
+    def __exit__(self, *exc: object) -> None:
+        import sys
+        sys.stdin = self._saved
+
+
+def run_subprocess_tool(argv: list[str]) -> dict[str, Any]:
+    """Run a command with no stdin, returning its merged output as messages."""
+    result = subprocess.run(
+        argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, check=False,
+    )
+    return {
+        "success": result.returncode == 0,
+        "exit_code": result.returncode,
+        "data": {},
+        "messages": (result.stdout or "").splitlines(),
+    }
+
+
+def _confirm_required(action: str, confirm: object) -> dict[str, Any] | None:
+    """Refuse a destructive tool call unless confirm is literally True."""
+    if confirm is True:
+        return None
+    return {
+        "success": False,
+        "exit_code": 2,
+        "data": {},
+        "messages": [
+            f"ERROR: {action} overwrites the project's current state. "
+            f"Call again with confirm=true to proceed."
+        ],
     }
 
 
@@ -94,7 +141,10 @@ def _tool_unstage(project: str, dry_run: bool = False) -> dict:
         lambda: run_unstage(project, paths, dry_run=dry_run))
 
 
-def _tool_rollback(project: str) -> dict:
+def _tool_rollback(project: str, confirm: object = False) -> dict:
+    refusal = _confirm_required("rollback", confirm)
+    if refusal:
+        return refusal
     from boxmunge.commands.rollback import run_rollback
     paths = _get_paths()
     return capture_tool_call(
@@ -110,11 +160,20 @@ def _tool_check(project: str, verbose: bool = True) -> dict:
 
 def _tool_backup(project: str) -> dict:
     from boxmunge.commands.backup_cmd import run_backup
+    from boxmunge.probation import clear_probation_if_active
     paths = _get_paths()
-    return capture_tool_call(lambda: run_backup(project, paths))
+
+    def operator_backup() -> int:
+        clear_probation_if_active(paths, "backup")
+        return run_backup(project, paths)
+    return capture_tool_call(operator_backup)
 
 
-def _tool_restore(project: str, snapshot: str | None = None) -> dict:
+def _tool_restore(project: str, snapshot: str | None = None,
+                  confirm: object = False) -> dict:
+    refusal = _confirm_required("restore", confirm)
+    if refusal:
+        return refusal
     from boxmunge.commands.restore import run_restore
     paths = _get_paths()
     return capture_tool_call(
@@ -133,11 +192,11 @@ def _tool_secrets(args: list[str]) -> dict:
     return capture_tool_call(lambda: run_secrets(args, paths))
 
 
-def _tool_upgrade(skip_self_test: bool = False) -> dict:
-    from boxmunge.commands.upgrade_cmd import run_upgrade
-    paths = _get_paths()
-    return capture_tool_call(
-        lambda: run_upgrade(paths, skip_self_test=skip_self_test))
+def _tool_upgrade(version: str | None = None) -> dict:
+    """Same path as the deploy shell's `upgrade`: sudo to the root shim,
+    which verifies the release signature, swaps venvs and runs probation."""
+    from boxmunge.upgrade_shim import shim_command
+    return run_subprocess_tool(shim_command(_get_paths(), target=version))
 
 
 def _tool_self_test(as_json: bool = False) -> dict:

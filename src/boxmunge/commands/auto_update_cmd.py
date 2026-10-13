@@ -29,6 +29,7 @@ def run_auto_update(paths: BoxPaths) -> int:
     Hands off to the boxmunge-upgrade shim via os.execvp on success.
     """
     from boxmunge.upgrade_discovery import auto_update_mode, discover_update
+    from boxmunge.upgrade_state import UpgradeInProgress, upgrade_lock
     try:
         mode = auto_update_mode(load_config(paths))
     except ConfigError as e:
@@ -37,7 +38,16 @@ def run_auto_update(paths: BoxPaths) -> int:
         return 1
     scope = _SCOPE[mode]
     print(f"Checking for {scope} updates...")
-    result = discover_update(paths, mode=mode)
+    # Discover under upgrade.lock so a check never runs against a half-swapped
+    # venv or a blocklist the shim is writing. The lock is released before
+    # exec: the shim takes it again itself.
+    try:
+        with upgrade_lock(paths):
+            result = discover_update(paths, mode=mode)
+    except UpgradeInProgress:
+        print("An upgrade is in progress; skipping this check.")
+        log_operation("auto-update", "Skipped: upgrade in progress", paths)
+        return 0
     action = result.get("action")
 
     if result.get("endpoint_error"):

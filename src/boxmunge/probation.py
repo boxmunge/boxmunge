@@ -5,6 +5,10 @@ When a user or agent runs deploy, rollback, backup, or restore during
 the probation window, the upgrade is immediately promoted. This prevents
 user-caused issues from triggering an automatic rollback to an older
 (potentially insecure) version.
+
+Only operator entry points may call this. A timer-driven backup (backup-all,
+container-update's pre-update backup) must not: it would cut probation short
+and open container-update's probation gate on a barely-tested platform.
 """
 from __future__ import annotations
 

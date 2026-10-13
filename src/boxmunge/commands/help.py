@@ -74,7 +74,7 @@ Container security & CVE policy:
 
 Platform updates:
   upgrade                 Upgrade boxmunge platform from latest release
-  upgrade --target VER    Pin platform to a specific version (e.g. 0.3.5)
+  upgrade --target VER    Upgrade to a specific newer version (e.g. 0.3.5)
   auto-update             Run the auto-update probation/promotion cycle
   container-update        Pull and recreate Caddy and project image: containers
   mcp-serve               Run MCP server (stdio) for AI agent integration
@@ -89,7 +89,7 @@ Options (run 'help <command>' to see exactly which a command accepts):
 
 An unknown or unsupported flag is an error (exit 2); nothing is run.
 
-Upload bundles with: scp bundle.tar.gz deploy@<host>:
+Upload bundles with: scp -O bundle.tar.gz deploy@<host>:
 
 If you are an AI agent, run: agent-help
 """
@@ -128,7 +128,7 @@ Operating safely:
 
 Deploying a bundle-based project (the recommended path):
   1. Build locally:  boxmunge bundle ./myproject
-  2. Upload:         scp -P 922 <bundle>.tar.gz deploy@<host>:
+  2. Upload:         scp -O -P 922 <bundle>.tar.gz deploy@<host>:
   3. Verify:         stage <project>    (check staging.<hostname>)
   4. Go live:        promote <project>
   Or skip staging:   prod-deploy <project>

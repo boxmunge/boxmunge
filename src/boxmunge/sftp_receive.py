@@ -1,89 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
-"""SFTP subsystem handler — routes deploy user uploads through the inbox.
+"""SFTP subsystem gate (sshd: `Subsystem sftp /opt/boxmunge/bin/boxmunge-sftp`).
 
-Replaces the default sftp-server subsystem. For the deploy user, uploads
-land in the deploy user's home directory (sftp-server default behaviour)
-and are then post-processed into the inbox by the reception handler.
+The deploy user gets no SFTP. sftp-server cannot be confined to the inbox
+without chrooting every deploy session, and unconfined it hands deploy read
+and write access to everything deploy can reach, outside the restricted
+shell's allowlist (audit A-04). Bundles are uploaded with the legacy scp
+protocol instead (`scp -O`), which the restricted shell receives into the
+inbox via `scp -t`.
 
-For all other users, it falls through to the real sftp-server.
+Every other user (supervisor) gets the real sftp-server unchanged.
 
-Configured in sshd_config:
-  Subsystem sftp /opt/boxmunge/bin/boxmunge-sftp
+For deploy, sshd normally runs this through the login shell, which refuses
+SFTP itself; this check covers any path that reaches the wrapper directly.
 """
 
 from __future__ import annotations
 
-import getpass
 import os
-import subprocess
+import pwd
 import sys
-from pathlib import Path
 
 REAL_SFTP_SERVER = "/usr/lib/openssh/sftp-server"
 DEPLOY_USER = "deploy"
-
-
-def _snapshot_home_files(home: Path) -> set[str]:
-    """Snapshot filenames in the deploy user's home directory."""
-    if not home.exists():
-        return set()
-    return {f.name for f in home.iterdir() if f.is_file()}
+SFTP_REFUSAL = (
+    "ERROR: SFTP is disabled for the deploy user. Upload bundles with the legacy "
+    "scp protocol: scp -O -P <port> bundle.tar.gz deploy@<host>:"
+)
 
 
 def main() -> None:
     """SFTP subsystem entry point."""
-    try:
-        current_user = getpass.getuser()
-    except Exception:
-        current_user = os.environ.get("USER", "")
-
-    # Breadcrumb on every invocation. sshd routes our stderr to the journal
-    # (look for "boxmunge-sftp:" via journalctl -u ssh). Silence here means
-    # the Subsystem directive is bypassing this wrapper — see boxmunge doctor.
-    print(f"boxmunge-sftp: invoked user={current_user} argv={sys.argv[1:]}",
-          file=sys.stderr, flush=True)
-
-    # Non-deploy users get the real sftp-server unmodified
-    if current_user != DEPLOY_USER:
-        os.execv(REAL_SFTP_SERVER, [REAL_SFTP_SERVER] + sys.argv[1:])
-        return  # unreachable after execv
-
-    deploy_home = Path.home()
-
-    # Snapshot files before sftp-server runs
-    before = _snapshot_home_files(deploy_home)
-
-    # Run the real sftp-server — it inherits stdin/stdout for the SFTP protocol.
-    # We let it use default home dir (not -d inbox) because many clients
-    # (including OpenSSH scp in SFTP mode) expect to write to $HOME.
-    result = subprocess.run(
-        [REAL_SFTP_SERVER] + sys.argv[1:],
-        check=False,
-    )
-
-    # Post-process: detect new files and route through reception
-    after = _snapshot_home_files(deploy_home)
-    new_files = sorted(after - before)
-
-    if not new_files:
-        sys.exit(result.returncode)
-
-    try:
-        from boxmunge.paths import BoxPaths
-        from boxmunge.reception import receive_bundle
-
-        paths = BoxPaths()
-        for fname in new_files:
-            fpath = deploy_home / fname
-            if not fpath.exists():
-                continue
-            try:
-                dest = receive_bundle(fpath, paths)
-                print(f"Received: {dest.name}", file=sys.stderr)
-            except ValueError as e:
-                print(f"Upload rejected ({fname}): {e}", file=sys.stderr)
-                fpath.unlink(missing_ok=True)
-    except Exception as e:
-        print(f"boxmunge-sftp post-processing error: {e}", file=sys.stderr)
-
-    sys.exit(result.returncode)
+    # The uid, not $USER/$LOGNAME, which a client may be able to influence.
+    user = pwd.getpwuid(os.getuid()).pw_name
+    if user == DEPLOY_USER:
+        print(SFTP_REFUSAL, file=sys.stderr, flush=True)
+        sys.exit(1)
+    os.execv(REAL_SFTP_SERVER, [REAL_SFTP_SERVER] + sys.argv[1:])

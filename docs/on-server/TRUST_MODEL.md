@@ -17,7 +17,7 @@ boxmunge's defences are calibrated against a specific set of attackers. Future e
 ### Out of scope (current product)
 
 - **Malicious operators** — anyone with `supervisor` or `deploy` SSH access is fully trusted. The restricted shell is a UX guard against accidents and a reduction in agent context-pollution surface, not a privilege boundary against a determined attacker who already has a key.
-- **Malicious agents / MCP tools** — at present, agents and tools invoked through the deploy shell or MCP are treated equivalently to operators. A future product evolution may split agent trust from operator trust; today they are the same principal.
+- **Malicious agents / MCP tools** — at present, agents and tools invoked through the deploy shell or MCP are treated equivalently to operators. A future product evolution may split agent trust from operator trust; today they are the same principal. MCP and the shell do take the same privileged paths: MCP `upgrade` uses the shell's sudo route to the upgrade shim, and MCP `restore`/`rollback` require an explicit `confirm: true`.
 
 ### Single human operator
 
@@ -40,6 +40,14 @@ The `deploy` user can operate on any project — this is by design, not a gap. T
 
 **Secrets** are file-permission isolated — each project's `secrets.env` is mode 600, owned by the deploy user. The deploy user can read any project's secrets (single-owner assumption).
 
+**Uploads** reach the box only through the restricted shell's `scp -t` path, which
+files them into the inbox. SFTP is disabled for deploy: OpenSSH's sftp-server cannot
+be confined to the inbox without chrooting every deploy session, and unconfined it
+would give deploy read and write access to every file deploy can reach (secrets,
+`backup.key`, `authorized_keys`, upgrade state) outside the shell's allowlist. Both
+the shell and the `boxmunge-sftp` subsystem wrapper refuse it. Clients upload with
+`scp -O`, the legacy protocol.
+
 **Logs and state** are per-project by default. The `boxmunge log` command scopes to a single project unless `--all` is passed. This prevents agent context pollution, not security isolation.
 
 ## What We Don't Isolate
@@ -48,6 +56,58 @@ The `deploy` user can operate on any project — this is by design, not a gap. T
 - **Docker group** — the deploy user is in the `docker` group, which is effectively equivalent to root on the host (a user can mount the host filesystem via `docker run -v /:/host`). This is an intentional trade-off: the deploy user needs to run `docker compose` for deployments, and Docker's permission model requires group membership. The restricted shell limits what the deploy user does *directly*, but it is not a privilege boundary against a determined attacker who already has SSH access as deploy. Key-only authentication is the real perimeter.
 - **Backup encryption key** — the deploy user can read the age identity key at `/opt/boxmunge/config/backup.key` (mode 640, group deploy). This is required for backup and restore operations to work without sudo. An authenticated deploy user can decrypt any backup snapshot.
 - **Backups** — the deploy user can trigger backup/restore for any project.
+
+## The Upgrade Shim and the Root Boundary
+
+The upgrade shim (`/opt/boxmunge/bin/boxmunge-upgrade`) runs as root: from the
+health and auto-update timers, and from the deploy shell through a scoped sudo
+rule. It is the one place where deploy-reachable input crosses into root, so it
+treats that input as untrusted even though the docker-group concession above
+means deploy is not a hard boundary today.
+
+`/opt/boxmunge/upgrade-state/` is `root:deploy 0770`, because the deploy shell
+ends upgrade probation early by removing `probation.json`. Every value the shim
+reads from that directory is checked before use:
+
+- The active slot must be exactly `a` or `b`, and must agree with the root-owned
+  `env-active` symlink. A disagreement stops the shim rather than letting a
+  forged `active-slot` turn the live venv into the "standby" that the next
+  upgrade deletes.
+- `probation.json` must be a JSON object with a semver `version`, an
+  ISO-8601 `expires_at` with a timezone, and a `previous_slot` of `a` or `b`
+  that is the current standby slot (promotion deletes it).
+- `blocklist.json` must be a JSON object keyed by semver versions.
+- None of these files, nor `upgrade.lock`, may be a symlink. The shim writes
+  `active-slot` by rename, so a planted link is replaced rather than followed.
+
+Any violation stops the shim with a non-zero exit and an error naming the
+file, before the value reaches a path, a URL, or an `rm -rf`. Repair or remove
+the file as `supervisor` and re-run.
+
+### What deploy may ask root to do
+
+`/etc/sudoers.d/boxmunge-deploy` grants deploy exactly two shim invocations:
+
+```text
+deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmunge/bin/boxmunge-upgrade target *
+```
+
+- `auto` discovers the latest release and upgrades to it.
+- `target <version>` takes exactly one strict-semver argument. It refuses a
+  version that is blocklisted on this box and any version below the installed
+  one (`config/version`, which deploy cannot write). Reinstalling the installed
+  version is allowed.
+
+Everything else is root-only: `run` (the auto-update timer), `check-probation`
+(the health timer), `clear-blocklist`, and `force-target <version>`, the operator
+override that skips the blocklist and the downgrade floor. sudo matches the whole
+argument string, so `target *` cannot reach `force-target`. The auto-update timer's
+`run` applies the same downgrade floor and skips blocklisted versions.
+
+The rule text lives in the shim (`boxmunge-upgrade install-sudoers`). install.sh
+calls it, and so does every upgrade before it installs anything, after checking
+the new file with `visudo -c`. A box carrying an older or wider rule is tightened
+on its next upgrade, and a hand-edited rule is put back.
 
 ## Explicitly Out of Scope
 
@@ -236,15 +296,22 @@ compromise of any single one cannot silently propagate.
     the signed `SHA256SUMS` to confirm the tarball's contents.
 
 13. **Installation.** Only after both signature and checksum verify does
-    the shim extract and `pip install` the bundle into the standby
-    venv.
+    the shim extract the bundle and install it into the standby venv.
+    Dependencies come only from the hash-pinned `requirements-tui.txt`
+    and `requirements-build.txt` inside the bundle (so covered by the
+    signed `SHA256SUMS`), installed with `pip install --require-hashes`;
+    the package itself is installed with `--no-deps --no-build-isolation`,
+    so pip resolves and downloads nothing else. The venv's pip is not
+    self-upgraded. `install.sh` installs the same way. A bundle without
+    the pinned requirements files is refused.
 
 A compromise of any single step is contained: a malicious Action
 release does not pass step 3 (SHA pin); a poisoned PyPI mirror does not
 pass step 4 (hash pin); a tampered upstream age binary does not pass
 step 5 (SHA256 ARG); a hijacked Docker Hub tag does not pass step 6
 (digest pin); a forged release does not pass step 11 (Fulcio identity
-pin); a tampered bundle does not pass step 12 (signed checksum).
+pin); a tampered bundle does not pass step 12 (signed checksum);
+a poisoned PyPI package does not pass step 13 on the box either (hash pin).
 
 ## CVE Policy as a Defensive Layer
 
