@@ -300,6 +300,21 @@ class TestEveryBindMountFormProtectsData:
         assert (dest / "uploads" / "photo.jpg").exists()
 
 
+class TestLiveRef:
+    def test_unknown_installed_release_is_an_error(self, paths) -> None:
+        """No live.json and no recorded deploy: refuse rather than invent a
+        label that would end up in previous.json and deploy history."""
+        from boxmunge.release import ReleaseStateError, live_ref
+        with pytest.raises(ReleaseStateError, match="myapp"):
+            live_ref(paths, "myapp")
+
+    def test_recorded_deploy_is_used_without_live_json(self, paths) -> None:
+        from boxmunge.release import live_ref
+        from boxmunge.state import write_state
+        write_state(paths.project_deploy_state("myapp"), {"current_ref": "myapp-1"})
+        assert live_ref(paths, "myapp") == "myapp-1"
+
+
 RO = ("services:\n  app:\n    volumes:\n"
       "      - ./static:/usr/share/nginx/html:ro\n"
       "      - type: bind\n        source: ./config\n        target: /etc/app\n"

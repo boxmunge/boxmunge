@@ -256,9 +256,16 @@ def live_ref(paths: BoxPaths, project_name: str) -> str:
         if not isinstance(ref, str) or not ref:
             raise ReleaseStateError(f"{meta} has no ref")
         return ref
+    # Projects deployed before .releases/ existed: the recorded deploy is
+    # the release on disk.
     from boxmunge.state import read_state
-    return read_state(paths.project_deploy_state(project_name)).get(
-        "current_ref", "unrecorded")
+    ref = read_state(paths.project_deploy_state(project_name)).get("current_ref")
+    if not isinstance(ref, str) or not ref:
+        raise ReleaseStateError(
+            f"No record of which release is installed for '{project_name}' "
+            f"(no {meta} and no recorded deploy). Deploy a bundle instead."
+        )
+    return ref
 
 
 def mark_live(paths: BoxPaths, project_name: str, ref: str) -> None:

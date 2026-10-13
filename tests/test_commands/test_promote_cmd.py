@@ -141,6 +141,8 @@ class TestPromoteComponentTagging:
         (pdir / "manifest.yml").write_text(VALID_MANIFEST)
         (pdir / "compose.yml").write_text("services:\n  web:\n    image: nginx\n")
         add_project("testapp", paths)
+        # A previously recorded deploy: the release already on disk.
+        write_state(paths.project_deploy_state("testapp"), {"current_ref": "testapp-1"})
 
         observed: list[str] = []
 
