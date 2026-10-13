@@ -47,14 +47,22 @@ def _deep_merge(defaults: dict, overrides: dict) -> dict:
 def load_config(paths: BoxPaths) -> dict[str, Any]:
     """Load boxmunge.yml, apply defaults, and validate required fields.
 
-    Raises ConfigError if the file is missing or required fields are absent.
+    Raises ConfigError, naming the file, if it is missing, unreadable, not
+    valid YAML, not a mapping, or required fields are absent.
     """
     config_file = paths.config_file
     if not config_file.exists():
         raise ConfigError(f"Config file not found: {config_file}")
 
-    with open(config_file) as f:
-        raw = yaml.safe_load(f) or {}
+    try:
+        with open(config_file) as f:
+            raw = yaml.safe_load(f) or {}
+    except yaml.YAMLError as e:
+        raise ConfigError(f"Config is not valid YAML: {config_file}: {e}") from e
+    except (OSError, UnicodeDecodeError) as e:
+        raise ConfigError(f"Cannot read config {config_file}: {e}") from e
+    if not isinstance(raw, dict):
+        raise ConfigError(f"Config is not a YAML mapping: {config_file}")
 
     config = _deep_merge(DEFAULTS, raw)
 

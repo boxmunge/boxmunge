@@ -34,7 +34,8 @@ Verify host health and configuration. Read-only.""",
     "status": """\
 Usage: boxmunge status [--json]
 
-Dashboard of all projects: status, last check, deployed-at. Read-only.""",
+Dashboard of all projects: status, last check, deployed-at. Read-only.
+Exits 1 if any project's state could not be read (shown as ERROR).""",
     "health": """\
 Usage: boxmunge health [--json]
 

@@ -229,6 +229,10 @@ class TestRunCheckSurfacesProfileOff:
         # Mark as deployed so run_check doesn't reject as pre-registered
         paths.project_deploy_state(name).parent.mkdir(parents=True, exist_ok=True)
         paths.project_deploy_state(name).write_text('{"current_ref": "main"}')
+        # check-all reports an unusable host config (alerts depend on it).
+        paths.config_file.write_text(
+            "hostname: box.example.com\nadmin_email: ops@example.com\n",
+        )
 
     def test_off_project_emits_security_off_warning(
         self, paths: BoxPaths, capsys,
@@ -290,6 +294,10 @@ class TestCheckAllReadOnly:
         paths.project_manifest(name).write_text(yaml.dump(manifest))
         paths.project_deploy_state(name).parent.mkdir(parents=True, exist_ok=True)
         paths.project_deploy_state(name).write_text('{"current_ref": "main"}')
+        # check-all reports an unusable host config (alerts depend on it).
+        paths.config_file.write_text(
+            "hostname: box.example.com\nadmin_email: ops@example.com\n",
+        )
 
     def _minimal_manifest(self) -> dict:
         return {
@@ -308,7 +316,7 @@ class TestCheckAllReadOnly:
         self._write_project(paths, "myapp", self._minimal_manifest())
 
         with patch("boxmunge.commands.check.update_health_state") as mock_update:
-            run_check_all([], paths)
+            run_check_all(paths, read_only=False)
 
         assert mock_update.called, (
             "default cmd_check_all invocation must continue calling "
@@ -324,7 +332,7 @@ class TestCheckAllReadOnly:
         self._write_project(paths, "myapp", self._minimal_manifest())
 
         with patch("boxmunge.commands.check.update_health_state") as mock_update:
-            run_check_all(["--read-only"], paths)
+            run_check_all(paths, read_only=True)
 
         assert not mock_update.called, (
             "--read-only must not call update_health_state — no health "
@@ -354,7 +362,7 @@ class TestCheckAllReadOnly:
 
         monkeypatch.setattr(check_mod, "run_check", _fake_run_check)
 
-        result = run_check_all(["--read-only"], paths)
+        result = run_check_all(paths, read_only=True)
         assert result == 2
 
 
@@ -375,6 +383,10 @@ class TestCheckAllSkipsQuarantined:
         }))
         paths.project_deploy_state(name).parent.mkdir(parents=True, exist_ok=True)
         paths.project_deploy_state(name).write_text('{"current_ref": "main"}')
+        # check-all reports an unusable host config (alerts depend on it).
+        paths.config_file.write_text(
+            "hostname: box.example.com\nadmin_email: ops@example.com\n",
+        )
 
     def test_quarantined_project_not_checked(
         self, paths: BoxPaths, monkeypatch,
@@ -398,7 +410,7 @@ class TestCheckAllSkipsQuarantined:
         monkeypatch.setattr(check_mod, "run_check", _fake_run_check)
 
         with patch("boxmunge.commands.check.update_health_state") as mock_update:
-            rc = run_check_all([], paths)
+            rc = run_check_all(paths, read_only=False)
 
         # run_check MUST NOT have run for the quarantined project.
         assert run_calls == []
@@ -427,7 +439,7 @@ class TestCheckAllSkipsQuarantined:
         )
 
         with patch("boxmunge.commands.check.log_operation") as mock_log:
-            run_check_all([], paths)
+            run_check_all(paths, read_only=False)
 
         skip_logs = [
             c for c in mock_log.call_args_list
@@ -457,6 +469,10 @@ class TestCheckAllSkipsLockedProject:
         }))
         paths.project_deploy_state(name).parent.mkdir(parents=True, exist_ok=True)
         paths.project_deploy_state(name).write_text('{"current_ref": "main"}')
+        # check-all reports an unusable host config (alerts depend on it).
+        paths.config_file.write_text(
+            "hostname: box.example.com\nadmin_email: ops@example.com\n",
+        )
 
     def test_locked_project_not_checked(self, paths: BoxPaths, monkeypatch) -> None:
         from unittest.mock import patch
@@ -475,7 +491,7 @@ class TestCheckAllSkipsLockedProject:
         # Simulate a concurrent lifecycle op holding the lock.
         with project_lock("myapp", paths):
             with patch("boxmunge.commands.check.update_health_state") as mock_update:
-                rc = run_check_all([], paths)
+                rc = run_check_all(paths, read_only=False)
 
         # No smoke run, no health-state mutation (so no compose_down) while
         # the lifecycle op holds the lock.
@@ -495,7 +511,7 @@ class TestCheckAllSkipsLockedProject:
 
         with project_lock("myapp", paths):
             with patch("boxmunge.commands.check.log_operation") as mock_log:
-                run_check_all([], paths)
+                run_check_all(paths, read_only=False)
 
         skip_logs = [
             c for c in mock_log.call_args_list
@@ -515,7 +531,7 @@ class TestCheckAllSkipsLockedProject:
         monkeypatch.setattr(check_mod, "run_check", lambda *a, **kw: 0)
 
         with patch("boxmunge.commands.check.update_health_state") as mock_update:
-            run_check_all([], paths)
+            run_check_all(paths, read_only=False)
 
         mock_update.assert_called_once()
 
@@ -529,6 +545,10 @@ class TestCheckJson:
         paths.project_manifest(name).write_text(yaml.dump(manifest))
         paths.project_deploy_state(name).parent.mkdir(parents=True, exist_ok=True)
         paths.project_deploy_state(name).write_text('{"current_ref": "main"}')
+        # check-all reports an unusable host config (alerts depend on it).
+        paths.config_file.write_text(
+            "hostname: box.example.com\nadmin_email: ops@example.com\n",
+        )
 
     def test_json_output_parses(self, paths: BoxPaths, capsys, monkeypatch) -> None:
         from boxmunge.commands.check import cmd_check

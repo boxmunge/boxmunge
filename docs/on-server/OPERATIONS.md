@@ -231,6 +231,14 @@ status --json
 
 Health checks also run automatically every 5 minutes via a systemd timer. Failures trigger Pushover alerts after the configured threshold.
 
+A project whose manifest or state files cannot be read does not stop the others being checked.
+`check-all`, `status` and `health` print an `ERROR:` line naming the project and the file, write
+an error entry to the operational log, and carry on with the rest of the fleet. `status` shows the
+project as `ERROR` (`"raw_status": "error"` with an `error` field in `--json`) and exits 1.
+`check-all` exits at least 1, and records an unreadable manifest in the project's health state so
+the normal threshold alert fires with the cause. `check-all` also reports an unreadable host
+config (`boxmunge.yml`), since alerts cannot be sent without it, and still runs the checks.
+
 ---
 
 ## Reading Logs
