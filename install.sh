@@ -365,10 +365,12 @@ chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-sftp"
 # ---------------------------------------------------------------------------
 # Wire sshd's SFTP subsystem to boxmunge-sftp.
 #
-# Modern OpenSSH (9+) routes scp through the SFTP protocol, so the Subsystem
-# directive — not the login shell — decides where uploads go. The wrapper
-# only runs uploads through reception if sshd actually invokes it. This step
-# is idempotent and runs on every install/upgrade so the wiring cannot drift.
+# The wrapper refuses SFTP for deploy (sftp-server cannot be confined to the
+# inbox without chrooting every deploy session, and unconfined it exposes
+# everything deploy can read and write) and execs the real sftp-server for
+# everyone else. deploy uploads with legacy scp (`scp -O`), which the
+# restricted shell receives through `scp -t`. Idempotent; runs on every
+# install/upgrade so the wiring cannot drift.
 # ---------------------------------------------------------------------------
 SSHD_CONFIG="/etc/ssh/sshd_config"
 SFTP_SUBSYSTEM_LINE="Subsystem sftp ${BOXMUNGE_ROOT}/bin/boxmunge-sftp"

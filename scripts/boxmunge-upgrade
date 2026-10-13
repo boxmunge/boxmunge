@@ -579,7 +579,8 @@ upgrade_to() {
             bm_log error upgrade "shim self-update skipped: bash -n failed" "{\"version\": \"$version\"}"
         fi
         # Also refresh any other shims under bin/ if the bundle ships them.
-        # boxmunge-sftp is the SFTP wrapper invoked by sshd; same self-bootstrap concern.
+        # boxmunge-sftp is the SFTP wrapper invoked by sshd (it refuses deploy).
+        # shellcheck disable=SC2043  # one wrapper today; new bin/ wrappers go in this list
         for shim_name in boxmunge-sftp; do
             shim_src="$tmp_download/boxmunge/scripts/$shim_name"
             if [[ -f "$shim_src" ]]; then

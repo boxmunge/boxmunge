@@ -70,7 +70,7 @@ Build a bundle locally, upload it to the server, then stage and promote from ins
 # Locally
 pip install boxmunge                          # see INSTALL.md
 boxmunge bundle ./myapp                       # produces myapp-<ts>.tar.gz
-scp -P 922 myapp-*.tar.gz deploy@your-server.example.com:
+scp -O -P 922 myapp-*.tar.gz deploy@your-server.example.com:
 
 # On the server (ssh into the deploy user's restricted shell)
 ssh -p 922 deploy@your-server.example.com

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from boxmunge.shell import parse_shell_command, run_command, dispatch_command, ALLOWED_COMMANDS
@@ -195,24 +194,22 @@ class TestDispatchCommand:
             dispatch_command("", [])
         assert exc_info.value.code == 0
 
+    @pytest.mark.parametrize("command", [
+        "/usr/lib/openssh/sftp-server",
+        "/opt/boxmunge/bin/boxmunge-sftp",
+        "sftp-server",
+    ])
     @patch("boxmunge.shell.subprocess.run")
-    def test_handles_sftp_direct(self, mock_run: MagicMock) -> None:
-        """SFTP subsystem via direct sftp-server path."""
-        mock_run.return_value = MagicMock(returncode=0)
-        with patch("boxmunge.shell.Path.home", return_value=Path("/tmp/fakehome")):
-            result = run_command("/usr/lib/openssh/sftp-server", [])
-        assert result == 0
-        mock_run.assert_called_once_with(["/usr/lib/openssh/sftp-server"], check=False)
-
-    @patch("boxmunge.shell.subprocess.run")
-    def test_handles_boxmunge_sftp(self, mock_run: MagicMock) -> None:
-        """SFTP subsystem via boxmunge-sftp wrapper (the normal case)."""
-        mock_run.return_value = MagicMock(returncode=0)
-        with patch("boxmunge.shell.Path.home", return_value=Path("/tmp/fakehome")):
-            result = run_command("/opt/boxmunge/bin/boxmunge-sftp", [])
-        assert result == 0
-        # Should delegate to the real sftp-server, not boxmunge-sftp
-        mock_run.assert_called_once_with(["/usr/lib/openssh/sftp-server"], check=False)
+    def test_sftp_is_refused(
+        self, mock_run: MagicMock, command: str, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A-04: sftp-server would run with deploy's full filesystem access,
+        outside the allowlist. Uploads use legacy scp (scp -O) instead."""
+        assert run_command(command, []) == 1
+        mock_run.assert_not_called()
+        err = capsys.readouterr().err
+        assert "SFTP is disabled" in err
+        assert "scp -O" in err
 
 
 class TestPauseResumeAllowed:

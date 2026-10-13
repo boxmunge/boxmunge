@@ -40,6 +40,14 @@ The `deploy` user can operate on any project — this is by design, not a gap. T
 
 **Secrets** are file-permission isolated — each project's `secrets.env` is mode 600, owned by the deploy user. The deploy user can read any project's secrets (single-owner assumption).
 
+**Uploads** reach the box only through the restricted shell's `scp -t` path, which
+files them into the inbox. SFTP is disabled for deploy: OpenSSH's sftp-server cannot
+be confined to the inbox without chrooting every deploy session, and unconfined it
+would give deploy read and write access to every file deploy can reach (secrets,
+`backup.key`, `authorized_keys`, upgrade state) outside the shell's allowlist. Both
+the shell and the `boxmunge-sftp` subsystem wrapper refuse it. Clients upload with
+`scp -O`, the legacy protocol.
+
 **Logs and state** are per-project by default. The `boxmunge log` command scopes to a single project unless `--all` is passed. This prevents agent context pollution, not security isolation.
 
 ## What We Don't Isolate

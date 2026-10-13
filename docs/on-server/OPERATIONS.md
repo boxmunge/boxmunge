@@ -20,7 +20,7 @@ The standard workflow for deploying a project from a bundle.
 2. Upload the bundle to the server:
 
    ```
-   scp -P 922 myapp.tar.gz deploy@<host>:
+   scp -O -P 922 myapp.tar.gz deploy@<host>:
    ```
 
    Bundles land in the inbox automatically.
@@ -130,7 +130,7 @@ Staging is useful for:
 Upload a new bundle and stage or deploy:
 
 ```
-scp -P 922 myapp-v2.tar.gz deploy@<host>:
+scp -O -P 922 myapp-v2.tar.gz deploy@<host>:
 stage myapp
 promote myapp
 ```
@@ -187,7 +187,9 @@ secrets unset --host OLD_KEY
 
 ## Managing the Inbox
 
-Bundles uploaded via scp land in the inbox automatically.
+Bundles uploaded via scp land in the inbox automatically. Use the legacy scp protocol
+(`scp -O`): SFTP, which OpenSSH 9+ uses for plain `scp`, is disabled for the deploy user
+because sftp-server cannot be confined to the inbox.
 
 List bundles in the inbox:
 

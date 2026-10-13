@@ -11,7 +11,6 @@ import os
 import shlex
 import subprocess
 import sys
-from pathlib import Path
 
 # Every command the deploy shell accepts. This is the complete allowlist.
 ALLOWED_COMMANDS: set[str] = {
@@ -73,7 +72,7 @@ This is a restricted shell. Available commands:
   inbox               List uploaded bundles
   secrets             Manage secrets
 
-Upload bundles with: scp bundle.tar.gz deploy@<host>:
+Upload bundles with: scp -O bundle.tar.gz deploy@<host>:
 
 Run 'help' for the full command list.
 """
@@ -148,44 +147,6 @@ def handle_scp_upload(args: list[str]) -> None:
             leftover.unlink(missing_ok=True)
 
 
-def _handle_sftp(command: str, args: list[str]) -> int:
-    """Handle SFTP subsystem — run sftp-server, then post-process uploads.
-
-    sshd invokes the login shell with: -c "/usr/lib/openssh/sftp-server"
-    We run the real sftp-server, then process any new files in $HOME into
-    the inbox. This is a fallback — normally sftp_receive.py handles this
-    via the sshd Subsystem directive.
-    """
-    from boxmunge.paths import BoxPaths
-    from boxmunge.reception import receive_bundle
-
-    paths = BoxPaths()
-    deploy_home = Path.home()
-
-    # Snapshot files before sftp
-    before = set(f.name for f in deploy_home.iterdir() if f.is_file()) \
-        if deploy_home.exists() else set()
-
-    # Run the real sftp-server — it inherits stdin/stdout for the protocol
-    result = subprocess.run([command] + args, check=False)
-
-    # Find and process new files
-    after = set(f.name for f in deploy_home.iterdir() if f.is_file()) \
-        if deploy_home.exists() else set()
-
-    for fname in sorted(after - before):
-        fpath = deploy_home / fname
-        if not fpath.exists():
-            continue
-        try:
-            dest = receive_bundle(fpath, paths)
-            print(f"Received: {dest.name}", file=sys.stderr)
-        except ValueError:
-            fpath.unlink(missing_ok=True)
-
-    return result.returncode
-
-
 def run_command(command: str, args: list[str]) -> int:
     """Run a single boxmunge command. Returns exit code.
 
@@ -205,11 +166,14 @@ def run_command(command: str, args: list[str]) -> int:
 
     # SFTP subsystem — sshd routes this through the login shell as:
     #   boxmunge-shell -c "/opt/boxmunge/bin/boxmunge-sftp"
-    # (or the real sftp-server path if the Subsystem directive changes).
-    # Run sftp-server, then post-process any new uploads via home-dir snapshot.
+    # deploy gets no SFTP: sftp-server would run with deploy's full
+    # filesystem access, outside this allowlist (A-04). Uploads use legacy
+    # scp (`scp -O`), received above through `scp -t`.
     cmd_base = os.path.basename(command) if "/" in command else command
     if cmd_base in ("sftp-server", "boxmunge-sftp"):
-        return _handle_sftp("/usr/lib/openssh/sftp-server", args)
+        from boxmunge.sftp_receive import SFTP_REFUSAL
+        print(SFTP_REFUSAL, file=sys.stderr)
+        return 1
 
     if command not in ALLOWED_COMMANDS:
         print(

@@ -541,9 +541,9 @@ def phase_2_deploy_v1(work_dir: Path):
     bundle = bundle_files[-1]
     step_pass(f"Bundle created: {bundle.name}")
 
-    # Upload bundle to deploy user via SCP (SFTP subsystem routes to inbox)
+    # Upload bundle to deploy user via legacy scp (-O); SFTP is refused for deploy
     scp_result = subprocess.run(
-        ["scp", *SSH_OPTS, "-P", str(PORTS["ssh_boxmunge"]),
+        ["scp", "-O", *SSH_OPTS, "-P", str(PORTS["ssh_boxmunge"]),
          str(bundle), f"deploy@localhost:"],
         capture_output=True, text=True, check=False, timeout=60,
     )
@@ -656,7 +656,7 @@ def phase_5_deploy_v2_and_overwrite(work_dir: Path):
     bundle = bundle_files[-1]
 
     subprocess.run(
-        ["scp", *SSH_OPTS, "-P", str(PORTS["ssh_boxmunge"]),
+        ["scp", "-O", *SSH_OPTS, "-P", str(PORTS["ssh_boxmunge"]),
          str(bundle), f"deploy@localhost:"],
         capture_output=True, check=True, timeout=60,
     )
@@ -714,7 +714,7 @@ def phase_6_restore_and_verify(work_dir: Path, snapshot: str):
     bundle = bundle_files[-1]
 
     subprocess.run(
-        ["scp", *SSH_OPTS, "-P", str(PORTS["ssh_boxmunge"]),
+        ["scp", "-O", *SSH_OPTS, "-P", str(PORTS["ssh_boxmunge"]),
          str(bundle), f"deploy@localhost:"],
         capture_output=True, check=True, timeout=60,
     )
