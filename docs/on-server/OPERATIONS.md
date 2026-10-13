@@ -818,6 +818,24 @@ If it is unreachable or answers in an unexpected shape, auto-update falls
 back to the GitHub releases list (a release marked `[security]` or
 `[breakfix]` in its title or notes) and logs a warning.
 
+Pin to a specific release (for example to roll forward past a bad one):
+
+```
+upgrade --target 0.11.2
+```
+
+`--target` only moves forward. It refuses a version below the installed one and a
+version blocklisted on this box (one that failed an earlier upgrade and was rolled
+back). To install such a version deliberately, an operator runs the shim directly
+as `supervisor`:
+
+```bash
+sudo /opt/boxmunge/bin/boxmunge-upgrade force-target 0.11.1   # ignore blocklist and floor
+sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist 0.11.1  # forget a failed version
+```
+
+Neither is available from the deploy shell or MCP.
+
 ## Querying Logs
 
 ```

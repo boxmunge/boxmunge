@@ -76,6 +76,31 @@ Any violation stops the shim with a non-zero exit and an error naming the
 file, before the value reaches a path, a URL, or an `rm -rf`. Repair or remove
 the file as `supervisor` and re-run.
 
+### What deploy may ask root to do
+
+`/etc/sudoers.d/boxmunge-deploy` grants deploy exactly two shim invocations:
+
+```text
+deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmunge/bin/boxmunge-upgrade target *
+```
+
+- `auto` discovers the latest release and upgrades to it.
+- `target <version>` takes exactly one strict-semver argument. It refuses a
+  version that is blocklisted on this box and any version below the installed
+  one (`config/version`, which deploy cannot write). Reinstalling the installed
+  version is allowed.
+
+Everything else is root-only: `run` (the auto-update timer), `check-probation`
+(the health timer), `clear-blocklist`, and `force-target <version>`, the operator
+override that skips the blocklist and the downgrade floor. sudo matches the whole
+argument string, so `target *` cannot reach `force-target`. The auto-update timer's
+`run` applies the same downgrade floor and skips blocklisted versions.
+
+The rule text lives in the shim (`boxmunge-upgrade install-sudoers`). install.sh
+calls it, and so does every upgrade before it installs anything, after checking
+the new file with `visudo -c`. A box carrying an older or wider rule is tightened
+on its next upgrade, and a hand-edited rule is put back.
+
 ## Explicitly Out of Scope
 
 - Multi-tenant isolation

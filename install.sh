@@ -437,23 +437,14 @@ systemctl enable --now \
     boxmunge-cve-scan.timer
 
 # ---------------------------------------------------------------------------
-# Sudoers: allow deploy to invoke the upgrade shim (single binary scope).
-# This lets `boxmunge upgrade` from the deploy shell route to the root-context
-# shim that handles stash + venv swap + probation properly. Same root of trust
-# as supervisor (deploy and supervisor share SSH keys).
+# Sudoers: deploy may run exactly `boxmunge-upgrade auto` and
+# `boxmunge-upgrade target <version>` as root, so `upgrade` from the deploy
+# shell reaches the shim that handles stash + venv swap + probation. The rule
+# text lives in the shim (install-sudoers), which validates it with visudo
+# before replacing /etc/sudoers.d/boxmunge-deploy. Every upgrade rewrites it
+# too, so a box carrying an older, wider rule is tightened on upgrade.
 # ---------------------------------------------------------------------------
-SUDOERS_FILE="/etc/sudoers.d/boxmunge-deploy"
-SUDOERS_RULE="deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade"
-if [[ ! -f "${SUDOERS_FILE}" ]] || ! grep -qF "${SUDOERS_RULE}" "${SUDOERS_FILE}"; then
-    echo "${SUDOERS_RULE}" > "${SUDOERS_FILE}"
-    chmod 440 "${SUDOERS_FILE}"
-    chown root:root "${SUDOERS_FILE}"
-    visudo -cqf "${SUDOERS_FILE}" || {
-        rm -f "${SUDOERS_FILE}"
-        echo "ERROR: sudoers rule failed validation; not installed" >&2
-        exit 1
-    }
-fi
+"${BOXMUNGE_ROOT}/bin/boxmunge-upgrade" install-sudoers
 
 # ---------------------------------------------------------------------------
 # Record installed version (read by boxmunge auto-update to decide if a

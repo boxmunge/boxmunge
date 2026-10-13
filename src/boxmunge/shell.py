@@ -228,9 +228,9 @@ def run_command(command: str, args: list[str]) -> int:
         )
         return result.returncode
 
-    # `upgrade --target VERSION` lets an operator pin to a specific older
-    # build (e.g. roll forward to a known-good version after a bad release).
-    # Same privileged path as `upgrade auto`, just with discovery bypassed.
+    # `upgrade --target VERSION` upgrades to a specific release, bypassing
+    # discovery. The shim refuses blocklisted versions and downgrades; only
+    # an operator running the shim directly (force-target) can do those.
     if command == "upgrade" and args[:1] == ["--target"]:
         if len(args) != 2 or not args[1]:
             print(

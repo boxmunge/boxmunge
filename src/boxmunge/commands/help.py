@@ -74,7 +74,7 @@ Container security & CVE policy:
 
 Platform updates:
   upgrade                 Upgrade boxmunge platform from latest release
-  upgrade --target VER    Pin platform to a specific version (e.g. 0.3.5)
+  upgrade --target VER    Upgrade to a specific newer version (e.g. 0.3.5)
   auto-update             Run the auto-update probation/promotion cycle
   container-update        Pull and recreate Caddy and project image: containers
   mcp-serve               Run MCP server (stdio) for AI agent integration

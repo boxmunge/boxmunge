@@ -5,12 +5,15 @@
 # Python code — it only calls Python commands as subprocesses and checks
 # exit codes. This ensures rollback works even if the new code is broken.
 #
-# Entry points:
-#   boxmunge-upgrade run <version> <url>      — full upgrade flow with explicit version
-#   boxmunge-upgrade auto                     — discover latest + run (manual upgrade UX)
-#   boxmunge-upgrade target <version>         — pin to a specific version (bypass discovery)
-#   boxmunge-upgrade check-probation          — called by health timer
-#   boxmunge-upgrade clear-blocklist <version> — manual blocklist mgmt
+# Entry points (deploy may sudo only the two marked *; see install-sudoers):
+# * auto                       discover the latest release and upgrade to it
+# * target <version>           upgrade to a specific newer, non-blocklisted version
+#   force-target <version>     operator only: ignore the blocklist and downgrade floor
+#   run <version> <url>        auto-update timer: upgrade to a discovered version
+#                              (the bundle URL is always derived from <version>)
+#   check-probation            health timer: promote or roll back a probation
+#   clear-blocklist <version>  operator only: forget a failed version
+#   install-sudoers            install.sh and upgrades: (re)write deploy's sudo rule
 
 set -euo pipefail
 
@@ -21,6 +24,8 @@ ACTIVE_SLOT_FILE="$STATE_DIR/active-slot"
 BLOCKLIST_FILE="$STATE_DIR/blocklist.json"
 PROBATION_FILE="$STATE_DIR/probation.json"
 BIN_DIR="$BOXMUNGE_ROOT/bin"
+VERSION_FILE="$BOXMUNGE_ROOT/config/version"
+SUDOERS_FILE="${BOXMUNGE_SUDOERS_FILE:-/etc/sudoers.d/boxmunge-deploy}"
 
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) boxmunge-upgrade: $*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
@@ -314,6 +319,88 @@ Stderr (truncated): $stderr_excerpt"
     exit 1
 }
 
+# ---------------------------------------------------------------------------
+# Upgrade policy: what each entry point may install.
+# ---------------------------------------------------------------------------
+
+# semver_lt <a> <b>: true when <a> has lower semver precedence than <b>.
+semver_lt() {
+    BM_A="$1" BM_B="$2" python3 - <<'PYSV'
+import os, sys
+def key(v):
+    core, _, pre = v.partition("-")
+    nums = tuple(int(x) for x in core.split("."))
+    if not pre:
+        return nums, 1, ()
+    return nums, 0, tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split("."))
+sys.exit(0 if key(os.environ["BM_A"]) < key(os.environ["BM_B"]) else 1)
+PYSV
+}
+
+# installed_version: the semver recorded in config/version (root-owned; the
+# config dir is not deploy-writable).
+installed_version() {
+    local v
+    [[ -f "$VERSION_FILE" ]] || die "No installed version recorded at $VERSION_FILE"
+    v="$(cat "$VERSION_FILE")"
+    v="${v%%+*}"
+    require_semver "$v" "$VERSION_FILE"
+    echo "$v"
+}
+
+# check_policy <version> <mode>: mode is run (timer), target (deploy) or
+# force (operator). Only force may install a blocklisted or older version.
+check_policy() {
+    local version="$1" mode="$2" installed operator_hint
+    require_semver "$version" "requested version"
+    operator_hint="To override, run as supervisor: sudo $BIN_DIR/boxmunge-upgrade force-target $version"
+    if [[ "$mode" == "force" ]]; then
+        log "WARN: operator override: blocklist and downgrade floor not enforced for $version"
+        return 0
+    fi
+    if is_blocklisted "$version"; then
+        if [[ "$mode" == "run" ]]; then
+            log "Version $version is blocklisted, skipping"
+            exit 0
+        fi
+        die "Version $version is blocklisted on this box (it failed an earlier upgrade). $operator_hint"
+    fi
+    installed="$(installed_version)"
+    if semver_lt "$version" "$installed"; then
+        die "Refusing to downgrade from $installed to $version. $operator_hint"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# deploy's sudo rule. Owned here so install.sh and every upgrade write the
+# same text; a box whose rule predates a tightening is fixed on its next
+# upgrade. `target *` cannot reach force-target or any other subcommand:
+# sudo matches the whole argument string against the pattern.
+# ---------------------------------------------------------------------------
+sudoers_rule() {
+    cat <<EOF
+# Managed by boxmunge-upgrade install-sudoers; rewritten on every install and upgrade.
+deploy ALL=(root) NOPASSWD: $BIN_DIR/boxmunge-upgrade auto, $BIN_DIR/boxmunge-upgrade target *
+EOF
+}
+
+cmd_install_sudoers() {
+    local tmp
+    if [[ -f "$SUDOERS_FILE" && ! -L "$SUDOERS_FILE" ]] && cmp -s <(sudoers_rule) "$SUDOERS_FILE"; then
+        return 0
+    fi
+    # A dot in the name keeps sudo from reading the temp file mid-write.
+    tmp="$(mktemp "$(dirname "$SUDOERS_FILE")/.boxmunge-deploy.XXXXXX")"
+    sudoers_rule > "$tmp"
+    chmod 0440 "$tmp"
+    if ! visudo -cqf "$tmp" >/dev/null; then
+        rm -f "$tmp"
+        die "Generated sudoers rule failed visudo; $SUDOERS_FILE left unchanged"
+    fi
+    replace_file "$tmp" "$SUDOERS_FILE"
+    log "Wrote deploy sudo rule to $SUDOERS_FILE"
+}
+
 # preflight_fail <version> <from_version> <blocklist_reason> <message> [stage]
 #
 # Abort before the slot swap: drop the half-built standby venv, blocklist
@@ -331,15 +418,18 @@ cleanup_download() { [[ -z "$TMP_DOWNLOAD" ]] || rm -rf "$TMP_DOWNLOAD"; }
 
 cmd_run() {
     local version="${1:?Usage: boxmunge-upgrade run <version> <url>}"
-    local url="${2:?Usage: boxmunge-upgrade run <version> <url>}"
+    : "${2:?Usage: boxmunge-upgrade run <version> <url>}"
+    upgrade_to "$version" run
+}
+
+# upgrade_to <version> <mode>: the upgrade itself, after the policy check.
+upgrade_to() {
+    local version="$1" mode="$2"
 
     load_active_slot
     acquire_lock
-
-    if is_blocklisted "$version"; then
-        log "Version $version is blocklisted, skipping"
-        exit 0
-    fi
+    check_policy "$version" "$mode"
+    cmd_install_sudoers
 
     local prev_slot from_version standby
     prev_slot="$ACTIVE_SLOT"
@@ -649,7 +739,7 @@ cmd_check_probation() {
 }
 
 cmd_auto() {
-    local result action version url msg
+    local result action version msg
     load_active_slot
     result="$("$(active_venv)/bin/boxmunge-server" _discover-update --json 2>/dev/null)" || \
         die "Discovery failed (boxmunge-server _discover-update returned non-zero)"
@@ -659,9 +749,8 @@ cmd_auto() {
     case "$action" in
         upgrade)
             version="$(echo "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
-            url="$(echo     "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["url"])')"
-            log "Manual upgrade: discovered $version at $url"
-            cmd_run "$version" "$url"
+            log "Manual upgrade: discovered $(printable "$version")"
+            upgrade_to "$version" run
             ;;
         up_to_date)
             log "Already on latest version"
@@ -681,21 +770,25 @@ cmd_auto() {
     esac
 }
 
+# target <version>: reachable by deploy through sudo, so exactly one argument
+# (sudo's `target *` would otherwise let extra words through).
 cmd_target() {
-    local version="${1:?Usage: boxmunge-upgrade target <version>}"
-    # Validate version: digits.digits.digits with optional pre-release suffix.
-    # The version is interpolated into a URL; reject anything that could
-    # contain shell metacharacters or path traversal.
-    if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]; then
-        die "Invalid version: '$version' (expected semver like 0.3.5 or 0.3.5-rc.1)"
-    fi
-    local url="https://github.com/boxmunge/boxmunge/releases/download/v${version}/boxmunge-${version}.tar.gz"
-    log "Targeted upgrade: $version"
-    cmd_run "$version" "$url"
+    [[ $# -eq 1 ]] || die "Usage: boxmunge-upgrade target <version>"
+    require_semver "$1" "requested version"
+    log "Targeted upgrade: $1"
+    upgrade_to "$1" target
+}
+
+cmd_force_target() {
+    [[ $# -eq 1 ]] || die "Usage: boxmunge-upgrade force-target <version>"
+    require_semver "$1" "requested version"
+    log "Operator-forced upgrade: $1"
+    upgrade_to "$1" force
 }
 
 cmd_clear_blocklist() {
     local version="${1:?Usage: boxmunge-upgrade clear-blocklist <version>}"
+    require_semver "$version" "requested version"
     load_active_slot
     BM_VERSION="$version" "$(active_venv)/bin/python" -c "
 import os
@@ -708,9 +801,11 @@ remove_from_blocklist(BoxPaths(), os.environ['BM_VERSION'])
 
 case "${1:-}" in
     run)             shift; cmd_run "$@" ;;
-    auto)            cmd_auto ;;
+    auto)            [[ $# -eq 1 ]] || die "Usage: boxmunge-upgrade auto"; cmd_auto ;;
     target)          shift; cmd_target "$@" ;;
+    force-target)    shift; cmd_force_target "$@" ;;
     check-probation) cmd_check_probation ;;
     clear-blocklist) shift; cmd_clear_blocklist "$@" ;;
-    *)               die "Usage: boxmunge-upgrade {run|auto|target|check-probation|clear-blocklist} [args]" ;;
+    install-sudoers) cmd_install_sudoers ;;
+    *)               die "Usage: boxmunge-upgrade {run|auto|target|force-target|check-probation|clear-blocklist|install-sudoers} [args]" ;;
 esac
