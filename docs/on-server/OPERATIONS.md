@@ -353,6 +353,31 @@ You will be shown what snapshot will be restored and asked to confirm before any
 
 ---
 
+## Deleting a Project
+
+```
+project-delete myapp
+```
+
+This removes the production and staging containers, the project directory (including its local
+backups), the Caddy site configs, and every piece of per-project state: health, deploy, pause and
+quarantine markers, CVE scan state, staging state, and container-update state. It then removes the
+name from the allowlist. A project later created with the same name starts clean, not paused or
+quarantined.
+
+The containers are removed first. If that fails, `project-delete` stops with an error and deletes
+nothing, so the compose files are still there for a retry. Fix the cause (usually Docker) and run it
+again. If the containers are already gone and the error persists, delete anyway with:
+
+```
+project-delete myapp --force
+```
+
+`--force` warns that containers named `myapp-*` may still be running. Check with `docker ps` as the
+supervisor user.
+
+---
+
 ## Concurrent Operations
 
 Every command that changes a project holds that project's lock while it works: `prod-deploy`,

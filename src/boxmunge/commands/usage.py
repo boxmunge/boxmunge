@@ -104,10 +104,11 @@ Usage: boxmunge project-list [--json]
 
 List registered project names.""",
     "project-delete": """\
-Usage: boxmunge project-delete <project> [--yes]
+Usage: boxmunge project-delete <project> [--yes] [--force]
 
 Destructive: stop the project, remove its files, and deregister it. Asks for
-confirmation unless --yes. Does not support --dry-run.""",
+confirmation unless --yes. If container teardown fails, nothing is deleted
+and the command exits 1; --force deletes anyway. Does not support --dry-run.""",
     "inbox": """\
 Usage: boxmunge inbox [project] [--json]
        boxmunge inbox clean [project] [--yes]
