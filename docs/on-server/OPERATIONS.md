@@ -644,7 +644,37 @@ Apply platform updates:
 upgrade
 ```
 
-Security releases are applied automatically every 6 hours.
+`upgrade` installs the newest release of any class. Every release has a
+class, and the auto-update timer (every 6 hours) decides by class what to
+install without you:
+
+| Class | Applied automatically? |
+|---|---|
+| `security` | Always. |
+| `breakfix` (a critical non-security fix) | Yes, unless `auto_update.breakfix` is `false` in `boxmunge.yml`. |
+| `feature` | Never. Run `upgrade` when ready. |
+
+Automatic updates stay on the box's own `major.minor` line (a 0.11.x box
+gets 0.11.y, never 0.12.0). To take security releases only, set this in
+`/opt/boxmunge/config/boxmunge.yml`:
+
+```yaml
+auto_update:
+  breakfix: false
+```
+
+The value must be `true` or `false`; anything else is a configuration error
+and auto-update stops with an `ERROR:` until it is fixed.
+
+Every automatic update, whatever its class, gets the same protection: the
+signature is verified, the release runs a 6-hour probation, and a release
+that fails is rolled back and blocklisted on this box. The auto-update log
+entry names the class that was applied (`log --component auto-update`).
+
+Releases are discovered through the version-check service at boxmunge.dev.
+If it is unreachable or answers in an unexpected shape, auto-update falls
+back to the GitHub releases list (a release marked `[security]` or
+`[breakfix]` in its title or notes) and logs a warning.
 
 ## Querying Logs
 

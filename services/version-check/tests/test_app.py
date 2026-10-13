@@ -15,13 +15,13 @@ def releases_data():
     """Multi-version release data for testing."""
     return {
         "releases": [
-            {"version": "0.3.0", "security": False,
+            {"version": "0.3.0", "class": "feature",
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.3.0"},
-            {"version": "0.2.1", "security": True,
+            {"version": "0.2.1", "class": "security",
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.1"},
-            {"version": "0.2.0", "security": False,
+            {"version": "0.2.0", "class": "feature",
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.0"},
-            {"version": "0.1.0", "security": False,
+            {"version": "0.1.0", "class": "feature",
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.1.0"},
         ]
     }
@@ -103,27 +103,91 @@ class TestCheckEndpoint:
         assert data["latest"]["version"] == "0.3.0"
 
 
+def _check_counts(db_path) -> dict:
+    db = sqlite3.connect(db_path)
+    try:
+        return dict(db.execute("SELECT version, count FROM version_checks").fetchall())
+    finally:
+        db.close()
+
+
 class TestCounter:
-    def test_increments_counter(self, client, tmp_path) -> None:
+    def test_counts_are_buffered_not_written_per_request(self, app, client, tmp_path) -> None:
+        client.get("/v1/check?v=0.2.0")
+        client.get("/v1/check?v=0.2.0")
+        client.get("/v1/check?v=0.3.0")
+        assert _check_counts(tmp_path / "checks.db") == {}
+        app.extensions["check_counter"].flush()
+        assert _check_counts(tmp_path / "checks.db") == {"0.2.0": 2, "0.3.0": 1}
+
+    def test_unlisted_versions_share_one_bucket(self, app, client, tmp_path) -> None:
+        client.get("/v1/check?v=7.7.7")
+        client.get("/v1/check?v=8.8.8")
+        app.extensions["check_counter"].flush()
+        assert _check_counts(tmp_path / "checks.db") == {"unlisted": 2}
+
+    def test_no_counter_on_error(self, app, client, tmp_path) -> None:
+        client.get("/v1/check")  # missing param — 400
+        client.get("/v1/check?v=not-a-version")  # malformed — 400
+        app.extensions["check_counter"].flush()
+        assert _check_counts(tmp_path / "checks.db") == {}
+
+    def test_malformed_version_rejected(self, client) -> None:
+        resp = client.get("/v1/check?v=1.2.3;drop")
+        assert resp.status_code == 400
+
+
+def _rel(version: str, cls: str) -> dict:
+    return {"version": version, "class": cls,
+            "url": f"https://github.com/boxmunge/boxmunge/releases/tag/v{version}"}
+
+
+def _make_app(tmp_path, releases: list[dict]):
+    releases_file = tmp_path / "releases.json"
+    releases_file.write_text(json.dumps({"releases": releases}))
+    with patch("app.RELEASES_PATH", releases_file), \
+         patch("app.DB_PATH", tmp_path / "checks.db"):
+        from app import create_app
+        application = create_app()
+        application.config["TESTING"] = True
+        return application
+
+
+class TestStartupValidation:
+    def test_refuses_to_start_on_entry_without_class(self, tmp_path) -> None:
+        from release_catalog import ReleaseCatalogError
+        bad = {"version": "0.3.0", "security": False,
+               "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.3.0"}
+        with pytest.raises(ReleaseCatalogError, match="class"):
+            _make_app(tmp_path, [bad])
+
+    def test_refuses_to_start_on_unknown_class(self, tmp_path) -> None:
+        from release_catalog import ReleaseCatalogError
+        with pytest.raises(ReleaseCatalogError, match="urgent"):
+            _make_app(tmp_path, [_rel("0.3.0", "urgent")])
+
+
+class TestBreakfixOffer:
+    @pytest.fixture
+    def bf_client(self, tmp_path):
         with patch("app.DB_PATH", tmp_path / "checks.db"):
-            client.get("/v1/check?v=0.2.0")
-            client.get("/v1/check?v=0.2.0")
-            client.get("/v1/check?v=0.3.0")
+            yield _make_app(tmp_path, [
+                _rel("0.4.0", "feature"),
+                _rel("0.3.2", "breakfix"),
+                _rel("0.3.1", "security"),
+                _rel("0.3.0", "feature"),
+            ]).test_client()
 
-            db = sqlite3.connect(tmp_path / "checks.db")
-            rows = db.execute(
-                "SELECT version, count FROM version_checks ORDER BY version"
-            ).fetchall()
-            db.close()
+    def test_breakfix_field_and_status(self, bf_client) -> None:
+        data = bf_client.get("/v1/check?v=0.3.1").get_json()
+        assert data["status"] == "breakfix_update_available"
+        assert data["security"] is None
+        assert data["breakfix"]["version"] == "0.3.2"
+        assert data["breakfix"]["class"] == "breakfix"
+        assert data["latest"]["version"] == "0.4.0"
 
-        counts = {row[0]: row[1] for row in rows}
-        assert counts.get("0.2.0", 0) >= 2
-        assert counts.get("0.3.0", 0) >= 1
-
-    def test_no_counter_on_error(self, client, tmp_path) -> None:
-        with patch("app.DB_PATH", tmp_path / "checks.db"):
-            client.get("/v1/check")  # missing param — 400
-            db = sqlite3.connect(tmp_path / "checks.db")
-            rows = db.execute("SELECT count(*) FROM version_checks").fetchone()
-            db.close()
-        assert rows[0] == 0
+    def test_security_still_reported_alongside_breakfix(self, bf_client) -> None:
+        data = bf_client.get("/v1/check?v=0.3.0").get_json()
+        assert data["status"] == "security_update_available"
+        assert data["security"]["version"] == "0.3.1"
+        assert data["breakfix"]["version"] == "0.3.2"

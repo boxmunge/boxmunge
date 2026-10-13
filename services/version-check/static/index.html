@@ -62,12 +62,16 @@ boxmunge server-setup you@your-server.example.com --email you@example.com</code>
 
     <h2 id="privacy">Security updates &amp; privacy</h2>
 
-    <p>Boxmunge servers periodically check for security updates to ensure you're
-       protected against known vulnerabilities. This check sends your current
-       version number — nothing else — so the service can tell if a security
-       patch is available for your release.</p>
+    <p>Boxmunge servers periodically check for updates to ensure you're
+       protected against known vulnerabilities and critical bugs. This check
+       sends your current version number — nothing else — so the service can
+       tell if a security or break-fix release is available for your release.</p>
 
-    <p>No IP addresses, hostnames, or machine identifiers are stored.</p>
+    <p>Version checks store only a daily count per version. No IP addresses,
+       hostnames, or machine identifiers are stored for them. If an upgrade
+       fails, the server reports the versions and the failed stage; the
+       sender's IP address is kept for one hour to filter duplicate reports,
+       then discarded.</p>
 
     <p>The source code for this service is
        <a href="https://github.com/boxmunge/boxmunge/tree/main/services/version-check">open

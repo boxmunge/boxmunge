@@ -19,6 +19,7 @@ Include:
 - **Acknowledgement** within 72 hours
 - **Assessment and fix timeline** communicated within 1 week
 - **Security releases** tagged with `[security]` and auto-applied to deployed instances within 12 hours via `boxmunge auto-update`
+- **Break-fix releases** (critical non-security fixes) tagged with `[breakfix]` and auto-applied the same way, unless an operator has set `auto_update.breakfix: false`. A fix for a vulnerability always ships as a security release, never as a break-fix, so it reaches every box
 
 ## Scope
 
