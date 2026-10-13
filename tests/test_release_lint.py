@@ -193,3 +193,45 @@ class TestWorkflowWiring:
         verify = self._index(steps, "release-lint.py verify")
         publish = self._index(steps, "--draft=false")
         assert create < verify < publish
+
+
+class TestWorkflowPrivileges:
+    """F-11 / D-34: build without write or OIDC tokens; any signing failure
+    fails the workflow instead of publishing an unsigned release."""
+
+    @staticmethod
+    def _workflow() -> dict:
+        import yaml
+        return yaml.safe_load((REPO / ".github" / "workflows" / "release.yml").read_text())
+
+    def test_top_level_permissions_are_read_only(self):
+        assert self._workflow()["permissions"] == {"contents": "read"}
+
+    def test_job_that_runs_third_party_code_is_read_only(self):
+        jobs = self._workflow()["jobs"]
+        for name, job in jobs.items():
+            runs = " ".join(s.get("run") or "" for s in job["steps"])
+            if "pip install" in runs or "pytest" in runs:
+                assert job["permissions"] == {"contents": "read"}, name
+
+    def test_only_the_publish_job_holds_write_and_oidc(self):
+        jobs = self._workflow()["jobs"]
+        privileged = [n for n, j in jobs.items()
+                      if j.get("permissions", {}).get("id-token") == "write"
+                      or j.get("permissions", {}).get("contents") == "write"]
+        assert privileged == ["publish"]
+        assert jobs["publish"]["needs"] == "build"
+
+    def test_no_step_may_fail_softly(self):
+        for job in self._workflow()["jobs"].values():
+            for step in job["steps"]:
+                assert "continue-on-error" not in step, step.get("name")
+                assert "if" not in step, step.get("name")
+
+    def test_signing_precedes_release_and_all_files_required(self):
+        steps = self._workflow()["jobs"]["publish"]["steps"]
+        sign = next(i for i, s in enumerate(steps) if "cosign sign-blob" in (s.get("run") or ""))
+        create = next(i for i, s in enumerate(steps)
+                      if "action-gh-release" in (s.get("uses") or ""))
+        assert sign < create
+        assert steps[create]["with"]["fail_on_unmatched_files"] is True

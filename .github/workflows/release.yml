@@ -1,19 +1,42 @@
 name: Release
 
+# Two jobs with separate privileges:
+#
+# - build: read-only. Gates the tag on releases.json, runs the tests, builds
+#   the installer and bundle, and generates the SBOM. This is the job that
+#   installs and runs third-party packages, so it gets no write token and no
+#   OIDC token.
+# - publish: holds contents: write and id-token: write. Runs no third-party
+#   Python: it signs SHA256SUMS with cosign (keyless), drafts the release,
+#   verifies the draft's class markers, and publishes.
+#
+# Any failure fails the workflow. There is no unsigned fallback: the upgrade
+# shim refuses an unsigned release, so publishing one would only put an
+# uninstallable release in front of every box.
+#
+# Every `uses:` is pinned to a commit SHA and every pip install is
+# hash-pinned; tests/test_release_pinning.py enforces both.
+
 on:
   push:
     tags:
       - 'v*'
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release_class: ${{ steps.release_class.outputs.class }}
+      title: ${{ steps.release_class.outputs.title }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
@@ -59,13 +82,43 @@ jobs:
       - name: Generate SBOM
         run: bash scripts/generate-sbom.sh
 
+      - name: Stage release files
+        run: |
+          mkdir -p release
+          cp dist/boxmunge-install.sh dist/boxmunge-*.tar.gz dist/sbom.json release/
+          cp "$RUNNER_TEMP/release-preamble.md" release/
+
+      - name: Upload release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files
+          path: release/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      # Checked out only for scripts/release-lint.py (stdlib only). Nothing
+      # from PyPI is installed or run in this job.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Download release files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: dist/
+
       - name: Install cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
-        continue-on-error: true
-        id: cosign
 
       - name: Sign artifacts (cosign keyless)
-        if: steps.cosign.outcome == 'success'
         run: |
           # Compute checksums with bare filenames so consumers can verify
           # by running `sha256sum -c SHA256SUMS` from any directory.
@@ -84,16 +137,7 @@ jobs:
             --output-certificate dist/boxmunge-install.cert \
             dist/boxmunge-install.sh
 
-      - name: Generate checksums (unsigned — upgrade shim WILL refuse this release)
-        if: steps.cosign.outcome != 'success'
-        run: |
-          # The cosign installer step failed. We still emit SHA256SUMS so a
-          # human can audit the artifacts, but the upgrade shim hard-requires
-          # a valid cosign signature on SHA256SUMS and will refuse to install
-          # this release. To recover, re-run this workflow from a clean state.
-          (cd dist && sha256sum boxmunge-install.sh boxmunge-*.tar.gz > SHA256SUMS)
-
-      - name: Create GitHub Release
+      - name: Create draft GitHub Release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
         with:
           files: |
@@ -105,9 +149,9 @@ jobs:
             dist/SHA256SUMS.sig
             dist/SHA256SUMS.cert
             dist/sbom.json
-          fail_on_unmatched_files: false
-          name: ${{ steps.release_class.outputs.title }}
-          body_path: ${{ runner.temp }}/release-preamble.md
+          fail_on_unmatched_files: true
+          name: ${{ needs.build.outputs.title }}
+          body_path: dist/release-preamble.md
           generate_release_notes: true
           # Created as a draft: drafts are invisible to boxes, so nothing is
           # offered until the text has been verified below.
@@ -116,14 +160,14 @@ jobs:
       - name: Verify the draft classifies as releases.json says
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_CLASS: ${{ steps.release_class.outputs.class }}
+          RELEASE_CLASS: ${{ needs.build.outputs.release_class }}
         run: |
           # Generated notes quote PR titles; a PR titled "[security] ..."
           # would otherwise turn a feature release into an auto-applied one
           # for boxes that fall back to the GitHub API.
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --json name,body > "$RUNNER_TEMP/release.json"
-          python scripts/release-lint.py verify \
+          python3 scripts/release-lint.py verify \
             --release-json "$RUNNER_TEMP/release.json" --class "$RELEASE_CLASS"
 
       - name: Publish the release
