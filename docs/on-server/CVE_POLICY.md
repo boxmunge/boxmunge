@@ -19,7 +19,7 @@ workflow, and recovery.
   regardless of NVD severity — the distro already judged it.
 - **KEV is an override.** A finding on CISA's Known Exploited Vulnerabilities
   catalog quarantines immediately under every posture. The AV filter, distro
-  status, and severity threshold do not apply.
+  status, severity threshold, and suppressions do not apply.
 - **Runtime relevance gate (balanced/strict).** A finding against an OS
   package that belongs to a language runtime (`perl`, `ruby`, `php`,
   `python`, `node`, `tcl`, `lua` — the ecosystem names accepted by
@@ -100,11 +100,13 @@ on hardened web surfaces are not worth taking services down for.
 For every finding, `evaluate_finding` runs these gates in order:
 
 1. **Fix available** → `IGNORED_FIXED`. Deferred to the auto-update path.
-2. **Active suppression** → `SUPPRESSED`. Skipped until suppression expiry.
-3. **On CISA KEV** → `QUARANTINE`. KEV is an override: active exploitation
-   bypasses the AV filter, distro-status routing, and the severity threshold.
-   Applies to every posture. (A KEV finding can still be suppressed via step 2
-   if the operator has reviewed it.)
+2. **On CISA KEV** → `QUARANTINE`. KEV is an override: active exploitation
+   bypasses the AV filter, distro-status routing, the severity threshold,
+   and any suppression. Applies to every posture. A suppression never hides
+   a KEV-listed CVE: a CVE reviewed and suppressed before CISA listed it is
+   re-activated the day it appears on KEV, and the project is quarantined
+   with a priority-1 alert that names the overridden suppression.
+3. **Active suppression** → `SUPPRESSED`. Skipped until suppression expiry.
 4. **Unknown severity** → `INFORMATIONAL`. The engine cannot reason about a
    severity it does not recognize; reporting only.
 5. **Paranoid short-circuit** — under `paranoid`, skip steps 6–10 and compare
@@ -149,8 +151,8 @@ For every finding, `evaluate_finding` runs these gates in order:
 | Condition | Outcome |
 |---|---|
 | Fix available upstream | `IGNORED_FIXED` — auto-update path |
+| CVE is on CISA KEV | `QUARANTINE` — override, beats suppressions; no further checks |
 | Active suppression matches the CVE | `SUPPRESSED` — skip until expiry |
-| CVE is on CISA KEV | `QUARANTINE` — override; no further checks |
 | Severity unknown | `INFORMATIONAL` |
 | Posture is `paranoid` | NVD threshold gate (step 5 above) |
 | Posture is `relaxed` (non-KEV finding) | `INFORMATIONAL` — relaxed is KEV-only |
@@ -561,6 +563,10 @@ Rules:
   This is deliberate — silent overwrites would erase audit-trail entries.
 - A suppression is active while `today < until`. So `until: 2026-08-01`
   applies through 2026-07-31 and expires on 2026-08-01.
+- A suppression never applies to a CVE on the CISA KEV catalog. `suppress`
+  refuses a KEV-listed CVE, and `suppress --current` skips KEV-listed CVEs
+  with a `NOTE:`. An existing suppression whose CVE is later added to KEV
+  stops applying on the next scan (see the decision order above).
 
 ### Audit trail (v0.7.0)
 

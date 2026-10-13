@@ -20,6 +20,7 @@ from boxmunge.cve.scanner import (
     Severity,
     VulnStatus,
 )
+from boxmunge.docker import DockerError
 from boxmunge.paths import BoxPaths
 
 
@@ -87,6 +88,30 @@ def make_box(tmp_path, projects=("demo",), **project_kwargs) -> BoxPaths:
     return paths
 
 
+class Pushover:
+    """Capture every Pushover send made through the real alerting path."""
+
+    def __init__(self, monkeypatch, paths: BoxPaths) -> None:
+        self.sent: list[tuple[str, str, int]] = []
+        paths.config_file.write_text(yaml.safe_dump({
+            "hostname": "box.example.com", "admin_email": "ops@example.com",
+            "pushover": {"user_key": "u", "app_token": "t"},
+        }))
+        monkeypatch.setattr(
+            "boxmunge.cve.alerting.send_notification", self._send,
+        )
+
+    def _send(self, user_key, app_token, title, body, priority=0) -> bool:
+        self.sent.append((title, body, priority))
+        return True
+
+    def titles(self) -> list[str]:
+        return [t for t, _, _ in self.sent]
+
+    def clear(self) -> None:
+        self.sent.clear()
+
+
 def seed_quarantine(paths: BoxPaths, name: str = "demo", **extra) -> None:
     paths.project_quarantine_state(name).write_text(json.dumps({
         "quarantined_at": "2026-10-01T03:00:00+00:00", "cve_id": "CVE-2026-0001",
@@ -94,3 +119,24 @@ def seed_quarantine(paths: BoxPaths, name: str = "demo", **extra) -> None:
         "explanation": "test", "image_ref": f"{name}-web:1",
         "action_complete": True, **extra,
     }))
+
+
+class Docker:
+    """Records the Docker primitives the quarantine action calls.
+
+    ``fail`` maps a primitive name to how many upcoming calls should raise.
+    """
+
+    def __init__(self, monkeypatch) -> None:
+        self.calls: list[str] = []
+        self.fail: dict[str, int] = {}
+        for name in ("caddy_reload", "compose_stop"):
+            monkeypatch.setattr(f"boxmunge.cve.quarantine.{name}", self._recorder(name))
+
+    def _recorder(self, name: str):
+        def call(*args, **kwargs):
+            self.calls.append(name)
+            if self.fail.get(name, 0) > 0:
+                self.fail[name] -= 1
+                raise DockerError(f"{name} timed out")
+        return call

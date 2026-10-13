@@ -49,7 +49,8 @@ def _f(
 # (row id, finding, evaluate kwargs, {posture: documented disposition})
 _ROWS: list[tuple[str, Finding, dict, dict[Posture, Disposition]]] = [
     ("fix-available+kev", _f(fix="2"), {"kev": True}, {R: X, B: X, S: X, P: X}),
-    ("suppressed+kev", _f(), {"kev": True, "sup": _SUP}, {R: SU, B: SU, S: SU, P: SU}),
+    ("suppressed", _f(), {"sup": _SUP}, {R: SU, B: SU, S: SU, P: SU}),
+    ("suppressed+kev", _f(), {"kev": True, "sup": _SUP}, {R: Q, B: Q, S: Q, P: Q}),
     ("kev-low-avl-will-not-fix",
      _f(sev=Severity.LOW, av=AV.LOCAL, status=VS.WILL_NOT_FIX), {"kev": True},
      {R: Q, B: Q, S: Q, P: Q}),

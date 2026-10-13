@@ -51,14 +51,22 @@ For every finding marked `QUARANTINE` or `STILL_RUNNING_AT_RISK`:
 If `disposition == IGNORED_FIXED`, the auto-update path picks it up on
 next image rebuild. No action. Move on.
 
-### 2. Is it already suppressed?
+### 2. Is it on CISA KEV?
+
+If the explanation says the CVE is on the CISA Known Exploited
+Vulnerabilities catalog, it is being exploited in the wild. Suppressions do
+not apply to it — `security suppress` refuses it, and an older suppression
+was overridden when CISA listed it. The only ways forward are a fixed
+image or accepting the quarantine. Escalate if no fix is available.
+
+### 3. Is it already suppressed?
 
 If `disposition == SUPPRESSED` but `until` is approaching, decide whether to
 extend. To extend: `security unsuppress` then `security suppress` with a new
 date and a freshly-reviewed reason. Don't blanket-extend without re-reading
 the CVE — if anything changed upstream, the original reasoning may be stale.
 
-### 3. Is it actually exploitable in our deployed config?
+### 4. Is it actually exploitable in our deployed config?
 
 **This is the only judgment call that matters.** The scanner doesn't know
 context. You do (or you can find out).
@@ -90,7 +98,7 @@ Cross-check with what you know about the project:
 | Network attack vector + project not internet-exposed | Often non-exploitable; suppress with reason citing the closed surface. |
 | Local attack vector (AV:L) | Already auto-informational under non-paranoid posture. Just keep an eye on it; no action needed. |
 | Critical RCE on a runtime-invoked dependency | Treat as exploitable. |
-| You can't tell | **Escalate.** See section 4. |
+| You can't tell | **Escalate.** See section 5. |
 
 What you can interrogate to inform the decision:
 
@@ -105,7 +113,7 @@ What you cannot interrogate (no shell access): the package source, the
 running process tree, network connections. If those would change your
 decision, escalate.
 
-### 4. When to escalate
+### 5. When to escalate
 
 Stop and write the operator a clear message if any of these hold:
 

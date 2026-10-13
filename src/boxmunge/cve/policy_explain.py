@@ -20,13 +20,23 @@ def explain_relaxed_kev_only() -> str:
     )
 
 
-def explain_kev_quarantine(cve_id: str) -> str:
-    """Explanation for a KEV-override quarantine (actively exploited)."""
-    return (
+def explain_kev_quarantine(cve_id: str, overridden_until: str | None = None) -> str:
+    """Explanation for a KEV-override quarantine (actively exploited).
+
+    ``overridden_until`` is the expiry of a suppression the KEV listing
+    overrode: suppressions never hide a KEV-listed CVE (audit B-07).
+    """
+    text = (
         f"{cve_id} is on the CISA Known Exploited Vulnerabilities (KEV) "
         "catalog — actively exploited in the wild; quarantined regardless "
         "of posture, distro status, attack vector, or severity threshold."
     )
+    if overridden_until is not None:
+        text += (
+            f" The suppression for it (until {overridden_until}) does not "
+            "apply: a suppression never hides a KEV-listed CVE."
+        )
+    return text
 
 
 def explain_distro_deprioritized(

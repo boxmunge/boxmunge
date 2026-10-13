@@ -12,29 +12,13 @@ from boxmunge.commands import security_scan_core, security_scan_inputs
 from boxmunge.commands.security_scan_core import scan_one_project
 from boxmunge.cve import quarantine as q
 from boxmunge.cve.scanner import ScannerError
-from boxmunge.docker import DockerError
-from tests.test_commands.cve_helpers import CRIT, make_box, scan_result, seed_quarantine
-
-
-class Docker:
-    """Records the Docker primitives the quarantine action calls.
-
-    ``fail`` maps a primitive name to how many upcoming calls should raise.
-    """
-
-    def __init__(self, monkeypatch) -> None:
-        self.calls: list[str] = []
-        self.fail: dict[str, int] = {}
-        for name in ("caddy_reload", "compose_stop"):
-            monkeypatch.setattr(q, name, self._recorder(name))
-
-    def _recorder(self, name: str):
-        def call(*args, **kwargs):
-            self.calls.append(name)
-            if self.fail.get(name, 0) > 0:
-                self.fail[name] -= 1
-                raise DockerError(f"{name} timed out")
-        return call
+from tests.test_commands.cve_helpers import (
+    CRIT,
+    Docker,
+    make_box,
+    scan_result,
+    seed_quarantine,
+)
 
 
 @pytest.fixture

@@ -870,9 +870,8 @@ def test_suppress_current_host_no_quarantine_findings_rejected(
 def test_unsuppress_host_removes_from_host_file(
     monkeypatch, tmp_path, capsys,
 ) -> None:
-    from boxmunge.commands.security_suppress import (
-        cmd_security_suppress, cmd_security_unsuppress,
-    )
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    from boxmunge.commands.security_unsuppress import cmd_security_unsuppress
     monkeypatch.setenv("USER", "jon")
     paths = _suppress_paths(tmp_path)
     paths.config.mkdir(parents=True, exist_ok=True)
@@ -896,7 +895,7 @@ def test_unsuppress_host_removes_from_host_file(
 def test_unsuppress_host_and_project_mutually_exclusive(
     tmp_path, capsys,
 ) -> None:
-    from boxmunge.commands.security_suppress import cmd_security_unsuppress
+    from boxmunge.commands.security_unsuppress import cmd_security_unsuppress
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_unsuppress(
         ["CVE-2026-1234", "--host", "--project", "demo"], paths,
@@ -928,7 +927,7 @@ def test_load_suppressions_stamps_scope_on_entries(tmp_path) -> None:
 
 
 def test_unsuppress_missing_project_flag_exits_2(tmp_path, capsys) -> None:
-    from boxmunge.commands.security_suppress import cmd_security_unsuppress
+    from boxmunge.commands.security_unsuppress import cmd_security_unsuppress
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_unsuppress(["CVE-2026-1234"], paths)
     assert rc == 2
@@ -937,7 +936,7 @@ def test_unsuppress_missing_project_flag_exits_2(tmp_path, capsys) -> None:
 
 
 def test_unsuppress_no_existing_entry_exits_1(tmp_path, capsys) -> None:
-    from boxmunge.commands.security_suppress import cmd_security_unsuppress
+    from boxmunge.commands.security_unsuppress import cmd_security_unsuppress
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_unsuppress(
         ["CVE-2026-1234", "--project", "demo"], paths,
@@ -948,9 +947,8 @@ def test_unsuppress_no_existing_entry_exits_1(tmp_path, capsys) -> None:
 
 
 def test_unsuppress_removes_entry(monkeypatch, tmp_path, capsys) -> None:
-    from boxmunge.commands.security_suppress import (
-        cmd_security_suppress, cmd_security_unsuppress,
-    )
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    from boxmunge.commands.security_unsuppress import cmd_security_unsuppress
     monkeypatch.setenv("USER", "jon")
     paths = _suppress_paths(tmp_path)
     rc1 = cmd_security_suppress(
@@ -1034,9 +1032,8 @@ def test_suppress_emits_log_operation(monkeypatch, tmp_path, capsys) -> None:
 
 def test_unsuppress_emits_log_operation(monkeypatch, tmp_path, capsys) -> None:
     """Audit D-1: unsuppress emits a structured log_operation."""
-    from boxmunge.commands.security_suppress import (
-        cmd_security_suppress, cmd_security_unsuppress,
-    )
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    from boxmunge.commands.security_unsuppress import cmd_security_unsuppress
     monkeypatch.setenv("USER", "jon")
     paths = _suppress_paths(tmp_path)
     paths.logs.mkdir(parents=True, exist_ok=True)
@@ -1077,9 +1074,8 @@ def test_resuppress_within_window_flags_silent_extension(
 ) -> None:
     """Audit D-2: unsuppress + suppress within 7 days warns AND records
     previously_suppressed=true in the audit log detail."""
-    from boxmunge.commands.security_suppress import (
-        cmd_security_suppress, cmd_security_unsuppress,
-    )
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    from boxmunge.commands.security_unsuppress import cmd_security_unsuppress
     monkeypatch.setenv("USER", "jon")
     paths = _suppress_paths(tmp_path)
     paths.logs.mkdir(parents=True, exist_ok=True)
@@ -1135,9 +1131,8 @@ def test_resuppress_after_window_treated_as_fresh(
 ) -> None:
     """Audit D-2: re-suppress beyond the 7-day window is treated as a fresh
     decision — no NOTE, previously_suppressed=false."""
-    from boxmunge.commands.security_suppress import (
-        cmd_security_suppress, cmd_security_unsuppress,
-    )
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    from boxmunge.commands.security_unsuppress import cmd_security_unsuppress
     from boxmunge.cve.suppressions import history_path_for
     monkeypatch.setenv("USER", "jon")
     paths = _suppress_paths(tmp_path)

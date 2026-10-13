@@ -45,6 +45,7 @@ def _serialize_disposition(d: Any) -> dict[str, Any]:
         "status": f.status.value,
         "pkg_class": f.pkg_class.value,
         "pkg_type": f.pkg_type,
+        "kev_listed": d.kev_listed,
     }
 
 
@@ -232,6 +233,7 @@ def decisions_from_scan_state(
                     disposition=disposition,
                     suppression=None,
                     explanation=raw.get("explanation", "") or "",
+                    kev_listed=raw.get("kev_listed") is True,
                 ),
             )
             if disposition == Disposition.QUARANTINE:

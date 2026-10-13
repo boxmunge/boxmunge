@@ -18,9 +18,11 @@ The trust ladder (non-paranoid postures trust the distro's own triage):
                filter, NVD severity (the pre-trust-ladder behavior). KEV can
                still escalate.
 
-KEV is an override applied first (after fix/suppression): an actively
-exploited CVE quarantines regardless of posture, distro status, attack
-vector, or threshold.
+KEV is an override applied right after the fix check and BEFORE
+suppressions: an actively exploited CVE quarantines regardless of posture,
+distro status, attack vector, threshold, or an operator suppression (a
+suppression reviewed before the CVE was known to be exploited must not
+keep hiding it — audit B-07).
 
 Below paranoid, a finding is otherwise routed to INFORMATIONAL when the
 distro deprioritized it (status will_not_fix / fix_deferred / not_affected /
@@ -172,6 +174,8 @@ class FindingDisposition:
     disposition: Disposition
     suppression: Suppression | None
     explanation: str
+    # The CVE was on a fresh CISA KEV catalog when this finding was judged.
+    kev_listed: bool = False
 
 
 @dataclass(frozen=True)
@@ -300,7 +304,7 @@ def evaluate_finding(
     """Decide the disposition for a single finding (the trust ladder).
 
     Order of checks (see the module docstring for the rationale of each):
-    fix → IGNORED_FIXED; suppression → SUPPRESSED; KEV override → QUARANTINE;
+    fix → IGNORED_FIXED; KEV override → QUARANTINE; suppression → SUPPRESSED;
     UNKNOWN severity → INFORMATIONAL; paranoid → NVD threshold; relaxed →
     INFORMATIONAL (KEV-only, handled above); else (balanced/strict)
     irrelevant-runtime / distro-deprioritized / no-distro-verdict /
@@ -325,8 +329,26 @@ def evaluate_finding(
             ),
         )
 
-    # 2. Active suppression.
     suppression = find_active_suppression(suppressions, finding.cve_id, today=today)
+
+    # 2. KEV override — actively exploited, quarantine regardless of posture,
+    # distro status, attack vector, threshold, or suppression (B-07).
+    if kev_lookup(finding.cve_id):
+        return FindingDisposition(
+            finding=finding,
+            base_severity=base,
+            hardening_penalty=hardening_penalty,
+            effective_severity=effective,
+            disposition=Disposition.QUARANTINE,
+            suppression=None,
+            explanation=explain_kev_quarantine(
+                finding.cve_id,
+                suppression.until.isoformat() if suppression else None,
+            ),
+            kev_listed=True,
+        )
+
+    # 3. Active suppression.
     if suppression is not None:
         return FindingDisposition(
             finding=finding,
@@ -339,19 +361,6 @@ def evaluate_finding(
                 f"Suppressed by operator (until {suppression.until.isoformat()}, "
                 f"reason: {suppression.reason})."
             ),
-        )
-
-    # 3. KEV override — actively exploited, quarantine regardless of posture,
-    # distro status, attack vector, or threshold.
-    if kev_lookup(finding.cve_id):
-        return FindingDisposition(
-            finding=finding,
-            base_severity=base,
-            hardening_penalty=hardening_penalty,
-            effective_severity=effective,
-            disposition=Disposition.QUARANTINE,
-            suppression=None,
-            explanation=explain_kev_quarantine(finding.cve_id),
         )
 
     # 4. Unknown severity — report only.
