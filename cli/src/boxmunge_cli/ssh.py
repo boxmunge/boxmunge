@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import sys
 from typing import Any
 
-from boxmunge_cli.exitcodes import CONNECTION, SSH_CONNECTION_FAILED
+from boxmunge_cli.exitcodes import CONNECTION, FAILURE, SSH_CONNECTION_FAILED
 
 
 def build_ssh_cmd(config: dict[str, Any], command: str, *args: str,
@@ -40,9 +41,14 @@ def _scp_host(server: str) -> str:
 
 
 def build_scp_cmd(config: dict[str, Any], local_path: str) -> list[str]:
-    """Build an SCP upload command list."""
+    """Build an SCP upload command list.
+
+    -O selects the legacy scp protocol. The deploy user has no SFTP
+    subsystem, and since OpenSSH 9 plain scp uses SFTP, so uploads need -O
+    (available since OpenSSH 8.7).
+    """
     return [
-        "scp",
+        "scp", "-O",
         "-P", str(config["port"]),
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "ConnectTimeout=15",
@@ -62,7 +68,18 @@ def run_ssh(config: dict[str, Any], command: str, *args: str) -> int:
     return _exit_code(result.returncode)
 
 
+# How OpenSSH older than 8.7 rejects -O.
+_NO_LEGACY_FLAG = ("unknown option -- O", "illegal option -- O")
+
+
 def run_scp(config: dict[str, Any], local_path: str) -> int:
     """Upload a file via SCP. Returns the exit code."""
-    result = subprocess.run(build_scp_cmd(config, local_path), check=False)
+    result = subprocess.run(build_scp_cmd(config, local_path), check=False,
+                            stderr=subprocess.PIPE, text=True)
+    sys.stderr.write(result.stderr)
+    if result.returncode != 0 and any(m in result.stderr for m in _NO_LEGACY_FLAG):
+        print("ERROR: this scp does not support -O (the legacy scp protocol), which "
+              "uploads to the boxmunge deploy user require. Upgrade OpenSSH to 8.7 or "
+              "newer.", file=sys.stderr)
+        return FAILURE
     return _exit_code(result.returncode)

@@ -10,7 +10,7 @@ boxmunge has two parts:
 
 ## Install the client
 
-Python 3.10 or newer:
+Python 3.10 or newer, and OpenSSH 8.7 or newer (uploads use `scp -O`):
 
 ```bash
 pipx install boxmunge        # recommended: an isolated install on your PATH

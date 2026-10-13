@@ -57,7 +57,8 @@ def test_bundle_without_config_hints_with_placeholders(tmp_path: Path, capsys) -
     (root / ".boxmunge").unlink()
     assert run_cli(["bundle", str(root), "--output", str(tmp_path)]) == 0
     out = capsys.readouterr().out
-    assert "deploy@<server>:" in out and "prod-deploy myapp" in out
+    assert "scp -O -P 922" in out and "deploy@<server>:" in out
+    assert "prod-deploy myapp" in out
 
 
 @pytest.mark.parametrize("port, flag", [(922, ""), (2222, " --port 2222")])

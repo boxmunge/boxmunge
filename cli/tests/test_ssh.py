@@ -39,7 +39,7 @@ class TestBuildScpCmd:
     def test_basic_upload(self) -> None:
         config = {"server": "box.example.com", "port": 922, "user": "deploy", "project": "myapp"}
         cmd = build_scp_cmd(config, "/tmp/myapp-2024.tar.gz")
-        assert cmd == ["scp", "-P", "922", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
+        assert cmd == ["scp", "-O", "-P", "922", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
                        "/tmp/myapp-2024.tar.gz", "deploy@box.example.com:"]
 
 
@@ -70,3 +70,15 @@ class TestRunScp:
     def test_uploads_file(self, fake_remote) -> None:
         assert run_scp(CONFIG, "/tmp/bundle.tar.gz") == 0
         assert fake_remote.calls("scp") == [build_scp_cmd(CONFIG, "/tmp/bundle.tar.gz")[1:]]
+
+
+class TestLegacyScpProtocol:
+    def test_upload_uses_the_legacy_protocol(self) -> None:
+        # The deploy user has no SFTP subsystem; OpenSSH 9's scp defaults to SFTP.
+        assert build_scp_cmd(CONFIG, "/tmp/b.tar.gz")[:2] == ["scp", "-O"]
+
+    def test_old_scp_without_O_fails_clearly(self, fake_remote, capsys) -> None:
+        fake_remote.respond("scp", "-O", stderr="scp: unknown option -- O\nusage: scp ...\n",
+                            rc=1)
+        assert run_scp(CONFIG, "/tmp/b.tar.gz") == 1
+        assert "OpenSSH to 8.7" in capsys.readouterr().err

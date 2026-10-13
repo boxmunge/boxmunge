@@ -108,6 +108,11 @@ Bundling stops with an error for `secrets.env` (set secrets with
 absolute or leave the project, and special files, unless `.boxmungeignore`
 leaves them out. `boxmunge bundle --list` shows the plan without writing.
 
+`stage` and `prod-deploy` upload with `scp -O` (the legacy scp protocol): the
+deploy user has no SFTP subsystem, and OpenSSH 9's scp uses SFTP by default.
+This needs OpenSSH 8.7 or newer on your machine. To upload by hand, use
+`scp -O -P 922 myapp-<timestamp>.tar.gz deploy@<server>:`.
+
 The client checks only the manifest's shape. The server validates the full
 manifest on `stage` and `prod-deploy` before it changes anything; add
 `--dry-run` to run that check without deploying.

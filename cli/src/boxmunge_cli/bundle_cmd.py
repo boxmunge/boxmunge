@@ -217,7 +217,7 @@ def _print_upload_hint(project_dir: Path, project_name: str, bundle_path: Path) 
         print("  Deploy with: boxmunge stage (then boxmunge promote), or boxmunge prod-deploy")
         return
     print("  No .boxmunge here ('boxmunge init' creates one). To deploy by hand:")
-    print(f"    scp -P 922 {bundle_path} deploy@<server>:")
+    print(f"    scp -O -P 922 {bundle_path} deploy@<server>:")
     print(f"    ssh -p 922 deploy@<server> prod-deploy {project_name}")
 
 
