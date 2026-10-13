@@ -718,6 +718,10 @@ suppressions file, or a quarantine action that could not complete.
 - Every run with an incomplete or failed project sends **one** priority-1
   alert, `[boxmunge] CVE scan incomplete — N projects not fully scanned`,
   listing each project and image. Single-project scans alert too.
+- `boxmunge health` has a `cve-scan` check that warns when any project
+  has not been scanned in 36 hours, has never been scanned, or whose last
+  scan was incomplete (each listed), so a project the nightly run keeps
+  missing shows up even if an alert was lost.
 - `security scan` exits `1` when any project failed or was incomplete,
   otherwise `2` when any project is quarantined or at-risk-running, and
   `0` when everything is clean.

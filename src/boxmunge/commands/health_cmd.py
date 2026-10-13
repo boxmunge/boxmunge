@@ -365,8 +365,12 @@ def run_health(paths: BoxPaths, *, as_json: bool = False) -> int:
     from boxmunge.health_checks.container_updates import check_container_updates
     report.checks.append(check_container_updates(paths))
 
-    from boxmunge.health_checks.security import check_security_profiles
+    from boxmunge.health_checks.security import (
+        check_cve_scan_freshness,
+        check_security_profiles,
+    )
     report.checks.append(check_security_profiles(paths))
+    report.checks.append(check_cve_scan_freshness(paths))
 
     # Host hardening checks
     from boxmunge.health_checks.hardening import (

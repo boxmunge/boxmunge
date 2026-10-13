@@ -12,6 +12,10 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
+from boxmunge.commands.security_scan_relevance import (
+    gate_exempted_packages,
+    log_relevance_gaps,
+)
 from boxmunge.commands.security_scan_inputs import (
     ProjectMeta,
     ScanTarget,
@@ -31,15 +35,12 @@ from boxmunge.cve.alerting import emit_scan_alerts
 from boxmunge.cve.grace import GraceError, init_grace_if_missing
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.policy import (
-    Disposition,
     FindingDisposition,
     Posture,
     ProjectDecision,
-    evaluate_finding,
     evaluate_project,
 )
 from boxmunge.cve.relevance import (
-    ecosystem_for_package,
     effective_runtimes,
     unrecognised_lang_types,
 )
@@ -51,7 +52,6 @@ from boxmunge.cve.scan_state import (
 from boxmunge.cve.suppressions import Suppression
 from boxmunge.cve.scanner import (
     _DEFAULT_TIMEOUT,
-    PkgClass,
     ScanResult,
     ScannerError,
     TrivyNotInstalledError,
@@ -107,13 +107,20 @@ class ProjectScan:
 
     def incomplete_reasons(self) -> list[str]:
         """One human line per unscanned image or service."""
-        out = [f"image {ref}: scan failed" for ref in self.failed_images]
-        out += [f"image {ref}: skipped (scan budget exhausted)"
-                for ref in self.skipped_images]
-        out += [f"service {svc!r}: no image could be identified (no container, "
-                f"no built image, and no image: in compose.yml)"
-                for svc in self.unidentified_services]
-        return out
+        return _unscanned(self.failed_images, self.skipped_images,
+                          self.unidentified_services)
+
+
+def _unscanned(
+    failed=(), skipped=(), unidentified=(),
+) -> list[str]:
+    """One human line per image or service a scan did not cover."""
+    out = [f"image {ref}: scan failed" for ref in failed]
+    out += [f"image {ref}: skipped (scan budget exhausted)" for ref in skipped]
+    out += [f"service {svc!r}: no image could be identified (no container, "
+            f"no built image, and no image: in compose.yml)"
+            for svc in unidentified]
+    return out
 
 
 def _today() -> date:
@@ -297,7 +304,10 @@ def _scan_one_project_locked(
         # Audit-only (resume re-scan, audit A-3) leaves the prior alone.
         if not audit_only:
             outcome = _enforce(paths, project, meta, None, in_grace=in_grace)
-            write_scan_state(scan_state_path, decisions=())
+            write_scan_state(
+                scan_state_path, decisions=(),
+                unscanned=tuple(_unscanned(unidentified=unidentified)),
+            )
             raise_enforcement_error(outcome.error)
         return ProjectScan(
             project=project, posture=meta.posture_str, dangerously=dangerously,
@@ -337,12 +347,12 @@ def _scan_one_project_locked(
         if declared is None and not runtimes and posture in (
             Posture.BALANCED, Posture.STRICT,
         ):
-            empty_runtime_exempted |= _gate_exempted_packages(
+            empty_runtime_exempted |= gate_exempted_packages(
                 decision, posture=posture, dangerously=dangerously,
                 suppressions=supps, today=today, kev_lookup=kev_lookup,
             )
 
-    _log_relevance_gaps(paths, project, dropped_lang_types, empty_runtime_exempted)
+    log_relevance_gaps(paths, project, dropped_lang_types, empty_runtime_exempted)
 
     headline = headline_of(decisions)
     # Audit-only callers (resume re-scan, audit A-3) are the lift flow
@@ -361,7 +371,10 @@ def _scan_one_project_locked(
         )
 
     if not audit_only:
-        write_scan_state(scan_state_path, decisions=tuple(decisions))
+        write_scan_state(
+            scan_state_path, decisions=tuple(decisions),
+            unscanned=tuple(_unscanned(failed, skipped, unidentified)),
+        )
 
     # Transition alerts are best-effort; during grace the operator gets the
     # single fleet-level heads-up instead, and audit-only callers (resume)
@@ -398,77 +411,6 @@ def _enforce(
         paths, project, hosts=meta.hosts, compose_files=meta.compose_files,
         headline=headline, in_grace=in_grace,
     )
-
-
-def _gate_exempted_packages(
-    decision: ProjectDecision, *, posture: Posture, dangerously: bool,
-    suppressions: tuple, today: date, kev_lookup,
-) -> set[str]:
-    """OS runtime packages the relevance gate de-escalated with an EMPTY
-    inferred runtime set.
-
-    An empty inferred set is legitimate for a static site, but it's
-    indistinguishable from "the image installs its runtime without a
-    Trivy-visible lang-pkgs manifest" (apt-only Python, conda, PHP without
-    composer.lock), in which case the gate exempts the project's OWN
-    runtime. Only a disposition that actually DIFFERS with the gate off
-    (runtimes=None) proves the gate was the cause: steps 8-11 also yield
-    INFORMATIONAL. evaluate_finding is pure, so re-running it is safe.
-    """
-    out: set[str] = set()
-    for disp in decision.findings:
-        f = disp.finding
-        if (
-            disp.disposition != Disposition.INFORMATIONAL
-            or f.pkg_class is not PkgClass.OS
-            or ecosystem_for_package(f.package) is None
-        ):
-            continue
-        but_for = evaluate_finding(
-            f,
-            posture=posture,
-            hardening_penalty=disp.hardening_penalty,
-            dangerously_disable_quarantine=dangerously,
-            suppressions=suppressions,
-            today=today,
-            kev_lookup=kev_lookup,
-            runtimes=None,
-        )
-        if but_for.disposition != disp.disposition:
-            out.add(f.package)
-    return out
-
-
-def _log_relevance_gaps(
-    paths: BoxPaths, project: str,
-    dropped_lang_types: set[str], empty_runtime_exempted: set[str],
-) -> None:
-    """Log the relevance-gate visibility warnings, once per project scan."""
-    if dropped_lang_types:
-        log_warning(
-            "cve-scan",
-            f"project {project}: unrecognised Trivy lang-pkgs type(s) "
-            f"{sorted(dropped_lang_types)} were ignored during runtime "
-            f"inference (they contribute no ecosystem); this can shrink the "
-            f"inferred runtime set and make more findings look foreign — "
-            f"extend relevance._TRIVY_TYPE_TO_ECOSYSTEM or declare "
-            f"security.runtimes to compensate",
-            paths, project=project,
-            detail={"lang_types": sorted(dropped_lang_types)},
-        )
-    if empty_runtime_exempted:
-        log_warning(
-            "cve-scan",
-            f"project {project}: relevance gate de-escalated OS package(s) "
-            f"{sorted(empty_runtime_exempted)} because no runtime was "
-            f"declared and none was inferred from a Trivy lang-pkgs "
-            f"manifest — if this image installs its runtime without one "
-            f"(apt-installed python3, conda, PHP without composer.lock), "
-            f"the gate is exempting the project's OWN runtime; declare "
-            f"security.runtimes to fix",
-            paths, project=project,
-            detail={"packages": sorted(empty_runtime_exempted)},
-        )
 
 
 def _emit_transition_alerts(

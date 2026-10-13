@@ -62,17 +62,20 @@ def write_scan_state(
     *,
     decisions: tuple[ProjectDecision, ...],
     scanned_at: datetime | None = None,
+    unscanned: tuple[str, ...] = (),
 ) -> None:
     """Persist the result of a project scan.
 
     `decisions` is one ProjectDecision per scanned image (most projects have
     one image, multi-service projects can have several). `scanned_at`
-    defaults to "now" when omitted.
+    defaults to "now" when omitted. `unscanned` names each image or service
+    the scan did not cover, for the scan-freshness health check.
     """
     when = scanned_at or datetime.now(timezone.utc)
     data: dict[str, Any] = {
         "scanned_at": when.isoformat(),
         "decisions": [_serialize_decision(d) for d in decisions],
+        "unscanned": list(unscanned),
     }
     atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
