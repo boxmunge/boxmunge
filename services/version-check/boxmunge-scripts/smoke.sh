@@ -14,7 +14,7 @@ try:
 except Exception as e:
     print(f'FAIL: /v1/check endpoint unreachable: {e}', file=sys.stderr)
     sys.exit(1)
-for k in ('status', 'security', 'latest'):
+for k in ('status', 'security', 'breakfix', 'latest'):
     if k not in data:
         print(f'FAIL: /v1/check response missing {k} field', file=sys.stderr)
         sys.exit(1)

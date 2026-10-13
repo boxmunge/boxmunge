@@ -15,9 +15,9 @@ def app(tmp_path):
     releases_file = tmp_path / "releases.json"
     releases_file.write_text(json.dumps({
         "releases": [
-            {"version": "0.2.1", "security": True,
+            {"version": "0.2.1", "class": "security",
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.1"},
-            {"version": "0.2.0", "security": False,
+            {"version": "0.2.0", "class": "feature",
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.0"},
         ]
     }))
@@ -125,8 +125,8 @@ class TestCircuitBreaker:
         resp = client.get("/v1/check?v=0.2.0")
         data = resp.get_json()
         assert data["security"] is None
-        assert data.get("held") is not None
-        assert data["held"]["version"] == "0.2.1"
+        assert data["breakfix"] is None
+        assert data["held"] == [{"version": "0.2.1", "reason": "circuit_breaker"}]
 
     def test_reset_re_enables_version(self, client, app):
         app.config["CB_SECRET"] = "test-secret"
@@ -169,4 +169,40 @@ class TestAutoTrip:
             resp = client.get("/v1/check?v=0.2.0")
             data = resp.get_json()
         assert data["security"] is None
-        assert data["held"]["version"] == "0.2.1"
+        assert data["held"] == [{"version": "0.2.1", "reason": "circuit_breaker"}]
+
+
+class TestCircuitBreakerBreakfix:
+    @pytest.fixture
+    def bf_app(self, tmp_path):
+        releases_file = tmp_path / "releases.json"
+        releases_file.write_text(json.dumps({"releases": [
+            {"version": v, "class": c,
+             "url": f"https://github.com/boxmunge/boxmunge/releases/tag/v{v}"}
+            for v, c in [("0.2.2", "breakfix"), ("0.2.1", "security"), ("0.2.0", "feature")]
+        ]}))
+        with patch("app.RELEASES_PATH", releases_file), \
+             patch("app.DB_PATH", tmp_path / "checks.db"):
+            from app import create_app
+            application = create_app()
+            application.config["TESTING"] = True
+            application.config["CB_SECRET"] = "s"
+            yield application
+
+    def test_tripped_breakfix_is_held(self, bf_app):
+        client = bf_app.test_client()
+        client.post("/v1/circuit-breaker/trip?version=0.2.2",
+                    headers={"Authorization": "Bearer s"})
+        data = client.get("/v1/check?v=0.2.1").get_json()
+        assert data["breakfix"] is None
+        assert data["held"] == [{"version": "0.2.2", "reason": "circuit_breaker"}]
+        assert data["status"] == "update_available"
+
+    def test_tripped_breakfix_falls_back_to_security(self, bf_app):
+        client = bf_app.test_client()
+        client.post("/v1/circuit-breaker/trip?version=0.2.2",
+                    headers={"Authorization": "Bearer s"})
+        data = client.get("/v1/check?v=0.2.0").get_json()
+        assert data["security"]["version"] == "0.2.1"
+        assert data["breakfix"]["version"] == "0.2.1"
+        assert data["status"] == "security_update_available"

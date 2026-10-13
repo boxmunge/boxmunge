@@ -15,13 +15,13 @@ def releases_data():
     """Multi-version release data for testing."""
     return {
         "releases": [
-            {"version": "0.3.0", "security": False,
+            {"version": "0.3.0", "class": "feature",
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.3.0"},
-            {"version": "0.2.1", "security": True,
+            {"version": "0.2.1", "class": "security",
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.1"},
-            {"version": "0.2.0", "security": False,
+            {"version": "0.2.0", "class": "feature",
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.0"},
-            {"version": "0.1.0", "security": False,
+            {"version": "0.1.0", "class": "feature",
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.1.0"},
         ]
     }
@@ -127,3 +127,59 @@ class TestCounter:
             rows = db.execute("SELECT count(*) FROM version_checks").fetchone()
             db.close()
         assert rows[0] == 0
+
+
+def _rel(version: str, cls: str) -> dict:
+    return {"version": version, "class": cls,
+            "url": f"https://github.com/boxmunge/boxmunge/releases/tag/v{version}"}
+
+
+def _make_app(tmp_path, releases: list[dict]):
+    releases_file = tmp_path / "releases.json"
+    releases_file.write_text(json.dumps({"releases": releases}))
+    with patch("app.RELEASES_PATH", releases_file), \
+         patch("app.DB_PATH", tmp_path / "checks.db"):
+        from app import create_app
+        application = create_app()
+        application.config["TESTING"] = True
+        return application
+
+
+class TestStartupValidation:
+    def test_refuses_to_start_on_entry_without_class(self, tmp_path) -> None:
+        from release_catalog import ReleaseCatalogError
+        bad = {"version": "0.3.0", "security": False,
+               "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.3.0"}
+        with pytest.raises(ReleaseCatalogError, match="class"):
+            _make_app(tmp_path, [bad])
+
+    def test_refuses_to_start_on_unknown_class(self, tmp_path) -> None:
+        from release_catalog import ReleaseCatalogError
+        with pytest.raises(ReleaseCatalogError, match="urgent"):
+            _make_app(tmp_path, [_rel("0.3.0", "urgent")])
+
+
+class TestBreakfixOffer:
+    @pytest.fixture
+    def bf_client(self, tmp_path):
+        with patch("app.DB_PATH", tmp_path / "checks.db"):
+            yield _make_app(tmp_path, [
+                _rel("0.4.0", "feature"),
+                _rel("0.3.2", "breakfix"),
+                _rel("0.3.1", "security"),
+                _rel("0.3.0", "feature"),
+            ]).test_client()
+
+    def test_breakfix_field_and_status(self, bf_client) -> None:
+        data = bf_client.get("/v1/check?v=0.3.1").get_json()
+        assert data["status"] == "breakfix_update_available"
+        assert data["security"] is None
+        assert data["breakfix"]["version"] == "0.3.2"
+        assert data["breakfix"]["class"] == "breakfix"
+        assert data["latest"]["version"] == "0.4.0"
+
+    def test_security_still_reported_alongside_breakfix(self, bf_client) -> None:
+        data = bf_client.get("/v1/check?v=0.3.0").get_json()
+        assert data["status"] == "security_update_available"
+        assert data["security"]["version"] == "0.3.1"
+        assert data["breakfix"]["version"] == "0.3.2"

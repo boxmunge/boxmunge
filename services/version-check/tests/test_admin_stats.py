@@ -22,9 +22,9 @@ def app(tmp_path):
     releases_file = tmp_path / "releases.json"
     releases_file.write_text(json.dumps({
         "releases": [
-            {"version": "0.4.2", "security": False,
+            {"version": "0.4.2", "class": "feature",
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.4.2"},
-            {"version": "0.4.1", "security": True,
+            {"version": "0.4.1", "class": "security",
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.4.1"},
         ]
     }))
