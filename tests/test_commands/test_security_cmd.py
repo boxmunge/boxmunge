@@ -1946,8 +1946,10 @@ def test_scan_per_project_budget_skips_remaining_images(
     )
     # The user-visible warning surfaced through the per-project warnings list.
     assert "budget exceeded" in out.lower()
-    # rc=0 because no failures, no quarantine — just a partial scan.
-    assert rc == 0
+    # Audit B-11: a partial scan is a failure — the skipped images are
+    # unprotected — so the scan exits 1.
+    assert rc == 1
+    assert "INCOMPLETE" in out
 
 
 # ---------- resume ----------

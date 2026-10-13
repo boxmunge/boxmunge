@@ -16,7 +16,7 @@ from typing import Any
 import yaml
 
 from boxmunge.cve.hardening import HardeningProfile, hardening_profile_from_compose
-from boxmunge.cve.policy import Posture, parse_posture
+from boxmunge.cve.policy import PolicyError, Posture, parse_posture
 from boxmunge.cve.suppressions import Suppression, SuppressionsError, load_suppressions
 from boxmunge.docker import container_image_digest
 from boxmunge.manifest import load_manifest
@@ -77,7 +77,9 @@ def load_compose(project_dir: Path) -> dict[str, Any]:
     except yaml.YAMLError as e:
         raise ProjectScanError(f"Failed to parse compose.yml: {e}") from e
     if not isinstance(data, dict):
-        return {}
+        raise ProjectScanError(
+            f"compose.yml must be a mapping, got {type(data).__name__}"
+        )
     return data
 
 
@@ -86,9 +88,22 @@ def load_project_meta(paths: BoxPaths, project: str) -> ProjectMeta:
     manifest = load_manifest(paths.project_manifest(project))
     compose = load_compose(paths.project_dir(project))
     sec_block = manifest.get("security") or {}
+    if not isinstance(sec_block, dict):
+        raise ProjectScanError(
+            f"project {project!r}: manifest security: must be a mapping, "
+            f"got {type(sec_block).__name__}"
+        )
     posture_str = sec_block.get("posture") or "balanced"
-    posture = parse_posture(posture_str)
-    ddq = bool(sec_block.get("dangerously_disable_quarantine", False))
+    try:
+        posture = parse_posture(posture_str)
+    except PolicyError as e:
+        raise ProjectScanError(f"project {project!r}: {e}") from e
+    ddq = sec_block.get("dangerously_disable_quarantine", False)
+    if not isinstance(ddq, bool):
+        raise ProjectScanError(
+            f"project {project!r}: security.dangerously_disable_quarantine "
+            f"must be true or false, got {ddq!r}"
+        )
     return ProjectMeta(
         manifest=manifest,
         compose=compose,

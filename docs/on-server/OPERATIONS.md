@@ -946,6 +946,8 @@ Scan cadence:
   ```
   boxmunge security scan              # all projects
   boxmunge security scan myapp        # one project
+  # exit 0 clean, 2 quarantined/at-risk, 1 a project failed or was only
+  # partly scanned (also sent as one priority-1 alert per run)
   ```
 
 Inspect state:

@@ -176,12 +176,15 @@ def scan_one_project(
 
 def _prior_decisions(paths: BoxPaths, project: str) -> tuple[ProjectDecision, ...]:
     """The previous scan's decisions, for transition detection."""
-    prior_state = read_scan_state(paths.project_scan_state(project))
-    if prior_state is None:
-        return ()
     try:
+        prior_state = read_scan_state(paths.project_scan_state(project))
+        if prior_state is None:
+            return ()
         return decisions_from_scan_state(prior_state, project_name=project)
-    except (ValueError, KeyError) as e:
+    except (ValueError, KeyError, TypeError, AttributeError) as e:
+        # Audit B-12: a truncated or hand-mangled file (JSON errors are
+        # ValueErrors) must not stop this project's scan, let alone the
+        # fleet's; this scan overwrites it.
         # A malformed prior state shouldn't block the scan; log and treat
         # as "no prior" (alerts will be emitted as if first scan).
         log_warning(

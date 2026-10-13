@@ -12,10 +12,14 @@ import fcntl
 import os
 import sys
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from boxmunge.commands.security_scan_core import scan_one_project
-from boxmunge.cve._alerting_formatters import format_kev_stale_alert
+from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project
+from boxmunge.cve._alerting_fleet import (
+    format_kev_stale_alert,
+    format_scan_failure_alert,
+)
 from boxmunge.cve.alerting import (
     format_grace_heads_up_alert,
     send_alerts,
@@ -166,25 +170,117 @@ def _summarise_decisions(decisions: list[ProjectDecision]) -> str:
 # ---------- subcommand: scan ----------
 
 
-def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
-    """boxmunge security scan [project] — scan one or all projects."""
+@dataclass
+class FleetRun:
+    """What one `security scan` run learned, project by project."""
+
+    scans: dict[str, ProjectScan] = field(default_factory=dict)
+    # project → human lines: a hard error, or each image/service not covered.
+    problems: dict[str, list[str]] = field(default_factory=dict)
+    skipped_locked: list[str] = field(default_factory=list)
+
+
+def _parse_scan_targets(args: list[str], paths: BoxPaths) -> list[str] | int:
+    """Resolve the projects to scan, or return a lookup exit code.
+
+    Usage errors exit 2 from parse_args.
+    """
     from boxmunge.commands.argv import parse_args, require_project_name
     parsed = parse_args("security", args, max_positional=1)
-    project: str | None = None
-    if parsed.positional:
-        project = require_project_name("security", parsed.positional[0])
+    if not parsed.positional:
+        return sorted(load_registered_projects(paths))
+    project = require_project_name("security", parsed.positional[0])
+    if not is_registered(project, paths):
+        print(f"ERROR: project '{project}' is not registered.", file=sys.stderr)
+        return 1
+    return [project]
 
-    if project is not None:
-        if not is_registered(project, paths):
-            print(
-                f"ERROR: project '{project}' is not registered.",
-                file=sys.stderr,
+
+def _scan_each(
+    paths: BoxPaths, targets: list[str], *, in_grace: bool, kev: KevCatalog,
+) -> FleetRun:
+    """Scan every target; one project's failure never stops the others.
+
+    Raises TrivyNotInstalledError — no project can be scanned without it.
+    """
+    run = FleetRun()
+    for name in targets:
+        try:
+            scan = scan_one_project(paths, name, in_grace=in_grace, kev=kev)
+        except LockError:
+            # Audit A-2: another operation holds the project lock. Skip and
+            # warn; the next cron tick will re-attempt.
+            run.skipped_locked.append(name)
+            log_warning(
+                "cve-scan",
+                f"scan: skipped project {name} — held by another operation",
+                paths, project=name,
             )
-            return 1
-        targets = [project]
-    else:
-        targets = sorted(load_registered_projects(paths))
+            print(f"{name}: SKIPPED — held by another operation; will be "
+                  f"picked up on next scan")
+            continue
+        except (RuntimeError, ManifestError, OSError) as e:
+            # Audit B-12: a malformed per-project file is reported for that
+            # project and the fleet scan carries on with the rest.
+            print(f"{name}: ERROR — {e}")
+            log_warning(
+                "cve-scan", f"scan failed for {name}: {e}",
+                paths, project=name, detail={"error": str(e)},
+            )
+            run.problems[name] = [str(e)]
+            continue
+        run.scans[name] = scan
+        for w in scan.warnings:
+            print(f"{name}: WARN — {w}")
+        print(f"{name}: {_summarise_decisions(list(scan.decisions))}")
+        if not scan.complete:
+            run.problems[name] = scan.incomplete_reasons()
+            print(f"{name}: INCOMPLETE — {len(run.problems[name])} image(s) "
+                  f"or service(s) not scanned")
+    return run
 
+
+def _alert_scan_failures(paths: BoxPaths, run: FleetRun) -> None:
+    """Audit B-11: scan failures are never silent — one alert per run."""
+    if not run.problems:
+        return
+    try:
+        send_alerts((format_scan_failure_alert(run.problems),), paths)
+    except Exception as e:  # noqa: BLE001 — alerting must never block scan
+        log_warning("cve-scan", f"scan-failure alert emission failed: {e}", paths)
+
+
+def _exit_code(paths: BoxPaths, run: FleetRun) -> int:
+    """Audit F-8 / B-11 exit codes.
+
+    1 = a project failed or was only partly scanned (or Trivy is missing);
+    2 = scanned, ≥1 project quarantined or at-risk-running; 0 = clean.
+    """
+    if run.problems:
+        print(f"Scan incomplete: {', '.join(sorted(run.problems))}. Exit code 1.")
+        return 1
+    quarantined = [n for n in run.scans if is_quarantined(n, paths)]
+    at_risk = [
+        n for n, scan in run.scans.items()
+        if any(f.disposition == Disposition.STILL_RUNNING_AT_RISK
+               for d in scan.decisions for f in d.findings)
+    ]
+    if not (quarantined or at_risk):
+        return 0
+    bits: list[str] = []
+    if quarantined:
+        bits.append(f"{len(quarantined)} quarantined ({', '.join(quarantined)})")
+    if at_risk:
+        bits.append(f"{len(at_risk)} at-risk-running ({', '.join(at_risk)})")
+    print(f"Attention required: {'; '.join(bits)}. Exit code 2.")
+    return 2
+
+
+def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
+    """boxmunge security scan [project] — scan one or all projects."""
+    targets = _parse_scan_targets(args, paths)
+    if isinstance(targets, int):
+        return targets
     if not targets:
         print("No projects registered.")
         return 0
@@ -196,15 +292,11 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
         return 1
 
     now = datetime.now(timezone.utc)
-
     kev = _refresh_kev_and_alert(paths, now)
 
     # Migration grace window — bootstrap lazily on first scan after upgrade.
-    # If grace state is corrupt we abort the scan rather than silently
-    # proceeding with full enforcement: the operator might believe they
-    # are in grace when they are not. (Per-project scans use the same
-    # bootstrap so the in_grace flag is consistent across entry-points.)
-    is_fleet_scan = project is None
+    # Corrupt grace state aborts the scan rather than silently proceeding
+    # with full enforcement: the operator might believe they are in grace.
     try:
         grace = init_grace_if_missing(paths, now=now)
     except GraceError as e:
@@ -217,109 +309,31 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
     in_grace = grace.is_active(now=now)
 
     start = time.monotonic()
-    failures = 0
-    skipped_locked: list[str] = []
-    quarantined_projects: list[str] = []
-    at_risk_running_projects: list[str] = []
-    decisions_by_project: dict[str, ProjectDecision] = {}
-    posture_by_project: dict[str, str] = {}
-    dangerously_by_project: dict[str, bool] = {}
+    try:
+        run = _scan_each(paths, targets, in_grace=in_grace, kev=kev)
+    except TrivyNotInstalledError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
 
-    for name in targets:
-        try:
-            scan = scan_one_project(paths, name, in_grace=in_grace, kev=kev)
-        except LockError:
-            # Audit A-2: another operation holds the project lock. Skip and
-            # warn — consistent with upgrade_cmd._restart_projects. The next
-            # cron tick will re-attempt.
-            skipped_locked.append(name)
-            log_warning(
-                "cve-scan",
-                f"scan: skipped project {name} — held by another operation",
-                paths, project=name,
-            )
-            print(
-                f"{name}: SKIPPED — held by another operation; will be "
-                f"picked up on next scan",
-            )
-            continue
-        except TrivyNotInstalledError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
-            return 1
-        except (RuntimeError, ManifestError) as e:
-            print(f"{name}: ERROR — {e}")
-            failures += 1
-            continue
-        decisions = list(scan.decisions)
-        for w in scan.warnings:
-            print(f"{name}: WARN — {w}")
-        print(f"{name}: {_summarise_decisions(decisions)}")
-
-        # Track per-project disposition outcomes for the F-8 exit code.
-        # is_quarantined() reads the live state file (just written above on
-        # the quarantine path); STILL_RUNNING_AT_RISK is observable from
-        # the decisions list directly.
-        if is_quarantined(name, paths):
-            quarantined_projects.append(name)
-        for d in decisions:
-            for f in d.findings:
-                if f.disposition == Disposition.STILL_RUNNING_AT_RISK:
-                    if name not in at_risk_running_projects:
-                        at_risk_running_projects.append(name)
-                    break
-
-        # Capture per-project state for the heads-up summary. We pick the
-        # first decision (one image per project for typical deployments;
-        # multi-image projects surface the most-severe via findings sort).
-        if decisions:
-            decisions_by_project[name] = decisions[0]
-            posture_by_project[name] = scan.posture
-            dangerously_by_project[name] = scan.dangerously
-
-    # Fire the one-time heads-up alert if we're still in grace AND it
-    # hasn't already gone out. Fleet scans only — per-project scans never
-    # have the full fleet state needed to populate the alert lists.
-    if (
-        is_fleet_scan
-        and in_grace
-        and not grace.heads_up_sent
-        and decisions_by_project
-    ):
+    # The one-time heads-up needs the whole fleet: fleet scans only.
+    if not args and in_grace and not grace.heads_up_sent and run.scans:
         _maybe_fire_grace_heads_up(
             paths,
-            decisions_by_project=decisions_by_project,
-            posture_by_project=posture_by_project,
-            dangerously_by_project=dangerously_by_project,
+            decisions_by_project={
+                n: s.decisions[0] for n, s in run.scans.items() if s.decisions
+            },
+            posture_by_project={n: s.posture for n, s in run.scans.items()},
+            dangerously_by_project={n: s.dangerously for n, s in run.scans.items()},
         )
+    _alert_scan_failures(paths, run)
 
     elapsed = time.monotonic() - start
     print(f"Scanned {len(targets)} projects in {elapsed:.1f}s.")
-    if skipped_locked:
-        print(f"Skipped (locked): {', '.join(skipped_locked)}")
+    if run.skipped_locked:
+        print(f"Skipped (locked): {', '.join(run.skipped_locked)}")
     if in_grace:
         print(
             f"Migration grace ACTIVE — full enforcement begins "
             f"{grace.expires_at.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC",
         )
-
-    # Audit F-8: distinguish exit codes so operator scripts can react.
-    # 1 = scan failed (Trivy missing handled above; runtime/manifest fails)
-    # 2 = scan completed, ≥1 project quarantined or at-risk-running
-    # 0 = clean
-    if failures > 0:
-        return 1
-    if quarantined_projects or at_risk_running_projects:
-        bits: list[str] = []
-        if quarantined_projects:
-            bits.append(
-                f"{len(quarantined_projects)} quarantined "
-                f"({', '.join(quarantined_projects)})",
-            )
-        if at_risk_running_projects:
-            bits.append(
-                f"{len(at_risk_running_projects)} at-risk-running "
-                f"({', '.join(at_risk_running_projects)})",
-            )
-        print(f"Attention required: {'; '.join(bits)}. Exit code 2.")
-        return 2
-    return 0
+    return _exit_code(paths, run)

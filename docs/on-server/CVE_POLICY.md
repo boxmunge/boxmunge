@@ -617,9 +617,9 @@ alerts.
 Each project gets a **600-second (10-minute) wall-clock budget** for the
 sum of its image scans. If a project exhausts the budget, remaining
 images for the current scan are skipped and the project resumes on the
-next cron tick. The skip is logged at WARNING with the elapsed time and
-the count of skipped images, so a project that consistently overflows
-becomes visible in the audit log:
+next cron tick. A skip makes the scan incomplete (see "Scan failures"
+below): it is alerted and the scan exits 1. It is also logged at WARNING
+with the elapsed time and the count of skipped images:
 
 ```
 boxmunge log --component cve-scan --level warning
@@ -628,6 +628,29 @@ boxmunge log --component cve-scan --level warning
 Rationale: an unbounded scan on a fleet of misbehaving images would
 starve the rest of the cron-driven workload. The budget bounds the
 worst case while still letting normal scans complete in seconds.
+
+### Scan failures
+
+An image that is not scanned is not covered by quarantine, so a scan that
+did not cover everything is never reported as success. A project's scan is
+**incomplete** when an image fails to scan (Trivy error, registry or DB
+unreachable), the budget skips an image, or a manifest service has no
+identifiable image (no container to read a digest from and no `image:` in
+`compose.yml` — declare `image:` alongside `build:` so the scanner can
+find a locally built image). A project **fails** outright when one of its
+inputs is malformed: an unparseable manifest or `compose.yml`, an unknown
+`security.posture`, a non-boolean `dangerously_disable_quarantine`, a broken
+suppressions file, or a quarantine action that could not complete.
+
+- One bad project never stops the others: the fleet scan reports it and
+  carries on. A corrupt prior scan state (`state/scans/<project>.json`) is
+  logged and treated as "no prior scan"; this scan overwrites it.
+- Every run with an incomplete or failed project sends **one** priority-1
+  alert, `[boxmunge] CVE scan incomplete — N projects not fully scanned`,
+  listing each project and image. Single-project scans alert too.
+- `security scan` exits `1` when any project failed or was incomplete,
+  otherwise `2` when any project is quarantined or at-risk-running, and
+  `0` when everything is clean.
 
 ## Migration grace
 
@@ -662,6 +685,7 @@ Seven categories. Titles only — bodies are self-explanatory.
 | `[boxmunge] CVE policy enforcement begins in <N>h` (one-time) | normal |
 | `[boxmunge] CISA KEV feed stale — exploitation defense degraded` | priority-1 |
 | `[boxmunge] CISA KEV refresh rejected — previous catalog kept` | priority-1 |
+| `[boxmunge] CVE scan incomplete — <N> projects not fully scanned` | priority-1 |
 
 Alerting is best-effort. The durable record is the on-disk scan state
 under `<project>/.cve/scan_state.json`. If Pushover isn't configured, or
