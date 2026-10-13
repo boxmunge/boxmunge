@@ -20,6 +20,19 @@ jobs:
         with:
           python-version: '3.13'
 
+      - name: Release class gate (releases.json)
+        id: release_class
+        # The tag must match pyproject.toml and be listed in
+        # services/version-check/releases.json with a valid class. The
+        # release title and notes preamble (with the [security] or
+        # [breakfix] marker that GitHub-fallback boxes read) are generated
+        # from that entry, never typed by hand.
+        run: >-
+          python scripts/release-lint.py check
+          --tag "$GITHUB_REF_NAME"
+          --github-output "$GITHUB_OUTPUT"
+          --notes-out "$RUNNER_TEMP/release-preamble.md"
+
       - name: Install pinned dependencies
         run: |
           # Hash-pinned transitive deps. --require-hashes refuses any package
@@ -93,4 +106,27 @@ jobs:
             dist/SHA256SUMS.cert
             dist/sbom.json
           fail_on_unmatched_files: false
+          name: ${{ steps.release_class.outputs.title }}
+          body_path: ${{ runner.temp }}/release-preamble.md
           generate_release_notes: true
+          # Created as a draft: drafts are invisible to boxes, so nothing is
+          # offered until the text has been verified below.
+          draft: true
+
+      - name: Verify the draft classifies as releases.json says
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_CLASS: ${{ steps.release_class.outputs.class }}
+        run: |
+          # Generated notes quote PR titles; a PR titled "[security] ..."
+          # would otherwise turn a feature release into an auto-applied one
+          # for boxes that fall back to the GitHub API.
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --json name,body > "$RUNNER_TEMP/release.json"
+          python scripts/release-lint.py verify \
+            --release-json "$RUNNER_TEMP/release.json" --class "$RELEASE_CLASS"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
