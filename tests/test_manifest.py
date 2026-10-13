@@ -326,6 +326,17 @@ class TestSchemaVersion:
         errors, warnings = validate_manifest(manifest, "testapp")
         assert any("schema_version" in e for e in errors)
 
+    @pytest.mark.parametrize("value", [True, False, "3", 3.0, None, [3]])
+    def test_non_integer_schema_version_rejected(self, value) -> None:
+        manifest = {
+            "schema_version": value,
+            "id": "01TEST", "project": "testapp", "source": "bundle",
+            "hosts": ["testapp.example.com"],
+            "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        }
+        errors, warnings = validate_manifest(manifest, "testapp")
+        assert any("schema_version must be an unquoted integer" in e for e in errors), errors
+
     def test_unknown_schema_version_rejected(self) -> None:
         manifest = {
             "schema_version": 99,

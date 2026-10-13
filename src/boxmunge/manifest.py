@@ -133,7 +133,15 @@ def validate_manifest(
 
     # Schema version check
     schema_version = manifest.get("schema_version", 1)
-    if not isinstance(schema_version, int) or schema_version < 1 or schema_version > CURRENT_SCHEMA_VERSION:
+    # bool is a subclass of int: `schema_version: true` must not pass as 1.
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        errors.append(
+            f"schema_version must be an unquoted integer from 1 to "
+            f"{CURRENT_SCHEMA_VERSION}, got {schema_version!r}. Write it as, "
+            f"for example, schema_version: {CURRENT_SCHEMA_VERSION}."
+        )
+        return errors, warnings  # Can't validate further
+    if schema_version < 1 or schema_version > CURRENT_SCHEMA_VERSION:
         errors.append(
             f"Unsupported schema_version {schema_version!r}. "
             f"This boxmunge supports schema_version up to {CURRENT_SCHEMA_VERSION}. "

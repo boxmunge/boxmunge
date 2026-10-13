@@ -191,15 +191,16 @@ deploy:
 
 boxmunge validates `manifest.yml` on every deploy and rejects invalid manifests with a clear error. The rules are:
 
-1. **`id` is required** and must be a valid ULID. Generated automatically by `boxmunge bundle` if missing from the source manifest.
-2. **`project` is required** and must exactly match the project's directory name. A mismatch is an error. Project names are lowercase letters, digits, and hyphens (1-63 characters, starting with a letter or digit). Names ending in `-staging` are reserved, because boxmunge runs a project's staging copy as `<project>-staging`; `caddy` and `system` are reserved for the platform's own containers.
-3. **`source` is required** and must be `bundle` or `git`.
-4. **`repo` is required if `source: git`**. The `ref` field defaults to `main` if omitted.
-5. **`hosts` is required** and must contain at least one hostname. Wildcard hosts (e.g. `*.example.com`) are rejected unless the manifest top level sets `allow_wildcard_hosts: true` — see SECURITY.md for the trade-off.
-6. **Each `web` service must have `port`** and **at least one entry in `routes`**. Routes must be dicts with a `path` key. Both values are written into the Caddy config, so they are checked strictly: `port` is an unquoted integer from 1 to 65535, and `path` starts with `/` and contains only letters, digits, `.`, `_`, `~`, `-`, and `/`, with an optional trailing `*` (`/`, `/api/*`, `/static*`). Spaces, braces, quotes, and wildcards in the middle of a path are rejected.
-7. **`limits`** fields are optional per service. `limits.memory` accepts Docker memory format (e.g., `256m`, `1g`). `limits.cpus` accepts a numeric string (e.g., `"0.5"`, `"2.0"`).
-8. **If `backup.type` is not `none`**, both `dump_command` and `restore_command` are mandatory. A backup you cannot restore is not a backup.
-9. **Per-service `smoke` is strongly recommended.** Each service can declare a `smoke: boxmunge-scripts/smoke.sh` field. The script is exec'd inside the running container, so `localhost:PORT` naturally works. boxmunge warns if no services have a smoke test.
+1. **`schema_version`**, when present, must be an unquoted integer from 1 to the newest version this boxmunge supports (currently 3). Absent means 1.
+2. **`id` is required** and must be a valid ULID. Generated automatically by `boxmunge bundle` if missing from the source manifest.
+3. **`project` is required** and must exactly match the project's directory name. A mismatch is an error. Project names are lowercase letters, digits, and hyphens (1-63 characters, starting with a letter or digit). Names ending in `-staging` are reserved, because boxmunge runs a project's staging copy as `<project>-staging`; `caddy` and `system` are reserved for the platform's own containers.
+4. **`source` is required** and must be `bundle` or `git`.
+5. **`repo` is required if `source: git`**. The `ref` field defaults to `main` if omitted.
+6. **`hosts` is required** and must contain at least one hostname. Wildcard hosts (e.g. `*.example.com`) are rejected unless the manifest top level sets `allow_wildcard_hosts: true` — see SECURITY.md for the trade-off.
+7. **Each `web` service must have `port`** and **at least one entry in `routes`**. Routes must be dicts with a `path` key. Both values are written into the Caddy config, so they are checked strictly: `port` is an unquoted integer from 1 to 65535, and `path` starts with `/` and contains only letters, digits, `.`, `_`, `~`, `-`, and `/`, with an optional trailing `*` (`/`, `/api/*`, `/static*`). Spaces, braces, quotes, and wildcards in the middle of a path are rejected.
+8. **`limits`** fields are optional per service. `limits.memory` accepts Docker memory format (e.g., `256m`, `1g`). `limits.cpus` accepts a numeric string (e.g., `"0.5"`, `"2.0"`).
+9. **If `backup.type` is not `none`**, both `dump_command` and `restore_command` are mandatory. A backup you cannot restore is not a backup.
+10. **Per-service `smoke` is strongly recommended.** Each service can declare a `smoke: boxmunge-scripts/smoke.sh` field. The script is exec'd inside the running container, so `localhost:PORT` naturally works. boxmunge warns if no services have a smoke test.
 
 ---
 
