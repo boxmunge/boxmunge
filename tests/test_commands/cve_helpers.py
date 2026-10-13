@@ -129,6 +129,7 @@ class Docker:
 
     def __init__(self, monkeypatch) -> None:
         self.calls: list[str] = []
+        self.kwargs: dict[str, dict] = {}
         self.fail: dict[str, int] = {}
         # Restart policy of each project container, as `docker update` sets it.
         self.policies: dict[str, str] = {}
@@ -146,6 +147,7 @@ class Docker:
     def _recorder(self, name: str):
         def call(*args, **kwargs):
             self.calls.append(name)
+            self.kwargs[name] = kwargs
             if self.fail.get(name, 0) > 0:
                 self.fail[name] -= 1
                 raise DockerError(f"{name} timed out")

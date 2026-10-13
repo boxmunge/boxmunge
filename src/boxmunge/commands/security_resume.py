@@ -20,6 +20,7 @@ from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.manifest import ManifestError, load_manifest
+from boxmunge.pause import is_paused
 from boxmunge.paths import BoxPaths
 
 
@@ -125,8 +126,31 @@ def cmd_security_resume(args: list[str], paths: BoxPaths) -> int:
         return 1
 
 
+def _lift_keeping_pause(paths: BoxPaths, project: str) -> int:
+    """Lift the quarantine of a project that is also paused (B-20).
+
+    The pause is the operator's own decision, so the project stays down:
+    maintenance page kept, containers left stopped. `boxmunge resume`
+    brings it back.
+    """
+    try:
+        lift_quarantine(
+            project, paths, project_dir=paths.project_dir(project),
+            project_caddy_site_content=None, compose_files=[],
+        )
+    except QuarantineError as e:
+        _err(f"ERROR: lift_quarantine failed: {e}")
+        return 1
+    print(f"  Quarantine lifted. '{project}' is still paused: the maintenance "
+          f"page stays up and its containers stay stopped.")
+    print(f"  Run `boxmunge resume {project}` to bring it back.")
+    return 0
+
+
 def _resume_lift(paths: BoxPaths, project: str) -> int:
     """Inner lift section. Caller MUST hold the per-project lock."""
+    if is_paused(project, paths):
+        return _lift_keeping_pause(paths, project)
     try:
         manifest = load_manifest(paths.project_manifest(project))
     except ManifestError as e:
@@ -155,7 +179,7 @@ def _resume_lift(paths: BoxPaths, project: str) -> int:
     except QuarantineError as e:
         _err(f"ERROR: lift_quarantine failed: {e}")
         return 1
-    print("  Containers started.")
+    print("  Containers started (scanned images, no rebuild).")
 
     smoke_ok, smoke_msg = run_smoke(project, paths)
     if smoke_ok:

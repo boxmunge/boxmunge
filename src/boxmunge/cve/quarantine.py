@@ -327,7 +327,7 @@ def lift_quarantine(
     paths: BoxPaths,
     *,
     project_dir: Path,
-    project_caddy_site_content: str,
+    project_caddy_site_content: str | None,
     compose_files: list[str],
 ) -> None:
     """Lift quarantine and restore normal serving.
@@ -336,8 +336,13 @@ def lift_quarantine(
     1. Atomic-write the regenerated normal site config to
        project_caddy_site.
     2. caddy_reload.
-    3. compose_up to restart containers.
+    3. Restore the saved restart policies, then compose_up WITHOUT a build,
+       so the exact images the resume re-scan cleared come back (B-20).
     4. Clear the quarantine state file (LAST — only after restart succeeds).
+
+    ``project_caddy_site_content=None`` lifts the quarantine but leaves the
+    project down: the maintenance page stays and nothing starts. Used when
+    the project is also paused — pause is lifted only by `resume` (B-20).
 
     The caller is responsible for regenerating the normal Caddyfile
     fragment (the resume command does this via existing helpers) and
@@ -363,6 +368,18 @@ def lift_quarantine(
         "quarantine: lifting on %s", project_name,
         extra=_extra(project=project_name),
     )
+    state = read_quarantine_state(project_name, paths) or {}
+
+    if project_caddy_site_content is None:
+        # Paused as well: keep the maintenance page and the stop; hand the
+        # containers their own restart policies back for when `resume` runs.
+        _restore_restart_policies(project_name, state)
+        clear_quarantine_state(project_name, paths)
+        _LOGGER.info(
+            "quarantine: %s lifted; project stays paused", project_name,
+            extra=_extra(project=project_name),
+        )
+        return
 
     # 1. Restore normal Caddy site config.
     try:
@@ -386,9 +403,9 @@ def lift_quarantine(
         ) from e
 
     # 3. Restart containers, with their own restart policies back.
-    _restore_restart_policies(project_name, read_quarantine_state(project_name, paths) or {})
+    _restore_restart_policies(project_name, state)
     try:
-        compose_up(project_dir, compose_files=compose_files)
+        compose_up(project_dir, compose_files=compose_files, build=False)
     except DockerError as e:
         raise QuarantineError(
             f"Failed to restart containers for {project_name!r}: {e}",

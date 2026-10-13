@@ -839,7 +839,14 @@ closed (see "Recovering a quarantined project" below).
    The error lists each image or service that was not covered. Fix the
    cause and retry; an incomplete re-scan is never treated as clean.
 
+The lift starts the containers **without rebuilding** (`compose up` with
+no `--build`), so the images that come back are the ones the re-scan just
+cleared.
+
 This is distinct from `boxmunge resume` (which lifts a manual `pause`).
+The two are independent: if the project is also paused, `security resume`
+lifts only the quarantine. The maintenance page stays up and the
+containers stay stopped until `boxmunge resume <project>` lifts the pause.
 
 **Quarantine holds across a reboot.** Docker restarts a stopped
 `restart: always` container whenever the daemon starts (a reboot, a
