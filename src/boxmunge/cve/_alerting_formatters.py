@@ -306,22 +306,33 @@ def format_grace_heads_up_alert(
 # ---------- KEV stale-feed alert ----------
 
 
-def format_kev_stale_alert(fetched_at: "datetime | None") -> Alert:
-    """Fleet-level alert: the CISA KEV catalog is stale/missing.
+def format_kev_stale_alert(
+    fetched_at: "datetime | None", *, stale: bool = True, rejected: str | None = None,
+) -> Alert:
+    """Fleet-level alert: the CISA KEV catalog is stale/missing, or this
+    run's refresh was rejected by the sanity floor.
 
-    Priority 1 because a stale KEV feed silently disables the lowest tier's
-    only quarantine trigger — the operator must know the exploitation-signal
-    protection is degraded.
+    Priority 1 because a degraded KEV feed silently disables the lowest
+    tier's only quarantine trigger — the operator must know the
+    exploitation-signal protection is at risk.
     """
     when = fetched_at.isoformat() if fetched_at else "never fetched"
-    title = "[boxmunge] CISA KEV feed stale — exploitation defense degraded"
-    body = (
-        "The CISA Known Exploited Vulnerabilities catalog could not be "
-        "refreshed and is stale or missing.\n"
-        f"Last fetched: {when}\n"
-        "\n"
+    if stale:
+        title = "[boxmunge] CISA KEV feed stale — exploitation defense degraded"
+        state = "The cached CISA Known Exploited Vulnerabilities catalog is stale or missing."
+    else:
+        title = "[boxmunge] CISA KEV refresh rejected — previous catalog kept"
+        state = (
+            "The cached CISA Known Exploited Vulnerabilities catalog is still "
+            "fresh, but it will go stale if the feed stays broken."
+        )
+    lines = [state, f"Last good fetch: {when}"]
+    if rejected:
+        lines.append(f"This run's refresh was rejected: {rejected}.")
+    lines += [
+        "",
         "KEV-based quarantine is fail-safe (sites stay up), so actively-"
-        "exploited CVEs will NOT be auto-quarantined until the feed "
-        "refreshes. Check egress to cisa.gov and the cve-scan log."
-    )
-    return Alert(kind="kev_stale", title=title, body=body, priority=1)
+        "exploited CVEs will NOT be auto-quarantined once the catalog is "
+        "stale. Check egress to cisa.gov and the cve-scan log.",
+    ]
+    return Alert(kind="kev_stale", title=title, body="\n".join(lines), priority=1)

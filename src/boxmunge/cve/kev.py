@@ -11,6 +11,13 @@ stale cache) must NOT take a site down. is_known_exploited returns False when
 the catalog is stale or empty, and callers alert the operator that the feed
 is degraded so the gap is never silent.
 
+Sanity floor (audit B-06): CISA's catalog only grows. A refresh that would
+replace the cache with fewer than KEV_MIN_ENTRIES IDs, or that shrinks the
+cached catalog by more than KEV_MAX_SHRINK, is rejected: the previous cache
+is kept, and the caller alerts. An empty or truncated feed (an error page,
+a CDN hiccup) would otherwise be accepted as a fresh catalog and switch the
+exploitation gate off with no staleness alert.
+
 EPSS seam: the policy engine consumes only the is_known_exploited predicate.
 A future EPSS layer becomes a second predicate on this object, wired into the
 same decision point — no change to the policy engine's shape.
@@ -34,6 +41,15 @@ KEV_FEED_URL = (
     "known_exploited_vulnerabilities.json"
 )
 KEV_MAX_AGE_DAYS = 8  # daily feed; >1 week stale = degraded.
+# The catalog held ~1,400 entries in late 2026 and only grows. A refresh
+# below this floor is a broken feed, not a smaller catalog.
+KEV_MIN_ENTRIES = 1000
+# Entries are very rarely withdrawn; losing more than 5% at once is a
+# truncated feed.
+KEV_MAX_SHRINK = 0.05
+# A fetched_at further than this in the future is clock skew at write time,
+# not a fresh catalog.
+_MAX_FUTURE_DAYS = 1
 _FETCH_TIMEOUT = 30
 
 
@@ -52,7 +68,7 @@ class KevCatalog:
         if self.fetched_at is None:
             return True
         age = today - self.fetched_at.date()
-        return age.days > max_age_days
+        return age.days > max_age_days or age.days < -_MAX_FUTURE_DAYS
 
     def is_known_exploited(
         self, cve_id: str, *, today: date | None = None,
@@ -99,12 +115,52 @@ def load_kev(paths: BoxPaths) -> KevCatalog:
         return KevCatalog(cve_ids=frozenset(), fetched_at=None)
 
 
-def refresh_kev(paths: BoxPaths) -> None:
-    """Best-effort fetch of the CISA KEV catalog → atomic cache write.
+@dataclass(frozen=True)
+class KevRefresh:
+    """Outcome of one refresh attempt.
 
-    Mirrors scanner.refresh_db: a failed refresh is logged at WARNING and
-    swallowed. The scan proceeds against whatever cache exists (possibly
-    stale, which the policy engine handles fail-safe).
+    ``rejected`` carries the reason when the feed answered but its content
+    failed the sanity floor (or was malformed). The cache is untouched in
+    that case and the caller must alert: unlike a transient network
+    failure, a bad feed would otherwise go unnoticed until the cache aged
+    out a week later.
+    """
+
+    updated: bool
+    rejected: str | None = None
+
+
+def check_catalog_sanity(new_count: int, cached_count: int) -> str | None:
+    """Return why a refreshed catalog of ``new_count`` IDs is implausible."""
+    if new_count < KEV_MIN_ENTRIES:
+        return (
+            f"feed returned {new_count} entries, below the floor of "
+            f"{KEV_MIN_ENTRIES} (the catalog only grows)"
+        )
+    if cached_count and new_count < cached_count * (1 - KEV_MAX_SHRINK):
+        return (
+            f"feed returned {new_count} entries, {cached_count - new_count} "
+            f"fewer than the {cached_count} cached (more than "
+            f"{KEV_MAX_SHRINK:.0%} shrink)"
+        )
+    return None
+
+
+def _reject(reason: str, detail: dict[str, Any]) -> KevRefresh:
+    _LOGGER.warning(
+        "KEV feed refresh rejected (%s) — keeping the cached catalog", reason,
+        extra=_extra(detail={"reason": reason, **detail}),
+    )
+    return KevRefresh(updated=False, rejected=reason)
+
+
+def refresh_kev(paths: BoxPaths) -> KevRefresh:
+    """Fetch the CISA KEV catalog and, if it is plausible, cache it.
+
+    A network failure is logged at WARNING and the scan proceeds against
+    the cache (possibly stale, which the policy engine handles fail-safe
+    and the caller alerts on). A malformed or implausible payload is
+    rejected: the cache is kept and the result says why.
     """
     req = urllib.request.Request(
         KEV_FEED_URL, headers={"User-Agent": "boxmunge"},
@@ -117,22 +173,25 @@ def refresh_kev(paths: BoxPaths) -> None:
             "KEV feed refresh failed (%s) — continuing with cached catalog", e,
             extra=_extra(detail={"error": str(e)}),
         )
-        return
+        return KevRefresh(updated=False)
 
     # The feed may return valid JSON that is not an object (e.g. [] or null
-    # from an error page). Treat any non-dict payload as "no vulnerabilities"
-    # rather than letting AttributeError escape this best-effort refresh.
+    # from an error page).
     vulns = payload.get("vulnerabilities") if isinstance(payload, dict) else None
     if not isinstance(vulns, list):
-        _LOGGER.warning(
-            "KEV feed payload malformed — continuing with cached catalog",
-            extra=_extra(detail={"payload_type": type(payload).__name__}),
+        return _reject(
+            "feed payload malformed (no 'vulnerabilities' list)",
+            {"payload_type": type(payload).__name__},
         )
-        return
-    cve_ids = sorted(
+    cve_ids = sorted({
         v["cveID"] for v in vulns
         if isinstance(v, dict) and isinstance(v.get("cveID"), str)
-    )
+    })
+    cached = load_kev(paths)
+    reason = check_catalog_sanity(len(cve_ids), len(cached.cve_ids))
+    if reason is not None:
+        return _reject(reason, {"new_count": len(cve_ids),
+                                "cached_count": len(cached.cve_ids)})
     doc = {
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "cve_ids": cve_ids,
@@ -144,3 +203,5 @@ def refresh_kev(paths: BoxPaths) -> None:
             "KEV catalog write failed (%s)", e,
             extra=_extra(detail={"error": str(e)}),
         )
+        return KevRefresh(updated=False)
+    return KevRefresh(updated=True)

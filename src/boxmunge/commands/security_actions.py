@@ -20,7 +20,7 @@ from boxmunge.cve.alerting import (
     format_grace_heads_up_alert,
     send_alerts,
 )
-from boxmunge.cve.kev import load_kev, refresh_kev
+from boxmunge.cve.kev import KevCatalog, load_kev, refresh_kev
 from boxmunge.cve.grace import (
     GraceError,
     init_grace_if_missing,
@@ -104,6 +104,41 @@ def _maybe_fire_grace_heads_up(
         os.close(fd)
 
 
+def _refresh_kev_and_alert(paths: BoxPaths, now: datetime) -> KevCatalog:
+    """Refresh the CISA KEV catalog once per run and load it.
+
+    The one catalog is threaded into every project scan so the exploitation
+    signal is consistent fleet-wide. Fail-safe: a stale catalog never
+    quarantines, and a rejected refresh keeps the previous cache (B-06), but
+    either fires ONE priority-1 alert per run so the degradation is never
+    silent.
+    """
+    refresh = refresh_kev(paths)
+    kev = load_kev(paths)
+    stale = kev.is_stale(now.date())
+    if not stale and refresh.rejected is None:
+        return kev
+    log_warning(
+        "cve-scan",
+        "CISA KEV catalog degraded — exploitation-based quarantine at risk"
+        + (f" (refresh rejected: {refresh.rejected})" if refresh.rejected else ""),
+        paths, project=None,
+        detail={
+            "kev_fetched_at": kev.fetched_at.isoformat() if kev.fetched_at else None,
+            "stale": stale,
+            "rejected": refresh.rejected,
+        },
+    )
+    alert = format_kev_stale_alert(kev.fetched_at, stale=stale, rejected=refresh.rejected)
+    try:
+        send_alerts((alert,), paths)
+    except Exception as e:  # noqa: BLE001 — alerting must never block scan
+        log_warning(
+            "cve-scan", f"KEV alert emission failed: {e}", paths, project=None,
+        )
+    return kev
+
+
 def _summarise_decisions(decisions: list[ProjectDecision]) -> str:
     """One-line counts of dispositions across all decisions."""
     counts: dict[str, int] = {}
@@ -162,29 +197,7 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
 
     now = datetime.now(timezone.utc)
 
-    # Refresh the CISA KEV catalog best-effort (one call per scan run,
-    # mirrors refresh_db). Load it once and thread it into every project scan
-    # so the exploitation-signal is consistent fleet-wide. Fail-safe: a stale
-    # catalog never quarantines, but we fire ONE priority-1 alert per run so
-    # the degradation is never silent.
-    refresh_kev(paths)
-    kev = load_kev(paths)
-    if kev.is_stale(now.date()):
-        log_warning(
-            "cve-scan",
-            "CISA KEV catalog stale/missing — exploitation-based quarantine "
-            "degraded",
-            paths, project=None,
-            detail={"kev_fetched_at":
-                    kev.fetched_at.isoformat() if kev.fetched_at else None},
-        )
-        try:
-            send_alerts((format_kev_stale_alert(kev.fetched_at),), paths)
-        except Exception as e:  # noqa: BLE001 — alerting must never block scan
-            log_warning(
-                "cve-scan", f"KEV stale-alert emission failed: {e}",
-                paths, project=None,
-            )
+    kev = _refresh_kev_and_alert(paths, now)
 
     # Migration grace window — bootstrap lazily on first scan after upgrade.
     # If grace state is corrupt we abort the scan rather than silently

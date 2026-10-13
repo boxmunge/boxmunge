@@ -82,8 +82,11 @@ def _no_kev_network(monkeypatch):
     monkeypatch.setattr(
         "boxmunge.cve.kev.refresh_kev", lambda paths: None,
     )
+    from boxmunge.cve.kev import KevRefresh
+
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.refresh_kev", lambda paths: None,
+        "boxmunge.commands.security_actions.refresh_kev",
+        lambda paths: KevRefresh(updated=False),
     )
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.load_kev", lambda paths: _fresh_empty,

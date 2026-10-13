@@ -191,7 +191,22 @@ exploitation signal is consistent fleet-wide within a scan run.
 
 The catalog is considered stale when its `fetched_at` timestamp is older than
 `KEV_MAX_AGE_DAYS` (currently 8 days — a week of fetch failures before the
-gate degrades).
+gate degrades), or more than a day in the future (clock skew when the cache
+was written).
+
+### Refresh sanity floor
+
+CISA's catalog only grows. A refresh is **rejected** — the previous cache
+is kept untouched — when the feed's payload is malformed, when it holds
+fewer than `KEV_MIN_ENTRIES` (1,000) CVEs, or when it would shrink the
+cached catalog by more than `KEV_MAX_SHRINK` (5%). An empty or truncated
+feed (an error page, a CDN serving a partial file) would otherwise be
+accepted as a fresh catalog and switch the exploitation gate off without
+ever going stale. A rejected refresh fires the priority-1 KEV alert for
+that run (title `CISA KEV refresh rejected — previous catalog kept`, with
+the reason), even while the kept cache is still fresh. A plain network
+failure is not a rejection: the cache ages normally and the staleness
+alert below takes over after `KEV_MAX_AGE_DAYS`.
 
 **Fail-safe: toward uptime, never toward quarantine.** When the catalog is
 missing or stale, `is_known_exploited` returns `False`. The site is not taken
@@ -201,7 +216,7 @@ Staleness is never silent. When a scan run detects a stale or missing catalog,
 it:
 1. Logs a WARNING with the last fetch timestamp (if any).
 2. Fires a single priority-1 Pushover alert per run:
-   `KEV feed stale — exploitation-based quarantine is degraded`.
+   `CISA KEV feed stale — exploitation defense degraded`.
 
 This alert fires once per scan run, not once per finding, to avoid alert
 storms. The degradation must not go unnoticed — the `relaxed` tier's only
@@ -581,10 +596,10 @@ audit trail.
   ```
 
 The Trivy DB and the CISA KEV catalog are both refreshed before each scan
-run (one call each, best-effort). DB-refresh and KEV-refresh failures are
-non-fatal: the scan proceeds against whatever cache exists and a warning is
-logged. A stale KEV catalog fires a priority-1 alert (see "CISA KEV feed"
-above).
+run (one call each). DB-refresh and KEV-refresh failures are non-fatal:
+the scan proceeds against whatever cache exists and a warning is logged. A
+stale KEV catalog, or a KEV refresh rejected by the sanity floor, fires a
+priority-1 alert (see "CISA KEV feed" above).
 
 Idempotency: the daily cron does not re-fire informational alerts for
 unchanged dispositions. Only state transitions (new finding, transition
@@ -639,7 +654,8 @@ Seven categories. Titles only — bodies are self-explanatory.
 | `[boxmunge:<project>] <CVE> (<severity>)` (informational, sub-threshold or distro-deprioritized) | normal |
 | `[boxmunge:<project>] Suppression for <CVE> expired` | high |
 | `[boxmunge] CVE policy enforcement begins in <N>h` (one-time) | normal |
-| `[boxmunge] KEV feed stale — exploitation-based quarantine is degraded` | priority-1 |
+| `[boxmunge] CISA KEV feed stale — exploitation defense degraded` | priority-1 |
+| `[boxmunge] CISA KEV refresh rejected — previous catalog kept` | priority-1 |
 
 Alerting is best-effort. The durable record is the on-disk scan state
 under `<project>/.cve/scan_state.json`. If Pushover isn't configured, or
