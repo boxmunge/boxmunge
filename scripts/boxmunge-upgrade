@@ -14,6 +14,7 @@
 #   check-probation            health timer: promote or roll back a probation
 #   clear-blocklist <version>  operator only: forget a failed version
 #   install-sudoers            install.sh and upgrades: (re)write deploy's sudo rule
+#   install-docs <dir>         install.sh and upgrades: replace docs/ with <dir>/*.md
 
 set -euo pipefail
 
@@ -311,6 +312,7 @@ Stderr (truncated): $stderr_excerpt"
         exit 2
     fi
 
+    refresh_docs_for_slot "$prev_slot"
     add_blocklist "$new_version" "$stage"
     report_failure "$new_version" "$from_version" "$stage"
     send_notification "boxmunge ROLLBACK" "Rolled back $new_version (stage: $stage)"
@@ -401,6 +403,69 @@ cmd_install_sudoers() {
     log "Wrote deploy sudo rule to $SUDOERS_FILE"
 }
 
+# ---------------------------------------------------------------------------
+# On-box docs (served by agent-help). Each venv slot keeps the docs of the
+# release it holds in env-<slot>/boxmunge-docs, so a rollback can put the
+# matching docs back. docs/ is a symlink to a versioned sibling directory and
+# is swapped by rename: a reader sees the old set or the new set, never a
+# partial or empty one. Doc files missing from the new set disappear.
+# ---------------------------------------------------------------------------
+slot_docs() { echo "$BOXMUNGE_ROOT/env-$1/boxmunge-docs"; }
+
+# install_docs <dir>: returns non-zero (and changes nothing) if <dir> has no
+# *.md files.
+install_docs() {
+    local src="$1" docs="$BOXMUNGE_ROOT/docs" stage link previous old=""
+    if ! compgen -G "$src/*.md" >/dev/null; then
+        log "ERROR: no *.md docs in $src; $docs left unchanged"
+        return 1
+    fi
+    stage="$(mktemp -d "$BOXMUNGE_ROOT/.docs.XXXXXX")"
+    cp "$src"/*.md "$stage/"
+    chmod 0644 "$stage"/*.md
+    chmod 0755 "$stage"
+    if [[ "$(id -u)" -eq 0 ]]; then chown -R root:root "$stage"; fi
+    link="$stage.link"
+    ln -s "$(basename "$stage")" "$link"
+    previous="$(readlink "$docs" 2>/dev/null || true)"
+    if [[ -d "$docs" && ! -L "$docs" ]]; then
+        # One-time move from a plain directory (installs before this change).
+        old="$stage.old"
+        mv "$docs" "$old"
+    fi
+    replace_file "$link" "$docs"
+    [[ -z "$old" ]] || rm -rf "$old"
+    if [[ "$previous" =~ ^\.docs\.[A-Za-z0-9]+$ ]]; then rm -rf "${BOXMUNGE_ROOT:?}/$previous"; fi
+    log "Installed docs from $src"
+}
+
+cmd_install_docs() {
+    install_docs "${1:?Usage: boxmunge-upgrade install-docs <dir>}" || die "install-docs failed"
+}
+
+# seed_slot_docs <slot>: a slot installed by install.sh (or an older shim)
+# has no docs copy; record the live docs as its own so a rollback to it
+# restores them.
+seed_slot_docs() {
+    local dest
+    dest="$(slot_docs "$1")"
+    if [[ ! -d "$dest" ]] && compgen -G "$BOXMUNGE_ROOT/docs/*.md" >/dev/null; then
+        mkdir -p "$dest"
+        cp "$BOXMUNGE_ROOT/docs/"*.md "$dest/"
+    fi
+}
+
+# refresh_docs_for_slot <slot>: best effort, because a docs failure must not
+# undo an upgrade or a rollback. Logged loudly so it is not missed.
+refresh_docs_for_slot() {
+    local src
+    src="$(slot_docs "$1")"
+    if [[ ! -d "$src" ]] || ! install_docs "$src"; then
+        log "ERROR: docs not refreshed for slot $1 ($src missing or empty); agent-help may be stale"
+        bm_log error upgrade "docs refresh failed" "{\"slot\": \"$1\"}"
+    fi
+}
+
 # preflight_fail <version> <from_version> <blocklist_reason> <message> [stage]
 #
 # Abort before the slot swap: drop the half-built standby venv, blocklist
@@ -430,6 +495,7 @@ upgrade_to() {
     acquire_lock
     check_policy "$version" "$mode"
     cmd_install_sudoers
+    seed_slot_docs "$ACTIVE_SLOT"
 
     local prev_slot from_version standby
     prev_slot="$ACTIVE_SLOT"
@@ -519,6 +585,11 @@ upgrade_to() {
     "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet "$tmp_download/boxmunge[tui]" \
         || preflight_fail "$version" "$from_version" "preflight_failed: pip_install" \
             "Failed to install boxmunge from bundle"
+    compgen -G "$tmp_download/boxmunge/on-server/*.md" >/dev/null \
+        || preflight_fail "$version" "$from_version" "preflight_failed: bundle_docs" \
+            "Bundle has no on-server/*.md docs"
+    mkdir -p "$(slot_docs "$standby")"
+    cp "$tmp_download/boxmunge/on-server/"*.md "$(slot_docs "$standby")/"
 
     # 2. PRE-FLIGHT
     log "Running pre-flight checks..."
@@ -676,6 +747,7 @@ from boxmunge.paths import BoxPaths
 write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT'], hours=6)
 "
     bm_log info upgrade "probation entered" "{\"version\": \"$version\", \"prev_slot\": \"$prev_slot\", \"hours\": 6}"
+    refresh_docs_for_slot "$ACTIVE_SLOT"
 
     send_notification "boxmunge security update applied" "Updated to $version (probation: 6h)"
     log "Upgrade to $version complete, probation started"
@@ -808,5 +880,6 @@ case "${1:-}" in
     check-probation) cmd_check_probation ;;
     clear-blocklist) shift; cmd_clear_blocklist "$@" ;;
     install-sudoers) cmd_install_sudoers ;;
-    *)               die "Usage: boxmunge-upgrade {run|auto|target|force-target|check-probation|clear-blocklist|install-sudoers} [args]" ;;
+    install-docs)    shift; cmd_install_docs "$@" ;;
+    *)               die "Usage: boxmunge-upgrade {run|auto|target|force-target|check-probation|clear-blocklist|install-sudoers|install-docs} [args]" ;;
 esac

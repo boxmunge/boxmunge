@@ -400,11 +400,10 @@ ln -sf "${BOXMUNGE_ROOT}/bin/boxmunge-server" /usr/local/bin/boxmunge-server
 # ---------------------------------------------------------------------------
 # On-server documentation
 # ---------------------------------------------------------------------------
-if [[ -d "${SCRIPT_DIR}/on-server" ]]; then
-    mkdir -p "${BOXMUNGE_ROOT}/docs"
-    cp "${SCRIPT_DIR}/on-server/"*.md "${BOXMUNGE_ROOT}/docs/"
-    chmod 644 "${BOXMUNGE_ROOT}/docs/"*.md
-fi
+# The shim replaces docs/ as a whole (atomic symlink swap), so docs removed
+# from the release disappear. Every upgrade does the same from the release
+# it installs, and a rollback restores the previous release's docs.
+"${BOXMUNGE_ROOT}/bin/boxmunge-upgrade" install-docs "${SCRIPT_DIR}/on-server"
 
 # ---------------------------------------------------------------------------
 # Canary project template (used by `boxmunge self-test`)

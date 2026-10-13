@@ -849,6 +849,10 @@ sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist 0.11.1  # forget a faile
 
 Neither is available from the deploy shell or MCP.
 
+The docs served by `agent-help` (`/opt/boxmunge/docs`) are replaced with the installed
+release's on every upgrade, and put back to the previous release's on a rollback, so they
+always describe the code that is running.
+
 `upgrade --dry-run` renders every project's migrated manifest and configs in memory and
 reports what the upgrade would do. It writes nothing; the upgrade shim runs it as a
 pre-flight check against the new release before touching anything.
