@@ -13,6 +13,12 @@ from boxmunge.capabilities import (
     VALID_CAP_NAMES,
     normalise_cap,
 )
+from boxmunge.published_ports import published_ports_problems
+
+# Fields that describe the whole project and are refused in a service block.
+_PROJECT_ONLY_FIELDS = (
+    "posture", "dangerously_disable_quarantine", "runtimes", "published_ports",
+)
 
 # Profile names. v0.5 ships `default` and `off`. Future tiers add `strict` and
 # `paranoid`; their names are reserved now so a manifest setting them today
@@ -214,6 +220,13 @@ def validate_security_block(
         raise SecurityValidationError(
             f"{context}: security block must be a mapping, got {type(block).__name__}"
         )
+    for field in _PROJECT_ONLY_FIELDS:
+        if field in block and context != "project":
+            raise SecurityValidationError(
+                f"{context}: {field!r} is only valid at the project level "
+                f"(manifest top-level security: block), not per-service. "
+                f"It applies to the whole project."
+            )
 
     if "profile" in block:
         profile = block["profile"]
@@ -275,12 +288,6 @@ def validate_security_block(
             )
 
     if "posture" in block:
-        if context != "project":
-            raise SecurityValidationError(
-                f"{context}: 'posture' is only valid at the project level "
-                f"(manifest top-level security: block), not per-service. "
-                f"CVE posture applies to the whole project."
-            )
         posture = block["posture"]
         # YAML 1.1 boolean trap: bool is a subtype of str-ish parsing failure
         # — bare `strict` is fine but check the type explicitly so we don't
@@ -297,12 +304,6 @@ def validate_security_block(
             )
 
     if "dangerously_disable_quarantine" in block:
-        if context != "project":
-            raise SecurityValidationError(
-                f"{context}: 'dangerously_disable_quarantine' is only valid "
-                f"at the project level (manifest top-level security: block), "
-                f"not per-service. CVE posture applies to the whole project."
-            )
         v = block["dangerously_disable_quarantine"]
         # bool is a subtype of int, so check bool first to avoid 0/1 slipping
         # through as "boolean".
@@ -312,13 +313,12 @@ def validate_security_block(
                 f"boolean (true or false), got {type(v).__name__}: {v!r}"
             )
 
+    if "published_ports" in block:
+        problems = published_ports_problems(block["published_ports"])
+        if problems:
+            raise SecurityValidationError(f"{context}: {problems[0]}")
+
     if "runtimes" in block:
-        if context != "project":
-            raise SecurityValidationError(
-                f"{context}: 'runtimes' is only valid at the project level "
-                f"(manifest top-level security: block), not per-service. "
-                f"CVE posture applies to the whole project."
-            )
         from boxmunge.cve.relevance import VALID_ECOSYSTEMS
 
         runtimes = block["runtimes"]

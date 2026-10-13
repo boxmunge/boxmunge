@@ -23,6 +23,7 @@ from boxmunge.compose_mounts import has_named_volume
 from boxmunge.compose_service_rules import service_findings
 from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
+from boxmunge.published_ports import declared_ports
 from boxmunge.security_overlay import (
     PROFILE_DEFAULT,
     PROFILE_OFF,
@@ -335,6 +336,12 @@ def validate_user_compose(
     isolation = isolation_problems(doc, project_name, base_dir, roots)
     if isolation:
         raise ComposeSecurityError(isolation[0])
+    for entry in declared_ports(cve_policy):
+        if entry["service"] not in services:
+            raise ComposeSecurityError(
+                f"security.published_ports names service {entry['service']!r}, "
+                f"which compose.yml does not define. Fix the service name."
+            )
 
     # Compose-only services (not in the manifest) inherit the project-level
     # profile, exactly as the overlay generator resolves them.

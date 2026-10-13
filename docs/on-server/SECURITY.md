@@ -199,7 +199,33 @@ They apply to every service and are **not** relaxed by `profile: "off"`.
 | An `external: true` volume, or a volume with `driver`/`driver_opts` | Use a plain named volume (`data: {}`) or a bind mount inside the project. |
 | `external_links`, or `volumes_from: [container:<name>]` | Reach services in the same file by service name; name a service in `volumes_from`. |
 | A `secrets`/`configs` `file:` or a `build` context outside the project directory | Keep the file or context inside the project. Secret values belong in `secrets set`. |
+| `ports:` on any service | Remove it: routed traffic reaches the service through Caddy. A port that must be published goes in the manifest, below. |
 | An `include:`, `extends: file:`, or `env_file:` path outside the project directory (followed through nested includes), remote, or written with `${VAR}` | Keep every compose, extends, include, and env file inside the project, and write the path literally. |
+
+### Published ports (opt-in)
+
+All ingress is meant to go through Caddy. Docker publishes `ports:` with its own
+firewall rules, so a published port bypasses UFW and the CrowdSec bouncer. That
+is why `compose.yml` may not contain `ports:`. When a port really must be
+reachable from the host (an admin tool reached over an SSH tunnel, say),
+declare it at the manifest's top level, with a reason:
+
+```yaml
+security:
+  published_ports:
+    - service: db              # any service in compose.yml
+      port: 5432               # container port
+      reason: "pgAdmin over an SSH tunnel"
+      # host_port: 15432       # defaults to port
+      # protocol: udp          # defaults to tcp
+      # host_ip: 0.0.0.0       # explicit widening; defaults to 127.0.0.1
+```
+
+boxmunge publishes the port in the generated overlay, bound to `127.0.0.1`
+unless `host_ip` says otherwise, and prints a `[WARNING]` naming the port and
+the reason on every deploy. A `host_ip` other than loopback makes the port
+reachable from the network with no UFW or CrowdSec protection, and the warning
+says so. Staging never publishes ports, so it cannot collide with production.
 
 ## Wildcard hosts and routing isolation
 

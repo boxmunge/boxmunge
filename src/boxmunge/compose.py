@@ -9,11 +9,14 @@ import yaml
 from boxmunge import compose_resolve
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
+from boxmunge.published_ports import overlay_ports
 from boxmunge.security_overlay import (
     resolve_security,
     render_compose_security_fragment,
 )
-from boxmunge.security_warn import warn_off_services, warn_writable_state
+from boxmunge.security_warn import (
+    warn_off_services, warn_published_ports, warn_writable_state,
+)
 from boxmunge.writable import WritableState, classify_state
 
 
@@ -257,6 +260,12 @@ def _build_service_override(
         if svc_override:
             services[svc_name] = svc_override
 
+    # Opt-in published ports, production only: staging would collide with
+    # production's host ports.
+    if alias_prefix is None:
+        for svc_name, ports in overlay_ports(project_security).items():
+            services.setdefault(svc_name, {})["ports"] = ports
+
     # Compose-only services (databases, caches, sidecars) get the same
     # hardening floor. They carry no routing, env_files, or limits.
     for svc_name, user_svc in user_services.items():
@@ -264,7 +273,7 @@ def _build_service_override(
             continue
         fragment = _hardening_fragment(project_security, None, user_svc)
         if fragment:
-            services[svc_name] = fragment
+            services[svc_name] = {**services.get(svc_name, {}), **fragment}
 
     return services
 
@@ -392,6 +401,7 @@ def prepare_compose_override(
     # [WARNING] for read_only:false in user compose, [INFO] for
     # writable.external in manifest. Both repeated every deploy.
     warn_writable_state(paths, manifest, user_compose, component=component)
+    warn_published_ports(paths, manifest, component=component)
 
 
 def is_bind_mount(volume_str: str) -> bool:

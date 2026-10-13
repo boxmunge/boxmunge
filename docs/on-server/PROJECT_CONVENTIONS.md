@@ -219,6 +219,7 @@ the `default` profile silently — most projects need nothing here.
 | `init` | bool | `true` | Set `false` to disable Tini. |
 | `pids_limit` | int | `512` | Set `0` to disable. |
 | `cap_drop` | list[str] | dangerous-cap list | If specified, REPLACES the default list. |
+| `published_ports` | list | — | Project level only. Opt-in host-published ports, each `{service, port, reason}` plus optional `host_port`, `protocol`, `host_ip` (default `127.0.0.1`). See SECURITY.md, "Published ports". |
 | `cap_add` | list[str] | `[]` | Capabilities to keep; subtracted from `cap_drop`. Canonical names only (`NET_RAW`). The denylist in SECURITY.md (`SYS_ADMIN`, `SYS_MODULE`, `ALL`, ...) is rejected. |
 
 ### Per-service `security:`
@@ -262,6 +263,7 @@ services:
 - Define all services listed in the manifest.
 - Use `restart: unless-stopped` on all long-running services.
 - **Not** include boxmunge networking (`boxmunge-proxy`). boxmunge injects that via the generated overlay.
+- **Not** publish ports (`ports:`). Caddy is the only ingress; declare an unavoidable host port under the manifest's `security.published_ports` instead.
 - Keep bind mounts, `secrets`/`configs` files, and build contexts inside the project directory, declare only the project's own networks and volumes, and start any network alias with `<project>-`. The full list is in SECURITY.md, "What `compose.yml` may not do".
 - **Not** set a top-level `name:`. boxmunge runs every compose command with `-p <project>` (`-p <project>-staging` for staging), and rejects a `name:` line so a compose file can never address another project's containers or volumes.
 

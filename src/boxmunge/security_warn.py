@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from boxmunge.log import log_operation, log_warning
+from boxmunge.published_ports import declared_ports, describe, is_widened
 from boxmunge.security_overlay import services_with_off_profile, format_off_warning
 
 
@@ -124,3 +125,27 @@ def warn_writable_state(
                     "service": svc_name,
                 },
             )
+
+
+def warn_published_ports(paths: Any, manifest: dict[str, Any], component: str) -> None:
+    """Emit a [WARNING] for every opt-in published port, on every deploy.
+
+    Published ports bypass Caddy, UFW and CrowdSec; a widened one (any
+    host_ip other than loopback) is reachable from the network.
+    """
+    project = manifest.get("project", "<unknown>")
+    for entry in declared_ports(manifest.get("security")):
+        reach = (
+            "REACHABLE FROM THE NETWORK, bypassing UFW and CrowdSec"
+            if is_widened(entry) else "reachable from this host only"
+        )
+        print(
+            f"[WARNING] {project} publishes {describe(entry)} outside Caddy, "
+            f"{reach}. Reason recorded in manifest: {entry['reason']!r}"
+        )
+        log_warning(
+            component, f"published port {describe(entry)}: {project}",
+            paths, project=project,
+            detail={"event": "published_port", "port": describe(entry),
+                    "widened": is_widened(entry), "reason": entry["reason"]},
+        )

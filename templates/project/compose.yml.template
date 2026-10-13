@@ -10,8 +10,9 @@ services:
     restart: unless-stopped
     env_file:
       - project.env
-    # ports:
-    #   - "127.0.0.1:3000:3000"   # only if needed for local debugging
+    # No ports: here. Caddy is the only ingress; a port that must be
+    # reachable from the host goes in manifest.yml under
+    # security.published_ports (published on 127.0.0.1, with a reason).
     volumes:
       - ./data/frontend:/app/data
 

@@ -6,7 +6,8 @@ keep one project's compose file from reaching another project: it may
 declare and join only its own networks, give its containers only aliases
 under its own `<project>-` prefix, use only its own named volumes, and
 read host files (secrets, configs, build contexts) only from inside its
-own directory. The shared `boxmunge-proxy` network is attached by
+own directory. It may not publish ports on the host either; a port that
+must be published is declared in the manifest (see `published_ports`). The shared `boxmunge-proxy` network is attached by
 boxmunge's overlay for routed services; a compose file may not join it
 itself.
 
@@ -147,6 +148,15 @@ def _check_service(
                     f"{prefix!r} (for example {prefix}{svc_name}), or reach the "
                     f"service by its service name instead."
                 )
+    if svc.get("ports"):
+        problems.append(
+            f"service {svc_name}: ports: publishes on the host directly, "
+            f"bypassing Caddy, UFW and CrowdSec. Remove ports: (routed traffic "
+            f"reaches the service through Caddy). If a port must be reachable "
+            f"from the host, declare it in manifest.yml under "
+            f"security.published_ports with a reason; boxmunge then publishes "
+            f"it on 127.0.0.1."
+        )
     if svc.get("external_links"):
         problems.append(
             f"service {svc_name}: external_links reach containers outside this "

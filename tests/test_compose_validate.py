@@ -27,8 +27,8 @@ class TestBenignCompose:
 services:
   web:
     image: nginx:alpine
-    ports:
-      - "8080:80"
+    expose:
+      - "80"
     volumes:
       - ./data:/data
 """)
