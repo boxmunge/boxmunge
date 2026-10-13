@@ -89,19 +89,140 @@ verify_release_signature() {
         "$sums" >/dev/null 2>&1
 }
 
-active_slot() { cat "$ACTIVE_SLOT_FILE" 2>/dev/null || echo "a"; }
-standby_slot() { [[ "$(active_slot)" == "a" ]] && echo "b" || echo "a"; }
-active_venv() { echo "$BOXMUNGE_ROOT/env-$(active_slot)"; }
-standby_venv() { echo "$BOXMUNGE_ROOT/env-$(standby_slot)"; }
+# ---------------------------------------------------------------------------
+# Deploy-writable state.
+#
+# upgrade-state/ is root:deploy 0770 so the deploy shell can end probation
+# early. Everything read from it is therefore untrusted input to this root
+# process. Each value is checked against a strict allowlist before it can
+# reach an executable path, a URL, or an rm -rf, and anything else stops the
+# shim. Symlinks are refused, and writes go through rename(2), so a planted
+# link is replaced rather than followed.
+# ---------------------------------------------------------------------------
+SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+ACTIVE_SLOT=""
+LOCK_HELD=0
 
+printable() { local s="${1:0:80}"; printf '%s' "${s//[^[:alnum:]._+-]/?}"; }
+
+require_slot() {  # require_slot <value> <where>
+    [[ "$1" == "a" || "$1" == "b" ]] \
+        || die "Invalid slot '$(printable "$1")' in $2 (expected a or b); refusing to continue"
+}
+
+require_semver() {  # require_semver <value> <where>
+    [[ "$1" =~ $SEMVER_RE ]] \
+        || die "Invalid version '$(printable "$1")' in $2 (expected semver like 0.3.5 or 0.3.5-rc.1)"
+}
+
+refuse_symlink() {
+    [[ ! -L "$1" ]] || die "$1 is a symlink; refusing to use it as root"
+}
+
+# replace_file <src> <dest>: rename(2), which never follows a link at <dest>.
+# (GNU mv would move <src> INTO <dest> if <dest> were a link to a directory.)
+replace_file() {
+    python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$1" "$2"
+}
+
+# load_active_slot: set ACTIVE_SLOT from the root-owned env-active symlink and
+# the deploy-writable active-slot file. Both must name a or b, and they must
+# agree: a forged active-slot would otherwise make the live venv look like
+# the standby, and the next upgrade would rm -rf it.
+load_active_slot() {
+    local from_file="" from_link="" target
+    refuse_symlink "$ACTIVE_SLOT_FILE"
+    if [[ -f "$ACTIVE_SLOT_FILE" ]]; then
+        from_file="$(cat "$ACTIVE_SLOT_FILE")"
+        require_slot "$from_file" "$ACTIVE_SLOT_FILE"
+    fi
+    if [[ -L "$BOXMUNGE_ROOT/env-active" ]]; then
+        target="$(readlink "$BOXMUNGE_ROOT/env-active")"
+        case "$target" in
+            "$BOXMUNGE_ROOT/env-a") from_link="a" ;;
+            "$BOXMUNGE_ROOT/env-b") from_link="b" ;;
+            *) die "env-active points at '$(printable "$target")', not env-a or env-b" ;;
+        esac
+    fi
+    if [[ -n "$from_file" && -n "$from_link" && "$from_file" != "$from_link" ]]; then
+        die "active-slot says '$from_file' but env-active points at env-$from_link; refusing to guess which venv is live"
+    fi
+    ACTIVE_SLOT="${from_link:-$from_file}"
+    [[ -n "$ACTIVE_SLOT" ]] || die "No active slot: neither $ACTIVE_SLOT_FILE nor $BOXMUNGE_ROOT/env-active exists"
+}
+
+standby_slot() { [[ "$ACTIVE_SLOT" == "a" ]] && echo "b" || echo "a"; }
+active_venv() { echo "$BOXMUNGE_ROOT/env-$ACTIVE_SLOT"; }
+
+# acquire_lock [skip]: take upgrade.lock once per run. With "skip", a busy
+# lock exits 0 (the health timer retries on its next fire); otherwise it dies.
+acquire_lock() {
+    [[ "$LOCK_HELD" -eq 1 ]] && return 0
+    mkdir -p "$STATE_DIR"
+    refuse_symlink "$LOCK_FILE"
+    exec 9>>"$LOCK_FILE"
+    if ! flock -n 9; then
+        [[ "${1:-}" == "skip" ]] && { log "Another upgrade is in progress; skipping"; exit 0; }
+        die "Another upgrade is in progress"
+    fi
+    LOCK_HELD=1
+}
+
+# is_blocklisted <version>: 0 if listed, 1 if not. A blocklist that is not a
+# JSON object keyed by semver strings is corrupt or tampered with: stop.
 is_blocklisted() {
-    local version="$1"
+    local rc=0
+    refuse_symlink "$BLOCKLIST_FILE"
     [[ -f "$BLOCKLIST_FILE" ]] || return 1
-    BM_VERSION="$version" BM_BLOCKLIST="$BLOCKLIST_FILE" python3 -c "
+    BM_VERSION="$1" BM_BLOCKLIST="$BLOCKLIST_FILE" BM_SEMVER_RE="$SEMVER_RE" python3 - <<'PYBL' || rc=$?
+import json, os, re, sys
+try:
+    with open(os.environ["BM_BLOCKLIST"]) as f:
+        bl = json.load(f)
+except (OSError, ValueError) as e:
+    print(f"blocklist unreadable: {e}", file=sys.stderr)
+    sys.exit(3)
+pattern = re.compile(os.environ["BM_SEMVER_RE"])
+if not isinstance(bl, dict) or not all(isinstance(k, str) and pattern.fullmatch(k) for k in bl):
+    print("blocklist is not an object keyed by semver versions", file=sys.stderr)
+    sys.exit(3)
+sys.exit(0 if os.environ["BM_VERSION"] in bl else 1)
+PYBL
+    case "$rc" in
+        0|1) return "$rc" ;;
+        *) die "$BLOCKLIST_FILE is malformed; inspect it and repair or remove it" ;;
+    esac
+}
+
+# read_probation: parse probation.json into PROB_VERSION, PROB_PREV_SLOT and
+# PROB_EXPIRED (yes/no). previous_slot must be the current standby slot,
+# because promotion rm -rf's it.
+read_probation() {
+    local out
+    refuse_symlink "$PROBATION_FILE"
+    out="$(BM_PROBATION_FILE="$PROBATION_FILE" python3 - <<'PYPROB'
 import json, os, sys
-bl = json.load(open(os.environ['BM_BLOCKLIST']))
-sys.exit(0 if os.environ['BM_VERSION'] in bl else 1)
-"
+from datetime import datetime, timezone
+with open(os.environ["BM_PROBATION_FILE"]) as f:
+    d = json.load(f)
+keys = ("version", "previous_slot", "expires_at")
+if not isinstance(d, dict) or not all(isinstance(d.get(k), str) and "\n" not in d[k] for k in keys):
+    sys.exit("probation.json must hold string version, previous_slot and expires_at")
+expires = datetime.fromisoformat(d["expires_at"])
+if expires.tzinfo is None:
+    sys.exit("probation.json expires_at has no timezone")
+print(d["version"])
+print(d["previous_slot"])
+print("yes" if datetime.now(timezone.utc) >= expires else "no")
+PYPROB
+)" || die "$PROBATION_FILE is malformed; refusing to act on it"
+    PROB_VERSION="$(echo "$out" | sed -n '1p')"
+    PROB_PREV_SLOT="$(echo "$out" | sed -n '2p')"
+    PROB_EXPIRED="$(echo "$out" | sed -n '3p')"
+    require_semver "$PROB_VERSION" "$PROBATION_FILE"
+    require_slot "$PROB_PREV_SLOT" "$PROBATION_FILE"
+    [[ "$PROB_PREV_SLOT" == "$(standby_slot)" ]] \
+        || die "$PROBATION_FILE previous_slot '$PROB_PREV_SLOT' is the live slot; refusing to act on it"
 }
 
 add_blocklist() {
@@ -137,9 +258,14 @@ send_notification(po.get('user_key',''), po.get('app_token',''), os.environ['BM_
 }
 
 swap_to() {
-    local slot="$1"
+    local slot="$1" tmp
+    require_slot "$slot" "swap target"
     ln -sfn "$BOXMUNGE_ROOT/env-$slot" "$BOXMUNGE_ROOT/env-active"
-    echo "$slot" > "$ACTIVE_SLOT_FILE"
+    tmp="$(mktemp "$STATE_DIR/.active-slot.XXXXXX")"
+    echo "$slot" > "$tmp"
+    chmod 0644 "$tmp"
+    replace_file "$tmp" "$ACTIVE_SLOT_FILE"
+    ACTIVE_SLOT="$slot"
     # The user-facing /opt/boxmunge/bin/boxmunge-server wrapper already routes
     # through env-active/bin/boxmunge-server, so the symlink swap above
     # is sufficient — no need to touch the wrapper itself.
@@ -188,14 +314,27 @@ Stderr (truncated): $stderr_excerpt"
     exit 1
 }
 
+# preflight_fail <version> <from_version> <blocklist_reason> <message> [stage]
+#
+# Abort before the slot swap: drop the half-built standby venv, blocklist
+# the version so auto-update stops retrying it, and report the failure.
+preflight_fail() {
+    log "$4"
+    rm -rf "$BOXMUNGE_ROOT/env-$(standby_slot)"
+    add_blocklist "$1" "$3"
+    report_failure "$1" "$2" "${5:-preflight}"
+    exit 1
+}
+
+TMP_DOWNLOAD=""
+cleanup_download() { [[ -z "$TMP_DOWNLOAD" ]] || rm -rf "$TMP_DOWNLOAD"; }
+
 cmd_run() {
     local version="${1:?Usage: boxmunge-upgrade run <version> <url>}"
     local url="${2:?Usage: boxmunge-upgrade run <version> <url>}"
 
-    mkdir -p "$STATE_DIR"
-
-    exec 9>"$LOCK_FILE"
-    flock -n 9 || die "Another upgrade is in progress"
+    load_active_slot
+    acquire_lock
 
     if is_blocklisted "$version"; then
         log "Version $version is blocklisted, skipping"
@@ -203,7 +342,7 @@ cmd_run() {
     fi
 
     local prev_slot from_version standby
-    prev_slot="$(active_slot)"
+    prev_slot="$ACTIVE_SLOT"
     from_version="$("$(active_venv)/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")"
     standby="$(standby_slot)"
 
@@ -215,18 +354,15 @@ cmd_run() {
 
     rm -rf "$BOXMUNGE_ROOT/env-$standby"
     python3 -m venv "$BOXMUNGE_ROOT/env-$standby"
-    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --upgrade pip || {
-        log "Failed to upgrade pip in standby venv"
-        rm -rf "$BOXMUNGE_ROOT/env-$standby"
-        add_blocklist "$version" "preflight_failed: pip_upgrade"
-        report_failure "$version" "$from_version" "preflight"
-        exit 1
-    }
+    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --upgrade pip \
+        || preflight_fail "$version" "$from_version" "preflight_failed: pip_upgrade" \
+            "Failed to upgrade pip in standby venv"
 
     # Download bundle from GitHub release
     local tmp_download
-    tmp_download="$(mktemp -d)"
-    trap "rm -rf '$tmp_download'" RETURN
+    TMP_DOWNLOAD="$(mktemp -d)"
+    tmp_download="$TMP_DOWNLOAD"
+    trap cleanup_download EXIT
     local release_base="https://github.com/boxmunge/boxmunge/releases/download/v${version}"
     local bundle_url="${release_base}/boxmunge-${version}.tar.gz"
     local sums_url="${release_base}/SHA256SUMS"
@@ -234,34 +370,18 @@ cmd_run() {
     local sums_cert_url="${release_base}/SHA256SUMS.cert"
 
     log "Downloading bundle from ${bundle_url}"
-    curl -sLf -o "$tmp_download/boxmunge-${version}.tar.gz" "$bundle_url" || {
-        log "Failed to download bundle"
-        rm -rf "$BOXMUNGE_ROOT/env-$standby"
-        add_blocklist "$version" "preflight_failed: bundle_download"
-        report_failure "$version" "$from_version" "preflight"
-        exit 1
-    }
-    curl -sLf -o "$tmp_download/SHA256SUMS" "$sums_url" || {
-        log "Failed to download SHA256SUMS"
-        rm -rf "$BOXMUNGE_ROOT/env-$standby"
-        add_blocklist "$version" "preflight_failed: checksum_download"
-        report_failure "$version" "$from_version" "preflight"
-        exit 1
-    }
-    curl -sLf -o "$tmp_download/SHA256SUMS.sig" "$sums_sig_url" || {
-        log "Failed to download SHA256SUMS.sig (release is unsigned or sig artifact missing)"
-        rm -rf "$BOXMUNGE_ROOT/env-$standby"
-        add_blocklist "$version" "preflight_failed: signature_download"
-        report_failure "$version" "$from_version" "preflight"
-        exit 1
-    }
-    curl -sLf -o "$tmp_download/SHA256SUMS.cert" "$sums_cert_url" || {
-        log "Failed to download SHA256SUMS.cert (release is unsigned or cert artifact missing)"
-        rm -rf "$BOXMUNGE_ROOT/env-$standby"
-        add_blocklist "$version" "preflight_failed: certificate_download"
-        report_failure "$version" "$from_version" "preflight"
-        exit 1
-    }
+    curl -sLf -o "$tmp_download/boxmunge-${version}.tar.gz" "$bundle_url" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: bundle_download" \
+            "Failed to download bundle"
+    curl -sLf -o "$tmp_download/SHA256SUMS" "$sums_url" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: checksum_download" \
+            "Failed to download SHA256SUMS"
+    curl -sLf -o "$tmp_download/SHA256SUMS.sig" "$sums_sig_url" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: signature_download" \
+            "Failed to download SHA256SUMS.sig (release is unsigned or sig artifact missing)"
+    curl -sLf -o "$tmp_download/SHA256SUMS.cert" "$sums_cert_url" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: certificate_download" \
+            "Failed to download SHA256SUMS.cert (release is unsigned or cert artifact missing)"
 
     # Verify cosign signature on SHA256SUMS BEFORE running sha256sum -c.
     #
@@ -275,11 +395,8 @@ cmd_run() {
     #
     # cosign is hard-required: if the host is missing it, abort.
     if ! verify_release_signature "$tmp_download"; then
-        log "Cosign verification of SHA256SUMS FAILED — refusing to install."
-        rm -rf "$BOXMUNGE_ROOT/env-$standby"
-        add_blocklist "$version" "preflight_failed: cosign_verify"
-        report_failure "$version" "$from_version" "preflight"
-        exit 1
+        preflight_fail "$version" "$from_version" "preflight_failed: cosign_verify" \
+            "Cosign verification of SHA256SUMS FAILED — refusing to install."
     fi
     log "Cosign signature on SHA256SUMS verified (release-workflow identity)"
     bm_log info upgrade "signature verified" "{\"version\": \"$version\"}"
@@ -298,31 +415,20 @@ cmd_run() {
     # (b) run the full check.
     local expected_filename="boxmunge-${version}.tar.gz"
     if ! grep -q "  ${expected_filename}\$" "${tmp_download}/SHA256SUMS"; then
-        log "Checksum verification FAILED: SHA256SUMS does not list ${expected_filename}"
-        rm -rf "$BOXMUNGE_ROOT/env-$standby"
-        add_blocklist "$version" "preflight_failed: checksum_missing_entry"
-        report_failure "$version" "$from_version" "preflight"
-        exit 1
+        preflight_fail "$version" "$from_version" "preflight_failed: checksum_missing_entry" \
+            "Checksum verification FAILED: SHA256SUMS does not list ${expected_filename}"
     fi
     # SHA256SUMS may also list boxmunge-install.sh and other release artefacts
     # we did not download; restrict the check to just the bundle line.
-    (cd "$tmp_download" && grep "  ${expected_filename}\$" SHA256SUMS | sha256sum -c -) || {
-        log "Checksum verification FAILED"
-        rm -rf "$BOXMUNGE_ROOT/env-$standby"
-        add_blocklist "$version" "preflight_failed: checksum_mismatch"
-        report_failure "$version" "$from_version" "preflight"
-        exit 1
-    }
+    (cd "$tmp_download" && grep "  ${expected_filename}\$" SHA256SUMS | sha256sum -c -) \
+        || preflight_fail "$version" "$from_version" "preflight_failed: checksum_mismatch" \
+            "Checksum verification FAILED"
 
     # Extract and pip install
     tar xzf "$tmp_download/boxmunge-${version}.tar.gz" -C "$tmp_download"
-    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet "$tmp_download/boxmunge[tui]" || {
-        log "Failed to install boxmunge from bundle"
-        rm -rf "$BOXMUNGE_ROOT/env-$standby"
-        add_blocklist "$version" "preflight_failed: pip_install"
-        report_failure "$version" "$from_version" "preflight"
-        exit 1
-    }
+    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet "$tmp_download/boxmunge[tui]" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: pip_install" \
+            "Failed to install boxmunge from bundle"
 
     # 2. PRE-FLIGHT
     log "Running pre-flight checks..."
@@ -332,29 +438,17 @@ cmd_run() {
     # `boxmunge.__version__` constant (drift-prone, not actually the source
     # of truth) — read from `boxmunge.version.get_build_version()` instead,
     # which has been the canonical accessor since v0.5.
-    "$BOXMUNGE_ROOT/env-$standby/bin/python" -c "from boxmunge.version import get_build_version; print(get_build_version())" || {
-        log "Pre-flight FAILED: import test"
-        rm -rf "$BOXMUNGE_ROOT/env-$standby"
-        add_blocklist "$version" "preflight_failed: import"
-        report_failure "$version" "$from_version" "preflight"
-        exit 1
-    }
+    "$BOXMUNGE_ROOT/env-$standby/bin/python" -c "from boxmunge.version import get_build_version; print(get_build_version())" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: import" \
+            "Pre-flight FAILED: import test"
 
-    "$BOXMUNGE_ROOT/env-$standby/bin/boxmunge-server" --version >/dev/null 2>&1 || {
-        log "Pre-flight FAILED: CLI version check"
-        rm -rf "$BOXMUNGE_ROOT/env-$standby"
-        add_blocklist "$version" "preflight_failed: cli_version"
-        report_failure "$version" "$from_version" "preflight"
-        exit 1
-    }
+    "$BOXMUNGE_ROOT/env-$standby/bin/boxmunge-server" --version >/dev/null 2>&1 \
+        || preflight_fail "$version" "$from_version" "preflight_failed: cli_version" \
+            "Pre-flight FAILED: CLI version check"
 
-    "$BOXMUNGE_ROOT/env-$standby/bin/boxmunge-server" upgrade --dry-run || {
-        log "Pre-flight FAILED: dry-run upgrade"
-        rm -rf "$BOXMUNGE_ROOT/env-$standby"
-        add_blocklist "$version" "preflight_failed: dry_run"
-        report_failure "$version" "$from_version" "preflight"
-        exit 1
-    }
+    "$BOXMUNGE_ROOT/env-$standby/bin/boxmunge-server" upgrade --dry-run \
+        || preflight_fail "$version" "$from_version" "preflight_failed: dry_run" \
+            "Pre-flight FAILED: dry-run upgrade"
 
     log "Pre-flight passed"
 
@@ -435,12 +529,9 @@ cmd_run() {
     local installer_hash_file="$BOXMUNGE_ROOT/state/installer.sha256"
     if [[ -f "$new_install_sh" ]]; then
         if ! bash -n "$new_install_sh" 2>/dev/null; then
-            log "ERROR: bundled install.sh has syntax errors; refusing to run system upgrade"
             bm_log error upgrade "system upgrade skipped: bash -n failed" "{\"version\": \"$version\"}"
-            rm -rf "$BOXMUNGE_ROOT/env-$standby"
-            add_blocklist "$version" "system_upgrade_failed: install_sh_syntax"
-            report_failure "$version" "$from_version" "system_upgrade"
-            exit 1
+            preflight_fail "$version" "$from_version" "system_upgrade_failed: install_sh_syntax" \
+                "ERROR: bundled install.sh has syntax errors; refusing to run system upgrade" system_upgrade
         fi
         local new_hash current_hash
         new_hash="$(sha256sum "$new_install_sh" | awk '{print $1}')"
@@ -453,12 +544,9 @@ cmd_run() {
             if [[ "$sysup_exit" -eq 0 ]]; then
                 bm_log info upgrade "system upgrade completed" "{\"hash\": \"${new_hash:0:16}\"}"
             else
-                log "ERROR: install.sh failed (exit ${sysup_exit}); aborting upgrade before slot swap"
                 bm_log error upgrade "system upgrade failed" "{\"exit_code\": $sysup_exit}"
-                rm -rf "$BOXMUNGE_ROOT/env-$standby"
-                add_blocklist "$version" "system_upgrade_failed: install_sh_exit_${sysup_exit}"
-                report_failure "$version" "$from_version" "system_upgrade"
-                exit 1
+                preflight_fail "$version" "$from_version" "system_upgrade_failed: install_sh_exit_${sysup_exit}" \
+                    "ERROR: install.sh failed (exit ${sysup_exit}); aborting upgrade before slot swap" system_upgrade
             fi
         else
             log "install.sh unchanged (${new_hash:0:8}); skipping system upgrade"
@@ -504,9 +592,8 @@ write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT']
 }
 
 cmd_check_probation() {
-    mkdir -p "$STATE_DIR"
-    exec 9>"$LOCK_FILE"
-    flock -n 9 || exit 0  # an upgrade is in progress; retry on the next health-timer fire
+    load_active_slot
+    acquire_lock skip  # an upgrade is in progress; retry on the next health-timer fire
 
     # Orphan venv cleanup: if there's no probation file but the inactive slot
     # has a venv, it's leftover from a deploy-context probation promotion
@@ -514,35 +601,17 @@ cmd_check_probation() {
     # Clean it up here in root context.
     local inactive
     inactive="$(standby_slot)"
-    if [[ ! -f "$PROBATION_FILE" ]] && [[ -d "$BOXMUNGE_ROOT/env-$inactive" ]]; then
+    if [[ ! -e "$PROBATION_FILE" && ! -L "$PROBATION_FILE" && -d "$BOXMUNGE_ROOT/env-$inactive" ]]; then
         log "Cleaning up orphan venv in inactive slot $inactive"
         rm -rf "$BOXMUNGE_ROOT/env-$inactive"
     fi
 
-    [[ -f "$PROBATION_FILE" ]] || exit 0
+    [[ -e "$PROBATION_FILE" || -L "$PROBATION_FILE" ]] || exit 0
 
-    local version prev_slot expires_at
-    local probation_data
-    probation_data="$(BM_PROBATION_FILE="$PROBATION_FILE" python3 -c "
-import json, os
-d = json.load(open(os.environ['BM_PROBATION_FILE']))
-print(d['version'])
-print(d['previous_slot'])
-print(d['expires_at'])
-")"
-    version="$(echo "$probation_data" | sed -n '1p')"
-    prev_slot="$(echo "$probation_data" | sed -n '2p')"
-    expires_at="$(echo "$probation_data" | sed -n '3p')"
+    read_probation
+    local version="$PROB_VERSION" prev_slot="$PROB_PREV_SLOT"
 
-    local expired
-    expired="$(BM_EXPIRES_AT="$expires_at" python3 -c "
-import os
-from datetime import datetime, timezone
-expires = datetime.fromisoformat(os.environ['BM_EXPIRES_AT'])
-print('yes' if datetime.now(timezone.utc) >= expires else 'no')
-")"
-
-    if [[ "$expired" == "yes" ]]; then
+    if [[ "$PROB_EXPIRED" == "yes" ]]; then
         log "Probation expired for $version — promoting"
         rm -rf "$BOXMUNGE_ROOT/env-$prev_slot"
         rm -f "$PROBATION_FILE"
@@ -581,6 +650,7 @@ print('yes' if datetime.now(timezone.utc) >= expires else 'no')
 
 cmd_auto() {
     local result action version url msg
+    load_active_slot
     result="$("$(active_venv)/bin/boxmunge-server" _discover-update --json 2>/dev/null)" || \
         die "Discovery failed (boxmunge-server _discover-update returned non-zero)"
 
@@ -626,6 +696,7 @@ cmd_target() {
 
 cmd_clear_blocklist() {
     local version="${1:?Usage: boxmunge-upgrade clear-blocklist <version>}"
+    load_active_slot
     BM_VERSION="$version" "$(active_venv)/bin/python" -c "
 import os
 from boxmunge.upgrade_state import remove_from_blocklist

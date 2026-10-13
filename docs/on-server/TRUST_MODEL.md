@@ -49,6 +49,33 @@ The `deploy` user can operate on any project — this is by design, not a gap. T
 - **Backup encryption key** — the deploy user can read the age identity key at `/opt/boxmunge/config/backup.key` (mode 640, group deploy). This is required for backup and restore operations to work without sudo. An authenticated deploy user can decrypt any backup snapshot.
 - **Backups** — the deploy user can trigger backup/restore for any project.
 
+## The Upgrade Shim and the Root Boundary
+
+The upgrade shim (`/opt/boxmunge/bin/boxmunge-upgrade`) runs as root: from the
+health and auto-update timers, and from the deploy shell through a scoped sudo
+rule. It is the one place where deploy-reachable input crosses into root, so it
+treats that input as untrusted even though the docker-group concession above
+means deploy is not a hard boundary today.
+
+`/opt/boxmunge/upgrade-state/` is `root:deploy 0770`, because the deploy shell
+ends upgrade probation early by removing `probation.json`. Every value the shim
+reads from that directory is checked before use:
+
+- The active slot must be exactly `a` or `b`, and must agree with the root-owned
+  `env-active` symlink. A disagreement stops the shim rather than letting a
+  forged `active-slot` turn the live venv into the "standby" that the next
+  upgrade deletes.
+- `probation.json` must be a JSON object with a semver `version`, an
+  ISO-8601 `expires_at` with a timezone, and a `previous_slot` of `a` or `b`
+  that is the current standby slot (promotion deletes it).
+- `blocklist.json` must be a JSON object keyed by semver versions.
+- None of these files, nor `upgrade.lock`, may be a symlink. The shim writes
+  `active-slot` by rename, so a planted link is replaced rather than followed.
+
+Any violation stops the shim with a non-zero exit and an error naming the
+file, before the value reaches a path, a URL, or an `rm -rf`. Repair or remove
+the file as `supervisor` and re-run.
+
 ## Explicitly Out of Scope
 
 - Multi-tenant isolation
