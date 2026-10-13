@@ -9,6 +9,7 @@ boxmunge upgrade; not a user-facing command.
 import io
 import json
 import os
+import pwd
 import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -119,6 +120,36 @@ def _check_member_safe(member: tarfile.TarInfo) -> None:
         raise StashError(f"refusing to extract suspicious member name: {member.name!r}")
 
 
+# Pause and quarantine markers record what an operator or the CVE scanner did
+# after the stash was taken. Restoring an old marker would mark a running
+# project paused (so backups and health checks skip it); dropping a new one
+# would put a quarantined project back in rotation. They are left as they are.
+_LIFECYCLE_MARKER_SUFFIXES = (".paused.json", ".quarantined.json")
+
+
+def _is_lifecycle_marker(member_name: str) -> bool:
+    return member_name.startswith("state/deploy/") and member_name.endswith(
+        _LIFECYCLE_MARKER_SUFFIXES
+    )
+
+
+def _allowed_owner(member: tarfile.TarInfo) -> tuple[int, int] | None:
+    """The (uid, gid) to restore, or None when not running as root.
+
+    The stash directory is writable by deploy, so the recorded owner is only
+    trusted if it is root or deploy; anything else stops the restore.
+    """
+    if os.geteuid() != 0:
+        return None
+    deploy = pwd.getpwnam("deploy")
+    if member.uid not in (0, deploy.pw_uid) or member.gid not in (0, deploy.pw_gid):
+        raise StashError(
+            f"refusing to restore {member.name!r}: recorded owner "
+            f"{member.uid}:{member.gid} is neither root nor deploy"
+        )
+    return member.uid, member.gid
+
+
 def _validate_meta(tar: tarfile.TarFile, archive: Path, paths: BoxPaths) -> None:
     """Validate stash schema version. Allows legacy stashes (no meta) with a warning.
 
@@ -183,7 +214,7 @@ def restore_stash(paths: BoxPaths, archive: Path | None = None) -> Path:
         _validate_meta(tar, archive, paths)
 
         for member in tar.getmembers():
-            if member.name == META_FILENAME:
+            if member.name == META_FILENAME or _is_lifecycle_marker(member.name):
                 continue
 
             _check_member_safe(member)
@@ -229,7 +260,11 @@ def restore_stash(paths: BoxPaths, archive: Path | None = None) -> Path:
 
             extracted = tar.extractfile(member)
             if extracted is not None:
-                atomic_write_bytes(target, extracted.read())
+                owner = _allowed_owner(member)
+                # Permission bits only: never setuid/setgid/sticky from an archive.
+                atomic_write_bytes(target, extracted.read(), mode=member.mode & 0o777)
+                if owner is not None:
+                    os.chown(str(target), *owner)
 
     log_operation("stash", f"Stash restored from: {archive.name}", paths)
     return archive

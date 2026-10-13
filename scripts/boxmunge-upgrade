@@ -278,6 +278,31 @@ swap_to() {
     log "Swapped active to slot $slot"
 }
 
+# rollback_partial <new_version> <from_version> <stage> <prev_slot> <step> <exit> <output>
+#
+# The venv is back on the previous slot but disk state may be partly
+# upgraded, a hybrid the old code is not guaranteed to handle. Hard failure
+# demanding operator attention; exit 2 so monitoring can tell it from a
+# clean rollback (exit 1).
+rollback_partial() {
+    local new_version="$1" from_version="$2" stage="$3" prev_slot="$4" step="$5" rc="$6" output="$7"
+    log "ERROR: $step failed during rollback (exit $rc)"
+    log "ERROR: $step output: $output"
+    bm_log error upgrade "rollback partial — manual intervention required" \
+        "{\"version\": \"$new_version\", \"stage\": \"$stage\", \"step\": \"$step\", \"exit\": $rc}"
+    add_blocklist "$new_version" "${stage}_partial_rollback"
+    report_failure "$new_version" "$from_version" "apply_partial_rollback"
+    # Truncate output in the alert body — Pushover messages are length-limited.
+    send_notification "boxmunge ROLLBACK PARTIAL" \
+        "ROLLBACK PARTIAL — manual intervention required.
+Version: $new_version
+Stage: $stage
+Failed step: $step (exit $rc)
+Output (truncated): ${output:0:500}"
+    log "Rollback PARTIAL: venv reverted to slot $prev_slot but $step failed"
+    exit 2
+}
+
 do_rollback() {
     local new_version="$1" from_version="$2" stage="$3" prev_slot="$4"
     log "ROLLBACK: $new_version failed at stage=$stage, reverting to slot $prev_slot"
@@ -285,32 +310,21 @@ do_rollback() {
 
     swap_to "$prev_slot"
 
-    # Stash restore is the part of rollback that returns config + state to the
-    # pre-upgrade snapshot. If it fails, the venv has been swapped back but
-    # disk state may be partly upgraded — a hybrid configuration that the old
-    # code is not guaranteed to handle. Treat this as a HARD failure and
-    # demand operator attention. Distinct exit code (2) so probation /
-    # monitoring can tell partial-rollback from clean-rollback (exit 1).
-    local stash_stderr stash_exit=0
-    stash_stderr="$("$(active_venv)/bin/boxmunge-server" stash restore --latest 2>&1)" || stash_exit=$?
-    if [[ "$stash_exit" -ne 0 ]]; then
-        log "ERROR: stash restore failed during rollback (exit $stash_exit)"
-        log "ERROR: stash restore stderr: $stash_stderr"
-        bm_log error upgrade "rollback partial — manual intervention required" \
-            "{\"version\": \"$new_version\", \"stage\": \"$stage\", \"stash_exit\": $stash_exit}"
-        add_blocklist "$new_version" "${stage}_partial_rollback"
-        report_failure "$new_version" "$from_version" "apply_partial_rollback"
-        # Truncate stderr in the alert body — Pushover messages are length-limited.
-        local stderr_excerpt="${stash_stderr:0:500}"
-        send_notification "boxmunge ROLLBACK PARTIAL" \
-            "ROLLBACK PARTIAL — manual intervention required.
-Version: $new_version
-Stage: $stage
-Stash restore exit: $stash_exit
-Stderr (truncated): $stderr_excerpt"
-        log "Rollback PARTIAL: venv reverted to slot $prev_slot but stash restore failed"
-        exit 2
-    fi
+    # 1. Stash restore returns config + state to the pre-upgrade snapshot.
+    local output rc=0
+    output="$("$(active_venv)/bin/boxmunge-server" stash restore --latest 2>&1)" || rc=$?
+    [[ "$rc" -eq 0 ]] || rollback_partial "$new_version" "$from_version" "$stage" "$prev_slot" \
+        "stash restore" "$rc" "$output"
+
+    # 2. Re-apply with the previous release's code. The stash holds inputs
+    #    (manifests, compose, secrets), not generated output: the overlays and
+    #    Caddy sites on disk, and the running containers, are still the new
+    #    release's. --apply regenerates both with the old code, reloads Caddy
+    #    and restarts projects, so a generator regression is really undone.
+    rc=0
+    output="$("$(active_venv)/bin/boxmunge-server" upgrade --apply 2>&1)" || rc=$?
+    [[ "$rc" -eq 0 ]] || rollback_partial "$new_version" "$from_version" "$stage" "$prev_slot" \
+        "re-apply of the previous release" "$rc" "$output"
 
     refresh_docs_for_slot "$prev_slot"
     add_blocklist "$new_version" "$stage"

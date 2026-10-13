@@ -25,6 +25,10 @@ from boxmunge.paths import BoxPaths
 from boxmunge.security_overlay import services_with_off_profile
 
 
+class UpgradeGateError(Exception):
+    """A step the upgrade cannot succeed without failed; the shim rolls back."""
+
+
 def _project_manifests(paths: BoxPaths) -> Iterator[tuple[Path, dict[str, Any]]]:
     """Yield (project_dir, manifest) for every project that has a manifest.
 
@@ -110,11 +114,8 @@ def _write_maintenance_site(paths: BoxPaths, name: str, manifest: dict[str, Any]
         atomic_write_text(paths.project_caddy_site(name),
                           render_maintenance_caddy_config(hosts), mode=0o644)
     except (OSError, ValueError) as e:
-        log_warning(
-            "upgrade",
-            f"Failed to re-render maintenance Caddy config for {name}: {e}",
-            paths, project=name,
-        )
+        raise UpgradeGateError(
+            f"Failed to re-render the maintenance page for {name}: {e}") from e
 
 
 def _regenerate_project(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> bool:
@@ -136,13 +137,11 @@ def _regenerate_project(paths: BoxPaths, name: str, manifest: dict[str, Any]) ->
     try:
         prepare_caddy_config(paths, manifest)
         prepare_compose_override(paths, manifest, component="upgrade")
-        return True
     except Exception as e:
-        log_warning(
-            "upgrade", f"Failed to regenerate configs for {name}: {e}",
-            paths, project=name,
-        )
-        return False
+        # The project would restart on its old overlay; fail so the shim
+        # rolls back instead of reporting a half-applied upgrade (D-07).
+        raise UpgradeGateError(f"Failed to regenerate configs for {name}: {e}") from e
+    return True
 
 
 def regenerate_configs(paths: BoxPaths) -> list[str]:

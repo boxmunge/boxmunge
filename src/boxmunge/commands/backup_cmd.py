@@ -124,7 +124,6 @@ def run_backup(
             paths, project=project_name,
         )
         return 0
-    clear_probation_if_active(paths, "backup")
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists():
         print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
@@ -436,6 +435,10 @@ def cmd_backup(args: list[str]) -> None:
     parsed = parse_args("backup", args, min_positional=1, max_positional=1)
     project = require_project_name("backup", parsed.positional[0])
     paths = BoxPaths()
+    # An operator's backup ends upgrade probation (the operator is looking at
+    # the box). run_backup itself does not: the nightly backup-all timer,
+    # container-update and self-test call it too (C-07).
+    clear_probation_if_active(paths, "backup")
     sys.exit(run_backup(project, paths))
 
 

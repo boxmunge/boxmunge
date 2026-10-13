@@ -160,8 +160,13 @@ def _tool_check(project: str, verbose: bool = True) -> dict:
 
 def _tool_backup(project: str) -> dict:
     from boxmunge.commands.backup_cmd import run_backup
+    from boxmunge.probation import clear_probation_if_active
     paths = _get_paths()
-    return capture_tool_call(lambda: run_backup(project, paths))
+
+    def operator_backup() -> int:
+        clear_probation_if_active(paths, "backup")
+        return run_backup(project, paths)
+    return capture_tool_call(operator_backup)
 
 
 def _tool_restore(project: str, snapshot: str | None = None,

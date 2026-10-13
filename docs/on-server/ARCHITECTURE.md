@@ -356,6 +356,8 @@ See `agent-help writable` and `PROJECT_CONVENTIONS.md` for the schema reference.
 - `upgrade` — stash current state, migrate manifests, regenerate configs (paused and quarantined projects keep
   their maintenance page), restart, self-test, health check. `upgrade --dry-run` renders all of this in memory
   and writes nothing.
+  A failed gate (config regeneration, Caddy reload, restart, self-test) fails the upgrade; it is never reported
+  as a warning followed by "Upgrade complete".
 
 ## CVE Policy Module
 

@@ -849,6 +849,30 @@ sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist 0.11.1  # forget a faile
 
 Neither is available from the deploy shell or MCP.
 
+How an upgrade is applied and undone:
+
+1. The new release is downloaded, its signature and checksum verified, and it is installed
+   into the standby venv. `upgrade --dry-run` runs against it as a pre-flight.
+2. Platform state is stashed: config, deploy state, and each project's manifest, compose file,
+   env files and `boxmunge-scripts/`, with their modes and owners.
+3. The venvs swap and `upgrade --apply` migrates manifests, regenerates every project's Caddy
+   site and compose overlay, reloads Caddy and restarts projects. A failure in any of these
+   (a project whose configs cannot be regenerated, a Caddy reload, a project that does not
+   restart) fails the upgrade and triggers a rollback.
+4. A health check runs, then a 6-hour probation. A critical health result during probation
+   rolls back.
+
+A rollback swaps the venvs back, restores the stash, and re-runs `upgrade --apply` with the
+previous release, so its overlays and Caddy sites are regenerated and projects restarted on
+them. Pause and quarantine markers are not restored from the stash: a project you resumed after
+the upgrade stays resumed. If either the restore or the re-apply fails, you get a "ROLLBACK
+PARTIAL" alert and the shim exits 2; inspect the box as `supervisor`.
+
+Probation ends early, promoting the upgrade, when you deploy, roll back, restore, or run
+`backup` yourself. Timer-driven work (the nightly `backup-all`, container-update's
+pre-update backup, self-test) does not end it, so container-update keeps waiting until
+probation is over.
+
 The docs served by `agent-help` (`/opt/boxmunge/docs`) are replaced with the installed
 release's on every upgrade, and put back to the previous release's on a rollback, so they
 always describe the code that is running.

@@ -16,6 +16,7 @@ import sys
 from boxmunge.commands.health_cmd import run_health
 from boxmunge.commands.self_test_cmd import run_self_test
 from boxmunge.commands.upgrade_steps import (
+    UpgradeGateError,
     check_upgrade,
     migrate_project_manifests,
     notify_locked_skips,
@@ -24,6 +25,8 @@ from boxmunge.commands.upgrade_steps import (
 )
 from boxmunge.docker import caddy_reload, DockerError
 from boxmunge.log import log_operation, log_error
+from boxmunge.manifest import ManifestError
+from boxmunge.migration import MigrationError
 from boxmunge.paths import BoxPaths
 from boxmunge.stash import create_stash, prune_stashes
 from boxmunge.version import read_installed_version, write_installed_version, get_build_version, parse_version_string
@@ -46,41 +49,36 @@ def _run_dry(paths: BoxPaths) -> int:
     return 0
 
 
-def _run_apply(paths: BoxPaths, current_version: str, new_version: str) -> int:
-    """Run migrate/regen/reload/restart/version-write only.
+def _gate_failed(paths: BoxPaths, error: Exception) -> int:
+    """Report a failed upgrade gate. Non-zero makes the shim roll back."""
+    print(f"ERROR: upgrade failed: {error}", file=sys.stderr)
+    log_error("upgrade", f"Upgrade failed: {error}", paths)
+    return 1
 
-    The upgrade shim handles stash creation, health checks, and rollback
-    externally, so we skip those here.
-    Returns 0 on success, 1 if any project failed to restart.
-    """
-    print("boxmunge upgrade --apply")
-    print("========================\n")
-    print(f"  Current: {current_version}")
-    print(f"  New:     {new_version}\n")
 
-    # Step 1: Migrate manifests
-    print("[1/4] Migrating manifests...")
+def _migrate_regenerate_reload(paths: BoxPaths, step: int, total: int) -> list[str]:
+    """Steps shared by --apply and the full flow. Any failure raises: a
+    project left on stale configs, or a Caddy that did not take the new
+    ones, is not an upgrade that should report success."""
+    print(f"[{step}/{total}] Migrating manifests...")
     migrated = migrate_project_manifests(paths)
-    if migrated:
-        print(f"  Migrated: {', '.join(migrated)}")
-    else:
-        print("  No migrations needed.")
+    print(f"  Migrated: {', '.join(migrated)}" if migrated else "  No migrations needed.")
 
-    # Step 2: Regenerate configs
-    print("[2/4] Regenerating configs...")
+    print(f"[{step + 1}/{total}] Regenerating configs...")
     processed = regenerate_configs(paths)
     print(f"  Processed: {len(processed)} project(s)")
 
-    # Step 3: Reload Caddy
-    print("[3/4] Reloading Caddy...")
+    print(f"[{step + 2}/{total}] Reloading Caddy...")
     try:
         caddy_reload(paths.caddy, paths.state)
-        print("  Caddy reloaded.")
     except DockerError as e:
-        print(f"  WARN: Caddy reload failed: {e}")
+        raise UpgradeGateError(f"Caddy reload failed: {e}") from e
+    print("  Caddy reloaded.")
+    return migrated
 
-    # Step 4: Restart projects
-    print("[4/4] Restarting projects...")
+
+def _restart(paths: BoxPaths, step: int, total: int) -> tuple[list[str], list[str], list[str]]:
+    print(f"[{step}/{total}] Restarting projects...")
     succeeded, failed_projects, skipped_locked = restart_projects(paths)
     if succeeded:
         print(f"  Restarted: {', '.join(succeeded)}")
@@ -88,14 +86,16 @@ def _run_apply(paths: BoxPaths, current_version: str, new_version: str) -> int:
         print(f"  Skipped (locked): {', '.join(skipped_locked)}")
     notify_locked_skips(paths, skipped_locked)
     if failed_projects:
-        print(f"  FAILED: {', '.join(failed_projects)}")
+        print(f"  FAILED: {', '.join(failed_projects)}", file=sys.stderr)
+    return succeeded, failed_projects, skipped_locked
 
-    # Write version
-    semver, commit = parse_version_string(new_version)
-    write_installed_version(paths, semver, commit)
 
+def _finish(paths: BoxPaths, label: str, migrated: list[str],
+            restart: tuple[list[str], list[str], list[str]], new_version: str) -> int:
+    """Record the new version, but only when every project restarted."""
+    succeeded, failed_projects, skipped_locked = restart
     log_operation(
-        "upgrade", f"Apply {current_version} -> {new_version}", paths,
+        "upgrade", label, paths,
         detail={
             "migrated": migrated,
             "restarted": succeeded,
@@ -103,10 +103,32 @@ def _run_apply(paths: BoxPaths, current_version: str, new_version: str) -> int:
             "failed": failed_projects,
         },
     )
-
     if failed_projects:
-        return 1
+        return _gate_failed(paths, UpgradeGateError(
+            f"projects failed to restart: {', '.join(failed_projects)}"))
+    semver, commit = parse_version_string(new_version)
+    write_installed_version(paths, semver, commit)
     return 0
+
+
+def _run_apply(paths: BoxPaths, current_version: str, new_version: str) -> int:
+    """Run migrate/regen/reload/restart/version-write only.
+
+    The upgrade shim handles stash creation, health checks, and rollback
+    externally, so we skip those here. Returns 0 on success and 1 if any
+    step failed, which makes the shim roll back.
+    """
+    print("boxmunge upgrade --apply")
+    print("========================\n")
+    print(f"  Current: {current_version}")
+    print(f"  New:     {new_version}\n")
+    try:
+        migrated = _migrate_regenerate_reload(paths, 1, 4)
+    except (ManifestError, MigrationError, UpgradeGateError) as e:
+        return _gate_failed(paths, e)
+    restart = _restart(paths, 4, 4)
+    return _finish(paths, f"Apply {current_version} -> {new_version}",
+                   migrated, restart, new_version)
 
 
 def _run_full(
@@ -116,7 +138,6 @@ def _run_full(
     skip_self_test: bool,
 ) -> int:
     """Run the complete six-step upgrade flow."""
-    # Step 1: Stash
     print("[1/6] Creating stash...")
     try:
         archive = create_stash(paths)
@@ -126,78 +147,30 @@ def _run_full(
         log_error("upgrade", f"Stash failed: {e}", paths)
         return 1
 
-    # Step 2: Migrate manifests
-    print("[2/6] Migrating manifests...")
-    migrated = migrate_project_manifests(paths)
-    if migrated:
-        print(f"  Migrated: {', '.join(migrated)}")
-    else:
-        print("  No migrations needed.")
-
-    # Step 3: Regenerate configs
-    print("[3/6] Regenerating configs...")
-    processed = regenerate_configs(paths)
-    print(f"  Processed: {len(processed)} project(s)")
-
-    # Step 4: Reload Caddy
-    print("[4/6] Reloading Caddy...")
     try:
-        caddy_reload(paths.caddy, paths.state)
-        print("  Caddy reloaded.")
-    except DockerError as e:
-        print(f"  WARN: Caddy reload failed: {e}")
-
-    # Step 5: Restart projects
-    print("[5/6] Restarting projects...")
-    succeeded, failed_projects, skipped_locked = restart_projects(paths)
-    if succeeded:
-        print(f"  Restarted: {', '.join(succeeded)}")
-    if skipped_locked:
-        print(f"  Skipped (locked): {', '.join(skipped_locked)}")
-    notify_locked_skips(paths, skipped_locked)
-    if failed_projects:
-        print(f"  FAILED: {', '.join(failed_projects)}")
-
-    # Prune old stashes
+        migrated = _migrate_regenerate_reload(paths, 2, 6)
+    except (ManifestError, MigrationError, UpgradeGateError) as e:
+        return _gate_failed(paths, e)
+    restart = _restart(paths, 5, 6)
     prune_stashes(paths, keep=5)
 
-    # Post-upgrade validation
-    print("\n[Post-upgrade validation]")
-
-    if not skip_self_test:
-        print("\nRunning self-test...")
-        self_test_result = run_self_test(paths)
-        if self_test_result != 0:
-            print("  WARN: Self-test failed (platform may still be functional)")
-    else:
+    print("\n[6/6] Post-upgrade validation")
+    if skip_self_test:
         print("  Self-test skipped.")
+    else:
+        print("\nRunning self-test...")
+        if run_self_test(paths) != 0:
+            return _gate_failed(paths, UpgradeGateError("self-test failed"))
 
     print("\nRunning health check...")
-    health_result = run_health(paths)
+    if run_health(paths) == 2:
+        return _gate_failed(paths, UpgradeGateError("health check found critical issues"))
 
-    if health_result == 2:
-        print("  Health check found issues requiring attention.")
-        return 1
-
-    # Only write version after health check passes
-    semver, commit = parse_version_string(new_version)
-    write_installed_version(paths, semver, commit)
-
-    print(f"\nUpgrade complete: {current_version} -> {new_version}")
-
-    log_operation(
-        "upgrade", f"Upgrade {current_version} -> {new_version}", paths,
-        detail={
-            "migrated": migrated,
-            "restarted": succeeded,
-            "skipped_locked": skipped_locked,
-            "failed": failed_projects,
-        },
-    )
-
-    if failed_projects:
-        return 1
-    return 0
+    rc = _finish(paths, f"Upgrade {current_version} -> {new_version}",
+                 migrated, restart, new_version)
+    if rc == 0:
+        print(f"\nUpgrade complete: {current_version} -> {new_version}")
+    return rc
 
 
 def run_upgrade(
