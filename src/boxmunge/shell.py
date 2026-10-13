@@ -219,33 +219,50 @@ def run_command(command: str, args: list[str]) -> int:
         )
         return 1
 
-    # `upgrade` needs root context (stash reads root-owned config + secrets,
-    # then swaps the env-active symlink). Route it through the bash shim,
-    # which is invokable by deploy via a scoped sudoers rule.
-    if command == "upgrade" and not args:
-        result = subprocess.run(
-            ["sudo", "-n", "/opt/boxmunge/bin/boxmunge-upgrade", "auto"]
-        )
-        return result.returncode
+    if command == "upgrade":
+        return _run_upgrade(args)
 
-    # `upgrade --target VERSION` upgrades to a specific release, bypassing
-    # discovery. The shim refuses blocklisted versions and downgrades; only
-    # an operator running the shim directly (force-target) can do those.
-    if command == "upgrade" and args[:1] == ["--target"]:
+    result = subprocess.run(["boxmunge-server", command] + args)
+    return result.returncode
+
+
+# `upgrade` forms deploy may use. --dry-run and --help run in-process and
+# write nothing; everything else needs root and goes through the shim.
+_UPGRADE_IN_PROCESS = (["--dry-run"], ["-h"], ["--help"])
+
+
+def _run_upgrade(args: list[str]) -> int:
+    """Route `upgrade` the same way MCP does: through the sudo shim.
+
+    The shim (root, via a sudo rule scoped to `auto` and `target <version>`)
+    verifies the release signature, swaps venvs and runs probation. The
+    shim-internal `--apply` would do none of that if run here as deploy, so
+    it is refused, as is anything else this function does not recognise.
+    """
+    from boxmunge.paths import BoxPaths
+    from boxmunge.upgrade_shim import shim_command
+
+    if not args:
+        argv = shim_command(BoxPaths())
+    elif args[0] == "--target":
         if len(args) != 2 or not args[1]:
             print(
-                "ERROR: --target requires a version argument "
+                "ERROR: --target takes exactly one version "
                 "(e.g. `upgrade --target 0.3.5`)",
                 file=sys.stderr,
             )
             return 2
-        result = subprocess.run(
-            ["sudo", "-n", "/opt/boxmunge/bin/boxmunge-upgrade", "target", args[1]]
+        argv = shim_command(BoxPaths(), target=args[1])
+    elif args in _UPGRADE_IN_PROCESS:
+        argv = ["boxmunge-server", "upgrade", *args]
+    else:
+        print(
+            f"ERROR: `upgrade {' '.join(args)}` is not available from the deploy shell. "
+            "Use `upgrade`, `upgrade --target <version>` or `upgrade --dry-run`.",
+            file=sys.stderr,
         )
-        return result.returncode
-
-    result = subprocess.run(["boxmunge-server", command] + args)
-    return result.returncode
+        return 2
+    return subprocess.run(argv).returncode
 
 
 def dispatch_command(command: str, args: list[str]) -> None:

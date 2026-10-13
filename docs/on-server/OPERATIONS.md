@@ -919,7 +919,12 @@ Configure your AI agent (Claude Code, Cursor, etc.) to use boxmunge via MCP:
 }
 ```
 
-The agent will discover all available tools automatically. Available tools include: prod-deploy, stage, promote, backup, restore, rollback, health, log, secrets, and more.
+The agent will discover all available tools automatically. Available tools include: prod-deploy, stage, promote, backup, restore, rollback, health, log, secrets, upgrade, and more.
+
+`restore` and `rollback` replace a project's running state, so they only run when called with
+`confirm: true`. `upgrade` goes through the same root upgrade shim as the shell's `upgrade`
+(optionally with `version` for `upgrade --target`). Each result's `messages` carries the
+command's stdout and stderr.
 
 Requires the `mcp` package on the server. It is not installed by default — add it
 to the server's environment with:

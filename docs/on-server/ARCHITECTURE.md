@@ -370,9 +370,16 @@ See `agent-help cve` (CVE_POLICY.md) for posture tiers, hardening penalty, suppr
 
 ## MCP Server
 
-boxmunge exposes its full command set via the Model Context Protocol (MCP) over SSH stdio transport. AI agents connect by running `mcp-serve` via SSH and speak the MCP protocol over stdin/stdout.
+boxmunge exposes a subset of its command set via the Model Context Protocol (MCP) over SSH stdio transport. AI agents connect by running `mcp-serve` via SSH and speak the MCP protocol over stdin/stdout.
 
 - One server process per SSH connection (no shared state)
-- Same permissions as the restricted shell — MCP can only do what the CLI can do
-- Structured JSON responses with success/exit_code/data/messages
+- Runs as deploy, like the restricted shell. Every tool corresponds to an allowlisted shell command
+- `upgrade` takes the shell's path: `sudo -n boxmunge-upgrade auto` (or `target <version>`), so it gets
+  the same signature check, venv swap, probation and rollback. It never upgrades in-process
+- Destructive tools `restore` and `rollback` refuse to run unless called with `confirm: true`
+- Structured JSON responses with success/exit_code/data/messages. `messages` holds the command's
+  stdout and stderr in order, so `ERROR:` lines reach the agent
+- The protocol uses private copies of the original stdin/stdout. Inside the server, fd 0 is
+  `/dev/null` and fd 1 is stderr, so nothing a tool runs (docker, git, a stray prompt) can read
+  from or write into the JSON-RPC stream
 - No additional network ports or attack surface

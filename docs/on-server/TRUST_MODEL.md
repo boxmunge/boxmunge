@@ -17,7 +17,7 @@ boxmunge's defences are calibrated against a specific set of attackers. Future e
 ### Out of scope (current product)
 
 - **Malicious operators** — anyone with `supervisor` or `deploy` SSH access is fully trusted. The restricted shell is a UX guard against accidents and a reduction in agent context-pollution surface, not a privilege boundary against a determined attacker who already has a key.
-- **Malicious agents / MCP tools** — at present, agents and tools invoked through the deploy shell or MCP are treated equivalently to operators. A future product evolution may split agent trust from operator trust; today they are the same principal.
+- **Malicious agents / MCP tools** — at present, agents and tools invoked through the deploy shell or MCP are treated equivalently to operators. A future product evolution may split agent trust from operator trust; today they are the same principal. MCP and the shell do take the same privileged paths: MCP `upgrade` uses the shell's sudo route to the upgrade shim, and MCP `restore`/`rollback` require an explicit `confirm: true`.
 
 ### Single human operator
 

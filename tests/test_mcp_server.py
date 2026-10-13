@@ -102,22 +102,6 @@ class TestToolRegistration:
         assert result["success"] is True
         mock.assert_called_once()
 
-    def test_restore_tool_always_passes_yes(self) -> None:
-        from boxmunge.mcp_tools import _tool_restore
-        with patch("boxmunge.commands.restore.run_restore") as mock:
-            mock.return_value = 0
-            _tool_restore("myapp")
-        call_kwargs = mock.call_args[1]
-        assert call_kwargs.get("yes") is True
-
-    def test_rollback_tool_always_passes_yes(self) -> None:
-        from boxmunge.mcp_tools import _tool_rollback
-        with patch("boxmunge.commands.rollback.run_rollback") as mock:
-            mock.return_value = 0
-            _tool_rollback("myapp")
-        call_kwargs = mock.call_args[1]
-        assert call_kwargs.get("yes") is True
-
     def test_log_tool_returns_entries_in_data(self) -> None:
         from boxmunge.mcp_tools import _tool_log
         with patch("boxmunge.commands.log_cmd.parse_log_file") as mock_parse, \

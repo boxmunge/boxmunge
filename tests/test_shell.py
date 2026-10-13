@@ -148,6 +148,27 @@ class TestDispatchCommand:
         assert rc != 0
         mock_run.assert_not_called()
 
+    @pytest.mark.parametrize("args", [
+        ["--apply"], ["--skip-self-test"], ["--dry-run", "--apply"],
+        ["--target", "0.3.5", "--force"], ["force-target", "0.3.5"],
+    ])
+    @patch("boxmunge.shell.subprocess.run")
+    def test_upgrade_shim_internal_flags_are_refused(
+        self, mock_run: MagicMock, args: list[str], capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """`--apply` and friends would run the upgrade in-process as deploy,
+        skipping the shim's signature check, venv swap and probation."""
+        rc = run_command("upgrade", args)
+        assert rc == 2
+        mock_run.assert_not_called()
+        assert "ERROR:" in capsys.readouterr().err
+
+    @patch("boxmunge.shell.subprocess.run")
+    def test_upgrade_help_is_allowed(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = MagicMock(returncode=0)
+        run_command("upgrade", ["--help"])
+        mock_run.assert_called_once_with(["boxmunge-server", "upgrade", "--help"])
+
     @patch("boxmunge.shell.subprocess.run")
     def test_dispatches_with_args(self, mock_run: MagicMock) -> None:
         mock_run.return_value = MagicMock(returncode=0)
