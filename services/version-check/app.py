@@ -9,17 +9,27 @@ Serves:
 6. GET  /v1/admin/version-checks?last=N  — daily check counts by version (auth required)
 7. GET  /                                — static landing page
 
+Abuse limits (F-12): the client address is taken from the X-Forwarded-For
+header set by the boxmunge Caddy proxy (one trusted hop), every request is
+rate-limited per client, request bodies are capped, and check counts are
+buffered in memory and flushed periodically rather than written per request.
+
 Source: https://github.com/boxmunge/boxmunge/tree/main/services/version-check
 """
 
+import hmac
 import os
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, request, jsonify
+from werkzeug.middleware.proxy_fix import ProxyFix
 
-from release_catalog import apply_holds, check_response, load_releases, select_offers
+from release_catalog import (
+    VERSION_RE, apply_holds, check_response, load_releases, select_offers,
+)
+from request_limits import CheckCounter, RateLimiter, client_key
 
 SERVICE_DIR = Path(__file__).parent
 RELEASES_PATH = SERVICE_DIR / "releases.json"
@@ -38,6 +48,26 @@ VALID_STAGES = {
 # weekly summary.
 STATS_MAX_DAYS = 90
 STATS_DEFAULT_DAYS = 7
+
+# The service runs behind exactly one proxy we control (boxmunge's Caddy),
+# which overwrites X-Forwarded-For with the address it saw.
+TRUSTED_PROXY_HOPS = 1
+# Per-client request limit across all endpoints. A box checks every 6 hours;
+# this leaves ample room for many boxes behind one NAT.
+RATE_LIMIT_REQUESTS = 60
+RATE_LIMIT_WINDOW_SECONDS = 60
+# Bounded limiter memory; beyond this many clients in one window, new
+# clients are refused until the window rolls over.
+RATE_LIMIT_MAX_CLIENTS = 100_000
+# Failure reports are ~200 bytes; nothing here needs a large body.
+MAX_REQUEST_BYTES = 4096
+CHECK_FLUSH_SECONDS = 60
+CHECK_MAX_PENDING = 1000
+# Versions not in releases.json are counted under one bucket, so arbitrary
+# caller input cannot grow the version_checks table.
+UNLISTED_VERSION = "unlisted"
+# Failure-report addresses are kept only for the duplicate filter's window.
+REPORT_DEDUPE_HOURS = 1
 
 
 # ---------------------------------------------------------------------------
@@ -80,28 +110,17 @@ def _init_db(db_path: Path) -> None:
         conn.close()
 
 
-def _record_check(db_path: Path, version: str) -> None:
-    """Increment the daily counter for this version."""
-    today = date.today().isoformat()
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.execute(
-            """INSERT INTO version_checks (date, version, count)
-               VALUES (?, ?, 1)
-               ON CONFLICT (date, version) DO UPDATE SET count = count + 1""",
-            (today, version),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def _record_failure(db_path, version, installed_from, stage, reported_at, remote_addr):
+    """Store a failure report and forget addresses older than the dedupe window."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=REPORT_DEDUPE_HOURS)).isoformat()
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
             "INSERT INTO failures (version, installed_from, stage, reported_at, remote_addr) VALUES (?, ?, ?, ?, ?)",
             (version, installed_from, stage, reported_at, remote_addr))
+        conn.execute(
+            "UPDATE failures SET remote_addr = NULL WHERE remote_addr IS NOT NULL AND reported_at <= ?",
+            (cutoff,))
         conn.commit()
     finally:
         conn.close()
@@ -192,7 +211,7 @@ def _check_cb_auth(app_config):
     if not secret:
         return False
     auth = request.headers.get("Authorization", "")
-    return auth == f"Bearer {secret}"
+    return hmac.compare_digest(auth, f"Bearer {secret}")
 
 
 def _check_stats_auth(app_config):
@@ -210,9 +229,9 @@ def _check_stats_auth(app_config):
     if not secret:
         return False
     bearer = request.headers.get("Authorization", "")
-    if bearer == f"Bearer {secret}":
+    if hmac.compare_digest(bearer, f"Bearer {secret}"):
         return True
-    return request.args.get("token", "") == secret
+    return hmac.compare_digest(request.args.get("token", ""), secret)
 
 
 def _query_version_checks(db_path: Path, days: int) -> dict:
@@ -279,27 +298,49 @@ def _parse_last_param(raw: str | None) -> int:
 # App factory
 # ---------------------------------------------------------------------------
 
+def _version_arg(name: str) -> str | None:
+    """The X.Y.Z version in query parameter `name`, or None if absent/malformed."""
+    value = request.args.get(name, "").strip()
+    return value if VERSION_RE.match(value) else None
+
+
 def create_app() -> Flask:
     """Create and configure the Flask application."""
     app = Flask(__name__, static_folder="static")
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=TRUSTED_PROXY_HOPS)
+    app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
 
     _init_db(DB_PATH)
     # Raises ReleaseCatalogError on any invalid entry: a service that
     # cannot classify releases must not answer fleet update checks.
     releases = load_releases(RELEASES_PATH)
+    listed_versions = {r["version"] for r in releases}
+    limiter = RateLimiter(RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_SECONDS,
+                          RATE_LIMIT_MAX_CLIENTS)
+    counter = CheckCounter(DB_PATH, CHECK_FLUSH_SECONDS, CHECK_MAX_PENDING)
+    app.extensions["check_counter"] = counter
+
+    @app.before_request
+    def rate_limit():
+        if not limiter.allow(client_key(request.remote_addr)):
+            response = jsonify({"error": "rate limited"})
+            response.status_code = 429
+            response.headers["Retry-After"] = str(RATE_LIMIT_WINDOW_SECONDS)
+            return response
+        return None
 
     @app.route("/v1/check")
     def check():
-        version = request.args.get("v", "").strip()
-        if not version:
-            return jsonify({"error": "missing version parameter"}), 400
+        version = _version_arg("v")
+        if version is None:
+            return jsonify({"error": "missing or malformed version parameter (want X.Y.Z)"}), 400
 
         offers, held = apply_holds(
             select_offers(releases, version),
             lambda v: _is_circuit_broken(DB_PATH, v),
         )
         result = check_response(offers, held)
-        _record_check(DB_PATH, version)
+        counter.record(version if version in listed_versions else UNLISTED_VERSION)
 
         response = jsonify(result)
         response.headers["Cache-Control"] = "no-cache"
@@ -307,14 +348,20 @@ def create_app() -> Flask:
 
     @app.route("/v1/report-failure", methods=["POST"])
     def report_failure():
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify({"error": "body must be a JSON object"}), 400
         version = body.get("version")
         stage = body.get("stage")
         if not version:
             return jsonify({"error": "missing required field: version"}), 400
+        if not isinstance(version, str) or not VERSION_RE.match(version):
+            return jsonify({"error": "version must be X.Y.Z"}), 400
         if stage not in VALID_STAGES:
             return jsonify({"error": f"invalid stage; must be one of {sorted(VALID_STAGES)}"}), 400
         installed_from = body.get("installed_from", "")
+        if not isinstance(installed_from, str) or len(installed_from) > 64:
+            return jsonify({"error": "installed_from must be a string of at most 64 characters"}), 400
         timestamp = datetime.now(timezone.utc).isoformat()
 
         # Check rate limit: max 1 report per version per IP per hour
@@ -338,18 +385,18 @@ def create_app() -> Flask:
 
     @app.route("/v1/failures")
     def failures():
-        version = request.args.get("version", "").strip()
-        if not version:
-            return jsonify({"error": "missing version parameter"}), 400
+        version = _version_arg("version")
+        if version is None:
+            return jsonify({"error": "missing or malformed version parameter (want X.Y.Z)"}), 400
         return jsonify(_query_failures(DB_PATH, version))
 
     @app.route("/v1/circuit-breaker/trip", methods=["POST"])
     def cb_trip():
         if not _check_cb_auth(app.config):
             return jsonify({"error": "unauthorized"}), 401
-        version = request.args.get("version", "").strip()
-        if not version:
-            return jsonify({"error": "missing version parameter"}), 400
+        version = _version_arg("version")
+        if version is None:
+            return jsonify({"error": "missing or malformed version parameter (want X.Y.Z)"}), 400
         _trip_circuit_breaker(DB_PATH, version, tripped_by="api")
         return jsonify({"status": "tripped", "version": version})
 
@@ -357,9 +404,9 @@ def create_app() -> Flask:
     def cb_reset():
         if not _check_cb_auth(app.config):
             return jsonify({"error": "unauthorized"}), 401
-        version = request.args.get("version", "").strip()
-        if not version:
-            return jsonify({"error": "missing version parameter"}), 400
+        version = _version_arg("version")
+        if version is None:
+            return jsonify({"error": "missing or malformed version parameter (want X.Y.Z)"}), 400
         _reset_circuit_breaker(DB_PATH, version)
         return jsonify({"status": "reset", "version": version})
 
@@ -368,11 +415,15 @@ def create_app() -> Flask:
         """Daily check counts by version, last N days. Auth required.
 
         Counts are /v1/check hits, NOT unique boxes — a single box checks
-        ~24x/day per its auto-update timer. Use this as a "is anyone
-        running boxmunge?" signal, not for precise install counts.
+        ~4x/day per its auto-update timer, plus manual upgrades. Versions
+        not in releases.json are counted as "unlisted". Use this as a "is
+        anyone running boxmunge?" signal, not for precise install counts.
+        Counts buffered in other gunicorn workers appear after their next
+        flush (at most CHECK_FLUSH_SECONDS later).
         """
         if not _check_stats_auth(app.config):
             return jsonify({"error": "unauthorized"}), 401
+        counter.flush()
         days = _parse_last_param(request.args.get("last"))
         return jsonify(_query_version_checks(DB_PATH, days))
 

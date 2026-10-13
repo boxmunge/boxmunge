@@ -103,30 +103,38 @@ class TestCheckEndpoint:
         assert data["latest"]["version"] == "0.3.0"
 
 
+def _check_counts(db_path) -> dict:
+    db = sqlite3.connect(db_path)
+    try:
+        return dict(db.execute("SELECT version, count FROM version_checks").fetchall())
+    finally:
+        db.close()
+
+
 class TestCounter:
-    def test_increments_counter(self, client, tmp_path) -> None:
-        with patch("app.DB_PATH", tmp_path / "checks.db"):
-            client.get("/v1/check?v=0.2.0")
-            client.get("/v1/check?v=0.2.0")
-            client.get("/v1/check?v=0.3.0")
+    def test_counts_are_buffered_not_written_per_request(self, app, client, tmp_path) -> None:
+        client.get("/v1/check?v=0.2.0")
+        client.get("/v1/check?v=0.2.0")
+        client.get("/v1/check?v=0.3.0")
+        assert _check_counts(tmp_path / "checks.db") == {}
+        app.extensions["check_counter"].flush()
+        assert _check_counts(tmp_path / "checks.db") == {"0.2.0": 2, "0.3.0": 1}
 
-            db = sqlite3.connect(tmp_path / "checks.db")
-            rows = db.execute(
-                "SELECT version, count FROM version_checks ORDER BY version"
-            ).fetchall()
-            db.close()
+    def test_unlisted_versions_share_one_bucket(self, app, client, tmp_path) -> None:
+        client.get("/v1/check?v=7.7.7")
+        client.get("/v1/check?v=8.8.8")
+        app.extensions["check_counter"].flush()
+        assert _check_counts(tmp_path / "checks.db") == {"unlisted": 2}
 
-        counts = {row[0]: row[1] for row in rows}
-        assert counts.get("0.2.0", 0) >= 2
-        assert counts.get("0.3.0", 0) >= 1
+    def test_no_counter_on_error(self, app, client, tmp_path) -> None:
+        client.get("/v1/check")  # missing param — 400
+        client.get("/v1/check?v=not-a-version")  # malformed — 400
+        app.extensions["check_counter"].flush()
+        assert _check_counts(tmp_path / "checks.db") == {}
 
-    def test_no_counter_on_error(self, client, tmp_path) -> None:
-        with patch("app.DB_PATH", tmp_path / "checks.db"):
-            client.get("/v1/check")  # missing param — 400
-            db = sqlite3.connect(tmp_path / "checks.db")
-            rows = db.execute("SELECT count(*) FROM version_checks").fetchone()
-            db.close()
-        assert rows[0] == 0
+    def test_malformed_version_rejected(self, client) -> None:
+        resp = client.get("/v1/check?v=1.2.3;drop")
+        assert resp.status_code == 400
 
 
 def _rel(version: str, cls: str) -> dict:
