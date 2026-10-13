@@ -1,12 +1,17 @@
 """Tests for the `boxmunge security <project>` introspection command."""
 import io
 import json
+from datetime import date, timedelta
 from contextlib import redirect_stdout
 
 import pytest
 import yaml
 
 from boxmunge.commands.security_cmd import cmd_security
+
+# Suppressions created through the CLI are capped at 90 days (B-15).
+_SOON = (date.today() + timedelta(days=30)).isoformat()
+_LATER = (date.today() + timedelta(days=60)).isoformat()
 
 
 @pytest.fixture
@@ -581,7 +586,7 @@ def test_suppress_unregistered_project_rejected(tmp_path, capsys) -> None:
     (paths.state / "projects.txt").write_text("")
     rc = cmd_security_suppress(
         ["CVE-2026-1234", "--project", "nope",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     assert rc == 1
@@ -595,7 +600,7 @@ def test_suppress_writes_file(monkeypatch, tmp_path, capsys) -> None:
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_suppress(
         ["CVE-2026-1234", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "Endpoint not exposed"],
+         "--until", _SOON, "--reason", "Endpoint not exposed"],
         paths,
     )
     out = capsys.readouterr().out
@@ -656,7 +661,7 @@ def test_suppress_current_suppresses_all_quarantine_findings(
     ])
     rc = cmd_security_suppress(
         ["--current", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "Wait for upstream"],
+         "--until", _SOON, "--reason", "Wait for upstream"],
         paths,
     )
     out = capsys.readouterr().out
@@ -679,7 +684,7 @@ def test_suppress_current_no_quarantine_findings_rejected(
     _write_quarantine_scan_state(paths, "demo", [])
     rc = cmd_security_suppress(
         ["--current", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     err = capsys.readouterr().err
@@ -695,7 +700,7 @@ def test_suppress_current_without_scan_state_rejected(
     # No scan_state file at all.
     rc = cmd_security_suppress(
         ["--current", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     err = capsys.readouterr().err
@@ -710,7 +715,7 @@ def test_suppress_current_with_positional_cve_rejected(
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_suppress(
         ["CVE-2026-1234", "--current", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     err = capsys.readouterr().err
@@ -732,7 +737,7 @@ def test_suppress_current_dedupes_repeated_cve(
     ])
     rc = cmd_security_suppress(
         ["--current", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "Wait"],
+         "--until", _SOON, "--reason", "Wait"],
         paths,
     )
     out = capsys.readouterr().out
@@ -757,7 +762,7 @@ def test_suppress_host_writes_host_file(
     paths.config.mkdir(parents=True, exist_ok=True)
     rc = cmd_security_suppress(
         ["CVE-2026-9999", "--host",
-         "--until", "2099-01-01", "--reason", "perl-base unused"],
+         "--until", _SOON, "--reason", "perl-base unused"],
         paths,
     )
     out = capsys.readouterr().out
@@ -780,7 +785,7 @@ def test_suppress_host_and_project_mutually_exclusive(
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_suppress(
         ["CVE-2026-1234", "--host", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     err = capsys.readouterr().err
@@ -794,7 +799,7 @@ def test_suppress_neither_host_nor_project_rejected(
     from boxmunge.commands.security_suppress import cmd_security_suppress
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_suppress(
-        ["CVE-2026-1234", "--until", "2099-01-01", "--reason", "x"],
+        ["CVE-2026-1234", "--until", _SOON, "--reason", "x"],
         paths,
     )
     err = capsys.readouterr().err
@@ -838,7 +843,7 @@ def test_suppress_current_host_unions_across_projects(
     paths.config.mkdir(parents=True, exist_ok=True)
     rc = cmd_security_suppress(
         ["--current", "--host",
-         "--until", "2099-01-01", "--reason", "fleet-wide ack"],
+         "--until", _SOON, "--reason", "fleet-wide ack"],
         paths,
     )
     out = capsys.readouterr().out
@@ -859,7 +864,7 @@ def test_suppress_current_host_no_quarantine_findings_rejected(
     paths = _suppress_paths(tmp_path)
     rc = cmd_security_suppress(
         ["--current", "--host",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     err = capsys.readouterr().err
@@ -877,7 +882,7 @@ def test_unsuppress_host_removes_from_host_file(
     paths.config.mkdir(parents=True, exist_ok=True)
     rc1 = cmd_security_suppress(
         ["CVE-2026-9999", "--host",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     capsys.readouterr()  # discard output from add
@@ -953,7 +958,7 @@ def test_unsuppress_removes_entry(monkeypatch, tmp_path, capsys) -> None:
     paths = _suppress_paths(tmp_path)
     rc1 = cmd_security_suppress(
         ["CVE-2026-1234", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     capsys.readouterr()  # discard
@@ -1007,7 +1012,7 @@ def test_suppress_emits_log_operation(monkeypatch, tmp_path, capsys) -> None:
     try:
         rc = cmd_security_suppress(
             ["CVE-2026-1234", "--project", "demo",
-             "--until", "2099-01-01", "--reason", "Endpoint not exposed"],
+             "--until", _SOON, "--reason", "Endpoint not exposed"],
             paths,
         )
     finally:
@@ -1024,7 +1029,7 @@ def test_suppress_emits_log_operation(monkeypatch, tmp_path, capsys) -> None:
     detail = getattr(rec, "detail", None)
     assert isinstance(detail, dict)
     assert detail["cve_id"] == "CVE-2026-1234"
-    assert detail["until"] == "2099-01-01"
+    assert detail["until"] == _SOON
     assert detail["reason"] == "Endpoint not exposed"
     assert detail["reviewed_by"] == "jon"
     assert detail["previously_suppressed"] is False
@@ -1039,7 +1044,7 @@ def test_unsuppress_emits_log_operation(monkeypatch, tmp_path, capsys) -> None:
     paths.logs.mkdir(parents=True, exist_ok=True)
     rc1 = cmd_security_suppress(
         ["CVE-2026-1234", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "x"],
+         "--until", _SOON, "--reason", "x"],
         paths,
     )
     capsys.readouterr()
@@ -1082,7 +1087,7 @@ def test_resuppress_within_window_flags_silent_extension(
     # Initial suppress.
     rc = cmd_security_suppress(
         ["CVE-2026-1234", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "first"],
+         "--until", _SOON, "--reason", "first"],
         paths,
     )
     capsys.readouterr()
@@ -1100,7 +1105,7 @@ def test_resuppress_within_window_flags_silent_extension(
     try:
         rc = cmd_security_suppress(
             ["CVE-2026-1234", "--project", "demo",
-             "--until", "2099-12-31", "--reason", "second"],
+             "--until", _LATER, "--reason", "second"],
             paths,
         )
     finally:
@@ -1139,7 +1144,7 @@ def test_resuppress_after_window_treated_as_fresh(
     paths.logs.mkdir(parents=True, exist_ok=True)
     rc = cmd_security_suppress(
         ["CVE-2026-1234", "--project", "demo",
-         "--until", "2099-01-01", "--reason", "first"],
+         "--until", _SOON, "--reason", "first"],
         paths,
     )
     capsys.readouterr()
@@ -1167,7 +1172,7 @@ def test_resuppress_after_window_treated_as_fresh(
     try:
         rc = cmd_security_suppress(
             ["CVE-2026-1234", "--project", "demo",
-             "--until", "2099-12-31", "--reason", "second"],
+             "--until", _LATER, "--reason", "second"],
             paths,
         )
     finally:

@@ -178,6 +178,8 @@ hold:
 
 Choose `--until` as the deadline by which you'd reasonably re-check upstream
 for a fix. 30-90 days for low-impact CVEs; 14-30 for higher-severity.
+`suppress` refuses an `--until` more than 90 days ahead. Host-scope
+suppressions (`--host`) are operator-only and refused by the deploy shell.
 
 After suppressing a finding that was QUARANTINE-disposition: bring the
 project back online.

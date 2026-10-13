@@ -546,12 +546,24 @@ All five fields are required. Dates are ISO `YYYY-MM-DD`.
 CLI:
 
 ```
-boxmunge security suppress <CVE> --project <name> --until <YYYY-MM-DD> --reason <text>
+boxmunge security suppress <CVE>|--current --project <name> --until <YYYY-MM-DD> --reason <text>
 boxmunge security unsuppress <CVE> --project <name>
+boxmunge security suppress <CVE>|--current --host --until <YYYY-MM-DD> --reason <text>   # operator only
+boxmunge security unsuppress <CVE> --host                                              # operator only
 ```
 
 The `suppress` command writes the entry, sets `reviewed_by` from `$USER`,
-and sets `added` to today. `--until` must be a future date.
+and sets `added` to today. `--reason` and `--until` are required, and
+`--until` must be a future date **at most 90 days ahead**
+(`MAX_SUPPRESSION_DAYS`). A suppression is a review note, not a permanent
+exemption: when it expires, re-review the CVE and suppress it again.
+
+**Host scope is operator-only.** `--host` writes
+`/opt/boxmunge/config/suppressions.yml`, which applies to every project on
+the box, so the restricted deploy shell refuses `suppress --host` and
+`unsuppress --host`; run them as the supervisor account. Project-scope
+suppressions remain available to the deploy shell. There is no MCP tool
+that creates suppressions.
 
 Rules:
 

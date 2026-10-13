@@ -9,7 +9,7 @@ from __future__ import annotations
 import getpass
 import os
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from boxmunge.commands.security_suppress_targets import (
@@ -21,6 +21,7 @@ from boxmunge.commands.security_suppress_targets import (
     utc_today,
 )
 from boxmunge.cve.suppressions import (
+    MAX_SUPPRESSION_DAYS,
     SuppressionsError,
     add_suppression,
     find_recent_removal,
@@ -177,6 +178,25 @@ def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
             detail={
                 "cve_id": cve_for_log, "until_raw": until_str,
                 "reason": "invalid_until_format",
+            },
+        )
+        return 1
+    if (until - today).days > MAX_SUPPRESSION_DAYS:
+        latest = today + timedelta(days=MAX_SUPPRESSION_DAYS)
+        print(
+            f"ERROR: --until may be at most {MAX_SUPPRESSION_DAYS} days ahead "
+            f"(latest {latest.isoformat()}, got {until.isoformat()}). Re-review "
+            f"and extend the suppression when it expires.",
+            file=sys.stderr,
+        )
+        log_error(
+            "cve-suppress",
+            f"Suppression rejected: --until {until.isoformat()} is more than "
+            f"{MAX_SUPPRESSION_DAYS} days ahead for {cve_for_log} in {project}",
+            paths, project=project,
+            detail={
+                "cve_id": cve_for_log, "until": until.isoformat(),
+                "max_days": MAX_SUPPRESSION_DAYS, "reason": "until_too_far",
             },
         )
         return 1
