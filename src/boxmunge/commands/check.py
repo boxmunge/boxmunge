@@ -157,13 +157,15 @@ def run_smoke_in_container(
 
 
 def should_downgrade_smoke_failure(project_name: str, paths: BoxPaths) -> bool:
-    """Return True if this is a first deploy (no deploy state exists).
+    """Return True if this is a first deploy (no deploy has been recorded).
 
     On first deploy, smoke test failures are downgraded from critical/failure
     to warning, since secrets and other config may not be fully in place yet.
+    The state file alone is not evidence of a deploy: deploy registers the
+    project's ULID there before the smoke test runs (audit D-36).
     """
-    state_path = paths.project_deploy_state(project_name)
-    return not state_path.exists()
+    from boxmunge.state import read_state
+    return "current_ref" not in read_state(paths.project_deploy_state(project_name))
 
 
 def run_check(project_name: str, paths: BoxPaths, verbose: bool = True) -> int:
