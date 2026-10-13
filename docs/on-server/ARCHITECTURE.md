@@ -197,10 +197,13 @@ If any step fails, the deploy stops and reports the failure. No automatic rollba
 
 `stage <project>` follows the same steps but deploys to the staging environment at `staging.<hostname>`. After verification:
 
-- `promote <project>` -- tears down staging, deploys to production
-- `unstage <project>` -- tears down staging, production unchanged
+- `promote <project>` -- deploys the staged release to production, then tears down staging
+- `unstage <project>` -- tears down staging and puts the production release's files back
 
-Staging state is tracked under `state/staging/`.
+The staged release is installed in the project directory (staging containers run from it); the
+production release it displaces is kept in `.releases/prestage/` until promote or unstage. A stage
+that fails after installing cleans up the same way unstage does. Staging state is tracked under
+`state/staging/`.
 
 ---
 

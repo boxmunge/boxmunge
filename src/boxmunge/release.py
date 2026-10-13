@@ -364,3 +364,15 @@ def prestage_to_previous(paths: BoxPaths, project_name: str,
     atomic_write_text(_previous_meta(paths, project_name),
                       json.dumps(meta, indent=2) + "\n", mode=0o644)
     meta_path.unlink()
+
+
+def restore_prestage(paths: BoxPaths, project_name: str) -> None:
+    """Put the kept production release back (unstage, or a failed stage)."""
+    ref = _prestage_ref(paths, project_name)
+    install_release(prestage_dir(paths, project_name), paths.project_dir(project_name))
+    if ref is None:
+        _remove(_live_meta(paths, project_name))
+    else:
+        mark_live(paths, project_name, ref)
+    _remove(prestage_dir(paths, project_name))
+    _prestage_meta(paths, project_name).unlink()

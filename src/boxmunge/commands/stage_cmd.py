@@ -6,6 +6,7 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 from boxmunge.caddy import generate_staging_caddy_config
+from boxmunge.commands.unstage_cmd import teardown_staging
 from boxmunge.compose import generate_staging_compose_base, generate_staging_compose_override
 from boxmunge.docker import compose_up, caddy_reload, DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
@@ -17,8 +18,8 @@ from boxmunge.intake import (
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_error
 from boxmunge.project_registry import is_registered
-from boxmunge.security_warn import warn_off_services, warn_writable_state
 from boxmunge.release import install_release, keep_prestage_release, live_ref, mark_live
+from boxmunge.security_warn import warn_off_services, warn_writable_state
 from boxmunge.source import SourceError, bundle_ref, consume_bundle, resolve_bundle_source
 from boxmunge.state import write_state
 
@@ -60,9 +61,11 @@ def _intake_bundle(project_name: str, paths: BoxPaths, ref: str | None,
                 install_release(tree, project_dir)
                 mark_live(paths, project_name, bundle_ref(bundle_path))
             except (OSError, ValueError) as e:
-                print(f"ERROR: Installing the staged release failed: {e}. Run "
-                      f"'unstage {project_name}' to put production back.",
+                print(f"ERROR: Installing the staged release failed: {e}",
                       file=sys.stderr)
+                if not teardown_staging(project_name, paths):
+                    print(f"ERROR: Putting production back was incomplete; "
+                          f"run 'unstage {project_name}'.", file=sys.stderr)
                 return 1
     except IntakeError as e:
         return report_refusal(e)
@@ -109,9 +112,28 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
         result = _checkout_repo(project_name, paths, ref, dry_run)
     if isinstance(result, int):
         return result
-    manifest = result
 
-    # Generate staging configs
+    # From here on the staged release is installed: any failure tears the
+    # stage down again and puts production's release back (audit C-13).
+    succeeded = False
+    try:
+        rc = _bring_up_staging(project_name, paths, result, ref)
+        succeeded = rc == 0
+        return rc
+    finally:
+        if not succeeded:
+            print("  Stage failed; cleaning up...")
+            if teardown_staging(project_name, paths):
+                print(f"  Staging for '{project_name}' cleaned up.")
+            else:
+                print(f"ERROR: Cleanup after the failed stage was incomplete; "
+                      f"run 'unstage {project_name}'.", file=sys.stderr)
+
+
+def _bring_up_staging(project_name: str, paths: BoxPaths,
+                      manifest: dict[str, Any], ref: str | None) -> int:
+    """Write staging config, start staging containers, smoke-test, record."""
+    project_dir = paths.project_dir(project_name)
     print(f"Staging {project_name}...")
     # Staging auth — inject basicauth if secrets are set
     staging_auth = None

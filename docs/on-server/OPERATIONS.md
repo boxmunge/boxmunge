@@ -118,6 +118,19 @@ After verifying the staging environment:
   unstage myapp
   ```
 
+Staging runs from the project directory, so `stage` installs the staged release there and keeps the
+production release aside in `.releases/prestage/`. Production's running containers are not touched.
+`promote` deploys the staged release (never a newer bundle that arrived in the inbox meanwhile) and
+keeps the displaced production release as the `rollback` target. `unstage` puts the production
+release's files back. While a release is staged, `prod-deploy` and `rollback` refuse: promote or
+unstage first.
+
+A stage that fails after installing its release (staging containers fail to start, the staging data
+copy fails) cleans up after itself: staging containers, the staging Caddy site and compose files are
+removed and the production release's files are put back. `unstage` removes whatever a stage left
+behind even if that stage never got as far as recording itself active, so it can always be used to
+clean up; with nothing staged it reports `No staging found` and exits 1.
+
 Staging is useful for:
 - Verifying a new bundle before it goes live
 - Testing configuration changes in a production-like environment
