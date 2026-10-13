@@ -32,7 +32,10 @@ def record_deploy_state(
         history = history[:10]
 
     now_iso = datetime.now(timezone.utc).isoformat()
+    # Merge, never rebuild: other writers keep keys here too, notably
+    # project_id, which the name/ULID collision guard reads (audit C-08).
     new_state = {
+        **current,
         "current_ref": ref,
         "deployed_at": now_iso,
         # Drives the health-check grace window in health_state.update_health_state.
