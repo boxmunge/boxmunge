@@ -26,7 +26,8 @@ from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
 from boxmunge.release import (
     ReleaseStateError, has_prestage, install_release, keep_previous_release,
-    live_ref, mark_live, prestage_ref, prestage_to_previous, prestage_tree,
+    discard_prestage, discard_previous_release, live_ref, mark_live, prestage_ref,
+    prestage_to_previous, prestage_tree,
 )
 from boxmunge.source import (
     SourceError, bundle_ref, consume_bundle, resolve_bundle_source,
@@ -175,10 +176,20 @@ def _promote_staged(
         prestage_to_previous(paths, project_name, snapshot_name, staged_ref)
     except (OSError, ReleaseStateError) as e:
         print(f"ERROR: {staged_ref} is live, but keeping the release it "
-              f"replaced failed: {e}. 'rollback {project_name}' will not be "
+              f"replaced failed: {e}. 'rollback {project_name}' is not "
               f"available for this deploy.", file=sys.stderr)
         log_error("deploy", f"Keeping the previous release failed: {e}",
                   paths, project=project_name)
+        # Production now runs the staged release. A kept production release
+        # left behind would let unstage put old files under it, and an older
+        # previous release would pair the wrong code with the data: drop both.
+        try:
+            discard_prestage(paths, project_name)
+            discard_previous_release(paths, project_name)
+        except OSError as cleanup_error:
+            print(f"ERROR: Could not remove .releases/prestage/: {cleanup_error}. "
+                  f"Remove it by hand before running 'unstage {project_name}'.",
+                  file=sys.stderr)
         return 1
     return 0
 

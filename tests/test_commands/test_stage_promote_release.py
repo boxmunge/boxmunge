@@ -89,6 +89,26 @@ def test_first_stage_then_promote_has_no_rollback_target(paths, capsys) -> None:
     assert "no previous release" in capsys.readouterr().err
 
 
+def test_failure_keeping_previous_after_promote_never_lets_unstage_revert(
+    paths, capsys,
+) -> None:
+    """Production already runs the staged release when the kept production
+    release is turned into the previous one. If that step fails, the kept
+    release must not linger: unstage would put old files under the running
+    new release."""
+    from boxmunge.commands.unstage_cmd import run_unstage
+    from boxmunge.release import has_prestage
+    pdir = _prod_v1_staged_v2(paths)
+    with _docker(), patch("boxmunge.commands.deploy.prestage_to_previous",
+                          side_effect=OSError("disk full")):
+        assert run_promote("myapp", paths) == 1
+    assert not has_prestage(paths, "myapp")
+    assert "rollback" in capsys.readouterr().err
+    with _docker():
+        assert run_unstage("myapp", paths) == 0
+    assert (pdir / "VERSION").read_text() == "v2\n"
+
+
 def test_promote_snapshots_production_data_with_the_production_manifest(paths) -> None:
     """The snapshot paired with the kept production release must be taken
     with that release's backup config, not the staged one's (which may
