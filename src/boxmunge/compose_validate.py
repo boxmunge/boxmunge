@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from boxmunge.compose_isolation import isolation_problems
 from boxmunge.compose_mounts import has_named_volume
 from boxmunge.compose_service_rules import service_findings
 from boxmunge.log import log_warning
@@ -244,8 +245,9 @@ def _enforce_cve_rule(
 def validate_user_compose(
     compose_path,
     paths: BoxPaths,
+    *,
+    project_name: str,
     off_services: set[str] | None = None,
-    project_name: str | None = None,
     cve_policy: dict | None = None,
     manifest_services: dict | None = None,
 ) -> None:
@@ -256,8 +258,10 @@ def validate_user_compose(
     raising. For multi-entry fields (cap_add, security_opt, volumes) every
     offender is logged.
 
-    `project_name` is threaded into log_warning so structured logs can be
-    filtered with `boxmunge log --project <name>` (audit E-NEW-2).
+    `project_name` scopes the isolation rules (own networks, volumes and
+    `<project>-` aliases; bind mounts inside the project directory) and is
+    threaded into log_warning so structured logs can be filtered with
+    `boxmunge log --project <name>` (audit E-NEW-2).
 
     `cve_policy` is the project-level security: block (or None / empty).
     Two project-level CVE-policy fields demand defense in depth:
@@ -273,6 +277,7 @@ def validate_user_compose(
     """
     off = off_services or set()
     base_dir = compose_path.parent
+    roots = (base_dir, paths.project_dir(project_name))
 
     try:
         raw = compose_path.read_text()
@@ -310,6 +315,10 @@ def validate_user_compose(
             f"got {type(services).__name__}"
         )
 
+    isolation = isolation_problems(doc, project_name, base_dir, roots)
+    if isolation:
+        raise ComposeSecurityError(isolation[0])
+
     # Compose-only services (not in the manifest) inherit the project-level
     # profile, exactly as the overlay generator resolves them.
     if isinstance(manifest_services, dict) and (cve_policy or {}).get("profile") == PROFILE_OFF:
@@ -319,7 +328,7 @@ def validate_user_compose(
         if not isinstance(svc, dict):
             continue
 
-        findings = service_findings(svc, base_dir, paths)
+        findings = service_findings(svc, base_dir, paths, roots)
         if not findings:
             continue
 

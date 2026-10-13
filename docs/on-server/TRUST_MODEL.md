@@ -48,11 +48,14 @@ would give deploy read and write access to every file deploy can reach (secrets,
 the shell and the `boxmunge-sftp` subsystem wrapper refuse it. Clients upload with
 `scp -O`, the legacy protocol.
 
+**Compose files** are confined to their own project. A project's `compose.yml` cannot set the compose project name, join or declare another project's networks (or `boxmunge-proxy`), claim a network alias outside its `<project>-` prefix, use another project's named volumes, bind-mount or read files outside its own directory, or join another container's namespaces. See SECURITY.md, "What `compose.yml` may not do".
+
 **Logs and state** are per-project by default. The `boxmunge log` command scopes to a single project unless `--all` is passed. This prevents agent context pollution, not security isolation.
 
 ## What We Don't Isolate
 
-- **Network** — projects share the `boxmunge-proxy` Docker network and can technically reach each other. Acceptable for single-owner.
+- **Network** — every routed service (and Caddy) shares the `boxmunge-proxy` Docker network, so a routed container can open connections to another project's routed services on their ports. Services that are not routed (`internal: true`, or not in the manifest) sit only on their project's own networks. There is no network policy between routed services. Acceptable for single-owner.
+- **Docker daemon, kernel, and host resources** — all projects run on one Docker daemon and one kernel; container hardening limits, but does not remove, what a compromised container can do to its neighbours (CPU, memory, and disk are shared unless `limits` are set).
 - **Docker group** — the deploy user is in the `docker` group, which is effectively equivalent to root on the host (a user can mount the host filesystem via `docker run -v /:/host`). This is an intentional trade-off: the deploy user needs to run `docker compose` for deployments, and Docker's permission model requires group membership. The restricted shell limits what the deploy user does *directly*, but it is not a privilege boundary against a determined attacker who already has SSH access as deploy. Key-only authentication is the real perimeter.
 - **Backup encryption key** — the deploy user can read the age identity key at `/opt/boxmunge/config/backup.key` (mode 640, group deploy). This is required for backup and restore operations to work without sudo. An authenticated deploy user can decrypt any backup snapshot.
 - **Backups** — the deploy user can trigger backup/restore for any project.

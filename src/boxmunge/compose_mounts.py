@@ -6,7 +6,8 @@ expanded, relative paths are joined to the directory holding compose.yml,
 `..` and repeated slashes are collapsed, and symlinks are resolved. A
 source is rejected when it is a denied host path, lies inside one, or is
 a parent of one (mounting `/run` exposes `/run/docker.sock` just as
-surely as mounting the socket itself).
+surely as mounting the socket itself). Any other source must stay inside
+the project directory, so one project cannot mount another's files.
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ import os
 import posixpath
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from boxmunge.paths import BoxPaths
 
@@ -133,10 +134,26 @@ def denied_host_path(src: str, base_dir: Path, paths: BoxPaths) -> str | None:
     return None
 
 
+def outside_roots(src: str, base_dir: Path, roots: Iterable[Path]) -> bool:
+    """True unless a host path, both as written and with symlinks resolved,
+    lies inside one of the allowed roots."""
+    root_forms = {form for root in roots for form in _both_spellings(str(root))}
+    return not all(
+        any(_within(cand, root) for root in root_forms)
+        for cand in host_path_forms(src, base_dir)
+    )
+
+
 def check_volumes(
-    svc: dict[str, Any], base_dir: Path, paths: BoxPaths,
+    svc: dict[str, Any], base_dir: Path, paths: BoxPaths, roots: Iterable[Path],
 ) -> list[tuple[str, str]]:
-    """Return every hostile volume entry of one service as (entry, advice)."""
+    """Return every hostile volume entry of one service as (entry, advice).
+
+    `roots` are the directories bind mounts may use: the project directory
+    (and the directory holding the compose file, when it is validated
+    before being copied into place).
+    """
+    roots = tuple(roots)
     volumes = svc.get("volumes")
     if not isinstance(volumes, list):
         return []
@@ -163,6 +180,15 @@ def check_volumes(
                 f"exposes a protected host path (source resolves to {norm}, "
                 f"which is, contains, or lies inside {denied}); bind-mount a "
                 f"directory inside the project instead, or set "
+                f"security.profile: off with reason",
+            ))
+        elif outside_roots(src, base_dir, roots):
+            norm, _ = host_path_forms(src, base_dir)
+            hits.append((
+                str(entry),
+                f"is outside the project directory (source resolves to "
+                f"{norm}); bind mounts may only use paths inside the project "
+                f"directory, such as ./data. Move the data there, or set "
                 f"security.profile: off with reason",
             ))
     return hits

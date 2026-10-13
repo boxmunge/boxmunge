@@ -234,3 +234,132 @@ def test_f03_compose_only_service_inherits_project_off(paths: BoxPaths) -> None:
         cve_policy={"profile": "off", "reason": "lab box"},
         manifest_services=_MANIFEST["services"],
     )
+
+
+# ---------------------------------------------------------------------------
+# F-09 — a project's compose file stays inside its own project
+# ---------------------------------------------------------------------------
+
+_EXT = {"external": True}
+
+F09_REJECTED = {
+    "join other project's network": (
+        {"networks": ["projb_default"]}, {"networks": {"projb_default": _EXT}},
+        "external",
+    ),
+    "join host network by name": (
+        {"networks": ["hostnet"]}, {"networks": {"hostnet": {"external": True, "name": "host"}}},
+        "external",
+    ),
+    "declare the shared proxy network": (
+        {"networks": {"boxmunge-proxy": {"aliases": ["projb-web"]}, "default": {}}},
+        {"networks": {"boxmunge-proxy": _EXT}},
+        "boxmunge attaches routed services",
+    ),
+    "rename own network onto another's": (
+        {"networks": ["backend"]}, {"networks": {"backend": {"name": "projb_default"}}},
+        "name:",
+    ),
+    "macvlan network": (
+        {"networks": ["lan"]}, {"networks": {"lan": {"driver": "macvlan"}}}, "driver",
+    ),
+    "undeclared network": ({"networks": ["projb_default"]}, None, "does not declare"),
+    "alias in another project's namespace": (
+        {"networks": {"default": {"aliases": ["projb-web"]}}}, None, "alias",
+    ),
+    "unprefixed alias": ({"networks": {"default": {"aliases": ["db"]}}}, None, "alias"),
+    "external volume": (
+        {"volumes": ["data:/d"]}, {"volumes": {"data": {"external": True, "name": "projb_data"}}},
+        "external",
+    ),
+    "volume renamed onto another's": (
+        {"volumes": ["data:/d"]}, {"volumes": {"data": {"name": "projb_data"}}}, "name:",
+    ),
+    "volume bound to host root": (
+        {"volumes": ["hostroot:/host"]},
+        {"volumes": {"hostroot": {"driver": "local", "driver_opts": {
+            "type": "none", "o": "bind", "device": "/"}}}},
+        "driver_opts",
+    ),
+    "external_links": ({"external_links": ["projb-db-1:db"]}, None, "external_links"),
+    "volumes_from container": (
+        {"volumes_from": ["container:projb-db-1"]}, None, "volumes_from",
+    ),
+    "secret file in boxmunge config": (
+        {"secrets": ["k"]}, {"secrets": {"k": {"file": "../../config/backup.key"}}},
+        "outside the project",
+    ),
+    "config file in another project": (
+        {"configs": ["c"]}, {"configs": {"c": {"file": "../projb/secrets.env"}}},
+        "outside the project",
+    ),
+    "build context outside project": (
+        {"build": {"context": "../.."}}, None, "build context",
+    ),
+    "bind other project": ({"volumes": ["../projb:/b"]}, None, "outside the project"),
+    "bind arbitrary host dir": ({"volumes": ["/srv/media:/m"]}, None, "outside the project"),
+    "build on host network": (
+        {"build": {"context": ".", "network": "host"}}, None, "build.network",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "svc,top,match", F09_REJECTED.values(), ids=F09_REJECTED.keys(),
+)
+def test_f09_cross_project_reach_rejected(
+    paths: BoxPaths, svc: dict, top: dict | None, match: str,
+) -> None:
+    with pytest.raises(ComposeSecurityError, match=match):
+        _validate(paths, svc, top)
+
+
+F09_ACCEPTED = {
+    "prefixed alias": ({"networks": {"default": {"aliases": ["myapp-db"]}}}, None),
+    "own internal network": (
+        {"networks": ["backend"]}, {"networks": {"backend": {"internal": True}}},
+    ),
+    "own named volume": ({"volumes": ["data:/d"]}, {"volumes": {"data": {}}}),
+    "secret file in project": ({"secrets": ["k"]}, {"secrets": {"k": {"file": "./k.txt"}}}),
+    "build context in project": ({"build": {"context": "./repo/web"}}, None),
+    "build from remote git": ({"build": "https://example.com/app.git#main"}, None),
+    "volumes_from sibling": ({"volumes_from": ["db"]}, None),
+}
+
+
+@pytest.mark.parametrize("svc,top", F09_ACCEPTED.values(), ids=F09_ACCEPTED.keys())
+def test_f09_own_project_resources_accepted(
+    paths: BoxPaths, svc: dict, top: dict | None,
+) -> None:
+    _validate(paths, svc, top)
+
+
+def test_f09_absolute_path_inside_project_accepted(paths: BoxPaths) -> None:
+    _validate(paths, {"volumes": [f"{paths.project_dir('myapp')}/data:/d"]})
+
+
+def test_f09_symlink_out_of_project_rejected(paths: BoxPaths, tmp_path) -> None:
+    project_dir = paths.project_dir("myapp")
+    project_dir.mkdir(parents=True)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (project_dir / "data").symlink_to(outside)
+    with pytest.raises(ComposeSecurityError, match="outside the project"):
+        _validate(paths, {"volumes": ["./data:/d"]})
+
+
+def _validate_off(paths: BoxPaths, svc: dict) -> None:
+    project_dir = paths.project_dir("myapp")
+    project_dir.mkdir(parents=True, exist_ok=True)
+    compose = project_dir / "compose.yml"
+    compose.write_text(yaml.safe_dump({"services": {"web": {"image": "x", **svc}}}))
+    validate_user_compose(compose, paths, project_name="myapp", off_services={"web"})
+
+
+def test_f09_profile_off_relaxes_bind_confinement_with_warning(paths: BoxPaths) -> None:
+    _validate_off(paths, {"volumes": ["/srv/media:/m"]})
+
+
+def test_f09_profile_off_does_not_relax_alias_namespace(paths: BoxPaths) -> None:
+    with pytest.raises(ComposeSecurityError, match="alias"):
+        _validate_off(paths, {"networks": {"default": {"aliases": ["projb-web"]}}})

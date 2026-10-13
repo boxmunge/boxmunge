@@ -160,14 +160,32 @@ def _check_cap_add(svc: dict[str, Any]) -> list[Finding]:
     ]
 
 
+def _check_build(svc: dict[str, Any]) -> list[Finding]:
+    """Build steps run in their own container: keep it off the host network
+    and unprivileged, like the service itself."""
+    build = svc.get("build")
+    if not isinstance(build, dict):
+        return []
+    hits: list[Finding] = []
+    network = build.get("network")
+    if isinstance(network, str) and network.strip().lower() == "host":
+        hits.append(Finding(
+            "build.network", network,
+            "lets build steps reach services listening on the host; remove it",
+        ))
+    if build.get("privileged") is not None and build.get("privileged") is not False:
+        hits.append(Finding("build.privileged", repr(build.get("privileged"))))
+    return hits
+
+
 _RULES = (
     _check_strict_bools, _check_namespaces, _check_devices,
-    _check_cgroup_parent, _check_security_opt, _check_cap_add,
+    _check_cgroup_parent, _check_security_opt, _check_cap_add, _check_build,
 )
 
 
 def service_findings(
-    svc: dict[str, Any], base_dir: Path, paths: BoxPaths,
+    svc: dict[str, Any], base_dir: Path, paths: BoxPaths, roots: tuple[Path, ...],
 ) -> list[Finding]:
     """Return every hostile key on one service, in rule order."""
     findings: list[Finding] = []
@@ -175,6 +193,6 @@ def service_findings(
         findings.extend(rule(svc))
     findings.extend(
         Finding("volumes", entry, advice)
-        for entry, advice in check_volumes(svc, base_dir, paths)
+        for entry, advice in check_volumes(svc, base_dir, paths, roots)
     )
     return findings

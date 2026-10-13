@@ -123,4 +123,4 @@ def test_hostile_compose_rejected_before_merge(tmp_path: Path) -> None:
     paths = BoxPaths(root=tmp_path)
 
     with pytest.raises(ComposeSecurityError, match="privileged"):
-        validate_user_compose(compose_path, paths)
+        validate_user_compose(compose_path, paths, project_name="myapp")

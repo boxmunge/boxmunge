@@ -32,7 +32,7 @@ services:
     volumes:
       - ./data:/data
 """)
-        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, project_name="myapp")
 
     def test_no_new_privileges_security_opt_on_off_profile_accepted(
         self, tmp_path: Path, paths,
@@ -47,7 +47,7 @@ services:
     security_opt:
       - no-new-privileges:true
 """)
-        validate_user_compose(compose, paths, off_services={"web"})
+        validate_user_compose(compose, paths, off_services={"web"}, project_name="myapp")
 
     def test_seccomp_runtime_default_accepted(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -57,7 +57,7 @@ services:
     security_opt:
       - seccomp=runtime/default
 """)
-        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, project_name="myapp")
 
     def test_legitimate_cap_add_net_raw_accepted(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -67,7 +67,7 @@ services:
     cap_add:
       - NET_RAW
 """)
-        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, project_name="myapp")
 
     def test_relative_volume_source_accepted(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -78,7 +78,7 @@ services:
       - ./data:/data
       - data_vol:/var/lib/data
 """)
-        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, project_name="myapp")
 
     def test_named_volume_accepted(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -90,7 +90,7 @@ services:
 volumes:
   dbdata: {}
 """)
-        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, project_name="myapp")
 
     def test_long_syntax_safe_bind_accepted(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -102,7 +102,7 @@ services:
         source: ./conf
         target: /etc/nginx/conf.d
 """)
-        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, project_name="myapp")
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +118,7 @@ services:
     privileged: true
 """)
         with pytest.raises(ComposeSecurityError, match="privileged"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
 
 class TestRejectsPid:
@@ -130,7 +130,7 @@ services:
     pid: host
 """)
         with pytest.raises(ComposeSecurityError, match="pid"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_pid_container_namespace_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -140,7 +140,7 @@ services:
     pid: "container:abc"
 """)
         with pytest.raises(ComposeSecurityError, match="pid"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_pid_unset_accepted(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -148,7 +148,7 @@ services:
   web:
     image: nginx
 """)
-        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, project_name="myapp")
 
 
 class TestRejectsUsernsHost:
@@ -160,7 +160,7 @@ services:
     userns_mode: host
 """)
         with pytest.raises(ComposeSecurityError, match="userns"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
 
 class TestRejectsNetworkHost:
@@ -172,7 +172,7 @@ services:
     network_mode: host
 """)
         with pytest.raises(ComposeSecurityError, match="network_mode"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
 
 class TestRejectsSecurityOpt:
@@ -185,7 +185,7 @@ services:
       - seccomp=unconfined
 """)
         with pytest.raises(ComposeSecurityError, match="security_opt"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_apparmor_unconfined_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -196,7 +196,7 @@ services:
       - apparmor=unconfined
 """)
         with pytest.raises(ComposeSecurityError, match="security_opt"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_label_disable_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -207,7 +207,7 @@ services:
       - label:disable
 """)
         with pytest.raises(ComposeSecurityError, match="security_opt"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_label_disable_case_insensitive_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -218,7 +218,7 @@ services:
       - LABEL:DISABLE
 """)
         with pytest.raises(ComposeSecurityError, match="security_opt"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
 
 class TestRejectsCapAdd:
@@ -231,7 +231,7 @@ services:
       - SYS_ADMIN
 """)
         with pytest.raises(ComposeSecurityError, match="cap_add"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_dac_read_search_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -242,7 +242,7 @@ services:
       - DAC_READ_SEARCH
 """)
         with pytest.raises(ComposeSecurityError, match="cap_add"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_bpf_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -253,7 +253,7 @@ services:
       - BPF
 """)
         with pytest.raises(ComposeSecurityError, match="cap_add"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_perfmon_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -264,7 +264,7 @@ services:
       - PERFMON
 """)
         with pytest.raises(ComposeSecurityError, match="cap_add"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_sys_resource_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -275,7 +275,7 @@ services:
       - SYS_RESOURCE
 """)
         with pytest.raises(ComposeSecurityError, match="cap_add"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_default_cap_drop_member_in_cap_add_accepted(self, tmp_path: Path, paths) -> None:
         # NET_ADMIN appears in DEFAULT_CAP_DROP. Adding it back via cap_add
@@ -288,7 +288,7 @@ services:
     cap_add:
       - NET_ADMIN
 """)
-        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, project_name="myapp")
 
 
 class TestRejectsHostileVolumes:
@@ -301,7 +301,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
 """)
         with pytest.raises(ComposeSecurityError, match="volumes"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_docker_socket_long_syntax_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -314,7 +314,7 @@ services:
         target: /sock
 """)
         with pytest.raises(ComposeSecurityError, match="volumes"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_run_docker_sock_short_syntax_rejected(self, tmp_path: Path, paths) -> None:
         # Audit B-1: on modern Debian /var/run is a symlink to /run, so the
@@ -328,7 +328,7 @@ services:
       - /run/docker.sock:/var/run/docker.sock
 """)
         with pytest.raises(ComposeSecurityError, match="volumes"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_run_docker_sock_long_syntax_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -341,12 +341,12 @@ services:
         target: /sock
 """)
         with pytest.raises(ComposeSecurityError, match="volumes"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
-    def test_run_subpath_still_allowed(self, tmp_path: Path, paths) -> None:
-        # Audit B-1 boundary: /run by itself must NOT be rejected — many
-        # legitimate apps mount /run/myapp tmpfs paths. Only /run/docker.sock
-        # (and its descendants) and /var/run/docker.sock are hostile.
+    def test_run_subpath_rejected_as_outside_project(self, tmp_path: Path, paths) -> None:
+        # /run/myapp is not a protected path (audit B-1 boundary: only the
+        # sockets and their parents are), but since v0.11 F-09 a bind mount
+        # must stay inside the project directory. Use tmpfs for /run paths.
         compose = _write(tmp_path / "compose.yml", """
 services:
   web:
@@ -354,8 +354,8 @@ services:
     volumes:
       - /run/myapp:/run/myapp
 """)
-        # Should not raise.
-        validate_user_compose(compose, paths)
+        with pytest.raises(ComposeSecurityError, match="outside the project directory"):
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_proc_mount_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -366,7 +366,7 @@ services:
       - /proc:/host/proc
 """)
         with pytest.raises(ComposeSecurityError, match="volumes"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_sys_mount_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -377,7 +377,7 @@ services:
       - /sys:/host/sys
 """)
         with pytest.raises(ComposeSecurityError, match="volumes"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_root_mount_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -388,7 +388,7 @@ services:
       - /:/host
 """)
         with pytest.raises(ComposeSecurityError, match="volumes"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_etc_mount_rejected_even_readonly(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -399,7 +399,7 @@ services:
       - /etc:/etc:ro
 """)
         with pytest.raises(ComposeSecurityError, match="volumes"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_dev_mount_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -410,7 +410,7 @@ services:
       - /dev:/dev
 """)
         with pytest.raises(ComposeSecurityError, match="volumes"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +431,7 @@ services:
     image: nginx
     privileged: true
 """)
-        validate_user_compose(compose, paths, off_services={"web"})
+        validate_user_compose(compose, paths, off_services={"web"}, project_name="myapp")
         captured = capsys.readouterr()
         assert "hostile compose key privileged" in captured.err
         assert "service web" in captured.err
@@ -448,7 +448,7 @@ services:
       - /var/run/docker.sock:/sock
 """)
         # No raise.
-        validate_user_compose(compose, paths, off_services={"web"})
+        validate_user_compose(compose, paths, off_services={"web"}, project_name="myapp")
 
     def test_non_off_service_in_same_compose_still_raises(
         self, tmp_path: Path, paths
@@ -464,7 +464,7 @@ services:
 """)
         # `web` is opted out, but `api` is not — must still raise.
         with pytest.raises(ComposeSecurityError, match="api"):
-            validate_user_compose(compose, paths, off_services={"web"})
+            validate_user_compose(compose, paths, off_services={"web"}, project_name="myapp")
 
 
 # ---------------------------------------------------------------------------
@@ -485,27 +485,27 @@ services:
     privileged: true
 """)
         with pytest.raises(ComposeSecurityError):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_unparseable_compose_raises_compose_security_error(
         self, tmp_path: Path, paths
     ) -> None:
         compose = _write(tmp_path / "compose.yml", "::: not yaml :::\n  - [ unbalanced")
         with pytest.raises(ComposeSecurityError, match="could not parse"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_missing_compose_raises(self, tmp_path: Path, paths) -> None:
         compose = tmp_path / "missing.yml"
         with pytest.raises(ComposeSecurityError):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_empty_compose_passes(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", "")
-        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, project_name="myapp")
 
     def test_no_services_block_passes(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", "version: '3'\n")
-        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, project_name="myapp")
 
     def test_non_dict_service_skipped(self, tmp_path: Path, paths) -> None:
         # Compose with a service entry that's not a mapping — defensive.
@@ -513,7 +513,7 @@ services:
 services:
   web: null
 """)
-        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, project_name="myapp")
 
     def test_off_services_none_treated_as_empty(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -523,7 +523,7 @@ services:
     privileged: true
 """)
         with pytest.raises(ComposeSecurityError):
-            validate_user_compose(compose, paths, off_services=None)
+            validate_user_compose(compose, paths, off_services=None, project_name="myapp")
 
 
 # ---------------------------------------------------------------------------
@@ -540,7 +540,7 @@ services:
       - /proc/self:/host_self
 """)
         with pytest.raises(ComposeSecurityError, match="volumes"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_etc_passwd_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -551,7 +551,7 @@ services:
       - /etc/passwd:/etc/passwd:ro
 """)
         with pytest.raises(ComposeSecurityError, match="volumes"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_etc_shadow_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -562,7 +562,7 @@ services:
       - /etc/shadow:/x
 """)
         with pytest.raises(ComposeSecurityError, match="volumes"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_dev_block_device_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -573,7 +573,7 @@ services:
       - /dev/sda:/dev/sda
 """)
         with pytest.raises(ComposeSecurityError, match="volumes"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_sys_fs_cgroup_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -584,7 +584,7 @@ services:
       - /sys/fs/cgroup:/cg
 """)
         with pytest.raises(ComposeSecurityError, match="volumes"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_docker_sock_lookalike_dir_rejected(self, tmp_path: Path, paths) -> None:
         # /var/run/docker.sock is a file; an attacker mounting a sibling
@@ -599,7 +599,7 @@ services:
       - /var/run/docker.sock/anything:/sock
 """)
         with pytest.raises(ComposeSecurityError, match="volumes"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_home_path_rejected(self, tmp_path: Path, paths) -> None:
         # F-01: /home holds the deploy user's ~/.ssh; a writable mount
@@ -612,7 +612,7 @@ services:
       - /home/deploy/foo:/foo
 """)
         with pytest.raises(ComposeSecurityError, match="volumes"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
 
 # ---------------------------------------------------------------------------
@@ -629,7 +629,7 @@ services:
       - ${SOCK_PATH}:/var/run/docker.sock
 """)
         with pytest.raises(ComposeSecurityError, match="substitution"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_bare_dollar_substitution_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -640,7 +640,7 @@ services:
       - $HOME/foo:/etc
 """)
         with pytest.raises(ComposeSecurityError, match="substitution"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_brace_substitution_in_long_syntax_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -653,7 +653,7 @@ services:
         target: /host_proc
 """)
         with pytest.raises(ComposeSecurityError, match="substitution"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     # Audit F-5: embedded `$` (not just leading) must trigger rejection.
     def test_embedded_bare_dollar_substitution_rejected(self, tmp_path: Path, paths) -> None:
@@ -665,7 +665,7 @@ services:
       - /foo$BAR:/dst
 """)
         with pytest.raises(ComposeSecurityError, match="substitution"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_embedded_brace_substitution_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -676,7 +676,7 @@ services:
       - /foo${BAR}/x:/dst
 """)
         with pytest.raises(ComposeSecurityError, match="substitution"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_trailing_brace_substitution_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -687,7 +687,7 @@ services:
       - /abc/${BAR}:/dst
 """)
         with pytest.raises(ComposeSecurityError, match="substitution"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_literal_path_no_dollars_accepted(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -695,9 +695,9 @@ services:
   web:
     image: nginx
     volumes:
-      - /literal/no/dollars:/dst
+      - ./literal/no/dollars:/dst
 """)
-        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, project_name="myapp")
 
 
 # ---------------------------------------------------------------------------
@@ -714,7 +714,7 @@ services:
       - no-new-privileges:false
 """)
         with pytest.raises(ComposeSecurityError, match="security_opt"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_no_new_privileges_false_mixed_case_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -725,7 +725,7 @@ services:
       - No-New-Privileges:False
 """)
         with pytest.raises(ComposeSecurityError, match="security_opt"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
 
 # ---------------------------------------------------------------------------
@@ -750,7 +750,7 @@ services:
       - no-new-privileges:true
 """)
         with pytest.raises(ComposeSecurityError, match="redundant"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_redeclared_on_off_profile_permitted(
         self, tmp_path: Path, paths,
@@ -764,7 +764,7 @@ services:
     security_opt:
       - no-new-privileges:true
 """)
-        validate_user_compose(compose, paths, off_services={"web"})
+        validate_user_compose(compose, paths, off_services={"web"}, project_name="myapp")
 
     def test_unrelated_security_opt_entry_permitted(
         self, tmp_path: Path, paths,
@@ -780,7 +780,7 @@ services:
     security_opt:
       - seccomp=runtime/default
 """)
-        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, project_name="myapp")
 
     def test_redeclared_no_new_privileges_false_still_hostile(
         self, tmp_path: Path, paths,
@@ -798,7 +798,7 @@ services:
       - no-new-privileges:false
 """)
         with pytest.raises(ComposeSecurityError, match="security_opt"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_redeclared_message_mentions_overlay(
         self, tmp_path: Path, paths,
@@ -811,7 +811,7 @@ services:
       - no-new-privileges:true
 """)
         with pytest.raises(ComposeSecurityError) as excinfo:
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
         msg = str(excinfo.value)
         assert "boxmunge default-profile overlay" in msg
         assert "no-new-privileges:true" in msg
@@ -830,7 +830,7 @@ services:
     ipc: host
 """)
         with pytest.raises(ComposeSecurityError, match="ipc"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
 
 class TestRejectsCgroupnsHost:
@@ -842,7 +842,7 @@ services:
     cgroupns_mode: host
 """)
         with pytest.raises(ComposeSecurityError, match="cgroupns_mode"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
 
 class TestRejectsDevices:
@@ -855,7 +855,7 @@ services:
       - /dev/kvm:/dev/kvm
 """)
         with pytest.raises(ComposeSecurityError, match="devices"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_empty_devices_accepted(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -864,7 +864,7 @@ services:
     image: nginx
     devices: []
 """)
-        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, project_name="myapp")
 
 
 class TestRejectsDeviceCgroupRules:
@@ -877,7 +877,7 @@ services:
       - "c *:* rwm"
 """)
         with pytest.raises(ComposeSecurityError, match="device_cgroup_rules"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
 
 class TestRejectsHostileCgroupParent:
@@ -889,7 +889,7 @@ services:
     cgroup_parent: /system.slice
 """)
         with pytest.raises(ComposeSecurityError, match="cgroup_parent"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_dotdot_traversal_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -899,7 +899,7 @@ services:
     cgroup_parent: foo/../bar
 """)
         with pytest.raises(ComposeSecurityError, match="cgroup_parent"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_flat_name_accepted(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -908,7 +908,7 @@ services:
     image: nginx
     cgroup_parent: my-cgroup
 """)
-        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, project_name="myapp")
 
 
 # ---------------------------------------------------------------------------
@@ -924,7 +924,7 @@ services:
     pid: HOST
 """)
         with pytest.raises(ComposeSecurityError, match="pid"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_network_mode_Host_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -934,7 +934,7 @@ services:
     network_mode: Host
 """)
         with pytest.raises(ComposeSecurityError, match="network_mode"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
     def test_userns_mode_HOST_rejected(self, tmp_path: Path, paths) -> None:
         compose = _write(tmp_path / "compose.yml", """
@@ -944,7 +944,7 @@ services:
     userns_mode: HOST
 """)
         with pytest.raises(ComposeSecurityError, match="userns"):
-            validate_user_compose(compose, paths)
+            validate_user_compose(compose, paths, project_name="myapp")
 
 
 # ---------------------------------------------------------------------------
@@ -965,7 +965,7 @@ services:
       - SYS_ADMIN
       - BPF
 """)
-        validate_user_compose(compose, paths, off_services={"web"})
+        validate_user_compose(compose, paths, off_services={"web"}, project_name="myapp")
         captured = capsys.readouterr()
         assert "SYS_ADMIN" in captured.err
         assert "BPF" in captured.err
@@ -983,7 +983,7 @@ services:
       - /proc:/host/proc
       - /etc:/host/etc
 """)
-        validate_user_compose(compose, paths, off_services={"web"})
+        validate_user_compose(compose, paths, off_services={"web"}, project_name="myapp")
         captured = capsys.readouterr()
         # Two warnings — one per hostile entry.
         assert captured.err.count("hostile compose key volumes") >= 2
@@ -1001,7 +1001,7 @@ services:
       - seccomp=unconfined
       - apparmor=unconfined
 """)
-        validate_user_compose(compose, paths, off_services={"web"})
+        validate_user_compose(compose, paths, off_services={"web"}, project_name="myapp")
         captured = capsys.readouterr()
         assert captured.err.count("hostile compose key security_opt") >= 2
 
@@ -1032,21 +1032,12 @@ services:
             for call in mw.call_args_list:
                 assert call.kwargs.get("project") == "myapp"
 
-    def test_project_name_optional(self, tmp_path: Path, paths) -> None:
-        # Existing call sites without project_name still work.
-        compose = _write(tmp_path / "compose.yml", """
-services:
-  web:
-    image: nginx
-    privileged: true
-""")
-        from unittest.mock import patch
-        with patch("boxmunge.compose_validate.log_warning") as mw:
-            validate_user_compose(compose, paths, off_services={"web"})
-            assert mw.called
-            for call in mw.call_args_list:
-                # project=None means structured logs simply don't carry the field.
-                assert call.kwargs.get("project") is None
+    def test_project_name_required(self, tmp_path: Path, paths) -> None:
+        # v0.11 F-09: the isolation rules are scoped to the project, so the
+        # validator cannot run without knowing which project it checks.
+        compose = _write(tmp_path / "compose.yml", "services:\n  web:\n    image: nginx\n")
+        with pytest.raises(TypeError):
+            validate_user_compose(compose, paths)
 
 
 # ---------------------------------------------------------------------------
@@ -1070,7 +1061,7 @@ services:
 """)
         validate_user_compose(
             compose, paths,
-            cve_policy={"dangerously_disable_quarantine": True},
+            cve_policy={"dangerously_disable_quarantine": True}, project_name="myapp",
         )
 
     def test_disable_quarantine_with_readonly_false_rejected(
@@ -1085,7 +1076,7 @@ services:
         with pytest.raises(ComposeSecurityError) as exc:
             validate_user_compose(
                 compose, paths,
-                cve_policy={"dangerously_disable_quarantine": True},
+                cve_policy={"dangerously_disable_quarantine": True}, project_name="myapp",
             )
         msg = str(exc.value)
         assert "service web" in msg
@@ -1104,7 +1095,7 @@ services:
         with pytest.raises(ComposeSecurityError, match="dangerously_disable_quarantine"):
             validate_user_compose(
                 compose, paths,
-                cve_policy={"dangerously_disable_quarantine": True},
+                cve_policy={"dangerously_disable_quarantine": True}, project_name="myapp",
             )
 
     def test_disable_quarantine_offending_service_in_off_warns_only(
@@ -1122,7 +1113,7 @@ services:
         validate_user_compose(
             compose, paths,
             off_services={"web"},
-            cve_policy={"dangerously_disable_quarantine": True},
+            cve_policy={"dangerously_disable_quarantine": True}, project_name="myapp",
         )
         captured = capsys.readouterr()
         assert "web" in captured.err
@@ -1139,7 +1130,7 @@ services:
 """)
         validate_user_compose(
             compose, paths,
-            cve_policy={"dangerously_disable_quarantine": False},
+            cve_policy={"dangerously_disable_quarantine": False}, project_name="myapp",
         )
 
     def test_disable_quarantine_absent_does_not_apply_rule(
@@ -1151,7 +1142,7 @@ services:
     image: nginx
 """)
         # Empty cve_policy dict — neither rule applies.
-        validate_user_compose(compose, paths, cve_policy={})
+        validate_user_compose(compose, paths, cve_policy={}, project_name="myapp")
 
     def test_cve_policy_none_does_not_apply_rules(
         self, tmp_path: Path, paths
@@ -1161,7 +1152,7 @@ services:
   web:
     image: nginx
 """)
-        validate_user_compose(compose, paths, cve_policy=None)
+        validate_user_compose(compose, paths, cve_policy=None, project_name="myapp")
 
     def test_disable_quarantine_first_offender_named_in_error(
         self, tmp_path: Path, paths
@@ -1182,7 +1173,7 @@ services:
         with pytest.raises(ComposeSecurityError) as exc:
             validate_user_compose(
                 compose, paths,
-                cve_policy={"dangerously_disable_quarantine": True},
+                cve_policy={"dangerously_disable_quarantine": True}, project_name="myapp",
             )
         msg = str(exc.value)
         assert "service alpha" in msg
@@ -1204,7 +1195,7 @@ services:
     read_only: true
 """)
         validate_user_compose(
-            compose, paths, cve_policy={"posture": "strict"},
+            compose, paths, cve_policy={"posture": "strict"}, project_name="myapp",
         )
 
     def test_posture_strict_without_readonly_rejected(
@@ -1217,7 +1208,7 @@ services:
 """)
         with pytest.raises(ComposeSecurityError) as exc:
             validate_user_compose(
-                compose, paths, cve_policy={"posture": "strict"},
+                compose, paths, cve_policy={"posture": "strict"}, project_name="myapp",
             )
         msg = str(exc.value)
         assert "service web" in msg
@@ -1237,7 +1228,7 @@ services:
         validate_user_compose(
             compose, paths,
             off_services={"web"},
-            cve_policy={"posture": "strict"},
+            cve_policy={"posture": "strict"}, project_name="myapp",
         )
         captured = capsys.readouterr()
         assert "web" in captured.err
@@ -1253,7 +1244,7 @@ services:
     image: nginx
 """)
         validate_user_compose(
-            compose, paths, cve_policy={"posture": "balanced"},
+            compose, paths, cve_policy={"posture": "balanced"}, project_name="myapp",
         )
 
     def test_posture_relaxed_does_not_apply_rule(
@@ -1265,7 +1256,7 @@ services:
     image: nginx
 """)
         validate_user_compose(
-            compose, paths, cve_policy={"posture": "relaxed"},
+            compose, paths, cve_policy={"posture": "relaxed"}, project_name="myapp",
         )
 
     def test_posture_absent_does_not_apply_rule(
@@ -1279,7 +1270,7 @@ services:
         # No `posture` key — Rule B inert.
         validate_user_compose(
             compose, paths,
-            cve_policy={"dangerously_disable_quarantine": False},
+            cve_policy={"dangerously_disable_quarantine": False}, project_name="myapp",
         )
 
     # --- Combined: rule order ------------------------------------------------
@@ -1300,7 +1291,7 @@ services:
                 cve_policy={
                     "dangerously_disable_quarantine": True,
                     "posture": "strict",
-                },
+                }, project_name="myapp",
             )
         msg = str(exc.value)
         assert "dangerously_disable_quarantine: true requires" in msg
@@ -1318,8 +1309,8 @@ services:
   web:
     image: nginx
 """)
-        validate_user_compose(compose, paths)
-        validate_user_compose(compose, paths, off_services={"web"})
+        validate_user_compose(compose, paths, project_name="myapp")
+        validate_user_compose(compose, paths, off_services={"web"}, project_name="myapp")
         validate_user_compose(
             compose, paths, off_services=None, project_name="demo",
         )
@@ -1353,7 +1344,7 @@ services:
 """)
         validate_user_compose(
             compose, paths,
-            manifest_services=self._manifest_services(writable=None),
+            manifest_services=self._manifest_services(writable=None), project_name="myapp",
         )
 
     def test_state1_compose_tmpfs_rejected(self, tmp_path: Path, paths) -> None:
@@ -1367,7 +1358,7 @@ services:
         with pytest.raises(ComposeSecurityError) as exc:
             validate_user_compose(
                 compose, paths,
-                manifest_services=self._manifest_services(writable=None),
+                manifest_services=self._manifest_services(writable=None), project_name="myapp",
             )
         msg = str(exc.value)
         assert "services.web.writable" in msg
@@ -1388,7 +1379,7 @@ services:
         with pytest.raises(ComposeSecurityError) as exc:
             validate_user_compose(
                 compose, paths,
-                manifest_services=self._manifest_services(writable=None),
+                manifest_services=self._manifest_services(writable=None), project_name="myapp",
             )
         msg = str(exc.value)
         assert "services.web.writable" in msg
@@ -1409,7 +1400,7 @@ services:
 """)
         validate_user_compose(
             compose, paths,
-            manifest_services=self._manifest_services(writable=None),
+            manifest_services=self._manifest_services(writable=None), project_name="myapp",
         )
 
     def test_state1_smoke_volume_ignored(self, tmp_path: Path, paths) -> None:
@@ -1423,7 +1414,7 @@ services:
 """)
         validate_user_compose(
             compose, paths,
-            manifest_services=self._manifest_services(writable=None),
+            manifest_services=self._manifest_services(writable=None), project_name="myapp",
         )
 
     # --- State 2 (manifest-managed) ------------------------------------------
@@ -1438,7 +1429,7 @@ services:
             compose, paths,
             manifest_services=self._manifest_services(
                 writable={"ephemeral": ["/var/cache"]},
-            ),
+            ), project_name="myapp",
         )
 
     def test_state2_compose_tmpfs_conflicts(
@@ -1456,7 +1447,7 @@ services:
                 compose, paths,
                 manifest_services=self._manifest_services(
                     writable={"ephemeral": ["/var/cache"]},
-                ),
+                ), project_name="myapp",
             )
         msg = str(exc.value)
         assert "conflicts with writable" in msg or "writable" in msg
@@ -1479,7 +1470,7 @@ services:
                 compose, paths,
                 manifest_services=self._manifest_services(
                     writable={"persistent": [{"name": "dbdata", "mount": "/x"}]},
-                ),
+                ), project_name="myapp",
             )
         msg = str(exc.value)
         assert "writable" in msg
@@ -1500,7 +1491,7 @@ services:
             compose, paths,
             manifest_services=self._manifest_services(
                 writable={"external": True},
-            ),
+            ), project_name="myapp",
         )
 
     def test_state3_compose_volumes_ok(self, tmp_path: Path, paths) -> None:
@@ -1517,7 +1508,7 @@ services:
             compose, paths,
             manifest_services=self._manifest_services(
                 writable={"external": True},
-            ),
+            ), project_name="myapp",
         )
 
     # --- Backward-compat: signature stays optional ---------------------------
@@ -1536,7 +1527,7 @@ services:
 """)
         # Without manifest_services, tmpfs should not fire the conflict
         # rule — it falls back to legacy validation only.
-        validate_user_compose(compose, paths)
+        validate_user_compose(compose, paths, project_name="myapp")
 
     # --- Error message quality ------------------------------------------------
 
@@ -1553,7 +1544,7 @@ services:
         with pytest.raises(ComposeSecurityError) as exc:
             validate_user_compose(
                 compose, paths,
-                manifest_services=self._manifest_services(writable=None),
+                manifest_services=self._manifest_services(writable=None), project_name="myapp",
             )
         msg = str(exc.value)
         # Operator needs to know how to fix this — three options listed.
@@ -1575,7 +1566,7 @@ services:
                 compose, paths,
                 manifest_services=self._manifest_services(
                     writable={"ephemeral": ["/var/cache"]},
-                ),
+                ), project_name="myapp",
             )
         msg = str(exc.value)
         # Migration text mentions where the truth lives.
@@ -1599,7 +1590,7 @@ services:
                 manifest_services={
                     "web": {"port": 80, "routes": [{"path": "/"}]},
                     "api": {"port": 8000, "routes": [{"path": "/api"}]},
-                },
+                }, project_name="myapp",
             )
         msg = str(exc.value)
         assert "services.api" in msg

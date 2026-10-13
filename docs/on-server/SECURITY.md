@@ -159,7 +159,8 @@ letter case, surrounding spaces, a `CAP_` prefix, and `=` versus `:` in
 | `cgroup_parent` that is absolute or contains `..` | Escapes the container cgroup. |
 | A bind mount of a protected host path, anything inside one, or any parent of one | Protected: the Docker and containerd sockets and state, `/proc`, `/sys`, `/dev`, `/etc`, `/boot`, `/root`, `/home`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, and the boxmunge root outside `projects/`. Paths are compared after `~` expansion, joining relative paths to the project directory, collapsing `..` and `//`, and resolving symlinks, so `/run` (the parent of `/run/docker.sock`), `/tmp/../etc`, and `../../config` are all refused. |
 | `${VAR}` or `$VAR` inside a bind-mount source | The path cannot be verified. Write it literally. |
-| A top-level `name:` | boxmunge runs every compose command as `-p <project>` (`-p <project>-staging` for staging); a `name:` could address another project's containers and volumes. Not relaxed by `profile: "off"`. |
+| A bind mount outside the project directory | One project must not read or write another's files. Use paths such as `./data`; an absolute path is fine if it is inside `/opt/boxmunge/projects/<project>/`. Symlinks are resolved before the check. |
+| `build.network: host`, `build.privileged` | Build steps run in a container too; keep them off the host network and unprivileged. |
 
 ### Capability denylist
 
@@ -175,6 +176,23 @@ form: upper case, no `CAP_` prefix (`NET_RAW`, not `cap_net_raw`).
 
 Services on `profile: "off"` get a logged warning for each of these instead
 of a rejection.
+
+### Project isolation
+
+These rules keep one project's `compose.yml` from reaching another project.
+They apply to every service and are **not** relaxed by `profile: "off"`.
+
+| Rejected | What to do instead |
+|---|---|
+| A top-level `name:` | Remove it. boxmunge runs every compose command as `-p <project>` (`-p <project>-staging` for staging). |
+| An `external: true` network, including `boxmunge-proxy` | Remove it. boxmunge attaches routed services to `boxmunge-proxy` itself; declare only the project's own networks. |
+| A top-level network or volume with a `name:` other than Compose's default (`<project>_<key>`) | Remove the `name:` line. |
+| A network with a `driver` other than `bridge` (`macvlan`, `ipvlan`, ...) | Remove the `driver:` line. |
+| A service joining a network the file does not declare | Declare it, or use `default`. |
+| A network alias that does not start with `<project>-` | Use `<project>-<name>`, or reach the service by its service name. |
+| An `external: true` volume, or a volume with `driver`/`driver_opts` | Use a plain named volume (`data: {}`) or a bind mount inside the project. |
+| `external_links`, or `volumes_from: [container:<name>]` | Reach services in the same file by service name; name a service in `volumes_from`. |
+| A `secrets`/`configs` `file:` or a `build` context outside the project directory | Keep the file or context inside the project. Secret values belong in `secrets set`. |
 
 ## Wildcard hosts and routing isolation
 
