@@ -75,6 +75,8 @@ def _bundle_upload_and_run(command: str, server_flags: list[str]) -> int:
         if not _handshake(config, _manifest_schema(config_path.parent)):
             return 1
 
+        print(f"Uploading {bundles[0].name} to {config['user']}@{config['server']}:"
+              f"{config['port']} ...", file=sys.stderr)
         exit_code = run_scp(config, str(bundles[0]))
         if exit_code != 0:
             print("ERROR: Upload failed.", file=sys.stderr)

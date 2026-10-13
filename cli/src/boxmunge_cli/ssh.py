@@ -32,6 +32,11 @@ def build_ssh_cmd(config: dict[str, Any], command: str, *args: str,
     ]
 
 
+def _scp_host(server: str) -> str:
+    """scp needs an IPv6 address in brackets (ssh does not)."""
+    return f"[{server}]" if ":" in server else server
+
+
 def build_scp_cmd(config: dict[str, Any], local_path: str) -> list[str]:
     """Build an SCP upload command list."""
     return [
@@ -40,7 +45,7 @@ def build_scp_cmd(config: dict[str, Any], local_path: str) -> list[str]:
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "ConnectTimeout=15",
         local_path,
-        f"{config['user']}@{config['server']}:",
+        f"{config['user']}@{_scp_host(config['server'])}:",
     ]
 
 

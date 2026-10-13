@@ -67,6 +67,11 @@ def test_ships_and_runs_the_configured_project(project, fake_remote, command) ->
     assert remote[-1].endswith(f"{command} myapp")
 
 
+def test_upload_destination_is_printed(project, fake_remote, capsys) -> None:
+    assert run_cli(["prod-deploy"]) == 0
+    assert "to deploy@box.example.com:922" in capsys.readouterr().err
+
+
 def test_prod_deploy_forwards_its_flags(project, fake_remote) -> None:
     assert run_cli(["prod-deploy", "--dry-run", "--no-snapshot"]) == 0
     assert _remote_commands(fake_remote)[-1].endswith("prod-deploy myapp --dry-run --no-snapshot")

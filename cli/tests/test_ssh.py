@@ -45,6 +45,12 @@ class TestBuildScpCmd:
                        "/tmp/myapp-2024.tar.gz", "deploy@box.example.com:"]
 
 
+    def test_ipv6_is_bracketed_for_scp(self) -> None:
+        config = {"server": "2001:db8::1", "port": 922, "user": "deploy", "project": "myapp"}
+        assert build_scp_cmd(config, "/tmp/b.tar.gz")[-1] == "deploy@[2001:db8::1]:"
+        assert build_ssh_cmd(config, "status")[-2] == "deploy@2001:db8::1"
+
+
 class TestRunSsh:
     @patch("boxmunge_cli.ssh.subprocess.run")
     def test_passes_args_as_list(self, mock_run: MagicMock) -> None:
