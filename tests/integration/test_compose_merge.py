@@ -115,8 +115,9 @@ def test_benign_compose_merge_preserves_overlay(tmp_path: Path) -> None:
 def test_hostile_compose_rejected_before_merge(tmp_path: Path) -> None:
     """Confirm validate_user_compose rejects privileged: true.
 
-    Doesn't need docker — the validator runs before docker compose config
-    is invoked, which is precisely the point of audit Finding 6's fix.
+    The validator resolves compose.yml with `docker compose config` and
+    rejects it before any overlay merge or container start, which is the
+    point of audit Finding 6's fix.
     """
     compose_path = tmp_path / "compose.yml"
     compose_path.write_text(_HOSTILE_COMPOSE)
