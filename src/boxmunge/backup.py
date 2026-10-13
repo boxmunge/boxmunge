@@ -113,6 +113,7 @@ class BackupKind(enum.Enum):
     PREDEPLOY = "predeploy"    # prod-deploy's snapshot before it changes anything
     PREUPDATE = "preupdate"    # container-update, before recreating changed images
     MANUAL = "manual"          # `backup <project>`, MCP, console, self-test
+    PRERESTORE = "prerestore"  # restore's safety snapshot of the data it replaces
 
 
 # Snapshots kept per project for each kind other than NIGHTLY, whose count is
@@ -121,6 +122,7 @@ SNAPSHOT_RETENTION = {
     BackupKind.PREDEPLOY: 5,
     BackupKind.PREUPDATE: 3,
     BackupKind.MANUAL: 5,
+    BackupKind.PRERESTORE: 3,
 }
 
 _TIMESTAMP = r"\d{4}-\d{2}-\d{2}T\d{6}"

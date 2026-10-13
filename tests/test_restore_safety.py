@@ -17,6 +17,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.fake_system_container import FakeSystemContainer
+
 from boxmunge.commands.backup_cmd import list_snapshots
 from boxmunge.commands.restore import run_restore
 from boxmunge.paths import BoxPaths
@@ -108,11 +110,10 @@ class Box:
 
 
 @pytest.fixture
-def box(paths: BoxPaths):
+def box(paths: BoxPaths, monkeypatch: pytest.MonkeyPatch):
     b = Box(paths)
-    with patch("boxmunge.backup._use_container", return_value=True), \
-         patch("boxmunge.backup._run_age_cmd", side_effect=b.age), \
-         patch("boxmunge.commands.restore.subprocess.run", side_effect=b.docker_run), \
+    FakeSystemContainer(paths, handler=b.age).install(monkeypatch)
+    with patch("boxmunge.commands.restore.subprocess.run", side_effect=b.docker_run), \
          patch("boxmunge.commands.restore.time.sleep"), \
          patch("boxmunge.commands.restore.clear_probation_if_active"), \
          patch("boxmunge.commands.restore.compose_down",
@@ -131,7 +132,7 @@ class TestVerifiedBeforeStop:
         assert _restore(box) == 0
         assert box.events == ["decrypt", "dump", "encrypt", "down", "start-db",
                               "restore-cmd", "up-all"]
-        safety = [s.name for s in list_snapshots(box.paths, PROJECT) if "pre-restore" in s.name]
+        safety = [s.name for s in list_snapshots(box.paths, PROJECT) if s.name.endswith("-prerestore.tar.gz.age")]
         assert len(safety) == 1, "safety snapshot is listed for restore"
         assert box.leftovers() == [], "plaintext and dump temp files removed"
 
@@ -187,7 +188,7 @@ class TestAlwaysRestarted:
         assert box.events[-1] == "up-all"
         assert box.events.index("down") < box.events.index("up-all")
         err = capsys.readouterr().err
-        assert "pre-restore" in err, "operator is pointed at the safety snapshot"
+        assert "-prerestore.tar.gz.age" in err, "operator is pointed at the safety snapshot"
         assert box.leftovers() == []
 
     def test_unexpected_error_still_restarts_and_surfaces(self, box):

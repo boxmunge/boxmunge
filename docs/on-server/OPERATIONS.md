@@ -309,6 +309,7 @@ Every snapshot is named `<project>-<UTC timestamp>-<kind>.tar.gz.age`, for examp
 | `nightly` | `backup-all` (the 02:00 timer) | `backup.retention` in the manifest (default 7) |
 | `predeploy` | `prod-deploy`'s pre-deploy snapshot (`deploy.snapshot_before_deploy`) | 5 |
 | `preupdate` | the container-update timer, only when a pulled image changed and the project is about to be recreated | 3 |
+| `prerestore` | `restore`, a safety snapshot of the data about to be replaced (unless `--no-safety-snapshot`) | 3 |
 | `manual` | `backup <project>`, the MCP `backup` tool, the console, `self-test` | 5 |
 
 After each backup, the oldest snapshots of that kind beyond its count are deleted. Archives from before kinds existed (`<project>-<timestamp>.tar.gz.age`) count as `nightly` and age out as new nightly backups arrive. Other files in `backups/` are never touched. `backup.retention` must be a whole number of at least 1; anything else fails the backup before it dumps.
@@ -350,14 +351,14 @@ restore myapp myapp-2026-03-30T020000-nightly.tar.gz.age
 
 Before `restore` stops anything, it decrypts the snapshot and checks that it unpacks: it must be
 non-empty, a gzip stream must decompress to the end, and a tar archive must list. It then takes a
-safety snapshot of the current data, named `myapp-pre-restore-<timestamp>.tar.gz.age`. If either
+safety snapshot of the current data, named `myapp-<timestamp>-prerestore.tar.gz.age` (the three newest are kept). If either
 step fails, production is left running and untouched. Only then does it stop the project, restore
 the data (the `restore_command` is limited to 10 minutes), and start every service again. The
 services are started again whether the restore succeeded or failed. When it fails, the error names
 the safety snapshot so you can put the previous data back:
 
 ```
-restore myapp myapp-pre-restore-2026-10-13T120000.tar.gz.age
+restore myapp myapp-2026-10-13T120000-prerestore.tar.gz.age
 ```
 
 The safety snapshot needs the backup service to be running and `backup.dump_command` to be set. If

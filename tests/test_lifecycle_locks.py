@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import yaml
 
+from boxmunge.backup import BackupKind
 from boxmunge.paths import BoxPaths
 from boxmunge.state import write_state
 from tests.lock_holder import hold_project_lock, project_lock_is_held
@@ -329,7 +330,7 @@ class TestContainerUpdateLock:
         assert result["rollback_attempted"] is True
         assert gate.calls == [True], "quarantine/pause check must run under the lock"
         assert backup_rec.calls == [True]
-        assert backup_kwargs == [{"_lock_held": True}]
+        assert backup_kwargs == [{"kind": BackupKind.PREUPDATE, "_lock_held": True}]
         assert pull.calls == [True]
         assert up.calls == [True, True]  # recreate + rollback recreate
         assert tag.calls == [True]
