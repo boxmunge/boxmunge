@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from unittest.mock import patch
 
+from boxmunge.backup import BackupKind
 from boxmunge.commands.deploy import run_deploy
 from boxmunge.commands.promote_cmd import run_promote
 from boxmunge.commands.rollback import find_rollback_target, run_rollback
@@ -117,7 +118,8 @@ def test_promote_snapshots_production_data_with_the_production_manifest(paths) -
 
     taken: list[dict] = []
 
-    def fake_backup(project_name, paths_, _lock_held=False, manifest=None):
+    def fake_backup(project_name, paths_, _lock_held=False, kind=None, manifest=None):
+        assert kind is BackupKind.PREDEPLOY
         taken.append(manifest)
         snap = paths_.project_backups(project_name) / f"{project_name}-p{len(taken)}.tar.gz.age"
         snap.parent.mkdir(parents=True, exist_ok=True)

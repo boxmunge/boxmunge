@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
+from boxmunge.backup import BackupKind
 from boxmunge.commands.deploy import run_deploy
 from boxmunge.commands.rollback import (
     RollbackUnavailable, find_rollback_target, run_rollback,
@@ -112,7 +113,8 @@ class TestRollbackRestoresData:
     def _fake_backup(paths):
         counter = iter(range(100))
 
-        def run_backup(project_name, paths_, _lock_held=False, manifest=None):
+        def run_backup(project_name, paths_, _lock_held=False, kind=None, manifest=None):
+            assert kind is BackupKind.PREDEPLOY
             n = next(counter)
             snap = paths_.project_backups(project_name) / f"{project_name}-snap{n}.tar.gz.age"
             snap.parent.mkdir(parents=True, exist_ok=True)
