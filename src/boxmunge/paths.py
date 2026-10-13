@@ -7,7 +7,7 @@ All paths are relative to a configurable root so tests can use a temp directory.
 import re
 from pathlib import Path
 
-_VALID_PROJECT_NAME = re.compile(r'^[a-z0-9][a-z0-9\-]{0,62}$')
+_VALID_PROJECT_NAME = re.compile(r'[a-z0-9][a-z0-9\-]{0,62}')
 
 
 def validate_project_name(name: str) -> None:
@@ -15,12 +15,24 @@ def validate_project_name(name: str) -> None:
 
     Project names must be lowercase alphanumeric with hyphens, 1-63 chars,
     starting with a letter or digit. This prevents path traversal attacks.
+    fullmatch, not match: a `$` anchor would accept a trailing newline.
     """
-    if not _VALID_PROJECT_NAME.match(name):
+    if not isinstance(name, str) or not _VALID_PROJECT_NAME.fullmatch(name):
         raise ValueError(
             f"Invalid project name: {name!r}. "
             f"Must be lowercase alphanumeric with hyphens, 1-63 chars."
         )
+
+def _checked(name: str) -> str:
+    """Return *name* unchanged after validating it as a project name.
+
+    Every BoxPaths method that turns a project name into a path calls this,
+    so no caller (CLI, MCP, TUI, timers) can resolve a path outside its
+    project by passing "", ".", ".." or a name containing "/".
+    """
+    validate_project_name(name)
+    return name
+
 
 DEFAULT_ROOT = Path("/opt/boxmunge")
 
@@ -82,60 +94,78 @@ class BoxPaths:
         return self.container_update_state / f"{name}.json"
 
     def project_secrets(self, name: str) -> Path:
+        name = _checked(name)
         return self.projects / name / "secrets.env"
 
     def project_dir(self, name: str) -> Path:
+        name = _checked(name)
         return self.projects / name
 
     def project_manifest(self, name: str) -> Path:
+        name = _checked(name)
         return self.projects / name / "manifest.yml"
 
     def project_compose(self, name: str) -> Path:
+        name = _checked(name)
         return self.projects / name / "compose.yml"
 
     def project_compose_override(self, name: str) -> Path:
+        name = _checked(name)
         return self.projects / name / "compose.boxmunge.yml"
 
     def project_caddy_override(self, name: str) -> Path:
+        name = _checked(name)
         return self.projects / name / "caddy.override.conf"
 
     def project_caddy_site(self, name: str) -> Path:
+        name = _checked(name)
         return self.caddy_sites / f"{name}.conf"
 
     def project_backups(self, name: str) -> Path:
+        name = _checked(name)
         return self.projects / name / "backups"
 
     def project_data(self, name: str) -> Path:
+        name = _checked(name)
         return self.projects / name / "data"
 
     def project_health_state(self, name: str) -> Path:
+        name = _checked(name)
         return self.health_state / f"{name}.json"
 
     def project_deploy_state(self, name: str) -> Path:
+        name = _checked(name)
         return self.deploy_state / f"{name}.json"
 
     def project_paused_state(self, name: str) -> Path:
+        name = _checked(name)
         return self.deploy_state / f"{name}.paused.json"
 
     def project_quarantine_state(self, name: str) -> Path:
+        name = _checked(name)
         return self.deploy_state / f"{name}.quarantined.json"
 
     def project_scan_state(self, name: str) -> Path:
+        name = _checked(name)
         return self.state / "scans" / f"{name}.json"
 
     def project_staging_caddy_site(self, name: str) -> Path:
+        name = _checked(name)
         return self.caddy_sites / f"{name}-staging.conf"
 
     def project_staging_compose_override(self, name: str) -> Path:
+        name = _checked(name)
         return self.projects / name / "compose.boxmunge-staging.yml"
 
     def project_staging_state(self, name: str) -> Path:
+        name = _checked(name)
         return self.staging_state / f"{name}.json"
 
     def project_lock_file(self, name: str) -> Path:
+        name = _checked(name)
         return self.state / f"{name}.lock"
 
     def is_project_pre_registered(self, name: str) -> bool:
         """True if project dir exists but has no manifest (secrets-only)."""
-        project_dir = self.project_dir(name)
+        project_dir = self.project_dir(name)  # validates name
         return project_dir.exists() and not (project_dir / "manifest.yml").exists()
