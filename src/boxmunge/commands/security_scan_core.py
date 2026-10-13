@@ -1,33 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Per-project CVE scan mechanics — image identification, evaluate, persist.
+"""Per-project CVE scan body — evaluate each image, persist, act.
 
-Extracted from security_actions.py to keep that file under the 500/650 LoC
-budget. Contains the scan body that runs under the per-project lock plus
-the small helpers (project meta, image identification, compose loader)
-that feed it. Action handlers (cmd_security_scan / cmd_security_resume)
-remain in security_actions.py and orchestrate fleet-wide concerns
-(grace heads-up, exit codes, locking).
+Runs under the per-project lock. Inputs (manifest meta, image
+identification, suppressions) come from security_scan_inputs.py; fleet
+orchestration (grace heads-up, exit codes, lock-skip handling) lives in
+security_actions.py.
 """
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from pathlib import Path
-from typing import Any
 
-import yaml
-
+from boxmunge.commands.security_scan_inputs import (
+    ScanTarget,
+    hardening_profile,
+    identify_images,
+    load_all_suppressions,
+    load_project_meta,
+)
 from boxmunge.cve.alerting import emit_scan_alerts
 from boxmunge.cve.grace import GraceError, init_grace_if_missing
-from boxmunge.cve.hardening import hardening_profile_from_compose
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.policy import (
     Disposition,
+    FindingDisposition,
     Posture,
     ProjectDecision,
     evaluate_finding,
     evaluate_project,
-    parse_posture,
 )
 from boxmunge.cve.quarantine import (
     QuarantineError,
@@ -52,13 +53,9 @@ from boxmunge.cve.scanner import (
     TrivyNotInstalledError,
     scan_image,
 )
-from boxmunge.cve.suppressions import SuppressionsError, load_suppressions
-from boxmunge.docker import container_image_digest
 from boxmunge.fileutil import project_lock
 from boxmunge.log import log_warning
-from boxmunge.manifest import load_manifest
 from boxmunge.paths import BoxPaths
-from boxmunge.security_overlay import services_with_off_profile
 
 
 # Per-project aggregate scan budget.
@@ -75,88 +72,45 @@ from boxmunge.security_overlay import services_with_off_profile
 _PROJECT_BUDGET_SECONDS = 600
 
 
-def project_suppressions_path(paths: BoxPaths, project: str) -> Path:
-    return paths.project_dir(project) / "security" / "suppressions.yml"
+@dataclass(frozen=True)
+class ProjectScan:
+    """Everything one project scan learned.
 
+    ``failed_images`` errored in Trivy, ``skipped_images`` were cut by the
+    per-project budget, and ``unidentified_services`` had no image that
+    could be resolved. Any of the three means the scan is incomplete: the
+    decisions cover only part of what the project runs.
+    """
 
-def _container_name(project: str, service: str) -> str:
-    """Replicate the convention used in commands/check.py."""
-    return f"{project}-{service}-1"
+    project: str
+    posture: str
+    dangerously: bool
+    decisions: tuple[ProjectDecision, ...]
+    warnings: tuple[str, ...]
+    failed_images: tuple[str, ...] = ()
+    skipped_images: tuple[str, ...] = ()
+    unidentified_services: tuple[str, ...] = ()
+    headline: tuple[ProjectDecision, FindingDisposition] | None = None
+
+    @property
+    def complete(self) -> bool:
+        return not (
+            self.failed_images or self.skipped_images or self.unidentified_services
+        )
+
+    def incomplete_reasons(self) -> list[str]:
+        """One human line per unscanned image or service."""
+        out = [f"image {ref}: scan failed" for ref in self.failed_images]
+        out += [f"image {ref}: skipped (scan budget exhausted)"
+                for ref in self.skipped_images]
+        out += [f"service {svc!r}: no image could be identified (no container "
+                f"digest and no image: in compose.yml)"
+                for svc in self.unidentified_services]
+        return out
 
 
 def _today() -> date:
     return datetime.now(timezone.utc).date()
-
-
-def _load_compose(project_dir: Path) -> dict[str, Any]:
-    """Load the user compose.yml as a parsed dict."""
-    path = project_dir / "compose.yml"
-    if not path.exists():
-        return {}
-    try:
-        data = yaml.safe_load(path.read_text()) or {}
-    except yaml.YAMLError as e:
-        raise RuntimeError(f"Failed to parse compose.yml: {e}") from e
-    if not isinstance(data, dict):
-        return {}
-    return data
-
-
-def _identify_images(
-    manifest: dict[str, Any], compose: dict[str, Any], project: str,
-) -> tuple[list[str], list[str]]:
-    """Return (images, warnings).
-
-    For each service: prefer the running container's image digest; fall back
-    to the compose-declared image. Build-only services are skipped with a
-    warning.
-    """
-    images: list[str] = []
-    warnings: list[str] = []
-    services = manifest.get("services") or {}
-    compose_services = compose.get("services") or {}
-
-    for svc_name in services.keys():
-        cname = _container_name(project, svc_name)
-        digest = container_image_digest(cname)
-        if digest:
-            # digest already includes "sha256:..." prefix — qualify with image
-            # ref if available so the scan target is unambiguous.
-            svc_compose = compose_services.get(svc_name, {})
-            base_ref = svc_compose.get("image") if isinstance(svc_compose, dict) else None
-            if base_ref and "@" not in base_ref:
-                # Strip any tag and pin to digest.
-                short = base_ref.split(":", 1)[0]
-                images.append(f"{short}@{digest}")
-            else:
-                images.append(digest)
-            continue
-
-        # Container not running: fall back to compose image.
-        svc_compose = compose_services.get(svc_name, {})
-        if isinstance(svc_compose, dict):
-            image_ref = svc_compose.get("image")
-            if image_ref:
-                images.append(image_ref)
-                continue
-        warnings.append(
-            f"service {svc_name!r}: no running container and no image declared "
-            f"in compose (build-only) — skipping"
-        )
-
-    return images, warnings
-
-
-def _project_meta(
-    paths: BoxPaths, project: str,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str, bool]:
-    """Load manifest + compose, derive posture and dangerously_disable flag."""
-    manifest = load_manifest(paths.project_manifest(project))
-    compose = _load_compose(paths.project_dir(project))
-    sec_block = manifest.get("security") or {}
-    posture = sec_block.get("posture") or "balanced"
-    dangerously = bool(sec_block.get("dangerously_disable_quarantine", False))
-    return manifest, compose, sec_block, posture, dangerously
 
 
 def scan_one_project(
@@ -164,19 +118,11 @@ def scan_one_project(
     in_grace: bool | None = None,
     audit_only: bool = False,
     kev: KevCatalog | None = None,
-) -> tuple[
-    ProjectDecision | None,
-    list[ProjectDecision],
-    list[str],
-    str,
-    bool,
-]:
+) -> ProjectScan:
     """Scan a single project, persist state, take quarantine action.
 
-    Returns (headline_decision, all_decisions, warnings, posture_str,
-    dangerously). ``headline_decision`` is the first decision that
-    requires quarantine (used to trigger the action), or None if no
-    decision quarantines.
+    ``ProjectScan.headline`` is the first (decision, finding) pair that
+    requires quarantine, or None if nothing quarantines.
 
     When ``in_grace`` is True, both quarantine actions and per-project
     transition alerts are suppressed. The scan_state is still written
@@ -193,25 +139,18 @@ def scan_one_project(
     transition alerts are emitted, and no quarantine action fires. Used
     by `cmd_security_resume` so a re-scan during the resume flow does
     not clobber the prior scan_state context (audit A-3). Audit-only
-    callers DO NOT lazy-bootstrap grace either — the resume flow
-    inspects current findings and is not a scan-entry-point.
+    callers DO NOT lazy-bootstrap grace either.
 
-    Concurrency: this function holds the per-project lock for its full
-    body — scan + quarantine action + scan_state write must be atomic
-    relative to deploy/promote/container-update.
+    Concurrency: holds the per-project lock for its full body.
 
     Raises:
-        LockError: when another operation holds the project lock. Caller
-            decides whether to skip-and-warn (fleet scan) or fail (resume).
+        LockError: when another operation holds the project lock.
         TrivyNotInstalledError: when the Trivy binary is missing.
         RuntimeError: on irrecoverable failures (manifest unreadable, all
             images failed to scan, quarantine action raised, grace state
             corrupt).
     """
     if in_grace is None:
-        # Audit F-2: any direct caller of scan_one_project lazily
-        # bootstraps grace. audit_only callers (resume) deliberately
-        # skip the bootstrap — they observe findings without scanning.
         if audit_only:
             in_grace = False
         else:
@@ -224,9 +163,7 @@ def scan_one_project(
                     f"CVE migration grace state is corrupt: {e}"
                 ) from e
             in_grace = grace.is_active(now=datetime.now(timezone.utc))
-    # Lazily load the KEV catalog when not provided by the fleet entry-point.
-    # Direct callers (deploy, container-update, resume) benefit from the cached
-    # catalog without triggering a refresh (no network call here).
+    # Direct callers use the cached catalog without a refresh (no network).
     if kev is None:
         kev = load_kev(paths)
     with project_lock(project, paths):
@@ -235,34 +172,92 @@ def scan_one_project(
         )
 
 
+def _prior_decisions(paths: BoxPaths, project: str) -> tuple[ProjectDecision, ...]:
+    """The previous scan's decisions, for transition detection."""
+    prior_state = read_scan_state(paths.project_scan_state(project))
+    if prior_state is None:
+        return ()
+    try:
+        return decisions_from_scan_state(prior_state, project_name=project)
+    except (ValueError, KeyError) as e:
+        # A malformed prior state shouldn't block the scan; log and treat
+        # as "no prior" (alerts will be emitted as if first scan).
+        log_warning(
+            "cve-scan",
+            f"ignoring unreadable prior scan state for {project}: {e}",
+            paths, project=project,
+        )
+        return ()
+
+
+def _scan_targets(
+    paths: BoxPaths, project: str, targets: list[ScanTarget],
+) -> tuple[list[ScanResult], list[str], list[str], list[str]]:
+    """Scan each target within the project budget.
+
+    Returns (results, failed image refs, budget-skipped image refs, warnings).
+    """
+    results: list[ScanResult] = []
+    failed: list[str] = []
+    skipped: list[str] = []
+    warnings: list[str] = []
+    project_start = time.monotonic()
+    for index, target in enumerate(targets):
+        # The systemd unit timeout (60m) is the outer cap — without this
+        # inner cap, one slow project could starve every project after it.
+        elapsed = time.monotonic() - project_start
+        remaining = _PROJECT_BUDGET_SECONDS - elapsed
+        if remaining <= 0:
+            skipped = [t.image_ref for t in targets[index:]]
+            log_warning(
+                "cve-scan",
+                f"project {project} exceeded scan budget after "
+                f"{elapsed:.0f}s — skipping remaining {len(skipped)} image(s)",
+                paths, project=project,
+                detail={
+                    "elapsed_s": round(elapsed, 1),
+                    "budget_s": _PROJECT_BUDGET_SECONDS,
+                    "skipped_images": skipped,
+                },
+            )
+            warnings.append(
+                f"project budget exceeded after {elapsed:.0f}s — "
+                f"skipped {len(skipped)} image(s)"
+            )
+            break
+        # Cap the per-image timeout so one scan can't blow the budget alone.
+        per_image_timeout = min(_DEFAULT_TIMEOUT, max(1, int(remaining)))
+        try:
+            results.append(scan_image(target.image_ref, timeout=per_image_timeout))
+        except TrivyNotInstalledError:
+            raise
+        except ScannerError as e:
+            log_warning(
+                "cve-scan",
+                f"scan failed for {project} image {target.image_ref}: {e}",
+                paths, project=project,
+                detail={"image_ref": target.image_ref, "error": str(e)},
+            )
+            failed.append(target.image_ref)
+            warnings.append(f"image {target.image_ref}: scan failed ({e})")
+    return results, failed, skipped, warnings
+
+
 def _scan_one_project_locked(
     paths: BoxPaths, project: str, *,
     in_grace: bool,
     kev: KevCatalog,
     audit_only: bool = False,
-) -> tuple[
-    ProjectDecision | None,
-    list[ProjectDecision],
-    list[str],
-    str,
-    bool,
-]:
+) -> ProjectScan:
     """Inner scan body. Caller MUST hold the per-project lock."""
-    manifest, compose, sec_block, posture_str, dangerously = _project_meta(
-        paths, project,
-    )
-    posture = parse_posture(posture_str)
+    meta = load_project_meta(paths, project)
+    posture = meta.posture
+    dangerously = meta.dangerously
     # `declared` is loop-invariant (one manifest, many images), so validate
-    # it once here rather than inside the per-image loop below. Doing this
-    # before any Trivy scan runs means a malformed security.runtimes fails
-    # in milliseconds, not after minutes of scanning, and it means the
-    # `if not images:` early-return and the budget-exhausted `break` below
-    # can no longer skip validation and report success for a manifest that
-    # a hand-edit (load_manifest does not validate the security: block —
-    # only validate_manifest at deploy time does) left broken. The per-image
-    # inference call using ``sr.lang_types`` stays in the loop below: that
-    # part genuinely varies per image.
-    declared = sec_block.get("runtimes")
+    # it once before any Trivy scan runs: a malformed security.runtimes then
+    # fails in milliseconds, and no early return below can skip validation
+    # (load_manifest does not validate the security: block).
+    declared = meta.declared_runtimes
     if declared is not None:
         try:
             effective_runtimes((), declared=declared)
@@ -271,130 +266,49 @@ def _scan_one_project_locked(
                 f"project {project!r}: invalid security.runtimes in "
                 f"manifest: {e}"
             ) from e
-    # Services with profile != off get boxmunge's hardening overlay applied
-    # at runtime. Pass the overlay set through so the policy doesn't penalise
-    # a project for relying on overlay defaults (e.g. no-new-privileges) it
-    # didn't redeclare in its own compose.yml.
-    off_services = {svc for svc, _ in services_with_off_profile(manifest)}
-    overlay_services = (
-        set((compose.get("services") or {}).keys()) - off_services
-    )
-    profile = hardening_profile_from_compose(
-        compose, services_with_overlay=overlay_services,
-    )
-    suppressions_path = project_suppressions_path(paths, project)
-    try:
-        project_supps = load_suppressions(suppressions_path)
-    except SuppressionsError as e:
-        raise RuntimeError(
-            f"Failed to load suppressions for {project!r}: {e}"
-        ) from e
-    # Host-scoped suppressions apply to every project on this box. Used for
-    # CVEs an operator has reviewed and accepted the risk of — the relevance
-    # gate (see cve/relevance.py) now handles the "base-image package the
-    # project never invokes" case (e.g. perl-base with no Perl anywhere in
-    # the project) automatically, so this is for everything else: reviewed
-    # false positives, accepted-risk findings pending a fix, and the like.
-    # Project entries are listed FIRST so they win precedence on collision —
-    # find_active_suppression returns the first match, and a project-level
-    # suppression is more specific than a host-level one.
-    try:
-        host_supps = load_suppressions(paths.host_suppressions, scope="host")
-    except SuppressionsError as e:
-        raise RuntimeError(
-            f"Failed to load host-scoped suppressions: {e}"
-        ) from e
-    supps = project_supps + host_supps
+    profile = hardening_profile(meta)
+    # Host-scoped suppressions are for reviewed, accepted-risk findings; the
+    # relevance gate handles "base-image package the project never invokes".
+    supps = load_all_suppressions(paths, project)
 
-    # Load the prior scan_state BEFORE we overwrite it. Used by the alerting
-    # path to detect transitions (new quarantine, expired suppression, ...).
+    # Load the prior scan_state BEFORE we overwrite it (transition alerts).
     scan_state_path = paths.project_scan_state(project)
-    prior_state = read_scan_state(scan_state_path)
-    prior_decisions: tuple[ProjectDecision, ...] = ()
-    if prior_state is not None:
-        try:
-            prior_decisions = decisions_from_scan_state(
-                prior_state, project_name=project,
-            )
-        except (ValueError, KeyError) as e:
-            # A malformed prior state file shouldn't block the scan; log and
-            # treat as "no prior" (alerts will be emitted as if first scan).
-            log_warning(
-                "cve-scan",
-                f"ignoring unreadable prior scan state for {project}: {e}",
-                paths, project=project,
-            )
+    prior_decisions = _prior_decisions(paths, project)
 
-    images, warnings = _identify_images(manifest, compose, project)
-    if not images:
+    targets, unidentified = identify_images(meta.manifest, meta.compose, project)
+    warnings = [
+        f"service {svc!r}: no running container and no image declared "
+        f"in compose (build-only) — skipping"
+        for svc in unidentified
+    ]
+    if not targets:
         # Persist an empty scan-state so we don't wedge the per-project view.
-        # In audit-only mode (resume re-scan, audit A-3), leave the prior
-        # scan_state alone — the caller is just inspecting current findings.
+        # Audit-only (resume re-scan, audit A-3) leaves the prior alone.
         if not audit_only:
             write_scan_state(scan_state_path, decisions=())
-        return None, [], warnings, posture_str, dangerously
+        return ProjectScan(
+            project=project, posture=meta.posture_str, dangerously=dangerously,
+            decisions=(), warnings=tuple(warnings),
+            unidentified_services=tuple(unidentified),
+        )
 
+    results, failed, skipped, scan_warnings = _scan_targets(paths, project, targets)
+    warnings.extend(scan_warnings)
     decisions: list[ProjectDecision] = []
-    failed: list[str] = []
     today = _today()
-    project_start = time.monotonic()
-    # Fix-2 and Fix-3 visibility gaps (final-review wave): both are collected
-    # across every image but logged at most once per project scan, not once
-    # per finding/image — see the two log_warning calls after this loop.
+
+    def kev_lookup(cid: str) -> bool:
+        return kev.is_known_exploited(cid, today=today)
+
+    # Collected across every image but logged at most once per project scan.
     dropped_lang_types: set[str] = set()
     empty_runtime_exempted: set[str] = set()
-    for index, image_ref in enumerate(images):
-        # Per-project aggregate budget: if the cumulative elapsed time for
-        # this project's scans has eaten the budget, skip the rest. The
-        # systemd unit timeout (60m) is the outer cap — without this inner
-        # cap, one slow project could starve every project after it.
-        elapsed = time.monotonic() - project_start
-        remaining = _PROJECT_BUDGET_SECONDS - elapsed
-        if remaining <= 0:
-            skipped = len(images) - index
-            log_warning(
-                "cve-scan",
-                f"project {project} exceeded scan budget after "
-                f"{elapsed:.0f}s — skipping remaining {skipped} image(s)",
-                paths, project=project,
-                detail={
-                    "elapsed_s": round(elapsed, 1),
-                    "budget_s": _PROJECT_BUDGET_SECONDS,
-                    "skipped_images": images[index:],
-                },
-            )
-            warnings.append(
-                f"project budget exceeded after {elapsed:.0f}s — "
-                f"skipped {skipped} image(s)"
-            )
-            break
-        # Cap the per-image timeout at the smaller of Trivy's default and
-        # the remaining project budget so an individual scan can't blow
-        # past the budget on its own.
-        per_image_timeout = min(_DEFAULT_TIMEOUT, max(1, int(remaining)))
-        try:
-            sr: ScanResult = scan_image(image_ref, timeout=per_image_timeout)
-        except TrivyNotInstalledError:
-            raise
-        except ScannerError as e:
-            log_warning(
-                "cve-scan",
-                f"scan failed for {project} image {image_ref}: {e}",
-                paths, project=project,
-                detail={"image_ref": image_ref, "error": str(e)},
-            )
-            failed.append(image_ref)
-            warnings.append(f"image {image_ref}: scan failed ({e})")
-            continue
-        # `declared` was already validated once above; this call only
-        # performs the per-image inference from ``sr.lang_types`` and cannot
-        # raise for a `declared` that passed validation.
+    for sr in results:
+        # `declared` was validated above; this only infers from lang_types.
         runtimes = effective_runtimes(sr.lang_types, declared=declared)
         if declared is None:
-            # Fix 2: an unmapped Trivy lang-pkgs Type is dropped by
-            # infer_runtimes rather than raising — see relevance.py's module
-            # docstring for why that biases toward OVER-exemption. Surface it
-            # here since relevance.py stays pure and cannot log it itself.
+            # An unmapped Trivy lang-pkgs Type is dropped by infer_runtimes,
+            # which biases toward OVER-exemption; surface it.
             dropped_lang_types |= unrecognised_lang_types(sr.lang_types)
         decision = evaluate_project(
             project, sr,
@@ -403,59 +317,127 @@ def _scan_one_project_locked(
             dangerously_disable_quarantine=dangerously,
             suppressions=supps,
             today=today,
-            kev_lookup=lambda cid: kev.is_known_exploited(cid, today=today),
+            kev_lookup=kev_lookup,
             runtimes=runtimes,
         )
         decisions.append(decision)
-
-        # Fix 3: an empty INFERRED runtime set is legitimate for a static
-        # site, but it's indistinguishable from "the image installs its
-        # runtime without a Trivy-visible lang-pkgs manifest" (apt-only
-        # Python, conda, PHP without composer.lock) — the gate then exempts
-        # the project's OWN runtime. `declared is None` restricts this to
-        # inference (a declared empty set is rejected by validation, so it
-        # cannot occur); the posture check restricts it to postures where the
-        # relevance gate actually runs (paranoid bypasses it entirely,
-        # relaxed's KEV-only rule returns INFORMATIONAL before reaching it).
-        if (
-            declared is None
-            and not runtimes
-            and posture in (Posture.BALANCED, Posture.STRICT)
+        if declared is None and not runtimes and posture in (
+            Posture.BALANCED, Posture.STRICT,
         ):
-            for disp in decision.findings:
-                f = disp.finding
-                if (
-                    disp.disposition != Disposition.INFORMATIONAL
-                    or f.pkg_class is not PkgClass.OS
-                    or ecosystem_for_package(f.package) is None
-                ):
-                    continue
-                # But-for check: distro-deprioritized / no-distro-verdict /
-                # AV-filter / below-threshold (steps 8-11 in
-                # evaluate_finding, all AFTER the relevance gate) also yield
-                # INFORMATIONAL. The gate merely intercepts those findings
-                # first without changing the outcome, so which route fired
-                # is not enough to attribute the disposition to the gate —
-                # only a disposition that actually DIFFERS with the gate off
-                # (runtimes=None) proves the gate was the cause. Every other
-                # argument must match the real evaluate_project call above
-                # (same hardening_penalty via disp, same suppressions,
-                # today, kev_lookup) or the comparison is meaningless.
-                # evaluate_finding is a pure function, so re-running it here
-                # is safe and side-effect free.
-                but_for = evaluate_finding(
-                    f,
-                    posture=posture,
-                    hardening_penalty=disp.hardening_penalty,
-                    dangerously_disable_quarantine=dangerously,
-                    suppressions=supps,
-                    today=today,
-                    kev_lookup=lambda cid: kev.is_known_exploited(cid, today=today),
-                    runtimes=None,
-                )
-                if but_for.disposition != disp.disposition:
-                    empty_runtime_exempted.add(f.package)
+            empty_runtime_exempted |= _gate_exempted_packages(
+                decision, posture=posture, dangerously=dangerously,
+                suppressions=supps, today=today, kev_lookup=kev_lookup,
+            )
 
+    _log_relevance_gaps(paths, project, dropped_lang_types, empty_runtime_exempted)
+
+    if failed and not decisions:
+        raise RuntimeError(
+            f"All images failed to scan for project {project!r}"
+        )
+
+    headline = _headline(decisions)
+    # During grace we still compute the headline decision (so the heads-up
+    # alert can summarise it) but never fire the quarantine action. In
+    # audit-only mode (resume re-scan, audit A-3) the caller is the
+    # quarantine-lift flow itself.
+    if (
+        not in_grace
+        and not audit_only
+        and headline is not None
+        and not is_quarantined(project, paths)
+    ):
+        try:
+            quarantine_project(
+                project, paths,
+                project_dir=paths.project_dir(project),
+                hosts=meta.hosts,
+                compose_files=meta.compose_files,
+                headline=headline[1],
+                image_ref=headline[0].image_ref,
+            )
+        except QuarantineError as e:
+            raise RuntimeError(
+                f"quarantine action failed for {project!r}: {e}"
+            ) from e
+
+    if not audit_only:
+        write_scan_state(scan_state_path, decisions=tuple(decisions))
+
+    # Transition alerts are best-effort; during grace the operator gets the
+    # single fleet-level heads-up instead, and audit-only callers (resume)
+    # must not push alerts.
+    if not in_grace and not audit_only:
+        _emit_transition_alerts(paths, project, decisions, prior_decisions, supps)
+
+    return ProjectScan(
+        project=project,
+        posture=meta.posture_str,
+        dangerously=dangerously,
+        decisions=tuple(decisions),
+        warnings=tuple(warnings),
+        failed_images=tuple(failed),
+        skipped_images=tuple(skipped),
+        unidentified_services=tuple(unidentified),
+        headline=headline,
+    )
+
+
+def _headline(
+    decisions: list[ProjectDecision],
+) -> tuple[ProjectDecision, FindingDisposition] | None:
+    """The first QUARANTINE finding (findings are sorted most-severe first)."""
+    for decision in decisions:
+        for disp in decision.findings:
+            if disp.disposition == Disposition.QUARANTINE:
+                return decision, disp
+    return None
+
+
+def _gate_exempted_packages(
+    decision: ProjectDecision, *, posture: Posture, dangerously: bool,
+    suppressions: tuple, today: date, kev_lookup,
+) -> set[str]:
+    """OS runtime packages the relevance gate de-escalated with an EMPTY
+    inferred runtime set.
+
+    An empty inferred set is legitimate for a static site, but it's
+    indistinguishable from "the image installs its runtime without a
+    Trivy-visible lang-pkgs manifest" (apt-only Python, conda, PHP without
+    composer.lock), in which case the gate exempts the project's OWN
+    runtime. Only a disposition that actually DIFFERS with the gate off
+    (runtimes=None) proves the gate was the cause: steps 8-11 also yield
+    INFORMATIONAL. evaluate_finding is pure, so re-running it is safe.
+    """
+    out: set[str] = set()
+    for disp in decision.findings:
+        f = disp.finding
+        if (
+            disp.disposition != Disposition.INFORMATIONAL
+            or f.pkg_class is not PkgClass.OS
+            or ecosystem_for_package(f.package) is None
+        ):
+            continue
+        but_for = evaluate_finding(
+            f,
+            posture=posture,
+            hardening_penalty=disp.hardening_penalty,
+            dangerously_disable_quarantine=dangerously,
+            suppressions=suppressions,
+            today=today,
+            kev_lookup=kev_lookup,
+            runtimes=None,
+        )
+        if but_for.disposition != disp.disposition:
+            out.add(f.package)
+    return out
+
+
+def _log_relevance_gaps(
+    paths: BoxPaths, project: str,
+    dropped_lang_types: set[str], empty_runtime_exempted: set[str],
+) -> None:
+    """Log the relevance-gate visibility warnings, once per project scan."""
     if dropped_lang_types:
         log_warning(
             "cve-scan",
@@ -468,7 +450,6 @@ def _scan_one_project_locked(
             paths, project=project,
             detail={"lang_types": sorted(dropped_lang_types)},
         )
-
     if empty_runtime_exempted:
         log_warning(
             "cve-scan",
@@ -483,103 +464,29 @@ def _scan_one_project_locked(
             detail={"packages": sorted(empty_runtime_exempted)},
         )
 
-    if failed and not decisions:
-        raise RuntimeError(
-            f"All images failed to scan for project {project!r}"
-        )
 
-    # Decide whether quarantine action fires. The headline decision is
-    # computed BEFORE the scan_state write so a quarantine_project failure
-    # leaves the prior scan_state untouched — next scan converges rather
-    # than recording a false "fresh scan complete" against an unstopped
-    # project (audit E-2).
-    headline_decision = None
-    headline_disp = None
-    for decision in decisions:
-        for disp in decision.findings:
-            if disp.disposition == Disposition.QUARANTINE:
-                headline_decision = decision
-                headline_disp = disp
-                break
-        if headline_decision is not None:
-            break
-
-    # During grace we still compute the headline decision (so the heads-up
-    # alert can summarise it) but never fire the quarantine action.
-    # In audit-only mode (resume re-scan, audit A-3) the caller is the
-    # quarantine-lift flow itself — firing a fresh quarantine on top of
-    # an in-progress resume would deadlock the operator path.
-    if (
-        not in_grace
-        and not audit_only
-        and headline_decision
-        and headline_disp
-        and not is_quarantined(project, paths)
-    ):
-        compose_files = ["compose.yml"]
-        if paths.project_compose_override(project).exists():
-            compose_files.append("compose.boxmunge.yml")
-        # Fail noisily if quarantine_project raises: scan_state stays
-        # untouched, the operator sees the error, and the next scan
-        # converges (Golden Rule: no fallbacks).
+def _emit_transition_alerts(
+    paths: BoxPaths, project: str,
+    decisions: list[ProjectDecision],
+    prior_decisions: tuple[ProjectDecision, ...],
+    supps: tuple,
+) -> None:
+    """Best-effort transition alerts — failures never fail the scan."""
+    prior_by_image = {pd.image_ref: pd for pd in prior_decisions}
+    for current_decision in decisions:
         try:
-            quarantine_project(
-                project, paths,
-                project_dir=paths.project_dir(project),
-                hosts=manifest.get("hosts") or [],
-                compose_files=compose_files,
-                headline=headline_disp,
-                image_ref=headline_decision.image_ref,
+            emit_scan_alerts(
+                project_name=project,
+                current=current_decision,
+                prior=prior_by_image.get(current_decision.image_ref),
+                suppressions=supps,
+                paths=paths,
             )
-        except QuarantineError as e:
-            raise RuntimeError(
-                f"quarantine action failed for {project!r}: {e}"
-            ) from e
-
-    # Persist scan_state AFTER the quarantine action succeeded. If the
-    # quarantine raised above, this write does not happen and the prior
-    # scan_state stays in place — next scan re-fires the action (audit E-2).
-    #
-    # Audit A-3: in audit-only mode (resume re-scan) we deliberately
-    # skip the write. The caller is verifying whether quarantine-level
-    # findings remain; mutating persisted scan_state on a read-only
-    # operation would create surprise deltas in the next normal scan.
-    if not audit_only:
-        write_scan_state(scan_state_path, decisions=tuple(decisions))
-
-    # Emit Pushover alerts for state transitions (new quarantine, newly
-    # at-risk-running, suppression expired, new sub-threshold finding).
-    # Best-effort — failures here do NOT fail the scan; the durable record
-    # is the scan_state file just written.
-    #
-    # During the migration grace window, transition alerts are suppressed:
-    # the operator gets the single fleet-level heads-up alert instead.
-    # Audit A-3: audit-only callers (resume) likewise must not push
-    # transition alerts — the resume flow has its own success/failure
-    # signalling and operators don't expect "boxmunge security resume X"
-    # to push alerts about X.
-    if not in_grace and not audit_only:
-        prior_by_image = {pd.image_ref: pd for pd in prior_decisions}
-        for current_decision in decisions:
-            prior_decision = prior_by_image.get(current_decision.image_ref)
-            try:
-                emit_scan_alerts(
-                    project_name=project,
-                    current=current_decision,
-                    prior=prior_decision,
-                    suppressions=supps,
-                    paths=paths,
-                )
-            except Exception as e:  # noqa: BLE001 — alerting must never block scan
-                log_warning(
-                    "cve-scan",
-                    f"alert emission failed for {project} "
-                    f"({current_decision.image_ref}): {e}",
-                    paths, project=project,
-                    detail={
-                        "image_ref": current_decision.image_ref,
-                        "error": str(e),
-                    },
-                )
-
-    return headline_decision, decisions, warnings, posture_str, dangerously
+        except Exception as e:  # noqa: BLE001 — alerting must never block scan
+            log_warning(
+                "cve-scan",
+                f"alert emission failed for {project} "
+                f"({current_decision.image_ref}): {e}",
+                paths, project=project,
+                detail={"image_ref": current_decision.image_ref, "error": str(e)},
+            )

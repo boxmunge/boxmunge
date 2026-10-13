@@ -1315,7 +1315,7 @@ def test_scan_clean_image_persists_state(monkeypatch, tmp_path, capsys) -> None:
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     sr = ScanResult(
@@ -1349,7 +1349,7 @@ def test_scan_quarantine_finding_triggers_quarantine_action(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     finding = Finding(
@@ -1403,7 +1403,7 @@ def test_scan_does_not_quarantine_unused_runtime_package(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     perl = Finding(
@@ -1476,7 +1476,7 @@ def test_scan_quarantines_runtime_the_project_actually_uses(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     python_os_pkg = Finding(
@@ -1535,7 +1535,7 @@ def test_scan_invalid_declared_runtimes_fails_loudly(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     scan_called = {"n": 0}
@@ -1567,7 +1567,7 @@ def test_scan_logs_unrecognised_lang_type_once(monkeypatch, tmp_path) -> None:
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     sr = ScanResult(
@@ -1616,7 +1616,7 @@ def test_scan_warns_on_empty_inferred_runtime_deescalation(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     python_os_pkg = Finding(
@@ -1700,7 +1700,7 @@ def test_scan_does_not_warn_when_deescalation_is_over_determined(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     perl_will_not_fix = Finding(
@@ -1759,7 +1759,7 @@ def test_scan_does_not_warn_when_runtimes_declared(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     python_os_pkg = Finding(
@@ -1818,7 +1818,7 @@ def test_scan_does_not_warn_under_paranoid_posture(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     python_os_pkg = Finding(
@@ -1902,7 +1902,7 @@ def test_scan_per_project_budget_skips_remaining_images(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
 
@@ -1990,7 +1990,7 @@ def test_resume_blocked_when_finding_still_quarantines(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     finding = Finding(
@@ -2043,7 +2043,7 @@ def test_scan_invokes_emit_scan_alerts_after_persist(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     finding = Finding(
@@ -2106,7 +2106,7 @@ def test_scan_passes_prior_decision_on_second_scan(monkeypatch, tmp_path) -> Non
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     finding = Finding(
@@ -2172,7 +2172,7 @@ def _grace_quarantine_scan(monkeypatch, paths) -> None:
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     finding = Finding(
@@ -2436,7 +2436,7 @@ def _wire_clean_scan(monkeypatch, paths) -> None:
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     sr = ScanResult(
@@ -2788,7 +2788,7 @@ def test_resume_audit_only_does_not_take_quarantine_action(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     finding = Finding(
@@ -2846,7 +2846,7 @@ def test_resume_audit_only_still_detects_blocking_findings(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     finding = Finding(
@@ -3054,7 +3054,7 @@ def test_kev_listed_cve_quarantines_via_scan_flow(
     _seed_grace(paths, in_grace=False)  # past grace so quarantine fires
 
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
 
@@ -3104,7 +3104,7 @@ def test_kev_listed_cve_quarantines_via_scan_flow(
         lambda: date(2026, 7, 1),
     )
 
-    headline, *_ = scan_one_project(paths, "demo", in_grace=False, kev=kev)
+    headline = scan_one_project(paths, "demo", in_grace=False, kev=kev).headline
 
     assert headline is not None, (
         "KEV-listed CVE should quarantine even when otherwise informational"
@@ -3143,7 +3143,7 @@ def test_fleet_scan_fires_priority1_kev_stale_alert(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.container_image_digest",
+        "boxmunge.commands.security_scan_inputs.container_image_digest",
         lambda c: None,
     )
     # Return a clean scan so the project doesn't quarantine — we only care

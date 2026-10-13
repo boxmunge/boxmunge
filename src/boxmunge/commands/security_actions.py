@@ -221,9 +221,7 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
 
     for name in targets:
         try:
-            headline, decisions, warnings, posture_str, dangerously = (
-                scan_one_project(paths, name, in_grace=in_grace, kev=kev)
-            )
+            scan = scan_one_project(paths, name, in_grace=in_grace, kev=kev)
         except LockError:
             # Audit A-2: another operation holds the project lock. Skip and
             # warn — consistent with upgrade_cmd._restart_projects. The next
@@ -246,7 +244,8 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
             print(f"{name}: ERROR — {e}")
             failures += 1
             continue
-        for w in warnings:
+        decisions = list(scan.decisions)
+        for w in scan.warnings:
             print(f"{name}: WARN — {w}")
         print(f"{name}: {_summarise_decisions(decisions)}")
 
@@ -268,8 +267,8 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
         # multi-image projects surface the most-severe via findings sort).
         if decisions:
             decisions_by_project[name] = decisions[0]
-            posture_by_project[name] = posture_str
-            dangerously_by_project[name] = dangerously
+            posture_by_project[name] = scan.posture
+            dangerously_by_project[name] = scan.dangerously
 
     # Fire the one-time heads-up alert if we're still in grace AND it
     # hasn't already gone out. Fleet scans only — per-project scans never
@@ -355,9 +354,7 @@ def cmd_security_resume(args: list[str], paths: BoxPaths) -> int:
     # scan_state would obscure the prior context the headline CVE was
     # based on.
     try:
-        _, decisions, _, _, _ = scan_one_project(
-            paths, project, audit_only=True,
-        )
+        decisions = scan_one_project(paths, project, audit_only=True).decisions
     except LockError:
         print(
             f"ERROR: Another operation is in progress for '{project}'. "

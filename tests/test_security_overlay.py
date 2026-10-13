@@ -214,7 +214,7 @@ class TestRuntimesValidation:
         `dangerously_disable_quarantine`. A service-level declaration must
         be rejected, not silently ignored at scan time (it would otherwise
         be discarded by _project_meta, which only ever reads the
-        project-level block — see security_scan_core._project_meta)."""
+        project-level block — see security_scan_inputs.load_project_meta)."""
         with pytest.raises(SecurityValidationError) as exc:
             validate_security_block(
                 {"runtimes": ["python"]}, context="service:web"
