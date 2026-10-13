@@ -21,7 +21,7 @@ def run_cli(argv: list[str]) -> int:
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_remote) -> Path:
     root = tmp_path / "myapp"
-    assert run_init(root, server="box.example.com") == 0
+    assert run_init(root, server="box.example.com", host="myapp.example.com") == 0
     monkeypatch.chdir(root)
     return root
 

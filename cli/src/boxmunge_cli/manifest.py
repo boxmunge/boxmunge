@@ -20,6 +20,19 @@ _VALID_PROJECT_NAME = re.compile(r'[a-z0-9][a-z0-9\-]{0,62}')
 # marker for warnings, NOT an upper bound on what may be bundled.
 CURRENT_SCHEMA_VERSION = 3
 
+# init scaffolds this until the user names a real host; bundling refuses it.
+PLACEHOLDER_HOST_SUFFIX = ".change-me.invalid"
+# The server's host rule (src/boxmunge/manifest.py _HOST_LABEL_RE).
+_HOST_RE = re.compile(r"([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}")
+
+
+def placeholder_host(project: str) -> str:
+    return f"{project}{PLACEHOLDER_HOST_SUFFIX}"
+
+
+def valid_host(host: str) -> bool:
+    return bool(_HOST_RE.fullmatch(host))
+
 
 class ManifestError(Exception):
     """Raised when a manifest file cannot be loaded."""
@@ -105,6 +118,12 @@ def validate_manifest(
     hosts = manifest.get("hosts", [])
     if not hosts:
         errors.append("'hosts' must contain at least one hostname.")
+    elif isinstance(hosts, list):
+        for host in hosts:
+            if isinstance(host, str) and host.endswith(PLACEHOLDER_HOST_SUFFIX):
+                errors.append(
+                    f"hosts: {host!r} is the scaffold's change-me placeholder. Set the "
+                    "real hostname this project serves.")
 
     # Services
     services = manifest.get("services", {})

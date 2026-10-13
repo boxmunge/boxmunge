@@ -30,7 +30,7 @@ def test_init_writes_a_real_ulid(tmp_path: Path) -> None:
 
 def test_init_then_bundle_ships_the_init_id(tmp_path: Path) -> None:
     project = tmp_path / "myapp"
-    assert run_init(project, server="box.example.com") == 0
+    assert run_init(project, server="box.example.com", host="myapp.example.com") == 0
     before = (project / "manifest.yml").read_text()
     out = tmp_path / "out"
     out.mkdir()
