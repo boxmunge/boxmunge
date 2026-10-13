@@ -41,20 +41,23 @@ class BackupAttemptResult(enum.Enum):
 
 
 def _execute_dump(
-    project_dir: Path, dump_command: str, project_name: str, service: str,
+    paths: BoxPaths, project_name: str, dump_command: str, service: str,
 ) -> Path:
     """Run the dump command inside the project container and capture output."""
-    backups_dir = project_dir / "backups"
-    backups_dir.mkdir(parents=True, exist_ok=True)
+    project_dir = paths.project_dir(project_name)
+    backups_dir = paths.project_backups(project_name)
+    if not backups_dir.exists():
+        backups_dir.mkdir()
+        # Created as root by a root-run backup, it would lock deploy out.
+        _backup.chown_for_system_container(backups_dir, paths)
     fd, raw_path_str = tempfile.mkstemp(
         dir=backups_dir, prefix=".dump-", suffix=".tar.gz"
     )
     os.close(fd)
     raw_path = Path(raw_path_str)
-    # The dump is later read by age in the system container (a fixed uid).
+    # The dump is later read by age in the system container (the deploy uid).
     # Align ownership so a root-invoked backup's 0600 dump is readable to it.
-    from boxmunge.backup import _match_dir_ownership
-    _match_dir_ownership(raw_path)
+    _backup.chown_for_system_container(raw_path, paths)
 
     cmd = [
         "docker", "compose",
@@ -182,7 +185,7 @@ def _run_backup_inner(
     print(f"{project_name}: starting backup (service: {service})...")
 
     try:
-        raw_path = _execute_dump(project_dir, dump_command, project_name, service)
+        raw_path = _execute_dump(paths, project_name, dump_command, service)
     except BackupError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         log_error("backup", f"Backup dump failed: {e}", paths, project=project_name)

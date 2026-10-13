@@ -283,12 +283,22 @@ fi
 if [[ -d "${SCRIPT_DIR}/system" ]]; then
     SYSTEM_CHANGED=0
     mkdir -p "${BOXMUNGE_ROOT}/system"
+    # The container runs as the deploy user so it can read the 0600 backup
+    # temp files and the root:deploy backup key (compose.yml `user:`).
+    printf 'BOXMUNGE_UID=%s\nBOXMUNGE_GID=%s\nBOXMUNGE_CONFIG=%s\nBOXMUNGE_PROJECTS=%s\n' \
+        "$(id -u deploy)" "$(id -g deploy)" \
+        "${BOXMUNGE_ROOT}/config" "${BOXMUNGE_ROOT}/projects" \
+        > "${BOXMUNGE_ROOT}/system/.env.next"
     for f in Dockerfile compose.yml; do
         if ! cmp -s "${SCRIPT_DIR}/system/$f" "${BOXMUNGE_ROOT}/system/$f" 2>/dev/null; then
             SYSTEM_CHANGED=1
         fi
         cp "${SCRIPT_DIR}/system/$f" "${BOXMUNGE_ROOT}/system/$f"
     done
+    if ! cmp -s "${BOXMUNGE_ROOT}/system/.env.next" "${BOXMUNGE_ROOT}/system/.env" 2>/dev/null; then
+        SYSTEM_CHANGED=1
+    fi
+    mv "${BOXMUNGE_ROOT}/system/.env.next" "${BOXMUNGE_ROOT}/system/.env"
     chown -R root:root "${BOXMUNGE_ROOT}/system"
     if [[ "${SYSTEM_CHANGED}" -eq 1 ]] || ! docker inspect boxmunge-system >/dev/null 2>&1; then
         if ! docker compose -f "${BOXMUNGE_ROOT}/system/compose.yml" up -d --build; then

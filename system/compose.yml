@@ -14,6 +14,11 @@ services:
       dockerfile: Dockerfile
     container_name: boxmunge-system
     restart: unless-stopped
+    # Must be the deploy user (owner of projects/): age reads its 0600 temp
+    # files and the group-readable backup key. install.sh writes these to
+    # .env beside this file from `id -u deploy` / `id -g deploy`; boxmunge
+    # refuses to use a container running as any other uid.
+    user: "${BOXMUNGE_UID:?set by install.sh in .env}:${BOXMUNGE_GID:?set by install.sh in .env}"
     volumes:
       # Backup key (read-only)
       - type: bind

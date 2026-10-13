@@ -287,7 +287,7 @@ The `boxmunge-system` container encapsulates risky tooling:
 - `age` — backup encryption/decryption
 - `rclone` — off-box backup sync
 
-This provides blast-radius containment — a compromised tool binary can't touch the host filesystem beyond its bind mounts. The container runs read-only, with no capabilities and a non-root user.
+This provides blast-radius containment — a compromised tool binary can't touch the host filesystem beyond its bind mounts. The container runs read-only, with no capabilities, as the `deploy` user's uid:gid. `install.sh` writes them to `/opt/boxmunge/system/.env` from `id -u deploy` and `id -g deploy`; boxmunge refuses to use a container running as any other uid.
 
 Its mounts are fixed: `projects/` read-write at `/projects`, `config/backup.key` read-only at `/config/backup.key`, and `config/rclone/` read-only at `/config/rclone`. Every path boxmunge hands to age or rclone must sit under one of these mounts, or the operation fails before the tool runs.
 

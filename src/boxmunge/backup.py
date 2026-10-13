@@ -19,7 +19,9 @@ from pathlib import Path
 from typing import Any
 
 from boxmunge.paths import BoxPaths
-from boxmunge.system_container import SystemContainerError, SystemTools, connect
+from boxmunge.system_container import (
+    SystemContainerError, SystemTools, connect, platform_owner,
+)
 
 _BACKUP_CMD_TIMEOUT = 600  # 10 minutes for large database dumps
 
@@ -73,25 +75,22 @@ def _system_tools(paths: BoxPaths) -> Iterator[SystemTools]:
         raise BackupError(str(e)) from e
 
 
-def _match_dir_ownership(path: Path) -> None:
-    """Align a freshly-created backup temp file's ownership with its directory.
+def chown_for_system_container(path: Path, paths: BoxPaths) -> None:
+    """Give a fresh temp file or dir to the user the system container runs as.
 
-    Backup dump/encrypt temp files are created via mkstemp (mode 0600) as the
-    invoking user — root for the container-update pre-deploy backup, deploy
-    for the daily timer. The ``age`` process runs inside the system container
-    as a fixed uid; a root-owned 0600 temp is unreadable to it ("permission
-    denied"). Chown the temp to its backups directory's owner (the platform
-    user the container also runs as) so age can read/write it regardless of
-    the invoking user. The mode is unchanged — the temp stays owner-only 0600,
-    never world-readable. A no-op when ownership already matches (the common
-    daily deploy path), so the working path is never touched.
+    Backup dump/encrypt/restore temps are created with mkstemp/mkdtemp (owner
+    only) as the invoking user: root for the container-update pre-backup, a
+    root-run self-test or upgrade; deploy for the daily timer. age runs in
+    the system container as the deploy user (the owner of the projects dir,
+    checked by ``connect``), so a root-owned temp would be unreadable to it.
+    Chown to that owner, not to the immediate directory's owner, which is
+    root when root created the project tree. The mode is unchanged. A no-op
+    when ownership already matches, the common deploy-invoked path.
     """
-    dir_stat = os.stat(path.parent)
-    file_stat = os.stat(path)
-    if (file_stat.st_uid == dir_stat.st_uid
-            and file_stat.st_gid == dir_stat.st_gid):
-        return
-    os.chown(path, dir_stat.st_uid, dir_stat.st_gid)
+    uid, gid = platform_owner(paths)
+    st = os.stat(path)
+    if (st.st_uid, st.st_gid) != (uid, gid):
+        os.chown(path, uid, gid)
 
 
 def _read_recipient(tools: SystemTools) -> str:
@@ -130,7 +129,7 @@ def encrypt_file(input_path: Path, output_path: Path, paths: BoxPaths) -> None:
         try:
             # age (in the system container) writes this temp via -o; align its
             # ownership so a root-invoked backup's temp stays writable to it.
-            _match_dir_ownership(tmp_path)
+            chown_for_system_container(tmp_path, paths)
             recipient = _read_recipient(tools)
             tools.run([
                 "age", "--encrypt", "-r", recipient,
@@ -163,12 +162,12 @@ def decrypted_snapshot(snapshot_path: Path, paths: BoxPaths) -> Iterator[Path]:
 
     The temp dir lives in the project's backups directory (mounted into the
     system container, unlike /tmp) so age's -o path translates. It is 0700,
-    chowned to the backups dir owner so the container's uid can write into
+    chowned to the deploy user the container runs as so age can write into
     it, dot-prefixed so prune/sync globs ignore it, and always removed.
     """
     tmpdir = Path(tempfile.mkdtemp(dir=snapshot_path.parent, prefix=".restore-"))
     try:
-        _match_dir_ownership(tmpdir)
+        chown_for_system_container(tmpdir, paths)
         output = tmpdir / snapshot_path.stem  # strips .age
         decrypt_file(snapshot_path, output, paths)
         yield output

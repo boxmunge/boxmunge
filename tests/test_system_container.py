@@ -68,11 +68,10 @@ class TestConnect:
     def test_container_mounted_for_another_root_fails(self, paths, tmp_path, monkeypatch) -> None:
         from boxmunge.paths import BoxPaths
         other = BoxPaths(root=tmp_path / "other")
-        monkeypatch.setattr(sc, "_inspect", lambda name: {
-            "State": {"Status": "running"},
-            "Mounts": [{"Source": str(m.host), "Destination": m.container}
-                       for m in sc.system_mounts(other)],
-        })
+        other.projects.mkdir(parents=True)
+        info = healthy_inspect(paths)
+        info["Mounts"] = healthy_inspect(other)["Mounts"]
+        monkeypatch.setattr(sc, "_inspect", lambda name: info)
         with pytest.raises(SystemContainerError) as exc:
             connect(paths)
         assert "not mounted for the boxmunge root" in str(exc.value)
@@ -84,6 +83,26 @@ class TestConnect:
         info["Mounts"] = [m for m in info["Mounts"] if m["Destination"] != "/config/rclone"]
         monkeypatch.setattr(sc, "_inspect", lambda name: info)
         with pytest.raises(SystemContainerError, match="/config/rclone: expected"):
+            connect(paths)
+
+    def test_container_uid_must_match_projects_owner(self, paths, monkeypatch) -> None:
+        """C-12: the image used to hard-code uid 1000. On a host where deploy
+        is another uid every backup failed with 'permission denied'."""
+        owner = paths.projects.stat()
+        info = healthy_inspect(paths, user=f"{owner.st_uid + 1}:{owner.st_gid}")
+        monkeypatch.setattr(sc, "_inspect", lambda name: info)
+        with pytest.raises(SystemContainerError) as exc:
+            connect(paths)
+        msg = str(exc.value)
+        assert f"runs as '{owner.st_uid + 1}:{owner.st_gid}'" in msg
+        assert f"{owner.st_uid}:{owner.st_gid}" in msg
+        assert "BOXMUNGE_UID" in msg
+
+    def test_named_image_user_is_rejected(self, paths, monkeypatch) -> None:
+        """A container started without compose's `user:` runs as the image
+        default, which is not the deploy user."""
+        monkeypatch.setattr(sc, "_inspect", lambda name: healthy_inspect(paths, user="boxmunge"))
+        with pytest.raises(SystemContainerError, match="runs as 'boxmunge'"):
             connect(paths)
 
     def test_docker_cli_missing_fails(self, paths) -> None:

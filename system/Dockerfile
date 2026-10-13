@@ -31,8 +31,8 @@ RUN apk add --no-cache \
     && age --version \
     && env -u RCLONE_VERSION rclone version | head -1
 
-# Run as non-root by default
-RUN adduser -D -u 1000 boxmunge
-USER boxmunge
+# Non-root by default. compose.yml runs it as the deploy user's uid:gid
+# (set at start time by install.sh), so no uid is baked into the image.
+USER 65534:65534
 
 ENTRYPOINT ["sleep", "infinity"]

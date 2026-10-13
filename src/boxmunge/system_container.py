@@ -121,6 +121,30 @@ def _check_mounts(info: dict[str, Any], paths: BoxPaths, name: str) -> None:
         )
 
 
+def platform_owner(paths: BoxPaths) -> tuple[int, int]:
+    """uid and gid of the deploy user: the owner of the projects directory.
+
+    The system container must run as exactly this user so that it can read
+    the 0600 temp files boxmunge hands it and the group-readable backup key.
+    """
+    st = paths.projects.stat()
+    return st.st_uid, st.st_gid
+
+
+def _check_user(info: dict[str, Any], paths: BoxPaths, name: str) -> None:
+    uid, gid = platform_owner(paths)
+    expected = f"{uid}:{gid}"
+    actual = info["Config"]["User"]
+    if actual != expected:
+        raise SystemContainerError(
+            f"{name} runs as '{actual or 'the image default'}' but the deploy "
+            f"user (owner of {paths.projects}) is {expected}, so age and rclone "
+            "would hit 'permission denied'. Set BOXMUNGE_UID and BOXMUNGE_GID in "
+            f"{paths.system / '.env'} (install.sh writes them) and recreate it: "
+            f"docker compose -f {paths.system_compose} up -d --force-recreate"
+        )
+
+
 @dataclass(frozen=True)
 class SystemTools:
     """A handle on a verified, running system container.
@@ -140,10 +164,12 @@ class SystemTools:
 
 
 def connect(paths: BoxPaths) -> SystemTools:
-    """Verify the system container is running with this root's mounts.
+    """Verify the system container is running, as the deploy user, with this
+    root's mounts.
 
     Raises SystemContainerError, saying how to fix it, when the container is
-    missing, not running, or mounted for a different boxmunge root.
+    missing, not running, running as another uid, or mounted for a different
+    boxmunge root.
     """
     name = CONTAINER_NAME
     info = _inspect(name)
@@ -154,6 +180,7 @@ def connect(paths: BoxPaths) -> SystemTools:
         raise SystemContainerError(
             f"The {name} container is {status}, not running. {start_hint(paths)}"
         )
+    _check_user(info, paths, name)
     _check_mounts(info, paths, name)
     return SystemTools(paths=paths, name=name)
 

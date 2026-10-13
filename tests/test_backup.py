@@ -128,13 +128,13 @@ class TestNoHostFallback:
         host_run.assert_not_called()
 
 
-class TestMatchDirOwnership:
-    """Backup temp files (mkstemp, mode 0600, owned by the invoking user) must
-    be readable by the system container's age process (a fixed uid). When a
-    backup is invoked as root (e.g. the container-update pre-deploy backup),
-    the temp is root-owned and age (uid 1000) gets 'permission denied'. The
-    helper aligns the temp's ownership with its backups dir so age can access
-    it regardless of the invoking user, without changing the 0600 mode.
+class TestChownForSystemContainer:
+    """Temp files age reads or writes must belong to the platform user that
+    the system container runs as: the owner of the projects directory (C-12).
+
+    The old helper copied the *immediate directory's* owner, which cannot help
+    when that directory is root-owned (self-test or an upgrade run as root
+    creates the project tree as root). mkstemp's 0600 mode is unchanged.
     """
 
     def _stat_with(self, uid: int, gid: int):
@@ -142,39 +142,31 @@ class TestMatchDirOwnership:
         m.st_uid, m.st_gid = uid, gid
         return m
 
-    def test_chowns_temp_to_dir_owner_when_mismatched(
-        self, tmp_path: Path
-    ) -> None:
+    def _chown_calls(self, paths, target, owners):
         from boxmunge import backup
-        f = tmp_path / ".dump-x.tar.gz"
-        f.write_text("x")
-
-        def fake_stat(p):
-            # backups dir owned 1000:1000; the root-invoked temp is 0:0
-            return self._stat_with(1000, 1000) if str(p) == str(tmp_path) \
-                else self._stat_with(0, 0)
-
-        chown_calls = []
-        with patch("boxmunge.backup.os.stat", side_effect=fake_stat), \
-             patch("boxmunge.backup.os.chown",
-                   side_effect=lambda p, u, g: chown_calls.append((str(p), u, g))):
-            backup._match_dir_ownership(f)
-        assert chown_calls == [(str(f), 1000, 1000)]
-
-    def test_no_chown_when_ownership_already_aligned(
-        self, tmp_path: Path
-    ) -> None:
-        from boxmunge import backup
-        f = tmp_path / ".dump-y.tar.gz"
-        f.write_text("y")
-
-        chown_calls = []
+        calls = []
         with patch("boxmunge.backup.os.stat",
-                   side_effect=lambda p: self._stat_with(1000, 1000)), \
+                   side_effect=lambda p, **_: self._stat_with(*owners.get(str(p), (0, 0)))), \
              patch("boxmunge.backup.os.chown",
-                   side_effect=lambda *a: chown_calls.append(a)):
-            backup._match_dir_ownership(f)
-        assert chown_calls == []  # daily (deploy/1000) path: already aligned
+                   side_effect=lambda p, u, g: calls.append((str(p), u, g))):
+            backup.chown_for_system_container(target, paths)
+        return calls
+
+    def test_root_owned_tree_temp_goes_to_projects_owner(self, paths) -> None:
+        bdir = paths.project_backups("boxmunge-canary")
+        bdir.mkdir(parents=True)
+        f = bdir / ".dump-x.tar.gz"
+        f.write_text("x")
+        # projects/ is deploy (1000); the root-created backups dir and temp are 0:0
+        calls = self._chown_calls(paths, f, {str(paths.projects): (1000, 1000)})
+        assert calls == [(str(f), 1000, 1000)]
+
+    def test_no_chown_when_already_owned_by_platform_user(self, paths) -> None:
+        f = paths.projects / ".dump-y.tar.gz"
+        f.write_text("y")
+        calls = self._chown_calls(paths, f, {str(paths.projects): (1000, 1000),
+                                             str(f): (1000, 1000)})
+        assert calls == []
 
 
 class TestDecryptFile:

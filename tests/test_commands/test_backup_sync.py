@@ -24,6 +24,34 @@ def configured(paths: BoxPaths) -> BoxPaths:
     return paths
 
 
+class TestDumpOwnership:
+    """C-12: a root-invoked backup (container-update, self-test) must not
+    leave a root-owned backups/ dir that the deploy user and the system
+    container can no longer create temp files in."""
+
+    def test_new_backups_dir_and_dump_go_to_the_platform_user(self, paths) -> None:
+        from boxmunge.commands import backup_cmd
+        paths.project_dir("myapp").mkdir()
+        chowned = []
+        with patch.object(backup_cmd._backup, "chown_for_system_container",
+                          side_effect=lambda p, _paths: chowned.append(p)), \
+             patch("boxmunge.commands.backup_cmd.subprocess.run",
+                   return_value=subprocess.CompletedProcess([], 0, stderr=b"")):
+            raw = backup_cmd._execute_dump(paths, "myapp", "dump", "db")
+        assert chowned == [paths.project_backups("myapp"), raw]
+
+    def test_existing_backups_dir_is_left_alone(self, paths) -> None:
+        from boxmunge.commands import backup_cmd
+        paths.project_backups("myapp").mkdir(parents=True)
+        chowned = []
+        with patch.object(backup_cmd._backup, "chown_for_system_container",
+                          side_effect=lambda p, _paths: chowned.append(p)), \
+             patch("boxmunge.commands.backup_cmd.subprocess.run",
+                   return_value=subprocess.CompletedProcess([], 0, stderr=b"")):
+            raw = backup_cmd._execute_dump(paths, "myapp", "dump", "db")
+        assert chowned == [raw]
+
+
 class TestBackupSync:
     def test_rclone_uses_the_mounted_operator_config(self, configured, system_container) -> None:
         system_container.handler = _ok

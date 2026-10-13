@@ -193,9 +193,12 @@ def real_system_container(integration_root: Path, tmp_path_factory):
         "services:\n"
         "  system:\n"
         f"    container_name: {name}\n"
-        f'    user: "{os.getuid()}:{os.getgid()}"\n'
     )
+    # The same variables install.sh writes to system/.env on a real box.
+    owner = paths.projects.stat()
     env = {**os.environ,
+           "BOXMUNGE_UID": str(owner.st_uid),
+           "BOXMUNGE_GID": str(owner.st_gid),
            "BOXMUNGE_CONFIG": str(paths.config),
            "BOXMUNGE_PROJECTS": str(paths.projects)}
     cmd = _system_compose(name, override)
