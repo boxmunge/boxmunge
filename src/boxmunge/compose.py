@@ -6,13 +6,17 @@ from typing import Any
 
 import yaml
 
+from boxmunge import compose_resolve
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
+from boxmunge.published_ports import overlay_ports
 from boxmunge.security_overlay import (
     resolve_security,
     render_compose_security_fragment,
 )
-from boxmunge.security_warn import warn_off_services, warn_writable_state
+from boxmunge.security_warn import (
+    warn_off_services, warn_published_ports, warn_writable_state,
+)
 from boxmunge.writable import WritableState, classify_state
 
 
@@ -34,22 +38,11 @@ def _build_env_file_list(env_files: dict[str, str] | None) -> list[str]:
 # ---------------------------------------------------------------------------
 # v0.8: user-wins-on-explicit-declarations for read_only / tmpfs.
 #
-# The v0.8 default profile baseline includes `read_only: true` and
-# `tmpfs: ['/tmp']`. Compose's multi-file merge would, however, do the
-# wrong thing for both:
-#
-#   - read_only is a scalar — Compose merge keeps the LATER file's value.
-#     Since the overlay is the second file, it would overwrite a user's
-#     deliberate `read_only: false` with `read_only: true`.
-#   - tmpfs is a list — Compose merge CONCATENATES across files, so a user
-#     `tmpfs: ['/tmp:size=128m']` would end up alongside the overlay's
-#     `tmpfs: ['/tmp']` and apps would see two clashing /tmp mounts.
-#
-# Solution: omit the overlay's contribution for either field when the user
-# has already expressed intent for it on that service. Compose-level merge
-# then leaves the user value alone — no error, no dedupe rejection rule
-# needed (we explicitly chose the omit-instead approach over the v0.7.2
-# security_opt-style rejection rule for these two fields).
+# Compose's merge keeps the later file's scalar (the overlay would overwrite
+# a deliberate `read_only: false`) and concatenates lists (a user
+# `tmpfs: ['/tmp:size=128m']` would clash with the overlay's `/tmp`). So the
+# overlay omits either field when the user already declared it for that
+# service, rather than rejecting the declaration.
 # ---------------------------------------------------------------------------
 
 
@@ -117,25 +110,62 @@ def _user_claims_tmp(svc: dict[str, Any]) -> bool:
     return False
 
 
+def _hardening_fragment(
+    project_security: dict[str, Any] | None,
+    service_security: dict[str, Any] | None,
+    user_svc: Any,
+) -> dict[str, Any]:
+    """Render one service's hardening fragment for its effective profile.
+
+    v0.8 user-wins rule: when compose.yml already declares `read_only` or
+    claims `/tmp` for this service, the overlay omits its own value. See
+    the module-level comment above `_user_declared_read_only` for why we
+    omit instead of reject for these two fields.
+    """
+    resolved = resolve_security(project_security, service_security)
+    fragment = render_compose_security_fragment(resolved)
+    if isinstance(user_svc, dict):
+        if "read_only" in fragment and _user_declared_read_only(user_svc):
+            fragment.pop("read_only")
+        if "tmpfs" in fragment and _user_claims_tmp(user_svc):
+            fragment.pop("tmpfs")
+    return fragment
+
+
+def _user_services(user_compose: dict[str, Any]) -> dict[str, Any]:
+    """Return the `services` mapping of a parsed user compose document."""
+    if not isinstance(user_compose, dict):
+        raise ComposeError(
+            f"user compose must be a mapping (got {type(user_compose).__name__})"
+        )
+    services = user_compose.get("services") or {}
+    if not isinstance(services, dict):
+        raise ComposeError(
+            f"compose.yml 'services' must be a mapping "
+            f"(got {type(services).__name__})"
+        )
+    return services
+
+
 def _build_service_override(
     manifest: dict[str, Any],
     env_file_list: list[str],
+    *,
+    user_compose: dict[str, Any],
     alias_prefix: str | None = None,
-    user_compose: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build per-service overrides for all services in the manifest.
+    """Build per-service overrides for every service.
 
-    Routable services (with routes) get network aliases.
-    All services get env_files and resource limits if applicable.
-    Services with a smoke test get boxmunge-scripts mounted.
-    All services get container hardening fragments unless they opt out.
+    Every service, whether the manifest declares it or it exists only in
+    compose.yml (a database, cache, or sidecar), gets the container
+    hardening fragment for its effective profile. Compose-only services
+    resolve against the project-level `security:` block and, for now, do
+    not get the read-only rootfs or its /tmp tmpfs. Manifest services add
+    routing on top: network aliases for routable services, env_files,
+    resource limits, the smoke-script mount, and the writable: translation.
 
-    `user_compose`: the parsed user compose.yml dict. Used to detect
-    services where the user has already declared `read_only` or claimed
-    `/tmp` so the overlay omits its v0.8 default for that field on that
-    service. Pass None when no user compose is available (tests and
-    callers that haven't been updated) — the overlay applies its full
-    defaults in that case.
+    `user_compose` (the resolved compose model) supplies the compose-only
+    services and the user's own read_only / tmpfs declarations.
     """
     project = manifest["project"]
     prefix = alias_prefix or project
@@ -149,11 +179,7 @@ def _build_service_override(
             f"(got {type(manifest_services).__name__})"
         )
 
-    user_services: dict[str, Any] = {}
-    if user_compose is not None:
-        raw_user_services = user_compose.get("services") or {}
-        if isinstance(raw_user_services, dict):
-            user_services = raw_user_services
+    user_services = _user_services(user_compose)
 
     for svc_name, svc in manifest_services.items():
         svc_override: dict[str, Any] = {}
@@ -181,18 +207,9 @@ def _build_service_override(
             svc_volumes.append("./boxmunge-scripts:/boxmunge-scripts:ro")
 
         # Security hardening — silent defaults injected here.
-        resolved = resolve_security(project_security, svc.get("security"))
-        sec_fragment = render_compose_security_fragment(resolved)
-
-        # v0.8: user-wins on explicit declarations for read_only and tmpfs.
-        # See module-level comment above _user_declared_read_only for why we
-        # omit-instead-of-reject for these two fields.
-        user_svc = user_services.get(svc_name)
-        if isinstance(user_svc, dict):
-            if "read_only" in sec_fragment and _user_declared_read_only(user_svc):
-                sec_fragment.pop("read_only")
-            if "tmpfs" in sec_fragment and _user_claims_tmp(user_svc):
-                sec_fragment.pop("tmpfs")
+        sec_fragment = _hardening_fragment(
+            project_security, svc.get("security"), user_services.get(svc_name),
+        )
 
         # v0.9: writable: block translation. Three states.
         # See docs/superpowers/specs/2026-05-08-v0.9-writable-abstraction-design.md
@@ -214,14 +231,12 @@ def _build_service_override(
                     baseline_tmpfs.append(path)
             if baseline_tmpfs:
                 sec_fragment["tmpfs"] = baseline_tmpfs
-            # Translate persistent entries into named-volume references.
-            # Volume name is <project>_<name> — matches Docker Compose's
-            # default convention when a user declares a top-level
-            # `volumes: { foo: {} }` block. Existing volumes (from the
-            # pre-v0.9 compose-side world) keep their data on migration
-            # because the generated name matches Compose's previous
-            # default. Cross-service uniqueness of `name` is enforced at
-            # manifest validation time.
+            # Translate persistent entries into named-volume references
+            # keyed <project>_<name>. Compose prefixes the key with the
+            # compose project name, so the Docker volume is
+            # <compose-project>_<project>_<name> (staging gets its own).
+            # Cross-service uniqueness of `name` is enforced at manifest
+            # validation time.
             for entry in persistent:
                 if not isinstance(entry, dict):
                     continue
@@ -244,6 +259,23 @@ def _build_service_override(
         if svc_override:
             services[svc_name] = svc_override
 
+    # Opt-in published ports, production only: staging would collide with
+    # production's host ports.
+    if alias_prefix is None:
+        for svc_name, ports in overlay_ports(project_security).items():
+            services.setdefault(svc_name, {})["ports"] = ports
+
+    # Compose-only services get every flag but read_only/tmpfs, which would break
+    # existing databases on the next regen (see security_warn.undeclared_services).
+    for svc_name, user_svc in user_services.items():
+        if svc_name in manifest_services:
+            continue
+        fragment = _hardening_fragment(project_security, None, user_svc)
+        fragment.pop("read_only", None)
+        fragment.pop("tmpfs", None)
+        if fragment:
+            services[svc_name] = {**services.get(svc_name, {}), **fragment}
+
     return services
 
 
@@ -252,9 +284,8 @@ def _build_top_level_volumes(manifest: dict[str, Any]) -> dict[str, dict]:
     overlay emitted for State MANAGED services.
 
     Each named volume gets an empty mapping — Docker auto-creates on
-    first deploy. Volume names follow `<project>_<name>` to match
-    Docker Compose's default convention; existing data survives
-    migration from a pre-v0.9 `volumes: {<name>: {}}` declaration.
+    first deploy. Keys are `<project>_<name>`; see the note in
+    `_build_service_override` for the resulting Docker volume name.
     """
     project = manifest.get("project", "")
     out: dict[str, dict] = {}
@@ -279,55 +310,56 @@ def _build_top_level_volumes(manifest: dict[str, Any]) -> dict[str, dict]:
 def generate_compose_override(
     manifest: dict[str, Any],
     env_files: dict[str, str] | None = None,
-    user_compose: dict[str, Any] | None = None,
+    *,
+    user_compose: dict[str, Any],
 ) -> str:
     """Generate compose.boxmunge.yml content.
 
-    Adds boxmunge-proxy network aliases to routable services, env_file
-    directives to all services, and resource limits where declared.
+    Hardens every service in `user_compose` and the manifest, adds
+    boxmunge-proxy network aliases to routable services, env_file
+    directives to manifest services, and resource limits where declared.
 
-    `user_compose`: the parsed user compose.yml dict. Threaded through to
-    the per-service override builder so it can omit v0.8 defaults
-    (read_only, tmpfs) on services where the user already declared
-    them. Callers should pass the same parsed dict they fed to
-    `validate_user_compose` — see deploy/stage/resume/upgrade.
+    `user_compose`: the parsed user compose.yml dict, the same document
+    `validate_user_compose` checked. Required: without it the overlay
+    could not see compose-only services, and they would run unhardened.
     """
+    return _render_override(manifest, env_files, user_compose, alias_prefix=None)
+
+
+def _render_override(
+    manifest: dict[str, Any],
+    env_files: dict[str, str] | None,
+    user_compose: dict[str, Any],
+    alias_prefix: str | None,
+) -> str:
     env_file_list = _build_env_file_list(env_files)
     services = _build_service_override(
-        manifest, env_file_list, user_compose=user_compose,
+        manifest, env_file_list, user_compose=user_compose, alias_prefix=alias_prefix,
     )
-
-    override: dict[str, Any] = {
-        "networks": {
-            "boxmunge-proxy": {"external": True},
-        },
-    }
+    override: dict[str, Any] = {"networks": {"boxmunge-proxy": {"external": True}}}
     if services:
         override["services"] = services
-
     top_level_volumes = _build_top_level_volumes(manifest)
     if top_level_volumes:
         override["volumes"] = top_level_volumes
-
     return yaml.dump(override, default_flow_style=False, sort_keys=False)
 
 
-def load_user_compose(compose_path: Path) -> dict[str, Any] | None:
-    """Read and parse compose.yml. Returns None if the file is missing or
-    parses to a non-mapping. Validation has already been done upstream by
-    `validate_user_compose`; we just re-parse here to detect user
-    declarations of read_only / tmpfs / volumes for the v0.8 overlay
-    omit-on-user-declaration logic.
+def load_user_compose(compose_path: Path, project_name: str) -> dict[str, Any]:
+    """Return the resolved user compose model for overlay generation.
+
+    Validation has already been done upstream by `validate_user_compose`;
+    the overlay needs every service Compose will run, including ones that
+    arrive through `include:` or `extends:`, and the user's own
+    read_only / tmpfs declarations, so it reads the same resolved model
+    (`docker compose config`). Raises ComposeError if the file cannot be
+    resolved: generating an overlay without it would leave services
+    unhardened.
     """
-    if not compose_path.exists():
-        return None
     try:
-        doc = yaml.safe_load(compose_path.read_text())
-    except (OSError, yaml.YAMLError):
-        return None
-    if not isinstance(doc, dict):
-        return None
-    return doc
+        return compose_resolve.resolve_compose_config(compose_path, project_name)
+    except compose_resolve.ComposeResolveError as e:
+        raise ComposeError(f"cannot resolve {compose_path}: {e}") from e
 
 
 def prepare_compose_override(
@@ -338,10 +370,8 @@ def prepare_compose_override(
     """Generate compose.boxmunge.yml for a project.
 
     `component` labels the SECURITY OFF log entry so callers from upgrade /
-    resume don't misattribute the warning as "deploy". Lives at module
-    scope (boxmunge.compose) rather than commands/ so cross-command
-    coordination doesn't require a `commands/`-to-`commands/` import
-    (audit A-2).
+    resume don't misattribute the warning as "deploy". Lives here, not in
+    commands/, to avoid `commands/`-to-`commands/` imports (audit A-2).
     """
     project_name = manifest["project"]
     override_path = paths.project_compose_override(project_name)
@@ -358,7 +388,7 @@ def prepare_compose_override(
     if project_secrets.exists():
         env_files["project_secrets"] = "./secrets.env"
 
-    user_compose = load_user_compose(paths.project_compose(project_name))
+    user_compose = load_user_compose(paths.project_compose(project_name), project_name)
 
     content = generate_compose_override(
         manifest, env_files=env_files or None, user_compose=user_compose,
@@ -372,12 +402,22 @@ def prepare_compose_override(
     # [WARNING] for read_only:false in user compose, [INFO] for
     # writable.external in manifest. Both repeated every deploy.
     warn_writable_state(paths, manifest, user_compose, component=component)
+    warn_published_ports(paths, manifest, component=component)
 
 
 def is_bind_mount(volume_str: str) -> bool:
-    """Check if a volume string is a bind mount (starts with . / or ~)."""
+    """Check if a short-syntax volume string is a bind mount (starts with . / or ~)."""
     host_part = volume_str.split(":")[0]
     return host_part.startswith((".", "/", "~"))
+
+
+def _staging_volume(entry: Any) -> Any:
+    """Point a bind mount (short or long syntax) at its -staging sibling."""
+    if isinstance(entry, dict) and entry.get("type") == "bind":
+        return {**entry, "source": f"{entry['source']}-staging"}
+    if isinstance(entry, str) and is_bind_mount(entry):
+        return _rewrite_bind_mount(entry)
+    return entry
 
 
 def _rewrite_bind_mount(volume_str: str) -> str:
@@ -401,7 +441,9 @@ def generate_staging_compose_base(compose_path: str | Path) -> str:
     declared in the base, so we generate a staging-specific base instead.
     Bind-mount host paths get a -staging suffix to prevent data sharing.
     Named volumes are left unchanged — Docker Compose's project naming
-    already isolates them.
+    already isolates them. Services pulled in by `include:` or
+    `extends: {file: ...}` live in other files this rewrite cannot reach,
+    so those are refused rather than staged with production's mounts.
     """
     raw = Path(compose_path).read_text()
     doc = yaml.safe_load(raw)
@@ -416,25 +458,33 @@ def generate_staging_compose_base(compose_path: str | Path) -> str:
             f"compose.yml 'services' must be a mapping "
             f"(got {type(services).__name__})"
         )
+    other_files = "include" in doc or any(
+        isinstance(svc, dict) and isinstance(svc.get("extends"), dict)
+        and "file" in svc["extends"] for svc in (services or {}).values()
+    )
+    if other_files:
+        raise ComposeError(
+            "stage cannot separate staging from production for services that "
+            "come from include: or extends: file: (their bind mounts would be "
+            "shared with production). Move those services into compose.yml to "
+            "use stage."
+        )
     for svc in (services or {}).values():
         if not isinstance(svc, dict):
-            # A non-dict service entry is malformed but we don't have to fail
-            # the whole file — just skip the rewrite for this entry.
+            # Malformed entry: leave it for Compose to reject.
             continue
         svc.pop("ports", None)
         volumes = svc.get("volumes")
         if volumes:
-            svc["volumes"] = [
-                _rewrite_bind_mount(v) if is_bind_mount(v) else v
-                for v in volumes
-            ]
+            svc["volumes"] = [_staging_volume(v) for v in volumes]
     return yaml.dump(doc, default_flow_style=False, sort_keys=False)
 
 
 def generate_staging_compose_override(
     manifest: dict[str, Any],
     env_files: dict[str, str] | None = None,
-    user_compose: dict[str, Any] | None = None,
+    *,
+    user_compose: dict[str, Any],
 ) -> str:
     """Generate compose.boxmunge-staging.yml content.
 
@@ -444,23 +494,7 @@ def generate_staging_compose_override(
     `user_compose`: parsed user compose.yml. Same threading as the
     production override — see `generate_compose_override`.
     """
-    project = manifest["project"]
-    env_file_list = _build_env_file_list(env_files)
-    services = _build_service_override(
-        manifest, env_file_list, alias_prefix=f"{project}-staging",
-        user_compose=user_compose,
+    return _render_override(
+        manifest, env_files, user_compose,
+        alias_prefix=f"{manifest['project']}-staging",
     )
-
-    override: dict[str, Any] = {
-        "networks": {
-            "boxmunge-proxy": {"external": True},
-        },
-    }
-    if services:
-        override["services"] = services
-
-    top_level_volumes = _build_top_level_volumes(manifest)
-    if top_level_volumes:
-        override["volumes"] = top_level_volumes
-
-    return yaml.dump(override, default_flow_style=False, sort_keys=False)

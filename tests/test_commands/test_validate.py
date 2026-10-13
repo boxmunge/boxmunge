@@ -43,6 +43,15 @@ class TestValidate:
         exit_code = run_validate("myapp", paths)
         assert exit_code == 0
 
+    def test_undeclared_compose_service_warns(self, paths: BoxPaths, capsys) -> None:
+        _setup_project(paths, "myapp", VALID_MANIFEST)
+        (paths.project_dir("myapp") / "compose.yml").write_text(
+            "services:\n  frontend:\n    image: nginx\n  db:\n    image: postgres\n"
+        )
+        assert run_validate("myapp", paths) == 0
+        out = capsys.readouterr().out
+        assert "WARN:  myapp/db is in compose.yml but not declared" in out
+
     def test_missing_project_returns_one(self, paths: BoxPaths) -> None:
         exit_code = run_validate("nope", paths)
         assert exit_code == 1

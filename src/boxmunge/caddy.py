@@ -2,7 +2,8 @@
 
 from typing import Any
 
-from boxmunge.fileutil import atomic_write_text
+from boxmunge.caddy_journal import write_site
+from boxmunge.docker import caddy_config_lock
 from boxmunge.log import log_operation
 from boxmunge.manifest import get_all_routes
 from boxmunge.paths import BoxPaths
@@ -67,25 +68,24 @@ def prepare_caddy_config(paths: BoxPaths, manifest: dict[str, Any]) -> None:
     this primitive — it lives at module scope (boxmunge.caddy) rather
     than commands/ so cross-command coordination doesn't require a
     `commands/`-to-`commands/` import (audit A-2).
+
+    The previous content is journaled so a failed Caddy validation on the
+    next reload restores it (see `caddy_journal`).
     """
     project_name = manifest["project"]
     site_conf = paths.project_caddy_site(project_name)
-    site_conf.parent.mkdir(parents=True, exist_ok=True)
-
     override = paths.project_caddy_override(project_name)
-    # mode=0o644: the Caddy container reads these as a host-mounted volume.
-    # The container's UID may not map to the host's deploy UID, so the files
-    # must be world-readable. They contain only routing config, no secrets.
     if override.exists():
-        atomic_write_text(site_conf, override.read_text(), mode=0o644)
+        content = override.read_text()
         log_operation(
             "deploy",
             f"Using custom Caddy config from {override.name}",
             paths, project=project_name,
         )
     else:
-        config = generate_caddy_config(manifest)
-        atomic_write_text(site_conf, config, mode=0o644)
+        content = generate_caddy_config(manifest)
+    with caddy_config_lock(paths.state):
+        write_site(paths.caddy, site_conf, content)
 
 
 def generate_staging_caddy_config(

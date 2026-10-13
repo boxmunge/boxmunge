@@ -51,6 +51,7 @@ class TestComposeOverrideEmitsOffWarning:
         # Build a paths-like with a real project_compose_override target.
         proj = tmp_path / "projects" / "demo"
         proj.mkdir(parents=True)
+        (proj / "compose.yml").write_text("services:\n  web:\n    image: nginx\n")
         (proj / "project.env").write_text("X=1\n")
 
         # Monkey-patch BoxPaths to point at tmp_path.
@@ -84,6 +85,7 @@ class TestComposeOverrideEmitsOffWarning:
     def test_no_warning_when_default(self, tmp_path, monkeypatch) -> None:
         proj = tmp_path / "projects" / "demo"
         proj.mkdir(parents=True)
+        (proj / "compose.yml").write_text("services:\n  web:\n    image: nginx\n")
         monkeypatch.setattr(BoxPaths, "__init__", lambda self: None)
         paths = BoxPaths()
         paths.host_secrets = tmp_path / "host_secrets.env"
@@ -110,6 +112,7 @@ class TestComposeOverrideEmitsOffWarning:
         don't get misattributed as 'deploy' in the structured log."""
         proj = tmp_path / "projects" / "demo"
         proj.mkdir(parents=True)
+        (proj / "compose.yml").write_text("services:\n  web:\n    image: nginx\n")
         monkeypatch.setattr(BoxPaths, "__init__", lambda self: None)
         paths = BoxPaths()
         paths.host_secrets = tmp_path / "host_secrets.env"

@@ -73,7 +73,8 @@ def _no_docker_image_lookups(monkeypatch):
     )
     # Quarantine and pause hold restart policies through boxmunge.restart_hold;
     # by default the project has no containers to hold.
-    monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies", lambda p: {})
+    monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies",
+        lambda *, project_name: {})
     monkeypatch.setattr("boxmunge.restart_hold.set_restart_policy", lambda n, p: None)
 
 
@@ -114,6 +115,37 @@ def _no_kev_network(monkeypatch):
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.load_kev", lambda paths: _fresh_empty,
     )
+
+
+@pytest.fixture(autouse=True)
+def _compose_config_without_docker(request, monkeypatch):
+    """Stand in for `docker compose config` outside the integration tier.
+
+    The compose validator and overlay generator read the resolved model
+    from `docker.compose_config`, which needs the Docker CLI. Unit tests
+    run without Docker, so this returns the literal compose file as JSON:
+    no interpolation, no extends/include merging. That exercises every
+    rule on the literal shapes; the real resolution is covered by the
+    integration-marked tests, which this fixture leaves alone.
+    """
+    if request.node.get_closest_marker("integration"):
+        return
+    import json
+
+    import yaml
+
+    from boxmunge import docker
+
+    def _literal_config(project_dir, compose_files=None, *, project_name):
+        docker.check_compose_project_name(project_name)
+        path = Path(project_dir) / (compose_files or ["compose.yml"])[0]
+        try:
+            doc = yaml.safe_load(path.read_text())
+        except (OSError, yaml.YAMLError) as e:
+            raise docker.DockerError(f"compose config failed: {e}") from e
+        return json.dumps(doc)
+
+    monkeypatch.setattr(docker, "compose_config", _literal_config)
 
 
 @pytest.fixture

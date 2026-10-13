@@ -104,6 +104,11 @@ Stage the project:
 stage myapp
 ```
 
+`stage` refuses a `compose.yml` that pulls services in through `include:` or
+`extends: file:`: it rewrites bind mounts to `-staging` copies only in
+`compose.yml` itself, so those services would share production's data. Move
+the services into `compose.yml` to stage them.
+
 After verifying the staging environment:
 
 - **Promote** -- tears down staging and deploys to production:

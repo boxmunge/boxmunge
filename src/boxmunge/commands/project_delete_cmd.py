@@ -77,7 +77,8 @@ def _teardown(project_name: str, paths: BoxPaths) -> list[str]:
         if paths.project_compose_override(project_name).exists():
             compose_files.append("compose.boxmunge.yml")
         try:
-            compose_down(project_dir, compose_files=compose_files)
+            compose_down(project_dir, compose_files=compose_files,
+                         project_name=project_name)
         except DockerError as e:
             failures.append(f"production: {e}")
     if paths.project_staging_compose_override(project_name).exists():

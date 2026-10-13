@@ -256,7 +256,7 @@ def run_post_deploy_diagnostics(
         def _default_fetch(svc: str) -> str:
             return compose_logs_capture(
                 project_dir, service=svc, tail=200,
-                compose_files=compose_files,
+                compose_files=compose_files, project_name=manifest["project"],
             )
 
         log_fetcher = _default_fetch
@@ -318,7 +318,7 @@ def enrich_failure_with_writable_hint(
         def _default_fetch(svc: str) -> str:
             return compose_logs_capture(
                 project_dir, service=svc, tail=tail,
-                compose_files=compose_files,
+                compose_files=compose_files, project_name=manifest["project"],
             )
 
         log_fetcher = _default_fetch

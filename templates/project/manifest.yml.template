@@ -23,6 +23,10 @@ services:
   #   health:
   #     endpoint: /api/health
   #     interval: 30s
+  # db:                     # declared only for a read-only root filesystem;
+  #   internal: true        # no port or routes needed
+  #   writable:
+  #     external: true      # keep its compose.yml volumes and tmpfs entries
 
 backup:
   type: none

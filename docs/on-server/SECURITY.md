@@ -7,7 +7,11 @@ when you must, and what's coming in future tiers.
 
 - **Defaults are silent.** Every service deployed via boxmunge runs with
   `no-new-privileges`, Tini init, a 512-process ceiling, and a list of
-  dangerous Linux capabilities dropped. You do nothing to get this.
+  dangerous Linux capabilities dropped. That includes services that appear
+  only in `compose.yml` (databases, caches, sidecars). Services declared in
+  the manifest also get a read-only root filesystem; undeclared ones do not
+  yet, and every deploy, stage, and validate warns about each of them. You do
+  nothing to get this.
 - **Don't disable hardening to "ship faster".** If a specific protection
   is in your way, relax that one field. Setting `profile: off` requires
   a reason and triggers a repeated deploy-time warning on every operation.
@@ -60,6 +64,45 @@ These caps are NOT in Docker's default deny list, but are dangerous and rarely n
 `read_only: true` and `tmpfs: ['/tmp']` were added to the default profile in v0.8. The CVE policy already treated missing `read_only` as a +1 hardening penalty; v0.8 closes the asymmetry by actually enforcing read-only rootfs at runtime so the platform delivers what it penalises operators for omitting.
 
 **User-wins on explicit declarations.** If your `compose.yml` declares `read_only` (true or false) on a service, the overlay omits its own `read_only` entry for that service. Compose merge then leaves your literal value alone — there's no merge conflict and no redundancy-rejection rule. The same rule applies to `tmpfs: ['/tmp']`: if you declare a `tmpfs` or `volumes` entry that targets `/tmp`, the overlay omits its `tmpfs` entry for that service.
+
+**Services that are not in the manifest.** A service that exists only in
+`compose.yml` (typically a database or cache) gets `no-new-privileges`, init,
+the process limit, and the capability drops, resolved against the
+project-level `security:` block (a project-level `profile: "off"` covers it
+too). It does **not** get `read_only: true` or the `/tmp` tmpfs yet: a platform
+upgrade regenerates every overlay, so turning read-only on for these services
+would break existing databases across the fleet at the next upgrade. Every
+`deploy`, `stage`, and `validate` prints a `[WARNING]` naming each undeclared
+service. A future release will make a read-only root filesystem the default for
+undeclared services too, so opt in now.
+
+To opt in, declare the service in the manifest. A service with `internal: true`
+needs no `port` or `routes`; give it a `writable:` block. Use `ephemeral:` for
+the paths it writes if it keeps no data in `compose.yml` volumes. For a
+database whose data already lives in a `compose.yml` volume, use
+`external: true` and list the paths it writes as `tmpfs:` in `compose.yml`
+(this keeps the existing volume and its data):
+
+```yaml
+# manifest.yml
+services:
+  db:
+    internal: true
+    writable:
+      external: true
+```
+
+```yaml
+# compose.yml
+services:
+  db:
+    image: postgres:16-alpine
+    tmpfs: [/tmp, /var/run/postgresql]
+    volumes: [pgdata:/var/lib/postgresql/data]
+```
+
+A declared service is treated like any manifest service: it also receives the
+project's `env_files` and `secrets.env`.
 
 **Opting out.** Apps that legitimately need writable rootfs declare `read_only: false` in `compose.yml` and accept the +1 CVE hardening penalty consciously. Most apps just need `tmpfs:['/tmp']` (the v0.8 default) and possibly extra tmpfs entries for cache/log paths under read-only rootfs.
 
@@ -119,6 +162,94 @@ Two invariants:
 
 - **Absence inherits.** Omitting a field never disables a protection.
 - **Disabling is explicit.** Set `no_new_privileges: false`, `pids_limit: 0`, etc.
+
+## What `compose.yml` may not do
+
+Your `compose.yml` is merged with the generated overlay, and Compose lets some
+user keys win over it. So every deploy, stage, resume, and upgrade checks
+`compose.yml` first and refuses to proceed (exit code 3) when it finds a key
+that would undo the hardening. Values are normalised before they are compared:
+letter case, surrounding spaces, a `CAP_` prefix, and `=` versus `:` in
+`security_opt` make no difference.
+
+The checks run on the configuration Compose will actually start: the output of
+`docker compose -p <project> config`, with `${VAR}` interpolated from the
+project's `.env` and the environment, and `extends:` and `include:` files
+merged in. A value hidden behind a variable or in an included file is checked
+like any other.
+
+| Rejected | Why |
+|---|---|
+| `privileged: true` | Full host access. |
+| `privileged`, `read_only`, or `init` given as anything but an unquoted `true`/`false` | A quoted `"true"` is not checked as a boolean. Write the bare value. |
+| `pid`, `ipc`, `network_mode`, `uts`, `userns_mode`, `cgroupns_mode` set to `host` | Shares a host namespace. |
+| `pid`, `ipc`, `network_mode` set to `container:<name>` | Joins another container's namespace, which may be another project's. Use `service:<name>` for a service in the same file. |
+| `cap_add` of a denied capability | See the denylist below. |
+| `security_opt` with `unconfined`, `label:disable`, `no-new-privileges:false`, or a custom `seccomp` profile file | Disables a kernel confinement layer. `seccomp=runtime/default` is fine. |
+| `devices`, `device_cgroup_rules` | Exposes host devices. |
+| `cgroup_parent` that is absolute or contains `..` | Escapes the container cgroup. |
+| A bind mount of a protected host path, anything inside one, or any parent of one | Protected: the Docker and containerd sockets and state, `/proc`, `/sys`, `/dev`, `/etc`, `/boot`, `/root`, `/home`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, and the boxmunge root outside `projects/`. Paths are compared after `~` expansion, joining relative paths to the project directory, collapsing `..` and `//`, and resolving symlinks, so `/run` (the parent of `/run/docker.sock`), `/tmp/../etc`, and `../../config` are all refused. |
+| `${VAR}` or `$VAR` inside a bind-mount source | The path cannot be verified. Write it literally. |
+| A bind mount outside the project directory | One project must not read or write another's files. Use paths such as `./data`; an absolute path is fine if it is inside `/opt/boxmunge/projects/<project>/`. Symlinks are resolved before the check. |
+| `build.network: host`, `build.privileged` | Build steps run in a container too; keep them off the host network and unprivileged. |
+
+### Capability denylist
+
+These capabilities let a container reach the host, so neither `compose.yml`
+`cap_add` nor the manifest's `security.cap_add` may grant them under the
+default profile: `ALL`, `SYS_ADMIN`, `DAC_READ_SEARCH`, `BPF`, `PERFMON`,
+`SYS_RESOURCE`, `SYS_MODULE`, `SYS_RAWIO`, `SYS_BOOT`, `MAC_ADMIN`,
+`MAC_OVERRIDE`. A service that truly needs one must use `profile: "off"` with a
+reason. Capabilities that are dropped by default but have real uses
+(`NET_RAW`, `NET_ADMIN`, `SYS_PTRACE`, and the rest of the default `cap_drop`
+list) can be added back. In the manifest, write capability names in canonical
+form: upper case, no `CAP_` prefix (`NET_RAW`, not `cap_net_raw`).
+
+Services on `profile: "off"` get a logged warning for each of these instead
+of a rejection.
+
+### Project isolation
+
+These rules keep one project's `compose.yml` from reaching another project.
+They apply to every service and are **not** relaxed by `profile: "off"`.
+
+| Rejected | What to do instead |
+|---|---|
+| A top-level `name:` | Remove it. boxmunge runs every compose command as `-p <project>` (`-p <project>-staging` for staging). |
+| An `external: true` network, including `boxmunge-proxy` | Remove it. boxmunge attaches routed services to `boxmunge-proxy` itself; declare only the project's own networks. |
+| A top-level network or volume with a `name:` other than Compose's default (`<project>_<key>`) | Remove the `name:` line. |
+| A network with a `driver` other than `bridge` (`macvlan`, `ipvlan`, ...) | Remove the `driver:` line. |
+| A service joining a network the file does not declare | Declare it, or use `default`. Any alias is fine on the project's own networks; they cannot collide with another project's. |
+| An `external: true` volume, or a volume with `driver`/`driver_opts` | Use a plain named volume (`data: {}`) or a bind mount inside the project. |
+| `external_links`, or `volumes_from: [container:<name>]` | Reach services in the same file by service name; name a service in `volumes_from`. |
+| A `secrets`/`configs` `file:` or a `build` context outside the project directory | Keep the file or context inside the project. Secret values belong in `secrets set`. |
+| `ports:` on any service | Remove it: routed traffic reaches the service through Caddy. A port that must be published goes in the manifest, below. |
+| An `include:`, `extends: file:`, or `env_file:` path outside the project directory (followed through nested includes), remote, or written with `${VAR}` | Keep every compose, extends, include, and env file inside the project, and write the path literally. |
+
+### Published ports (opt-in)
+
+All ingress is meant to go through Caddy. Docker publishes `ports:` with its own
+firewall rules, so a published port bypasses UFW and the CrowdSec bouncer. That
+is why `compose.yml` may not contain `ports:`. When a port really must be
+reachable from the host (an admin tool reached over an SSH tunnel, say),
+declare it at the manifest's top level, with a reason:
+
+```yaml
+security:
+  published_ports:
+    - service: db              # any service in compose.yml
+      port: 5432               # container port
+      reason: "pgAdmin over an SSH tunnel"
+      # host_port: 15432       # defaults to port
+      # protocol: udp          # defaults to tcp
+      # host_ip: 0.0.0.0       # explicit widening; defaults to 127.0.0.1
+```
+
+boxmunge publishes the port in the generated overlay, bound to `127.0.0.1`
+unless `host_ip` says otherwise, and prints a `[WARNING]` naming the port and
+the reason on every deploy. A `host_ip` other than loopback makes the port
+reachable from the network with no UFW or CrowdSec protection, and the warning
+says so. Staging never publishes ports, so it cannot collide with production.
 
 ## Wildcard hosts and routing isolation
 

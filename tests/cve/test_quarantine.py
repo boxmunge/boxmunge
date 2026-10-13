@@ -31,7 +31,8 @@ from boxmunge.paths import BoxPaths
 def _no_restart_policy_docker(monkeypatch):
     """Restart-policy pinning (B-19) talks to Docker; these tests cover the
     other steps, so the project has no containers to pin."""
-    monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies", lambda p: {})
+    monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies",
+        lambda *, project_name: {})
     monkeypatch.setattr("boxmunge.restart_hold.set_restart_policy", lambda n, p: None)
 
 # ---------- helpers ----------

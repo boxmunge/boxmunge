@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from boxmunge.fileutil import atomic_write_text
-from boxmunge.manifest import load_manifest, ManifestError
+from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
+from boxmunge.manifest import load_manifest
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -58,10 +59,7 @@ def _build_project_target(
     manifest_path = project_dir / "manifest.yml"
     if not manifest_path.exists():
         return None
-    try:
-        manifest = load_manifest(manifest_path)
-    except ManifestError:
-        return None
+    manifest = load_manifest(manifest_path)
 
     proj_cu = manifest.get("container_updates", {})
     if proj_cu.get("enabled") is False:
@@ -99,7 +97,13 @@ def build_targets(paths: "BoxPaths", config: dict[str, Any]) -> list[UpdateTarge
         for project_dir in sorted(paths.projects.iterdir()):
             if not project_dir.is_dir():
                 continue
-            target = _build_project_target(paths, box_cu, project_dir)
+            try:
+                target = _build_project_target(paths, box_cu, project_dir)
+            except PROJECT_INPUT_ERRORS as e:
+                # One broken or stranded project must not stop updates for
+                # the rest of the fleet; it must not vanish silently either.
+                report_project_failure("container-update", project_dir.name, e, paths)
+                continue
             if target is not None:
                 targets.append(target)
 

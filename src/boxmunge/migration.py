@@ -49,6 +49,12 @@ def get_migration_path(source: int, target: int) -> list[tuple[int, int]]:
 def migrate_manifest(manifest: dict[str, Any], target_version: int) -> dict[str, Any]:
     """Migrate a manifest to the target schema version. Returns new dict."""
     source = manifest.get("schema_version", 1)
+    # bool is a subclass of int: `schema_version: true` must not migrate as 1.
+    if isinstance(source, bool) or not isinstance(source, int):
+        raise MigrationError(
+            f"schema_version must be an unquoted integer, got {source!r}. "
+            f"Write it as a bare number, e.g. schema_version: 1."
+        )
     path = get_migration_path(source, target_version)
     if not path:
         return dict(manifest)

@@ -8,6 +8,18 @@ from __future__ import annotations
 
 from typing import Any
 
+from boxmunge.capabilities import (
+    DENIED_CAPS,
+    VALID_CAP_NAMES,
+    normalise_cap,
+)
+from boxmunge.published_ports import published_ports_problems
+
+# Fields that describe the whole project and are refused in a service block.
+_PROJECT_ONLY_FIELDS = (
+    "posture", "dangerously_disable_quarantine", "runtimes", "published_ports",
+)
+
 # Profile names. v0.5 ships `default` and `off`. Future tiers add `strict` and
 # `paranoid`; their names are reserved now so a manifest setting them today
 # fails validation rather than silently doing nothing.
@@ -47,25 +59,6 @@ DEFAULT_CAP_DROP: list[str] = [
     "LEASE",
     "NET_RAW",
 ]
-
-# Whitelist of cap names accepted in user-supplied cap_drop / cap_add fields.
-# Validation rejects anything outside this set.
-VALID_CAP_NAMES: set[str] = {
-    "AUDIT_CONTROL", "AUDIT_READ", "AUDIT_WRITE",
-    "BLOCK_SUSPEND", "BPF",
-    "CHOWN", "DAC_OVERRIDE", "DAC_READ_SEARCH",
-    "FOWNER", "FSETID",
-    "IPC_LOCK", "IPC_OWNER",
-    "KILL", "LEASE", "LINUX_IMMUTABLE",
-    "MAC_ADMIN", "MAC_OVERRIDE", "MKNOD",
-    "NET_ADMIN", "NET_BIND_SERVICE", "NET_BROADCAST", "NET_RAW",
-    "PERFMON",
-    "SETFCAP", "SETGID", "SETPCAP", "SETUID",
-    "SYS_ADMIN", "SYS_BOOT", "SYS_CHROOT", "SYS_MODULE",
-    "SYS_NICE", "SYS_PACCT", "SYS_PTRACE", "SYS_RAWIO",
-    "SYS_RESOURCE", "SYS_TIME", "SYS_TTY_CONFIG",
-    "SYSLOG", "WAKE_ALARM",
-}
 
 DEFAULT_PIDS_LIMIT = 512
 
@@ -181,6 +174,38 @@ class SecurityValidationError(ValueError):
     """Raised when a security: block is malformed."""
 
 
+def _validate_cap(cap: Any, cap_field: str, context: str) -> None:
+    """Reject a manifest capability that is unknown, misspelt, or denied.
+
+    Manifest entries must use the canonical spelling (upper case, no
+    `CAP_` prefix) so the rendered overlay and the CVE hardening report
+    agree on names. `cap_add` additionally refuses the shared denylist
+    that compose validation enforces.
+    """
+    if not isinstance(cap, str):
+        raise SecurityValidationError(
+            f"{context}: capability {cap!r} in {cap_field} must be a string."
+        )
+    canonical = normalise_cap(cap)
+    if cap_field == "cap_add" and canonical in DENIED_CAPS:
+        raise SecurityValidationError(
+            f"{context}: cap_add {cap!r} is never allowed under the default "
+            f"profile (it lets a container reach the host). Remove it; a "
+            f"service that truly needs it must use profile: \"off\" with a "
+            f"reason. Denied: {sorted(DENIED_CAPS)}."
+        )
+    if canonical not in VALID_CAP_NAMES:
+        raise SecurityValidationError(
+            f"{context}: Unknown capability {cap!r} in {cap_field}. "
+            f"Run `agent-help security` for the valid list."
+        )
+    if cap != canonical:
+        raise SecurityValidationError(
+            f"{context}: write capability {cap!r} in {cap_field} as "
+            f"{canonical!r} (upper case, no CAP_ prefix)."
+        )
+
+
 def validate_security_block(
     block: dict[str, Any] | None, context: str
 ) -> None:
@@ -195,6 +220,13 @@ def validate_security_block(
         raise SecurityValidationError(
             f"{context}: security block must be a mapping, got {type(block).__name__}"
         )
+    for field in _PROJECT_ONLY_FIELDS:
+        if field in block and context != "project":
+            raise SecurityValidationError(
+                f"{context}: {field!r} is only valid at the project level "
+                f"(manifest top-level security: block), not per-service. "
+                f"It applies to the whole project."
+            )
 
     if "profile" in block:
         profile = block["profile"]
@@ -238,11 +270,7 @@ def validate_security_block(
                 f"{context}: {cap_field} must be a list, got {type(caps).__name__}"
             )
         for cap in caps:
-            if not isinstance(cap, str) or cap not in VALID_CAP_NAMES:
-                raise SecurityValidationError(
-                    f"{context}: Unknown capability {cap!r} in {cap_field}. "
-                    f"Run `agent-help security` for the valid list."
-                )
+            _validate_cap(cap, cap_field, context)
 
     if "pids_limit" in block:
         v = block["pids_limit"]
@@ -260,12 +288,6 @@ def validate_security_block(
             )
 
     if "posture" in block:
-        if context != "project":
-            raise SecurityValidationError(
-                f"{context}: 'posture' is only valid at the project level "
-                f"(manifest top-level security: block), not per-service. "
-                f"CVE posture applies to the whole project."
-            )
         posture = block["posture"]
         # YAML 1.1 boolean trap: bool is a subtype of str-ish parsing failure
         # — bare `strict` is fine but check the type explicitly so we don't
@@ -282,12 +304,6 @@ def validate_security_block(
             )
 
     if "dangerously_disable_quarantine" in block:
-        if context != "project":
-            raise SecurityValidationError(
-                f"{context}: 'dangerously_disable_quarantine' is only valid "
-                f"at the project level (manifest top-level security: block), "
-                f"not per-service. CVE posture applies to the whole project."
-            )
         v = block["dangerously_disable_quarantine"]
         # bool is a subtype of int, so check bool first to avoid 0/1 slipping
         # through as "boolean".
@@ -297,13 +313,12 @@ def validate_security_block(
                 f"boolean (true or false), got {type(v).__name__}: {v!r}"
             )
 
+    if "published_ports" in block:
+        problems = published_ports_problems(block["published_ports"])
+        if problems:
+            raise SecurityValidationError(f"{context}: {problems[0]}")
+
     if "runtimes" in block:
-        if context != "project":
-            raise SecurityValidationError(
-                f"{context}: 'runtimes' is only valid at the project level "
-                f"(manifest top-level security: block), not per-service. "
-                f"CVE posture applies to the whole project."
-            )
         from boxmunge.cve.relevance import VALID_ECOSYSTEMS
 
         runtimes = block["runtimes"]

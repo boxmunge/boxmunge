@@ -9,18 +9,53 @@ from pathlib import Path
 
 _VALID_PROJECT_NAME = re.compile(r'[a-z0-9][a-z0-9\-]{0,62}')
 
+# Staging runs as the compose project `<project>-staging`, so a project
+# whose own name ends in this suffix would share containers, networks and
+# volumes with another project's staging copy. The suffix is reserved.
+STAGING_SUFFIX = "-staging"
+
+# Compose project names of the platform's own stacks (/opt/boxmunge/caddy
+# and /opt/boxmunge/system, named after their directories). A project with
+# one of these names would share that compose project, and its
+# `up --remove-orphans` would remove the platform's containers.
+RESERVED_PROJECT_NAMES: frozenset[str] = frozenset({"caddy", "system"})
+
+
+class InvalidProjectName(ValueError):
+    """A name that is not, or is no longer, a usable project name.
+
+    A project created before a name was reserved (`<x>-staging`, `caddy`,
+    `system`) can no longer be managed. Fleet loops treat this like any
+    other unreadable per-project input (boxmunge.fleet): report the project
+    loudly and carry on with the rest.
+    """
+
 
 def validate_project_name(name: str) -> None:
-    """Validate a project name. Raises ValueError if invalid.
+    """Validate a project name. Raises InvalidProjectName if invalid.
 
     Project names must be lowercase alphanumeric with hyphens, 1-63 chars,
     starting with a letter or digit. This prevents path traversal attacks.
     fullmatch, not match: a `$` anchor would accept a trailing newline.
+    Names ending in STAGING_SUFFIX are reserved for staging environments,
+    and RESERVED_PROJECT_NAMES for the platform's own compose stacks.
     """
     if not isinstance(name, str) or not _VALID_PROJECT_NAME.fullmatch(name):
-        raise ValueError(
+        raise InvalidProjectName(
             f"Invalid project name: {name!r}. "
             f"Must be lowercase alphanumeric with hyphens, 1-63 chars."
+        )
+    if name in RESERVED_PROJECT_NAMES:
+        raise InvalidProjectName(
+            f"Invalid project name: {name!r}. It is reserved for a boxmunge "
+            f"platform service. Choose another name."
+        )
+    if name.endswith(STAGING_SUFFIX):
+        raise InvalidProjectName(
+            f"Invalid project name: {name!r}. Names ending in "
+            f"'{STAGING_SUFFIX}' are reserved: boxmunge runs the staging copy "
+            f"of project '{name[:-len(STAGING_SUFFIX)]}' under that name. "
+            f"Choose a name without the suffix."
         )
 
 def _checked(name: str) -> str:

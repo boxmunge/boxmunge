@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
+from boxmunge.docker import compose_command
 from boxmunge.fleet import PROJECT_INPUT_ERRORS
 from boxmunge.lifecycle import is_blocked
 from boxmunge.pause import is_paused
@@ -182,10 +183,11 @@ def check_project_containers(paths: BoxPaths) -> HealthCheck:
         if blocked:
             blocked_count += 1
             continue
-        compose_cmd = ["docker", "compose", "-f", "compose.yml"]
+        compose_files = ["compose.yml"]
         override = paths.project_compose_override(name)
         if override.exists():
-            compose_cmd.extend(["-f", "compose.boxmunge.yml"])
+            compose_files.append("compose.boxmunge.yml")
+        compose_cmd = compose_command(name, compose_files)
         compose_cmd.extend(["ps", "--format", "json"])
         result = subprocess.run(
             compose_cmd,

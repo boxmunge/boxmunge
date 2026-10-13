@@ -14,7 +14,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from boxmunge.caddy_journal import commit_sites, restore_sites
 from boxmunge.fileutil import open_shared_lockfile
+from boxmunge.paths import (
+    RESERVED_PROJECT_NAMES,
+    STAGING_SUFFIX,
+    validate_project_name,
+)
 
 _DEFAULT_TIMEOUT = 120
 _COMPOSE_UP_TIMEOUT = 300
@@ -27,6 +33,8 @@ _CADDY_VALIDATE_TIMEOUT = 30
 # Audit E-NEW-3: log a warning when a deploy waits more than this long for
 # the global Caddy reload lock — visible signal that deploys are queueing.
 _CADDY_LOCK_WAIT_WARN_SECONDS = 0.1
+# Fixed by caddy/compose.yml (`container_name`).
+_CADDY_CONTAINER = "boxmunge-caddy"
 
 
 class DockerError(Exception):
@@ -61,18 +69,51 @@ def _run(
         ) from e
 
 
+def check_compose_project_name(name: str) -> None:
+    """Raise ValueError unless `name` is a project name, its staging name,
+    or one of the platform's own stacks (RESERVED_PROJECT_NAMES).
+
+    Every compose invocation names its project explicitly with `-p`, so a
+    compose file's top-level `name:` or the directory name can never
+    redirect a command at another project's containers.
+    """
+    if name in RESERVED_PROJECT_NAMES:
+        return
+    base = name
+    if isinstance(name, str) and name.endswith(STAGING_SUFFIX):
+        base = name[:-len(STAGING_SUFFIX)]
+    validate_project_name(base)
+
+
+def staging_compose_project(project: str) -> str:
+    """Return the compose project name of a project's staging copy."""
+    validate_project_name(project)
+    return f"{project}{STAGING_SUFFIX}"
+
+
+def compose_command(project_name: str, compose_files: list[str] | None) -> list[str]:
+    """Return `docker compose -p <project> -f ...` for a validated project.
+
+    Use this for every compose invocation, including ones run outside this
+    module (exec, streaming logs), so none relies on Compose's own
+    project-name inference.
+    """
+    check_compose_project_name(project_name)
+    cmd = ["docker", "compose", "-p", project_name]
+    for f in (compose_files or ["compose.yml"]):
+        cmd.extend(["-f", f])
+    return cmd
+
+
 def compose_up(
     project_dir: Path,
     compose_files: list[str] | None = None,
     build: bool = True,
-    project_name: str | None = None,
+    *,
+    project_name: str,
 ) -> None:
     """Run docker compose up -d in the project directory."""
-    cmd = ["docker", "compose"]
-    if project_name:
-        cmd.extend(["-p", project_name])
-    for f in (compose_files or ["compose.yml"]):
-        cmd.extend(["-f", f])
+    cmd = compose_command(project_name, compose_files)
     cmd.extend(["up", "-d", "--remove-orphans"])
     if build:
         cmd.append("--build")
@@ -82,14 +123,11 @@ def compose_up(
 def compose_down(
     project_dir: Path,
     compose_files: list[str] | None = None,
-    project_name: str | None = None,
+    *,
+    project_name: str,
 ) -> None:
     """Run docker compose down in the project directory."""
-    cmd = ["docker", "compose"]
-    if project_name:
-        cmd.extend(["-p", project_name])
-    for f in (compose_files or ["compose.yml"]):
-        cmd.extend(["-f", f])
+    cmd = compose_command(project_name, compose_files)
     cmd.append("down")
     _run(cmd, cwd=project_dir)
 
@@ -97,15 +135,12 @@ def compose_down(
 def compose_stop(
     project_dir: Path,
     compose_files: list[str] | None = None,
-    project_name: str | None = None,
+    *,
+    project_name: str,
     timeout: int = 15,
 ) -> None:
     """Run docker compose stop (without removing containers or volumes)."""
-    cmd = ["docker", "compose"]
-    if project_name:
-        cmd.extend(["-p", project_name])
-    for f in (compose_files or ["compose.yml"]):
-        cmd.extend(["-f", f])
+    cmd = compose_command(project_name, compose_files)
     cmd.extend(["stop", "-t", str(timeout)])
     _run(cmd, cwd=project_dir)
 
@@ -113,14 +148,11 @@ def compose_stop(
 def compose_start(
     project_dir: Path,
     compose_files: list[str] | None = None,
-    project_name: str | None = None,
+    *,
+    project_name: str,
 ) -> None:
     """Run docker compose start (restart previously stopped containers)."""
-    cmd = ["docker", "compose"]
-    if project_name:
-        cmd.extend(["-p", project_name])
-    for f in (compose_files or ["compose.yml"]):
-        cmd.extend(["-f", f])
+    cmd = compose_command(project_name, compose_files)
     cmd.append("start")
     _run(cmd, cwd=project_dir)
 
@@ -131,11 +163,11 @@ def compose_logs(
     tail: int = 100,
     follow: bool = False,
     compose_files: list[str] | None = None,
+    *,
+    project_name: str,
 ) -> None:
     """Show docker compose logs."""
-    cmd = ["docker", "compose"]
-    for f in (compose_files or ["compose.yml"]):
-        cmd.extend(["-f", f])
+    cmd = compose_command(project_name, compose_files)
     cmd.extend(["logs", f"--tail={tail}"])
     if follow:
         cmd.append("--follow")
@@ -149,11 +181,11 @@ def compose_logs_capture(
     service: str | None = None,
     tail: int = 100,
     compose_files: list[str] | None = None,
+    *,
+    project_name: str,
 ) -> str:
     """Capture docker compose logs as a string."""
-    cmd = ["docker", "compose"]
-    for f in (compose_files or ["compose.yml"]):
-        cmd.extend(["-f", f])
+    cmd = compose_command(project_name, compose_files)
     cmd.extend(["logs", f"--tail={tail}", "--no-color"])
     if service:
         cmd.append(service)
@@ -164,12 +196,30 @@ def compose_logs_capture(
 def compose_ps(
     project_dir: Path,
     compose_files: list[str] | None = None,
+    *,
+    project_name: str,
 ) -> str:
     """Get docker compose ps output."""
-    cmd = ["docker", "compose"]
-    for f in (compose_files or ["compose.yml"]):
-        cmd.extend(["-f", f])
+    cmd = compose_command(project_name, compose_files)
     cmd.extend(["ps", "--format", "json"])
+    result = _run(cmd, cwd=project_dir, capture=True)
+    return result.stdout
+
+
+def compose_config(
+    project_dir: Path,
+    compose_files: list[str] | None = None,
+    *,
+    project_name: str,
+) -> str:
+    """Return `docker compose config --format json` output.
+
+    The fully resolved model Compose will run: variables interpolated from
+    the project's `.env` and the environment, `extends`/`include` merged,
+    and paths made absolute. Client-side only; needs no daemon.
+    """
+    cmd = compose_command(project_name, compose_files)
+    cmd.extend(["config", "--format", "json"])
     result = _run(cmd, cwd=project_dir, capture=True)
     return result.stdout
 
@@ -188,13 +238,15 @@ def container_health(container_name: str) -> str | None:
 
 
 @contextmanager
-def _caddy_reload_lock(lock_dir: Path) -> Iterator[None]:
-    """Global Caddy validate+reload flock. Blocking, bounded section.
+def caddy_config_lock(lock_dir: Path) -> Iterator[None]:
+    """Global Caddy config flock. Blocking, bounded section.
 
     Serialises validate+reload across concurrent deploys so deploy-A cannot
     pass validate, then have deploy-B write a malformed site config that
-    deploy-A's subsequent reload ingests and fails on. The protected section
-    is short (~100ms typical), so blocking is fine.
+    deploy-A's subsequent reload ingests and fails on. Site writers that
+    journal their previous content (`caddy.prepare_caddy_config`) take it
+    too, so a restore never races a write. The protected section is short
+    (~100ms typical), so blocking is fine. Not re-entrant: never nest it.
 
     Audit E-NEW-3: any wait longer than the warn threshold is logged via
     the boxmunge logger so prolonged contention is visible in operations.
@@ -223,10 +275,26 @@ def caddy_reload(caddy_compose_dir: Path, lock_dir: Path) -> None:
     runs under a flock at lock_dir/.caddy.lock so two concurrent deploys
     cannot race past each other's validate. Callers pass paths.state as
     lock_dir.
+
+    When Caddy rejects the config, every site file written since Caddy
+    last accepted one (see `caddy_journal`) is put back, so the bad file
+    does not break the next reload or a Caddy restart. When Caddy is not
+    running nothing can be validated, and the new files stay in place.
     """
-    with _caddy_reload_lock(lock_dir):
+    with caddy_config_lock(lock_dir):
         if not caddy_validate(caddy_compose_dir):
-            raise DockerError("Caddy config validation failed — reload aborted to prevent downtime")
+            if not container_running(_CADDY_CONTAINER):
+                raise DockerError(
+                    "Caddy is not running, so the new site config could not "
+                    "be validated or loaded. Start Caddy and run `doctor`."
+                )
+            restored = restore_sites(caddy_compose_dir)
+            raise DockerError(
+                "Caddy config validation failed — reload aborted to prevent "
+                "downtime. Restored the last accepted site config for: "
+                f"{', '.join(restored) or '(none journaled)'}."
+            )
+        commit_sites(caddy_compose_dir)
         _run(
             ["docker", "compose", "exec", "caddy", "caddy", "reload",
              "--config", "/etc/caddy/Caddyfile"],
@@ -257,18 +325,15 @@ def caddy_validate(caddy_compose_dir: Path) -> bool:
 def compose_pull(
     project_dir: Path,
     compose_files: list[str] | None = None,
-    project_name: str | None = None,
+    *,
+    project_name: str,
 ) -> None:
     """Run docker compose pull in the project directory.
 
     Pulls latest images for all services with image: directives.
     Build: services are unaffected.
     """
-    cmd = ["docker", "compose"]
-    if project_name:
-        cmd.extend(["-p", project_name])
-    for f in (compose_files or ["compose.yml"]):
-        cmd.extend(["-f", f])
+    cmd = compose_command(project_name, compose_files)
     cmd.append("pull")
     _run(cmd, cwd=project_dir, timeout=_COMPOSE_UP_TIMEOUT)
 
@@ -331,15 +396,26 @@ def container_running(container_name: str) -> bool:
     return result.stdout.strip() == "true"
 
 
-def project_restart_policies(project_name: str) -> dict[str, str]:
+def compose_project_filter(project_name: str) -> list[str]:
+    """Return `--filter label=com.docker.compose.project=<project>` for a
+    validated compose project name.
+
+    Every compose command runs with `-p <project>` (compose_command), so this
+    label selects exactly that project's containers. Use it for every raw
+    `docker` call that addresses a project's containers by label.
+    """
+    check_compose_project_name(project_name)
+    return ["--filter", f"label=com.docker.compose.project={project_name}"]
+
+
+def project_restart_policies(*, project_name: str) -> dict[str, str]:
     """Map each container of a compose project to its restart policy.
 
     Policies use `docker update --restart` syntax: "no", "always",
     "unless-stopped", "on-failure" or "on-failure:<max retries>".
     """
     listed = _run(
-        ["docker", "ps", "-a", "--filter",
-         f"label=com.docker.compose.project={project_name}",
+        ["docker", "ps", "-a", *compose_project_filter(project_name),
          "--format", "{{.Names}}"],
         capture=True,
     )

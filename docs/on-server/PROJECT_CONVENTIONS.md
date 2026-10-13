@@ -191,15 +191,16 @@ deploy:
 
 boxmunge validates `manifest.yml` on every deploy and rejects invalid manifests with a clear error. The rules are:
 
-1. **`id` is required** and must be a valid ULID. Generated automatically by `boxmunge bundle` if missing from the source manifest.
-2. **`project` is required** and must exactly match the project's directory name. A mismatch is an error.
-3. **`source` is required** and must be `bundle` or `git`.
-4. **`repo` is required if `source: git`**. The `ref` field defaults to `main` if omitted.
-5. **`hosts` is required** and must contain at least one hostname. Wildcard hosts (e.g. `*.example.com`) are rejected unless the manifest top level sets `allow_wildcard_hosts: true` — see SECURITY.md for the trade-off.
-6. **Each `web` service must have `port`** and **at least one entry in `routes`**. Routes must be dicts with a `path` key.
-7. **`limits`** fields are optional per service. `limits.memory` accepts Docker memory format (e.g., `256m`, `1g`). `limits.cpus` accepts a numeric string (e.g., `"0.5"`, `"2.0"`).
-8. **If `backup.type` is not `none`**, both `dump_command` and `restore_command` are mandatory. A backup you cannot restore is not a backup.
-9. **Per-service `smoke` is strongly recommended.** Each service can declare a `smoke: boxmunge-scripts/smoke.sh` field. The script is exec'd inside the running container, so `localhost:PORT` naturally works. boxmunge warns if no services have a smoke test.
+1. **`schema_version`**, when present, must be an unquoted integer from 1 to the newest version this boxmunge supports (currently 3). Absent means 1.
+2. **`id` is required** and must be a valid ULID. Generated automatically by `boxmunge bundle` if missing from the source manifest.
+3. **`project` is required** and must exactly match the project's directory name. A mismatch is an error. Project names are lowercase letters, digits, and hyphens (1-63 characters, starting with a letter or digit). Names ending in `-staging` are reserved, because boxmunge runs a project's staging copy as `<project>-staging`; `caddy` and `system` are reserved for the platform's own containers. A project created under such a name before it was reserved cannot be managed; fleet commands (`check-all`, `health`, `status`, container updates, upgrades) report it as an error and carry on with the other projects. Recreate it under another name.
+4. **`source` is required** and must be `bundle` or `git`.
+5. **`repo` is required if `source: git`**. The `ref` field defaults to `main` if omitted.
+6. **`hosts` is required** and must contain at least one hostname. Wildcard hosts (e.g. `*.example.com`) are rejected unless the manifest top level sets `allow_wildcard_hosts: true` — see SECURITY.md for the trade-off.
+7. **Each `web` service must have `port`** and **at least one entry in `routes`**, unless it sets `internal: true` (a service Caddy does not route to, declared to give it a read-only root filesystem and `writable:` paths), which may omit both. `internal` must be `true` or `false`. Routes must be dicts with a `path` key. Both values are written into the Caddy config, so they are checked strictly: `port` is an unquoted integer from 1 to 65535, and `path` starts with `/` and contains only letters, digits, `.`, `_`, `~`, `-`, and `/`, with an optional trailing `*` (`/`, `/api/*`, `/static*`). Spaces, braces, quotes, and wildcards in the middle of a path are rejected.
+8. **`limits`** fields are optional per service. `limits.memory` accepts Docker memory format (e.g., `256m`, `1g`). `limits.cpus` accepts a numeric string (e.g., `"0.5"`, `"2.0"`).
+9. **If `backup.type` is not `none`**, both `dump_command` and `restore_command` are mandatory. A backup you cannot restore is not a backup.
+10. **Per-service `smoke` is strongly recommended.** Each service can declare a `smoke: boxmunge-scripts/smoke.sh` field. The script is exec'd inside the running container, so `localhost:PORT` naturally works. boxmunge warns if no services have a smoke test.
 
 ---
 
@@ -218,7 +219,8 @@ the `default` profile silently — most projects need nothing here.
 | `init` | bool | `true` | Set `false` to disable Tini. |
 | `pids_limit` | int | `512` | Set `0` to disable. |
 | `cap_drop` | list[str] | dangerous-cap list | If specified, REPLACES the default list. |
-| `cap_add` | list[str] | `[]` | Capabilities to keep; subtracted from `cap_drop`. |
+| `published_ports` | list | — | Project level only. Opt-in host-published ports, each `{service, port, reason}` plus optional `host_port`, `protocol`, `host_ip` (default `127.0.0.1`). See SECURITY.md, "Published ports". |
+| `cap_add` | list[str] | `[]` | Capabilities to keep; subtracted from `cap_drop`. Canonical names only (`NET_RAW`). The denylist in SECURITY.md (`SYS_ADMIN`, `SYS_MODULE`, `ALL`, ...) is rejected. |
 
 ### Per-service `security:`
 
@@ -261,6 +263,9 @@ services:
 - Define all services listed in the manifest.
 - Use `restart: unless-stopped` on all long-running services.
 - **Not** include boxmunge networking (`boxmunge-proxy`). boxmunge injects that via the generated overlay.
+- **Not** publish ports (`ports:`). Caddy is the only ingress; declare an unavoidable host port under the manifest's `security.published_ports` instead.
+- Keep bind mounts, `secrets`/`configs` files, and build contexts inside the project directory, and declare only the project's own networks and volumes (aliases on those are fine). The full list is in SECURITY.md, "What `compose.yml` may not do".
+- **Not** set a top-level `name:`. boxmunge runs every compose command with `-p <project>` (`-p <project>-staging` for staging), and rejects a `name:` line so a compose file can never address another project's containers or volumes.
 
 boxmunge generates `compose.boxmunge.yml` alongside `compose.yml`. **Do not edit this file** -- it is regenerated on every deploy.
 
@@ -271,13 +276,13 @@ boxmunge generates `compose.boxmunge.yml` alongside `compose.yml`. **Do not edit
 - **Proxy network** -- the `boxmunge-proxy` external network to every non-internal `web` service, with project-scoped network aliases (e.g., `myapp-frontend`, `myapp-backend`)
 - **Environment files** -- `env_file` entries for `project.env` and `secrets.env`, injecting both non-secret config and CLI-managed secrets into containers
 - **Resource limits** -- `deploy.resources.limits` for services declaring `limits` in the manifest, enforcing memory and CPU constraints
-- **Container hardening** -- under the `default` security profile (the silent floor): `security_opt: ["no-new-privileges:true"]`, `init: true`, `pids_limit: 512`, a curated `cap_drop` list, and (v0.8) `read_only: true` and `tmpfs: ['/tmp']`
+- **Container hardening** -- under the `default` security profile (the silent floor): `security_opt: ["no-new-privileges:true"]`, `init: true`, `pids_limit: 512`, a curated `cap_drop` list, and (v0.8) `read_only: true` and `tmpfs: ['/tmp']`. Services the manifest does not list (databases, caches, sidecars) get the same flags, resolved against the project-level `security:` block, **except** `read_only` and the `/tmp` tmpfs. Every deploy, stage, and validate warns about each undeclared service; a future release will make read-only the default for them too. To give one a read-only root filesystem now, declare it under `services:` with `internal: true` (no `port` or `routes` needed) and a `writable:` block, as shown in SECURITY.md ("Services that are not in the manifest").
 
 Services with `internal: true` are excluded from the proxy network.
 
 ### v0.8 read-only rootfs default
 
-The default profile applies `read_only: true` and `tmpfs: ['/tmp']` to every service. Pre-v0.8 the CVE policy penalised missing `read_only` without enforcing it; v0.8 closed that asymmetry.
+The default profile applies `read_only: true` and `tmpfs: ['/tmp']` to every service declared in the manifest (services only in `compose.yml` do not get them yet; see the overlay section above). Pre-v0.8 the CVE policy penalised missing `read_only` without enforcing it; v0.8 closed that asymmetry.
 
 If a service legitimately needs writable rootfs, declare `read_only: false` in the project's `compose.yml` for that service. Doing so:
 
@@ -330,7 +335,7 @@ services:
 
 - All paths must be absolute, no `..`, max 256 chars.
 - `ephemeral` entries: list of strings, no duplicates within the list.
-- `persistent` entries: `{name, mount}` mappings. **Names must be unique project-wide** (across all services), not just within one service — the generated docker volume name is `<project>_<name>` to match Docker Compose's default convention, so two services declaring the same `name` would alias to the same physical volume. Mounts unique within the service.
+- `persistent` entries: `{name, mount}` mappings. **Names must be unique project-wide** (across all services), not just within one service — the overlay declares each volume as `<project>_<name>`, so two services declaring the same `name` would alias to the same physical volume. Docker Compose then prefixes the compose project name, so the Docker volume on the host is `<project>_<project>_<name>` (staging's is `<project>-staging_<project>_<name>`). Mounts unique within the service.
 - A path cannot appear in both `ephemeral` and `persistent` for the same service.
 - A `persistent` mount cannot be nested under any `ephemeral` path (tmpfs would shadow the volume at runtime).
 - Reserved roots (`/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/boot`, `/proc`, `/sys`, `/dev`) cannot be used as persistent mounts.
@@ -543,6 +548,6 @@ Use this only when necessary. Projects using `caddy.override.conf`:
 
 - Take full responsibility for correct TLS, routing, and upstream configuration.
 - Will not benefit from future improvements to boxmunge's Caddy generation.
-- Must ensure their override remains valid Caddyfile syntax -- boxmunge will refuse to reload Caddy with an invalid config and will alert.
+- Must ensure their override remains valid Caddyfile syntax -- boxmunge will refuse to reload Caddy with an invalid config, put back the site config Caddy last accepted, and fail the operation.
 
 When in doubt, request a manifest feature rather than reaching for the override.

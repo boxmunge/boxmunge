@@ -30,7 +30,8 @@ def _dry_run_target(paths: BoxPaths, target: UpdateTarget) -> dict[str, Any]:
                 "previous_digests": {}, "current_digests": {}}
     before = _capture_service_digests(target)
     try:
-        compose_pull(target.project_dir, compose_files=target.compose_files)
+        compose_pull(target.project_dir, compose_files=target.compose_files,
+                     project_name=target.name)
     except DockerError as e:
         return {"name": target.name, "status": "failed", "reason": f"pull_failed: {e}",
                 "previous_digests": before, "current_digests": before}

@@ -21,7 +21,8 @@ from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, validate_manifest, CURRENT_SCHEMA_VERSION
 from boxmunge.migration import migrate_manifest, MigrationError
 from boxmunge.pause import render_maintenance_caddy_config
-from boxmunge.paths import BoxPaths
+from boxmunge.fleet import report_project_failure
+from boxmunge.paths import BoxPaths, InvalidProjectName, validate_project_name
 from boxmunge.security_overlay import services_with_off_profile
 
 
@@ -40,8 +41,24 @@ def _project_manifests(paths: BoxPaths) -> Iterator[tuple[Path, dict[str, Any]]]
         return
     for project_dir in sorted(paths.projects.iterdir()):
         manifest_path = project_dir / "manifest.yml"
-        if project_dir.is_dir() and manifest_path.exists():
+        if project_dir.is_dir() and manifest_path.exists() and _addressable(project_dir, paths):
             yield project_dir, load_manifest(manifest_path)
+
+
+def _addressable(project_dir: Path, paths: BoxPaths) -> bool:
+    """False, after reporting it, for a project directory whose name is no
+    longer a valid project name (a reserved name such as `<x>-staging`).
+
+    Such a project cannot be managed at all, and rolling the upgrade back
+    would not change that, so it is reported loudly and the upgrade carries
+    on with every other project.
+    """
+    try:
+        validate_project_name(project_dir.name)
+    except InvalidProjectName as e:
+        report_project_failure("upgrade", project_dir.name, e, paths)
+        return False
+    return True
 
 
 def _migrated(project_dir: Path, manifest: dict[str, Any]) -> dict[str, Any] | None:
@@ -189,7 +206,7 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
         if not paths.project_caddy_override(name).exists():
             generate_caddy_config(manifest)
         generate_compose_override(
-            manifest, user_compose=load_user_compose(paths.project_compose(name)),
+            manifest, user_compose=load_user_compose(paths.project_compose(name), name),
         )
         report.append(f"{name}: configs render OK")
     return report
@@ -250,7 +267,7 @@ def restart_projects(
         if not project_dir.is_dir():
             continue
         manifest_path = project_dir / "manifest.yml"
-        if not manifest_path.exists():
+        if not manifest_path.exists() or not _addressable(project_dir, paths):
             continue
 
         project_name = project_dir.name
@@ -278,7 +295,8 @@ def restart_projects(
         try:
             with project_lock(project_name, paths):
                 try:
-                    compose_up(project_dir, compose_files=compose_files)
+                    compose_up(project_dir, compose_files=compose_files,
+                               project_name=project_name)
                     succeeded.append(project_name)
                 except DockerError as e:
                     failed.append(project_name)

@@ -24,7 +24,7 @@ def hold(project_name: str, saved: Mapping[str, str]) -> dict[str, str]:
     it. A policy already saved is kept: re-holding sees "no" everywhere and
     must not overwrite "always" with it.
     """
-    current = project_restart_policies(project_name)
+    current = project_restart_policies(project_name=project_name)
     set_restart_policy(sorted(n for n, p in current.items() if p != "no"), "no")
     merged = dict(saved)
     for name, policy in current.items():
@@ -38,7 +38,7 @@ def release(project_name: str, saved: Mapping[str, str]) -> None:
     A container that no longer exists is recreated by `compose up` with the
     compose file's policy.
     """
-    present = project_restart_policies(project_name)
+    present = project_restart_policies(project_name=project_name)
     by_policy: dict[str, list[str]] = {}
     for name, policy in saved.items():
         if name in present and policy != present[name]:

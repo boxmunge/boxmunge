@@ -415,10 +415,9 @@ class TestUpdateTargetSkipsQuarantined:
         )
         # Even if a stray "caddy.quarantined.json" exists (it shouldn't),
         # Caddy targets short-circuit via the is_caddy flag.
-        paths.project_quarantine_state("caddy").parent.mkdir(
-            parents=True, exist_ok=True,
-        )
-        paths.project_quarantine_state("caddy").write_text("{}")
+        # "caddy" is a reserved project name, so build the path by hand.
+        paths.deploy_state.mkdir(parents=True, exist_ok=True)
+        (paths.deploy_state / "caddy.quarantined.json").write_text("{}")
         mock_capture.return_value = {"caddy": "sha256:same"}
         result = update_target(paths, target)
         # No-change path runs; status is no_change (not quarantined).

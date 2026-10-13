@@ -15,13 +15,15 @@ from boxmunge.config import ConfigError
 from boxmunge.cve.quarantine import QuarantineError
 from boxmunge.log import log_error
 from boxmunge.manifest import ManifestError
-from boxmunge.paths import BoxPaths
+from boxmunge.paths import BoxPaths, InvalidProjectName
 from boxmunge.state import StateError
 
 # Errors raised by unreadable per-project inputs: manifest, host config,
-# JSON state files (health, deploy, quarantine, pause). Programming errors
-# are deliberately not in this list; they still propagate.
+# JSON state files (health, deploy, quarantine, pause), and a project
+# directory whose name is no longer valid (a reserved name). Programming
+# errors are deliberately not in this list; they still propagate.
 PROJECT_INPUT_ERRORS: tuple[type[Exception], ...] = (
+    InvalidProjectName,
     ManifestError,
     ConfigError,
     StateError,

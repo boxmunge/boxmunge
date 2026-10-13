@@ -292,7 +292,8 @@ def _start_release(
     print("  Starting containers...")
     compose_files = ["compose.yml", "compose.boxmunge.yml"]
     try:
-        compose_up(project_dir, compose_files=compose_files)
+        compose_up(project_dir, compose_files=compose_files,
+                   project_name=project_name)
     except DockerError as e:
         print(f"  ERROR: {e}", file=sys.stderr)
         log_error("deploy", f"Deploy failed: container start: {e}", paths, project=project_name)

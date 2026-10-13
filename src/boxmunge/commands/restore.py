@@ -23,7 +23,7 @@ from boxmunge.backup import (
     resolve_backup_service,
 )
 from boxmunge.commands.backup_cmd import list_snapshots
-from boxmunge.docker import compose_down, compose_up, DockerError
+from boxmunge.docker import compose_command, compose_down, compose_up, DockerError
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_error
@@ -214,11 +214,12 @@ def _replace_data(
     try:
         print("  Stopping project...")
         try:
-            compose_down(project_dir, compose_files=compose_files)
+            compose_down(project_dir, compose_files=compose_files,
+                         project_name=project_name)
         except DockerError as e:
             print(f"  WARN: Stop failed (may not be running): {e}")
         print(f"  Starting {service} for restore...")
-        _start_service(project_dir, compose_files, service)
+        _start_service(project_dir, compose_files, project_name, service)
         _wait_ready(project_name, service)
         print("  Restoring data...")
         _run_restore_command(project_dir, project_name, service, restore_command, plaintext)
@@ -230,7 +231,7 @@ def _replace_data(
     finally:
         print("  Starting all services..." if restored
               else "  Restarting all services...")
-        started = _start_all(project_dir, compose_files)
+        started = _start_all(project_dir, compose_files, project_name)
 
     if not restored:
         if safety is not None:
@@ -252,10 +253,10 @@ def _replace_data(
     return 0
 
 
-def _start_service(project_dir: Path, compose_files: list[str], service: str) -> None:
-    cmd = ["docker", "compose"]
-    for f in compose_files:
-        cmd.extend(["-f", f])
+def _start_service(
+    project_dir: Path, compose_files: list[str], project_name: str, service: str,
+) -> None:
+    cmd = compose_command(project_name, compose_files)
     cmd.extend(["up", "-d", service])
     subprocess.run(cmd, cwd=project_dir, check=True, capture_output=True,
                    text=True, timeout=_SERVICE_START_TIMEOUT)
@@ -312,9 +313,10 @@ def _run_restore_command(
         raise RestoreError(f"restore_command failed: {result.stderr.strip()}")
 
 
-def _start_all(project_dir: Path, compose_files: list[str]) -> bool:
+def _start_all(project_dir: Path, compose_files: list[str], project_name: str) -> bool:
     try:
-        compose_up(project_dir, compose_files=compose_files)
+        compose_up(project_dir, compose_files=compose_files,
+                   project_name=project_name)
     except DockerError as e:
         print(f"  ERROR: Start failed: {e}", file=sys.stderr)
         return False
