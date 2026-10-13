@@ -11,7 +11,6 @@ run `boxmunge doctor` to migrate the key.
 
 import os
 import shutil
-import subprocess
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -20,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from boxmunge.paths import BoxPaths
+from boxmunge.system_container import SystemContainerError, SystemTools, connect
 
 _BACKUP_CMD_TIMEOUT = 600  # 10 minutes for large database dumps
 
@@ -59,44 +59,16 @@ def resolve_backup_service(manifest: dict[str, Any]) -> str:
     )
 
 
-def _run_age_cmd(cmd: list[str], timeout: int = _BACKUP_CMD_TIMEOUT) -> subprocess.CompletedProcess:
-    """Run an age command, preferring the system container.
+@contextmanager
+def _system_tools(paths: BoxPaths) -> Iterator[SystemTools]:
+    """Yield a verified system-container handle; surface failures as BackupError.
 
-    Falls back to host-level execution if the system container isn't running.
-    This allows the tool to work both on containerised servers and in
-    development/test environments without Docker.
+    age runs only inside the system container. There is no host fallback:
+    if the container is missing, stopped or mounted for another root, or a
+    path is outside its mounts, the operation fails with the reason.
     """
-    from boxmunge.system_container import system_exec, ensure_system_container, SystemContainerError
-
-    if ensure_system_container():
-        try:
-            return system_exec(cmd, timeout=timeout)
-        except SystemContainerError as e:
-            raise BackupError(str(e)) from e
-
-    # Fallback: run on host
     try:
-        return subprocess.run(cmd, check=True, capture_output=True, text=True,
-                              timeout=timeout)
-    except subprocess.TimeoutExpired as e:
-        raise BackupError(f"Command timed out after {timeout}s: {' '.join(cmd)}") from e
-    except subprocess.CalledProcessError as e:
-        raise BackupError(f"Command failed: {' '.join(cmd)}\n{e.stderr}") from e
-
-
-def _use_container() -> bool:
-    """Check if the system container is available for age operations."""
-    from boxmunge.system_container import ensure_system_container
-    return ensure_system_container()
-
-
-def _resolve_path(host_path: Path, use_container: bool, paths: BoxPaths) -> str:
-    """Return the container path if using the container, the host path otherwise."""
-    if not use_container:
-        return str(host_path)
-    from boxmunge.system_container import container_path, SystemContainerError
-    try:
-        return container_path(host_path, paths)
+        yield connect(paths)
     except SystemContainerError as e:
         raise BackupError(str(e)) from e
 
@@ -122,15 +94,14 @@ def _match_dir_ownership(path: Path) -> None:
     os.chown(path, dir_stat.st_uid, dir_stat.st_gid)
 
 
-def _read_recipient(paths: BoxPaths) -> str:
+def _read_recipient(tools: SystemTools) -> str:
     """Extract the public key (recipient) from the age identity file."""
-    key_path = paths.backup_key
+    key_path = tools.paths.backup_key
     for line in key_path.read_text().splitlines():
         if line.startswith("# public key: "):
             return line.removeprefix("# public key: ").strip()
     # If no comment header, derive it via age-keygen
-    container = _use_container()
-    result = _run_age_cmd(["age-keygen", "-y", _resolve_path(key_path, container, paths)])
+    result = tools.run(["age-keygen", "-y", tools.path(key_path)], timeout=_BACKUP_CMD_TIMEOUT)
     return result.stdout.strip()
 
 
@@ -150,27 +121,26 @@ def encrypt_file(input_path: Path, output_path: Path, paths: BoxPaths) -> None:
     if not key_path.exists():
         raise FileNotFoundError(f"Backup encryption key not found: {key_path}")
 
-    fd, tmp_path_str = tempfile.mkstemp(
-        dir=output_path.parent, prefix=".encrypt-", suffix=".tmp"
-    )
-    os.close(fd)
-    tmp_path = Path(tmp_path_str)
-    # age (in the system container, a fixed uid) writes this temp via -o;
-    # align its ownership so a root-invoked backup's temp stays writable to it.
-    _match_dir_ownership(tmp_path)
-
-    try:
-        recipient = _read_recipient(paths)
-        container = _use_container()
-        _run_age_cmd([
-            "age", "--encrypt", "-r", recipient,
-            "-o", _resolve_path(tmp_path, container, paths),
-            _resolve_path(input_path, container, paths),
-        ])
-        os.rename(tmp_path, output_path)
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
+    with _system_tools(paths) as tools:
+        fd, tmp_path_str = tempfile.mkstemp(
+            dir=output_path.parent, prefix=".encrypt-", suffix=".tmp"
+        )
+        os.close(fd)
+        tmp_path = Path(tmp_path_str)
+        try:
+            # age (in the system container) writes this temp via -o; align its
+            # ownership so a root-invoked backup's temp stays writable to it.
+            _match_dir_ownership(tmp_path)
+            recipient = _read_recipient(tools)
+            tools.run([
+                "age", "--encrypt", "-r", recipient,
+                "-o", tools.path(tmp_path),
+                tools.path(input_path),
+            ], timeout=_BACKUP_CMD_TIMEOUT)
+            os.rename(tmp_path, output_path)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
 
 
 def decrypt_file(input_path: Path, output_path: Path, paths: BoxPaths) -> None:
@@ -179,12 +149,12 @@ def decrypt_file(input_path: Path, output_path: Path, paths: BoxPaths) -> None:
     if not key_path.exists():
         raise FileNotFoundError(f"Backup encryption key not found: {key_path}")
 
-    container = _use_container()
-    _run_age_cmd([
-        "age", "--decrypt", "-i", _resolve_path(key_path, container, paths),
-        "-o", _resolve_path(output_path, container, paths),
-        _resolve_path(input_path, container, paths),
-    ])
+    with _system_tools(paths) as tools:
+        tools.run([
+            "age", "--decrypt", "-i", tools.path(key_path),
+            "-o", tools.path(output_path),
+            tools.path(input_path),
+        ], timeout=_BACKUP_CMD_TIMEOUT)
 
 
 @contextmanager
@@ -193,8 +163,8 @@ def decrypted_snapshot(snapshot_path: Path, paths: BoxPaths) -> Iterator[Path]:
 
     The temp dir lives in the project's backups directory (mounted into the
     system container, unlike /tmp) so age's -o path translates. It is 0700,
-    chowned to the backups dir owner so age's fixed container uid can write
-    into it, dot-prefixed so prune/sync globs ignore it, and always removed.
+    chowned to the backups dir owner so the container's uid can write into
+    it, dot-prefixed so prune/sync globs ignore it, and always removed.
     """
     tmpdir = Path(tempfile.mkdtemp(dir=snapshot_path.parent, prefix=".restore-"))
     try:

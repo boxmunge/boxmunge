@@ -1,35 +1,29 @@
-"""Tests for system container abstraction (unit tests with mocked Docker)."""
+"""Tests for the system container abstraction (unit tests, docker mocked)."""
 
-from pathlib import Path
-from unittest.mock import patch, MagicMock
 import subprocess
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+import boxmunge.system_container as sc
 from boxmunge.system_container import (
-    system_exec, ensure_system_container, SystemContainerError,
-    CONTAINER_NAME,
+    CONTAINER_NAME, SystemContainerError, connect, system_exec,
 )
+from tests.fake_system_container import healthy_inspect
 
 
 class TestSystemExec:
     @patch("boxmunge.system_container.subprocess.run")
     def test_exec_returns_stdout(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="output\n", stderr=""
-        )
+        mock_run.return_value = MagicMock(returncode=0, stdout="output\n", stderr="")
         result = system_exec(["age", "--version"])
         assert result.stdout == "output\n"
-        cmd = mock_run.call_args[0][0]
-        assert cmd[:3] == ["docker", "exec", CONTAINER_NAME]
-        assert "age" in cmd
-        assert "--version" in cmd
+        assert mock_run.call_args[0][0] == ["docker", "exec", CONTAINER_NAME, "age", "--version"]
 
     @patch("boxmunge.system_container.subprocess.run")
     def test_exec_raises_on_failure(self, mock_run: MagicMock) -> None:
-        mock_run.side_effect = subprocess.CalledProcessError(
-            1, "docker", stderr="error"
-        )
+        mock_run.side_effect = subprocess.CalledProcessError(1, "docker", stderr="error")
         with pytest.raises(SystemContainerError, match="Command failed"):
             system_exec(["age", "--encrypt"])
 
@@ -37,26 +31,78 @@ class TestSystemExec:
     def test_exec_raises_on_timeout(self, mock_run: MagicMock) -> None:
         mock_run.side_effect = subprocess.TimeoutExpired("docker", 600)
         with pytest.raises(SystemContainerError, match="timed out"):
-            system_exec(["rclone", "sync"])
-
-    @patch("boxmunge.system_container.subprocess.run")
-    def test_exec_with_stdin(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        system_exec(["age", "--decrypt"], stdin=b"encrypted-data")
-        call_kwargs = mock_run.call_args[1]
-        assert call_kwargs.get("input") == b"encrypted-data"
+            system_exec(["rclone", "copy"])
 
 
-class TestEnsureSystemContainer:
-    @patch("boxmunge.system_container.subprocess.run")
-    def test_returns_true_when_running(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(returncode=0, stdout="running\n")
-        assert ensure_system_container() is True
+def _inspect_result(stdout: str = "", stderr: str = "", rc: int = 0) -> MagicMock:
+    return MagicMock(returncode=rc, stdout=stdout, stderr=stderr)
 
-    @patch("boxmunge.system_container.subprocess.run")
-    def test_returns_false_when_not_running(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(returncode=1, stdout="")
-        assert ensure_system_container() is False
+
+class TestConnect:
+    """No host fallback (D-08/C-20): connect() succeeds only for a running
+    container mounted for this root, and otherwise says how to fix it."""
+
+    def test_running_and_correctly_mounted(self, paths, monkeypatch) -> None:
+        monkeypatch.setattr(sc, "_inspect", lambda name: healthy_inspect(paths))
+        tools = connect(paths)
+        assert tools.name == CONTAINER_NAME
+        assert tools.path(paths.backup_key) == "/config/backup.key"
+
+    def test_missing_container_fails_with_start_command(self, paths) -> None:
+        with patch("boxmunge.system_container.subprocess.run",
+                   return_value=_inspect_result(rc=1, stderr="Error: No such container: x")):
+            with pytest.raises(SystemContainerError) as exc:
+                connect(paths)
+        msg = str(exc.value)
+        assert "does not exist" in msg
+        assert f"docker compose -f {paths.system_compose} up -d --build" in msg
+        assert "never fall back to host tools" in msg
+
+    def test_stopped_container_fails(self, paths, monkeypatch) -> None:
+        info = healthy_inspect(paths)
+        info["State"]["Status"] = "exited"
+        monkeypatch.setattr(sc, "_inspect", lambda name: info)
+        with pytest.raises(SystemContainerError, match="is exited, not running"):
+            connect(paths)
+
+    def test_container_mounted_for_another_root_fails(self, paths, tmp_path, monkeypatch) -> None:
+        from boxmunge.paths import BoxPaths
+        other = BoxPaths(root=tmp_path / "other")
+        monkeypatch.setattr(sc, "_inspect", lambda name: {
+            "State": {"Status": "running"},
+            "Mounts": [{"Source": str(m.host), "Destination": m.container}
+                       for m in sc.system_mounts(other)],
+        })
+        with pytest.raises(SystemContainerError) as exc:
+            connect(paths)
+        assert "not mounted for the boxmunge root" in str(exc.value)
+        assert "--force-recreate" in str(exc.value)
+
+    def test_rclone_config_mount_is_required(self, paths, monkeypatch) -> None:
+        """The old compose file mounted /dev/null as the rclone config."""
+        info = healthy_inspect(paths)
+        info["Mounts"] = [m for m in info["Mounts"] if m["Destination"] != "/config/rclone"]
+        monkeypatch.setattr(sc, "_inspect", lambda name: info)
+        with pytest.raises(SystemContainerError, match="/config/rclone: expected"):
+            connect(paths)
+
+    def test_docker_cli_missing_fails(self, paths) -> None:
+        with patch("boxmunge.system_container.subprocess.run", side_effect=FileNotFoundError):
+            with pytest.raises(SystemContainerError, match="docker CLI not found"):
+                connect(paths)
+
+    def test_inspect_error_other_than_missing_is_surfaced(self, paths) -> None:
+        with patch("boxmunge.system_container.subprocess.run",
+                   return_value=_inspect_result(rc=1, stderr="permission denied on socket")):
+            with pytest.raises(SystemContainerError, match="permission denied on socket"):
+                connect(paths)
+
+    def test_tools_run_execs_in_the_container(self, paths, monkeypatch) -> None:
+        monkeypatch.setattr(sc, "_inspect", lambda name: healthy_inspect(paths))
+        with patch("boxmunge.system_container.subprocess.run",
+                   return_value=_inspect_result(stdout="ok")) as run:
+            connect(paths).run(["age", "--version"])
+        assert run.call_args[0][0][:3] == ["docker", "exec", CONTAINER_NAME]
 
 
 class TestContainerPath:

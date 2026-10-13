@@ -7,6 +7,9 @@ from pathlib import Path
 
 from boxmunge.paths import BoxPaths
 
+# Provides the `system_container` fixture (a fake boxmunge-system container).
+pytest_plugins = ["tests.fake_system_container"]
+
 
 @pytest.fixture(autouse=True)
 def _reset_boxmunge_logger():

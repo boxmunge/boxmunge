@@ -8,7 +8,8 @@ import pytest
 
 
 
-pytestmark = [pytest.mark.integration]
+# Backups run through the real system container: there is no host fallback.
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("real_system_container")]
 
 
 class TestBackupRestoreRoundTrip:

@@ -92,17 +92,13 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
     docker_available = shutil.which("docker") is not None
     check("Docker available", docker_available)
 
-    # age
-    age_available = shutil.which("age") is not None
-    check("age available", age_available,
-          "" if age_available else "Install age for backup encryption")
-
-    # rclone
-    rclone_available = shutil.which("rclone") is not None
-    if rclone_available:
-        check("rclone available", True)
-    else:
-        warn("rclone available", "Not found — backup-sync won't work")
+    # age and rclone run only inside the system container (no host fallback)
+    from boxmunge.system_container import connect, SystemContainerError
+    try:
+        connect(paths)
+        check("System container (age, rclone)", True)
+    except SystemContainerError as e:
+        check("System container (age, rclone)", False, str(e))
 
     # Caddy container
     if docker_available:

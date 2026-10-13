@@ -46,6 +46,9 @@ class BoxPaths:
         self.config = root / "config"
         self.config_file = self.config / "boxmunge.yml"
         self.backup_key = self.config / "backup.key"
+        # Mounted read-only into the system container at /config/rclone.
+        self.rclone_config_dir = self.config / "rclone"
+        self.rclone_config = self.rclone_config_dir / "rclone.conf"
         self.version_file = self.config / "version"
         self.system = root / "system"
         self.system_compose = self.system / "compose.yml"

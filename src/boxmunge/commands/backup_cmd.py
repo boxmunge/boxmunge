@@ -385,40 +385,25 @@ def run_backup_sync(paths: BoxPaths, project_name: str | None = None) -> int:
         return 1
 
     if project_name:
-        container_src = f"/projects/{project_name}/backups/"
+        src = paths.project_backups(project_name)
         dest = f"{remote}/{project_name}/"
     else:
-        container_src = "/projects/"
+        src = paths.projects
         dest = remote
 
     print(f"Syncing backups to {dest}...")
 
-    from boxmunge.system_container import system_exec, ensure_system_container, SystemContainerError
+    from boxmunge.system_container import RCLONE_CONFIG, SystemContainerError, connect
 
-    rclone_cmd = ["rclone", "sync", container_src, dest,
-                  "--include", "*.tar.gz.age",
-                  "--config", "/config/rclone.conf"]
-
-    if ensure_system_container():
-        try:
-            system_exec(rclone_cmd)
-        except SystemContainerError as e:
-            print(f"ERROR: rclone sync failed: {e}", file=sys.stderr)
-            return 1
-    else:
-        # Fallback: host-level rclone
-        host_src = str(paths.project_backups(project_name)) if project_name else str(paths.projects)
-        try:
-            subprocess.run(
-                ["rclone", "sync", host_src, dest, "--include", "*.tar.gz.age"],
-                check=True, capture_output=True, text=True,
-            )
-        except subprocess.CalledProcessError as e:
-            print(f"ERROR: rclone sync failed: {e.stderr}", file=sys.stderr)
-            return 1
-        except FileNotFoundError:
-            print("ERROR: rclone not found — install rclone or start the system container", file=sys.stderr)
-            return 1
+    try:
+        tools = connect(paths)
+        tools.run(["rclone", "sync", tools.path(src), dest,
+                   "--include", "*.tar.gz.age",
+                   "--config", RCLONE_CONFIG])
+    except SystemContainerError as e:
+        print(f"ERROR: rclone sync failed: {e}", file=sys.stderr)
+        log_error("backup", f"Backup sync to {dest} failed: {e}", paths)
+        return 1
 
     log_operation("backup", f"Backup sync to {dest} completed", paths)
     print("Backup sync complete.")

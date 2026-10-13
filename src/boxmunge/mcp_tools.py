@@ -166,7 +166,7 @@ def _run_health_checks(paths: BoxPaths) -> tuple[int, dict]:
     report = HealthReport()
     report.checks.append(check_docker_running())
     report.checks.append(check_caddy_container())
-    report.checks.append(check_system_container())
+    report.checks.append(check_system_container(paths))
     report.checks.append(check_file_permissions(paths))
     report.checks.append(check_age_key(paths))
     report.checks.append(check_project_containers(paths))

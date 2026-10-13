@@ -1,0 +1,58 @@
+"""backup-sync runs rclone only inside the system container (D-08/C-20)."""
+
+import subprocess
+from unittest.mock import patch
+
+import pytest
+
+import boxmunge.system_container as sc
+from boxmunge.commands.backup_cmd import run_backup_sync
+from boxmunge.paths import BoxPaths
+
+
+def _ok(cmd: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+
+@pytest.fixture
+def configured(paths: BoxPaths) -> BoxPaths:
+    paths.config_file.write_text(
+        "hostname: box.example.com\nadmin_email: a@example.com\n"
+        "backup_remote: offsite:bucket\n"
+    )
+    paths.project_backups("myapp").mkdir(parents=True)
+    return paths
+
+
+class TestBackupSync:
+    def test_rclone_uses_the_mounted_operator_config(self, configured, system_container) -> None:
+        system_container.handler = _ok
+        assert run_backup_sync(configured) == 0
+        [cmd] = system_container.calls
+        assert cmd[0] == "rclone"
+        assert cmd[cmd.index("--config") + 1] == "/config/rclone/rclone.conf"
+        assert "/projects" in cmd
+
+    def test_single_project_source_is_translated(self, configured, system_container) -> None:
+        system_container.handler = _ok
+        assert run_backup_sync(configured, "myapp") == 0
+        [cmd] = system_container.calls
+        assert "/projects/myapp/backups" in cmd
+
+    def test_missing_container_fails_without_host_rclone(
+        self, configured, monkeypatch, capsys,
+    ) -> None:
+        monkeypatch.setattr(sc, "_inspect", lambda name: None)
+        with patch("subprocess.run") as host_run:
+            assert run_backup_sync(configured) == 1
+        host_run.assert_not_called()
+        err = capsys.readouterr().err
+        assert "does not exist" in err
+        assert "up -d --build" in err
+
+    def test_rclone_failure_is_reported(self, configured, system_container, capsys) -> None:
+        def fail(cmd):
+            raise sc.SystemContainerError("Command failed in system container: rclone")
+        system_container.handler = fail
+        assert run_backup_sync(configured) == 1
+        assert "rclone" in capsys.readouterr().err

@@ -102,27 +102,18 @@ def check_caddy_container() -> HealthCheck:
         return HealthCheck("caddy", "error", "Could not check Caddy container")
 
 
-def check_system_container() -> HealthCheck:
-    """Check if boxmunge-system container is running."""
+def check_system_container(paths: BoxPaths) -> HealthCheck:
+    """Check boxmunge-system is running with this root's mounts.
+
+    An error, not a warning: age and rclone have no host fallback, so
+    backups, restores and backup-sync all fail while this check fails.
+    """
+    from boxmunge.system_container import connect, SystemContainerError
     try:
-        result = subprocess.run(
-            ["docker", "inspect", "--format",
-             "{{.State.Status}}", "boxmunge-system"],
-            capture_output=True, text=True, check=False, timeout=10,
-        )
-        if result.returncode == 0 and "running" in result.stdout:
-            return HealthCheck(
-                "system-container", "ok", "boxmunge-system running",
-            )
-        return HealthCheck(
-            "system-container", "warn",
-            "boxmunge-system not running (host fallback active)",
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return HealthCheck(
-            "system-container", "warn",
-            "Could not check system container",
-        )
+        connect(paths)
+    except SystemContainerError as e:
+        return HealthCheck("system-container", "error", str(e))
+    return HealthCheck("system-container", "ok", "boxmunge-system running")
 
 
 def check_file_permissions(paths: BoxPaths) -> HealthCheck:
@@ -363,7 +354,7 @@ def run_health(paths: BoxPaths, *, as_json: bool = False) -> int:
     report = HealthReport()
     report.checks.append(check_docker_running())
     report.checks.append(check_caddy_container())
-    report.checks.append(check_system_container())
+    report.checks.append(check_system_container(paths))
     report.checks.append(check_file_permissions(paths))
     report.checks.append(check_age_key(paths))
     report.checks.append(check_project_containers(paths))

@@ -299,6 +299,25 @@ Sync all local encrypted backups to the configured off-box remote:
 backup-sync
 ```
 
+`backup-sync` needs `backup_remote` in `boxmunge.yml` (for example `offsite:my-bucket/boxmunge`). A named remote such as `offsite` is defined in `/opt/boxmunge/config/rclone/rclone.conf`, which `install.sh` creates empty (`root:deploy`, mode 0640). Edit it as root, for example:
+
+```ini
+[offsite]
+type = s3
+provider = AWS
+access_key_id = ...
+secret_access_key = ...
+region = eu-west-1
+```
+
+The directory is mounted read-only into the `boxmunge-system` container, so edits take effect on the next sync without a restart. Backends that rewrite their config to refresh OAuth tokens cannot save the refreshed token there; prefer static-key backends (S3, B2 and similar).
+
+age and rclone run only inside the `boxmunge-system` container. If it is not running, `backup`, `backup-all`, `restore`, `test-restore` and `backup-sync` fail with an error rather than falling back to host tools. Start it with:
+
+```
+sudo docker compose -f /opt/boxmunge/system/compose.yml up -d --build
+```
+
 Restore from the most recent backup:
 
 ```

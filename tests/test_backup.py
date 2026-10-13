@@ -4,7 +4,6 @@ import os
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-import subprocess
 
 from boxmunge.backup import (
     encrypt_file,
@@ -73,26 +72,60 @@ class TestBackupFilename:
 
 
 class TestEncryptFile:
-    def test_encrypt_creates_output(self, paths) -> None:
+    def test_encrypt_runs_age_in_the_container(self, paths, system_container) -> None:
         paths.backup_key.write_text(AGE_IDENTITY)
         bdir = paths.project_backups("myapp")
         bdir.mkdir(parents=True)
-        input_file = bdir / "data.tar.gz"
+        input_file = bdir / ".dump-x.tar.gz"
         input_file.write_bytes(b"fake archive data here")
-        output_file = bdir / "data.tar.gz.age"
+        output_file = bdir / "myapp-2026.tar.gz.age"
 
-        with patch("boxmunge.backup._run_age_cmd") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess([], 0)
-            encrypt_file(input_file, output_file, paths)
-            mock_run.assert_called_once()
-            cmd = mock_run.call_args[0][0]
-            assert "age" in cmd[0]
+        encrypt_file(input_file, output_file, paths)
+
+        [cmd] = system_container.calls
+        assert cmd[:2] == ["age", "--encrypt"]
+        assert cmd[cmd.index("-o") + 1].startswith("/projects/myapp/backups/.encrypt-")
+        assert cmd[-1] == "/projects/myapp/backups/.dump-x.tar.gz"
+        assert output_file.exists()
+        assert [f.name for f in bdir.iterdir() if f.name.startswith(".encrypt-")] == []
 
     def test_encrypt_raises_on_missing_key(self, paths) -> None:
         input_file = paths.projects / "data.tar.gz"
         input_file.write_bytes(b"data")
         with pytest.raises(FileNotFoundError, match="key"):
             encrypt_file(input_file, paths.projects / "out.age", paths)
+
+
+class TestNoHostFallback:
+    """D-08/C-20: when the system container is missing, age must not run on
+    the host. The old code silently ran host age, which is how the v0.9.16
+    /tmp decrypt bug passed every test."""
+
+    @pytest.fixture
+    def no_container(self, paths, monkeypatch):
+        import boxmunge.system_container as sc
+        monkeypatch.setattr(sc, "_inspect", lambda name: None)
+        paths.backup_key.write_text(AGE_IDENTITY)
+        bdir = paths.project_backups("myapp")
+        bdir.mkdir(parents=True)
+        return bdir
+
+    def test_encrypt_fails_loudly_and_leaves_no_temp(self, paths, no_container) -> None:
+        dump = no_container / ".dump-x.tar.gz"
+        dump.write_bytes(b"x")
+        with patch("subprocess.run") as host_run:
+            with pytest.raises(BackupError, match="does not exist.*up -d --build"):
+                encrypt_file(dump, no_container / "out.tar.gz.age", paths)
+        host_run.assert_not_called()
+        assert sorted(f.name for f in no_container.iterdir()) == [".dump-x.tar.gz"]
+
+    def test_decrypt_fails_loudly(self, paths, no_container) -> None:
+        snap = no_container / "myapp-1.tar.gz.age"
+        snap.write_bytes(b"x")
+        with patch("subprocess.run") as host_run:
+            with pytest.raises(BackupError, match="never fall back to host tools"):
+                decrypt_file(snap, no_container / "out", paths)
+        host_run.assert_not_called()
 
 
 class TestMatchDirOwnership:
@@ -145,19 +178,30 @@ class TestMatchDirOwnership:
 
 
 class TestDecryptFile:
-    def test_decrypt_calls_age(self, paths) -> None:
-        paths.backup_key.write_text(AGE_IDENTITY)
-        input_file = paths.projects / "data.tar.gz.age"
+    def test_decrypt_runs_age_in_the_container(self, paths, system_container) -> None:
+        bdir = paths.project_backups("myapp")
+        bdir.mkdir(parents=True)
+        input_file = bdir / "myapp-1.tar.gz.age"
         input_file.write_bytes(b"encrypted data")
-        output_file = paths.projects / "data.tar.gz"
 
-        with patch("boxmunge.backup._run_age_cmd") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess([], 0)
-            decrypt_file(input_file, output_file, paths)
-            mock_run.assert_called_once()
-            cmd = mock_run.call_args[0][0]
-            assert "age" in cmd[0]
-            assert "--decrypt" in cmd
+        decrypt_file(input_file, bdir / "out.tar.gz", paths)
+
+        [cmd] = system_container.calls
+        assert cmd[:2] == ["age", "--decrypt"]
+        assert cmd[cmd.index("-i") + 1] == "/config/backup.key"
+        assert cmd[cmd.index("-o") + 1] == "/projects/myapp/backups/out.tar.gz"
+        assert (bdir / "out.tar.gz").read_bytes() == b"plaintext snapshot"
+
+    def test_decrypt_to_unmounted_path_fails_before_age_runs(
+        self, paths, system_container, tmp_path,
+    ) -> None:
+        """The v0.9.16 shape: a decrypt target outside the mounts."""
+        bdir = paths.project_backups("myapp")
+        bdir.mkdir(parents=True)
+        (bdir / "myapp-1.tar.gz.age").write_bytes(b"x")
+        with pytest.raises(BackupError, match="outside the system container's mounts"):
+            decrypt_file(bdir / "myapp-1.tar.gz.age", tmp_path / "out", paths)
+        assert system_container.calls == []
 
 
 class TestPruneBackups:

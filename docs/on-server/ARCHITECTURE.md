@@ -289,7 +289,9 @@ The `boxmunge-system` container encapsulates risky tooling:
 
 This provides blast-radius containment — a compromised tool binary can't touch the host filesystem beyond its bind mounts. The container runs read-only, with no capabilities and a non-root user.
 
-If the system container is not running, boxmunge falls back to host-level tool execution (for development and testing).
+Its mounts are fixed: `projects/` read-write at `/projects`, `config/backup.key` read-only at `/config/backup.key`, and `config/rclone/` read-only at `/config/rclone`. Every path boxmunge hands to age or rclone must sit under one of these mounts, or the operation fails before the tool runs.
+
+There is no host fallback. If the system container is missing, stopped, or mounted for a different boxmunge root, backups, restores, `test-restore` and `backup-sync` fail with an error saying how to start it, and `health` reports an error.
 
 ## Per-Project Container Hardening
 

@@ -155,3 +155,58 @@ def deployed_fixture(int_paths: BoxPaths, fixture_project_dir: Path, test_port: 
             cwd=project_dir, check=False, capture_output=True,
             timeout=60,
         )
+
+
+# ---------------------------------------------------------------------------
+# The real boxmunge-system container (age, rclone), built from system/.
+# ---------------------------------------------------------------------------
+
+_REPO = Path(__file__).resolve().parents[2]
+
+
+def _system_compose(project: str, override: Path) -> list[str]:
+    return ["docker", "compose", "-p", project,
+            "-f", str(_REPO / "system" / "compose.yml"), "-f", str(override)]
+
+
+@pytest.fixture(scope="session")
+def real_system_container(integration_root: Path, tmp_path_factory):
+    """Build system/Dockerfile and start it from system/compose.yml.
+
+    Mounts point at the integration root (the compose file's BOXMUNGE_CONFIG
+    and BOXMUNGE_PROJECTS variables). Only the container name is overridden,
+    so a developer's real boxmunge-system is never touched, and the module's
+    CONTAINER_NAME points at it for the session. Yields the name.
+    """
+    import uuid
+
+    import boxmunge.system_container as sc
+
+    if not _docker_available():
+        pytest.skip("Docker not available")
+    paths = BoxPaths(root=integration_root)
+    paths.rclone_config_dir.mkdir(exist_ok=True)
+    paths.rclone_config.touch()
+    name = f"bmsys-it-{uuid.uuid4().hex[:10]}"
+    override = tmp_path_factory.mktemp("system-compose") / "override.yml"
+    override.write_text(
+        "services:\n"
+        "  system:\n"
+        f"    container_name: {name}\n"
+        f'    user: "{os.getuid()}:{os.getgid()}"\n'
+    )
+    env = {**os.environ,
+           "BOXMUNGE_CONFIG": str(paths.config),
+           "BOXMUNGE_PROJECTS": str(paths.projects)}
+    cmd = _system_compose(name, override)
+    try:
+        up = subprocess.run(cmd + ["up", "-d", "--build", "--wait"], env=env,
+                            capture_output=True, text=True, timeout=900, check=False)
+        if up.returncode != 0:
+            pytest.fail(f"system container failed to start:\n{up.stdout}\n{up.stderr}")
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(sc, "CONTAINER_NAME", name)
+            yield name
+    finally:
+        subprocess.run(cmd + ["down", "--volumes", "--rmi", "local"], env=env,
+                       capture_output=True, timeout=120, check=False)
