@@ -38,14 +38,53 @@ def _prod(paths) -> None:
     place_bundle(paths, timestamp=V2)
 
 
-def test_rejected_staging_site_is_rolled_back_by_the_reload(paths, capsys) -> None:
+@contextmanager
+def _caddy_rejects():
+    with patch("boxmunge.docker.caddy_validate", return_value=False), \
+            patch("boxmunge.docker.container_running", return_value=True):
+        yield
+
+
+def test_rejected_staging_site_fails_the_stage_and_cleans_up(paths, capsys) -> None:
+    _prod(paths)
+    with _containers(), _caddy_rejects():
+        assert run_stage("myapp", paths) == 1
+    assert not paths.project_staging_caddy_site("myapp").exists()
+    assert not paths.project_staging_compose_override("myapp").exists()
+    assert (paths.project_dir("myapp") / ".releases" / "prestage").exists() is False
+    err = capsys.readouterr().err
+    assert "ERROR" in err and "myapp-staging.conf" in err
+    assert "previous routing was restored" in err
+
+
+def test_rejected_site_fails_prod_deploy_with_recovery_advice(paths, capsys) -> None:
+    _prod(paths)
+    with _containers(), _caddy_rejects():
+        assert run_deploy("myapp", paths) == 1
+    err = capsys.readouterr().err
+    assert "myapp.conf" in err and "previous routing was restored" in err
+    assert "containers are running" in err
+    assert "rollback myapp" in err
+
+
+def test_rejected_first_deploy_does_not_advise_rollback(paths, capsys) -> None:
+    add_project("myapp", paths)
+    place_bundle(paths, timestamp=V1)
+    with _containers(), _caddy_rejects():
+        assert run_deploy("myapp", paths) == 1
+    err = capsys.readouterr().err
+    assert "previous routing was restored" in err
+    assert "rollback" not in err
+
+
+def test_caddy_not_running_is_still_a_warning(paths, capsys) -> None:
+    """Nothing was rejected: the files stay and load when Caddy starts."""
     _prod(paths)
     with _containers(), \
             patch("boxmunge.docker.caddy_validate", return_value=False), \
-            patch("boxmunge.docker.container_running", return_value=True):
-        run_stage("myapp", paths)
-    assert not paths.project_staging_caddy_site("myapp").exists()
-    assert "myapp-staging.conf" in capsys.readouterr().out
+            patch("boxmunge.docker.container_running", return_value=False):
+        assert run_deploy("myapp", paths) == 0
+    assert "WARN" in capsys.readouterr().out
 
 
 def test_unstage_removes_the_site_and_forgets_its_journal_entry(paths) -> None:

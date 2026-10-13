@@ -41,6 +41,17 @@ class DockerError(Exception):
     """Raised when a Docker/Compose operation fails."""
 
 
+class CaddyConfigRejected(DockerError):
+    """Caddy rejected the config; the journaled site files were put back.
+
+    `restored` names the site files restored to what Caddy last accepted.
+    """
+
+    def __init__(self, message: str, restored: list[str]) -> None:
+        super().__init__(message)
+        self.restored = restored
+
+
 def _run(
     cmd: list[str],
     cwd: Path | None = None,
@@ -278,8 +289,10 @@ def caddy_reload(caddy_compose_dir: Path, lock_dir: Path) -> None:
 
     When Caddy rejects the config, every site file written since Caddy
     last accepted one (see `caddy_journal`) is put back, so the bad file
-    does not break the next reload or a Caddy restart. When Caddy is not
-    running nothing can be validated, and the new files stay in place.
+    does not break the next reload or a Caddy restart, and
+    CaddyConfigRejected is raised: callers must fail the operation. When
+    Caddy is not running nothing can be validated, the new files stay in
+    place, and a plain DockerError is raised.
     """
     with caddy_config_lock(lock_dir):
         if not caddy_validate(caddy_compose_dir):
@@ -289,10 +302,11 @@ def caddy_reload(caddy_compose_dir: Path, lock_dir: Path) -> None:
                     "be validated or loaded. Start Caddy and run `doctor`."
                 )
             restored = restore_sites(caddy_compose_dir)
-            raise DockerError(
+            raise CaddyConfigRejected(
                 "Caddy config validation failed — reload aborted to prevent "
                 "downtime. Restored the last accepted site config for: "
-                f"{', '.join(restored) or '(none journaled)'}."
+                f"{', '.join(restored) or '(none journaled)'}.",
+                restored,
             )
         commit_sites(caddy_compose_dir)
         _run(
