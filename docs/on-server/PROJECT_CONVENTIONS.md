@@ -15,7 +15,7 @@ Each project lives at `/opt/boxmunge/projects/<project-name>/`. The directory st
   compose.boxmunge.yml         # Auto-generated overlay (do not edit)
   project.env                  # Non-secret config (ships with bundle)
   secrets.env                  # CLI-managed secrets (boxmunge secrets)
-  caddy.override.conf          # Optional: manual Caddy config override
+  caddy.override.conf          # Optional: operator-placed Caddy config override
   boxmunge-scripts/
     smoke.sh                   # Health check (strongly recommended; 755)
     backup.sh                  # Backup to stdout (required if backup.type != none)
@@ -29,12 +29,12 @@ Each project lives at `/opt/boxmunge/projects/<project-name>/`. The directory st
 ### What a bundle may contain
 
 A bundle carries the project's code and configuration: `manifest.yml`, `compose.yml`, `project.env`,
-`caddy.override.conf`, `boxmunge-scripts/`, build contexts, and anything else the project needs.
+`boxmunge-scripts/`, build contexts, and anything else the project needs.
 
 Each bundle deploy makes the project's code exactly the bundle: a file or directory the previous
 release had but the new bundle does not is removed (it stays in the previous-release copy that
-`rollback` restores). So anything the project needs on the server, including `project.env` and
-`caddy.override.conf`, must ship in every bundle. Server-owned entries (below), read-write
+`rollback` restores). So anything the project needs on the server, including `project.env`, must
+ship in every bundle. Server-owned entries (below), read-write
 bind-mounted data directories, and `-staging` copies of bind-mounted directories are never touched
 by a deploy.
 
@@ -47,6 +47,7 @@ on the server changes (`ERROR:` naming each entry, exit 1):
 | `security/` | CVE suppressions and their audit history, managed with `security suppress` / `unsuppress` |
 | `data/` | The project's live data |
 | `backups/` | Encrypted snapshots |
+| `caddy.override.conf` | Used verbatim as the project's Caddy config, so only an operator places it, on the server |
 | `repo/` | The clone of a git-sourced project |
 | `.releases/`, `compose.boxmunge*.yml`, `compose.staging-base.yml` | Written by boxmunge itself |
 
@@ -535,6 +536,8 @@ bypass the audit trail and risk breaking the schema.
 ## Caddy Override
 
 `caddy.override.conf` is an escape hatch for projects with routing requirements that boxmunge's generated Caddy config cannot express. If this file is present, boxmunge uses it **verbatim** in place of the generated Caddy configuration for the project's hosts.
+
+Because it is raw proxy configuration, it is operator-only: an operator places it in `/opt/boxmunge/projects/<project>/` on the server. A bundle that carries `caddy.override.conf` is refused, and deploys and rollbacks never remove or replace it.
 
 Use this only when necessary. Projects using `caddy.override.conf`:
 

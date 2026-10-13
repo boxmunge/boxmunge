@@ -42,7 +42,7 @@ Key features:
       compose.boxmunge.yml    # generated overlay (networking, env, limits)
       project.env             # ships with bundle (non-secret config)
       secrets.env             # CLI-managed secrets (boxmunge secrets)
-      caddy.override.conf     # optional: verbatim Caddy config escape hatch
+      caddy.override.conf     # optional: verbatim Caddy config escape hatch (operator-placed)
       boxmunge-scripts/       # project's integration scripts
         smoke.sh
         backup.sh
@@ -112,7 +112,7 @@ When a project is staged, its containers run alongside production on a separate 
 
 The project's own `compose.yml` does not need to reference boxmunge networking at all. The overlay is the platform's concern.
 
-If a project contains `caddy.override.conf`, boxmunge uses it verbatim instead of generating config. A notice is logged when this escape hatch is active.
+If a project contains `caddy.override.conf`, boxmunge uses it verbatim instead of generating config. A notice is logged when this escape hatch is active. Only an operator places it, directly on the server: a bundle that carries one is refused, and deploys never remove it.
 
 ---
 

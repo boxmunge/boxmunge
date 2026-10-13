@@ -69,6 +69,30 @@ def test_stage_refuses_bundle_carrying_suppressions(paths, live, capsys) -> None
     assert (live / "security" / "suppressions.history.yml").read_text() == "history: [audit]\n"
 
 
+def test_bundle_cannot_ship_a_caddy_override(paths, live, capsys) -> None:
+    """caddy.override.conf is used verbatim as the project's Caddy config; a
+    bundle must not be able to supply raw proxy config (P2 leftover)."""
+    before = tree_snapshot(live)
+    place_bundle(paths, timestamp="2026-10-13T100000000000",
+                 files={"caddy.override.conf": "myapp.example.com { reverse_proxy evil:80 }\n"})
+    with patch("boxmunge.commands.deploy.compose_up") as up:
+        assert run_deploy("myapp", paths) == 1
+    up.assert_not_called()
+    assert tree_snapshot(live) == before
+    err = capsys.readouterr().err
+    assert "caddy.override.conf" in err and "operator" in err
+
+
+def test_operator_placed_caddy_override_survives_deploys(paths, live) -> None:
+    (live / "caddy.override.conf").write_text("myapp.example.com { respond 200 }\n")
+    place_bundle(paths, timestamp="2026-10-13T100000000000", files={"VERSION": "v2\n"})
+    with patch("boxmunge.commands.deploy.compose_up"), \
+            patch("boxmunge.commands.deploy.caddy_reload"):
+        assert run_deploy("myapp", paths) == 0
+    assert (live / "caddy.override.conf").read_text() == "myapp.example.com { respond 200 }\n"
+    assert not (live / ".releases" / "previous" / "caddy.override.conf").exists()
+
+
 def test_placeholder_data_dir_is_accepted(paths, live, capsys) -> None:
     place_bundle(paths, timestamp="2026-10-13T100000000000",
                  files={"data/.gitkeep": "", "VERSION": "v2\n"})

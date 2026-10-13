@@ -156,6 +156,9 @@ BOX_OWNED_ENTRIES: dict[str, str] = {
                 "server with 'security suppress' and 'security unsuppress'",
     "data": "the project's live data lives here on the server",
     "backups": "the server's encrypted snapshots live here",
+    "caddy.override.conf": "it replaces the generated Caddy config verbatim, so "
+                           "only an operator may place it, directly on the "
+                           "server",
 }
 
 # Entries boxmunge itself creates in a project directory.

@@ -56,6 +56,7 @@ class TestBoxOwnedEntriesRefused:
         ("repo/README", "stray clone"),
         (".releases/previous/compose.yml", "services: {}\n"),
         ("compose.boxmunge.yml", "services: {}\n"),
+        ("caddy.override.conf", "example.com { respond 200 }\n"),
     ])
     def test_refused_with_named_entry(self, tmp_path: Path, entry: str,
                                       content: str) -> None:
