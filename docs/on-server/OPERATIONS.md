@@ -131,7 +131,7 @@ release's files back. While a release is staged, `prod-deploy` and `rollback` re
 unstage first.
 
 A stage that fails after installing its release (staging containers fail to start, the staging data
-copy fails) cleans up after itself: staging containers, the staging Caddy site and compose files are
+copy fails, Caddy rejects the staging site) cleans up after itself: staging containers, the staging Caddy site and compose files are
 removed and the production release's files are put back. `unstage` removes whatever a stage left
 behind even if that stage never got as far as recording itself active, so it can always be used to
 clean up; with nothing staged it reports `No staging found` and exits 1.

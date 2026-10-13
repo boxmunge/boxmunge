@@ -53,6 +53,17 @@ def write_site(caddy_dir: Path, site_path: Path, content: str) -> None:
     atomic_write_text(site_path, content, mode=SITE_MODE)
 
 
+def remove_site(caddy_dir: Path, site_path: Path) -> None:
+    """Delete a site file and forget any journal entry for it.
+
+    For a site that is being torn down (unstage): a later restore must not
+    bring back routing to containers that no longer exist. Removing a site
+    cannot make Caddy's config invalid, so nothing needs journaling.
+    """
+    site_path.unlink(missing_ok=True)
+    (_journal_dir(caddy_dir) / f"{site_path.name}.json").unlink(missing_ok=True)
+
+
 def restore_sites(caddy_dir: Path) -> list[str]:
     """Put every journaled site file back as Caddy last accepted it.
 

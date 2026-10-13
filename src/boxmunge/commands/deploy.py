@@ -12,7 +12,7 @@ from boxmunge.commands.deploy_steps import (
     snapshot_live_release, take_pre_deploy_snapshot, update_repo,
 )
 from boxmunge.compose import prepare_compose_override
-from boxmunge.docker import compose_up, caddy_reload, DockerError
+from boxmunge.docker import CaddyConfigRejected, compose_up, caddy_reload, DockerError
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.identity import register_project_identity
 from boxmunge.intake import (
@@ -27,11 +27,12 @@ from boxmunge.probation import clear_probation_if_active
 from boxmunge.release import (
     ReleaseStateError, has_prestage, install_release, keep_previous_release,
     discard_prestage, discard_previous_release, live_ref, mark_live, prestage_ref,
-    prestage_to_previous, prestage_tree,
+    prestage_to_previous, prestage_tree, previous_dir,
 )
 from boxmunge.source import (
     SourceError, bundle_ref, consume_bundle, resolve_bundle_source,
 )
+from boxmunge.state import read_state
 
 
 def _run_deploy_inner(
@@ -304,6 +305,8 @@ def _start_release(
     print("  Reloading Caddy...")
     try:
         caddy_reload(paths.caddy, paths.state)
+    except CaddyConfigRejected as e:
+        return _caddy_rejected(project_name, paths, e)
     except DockerError as e:
         print(f"  WARN: Caddy reload failed: {e}")
 
@@ -320,6 +323,29 @@ def _start_release(
     webhook_safe("deploy", project_name, paths, details={"ref": actual_ref})
 
     return 0
+
+
+def _caddy_rejected(project_name: str, paths: BoxPaths,
+                    error: CaddyConfigRejected) -> int:
+    """Caddy refused the new site config: fail, and say where things stand."""
+    site = paths.project_caddy_site(project_name).name
+    restored = ", ".join(error.restored) or "(nothing journaled)"
+    print(f"ERROR: Caddy rejected the new site config ({site}); the previous "
+          f"routing was restored for: {restored}.", file=sys.stderr)
+    print(f"  The new release's containers are running behind the previous "
+          f"routing. Fix the site config and deploy again"
+          + (f", or run 'rollback {project_name}' to return to the previous "
+             f"release." if _has_rollback_target(paths, project_name) else "."),
+          file=sys.stderr)
+    log_error("deploy", f"Caddy rejected {site}; previous routing restored",
+              paths, project=project_name)
+    return 1
+
+
+def _has_rollback_target(paths: BoxPaths, project_name: str) -> bool:
+    if (paths.project_dir(project_name) / "repo").exists():
+        return bool(read_state(paths.project_deploy_state(project_name)).get("history"))
+    return previous_dir(paths, project_name).is_dir()
 
 
 def run_deploy(
