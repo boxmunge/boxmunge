@@ -333,19 +333,22 @@ def discard_previous_release(paths: BoxPaths, project_name: str) -> None:
 # --- staging ---------------------------------------------------------------
 # `stage` installs the staged release into the shared project dir (staging
 # containers run from it). The production release it displaced is kept in
-# ``.releases/prestage/`` until `promote` (it becomes the previous release)
-# or `unstage` (it is put back).
+# ``.releases/prestage/`` (``release/`` plus ``meta.json``) until `promote`
+# (it becomes the previous release) or `unstage` (it is put back). The
+# directory is assembled beside its final name and renamed into place
+# complete, so a kept release always has its metadata.
 
-def prestage_dir(paths: BoxPaths, project_name: str) -> Path:
+def _prestage(paths: BoxPaths, project_name: str) -> Path:
     return paths.project_releases(project_name) / "prestage"
 
 
-def _prestage_meta(paths: BoxPaths, project_name: str) -> Path:
-    return paths.project_releases(project_name) / "prestage.json"
+def prestage_tree(paths: BoxPaths, project_name: str) -> Path:
+    """The kept production release's code."""
+    return _prestage(paths, project_name) / "release"
 
 
 def has_prestage(paths: BoxPaths, project_name: str) -> bool:
-    return prestage_dir(paths, project_name).is_dir()
+    return _prestage(paths, project_name).is_dir()
 
 
 def keep_prestage_release(paths: BoxPaths, project_name: str,
@@ -362,38 +365,40 @@ def keep_prestage_release(paths: BoxPaths, project_name: str,
     deployed = (project_dir / "manifest.yml").exists()
     building = paths.project_releases(project_name) / "prestage.building"
     _remove(building)
-    building.mkdir(parents=True)
+    (building / "release").mkdir(parents=True)
     if deployed:
         for entry in live_code_entries(project_dir, release_tree):
-            _copy_entry(entry, building / entry.name)
+            _copy_entry(entry, building / "release" / entry.name)
     meta = {"ref": live_ref(paths, project_name) if deployed else None}
-    building.rename(prestage_dir(paths, project_name))
-    atomic_write_text(_prestage_meta(paths, project_name),
-                      json.dumps(meta) + "\n", mode=0o644)
+    atomic_write_text(building / "meta.json", json.dumps(meta) + "\n", mode=0o644)
+    building.rename(_prestage(paths, project_name))
 
 
-def _prestage_ref(paths: BoxPaths, project_name: str) -> str | None:
-    meta_path = _prestage_meta(paths, project_name)
+def prestage_ref(paths: BoxPaths, project_name: str) -> str | None:
+    """Ref of the kept production release; None if it was never deployed."""
+    meta_path = _prestage(paths, project_name) / "meta.json"
     ref = _read_meta(meta_path).get("ref")
     if ref is not None and not isinstance(ref, str):
         raise ReleaseStateError(f"{meta_path} has an invalid ref")
     return ref
 
 
+def discard_prestage(paths: BoxPaths, project_name: str) -> None:
+    _remove(_prestage(paths, project_name))
+
+
 def prestage_to_previous(paths: BoxPaths, project_name: str,
                          data_snapshot: str | None, replaced_by: str) -> None:
     """On promote: the kept production release becomes the previous release."""
-    ref = _prestage_ref(paths, project_name)
-    meta_path = _prestage_meta(paths, project_name)
+    ref = prestage_ref(paths, project_name)
     if ref is None:
         # First promote of a never-deployed project: nothing to roll back to.
-        _remove(prestage_dir(paths, project_name))
-        meta_path.unlink()
+        discard_prestage(paths, project_name)
         return
     _remove(_previous_meta(paths, project_name))
     target = previous_dir(paths, project_name)
     _remove(target)
-    prestage_dir(paths, project_name).rename(target)
+    prestage_tree(paths, project_name).rename(target)
     meta = {
         "ref": ref,
         "data_snapshot": data_snapshot or "",
@@ -402,16 +407,15 @@ def prestage_to_previous(paths: BoxPaths, project_name: str,
     }
     atomic_write_text(_previous_meta(paths, project_name),
                       json.dumps(meta, indent=2) + "\n", mode=0o644)
-    meta_path.unlink()
+    discard_prestage(paths, project_name)
 
 
 def restore_prestage(paths: BoxPaths, project_name: str) -> None:
     """Put the kept production release back (unstage, or a failed stage)."""
-    ref = _prestage_ref(paths, project_name)
-    install_release(prestage_dir(paths, project_name), paths.project_dir(project_name))
+    ref = prestage_ref(paths, project_name)
+    install_release(prestage_tree(paths, project_name), paths.project_dir(project_name))
     if ref is None:
         _remove(_live_meta(paths, project_name))
     else:
         mark_live(paths, project_name, ref)
-    _remove(prestage_dir(paths, project_name))
-    _prestage_meta(paths, project_name).unlink()
+    discard_prestage(paths, project_name)
