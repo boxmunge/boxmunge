@@ -443,7 +443,8 @@ def evaluate_finding(
     # 11. Threshold comparison against the DISTRO severity (elevated by the
     # hardening penalty). effective_severity now reflects the distro severity
     # the decision was actually made on. Reached only by balanced/strict with
-    # status ∈ {AFFECTED, END_OF_LIFE} and a distro severity.
+    # a distro severity and a status outside _DEPRIORITIZED_STATUS (AFFECTED,
+    # END_OF_LIFE, or UNKNOWN — a missing status fails closed).
     distro_effective = elevate_severity(distro_sev, hardening_penalty)
     return _threshold_disposition(
         finding,

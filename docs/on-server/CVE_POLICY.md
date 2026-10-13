@@ -138,8 +138,11 @@ For every finding, `evaluate_finding` runs these gates in order:
 11. **Threshold comparison** against the distro severity (elevated by the
    hardening penalty, using the posture threshold from the trust ladder table)
    → `QUARANTINE` / `STILL_RUNNING_AT_RISK` / `INFORMATIONAL`. Reached only by
-   `balanced`/`strict` with `Status ∈ {affected, end_of_life}` and a distro
-   severity.
+   `balanced`/`strict` with a distro severity and a `Status` that is not one
+   of the deprioritized statuses in step 8: `affected`, `end_of_life`, or a
+   missing/unrecognised status. A missing status is not a distro verdict that
+   the finding is low-risk, so it fails closed and is threshold-compared like
+   `affected`.
 
 ### Decision matrix summary
 
@@ -164,7 +167,7 @@ For every finding, `evaluate_finding` runs these gates in order:
 A finding with `Status: end_of_life` is **not** in the distro-deprioritized
 bucket. EOL means the distro will never ship a fix — that is a more dangerous
 signal, not less. On Debian 13 stable it should not appear; if it does, it
-falls through to step 9 (the threshold gate) alongside `Status: affected`.
+falls through to step 11 (the threshold gate) alongside `Status: affected`.
 
 ## CISA KEV feed
 
@@ -359,7 +362,7 @@ explanation show the elevation reason explicitly so you can see why a
 Medium CVE quarantined a project running on `strict` posture.
 
 For non-paranoid postures, the penalty applies to the **distro** severity
-at step 9. For `paranoid`, the penalty applies to the **NVD** severity.
+at step 11. For `paranoid`, the penalty applies to the **NVD** severity.
 
 Rationale: running with read-only rootfs disabled means a Medium CVE
 behaves more like a High one in practice — the policy treats it that way.
