@@ -95,3 +95,27 @@ class TestStageRejectsBeforeTouchingLiveTree:
         up.assert_not_called()
         assert tree_snapshot(project_dir) == before
         assert not paths.project_staging_caddy_site("myapp").exists()
+
+
+class TestInstallFailureAdvice:
+    def _fail_install(self, paths):
+        with patch("boxmunge.commands.deploy.install_release",
+                   side_effect=OSError("disk full")), \
+                patch("boxmunge.commands.deploy.compose_up") as up:
+            rc = run_deploy("myapp", paths)
+        up.assert_not_called()
+        return rc
+
+    def test_first_deploy_does_not_advise_rollback(self, paths, capsys) -> None:
+        add_project("myapp", paths)
+        place_bundle(paths)
+        assert self._fail_install(paths) == 1
+        err = capsys.readouterr().err
+        assert "disk full" in err
+        assert "rollback" not in err
+
+    def test_upgrade_advises_rollback(self, paths, capsys) -> None:
+        _deploy_working(paths)
+        place_bundle(paths, timestamp="2026-10-13T100000000000")
+        assert self._fail_install(paths) == 1
+        assert "rollback myapp" in capsys.readouterr().err

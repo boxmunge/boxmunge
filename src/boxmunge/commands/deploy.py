@@ -102,12 +102,14 @@ def _deploy_bundle(
                     keep_previous_release(paths, project_name, snapshot_name,
                                           new_ref, release_tree=tree)
                 except (OSError, ReleaseStateError) as e:
-                    return _install_failed(project_name, paths, e, changed=False)
+                    return _install_failed(project_name, paths, e, changed=False,
+                                           first_deploy=is_new)
             try:
                 install_release(tree, paths.project_dir(project_name))
                 mark_live(paths, project_name, new_ref)
             except (OSError, ValueError) as e:
-                return _install_failed(project_name, paths, e, changed=True)
+                return _install_failed(project_name, paths, e, changed=True,
+                                       first_deploy=is_new)
     except IntakeError as e:
         return report_refusal(e)
 
@@ -118,9 +120,12 @@ def _deploy_bundle(
 
 
 def _install_failed(project_name: str, paths: BoxPaths, error: Exception,
-                    changed: bool) -> int:
+                    changed: bool, first_deploy: bool) -> int:
     print(f"ERROR: Installing the release failed: {error}", file=sys.stderr)
-    if changed:
+    if changed and first_deploy:
+        print("  The project files may be partly written. Fix the cause and "
+              "deploy the bundle again.", file=sys.stderr)
+    elif changed:
         print(f"  The project files may be partly updated. 'rollback "
               f"{project_name}' restores the previous release.", file=sys.stderr)
     else:
