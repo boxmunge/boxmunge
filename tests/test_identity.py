@@ -28,6 +28,6 @@ class TestProjectIdentity:
         assert state["project_id"] == "01AAA"
 
     def test_ulid_registered_under_different_name_raises(self, paths: BoxPaths) -> None:
-        register_project_identity("existing_app", "01AAA", paths)
+        register_project_identity("existing-app", "01AAA", paths)
         with pytest.raises(ValueError, match="already registered"):
-            check_project_identity("new_app", "01AAA", paths)
+            check_project_identity("new-app", "01AAA", paths)
