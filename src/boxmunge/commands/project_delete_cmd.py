@@ -5,6 +5,7 @@ import shutil
 import sys
 
 from boxmunge.docker import compose_down, caddy_reload, DockerError
+from boxmunge.fileutil import LockError, project_lock
 from boxmunge.log import log_operation
 from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import is_registered, remove_project as registry_remove
@@ -29,6 +30,17 @@ def run_project_delete(project_name: str, paths: BoxPaths, yes: bool = False) ->
             print("Aborted.")
             return 1
 
+    try:
+        with project_lock(project_name, paths):
+            return _delete_locked(project_name, paths)
+    except LockError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+
+def _delete_locked(project_name: str, paths: BoxPaths) -> int:
+    """Tear down and remove the project. Caller holds the project lock."""
+    project_dir = paths.project_dir(project_name)
     if project_dir.exists():
         compose_files = ["compose.yml"]
         override = paths.project_compose_override(project_name)

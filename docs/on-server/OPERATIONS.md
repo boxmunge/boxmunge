@@ -329,6 +329,26 @@ You will be shown what snapshot will be restored and asked to confirm before any
 
 ---
 
+## Concurrent Operations
+
+Every command that changes a project holds that project's lock while it works: `prod-deploy`,
+`stage`, `promote`, `unstage`, `rollback`, `restore`, `backup`, `pause`, `resume`, `recover`,
+`project-delete`, the daily `container-update` (for the whole backup, pull, recreate, and rollback
+sequence), the CVE scan, and the 5-minute health check. Only one of them runs against a project at a
+time.
+
+If another operation holds the lock, an operator command fails at once and changes nothing:
+
+```text
+ERROR: Another operation is in progress for 'myapp'. Try again shortly.
+```
+
+Confirmation prompts are answered before the lock is taken, and the checks that decide whether the
+command may act (paused, CVE-quarantined, monitor-stopped) are repeated once the lock is held. A
+quarantine that lands while you are answering the prompt therefore still wins.
+
+---
+
 ## Pause and Resume
 
 Take a project offline temporarily without tearing it down. Visitors see a styled 503 maintenance page branded "Scheduled maintenance" -- not a broken site.

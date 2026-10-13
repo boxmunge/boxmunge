@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.compose import prepare_compose_override
 from boxmunge.docker import compose_up, caddy_reload, DockerError
+from boxmunge.fileutil import LockError, project_lock
 from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
@@ -30,26 +31,24 @@ from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state, write_state
 
 
-def run_recover(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
-    """Un-stop a health-monitor-stopped project. Returns 0 on success."""
-    project_dir = paths.project_dir(project_name)
-    if not project_dir.exists() or not (project_dir / "manifest.yml").exists():
-        print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
-        return 1
+def _monitor_stopped_health(project_name: str, paths: BoxPaths) -> dict | None:
+    """Return the health state if the project can be recovered, else None.
 
-    # Route paused / quarantined projects to their dedicated recovery paths
-    # rather than restarting them here (which would bypass those checks).
+    Prints why on refusal. Paused / quarantined projects are routed to
+    their dedicated recovery paths rather than restarted here (which would
+    bypass those checks).
+    """
     if is_paused(project_name, paths):
         print(
             f"ERROR: Project '{project_name}' is paused, not monitor-stopped. "
             f"Use: boxmunge resume {project_name}",
             file=sys.stderr,
         )
-        return 1
+        return None
     block = is_blocked(project_name, paths)
     if block and block.reason is BlockReason.QUARANTINED:
         print(f"ERROR: {block.refuse_message}", file=sys.stderr)
-        return 1
+        return None
 
     health = read_state(paths.project_health_state(project_name))
     status = health.get("status", "unknown")
@@ -59,18 +58,23 @@ def run_recover(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
             f"state (health status: {status}). Nothing to recover.",
             file=sys.stderr,
         )
-        return 1
+        return None
+    return health
 
-    try:
-        manifest = load_manifest(paths.project_manifest(project_name))
-    except ManifestError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
 
-    compose_files = ["compose.yml"]
-    override = paths.project_compose_override(project_name)
-    if override.exists():
-        compose_files.append("compose.boxmunge.yml")
+def run_recover(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
+    """Un-stop a health-monitor-stopped project. Returns 0 on success.
+
+    Preconditions are checked before the prompt and again under the
+    project lock, which the recovery holds throughout.
+    """
+    project_dir = paths.project_dir(project_name)
+    if not project_dir.exists() or not (project_dir / "manifest.yml").exists():
+        print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
+        return 1
+    health = _monitor_stopped_health(project_name, paths)
+    if health is None:
+        return 1
 
     if not yes:
         reason = health.get("failure_reason", "")
@@ -83,6 +87,30 @@ def run_recover(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
         if response.lower() != "y":
             print("Aborted.")
             return 1
+
+    try:
+        with project_lock(project_name, paths):
+            return _recover_locked(project_name, paths)
+    except LockError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+
+def _recover_locked(project_name: str, paths: BoxPaths) -> int:
+    """Restart the stopped build. Caller holds the project lock."""
+    health = _monitor_stopped_health(project_name, paths)
+    if health is None:
+        return 1
+    project_dir = paths.project_dir(project_name)
+    try:
+        manifest = load_manifest(paths.project_manifest(project_name))
+    except ManifestError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+    compose_files = ["compose.yml"]
+    if paths.project_compose_override(project_name).exists():
+        compose_files.append("compose.boxmunge.yml")
 
     # Start containers — no pull/rebuild, so the exact build the monitor
     # stopped comes back (recovery must be a faithful un-stop, not a silent

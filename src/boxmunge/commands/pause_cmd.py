@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 
 from boxmunge.docker import compose_stop, caddy_reload, DockerError
-from boxmunge.fileutil import atomic_write_text
+from boxmunge.fileutil import LockError, atomic_write_text, project_lock
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import (
@@ -20,7 +20,12 @@ def run_pause(
     yes: bool = False,
     reason: str | None = None,
 ) -> int:
-    """Pause a project. Returns 0 on success, 1 on failure."""
+    """Pause a project. Returns 0 on success, 1 on failure.
+
+    Checks and the confirmation prompt run first; the pause itself runs
+    under the project lock so it cannot interleave with a deploy, restore,
+    scan, or health tick.
+    """
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists() or not (project_dir / "manifest.yml").exists():
         print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
@@ -31,16 +36,8 @@ def run_pause(
               file=sys.stderr)
         return 1
 
-    try:
-        manifest = load_manifest(paths.project_manifest(project_name))
-    except ManifestError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
-
-    hosts = manifest.get("hosts", [])
-    if not hosts:
-        print(f"ERROR: Project '{project_name}' has no hosts in manifest.",
-              file=sys.stderr)
+    hosts = _manifest_hosts(project_name, paths)
+    if hosts is None:
         return 1
 
     if not yes:
@@ -52,6 +49,41 @@ def run_pause(
         if response.lower() != "y":
             print("Aborted.")
             return 1
+
+    try:
+        with project_lock(project_name, paths):
+            return _pause_locked(project_name, paths, reason)
+    except LockError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+
+def _manifest_hosts(project_name: str, paths: BoxPaths) -> list[str] | None:
+    """The manifest's hosts, or None (after printing why) if unusable."""
+    try:
+        manifest = load_manifest(paths.project_manifest(project_name))
+    except ManifestError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return None
+    hosts = manifest.get("hosts", [])
+    if not hosts:
+        print(f"ERROR: Project '{project_name}' has no hosts in manifest.",
+              file=sys.stderr)
+        return None
+    return hosts
+
+
+def _pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int:
+    """Pause the project. Caller holds the project lock."""
+    # Re-check under the lock: a pause or deploy may have landed while the
+    # operator was answering the prompt.
+    if is_paused(project_name, paths):
+        print(f"ERROR: Project '{project_name}' is already paused.",
+              file=sys.stderr)
+        return 1
+    hosts = _manifest_hosts(project_name, paths)
+    if hosts is None:
+        return 1
 
     # Write paused.json FIRST so any subsequent failure leaves status as PAUSED.
     write_paused_state(project_name, paths, reason=reason)
@@ -70,6 +102,7 @@ def run_pause(
         return 1
 
     # Now stop the containers.
+    project_dir = paths.project_dir(project_name)
     compose_files = ["compose.yml"]
     override = paths.project_compose_override(project_name)
     if override.exists():

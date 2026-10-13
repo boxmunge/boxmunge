@@ -21,6 +21,7 @@ from boxmunge.compose_validate import validate_user_compose, ComposeSecurityErro
 from boxmunge.docker import (
     compose_pull, compose_up, caddy_reload, DockerError,
 )
+from boxmunge.fileutil import LockError, project_lock
 from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
@@ -49,18 +50,8 @@ def _has_image_services(project_dir: Path, compose_files: list[str]) -> bool:
     return False
 
 
-def run_resume(
-    project_name: str,
-    paths: BoxPaths,
-    yes: bool = False,
-    skip_security_checks: bool = False,
-) -> int:
-    """Resume a paused project. Returns 0 on success, 1 on failure."""
-    project_dir = paths.project_dir(project_name)
-    if not project_dir.exists() or not (project_dir / "manifest.yml").exists():
-        print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
-        return 1
-
+def _refuse_unless_resumable(project_name: str, paths: BoxPaths) -> bool:
+    """Print why and return False unless the project is paused, not quarantined."""
     # Pause-resume must NOT silently un-quarantine. Lifting CVE quarantine
     # has its own dedicated command path (`boxmunge security resume`)
     # which re-scans before lifting. is_blocked() returns QUARANTINED
@@ -69,30 +60,47 @@ def run_resume(
     block = is_blocked(project_name, paths)
     if block and block.reason is BlockReason.QUARANTINED:
         print(f"ERROR: {block.refuse_message}", file=sys.stderr)
-        return 1
-
+        return False
     # Positive precondition: this command can only be invoked when the
-    # project is paused. Note this is a different semantic from the
-    # is_blocked refuse path above.
+    # project is paused.
     if not is_paused(project_name, paths):
         print(f"ERROR: Project '{project_name}' is not paused.",
               file=sys.stderr)
-        return 1
+        return False
+    return True
 
-    try:
-        manifest = load_manifest(paths.project_manifest(project_name))
-    except ManifestError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
 
+def _compose_files(project_name: str, paths: BoxPaths) -> list[str]:
     compose_files = ["compose.yml"]
-    override = paths.project_compose_override(project_name)
-    if override.exists():
+    if paths.project_compose_override(project_name).exists():
         compose_files.append("compose.boxmunge.yml")
+    return compose_files
 
-    pull_image_services = _has_image_services(project_dir, compose_files)
+
+def run_resume(
+    project_name: str,
+    paths: BoxPaths,
+    yes: bool = False,
+    skip_security_checks: bool = False,
+) -> int:
+    """Resume a paused project. Returns 0 on success, 1 on failure.
+
+    Preconditions are checked before the confirmation prompt (so the
+    operator is not asked to confirm something that cannot happen) and
+    again under the project lock, which the resume itself holds: a
+    quarantine landing while the operator answered the prompt wins.
+    """
+    project_dir = paths.project_dir(project_name)
+    if not project_dir.exists() or not (project_dir / "manifest.yml").exists():
+        print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
+        return 1
+    if not _refuse_unless_resumable(project_name, paths):
+        return 1
 
     if not yes:
+        pull_image_services = _has_image_services(
+            project_dir, _compose_files(project_name, paths),
+        )
         print(f"This will resume '{project_name}':")
         if skip_security_checks:
             print("  - SKIPPING image pull (--skip-security-checks set)")
@@ -106,6 +114,29 @@ def run_resume(
         if response.lower() != "y":
             print("Aborted.")
             return 1
+
+    try:
+        with project_lock(project_name, paths):
+            return _resume_locked(project_name, paths, skip_security_checks)
+    except LockError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+
+def _resume_locked(
+    project_name: str, paths: BoxPaths, skip_security_checks: bool,
+) -> int:
+    """Bring the project back online. Caller holds the project lock."""
+    if not _refuse_unless_resumable(project_name, paths):
+        return 1
+    project_dir = paths.project_dir(project_name)
+    try:
+        manifest = load_manifest(paths.project_manifest(project_name))
+    except ManifestError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    compose_files = _compose_files(project_name, paths)
+    pull_image_services = _has_image_services(project_dir, compose_files)
 
     # Validate user compose.yml against silent-floor-defeating keys BEFORE
     # any container action. A hostile compose.yml introduced while the

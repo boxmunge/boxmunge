@@ -1,4 +1,31 @@
-"""File utilities — atomic writes and project locking."""
+"""File utilities — atomic writes and project locking.
+
+Lock order
+----------
+Root timers and deploy-user commands coordinate through advisory flocks.
+To rule out deadlock, a process only ever acquires them in this order
+(outermost first) and releases them in reverse:
+
+1. ``upgrade-state/upgrade.lock``: one platform upgrade at a time (upgrade
+   shim, ``auto-update``, ``check-probation``).
+2. ``state/container-updates/.lock``: one ``container-update`` run at a time.
+3. ``state/<project>.lock`` (``project_lock``): every mutation of one
+   project's compose, Caddy, or lifecycle state: deploy, stage, promote,
+   unstage, rollback, restore, backup, pause, resume, recover,
+   project-delete, container-update, CVE scan and quarantine lift, and the
+   health tick. Non-blocking. A process holds **at most one** project lock
+   and never acquires a second project lock while holding one.
+4. Short blocking locks, always innermost: ``state/.registry.lock``
+   (``registry_lock``), ``state/.caddy.lock`` (inside ``caddy_reload``), and
+   ``state/.cve-grace.lock``. None of them is held while acquiring any
+   other lock, and none is held across slow work.
+
+Gating checks (paused, quarantined, monitor-stopped) that decide whether a
+project may be mutated are made *after* taking the project lock, so a
+concurrent quarantine cannot land between the check and the action.
+Network calls that do not need the lock (webhooks, Pushover) run after it
+is released.
+"""
 
 import fcntl
 import logging

@@ -9,6 +9,7 @@ it applies the configured strategy (leave_broken or rollback_to_previous).
 from __future__ import annotations
 
 import time
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +20,7 @@ from boxmunge.docker import (
     container_running,
 )
 from boxmunge.commands.backup_cmd import run_backup
+from boxmunge.fileutil import LockError, project_lock
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_warning, log_error
 
@@ -202,9 +204,14 @@ def _maybe_rollback(
         log_operation("container-update", f"Rollback succeeded for {target.name}", paths, project=target.name)
 
 
-
 def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
-    """Update a single target. Returns a result dict suitable for logging."""
+    """Update a single target. Returns a result dict suitable for logging.
+
+    A user project's whole update (lifecycle check, pre-update backup,
+    pull, recreate, health wait, rollback) runs under its project lock, so
+    it cannot interleave with a deploy, stage, restore, CVE quarantine, or
+    health tick. Caddy is not a project and has no project lock.
+    """
     result: dict[str, Any] = {
         "name": target.name,
         "ts": _now(),
@@ -215,11 +222,29 @@ def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
         "current_digests": {},
         "reason": None,
     }
+    with ExitStack() as stack:
+        if not target.is_caddy:
+            try:
+                stack.enter_context(project_lock(target.name, paths))
+            except LockError as e:
+                result["status"] = "failed"
+                result["reason"] = f"project_locked: {e}"
+                log_error(
+                    "container-update",
+                    f"Skipped {target.name}: project lock held by another operation",
+                    paths, project=target.name,
+                )
+                return result
+        return _update_locked(paths, target, result)
 
-    # Defense-in-depth: callers of update_target SHOULD already filter
-    # blocked projects (see container_update_cmd's run_container_update).
-    # If a future direct caller forgets, refuse to pull/recreate here
-    # too — Caddy targets are exempt because they are not user projects
+
+def _update_locked(
+    paths: "BoxPaths", target: UpdateTarget, result: dict[str, Any],
+) -> dict[str, Any]:
+    """The update flow. Caller holds the project lock (user projects)."""
+    # Checked under the lock: a CVE scan may have quarantined the project,
+    # or the operator paused it, while this run was working on earlier
+    # targets. Caddy targets are exempt because they are not user projects
     # and have no lifecycle state.
     if not target.is_caddy:
         block = is_blocked(target.name, paths)
@@ -252,7 +277,7 @@ def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
 
     # Step 1: Pre-update backup (if applicable)
     if target.has_backup:
-        rc = run_backup(target.name, paths)
+        rc = run_backup(target.name, paths, _lock_held=True)
         if rc != 0:
             result["status"] = "failed"
             result["reason"] = "backup_failed"

@@ -292,7 +292,7 @@ class TestUpdateTarget:
         mock_capture.return_value = {"web": "sha256:old"}
         mock_backup.return_value = 0
         update_target(paths, target)
-        mock_backup.assert_called_once_with("stateful", paths)
+        mock_backup.assert_called_once_with("stateful", paths, _lock_held=True)
 
     @patch("boxmunge.container_update.run_backup", return_value=1)
     @patch("boxmunge.container_update.compose_pull")
