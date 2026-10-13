@@ -1,7 +1,7 @@
 """Restore and test-restore must decrypt somewhere the system container can see.
 
 When age runs in the system container, every path handed to it must
-translate through ``_container_path``. A decrypt target under /tmp does
+translate through ``container_path``. A decrypt target under /tmp does
 not, which crashed restore and test-restore on container-age hosts.
 """
 
@@ -20,6 +20,9 @@ from boxmunge.paths import BoxPaths
 
 PROJECT = "myapp"
 SNAPSHOT = f"{PROJECT}-2026-10-11T181604.tar.gz.age"
+# Any valid project name works, including `config` (C-11: the old substring
+# translation sent it to the read-only key mount).
+PROJECTS = ["myapp", "config"]
 
 
 class FakeAge:
@@ -64,9 +67,25 @@ def _leftovers(paths: BoxPaths) -> list[str]:
 
 
 class TestContainerPath:
-    def test_untranslatable_path_raises_backup_error(self) -> None:
-        with pytest.raises(BackupError):
-            backup._container_path(Path("/tmp/x/out.tar.gz"))
+    def test_untranslatable_path_raises_backup_error(self, paths) -> None:
+        with pytest.raises(BackupError, match="outside the system container"):
+            backup._resolve_path(Path("/tmp/x/out.tar.gz"), True, paths)
+
+
+class TestProjectNamedConfig:
+    def test_test_restore_of_project_named_config(self, paths, capsys) -> None:
+        paths.backup_key.write_text("AGE-SECRET-KEY-1TEST\n")
+        bdir = paths.project_backups("config")
+        bdir.mkdir(parents=True)
+        (bdir / "config-2026-10-11T181604.tar.gz.age").write_bytes(b"encrypted")
+        fake = FakeAge(paths)
+        with patch("boxmunge.backup._use_container", return_value=True), \
+             patch("boxmunge.backup._run_age_cmd", side_effect=fake):
+            assert run_test_restore("config", paths) == 0
+        cmd = fake.calls[0]
+        assert cmd[cmd.index("-o") + 1].startswith("/projects/config/backups/.restore-")
+        assert cmd[-1] == "/projects/config/backups/config-2026-10-11T181604.tar.gz.age"
+        assert cmd[cmd.index("-i") + 1] == "/config/backup.key"
 
 
 class TestTestRestore:
@@ -79,7 +98,7 @@ class TestTestRestore:
 
     def test_untranslatable_path_fails_cleanly(self, project, capsys) -> None:
         with patch("boxmunge.backup._use_container", return_value=True), \
-             patch("boxmunge.backup._container_path",
+             patch("boxmunge.backup._resolve_path",
                    side_effect=BackupError("cannot translate")):
             assert run_test_restore(PROJECT, project) == 1
         assert "FAIL" in capsys.readouterr().out

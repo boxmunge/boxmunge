@@ -81,7 +81,7 @@ def take_safety_snapshot(
         ) from e
     out = paths.project_backups(project_name) / safety_snapshot_name(project_name)
     try:
-        encrypt_file(raw, out, paths.backup_key)
+        encrypt_file(raw, out, paths)
     except (BackupError, FileNotFoundError) as e:
         raise RestoreError(f"pre-restore safety snapshot could not be encrypted: {e}") from e
     finally:

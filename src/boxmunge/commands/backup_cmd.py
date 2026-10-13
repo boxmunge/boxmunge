@@ -193,7 +193,7 @@ def _run_backup_inner(
     encrypted_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        _backup.encrypt_file(raw_path, encrypted_path, key_path)
+        _backup.encrypt_file(raw_path, encrypted_path, paths)
     except (BackupError, FileNotFoundError) as e:
         print(f"ERROR: Encryption failed: {e}", file=sys.stderr)
         raw_path.unlink(missing_ok=True)

@@ -73,25 +73,26 @@ class TestBackupFilename:
 
 
 class TestEncryptFile:
-    def test_encrypt_creates_output(self, tmp_path: Path) -> None:
-        key_file = tmp_path / "backup.key"
-        key_file.write_text(AGE_IDENTITY)
-        input_file = tmp_path / "data.tar.gz"
+    def test_encrypt_creates_output(self, paths) -> None:
+        paths.backup_key.write_text(AGE_IDENTITY)
+        bdir = paths.project_backups("myapp")
+        bdir.mkdir(parents=True)
+        input_file = bdir / "data.tar.gz"
         input_file.write_bytes(b"fake archive data here")
-        output_file = tmp_path / "data.tar.gz.age"
+        output_file = bdir / "data.tar.gz.age"
 
         with patch("boxmunge.backup._run_age_cmd") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess([], 0)
-            encrypt_file(input_file, output_file, key_file)
+            encrypt_file(input_file, output_file, paths)
             mock_run.assert_called_once()
             cmd = mock_run.call_args[0][0]
             assert "age" in cmd[0]
 
-    def test_encrypt_raises_on_missing_key(self, tmp_path: Path) -> None:
-        input_file = tmp_path / "data.tar.gz"
+    def test_encrypt_raises_on_missing_key(self, paths) -> None:
+        input_file = paths.projects / "data.tar.gz"
         input_file.write_bytes(b"data")
         with pytest.raises(FileNotFoundError, match="key"):
-            encrypt_file(input_file, tmp_path / "out.age", tmp_path / "nokey")
+            encrypt_file(input_file, paths.projects / "out.age", paths)
 
 
 class TestMatchDirOwnership:
@@ -144,16 +145,15 @@ class TestMatchDirOwnership:
 
 
 class TestDecryptFile:
-    def test_decrypt_calls_age(self, tmp_path: Path) -> None:
-        key_file = tmp_path / "backup.key"
-        key_file.write_text(AGE_IDENTITY)
-        input_file = tmp_path / "data.tar.gz.age"
+    def test_decrypt_calls_age(self, paths) -> None:
+        paths.backup_key.write_text(AGE_IDENTITY)
+        input_file = paths.projects / "data.tar.gz.age"
         input_file.write_bytes(b"encrypted data")
-        output_file = tmp_path / "data.tar.gz"
+        output_file = paths.projects / "data.tar.gz"
 
         with patch("boxmunge.backup._run_age_cmd") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess([], 0)
-            decrypt_file(input_file, output_file, key_file)
+            decrypt_file(input_file, output_file, paths)
             mock_run.assert_called_once()
             cmd = mock_run.call_args[0][0]
             assert "age" in cmd[0]

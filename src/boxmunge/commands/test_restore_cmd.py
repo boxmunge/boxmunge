@@ -30,7 +30,7 @@ def run_test_restore(project_name: str, paths: BoxPaths) -> int:
     print(f"Testing restore of {snapshot.name}...")
 
     try:
-        with decrypted_snapshot(snapshot, key_path) as output:
+        with decrypted_snapshot(snapshot, paths) as output:
             size = output.stat().st_size if output.exists() else 0
     except (BackupError, FileNotFoundError) as e:
         print(f"FAIL: Decryption failed: {e}")

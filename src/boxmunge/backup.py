@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from boxmunge.paths import BoxPaths
+
 _BACKUP_CMD_TIMEOUT = 600  # 10 minutes for large database dumps
 
 
@@ -57,17 +59,6 @@ def resolve_backup_service(manifest: dict[str, Any]) -> str:
     )
 
 
-def _run_cmd(cmd: list[str], timeout: int = _BACKUP_CMD_TIMEOUT, **kwargs) -> subprocess.CompletedProcess:
-    """Run a command, raising BackupError on failure."""
-    try:
-        return subprocess.run(cmd, check=True, capture_output=True, text=True,
-                              timeout=timeout, **kwargs)
-    except subprocess.TimeoutExpired as e:
-        raise BackupError(f"Command timed out after {timeout}s: {' '.join(cmd)}") from e
-    except subprocess.CalledProcessError as e:
-        raise BackupError(f"Command failed: {' '.join(cmd)}\n{e.stderr}") from e
-
-
 def _run_age_cmd(cmd: list[str], timeout: int = _BACKUP_CMD_TIMEOUT) -> subprocess.CompletedProcess:
     """Run an age command, preferring the system container.
 
@@ -93,33 +84,21 @@ def _run_age_cmd(cmd: list[str], timeout: int = _BACKUP_CMD_TIMEOUT) -> subproce
         raise BackupError(f"Command failed: {' '.join(cmd)}\n{e.stderr}") from e
 
 
-def _container_path(host_path: Path) -> str:
-    """Translate a host path to its container-internal equivalent.
-
-    The system container mounts:
-      /opt/boxmunge/config/backup.key → /config/backup.key
-      /opt/boxmunge/projects/ → /projects/
-    """
-    path_str = str(host_path)
-    if "/config/" in path_str:
-        return "/config/" + host_path.name
-    if "/projects/" in path_str:
-        idx = path_str.index("/projects/")
-        return path_str[idx:]
-    raise BackupError(f"Cannot translate path to container path: {host_path}")
-
-
 def _use_container() -> bool:
     """Check if the system container is available for age operations."""
     from boxmunge.system_container import ensure_system_container
     return ensure_system_container()
 
 
-def _resolve_path(host_path: Path, use_container: bool) -> str:
-    """Return container path if using container, host path otherwise."""
-    if use_container:
-        return _container_path(host_path)
-    return str(host_path)
+def _resolve_path(host_path: Path, use_container: bool, paths: BoxPaths) -> str:
+    """Return the container path if using the container, the host path otherwise."""
+    if not use_container:
+        return str(host_path)
+    from boxmunge.system_container import container_path, SystemContainerError
+    try:
+        return container_path(host_path, paths)
+    except SystemContainerError as e:
+        raise BackupError(str(e)) from e
 
 
 def _match_dir_ownership(path: Path) -> None:
@@ -143,14 +122,15 @@ def _match_dir_ownership(path: Path) -> None:
     os.chown(path, dir_stat.st_uid, dir_stat.st_gid)
 
 
-def _read_recipient(key_path: Path) -> str:
-    """Extract the public key (recipient) from an age identity file."""
+def _read_recipient(paths: BoxPaths) -> str:
+    """Extract the public key (recipient) from the age identity file."""
+    key_path = paths.backup_key
     for line in key_path.read_text().splitlines():
         if line.startswith("# public key: "):
             return line.removeprefix("# public key: ").strip()
     # If no comment header, derive it via age-keygen
     container = _use_container()
-    result = _run_age_cmd(["age-keygen", "-y", _resolve_path(key_path, container)])
+    result = _run_age_cmd(["age-keygen", "-y", _resolve_path(key_path, container, paths)])
     return result.stdout.strip()
 
 
@@ -160,12 +140,13 @@ def backup_filename(project_name: str) -> str:
     return f"{project_name}-{ts}.tar.gz.age"
 
 
-def encrypt_file(input_path: Path, output_path: Path, key_path: Path) -> None:
-    """Encrypt a file using age, via system container if available.
+def encrypt_file(input_path: Path, output_path: Path, paths: BoxPaths) -> None:
+    """Encrypt a file to the recipient of ``paths.backup_key`` using age.
 
     Writes to a temp file then renames to prevent partial encrypted files
     from appearing under the final name.
     """
+    key_path = paths.backup_key
     if not key_path.exists():
         raise FileNotFoundError(f"Backup encryption key not found: {key_path}")
 
@@ -179,12 +160,12 @@ def encrypt_file(input_path: Path, output_path: Path, key_path: Path) -> None:
     _match_dir_ownership(tmp_path)
 
     try:
-        recipient = _read_recipient(key_path)
+        recipient = _read_recipient(paths)
         container = _use_container()
         _run_age_cmd([
             "age", "--encrypt", "-r", recipient,
-            "-o", _resolve_path(tmp_path, container),
-            _resolve_path(input_path, container),
+            "-o", _resolve_path(tmp_path, container, paths),
+            _resolve_path(input_path, container, paths),
         ])
         os.rename(tmp_path, output_path)
     except BaseException:
@@ -192,21 +173,22 @@ def encrypt_file(input_path: Path, output_path: Path, key_path: Path) -> None:
         raise
 
 
-def decrypt_file(input_path: Path, output_path: Path, key_path: Path) -> None:
-    """Decrypt an age-encrypted file, via system container if available."""
+def decrypt_file(input_path: Path, output_path: Path, paths: BoxPaths) -> None:
+    """Decrypt an age-encrypted file with the identity at ``paths.backup_key``."""
+    key_path = paths.backup_key
     if not key_path.exists():
         raise FileNotFoundError(f"Backup encryption key not found: {key_path}")
 
     container = _use_container()
     _run_age_cmd([
-        "age", "--decrypt", "-i", _resolve_path(key_path, container),
-        "-o", _resolve_path(output_path, container),
-        _resolve_path(input_path, container),
+        "age", "--decrypt", "-i", _resolve_path(key_path, container, paths),
+        "-o", _resolve_path(output_path, container, paths),
+        _resolve_path(input_path, container, paths),
     ])
 
 
 @contextmanager
-def decrypted_snapshot(snapshot_path: Path, key_path: Path) -> Iterator[Path]:
+def decrypted_snapshot(snapshot_path: Path, paths: BoxPaths) -> Iterator[Path]:
     """Decrypt a snapshot into a private temp dir beside it; yield the plaintext.
 
     The temp dir lives in the project's backups directory (mounted into the
@@ -218,7 +200,7 @@ def decrypted_snapshot(snapshot_path: Path, key_path: Path) -> Iterator[Path]:
     try:
         _match_dir_ownership(tmpdir)
         output = tmpdir / snapshot_path.stem  # strips .age
-        decrypt_file(snapshot_path, output, key_path)
+        decrypt_file(snapshot_path, output, paths)
         yield output
     finally:
         shutil.rmtree(tmpdir)

@@ -159,7 +159,7 @@ def _run_restore_inner(
     print(f"Restoring {project_name} from {snapshot_path.name}...")
     phase = "verify"
     try:
-        with decrypted_snapshot(snapshot_path, paths.backup_key) as plaintext:
+        with decrypted_snapshot(snapshot_path, paths) as plaintext:
             print("  Decrypting and verifying snapshot...")
             verify_plaintext(plaintext)
             safety: Path | None = None
