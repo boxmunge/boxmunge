@@ -939,8 +939,9 @@ judged not exploitable.
 
 Scan cadence:
 
-- Daily at 03:00 (±30 min jitter) via `boxmunge-cve-scan.timer`
-- On every `prod-deploy`, `stage`, `promote`, `resume`, and image update
+- Daily between 03:00 and 03:30 via `boxmunge-cve-scan.timer`
+- Not yet at deploy or image-update time: run `security scan <project>`
+  after a deploy to check a new image at once
 - Ad-hoc:
 
   ```

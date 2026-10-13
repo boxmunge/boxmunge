@@ -6,8 +6,10 @@ workflow, and recovery.
 
 ## TL;DR for agents
 
-- **Daily scan via Trivy.** Every project's deployed images are scanned at
-  03:00 system time (±30 min jitter); also on every deploy and image update.
+- **Daily scan via Trivy.** Every project's deployed images are scanned
+  daily between 03:00 and 03:30 system time, and on demand with
+  `security scan`. There is no scan at deploy or image-update time yet: a
+  newly deployed image is first scanned by the next daily run.
 - **Posture per project (default `balanced`).** Four tiers form a trust ladder
   — `relaxed` quarantines only on CISA KEV, `balanced` (default) quarantines
   on KEV or a distro-acknowledged High + AV:N finding, `strict` extends that
@@ -627,10 +629,11 @@ audit trail.
 ## Scan cadence
 
 - **Daily** at 03:00 system time via systemd timer `boxmunge-cve-scan.timer`,
-  with up to 30 minutes of randomized jitter.
-- **On every deploy** and **on every image update**. If a new image would
-  immediately quarantine under current posture, the deploy is rejected with
-  an error pointing to suppress/posture options.
+  with up to 30 minutes of randomized delay (03:00 to 03:30).
+- **Not yet at deploy or image-update time.** `prod-deploy`, `stage`,
+  `promote` and `container-update` do not scan, and no deploy is rejected
+  for CVEs: a new image runs unscanned until the next daily scan. Run
+  `boxmunge security scan <project>` after a deploy to check it at once.
 - **Ad-hoc:**
 
   ```
