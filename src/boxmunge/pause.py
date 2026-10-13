@@ -11,6 +11,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from boxmunge import restart_hold
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
 
@@ -36,6 +37,44 @@ def write_paused_state(
         paths.project_paused_state(project_name),
         json.dumps(data, indent=2) + "\n",
     )
+
+
+def _update_paused_state(project_name: str, paths: BoxPaths, **fields: Any) -> None:
+    state = read_paused_state(project_name, paths)
+    if state is None:
+        raise ValueError(f"project {project_name!r} is not paused")
+    atomic_write_text(
+        paths.project_paused_state(project_name),
+        json.dumps({**state, **fields}, indent=2) + "\n",
+    )
+
+
+def hold_restart_policies(project_name: str, paths: BoxPaths) -> None:
+    """Keep a paused project's containers stopped across a Docker restart.
+
+    Sets each container's restart policy to "no" and saves the originals in
+    the pause record (see boxmunge.restart_hold). Raises DockerError.
+    """
+    state = read_paused_state(project_name, paths) or {}
+    saved = restart_hold.hold(project_name, state.get("restart_policies") or {})
+    _update_paused_state(project_name, paths, restart_policies=saved)
+
+
+def release_restart_policies(project_name: str, paths: BoxPaths) -> None:
+    """Give a paused project's containers their saved restart policies back.
+    Raises DockerError."""
+    state = read_paused_state(project_name, paths) or {}
+    restart_hold.release(project_name, state.get("restart_policies") or {})
+
+
+def hand_over_restart_policies(
+    project_name: str, paths: BoxPaths, saved: dict[str, str],
+) -> None:
+    """A quarantine lifted while paused passes its saved originals to the
+    pause record, so the containers stay held until `resume`."""
+    state = read_paused_state(project_name, paths) or {}
+    merged = restart_hold.originals(state.get("restart_policies") or {}, saved)
+    _update_paused_state(project_name, paths, restart_policies=merged)
 
 
 def clear_paused_state(project_name: str, paths: BoxPaths) -> None:

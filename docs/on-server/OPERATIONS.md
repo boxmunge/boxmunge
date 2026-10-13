@@ -514,6 +514,7 @@ Containers are stopped via `docker compose stop`, so state is preserved on disk 
 - `prod-deploy`, `stage`, and `promote` refuse to run against it
 - `backup-sync` continues (it only copies; existing off-box snapshots are never removed)
 - Platform upgrades keep it paused: the maintenance page stays in place and the containers stay stopped
+- A Docker restart or reboot keeps it stopped: pause sets each container's restart policy to `no` (saving the original), and `resume` restores the originals before starting the containers
 
 To bring it back:
 

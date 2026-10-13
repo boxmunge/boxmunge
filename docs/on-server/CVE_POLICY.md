@@ -956,7 +956,9 @@ containers stay stopped until `boxmunge resume <project>` lifts the pause.
 container's restart policy to `no` with `docker update`, saving each
 original policy in the quarantine record; `security resume` restores them
 before starting the containers. Nothing else restarts a quarantined
-project.
+project. `pause` holds restart policies the same way; when a quarantine
+is lifted from a project that is still paused, the pause record takes over
+the saved policies and `boxmunge resume` restores them.
 
 ## Recommendations
 

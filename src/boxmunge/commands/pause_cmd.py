@@ -9,7 +9,8 @@ from boxmunge.fileutil import LockError, atomic_write_text, project_lock
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import (
-    is_paused, write_paused_state, render_maintenance_caddy_config,
+    hold_restart_policies, is_paused, write_paused_state,
+    render_maintenance_caddy_config,
 )
 from boxmunge.paths import BoxPaths
 
@@ -113,6 +114,18 @@ def _pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int
         print(f"WARN: compose stop reported errors: {e}", file=sys.stderr)
         log_error("pause", f"compose stop warning: {e}", paths,
                   project=project_name)
+
+    # Keep it stopped across a Docker restart or reboot (B-19 for pause).
+    try:
+        hold_restart_policies(project_name, paths)
+    except DockerError as e:
+        print(f"ERROR: Project paused, but its restart policies could not be "
+              f"disabled: {e}\n       A Docker restart may start "
+              f"`restart: always` services. Run 'resume {project_name}' and "
+              f"pause again.", file=sys.stderr)
+        log_error("pause", f"restart-policy hold failed: {e}", paths,
+                  project=project_name)
+        return 1
 
     log_operation("pause", "Project paused", paths,
                   project=project_name,

@@ -59,7 +59,8 @@ def _no_writable_diagnostic_sleep(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_docker_image_lookups(monkeypatch):
-    """Keep the CVE scan's image identification off the real Docker daemon.
+    """Keep CVE image identification and restart-policy holds off the real
+    Docker daemon.
 
     Tests stub container_image_digest themselves; the image-ID lookups
     default to "no container, no local image" unless a test overrides them.
@@ -70,6 +71,10 @@ def _no_docker_image_lookups(monkeypatch):
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_inputs.local_image_id", lambda r: None,
     )
+    # Quarantine and pause hold restart policies through boxmunge.restart_hold;
+    # by default the project has no containers to hold.
+    monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies", lambda p: {})
+    monkeypatch.setattr("boxmunge.restart_hold.set_restart_policy", lambda n, p: None)
 
 
 @pytest.fixture(autouse=True)

@@ -171,6 +171,9 @@ def test_lift_respects_pause(tmp_path, real_lift, capsys):
     assert real_lift.calls == []  # no Caddy reload, no compose up
     assert real_lift.rendered == []  # normal site config not rendered
     assert maintenance.read_text() == "maintenance page\n"
-    assert real_lift.policies == {"demo-web-1": "always"}
+    # Still held at "no"; the pause record now owns the original policy.
+    assert real_lift.policies == {"demo-web-1": "no"}
+    from boxmunge.pause import read_paused_state
+    assert read_paused_state("demo", paths)["restart_policies"] == {"demo-web-1": "always"}
     assert "still paused" in out and "boxmunge resume demo" in out
 

@@ -34,16 +34,10 @@ from pathlib import Path
 from typing import Any
 
 from boxmunge.cve.policy import FindingDisposition
-from boxmunge.docker import (
-    DockerError,
-    caddy_reload,
-    compose_stop,
-    compose_up,
-    project_restart_policies,
-    set_restart_policy,
-)
+from boxmunge import restart_hold
+from boxmunge.docker import DockerError, caddy_reload, compose_stop, compose_up
 from boxmunge.fileutil import atomic_write_text
-from boxmunge.pause import render_maintenance_caddy_config
+from boxmunge.pause import hand_over_restart_policies, render_maintenance_caddy_config
 from boxmunge.paths import BoxPaths
 
 _LOGGER = logging.getLogger("boxmunge")
@@ -279,43 +273,21 @@ def _complete_action(
 
 
 def _pin_restart_policies(project_name: str, state: dict[str, Any]) -> dict[str, Any]:
-    """Set every project container's restart policy to "no"; return the
-    record with each container's ORIGINAL policy saved for the lift.
-
-    `compose stop` alone is not enough: Docker restarts a stopped
-    `restart: always` container when the daemon starts (a reboot, a
-    docker-ce upgrade), which would bring workers and cron services back
-    while the maintenance page still shows. A policy saved by an earlier
-    attempt is kept — re-asserting must not overwrite "always" with "no".
-    """
+    """Hold the project's containers at restart policy "no" (B-19); return
+    the record with each container's original policy saved for the lift."""
     try:
-        current = project_restart_policies(project_name)
-        set_restart_policy(sorted(n for n, p in current.items() if p != "no"), "no")
+        saved = restart_hold.hold(project_name, state.get("restart_policies") or {})
     except DockerError as e:
         raise QuarantineError(
             f"Failed to disable restart policies for {project_name!r}: {e}",
         ) from e
-    saved = dict(state.get("restart_policies") or {})
-    for name, policy in current.items():
-        saved.setdefault(name, policy)
     return {**state, "restart_policies": saved}
 
 
 def _restore_restart_policies(project_name: str, state: dict[str, Any]) -> None:
-    """Give each still-existing container back its pre-quarantine policy.
-
-    A container that no longer exists is recreated by `compose up` from the
-    compose file, with the compose file's policy.
-    """
-    saved = state.get("restart_policies") or {}
+    """Give each still-existing container its pre-quarantine policy back."""
     try:
-        present = project_restart_policies(project_name)
-        by_policy: dict[str, list[str]] = {}
-        for name, policy in saved.items():
-            if name in present and policy != present[name]:
-                by_policy.setdefault(policy, []).append(name)
-        for policy, names in sorted(by_policy.items()):
-            set_restart_policy(sorted(names), policy)
+        restart_hold.release(project_name, state.get("restart_policies") or {})
     except DockerError as e:
         raise QuarantineError(
             f"Failed to restore restart policies for {project_name!r}: {e}",
@@ -371,9 +343,10 @@ def lift_quarantine(
     state = read_quarantine_state(project_name, paths) or {}
 
     if project_caddy_site_content is None:
-        # Paused as well: keep the maintenance page and the stop; hand the
-        # containers their own restart policies back for when `resume` runs.
-        _restore_restart_policies(project_name, state)
+        # Paused as well: keep the maintenance page, the stop and the held
+        # restart policies; the pause record takes over the originals so
+        # `resume` gives them back.
+        hand_over_restart_policies(project_name, paths, state.get("restart_policies") or {})
         clear_quarantine_state(project_name, paths)
         _LOGGER.info(
             "quarantine: %s lifted; project stays paused", project_name,

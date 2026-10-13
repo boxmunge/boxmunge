@@ -83,7 +83,7 @@ def test_pinning_failure_leaves_the_action_incomplete(box, monkeypatch):
     def boom(names, policy):
         raise DockerError("daemon not responding")
 
-    monkeypatch.setattr("boxmunge.cve.quarantine.set_restart_policy", boom)
+    monkeypatch.setattr("boxmunge.restart_hold.set_restart_policy", boom)
     with pytest.raises(q.QuarantineError, match="restart policies"):
         _reassert(paths)
     assert not q.quarantine_action_complete("demo", paths)
