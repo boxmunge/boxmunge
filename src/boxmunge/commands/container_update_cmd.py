@@ -6,9 +6,8 @@ import sys
 from typing import Any
 
 from boxmunge.config import load_config, ConfigError
-from boxmunge.container_update import (
-    UpdateTarget, build_targets, update_target,
-)
+from boxmunge.container_update import update_target
+from boxmunge.container_update_targets import UpdateTarget, build_targets
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error
 from boxmunge.paths import BoxPaths
