@@ -1,5 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Load and validate project manifests (manifest.yml)."""
+"""Load manifest.yml and check the shape the client relies on.
+
+The server is the only authority on manifest policy (hosts, routes, backup,
+security:, writable:, schema rules): it validates every bundle on stage and
+prod-deploy before it changes anything. A vendored copy of those rules
+drifted from the server and accepted manifests the server rejects, so the
+client no longer carries one. It checks only what it needs to build, name
+and route a bundle, and never raises on a malformed shape:
+
+  - the document is a mapping;
+  - schema_version, if present, is a positive integer (the handshake
+    compares it with the server's before upload);
+  - id (unless bundle is about to add it), project and source are present,
+    and project is a valid project name, because it names the bundle file;
+  - hosts is a non-empty list of strings, without init's placeholder;
+  - services is a non-empty mapping of name -> mapping.
+
+`stage --dry-run` / `prod-deploy --dry-run` run the server's full
+validation without deploying.
+"""
+
+from __future__ import annotations
 
 import re
 from pathlib import Path
@@ -7,16 +28,21 @@ from typing import Any
 
 import yaml
 
-_VALID_SERVICE_NAME = re.compile(r'^[a-z0-9][a-z0-9\-]{0,62}$')
+# The server's project-name rule (src/boxmunge/paths.py); used with fullmatch.
+_VALID_PROJECT_NAME = re.compile(r"[a-z0-9][a-z0-9\-]{0,62}")
+
+# init scaffolds this until the user names a real host; bundling refuses it.
+PLACEHOLDER_HOST_SUFFIX = ".change-me.invalid"
+# The server's host rule (src/boxmunge/manifest.py _HOST_LABEL_RE), for init --host.
+_HOST_RE = re.compile(r"([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}")
 
 
-# Highest manifest schema this client has been taught about. The client
-# validates only schema-independent basics (project/hosts/services/port/
-# routes/id/source) and never inspects schema-gated blocks such as
-# `security:` (schema 2) or `writable:` (schema 3) — the server owns those
-# and re-validates on receive and deploy. So this is a "what I know about"
-# marker for warnings, NOT an upper bound on what may be bundled.
-CURRENT_SCHEMA_VERSION = 3
+def placeholder_host(project: str) -> str:
+    return f"{project}{PLACEHOLDER_HOST_SUFFIX}"
+
+
+def valid_host(host: str) -> bool:
+    return bool(_HOST_RE.fullmatch(host))
 
 
 class ManifestError(Exception):
@@ -24,201 +50,83 @@ class ManifestError(Exception):
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
-    """Load a manifest.yml file and return its contents as a dict.
-
-    Raises ManifestError if the file doesn't exist or can't be parsed.
-    """
+    """Load manifest.yml. Raises ManifestError if missing, unparseable or not a mapping."""
     if not path.exists():
         raise ManifestError(f"Manifest not found: {path}")
-
-    with open(path) as f:
-        data = yaml.safe_load(f)
-
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        raise ManifestError(f"{path} is not valid YAML: {e}") from e
+    except (OSError, UnicodeDecodeError) as e:
+        raise ManifestError(f"Cannot read {path}: {e}") from e
     if not isinstance(data, dict):
         raise ManifestError(f"Manifest is not a YAML mapping: {path}")
-
     return data
 
 
-def validate_manifest(
-    manifest: dict[str, Any], expected_name: str
-) -> tuple[list[str], list[str]]:
-    """Validate a parsed manifest against the boxmunge project conventions.
+def _check_schema(manifest: dict[str, Any]) -> list[str]:
+    schema = manifest.get("schema_version", 1)
+    # YAML 1.1 parses unquoted yes/no/on/off/true/false as booleans, and bool
+    # is an int in Python: reject it explicitly.
+    if isinstance(schema, bool):
+        return [f"schema_version parsed as boolean {schema}: it must be an integer, "
+                "e.g. schema_version: 3."]
+    if not isinstance(schema, int) or schema < 1:
+        return [f"Invalid schema_version {schema!r}: expected an integer >= 1."]
+    return []
 
-    Returns (errors, warnings). errors is empty if the manifest is valid.
-    """
-    errors: list[str] = []
-    warnings: list[str] = []
 
-    # Schema version check
-    schema_version = manifest.get("schema_version", 1)
-    # YAML 1.1 boolean trap: unquoted `yes`/`on`/`true` parse as booleans, and
-    # isinstance(True, int) is True in Python — so an unguarded check would
-    # silently accept `schema_version: yes` as schema 1 and validate the
-    # manifest against the wrong schema. Reject booleans explicitly.
-    if isinstance(schema_version, bool):
-        errors.append(
-            f"schema_version parsed as boolean {schema_version} — it must be "
-            f"an integer, e.g. schema_version: 3. YAML parses unquoted "
-            f"yes/no/on/off/true/false as booleans."
-        )
-        return errors, warnings  # Can't validate further
-    if not isinstance(schema_version, int) or schema_version < 1:
-        errors.append(
-            f"Invalid schema_version {schema_version!r}: "
-            f"expected an integer >= 1."
-        )
-        return errors, warnings  # Can't validate further
-
-    if schema_version > CURRENT_SCHEMA_VERSION:
-        # Newer than this client knows about. Not an error: the client cannot
-        # assess schema-specific validity at all, so failing here would be a
-        # false claim of competence and would block a manifest the server
-        # accepts. Warn, keep validating the basics, and let the server — the
-        # authority on the schema — reject it if it really is unsupported.
-        warnings.append(
-            f"Manifest declares schema_version {schema_version}, newer than "
-            f"this CLI knows about (up to {CURRENT_SCHEMA_VERSION}). "
-            f"Local validation is best-effort; the server validates the "
-            f"schema authoritatively on deploy. Upgrade the CLI if it "
-            f"rejects fields your server supports."
-        )
-
-    # Project name
-    project = manifest.get("project", "")
+def _check_identity(manifest: dict[str, Any], require_id: bool) -> list[str]:
+    errors = []
+    project = manifest.get("project")
     if not project:
         errors.append("Required field 'project' is missing.")
-    elif project != expected_name:
-        errors.append(
-            f"Project name '{project}' does not match directory name "
-            f"'{expected_name}'."
-        )
-
-    # Hosts
-    hosts = manifest.get("hosts", [])
-    if not hosts:
-        errors.append("'hosts' must contain at least one hostname.")
-
-    # Services
-    services = manifest.get("services", {})
-    if not services:
-        errors.append("'services' must define at least one service.")
-    else:
-        for svc_name, svc in services.items():
-            if not _VALID_SERVICE_NAME.match(svc_name):
-                errors.append(f"Service name '{svc_name}' is invalid. Must be lowercase alphanumeric with hyphens.")
-            if "port" not in svc:
-                errors.append(f"Service '{svc_name}' is missing 'port'.")
-            routes = svc.get("routes", [])
-            if not routes:
-                errors.append(
-                    f"Service '{svc_name}' must have at least one route."
-                )
-            else:
-                for i, route in enumerate(routes):
-                    if not isinstance(route, dict) or "path" not in route:
-                        errors.append(
-                            f"Service '{svc_name}' route {i}: must be "
-                            f"a mapping with 'path' key, e.g. {{path: /}}, "
-                            f"got: {route!r}"
-                        )
-
-            if "limits" not in svc:
-                warnings.append(
-                    f"Service '{svc_name}' has no resource limits. "
-                    "Consider setting memory/cpu limits to prevent resource starvation."
-                )
-
-    # Backup
-    backup = manifest.get("backup", {})
-    backup_type = backup.get("type", "none")
-    if backup_type != "none":
-        if not backup.get("dump_command"):
-            errors.append(
-                f"Backup type is '{backup_type}' but 'dump_command' is missing. "
-                "No write-only backups — both dump and restore are required."
-            )
-        if not backup.get("restore_command"):
-            errors.append(
-                f"Backup type is '{backup_type}' but 'restore_command' is missing. "
-                "No write-only backups — both dump and restore are required."
-            )
-
-    # Smoke tests — per-service
-    has_any_smoke = any(
-        svc.get("smoke") for svc in services.values()
-    ) if services else False
-    if not has_any_smoke:
-        warnings.append(
-            "No smoke tests configured. Strongly recommended to set "
-            "'smoke' on at least one service."
-        )
-
-    # Project ID (ULID) — mandatory
-    project_id = manifest.get("id", "")
-    if not project_id:
-        errors.append(
-            "Required field 'id' is missing. "
-            "Use 'boxmunge bundle' to generate a ULID automatically."
-        )
-
-    # Source type — mandatory
-    source = manifest.get("source", "")
-    if not source:
-        errors.append(
-            "Required field 'source' is missing. "
-            "Specify 'source: bundle' or 'source: git'."
-        )
-    elif source not in ("bundle", "git"):
-        errors.append(
-            f"'source' must be 'bundle' or 'git', got '{source}'."
-        )
-    elif source == "git":
-        if not manifest.get("repo"):
-            errors.append(
-                "'source' is 'git' but 'repo' is missing. "
-                "Specify the git repository URL."
-            )
-
-    return errors, warnings
+    elif not isinstance(project, str) or not _VALID_PROJECT_NAME.fullmatch(project):
+        errors.append(f"Invalid 'project' {project!r}: must be lowercase alphanumeric "
+                      "with hyphens, 1-63 chars.")
+    project_id = manifest.get("id")
+    if require_id and not project_id:
+        errors.append("Required field 'id' is missing. "
+                      "Run 'boxmunge bundle' without --validate to add one.")
+    if not manifest.get("source"):
+        errors.append("Required field 'source' is missing. Specify 'source: bundle'.")
+    return errors
 
 
-def get_routable_services(
-    manifest: dict[str, Any],
-) -> dict[str, dict[str, Any]]:
-    """Return services that should be connected to the boxmunge-proxy network.
+def _check_hosts(manifest: dict[str, Any]) -> list[str]:
+    hosts = manifest.get("hosts")
+    if not isinstance(hosts, list) or not hosts:
+        return ["'hosts' must be a list with at least one hostname."]
+    errors = []
+    for host in hosts:
+        if not isinstance(host, str):
+            errors.append(f"hosts: {host!r} is not a string.")
+        elif host.endswith(PLACEHOLDER_HOST_SUFFIX):
+            errors.append(f"hosts: {host!r} is the scaffold's change-me placeholder. "
+                          "Set the real hostname this project serves.")
+    return errors
 
-    Excludes services marked internal: true.
+
+def _check_services(manifest: dict[str, Any]) -> list[str]:
+    services = manifest.get("services")
+    if not isinstance(services, dict) or not services:
+        return ["'services' must be a mapping with at least one service."]
+    return [f"Service {name!r} must be a mapping, got {type(svc).__name__}."
+            for name, svc in services.items() if not isinstance(svc, dict)]
+
+
+def validate_manifest(
+    manifest: Any, require_id: bool = True
+) -> tuple[list[str], list[str]]:
+    """Check the manifest's shape (see the module docstring).
+
+    require_id=False when the caller is about to add a missing id. Returns
+    (errors, warnings); never raises on a malformed manifest.
     """
-    result = {}
-    for name, svc in manifest.get("services", {}).items():
-        if not svc.get("internal", False):
-            result[name] = svc
-    return result
-
-
-def get_all_routes(
-    manifest: dict[str, Any],
-) -> list[tuple[str, str, int]]:
-    """Return all routes as (path, service_alias, port) sorted by specificity.
-
-    More specific paths (longer, more segments) come first so Caddy's
-    first-match routing works correctly.
-    """
-    project = manifest["project"]
-    routes = []
-    for svc_name, svc in manifest.get("services", {}).items():
-        alias = f"{project}-{svc_name}"
-        port = svc["port"]
-        for route in svc.get("routes", []):
-            if isinstance(route, dict):
-                path = route.get("path", "/")
-            elif isinstance(route, str):
-                path = route
-            else:
-                continue
-            routes.append((path, alias, port))
-
-    # Sort: longer/more specific paths first, then alphabetical
-    routes.sort(key=lambda r: (-len(r[0]), r[0]))
-    return routes
+    if not isinstance(manifest, dict):
+        return ["manifest.yml must be a YAML mapping at the top level."], []
+    errors = _check_schema(manifest)
+    errors += _check_identity(manifest, require_id)
+    errors += _check_hosts(manifest)
+    errors += _check_services(manifest)
+    return errors, []

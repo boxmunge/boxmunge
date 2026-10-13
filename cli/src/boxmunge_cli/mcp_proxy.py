@@ -12,7 +12,9 @@ from boxmunge_cli.ssh import build_ssh_cmd
 
 def run_mcp_proxy(config: dict[str, Any]) -> int:
     """Run the MCP proxy. Blocks until the SSH process exits."""
-    cmd = build_ssh_cmd(config, "mcp-serve")
+    # BatchMode: an MCP host has no terminal, so a password or passphrase
+    # prompt would hang it; fail instead. stdout carries only the protocol.
+    cmd = build_ssh_cmd(config, "mcp-serve", batch=True)
     proc = subprocess.Popen(cmd)
 
     def _terminate(signum: int, frame: Any) -> None:

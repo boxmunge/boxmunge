@@ -3,7 +3,7 @@
 
 import pytest
 
-from boxmunge_cli.server_setup.command import parse_args
+from boxmunge_cli.server_setup.args import parse_args
 
 
 class TestParseArgs:
@@ -30,7 +30,6 @@ class TestParseArgs:
             "--hostname", "custom.example.com",
             "--boxmunge-ssh-port", "2222",
             "--no-aide", "--no-crowdsec", "--no-auto-updates",
-            "--reboot-window", "05:00",
         ])
         assert args.ssh_key_arg == "/tmp/key.pub"
         assert args.hostname == "custom.example.com"
@@ -38,7 +37,6 @@ class TestParseArgs:
         assert args.no_aide is True
         assert args.no_crowdsec is True
         assert args.no_auto_updates is True
-        assert args.reboot_window == "05:00"
 
     def test_missing_email_raises(self) -> None:
         with pytest.raises(SystemExit):
@@ -52,9 +50,11 @@ class TestParseArgs:
         args = parse_args(["myserver.example.com", "--email", "a@b.com"])
         assert args.hostname == "myserver.example.com"
 
-    def test_hostname_from_ip_is_none(self) -> None:
-        args = parse_args(["203.0.113.50", "--email", "a@b.com"])
-        assert args.hostname is None
+    def test_ip_target_requires_hostname(self, capsys) -> None:
+        with pytest.raises(SystemExit) as exc:
+            parse_args(["203.0.113.50", "--email", "a@b.com"])
+        assert exc.value.code == 2
+        assert "--hostname" in capsys.readouterr().err
 
     def test_self_signed_tls_flag(self) -> None:
         args = parse_args([

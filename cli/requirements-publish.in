@@ -6,4 +6,4 @@
 # Regenerate with: make lock
 pytest>=8.0
 build>=1.2
-setuptools>=70.1
+setuptools>=77

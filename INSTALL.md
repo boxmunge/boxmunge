@@ -1,51 +1,58 @@
-# boxmunge — Local Installation
+# boxmunge — Installing the client
 
-The `boxmunge` CLI works in two contexts:
+boxmunge has two parts:
 
-- **On the server** — full command set (deploy, stage, secrets, etc.). Installed by `init-host.sh`.
-- **Locally** — `boxmunge bundle` and `boxmunge bundle --validate` only. Used to build and validate bundles before uploading.
+- **The server** (`boxmunge-server`) runs on your VPS. It is installed from signed GitHub releases,
+  either by `boxmunge server-setup` (below) or by running the release's `boxmunge-install.sh` on the
+  server as described in the [README](README.md). It is not on PyPI.
+- **The client** (`boxmunge`) runs on your machine. It scaffolds and bundles projects, uploads them,
+  drives the server over SSH, and provides the MCP proxy for agents. It is on PyPI.
 
-## Local install (macOS / Linux)
+## Install the client
 
-One-time setup. Creates an isolated venv and symlinks the `boxmunge` command to `~/bin/`.
-
-```bash
-# From the boxmunge repo directory:
-./scripts/install-local.sh
-```
-
-This installs only the core dependency (PyYAML). The TUI (`textual`) is not installed.
-
-## Upgrading
-
-After pulling new changes:
+Python 3.10 or newer, and OpenSSH 8.7 or newer (uploads use `scp -O`):
 
 ```bash
-./scripts/install-local.sh
+pipx install boxmunge        # recommended: an isolated install on your PATH
+# or
+python3 -m pip install --user boxmunge
 ```
 
-Same script — it reinstalls into the existing venv.
-
-## Manual install
-
-If you prefer not to use the script:
+Check it:
 
 ```bash
-python3 -m venv ~/.local/share/boxmunge-venv
-~/.local/share/boxmunge-venv/bin/pip install /path/to/boxmunge
-ln -sf ~/.local/share/boxmunge-venv/bin/boxmunge ~/bin/boxmunge
+boxmunge --version
+boxmunge --help
 ```
 
-## Verify
+`boxmunge server-setup` also needs [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+on your machine: it verifies the release's signature locally before installing anything on the
+server, and refuses to continue without it.
+
+## Set up a server and ship a project
 
 ```bash
-boxmunge help
-boxmunge bundle --validate ./my-project
+boxmunge server-setup root@box.example.com --email you@example.com
+cd myapp
+boxmunge init --server box.example.com --host myapp.example.com
+boxmunge remote project-add myapp   # once, registers the project on the server
+boxmunge stage && boxmunge promote
 ```
+
+See [cli/README.md](cli/README.md) for every command, the `.boxmunge` file, what goes into a
+bundle, and MCP configuration.
+
+## Upgrade
+
+```bash
+pipx upgrade boxmunge        # or: python3 -m pip install --user --upgrade boxmunge
+```
+
+The client and server version independently. If the server needs a newer client, every server
+command stops with a message telling you to upgrade.
 
 ## Uninstall
 
 ```bash
-rm ~/bin/boxmunge
-rm -rf ~/.local/share/boxmunge-venv
+pipx uninstall boxmunge      # or: python3 -m pip uninstall boxmunge
 ```

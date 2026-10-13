@@ -1,49 +1,85 @@
 # SPDX-License-Identifier: Apache-2.0
 """SSH and SCP command building and execution.
 
-All commands are built as explicit lists and executed with shell=False
-to prevent injection from untrusted .boxmunge config values.
+Commands run locally with shell=False. ssh sends the remote command to the
+server as one string that the server parses again, so the command and its
+arguments are joined with shlex.join: an argument with spaces or quotes
+reaches the server as one argument. The deploy user's restricted shell then
+splits it with shlex and runs only allowlisted commands.
 """
 
 from __future__ import annotations
 
+import shlex
 import subprocess
+import sys
 from typing import Any
 
+from boxmunge_cli.exitcodes import CONNECTION, FAILURE, SSH_CONNECTION_FAILED
 
-def build_ssh_cmd(config: dict[str, Any], command: str, *args: str) -> list[str]:
-    """Build an SSH command list from config and arguments."""
-    cmd = [
+
+def build_ssh_cmd(config: dict[str, Any], command: str, *args: str,
+                  batch: bool = False) -> list[str]:
+    """Build an SSH command list from config and arguments.
+
+    batch: never prompt (for callers with no person at a terminal).
+    """
+    return [
         "ssh",
         "-p", str(config["port"]),
         "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ConnectTimeout=15",
+        *(["-o", "BatchMode=yes"] if batch else []),
         f"{config['user']}@{config['server']}",
-        command,
+        shlex.join([command, *args]),
     ]
-    cmd.extend(args)
-    return cmd
+
+
+def _scp_host(server: str) -> str:
+    """scp needs an IPv6 address in brackets (ssh does not)."""
+    return f"[{server}]" if ":" in server else server
 
 
 def build_scp_cmd(config: dict[str, Any], local_path: str) -> list[str]:
-    """Build an SCP upload command list."""
+    """Build an SCP upload command list.
+
+    -O selects the legacy scp protocol. The deploy user has no SFTP
+    subsystem, and since OpenSSH 9 plain scp uses SFTP, so uploads need -O
+    (available since OpenSSH 8.7).
+    """
     return [
-        "scp",
+        "scp", "-O",
         "-P", str(config["port"]),
         "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ConnectTimeout=15",
         local_path,
-        f"{config['user']}@{config['server']}:",
+        f"{config['user']}@{_scp_host(config['server'])}:",
     ]
 
 
+def _exit_code(returncode: int) -> int:
+    """ssh's own failure (255) becomes CONNECTION; anything else is the remote's."""
+    return CONNECTION if returncode == SSH_CONNECTION_FAILED else returncode
+
+
 def run_ssh(config: dict[str, Any], command: str, *args: str) -> int:
-    """Execute an SSH command. Returns the exit code."""
-    cmd = build_ssh_cmd(config, command, *args)
-    result = subprocess.run(cmd, check=False)
-    return result.returncode
+    """Execute an SSH command. Returns the remote exit code (4 if ssh failed)."""
+    result = subprocess.run(build_ssh_cmd(config, command, *args), check=False)
+    return _exit_code(result.returncode)
+
+
+# How OpenSSH older than 8.7 rejects -O.
+_NO_LEGACY_FLAG = ("unknown option -- O", "illegal option -- O")
 
 
 def run_scp(config: dict[str, Any], local_path: str) -> int:
     """Upload a file via SCP. Returns the exit code."""
-    cmd = build_scp_cmd(config, local_path)
-    result = subprocess.run(cmd, check=False)
-    return result.returncode
+    result = subprocess.run(build_scp_cmd(config, local_path), check=False,
+                            stderr=subprocess.PIPE, text=True)
+    sys.stderr.write(result.stderr)
+    if result.returncode != 0 and any(m in result.stderr for m in _NO_LEGACY_FLAG):
+        print("ERROR: this scp does not support -O (the legacy scp protocol), which "
+              "uploads to the boxmunge deploy user require. Upgrade OpenSSH to 8.7 or "
+              "newer.", file=sys.stderr)
+        return FAILURE
+    return _exit_code(result.returncode)

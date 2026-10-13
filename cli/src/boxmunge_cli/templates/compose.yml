@@ -1,7 +1,7 @@
-# TODO: Update with your project's actual services.
+# Docker Compose file for {project}. boxmunge adds the proxy network,
+# project.env and secrets.env, resource limits and container hardening in a
+# generated overlay: do not publish ports or add the boxmunge-proxy network.
 services:
   web:
     build: .
     restart: unless-stopped
-    env_file:
-      - project.env

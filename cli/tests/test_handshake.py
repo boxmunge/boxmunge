@@ -1,61 +1,149 @@
-"""Tests for the client-side version handshake."""
+"""Tests for the client/server compatibility handshake (fake ssh on PATH)."""
 
 import json
+from pathlib import Path
+
 import pytest
-from unittest.mock import patch, MagicMock
 
-from boxmunge_cli.handshake import check_server_compatibility, HandshakeError
+from boxmunge_cli import handshake
+from boxmunge_cli.cli import main
+from boxmunge_cli.handshake import HandshakeError, MIN_SERVER_VERSION, check_server_compatibility
+from boxmunge_cli.init_cmd import run_init
+from boxmunge_cli.version import parse_version
 
-
-VALID_RESPONSE = json.dumps({
-    "server_version": "0.2.0",
-    "min_client_version": "0.1.0",
-    "schema_version": 1,
-})
+CONFIG = {"server": "box.example.com", "port": 922, "user": "deploy", "project": "myapp"}
 
 
-class TestCheckServerCompatibility:
-    @patch("boxmunge_cli.handshake.subprocess.run")
-    def test_passes_when_compatible(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(returncode=0, stdout=VALID_RESPONSE)
-        config = {"server": "box.example.com", "port": 922, "user": "deploy", "project": "myapp"}
-        check_server_compatibility(config)  # should not raise
+def _reply(fake_remote, **fields) -> None:
+    data = {"server_version": "0.11.0", "min_client_version": "0.1.0", "schema_version": 3}
+    data.update(fields)
+    fake_remote.respond("ssh", "handshake", stdout=json.dumps(data))
 
-    @patch("boxmunge_cli.handshake.subprocess.run")
-    def test_rejects_when_client_too_old(self, mock_run: MagicMock) -> None:
-        response = json.dumps({
-            "server_version": "1.0.0",
-            "min_client_version": "99.0.0",
-            "schema_version": 1,
-        })
-        mock_run.return_value = MagicMock(returncode=0, stdout=response)
-        config = {"server": "box.example.com", "port": 922, "user": "deploy", "project": "myapp"}
-        with pytest.raises(HandshakeError, match="upgrade"):
-            check_server_compatibility(config)
 
-    @patch("boxmunge_cli.handshake.subprocess.run")
-    def test_warns_when_server_old(self, mock_run: MagicMock, capsys) -> None:
-        response = json.dumps({
-            "server_version": "0.0.1",
-            "min_client_version": "0.1.0",
-            "schema_version": 1,
-        })
-        mock_run.return_value = MagicMock(returncode=0, stdout=response)
-        config = {"server": "box.example.com", "port": 922, "user": "deploy", "project": "myapp"}
-        check_server_compatibility(config)  # should not raise
-        output = capsys.readouterr().err
-        assert "WARNING" in output or "old" in output.lower()
+def test_compatible(fake_remote) -> None:
+    info = check_server_compatibility(CONFIG)
+    assert info.schema_version == 3
 
-    @patch("boxmunge_cli.handshake.subprocess.run")
-    def test_handles_ssh_failure(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(returncode=255, stdout="")
-        config = {"server": "box.example.com", "port": 922, "user": "deploy", "project": "myapp"}
-        with pytest.raises(HandshakeError, match="[Ff]ailed|connect"):
-            check_server_compatibility(config)
 
-    @patch("boxmunge_cli.handshake.subprocess.run")
-    def test_handles_malformed_json(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(returncode=0, stdout="not json")
-        config = {"server": "box.example.com", "port": 922, "user": "deploy", "project": "myapp"}
-        with pytest.raises(HandshakeError, match="[Mm]alformed|[Ii]nvalid"):
-            check_server_compatibility(config)
+def test_client_too_old(fake_remote) -> None:
+    _reply(fake_remote, min_client_version="99.0.0")
+    with pytest.raises(HandshakeError, match="pip install --upgrade boxmunge"):
+        check_server_compatibility(CONFIG)
+
+
+def test_server_too_old(fake_remote) -> None:
+    _reply(fake_remote, server_version="0.9.4")
+    with pytest.raises(HandshakeError, match=MIN_SERVER_VERSION):
+        check_server_compatibility(CONFIG)
+
+
+def test_server_line_is_not_compared_with_the_client_line(fake_remote, monkeypatch,
+                                                          capsys) -> None:
+    monkeypatch.setattr(handshake, "__version__", "0.11.0")
+    _reply(fake_remote, server_version="0.10.0")
+    check_server_compatibility(CONFIG)
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("client, minimum, ok", [
+    ("0.2.0rc1", "0.2.0", False),
+    ("0.2.0rc1", "0.1.0", True),
+    ("0.2.0", "0.2.0rc1", True),
+    ("0.2.0.dev3", "0.2.0a1", False),
+])
+def test_pre_release_clients(fake_remote, monkeypatch, client, minimum, ok) -> None:
+    monkeypatch.setattr(handshake, "__version__", client)
+    _reply(fake_remote, min_client_version=minimum)
+    if ok:
+        check_server_compatibility(CONFIG)
+    else:
+        with pytest.raises(HandshakeError, match="too old"):
+            check_server_compatibility(CONFIG)
+
+
+@pytest.mark.parametrize("server", ["0.11.0rc1", "0.10.1.dev3", "0.10.0+local.1"])
+def test_pre_release_servers(fake_remote, server) -> None:
+    _reply(fake_remote, server_version=server)
+    check_server_compatibility(CONFIG)
+
+
+@pytest.mark.parametrize("fields", [
+    {"server_version": 10}, {"server_version": "ten"}, {"min_client_version": None},
+    {"schema_version": True}, {"schema_version": "3"}, {"schema_version": 0},
+])
+def test_malformed_fields_are_errors_not_tracebacks(fake_remote, fields) -> None:
+    _reply(fake_remote, **fields)
+    with pytest.raises(HandshakeError, match="Invalid handshake response"):
+        check_server_compatibility(CONFIG)
+
+
+@pytest.mark.parametrize("stdout", ["not json", "[1, 2]", "{}"])
+def test_malformed_responses(fake_remote, stdout) -> None:
+    fake_remote.respond("ssh", "handshake", stdout=stdout)
+    with pytest.raises(HandshakeError, match="[Mm]alformed|Invalid"):
+        check_server_compatibility(CONFIG)
+
+
+def test_ssh_error_is_shown(fake_remote) -> None:
+    fake_remote.respond("ssh", "handshake", stderr="deploy@box.example.com: Permission "
+                        "denied (publickey).\n", rc=255)
+    with pytest.raises(HandshakeError, match=r"Permission denied \(publickey\)"):
+        check_server_compatibility(CONFIG)
+
+
+def test_newer_manifest_schema_is_refused(fake_remote) -> None:
+    with pytest.raises(HandshakeError, match="schema_version 4"):
+        check_server_compatibility(CONFIG, manifest_schema=4)
+
+
+def test_version_ordering() -> None:
+    ordered = ["0.1.0", "0.2.0.dev1", "0.2.0a1", "0.2.0b2", "0.2.0rc1", "0.2.0",
+               "0.2.0.post1", "0.2.1", "0.10.0", "1.0"]
+    keys = [parse_version(v) for v in ordered]
+    assert keys == sorted(keys)
+    assert parse_version("0.2") == parse_version("0.2.0")
+
+
+@pytest.fixture
+def project(tmp_path: Path, monkeypatch, fake_remote) -> Path:
+    root = tmp_path / "myapp"
+    assert run_init(root, server="box.example.com", host="myapp.example.com") == 0
+    monkeypatch.chdir(root)
+    return root
+
+
+def _run(argv: list[str]) -> int:
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    return exc.value.code
+
+
+@pytest.mark.parametrize("argv", [["promote"], ["status"], ["logs"], ["mcp-serve"]])
+def test_every_server_command_handshakes_first(project, fake_remote, argv) -> None:
+    assert _run(argv) == 0
+    first = fake_remote.calls("ssh")[0]
+    assert first[-1] == "handshake"
+
+
+def test_incompatible_server_stops_before_upload(project, fake_remote, capsys) -> None:
+    _reply(fake_remote, schema_version=2)
+    assert _run(["prod-deploy"]) == 3
+    assert fake_remote.calls("scp") == []
+    assert "schema_version 3" in capsys.readouterr().err
+
+
+def test_unreachable_server_exits_4(project, fake_remote, capsys) -> None:
+    fake_remote.respond("ssh", "handshake", stderr="ssh: connect to host box.example.com "
+                        "port 922: Connection refused\n", rc=255)
+    assert _run(["promote"]) == 4
+    assert "ERROR:" in capsys.readouterr().err
+
+
+def test_ssh_failure_after_handshake_exits_4(project, fake_remote) -> None:
+    fake_remote.respond("ssh", "status", rc=255)
+    assert _run(["status"]) == 4
+
+
+def test_server_command_exit_code_passes_through(project, fake_remote) -> None:
+    fake_remote.respond("ssh", "status", rc=2)
+    assert _run(["status"]) == 2

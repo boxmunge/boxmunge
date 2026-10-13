@@ -51,7 +51,7 @@ class TestRunInit:
         assert (tmp_path / "manifest.yml").exists()
         assert (tmp_path / "compose.yml").exists()
         assert (tmp_path / "boxmunge-scripts" / "smoke.sh").exists()
-        assert (tmp_path / ".env.example").exists()
+        assert (tmp_path / "Dockerfile").exists()
 
     def test_skips_scaffold_when_manifest_exists(self, tmp_path: Path) -> None:
         (tmp_path / "manifest.yml").write_text("project: existing\n")
@@ -75,7 +75,7 @@ class TestRunInit:
         manifest = (tmp_path / "manifest.yml").read_text()
         assert "coolapp" in manifest
 
-    def test_scaffold_has_todo_markers(self, tmp_path: Path) -> None:
+    def test_scaffold_marks_the_host_to_change(self, tmp_path: Path) -> None:
         run_init(tmp_path, server="box.example.com", project="myapp")
         manifest = (tmp_path / "manifest.yml").read_text()
-        assert "TODO" in manifest
+        assert "myapp.change-me.invalid" in manifest

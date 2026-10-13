@@ -1,0 +1,4 @@
+# The sdist carries the whole client test suite (conftest.py and the
+# test_server_setup package included) so it can be run from the sdist.
+graft tests
+global-exclude __pycache__ *.py[cod]
