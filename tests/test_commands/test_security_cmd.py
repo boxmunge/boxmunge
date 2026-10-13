@@ -2071,7 +2071,7 @@ def test_scan_invokes_emit_scan_alerts_after_persist(
     captured: dict = {}
     def fake_emit(**kwargs):
         captured.update(kwargs)
-        return 0
+        return ()
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.emit_scan_alerts", fake_emit,
     )
@@ -2081,9 +2081,8 @@ def test_scan_invokes_emit_scan_alerts_after_persist(
     assert paths.project_scan_state("demo").exists()
     # emit_scan_alerts received this scan's current decision and no prior.
     assert captured.get("project_name") == "demo"
-    assert captured.get("prior") is None
-    current = captured.get("current")
-    assert current is not None
+    assert captured.get("prior") == ()
+    [current] = captured.get("current")
     assert current.image_ref == "myapp:1.0"
     assert any(
         d.finding.cve_id == "CVE-2026-9999" for d in current.findings
@@ -2135,7 +2134,7 @@ def test_scan_passes_prior_decision_on_second_scan(monkeypatch, tmp_path) -> Non
     captured_runs: list[dict] = []
     def fake_emit(**kwargs):
         captured_runs.append(kwargs)
-        return 0
+        return ()
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.emit_scan_alerts", fake_emit,
     )
@@ -2146,9 +2145,8 @@ def test_scan_passes_prior_decision_on_second_scan(monkeypatch, tmp_path) -> Non
     rc = cmd_security_scan([], paths)
     assert rc == 0
     assert len(captured_runs) == 2
-    assert captured_runs[0]["prior"] is None
-    second_prior = captured_runs[1]["prior"]
-    assert second_prior is not None
+    assert captured_runs[0]["prior"] == ()
+    [second_prior] = captured_runs[1]["prior"]
     assert second_prior.image_ref == "myapp:1.0"
     assert any(
         d.finding.cve_id == "CVE-2026-9999" for d in second_prior.findings
@@ -2315,7 +2313,7 @@ def test_scan_all_during_grace_skips_normal_transition_alerts(
     captured: list = []
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.emit_scan_alerts",
-        lambda **kw: captured.append(kw) or 0,
+        lambda **kw: captured.append(kw) or (),
     )
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.send_alerts",
@@ -2341,7 +2339,7 @@ def test_scan_all_after_grace_quarantines_normally(
     emit_called: list = []
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.emit_scan_alerts",
-        lambda **kw: emit_called.append(kw) or 0,
+        lambda **kw: emit_called.append(kw) or (),
     )
     rc = cmd_security_scan([], paths)
     assert rc == 0

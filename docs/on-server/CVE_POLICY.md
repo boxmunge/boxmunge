@@ -607,10 +607,17 @@ the scan proceeds against whatever cache exists and a warning is logged. A
 stale KEV catalog, or a KEV refresh rejected by the sanity floor, fires a
 priority-1 alert (see "CISA KEV feed" above).
 
-Idempotency: the daily cron does not re-fire informational alerts for
-unchanged dispositions. Only state transitions (new finding, transition
-across threshold, suppression expiry, new quarantine, resume) produce
-alerts.
+Idempotency: the daily cron does not re-fire alerts for unchanged
+dispositions. A finding is identified by its CVE **and package**, across
+all of the project's images — never by image digest — so an image rebuild
+or container update with the same findings alerts nothing, and one CVE
+that quarantines in `libperl5.36` but is informational in `perl-base` is
+two stable findings, not one that flaps every day. Only transitions (a new
+finding, a change of disposition, a suppression expiring, a new
+quarantine) alert, and each kind of transition is **one alert per project
+per scan** listing every finding involved — a project's first scan sends
+one informational digest, not one push per finding. Host-scope
+suppression expiry is alerted once per fleet scan, not once per project.
 
 ### Per-project scan budget (v0.7.0)
 
@@ -673,22 +680,25 @@ top-level `grace` field.
 
 ## Alerts you'll see (Pushover)
 
-Seven categories. Titles only — bodies are self-explanatory.
+Titles only — bodies list every finding involved and what to do. Where
+several findings are involved the title names the worst and adds
+`(+N more)`. Priority 1 bypasses the recipient's quiet hours.
 
 | Title | Priority |
 |---|---|
-| `[boxmunge:<project>] QUARANTINED — <CVE> (<severity>)` | high |
-| `[boxmunge:<project>] QUARANTINED — <CVE> (actively exploited — CISA KEV)` | high |
-| `[boxmunge:<project>] [STILL RUNNING — quarantine disabled by config]` | high |
-| `[boxmunge:<project>] <CVE> (<severity>)` (informational, sub-threshold or distro-deprioritized) | normal |
-| `[boxmunge:<project>] Suppression for <CVE> expired` | high |
-| `[boxmunge] CVE policy enforcement begins in <N>h` (one-time) | normal |
+| `[boxmunge:<project>] QUARANTINED — <CVE> (<severity>)` | priority-1 |
+| `[boxmunge:<project>] QUARANTINED — <CVE> (actively exploited — CISA KEV)` | priority-1 |
+| `[boxmunge:<project>] [STILL RUNNING — quarantine disabled by config] <CVE> (<severity>)` | priority-1 |
+| `[boxmunge:<project>] <N> new CVE findings (informational)` (digest, top 5 listed) | normal |
+| `[boxmunge:<project>] Suppression expired — <CVE>` | priority-1 |
+| `[boxmunge] Host suppression expired — <CVE>` (once per fleet scan) | priority-1 |
+| `[boxmunge] CVE policy enforcement begins in <N>h` (one-time) | priority-1 |
 | `[boxmunge] CISA KEV feed stale — exploitation defense degraded` | priority-1 |
 | `[boxmunge] CISA KEV refresh rejected — previous catalog kept` | priority-1 |
 | `[boxmunge] CVE scan incomplete — <N> projects not fully scanned` | priority-1 |
 
 Alerting is best-effort. The durable record is the on-disk scan state
-under `<project>/.cve/scan_state.json`. If Pushover isn't configured, or
+under `state/scans/<project>.json`. If Pushover isn't configured, or
 the API call fails, the scan still runs, the quarantine still happens,
 and the state file is still written — you just won't get a push.
 

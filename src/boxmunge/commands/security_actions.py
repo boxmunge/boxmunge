@@ -16,12 +16,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project
-from boxmunge.cve._alerting_fleet import (
-    format_kev_stale_alert,
-    format_scan_failure_alert,
-)
 from boxmunge.cve.alerting import (
     format_grace_heads_up_alert,
+    format_host_suppression_expired_alert,
+    format_kev_stale_alert,
+    format_scan_failure_alert,
     send_alerts,
 )
 from boxmunge.cve.kev import KevCatalog, load_kev, refresh_kev
@@ -240,14 +239,21 @@ def _scan_each(
     return run
 
 
-def _alert_scan_failures(paths: BoxPaths, run: FleetRun) -> None:
-    """Audit B-11: scan failures are never silent — one alert per run."""
-    if not run.problems:
+def _alert_fleet(paths: BoxPaths, run: FleetRun) -> None:
+    """Once-per-run alerts: scan failures (audit B-11) and expired
+    host-scope suppressions (once, not once per project — B-14)."""
+    alerts = []
+    if run.problems:
+        alerts.append(format_scan_failure_alert(run.problems))
+    host_expired = {s.cve_id: s for scan in run.scans.values() for s in scan.host_expired}
+    if host_expired:
+        alerts.append(format_host_suppression_expired_alert(list(host_expired.values())))
+    if not alerts:
         return
     try:
-        send_alerts((format_scan_failure_alert(run.problems),), paths)
+        send_alerts(tuple(alerts), paths)
     except Exception as e:  # noqa: BLE001 — alerting must never block scan
-        log_warning("cve-scan", f"scan-failure alert emission failed: {e}", paths)
+        log_warning("cve-scan", f"fleet alert emission failed: {e}", paths)
 
 
 def _exit_code(paths: BoxPaths, run: FleetRun) -> int:
@@ -325,7 +331,7 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
             posture_by_project={n: s.posture for n, s in run.scans.items()},
             dangerously_by_project={n: s.dangerously for n, s in run.scans.items()},
         )
-    _alert_scan_failures(paths, run)
+    _alert_fleet(paths, run)
 
     elapsed = time.monotonic() - start
     print(f"Scanned {len(targets)} projects in {elapsed:.1f}s.")

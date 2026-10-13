@@ -12,14 +12,15 @@ matrix, suppression file format), see `agent-help cve`.
 
 ## Triage
 
-The five things that produce a CVE alert:
+The things that produce a CVE alert:
 
 | Alert title prefix | What it means |
 |---|---|
-| `[boxmunge:<p>] QUARANTINED — <CVE>` | Project taken offline by policy. Maintenance page is being served. |
-| `[boxmunge:<p>] [STILL RUNNING]` | Would have quarantined but `dangerously_disable_quarantine: true`. Project is up at known risk. |
-| `[boxmunge:<p>] <CVE>` (no severity prefix) | Sub-threshold finding. Informational only. |
-| `[boxmunge:<p>] Suppression expired` | A previously-suppressed CVE is now an active finding. Quarantine queued for next scan. |
+| `[boxmunge:<p>] QUARANTINED — <CVE>` | Project taken offline by policy. Maintenance page is being served. `(+N more)` means several CVEs. |
+| `[boxmunge:<p>] [STILL RUNNING — quarantine disabled by config]` | Would have quarantined but `dangerously_disable_quarantine: true`. Project is up at known risk. |
+| `[boxmunge:<p>] <N> new CVE findings (informational)` | New findings below the quarantine gate. One digest per scan. |
+| `[boxmunge:<p>] Suppression expired` / `[boxmunge] Host suppression expired` | A previously-suppressed CVE is an active finding again. |
+| `[boxmunge] CVE scan incomplete` | Some images were not scanned. They are unprotected until a scan succeeds. |
 | `[boxmunge] CVE policy enforcement begins in <N>h` | One-time migration grace heads-up after upgrade. Affects the whole fleet. |
 
 If you got an alert, run these two commands first — they tell you everything.

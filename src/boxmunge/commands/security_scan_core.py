@@ -47,6 +47,7 @@ from boxmunge.cve.scan_state import (
     read_scan_state,
     write_scan_state,
 )
+from boxmunge.cve.suppressions import Suppression
 from boxmunge.cve.scanner import (
     _DEFAULT_TIMEOUT,
     PkgClass,
@@ -93,6 +94,9 @@ class ProjectScan:
     skipped_images: tuple[str, ...] = ()
     unidentified_services: tuple[str, ...] = ()
     headline: tuple[ProjectDecision, FindingDisposition] | None = None
+    # Host-scope suppressions that expired since the last scan; the fleet
+    # run alerts them once rather than once per project (audit B-14).
+    host_expired: tuple[Suppression, ...] = ()
 
     @property
     def complete(self) -> bool:
@@ -358,8 +362,11 @@ def _scan_one_project_locked(
     # Transition alerts are best-effort; during grace the operator gets the
     # single fleet-level heads-up instead, and audit-only callers (resume)
     # must not push alerts.
+    host_expired: tuple[Suppression, ...] = ()
     if not in_grace and not audit_only:
-        _emit_transition_alerts(paths, project, decisions, prior_decisions, supps)
+        host_expired = _emit_transition_alerts(
+            paths, project, decisions, prior_decisions, supps,
+        )
     _raise_enforce_error(project, enforce_error)
 
     return ProjectScan(
@@ -372,6 +379,7 @@ def _scan_one_project_locked(
         skipped_images=tuple(skipped),
         unidentified_services=tuple(unidentified),
         headline=headline,
+        host_expired=host_expired,
     )
 
 
@@ -496,24 +504,23 @@ def _emit_transition_alerts(
     paths: BoxPaths, project: str,
     decisions: list[ProjectDecision],
     prior_decisions: tuple[ProjectDecision, ...],
-    supps: tuple,
-) -> None:
-    """Best-effort transition alerts — failures never fail the scan."""
-    prior_by_image = {pd.image_ref: pd for pd in prior_decisions}
-    for current_decision in decisions:
-        try:
-            emit_scan_alerts(
-                project_name=project,
-                current=current_decision,
-                prior=prior_by_image.get(current_decision.image_ref),
-                suppressions=supps,
-                paths=paths,
-            )
-        except Exception as e:  # noqa: BLE001 — alerting must never block scan
-            log_warning(
-                "cve-scan",
-                f"alert emission failed for {project} "
-                f"({current_decision.image_ref}): {e}",
-                paths, project=project,
-                detail={"image_ref": current_decision.image_ref, "error": str(e)},
-            )
+    supps: tuple[Suppression, ...],
+) -> tuple[Suppression, ...]:
+    """Best-effort transition alerts — failures never fail the scan.
+
+    Returns the expired host-scope suppressions for the fleet to alert once.
+    """
+    try:
+        return emit_scan_alerts(
+            project_name=project,
+            current=decisions,
+            prior=prior_decisions,
+            suppressions=supps,
+            paths=paths,
+        )
+    except Exception as e:  # noqa: BLE001 — alerting must never block scan
+        log_warning(
+            "cve-scan", f"alert emission failed for {project}: {e}",
+            paths, project=project, detail={"error": str(e)},
+        )
+        return ()
