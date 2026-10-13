@@ -162,10 +162,12 @@ Usage: boxmunge backup-sync [project]
 
 Sync encrypted backups to the off-box remote.""",
     "restore": """\
-Usage: boxmunge restore <project> [snapshot] [--yes]
+Usage: boxmunge restore <project> [snapshot] [--yes] [--no-safety-snapshot]
 
-Restore from a backup snapshot (latest if none given). Does not support
---dry-run.""",
+Restore from a backup snapshot (latest if none given). The snapshot is
+verified before production stops, and the current data is saved as a
+pre-restore safety snapshot first unless --no-safety-snapshot is given.
+Does not support --dry-run.""",
     "test-restore": """\
 Usage: boxmunge test-restore <project>
 

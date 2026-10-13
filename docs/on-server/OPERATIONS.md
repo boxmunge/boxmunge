@@ -311,6 +311,28 @@ Restore from a specific snapshot:
 restore myapp myapp-2026-03-30T020000.tar.gz.age
 ```
 
+Before `restore` stops anything, it decrypts the snapshot and checks that it unpacks: it must be
+non-empty, a gzip stream must decompress to the end, and a tar archive must list. It then takes a
+safety snapshot of the current data, named `myapp-pre-restore-<timestamp>.tar.gz.age`. If either
+step fails, production is left running and untouched. Only then does it stop the project, restore
+the data (the `restore_command` is limited to 10 minutes), and start every service again. The
+services are started again whether the restore succeeded or failed. When it fails, the error names
+the safety snapshot so you can put the previous data back:
+
+```
+restore myapp myapp-pre-restore-2026-10-13T120000.tar.gz.age
+```
+
+The safety snapshot needs the backup service to be running and `backup.dump_command` to be set. If
+it cannot be taken (for example, the database is down, which is why you are restoring), the restore
+stops with an error. To restore anyway, without a safety snapshot:
+
+```
+restore myapp myapp-2026-03-30T020000.tar.gz.age --no-safety-snapshot
+```
+
+Safety snapshots sit alongside the nightly backups and are pruned by the same retention.
+
 Verify that a backup restores successfully (non-destructive):
 
 ```
