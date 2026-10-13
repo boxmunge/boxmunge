@@ -51,6 +51,38 @@ def _validate_host(entry: object) -> str | None:
     return "is not a valid hostname"
 
 
+# Route paths and service ports are written into the Caddyfile. Anything
+# beyond a plain path (braces, whitespace, quotes, newlines) could inject
+# Caddy directives, so paths are limited to unreserved URL characters and
+# `/`, with an optional trailing `*` wildcard.
+_ROUTE_PATH_RE = re.compile(r'^/[A-Za-z0-9._~/-]*\*?$')
+_MAX_PORT = 65535
+
+
+def _route_path_problem(path: object) -> str | None:
+    """Return why a route path is unacceptable, or None if it is fine."""
+    if not isinstance(path, str):
+        return f"must be a string, got {type(path).__name__}"
+    if not _ROUTE_PATH_RE.fullmatch(path):
+        return (
+            "must start with '/' and contain only letters, digits, '.', '_', "
+            "'~', '-' and '/', with an optional trailing '*' (e.g. /api/*)"
+        )
+    return None
+
+
+def _port_problem(port: object) -> str | None:
+    """Return why a service port is unacceptable, or None if it is fine."""
+    if isinstance(port, bool) or not isinstance(port, int):
+        return (
+            f"must be an unquoted integer from 1 to {_MAX_PORT} "
+            f"(e.g. port: 8080), got {port!r}"
+        )
+    if not 1 <= port <= _MAX_PORT:
+        return f"must be from 1 to {_MAX_PORT}, got {port}"
+    return None
+
+
 CURRENT_SCHEMA_VERSION = 3
 
 
@@ -150,15 +182,24 @@ def validate_manifest(
         errors.append("'services' must define at least one service.")
     else:
         for svc_name, svc in services.items():
-            if not _VALID_SERVICE_NAME.match(svc_name):
+            if not isinstance(svc_name, str) or not _VALID_SERVICE_NAME.fullmatch(svc_name):
                 errors.append(f"Service name '{svc_name}' is invalid. Must be lowercase alphanumeric with hyphens.")
+            if not isinstance(svc, dict):
+                errors.append(f"Service '{svc_name}' must be a mapping.")
+                continue
             if "port" not in svc:
                 errors.append(f"Service '{svc_name}' is missing 'port'.")
+            else:
+                problem = _port_problem(svc["port"])
+                if problem:
+                    errors.append(f"Service '{svc_name}' port {problem}.")
             routes = svc.get("routes", [])
             if not routes:
                 errors.append(
                     f"Service '{svc_name}' must have at least one route."
                 )
+            elif not isinstance(routes, list):
+                errors.append(f"Service '{svc_name}' routes must be a list.")
             else:
                 for i, route in enumerate(routes):
                     if not isinstance(route, dict) or "path" not in route:
@@ -166,6 +207,13 @@ def validate_manifest(
                             f"Service '{svc_name}' route {i}: must be "
                             f"a mapping with 'path' key, e.g. {{path: /}}, "
                             f"got: {route!r}"
+                        )
+                        continue
+                    problem = _route_path_problem(route["path"])
+                    if problem:
+                        errors.append(
+                            f"Service '{svc_name}' route {i}: path "
+                            f"{route['path']!r} {problem}."
                         )
 
             if "limits" not in svc:
@@ -300,8 +348,8 @@ def validate_manifest(
 
     # Smoke tests — per-service
     has_any_smoke = any(
-        svc.get("smoke") for svc in services.values()
-    ) if services else False
+        isinstance(svc, dict) and svc.get("smoke") for svc in services.values()
+    )
     if not has_any_smoke:
         warnings.append(
             "No smoke tests configured. Strongly recommended to set "

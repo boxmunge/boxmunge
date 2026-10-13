@@ -196,7 +196,7 @@ boxmunge validates `manifest.yml` on every deploy and rejects invalid manifests 
 3. **`source` is required** and must be `bundle` or `git`.
 4. **`repo` is required if `source: git`**. The `ref` field defaults to `main` if omitted.
 5. **`hosts` is required** and must contain at least one hostname. Wildcard hosts (e.g. `*.example.com`) are rejected unless the manifest top level sets `allow_wildcard_hosts: true` — see SECURITY.md for the trade-off.
-6. **Each `web` service must have `port`** and **at least one entry in `routes`**. Routes must be dicts with a `path` key.
+6. **Each `web` service must have `port`** and **at least one entry in `routes`**. Routes must be dicts with a `path` key. Both values are written into the Caddy config, so they are checked strictly: `port` is an unquoted integer from 1 to 65535, and `path` starts with `/` and contains only letters, digits, `.`, `_`, `~`, `-`, and `/`, with an optional trailing `*` (`/`, `/api/*`, `/static*`). Spaces, braces, quotes, and wildcards in the middle of a path are rejected.
 7. **`limits`** fields are optional per service. `limits.memory` accepts Docker memory format (e.g., `256m`, `1g`). `limits.cpus` accepts a numeric string (e.g., `"0.5"`, `"2.0"`).
 8. **If `backup.type` is not `none`**, both `dump_command` and `restore_command` are mandatory. A backup you cannot restore is not a backup.
 9. **Per-service `smoke` is strongly recommended.** Each service can declare a `smoke: boxmunge-scripts/smoke.sh` field. The script is exec'd inside the running container, so `localhost:PORT` naturally works. boxmunge warns if no services have a smoke test.
@@ -543,6 +543,6 @@ Use this only when necessary. Projects using `caddy.override.conf`:
 
 - Take full responsibility for correct TLS, routing, and upstream configuration.
 - Will not benefit from future improvements to boxmunge's Caddy generation.
-- Must ensure their override remains valid Caddyfile syntax -- boxmunge will refuse to reload Caddy with an invalid config and will alert.
+- Must ensure their override remains valid Caddyfile syntax -- boxmunge will refuse to reload Caddy with an invalid config, put back the site config Caddy last accepted, and fail the operation.
 
 When in doubt, request a manifest feature rather than reaching for the override.

@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from boxmunge.caddy_journal import commit_sites, restore_sites
 from boxmunge.fileutil import open_shared_lockfile
 
 _DEFAULT_TIMEOUT = 120
@@ -27,6 +28,8 @@ _CADDY_VALIDATE_TIMEOUT = 30
 # Audit E-NEW-3: log a warning when a deploy waits more than this long for
 # the global Caddy reload lock — visible signal that deploys are queueing.
 _CADDY_LOCK_WAIT_WARN_SECONDS = 0.1
+# Fixed by caddy/compose.yml (`container_name`).
+_CADDY_CONTAINER = "boxmunge-caddy"
 
 
 class DockerError(Exception):
@@ -188,13 +191,15 @@ def container_health(container_name: str) -> str | None:
 
 
 @contextmanager
-def _caddy_reload_lock(lock_dir: Path) -> Iterator[None]:
-    """Global Caddy validate+reload flock. Blocking, bounded section.
+def caddy_config_lock(lock_dir: Path) -> Iterator[None]:
+    """Global Caddy config flock. Blocking, bounded section.
 
     Serialises validate+reload across concurrent deploys so deploy-A cannot
     pass validate, then have deploy-B write a malformed site config that
-    deploy-A's subsequent reload ingests and fails on. The protected section
-    is short (~100ms typical), so blocking is fine.
+    deploy-A's subsequent reload ingests and fails on. Site writers that
+    journal their previous content (`caddy.prepare_caddy_config`) take it
+    too, so a restore never races a write. The protected section is short
+    (~100ms typical), so blocking is fine. Not re-entrant: never nest it.
 
     Audit E-NEW-3: any wait longer than the warn threshold is logged via
     the boxmunge logger so prolonged contention is visible in operations.
@@ -223,10 +228,26 @@ def caddy_reload(caddy_compose_dir: Path, lock_dir: Path) -> None:
     runs under a flock at lock_dir/.caddy.lock so two concurrent deploys
     cannot race past each other's validate. Callers pass paths.state as
     lock_dir.
+
+    When Caddy rejects the config, every site file written since Caddy
+    last accepted one (see `caddy_journal`) is put back, so the bad file
+    does not break the next reload or a Caddy restart. When Caddy is not
+    running nothing can be validated, and the new files stay in place.
     """
-    with _caddy_reload_lock(lock_dir):
+    with caddy_config_lock(lock_dir):
         if not caddy_validate(caddy_compose_dir):
-            raise DockerError("Caddy config validation failed — reload aborted to prevent downtime")
+            if not container_running(_CADDY_CONTAINER):
+                raise DockerError(
+                    "Caddy is not running, so the new site config could not "
+                    "be validated or loaded. Start Caddy and run `doctor`."
+                )
+            restored = restore_sites(caddy_compose_dir)
+            raise DockerError(
+                "Caddy config validation failed — reload aborted to prevent "
+                "downtime. Restored the last accepted site config for: "
+                f"{', '.join(restored) or '(none journaled)'}."
+            )
+        commit_sites(caddy_compose_dir)
         _run(
             ["docker", "compose", "exec", "caddy", "caddy", "reload",
              "--config", "/etc/caddy/Caddyfile"],
