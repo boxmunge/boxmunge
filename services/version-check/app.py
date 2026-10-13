@@ -41,6 +41,7 @@ VALID_STAGES = {
     "apply_partial_rollback",
     "health_immediate",
     "health_probation",
+    "system_upgrade",
 }
 
 # Stats endpoint window cap. Stops a runaway query against an unbounded
@@ -182,14 +183,27 @@ def _reset_circuit_breaker(db_path, version):
         conn.close()
 
 
-def _maybe_auto_trip(db_path: Path, version: str) -> None:
-    """Auto-trip circuit breaker if failure threshold is exceeded."""
-    threshold_str = os.environ.get("CIRCUIT_BREAKER_AUTO_THRESHOLD", "0")
+def _auto_trip_threshold() -> int:
+    """CIRCUIT_BREAKER_AUTO_THRESHOLD: failures in 6 hours that trip a version.
+
+    0 (the default) disables auto-trip. Anything that is not a non-negative
+    integer stops the service from starting, rather than silently leaving
+    auto-trip off.
+    """
+    raw = os.environ.get("CIRCUIT_BREAKER_AUTO_THRESHOLD", "0")
     try:
-        threshold = int(threshold_str)
+        threshold = int(raw)
     except ValueError:
-        return
-    if threshold <= 0:
+        threshold = -1
+    if threshold < 0:
+        raise ValueError(
+            f"CIRCUIT_BREAKER_AUTO_THRESHOLD must be a non-negative integer, got {raw!r}")
+    return threshold
+
+
+def _maybe_auto_trip(db_path: Path, version: str, threshold: int) -> None:
+    """Auto-trip circuit breaker if failure threshold is exceeded."""
+    if threshold == 0:
         return
 
     six_hours_ago = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
@@ -315,6 +329,7 @@ def create_app() -> Flask:
     # cannot classify releases must not answer fleet update checks.
     releases = load_releases(RELEASES_PATH)
     listed_versions = {r["version"] for r in releases}
+    auto_trip_threshold = _auto_trip_threshold()
     limiter = RateLimiter(RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_SECONDS,
                           RATE_LIMIT_MAX_CLIENTS)
     counter = CheckCounter(DB_PATH, CHECK_FLUSH_SECONDS, CHECK_MAX_PENDING)
@@ -380,7 +395,7 @@ def create_app() -> Flask:
 
         _record_failure(DB_PATH, version, installed_from, stage, timestamp,
                         request.remote_addr)
-        _maybe_auto_trip(DB_PATH, version)
+        _maybe_auto_trip(DB_PATH, version, auto_trip_threshold)
         return "", 204
 
     @app.route("/v1/failures")
