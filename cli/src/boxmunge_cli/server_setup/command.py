@@ -102,17 +102,19 @@ def run_server_setup(setup_args: ServerSetupArgs, known_hosts: Path | None = Non
     target = Target(setup_args.user, setup_args.host, setup_args.port,
                     known_hosts or default_known_hosts())
 
+    try:
+        public_key = detect_ssh_key(setup_args.ssh_key_arg)
+    except SSHKeyError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    print(f"Key to authorise for the deploy and supervisor users: {public_key.describe()}")
+
     if not setup_args.yes:
         print(f"This will turn [{setup_args.host}] into a boxmunge server.")
         if not _confirm("Are you sure? [y/N] "):
             print("Aborted.")
             return 1
-
-    try:
-        ssh_key = detect_ssh_key(setup_args.ssh_key_arg)
-    except SSHKeyError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
+    ssh_key = public_key.line
 
     with tempfile.TemporaryDirectory(prefix="boxmunge-release-") as workdir:
         try:

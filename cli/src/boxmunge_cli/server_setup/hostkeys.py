@@ -11,15 +11,13 @@ silently.
 
 from __future__ import annotations
 
-import base64
-import binascii
-import hashlib
 import os
 import subprocess
 from pathlib import Path
 from typing import Callable
 
 from boxmunge_cli.server_setup.remote import Target
+from boxmunge_cli.server_setup.ssh_key import fingerprint as key_fingerprint
 
 # Preference order when a person is asked to confirm one key.
 _PREFERRED = ("ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384",
@@ -38,11 +36,9 @@ def host_pattern(host: str, port: int) -> str:
 
 def fingerprint(key_b64: str) -> str:
     try:
-        blob = base64.b64decode(key_b64, validate=True)
-    except binascii.Error as e:
+        return key_fingerprint(key_b64)
+    except ValueError as e:
         raise HostKeyError(f"Malformed host key from ssh-keyscan: {e}") from e
-    digest = base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
-    return f"SHA256:{digest}"
 
 
 def _lookup(target: Target, port: int) -> list[tuple[str, str]]:
