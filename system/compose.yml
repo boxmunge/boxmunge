@@ -1,6 +1,11 @@
 # system/compose.yml
 # boxmunge-system container — managed by boxmunge platform
 # Do not edit directly.
+#
+# The mounts below must match boxmunge.system_container.system_mounts():
+# the platform refuses to run age or rclone in a container mounted otherwise.
+# Missing host paths fail `docker compose up` instead of being created as
+# empty root-owned directories.
 
 services:
   system:
@@ -9,13 +14,32 @@ services:
       dockerfile: Dockerfile
     container_name: boxmunge-system
     restart: unless-stopped
+    # Must be the deploy user (owner of projects/): age reads its 0600 temp
+    # files and the group-readable backup key. install.sh writes these to
+    # .env beside this file from `id -u deploy` / `id -g deploy`; boxmunge
+    # refuses to use a container running as any other uid.
+    user: "${BOXMUNGE_UID:?set by install.sh in .env}:${BOXMUNGE_GID:?set by install.sh in .env}"
     volumes:
       # Backup key (read-only)
-      - ${BOXMUNGE_CONFIG:-/opt/boxmunge/config}/backup.key:/config/backup.key:ro
-      # Project backups directory (read-write for encrypt/decrypt)
-      - ${BOXMUNGE_PROJECTS:-/opt/boxmunge/projects}:/projects
-      # Rclone config (read-only, if exists)
-      - ${RCLONE_CONFIG:-/dev/null}:/config/rclone.conf:ro
+      - type: bind
+        source: ${BOXMUNGE_CONFIG:-/opt/boxmunge/config}/backup.key
+        target: /config/backup.key
+        read_only: true
+        bind:
+          create_host_path: false
+      # Operator's rclone config directory (read-only); holds rclone.conf
+      - type: bind
+        source: ${BOXMUNGE_CONFIG:-/opt/boxmunge/config}/rclone
+        target: /config/rclone
+        read_only: true
+        bind:
+          create_host_path: false
+      # Project tree (read-write for encrypt/decrypt temp files)
+      - type: bind
+        source: ${BOXMUNGE_PROJECTS:-/opt/boxmunge/projects}
+        target: /projects
+        bind:
+          create_host_path: false
     read_only: true
     tmpfs:
       - /tmp:size=512m

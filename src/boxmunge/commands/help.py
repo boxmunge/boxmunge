@@ -55,7 +55,7 @@ Project operations:
   logs --boxmunge         Tail the boxmunge service log
   backup <project>        Backup, encrypt, store locally
   backup-all              Backup all configured projects
-  backup-sync [project]   Sync encrypted backups to off-box remote
+  backup-sync [project]   Copy encrypted backups to off-box remote (never deletes)
   restore <project>       Restore from a backup snapshot
   test-restore <project>  Verify latest backup decrypts (no restore run)
   caddy-status            Show Caddy sites and certificate expiry

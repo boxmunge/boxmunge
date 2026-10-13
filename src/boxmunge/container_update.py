@@ -19,6 +19,7 @@ from boxmunge.docker import (
     container_image_digest, image_digest, tag_image, container_health,
     container_running,
 )
+from boxmunge.backup import BackupKind
 from boxmunge.commands.backup_cmd import run_backup
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.lifecycle import is_blocked
@@ -282,25 +283,11 @@ def _update_locked(
         persist_result(paths, target, result, before={})
         return result
 
-    # Step 1: Pre-update backup (if applicable)
-    if target.has_backup:
-        rc = run_backup(target.name, paths, _lock_held=True)
-        if rc != 0:
-            result["status"] = "failed"
-            result["reason"] = "backup_failed"
-            log_error(
-                "container-update", f"Backup failed for {target.name}, aborting update",
-                paths, project=target.name,
-                detail={"strategy": target.strategy, "reason": "backup_failed"},
-            )
-            persist_result(paths, target, result, before=None)
-            return result
-
-    # Step 2: Capture current digests
+    # Step 1: Capture current digests
     before = _capture_service_digests(target)
     result["previous_digests"] = before
 
-    # Step 3: Pull
+    # Step 2: Pull
     try:
         compose_pull(target.project_dir, compose_files=target.compose_files)
     except DockerError as e:
@@ -314,7 +301,7 @@ def _update_locked(
         persist_result(paths, target, result, before=before)
         return result
 
-    # Step 4: Detect what changed (compares local image digest vs running digest)
+    # Step 3: Detect what changed (compares local image digest vs running digest)
     changed = _detect_image_changes(target, before)
     if not changed:
         result["status"] = "no_change"
@@ -322,6 +309,24 @@ def _update_locked(
         log_operation("container-update", f"No updates available for {target.name}", paths, project=target.name)
         persist_result(paths, target, result, before=before)
         return result
+
+    # Step 4: Pre-update backup, only now that a recreate will happen. Pulling
+    # leaves running containers untouched, so this still captures the data
+    # as the current images left it; a no-change run takes no backup.
+    if target.has_backup:
+        rc = run_backup(
+            target.name, paths, kind=BackupKind.PREUPDATE, _lock_held=True,
+        )
+        if rc != 0:
+            result["status"] = "failed"
+            result["reason"] = "backup_failed"
+            log_error(
+                "container-update", f"Backup failed for {target.name}, aborting update",
+                paths, project=target.name,
+                detail={"strategy": target.strategy, "reason": "backup_failed"},
+            )
+            persist_result(paths, target, result, before=before)
+            return result
 
     # Step 5: Recreate
     try:

@@ -18,7 +18,10 @@ import sys
 import time
 from pathlib import Path
 
-from boxmunge.backup import decrypted_snapshot, resolve_backup_service, BackupError
+from boxmunge.backup import (
+    SNAPSHOT_RETENTION, BackupError, BackupKind, decrypted_snapshot, prune_backups,
+    resolve_backup_service,
+)
 from boxmunge.commands.backup_cmd import list_snapshots
 from boxmunge.docker import compose_down, compose_up, DockerError
 from boxmunge.fileutil import project_lock, LockError
@@ -159,7 +162,7 @@ def _run_restore_inner(
     print(f"Restoring {project_name} from {snapshot_path.name}...")
     phase = "verify"
     try:
-        with decrypted_snapshot(snapshot_path, paths.backup_key) as plaintext:
+        with decrypted_snapshot(snapshot_path, paths) as plaintext:
             print("  Decrypting and verifying snapshot...")
             verify_plaintext(plaintext)
             safety: Path | None = None
@@ -241,6 +244,10 @@ def _replace_data(
     if not started:
         return 1
     log_operation("restore", f"Restored from {snapshot_path.name}", paths, project=project_name)
+    prune_backups(
+        paths.project_backups(project_name), project_name,
+        BackupKind.PRERESTORE, SNAPSHOT_RETENTION[BackupKind.PRERESTORE],
+    )
     print(f"{project_name}: restore complete")
     return 0
 

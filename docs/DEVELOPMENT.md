@@ -93,9 +93,12 @@ command means touching several places, listed below.
 - **Write state atomically** with `fileutil.atomic_write_text` or `state.write_state`.
 - **Mind file ownership.** Some code runs as root (timers, the upgrade shim) and some as `deploy`.
   A file root creates under a deploy-owned directory can become unreadable to `deploy` or to the
-  system container (uid 1000). Match the owning directory's ownership when you create files there.
-- **age runs in a container.** Paths passed to backup encryption or decryption must be under a
-  directory mounted into `boxmunge-system` (the project's directory under `projects/`), not `/tmp`.
+  system container, which runs as the deploy user's uid:gid (the owner of `projects/`). Give files
+  that age or rclone touch to that user with `backup.chown_for_system_container`.
+- **age and rclone run in a container, with no host fallback.** Get a handle with
+  `system_container.connect(paths)` and pass every path through `tools.path()`. Paths must be
+  under a mount of `boxmunge-system` (`projects/`, the backup key, `config/rclone/`), not `/tmp`;
+  anything else raises before the tool runs.
 
 ## Where state lives on a server
 
@@ -124,6 +127,13 @@ Three tiers, fastest first.
 Tests that need Docker carry the `integration` marker, wherever they live; `make test` deselects
 them and `make test-integration` selects them. Integration tests skip when Docker or `age` is missing. CI sets `BOXMUNGE_REQUIRE_INTEGRATION=1`,
 which turns a missing prerequisite into a failure, so a green CI run means they actually ran.
+
+Every integration test that backs up, restores or syncs runs through a real `boxmunge-system`
+container, built from `system/Dockerfile` and started from `system/compose.yml` on the test root
+(the `real_system_container` fixture; it uses a unique container name). There is no host fallback.
+`tests/integration/test_system_container_tier.py` adds a tripwire that fails if age or rclone is
+handed a path outside `/projects` or `/config`, or runs on the host. Docker Desktop on macOS hides
+uid and ownership bugs, so the Linux CI run is authoritative for that tier.
 
 Prefer tests that exercise real behaviour. A test that mocks `subprocess.run` for the very code
 under test passes whether the code works or not. When you need Docker or git behaviour, use the

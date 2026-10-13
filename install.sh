@@ -263,25 +263,48 @@ if [[ -f "${SCRIPT_DIR}/caddy/compose.yml" ]]; then
     fi
 fi
 
+# rclone config for off-site backup-sync. Mounted read-only into the
+# boxmunge-system container at /config/rclone (a directory mount, so editing
+# rclone.conf in place is seen without recreating the container). An empty
+# file is a valid rclone config; the operator adds remotes to it.
+mkdir -p "${BOXMUNGE_ROOT}/config/rclone"
+chown root:deploy "${BOXMUNGE_ROOT}/config/rclone"
+chmod 750 "${BOXMUNGE_ROOT}/config/rclone"
+if [[ ! -f "${BOXMUNGE_ROOT}/config/rclone/rclone.conf" ]]; then
+    install -m 640 -o root -g deploy /dev/null "${BOXMUNGE_ROOT}/config/rclone/rclone.conf"
+fi
+
 # Build + (re)start the boxmunge-system container — isolation for age/rclone
-# (blast-radius containment). Best-effort: the platform falls back to host-level
-# age/rclone when the container is absent, so a transient build/network failure
-# must NOT fail the install or block an upgrade. Rebuild only when the
-# definition changed or the container isn't running, mirroring the caddy block.
+# (blast-radius containment). There is no host fallback: while the container
+# is absent, backups, restores and backup-sync fail loudly. A transient
+# build/network failure still must not block an upgrade, so warn and carry
+# on. Rebuild only when the definition changed or the container isn't
+# running, mirroring the caddy block.
 if [[ -d "${SCRIPT_DIR}/system" ]]; then
     SYSTEM_CHANGED=0
     mkdir -p "${BOXMUNGE_ROOT}/system"
+    # The container runs as the deploy user so it can read the 0600 backup
+    # temp files and the root:deploy backup key (compose.yml `user:`).
+    printf 'BOXMUNGE_UID=%s\nBOXMUNGE_GID=%s\nBOXMUNGE_CONFIG=%s\nBOXMUNGE_PROJECTS=%s\n' \
+        "$(id -u deploy)" "$(id -g deploy)" \
+        "${BOXMUNGE_ROOT}/config" "${BOXMUNGE_ROOT}/projects" \
+        > "${BOXMUNGE_ROOT}/system/.env.next"
     for f in Dockerfile compose.yml; do
         if ! cmp -s "${SCRIPT_DIR}/system/$f" "${BOXMUNGE_ROOT}/system/$f" 2>/dev/null; then
             SYSTEM_CHANGED=1
         fi
         cp "${SCRIPT_DIR}/system/$f" "${BOXMUNGE_ROOT}/system/$f"
     done
+    if ! cmp -s "${BOXMUNGE_ROOT}/system/.env.next" "${BOXMUNGE_ROOT}/system/.env" 2>/dev/null; then
+        SYSTEM_CHANGED=1
+    fi
+    mv "${BOXMUNGE_ROOT}/system/.env.next" "${BOXMUNGE_ROOT}/system/.env"
     chown -R root:root "${BOXMUNGE_ROOT}/system"
     if [[ "${SYSTEM_CHANGED}" -eq 1 ]] || ! docker inspect boxmunge-system >/dev/null 2>&1; then
         if ! docker compose -f "${BOXMUNGE_ROOT}/system/compose.yml" up -d --build; then
-            echo "WARNING: boxmunge-system container build failed; the platform" \
-                 "will use host-level age/rclone. Re-run install.sh to retry." >&2
+            echo "WARNING: boxmunge-system container build failed. Backups," \
+                 "restores and backup-sync will FAIL until it runs. Re-run" \
+                 "install.sh to retry." >&2
         fi
     fi
 fi

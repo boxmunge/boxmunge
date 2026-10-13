@@ -11,10 +11,9 @@ from __future__ import annotations
 import gzip
 import tarfile
 import zlib
-from datetime import datetime, timezone
 from pathlib import Path
 
-from boxmunge.backup import BackupError, encrypt_file
+from boxmunge.backup import BackupError, BackupKind, backup_filename, encrypt_file
 from boxmunge.commands.backup_cmd import _execute_dump
 from boxmunge.paths import BoxPaths
 
@@ -50,20 +49,15 @@ def verify_plaintext(path: Path) -> None:
         raise RestoreError(f"decrypted snapshot does not unpack: {e}") from e
 
 
-def safety_snapshot_name(project_name: str) -> str:
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S")
-    return f"{project_name}-pre-restore-{ts}.tar.gz.age"
-
-
 def take_safety_snapshot(
     project_name: str, paths: BoxPaths, dump_command: str, service: str,
 ) -> Path:
     """Dump and encrypt the project's current data next to its backups.
 
-    The file matches the usual snapshot pattern, so ``restore`` can list
-    and restore it, and later nightly retention treats it like any other
-    snapshot. It is never pruned here: pruning now could delete the very
-    snapshot being restored.
+    It is an ordinary snapshot of kind ``prerestore``, so ``restore`` can list
+    and restore it. It is never pruned here, because pruning before the
+    restore could delete the very snapshot being restored; ``restore`` prunes
+    this kind after it succeeds.
     """
     if not dump_command:
         raise RestoreError(
@@ -71,17 +65,16 @@ def take_safety_snapshot(
             "is not set in the manifest (use --no-safety-snapshot to restore "
             "without one)"
         )
-    project_dir = paths.project_dir(project_name)
     try:
-        raw = _execute_dump(project_dir, dump_command, project_name, service)
+        raw = _execute_dump(paths, project_name, dump_command, service)
     except BackupError as e:
         raise RestoreError(
             f"pre-restore safety snapshot failed: {e} (fix the service, or "
             f"use --no-safety-snapshot to restore without one)"
         ) from e
-    out = paths.project_backups(project_name) / safety_snapshot_name(project_name)
+    out = paths.project_backups(project_name) / backup_filename(project_name, BackupKind.PRERESTORE)
     try:
-        encrypt_file(raw, out, paths.backup_key)
+        encrypt_file(raw, out, paths)
     except (BackupError, FileNotFoundError) as e:
         raise RestoreError(f"pre-restore safety snapshot could not be encrypted: {e}") from e
     finally:

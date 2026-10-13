@@ -274,40 +274,67 @@ class TestUpdateTarget:
         # compose up called twice (initial + rollback recreate)
         assert mock_up.call_count == 2
 
-    @patch("boxmunge.container_update.image_digest", return_value="sha256:old")
+    @staticmethod
+    def _stateful(paths):
+        _write_project(paths, "stateful", with_backup=True)
+        return UpdateTarget(
+            name="stateful", project_dir=paths.project_dir("stateful"),
+            compose_files=["compose.yml"], strategy="leave_broken",
+            has_backup=True, is_caddy=False,
+        )
+
     @patch("boxmunge.container_update.run_backup")
     @patch("boxmunge.container_update.compose_pull")
-    @patch("boxmunge.container_update._capture_service_digests")
-    def test_backup_runs_first_when_target_has_backup(
-        self, mock_capture, mock_pull, mock_backup, mock_image_digest, paths
+    @patch("boxmunge.container_update._detect_image_changes", return_value={})
+    @patch("boxmunge.container_update._capture_service_digests",
+           return_value={"web": "sha256:old"})
+    def test_no_backup_when_no_image_changed(
+        self, mock_capture, mock_detect, mock_pull, mock_backup, paths
     ):
+        """C-10: the pre-backup used to run every day before change detection,
+        so a no-op sweep consumed a retention slot."""
         from boxmunge.container_update import update_target
-        _write_project(paths, "stateful", with_backup=True)
-        target = UpdateTarget(
-            name="stateful", project_dir=paths.project_dir("stateful"),
-            compose_files=["compose.yml"], strategy="leave_broken",
-            has_backup=True, is_caddy=False,
-        )
-        # Only one capture (before pull); local image digest matches → no change
-        mock_capture.return_value = {"web": "sha256:old"}
-        mock_backup.return_value = 0
-        update_target(paths, target)
-        mock_backup.assert_called_once_with("stateful", paths, _lock_held=True)
+        result = update_target(paths, self._stateful(paths))
+        assert result["status"] == "no_change"
+        mock_backup.assert_not_called()
 
+    @patch("boxmunge.container_update._wait_healthy", return_value=(True, []))
+    @patch("boxmunge.container_update.compose_up")
+    @patch("boxmunge.container_update.run_backup", return_value=0)
+    @patch("boxmunge.container_update.compose_pull")
+    @patch("boxmunge.container_update._detect_image_changes",
+           return_value={"web": "sha256:new"})
+    @patch("boxmunge.container_update._capture_service_digests",
+           return_value={"web": "sha256:old"})
+    def test_preupdate_backup_runs_before_recreate(
+        self, mock_capture, mock_detect, mock_pull, mock_backup, mock_up, mock_wait, paths
+    ):
+        from boxmunge.backup import BackupKind
+        from boxmunge.container_update import update_target
+        order = []
+        mock_backup.side_effect = lambda *a, **k: order.append("backup") or 0
+        mock_up.side_effect = lambda *a, **k: order.append("up")
+        update_target(paths, self._stateful(paths))
+        mock_backup.assert_called_once_with(
+            "stateful", paths, kind=BackupKind.PREUPDATE, _lock_held=True,
+        )
+        assert order[:2] == ["backup", "up"]
+
+    @patch("boxmunge.container_update.compose_up")
     @patch("boxmunge.container_update.run_backup", return_value=1)
     @patch("boxmunge.container_update.compose_pull")
-    def test_aborts_when_backup_fails(self, mock_pull, mock_backup, paths):
+    @patch("boxmunge.container_update._detect_image_changes",
+           return_value={"web": "sha256:new"})
+    @patch("boxmunge.container_update._capture_service_digests",
+           return_value={"web": "sha256:old"})
+    def test_aborts_before_recreate_when_backup_fails(
+        self, mock_capture, mock_detect, mock_pull, mock_backup, mock_up, paths
+    ):
         from boxmunge.container_update import update_target
-        _write_project(paths, "stateful", with_backup=True)
-        target = UpdateTarget(
-            name="stateful", project_dir=paths.project_dir("stateful"),
-            compose_files=["compose.yml"], strategy="leave_broken",
-            has_backup=True, is_caddy=False,
-        )
-        result = update_target(paths, target)
+        result = update_target(paths, self._stateful(paths))
         assert result["status"] == "failed"
         assert "backup" in result.get("reason", "").lower()
-        mock_pull.assert_not_called()
+        mock_up.assert_not_called()
 
 
 class TestContainerNameFallback:

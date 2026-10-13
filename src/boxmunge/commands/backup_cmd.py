@@ -7,11 +7,11 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
 
 import boxmunge.backup as _backup
 from boxmunge.backup import (
-    backup_filename, prune_backups, resolve_backup_service, BackupError,
+    SNAPSHOT_RETENTION, BackupError, BackupKind, backup_filename, prune_backups,
+    resolve_backup_service,
 )
 from boxmunge.config import load_config, ConfigError
 from boxmunge.fileutil import project_lock, LockError
@@ -41,20 +41,23 @@ class BackupAttemptResult(enum.Enum):
 
 
 def _execute_dump(
-    project_dir: Path, dump_command: str, project_name: str, service: str,
+    paths: BoxPaths, project_name: str, dump_command: str, service: str,
 ) -> Path:
     """Run the dump command inside the project container and capture output."""
-    backups_dir = project_dir / "backups"
-    backups_dir.mkdir(parents=True, exist_ok=True)
+    project_dir = paths.project_dir(project_name)
+    backups_dir = paths.project_backups(project_name)
+    if not backups_dir.exists():
+        backups_dir.mkdir()
+        # Created as root by a root-run backup, it would lock deploy out.
+        _backup.chown_for_system_container(backups_dir, paths)
     fd, raw_path_str = tempfile.mkstemp(
         dir=backups_dir, prefix=".dump-", suffix=".tar.gz"
     )
     os.close(fd)
     raw_path = Path(raw_path_str)
-    # The dump is later read by age in the system container (a fixed uid).
+    # The dump is later read by age in the system container (the deploy uid).
     # Align ownership so a root-invoked backup's 0600 dump is readable to it.
-    from boxmunge.backup import _match_dir_ownership
-    _match_dir_ownership(raw_path)
+    _backup.chown_for_system_container(raw_path, paths)
 
     cmd = [
         "docker", "compose",
@@ -89,8 +92,14 @@ def list_snapshots(paths: BoxPaths, project_name: str) -> list[Path]:
     )
 
 
-def run_backup(project_name: str, paths: BoxPaths, _lock_held: bool = False) -> int:
+def run_backup(
+    project_name: str, paths: BoxPaths, _lock_held: bool = False,
+    kind: BackupKind = BackupKind.MANUAL,
+) -> int:
     """Run backup for a project. Returns 0 on success, 1 on failure.
+
+    ``kind`` tags the snapshot and selects its retention: the manifest's
+    ``backup.retention`` for nightly backups, SNAPSHOT_RETENTION otherwise.
 
     Paused projects refuse with rc=1 (operator-driven backup against a
     paused project is almost certainly wrong). Quarantined projects skip
@@ -149,7 +158,12 @@ def run_backup(project_name: str, paths: BoxPaths, _lock_held: bool = False) -> 
     except BackupError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
-    retention = backup_conf.get("retention", 7)
+    retention = (backup_conf.get("retention", 7) if kind is BackupKind.NIGHTLY
+                 else SNAPSHOT_RETENTION[kind])
+    if type(retention) is not int or retention < 1:
+        print(f"ERROR: backup.retention must be a whole number of at least 1, "
+              f"got {retention!r}", file=sys.stderr)
+        return 1
     key_path = paths.backup_key
 
     if not key_path.exists():
@@ -160,40 +174,39 @@ def run_backup(project_name: str, paths: BoxPaths, _lock_held: bool = False) -> 
         try:
             with project_lock(project_name, paths):
                 return _run_backup_inner(
-                    project_name, paths, project_dir, dump_command, service, retention, key_path,
+                    project_name, paths, dump_command, service, kind, retention,
                 )
         except LockError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
     return _run_backup_inner(
-        project_name, paths, project_dir, dump_command, service, retention, key_path,
+        project_name, paths, dump_command, service, kind, retention,
     )
 
 
 def _run_backup_inner(
     project_name: str,
     paths: BoxPaths,
-    project_dir: Any,
     dump_command: str,
     service: str,
+    kind: BackupKind,
     retention: int,
-    key_path: Any,
 ) -> int:
-    print(f"{project_name}: starting backup (service: {service})...")
+    print(f"{project_name}: starting {kind.value} backup (service: {service})...")
 
     try:
-        raw_path = _execute_dump(project_dir, dump_command, project_name, service)
+        raw_path = _execute_dump(paths, project_name, dump_command, service)
     except BackupError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         log_error("backup", f"Backup dump failed: {e}", paths, project=project_name)
         return 1
 
-    fname = backup_filename(project_name)
+    fname = backup_filename(project_name, kind)
     encrypted_path = paths.project_backups(project_name) / fname
     encrypted_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        _backup.encrypt_file(raw_path, encrypted_path, key_path)
+        _backup.encrypt_file(raw_path, encrypted_path, paths)
     except (BackupError, FileNotFoundError) as e:
         print(f"ERROR: Encryption failed: {e}", file=sys.stderr)
         raw_path.unlink(missing_ok=True)
@@ -202,9 +215,9 @@ def _run_backup_inner(
     finally:
         raw_path.unlink(missing_ok=True)
 
-    pruned = prune_backups(paths.project_backups(project_name), project_name, retention)
+    pruned = prune_backups(paths.project_backups(project_name), project_name, kind, retention)
     if pruned:
-        print(f"  Pruned {len(pruned)} old backup(s)")
+        print(f"  Pruned {len(pruned)} old {kind.value} backup(s)")
 
     log_operation("backup", f"Backup completed: {fname}", paths, project=project_name)
     print(f"{project_name}: backup complete -> {fname}")
@@ -221,7 +234,7 @@ def _attempt_locked_backup(name: str, paths: BoxPaths) -> BackupAttemptResult:
     """
     try:
         with project_lock(name, paths):
-            rc = run_backup(name, paths, _lock_held=True)
+            rc = run_backup(name, paths, _lock_held=True, kind=BackupKind.NIGHTLY)
     except LockError:
         return BackupAttemptResult.LOCKED
     return BackupAttemptResult.OK if rc == 0 else BackupAttemptResult.FAILED
@@ -372,7 +385,13 @@ def run_backup_all(paths: BoxPaths) -> int:
 
 
 def run_backup_sync(paths: BoxPaths, project_name: str | None = None) -> int:
-    """Sync encrypted backups to the configured remote via rclone."""
+    """Copy encrypted backups to the configured remote with rclone.
+
+    ``rclone copy``, never ``sync``: the remote is an archive, not a mirror,
+    so a local prune or ``project-delete`` never deletes an off-site copy.
+    Off-site retention is the remote's job (for example a bucket lifecycle
+    rule). Layout on the remote: ``<remote>/<project>/backups/<snapshot>``.
+    """
     try:
         config = load_config(paths)
     except ConfigError as e:
@@ -385,40 +404,27 @@ def run_backup_sync(paths: BoxPaths, project_name: str | None = None) -> int:
         return 1
 
     if project_name:
-        container_src = f"/projects/{project_name}/backups/"
-        dest = f"{remote}/{project_name}/"
+        src = paths.project_backups(project_name)
+        dest = f"{remote}/{project_name}/backups"
+        include = "/*.tar.gz.age"
     else:
-        container_src = "/projects/"
+        src = paths.projects
         dest = remote
+        include = "/*/backups/*.tar.gz.age"
 
-    print(f"Syncing backups to {dest}...")
+    print(f"Copying backups to {dest}...")
 
-    from boxmunge.system_container import system_exec, ensure_system_container, SystemContainerError
+    from boxmunge.system_container import RCLONE_CONFIG, SystemContainerError, connect
 
-    rclone_cmd = ["rclone", "sync", container_src, dest,
-                  "--include", "*.tar.gz.age",
-                  "--config", "/config/rclone.conf"]
-
-    if ensure_system_container():
-        try:
-            system_exec(rclone_cmd)
-        except SystemContainerError as e:
-            print(f"ERROR: rclone sync failed: {e}", file=sys.stderr)
-            return 1
-    else:
-        # Fallback: host-level rclone
-        host_src = str(paths.project_backups(project_name)) if project_name else str(paths.projects)
-        try:
-            subprocess.run(
-                ["rclone", "sync", host_src, dest, "--include", "*.tar.gz.age"],
-                check=True, capture_output=True, text=True,
-            )
-        except subprocess.CalledProcessError as e:
-            print(f"ERROR: rclone sync failed: {e.stderr}", file=sys.stderr)
-            return 1
-        except FileNotFoundError:
-            print("ERROR: rclone not found — install rclone or start the system container", file=sys.stderr)
-            return 1
+    try:
+        tools = connect(paths)
+        tools.run(["rclone", "copy", tools.path(src), dest,
+                   "--include", include,
+                   "--config", RCLONE_CONFIG])
+    except SystemContainerError as e:
+        print(f"ERROR: rclone copy failed: {e}", file=sys.stderr)
+        log_error("backup", f"Backup sync to {dest} failed: {e}", paths)
+        return 1
 
     log_operation("backup", f"Backup sync to {dest} completed", paths)
     print("Backup sync complete.")
