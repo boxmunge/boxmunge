@@ -188,7 +188,8 @@ def _resume_locked(
     print("  Starting containers...")
     try:
         release_restart_policies(project_name, paths)
-        compose_up(project_dir, compose_files=compose_files)
+        compose_up(project_dir, compose_files=compose_files,
+                   project_name=project_name)
     except DockerError as e:
         print(f"ERROR: compose up failed: {e}", file=sys.stderr)
         log_error("resume", f"compose up failed: {e}", paths,

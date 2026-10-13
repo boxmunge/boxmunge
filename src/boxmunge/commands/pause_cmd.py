@@ -109,7 +109,8 @@ def _pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int
     if override.exists():
         compose_files.append("compose.boxmunge.yml")
     try:
-        compose_stop(project_dir, compose_files=compose_files)
+        compose_stop(project_dir, compose_files=compose_files,
+                     project_name=project_name)
     except DockerError as e:
         print(f"WARN: compose stop reported errors: {e}", file=sys.stderr)
         log_error("pause", f"compose stop warning: {e}", paths,

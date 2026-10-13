@@ -121,7 +121,8 @@ def run_log(
             try:
                 docker_tail = 50 if tail is None else tail
                 output = compose_logs_capture(project_dir, tail=docker_tail,
-                                              compose_files=compose_files)
+                                              compose_files=compose_files,
+                                              project_name=project)
                 if output:
                     print(f"\n--- Container logs for {project} ---")
                     print(output)

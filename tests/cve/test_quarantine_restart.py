@@ -106,7 +106,7 @@ def test_project_restart_policies_parses_inspect(monkeypatch):
         return _completed("/demo-web-1|always|0\n/demo-worker-1|on-failure|3\n")
 
     monkeypatch.setattr(docker, "_run", fake_run)
-    assert docker.project_restart_policies("demo") == {
+    assert docker.project_restart_policies(project_name="demo") == {
         "demo-web-1": "always", "demo-worker-1": "on-failure:3",
     }
     assert "label=com.docker.compose.project=demo" in calls[0]
@@ -114,7 +114,7 @@ def test_project_restart_policies_parses_inspect(monkeypatch):
 
 def test_project_restart_policies_empty_project(monkeypatch):
     monkeypatch.setattr(docker, "_run", lambda cmd, **kw: _completed(""))
-    assert docker.project_restart_policies("demo") == {}
+    assert docker.project_restart_policies(project_name="demo") == {}
 
 
 def test_project_restart_policies_rejects_garbage(monkeypatch):
@@ -123,7 +123,7 @@ def test_project_restart_policies_rejects_garbage(monkeypatch):
 
     monkeypatch.setattr(docker, "_run", fake_run)
     with pytest.raises(DockerError, match="unexpected docker inspect output"):
-        docker.project_restart_policies("demo")
+        docker.project_restart_policies(project_name="demo")
 
 
 def test_set_restart_policy_runs_docker_update(monkeypatch):

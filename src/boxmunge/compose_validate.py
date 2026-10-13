@@ -294,6 +294,15 @@ def validate_user_compose(
             f"got {type(doc).__name__}"
         )
 
+    if "name" in doc:
+        raise ComposeSecurityError(
+            f"compose.yml sets a top-level name: {doc['name']!r}. boxmunge "
+            f"names the compose project after the boxmunge project (and "
+            f"'<project>-staging' for staging), so a name: line could point "
+            f"commands at another project's containers and volumes. Remove "
+            f"the top-level name: line."
+        )
+
     services = doc.get("services") or {}
     if not isinstance(services, dict):
         raise ComposeSecurityError(

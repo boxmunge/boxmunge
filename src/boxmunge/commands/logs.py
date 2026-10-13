@@ -58,7 +58,7 @@ def cmd_logs(args: list[str]) -> None:
             # users get immediate output as docker emits it.
             compose_logs(
                 project_dir, service=service, tail=tail, follow=follow,
-                compose_files=compose_files,
+                compose_files=compose_files, project_name=project,
             )
             return
         # Non-follow: capture, print, then append a writable hint
@@ -67,7 +67,7 @@ def cmd_logs(args: list[str]) -> None:
         # default tail=100.
         output = compose_logs_capture(
             project_dir, service=service, tail=tail,
-            compose_files=compose_files,
+            compose_files=compose_files, project_name=project,
         )
         print(output, end="" if output.endswith("\n") else "\n")
         _append_writable_postscript(output)

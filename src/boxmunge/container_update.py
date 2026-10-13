@@ -194,7 +194,8 @@ def _maybe_rollback(
 
     # Recreate from the now-retagged local images
     try:
-        compose_up(target.project_dir, compose_files=target.compose_files, build=False)
+        compose_up(target.project_dir, compose_files=target.compose_files, build=False,
+                   project_name=target.name)
     except DockerError as e:
         log_error("container-update", f"Rollback recreate failed: {e}", paths, project=target.name)
         result["rollback_succeeded"] = False
@@ -289,7 +290,8 @@ def _update_locked(
 
     # Step 2: Pull
     try:
-        compose_pull(target.project_dir, compose_files=target.compose_files)
+        compose_pull(target.project_dir, compose_files=target.compose_files,
+                     project_name=target.name)
     except DockerError as e:
         result["status"] = "failed"
         result["reason"] = f"pull_failed: {e}"
@@ -330,7 +332,8 @@ def _update_locked(
 
     # Step 5: Recreate
     try:
-        compose_up(target.project_dir, compose_files=target.compose_files, build=False)
+        compose_up(target.project_dir, compose_files=target.compose_files, build=False,
+                   project_name=target.name)
     except DockerError as e:
         result["status"] = "failed"
         result["reason"] = f"recreate_failed: {e}"

@@ -253,7 +253,8 @@ def _complete_action(
 
     # 4. Stop containers (Caddy is already serving the maintenance page).
     try:
-        compose_stop(project_dir, compose_files=compose_files)
+        compose_stop(project_dir, compose_files=compose_files,
+                     project_name=project_name)
     except DockerError as e:
         raise QuarantineError(
             f"Failed to stop containers for {project_name!r}: {e}",
@@ -378,7 +379,8 @@ def lift_quarantine(
     # 3. Restart containers, with their own restart policies back.
     _restore_restart_policies(project_name, state)
     try:
-        compose_up(project_dir, compose_files=compose_files, build=False)
+        compose_up(project_dir, compose_files=compose_files, build=False,
+                   project_name=project_name)
     except DockerError as e:
         raise QuarantineError(
             f"Failed to restart containers for {project_name!r}: {e}",

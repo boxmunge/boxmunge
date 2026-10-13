@@ -206,7 +206,7 @@ def _record_critical(
     log_error("health", f"CRITICAL: {message} — stopping containers", paths, project=project_name)
     consecutive = state.get("consecutive_failures", 0) + 1
     try:
-        compose_down(paths.project_dir(project_name))
+        compose_down(paths.project_dir(project_name), project_name=project_name)
         stopped = True
         reason = message
     except DockerError as e:

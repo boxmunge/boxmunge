@@ -22,7 +22,10 @@ PER_PROJECT_METHODS = sorted(
     if name.startswith("project_") or name == "is_project_pre_registered"
 )
 
-BAD_NAMES = ["", ".", "..", "../x", "a/b", "/abs", "UPPER", "-lead", "a" * 64, "a b", "x\n"]
+BAD_NAMES = [
+    "", ".", "..", "../x", "a/b", "/abs", "UPPER", "-lead", "a" * 64, "a b", "x\n",
+    "shop-staging", "caddy", "system",
+]
 
 
 def test_per_project_methods_discovered() -> None:
@@ -62,3 +65,19 @@ def test_mcp_project_delete_refuses_and_deletes_nothing(
     assert result["success"] is False
     assert any("Invalid project name" in m for m in result["messages"])
     assert (paths.projects / "alpha" / "data" / "keep.txt").read_text() == "precious"
+
+
+def test_staging_suffix_is_reserved() -> None:
+    # F-08: project "shop-staging" would share its compose project with the
+    # staging copy of project "shop".
+    from boxmunge.paths import validate_project_name
+
+    with pytest.raises(ValueError, match="reserved.*project 'shop'"):
+        validate_project_name("shop-staging")
+
+
+@pytest.mark.parametrize("name", ["staging", "staging-site", "my-stagingx", "stagingshop"])
+def test_names_merely_containing_staging_are_allowed(name: str) -> None:
+    from boxmunge.paths import validate_project_name
+
+    validate_project_name(name)

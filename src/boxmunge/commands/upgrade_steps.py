@@ -278,7 +278,8 @@ def restart_projects(
         try:
             with project_lock(project_name, paths):
                 try:
-                    compose_up(project_dir, compose_files=compose_files)
+                    compose_up(project_dir, compose_files=compose_files,
+                               project_name=project_name)
                     succeeded.append(project_name)
                 except DockerError as e:
                     failed.append(project_name)

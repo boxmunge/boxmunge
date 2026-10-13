@@ -159,6 +159,7 @@ letter case, surrounding spaces, a `CAP_` prefix, and `=` versus `:` in
 | `cgroup_parent` that is absolute or contains `..` | Escapes the container cgroup. |
 | A bind mount of a protected host path, anything inside one, or any parent of one | Protected: the Docker and containerd sockets and state, `/proc`, `/sys`, `/dev`, `/etc`, `/boot`, `/root`, `/home`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, and the boxmunge root outside `projects/`. Paths are compared after `~` expansion, joining relative paths to the project directory, collapsing `..` and `//`, and resolving symlinks, so `/run` (the parent of `/run/docker.sock`), `/tmp/../etc`, and `../../config` are all refused. |
 | `${VAR}` or `$VAR` inside a bind-mount source | The path cannot be verified. Write it literally. |
+| A top-level `name:` | boxmunge runs every compose command as `-p <project>` (`-p <project>-staging` for staging); a `name:` could address another project's containers and volumes. Not relaxed by `profile: "off"`. |
 
 ### Capability denylist
 

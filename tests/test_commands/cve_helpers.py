@@ -136,8 +136,9 @@ class Docker:
         for name in ("caddy_reload", "compose_stop", "compose_up"):
             monkeypatch.setattr(f"boxmunge.cve.quarantine.{name}", self._recorder(name))
         monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies",
-                            lambda project: {n: p for n, p in self.policies.items()
-                                             if n.startswith(f"{project}-")})
+                            lambda *, project_name: {
+                                n: p for n, p in self.policies.items()
+                                if n.startswith(f"{project_name}-")})
         monkeypatch.setattr("boxmunge.restart_hold.set_restart_policy", self._set_policy)
 
     def _set_policy(self, names, policy) -> None:

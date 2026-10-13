@@ -24,14 +24,16 @@ from boxmunge.docker import (
 class TestComposeStop:
     @patch("boxmunge.docker._run")
     def test_stop_default(self, mock_run: any, tmp_path: Path) -> None:
-        compose_stop(tmp_path)
+        compose_stop(tmp_path, project_name="myapp")
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
-        assert cmd == ["docker", "compose", "-f", "compose.yml", "stop", "-t", "15"]
+        assert cmd == [
+            "docker", "compose", "-p", "myapp", "-f", "compose.yml", "stop", "-t", "15",
+        ]
 
     @patch("boxmunge.docker._run")
     def test_stop_custom_timeout(self, mock_run: any, tmp_path: Path) -> None:
-        compose_stop(tmp_path, timeout=30)
+        compose_stop(tmp_path, project_name="myapp", timeout=30)
         cmd = mock_run.call_args[0][0]
         assert "-t" in cmd
         assert cmd[cmd.index("-t") + 1] == "30"
@@ -47,10 +49,10 @@ class TestComposeStop:
 class TestComposeStart:
     @patch("boxmunge.docker._run")
     def test_start_default(self, mock_run: any, tmp_path: Path) -> None:
-        compose_start(tmp_path)
+        compose_start(tmp_path, project_name="myapp")
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
-        assert cmd == ["docker", "compose", "-f", "compose.yml", "start"]
+        assert cmd == ["docker", "compose", "-p", "myapp", "-f", "compose.yml", "start"]
 
     @patch("boxmunge.docker._run")
     def test_start_with_project_name(self, mock_run: any, tmp_path: Path) -> None:
@@ -63,14 +65,17 @@ class TestComposeStart:
 class TestComposePull:
     @patch("boxmunge.docker._run")
     def test_runs_compose_pull(self, mock_run):
-        compose_pull(Path("/projects/myapp"))
+        compose_pull(Path("/projects/myapp"), project_name="myapp")
         cmd = mock_run.call_args[0][0]
         assert cmd[:2] == ["docker", "compose"]
         assert "pull" in cmd
 
     @patch("boxmunge.docker._run")
     def test_includes_compose_files(self, mock_run):
-        compose_pull(Path("/projects/myapp"), compose_files=["compose.yml", "compose.boxmunge.yml"])
+        compose_pull(
+            Path("/projects/myapp"), compose_files=["compose.yml", "compose.boxmunge.yml"],
+            project_name="myapp",
+        )
         cmd = mock_run.call_args[0][0]
         assert "compose.yml" in cmd
         assert "compose.boxmunge.yml" in cmd

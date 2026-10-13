@@ -10,6 +10,7 @@ from textual.widgets import (
     TabbedContent, TabPane,
 )
 
+from boxmunge.docker import compose_command
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state
@@ -186,10 +187,11 @@ class ProjectDetailScreen(Screen):
         log_widget.clear()
 
         project_dir = self.paths.project_dir(self.project_name)
-        cmd = ["docker", "compose", "-f", "compose.yml"]
+        compose_files = ["compose.yml"]
         override = self.paths.project_compose_override(self.project_name)
         if override.exists():
-            cmd.extend(["-f", "compose.boxmunge.yml"])
+            compose_files.append("compose.boxmunge.yml")
+        cmd = compose_command(self.project_name, compose_files)
         cmd.extend(["logs", "--tail=50", "--follow"])
         if service:
             cmd.append(service)

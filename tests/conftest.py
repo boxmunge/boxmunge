@@ -73,7 +73,8 @@ def _no_docker_image_lookups(monkeypatch):
     )
     # Quarantine and pause hold restart policies through boxmunge.restart_hold;
     # by default the project has no containers to hold.
-    monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies", lambda p: {})
+    monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies",
+        lambda *, project_name: {})
     monkeypatch.setattr("boxmunge.restart_hold.set_restart_policy", lambda n, p: None)
 
 
