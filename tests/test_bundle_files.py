@@ -219,3 +219,35 @@ class TestInstall:
 
         assert inode_after == inode_before
         assert (dest / "boxmunge-scripts" / "smoke.sh").read_text() == "new"
+
+
+class TestLinksAreNeverFollowed:
+    def test_internal_link_is_installed_as_a_link(self, tmp_path: Path) -> None:
+        src = tmp_path / "bundle"
+        dest = tmp_path / "project"
+        _make_bundle(src)
+        (src / "loop").symlink_to(".")
+        dest.mkdir()
+        copy_project_files(src, dest, is_upgrade=False)
+        assert (dest / "loop").is_symlink()
+
+    def test_live_link_is_replaced_not_written_through(self, tmp_path: Path) -> None:
+        """An old release's `scripts -> data` link must not turn the new
+        release's scripts/ install into a wipe of live data/."""
+        src = tmp_path / "bundle"
+        dest = tmp_path / "project"
+        _make_bundle(src)
+        (src / "scripts").mkdir()
+        (src / "scripts" / "run.sh").write_text("new")
+        (src / "config.txt").write_text("new config")
+        _live_project(dest)
+        (dest / "scripts").symlink_to("data")
+        (dest / "config.txt").symlink_to("data/app.db")
+
+        copy_project_files(src, dest, is_upgrade=True)
+
+        assert (dest / "data" / "app.db").read_text() == "PRODUCTION DATA"
+        assert not (dest / "scripts").is_symlink()
+        assert (dest / "scripts" / "run.sh").read_text() == "new"
+        assert not (dest / "config.txt").is_symlink()
+        assert (dest / "config.txt").read_text() == "new config"

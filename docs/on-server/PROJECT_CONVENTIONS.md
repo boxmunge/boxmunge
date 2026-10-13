@@ -43,6 +43,11 @@ on the server changes (`ERROR:` naming each entry, exit 1):
 | `repo/` | The clone of a git-sourced project |
 | `.releases/`, `compose.boxmunge*.yml`, `compose.staging-base.yml` | Written by boxmunge itself |
 
+The archive itself must hold exactly one top-level directory (the project), and only regular files,
+directories and links. A link must resolve inside the project directory: a bundle with an absolute
+link, a link that climbs out of the project, or a device or FIFO entry is refused with an `ERROR:`
+naming the entry. Links are installed as links and are never followed.
+
 An empty `data/`, `backups/` or `security/` directory (or one holding only empty `.gitkeep` / `.keep`
 files) carries nothing; it is ignored with a `NOTE`. A user bind-mount directory declared in the
 live `compose.yml` (for example `./uploads`) that already holds data is kept as it is; the bundle's

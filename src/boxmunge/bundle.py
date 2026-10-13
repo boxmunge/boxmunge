@@ -1,6 +1,7 @@
 """Shared bundle extraction, content policy, and file-copy helpers."""
 from __future__ import annotations
 
+import posixpath
 import shutil
 import tarfile
 from pathlib import Path
@@ -12,39 +13,86 @@ class BundleError(ValueError):
     """A bundle is malformed or carries content a deploy must not install."""
 
 
-def extract_bundle(bundle_path: Path, dest: Path) -> Path:
-    """Extract a tar.gz bundle and return the project directory inside.
+def _member_parts(name: str) -> list[str]:
+    return [p for p in name.split("/") if p not in ("", ".")]
 
-    Raises ValueError if the archive doesn't contain exactly one top-level dir.
+
+def _within(path: str, top: str) -> bool:
+    return path == top or path.startswith(top + "/")
+
+
+def _check_members(members: list[tarfile.TarInfo]) -> str:
+    """Validate archive members before anything is written; return the top dir.
+
+    Every member must live under one top-level directory, be a regular file,
+    directory or link, and every link must resolve inside that directory.
+    """
+    tops: set[str] = set()
+    for m in members:
+        if m.name.startswith("/") or ".." in m.name.split("/"):
+            raise BundleError(f"Unsafe path in bundle: {m.name}")
+        parts = _member_parts(m.name)
+        if not parts:
+            continue
+        tops.add(parts[0])
+        if not (m.isfile() or m.isdir() or m.issym() or m.islnk()):
+            raise BundleError(
+                f"Bundle entry '{m.name}' is a device, FIFO or other special "
+                f"file; bundles may only contain files, directories and links"
+            )
+    if len(tops) != 1:
+        raise BundleError(
+            f"Bundle must contain exactly one top-level directory, "
+            f"found: {sorted(tops)}"
+        )
+    top = tops.pop()
+    for m in members:
+        if not (m.issym() or m.islnk()):
+            continue
+        name = "/".join(_member_parts(m.name))
+        if m.issym():
+            target = m.linkname
+            resolved = posixpath.normpath(
+                posixpath.join(posixpath.dirname(name), target))
+        else:
+            target = m.linkname
+            resolved = posixpath.normpath("/".join(_member_parts(target)))
+        if target.startswith("/") or not _within(resolved, top):
+            raise BundleError(
+                f"Bundle entry '{m.name}' is a link to '{target}', outside the "
+                f"project directory; bundles may only contain links that stay "
+                f"inside the project"
+            )
+    return top
+
+
+def extract_bundle(bundle_path: Path, dest: Path) -> Path:
+    """Extract a tar.gz bundle into dest and return the project directory.
+
+    Raises BundleError (a ValueError) for anything unsafe or malformed: a
+    corrupt archive, members outside a single top-level directory, special
+    files, or links that resolve outside the project.
     """
     if not bundle_path.exists():
-        raise ValueError(f"Bundle not found: {bundle_path}")
+        raise BundleError(f"Bundle not found: {bundle_path}")
+    try:
+        with tarfile.open(bundle_path, "r:gz") as tar:
+            top = _check_members(tar.getmembers())
+            # The "data" filter re-checks links against the real filesystem
+            # as it extracts: defence in depth behind _check_members.
+            tar.extractall(path=dest, filter="data")
+    except BundleError:
+        raise
+    except (tarfile.TarError, EOFError, OSError) as e:
+        raise BundleError(f"Not a valid tar.gz bundle: {bundle_path.name}: {e}") from e
 
-    if not tarfile.is_tarfile(bundle_path):
-        raise ValueError(f"Not a valid tar.gz file: {bundle_path}")
-
-    with tarfile.open(bundle_path, "r:gz") as tar:
-        # Security: reject paths that escape the extraction dir
-        for member in tar.getmembers():
-            if member.name.startswith("/") or ".." in member.name:
-                raise ValueError(
-                    f"Unsafe path in archive: {member.name}"
-                )
-        tar.extractall(path=dest, filter="data")
-
-    # Find the single top-level directory
-    top_entries = [
-        e for e in dest.iterdir()
-        if e.is_dir() and not e.name.startswith(".")
-    ]
-    if len(top_entries) != 1:
-        names = [e.name for e in top_entries]
-        raise ValueError(
-            f"Bundle must contain exactly one top-level directory, "
-            f"found: {names}"
+    project = dest / top
+    if project.is_symlink() or not project.is_dir():
+        raise BundleError(
+            f"Bundle must contain exactly one top-level directory; "
+            f"'{top}' is not a directory"
         )
-
-    return top_entries[0]
+    return project
 
 
 # Top-level project entries owned by the box, never by a bundle. Each maps to
@@ -151,8 +199,24 @@ def _bind_mount_dir_names(project_dir: Path) -> set[str]:
     return names
 
 
+def _remove(path: Path) -> None:
+    """Remove a file, link or directory without following links."""
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    elif path.exists() or path.is_symlink():
+        path.unlink()
+
+
+def _copy_entry(src: Path, dest: Path) -> None:
+    """Copy one entry, keeping links as links. dest must not exist."""
+    if src.is_dir() and not src.is_symlink():
+        shutil.copytree(src, dest, symlinks=True)
+    else:
+        shutil.copy2(src, dest, follow_symlinks=False)
+
+
 def _refresh_dir_in_place(src_dir: Path, dest_dir: Path) -> None:
-    """Mirror ``src_dir`` into an existing ``dest_dir``, preserving its inode.
+    """Mirror ``src_dir`` into an existing real ``dest_dir``, preserving its inode.
 
     Deletes children of ``dest_dir`` that are not being replaced, then copies
     the bundle's children in. The top-level ``dest_dir`` inode is never
@@ -160,18 +224,44 @@ def _refresh_dir_in_place(src_dir: Path, dest_dir: Path) -> None:
     (see the caller's note on the stage/health-monitor prod outage). Nested
     entries are not bind-mount roots, so they are replaced wholesale.
     """
-    dest_dir.mkdir(parents=True, exist_ok=True)
     for child in dest_dir.iterdir():
-        if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
+        _remove(child)
     for child in src_dir.iterdir():
-        target = dest_dir / child.name
-        if child.is_dir():
-            shutil.copytree(child, target)
-        else:
-            shutil.copy2(child, target)
+        _copy_entry(child, dest_dir / child.name)
+
+
+def install_entry(item: Path, dest_item: Path) -> None:
+    """Install one top-level release entry over whatever is at dest_item.
+
+    Links are never followed, on either side: a link in the old release is
+    replaced, not written through, and a link in the release is installed as
+    a link (the bundle check guarantees it stays inside the project).
+    """
+    if item.is_dir() and not item.is_symlink() \
+            and dest_item.is_dir() and not dest_item.is_symlink():
+        # Refresh contents in place rather than rmtree+copytree: a
+        # still-running container (e.g. prod during a `stage`) may
+        # bind-mount this dir, and Docker resolves a bind mount to the
+        # directory inode at container start. Replacing the directory
+        # gives it a new inode and severs the live mount — the classic
+        # symptom being boxmunge-scripts/smoke.sh vanishing inside the
+        # running prod container, failing its smoke check, and the
+        # health monitor stopping prod. Preserve the inode.
+        _refresh_dir_in_place(item, dest_item)
+        return
+    _remove(dest_item)
+    _copy_entry(item, dest_item)
+
+
+def make_scripts_executable(entries: list[Path]) -> None:
+    """chmod +x every real ``*.sh`` file in the given installed entries."""
+    for entry in entries:
+        if entry.is_symlink():
+            continue
+        scripts = entry.rglob("*.sh") if entry.is_dir() else [entry]
+        for sh_file in scripts:
+            if sh_file.suffix == ".sh" and sh_file.is_file() and not sh_file.is_symlink():
+                sh_file.chmod(sh_file.stat().st_mode | 0o755)
 
 
 def copy_project_files(src: Path, dest: Path, is_upgrade: bool) -> None:
@@ -193,36 +283,17 @@ def copy_project_files(src: Path, dest: Path, is_upgrade: bool) -> None:
     installed: list[Path] = []
     for item in src.iterdir():
         dest_item = dest / item.name
-        if item.is_dir():
-            if item.name in preserved and dest_item.exists() and any(dest_item.iterdir()):
-                # Live persistent data present — never overwrite it. An
-                # empty dir has never held data, so it is seeded below.
-                print(f"  NOTE: kept the server's {item.name}/ (it holds live "
-                      f"data); the bundle's {item.name}/ was not installed")
-                continue
-            if dest_item.exists():
-                # Refresh contents in place rather than rmtree+copytree: a
-                # still-running container (e.g. prod during a `stage`) may
-                # bind-mount this dir, and Docker resolves a bind mount to the
-                # directory inode at container start. Replacing the directory
-                # gives it a new inode and severs the live mount — the classic
-                # symptom being boxmunge-scripts/smoke.sh vanishing inside the
-                # running prod container, failing its smoke check, and the
-                # health monitor stopping prod. Preserve the inode.
-                _refresh_dir_in_place(item, dest_item)
-            else:
-                shutil.copytree(item, dest_item)
-        else:
-            shutil.copy2(item, dest_item)
+        if item.name in preserved and dest_item.is_dir() \
+                and not dest_item.is_symlink() and any(dest_item.iterdir()):
+            # Live persistent data present — never overwrite it. An empty
+            # dir has never held data, so it is seeded like any other.
+            print(f"  NOTE: kept the server's {item.name}/ (it holds live "
+                  f"data); the bundle's {item.name}/ was not installed")
+            continue
+        install_entry(item, dest_item)
         installed.append(dest_item)
 
     # Ensure required subdirectories exist
     (dest / "backups").mkdir(exist_ok=True)
     (dest / "data").mkdir(exist_ok=True)
-
-    # Make the release's scripts executable
-    for entry in installed:
-        scripts = entry.rglob("*.sh") if entry.is_dir() else [entry]
-        for sh_file in scripts:
-            if sh_file.suffix == ".sh" and sh_file.is_file():
-                sh_file.chmod(sh_file.stat().st_mode | 0o755)
+    make_scripts_executable(installed)
