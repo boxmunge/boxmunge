@@ -8,7 +8,8 @@ dir, which is replaced by the production release stage kept aside.
 from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING
-from boxmunge.docker import compose_down, caddy_reload, DockerError
+from boxmunge.caddy_journal import remove_site
+from boxmunge.docker import caddy_config_lock, compose_down, caddy_reload, DockerError
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.log import log_error, log_operation
 from boxmunge.release import has_prestage, restore_prestage
@@ -56,6 +57,8 @@ def teardown_staging(project_name: str, paths: BoxPaths) -> bool:
             print(f"  WARN: Staging container teardown failed: {e}")
             ok = False
 
+    with caddy_config_lock(paths.state):
+        remove_site(paths.caddy, paths.project_staging_caddy_site(project_name))
     for path in _staging_files(project_name, paths):
         path.unlink(missing_ok=True)
 

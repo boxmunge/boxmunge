@@ -114,7 +114,7 @@ The project's own `compose.yml` does not need to reference boxmunge networking a
 
 If a project contains `caddy.override.conf`, boxmunge uses it verbatim instead of generating config. A notice is logged when this escape hatch is active. Only an operator places it, directly on the server: a bundle that carries one is refused, and deploys never remove it.
 
-Caddy validates the whole configuration before every reload. If it rejects the new config, boxmunge puts back each site file written since Caddy last accepted a config (kept in `caddy/.site-journal/`) and the operation fails, so one bad site file cannot stop Caddy reloading or restarting for every other project. If Caddy is not running, nothing can be validated and the new files stay in place until it starts.
+Caddy validates the whole configuration before every reload. If it rejects the new config, boxmunge puts back each site file (production or staging) written since Caddy last accepted a config (kept in `caddy/.site-journal/`) and the operation fails, so one bad site file cannot stop Caddy reloading or restarting for every other project. If Caddy is not running, nothing can be validated and the new files stay in place until it starts. `unstage` deletes the staging site and drops its journal entry, so a later restore never brings back routing to torn-down staging containers.
 
 ---
 

@@ -6,9 +6,10 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 from boxmunge.caddy import generate_staging_caddy_config
+from boxmunge.caddy_journal import write_site
 from boxmunge.commands.unstage_cmd import teardown_staging
 from boxmunge.compose import generate_staging_compose_base, generate_staging_compose_override
-from boxmunge.docker import compose_up, caddy_reload, DockerError
+from boxmunge.docker import compose_up, caddy_config_lock, caddy_reload, DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
 from boxmunge.identity import register_project_identity
 from boxmunge.intake import (
@@ -152,11 +153,14 @@ def _bring_up_staging(project_name: str, paths: BoxPaths,
             staging_auth = (auth_user, hashed)
             print(f"  Staging auth enabled for user '{auth_user}'")
 
+    # Journaled like production's site: if Caddy rejects it, the reload
+    # restores the last accepted config instead of leaving it to break the
+    # next reload of every project.
     staging_conf = paths.project_staging_caddy_site(project_name)
     staging_conf.parent.mkdir(parents=True, exist_ok=True)
-    # mode=0o644: Caddy container reads this from a host-mounted volume; its
-    # uid may not map to the deploy uid. Same rationale as deploy.py.
-    atomic_write_text(staging_conf, generate_staging_caddy_config(manifest, auth=staging_auth), mode=0o644)
+    with caddy_config_lock(paths.state):
+        write_site(paths.caddy, staging_conf,
+                   generate_staging_caddy_config(manifest, auth=staging_auth))
 
     # Build env_files for staging (same as production)
     staging_env_files = {}
