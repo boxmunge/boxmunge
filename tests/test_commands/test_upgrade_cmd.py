@@ -45,8 +45,8 @@ class TestDryRun:
         run_upgrade(paths, dry_run=True)
         mock_reload.assert_not_called()
 
-    @patch("boxmunge.commands.upgrade_cmd.compose_up")
-    def test_dry_run_does_not_restart_projects(self, mock_up, tmp_path):
+    @patch("boxmunge.commands.upgrade_steps.compose_up")
+    def test_dry_run_does_notrestart_projects(self, mock_up, tmp_path):
         paths = _setup_paths(tmp_path)
         run_upgrade(paths, dry_run=True)
         mock_up.assert_not_called()
@@ -78,7 +78,7 @@ class TestApplyMode:
 
 
 class TestRestartRespectsLock:
-    """4b: _restart_projects must skip projects whose project_lock is held."""
+    """4b: restart_projects must skip projects whose project_lock is held."""
 
     def _make_project(self, paths: BoxPaths, name: str) -> None:
         import yaml
@@ -90,11 +90,11 @@ class TestRestartRespectsLock:
             "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
         }))
 
-    @patch("boxmunge.commands.upgrade_cmd.compose_up")
+    @patch("boxmunge.commands.upgrade_steps.compose_up")
     def test_locked_project_is_skipped_not_raised(
         self, mock_up, tmp_path
     ) -> None:
-        from boxmunge.commands.upgrade_cmd import _restart_projects
+        from boxmunge.commands.upgrade_steps import restart_projects
 
         paths = _setup_paths(tmp_path)
         self._make_project(paths, "alpha")
@@ -110,7 +110,7 @@ class TestRestartRespectsLock:
         fd = os.open(str(alpha_lock), os.O_CREAT | os.O_RDWR)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
-            succeeded, failed, skipped = _restart_projects(paths)
+            succeeded, failed, skipped = restart_projects(paths)
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
@@ -121,17 +121,17 @@ class TestRestartRespectsLock:
         # compose_up was only called for beta.
         assert mock_up.call_count == 1
 
-    @patch("boxmunge.commands.upgrade_cmd.compose_up")
+    @patch("boxmunge.commands.upgrade_steps.compose_up")
     def test_no_locks_held_returns_all_succeeded(
         self, mock_up, tmp_path
     ) -> None:
-        from boxmunge.commands.upgrade_cmd import _restart_projects
+        from boxmunge.commands.upgrade_steps import restart_projects
 
         paths = _setup_paths(tmp_path)
         self._make_project(paths, "alpha")
         self._make_project(paths, "beta")
 
-        succeeded, failed, skipped = _restart_projects(paths)
+        succeeded, failed, skipped = restart_projects(paths)
 
         assert sorted(succeeded) == ["alpha", "beta"]
         assert failed == []
@@ -139,7 +139,7 @@ class TestRestartRespectsLock:
 
 
 class TestLockSkipPushoverNotification:
-    """D-NEW-1: when _restart_projects skips locked projects during upgrade,
+    """D-NEW-1: when restart_projects skips locked projects during upgrade,
     a Pushover notification must fire so non-interactive operators see it."""
 
     def _make_project(self, paths: BoxPaths, name: str) -> None:
@@ -158,7 +158,7 @@ class TestLockSkipPushoverNotification:
         }))
 
     @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
-    @patch("boxmunge.commands.upgrade_cmd.compose_up")
+    @patch("boxmunge.commands.upgrade_steps.compose_up")
     @patch("boxmunge.pushover.send_notification")
     def test_pushover_fires_when_apply_skips_locked_project(
         self, mock_pushover, mock_up, mock_reload, tmp_path
@@ -194,7 +194,7 @@ class TestLockSkipPushoverNotification:
         assert "alpha" in message
 
     @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
-    @patch("boxmunge.commands.upgrade_cmd.compose_up")
+    @patch("boxmunge.commands.upgrade_steps.compose_up")
     @patch("boxmunge.pushover.send_notification")
     def test_pushover_silent_when_no_skips(
         self, mock_pushover, mock_up, mock_reload, tmp_path
@@ -215,9 +215,9 @@ class TestLockSkipPushoverNotification:
 class TestSkipsQuarantined:
     """Wave 1: upgrade must NOT silently un-quarantine projects.
 
-    `_regenerate_configs` MUST re-render the maintenance Caddy fragment
+    `regenerate_configs` MUST re-render the maintenance Caddy fragment
     (not the normal site config) for a quarantined project, and
-    `_restart_projects` MUST skip them entirely.
+    `restart_projects` MUST skip them entirely.
     """
 
     def _make_project(self, paths: BoxPaths, name: str) -> None:
@@ -239,15 +239,15 @@ class TestSkipsQuarantined:
         )
         paths.project_quarantine_state(name).write_text("{}")
 
-    @patch("boxmunge.commands.upgrade_cmd.compose_up")
+    @patch("boxmunge.commands.upgrade_steps.compose_up")
     def test_restart_skips_quarantined_project(self, mock_up, tmp_path):
-        from boxmunge.commands.upgrade_cmd import _restart_projects
+        from boxmunge.commands.upgrade_steps import restart_projects
         paths = _setup_paths(tmp_path)
         self._make_project(paths, "alpha")
         self._make_project(paths, "beta")
         self._quarantine(paths, "alpha")
 
-        succeeded, failed, skipped = _restart_projects(paths)
+        succeeded, failed, skipped = restart_projects(paths)
 
         # alpha was quarantined, so compose_up MUST NOT have been called
         # for it — only beta should have been started.
@@ -260,15 +260,15 @@ class TestSkipsQuarantined:
         assert "alpha" not in skipped
         assert mock_up.call_count == 1
 
-    @patch("boxmunge.commands.upgrade_cmd.compose_up")
+    @patch("boxmunge.commands.upgrade_steps.compose_up")
     def test_restart_logs_quarantine_skip(self, mock_up, tmp_path):
-        from boxmunge.commands.upgrade_cmd import _restart_projects
+        from boxmunge.commands.upgrade_steps import restart_projects
         paths = _setup_paths(tmp_path)
         self._make_project(paths, "alpha")
         self._quarantine(paths, "alpha")
 
-        with patch("boxmunge.commands.upgrade_cmd.log_operation") as mock_log:
-            _restart_projects(paths)
+        with patch("boxmunge.commands.upgrade_steps.log_operation") as mock_log:
+            restart_projects(paths)
 
         # The skip MUST be logged with the upgrade component and project.
         skip_logs = [
@@ -280,19 +280,19 @@ class TestSkipsQuarantined:
         assert len(skip_logs) == 1, mock_log.call_args_list
 
     def test_regen_renders_maintenance_for_quarantined(self, tmp_path):
-        from boxmunge.commands.upgrade_cmd import _regenerate_configs
+        from boxmunge.commands.upgrade_steps import regenerate_configs
         paths = _setup_paths(tmp_path)
         self._make_project(paths, "alpha")
         self._quarantine(paths, "alpha")
 
         # Pre-existing site config from a prior deploy (we want to be sure
-        # _regenerate_configs OVERWRITES with the maintenance fragment, not
+        # regenerate_configs OVERWRITES with the maintenance fragment, not
         # the normal one).
         site_conf = paths.project_caddy_site("alpha")
         site_conf.parent.mkdir(parents=True, exist_ok=True)
         site_conf.write_text("# pre-existing normal config\n")
 
-        processed = _regenerate_configs(paths)
+        processed = regenerate_configs(paths)
 
         # alpha was quarantined, so the normal-regen path must have been
         # skipped (alpha not in processed).
@@ -303,13 +303,13 @@ class TestSkipsQuarantined:
         assert "alpha.test" in content
 
     def test_regen_logs_quarantine_skip(self, tmp_path):
-        from boxmunge.commands.upgrade_cmd import _regenerate_configs
+        from boxmunge.commands.upgrade_steps import regenerate_configs
         paths = _setup_paths(tmp_path)
         self._make_project(paths, "alpha")
         self._quarantine(paths, "alpha")
 
-        with patch("boxmunge.commands.upgrade_cmd.log_operation") as mock_log:
-            _regenerate_configs(paths)
+        with patch("boxmunge.commands.upgrade_steps.log_operation") as mock_log:
+            regenerate_configs(paths)
 
         skip_logs = [
             c for c in mock_log.call_args_list
@@ -323,24 +323,24 @@ class TestSkipsQuarantined:
         """Defensive: prepare_caddy_config / prepare_compose_override
         MUST NOT be invoked for a quarantined project — the maintenance
         fragment is hand-rendered."""
-        from boxmunge.commands.upgrade_cmd import _regenerate_configs
+        from boxmunge.commands.upgrade_steps import regenerate_configs
         paths = _setup_paths(tmp_path)
         self._make_project(paths, "alpha")
         self._quarantine(paths, "alpha")
 
         with patch(
-            "boxmunge.commands.upgrade_cmd.prepare_caddy_config",
+            "boxmunge.commands.upgrade_steps.prepare_caddy_config",
         ) as mock_caddy, patch(
-            "boxmunge.commands.upgrade_cmd.prepare_compose_override",
+            "boxmunge.commands.upgrade_steps.prepare_compose_override",
         ) as mock_overlay:
-            _regenerate_configs(paths)
+            regenerate_configs(paths)
 
         mock_caddy.assert_not_called()
         mock_overlay.assert_not_called()
 
 
 class TestCvePolicyValidatorWiring:
-    """C-1 regression: upgrade's `_regenerate_configs` must pass the
+    """C-1 regression: upgrade's `regenerate_configs` must pass the
     manifest's `security` block as `cve_policy` to validate_user_compose.
     Mirrors the deploy.py canonical test in
     test_deploy.py::TestCvePolicyValidatorWiring.
@@ -365,21 +365,21 @@ class TestCvePolicyValidatorWiring:
             "services:\n  web:\n    image: nginx:1.25\n    read_only: true\n"
         )
 
-    @patch("boxmunge.commands.upgrade_cmd.prepare_compose_override")
-    @patch("boxmunge.commands.upgrade_cmd.prepare_caddy_config")
+    @patch("boxmunge.commands.upgrade_steps.prepare_compose_override")
+    @patch("boxmunge.commands.upgrade_steps.prepare_caddy_config")
     def test_regen_passes_security_block_as_cve_policy(
         self, _caddy, _overlay, tmp_path,
     ) -> None:
-        from boxmunge.commands.upgrade_cmd import _regenerate_configs
+        from boxmunge.commands.upgrade_steps import regenerate_configs
 
         paths = _setup_paths(tmp_path)
         self._make_project_with_security(paths, "alpha")
         # Sanity: alpha is NOT quarantined — the validator path runs.
 
         with patch(
-            "boxmunge.commands.upgrade_cmd.validate_user_compose",
+            "boxmunge.commands.upgrade_steps.validate_user_compose",
         ) as mock_validate:
-            _regenerate_configs(paths)
+            regenerate_configs(paths)
 
         # validate_user_compose must have been called for alpha and the
         # manifest's `security` block must have been forwarded as cve_policy.
