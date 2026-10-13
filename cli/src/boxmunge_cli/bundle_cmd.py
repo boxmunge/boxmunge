@@ -1,11 +1,12 @@
 """boxmunge bundle <project-dir> — build a validated, ready-to-upload bundle."""
 from __future__ import annotations
 import sys
-import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 import yaml
 from boxmunge_cli.manifest import load_manifest, validate_manifest, ManifestError
+from boxmunge_cli.bundle_filter import IGNORE_FILE, BundlePlan, plan_bundle, write_bundle
+from boxmunge_cli.ignore_rules import IgnoreFileError
 from boxmunge_cli.manifest_id import add_manifest_id, ManifestIdError
 
 
@@ -18,6 +19,18 @@ Usage:
 Options:
   --output PATH    Write bundle to this directory (default: parent of project dir)
   --validate       Validate only, don't create the bundle
+  --list           Print what would ship (stdout) and what is left out (stderr)
+
+What ships: everything in the project directory except
+  - never shipped: .git/ .hg/ .svn/, .env and .env.* (but .env.example ships),
+    the client's .boxmunge config
+  - left out by default: node_modules/ .venv/ venv/ __pycache__/ *.pyc tool
+    caches, .DS_Store, earlier <project>-*.tar.gz bundles, top-level data/
+    and backups/ (re-include with a '!pattern' line in .boxmungeignore)
+  - anything matched by .boxmungeignore (gitignore syntax)
+Bundling stops with an error for secrets.env, a top-level repo/, symlinks
+that are absolute or leave the tree, and special files, unless
+.boxmungeignore leaves them out.
 
 The project directory must contain:
 
@@ -64,73 +77,109 @@ Or skip staging:
   ssh -p 922 deploy@<host> "deploy <project>"
 """
 
+def _err(msg: str) -> None:
+    print(f"ERROR: {msg}", file=sys.stderr)
+
+
+def _resolve_bundle_path(project_dir: Path, project_name: str,
+                         output: str | None) -> Path | None:
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S")
+    filename = f"{project_name}-{timestamp}.tar.gz"
+    if not output:
+        return project_dir.parent / filename
+    output_path = Path(output).resolve()
+    if output_path.is_dir():
+        return output_path / filename
+    if not output_path.parent.is_dir():
+        _err(f"Output directory does not exist: {output_path.parent}")
+        return None
+    return output_path
+
+
+def _report_plan(plan: BundlePlan) -> None:
+    for rel, reason in plan.excluded:
+        print(f"  excluded: {rel}  ({reason})", file=sys.stderr)
+
+
 def run_bundle(project_dir_str: str, output: str | None = None,
-               validate_only: bool = False) -> int:
+               validate_only: bool = False, list_only: bool = False) -> int:
     project_dir = Path(project_dir_str).resolve()
     if not project_dir.is_dir():
-        print(f"ERROR: Not a directory: {project_dir}")
+        _err(f"Not a directory: {project_dir}")
         return 1
 
     manifest_path = project_dir / "manifest.yml"
     if not manifest_path.exists():
-        print(f"ERROR: No manifest.yml in {project_dir}")
+        _err(f"No manifest.yml in {project_dir}")
         return 1
 
     try:
         manifest = load_manifest(manifest_path)
     except ManifestError as e:
-        print(f"ERROR: {e}")
+        _err(str(e))
         return 1
 
     project_name = manifest.get("project", project_dir.name)
 
-    if not manifest.get("id") and not validate_only:
+    if not manifest.get("id") and not (validate_only or list_only):
         try:
             manifest["id"] = add_manifest_id(manifest_path)
         except ManifestIdError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
+            _err(str(e))
             return 1
         print(f"  Added project id {manifest['id']} to manifest.yml. Commit this change:"
               " the id is the project's identity on the server.", file=sys.stderr)
 
     errors, warnings = validate_manifest(manifest, project_name)
-    if errors:
-        print("ERROR: Manifest validation failed:")
+    if errors and not list_only:
+        _err("Manifest validation failed:")
         for e in errors:
-            print(f"  {e}")
+            print(f"  {e}", file=sys.stderr)
         return 1
     for w in warnings:
-        print(f"  WARN: {w}")
+        print(f"  WARN: {w}", file=sys.stderr)
 
     compose_path = project_dir / "compose.yml"
     if not compose_path.exists():
-        print(f"ERROR: No compose.yml in {project_dir}")
+        _err(f"No compose.yml in {project_dir}")
         return 1
 
     try:
         compose_data = yaml.safe_load(compose_path.read_text())
         if not isinstance(compose_data, dict):
-            print("ERROR: compose.yml is not a valid YAML mapping")
+            _err("compose.yml is not a valid YAML mapping")
             return 1
     except yaml.YAMLError as e:
-        print(f"ERROR: compose.yml parse error: {e}")
+        _err(f"compose.yml parse error: {e}")
         return 1
 
     if validate_only:
         print(f"Validation passed for '{project_name}'.")
         return 0
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S")
-    filename = f"{project_name}-{timestamp}.tar.gz"
+    bundle_path = _resolve_bundle_path(project_dir, project_name, output)
+    if bundle_path is None:
+        return 1
 
-    if output:
-        output_path = Path(output).resolve()
-        bundle_path = output_path / filename if output_path.is_dir() else output_path
-    else:
-        bundle_path = project_dir.parent / filename
+    try:
+        plan = plan_bundle(project_dir, project_name, skip=bundle_path)
+    except IgnoreFileError as e:
+        _err(f"{IGNORE_FILE}: {e}")
+        return 1
+    _report_plan(plan)
+    if plan.refused:
+        _err("Refusing to bundle. Remove these paths, or list them in "
+             f"{IGNORE_FILE} to leave them out:")
+        for rel, reason in plan.refused:
+            print(f"  {rel}: {reason}", file=sys.stderr)
+        return 1
 
-    with tarfile.open(bundle_path, "w:gz") as tar:
-        tar.add(project_dir, arcname=project_name)
+    if list_only:
+        for rel in plan.shipped:
+            print(rel)
+        return 0
+
+    write_bundle(plan, project_name, bundle_path)
 
     size_mb = bundle_path.stat().st_size / (1024 * 1024)
     print(f"Bundle created: {bundle_path}")
@@ -138,11 +187,13 @@ def run_bundle(project_dir_str: str, output: str | None = None,
     print(f"  Upload with: scp -P 922 {bundle_path.name} deploy@<host>:")
     return 0
 
+
 def cmd_bundle(args: list[str]) -> None:
     validate_only = "--validate" in args
+    list_only = "--list" in args
     output = None
     positional = []
-    filtered = [a for a in args if a != "--validate"]
+    filtered = [a for a in args if a not in ("--validate", "--list")]
     i = 0
     while i < len(filtered):
         if filtered[i] == "--output" and i + 1 < len(filtered):
@@ -156,4 +207,5 @@ def cmd_bundle(args: list[str]) -> None:
     if not positional:
         print(BUNDLE_HELP)
         sys.exit(2)
-    sys.exit(run_bundle(positional[0], output=output, validate_only=validate_only))
+    sys.exit(run_bundle(positional[0], output=output, validate_only=validate_only,
+                        list_only=list_only))
