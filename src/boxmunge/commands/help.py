@@ -99,64 +99,66 @@ boxmunge agent orientation
 ==========================
 
 You are operating a boxmunge-managed VPS through a restricted deploy shell.
-Only boxmunge commands are available — there is no general shell access.
+Only boxmunge commands exist here. 'help <command>' shows usage and never
+runs it. This page is short on purpose: read all of it.
 
-Key principles:
-  - Use the commands listed in 'help'. There are no other commands.
-  - Run 'help <command>' (or '<command> --help') to see its usage. It never
-    runs the command.
-  - Where a command supports --dry-run (prod-deploy, stage, promote, unstage,
-    upgrade, container-update), use it first if unsure. Commands without
-    --dry-run reject it (exit 2) rather than ignoring it.
-  - An unknown flag is always an error (exit 2) and nothing is run.
-  - Use 'validate <project>' before deploying new/modified projects.
-  - Check 'status' before and after making changes.
+Rules that prevent outages (building or changing a project):
+  1. Base image: the smallest official image for your stack (-slim or
+     distroless), pinned by digest. Never a full or generic distro image:
+     every OS package is CVE surface, and a CVE in a package your app never
+     uses can still quarantine the site.          -> agent-help images
+  2. Multi-stage builds: compilers, pip/npm caches and build headers stay in
+     the builder stage, never in the runtime image.
+  3. Root filesystems are read-only. Declare every path the app writes in
+     the manifest's writable: block.              -> agent-help writable
+  4. All ingress goes through Caddy. Do not publish ports: in compose.
+  5. smoke.sh is POSIX sh and exits 0 only when the app really works.
+                                                  -> agent-help conventions
+  6. Run 'validate <project>' before every deploy.
+  7. Fix a CVE alert by rebuilding or slimming the image, not by
+     suppressing it. Suppress only with evidence. -> agent-help cve-incident
 
-Deploying a bundle-based project:
-  1. Build a tar.gz bundle locally:  boxmunge bundle ./myproject
-  2. Upload:  scp -P 922 bundle.tar.gz deploy@<host>:
-  3. Verify:  stage <project>    (check staging.<hostname>)
-  4. Go live:  promote <project>
-  Or skip staging:  prod-deploy <project>
+Operating safely:
+  - Check 'status' before and after changes.
+  - Unknown flags are errors (exit 2) and nothing runs. --dry-run works on
+    prod-deploy, stage, promote, unstage, upgrade and container-update;
+    other commands refuse it.
+  - QUARANTINED or STILL_RUNNING_AT_RISK in any output: stop and follow
+    agent-help cve-incident.
 
-Deploying a git-based project:
-  1. First time:  add-git-project <name> <repo-url>
-  2. Stage:  stage <project> --ref <branch-or-tag>
-  3. Verify, then:  promote <project>
-  Or skip staging:  prod-deploy <project> --ref <tag>
+Deploying a bundle-based project (the recommended path):
+  1. Build locally:  boxmunge bundle ./myproject
+  2. Upload:         scp -P 922 <bundle>.tar.gz deploy@<host>:
+  3. Verify:         stage <project>    (check staging.<hostname>)
+  4. Go live:        promote <project>
+  Or skip staging:   prod-deploy <project>
 
-Managing secrets:
-  secrets set <project> DB_URL="postgres://..."
-  secrets set --host GITHUB_TOKEN=ghp_xxx
-  secrets list <project>
+Git-based projects are supported but being reworked; prefer bundles.
+                                                  -> agent-help operations
 
-Scheduled maintenance:
-  pause <project>     — take offline; visitors see a maintenance page
-  resume <project>    — bring back online; pulls latest images first
-                        (use --skip-security-checks only in emergencies)
+Secrets:  secrets set <project> DB_URL="postgres://..."
+          secrets list <project>
 
-First moves:
-  status              — see what's deployed and its health
-  doctor              — check host health
-  inbox               — see uploaded bundles
-  log --tail 50       — recent ops audit (deploys, checks, rollbacks)
+Maintenance:  pause <project>   (visitors see a maintenance page)
+              resume <project>  (brings it back; pulls latest images first)
 
-When in doubt, check 'help <command>' first, and use --dry-run where the
-command supports it.
+First moves:  status, doctor, inbox, log --tail 50
 
-For detailed documentation, run:
-  agent-help architecture     How the system is structured
-  agent-help operations       Step-by-step operational guides
-  agent-help conventions      Project manifest and conventions
-  agent-help rules            Agent guardrails and safe practices
-  agent-help security         Container security model and opt-outs
-  agent-help cve              CVE policy reference (posture, suppressions, scan)
-  agent-help cve-incident     Step-by-step playbook for handling a CVE alert
-  agent-help writable         writable: manifest block (v0.9 schema 3)
+Topics (agent-help <topic>):
+  images        Choosing a base image (read before writing a Dockerfile)
+  conventions   Project manifest, scripts, and layout
+  writable      The writable: manifest block
+  rules         Agent guardrails and safe practices
+  operations    Step-by-step operational guides
+  security      Container security model and opt-outs
+  cve           CVE policy reference
+  cve-incident  Playbook for a CVE alert
+  architecture  How the system is structured
 """
 
 # Map topic names to on-server doc filenames
 AGENT_HELP_TOPICS: dict[str, str] = {
+    "images": "IMAGES.md",
     "architecture": "ARCHITECTURE.md",
     "operations": "OPERATIONS.md",
     "conventions": "PROJECT_CONVENTIONS.md",
