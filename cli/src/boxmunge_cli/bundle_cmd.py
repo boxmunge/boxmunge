@@ -168,7 +168,8 @@ def run_bundle(project_dir_str: str, output: str | None = None,
         return 1
 
     if validate_only:
-        print(f"Validation passed for '{project_name}'.")
+        print(f"Local checks passed for '{project_name}'. The server validates the full "
+              "manifest on stage/prod-deploy; add --dry-run to check without deploying.")
         return 0
 
     bundle_path = _resolve_bundle_path(project_dir, project_name, output)
