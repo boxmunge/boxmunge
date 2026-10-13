@@ -65,7 +65,7 @@ def _tick(paths: BoxPaths, smoke: _Smoke, down, push) -> int:
     with patch("boxmunge.commands.check.subprocess.run", smoke), \
          patch("boxmunge.commands.health_state.compose_down", down), \
          patch("boxmunge.notify.send_notification", push):
-        return run_check_all([], paths)
+        return run_check_all(paths, read_only=False)
 
 
 class TestStickyCriticalStop:
@@ -143,7 +143,7 @@ class TestStickyCriticalStop:
         before = paths.project_health_state(NAME).read_text()
         smoke = _Smoke((1, NO_CONTAINER))
         with patch("boxmunge.commands.check.subprocess.run", smoke):
-            assert run_check_all(["--read-only"], paths) == 2
+            assert run_check_all(paths, read_only=True) == 2
         assert smoke.calls == 0
         assert paths.project_health_state(NAME).read_text() == before
 
