@@ -37,7 +37,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 
-from boxmunge.config import ConfigError, load_config
 from boxmunge.cve._alerting_fleet import (
     format_breaker_held_alert,
     format_grace_heads_up_alert,
@@ -57,8 +56,8 @@ from boxmunge.cve._alerting_formatters import (
 from boxmunge.cve._alerting_types import Alert, AlertKind, Hit
 from boxmunge.cve.policy import Disposition, ProjectDecision
 from boxmunge.cve.suppressions import SCOPE_HOST, Suppression
+from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
-from boxmunge.pushover import send_notification
 
 __all__ = [
     "Alert",
@@ -215,66 +214,19 @@ def detect_transitions(
 # ---------- delivery ----------
 
 
-def _load_pushover_config(paths: BoxPaths) -> tuple[str, str]:
-    """Return (user_key, app_token). Empty strings if missing or unreadable."""
-    try:
-        config = load_config(paths)
-    except ConfigError:
-        return "", ""
-    pushover = config.get("pushover", {}) or {}
-    return pushover.get("user_key", "") or "", pushover.get("app_token", "") or ""
-
-
 def send_alerts(alerts: tuple[Alert, ...], paths: BoxPaths) -> int:
-    """Send Pushover notifications for each alert. Returns count successfully sent.
+    """Send each alert through ``boxmunge.notify``. Returns how many were
+    delivered.
 
-    If the Pushover config is missing (no user_key / app_token), logs a
-    single WARNING and returns 0 — the scan record on disk is the durable
-    truth, alerts are best-effort surfacing.
-
-    Each send is independent: a failure on one alert is logged at WARNING
-    and the loop continues. Returns the count of successful sends.
+    ``notify`` logs every non-delivery (Pushover unconfigured, config
+    unreadable, API failure), so an undelivered alert is never silent.
+    Callers that record "alert sent" state do so only for delivered alerts.
     """
-    if not alerts:
-        return 0
-
-    user_key, app_token = _load_pushover_config(paths)
-    if not user_key or not app_token:
-        _LOGGER.warning(
-            "alerts skipped, pushover not configured "
-            "(%d alert(s) would have been sent)",
-            len(alerts),
-            extra=_extra(detail={"alert_count": len(alerts)}),
-        )
-        return 0
-
-    sent = 0
-    for alert in alerts:
-        try:
-            ok = send_notification(
-                user_key, app_token, alert.title, alert.body,
-                priority=alert.priority,
-            )
-        except Exception as e:  # defensive: pushover.send_notification swallows  # noqa: BLE001
-            _LOGGER.warning(
-                "pushover send raised for %r: %s", alert.title, e,
-                extra=_extra(detail={
-                    "alert_kind": alert.kind, "title": alert.title,
-                    "error": str(e),
-                }),
-            )
-            ok = False
-        if ok:
-            sent += 1
-        else:
-            _LOGGER.warning(
-                "pushover send failed for %r (kind=%s)",
-                alert.title, alert.kind,
-                extra=_extra(detail={
-                    "alert_kind": alert.kind, "title": alert.title,
-                }),
-            )
-    return sent
+    return sum(
+        notify(paths, alert.title, alert.body, component="cve-alert",
+               priority=alert.priority)
+        for alert in alerts
+    )
 
 
 def emit_scan_alerts(

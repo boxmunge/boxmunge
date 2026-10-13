@@ -118,8 +118,25 @@ def read_held(paths: BoxPaths) -> dict[str, frozenset[str]]:
         raise BreakerError(f"cannot read {path}: {e}") from e
 
 
-def write_held(paths: BoxPaths, held: Mapping[str, frozenset[str]]) -> None:
-    """Persist the held set; an empty set removes the file."""
+def alert_pending(paths: BoxPaths) -> bool:
+    """True when the held set changed but its alert was never delivered."""
+    path = breaker_path(paths)
+    if not path.exists():
+        return False
+    try:
+        return json.loads(path.read_text()).get("alert_pending") is True
+    except (OSError, ValueError, AttributeError) as e:
+        raise BreakerError(f"cannot read {path}: {e}") from e
+
+
+def write_held(
+    paths: BoxPaths, held: Mapping[str, frozenset[str]], *, alert_pending: bool = False,
+) -> None:
+    """Persist the held set; an empty set removes the file.
+
+    ``alert_pending`` marks a hold whose alert has not been delivered yet,
+    so the next scan retries it.
+    """
     path = breaker_path(paths)
     if not held:
         path.unlink(missing_ok=True)
@@ -127,5 +144,6 @@ def write_held(paths: BoxPaths, held: Mapping[str, frozenset[str]]) -> None:
     doc = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "held": {p: sorted(cves) for p, cves in sorted(held.items())},
+        "alert_pending": alert_pending,
     }
     atomic_write_text(path, json.dumps(doc, indent=2) + "\n")

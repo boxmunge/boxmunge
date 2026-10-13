@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -366,24 +365,19 @@ def _write_config(paths: BoxPaths, *, user_key: str, app_token: str) -> None:
 
 
 def test_send_alerts_no_pushover_config_logs_warning_returns_zero(
-    tmp_path, caplog,
+    tmp_path, capsys,
 ) -> None:
+    """Delivery goes through boxmunge.notify, which logs every non-delivery
+    under the caller's component."""
     paths = _fresh_paths(tmp_path)
     _write_config(paths, user_key="", app_token="")
     alert = Alert(
         kind="quarantine", title="t", body="b", priority=1,
     )
-    caplog.set_level(logging.WARNING, logger="boxmunge")
     sent = send_alerts((alert,), paths)
     assert sent == 0
-    assert "alerts skipped, pushover not configured" in caplog.text
-    # Wave 3 / audit A-1: warnings carry component='cve-alert' so
-    # `boxmunge log --component cve-alert` finds them.
-    matching = [
-        r for r in caplog.records
-        if getattr(r, "component", None) == "cve-alert"
-    ]
-    assert matching, "expected at least one record with component='cve-alert'"
+    err = capsys.readouterr().err
+    assert "cve-alert" in err and "Alert not sent (t): Pushover is not configured" in err
 
 
 def test_send_alerts_calls_send_notification_per_alert(
@@ -395,7 +389,7 @@ def test_send_alerts_calls_send_notification_per_alert(
     def fake_send(user, token, title, message, priority=0):
         calls.append((user, token, title, message, priority))
         return True
-    monkeypatch.setattr("boxmunge.cve.alerting.send_notification", fake_send)
+    monkeypatch.setattr("boxmunge.notify.send_notification", fake_send)
     alerts = (
         Alert(kind="quarantine", title="t1", body="b1", priority=1),
         Alert(kind="still_running", title="t2", body="b2", priority=1),
@@ -408,30 +402,22 @@ def test_send_alerts_calls_send_notification_per_alert(
     assert calls[2] == ("u", "a", "t3", "b3", 0)
 
 
-def test_send_alerts_continues_on_failure(monkeypatch, tmp_path, caplog) -> None:
+def test_send_alerts_continues_on_failure(monkeypatch, tmp_path, capsys) -> None:
     paths = _fresh_paths(tmp_path)
     _write_config(paths, user_key="u", app_token="a")
     seq = iter([True, False, True])
     def fake_send(*args, **kwargs):
         return next(seq)
-    monkeypatch.setattr("boxmunge.cve.alerting.send_notification", fake_send)
+    monkeypatch.setattr("boxmunge.notify.send_notification", fake_send)
     alerts = (
         Alert(kind="quarantine", title="t1", body="b1", priority=1),
         Alert(kind="quarantine", title="t2", body="b2", priority=1),
         Alert(kind="quarantine", title="t3", body="b3", priority=1),
     )
-    caplog.set_level(logging.WARNING, logger="boxmunge")
     sent = send_alerts(alerts, paths)
     assert sent == 2
-    assert "pushover send failed" in caplog.text
-    assert "t2" in caplog.text
-    # Wave 3 / audit A-1: send-failure warnings carry component='cve-alert'.
-    matching = [
-        r for r in caplog.records
-        if getattr(r, "component", None) == "cve-alert"
-        and "pushover send failed" in r.getMessage()
-    ]
-    assert matching, "expected pushover-send-failed record with cve-alert"
+    err = capsys.readouterr().err
+    assert "cve-alert" in err and "Alert not sent (t2): Pushover request failed" in err
 
 
 # ---------- emit_scan_alerts ----------
@@ -444,7 +430,7 @@ def test_emit_scan_alerts_integration(monkeypatch, tmp_path) -> None:
     def fake_send(user, token, title, message, priority=0):
         sent_titles.append(title)
         return True
-    monkeypatch.setattr("boxmunge.cve.alerting.send_notification", fake_send)
+    monkeypatch.setattr("boxmunge.notify.send_notification", fake_send)
 
     fd = _disp("CVE-2026-9999", base=Severity.CRITICAL,
                effective=Severity.CRITICAL,

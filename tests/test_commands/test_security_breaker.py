@@ -57,6 +57,20 @@ def test_hold_persists_without_re_alerting(fleet):
     assert pushover.sent == []
 
 
+def test_undelivered_hold_alert_is_retried(fleet, monkeypatch):
+    """A hold is recorded as alerted only once the alert was delivered."""
+    paths, pushover = fleet
+    monkeypatch.setattr("boxmunge.notify.send_notification", lambda *a, **k: False)
+    cmd_security_scan([], paths)
+    assert set(read_held(paths)) == {"aaa", "bbb", "ccc"}
+    monkeypatch.setattr("boxmunge.notify.send_notification", pushover._send)
+    cmd_security_scan([], paths)
+    assert len(_breaker_alerts(pushover)) == 1
+    pushover.clear()
+    cmd_security_scan([], paths)
+    assert _breaker_alerts(pushover) == []
+
+
 def test_single_project_scan_keeps_a_held_project_held(fleet):
     paths, _ = fleet
     cmd_security_scan([], paths)

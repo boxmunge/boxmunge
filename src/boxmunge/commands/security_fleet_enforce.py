@@ -17,7 +17,14 @@ from boxmunge.commands.security_enforce import announce_quarantine, enforce, hea
 from boxmunge.commands.security_scan_core import ProjectScan
 from boxmunge.commands.security_scan_inputs import load_project_meta
 from boxmunge.cve.alerting import format_breaker_held_alert, send_alerts
-from boxmunge.cve.breaker import Candidate, decide, read_held, trip_threshold, write_held
+from boxmunge.cve.breaker import (
+    Candidate,
+    alert_pending,
+    decide,
+    read_held,
+    trip_threshold,
+    write_held,
+)
 from boxmunge.cve.policy import Disposition, ProjectDecision
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.cve.scan_state import decisions_from_scan_state, read_scan_state
@@ -76,6 +83,7 @@ def apply_new_quarantines(
     """
     result = PhaseTwo()
     already = read_held(paths)
+    pending = alert_pending(paths)
     if in_grace:
         result.held = already
         return result
@@ -93,13 +101,17 @@ def apply_new_quarantines(
 
     # Projects not re-evaluated this run keep their held entries.
     result.held = {**{p: c for p, c in already.items() if p not in scans}, **verdict.held}
-    write_held(paths, result.held)
     if verdict.newly_held:
-        _announce_hold(paths, result.held, verdict.newly_held, len(scans))
+        _log_hold(paths, result.held, verdict.newly_held, len(scans))
+    # The hold is recorded as alerted only once the alert was delivered;
+    # until then every scan retries it.
+    if result.held and (verdict.newly_held or pending):
+        pending = not _send_hold_alert(paths, result.held, len(scans))
+    write_held(paths, result.held, alert_pending=pending and bool(result.held))
     return result
 
 
-def _announce_hold(
+def _log_hold(
     paths: BoxPaths, held: Mapping[str, frozenset[str]],
     newly: frozenset[str], scanned: int,
 ) -> None:
@@ -110,11 +122,16 @@ def _announce_hold(
         detail={"held": {p: sorted(c) for p, c in held.items()},
                 "threshold": trip_threshold(scanned), "projects_scanned": scanned},
     )
+
+
+def _send_hold_alert(paths: BoxPaths, held: Mapping[str, frozenset[str]], scanned: int) -> bool:
+    """One priority-1 alert for the whole hold. True if delivered."""
     alert = format_breaker_held_alert(held, threshold=trip_threshold(scanned), scanned=scanned)
     try:
-        send_alerts((alert,), paths)
+        return send_alerts((alert,), paths) == 1
     except Exception as e:  # noqa: BLE001 — alerting must never block scan
         log_warning("cve-scan", f"breaker alert emission failed: {e}", paths)
+        return False
 
 
 def apply_held(paths: BoxPaths) -> PhaseTwo:

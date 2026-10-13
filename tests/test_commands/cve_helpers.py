@@ -98,7 +98,7 @@ class Pushover:
             "pushover": {"user_key": "u", "app_token": "t"},
         }))
         monkeypatch.setattr(
-            "boxmunge.cve.alerting.send_notification", self._send,
+            "boxmunge.notify.send_notification", self._send,
         )
 
     def _send(self, user_key, app_token, title, body, priority=0) -> bool:

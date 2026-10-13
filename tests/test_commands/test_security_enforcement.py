@@ -26,7 +26,7 @@ from tests.test_commands.cve_helpers import (
 def docker(monkeypatch):
     monkeypatch.setattr(security_scan_inputs, "container_image_digest", lambda c: None)
     monkeypatch.setattr(
-        "boxmunge.cve.alerting.send_notification", lambda *a, **k: True,
+        "boxmunge.notify.send_notification", lambda *a, **k: True,
     )
     return Docker(monkeypatch)
 

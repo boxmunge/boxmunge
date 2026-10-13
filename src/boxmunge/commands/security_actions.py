@@ -87,15 +87,10 @@ def _maybe_fire_grace_heads_up(
             posture_by_project=posture_by_project,
             dangerously_by_project=dangerously_by_project,
         )
-        try:
-            send_alerts((alert,), paths)
-        except Exception as e:  # noqa: BLE001 — alerting must never block scan
-            log_warning(
-                "cve-scan", f"heads-up alert send raised: {e}", paths,
-            )
-        # Persist regardless of delivery success: operator can see grace
-        # state in `boxmunge security` and we don't want repeated sends
-        # if Pushover is down.
+        # Record the heads-up as sent only once it was delivered, so an
+        # undelivered one is retried by the next scan in the window.
+        if send_alerts((alert,), paths) != 1:
+            return
         try:
             mark_heads_up_sent(paths, current)
         except OSError as e:

@@ -3229,3 +3229,23 @@ def test_fleet_summary_excludes_expired_host_suppressions(
     payload = json.loads(buf.getvalue())
     assert payload["active_suppressions_host"] == 0
     assert payload["active_suppressions_count"] == 0
+
+
+def test_undelivered_grace_heads_up_is_not_marked_sent(monkeypatch, tmp_path) -> None:
+    """The heads-up is recorded as sent only once Pushover accepted it, so
+    an undelivered one is retried by the next scan in the window."""
+    from boxmunge.commands.security_actions import cmd_security_scan
+    from boxmunge.cve.grace import read_grace_state
+    paths = _scan_paths(tmp_path, in_grace=True)
+    _grace_quarantine_scan(monkeypatch, paths)
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.send_alerts", lambda alerts, p: 0,
+    )
+    cmd_security_scan([], paths)
+    assert read_grace_state(paths).heads_up_sent is False
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.send_alerts", lambda alerts, p: len(alerts),
+    )
+    cmd_security_scan([], paths)
+    assert read_grace_state(paths).heads_up_sent is True
+

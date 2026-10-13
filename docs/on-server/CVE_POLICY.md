@@ -799,7 +799,11 @@ several findings are involved the title names the worst and adds
 Alerting is best-effort. The durable record is the on-disk scan state
 under `state/scans/<project>.json`. If Pushover isn't configured, or
 the API call fails, the scan still runs, the quarantine still happens,
-and the state file is still written — you just won't get a push.
+and the state file is still written — you just won't get a push. Every
+alert that was not delivered is logged (component `cve-alert`). The two
+alerts that record "sent" state — the grace heads-up and a circuit-breaker
+hold — record it only once Pushover accepted them, so an undelivered one
+is retried by the next scan.
 
 ## CLI reference
 
