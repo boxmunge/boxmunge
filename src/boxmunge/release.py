@@ -25,8 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import yaml
-
+from boxmunge.bind_mounts import BindMountError, bind_mounted_dirs
 from boxmunge.bundle import BOX_OWNED_ENTRIES, BOXMUNGE_ENTRIES, BundleError
 from boxmunge.fileutil import atomic_write_text
 
@@ -35,7 +34,8 @@ if TYPE_CHECKING:
 
 
 class ReleaseStateError(ValueError):
-    """A release bookkeeping file under .releases/ is unreadable."""
+    """Release state is unreadable: a .releases/ bookkeeping file, or the
+    live compose.yml that says which directories hold data."""
 
 
 def _read_meta(path: Path) -> dict:
@@ -69,42 +69,23 @@ def _live_meta(paths: BoxPaths, project_name: str) -> Path:
     return paths.project_releases(project_name) / "live.json"
 
 
-def _bind_mount_dir_names(compose_path: Path) -> set[str]:
-    """Top-level dirs a compose file bind-mounts (``./uploads`` -> uploads).
-
-    Best-effort: a missing or unparseable compose file yields no names. The
-    release's own compose has already passed validation; the live one is only
-    consulted to protect the data its bind mounts hold.
-    """
-    names: set[str] = set()
-    if not compose_path.exists():
-        return names
+def _bind_dirs(compose_path: Path, project_dir: Path) -> dict[str, bool]:
+    """Bind-mounted top-level dirs of a compose file -> read-write?"""
     try:
-        from boxmunge.compose import is_bind_mount
-
-        compose = yaml.safe_load(compose_path.read_text()) or {}
-        for svc in (compose.get("services") or {}).values():
-            if not isinstance(svc, dict):
-                continue
-            for vol in svc.get("volumes", []) or []:
-                if not isinstance(vol, str) or not is_bind_mount(vol):
-                    continue
-                host = vol.split(":")[0]
-                if host.startswith("./"):
-                    top = host.removeprefix("./").split("/", 1)[0]
-                    if top:
-                        names.add(top)
-    except (yaml.YAMLError, OSError):
-        pass
-    return names
+        return bind_mounted_dirs(compose_path, project_dir)
+    except BindMountError as e:
+        raise ReleaseStateError(
+            f"Cannot tell which project directories hold data: {e}. Nothing "
+            f"was changed; fix the file by hand before deploying."
+        ) from e
 
 
 def _box_state_names(project_dir: Path, release_tree: Path | None) -> set[str]:
     """Names of live entries that are box state, never release code."""
-    live_binds = _bind_mount_dir_names(project_dir / "compose.yml")
+    live_binds = set(_bind_dirs(project_dir / "compose.yml", project_dir))
     tops = set(live_binds)
     if release_tree is not None:
-        tops |= _bind_mount_dir_names(release_tree / "compose.yml")
+        tops |= set(_bind_dirs(release_tree / "compose.yml", project_dir))
     staging_copies = {f"{t}-staging" for t in tops}
     return set(BOX_OWNED_ENTRIES) | set(BOXMUNGE_ENTRIES) | live_binds | staging_copies
 
@@ -195,12 +176,15 @@ def install_release(tree: Path, project_dir: Path) -> None:
     if forbidden:
         raise BundleError(f"Release tree carries box-owned entries: {forbidden}")
 
-    project_dir.mkdir(parents=True, exist_ok=True)
+    # Classify everything before changing anything.
     shipped = {e.name for e in tree.iterdir()}
-    live_binds = _bind_mount_dir_names(project_dir / "compose.yml")
-    for stale in live_code_entries(project_dir, tree):
-        if stale.name not in shipped:
-            _remove(stale)
+    live_binds = set(_bind_dirs(project_dir / "compose.yml", project_dir))
+    stale_entries = [e for e in live_code_entries(project_dir, tree)
+                     if e.name not in shipped]
+
+    project_dir.mkdir(parents=True, exist_ok=True)
+    for stale in stale_entries:
+        _remove(stale)
 
     installed: list[Path] = []
     for item in tree.iterdir():

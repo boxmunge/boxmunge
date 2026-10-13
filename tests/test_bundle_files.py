@@ -252,3 +252,63 @@ class TestLinksAreNeverFollowed:
         assert (dest / "scripts" / "run.sh").read_text() == "new"
         assert not (dest / "config.txt").is_symlink()
         assert (dest / "config.txt").read_text() == "new config"
+
+
+def _release(src: Path, compose: str) -> None:
+    src.mkdir(parents=True)
+    (src / "manifest.yml").write_text("project: app\n")
+    (src / "compose.yml").write_text(compose)
+
+
+class TestEveryBindMountFormProtectsData:
+    """Review finding: only short-syntax `./x` sources were recognised; long
+    syntax and absolute sources were treated as release code and deleted by
+    the next install that did not ship them."""
+
+    LONG = ("services:\n  app:\n    volumes:\n"
+            "      - type: bind\n        source: ./uploads\n        target: /u\n")
+
+    def _live(self, dest: Path, compose: str) -> None:
+        dest.mkdir()
+        (dest / "compose.yml").write_text(compose)
+        (dest / "uploads").mkdir()
+        (dest / "uploads" / "photo.jpg").write_text("USER UPLOAD")
+
+    def test_long_syntax_bind_survives_install(self, tmp_path: Path) -> None:
+        from boxmunge.release import live_code_entries
+        dest = tmp_path / "project"
+        self._live(dest, self.LONG)
+        src = tmp_path / "bundle"
+        _release(src, self.LONG)
+        assert dest / "uploads" not in live_code_entries(dest, src)
+        install_release(src, dest)
+        assert (dest / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
+
+    def test_absolute_source_under_the_project_survives_install(self, tmp_path: Path) -> None:
+        dest = tmp_path / "project"
+        compose = f"services:\n  app:\n    volumes:\n      - {dest}/uploads:/u\n"
+        self._live(dest, compose)
+        src = tmp_path / "bundle"
+        _release(src, compose)
+        install_release(src, dest)
+        assert (dest / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
+
+    @pytest.mark.parametrize("compose", [
+        "services: [not, a, mapping]\n",
+        "services:\n  app:\n    volumes: ./uploads:/u\n",
+        "services: {app: [1]}\n",
+        "{{{ not yaml\n",
+    ])
+    def test_unreadable_live_compose_refuses_before_any_change(
+        self, tmp_path: Path, compose: str,
+    ) -> None:
+        from boxmunge.release import ReleaseStateError
+        dest = tmp_path / "project"
+        self._live(dest, compose)
+        (dest / "old.txt").write_text("old")
+        src = tmp_path / "bundle"
+        _release(src, "services: {}\n")
+        with pytest.raises(ReleaseStateError, match="compose.yml"):
+            install_release(src, dest)
+        assert (dest / "old.txt").exists()
+        assert (dest / "uploads" / "photo.jpg").exists()

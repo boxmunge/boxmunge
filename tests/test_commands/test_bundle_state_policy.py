@@ -78,3 +78,28 @@ def test_placeholder_data_dir_is_accepted(paths, live, capsys) -> None:
     assert (live / "data" / "app.db").read_text() == "PRODUCTION"
     assert (live / "VERSION").read_text() == "v2\n"
     assert "placeholder" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("form", ["long", "absolute"])
+def test_bind_mounted_data_survives_a_deploy_that_does_not_ship_it(paths, form) -> None:
+    """Review finding: long-syntax and absolute bind sources were treated as
+    release code and deleted by the next deploy."""
+    pdir = paths.project_dir("myapp")
+    if form == "long":
+        volume = ("      - type: bind\n        source: ./uploads\n"
+                  "        target: /srv/uploads\n")
+    else:
+        volume = f"      - {pdir}/uploads:/srv/uploads\n"
+    compose = "services:\n  web:\n    image: nginx\n    volumes:\n" + volume
+    add_project("myapp", paths)
+    place_bundle(paths, timestamp="2026-10-13T090000000000",
+                 files={"compose.yml": compose, "uploads/.gitkeep": ""})
+    with patch("boxmunge.commands.deploy.compose_up"), \
+            patch("boxmunge.commands.deploy.caddy_reload"):
+        assert run_deploy("myapp", paths) == 0
+        (pdir / "uploads" / "photo.jpg").write_text("USER UPLOAD")
+        place_bundle(paths, timestamp="2026-10-13T100000000000",
+                     files={"compose.yml": compose})
+        assert run_deploy("myapp", paths) == 0
+    assert (pdir / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
+    assert not (pdir / ".releases" / "previous" / "uploads").exists()
