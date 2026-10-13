@@ -51,8 +51,9 @@ on the server changes (`ERROR:` naming each entry, exit 1):
 
 The archive itself must hold exactly one top-level directory (the project), and only regular files,
 directories and links. A link must resolve inside the project directory: a bundle with an absolute
-link, a link that climbs out of the project, or a device or FIFO entry is refused with an `ERROR:`
-naming the entry. Links are installed as links and are never followed.
+link, a link that climbs out of the project (also through a chain of other links), a link with `..`
+anywhere but at the start of its target (`sub/../x`), or a device or FIFO entry is refused with an
+`ERROR:` naming the entry. Links are installed as links and are never followed.
 
 An empty `data/`, `backups/` or `security/` directory (or one holding only empty `.gitkeep` / `.keep`
 files) carries nothing; it is ignored with a `NOTE`. A user bind-mount directory declared in the

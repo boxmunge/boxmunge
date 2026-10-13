@@ -124,3 +124,50 @@ def test_deploy_reports_escaping_symlink_cleanly(paths, capsys) -> None:
     assert err.startswith("ERROR:")
     assert "myapp/link" in err
     assert not paths.project_dir("myapp").exists()
+
+
+def test_chained_links_cannot_climb_out(tmp_path: Path) -> None:
+    """Each link looks harmless lexically on its own; chained, `l` resolves to
+    the parent of the project and `m` climbs further (review finding)."""
+    def extra(t):
+        _link(t, "myapp/m", "l/..")      # ordered before the links it uses
+        _link(t, "myapp/s", ".")
+        _link(t, "myapp/l", "s/..")
+    bundle = _bundle(tmp_path / "b.tar.gz", extra)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with pytest.raises(BundleError, match="myapp/(m|l)"):
+        extract_bundle(bundle, dest)
+
+
+@pytest.mark.parametrize("target", ["s/..", "a/../b", "./x/../../y"])
+def test_dotdot_after_a_name_is_refused(tmp_path: Path, target: str) -> None:
+    bundle = _bundle(tmp_path / "b.tar.gz",
+                     lambda t: _link(t, "myapp/link", target))
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with pytest.raises(BundleError, match="myapp/link"):
+        extract_bundle(bundle, dest)
+
+
+def test_leading_dotdot_inside_the_project_is_allowed(tmp_path: Path) -> None:
+    def extra(t):
+        _file(t, "myapp/conf/app.conf")
+        _link(t, "myapp/sub/app.conf", "../conf/app.conf")
+    bundle = _bundle(tmp_path / "b.tar.gz", extra)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    tree = extract_bundle(bundle, dest)
+    assert (tree / "sub" / "app.conf").is_symlink()
+
+
+def test_extracted_tree_check_resolves_links_on_disk(tmp_path: Path) -> None:
+    """Defence in depth: after extraction every link is resolved with
+    realpath and must stay inside the project."""
+    from boxmunge.bundle import check_extracted_links
+    project = tmp_path / "out" / "myapp"
+    project.mkdir(parents=True)
+    (project / "s").symlink_to(".")
+    (project / "l").symlink_to("s/..")
+    with pytest.raises(BundleError, match="l"):
+        check_extracted_links(project)

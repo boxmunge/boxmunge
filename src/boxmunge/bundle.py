@@ -4,11 +4,11 @@ Installing a checked tree into a project lives in boxmunge.release.
 """
 from __future__ import annotations
 
+import os
 import posixpath
 import shutil
 import tarfile
 from pathlib import Path
-
 
 
 class BundleError(ValueError):
@@ -21,6 +21,31 @@ def _member_parts(name: str) -> list[str]:
 
 def _within(path: str, top: str) -> bool:
     return path == top or path.startswith(top + "/")
+
+
+def _climbs_after_name(target: str) -> bool:
+    """True if a link target has a `..` after a real name (``s/..``).
+
+    Such a target is only safe if every name before the `..` is a real
+    directory; when one is itself a link, a chain of individually harmless
+    links climbs out of the project. Leading `..` segments are fine.
+    """
+    seen_name = False
+    for part in target.split("/"):
+        if part == "..":
+            if seen_name:
+                return True
+        elif part not in ("", "."):
+            seen_name = True
+    return False
+
+
+def _escaping_link(m: tarfile.TarInfo, target: str) -> BundleError:
+    return BundleError(
+        f"Bundle entry '{m.name}' is a link to '{target}', outside the "
+        f"project directory; bundles may only contain links that stay "
+        f"inside the project"
+    )
 
 
 def _check_members(members: list[tarfile.TarInfo]) -> str:
@@ -52,20 +77,42 @@ def _check_members(members: list[tarfile.TarInfo]) -> str:
         if not (m.issym() or m.islnk()):
             continue
         name = "/".join(_member_parts(m.name))
+        target = m.linkname
         if m.issym():
-            target = m.linkname
+            if _climbs_after_name(target):
+                raise _escaping_link(m, target)
             resolved = posixpath.normpath(
                 posixpath.join(posixpath.dirname(name), target))
         else:
-            target = m.linkname
+            if ".." in target.split("/"):
+                raise _escaping_link(m, target)
             resolved = posixpath.normpath("/".join(_member_parts(target)))
         if target.startswith("/") or not _within(resolved, top):
-            raise BundleError(
-                f"Bundle entry '{m.name}' is a link to '{target}', outside the "
-                f"project directory; bundles may only contain links that stay "
-                f"inside the project"
-            )
+            raise _escaping_link(m, target)
     return top
+
+
+def check_extracted_links(project: Path) -> None:
+    """Resolve every link in an extracted project on disk; all must stay inside.
+
+    The member checks reason about each link lexically. This walks the real
+    tree, where links can chain, and requires ``realpath`` of every link to
+    land inside the project.
+    """
+    root = os.path.realpath(project)
+    for dirpath, dirnames, filenames in os.walk(project):
+        for name in dirnames + filenames:
+            path = os.path.join(dirpath, name)
+            if not os.path.islink(path):
+                continue
+            real = os.path.realpath(path)
+            if real != root and not real.startswith(root + os.sep):
+                rel = os.path.relpath(path, project)
+                raise BundleError(
+                    f"Bundle entry '{rel}' is a link that resolves outside the "
+                    f"project directory; bundles may only contain links that "
+                    f"stay inside the project"
+                )
 
 
 def extract_bundle(bundle_path: Path, dest: Path) -> Path:
@@ -94,6 +141,7 @@ def extract_bundle(bundle_path: Path, dest: Path) -> Path:
             f"Bundle must contain exactly one top-level directory; "
             f"'{top}' is not a directory"
         )
+    check_extracted_links(project)
     return project
 
 
