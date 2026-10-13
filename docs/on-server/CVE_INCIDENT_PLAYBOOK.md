@@ -21,6 +21,7 @@ The things that produce a CVE alert:
 | `[boxmunge:<p>] <N> new CVE findings (informational)` | New findings below the quarantine gate. One digest per scan. |
 | `[boxmunge:<p>] Suppression expired` / `[boxmunge] Host suppression expired` | A previously-suppressed CVE is an active finding again. |
 | `[boxmunge] CVE scan incomplete` | Some images were not scanned. They are unprotected until a scan succeeds. |
+| `[boxmunge] Circuit breaker held <N> quarantines` | Many projects would have quarantined at once for the same CVE(s). They are still running. Escalate: applying (`security scan --apply-held`) or host-suppressing is an operator decision. |
 | `[boxmunge] CVE policy enforcement begins in <N>h` | One-time migration grace heads-up after upgrade. Affects the whole fleet. |
 
 If you got an alert, run these two commands first — they tell you everything.

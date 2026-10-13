@@ -15,7 +15,9 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from boxmunge.commands.security_fleet_enforce import apply_held, apply_new_quarantines
 from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project
+from boxmunge.cve.breaker import BreakerError
 from boxmunge.cve.alerting import (
     format_grace_heads_up_alert,
     format_host_suppression_expired_alert,
@@ -177,6 +179,8 @@ class FleetRun:
     # project → human lines: a hard error, or each image/service not covered.
     problems: dict[str, list[str]] = field(default_factory=dict)
     skipped_locked: list[str] = field(default_factory=list)
+    # Held by the circuit breaker: project → its held CVEs.
+    held: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 def _parse_scan_targets(args: list[str], paths: BoxPaths) -> list[str] | int:
@@ -205,7 +209,9 @@ def _scan_each(
     run = FleetRun()
     for name in targets:
         try:
-            scan = scan_one_project(paths, name, in_grace=in_grace, kev=kev)
+            scan = scan_one_project(
+                paths, name, in_grace=in_grace, kev=kev, defer_new=True,
+            )
         except LockError:
             # Audit A-2: another operation holds the project lock. Skip and
             # warn; the next cron tick will re-attempt.
@@ -239,6 +245,39 @@ def _scan_each(
     return run
 
 
+def _enforce_fleet(paths: BoxPaths, run: FleetRun, *, in_grace: bool) -> None:
+    """Phase 2: new quarantines for the whole run, via the circuit breaker."""
+    try:
+        phase2 = apply_new_quarantines(paths, run.scans, in_grace=in_grace)
+    except BreakerError as e:
+        print(f"ERROR: {e} — no new quarantine was applied this run", file=sys.stderr)
+        run.problems["(circuit breaker)"] = [f"{e}; no new quarantine was applied"]
+        return
+    for name, error in sorted(phase2.errors.items()):
+        print(f"{name}: ERROR — {error}")
+        run.problems.setdefault(name, []).append(error)
+    run.held = phase2.held
+    for name in sorted(run.held):
+        print(f"{name}: HELD by the circuit breaker "
+              f"({', '.join(sorted(run.held[name]))}) — still running")
+
+
+def _cmd_apply_held(paths: BoxPaths) -> int:
+    """`security scan --apply-held`: apply the breaker's held quarantines."""
+    try:
+        result = apply_held(paths)
+    except BreakerError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    for name in result.applied:
+        print(f"{name}: quarantined (held by the circuit breaker, now applied)")
+    for name, error in sorted(result.errors.items()):
+        print(f"{name}: ERROR — {error}", file=sys.stderr)
+    if not (result.applied or result.errors):
+        print("Nothing held by the circuit breaker.")
+    return 1 if result.errors else 0
+
+
 def _alert_fleet(paths: BoxPaths, run: FleetRun) -> None:
     """Once-per-run alerts: scan failures (audit B-11) and expired
     host-scope suppressions (once, not once per project — B-14)."""
@@ -260,20 +299,24 @@ def _exit_code(paths: BoxPaths, run: FleetRun) -> int:
     """Audit F-8 / B-11 exit codes.
 
     1 = a project failed or was only partly scanned (or Trivy is missing);
-    2 = scanned, ≥1 project quarantined or at-risk-running; 0 = clean.
+    2 = scanned, ≥1 project quarantined, at-risk-running or held by the
+    circuit breaker; 0 = clean.
     """
     if run.problems:
         print(f"Scan incomplete: {', '.join(sorted(run.problems))}. Exit code 1.")
         return 1
     quarantined = [n for n in run.scans if is_quarantined(n, paths)]
+    held = sorted(n for n in run.held if n in run.scans)
     at_risk = [
         n for n, scan in run.scans.items()
         if any(f.disposition == Disposition.STILL_RUNNING_AT_RISK
                for d in scan.decisions for f in d.findings)
     ]
-    if not (quarantined or at_risk):
+    if not (quarantined or at_risk or held):
         return 0
     bits: list[str] = []
+    if held:
+        bits.append(f"{len(held)} held by the circuit breaker ({', '.join(held)})")
     if quarantined:
         bits.append(f"{len(quarantined)} quarantined ({', '.join(quarantined)})")
     if at_risk:
@@ -283,7 +326,9 @@ def _exit_code(paths: BoxPaths, run: FleetRun) -> int:
 
 
 def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
-    """boxmunge security scan [project] — scan one or all projects."""
+    """boxmunge security scan [project] | --apply-held."""
+    if args == ["--apply-held"]:
+        return _cmd_apply_held(paths)
     targets = _parse_scan_targets(args, paths)
     if isinstance(targets, int):
         return targets
@@ -320,6 +365,7 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
     except TrivyNotInstalledError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
+    _enforce_fleet(paths, run, in_grace=in_grace)
 
     # The one-time heads-up needs the whole fleet: fleet scans only.
     if not args and in_grace and not grace.heads_up_sent and run.scans:

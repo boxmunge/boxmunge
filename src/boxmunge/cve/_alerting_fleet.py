@@ -7,7 +7,7 @@ from ``boxmunge.cve.alerting``.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 
 from boxmunge.cve._alerting_types import Alert
@@ -76,6 +76,45 @@ def format_scan_failure_alert(problems: dict[str, list[str]]) -> Alert:
         "re-run `boxmunge security scan`.",
     ]
     return Alert(kind="scan_failed", title=title, body="\n".join(lines), priority=1)
+
+
+def format_breaker_held_alert(
+    held: Mapping[str, frozenset[str]], *, threshold: int, scanned: int,
+) -> Alert:
+    """The circuit breaker held new quarantines instead of applying them.
+
+    Priority 1: the held projects are running with quarantine-level
+    findings until the operator decides.
+    """
+    n = len(held)
+    per_cve: dict[str, list[str]] = {}
+    for project, cves in held.items():
+        for cve in cves:
+            per_cve.setdefault(cve, []).append(project)
+    lines = [
+        f"{n} project{'s' if n != 1 else ''} would be newly quarantined in one scan "
+        f"(the breaker trips at {threshold} of {scanned} scanned). That pattern "
+        f"usually means a shared base-image CVE or a Trivy DB change, so the "
+        f"quarantines are HELD and the projects are still running.",
+        "",
+        "Held, by CVE:",
+    ]
+    for cve in sorted(per_cve, key=lambda c: (-len(per_cve[c]), c))[:_MAX_LINES]:
+        lines.append(f"- {cve}: {', '.join(sorted(per_cve[cve]))}")
+    lines += [
+        "",
+        "Review: boxmunge security <project>",
+        "Apply the held quarantines (operator only):",
+        "  boxmunge security scan --apply-held",
+        "Or, after review, suppress the CVE for every project (operator only):",
+        "  boxmunge security suppress <CVE> --host --until <date> --reason <text>",
+        "KEV-listed CVEs are never held.",
+    ]
+    return Alert(
+        kind="breaker_held",
+        title=f"[boxmunge] Circuit breaker held {n} quarantine{'s' if n != 1 else ''}",
+        body="\n".join(lines), priority=1,
+    )
 
 
 def format_host_suppression_expired_alert(suppressions: Sequence[Suppression]) -> Alert:

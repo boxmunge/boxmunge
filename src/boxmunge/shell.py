@@ -28,8 +28,8 @@ ALLOWED_COMMANDS: set[str] = {
     # Container security & CVE policy.
     # - `security` (no args / <project>): introspection
     # - `security scan|suppress|unsuppress|resume`: mutating
-    # Operator-only forms (host-scope suppressions) are refused by
-    # operator_only_reason below.
+    # Operator-only forms (host-scope suppressions, scan --apply-held) are
+    # refused by operator_only_reason below.
     "security",
     # Project operations.
     # `check` is read-only. `check-all` is the timer-driven mutator: it
@@ -68,6 +68,11 @@ def operator_only_reason(command: str, args: list[str]) -> str | None:
         return (
             "host-scope suppressions apply to every project on the box and "
             "are operator-only"
+        )
+    if command == "security" and args[:1] == ["scan"] and "--apply-held" in args:
+        return (
+            "applying quarantines held by the CVE circuit breaker is "
+            "operator-only"
         )
     return None
 

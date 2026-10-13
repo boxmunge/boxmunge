@@ -39,6 +39,7 @@ from datetime import date
 
 from boxmunge.config import ConfigError, load_config
 from boxmunge.cve._alerting_fleet import (
+    format_breaker_held_alert,
     format_grace_heads_up_alert,
     format_host_suppression_expired_alert,
     format_kev_stale_alert,
@@ -67,6 +68,7 @@ __all__ = [
     "format_suppression_expired_alert",
     "format_host_suppression_expired_alert",
     "format_grace_heads_up_alert",
+    "format_breaker_held_alert",
     "format_kev_stale_alert",
     "format_scan_failure_alert",
     "detect_transitions",

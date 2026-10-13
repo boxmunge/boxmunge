@@ -91,6 +91,17 @@ def announce_quarantine(
         )
 
 
+def headline_of(
+    decisions: Sequence[ProjectDecision],
+) -> tuple[ProjectDecision, FindingDisposition] | None:
+    """The first QUARANTINE finding (findings are sorted most-severe first)."""
+    for decision in decisions:
+        for disp in decision.findings:
+            if disp.disposition == Disposition.QUARANTINE:
+                return decision, disp
+    return None
+
+
 def raise_enforcement_error(error: str | None) -> None:
     """Fail the project scan loudly once its state has been persisted."""
     if error is not None:

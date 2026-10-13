@@ -24,6 +24,7 @@ from boxmunge.commands.security_enforce import (
     Enforcement,
     announce_quarantine,
     enforce,
+    headline_of,
     raise_enforcement_error,
 )
 from boxmunge.cve.alerting import emit_scan_alerts
@@ -124,28 +125,23 @@ def scan_one_project(
     in_grace: bool | None = None,
     audit_only: bool = False,
     kev: KevCatalog | None = None,
+    defer_new: bool = False,
 ) -> ProjectScan:
     """Scan a single project, persist state, take quarantine action.
 
     ``ProjectScan.headline`` is the first (decision, finding) pair that
     requires quarantine, or None if nothing quarantines.
 
-    When ``in_grace`` is True, both quarantine actions and per-project
-    transition alerts are suppressed. The scan_state is still written
-    so subsequent scans see correct prior state. When ``in_grace`` is
-    None (the default for direct callers), this function lazily
-    bootstraps grace state if missing and derives ``in_grace`` from the
-    persisted state (audit F-2). The fleet scan entry-point
-    (``cmd_security_scan``) already does its own bootstrap and passes
-    the resolved value through explicitly.
+    ``in_grace=True`` suppresses new quarantines and transition alerts but
+    still writes scan_state; ``None`` (direct callers) lazily bootstraps
+    the grace state and derives it (audit F-2).
 
-    When ``audit_only`` is True, the function evaluates findings for the
-    caller (so it can decide e.g. whether to lift quarantine) but does
-    NOT mutate persisted state: scan_state.json is not written, no
-    transition alerts are emitted, and no quarantine action fires. Used
-    by `cmd_security_resume` so a re-scan during the resume flow does
-    not clobber the prior scan_state context (audit A-3). Audit-only
-    callers DO NOT lazy-bootstrap grace either.
+    ``audit_only=True`` (the resume re-scan, audit A-3) only evaluates: no
+    scan_state write, no alerts, no action, no grace bootstrap.
+
+    When ``defer_new`` is True, an existing quarantine is still re-asserted
+    but a NEW quarantine is not taken here: the fleet scan decides it for
+    the whole run, through the circuit breaker (security_enforce).
 
     Concurrency: holds the per-project lock for its full body.
 
@@ -175,6 +171,7 @@ def scan_one_project(
     with project_lock(project, paths):
         return _scan_one_project_locked(
             paths, project, in_grace=in_grace, audit_only=audit_only, kev=kev,
+            defer_new=defer_new,
         )
 
 
@@ -257,6 +254,7 @@ def _scan_one_project_locked(
     in_grace: bool,
     kev: KevCatalog,
     audit_only: bool = False,
+    defer_new: bool = False,
 ) -> ProjectScan:
     """Inner scan body. Caller MUST hold the per-project lock."""
     meta = load_project_meta(paths, project)
@@ -342,13 +340,15 @@ def _scan_one_project_locked(
 
     _log_relevance_gaps(paths, project, dropped_lang_types, empty_runtime_exempted)
 
-    headline = _headline(decisions)
+    headline = headline_of(decisions)
     # Audit-only callers (resume re-scan, audit A-3) are the lift flow
     # itself and never act. Everyone else enforces: an existing quarantine
     # is re-asserted on every scan (B-03), a new one fires outside grace.
     outcome = Enforcement()
     if not audit_only:
-        outcome = _enforce(paths, project, meta, headline, in_grace=in_grace)
+        outcome = _enforce(
+            paths, project, meta, headline, in_grace=in_grace or defer_new,
+        )
 
     if failed and not decisions:
         detail = f"; {outcome.error}" if outcome.error else ""
@@ -394,17 +394,6 @@ def _enforce(
         paths, project, hosts=meta.hosts, compose_files=meta.compose_files,
         headline=headline, in_grace=in_grace,
     )
-
-
-def _headline(
-    decisions: list[ProjectDecision],
-) -> tuple[ProjectDecision, FindingDisposition] | None:
-    """The first QUARANTINE finding (findings are sorted most-severe first)."""
-    for decision in decisions:
-        for disp in decision.findings:
-            if disp.disposition == Disposition.QUARANTINE:
-                return decision, disp
-    return None
 
 
 def _gate_exempted_packages(

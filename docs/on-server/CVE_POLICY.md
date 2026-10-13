@@ -679,6 +679,54 @@ suppressions file, or a quarantine action that could not complete.
   otherwise `2` when any project is quarantined or at-risk-running, and
   `0` when everything is clean.
 
+## Fleet circuit breaker
+
+Base images are shared, so one CVE, one Trivy DB update, or one feed change
+can hit every project in the same scan. The circuit breaker looks at the
+fleet as a whole before stopping anything.
+
+Each `security scan` run first scans every project (re-asserting existing
+quarantines), then decides the run's **new** quarantines together. With N
+projects scanned, the breaker **trips** when either
+
+- a single non-KEV CVE would newly quarantine at least
+  `max(2, ceil(0.34 × N))` projects, or
+- the run's new non-KEV quarantines, all CVEs together, reach that same
+  number (the shape of a poisoned or regressed Trivy DB).
+
+When it trips, every new non-KEV quarantine in the run is **held**: the
+projects keep running, their scan state still records the `QUARANTINE`
+dispositions, and **one** priority-1 alert (`[boxmunge] Circuit breaker
+held <N> quarantines`) lists the held projects by CVE. The held set is
+kept in `state/cve-breaker.json`, shown by `boxmunge security` (and
+`held_by_breaker` in `--json`), and makes `security scan` exit 2. Later
+scans — including `security scan <project>`, which scans one project and so
+can never trip by count — keep holding a project whose quarantine-level
+CVEs are all held. A project with a quarantine-level CVE that is not held
+is quarantined normally. A hold is alerted once, when it starts; it is not
+re-alerted every night.
+
+To resolve a hold, review the findings (`boxmunge security <project>`),
+then either:
+
+- apply the held quarantines: `boxmunge security scan --apply-held`
+  (operator only; refused by the deploy shell). It acts on the persisted
+  scan decisions, without a re-scan, and clears the held set; or
+- after review, suppress the CVE for every project:
+  `boxmunge security suppress <CVE> --host ...` (operator only). The next
+  scan finds nothing to quarantine and drops the hold.
+
+**KEV is never held.** A project with a KEV-listed quarantine-level finding
+is quarantined at once, whatever else is happening: active exploitation is
+exactly when blast radius is acceptable. A broken KEV feed is guarded
+earlier, by the refresh sanity floor (see "CISA KEV feed").
+
+A single-project box never trips (the threshold is at least 2). On a
+two-project box both projects quarantining for new findings in the same
+run trips it. An unreadable `state/cve-breaker.json` fails loudly: no new
+quarantine is applied that run, the scan exits 1 and the scan-failure
+alert names the file.
+
 ## Migration grace
 
 A one-time 24-hour grace window applies after upgrade to v0.6.0 (or after
@@ -732,6 +780,7 @@ boxmunge security <project>                             Per-project view
 boxmunge security <project> --json                      Per-project JSON
 boxmunge security scan                                  Scan all projects
 boxmunge security scan <project>                        Scan one project
+boxmunge security scan --apply-held                     Apply breaker-held quarantines (operator only)
 boxmunge security suppress <CVE> --project <name> --until <YYYY-MM-DD> --reason <text>
 boxmunge security unsuppress <CVE> --project <name>
 boxmunge security resume <project>                      Lift CVE quarantine
