@@ -23,6 +23,7 @@ from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
 from boxmunge.security_overlay import (
     PROFILE_DEFAULT,
+    PROFILE_OFF,
     overlay_security_opt_for_profile,
 )
 
@@ -299,6 +300,11 @@ def validate_user_compose(
             f"could not parse compose.yml: 'services' must be a mapping, "
             f"got {type(services).__name__}"
         )
+
+    # Compose-only services (not in the manifest) inherit the project-level
+    # profile, exactly as the overlay generator resolves them.
+    if isinstance(manifest_services, dict) and (cve_policy or {}).get("profile") == PROFILE_OFF:
+        off = off | {name for name in services if name not in manifest_services}
 
     for svc_name, svc in services.items():
         if not isinstance(svc, dict):

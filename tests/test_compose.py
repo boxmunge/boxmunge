@@ -34,7 +34,7 @@ FULL_MANIFEST = {
 
 class TestGenerateComposeOverride:
     def test_routable_services_get_proxy_network(self) -> None:
-        override = generate_compose_override(FULL_MANIFEST)
+        override = generate_compose_override(FULL_MANIFEST, user_compose={})
         parsed = yaml.safe_load(override)
         assert "frontend" in parsed["services"]
         networks = parsed["services"]["frontend"]["networks"]
@@ -46,13 +46,13 @@ class TestGenerateComposeOverride:
         They may still appear in the overlay for other reasons (env_files,
         limits, hardening), but never with a boxmunge-proxy network entry.
         """
-        override = generate_compose_override(FULL_MANIFEST)
+        override = generate_compose_override(FULL_MANIFEST, user_compose={})
         parsed = yaml.safe_load(override)
         db = parsed["services"].get("db", {})
         assert "networks" not in db
 
     def test_backend_with_routes_gets_proxy_network(self) -> None:
-        override = generate_compose_override(FULL_MANIFEST)
+        override = generate_compose_override(FULL_MANIFEST, user_compose={})
         parsed = yaml.safe_load(override)
         assert "backend" in parsed["services"]
         aliases = parsed["services"]["backend"]["networks"]["boxmunge-proxy"]["aliases"]
@@ -60,20 +60,20 @@ class TestGenerateComposeOverride:
 
     def test_routable_services_keep_default_network(self) -> None:
         """Routable services must stay on default network for inter-service DNS."""
-        override = generate_compose_override(FULL_MANIFEST)
+        override = generate_compose_override(FULL_MANIFEST, user_compose={})
         parsed = yaml.safe_load(override)
         networks = parsed["services"]["frontend"]["networks"]
         assert "default" in networks
         assert "boxmunge-proxy" in networks
 
     def test_aliases_are_project_scoped(self) -> None:
-        override = generate_compose_override(FULL_MANIFEST)
+        override = generate_compose_override(FULL_MANIFEST, user_compose={})
         parsed = yaml.safe_load(override)
         aliases = parsed["services"]["frontend"]["networks"]["boxmunge-proxy"]["aliases"]
         assert aliases == ["myapp-frontend"]
 
     def test_declares_external_network(self) -> None:
-        override = generate_compose_override(FULL_MANIFEST)
+        override = generate_compose_override(FULL_MANIFEST, user_compose={})
         parsed = yaml.safe_load(override)
         assert parsed["networks"]["boxmunge-proxy"]["external"] is True
 
@@ -88,7 +88,7 @@ class TestComposeEnvFiles:
             "host_secrets": "/opt/boxmunge/config/secrets.env",
             "project_env": "./project.env",
             "project_secrets": "./secrets.env",
-        })
+        }, user_compose={})
         parsed = yaml.safe_load(content)
         env_list = parsed["services"]["web"]["env_file"]
         assert env_list[0] == "/opt/boxmunge/config/secrets.env"
@@ -102,7 +102,7 @@ class TestComposeEnvFiles:
         }
         content = generate_compose_override(manifest, env_files={
             "host_secrets": "/opt/boxmunge/config/secrets.env",
-        })
+        }, user_compose={})
         parsed = yaml.safe_load(content)
         assert len(parsed["services"]["web"]["env_file"]) == 1
 
@@ -111,7 +111,7 @@ class TestComposeEnvFiles:
             "project": "myapp",
             "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
         }
-        content = generate_compose_override(manifest)
+        content = generate_compose_override(manifest, user_compose={})
         parsed = yaml.safe_load(content)
         assert "env_file" not in parsed["services"]["web"]
 
@@ -125,7 +125,7 @@ class TestComposeResourceLimits:
                 "limits": {"memory": "512m", "cpus": "0.5"},
             }},
         }
-        content = generate_compose_override(manifest)
+        content = generate_compose_override(manifest, user_compose={})
         parsed = yaml.safe_load(content)
         limits = parsed["services"]["web"]["deploy"]["resources"]["limits"]
         assert limits["memory"] == "512m"
@@ -136,7 +136,7 @@ class TestComposeResourceLimits:
             "project": "myapp",
             "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
         }
-        content = generate_compose_override(manifest)
+        content = generate_compose_override(manifest, user_compose={})
         parsed = yaml.safe_load(content)
         assert "deploy" not in parsed["services"]["web"]
 
@@ -148,7 +148,7 @@ class TestComposeResourceLimits:
                 "api": {"port": 9000, "routes": [{"path": "/api/*"}]},
             },
         }
-        content = generate_compose_override(manifest)
+        content = generate_compose_override(manifest, user_compose={})
         parsed = yaml.safe_load(content)
         assert "deploy" in parsed["services"]["web"]
         assert "deploy" not in parsed["services"]["api"]
@@ -166,7 +166,7 @@ class TestNonRoutableServices:
         }
         content = generate_compose_override(manifest, env_files={
             "host_secrets": "/opt/boxmunge/config/secrets.env",
-        })
+        }, user_compose={})
         parsed = yaml.safe_load(content)
         # Worker should get env_files even without routes
         assert "worker" in parsed["services"]
@@ -184,7 +184,7 @@ class TestNonRoutableServices:
                 "worker": {"port": 9000, "routes": [], "limits": {"memory": "256m"}},
             },
         }
-        content = generate_compose_override(manifest)
+        content = generate_compose_override(manifest, user_compose={})
         parsed = yaml.safe_load(content)
         assert "worker" in parsed["services"]
         assert parsed["services"]["worker"]["deploy"]["resources"]["limits"]["memory"] == "256m"
@@ -200,7 +200,7 @@ class TestSmokeScriptMount:
                 "smoke": "boxmunge-scripts/smoke.sh",
             }},
         }
-        content = generate_compose_override(manifest)
+        content = generate_compose_override(manifest, user_compose={})
         parsed = yaml.safe_load(content)
         assert "./boxmunge-scripts:/boxmunge-scripts:ro" in parsed["services"]["web"]["volumes"]
 
@@ -216,7 +216,7 @@ class TestSmokeScriptMount:
                 "worker": {"port": 9000, "routes": [{"path": "/work"}]},
             },
         }
-        content = generate_compose_override(manifest)
+        content = generate_compose_override(manifest, user_compose={})
         parsed = yaml.safe_load(content)
         assert "volumes" in parsed["services"]["web"]
         assert "volumes" not in parsed["services"]["worker"]
@@ -236,7 +236,7 @@ class TestSmokeScriptMount:
                 },
             },
         }
-        content = generate_compose_override(manifest)
+        content = generate_compose_override(manifest, user_compose={})
         parsed = yaml.safe_load(content)
         assert "volumes" in parsed["services"]["web"]
         assert "volumes" in parsed["services"]["api"]
@@ -247,7 +247,7 @@ class TestSmokeScriptMount:
             "project": "myapp",
             "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
         }
-        content = generate_compose_override(manifest)
+        content = generate_compose_override(manifest, user_compose={})
         parsed = yaml.safe_load(content)
         assert "volumes" not in parsed["services"]["web"]
 
@@ -260,7 +260,7 @@ class TestStagingOverrideEnvAndLimits:
         }
         content = generate_staging_compose_override(manifest, env_files={
             "project_secrets": "./secrets.env",
-        })
+        }, user_compose={})
         parsed = yaml.safe_load(content)
         assert parsed["services"]["web"]["env_file"] == ["./secrets.env"]
 
@@ -272,7 +272,7 @@ class TestStagingOverrideEnvAndLimits:
                 "limits": {"memory": "512m"},
             }},
         }
-        content = generate_staging_compose_override(manifest)
+        content = generate_staging_compose_override(manifest, user_compose={})
         parsed = yaml.safe_load(content)
         assert parsed["services"]["web"]["deploy"]["resources"]["limits"]["memory"] == "512m"
 
@@ -402,7 +402,7 @@ class TestComposeSecurityHardening:
         return m
 
     def test_default_injects_no_new_privileges_init_pids_capdrop(self) -> None:
-        override = generate_compose_override(self._manifest())
+        override = generate_compose_override(self._manifest(), user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         assert "no-new-privileges:true" in web["security_opt"]
@@ -414,7 +414,7 @@ class TestComposeSecurityHardening:
     def test_default_injects_read_only_and_tmpfs_v08(self) -> None:
         """v0.8: default profile makes read_only:true and tmpfs:['/tmp']
         defaults of the silent-floor overlay."""
-        override = generate_compose_override(self._manifest())
+        override = generate_compose_override(self._manifest(), user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         assert web["read_only"] is True
@@ -422,7 +422,7 @@ class TestComposeSecurityHardening:
 
     def test_off_omits_hardening_fields(self) -> None:
         override = generate_compose_override(
-            self._manifest(security={"profile": "off", "reason": "test"})
+            self._manifest(security={"profile": "off", "reason": "test"}), user_compose={}
         )
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
@@ -436,7 +436,7 @@ class TestComposeSecurityHardening:
 
     def test_service_cap_add_subtracts_from_drop(self) -> None:
         override = generate_compose_override(
-            self._manifest(service_security={"cap_add": ["NET_RAW"]})
+            self._manifest(service_security={"cap_add": ["NET_RAW"]}), user_compose={}
         )
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
@@ -445,7 +445,7 @@ class TestComposeSecurityHardening:
 
     def test_per_service_pids_override(self) -> None:
         override = generate_compose_override(
-            self._manifest(service_security={"pids_limit": 4096})
+            self._manifest(service_security={"pids_limit": 4096}), user_compose={}
         )
         parsed = yaml.safe_load(override)
         assert parsed["services"]["web"]["pids_limit"] == 4096
@@ -461,7 +461,7 @@ class TestComposeSecurityHardening:
         m = self._manifest()
         m["services"]["web"]["limits"] = {"memory": "256m", "cpus": "0.5"}
 
-        override = generate_compose_override(m)
+        override = generate_compose_override(m, user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
 
@@ -483,7 +483,7 @@ class TestComposeSecurityHardening:
     def test_pids_at_top_level_when_manifest_has_no_limits(self) -> None:
         """When the manifest doesn't declare limits, no deploy block is
         created — pids_limit stays at the top level (the default)."""
-        override = generate_compose_override(self._manifest())
+        override = generate_compose_override(self._manifest(), user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         assert web["pids_limit"] == 512
@@ -495,7 +495,7 @@ class TestComposeSecurityHardening:
         manifest limits must end up nested under deploy.resources.limits.pids."""
         m = self._manifest(service_security={"pids_limit": 4096})
         m["services"]["web"]["limits"] = {"memory": "256m"}
-        override = generate_compose_override(m)
+        override = generate_compose_override(m, user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         assert "pids_limit" not in web
@@ -529,7 +529,7 @@ class TestV08UserWinsOnExplicitDeclarations:
         }
 
     def test_no_user_compose_emits_v08_defaults(self) -> None:
-        override = generate_compose_override(self._manifest())
+        override = generate_compose_override(self._manifest(), user_compose={})
         web = yaml.safe_load(override)["services"]["web"]
         assert web["read_only"] is True
         assert web["tmpfs"] == ["/tmp"]
@@ -692,7 +692,7 @@ class TestV08UserWinsOnExplicitDeclarations:
                 },
             },
         }
-        override = generate_compose_override(manifest)
+        override = generate_compose_override(manifest, user_compose={})
         web = yaml.safe_load(override)["services"]["web"]
         assert "read_only" not in web
         assert "tmpfs" not in web
@@ -729,7 +729,7 @@ class TestWritableOverlay:
 
     def test_default_state_baseline_unchanged(self) -> None:
         """Regression: service with no writable: block stays on v0.8 baseline."""
-        override = generate_compose_override(self._manifest())
+        override = generate_compose_override(self._manifest(), user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         assert web["read_only"] is True
@@ -744,7 +744,7 @@ class TestWritableOverlay:
     def test_ephemeral_appended_to_baseline_tmpfs(self) -> None:
         override = generate_compose_override(self._manifest(writable={
             "ephemeral": ["/var/cache/nginx", "/var/run"],
-        }))
+        }), user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         # /tmp baseline is preserved; ephemeral entries appear after.
@@ -754,7 +754,7 @@ class TestWritableOverlay:
     def test_ephemeral_with_explicit_tmp_dedupes(self) -> None:
         override = generate_compose_override(self._manifest(writable={
             "ephemeral": ["/tmp", "/var/run"],
-        }))
+        }), user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         # /tmp appears exactly once.
@@ -764,7 +764,7 @@ class TestWritableOverlay:
     def test_persistent_emits_volume_reference(self) -> None:
         override = generate_compose_override(self._manifest(writable={
             "persistent": [{"name": "dbdata", "mount": "/app/data"}],
-        }))
+        }), user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         vols = web["volumes"]
@@ -773,7 +773,7 @@ class TestWritableOverlay:
     def test_persistent_emits_top_level_volumes_block(self) -> None:
         override = generate_compose_override(self._manifest(writable={
             "persistent": [{"name": "dbdata", "mount": "/app/data"}],
-        }))
+        }), user_compose={})
         parsed = yaml.safe_load(override)
         # Top-level volumes: block declares the named volume.
         assert "volumes" in parsed
@@ -787,7 +787,7 @@ class TestWritableOverlay:
                 {"name": "dbdata", "mount": "/app/data"},
                 {"name": "uploads", "mount": "/app/uploads"},
             ],
-        }))
+        }), user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         assert "demo_dbdata:/app/data" in web["volumes"]
@@ -800,7 +800,7 @@ class TestWritableOverlay:
             "persistent": [{"name": "dbdata", "mount": "/app/data"}],
         })
         m["services"]["web"]["smoke"] = "smoke.sh"
-        override = generate_compose_override(m)
+        override = generate_compose_override(m, user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         # Smoke mount must still be present.
@@ -812,7 +812,7 @@ class TestWritableOverlay:
         override = generate_compose_override(self._manifest(writable={
             "ephemeral": ["/var/run"],
             "persistent": [{"name": "dbdata", "mount": "/app/data"}],
-        }))
+        }), user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         assert "/var/run" in web["tmpfs"]
@@ -823,7 +823,7 @@ class TestWritableOverlay:
     def test_external_suppresses_tmpfs_baseline(self) -> None:
         override = generate_compose_override(self._manifest(writable={
             "external": True,
-        }))
+        }), user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         # Boxmunge emits NO tmpfs — not even /tmp.
@@ -834,7 +834,7 @@ class TestWritableOverlay:
         # But without smoke, no volumes entry should appear.
         override = generate_compose_override(self._manifest(writable={
             "external": True,
-        }))
+        }), user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         # No "volumes" key on the service — the operator owns this surface.
@@ -846,7 +846,7 @@ class TestWritableOverlay:
         separately via compose."""
         override = generate_compose_override(self._manifest(writable={
             "external": True,
-        }))
+        }), user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         assert web["read_only"] is True
@@ -856,7 +856,7 @@ class TestWritableOverlay:
         its smoke test. That's a boxmunge concern, not the operator's."""
         m = self._manifest(writable={"external": True})
         m["services"]["web"]["smoke"] = "smoke.sh"
-        override = generate_compose_override(m)
+        override = generate_compose_override(m, user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         assert "./boxmunge-scripts:/boxmunge-scripts:ro" in web.get(

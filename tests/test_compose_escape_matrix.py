@@ -131,3 +131,106 @@ def test_f01_manifest_benign_cap_add_accepted() -> None:
 def test_f01_manifest_cap_drop_of_denied_cap_accepted() -> None:
     # Dropping a dangerous capability only ever tightens the posture.
     validate_security_block({"cap_drop": ["SYS_ADMIN"]}, "project")
+
+
+# ---------------------------------------------------------------------------
+# F-03 — every compose service is hardened, not only manifest services
+# ---------------------------------------------------------------------------
+
+_MANIFEST = {
+    "project": "myapp",
+    "hosts": ["myapp.example.com"],
+    "services": {"web": {"port": 80, "routes": [{"path": "/"}]}},
+}
+_USER_COMPOSE = {
+    "services": {
+        "web": {"build": "."},
+        "db": {"image": "postgres:16-alpine"},
+        "cache": {"image": "redis:7", "read_only": False},
+    },
+}
+
+
+def _overlay(manifest: dict, user_compose: dict) -> dict:
+    from boxmunge.compose import generate_compose_override
+    return yaml.safe_load(generate_compose_override(manifest, user_compose=user_compose))
+
+
+def test_f03_compose_only_services_get_default_hardening() -> None:
+    services = _overlay(_MANIFEST, _USER_COMPOSE)["services"]
+    db = services["db"]
+    assert db["security_opt"] == ["no-new-privileges:true"]
+    assert db["init"] is True
+    assert db["pids_limit"] == 512
+    assert "SYS_PTRACE" in db["cap_drop"]
+    assert db["read_only"] is True
+    assert db["tmpfs"] == ["/tmp"]
+
+
+def test_f03_compose_only_services_get_no_routing_or_env() -> None:
+    db = _overlay(_MANIFEST, _USER_COMPOSE)["services"]["db"]
+    assert "networks" not in db
+    assert "env_file" not in db
+
+
+def test_f03_compose_only_service_keeps_user_read_only_choice() -> None:
+    cache = _overlay(_MANIFEST, _USER_COMPOSE)["services"]["cache"]
+    assert "read_only" not in cache
+    assert cache["security_opt"] == ["no-new-privileges:true"]
+
+
+def test_f03_compose_only_services_follow_project_security_block() -> None:
+    manifest = {**_MANIFEST, "security": {"pids_limit": 2048, "cap_add": ["NET_RAW"]}}
+    db = _overlay(manifest, _USER_COMPOSE)["services"]["db"]
+    assert db["pids_limit"] == 2048
+    assert "NET_RAW" not in db["cap_drop"]
+
+
+def test_f03_compose_only_services_unhardened_only_by_project_off() -> None:
+    manifest = {**_MANIFEST, "security": {"profile": "off", "reason": "lab box"}}
+    services = _overlay(manifest, _USER_COMPOSE).get("services", {})
+    assert "db" not in services
+
+
+def test_f03_staging_overlay_hardens_compose_only_services() -> None:
+    from boxmunge.compose import generate_staging_compose_override
+    overlay = yaml.safe_load(
+        generate_staging_compose_override(_MANIFEST, user_compose=_USER_COMPOSE)
+    )
+    assert overlay["services"]["db"]["security_opt"] == ["no-new-privileges:true"]
+
+
+def test_f03_overlay_refuses_missing_compose_file(paths: BoxPaths) -> None:
+    from boxmunge.compose import ComposeError, prepare_compose_override
+    paths.project_dir("myapp").mkdir(parents=True)
+    with pytest.raises(ComposeError, match="compose.yml"):
+        prepare_compose_override(paths, _MANIFEST)
+
+
+def _write_two_service_compose(paths: BoxPaths):
+    project_dir = paths.project_dir("myapp")
+    project_dir.mkdir(parents=True)
+    compose = project_dir / "compose.yml"
+    compose.write_text(yaml.safe_dump({
+        "services": {"web": {"image": "nginx"}, "db": {"image": "x", "privileged": True}},
+    }))
+    return compose
+
+
+def test_f03_compose_only_service_validated_under_default(paths: BoxPaths) -> None:
+    compose = _write_two_service_compose(paths)
+    with pytest.raises(ComposeSecurityError, match="service db"):
+        validate_user_compose(
+            compose, paths, project_name="myapp",
+            manifest_services=_MANIFEST["services"],
+        )
+
+
+def test_f03_compose_only_service_inherits_project_off(paths: BoxPaths) -> None:
+    compose = _write_two_service_compose(paths)
+    validate_user_compose(
+        compose, paths, project_name="myapp",
+        off_services={"web"},
+        cve_policy={"profile": "off", "reason": "lab box"},
+        manifest_services=_MANIFEST["services"],
+    )

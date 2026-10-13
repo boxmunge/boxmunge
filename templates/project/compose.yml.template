@@ -30,6 +30,10 @@ services:
   #   restart: unless-stopped
   #   env_file:
   #     - project.env
+  #   # boxmunge runs every service with a read-only root filesystem;
+  #   # postgres needs its socket directory writable.
+  #   tmpfs:
+  #     - /var/run/postgresql
   #   volumes:
   #     - ./data/postgres:/var/lib/postgresql/data
   #   healthcheck:

@@ -68,21 +68,26 @@ def warn_writable_state(
         if isinstance(raw, dict):
             user_services = raw
 
-    # 1. read_only: false in user compose — per-service warning.
-    for svc_name in services:
+    # 1. read_only: false in user compose — per-service warning, for
+    #    manifest services and compose-only services alike.
+    for svc_name in list(services) + [n for n in user_services if n not in services]:
         user_svc = user_services.get(svc_name)
         if not isinstance(user_svc, dict):
             continue
         # bool is a subtype of int — check explicitly for False to avoid
         # accidentally matching `read_only: 0`.
         if user_svc.get("read_only") is False:
+            remedy = (
+                f"`services.{svc_name}.writable` in manifest.yml"
+                if svc_name in services
+                else "`tmpfs:` entries in compose.yml for the paths it writes"
+            )
             print(
                 f"[WARNING] {project}/{svc_name} declares "
                 f"`read_only: false` in compose.yml, opting out of the "
                 f"read-only rootfs default. CVE hardening penalty "
                 f"applies. If your app needs specific writable paths "
-                f"under a read-only rootfs, prefer "
-                f"`services.{svc_name}.writable` in manifest.yml instead."
+                f"under a read-only rootfs, prefer {remedy} instead."
             )
             log_warning(
                 component,

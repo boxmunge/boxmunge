@@ -73,6 +73,7 @@ class TestPrepareComposeOverride:
     def test_writes_override_file(self, paths: BoxPaths) -> None:
         project_dir = paths.project_dir("myapp")
         project_dir.mkdir(parents=True)
+        (project_dir / "compose.yml").write_text("services:\n  frontend:\n    image: nginx\n")
         prepare_compose_override(paths, MANIFEST)
         override = paths.project_compose_override("myapp")
         assert override.exists()

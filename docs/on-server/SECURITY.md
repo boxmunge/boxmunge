@@ -6,8 +6,11 @@ when you must, and what's coming in future tiers.
 ## TL;DR for agents
 
 - **Defaults are silent.** Every service deployed via boxmunge runs with
-  `no-new-privileges`, Tini init, a 512-process ceiling, and a list of
-  dangerous Linux capabilities dropped. You do nothing to get this.
+  `no-new-privileges`, Tini init, a 512-process ceiling, a read-only root
+  filesystem, and a list of dangerous Linux capabilities dropped. That
+  includes services that appear only in `compose.yml` (databases, caches,
+  sidecars), not just the ones the manifest routes to. You do nothing to get
+  this.
 - **Don't disable hardening to "ship faster".** If a specific protection
   is in your way, relax that one field. Setting `profile: off` requires
   a reason and triggers a repeated deploy-time warning on every operation.
@@ -60,6 +63,21 @@ These caps are NOT in Docker's default deny list, but are dangerous and rarely n
 `read_only: true` and `tmpfs: ['/tmp']` were added to the default profile in v0.8. The CVE policy already treated missing `read_only` as a +1 hardening penalty; v0.8 closes the asymmetry by actually enforcing read-only rootfs at runtime so the platform delivers what it penalises operators for omitting.
 
 **User-wins on explicit declarations.** If your `compose.yml` declares `read_only` (true or false) on a service, the overlay omits its own `read_only` entry for that service. Compose merge then leaves your literal value alone — there's no merge conflict and no redundancy-rejection rule. The same rule applies to `tmpfs: ['/tmp']`: if you declare a `tmpfs` or `volumes` entry that targets `/tmp`, the overlay omits its `tmpfs` entry for that service.
+
+**Services that are not in the manifest.** A service that exists only in
+`compose.yml` (typically a database or cache) gets the same hardening,
+resolved against the project-level `security:` block (a project-level
+`profile: "off"` covers it too). It has no manifest entry, so give it writable
+paths in `compose.yml` itself: `tmpfs:` for scratch paths and named volumes for
+data. PostgreSQL images need their socket directory writable:
+
+```yaml
+services:
+  db:
+    image: postgres:16-alpine
+    tmpfs: [/var/run/postgresql]
+    volumes: [pgdata:/var/lib/postgresql/data]
+```
 
 **Opting out.** Apps that legitimately need writable rootfs declare `read_only: false` in `compose.yml` and accept the +1 CVE hardening penalty consciously. Most apps just need `tmpfs:['/tmp']` (the v0.8 default) and possibly extra tmpfs entries for cache/log paths under read-only rootfs.
 

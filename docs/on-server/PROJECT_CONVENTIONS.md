@@ -271,7 +271,7 @@ boxmunge generates `compose.boxmunge.yml` alongside `compose.yml`. **Do not edit
 - **Proxy network** -- the `boxmunge-proxy` external network to every non-internal `web` service, with project-scoped network aliases (e.g., `myapp-frontend`, `myapp-backend`)
 - **Environment files** -- `env_file` entries for `project.env` and `secrets.env`, injecting both non-secret config and CLI-managed secrets into containers
 - **Resource limits** -- `deploy.resources.limits` for services declaring `limits` in the manifest, enforcing memory and CPU constraints
-- **Container hardening** -- under the `default` security profile (the silent floor): `security_opt: ["no-new-privileges:true"]`, `init: true`, `pids_limit: 512`, a curated `cap_drop` list, and (v0.8) `read_only: true` and `tmpfs: ['/tmp']`
+- **Container hardening** -- under the `default` security profile (the silent floor): `security_opt: ["no-new-privileges:true"]`, `init: true`, `pids_limit: 512`, a curated `cap_drop` list, and (v0.8) `read_only: true` and `tmpfs: ['/tmp']`. This applies to every service in `compose.yml`, including services the manifest does not list (databases, caches, sidecars), which resolve against the project-level `security:` block. Give those services writable paths with `tmpfs:` or named volumes in `compose.yml`; PostgreSQL needs `tmpfs: [/var/run/postgresql]`.
 
 Services with `internal: true` are excluded from the proxy network.
 
@@ -330,7 +330,7 @@ services:
 
 - All paths must be absolute, no `..`, max 256 chars.
 - `ephemeral` entries: list of strings, no duplicates within the list.
-- `persistent` entries: `{name, mount}` mappings. **Names must be unique project-wide** (across all services), not just within one service — the generated docker volume name is `<project>_<name>` to match Docker Compose's default convention, so two services declaring the same `name` would alias to the same physical volume. Mounts unique within the service.
+- `persistent` entries: `{name, mount}` mappings. **Names must be unique project-wide** (across all services), not just within one service — the overlay declares each volume as `<project>_<name>`, so two services declaring the same `name` would alias to the same physical volume. Docker Compose then prefixes the compose project name, so the Docker volume on the host is `<project>_<project>_<name>` (staging's is `<project>-staging_<project>_<name>`). Mounts unique within the service.
 - A path cannot appear in both `ephemeral` and `persistent` for the same service.
 - A `persistent` mount cannot be nested under any `ephemeral` path (tmpfs would shadow the volume at runtime).
 - Reserved roots (`/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/boot`, `/proc`, `/sys`, `/dev`) cannot be used as persistent mounts.

@@ -43,18 +43,18 @@ class TestStagingCaddyConfig:
 
 class TestStagingComposeOverride:
     def test_staging_aliases(self) -> None:
-        content = generate_staging_compose_override(MANIFEST)
+        content = generate_staging_compose_override(MANIFEST, user_compose={})
         assert "myapp-staging-frontend" in content
         assert "myapp-staging-backend" in content
 
     def test_includes_proxy_network(self) -> None:
-        content = generate_staging_compose_override(MANIFEST)
+        content = generate_staging_compose_override(MANIFEST, user_compose={})
         assert "boxmunge-proxy" in content
         assert "external: true" in content
 
     def test_staging_routable_services_keep_default_network(self) -> None:
         """Staging routable services must stay on default for inter-service DNS."""
-        content = generate_staging_compose_override(MANIFEST)
+        content = generate_staging_compose_override(MANIFEST, user_compose={})
         parsed = yaml.safe_load(content)
         for svc in ("frontend", "backend"):
             networks = parsed["services"][svc]["networks"]
@@ -74,7 +74,7 @@ class TestStagingComposeOverride:
                 "db": {"port": 5432, "internal": True, "routes": []},
             },
         }
-        content = generate_staging_compose_override(manifest)
+        content = generate_staging_compose_override(manifest, user_compose={})
         parsed = yaml.safe_load(content)
         db = parsed["services"].get("db", {})
         assert "networks" not in db
