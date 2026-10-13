@@ -1,0 +1,8 @@
+# Tooling for .github/workflows/publish-cli.yml: test, build, and check the
+# client distribution. The build runs with --no-isolation so setuptools comes
+# from this hash-pinned set rather than an unpinned isolated build env.
+# Regenerate with: make lock
+pytest>=8.0
+build>=1.2
+twine>=5.0
+setuptools>=70.1

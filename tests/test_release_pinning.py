@@ -24,6 +24,7 @@ REQUIREMENTS_FILES = [
     REPO / "requirements-mcp.txt",
     REPO / "requirements-dev.txt",
     REPO / "cli" / "requirements.txt",
+    REPO / "cli" / "requirements-publish.txt",
 ]
 
 HASH_LINE_RE = re.compile(r"--hash=sha256:[0-9a-f]{64}")
@@ -75,29 +76,39 @@ def test_requirements_file_uses_hashes(path: Path) -> None:
     )
 
 
-def test_release_workflow_uses_hash_pinned_installs() -> None:
-    """The release workflow must install via --require-hashes from the
-    checked-in requirements files. Any bare `pip install <package>` without
-    --require-hashes lets unhashed transitive deps in."""
-    workflow = REPO / ".github" / "workflows" / "release.yml"
+WORKFLOWS = sorted((REPO / ".github" / "workflows").glob("*.yml"))
+
+
+def test_workflows_discovered() -> None:
+    names = {w.name for w in WORKFLOWS}
+    assert {"release.yml", "ci.yml", "publish-cli.yml"} <= names, names
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS, ids=lambda p: p.name)
+def test_workflow_uses_hash_pinned_installs(workflow: Path) -> None:
+    """Every workflow must install via --require-hashes from checked-in
+    requirements files. Any bare `pip install <package>` without
+    --require-hashes lets unhashed transitive deps in. This matters most in
+    release.yml (cosign signing) and publish-cli.yml (PyPI publication), and
+    ci.yml follows the same rule so a contributor's PR cannot introduce an
+    unpinned install path that later gets copied into a release workflow."""
     content = workflow.read_text()
 
     install_lines = [
         line.strip() for line in content.splitlines()
         if "pip install" in line and not line.lstrip().startswith("#")
     ]
-    assert install_lines, "release.yml has no pip install lines"
 
     for line in install_lines:
         # Permitted forms:
         #   pip install --require-hashes -r requirements.txt
-        #   pip install -e . --no-deps        (editable install of THIS package,
-        #                                     deps already installed via --require-hashes)
+        #   pip install -e <local path> --no-deps   (editable install of THIS
+        #       repo's package; deps already installed via --require-hashes)
         is_hash_pinned = "--require-hashes" in line
         is_local_no_deps = "-e ." in line and "--no-deps" in line
         is_pip_upgrade = re.match(r"^pip install --upgrade pip(==.*)?\s*$", line)
         assert is_hash_pinned or is_local_no_deps or is_pip_upgrade, (
-            f"release.yml install line not hash-pinned: {line!r}"
+            f"{workflow.name} install line not hash-pinned: {line!r}"
         )
 
 
@@ -108,16 +119,16 @@ SHA_PIN_RE = re.compile(
 )
 
 
-def test_release_workflow_actions_are_sha_pinned() -> None:
-    """Every `uses:` in release.yml must reference a 40-char commit SHA,
+@pytest.mark.parametrize("workflow", WORKFLOWS, ids=lambda p: p.name)
+def test_workflow_actions_are_sha_pinned(workflow: Path) -> None:
+    """Every `uses:` in every workflow must reference a 40-char commit SHA,
     not a tag like @v5. Tag-takeover on any pinned action would compromise
-    the cosign release-signing trust root."""
-    workflow = REPO / ".github" / "workflows" / "release.yml"
+    the cosign release-signing trust root or the PyPI publishing identity."""
     matches = USES_RE.findall(workflow.read_text())
-    assert matches, "release.yml has no `uses:` lines"
+    assert matches, f"{workflow.name} has no `uses:` lines"
     bad = [m for m in matches if not SHA_PIN_RE.match(m)]
     assert not bad, (
-        f"release.yml has tag-pinned actions: {bad}. "
+        f"{workflow.name} has tag-pinned actions: {bad}. "
         "Resolve each tag to a commit SHA and replace inline."
     )
 
