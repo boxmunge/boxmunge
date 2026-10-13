@@ -629,6 +629,13 @@ The boxmunge CLI uses these conventions across mutating commands
 - `0` — success
 - `1` — generic operational failure (image pull, smoke test, Caddy reload, etc.)
 - `2` — usage error (unknown flag, missing argument) or critical health (`check`)
+
+Every command rejects a flag it does not implement with exit 2, `ERROR:` and its usage on
+stderr, and runs nothing. That includes `--dry-run`: only `prod-deploy`, `stage`, `promote`,
+`unstage`, `upgrade` and `container-update` support it, and every other command (for example
+`project-delete`, `rollback`, `restore`, `pause`, `secrets set`) refuses it instead of acting.
+`check-all` accepts only `--read-only`; a typo such as `--raed-only` is an error, not a run of
+the mutator. `-h` or `--help` on any command prints its usage, exits 0, and never runs it.
 - `3` — compose hardening rejection (validate_user_compose found a
   policy-violating key in the project's `compose.yml`; the deploy/stage/
   promote/resume aborted before touching containers)

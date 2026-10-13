@@ -26,7 +26,7 @@ from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import is_paused
-from boxmunge.paths import BoxPaths, validate_project_name
+from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state, write_state
 
 
@@ -151,17 +151,11 @@ def run_recover(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
 
 
 def cmd_recover(args: list[str]) -> None:
-    if not args:
-        print("Usage: boxmunge recover <project> [--yes]", file=sys.stderr)
-        sys.exit(2)
-
-    project = args[0]
-    try:
-        validate_project_name(project)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(2)
-
-    yes = "--yes" in args
+    from boxmunge.commands.argv import parse_args, require_project_name
+    parsed = parse_args(
+        "recover", args, flags={"--yes"}, min_positional=1, max_positional=1,
+    )
+    project = require_project_name("recover", parsed.positional[0])
+    yes = parsed.has("--yes")
     paths = BoxPaths()
     sys.exit(run_recover(project, paths, yes=yes))

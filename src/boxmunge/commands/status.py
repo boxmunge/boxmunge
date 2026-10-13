@@ -4,6 +4,7 @@ import json
 import sys
 from datetime import datetime, timezone
 
+from boxmunge.commands.argv import parse_args
 from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.paths import BoxPaths
@@ -186,6 +187,6 @@ def _print_table(rows: list[dict[str, str]]) -> None:
 
 def cmd_status(args: list[str]) -> None:
     """CLI entry point for status command."""
+    as_json = parse_args("status", args, flags={"--json"}).has("--json")
     paths = BoxPaths()
-    as_json = "--json" in args
     sys.exit(run_status(paths, as_json=as_json))

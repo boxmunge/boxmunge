@@ -274,6 +274,7 @@ def run_self_test(paths: BoxPaths, as_json: bool = False) -> int:
 
 def cmd_self_test(args: list[str]) -> None:
     """CLI entry point for self-test command."""
-    as_json = "--json" in args
+    from boxmunge.commands.argv import parse_args
+    as_json = parse_args("self-test", args, flags={"--json"}).has("--json")
     paths = BoxPaths()
     sys.exit(run_self_test(paths, as_json=as_json))

@@ -86,27 +86,13 @@ def run_add_git_project(
 
 def cmd_add_git_project(args: list[str]) -> None:
     """CLI entry point for add-git-project command."""
+    from boxmunge.commands.argv import parse_args
     from boxmunge.paths import BoxPaths
 
-    ref = None
-    positional = []
-    i = 0
-    while i < len(args):
-        if args[i] == "--ref" and i + 1 < len(args):
-            ref = args[i + 1]
-            i += 2
-        elif not args[i].startswith("--"):
-            positional.append(args[i])
-            i += 1
-        else:
-            print(f"ERROR: unknown argument: {args[i]}", file=sys.stderr)
-            sys.exit(2)
-
-    if len(positional) < 2:
-        print("Usage: boxmunge add-git-project <name> <repo-url> [--ref REF]",
-              file=sys.stderr)
-        sys.exit(2)
-
-    name, repo_url = positional[0], positional[1]
+    parsed = parse_args(
+        "add-git-project", args, options={"--ref"},
+        min_positional=2, max_positional=2,
+    )
+    name, repo_url = parsed.positional
     paths = BoxPaths()
-    sys.exit(run_add_git_project(name, repo_url, paths, ref=ref))
+    sys.exit(run_add_git_project(name, repo_url, paths, ref=parsed.get("--ref")))

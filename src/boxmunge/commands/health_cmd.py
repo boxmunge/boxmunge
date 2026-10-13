@@ -420,6 +420,7 @@ def run_health(paths: BoxPaths, *, as_json: bool = False) -> int:
 
 def cmd_health(args: list[str]) -> None:
     """CLI entry point for health command."""
-    as_json = "--json" in args
+    from boxmunge.commands.argv import parse_args
+    parsed = parse_args("health", args, flags={"--json"})
     paths = BoxPaths()
-    sys.exit(run_health(paths, as_json=as_json))
+    sys.exit(run_health(paths, as_json=parsed.has("--json")))

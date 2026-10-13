@@ -77,5 +77,7 @@ def run_auto_update(paths: BoxPaths) -> int:
 
 def cmd_auto_update(args: list[str]) -> None:
     """CLI entry point for auto-update command."""
+    from boxmunge.commands.argv import parse_args
+    parse_args("auto-update", args)
     paths = BoxPaths()
     sys.exit(run_auto_update(paths))

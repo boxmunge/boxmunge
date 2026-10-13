@@ -147,18 +147,24 @@ def run_inbox_clean(
 
 def cmd_inbox(args: list[str]) -> None:
     """CLI entry point for inbox command."""
+    from boxmunge.commands.argv import parse_args, require_project_name
     from boxmunge.paths import BoxPaths
+
+    if args and args[0] == "clean":
+        parsed = parse_args("inbox", args[1:], flags={"--yes"},
+                            max_positional=1)
+        project = parsed.positional[0] if parsed.positional else None
+        if project is not None:
+            require_project_name("inbox", project)
+        paths = BoxPaths()
+        sys.exit(run_inbox_clean(paths, project_filter=project,
+                                 yes=parsed.has("--yes")))
+
+    parsed = parse_args("inbox", args, flags={"--json"}, max_positional=1)
+    project = parsed.positional[0] if parsed.positional else None
+    if project is not None:
+        require_project_name("inbox", project)
     paths = BoxPaths()
-
-    yes = "--yes" in args
-    as_json = "--json" in args
-    positional = [a for a in args if not a.startswith("--")]
-
-    if positional and positional[0] == "clean":
-        project = positional[1] if len(positional) > 1 else None
-        sys.exit(run_inbox_clean(paths, project_filter=project, yes=yes))
-    else:
-        project = positional[0] if positional else None
-        if as_json:
-            sys.exit(_run_inbox_list_json(paths, project_filter=project))
-        sys.exit(run_inbox_list(paths, project_filter=project))
+    if parsed.has("--json"):
+        sys.exit(_run_inbox_list_json(paths, project_filter=project))
+    sys.exit(run_inbox_list(paths, project_filter=project))

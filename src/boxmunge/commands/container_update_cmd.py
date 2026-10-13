@@ -224,15 +224,14 @@ def run_container_update(
 
 def cmd_container_update(args: list[str]) -> None:
     """CLI entry point."""
-    force = "--force" in args
-    dry_run = "--dry-run" in args
-    # Positional target
-    only = None
-    for a in args:
-        if a.startswith("-"):
-            continue
-        only = a
-        break
-
+    from boxmunge.commands.argv import parse_args
+    parsed = parse_args(
+        "container-update", args, flags={"--force", "--dry-run"},
+        max_positional=1,
+    )
+    only = parsed.positional[0] if parsed.positional else None
     paths = BoxPaths()
-    sys.exit(run_container_update(paths, force=force, only=only, dry_run=dry_run))
+    sys.exit(run_container_update(
+        paths, force=parsed.has("--force"), only=only,
+        dry_run=parsed.has("--dry-run"),
+    ))

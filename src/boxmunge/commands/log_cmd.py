@@ -84,55 +84,18 @@ def _format_human(entry: dict[str, Any]) -> str:
     return f"{ts} {level:5s} {scope} {msg}"
 
 
-def run_log(args: list[str], paths: BoxPaths) -> int:
+def run_log(
+    paths: BoxPaths,
+    *,
+    project: str | None = None,
+    component: str | None = None,
+    level: str | None = None,
+    since: str | None = None,
+    tail: int | None = 50,
+    as_json: bool = False,
+    containers: bool = False,
+) -> int:
     """Execute the log command. Returns 0 on success."""
-    project = None
-    component = None
-    level = None
-    since = None
-    tail = 50
-    as_json = False
-    containers = False
-
-    i = 0
-    while i < len(args):
-        arg = args[i]
-        if arg == "--project" and i + 1 < len(args):
-            project = args[i + 1]
-            i += 2
-        elif arg == "--component" and i + 1 < len(args):
-            component = args[i + 1]
-            i += 2
-        elif arg == "--level" and i + 1 < len(args):
-            level = args[i + 1]
-            i += 2
-        elif arg == "--since" and i + 1 < len(args):
-            since = args[i + 1]
-            i += 2
-        elif arg == "--tail" and i + 1 < len(args):
-            tail = int(args[i + 1])
-            i += 2
-        elif arg == "--json":
-            as_json = True
-            i += 1
-        elif arg == "--all":
-            tail = None
-            i += 1
-        elif arg == "--containers":
-            containers = True
-            i += 1
-        else:
-            print(f"ERROR: unknown argument: {arg}", file=sys.stderr)
-            return 2
-
-    if project:
-        from boxmunge.paths import validate_project_name
-        try:
-            validate_project_name(project)
-        except ValueError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
-            return 1
-
     entries = parse_log_file(paths.log_file)
     filtered = filter_log_entries(entries, project=project, component=component,
                                   level=level, since=since, tail=tail)
@@ -171,5 +134,37 @@ def run_log(args: list[str], paths: BoxPaths) -> int:
 
 def cmd_log(args: list[str]) -> None:
     """CLI entry point for log command."""
+    from boxmunge.commands.argv import (
+        parse_args, require_project_name, usage_error,
+    )
+    parsed = parse_args(
+        "log", args,
+        flags={"--json", "--all", "--containers"},
+        options={"--project", "--component", "--level", "--since", "--tail"},
+    )
+    project = parsed.get("--project")
+    if project is not None:
+        require_project_name("log", project)
+    since = parsed.get("--since")
+    if since is not None:
+        try:
+            _parse_since(since)
+        except ValueError as e:
+            usage_error("log", str(e))
+    tail: int | None = 50
+    raw_tail = parsed.get("--tail")
+    if raw_tail is not None:
+        if parsed.has("--all"):
+            usage_error("log", "--tail and --all are mutually exclusive")
+        if not raw_tail.isdigit():
+            usage_error("log", f"--tail must be a whole number, got {raw_tail!r}")
+        tail = int(raw_tail)
+    if parsed.has("--all"):
+        tail = None
+
     paths = BoxPaths()
-    sys.exit(run_log(args, paths))
+    sys.exit(run_log(
+        paths, project=project, component=parsed.get("--component"),
+        level=parsed.get("--level"), since=since, tail=tail,
+        as_json=parsed.has("--json"), containers=parsed.has("--containers"),
+    ))

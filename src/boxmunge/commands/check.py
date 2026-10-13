@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from boxmunge.commands.argv import parse_args, require_project_name
 from boxmunge.commands.health_state import update_health_state
 from boxmunge.config import ConfigError, load_config
 from boxmunge.fileutil import project_lock, LockError
@@ -305,40 +306,14 @@ def _run_check_json(project_name: str, paths: BoxPaths) -> int:
 
 def cmd_check(args: list[str]) -> None:
     """CLI entry point for check command."""
-    known_flags = {"--json"}
-    unknown = [a for a in args if a.startswith("--") and a not in known_flags]
-    if unknown:
-        print(
-            f"ERROR: unknown argument(s): {' '.join(unknown)}",
-            file=sys.stderr,
-        )
-        print("Usage: boxmunge check <project> [--json]", file=sys.stderr)
-        sys.exit(2)
-
-    as_json = "--json" in args
-    positional = [a for a in args if not a.startswith("--")]
-    if not positional:
-        print("Usage: boxmunge check <project> [--json]", file=sys.stderr)
-        sys.exit(2)
-    if len(positional) > 1:
-        print(
-            f"ERROR: unknown argument(s): {' '.join(positional[1:])}",
-            file=sys.stderr,
-        )
-        print("Usage: boxmunge check <project> [--json]", file=sys.stderr)
-        sys.exit(2)
-
-    from boxmunge.paths import validate_project_name
-    try:
-        validate_project_name(positional[0])
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(2)
-
+    parsed = parse_args(
+        "check", args, flags={"--json"}, min_positional=1, max_positional=1,
+    )
+    project = require_project_name("check", parsed.positional[0])
     paths = BoxPaths()
-    if as_json:
-        sys.exit(_run_check_json(positional[0], paths))
-    sys.exit(run_check(positional[0], paths))
+    if parsed.has("--json"):
+        sys.exit(_run_check_json(project, paths))
+    sys.exit(run_check(project, paths))
 
 
 def run_check_all(paths: BoxPaths, *, read_only: bool) -> int:
@@ -486,8 +461,9 @@ def cmd_check_all(args: list[str]) -> None:
     Without --read-only this is the timer-driven mutator: it writes per-
     project health state, can call compose_down on critical results, and
     emits Pushover notifications. With --read-only it only prints the
-    report; no side effects.
+    report; no side effects. Any other argument is a usage error, so a
+    mistyped --read-only can never fall through to the mutator (audit D-04).
     """
-    read_only = "--read-only" in args
+    parsed = parse_args("check-all", args, flags={"--read-only"})
     paths = BoxPaths()
-    sys.exit(run_check_all(paths, read_only=read_only))
+    sys.exit(run_check_all(paths, read_only=parsed.has("--read-only")))

@@ -9,6 +9,8 @@ from boxmunge.pushover import send_notification
 
 def cmd_test_alert(args: list[str]) -> None:
     """Send a test Pushover notification to verify alerting works."""
+    from boxmunge.commands.argv import parse_args
+    parse_args("test-alert", args)
     paths = BoxPaths()
 
     try:

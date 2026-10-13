@@ -5,6 +5,8 @@ import sys
 
 def cmd_console(args: list[str]) -> None:
     """Launch the interactive TUI console."""
+    from boxmunge.commands.argv import parse_args
+    parse_args("console", args)
     try:
         from boxmunge.tui.app import BoxmungeApp
     except ImportError:

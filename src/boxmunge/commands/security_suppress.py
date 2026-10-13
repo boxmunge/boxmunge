@@ -155,6 +155,11 @@ def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
     the union of findings across every project on the box. Removes the
     need to copy-paste CVE ids.
     """
+    from boxmunge.commands.argv import parse_args
+    parse_args(  # reject unknown flags and stray positionals up front
+        "security", args, flags={"--current", "--host"},
+        options={"--project", "--until", "--reason"}, max_positional=1,
+    )
     use_current = "--current" in args
     use_host = "--host" in args
     rest: list[str]
@@ -481,6 +486,11 @@ def _apply_single_suppression(
 
 def cmd_security_unsuppress(args: list[str], paths: BoxPaths) -> int:
     """boxmunge security unsuppress <CVE> (--project <name>|--host)."""
+    from boxmunge.commands.argv import parse_args
+    parse_args(  # reject unknown flags and stray positionals up front
+        "security", args, flags={"--host"}, options={"--project"},
+        max_positional=1,
+    )
     if not args or args[0].startswith("--"):
         print(
             "Usage: boxmunge security unsuppress <CVE> "

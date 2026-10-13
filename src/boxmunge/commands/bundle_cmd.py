@@ -137,22 +137,15 @@ def run_bundle(project_dir_str: str, output: str | None = None,
     return 0
 
 def cmd_bundle(args: list[str]) -> None:
-    validate_only = "--validate" in args
-    output = None
-    positional = []
-    filtered = [a for a in args if a != "--validate"]
-    i = 0
-    while i < len(filtered):
-        if filtered[i] == "--output" and i + 1 < len(filtered):
-            output = filtered[i + 1]
-            i += 2
-        elif not filtered[i].startswith("--"):
-            positional.append(filtered[i])
-            i += 1
-        else:
-            print(f"ERROR: unknown argument: {filtered[i]}", file=sys.stderr)
-            sys.exit(2)
-    if not positional:
+    if not args:
         print(BUNDLE_HELP)
         sys.exit(2)
-    sys.exit(run_bundle(positional[0], output=output, validate_only=validate_only))
+    from boxmunge.commands.argv import parse_args
+    parsed = parse_args(
+        "bundle", args, flags={"--validate"}, options={"--output"},
+        min_positional=1, max_positional=1,
+    )
+    sys.exit(run_bundle(
+        parsed.positional[0], output=parsed.get("--output"),
+        validate_only=parsed.has("--validate"),
+    ))

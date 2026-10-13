@@ -130,7 +130,9 @@ Usage: boxmunge check-all [--read-only]
 Check every project. Without --read-only this is the timer-driven mutator:
 it writes health state, sends Pushover alerts, and stops a project's
 containers on a critical result. --read-only prints the same report with no
-side effects.""",
+side effects. Any other argument is an error and nothing runs. Exits with
+the worst status (0 ok, 1 warning, 2 critical), and at least 1 if any
+project could not be checked.""",
     "validate": """\
 Usage: boxmunge validate <project> [--json]
 
@@ -210,10 +212,11 @@ Usage: boxmunge container-update [target] [--force] [--dry-run]
 Pull and recreate Caddy and project image: containers. --dry-run pulls and
 reports what would change without recreating anything.""",
     "_discover-update": """\
-Usage: boxmunge _discover-update --json [--security-only]
+Usage: boxmunge _discover-update --json [--auto]
 
-Internal: report the newest available release as JSON (used by the upgrade
-shim).""",
+Internal: report an available release as JSON (used by the upgrade shim).
+Without --auto, the newest release of any class. With --auto, what
+auto-update would apply under this box's auto_update policy.""",
     "mcp-serve": """\
 Usage: boxmunge mcp-serve
 

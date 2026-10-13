@@ -46,8 +46,8 @@ def run_test_restore(project_name: str, paths: BoxPaths) -> int:
 
 def cmd_test_restore(args: list[str]) -> None:
     """CLI entry point."""
-    if not args:
-        print("Usage: boxmunge test-restore <project>", file=sys.stderr)
-        sys.exit(2)
+    from boxmunge.commands.argv import parse_args, require_project_name
+    parsed = parse_args("test-restore", args, min_positional=1, max_positional=1)
+    project = require_project_name("test-restore", parsed.positional[0])
     paths = BoxPaths()
-    sys.exit(run_test_restore(args[0], paths))
+    sys.exit(run_test_restore(project, paths))

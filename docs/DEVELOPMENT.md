@@ -66,7 +66,10 @@ command means touching several places, listed below.
 
 ### Adding a command today
 
-1. Create `src/boxmunge/commands/<name>_cmd.py` with `cmd_<name>` and `run_<name>`.
+1. Create `src/boxmunge/commands/<name>_cmd.py` with `cmd_<name>` and `run_<name>`. Parse
+   arguments in `cmd_<name>` with `boxmunge.commands.argv.parse_args`, which rejects any flag or
+   positional the command does not declare (exit 2). Never ignore an argument, and never accept
+   `--dry-run` unless the command implements it. `cli.main` handles `-h`/`--help` for you.
 2. Register it in `COMMANDS` in `src/boxmunge/cli.py`.
 3. Decide whether the deploy user may run it. Either add it to `ALLOWED_COMMANDS` in
    `src/boxmunge/shell.py`, or add it to `INTENTIONALLY_RESTRICTED` in `tests/test_shell.py` with

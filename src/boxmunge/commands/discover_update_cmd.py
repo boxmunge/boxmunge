@@ -20,21 +20,17 @@ from boxmunge.paths import BoxPaths
 from boxmunge.upgrade_discovery import auto_update_mode, discover_update
 
 
-USAGE = "Usage: boxmunge _discover-update --json [--auto]"
 _FLAGS = frozenset({"--json", "--auto"})
 
 
 def cmd_discover_update(args: list[str]) -> None:
-    unknown = [a for a in args if a not in _FLAGS]
-    if unknown:
-        print(f"ERROR: unknown argument(s): {' '.join(unknown)}\n{USAGE}", file=sys.stderr)
-        sys.exit(2)
-    if "--json" not in args:
-        print(USAGE, file=sys.stderr)
-        sys.exit(2)
+    from boxmunge.commands.argv import parse_args, usage_error
+    parsed = parse_args("_discover-update", args, flags=set(_FLAGS))
+    if not parsed.has("--json"):
+        usage_error("_discover-update", "--json is required")
     paths = BoxPaths()
     mode = "latest"
-    if "--auto" in args:
+    if parsed.has("--auto"):
         try:
             mode = auto_update_mode(load_config(paths))
         except ConfigError as e:

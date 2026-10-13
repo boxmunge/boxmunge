@@ -91,6 +91,15 @@ These commands prompt for confirmation before executing. Use `--yes` only when y
 
 Do not pass `--yes` reflexively. Confirm the target project and the effect before proceeding.
 
+### Flags are strict
+
+- `help <command>` or `<command> --help` shows a command's usage. Neither runs the command.
+- A flag a command does not implement is an error (exit 2) and nothing runs. Read the usage
+  rather than guessing flags.
+- `--dry-run` exists only on `prod-deploy`, `stage`, `promote`, `unstage`, `upgrade` and
+  `container-update`. Other commands, including `project-delete`, `rollback`, `restore` and
+  `pause`, reject it. There is no way to preview those; confirm the target before running them.
+
 ---
 
 ## What You Cannot Do
