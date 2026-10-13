@@ -5,8 +5,21 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 from boxmunge_cli.server_setup.args import ServerSetupArgs
+from boxmunge_cli.server_setup.install import (
+    InstallError,
+    run_with_progress,
+    upload_local_bundle,
+    upload_verified_installer,
+)
+from boxmunge_cli.server_setup.release import (
+    ReleaseError,
+    VerifiedInstaller,
+    fetch_verified_installer,
+)
 from boxmunge_cli.server_setup.ssh_key import detect_ssh_key, SSHKeyError
 from boxmunge_cli.server_setup.preflight import (
     check_ssh_access,
@@ -16,10 +29,6 @@ from boxmunge_cli.server_setup.preflight import (
     check_freshness,
     PreflightError,
 )
-from boxmunge_cli.server_setup.progress import parse_marker, render_progress_bar
-
-
-GITHUB_REPO = "boxmunge/boxmunge"
 
 
 def _ssh_cmd(user: str, host: str, port: int, needs_sudo: bool, command: str) -> list[str]:
@@ -49,65 +58,43 @@ def _resolve_hostname(user: str, host: str, port: int, needs_sudo: bool) -> str:
     return fqdn
 
 
+def _scp_cmd(user: str, host: str, port: int, local: str, remote: str) -> list[str]:
+    return ["scp", "-P", str(port),
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "UserKnownHostsFile=/dev/null",
+            local, f"{user}@{host}:{remote}"]
+
+
 def _run_install(
     user: str, host: str, port: int, needs_sudo: bool,
     setup_args: ServerSetupArgs, ssh_key: str,
+    installer: VerifiedInstaller | None,
 ) -> int:
-    """Upload or pull release on the server and run init-host.sh with progress tracking."""
+    """Upload the release to the server and run it with progress tracking."""
     hostname = setup_args.hostname or host
 
-    # Step 1: Get release onto the server
-    if setup_args.local_bundle:
-        # Upload local bundle via SCP and extract
-        print(f"Uploading local bundle: {setup_args.local_bundle}")
-        scp_cmd = [
-            "scp",
-            "-P", str(port),
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "UserKnownHostsFile=/dev/null",
-            setup_args.local_bundle,
-            f"{user}@{host}:/tmp/boxmunge-release.tar.gz",
-        ]
-        result = subprocess.run(scp_cmd, check=False)
-        if result.returncode != 0:
-            print("ERROR: Failed to upload bundle.", file=sys.stderr)
-            return 1
-        extract_script = (
-            "set -e && cd /tmp && "
-            "rm -rf boxmunge-release && mkdir boxmunge-release && "
-            "tar xzf boxmunge-release.tar.gz -C boxmunge-release --strip-components=1 && "
-            "echo PULL_OK"
-        )
-        cmd = _ssh_cmd(user, host, port, needs_sudo, extract_script)
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if result.returncode != 0 or "PULL_OK" not in result.stdout:
-            print("ERROR: Failed to extract bundle on server.", file=sys.stderr)
-            print(result.stderr, file=sys.stderr)
-            return 1
-    else:
-        # Pull latest release from GitHub
-        pull_script = (
-            f"set -e && "
-            f"cd /tmp && "
-            f"RELEASE_URL=$(curl -sf 'https://api.github.com/repos/{GITHUB_REPO}/releases/latest' "
-            f"| python3 -c \"import sys,json; print(json.load(sys.stdin)['tarball_url'])\") && "
-            f"curl -sfL \"$RELEASE_URL\" -o boxmunge-release.tar.gz && "
-            f"rm -rf boxmunge-release && mkdir boxmunge-release && "
-            f"tar xzf boxmunge-release.tar.gz -C boxmunge-release --strip-components=1 && "
-            f"echo PULL_OK"
-        )
-        print("Fetching latest release from GitHub...")
-        cmd = _ssh_cmd(user, host, port, needs_sudo, pull_script)
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if result.returncode != 0 or "PULL_OK" not in result.stdout:
-            print("ERROR: Failed to fetch release from GitHub.", file=sys.stderr)
-            print(result.stderr, file=sys.stderr)
-            return 1
+    def ssh(command: str, sudo: bool) -> list[str]:
+        return _ssh_cmd(user, host, port, sudo, command)
 
-    # Step 2: Run install.sh (which calls init-host.sh for bootstrapping,
-    # then installs the Python package, wrapper scripts, and systemd units)
+    def scp(local: str, remote: str) -> list[str]:
+        return _scp_cmd(user, host, port, local, remote)
+
+    try:
+        if installer is None:
+            assert setup_args.local_bundle is not None
+            print(f"Uploading local bundle: {setup_args.local_bundle}")
+            workdir, run_prefix = upload_local_bundle(ssh, scp, setup_args.local_bundle)
+        else:
+            print(f"Uploading verified installer ({installer.tag})...")
+            workdir, run_prefix = upload_verified_installer(ssh, scp, installer)
+    except InstallError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+    # The installer runs install.sh, which bootstraps the host (init-host.sh)
+    # and installs the package, wrapper scripts and systemd units.
     init_cmd_parts = [
-        "bash /tmp/boxmunge-release/install.sh",
+        run_prefix,
         f"--hostname {hostname}",
         f"--email {setup_args.email}",
         f"--ssh-key '{ssh_key}'",
@@ -122,40 +109,19 @@ def _run_install(
     if setup_args.self_signed_tls:
         init_cmd_parts.append("--self-signed-tls")
 
-    remote_cmd = " ".join(init_cmd_parts)
-    ssh_cmd = _ssh_cmd(user, host, port, needs_sudo, remote_cmd)
+    remote_cmd = " ".join(init_cmd_parts) + f"; rc=$?; rm -rf {workdir}; exit $rc"
+    return run_with_progress(_ssh_cmd(user, host, port, needs_sudo, remote_cmd))
 
-    proc = subprocess.Popen(
-        ssh_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True,
-    )
 
-    log_buffer: list[str] = []
-    last_bar = ""
-
-    for line in proc.stdout:  # type: ignore[union-attr]
-        line = line.rstrip("\n")
-        log_buffer.append(line)
-        marker = parse_marker(line)
-        if marker:
-            current, total, desc = marker
-            bar = render_progress_bar(current, total, desc)
-            # Overwrite previous line
-            print(f"\r{bar}    ", end="", flush=True)
-            last_bar = bar
-        # Non-marker lines are silently buffered
-
-    proc.wait()
-
-    if last_bar:
-        print()  # newline after final progress bar
-
-    if proc.returncode != 0:
-        print("\nERROR: Server setup failed. Full log:\n", file=sys.stderr)
-        print("\n".join(log_buffer), file=sys.stderr)
-        return 1
-
-    return 0
+def _fetch_installer(setup_args: ServerSetupArgs, workdir: Path) -> VerifiedInstaller | None:
+    """Download and verify the release locally, before touching the server."""
+    if setup_args.local_bundle:
+        return None
+    which = setup_args.release or "the latest release"
+    print(f"Downloading and verifying {which}...", end=" ", flush=True)
+    installer = fetch_verified_installer(setup_args.release, workdir)
+    print(f"Ok ({installer.tag}, signature and checksum verified)")
+    return installer
 
 
 def _confirm(prompt: str) -> bool:
@@ -186,6 +152,18 @@ def _run(setup_args: ServerSetupArgs) -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
+    with tempfile.TemporaryDirectory(prefix="boxmunge-release-") as workdir:
+        try:
+            installer = _fetch_installer(setup_args, Path(workdir))
+        except ReleaseError as e:
+            print("FAILED")
+            print(f"\nERROR: {e}", file=sys.stderr)
+            return 1
+        return _preflight_and_install(setup_args, ssh_key, installer)
+
+
+def _preflight_and_install(setup_args: ServerSetupArgs, ssh_key: str,
+                           installer: VerifiedInstaller | None) -> int:
     # Pre-flight checks
     try:
         print("Attempting SSH access...", end=" ", flush=True)
@@ -234,7 +212,7 @@ def _run(setup_args: ServerSetupArgs) -> int:
     print(f"\nInstalling boxmunge on {setup_args.hostname}...")
     exit_code = _run_install(
         setup_args.user, setup_args.host, setup_args.port,
-        needs_sudo, setup_args, ssh_key,
+        needs_sudo, setup_args, ssh_key, installer,
     )
 
     if exit_code == 0:

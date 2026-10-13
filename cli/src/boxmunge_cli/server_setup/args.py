@@ -12,6 +12,11 @@ DESCRIPTION = """\
 Turn a fresh Debian VPS into a boxmunge server. Connects as [user@]host
 (default user root; a non-root user needs passwordless sudo), runs pre-flight
 checks, then installs the signed boxmunge release.
+
+The release is downloaded and verified on this machine first: cosign must be
+installed locally. Its keyless signature on SHA256SUMS must come from the
+boxmunge release workflow for that tag, and the installer must match
+SHA256SUMS. Nothing is installed if either check fails.
 """
 
 
@@ -29,6 +34,7 @@ class ServerSetupArgs:
     no_auto_updates: bool = False
     self_signed_tls: bool = False
     yes: bool = False
+    release: str | None = None
     local_bundle: str | None = None
 
 
@@ -63,8 +69,12 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                    help="Use self-signed TLS instead of Let's Encrypt (testing)")
     p.add_argument("-y", "--yes", action="store_true",
                    help="Do not ask for confirmation (required without a terminal)")
-    p.add_argument("--local-bundle", metavar="PATH",
-                   help="Install a locally built release bundle (development only)")
+    source = p.add_mutually_exclusive_group()
+    source.add_argument("--release", metavar="vX.Y.Z",
+                        help="Install this signed release (default: the latest)")
+    source.add_argument("--local-bundle", metavar="PATH",
+                        help="Install an unverified locally built bundle "
+                             "(development only)")
 
 
 def from_namespace(ns: argparse.Namespace) -> ServerSetupArgs:
@@ -78,7 +88,7 @@ def from_namespace(ns: argparse.Namespace) -> ServerSetupArgs:
         boxmunge_ssh_port=ns.boxmunge_ssh_port,
         no_aide=ns.no_aide, no_crowdsec=ns.no_crowdsec,
         no_auto_updates=ns.no_auto_updates, self_signed_tls=ns.self_signed_tls,
-        yes=ns.yes, local_bundle=ns.local_bundle,
+        yes=ns.yes, release=ns.release, local_bundle=ns.local_bundle,
     )
 
 
