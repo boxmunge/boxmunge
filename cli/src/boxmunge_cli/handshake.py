@@ -1,68 +1,104 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Client-side version handshake with boxmunge-server."""
+"""Client/server compatibility handshake.
+
+The client and server version independently (client 0.x on PyPI, server
+releases on GitHub), so their versions are never compared with each other.
+Instead:
+  - the server says the oldest client it accepts (min_client_version);
+  - the client says the oldest server it needs (MIN_SERVER_VERSION);
+  - the server says the newest manifest schema it understands, and a
+    manifest declaring a newer one is refused before upload.
+"""
 
 from __future__ import annotations
 
 import json
 import subprocess
-import sys
+from dataclasses import dataclass
 from typing import Any
 
 from boxmunge_cli import __version__
 from boxmunge_cli.ssh import build_ssh_cmd
+from boxmunge_cli.version import parse_version
+
+# Oldest boxmunge-server this client works with: the release whose command
+# surface (stage/prod-deploy/promote flags, status --json, logs options,
+# handshake schema_version) the client was built and tested against.
+MIN_SERVER_VERSION = "0.10.0"
 
 
 class HandshakeError(Exception):
     """Raised when the server handshake fails or versions are incompatible."""
 
 
-def _parse_version(version: str) -> tuple[int, ...]:
-    """Parse a semver string into a comparable tuple."""
-    parts = version.split("+")[0]
-    return tuple(int(x) for x in parts.split("."))
+@dataclass(frozen=True)
+class ServerInfo:
+    server_version: str
+    min_client_version: str
+    schema_version: int
 
 
-def check_server_compatibility(config: dict[str, Any]) -> None:
-    """Call server handshake and verify version compatibility.
-
-    Raises HandshakeError if the client is too old.
-    Prints a warning to stderr if the server is old.
-    """
-    cmd = build_ssh_cmd(config, "handshake")
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-
-    if result.returncode != 0:
-        raise HandshakeError(
-            f"Handshake failed: could not connect to "
-            f"{config['server']}:{config['port']} (exit code {result.returncode})."
-        )
-
+def _version(data: dict[str, Any], field: str) -> str:
+    value = data.get(field)
     try:
-        data = json.loads(result.stdout)
-    except (json.JSONDecodeError, ValueError):
+        parse_version(value)
+    except ValueError as e:
+        raise HandshakeError(f"Invalid handshake response: '{field}' {e}.") from e
+    return value  # type: ignore[return-value]
+
+
+def _parse_response(stdout: str) -> ServerInfo:
+    try:
+        data = json.loads(stdout)
+    except ValueError:
         raise HandshakeError(
-            "Malformed handshake response from server. "
+            "Malformed handshake response from server (not JSON). "
             "Is the server running a compatible version of boxmunge-server?"
         )
-
-    for field in ("server_version", "min_client_version", "schema_version"):
-        if field not in data:
-            raise HandshakeError(f"Invalid handshake response: missing '{field}'.")
-
-    min_client = _parse_version(data["min_client_version"])
-    client_version = _parse_version(__version__)
-
-    if client_version < min_client:
+    if not isinstance(data, dict):
+        raise HandshakeError("Invalid handshake response: expected a JSON object.")
+    schema = data.get("schema_version")
+    if isinstance(schema, bool) or not isinstance(schema, int) or schema < 1:
         raise HandshakeError(
-            f"This boxmunge CLI (v{__version__}) is too old for the server "
-            f"(requires >= {data['min_client_version']}). "
-            f"Please upgrade: pip install --upgrade boxmunge"
-        )
+            f"Invalid handshake response: 'schema_version' must be a positive "
+            f"integer, got {schema!r}.")
+    return ServerInfo(_version(data, "server_version"),
+                      _version(data, "min_client_version"), schema)
 
-    server_version = _parse_version(data["server_version"])
-    if server_version < client_version:
-        print(
-            f"WARNING: Server is running an old version "
-            f"(v{data['server_version']}). Some features may not work.",
-            file=sys.stderr,
+
+def check_server_compatibility(config: dict[str, Any],
+                               manifest_schema: int | None = None) -> ServerInfo:
+    """Run the server's handshake and refuse incompatible combinations.
+
+    manifest_schema: the schema_version of the manifest about to be
+    uploaded, checked against what the server understands.
+    """
+    result = subprocess.run(build_ssh_cmd(config, "handshake"),
+                            capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"ssh exited with {result.returncode}"
+        raise HandshakeError(
+            f"Handshake with {config['user']}@{config['server']}:{config['port']} "
+            f"failed: {detail}"
         )
+    info = _parse_response(result.stdout)
+
+    if parse_version(__version__) < parse_version(info.min_client_version):
+        raise HandshakeError(
+            f"This boxmunge CLI ({__version__}) is too old for the server, which "
+            f"requires >= {info.min_client_version}. "
+            "Upgrade: pip install --upgrade boxmunge"
+        )
+    if parse_version(info.server_version) < parse_version(MIN_SERVER_VERSION):
+        raise HandshakeError(
+            f"The server runs boxmunge-server {info.server_version}; this CLI needs "
+            f">= {MIN_SERVER_VERSION}. Upgrade the server (run 'upgrade' on it), "
+            "or install an older CLI."
+        )
+    if manifest_schema is not None and manifest_schema > info.schema_version:
+        raise HandshakeError(
+            f"manifest.yml declares schema_version {manifest_schema}, but the server "
+            f"understands up to {info.schema_version}. Upgrade the server, or use "
+            f"schema_version {info.schema_version}."
+        )
+    return info

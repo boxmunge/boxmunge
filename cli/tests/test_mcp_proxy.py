@@ -17,7 +17,7 @@ class TestRunMcpProxy:
 
         mock_popen.assert_called_once()
         cmd = mock_popen.call_args[0][0]
-        assert cmd == ["ssh", "-p", "922", "-o", "StrictHostKeyChecking=accept-new",
+        assert cmd == ["ssh", "-p", "922", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
                        "deploy@box.example.com", "mcp-serve"]
 
     @patch("boxmunge_cli.mcp_proxy.subprocess.Popen")

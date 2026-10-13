@@ -22,9 +22,33 @@ def _load_project_config() -> tuple[dict[str, Any], Path] | None:
         return None
 
 
+def _handshake(config: dict[str, Any], manifest_schema: int | None = None) -> bool:
+    from boxmunge_cli.handshake import HandshakeError, check_server_compatibility
+    try:
+        check_server_compatibility(config, manifest_schema)
+    except HandshakeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return False
+    return True
+
+
+def _connect() -> dict[str, Any] | None:
+    """Load .boxmunge and confirm the server is compatible."""
+    loaded = _load_project_config()
+    if loaded is None or not _handshake(loaded[0]):
+        return None
+    return loaded[0]
+
+
+def _manifest_schema(project_dir: Path) -> int:
+    from boxmunge_cli.manifest import load_manifest
+    schema = load_manifest(project_dir / "manifest.yml").get("schema_version", 1)
+    assert isinstance(schema, int), "bundle validation guarantees an int schema_version"
+    return schema
+
+
 def _bundle_upload_and_run(command: str, server_flags: list[str]) -> int:
     from boxmunge_cli.bundle_cmd import run_bundle
-    from boxmunge_cli.handshake import HandshakeError, check_server_compatibility
     from boxmunge_cli.ssh import run_scp, run_ssh
 
     loaded = _load_project_config()
@@ -41,10 +65,7 @@ def _bundle_upload_and_run(command: str, server_flags: list[str]) -> int:
             print("ERROR: Bundle was not created.", file=sys.stderr)
             return 1
 
-        try:
-            check_server_compatibility(config)
-        except HandshakeError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
+        if not _handshake(config, _manifest_schema(config_path.parent)):
             return 1
 
         exit_code = run_scp(config, str(bundles[0]))
@@ -70,29 +91,26 @@ def _cmd_prod_deploy(args: argparse.Namespace) -> int:
 
 def _cmd_promote(args: argparse.Namespace) -> int:
     from boxmunge_cli.ssh import run_ssh
-    loaded = _load_project_config()
-    if loaded is None:
+    config = _connect()
+    if config is None:
         return 1
-    config, _ = loaded
     return run_ssh(config, "promote", config["project"],
                    *(["--dry-run"] if args.dry_run else []))
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
     from boxmunge_cli.ssh import run_ssh
-    loaded = _load_project_config()
-    if loaded is None:
+    config = _connect()
+    if config is None:
         return 1
-    config, _ = loaded
     return run_ssh(config, "status", *(["--json"] if args.json else []))
 
 
 def _cmd_logs(args: argparse.Namespace) -> int:
     from boxmunge_cli.ssh import run_ssh
-    loaded = _load_project_config()
-    if loaded is None:
+    config = _connect()
+    if config is None:
         return 1
-    config, _ = loaded
     server_args = [config["project"]]
     if args.service:
         server_args.append(args.service)
@@ -105,10 +123,9 @@ def _cmd_logs(args: argparse.Namespace) -> int:
 
 def _cmd_mcp_serve(args: argparse.Namespace) -> int:
     from boxmunge_cli.mcp_proxy import run_mcp_proxy
-    loaded = _load_project_config()
-    if loaded is None:
+    config = _connect()
+    if config is None:
         return 1
-    config, _ = loaded
     return run_mcp_proxy(config)
 
 

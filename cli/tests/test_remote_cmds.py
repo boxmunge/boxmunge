@@ -81,10 +81,8 @@ def test_promote_status_logs(project, fake_remote) -> None:
     assert run_cli(["promote"]) == 0
     assert run_cli(["status", "--json"]) == 0
     assert run_cli(["logs", "web", "--tail", "20", "--follow"]) == 0
-    remote = _remote_commands(fake_remote)
-    assert remote[0].endswith("promote myapp")
-    assert remote[1].endswith("status --json")
-    assert remote[2].endswith("logs myapp web --tail 20 --follow")
+    remote = [c for c in _remote_commands(fake_remote) if c != "handshake"]
+    assert remote == ["promote myapp", "status --json", "logs myapp web --tail 20 --follow"]
 
 
 def test_manifest_project_must_be_a_valid_name(project, capsys) -> None:
