@@ -1,5 +1,7 @@
-"""boxmunge bundle <project-dir> — build a validated, ready-to-upload bundle."""
+# SPDX-License-Identifier: Apache-2.0
+"""boxmunge bundle [project-dir]: build a validated, ready-to-upload bundle."""
 from __future__ import annotations
+import argparse
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,17 +12,7 @@ from boxmunge_cli.ignore_rules import IgnoreFileError
 from boxmunge_cli.manifest_id import add_manifest_id, ManifestIdError
 
 
-BUNDLE_HELP = """\
-boxmunge bundle — build a validated, ready-to-upload project bundle
-
-Usage:
-  boxmunge bundle <project-dir> [--output PATH] [--validate]
-
-Options:
-  --output PATH    Write bundle to this directory (default: parent of project dir)
-  --validate       Validate only, don't create the bundle
-  --list           Print what would ship (stdout) and what is left out (stderr)
-
+BUNDLE_EPILOG = """\
 What ships: everything in the project directory except
   - never shipped: .git/ .hg/ .svn/, .env and .env.* (but .env.example ships),
     the client's .boxmunge config
@@ -188,24 +180,23 @@ def run_bundle(project_dir_str: str, output: str | None = None,
     return 0
 
 
-def cmd_bundle(args: list[str]) -> None:
-    validate_only = "--validate" in args
-    list_only = "--list" in args
-    output = None
-    positional = []
-    filtered = [a for a in args if a not in ("--validate", "--list")]
-    i = 0
-    while i < len(filtered):
-        if filtered[i] == "--output" and i + 1 < len(filtered):
-            output = filtered[i + 1]
-            i += 2
-        elif not filtered[i].startswith("--"):
-            positional.append(filtered[i])
-            i += 1
-        else:
-            i += 1
-    if not positional:
-        print(BUNDLE_HELP)
-        sys.exit(2)
-    sys.exit(run_bundle(positional[0], output=output, validate_only=validate_only,
-                        list_only=list_only))
+def _cmd_bundle(args: argparse.Namespace) -> int:
+    return run_bundle(args.project_dir, output=args.output,
+                      validate_only=args.validate, list_only=args.list)
+
+
+def register(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "bundle", help="Build a deployable bundle",
+        description="Validate the project and build <project>-<timestamp>.tar.gz.",
+        epilog=BUNDLE_EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("project_dir", nargs="?", default=".",
+                   help="Project directory (default: current directory)")
+    p.add_argument("--output", metavar="PATH",
+                   help="Directory or file to write (default: the project's parent dir)")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--validate", action="store_true",
+                      help="Validate only; write nothing")
+    mode.add_argument("--list", action="store_true",
+                      help="Print what would ship (stdout) and what is left out (stderr)")
+    p.set_defaults(func=_cmd_bundle)

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from importlib import resources
@@ -10,6 +11,7 @@ from pathlib import Path
 
 import yaml
 
+from boxmunge_cli.config import ConfigError, validate_config
 from boxmunge_cli.ulid import generate_ulid
 
 _VALID_PROJECT = re.compile(r'^[a-z0-9][a-z0-9\-]{0,62}$')
@@ -80,6 +82,11 @@ def run_init(
         "user": user,
         "project": project_name,
     }
+    try:
+        validate_config(config)
+    except ConfigError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
     config_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
     print(f"Created {config_path}")
 
@@ -93,48 +100,41 @@ def run_init(
     return 0
 
 
-def cmd_init(args: list[str]) -> None:
-    """CLI entry point for init command."""
-    server = None
-    port = 922
-    user = "deploy"
-    project = None
-    force = False
-    no_scaffold = False
-    force_scaffold = False
+def _port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an integer: {value!r}")
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError(f"must be 1-65535: {value!r}")
+    return port
 
-    i = 0
-    while i < len(args):
-        if args[i] == "--server" and i + 1 < len(args):
-            server = args[i + 1]
-            i += 2
-        elif args[i] == "--port" and i + 1 < len(args):
-            port = int(args[i + 1])
-            i += 2
-        elif args[i] == "--user" and i + 1 < len(args):
-            user = args[i + 1]
-            i += 2
-        elif args[i] == "--project" and i + 1 < len(args):
-            project = args[i + 1]
-            i += 2
-        elif args[i] == "--force":
-            force = True
-            i += 1
-        elif args[i] == "--no-scaffold":
-            no_scaffold = True
-            i += 1
-        elif args[i] == "--force-scaffold":
-            force_scaffold = True
-            i += 1
-        else:
-            i += 1
 
-    if not server:
-        print("Usage: boxmunge init --server <hostname> [--port PORT] [--user USER] [--project NAME]",
-              file=sys.stderr)
-        sys.exit(2)
+def _cmd_init(args: argparse.Namespace) -> int:
+    return run_init(
+        Path.cwd(), server=args.server, port=args.port, user=args.user,
+        project=args.project, force=args.force, no_scaffold=args.no_scaffold,
+        force_scaffold=args.force_scaffold,
+    )
 
-    sys.exit(run_init(
-        Path.cwd(), server=server, port=port, user=user, project=project,
-        force=force, no_scaffold=no_scaffold, force_scaffold=force_scaffold,
-    ))
+
+def register(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "init", help="Create .boxmunge and scaffold a project",
+        description="Write .boxmunge (server connection details) in the current "
+                    "directory and scaffold manifest.yml, compose.yml and "
+                    "boxmunge-scripts/smoke.sh if no manifest exists yet.")
+    p.add_argument("--server", required=True, metavar="HOST",
+                   help="Server hostname or IP")
+    p.add_argument("--port", type=_port, default=922,
+                   help="Server SSH port (default: 922)")
+    p.add_argument("--user", default="deploy", help="SSH user (default: deploy)")
+    p.add_argument("--project", metavar="NAME",
+                   help="Project name (default: the directory name)")
+    p.add_argument("--force", action="store_true", help="Overwrite an existing .boxmunge")
+    scaffold = p.add_mutually_exclusive_group()
+    scaffold.add_argument("--no-scaffold", action="store_true",
+                          help="Only write .boxmunge")
+    scaffold.add_argument("--force-scaffold", action="store_true",
+                          help="Scaffold missing files even if manifest.yml exists")
+    p.set_defaults(func=_cmd_init)

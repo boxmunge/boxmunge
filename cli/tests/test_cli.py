@@ -38,10 +38,13 @@ class TestCLI:
                 assert exc.value.code == 2
 
     def test_all_commands_registered(self) -> None:
-        from boxmunge_cli.cli import COMMANDS
+        import argparse
+        from boxmunge_cli.cli import build_parser
+        sub = next(a for a in build_parser()._actions
+                   if isinstance(a, argparse._SubParsersAction))
         expected = {"init", "bundle", "stage", "promote", "prod-deploy",
                     "status", "logs", "mcp-serve", "server-setup"}
-        assert expected == set(COMMANDS.keys())
+        assert expected == set(sub.choices)
 
     def test_help_shows_only_local_commands(self, capsys) -> None:
         from boxmunge_cli.cli import main

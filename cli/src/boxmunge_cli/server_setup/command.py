@@ -5,9 +5,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from dataclasses import dataclass
 
-from boxmunge_cli.server_setup.target import parse_target, is_ip_address
+from boxmunge_cli.server_setup.args import ServerSetupArgs
 from boxmunge_cli.server_setup.ssh_key import detect_ssh_key, SSHKeyError
 from boxmunge_cli.server_setup.preflight import (
     check_ssh_access,
@@ -21,97 +20,6 @@ from boxmunge_cli.server_setup.progress import parse_marker, render_progress_bar
 
 
 GITHUB_REPO = "boxmunge/boxmunge"
-
-
-@dataclass
-class ServerSetupArgs:
-    user: str
-    host: str
-    port: int
-    email: str
-    ssh_key_arg: str | None = None
-    hostname: str | None = None
-    boxmunge_ssh_port: int = 922
-    no_aide: bool = False
-    no_crowdsec: bool = False
-    no_auto_updates: bool = False
-    reboot_window: str = "04:00"
-    self_signed_tls: bool = False
-    yes: bool = False
-    local_bundle: str | None = None
-
-
-def parse_args(args: list[str]) -> ServerSetupArgs:
-    """Parse server-setup command arguments."""
-    email: str | None = None
-    ssh_key_arg: str | None = None
-    hostname: str | None = None
-    port = 22
-    boxmunge_ssh_port = 922
-    no_aide = False
-    no_crowdsec = False
-    no_auto_updates = False
-    reboot_window = "04:00"
-    self_signed_tls = False
-    yes = False
-    local_bundle: str | None = None
-
-    i = 0
-    positional: list[str] = []
-    while i < len(args):
-        if args[i] in ("-p", "--port") and i + 1 < len(args):
-            port = int(args[i + 1]); i += 2
-        elif args[i] == "--email" and i + 1 < len(args):
-            email = args[i + 1]; i += 2
-        elif args[i] == "--ssh-key" and i + 1 < len(args):
-            ssh_key_arg = args[i + 1]; i += 2
-        elif args[i] == "--hostname" and i + 1 < len(args):
-            hostname = args[i + 1]; i += 2
-        elif args[i] == "--boxmunge-ssh-port" and i + 1 < len(args):
-            boxmunge_ssh_port = int(args[i + 1]); i += 2
-        elif args[i] == "--no-aide":
-            no_aide = True; i += 1
-        elif args[i] == "--no-crowdsec":
-            no_crowdsec = True; i += 1
-        elif args[i] == "--no-auto-updates":
-            no_auto_updates = True; i += 1
-        elif args[i] == "--reboot-window" and i + 1 < len(args):
-            reboot_window = args[i + 1]; i += 2
-        elif args[i] == "--self-signed-tls":
-            self_signed_tls = True; i += 1
-        elif args[i] in ("-y", "--yes"):
-            yes = True; i += 1
-        elif args[i] == "--local-bundle" and i + 1 < len(args):
-            local_bundle = args[i + 1]; i += 2
-        elif not args[i].startswith("-"):
-            positional.append(args[i]); i += 1
-        else:
-            i += 1
-
-    if not positional:
-        print("Usage: boxmunge server-setup [user@]host --email EMAIL [options]",
-              file=sys.stderr)
-        sys.exit(2)
-    if not email:
-        print("ERROR: --email is required (for Let's Encrypt only, never collected by boxmunge).",
-              file=sys.stderr)
-        sys.exit(2)
-
-    user, host = parse_target(positional[0])
-
-    # Hostname resolution: use the provided name if it's not an IP
-    if hostname is None and not is_ip_address(host):
-        hostname = host
-
-    return ServerSetupArgs(
-        user=user, host=host, port=port, email=email,
-        ssh_key_arg=ssh_key_arg, hostname=hostname,
-        boxmunge_ssh_port=boxmunge_ssh_port,
-        no_aide=no_aide, no_crowdsec=no_crowdsec,
-        no_auto_updates=no_auto_updates, reboot_window=reboot_window,
-        self_signed_tls=self_signed_tls, yes=yes,
-        local_bundle=local_bundle,
-    )
 
 
 def _ssh_cmd(user: str, host: str, port: int, needs_sudo: bool, command: str) -> list[str]:
@@ -250,24 +158,33 @@ def _run_install(
     return 0
 
 
-def cmd_server_setup(args: list[str]) -> None:
-    """CLI entry point for server-setup command."""
-    setup_args = parse_args(args)
+def _confirm(prompt: str) -> bool:
+    return input(prompt).strip().lower() == "y"
 
+
+def run_server_setup(setup_args: ServerSetupArgs) -> int:
+    """Run server-setup. Returns an exit code."""
+    if not setup_args.yes and not sys.stdin.isatty():
+        print("ERROR: server-setup asks for confirmation, but stdin is not a terminal. "
+              "Pass --yes to confirm non-interactively.", file=sys.stderr)
+        return 2
+    return _run(setup_args)
+
+
+def _run(setup_args: ServerSetupArgs) -> int:
     # Interactive confirmation
     if not setup_args.yes:
         print(f"This will turn [{setup_args.host}] into a boxmunge server.")
-        response = input("Are you sure? [y/N] ").strip().lower()
-        if response != "y":
+        if not _confirm("Are you sure? [y/N] "):
             print("Aborted.")
-            sys.exit(0)
+            return 1
 
     # Detect SSH key
     try:
         ssh_key = detect_ssh_key(setup_args.ssh_key_arg)
     except SSHKeyError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
+        return 1
 
     # Pre-flight checks
     try:
@@ -296,17 +213,16 @@ def cmd_server_setup(args: list[str]) -> None:
                 print(f"  - {w}")
             print("\nboxmunge takes over the entire box. Proceeding may interfere with existing services.")
             if not setup_args.yes:
-                response = input("Continue anyway? [y/N] ").strip().lower()
-                if response != "y":
+                if not _confirm("Continue anyway? [y/N] "):
                     print("Aborted.")
-                    sys.exit(0)
+                    return 1
         else:
             print("Ok")
 
     except PreflightError as e:
         print("FAILED")
         print(f"\nERROR: {e}", file=sys.stderr)
-        sys.exit(1)
+        return 1
 
     # Resolve hostname if target was an IP
     if setup_args.hostname is None:
@@ -324,9 +240,9 @@ def cmd_server_setup(args: list[str]) -> None:
     if exit_code == 0:
         bsp = setup_args.boxmunge_ssh_port
         hn = setup_args.hostname
-        print(f"\nServer setup complete.")
+        print("\nServer setup complete.")
         print(f"  SSH (deploy): ssh -p {bsp} deploy@{hn}")
         print(f"  SSH (admin):  ssh -p {bsp} supervisor@{hn}")
         print(f"  Next: cd your-project && boxmunge init --server {hn}")
 
-    sys.exit(exit_code)
+    return exit_code
