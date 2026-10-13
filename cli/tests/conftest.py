@@ -55,16 +55,19 @@ class FakeRemote:
 
     TOOLS = ("ssh", "scp", "ssh-keyscan", "cosign")
 
-    def __init__(self, root: Path) -> None:
-        self.bin = root / "fakebin"
-        self.bin.mkdir()
+    def __init__(self, bin_dir: Path, root: Path) -> None:
+        self.bin = bin_dir
         self.log = root / "fake-remote.log"
         self.log.write_text("")
         self.rules_path = root / "fake-remote-rules.json"
         self._rules: list[dict] = []
         self._save()
-        for tool in self.TOOLS:
-            path = self.bin / tool
+
+    @classmethod
+    def install_tools(cls, bin_dir: Path) -> None:
+        bin_dir.mkdir()
+        for tool in cls.TOOLS:
+            path = bin_dir / tool
             path.write_text(_FAKE_TOOL.format(python=sys.executable))
             path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
@@ -89,9 +92,18 @@ HANDSHAKE_OK = json.dumps({
 })
 
 
+@pytest.fixture(scope="session")
+def _fake_bin(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    # Created once per session: on macOS the first exec of a new executable is
+    # slow (it is scanned), so per-test copies would dominate the run time.
+    bin_dir = tmp_path_factory.mktemp("fake-remote") / "bin"
+    FakeRemote.install_tools(bin_dir)
+    return bin_dir
+
+
 @pytest.fixture
-def fake_remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeRemote:
-    fake = FakeRemote(tmp_path)
+def fake_remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _fake_bin: Path) -> FakeRemote:
+    fake = FakeRemote(_fake_bin, tmp_path)
     monkeypatch.setenv("PATH", str(fake.bin) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("FAKE_REMOTE_LOG", str(fake.log))
     monkeypatch.setenv("FAKE_REMOTE_RULES", str(fake.rules_path))

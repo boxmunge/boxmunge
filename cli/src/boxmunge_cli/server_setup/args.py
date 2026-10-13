@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from dataclasses import dataclass
 
 from boxmunge_cli.server_setup.target import is_ip_address, parse_target
@@ -17,6 +18,11 @@ The release is downloaded and verified on this machine first: cosign must be
 installed locally. Its keyless signature on SHA256SUMS must come from the
 boxmunge release workflow for that tag, and the installer must match
 SHA256SUMS. Nothing is installed if either check fails.
+
+The server's SSH host key is verified too: a server not yet in
+~/.ssh/known_hosts must match --host-key-fingerprint, or be confirmed at the
+terminal after its fingerprint is shown. The verified key is recorded for
+both the current port and the post-setup port.
 """
 
 
@@ -36,6 +42,7 @@ class ServerSetupArgs:
     yes: bool = False
     release: str | None = None
     local_bundle: str | None = None
+    host_key_fingerprint: str | None = None
 
 
 def _port(value: str) -> int:
@@ -46,6 +53,13 @@ def _port(value: str) -> int:
     if not 1 <= port <= 65535:
         raise argparse.ArgumentTypeError(f"must be 1-65535: {value!r}")
     return port
+
+
+def _fingerprint(value: str) -> str:
+    if not re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}", value):
+        raise argparse.ArgumentTypeError(
+            f"expected an OpenSSH SHA256 fingerprint like SHA256:abc...xyz, got {value!r}")
+    return value
 
 
 def add_arguments(p: argparse.ArgumentParser) -> None:
@@ -67,6 +81,9 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                    help="Skip unattended-upgrades")
     p.add_argument("--self-signed-tls", action="store_true",
                    help="Use self-signed TLS instead of Let's Encrypt (testing)")
+    p.add_argument("--host-key-fingerprint", type=_fingerprint, metavar="SHA256:...",
+                   help="Expected SSH host key fingerprint of a server not yet in "
+                        "known_hosts (required with --yes for a new server)")
     p.add_argument("-y", "--yes", action="store_true",
                    help="Do not ask for confirmation (required without a terminal)")
     source = p.add_mutually_exclusive_group()
@@ -89,6 +106,7 @@ def from_namespace(ns: argparse.Namespace) -> ServerSetupArgs:
         no_aide=ns.no_aide, no_crowdsec=ns.no_crowdsec,
         no_auto_updates=ns.no_auto_updates, self_signed_tls=ns.self_signed_tls,
         yes=ns.yes, release=ns.release, local_bundle=ns.local_bundle,
+        host_key_fingerprint=ns.host_key_fingerprint,
     )
 
 

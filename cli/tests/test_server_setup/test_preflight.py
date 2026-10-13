@@ -1,96 +1,85 @@
-"""Tests for server-setup pre-flight checks."""
+"""Tests for server-setup pre-flight checks, against a fake ssh on PATH."""
+
+from pathlib import Path
 
 import pytest
-from unittest.mock import patch, MagicMock
 
 from boxmunge_cli.server_setup.preflight import (
-    check_ssh_access,
-    check_is_debian,
-    check_privileges,
-    check_not_installed,
-    check_freshness,
     PreflightError,
+    check_freshness,
+    check_is_debian,
+    check_not_installed,
+    check_privileges,
+    check_ssh_access,
 )
+from boxmunge_cli.server_setup.remote import Target
 
 
-def _mock_ssh(returncode: int = 0, stdout: str = "", stderr: str = ""):
-    return MagicMock(returncode=returncode, stdout=stdout, stderr=stderr)
+@pytest.fixture
+def target(tmp_path: Path) -> Target:
+    return Target("root", "box.example.com", 22, tmp_path / "known_hosts")
+
+
+@pytest.fixture
+def admin(tmp_path: Path) -> Target:
+    return Target("admin", "box.example.com", 22, tmp_path / "known_hosts")
 
 
 class TestCheckSshAccess:
-    @patch("boxmunge_cli.server_setup.preflight.subprocess.run")
-    def test_success(self, mock_run) -> None:
-        mock_run.return_value = _mock_ssh(0, "ok")
-        check_ssh_access("root", "box.example.com", 22)
+    def test_success(self, target, fake_remote) -> None:
+        fake_remote.respond("ssh", "echo ok", stdout="ok\n")
+        check_ssh_access(target)
 
-    @patch("boxmunge_cli.server_setup.preflight.subprocess.run")
-    def test_failure_raises(self, mock_run) -> None:
-        mock_run.return_value = _mock_ssh(255, "", "Connection refused")
-        with pytest.raises(PreflightError, match="SSH"):
-            check_ssh_access("root", "box.example.com", 22)
+    def test_failure_shows_ssh_error(self, target, fake_remote) -> None:
+        fake_remote.respond("ssh", "echo ok", stderr="Connection refused", rc=255)
+        with pytest.raises(PreflightError, match="Connection refused"):
+            check_ssh_access(target)
 
 
 class TestCheckIsDebian:
-    @patch("boxmunge_cli.server_setup.preflight.subprocess.run")
-    def test_debian_passes(self, mock_run) -> None:
-        mock_run.return_value = _mock_ssh(0, 'ID=debian\nVERSION_ID="13"\n')
-        check_is_debian("root", "box.example.com", 22)
+    def test_debian_passes(self, target, fake_remote) -> None:
+        fake_remote.respond("ssh", "os-release", stdout='ID=debian\nVERSION_ID="13"\n')
+        check_is_debian(target)
 
-    @patch("boxmunge_cli.server_setup.preflight.subprocess.run")
-    def test_ubuntu_fails(self, mock_run) -> None:
-        mock_run.return_value = _mock_ssh(0, 'ID=ubuntu\nVERSION_ID="24.04"\n')
+    def test_ubuntu_fails(self, target, fake_remote) -> None:
+        fake_remote.respond("ssh", "os-release", stdout='ID=ubuntu\nVERSION_ID="24.04"\n')
         with pytest.raises(PreflightError, match="Debian"):
-            check_is_debian("root", "box.example.com", 22)
+            check_is_debian(target)
 
 
 class TestCheckPrivileges:
-    @patch("boxmunge_cli.server_setup.preflight.subprocess.run")
-    def test_direct_root(self, mock_run) -> None:
-        mock_run.return_value = _mock_ssh(0, "0\n")
-        needs_sudo = check_privileges("root", "box.example.com", 22)
-        assert needs_sudo is False
+    def test_direct_root(self, target, fake_remote) -> None:
+        fake_remote.respond("ssh", "id -u", stdout="0\n")
+        assert check_privileges(target) is False
 
-    @patch("boxmunge_cli.server_setup.preflight.subprocess.run")
-    def test_passwordless_sudo(self, mock_run) -> None:
-        mock_run.side_effect = [
-            _mock_ssh(0, "1000\n"),
-            _mock_ssh(0, "0\n"),
-        ]
-        needs_sudo = check_privileges("admin", "box.example.com", 22)
-        assert needs_sudo is True
+    def test_passwordless_sudo(self, admin, fake_remote) -> None:
+        fake_remote.respond("ssh", "id -u", stdout="1000\n")
+        fake_remote.respond("ssh", "sudo -n id -u", stdout="0\n")
+        assert check_privileges(admin) is True
 
-    @patch("boxmunge_cli.server_setup.preflight.subprocess.run")
-    def test_no_root_no_sudo_fails(self, mock_run) -> None:
-        mock_run.side_effect = [
-            _mock_ssh(0, "1000\n"),
-            _mock_ssh(1, ""),
-        ]
+    def test_no_root_no_sudo_fails(self, admin, fake_remote) -> None:
+        fake_remote.respond("ssh", "id -u", stdout="1000\n")
+        fake_remote.respond("ssh", "sudo -n id -u", rc=1)
         with pytest.raises(PreflightError, match="sudo"):
-            check_privileges("admin", "box.example.com", 22)
+            check_privileges(admin)
 
 
 class TestCheckNotInstalled:
-    @patch("boxmunge_cli.server_setup.preflight.subprocess.run")
-    def test_clean_box_passes(self, mock_run) -> None:
-        mock_run.return_value = _mock_ssh(1, "")
-        check_not_installed("root", "box.example.com", 22, False)
+    def test_clean_box_passes(self, target, fake_remote) -> None:
+        fake_remote.respond("ssh", "test -d /opt/boxmunge", rc=1)
+        check_not_installed(target, False)
 
-    @patch("boxmunge_cli.server_setup.preflight.subprocess.run")
-    def test_installed_fails(self, mock_run) -> None:
-        mock_run.return_value = _mock_ssh(0, "")
+    def test_installed_fails(self, target, fake_remote) -> None:
+        fake_remote.respond("ssh", "test -d /opt/boxmunge", rc=0)
         with pytest.raises(PreflightError, match="already installed"):
-            check_not_installed("root", "box.example.com", 22, False)
+            check_not_installed(target, False)
 
 
 class TestCheckFreshness:
-    @patch("boxmunge_cli.server_setup.preflight.subprocess.run")
-    def test_clean_box_returns_empty(self, mock_run) -> None:
-        mock_run.return_value = _mock_ssh(0, "")
-        warnings = check_freshness("root", "box.example.com", 22, False)
-        assert warnings == []
+    def test_clean_box_returns_empty(self, target, fake_remote) -> None:
+        assert check_freshness(target, False) == []
 
-    @patch("boxmunge_cli.server_setup.preflight.subprocess.run")
-    def test_detects_extra_users(self, mock_run) -> None:
-        mock_run.return_value = _mock_ssh(0, "webadmin\n")
-        warnings = check_freshness("root", "box.example.com", 22, False)
+    def test_detects_extra_users(self, target, fake_remote) -> None:
+        fake_remote.respond("ssh", "/etc/passwd", stdout="webadmin\n")
+        warnings = check_freshness(target, False)
         assert any("user" in w.lower() for w in warnings)
