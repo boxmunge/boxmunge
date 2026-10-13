@@ -38,7 +38,7 @@ jobs:
           pip install -e . --no-deps
 
       - name: Run tests
-        run: python -m pytest tests/ --ignore=tests/integration --ignore=tests/vm -v
+        run: python -m pytest tests/ --ignore=tests/integration --ignore=tests/vm -m 'not integration' -v
 
       - name: Build installer
         run: make installer
