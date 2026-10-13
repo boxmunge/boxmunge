@@ -87,3 +87,31 @@ def test_first_stage_then_promote_has_no_rollback_target(paths, capsys) -> None:
         assert run_promote("myapp", paths) == 0
         assert run_rollback("myapp", paths, yes=True) == 1
     assert "no previous release" in capsys.readouterr().err
+
+
+def test_promote_snapshots_production_data_with_the_production_manifest(paths) -> None:
+    """The snapshot paired with the kept production release must be taken
+    with that release's backup config, not the staged one's (which may
+    differ, or declare no backups at all)."""
+    from tests.bundle_helpers import manifest_text
+
+    taken: list[dict] = []
+
+    def fake_backup(project_name, paths_, _lock_held=False, manifest=None):
+        taken.append(manifest)
+        snap = paths_.project_backups(project_name) / f"{project_name}-p{len(taken)}.tar.gz.age"
+        snap.parent.mkdir(parents=True, exist_ok=True)
+        snap.write_text("snapshot")
+        return 0
+
+    add_project("myapp", paths)
+    place_bundle(paths, timestamp=V1, files={"manifest.yml": manifest_text(backup="postgres")})
+    place_bundle(paths, timestamp=V2, files={"manifest.yml": manifest_text(backup="none")})
+    with _docker(), patch("boxmunge.commands.backup_cmd.run_backup", fake_backup):
+        assert run_deploy("myapp", paths, ref=V1) == 0
+        assert run_stage("myapp", paths, ref=V2) == 0
+        taken.clear()
+        assert run_promote("myapp", paths) == 0
+    assert len(taken) == 1
+    assert taken[0]["backup"]["type"] == "postgres"
+    assert find_rollback_target(paths, "myapp").snapshot == "myapp-p1.tar.gz.age"

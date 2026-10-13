@@ -26,7 +26,7 @@ from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
 from boxmunge.release import (
     ReleaseStateError, has_prestage, install_release, keep_previous_release,
-    live_ref, mark_live, prestage_to_previous,
+    live_ref, mark_live, prestage_ref, prestage_to_previous, prestage_tree,
 )
 from boxmunge.source import (
     SourceError, bundle_ref, consume_bundle, resolve_bundle_source,
@@ -156,7 +156,17 @@ def _promote_staged(
     if dry_run:
         print(f"[DRY RUN] Would deploy the staged release {staged_ref}")
         return 0
-    snapshot_name = take_pre_deploy_snapshot(project_name, paths, manifest, no_snapshot)
+    # Production data is snapshotted with the production release's own
+    # backup config: that snapshot is what rollback pairs with it.
+    snapshot_name = None
+    try:
+        if prestage_ref(paths, project_name) is not None:
+            production = load_manifest(prestage_tree(paths, project_name) / "manifest.yml")
+            snapshot_name = take_pre_deploy_snapshot(project_name, paths, production,
+                                                     no_snapshot)
+    except (ManifestError, ReleaseStateError) as e:
+        print(f"ERROR: Cannot read the kept production release: {e}", file=sys.stderr)
+        return 1
     rc = _start_release(project_name, paths, manifest, staged_ref,
                         snapshot_name, component)
     if rc != 0:
