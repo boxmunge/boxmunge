@@ -228,9 +228,14 @@ def compose_config(
     The fully resolved model Compose will run: variables interpolated from
     the project's `.env` and the environment, `extends`/`include` merged,
     and paths made absolute. Client-side only; needs no daemon.
+
+    Service env files are not read (``--no-env-resolution``): validation runs
+    on bundles where on-box files such as secrets.env are absent, and never
+    needs their values. Their paths still appear in the model, so env_file
+    confinement is still checked.
     """
     cmd = compose_command(project_name, compose_files)
-    cmd.extend(["config", "--format", "json"])
+    cmd.extend(["config", "--format", "json", "--no-env-resolution"])
     result = _run(cmd, cwd=project_dir, capture=True)
     return result.stdout
 

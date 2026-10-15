@@ -86,3 +86,38 @@ def test_include_outside_project_rejected_before_resolution(tmp_path: Path) -> N
     (paths.projects / "other" / "inc.yml").write_text("services: {}\n")
     with pytest.raises(ComposeSecurityError, match="outside the project"):
         _validate(paths, compose)
+
+
+def test_on_box_env_file_absent_from_bundle_is_not_needed(tmp_path: Path) -> None:
+    """A bundle's compose may name secrets.env, which only exists on the box.
+
+    Deploy validates the bundle in an extraction directory where that file is
+    absent; resolution must not try to read service env files (regression:
+    every such project's deploy was refused with "env file not found").
+    """
+    paths, compose = _project(tmp_path, {
+        "compose.yml": {"services": {"web": {
+            "image": "nginx", "env_file": ["project.env", "secrets.env"],
+        }}},
+        "project.env": "MODE=prod\n",
+    })
+    assert not (compose.parent / "secrets.env").exists()
+    _validate(paths, compose)
+
+
+def test_env_file_outside_project_still_refused_without_resolution(tmp_path: Path) -> None:
+    paths, compose = _project(tmp_path, {
+        "compose.yml": {"services": {"web": {
+            "image": "nginx", "env_file": ["../../elsewhere.env"],
+        }}},
+    })
+    with pytest.raises(ComposeSecurityError, match="env_file"):
+        _validate(paths, compose)
+
+
+def test_env_file_placeholder_is_removed_after_validation(tmp_path: Path) -> None:
+    paths, compose = _project(tmp_path, {
+        "compose.yml": {"services": {"web": {"image": "nginx", "env_file": ["secrets.env"]}}},
+    })
+    _validate(paths, compose)
+    assert not (compose.parent / "secrets.env").exists()
