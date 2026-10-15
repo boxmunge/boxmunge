@@ -92,3 +92,4 @@ lock:
 	pip-compile --generate-hashes --allow-unsafe -o requirements-build.txt requirements-build.in
 	pip-compile --generate-hashes -o cli/requirements.txt cli/pyproject.toml
 	pip-compile --generate-hashes --strip-extras --allow-unsafe -o cli/requirements-publish.txt cli/requirements-publish.in
+	pip-compile --generate-hashes --strip-extras --allow-unsafe -o services/version-check/requirements.txt services/version-check/requirements.in

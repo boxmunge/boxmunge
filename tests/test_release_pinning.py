@@ -26,6 +26,7 @@ REQUIREMENTS_FILES = [
     REPO / "requirements-build.txt",
     REPO / "cli" / "requirements.txt",
     REPO / "cli" / "requirements-publish.txt",
+    REPO / "services" / "version-check" / "requirements.txt",
 ]
 
 HASH_LINE_RE = re.compile(r"--hash=sha256:[0-9a-f]{64}")

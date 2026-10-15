@@ -70,6 +70,20 @@ jobs:
           /tmp/wheel-smoke/bin/pip install --no-deps dist/*.whl
           /tmp/wheel-smoke/bin/boxmunge --version
 
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.13'
+      - name: Install pinned service and test dependencies
+        run: |
+          pip install --require-hashes -r services/version-check/requirements.txt
+          pip install --require-hashes -r requirements-dev.txt
+      - name: Version-check service tests
+        run: cd services/version-check && python -m pytest tests -q
+
   integration:
     runs-on: ubuntu-latest
     steps:
