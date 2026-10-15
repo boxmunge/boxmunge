@@ -27,3 +27,23 @@ def test_compose_config_skips_service_env_file_resolution(tmp_path: Path) -> Non
     with patch.object(docker, "_run", side_effect=fake_run):
         _REAL_COMPOSE_CONFIG(tmp_path, project_name="myapp")
     assert seen and "--no-env-resolution" in seen[0]
+
+
+def test_missing_env_file_exists_only_during_resolution(tmp_path: Path) -> None:
+    from boxmunge import compose_resolve
+
+    (tmp_path / "compose.yml").write_text(
+        "services:\n  web:\n    image: nginx\n    env_file: [project.env, secrets.env]\n"
+    )
+    (tmp_path / "project.env").write_text("MODE=prod\n")
+    during: list[bool] = []
+
+    def fake_config(project_dir, compose_files=None, *, project_name):
+        during.append((project_dir / "secrets.env").exists())
+        return "{}"
+
+    with patch.object(compose_resolve.docker, "compose_config", side_effect=fake_config):
+        compose_resolve.resolve_compose_config(tmp_path / "compose.yml", "myapp")
+    assert during == [True]
+    assert not (tmp_path / "secrets.env").exists()
+    assert (tmp_path / "project.env").read_text() == "MODE=prod\n"

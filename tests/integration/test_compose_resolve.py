@@ -113,3 +113,11 @@ def test_env_file_outside_project_still_refused_without_resolution(tmp_path: Pat
     })
     with pytest.raises(ComposeSecurityError, match="env_file"):
         _validate(paths, compose)
+
+
+def test_env_file_placeholder_is_removed_after_validation(tmp_path: Path) -> None:
+    paths, compose = _project(tmp_path, {
+        "compose.yml": {"services": {"web": {"image": "nginx", "env_file": ["secrets.env"]}}},
+    })
+    _validate(paths, compose)
+    assert not (compose.parent / "secrets.env").exists()

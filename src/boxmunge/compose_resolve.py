@@ -17,6 +17,8 @@ include and extends file they lead to.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -30,12 +32,52 @@ class ComposeResolveError(Exception):
     """Raised when a compose file cannot be resolved by Docker Compose."""
 
 
+@contextmanager
+def _missing_env_files_present(compose_path: Path) -> Iterator[None]:
+    """Make absent in-project service env files exist while Compose resolves.
+
+    A bundle is validated in an extraction directory, where on-box files such
+    as secrets.env do not exist, and some Compose versions refuse to resolve
+    a model whose env_file is missing, even with --no-env-resolution. Each
+    missing env file that stays inside the compose file's directory is
+    created empty for the duration of the call and removed afterwards.
+    Validation never reads their values. A placeholder that somehow
+    survived could not reach a live project: installing a release that
+    carries secrets.env is refused.
+    """
+    created: list[Path] = []
+    base = compose_path.parent
+    try:
+        doc = yaml.safe_load(compose_path.read_text())
+    except (OSError, yaml.YAMLError):
+        doc = None  # Compose reports the real problem when it resolves.
+    services = doc.get("services") if isinstance(doc, dict) else None
+    try:
+        for svc in (services.values() if isinstance(services, dict) else []):
+            if not isinstance(svc, dict):
+                continue
+            for ref in _env_file_paths(svc.get("env_file")):
+                if (not isinstance(ref, str) or not ref or has_env_substitution(ref)
+                        or outside_roots(ref, base, (base,))):
+                    continue  # the reference walk reports these
+                target = Path(host_path_forms(ref, base)[0])
+                if not target.exists() and not target.is_symlink():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.touch()
+                    created.append(target)
+        yield
+    finally:
+        for path in created:
+            path.unlink(missing_ok=True)
+
+
 def resolve_compose_config(compose_path: Path, project_name: str) -> dict[str, Any]:
     """Return the fully resolved compose model for one compose file."""
     try:
-        out = docker.compose_config(
-            compose_path.parent, [compose_path.name], project_name=project_name,
-        )
+        with _missing_env_files_present(compose_path):
+            out = docker.compose_config(
+                compose_path.parent, [compose_path.name], project_name=project_name,
+            )
     except docker.DockerError as e:
         raise ComposeResolveError(
             f"`docker compose config` could not resolve {compose_path.name}: {e}"
