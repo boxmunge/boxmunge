@@ -201,9 +201,17 @@ class TestShimStages:
         import re
         shim = Path(__file__).resolve().parents[3] / "scripts" / "boxmunge-upgrade"
         text = shim.read_text()
+        # Literal stages passed straight to report_failure.
         stages = set(re.findall(r'report_failure "\$\w+" "\$\w+" "(\w+)"', text))
+        # Defaults written as "${N:-stage}" inside helper functions.
+        stages |= set(re.findall(r'report_failure [^\n]*"\$\{\d:-(\w+)\}"', text))
+        # preflight_fail <v> <from> <reason> <message> [stage]: the optional
+        # trailing bare word after the quoted message, possibly on a
+        # continuation line.
+        stages |= set(re.findall(
+            r'preflight_fail "[^"]*" "[^"]*" "[^"]*" \\?\s*"[^"]*" (\w+)\s*$', text, re.M))
         stages |= {"apply", "health_immediate", "health_probation"}  # passed via $stage
-        assert "system_upgrade" in stages
+        assert {"system_upgrade", "preflight"} <= stages, stages
         from app import VALID_STAGES
         assert stages <= VALID_STAGES, stages - VALID_STAGES
         for i, stage in enumerate(sorted(stages)):

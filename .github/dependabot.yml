@@ -20,6 +20,16 @@ updates:
       - dependencies
       - python
 
+  # Python deps of the public version-check service
+  - package-ecosystem: pip
+    directory: "/services/version-check"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - python
+
   # Python deps in the CLI package
   - package-ecosystem: pip
     directory: "/cli"
