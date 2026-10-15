@@ -9,7 +9,7 @@ import pytest
 
 from boxmunge.fileutil import atomic_write_bytes, atomic_write_text
 from boxmunge.fileutil import open_shared_lockfile, project_lock, LockError
-from boxmunge.fileutil import _mkdir_p_deploy
+from boxmunge.fileutil import mkdir_p_deploy
 from boxmunge.paths import BoxPaths
 
 
@@ -74,7 +74,7 @@ class TestMkdirPDeploy:
 
     def test_creates_full_chain(self, tmp_path: Path) -> None:
         target = tmp_path / "a" / "b" / "c"
-        _mkdir_p_deploy(target)
+        mkdir_p_deploy(target)
         assert target.is_dir()
         assert (tmp_path / "a").is_dir()
         assert (tmp_path / "a" / "b").is_dir()
@@ -88,7 +88,7 @@ class TestMkdirPDeploy:
             "boxmunge.fileutil._chown_deploy",
             side_effect=lambda p: chowned.append(p),
         ):
-            _mkdir_p_deploy(existing / "b" / "c")
+            mkdir_p_deploy(existing / "b" / "c")
         assert str(existing) not in chowned, (
             "pre-existing dir must not be chowned"
         )
@@ -103,7 +103,7 @@ class TestMkdirPDeploy:
             "boxmunge.fileutil._chown_deploy",
             side_effect=lambda p: chowned.append(p),
         ):
-            _mkdir_p_deploy(target)
+            mkdir_p_deploy(target)
         assert chowned == [], "nothing was created, nothing to chown"
 
     def test_race_loser_does_not_chown(self, tmp_path: Path) -> None:
@@ -125,7 +125,7 @@ class TestMkdirPDeploy:
             "boxmunge.fileutil._chown_deploy",
             side_effect=lambda p: chowned.append(p),
         ):
-            _mkdir_p_deploy(target)
+            mkdir_p_deploy(target)
         assert target.is_dir()
         assert chowned == []
 

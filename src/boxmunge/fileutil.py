@@ -72,7 +72,7 @@ def _chown_deploy(path: str) -> None:
         )
 
 
-def _mkdir_p_deploy(path: Path) -> None:
+def mkdir_p_deploy(path: Path) -> None:
     """mkdir -p, then chown each newly-created directory to deploy.
 
     Plain ``Path.mkdir(parents=True, exist_ok=True)`` running as root leaves
@@ -107,6 +107,24 @@ def _mkdir_p_deploy(path: Path) -> None:
         _chown_deploy(str(p))
 
 
+def chown_tree_deploy(path: Path) -> None:
+    """Best-effort chown of ``path`` and everything under it to deploy.
+
+    For trees a root-run path (upgrade) copies that the deploy shell must
+    later replace. Links are re-owned, never followed. Same best-effort
+    rules as ``_chown_deploy``.
+    """
+    if os.getuid() != 0:
+        return
+    _chown_deploy(str(path))
+    for root, dirs, files in os.walk(path):
+        for name in dirs + files:
+            target = os.path.join(root, name)
+            if os.path.islink(target):
+                continue
+            _chown_deploy(target)
+
+
 def open_shared_lockfile(path: Path) -> int:
     """Open (or create) a lock file usable by both root and the deploy user.
 
@@ -125,7 +143,7 @@ def open_shared_lockfile(path: Path) -> int:
 
     Returns the fd. Caller is responsible for fcntl.flock and os.close.
     """
-    _mkdir_p_deploy(path.parent)
+    mkdir_p_deploy(path.parent)
     fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o664)
     try:
         os.chmod(str(path), 0o664)
@@ -143,7 +161,7 @@ def atomic_write_text(path: Path, content: str, mode: int | None = None) -> None
     If mode is provided, the temp file is chmod'd before rename so
     the final file is never visible with wrong permissions.
     """
-    _mkdir_p_deploy(path.parent)
+    mkdir_p_deploy(path.parent)
 
     fd, tmp_path = tempfile.mkstemp(
         dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp"
@@ -174,7 +192,7 @@ def atomic_write_bytes(path: Path, content: bytes, mode: int | None = None) -> N
     chmod'd before rename so the final file is never visible with wrong
     permissions.
     """
-    _mkdir_p_deploy(path.parent)
+    mkdir_p_deploy(path.parent)
 
     fd, tmp_path = tempfile.mkstemp(
         dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp"

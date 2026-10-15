@@ -35,7 +35,7 @@ from boxmunge.commands.restore import run_restore
 from boxmunge.commands.test_restore_cmd import run_test_restore
 from boxmunge.paths import BoxPaths
 
-pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("real_system_container")]
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("system_container")]
 
 # The system image's own base, so it is already present once the image built.
 _ALPINE = "alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d"

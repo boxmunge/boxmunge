@@ -29,7 +29,8 @@ from boxmunge.bind_mounts import BindMountError, bind_mounted_dirs
 from boxmunge.bundle import (
     BOX_OWNED_ENTRIES, BOXMUNGE_ENTRIES, BundleError, is_placeholder,
 )
-from boxmunge.fileutil import atomic_write_text
+from boxmunge.compose_mounts import PROD_SMOKE_SOURCE
+from boxmunge.fileutil import atomic_write_text, chown_tree_deploy, mkdir_p_deploy
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -408,6 +409,40 @@ def prestage_to_previous(paths: BoxPaths, project_name: str,
     atomic_write_text(_previous_meta(paths, project_name),
                       json.dumps(meta, indent=2) + "\n", mode=0o644)
     discard_prestage(paths, project_name)
+
+
+def production_release_root(paths: BoxPaths, project_name: str) -> Path:
+    """Where production's release code is: the kept release during a stage."""
+    if has_prestage(paths, project_name):
+        return prestage_tree(paths, project_name)
+    return paths.project_dir(project_name)
+
+
+# --- production smoke scripts ---------------------------------------------
+# Production containers mount a copy of their release's boxmunge-scripts/,
+# not the project dir's, which `stage` overwrites with the staged release's
+# scripts while production keeps running. The copy changes only when
+# production's overlay is regenerated.
+
+def sync_live_scripts(paths: BoxPaths, project_name: str, release_root: Path) -> None:
+    """Make production's smoke-script copy mirror ``release_root``'s scripts.
+
+    Refreshed in place so a running container's bind mount (resolved to the
+    directory inode at start) keeps seeing it. A release without
+    boxmunge-scripts/ leaves the copy empty.
+    """
+    dest = paths.project_dir(project_name) / PROD_SMOKE_SOURCE
+    src = release_root / "boxmunge-scripts"
+    if dest.is_symlink() or (dest.exists() and not dest.is_dir()):
+        raise ReleaseStateError(f"{dest} is not a directory")
+    mkdir_p_deploy(dest)
+    dest.chmod(0o755)
+    if src.is_dir() and not src.is_symlink():
+        _refresh_dir_in_place(src, dest)
+    else:
+        for child in dest.iterdir():
+            _remove(child)
+    chown_tree_deploy(dest)
 
 
 def restore_prestage(paths: BoxPaths, project_name: str) -> None:

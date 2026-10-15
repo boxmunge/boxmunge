@@ -147,7 +147,7 @@ class TestPromoteComponentTagging:
         observed: list[str] = []
 
         def fake_prepare_compose_override(
-            paths, manifest, component: str = "deploy",
+            paths, manifest, component: str = "deploy", release_root=None,
         ) -> None:
             observed.append(component)
 

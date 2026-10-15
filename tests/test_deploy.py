@@ -61,6 +61,7 @@ class TestComposeOverrideEmitsOffWarning:
         paths.project_compose_override = lambda name: proj / "compose.boxmunge.yml"
         paths.project_compose = lambda name: proj / "compose.yml"
         paths.project_dir = lambda name: proj
+        paths.project_releases = lambda name: proj / ".releases"
         paths.project_secrets = lambda name: proj / "secrets.env"
         # get_logger reads paths.logs; the deploy warning path logs, and
         # a pristine logger (no warm cache) triggers a cold build.
@@ -92,6 +93,7 @@ class TestComposeOverrideEmitsOffWarning:
         paths.project_compose_override = lambda name: proj / "compose.boxmunge.yml"
         paths.project_compose = lambda name: proj / "compose.yml"
         paths.project_dir = lambda name: proj
+        paths.project_releases = lambda name: proj / ".releases"
         paths.project_secrets = lambda name: proj / "secrets.env"
         # get_logger reads paths.logs; the deploy warning path logs, and
         # a pristine logger (no warm cache) triggers a cold build.
@@ -119,6 +121,7 @@ class TestComposeOverrideEmitsOffWarning:
         paths.project_compose_override = lambda name: proj / "compose.boxmunge.yml"
         paths.project_compose = lambda name: proj / "compose.yml"
         paths.project_dir = lambda name: proj
+        paths.project_releases = lambda name: proj / ".releases"
         paths.project_secrets = lambda name: proj / "secrets.env"
         # get_logger reads paths.logs; the deploy warning path logs, and
         # a pristine logger (no warm cache) triggers a cold build.
