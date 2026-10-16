@@ -72,8 +72,8 @@ def take_safety_snapshot(
             f"pre-restore safety snapshot failed: {e} (fix the service, or "
             f"use --no-safety-snapshot to restore without one)"
         ) from e
-    out = paths.project_backups(project_name) / backup_filename(project_name, BackupKind.PRERESTORE)
     try:
+        out = paths.project_backups(project_name) / backup_filename(project_name, BackupKind.PRERESTORE)
         encrypt_file(raw, out, paths)
     except (BackupError, FileNotFoundError) as e:
         raise RestoreError(f"pre-restore safety snapshot could not be encrypted: {e}") from e

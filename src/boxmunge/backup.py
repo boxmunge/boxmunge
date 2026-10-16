@@ -2,7 +2,9 @@
 """Backup encryption, decryption, and pruning.
 
 Uses the `age` CLI for encryption with an identity file (age-keygen key pair).
-All backup archives are encrypted before writing to disk.
+Every stored archive is encrypted. The dump it is made from is not: it sits
+in the project's backups dir as a 0600 ``.dump-*`` file until encryption
+finishes, and is removed whether or not encryption succeeds.
 
 The backup key at /opt/boxmunge/config/backup.key must be an age identity file
 (contains AGE-SECRET-KEY-1...). On first run after upgrade from passphrase mode,
@@ -26,7 +28,7 @@ from boxmunge.system_container import (
     SystemContainerError, SystemTools, connect, platform_owner,
 )
 
-_BACKUP_CMD_TIMEOUT = 600  # 10 minutes for large database dumps
+BACKUP_CMD_TIMEOUT = 600  # 10 minutes for large database dumps
 
 
 class BackupError(Exception):
@@ -103,7 +105,7 @@ def _read_recipient(tools: SystemTools) -> str:
         if line.startswith("# public key: "):
             return line.removeprefix("# public key: ").strip()
     # If no comment header, derive it via age-keygen
-    result = tools.run(["age-keygen", "-y", tools.path(key_path)], timeout=_BACKUP_CMD_TIMEOUT)
+    result = tools.run(["age-keygen", "-y", tools.path(key_path)], timeout=BACKUP_CMD_TIMEOUT)
     return result.stdout.strip()
 
 
@@ -186,7 +188,7 @@ def encrypt_file(input_path: Path, output_path: Path, paths: BoxPaths) -> None:
                 "age", "--encrypt", "-r", recipient,
                 "-o", tools.path(tmp_path),
                 tools.path(input_path),
-            ], timeout=_BACKUP_CMD_TIMEOUT)
+            ], timeout=BACKUP_CMD_TIMEOUT)
             # age wrote the temp from another container; sync it before it
             # replaces anything, or a power cut could leave an empty backup.
             durable_rename(tmp_path, output_path)
@@ -206,7 +208,7 @@ def decrypt_file(input_path: Path, output_path: Path, paths: BoxPaths) -> None:
             "age", "--decrypt", "-i", tools.path(key_path),
             "-o", tools.path(output_path),
             tools.path(input_path),
-        ], timeout=_BACKUP_CMD_TIMEOUT)
+        ], timeout=BACKUP_CMD_TIMEOUT)
 
 
 @contextmanager

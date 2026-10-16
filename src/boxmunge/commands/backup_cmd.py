@@ -10,7 +10,7 @@ from pathlib import Path
 
 import boxmunge.backup as _backup
 from boxmunge.backup import (
-    SNAPSHOT_RETENTION, BackupError, BackupKind, backup_filename, prune_backups,
+    BACKUP_CMD_TIMEOUT, SNAPSHOT_RETENTION, BackupError, BackupKind, backup_filename, prune_backups,
     resolve_backup_service,
 )
 from boxmunge.config import load_config, ConfigError
@@ -43,7 +43,12 @@ class BackupAttemptResult(enum.Enum):
 def _execute_dump(
     paths: BoxPaths, project_name: str, dump_command: str, service: str,
 ) -> Path:
-    """Run the dump command inside the project container and capture output."""
+    """Run the dump command inside the project container and capture output.
+
+    The output is plaintext on disk (a 0600 dot-file in the project's backups
+    dir) until it is encrypted. This function removes it on every failure;
+    once it returns the path, removing it is the caller's job.
+    """
     project_dir = paths.project_dir(project_name)
     backups_dir = paths.project_backups(project_name)
     if not backups_dir.exists():
@@ -55,29 +60,44 @@ def _execute_dump(
     )
     os.close(fd)
     raw_path = Path(raw_path_str)
-    # The dump is later read by age in the system container (the deploy uid).
-    # Align ownership so a root-invoked backup's 0600 dump is readable to it.
-    _backup.chown_for_system_container(raw_path, paths)
-
-    cmd = [
-        "docker", "compose",
-        "-f", "compose.yml",
-        "-p", project_name,
-        "exec", "-T", service,
-        "sh", "-c", dump_command,
-    ]
-
-    with open(raw_path, "wb") as outf:
-        result = subprocess.run(
-            cmd, cwd=project_dir,
-            stdout=outf, stderr=subprocess.PIPE, text=False,
-        )
-    if result.returncode != 0:
-        stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
-        raw_path.unlink(missing_ok=True)
-        raise BackupError(f"Dump command failed: {stderr}")
-
-    return raw_path
+    handed_off = False
+    try:
+        # The dump is later read by age in the system container (the deploy
+        # uid). Align ownership so a root-invoked backup's 0600 dump is
+        # readable to it.
+        _backup.chown_for_system_container(raw_path, paths)
+        cmd = [
+            "docker", "compose",
+            "-f", "compose.yml",
+            "-p", project_name,
+            "exec", "-T", service,
+            "sh", "-c", dump_command,
+        ]
+        with open(raw_path, "wb") as outf:
+            try:
+                result = subprocess.run(
+                    cmd, cwd=project_dir,
+                    stdout=outf, stderr=subprocess.PIPE, text=False,
+                    timeout=BACKUP_CMD_TIMEOUT,
+                )
+            except subprocess.TimeoutExpired as e:
+                # The project lock is held for the whole dump; without a bound
+                # a stuck database would also stall every later backup-all run.
+                raise BackupError(
+                    f"Dump command timed out after {BACKUP_CMD_TIMEOUT}s "
+                    f"(service {service!r}). Check that the service is "
+                    "responsive and the dump_command finishes on its own."
+                ) from e
+            except OSError as e:
+                raise BackupError(f"Dump command could not run: {e}") from e
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
+            raise BackupError(f"Dump command failed: {stderr}")
+        handed_off = True
+        return raw_path
+    finally:
+        if not handed_off:
+            raw_path.unlink(missing_ok=True)
 
 
 def list_snapshots(paths: BoxPaths, project_name: str) -> list[Path]:
@@ -207,14 +227,10 @@ def _run_backup_inner(
         return 1
 
     fname = backup_filename(project_name, kind)
-    encrypted_path = paths.project_backups(project_name) / fname
-    encrypted_path.parent.mkdir(parents=True, exist_ok=True)
-
     try:
-        _backup.encrypt_file(raw_path, encrypted_path, paths)
+        _backup.encrypt_file(raw_path, paths.project_backups(project_name) / fname, paths)
     except (BackupError, FileNotFoundError) as e:
         print(f"ERROR: Encryption failed: {e}", file=sys.stderr)
-        raw_path.unlink(missing_ok=True)
         log_error("backup", f"Backup encrypt failed: {e}", paths, project=project_name)
         return 1
     finally:

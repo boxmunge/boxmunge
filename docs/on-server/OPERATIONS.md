@@ -359,7 +359,8 @@ The operational log records every boxmunge action with timestamp, level, project
 
 ## Backups
 
-Back up a single project (dump, compress, encrypt, store locally):
+Back up a single project (dump, encrypt, store locally). The dump command has 10 minutes;
+past that the backup fails and the project lock is released:
 
 ```
 backup myapp
