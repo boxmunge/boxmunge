@@ -289,12 +289,15 @@ Recurring operations run via systemd timers:
 | `boxmunge-health.timer` | Every 5 minutes | `check-all` |
 | `boxmunge-backup.timer` | Daily at 02:00 | `backup-all` |
 | `boxmunge-backup-sync.timer` | Daily at 03:00 | `backup-sync` |
+| `boxmunge-cve-scan.timer` | Daily at 03:00 (up to 30 min jitter) | `security scan` |
+| `boxmunge-container-update.timer` | Daily at 03:00 (up to 60 min jitter) | `container-update` |
+| `boxmunge-auto-update.timer` | Every 6 hours (up to 30 min jitter) | `auto-update` |
 
 All timers use `Persistent=true` so a missed run (e.g., server was rebooted) executes on next start rather than being silently skipped.
 
-Host security patching is handled by unattended-upgrades, configured to install security updates automatically and reboot during a configurable maintenance window (default 04:00).
+Host security patching is handled by unattended-upgrades, configured to install security updates automatically and reboot during a configurable maintenance window (default 04:00). Because an enabled service proves nothing about updates arriving, the `auto-updates` health check and every `auto-update` run look for evidence (a recent successful `apt-get update`, successful apt-daily runs), and `auto-update` sends a Pushover alert when it is missing.
 
-`doctor` verifies all timers are active and enabled as part of its host health check.
+`doctor` and the `timers` health check verify that every timer above is active.
 
 ---
 

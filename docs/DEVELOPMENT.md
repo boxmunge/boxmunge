@@ -109,7 +109,7 @@ command means touching several places, listed below.
 |---|---|---|
 | `/opt/boxmunge/config/` | root:deploy | `boxmunge.yml`, backup key, host secrets, suppressions |
 | `/opt/boxmunge/projects/<p>/` | deploy | manifest, compose files, generated overlay, secrets, backups, data |
-| `/opt/boxmunge/state/` | deploy | registry, locks, health, deploy, staging, scan, KEV, container-update and platform-update state |
+| `/opt/boxmunge/state/` | deploy | registry, locks, health, deploy, staging, scan, KEV, container-update, platform-update and OS-update state, and the unconfigured-alerts log throttle |
 | `/opt/boxmunge/upgrade-state/` | root:deploy | active venv slot, probation, blocklist |
 | `/opt/boxmunge/logs/boxmunge.log` | deploy, group-writable | structured JSON-lines operational log, written by root and deploy |
 | `/opt/boxmunge/caddy/` | root:deploy | Caddyfile and generated `sites/*.conf` |
