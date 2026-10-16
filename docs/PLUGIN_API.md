@@ -118,7 +118,7 @@ Parameter and result schemas use a small JSON Schema subset: `type`, `properties
 | `not_found` | 404 | Unknown action, endpoint, project, job, or snapshot |
 | `forbidden` | 403 | Your grant does not allow this action, or this server does not serve its tier |
 | `approval_required` | 401 | An operate call arrived without an approval (planned flow) |
-| `approval_invalid` | 401 | The approval is missing, expired, reused, or bound to another call |
+| `approval_invalid` | 401 | The approval sent cannot be used: unknown, expired, already used, or bound to another call |
 | `busy` | 409 | The project lock is held by another operation; retry shortly |
 | `conflict` | 409 | The project's state forbids it: not yet deployed, quarantined, paused, staged |
 | `stale_approval` | 409 | The project changed after the operator approved; request a new approval |
@@ -150,6 +150,10 @@ The catalog is the authority on parameters and result fields; this table is the 
 | `jobs.list` | `project`?, `limit`? (1-200, default 50) | `jobs`, newest first |
 | `job.get` | `id` | One job record |
 | `job.events` | `id`, `after`? (default 0) | `events` with `seq` greater than `after` |
+
+`project.health` runs the project's smoke checks inside its containers each time it is called:
+it is an observe action, but not free of side effects, so call it when someone asks rather than
+polling it. `project.get` and `status.get` report the result of the platform's own periodic checks.
 
 ### Jobs
 
