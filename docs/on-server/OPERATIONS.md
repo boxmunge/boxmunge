@@ -217,7 +217,7 @@ spaces are not interpreted. The one value Compose's env-file format cannot carry
 literally is one that ends in an odd number of backslashes or has an odd number of
 backslashes right before a `'`; `set` refuses it (base64-encode it instead).
 Concurrent `set`/`unset` calls on the same scope are serialised, so none is lost.
-This needs Docker Compose 2.24 or newer (older releases mis-read the stored form):
+boxmunge needs Docker Compose 2.35 or newer (older releases cannot run its compose validation):
 `install.sh` refuses to install or upgrade with an older one, and `doctor` reports it.
 Upgrade with `apt-get install --only-upgrade docker-compose-plugin`.
 
