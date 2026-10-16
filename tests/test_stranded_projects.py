@@ -58,7 +58,8 @@ def test_upgrade_restart_skips_stranded_project(paths: BoxPaths, capsys) -> None
     _project(paths, "shop")
     _project(paths, "system")
     with patch("boxmunge.commands.upgrade_steps.compose_up") as up:
-        succeeded, failed, _ = restart_projects(paths)
+        r = restart_projects(paths, refused=())
+        succeeded, failed, _ = r.succeeded, r.failed, r.skipped_locked
     assert succeeded == ["shop"] and failed == []
     assert up.call_args.kwargs["project_name"] == "shop"
     assert "upgrade: system: Invalid project name" in capsys.readouterr().err
@@ -70,6 +71,6 @@ def test_upgrade_regenerate_skips_stranded_project(paths: BoxPaths, capsys) -> N
     _project(paths, "shop")
     _project(paths, "shop-staging")
     with patch("boxmunge.caddy.caddy_config_lock"):
-        processed = regenerate_configs(paths)
+        processed = regenerate_configs(paths).processed
     assert processed == ["shop"]
     assert "upgrade: shop-staging:" in capsys.readouterr().err

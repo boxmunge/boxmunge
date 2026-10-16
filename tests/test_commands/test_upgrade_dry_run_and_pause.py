@@ -75,7 +75,7 @@ class TestPausedProjectsKeepMaintenancePage:
         _pause(paths, "alpha")
         with patch("boxmunge.commands.upgrade_steps.prepare_caddy_config") as caddy, \
              patch("boxmunge.commands.upgrade_steps.prepare_compose_override") as overlay:
-            processed = regenerate_configs(paths)
+            processed = regenerate_configs(paths).processed
         caddy.assert_not_called()
         overlay.assert_not_called()
         assert "alpha" not in processed
@@ -153,7 +153,7 @@ class TestRegenTakesProjectLock:
         fd = os.open(str(lock), os.O_CREAT | os.O_RDWR)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
-            processed = regenerate_configs(paths)
+            processed = regenerate_configs(paths).processed
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)

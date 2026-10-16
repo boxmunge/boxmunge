@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from boxmunge.docker_run import docker_env
 from boxmunge.paths import BoxPaths
 
 CONTAINER_NAME = "boxmunge-system"
@@ -89,6 +90,7 @@ def _inspect(name: str) -> dict[str, Any] | None:
         result = subprocess.run(
             ["docker", "inspect", "--type", "container", name],
             capture_output=True, text=True, check=False, timeout=_INSPECT_TIMEOUT,
+            env=docker_env(),
         )
     except FileNotFoundError as e:
         raise SystemContainerError(f"docker CLI not found; cannot reach {name}.") from e
@@ -196,6 +198,7 @@ def system_exec(
         return subprocess.run(
             ["docker", "exec", name, *cmd],
             capture_output=True, text=True, check=True, timeout=timeout,
+            env=docker_env(),
         )
     except subprocess.TimeoutExpired as e:
         raise SystemContainerError(f"Command timed out after {timeout}s: {' '.join(cmd)}") from e

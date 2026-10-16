@@ -11,6 +11,7 @@ import yaml
 from boxmunge.compose import managed_volume_keys
 from boxmunge.compose_mounts import is_bind_entry, volume_source
 from boxmunge.docker import compose_stop, compose_start
+from boxmunge.docker_run import docker_env
 
 
 class StagingDataError(Exception):
@@ -48,12 +49,13 @@ def _run_in_system_container(cmd: str) -> None:
         ["docker", "exec", "boxmunge-system", "sh", "-c", cmd],
         check=True, capture_output=True, text=True,
         timeout=300,
+        env=docker_env(),
     )
 
 
 def _docker_run(cmd: list[str]) -> None:
     """Run a short-lived Docker container."""
-    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300)
+    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300, env=docker_env())
 
 
 def copy_bind_mounts(

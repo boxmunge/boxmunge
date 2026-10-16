@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from boxmunge.config import load_config, ConfigError
+from boxmunge.docker_run import docker_env
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.state import StateError, read_state
@@ -128,6 +129,7 @@ def load_host_info(paths: BoxPaths) -> HostInfo:
         result = subprocess.run(
             ["docker", "compose", "ps", "-q", "caddy"],
             cwd=paths.caddy, capture_output=True, text=True, check=False,
+            env=docker_env(),
         )
         caddy_running = bool(result.stdout.strip())
     except (FileNotFoundError, OSError):
@@ -163,6 +165,7 @@ def load_project_services(paths: BoxPaths, project: str) -> list[ServiceInfo]:
                 ["docker", "inspect", "--format", "{{.State.Health.Status}}",
                  f"{project}-{svc_name}-1"],
                 capture_output=True, text=True, check=False,
+                env=docker_env(),
             )
             status = r.stdout.strip()
             if status and status != "<no value>":

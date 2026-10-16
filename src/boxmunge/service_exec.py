@@ -24,6 +24,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from boxmunge.docker_run import docker_env
+
 # $0 is this script, $1 the pid file name, $2 the command. No output on
 # stdout, which carries the dump.
 _WRAPPER = r"""
@@ -111,7 +113,7 @@ def _stop(project_dir: Path, project_name: str, service: str,
     cmd = _exec(project_name, service, ["sh", "-c", _STOP_SCRIPT, "boxmunge-stop", pid_name])
     try:
         result = subprocess.run(cmd, cwd=project_dir, capture_output=True,
-                                text=True, timeout=_STOP_TIMEOUT)
+                                text=True, timeout=_STOP_TIMEOUT, env=docker_env())
     except (subprocess.TimeoutExpired, OSError) as e:
         return None, str(e)
     group = result.stdout.strip()
@@ -133,7 +135,8 @@ def run_in_service(
     pid_name = f"boxmunge-exec-{secrets.token_hex(16)}.pid"
     cmd = _exec(project_name, service, ["sh", "-c", _WRAPPER, _WRAPPER, pid_name, command])
     try:
-        return subprocess.run(cmd, cwd=project_dir, timeout=timeout, **run_kwargs)
+        return subprocess.run(cmd, cwd=project_dir, timeout=timeout, env=docker_env(),
+                              **run_kwargs)
     except subprocess.TimeoutExpired as e:
         raise ServiceCommandTimeout(
             timeout, *_stop(project_dir, project_name, service, pid_name)) from e

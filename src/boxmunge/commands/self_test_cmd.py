@@ -14,6 +14,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from boxmunge.docker_run import docker_env
 from boxmunge.log import log_operation, log_error
 from boxmunge.paths import BoxPaths
 
@@ -103,6 +104,7 @@ def _step_deploy(
             ["docker", "compose", "-f", "compose.yml",
              "-p", CANARY_PROJECT, "up", "-d", "--build"],
             cwd=project_dir, check=True, capture_output=True, text=True, timeout=120,
+            env=docker_env(),
         )
         if not _wait_for_health(CANARY_PORT):
             report.steps.append(SelfTestStep("deploy", False, "Health check timeout"))
@@ -161,6 +163,7 @@ def _step_wipe(report: SelfTestReport, project_dir: Path) -> bool:
                    " CREATE TABLE canary_data"
                    " (id SERIAL PRIMARY KEY, value TEXT);"],
             cwd=project_dir, check=True, capture_output=True, timeout=30,
+            env=docker_env(),
         )
         data = _http_get_json(f"http://localhost:{CANARY_PORT}/data")
         if data["count"] != 0:
@@ -209,6 +212,7 @@ def _teardown_canary(project_dir: Path) -> None:
             ["docker", "compose", "-f", "compose.yml",
              "-p", CANARY_PROJECT, "down", "-v", "--remove-orphans"],
             cwd=project_dir, check=False, capture_output=True, timeout=60,
+            env=docker_env(),
         )
         shutil.rmtree(project_dir, ignore_errors=True)
 

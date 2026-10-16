@@ -639,6 +639,24 @@ List the project allowlist (registered project names):
 project-list
 ```
 
+### Private registry credentials
+
+boxmunge runs Compose without `HOME` or `DOCKER_CONFIG` (see TRUST_MODEL.md, "Compose interpolation"). So the docker CLI reads the registry credentials of the Unix user running the command, found through the password database. What the caller's environment says does not matter:
+
+| Who runs Compose | Credentials used |
+|---|---|
+| deploy (`deploy`, `stage`, `resume`, `restore`, ...) | `/home/deploy/.docker/config.json` |
+| root (the container-update and other timers, upgrades, `sudo boxmunge ...`) | `/root/.docker/config.json` |
+
+A project that pulls from a private registry needs a login for both users. Run these as `supervisor`:
+
+```bash
+sudo -u deploy -H docker login registry.example.com
+sudo -H docker login registry.example.com
+```
+
+A login missing for one user fails noisily ("pull access denied") on that user's runs. Nothing falls back to the other user's file. The two are kept separate on purpose: a single directory shared by both would have to be writable by deploy (buildx keeps state there), and root would then run plugins and credential helpers that deploy could replace.
+
 ---
 
 ## Troubleshooting
@@ -790,7 +808,7 @@ If deeper Caddy investigation is needed (container logs, config file inspection)
 
 This state means the smoke test exited with code 2 -- a critical failure that caused boxmunge to stop the project containers. The project will not restart automatically.
 
-The stop is sticky. Later 5-minute health checks do not run smoke against the stopped project, do not change its recorded failure reason, and do not send more alerts. The daily `container-update` skips it rather than recreating it. `check-all` reports it as `CRITICAL (stopped by the health monitor ...)`, and `health` lists it under `lifecycle` as `monitor-stopped`. The stop stays in place until you run `recover`, or until a later deploy, rollback, or resume starts the project successfully.
+The stop is sticky. Later 5-minute health checks do not run smoke against the stopped project, do not change its recorded failure reason, and do not send more alerts. The daily `container-update` skips it rather than recreating it, and a platform upgrade does not restart it either (the upgrade output lists it under `Not restarted (stopped by the health monitor ...)`). `check-all` reports it as `CRITICAL (stopped by the health monitor ...)`, and `health` lists it under `lifecycle` as `monitor-stopped`. The stop stays in place until you run `recover`, or until a later deploy, rollback, or resume starts the project successfully.
 
 Check the dashboard to confirm the state:
 
@@ -1064,6 +1082,17 @@ How an upgrade is applied and undone:
    site and compose overlay, reloads Caddy and restarts projects. A failure in any of these
    (a project whose configs cannot be regenerated, a Caddy reload, a project that does not
    restart) fails the upgrade and triggers a rollback.
+   A project whose `compose.yml` the new release's compose validator refuses (a file that
+   predates a validator fix) does not fail the upgrade. Rolling back would only bring back
+   the validator that let the file in. The upgrade gives the project no new overlay or Caddy
+   site, and **does not restart or rebuild it**: the upgrade leaves its running containers as
+   they were. The upgrade output prints `REFUSED: <project>: <reason>`, the refusal is logged
+   as an error (`log <project>`), and one priority-1 Pushover alert lists every refused
+   project. Fix the compose file and redeploy. This covers the upgrade only. Other root-run
+   operations that recreate containers (the daily container-update, for one) do not consult
+   the upgrade's refusal.
+   Paused, quarantined and health-monitor-stopped projects are not restarted either; each
+   stays offline until `resume`, `security resume` or `recover` brings it back.
 4. A health check runs, then a 6-hour probation. A critical health result during probation
    rolls back.
 
@@ -1083,8 +1112,12 @@ release's on every upgrade, and put back to the previous release's on a rollback
 always describe the code that is running.
 
 `upgrade --dry-run` renders every project's migrated manifest and configs in memory and
-reports what the upgrade would do. It writes nothing; the upgrade shim runs it as a
-pre-flight check against the new release before touching anything.
+reports what the upgrade would do. That includes each project the new release's compose
+validator would refuse, as `<project>: would be refused by this release's compose validator
+... : <reason>`. A refusal does not fail the dry run, because it does not fail the upgrade.
+The dry run writes nothing and sends no alert. The upgrade shim runs it as a pre-flight check
+against the new release before touching anything, so `upgrade --dry-run` run by hand
+reports against the installed release.
 
 ## Querying Logs
 
