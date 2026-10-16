@@ -13,6 +13,7 @@ Built on boxmunge.release, whose tree-copy and record helpers it shares.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -111,24 +112,47 @@ def prestage_snapshot(paths: BoxPaths, project_name: str) -> str | None:
     return snapshot or None
 
 
+def _move(src: Path, dest: Path) -> None:
+    os.rename(src, dest)
+
+
 def discard_prestage(paths: BoxPaths, project_name: str) -> None:
+    """Drop the kept release. Renamed out of the way first, so a crash
+    part-way never leaves a kept release without its metadata."""
     _ensure_record(paths.project_dir(project_name))
-    _remove(_prestage(paths, project_name))
+    doomed = paths.project_releases(project_name) / "prestage.discarded"
+    _remove(doomed)
+    if _prestage(paths, project_name).exists():
+        _move(_prestage(paths, project_name), doomed)
+    _remove(doomed)
 
 
 def prestage_to_previous(paths: BoxPaths, project_name: str,
                          data_snapshot: str | None, replaced_by: str) -> None:
-    """On promote: the kept production release becomes the previous release."""
+    """On promote: the kept production release becomes the previous release.
+
+    Safe to run again after a crash at any step: once the kept tree has
+    been moved into ``previous/``, a rerun finds only the kept release's
+    metadata left and finishes from there instead of deleting the moved
+    tree.
+    """
     _ensure_record(paths.project_dir(project_name))
     ref = prestage_ref(paths, project_name)
     if ref is None:
         # First promote of a never-deployed project: nothing to roll back to.
         discard_prestage(paths, project_name)
         return
-    _remove(_previous_meta(paths, project_name))
+    tree = prestage_tree(paths, project_name)
     target = previous_dir(paths, project_name)
-    _remove(target)
-    prestage_tree(paths, project_name).rename(target)
+    if tree.is_dir():
+        _remove(_previous_meta(paths, project_name))
+        _remove(target)
+        _move(tree, target)
+    elif not target.is_dir():
+        raise ReleaseStateError(
+            f"{tree} is gone and {target} does not hold it: the kept "
+            f"production release was lost")
+    # Otherwise an earlier run moved the tree and stopped: previous/ is it.
     meta = {
         "ref": ref,
         "data_snapshot": data_snapshot or "",
@@ -141,9 +165,11 @@ def prestage_to_previous(paths: BoxPaths, project_name: str,
 
 
 def production_release_root(paths: BoxPaths, project_name: str) -> Path:
-    """Where production's release code is: the kept release during a stage."""
-    if has_prestage(paths, project_name):
-        return prestage_tree(paths, project_name)
+    """Where production's release code is: the kept release during a stage,
+    until a promote has switched production to the staged release."""
+    tree = prestage_tree(paths, project_name)
+    if tree.is_dir() and not prestage_replaced(paths, project_name):
+        return tree
     return paths.project_dir(project_name)
 
 

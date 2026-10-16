@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 import pytest
 import yaml
+from boxmunge.commands.container_update_cmd import update_project
 from boxmunge.paths import BoxPaths
 from boxmunge.container_update_targets import (
     UpdateTarget, build_targets, resolve_strategy,
@@ -201,15 +202,15 @@ def caddy(monkeypatch, fake_containers):
 
 class TestUpdateTarget:
     def test_no_change_when_the_pull_brings_nothing_new(self, paths, caddy):
-        from boxmunge.container_update import update_target
-        result = update_target(paths, _caddy_target(paths))
+        from boxmunge.container_update import update_target_locked
+        result = update_target_locked(paths, _caddy_target(paths))
         assert result["status"] == "no_change"
         assert caddy.ups == 0
 
     def test_succeeds_on_image_change_and_healthy(self, paths, caddy):
-        from boxmunge.container_update import update_target
+        from boxmunge.container_update import update_target_locked
         caddy.pulled = {"caddy:2-alpine": _NEW}
-        result = update_target(paths, _caddy_target(paths))
+        result = update_target_locked(paths, _caddy_target(paths))
         assert result["status"] == "succeeded"
         assert caddy.ups == 1
         # Display references: the registry digest before, the image ID after.
@@ -223,7 +224,7 @@ class TestUpdateTarget:
         def fail(*a, **k):
             raise DockerError("network")
         monkeypatch.setattr(cu, "compose_pull", fail)
-        result = cu.update_target(paths, _caddy_target(paths))
+        result = cu.update_target_locked(paths, _caddy_target(paths))
         assert result["status"] == "failed"
         assert "pull" in result.get("reason", "").lower()
 
@@ -248,7 +249,7 @@ class TestUpdateTarget:
             compose_files=["compose.yml"], strategy="leave_broken",
             has_backup=False, is_caddy=False,
         )
-        result = cu.update_target(paths, target)
+        result = update_project(paths, target, dry_run=False)
         assert result["status"] == "no_change"
         pull.assert_not_called()
         # State persisted as no_change (self-heals a prior 'failed' state).
@@ -258,9 +259,9 @@ class TestUpdateTarget:
         self, paths, caddy, fake_containers,
     ):
         """Nothing shows which image it runs, so "no change" would be a guess."""
-        from boxmunge.container_update import update_target
+        from boxmunge.container_update import update_target_locked
         fake_containers.remove("caddy")
-        result = update_target(paths, _caddy_target(paths))
+        result = update_target_locked(paths, _caddy_target(paths))
         assert result["status"] == "failed"
         assert "service 'caddy' has no container" in result["reason"]
         assert caddy.ups == 0
@@ -268,22 +269,22 @@ class TestUpdateTarget:
     def test_image_missing_after_pull_fails(self, paths, caddy, monkeypatch):
         import boxmunge.container_update as cu
         monkeypatch.setattr("boxmunge.docker_containers.local_image", lambda ref: None)
-        result = cu.update_target(paths, _caddy_target(paths))
+        result = cu.update_target_locked(paths, _caddy_target(paths))
         assert result["status"] == "failed"
         assert "not in the local image store" in result["reason"]
 
     def test_replicas_on_different_images_fail(self, paths, caddy, fake_containers):
-        from boxmunge.container_update import update_target
+        from boxmunge.container_update import update_target_locked
         fake_containers.run("caddy", "caddy", _NEW)
-        result = update_target(paths, _caddy_target(paths))
+        result = update_target_locked(paths, _caddy_target(paths))
         assert result["status"] == "failed"
         assert "run different images" in result["reason"]
 
     def test_leave_broken_strategy_does_not_rollback(self, paths, caddy):
-        from boxmunge.container_update import update_target
+        from boxmunge.container_update import update_target_locked
         caddy.pulled = {"caddy:2-alpine": _NEW}
         caddy.health[_NEW] = "unhealthy"
-        result = update_target(paths, _caddy_target(paths))
+        result = update_target_locked(paths, _caddy_target(paths))
         assert result["status"] == "failed"
         assert result["reason"] == "unhealthy: caddy"
         assert result["rollback_attempted"] is False
@@ -293,10 +294,10 @@ class TestUpdateTarget:
         """Review finding 08: the previous image is restored by its image ID.
         Its registry digest (shown in previous_digests) is not an ID Docker
         can tag from."""
-        from boxmunge.container_update import update_target
+        from boxmunge.container_update import update_target_locked
         caddy.pulled = {"caddy:2-alpine": _NEW}
         caddy.health[_NEW] = "unhealthy"
-        result = update_target(paths, _caddy_target(paths, "rollback_to_previous"))
+        result = update_target_locked(paths, _caddy_target(paths, "rollback_to_previous"))
         assert result["status"] == "failed"
         assert result["rollback_attempted"] is True
         assert result["rollback_succeeded"] is True
@@ -364,8 +365,7 @@ class TestUpdateTarget:
     ):
         """C-10: the pre-backup used to run every day before change detection,
         so a no-op sweep consumed a retention slot."""
-        from boxmunge.container_update import update_target
-        result = update_target(paths, self._stateful(paths, monkeypatch, fake_containers))
+        result = update_project(paths, self._stateful(paths, monkeypatch, fake_containers), dry_run=False)
         assert result["status"] == "no_change"
         mock_backup.assert_not_called()
 
@@ -380,7 +380,7 @@ class TestUpdateTarget:
         order = []
         mock_backup.side_effect = lambda *a, **k: order.append("backup") or 0
         monkeypatch.setattr(cu, "compose_up", lambda *a, **k: order.append("up"))
-        cu.update_target(paths, target)
+        update_project(paths, target, dry_run=False)
         mock_backup.assert_called_once_with(
             "stateful", paths, kind=BackupKind.PREUPDATE,
         )
@@ -395,7 +395,7 @@ class TestUpdateTarget:
         monkeypatch.setattr(cu, "detect_image_changes", lambda s, r: {"web": _NEW})
         up = MagicMock()
         monkeypatch.setattr(cu, "compose_up", up)
-        result = cu.update_target(paths, target)
+        result = update_project(paths, target, dry_run=False)
         assert result["status"] == "failed"
         assert "backup" in result.get("reason", "").lower()
         up.assert_not_called()
@@ -450,7 +450,7 @@ class TestTargetStateErrors:
 
 
 class TestUpdateTargetSkipsQuarantined:
-    """Wave 1 defense-in-depth: update_target itself refuses to pull/recreate
+    """Wave 1 defense-in-depth: the update itself refuses to pull/recreate
     a CVE-quarantined user project, even if a future caller forgets to
     pre-filter. Caddy is exempt — it has no quarantine state."""
 
@@ -468,7 +468,7 @@ class TestUpdateTargetSkipsQuarantined:
             compose_files=["compose.yml"], strategy="leave_broken",
             has_backup=False, is_caddy=False,
         )
-        assert cu.update_target(paths, target)["status"] == cu.SKIPPED_MONITOR_STOPPED
+        assert update_project(paths, target, dry_run=False)["status"] == cu.SKIPPED_MONITOR_STOPPED
         pull.assert_not_called()
 
     @patch("boxmunge.container_update.compose_pull")
@@ -477,7 +477,6 @@ class TestUpdateTargetSkipsQuarantined:
     def test_quarantined_project_returns_quarantined_status(
         self, mock_backup, mock_up, mock_pull, paths,
     ):
-        from boxmunge.container_update import update_target
         _write_project(paths, "quar-app")
         # Mark CVE-quarantined.
         paths.project_quarantine_state("quar-app").parent.mkdir(
@@ -490,7 +489,7 @@ class TestUpdateTargetSkipsQuarantined:
             compose_files=["compose.yml"], strategy="leave_broken",
             has_backup=False, is_caddy=False,
         )
-        result = update_target(paths, target)
+        result = update_project(paths, target, dry_run=False)
         assert result["status"] == "quarantined"
         # Mutating side effects MUST NOT have run.
         mock_pull.assert_not_called()
@@ -500,13 +499,13 @@ class TestUpdateTargetSkipsQuarantined:
     def test_caddy_is_not_blocked_by_quarantine_check(self, paths, caddy):
         """Caddy targets must continue updating regardless — quarantine state
         applies to user projects only."""
-        from boxmunge.container_update import update_target
+        from boxmunge.container_update import update_target_locked
         # Even if a stray "caddy.quarantined.json" exists (it shouldn't),
         # Caddy targets short-circuit via the is_caddy flag.
         # "caddy" is a reserved project name, so build the path by hand.
         paths.deploy_state.mkdir(parents=True, exist_ok=True)
         (paths.deploy_state / "caddy.quarantined.json").write_text("{}")
-        result = update_target(paths, _caddy_target(paths))
+        result = update_target_locked(paths, _caddy_target(paths))
         # No-change path runs; status is no_change (not quarantined).
         assert result["status"] == "no_change"
 

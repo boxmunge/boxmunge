@@ -167,6 +167,6 @@ def test_container_update_never_recreates_once_blocked(tmp_path, marker) -> None
             patch.object(container_update_cmd, "_dry_run_target",
                          return_value={"status": "no_change"}), \
             _marker_at_lock(container_update_cmd, marker):
-        result = container_update_cmd._user_target(paths, _cu_target(paths), dry_run=False)
+        result = container_update_cmd.update_project(paths, _cu_target(paths), dry_run=False)
     update.assert_not_called()
     assert result["status"] in ("quarantined", "paused")

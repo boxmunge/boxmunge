@@ -28,7 +28,6 @@ from boxmunge.docker_containers import ProjectContainer
 from boxmunge.backup import BackupKind
 from boxmunge.commands.backup_cmd import backup_locked
 from boxmunge.commands.health_state import is_monitor_stopped
-from boxmunge.fileutil import LockError, project_lock
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_warning, log_error
 
@@ -269,25 +268,16 @@ def lock_skipped(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
     return result
 
 
-def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
+def update_target_locked(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
     """Update a single target. Returns a result dict suitable for logging.
 
-    A user project's whole update (lifecycle check, pre-update backup,
-    pull, recreate, health wait, rollback) runs under its project lock, so
-    it cannot interleave with a deploy, stage, restore, CVE quarantine, or
-    health tick. Caddy is not a project and has no project lock.
+    The update core: for a user project the caller holds its project lock
+    for the whole update (lifecycle check, pre-update backup, pull,
+    recreate, health wait, rollback), so it cannot interleave with a
+    deploy, stage, restore, CVE quarantine, or health tick
+    (container_update_cmd.update_project). Caddy is not a project and has
+    no project lock.
     """
-    if target.is_caddy:
-        return update_target_locked(paths, target)
-    try:
-        with project_lock(target.name, paths):
-            return update_target_locked(paths, target)
-    except LockError:
-        return lock_skipped(paths, target)
-
-
-def update_target_locked(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
-    """The update core. Caller holds the project lock (user projects)."""
     return _update_locked(paths, target, _new_result(target))
 
 

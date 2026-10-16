@@ -13,10 +13,7 @@ from boxmunge.paths import BoxPaths
 from boxmunge.published_ports import overlay_ports
 from boxmunge.release import sync_live_scripts
 from boxmunge.release_staging import production_release_root
-from boxmunge.security_overlay import (
-    resolve_security,
-    render_compose_security_fragment,
-)
+from boxmunge.compose_hardening import hardening_fragment
 from boxmunge.security_warn import (
     warn_off_services, warn_published_ports, warn_writable_state,
 )
@@ -36,103 +33,6 @@ def _build_env_file_list(env_files: dict[str, str] | None) -> list[str]:
         if key in env_files:
             result.append(env_files[key])
     return result
-
-
-# ---------------------------------------------------------------------------
-# v0.8: user-wins-on-explicit-declarations for read_only / tmpfs.
-#
-# Compose's merge keeps the later file's scalar (the overlay would overwrite
-# a deliberate `read_only: false`) and concatenates lists (a user
-# `tmpfs: ['/tmp:size=128m']` would clash with the overlay's `/tmp`). So the
-# overlay omits either field when the user already declared it for that
-# service, rather than rejecting the declaration.
-# ---------------------------------------------------------------------------
-
-
-def _user_declared_read_only(svc: dict[str, Any]) -> bool:
-    """True iff the user compose declares `read_only` on this service.
-
-    Any value counts (True or False) — the point is "the user has
-    expressed intent", not "the user agrees with the overlay".
-    """
-    return "read_only" in svc
-
-
-def _volume_target(entry: Any) -> str | None:
-    """Extract the container target path from a compose volume entry.
-
-    Short syntax: 'src:target[:opts]' — if it has a colon, the second
-    field is the target. Anonymous volume short syntax ('/path' with
-    no colon) is itself the target.
-    Long syntax: {target: '/path', ...}.
-    """
-    if isinstance(entry, str):
-        if ":" not in entry:
-            # Anonymous volume — the whole string is the target.
-            return entry
-        parts = entry.split(":")
-        if len(parts) >= 2:
-            return parts[1]
-        return None
-    if isinstance(entry, dict):
-        target = entry.get("target")
-        return target if isinstance(target, str) else None
-    return None
-
-
-def _tmpfs_target(entry: Any) -> str | None:
-    """Extract the target path from a compose tmpfs entry.
-
-    Short syntax: '/tmp' or '/tmp:size=64m' — target is everything before
-    the first colon.
-    """
-    if not isinstance(entry, str):
-        return None
-    if ":" in entry:
-        return entry.split(":", 1)[0]
-    return entry
-
-
-def _user_claims_tmp(svc: dict[str, Any]) -> bool:
-    """True iff the user compose has any /tmp claim on this service.
-
-    Conservative detection over both `tmpfs` (string list) and `volumes`
-    (short or long syntax). A weird combo that slips through would
-    surface as a Compose-up time error, which is acceptable.
-    """
-    tmpfs = svc.get("tmpfs")
-    if isinstance(tmpfs, list):
-        for entry in tmpfs:
-            if _tmpfs_target(entry) == "/tmp":
-                return True
-    volumes = svc.get("volumes")
-    if isinstance(volumes, list):
-        for entry in volumes:
-            if _volume_target(entry) == "/tmp":
-                return True
-    return False
-
-
-def _hardening_fragment(
-    project_security: dict[str, Any] | None,
-    service_security: dict[str, Any] | None,
-    user_svc: Any,
-) -> dict[str, Any]:
-    """Render one service's hardening fragment for its effective profile.
-
-    v0.8 user-wins rule: when compose.yml already declares `read_only` or
-    claims `/tmp` for this service, the overlay omits its own value. See
-    the module-level comment above `_user_declared_read_only` for why we
-    omit instead of reject for these two fields.
-    """
-    resolved = resolve_security(project_security, service_security)
-    fragment = render_compose_security_fragment(resolved)
-    if isinstance(user_svc, dict):
-        if "read_only" in fragment and _user_declared_read_only(user_svc):
-            fragment.pop("read_only")
-        if "tmpfs" in fragment and _user_claims_tmp(user_svc):
-            fragment.pop("tmpfs")
-    return fragment
 
 
 def _user_services(user_compose: dict[str, Any]) -> dict[str, Any]:
@@ -213,7 +113,7 @@ def _build_service_override(
             svc_volumes.append(f"{source}:/boxmunge-scripts:ro")
 
         # Security hardening — silent defaults injected here.
-        sec_fragment = _hardening_fragment(
+        sec_fragment = hardening_fragment(
             project_security, svc.get("security"), user_services.get(svc_name),
         )
 
@@ -276,7 +176,7 @@ def _build_service_override(
     for svc_name, user_svc in user_services.items():
         if svc_name in manifest_services:
             continue
-        fragment = _hardening_fragment(project_security, None, user_svc)
+        fragment = hardening_fragment(project_security, None, user_svc)
         fragment.pop("read_only", None)
         fragment.pop("tmpfs", None)
         if fragment:

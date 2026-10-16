@@ -21,12 +21,13 @@ from dataclasses import dataclass
 from boxmunge.commands.deploy import (
     deploy_eligible, generate_release_config, replace_release, run_pre_deploy_hook,
 )
-from boxmunge.commands.deploy_steps import take_pre_deploy_snapshot
+from boxmunge.commands.deploy_steps import record_deploy_state, take_pre_deploy_snapshot
 from boxmunge.intake import IntakeError, report_refusal, validate_release_tree
 from boxmunge.log import log_error
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
+from boxmunge.state import read_state
 from boxmunge.release import ReleaseStateError, discard_previous_release, live_ref
 from boxmunge.release_staging import (
     discard_prestage, has_prestage, mark_prestage_replaced, prestage_ref,
@@ -85,7 +86,8 @@ def _promote(project_name: str, paths: BoxPaths) -> Promotion:
     # Recorded before the containers start: see the module docstring.
     mark_prestage_replaced(paths, project_name, snapshot)
     return _switch(project_name, paths, staged_ref, snapshot,
-                   lambda: replace_release(project_name, paths, manifest, staged_ref, snapshot))
+                   lambda: replace_release(project_name, paths, manifest, staged_ref, snapshot),
+                   certain=True)
 
 
 def _finish_switched(project_name: str, paths: BoxPaths) -> Promotion:
@@ -96,6 +98,8 @@ def _finish_switched(project_name: str, paths: BoxPaths) -> Promotion:
           f"runs it, so its pre-deploy hook is not run again and no new snapshot "
           f"is taken.")
 
+    first_deploy = "current_ref" not in read_state(paths.project_deploy_state(project_name))
+
     def restart() -> int:
         try:
             manifest = validate_release_tree(paths.project_dir(project_name),
@@ -104,11 +108,21 @@ def _finish_switched(project_name: str, paths: BoxPaths) -> Promotion:
             return report_refusal(e)
         generate_release_config(project_name, paths, manifest, COMPONENT)
         return replace_release(project_name, paths, manifest, staged_ref, snapshot)
-    return _switch(project_name, paths, staged_ref, snapshot, restart)
+
+    try:
+        # The killed run may or may not have reached its first container
+        # start: say so, rather than claim the switch happened.
+        return _switch(project_name, paths, staged_ref, snapshot, restart, certain=False)
+    finally:
+        # The release history now treats production as switched, so the
+        # deploy state does too, as replace_release records once containers
+        # may have started (recording the current ref again is a no-op).
+        if not first_deploy:
+            record_deploy_state(paths, project_name, staged_ref, snapshot)
 
 
 def _switch(project_name: str, paths: BoxPaths, staged_ref: str,
-            snapshot: str | None, start) -> Promotion:
+            snapshot: str | None, start, *, certain: bool) -> Promotion:
     """Run ``start`` (production runs the staged release from its first
     container start); whatever happens, keep the production release as the
     previous one."""
@@ -119,7 +133,7 @@ def _switch(project_name: str, paths: BoxPaths, staged_ref: str,
         raise
     kept = _keep_replaced_release(project_name, paths, snapshot, staged_ref)
     if rc != 0:
-        _report_failed_after_switch(project_name, paths, staged_ref)
+        report_failed_after_switch(project_name, paths, staged_ref, certain)
         return Promotion(rc, switched=True)
     return Promotion(0 if kept else 1, switched=True)
 
@@ -151,13 +165,14 @@ def _keep_replaced_release(project_name: str, paths: BoxPaths,
     return False
 
 
-def _report_failed_after_switch(project_name: str, paths: BoxPaths,
-                                staged_ref: str) -> None:
+def report_failed_after_switch(project_name: str, paths: BoxPaths,
+                                staged_ref: str, certain: bool) -> None:
     # rollback imports deploy, which this module also builds on: imported
     # here, where it is needed, rather than at module load.
     from boxmunge.commands.rollback import RollbackUnavailable, find_rollback_target
+    runs = "now runs" if certain else "may now run"
     print(f"ERROR: The promotion failed after production was switched: "
-          f"production now runs {staged_ref}.", file=sys.stderr)
+          f"production {runs} {staged_ref}.", file=sys.stderr)
     try:
         target = find_rollback_target(paths, project_name)
     except RollbackUnavailable as e:

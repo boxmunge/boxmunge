@@ -16,6 +16,7 @@ import yaml
 from boxmunge.backup import BackupKind
 from boxmunge.paths import BoxPaths
 from boxmunge.state import write_state
+from boxmunge.commands.container_update_cmd import update_project
 from tests.lock_holder import hold_project_lock, project_lock_is_held
 
 NAME = "myapp"
@@ -290,7 +291,7 @@ class TestContainerUpdateLock:
              patch.object(cu, "detect_image_changes", return_value={"web": "sha256:new"}), \
              patch.object(cu, "_wait_healthy", return_value=(True, [])):
             with hold_project_lock(NAME, paths):
-                result = cu.update_target(paths, _cu_target(paths, has_backup=True))
+                result = update_project(paths, _cu_target(paths, has_backup=True), dry_run=False)
         assert result["status"] != "succeeded"
         assert "lock" in (result["reason"] or "")
         assert pull.calls == [] and up.calls == [] and backup.calls == []
@@ -322,8 +323,9 @@ class TestContainerUpdateLock:
              patch.object(cu, "tag_image", tag), \
              patch.object(cu, "_wait_healthy", health), \
              patch.object(cu, "detect_image_changes", return_value={"web": "sha256:new"}):
-            result = cu.update_target(
+            result = update_project(
                 paths, _cu_target(paths, has_backup=True, strategy="rollback_to_previous"),
+                dry_run=False,
             )
         assert result["rollback_attempted"] is True
         assert gate.calls == [True], "quarantine/pause check must run under the lock"
@@ -342,6 +344,6 @@ class TestContainerUpdateLock:
         _quarantine(paths)
         pull, up = _Recorder(paths), _Recorder(paths)
         with patch.object(cu, "compose_pull", pull), patch.object(cu, "compose_up", up):
-            result = cu.update_target(paths, _cu_target(paths))
+            result = update_project(paths, _cu_target(paths), dry_run=False)
         assert result["status"] == "quarantined"
         assert pull.calls == [] and up.calls == []

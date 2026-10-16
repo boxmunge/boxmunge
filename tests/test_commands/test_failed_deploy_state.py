@@ -73,3 +73,27 @@ def test_a_failed_first_deploy_records_nothing(paths) -> None:
     manifest = _repo_project(paths, None)
     assert _start(paths, manifest, "V1", None, smoke=False) == 1
     assert "current_ref" not in read_state(paths.project_deploy_state(NAME))
+
+
+def test_git_promote_failing_after_the_switch_says_so(paths, capsys) -> None:
+    """A git project's promote is a deploy of the staged ref: once its
+    containers started, the operator is told production runs it, what
+    rollback would do, and to unstage."""
+    from boxmunge.commands.promote_cmd import run_promote
+    from boxmunge.project_registry import add_project
+    manifest = _repo_project(paths, dict(V1_LIVE))
+    add_project(NAME, paths)
+    write_state(paths.project_staging_state(NAME), {"active": True, "ref": "V2"})
+    with patch.object(deploy, "update_repo", return_value="V2"), \
+            patch.object(deploy, "validate_release_tree", return_value=manifest), \
+            patch.object(deploy, "take_pre_deploy_snapshot", return_value="S1"), \
+            patch.object(deploy, "prepare_caddy_config"), \
+            patch.object(deploy, "prepare_compose_override"), \
+            patch.object(deploy, "compose_up"), patch.object(deploy, "caddy_reload"), \
+            patch.object(deploy, "post_deploy_diagnostics"), \
+            patch.object(deploy, "smoke_ok", return_value=False):
+        assert run_promote(NAME, paths) == 1
+    err = capsys.readouterr().err
+    assert "production now runs V2" in err
+    assert f"'rollback {NAME}' returns to V1" in err
+    assert f"run 'unstage {NAME}'" in err

@@ -156,7 +156,7 @@ def test_finishing_a_killed_promote_keeps_the_pre_promotion_snapshot(paths) -> N
     assert (target.ref, target.snapshot) == (f"{NAME}-{V1}", taken[0])
 
 
-def test_a_failing_rerun_of_a_killed_promote_still_releases_the_stage(paths) -> None:
+def test_a_failing_rerun_of_a_killed_promote_still_releases_the_stage(paths, capsys) -> None:
     """Production switched before the kill, so however the rerun ends, the
     kept release becomes the previous one: nothing may stay wedged. The
     pre-deploy hook already ran and is not run again."""
@@ -174,6 +174,9 @@ def test_a_failing_rerun_of_a_killed_promote_still_releases_the_stage(paths) -> 
     with _docker(), _backups_counted(paths, taken):
         assert run_promote(NAME, paths) == 3
     assert not ran.exists(), "the pre-deploy hook ran again"
+    # The killed run may not have reached a container start.
+    assert "production may now run" in capsys.readouterr().err
+    assert read_state(paths.project_deploy_state(NAME))["current_ref"] == f"{NAME}-{V2}"
     assert not has_prestage(paths, NAME)
     target = find_rollback_target(paths, NAME)
     assert (target.ref, target.snapshot) == (f"{NAME}-{V1}", taken[0])
@@ -236,3 +239,54 @@ def test_promote_whose_staging_teardown_fails_exits_nonzero(paths, capsys) -> No
     assert "is live in production" in err and f"Run 'unstage {NAME}'" in err
     assert _version(paths) == "v2\n"
     assert read_state(paths.project_staging_state(NAME))["cleanup_incomplete"]
+
+
+# Steps prestage_to_previous takes through these helpers, in order: drop
+# the old previous metadata, drop the old previous tree, move the kept tree,
+# write the new metadata, then discard the kept release (clear the
+# tombstone, move it there, remove it).
+_KEEP_STEPS = 7
+
+
+@pytest.mark.parametrize("kill_after", range(1, _KEEP_STEPS + 1))
+def test_a_crash_while_keeping_the_previous_release_never_loses_it(
+    paths, kill_after,
+) -> None:
+    from boxmunge.commands import promote_release
+    from boxmunge import release_staging
+    _staged_with_backups(paths)
+    real = {name: getattr(release_staging, name)
+            for name in ("_remove", "_move", "atomic_write_text")}
+    count = [0]
+
+    def killing(name):
+        def step(*args, **kwargs):
+            real[name](*args, **kwargs)
+            count[0] += 1
+            if count[0] == kill_after:
+                raise _Killed
+        return step
+
+    real_keep = promote_release.prestage_to_previous
+
+    def keep_then_die(*args, **kwargs):
+        with patch.multiple(release_staging, **{n: killing(n) for n in real}):
+            real_keep(*args, **kwargs)
+    taken: list[str] = []
+    with _docker(), _backups_counted(paths, taken), \
+            patch.object(promote_release, "prestage_to_previous", keep_then_die), \
+            pytest.raises(_Killed):
+        run_promote(NAME, paths)
+    assert count[0] == kill_after
+    rerun = has_prestage(paths, NAME)
+    with _docker(), _backups_counted(paths, taken):
+        if rerun:
+            # The kept release still exists: finishing the promote is the way out.
+            assert run_promote(NAME, paths) == 0
+        # The finished promote tore staging down; otherwise unstage does.
+        assert run_unstage(NAME, paths) == (1 if rerun else 0)
+    assert not has_prestage(paths, NAME)
+    target = find_rollback_target(paths, NAME)
+    assert (target.ref, target.snapshot) == (f"{NAME}-{V1}", taken[0])
+    assert (target.tree / "VERSION").read_text() == "v1\n"
+    assert _version(paths) == "v2\n"

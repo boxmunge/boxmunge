@@ -3,7 +3,9 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING
 from boxmunge.commands.deploy import deploy_locked
-from boxmunge.commands.promote_release import Promotion, deploy_staged_locked
+from boxmunge.commands.promote_release import (
+    Promotion, deploy_staged_locked, report_failed_after_switch,
+)
 from boxmunge.commands.unstage_cmd import unstage_locked
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.lifecycle import refuse_if_blocked
@@ -88,8 +90,17 @@ def _deploy_to_production(project_name: str, paths: BoxPaths,
     if (paths.project_dir(project_name) / "repo").exists():
         staged_ref = staging_state.get("ref")
         ref_arg = staged_ref if staged_ref and staged_ref != "latest" else None
+        state_path = paths.project_deploy_state(project_name)
+        started_before = read_state(state_path).get("last_started_at")
         rc = deploy_locked(project_name, paths, ref=ref_arg, component="promote")
-        return Promotion(rc, switched=False)
+        # The deploy records a start once its containers may have started
+        # (deploy.replace_release), so a failure after that point is one
+        # past the switch.
+        switched = read_state(state_path).get("last_started_at") != started_before
+        if rc != 0 and switched:
+            current = read_state(state_path).get("current_ref", "the staged ref")
+            report_failed_after_switch(project_name, paths, current, certain=True)
+        return Promotion(rc, switched=switched)
     return deploy_staged_locked(project_name, paths)
 
 

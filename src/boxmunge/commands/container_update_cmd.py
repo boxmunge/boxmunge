@@ -39,7 +39,7 @@ def _dry_run_target(paths: BoxPaths, target: UpdateTarget) -> dict[str, Any]:
                 "reason": f"inventory_failed: {e}",
                 "previous_digests": {}, "current_digests": {}}
     # Build-only projects have no image: services to pull — a pull would
-    # error. Report no_change without attempting it (mirrors update_target).
+    # error. Report no_change without attempting it (mirrors update_target_locked).
     if not services:
         return {"name": target.name, "status": "no_change",
                 "previous_digests": {}, "current_digests": {}}
@@ -94,18 +94,18 @@ def _update_one(paths: BoxPaths, target: UpdateTarget, dry_run: bool) -> dict[st
         return {"name": target.name, "status": "failed", "reason": f"exception: {e}"}
 
 
-def _user_target(paths: BoxPaths, target: UpdateTarget, dry_run: bool) -> dict[str, Any]:
+def update_project(paths: BoxPaths, target: UpdateTarget, dry_run: bool) -> dict[str, Any]:
     """One user project, entirely under its project lock: its lifecycle state
     is read while the lock is held, so a pause or quarantine that lands while
     the run works on other targets is honoured."""
     try:
         with project_lock(target.name, paths):
-            return _user_target_locked(paths, target, dry_run)
+            return _update_project_locked(paths, target, dry_run)
     except LockError:
         return lock_skipped(paths, target)
 
 
-def _user_target_locked(paths: BoxPaths, target: UpdateTarget,
+def _update_project_locked(paths: BoxPaths, target: UpdateTarget,
                         dry_run: bool) -> dict[str, Any]:
     # A CVE-quarantined project must NOT be pulled or recreated by the
     # daily container-update cron — that would silently un-quarantine on
@@ -179,7 +179,7 @@ def _retry_locked(
     retried: list[dict[str, Any]] = []
     for result in results:
         if result["status"] == SKIPPED_LOCKED:
-            result = _user_target(paths, by_name[result["name"]], dry_run)
+            result = update_project(paths, by_name[result["name"]], dry_run)
             if result["status"] == SKIPPED_LOCKED:
                 print(
                     f"Skipped {result['name']}: another operation holds its "
@@ -258,7 +258,7 @@ def run_container_update(
         # Step 5: Update user projects independently
         for target in targets:
             if not target.is_caddy:
-                results.append(_user_target(paths, target, dry_run))
+                results.append(update_project(paths, target, dry_run))
 
         # Step 5b: a project whose lock was held (a deploy, scan, or health
         # tick in progress) gets one more try now the others are done.
