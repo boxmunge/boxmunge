@@ -59,62 +59,27 @@ expect 1 "failed visudo" "a stale probation does not block an upgrade"
     && pass "the stale probation is removed with a warning" || fail "stale probation: $OUT"
 drop_root
 
-# --- shim libraries -------------------------------------------------------
+# --- the shipped shim is one file -----------------------------------------
+# Whatever installs the shim (install.sh, or an older release's shim
+# self-updating) copies only scripts/boxmunge-upgrade, so the built shim
+# must run with nothing next to it.
 
-api="$(sed -n 's/^UPGRADE_LIB_API=//p' "$SHIM")"
-for lib in "$REPO_DIR"/scripts/boxmunge-upgrade.d/*.sh; do
-    [[ "$(sed -n 's/^BM_LIB_API=//p' "$lib")" == "$api" ]] && pass "$(basename "$lib") declares API $api" \
-        || fail "$(basename "$lib") does not declare the shim's API $api"
-done
-
-# copy_shim: a private copy of the shim and its libraries in $COPY.
-copy_shim() {
-    COPY="$(mktemp -d)"
-    cp "$REPO_DIR/scripts/boxmunge-upgrade" "$COPY/"
-    cp -R "$REPO_DIR/scripts/boxmunge-upgrade.d" "$COPY/"
-    chmod -R go-w "$COPY"
-}
-run_copy() { RC=0; OUT="$(bash "$COPY/boxmunge-upgrade" "$@" 2>&1)" || RC=$?; }
-
+BUILT_DIR="$(mktemp -d)"
+python3 "$REPO_DIR/scripts/build-shim.py" "$REPO_DIR/scripts/boxmunge-upgrade" "$BUILT_DIR/boxmunge-upgrade"
 new_root a
-copy_shim
-run_copy check-probation
-expect 0 "" "a complete copy of the shim runs"
-rm "$COPY/boxmunge-upgrade.d/probation.sh"
-run_copy check-probation
-expect 1 "probation.sh is missing" "a missing library stops the shim"
-rm -r "$COPY"
-copy_shim
-sed -i.bak 's/^BM_LIB_API=.*/BM_LIB_API=999/' "$COPY/boxmunge-upgrade.d/slots.sh"
-rm "$COPY/boxmunge-upgrade.d/slots.sh.bak"
-run_copy check-probation
-expect 1 "slots.sh is for API '999'" "a library for another API stops the shim"
-rm -r "$COPY"
-copy_shim
-chmod g+w "$COPY/boxmunge-upgrade.d/state.sh"
-run_copy check-probation
-expect 1 "writable by group or others" "a group-writable library is not sourced"
-rm -r "$COPY"
-copy_shim
-rm -r "$COPY/boxmunge-upgrade.d"
-run_copy check-probation
-expect 1 "library directory" "a missing library directory stops the shim"
-rm -r "$COPY"
+RC=0; OUT="$(bash "$BUILT_DIR/boxmunge-upgrade" check-probation 2>&1)" || RC=$?
+expect 0 "" "the built shim runs on its own"
+grep -q '^# >>> boxmunge-upgrade.d:' "$BUILT_DIR/boxmunge-upgrade" && fail "built shim still has the source loader" \
+    || pass "built shim has no source loader"
+cp "$REPO_DIR/scripts/boxmunge-upgrade" "$BUILT_DIR/unbuilt"
+RC=0; OUT="$(bash "$BUILT_DIR/unbuilt" check-probation 2>&1)" || RC=$?
+expect 1 "unbuilt source shim" "the unbuilt shim on its own refuses, saying why"
 drop_root
+rm -r "$BUILT_DIR"
 
-# Libraries are installed before the shim, by install.sh (which is also how
-# they reach a box upgraded by a shim from before the split) and by the
-# shim's self-update.
-lib_line="$(grep -n 'scripts/boxmunge-upgrade.d/"\*.sh' "$REPO_DIR/install.sh" | cut -d: -f1)"
-shim_line="$(grep -n 'scripts/boxmunge-upgrade" "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade"' "$REPO_DIR/install.sh" | cut -d: -f1)"
-[[ -n "$lib_line" && -n "$shim_line" && "$lib_line" -lt "$shim_line" ]] \
-    && pass "install.sh installs the libraries before the shim" || fail "install.sh order: libs=$lib_line shim=$shim_line"
-system="$REPO_DIR/scripts/boxmunge-upgrade.d/system.sh"
-lib_line="$(grep -n 'install -m 0644 -o root -g root "$f" "$UPGRADE_LIB_INSTALL_DIR' "$system" | cut -d: -f1)"
-shim_line="$(grep -n 'install -m 0755 -o root -g root "$new_shim"' "$system" | cut -d: -f1)"
-[[ -n "$lib_line" && -n "$shim_line" && "$lib_line" -lt "$shim_line" ]] \
-    && pass "self-update installs the libraries before the shim" || fail "self-update order: libs=$lib_line shim=$shim_line"
-grep -qE '^BUNDLE_DIRS .*\bscripts\b' "$REPO_DIR/Makefile" && pass "the bundle ships scripts/, libraries included" \
-    || fail "BUNDLE_DIRS does not ship scripts/"
+grep -q 'boxmunge-upgrade.d/"\*' "$REPO_DIR/install.sh" && fail "install.sh still installs shim libraries" \
+    || pass "install.sh installs the shim as one file"
+grep -q 'rm -rf "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade.d"' "$REPO_DIR/install.sh" \
+    && pass "install.sh removes a leftover library directory" || fail "install.sh leaves bin/boxmunge-upgrade.d"
 
 finish

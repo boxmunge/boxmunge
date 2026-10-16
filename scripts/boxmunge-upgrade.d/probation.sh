@@ -1,10 +1,9 @@
 # shellcheck shell=bash
-# probation.sh — sourced by boxmunge-upgrade (root). Reading probation.json,
-# deferring upgrades while a release is unproven, and check-probation:
-# finishing interrupted rollbacks and upgrades, promotion, and rollback.
-# Must match the shim's UPGRADE_LIB_API; the shim refuses to run otherwise.
-# shellcheck disable=SC2034  # read by the shim's load_libs
-BM_LIB_API=1
+# probation.sh — reading probation.json, deferring upgrades while a release
+# is unproven, and check-probation: finishing interrupted rollbacks and
+# upgrades, promotion, and rollback.
+# Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
+# the shim that releases ship.
 
 # read_probation: parse probation.json into PROB_VERSION, PROB_PREV_SLOT,
 # PROB_EXPIRED (yes/no) and PROB_EXPIRES_AT (re-formatted in UTC, so safe to

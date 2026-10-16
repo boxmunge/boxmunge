@@ -17,11 +17,10 @@
 #   install-sudoers            install.sh and upgrades: (re)write deploy's sudo rule
 #   install-docs <dir>         install.sh and upgrades: replace docs/ with <dir>/*.md
 #
-# The functions live in boxmunge-upgrade.d/ next to this file (state, slots,
-# probation, system), installed and self-updated together with it. The shim
-# refuses to run if one is missing, is writable by anyone but its owner, or
-# was written for a different UPGRADE_LIB_API. Bump UPGRADE_LIB_API, here
-# and in every library, whenever a contract between them changes.
+# In the source tree the functions live in boxmunge-upgrade.d/ (state, slots,
+# probation, system). The release build (scripts/build-shim.py) inlines them,
+# so the shim a box runs is this one self-contained file: whatever installs it
+# (install.sh, or an older release's shim self-updating) copies only this file.
 #
 # Cross-version contract: the crash-safety markers (upgrade-inflight,
 # rollback-inflight; see slots.sh) may be left by this shim and found by a
@@ -42,9 +41,6 @@ PROBATION_HOURS=6
 BIN_DIR="$BOXMUNGE_ROOT/bin"
 VERSION_FILE="$BOXMUNGE_ROOT/config/version"
 SUDOERS_FILE="${BOXMUNGE_SUDOERS_FILE:-/etc/sudoers.d/boxmunge-deploy}"
-UPGRADE_LIB_API=1
-UPGRADE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/boxmunge-upgrade.d"
-UPGRADE_LIB_INSTALL_DIR="$BIN_DIR/boxmunge-upgrade.d"
 
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) boxmunge-upgrade: $*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
@@ -75,25 +71,16 @@ fn(os.environ["BM_COMPONENT"], os.environ["BM_MSG"], BoxPaths(), detail=detail)
 PYBM
 }
 
-# load_libs: source the shim's libraries. Run as root, so a library anyone
-# else could write would be a root shell for them; a missing or mismatched
-# one means a half-finished install or self-update.
-load_libs() {
-    local lib fix="re-run install.sh from the release bundle"
-    [[ -d "$UPGRADE_LIB_DIR" && ! -L "$UPGRADE_LIB_DIR" ]] \
-        || die "Shim library directory $UPGRADE_LIB_DIR is missing; $fix"
-    [[ -z "$(find "$UPGRADE_LIB_DIR" \( -perm -020 -o -perm -002 \) -print -quit)" ]] \
-        || die "Shim libraries in $UPGRADE_LIB_DIR are writable by group or others; refusing to source them"
-    for lib in state slots probation system; do
-        [[ -f "$UPGRADE_LIB_DIR/$lib.sh" ]] || die "Shim library $UPGRADE_LIB_DIR/$lib.sh is missing; $fix"
-        BM_LIB_API=""
-        # shellcheck source=/dev/null
-        source "$UPGRADE_LIB_DIR/$lib.sh"
-        [[ "$BM_LIB_API" == "$UPGRADE_LIB_API" ]] \
-            || die "Shim library $lib.sh is for API '${BM_LIB_API:0:20}', this shim needs $UPGRADE_LIB_API; $fix"
-    done
-}
-load_libs
+# >>> boxmunge-upgrade.d: the source loader; scripts/build-shim.py replaces
+# this block with the libraries themselves.
+SHIM_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/boxmunge-upgrade.d"
+[[ -d "$SHIM_LIB_DIR" ]] \
+    || die "This is the unbuilt source shim and $SHIM_LIB_DIR is missing; install a release bundle, whose shim is built"
+for lib in state slots probation system; do
+    # shellcheck source=/dev/null
+    source "$SHIM_LIB_DIR/$lib.sh"
+done
+# <<< boxmunge-upgrade.d
 
 # preflight_fail <version> <from_version> <blocklist_reason> <message> [stage]
 #

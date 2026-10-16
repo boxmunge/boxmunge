@@ -1,9 +1,8 @@
 # shellcheck shell=bash
-# slots.sh — sourced by boxmunge-upgrade (root). The two venv slots: whether
-# a slot can be trusted, the crash-safety markers, the swap, and rollback.
-# Must match the shim's UPGRADE_LIB_API; the shim refuses to run otherwise.
-# shellcheck disable=SC2034  # read by the shim's load_libs
-BM_LIB_API=1
+# slots.sh — the two venv slots: whether a slot can be trusted, the
+# crash-safety markers, the swap, and rollback.
+# Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
+# the shim that releases ship.
 
 # ---------------------------------------------------------------------------
 # Crash-safety markers. Both live inside a venv slot, which is root-owned, so
@@ -137,7 +136,8 @@ do_rollback() {
 
 # complete_rollback <new_version> <from_version> <stage> <prev_slot> <count>:
 # everything after the marker. Safe to run again after a crash part-way: the
-# swap is skipped once done, and the stash restore and re-apply are idempotent.
+# swap is skipped once done, the stash restore and re-apply are idempotent,
+# and the interruption count is set, not incremented.
 complete_rollback() {
     local new_version="$1" from_version="$2" stage="$3" prev_slot="$4" count="$5"
     log "ROLLBACK: $new_version failed at stage=$stage, reverting to slot $prev_slot"
@@ -165,10 +165,14 @@ complete_rollback() {
         "re-apply of the previous release" "$rc" "$output"
 
     refresh_docs_for_slot "$prev_slot"
+    [[ "$stage" != interrupted ]] || interruptions "$new_version" "$count"
+    # The box is back on the previous release. Drop the marker before the
+    # bookkeeping: if that fails, the next fire must not restore and re-apply
+    # (restarting every project) all over again.
+    rm -f "$(rollback_marker "$prev_slot")"
     if [[ "$stage" == interrupted ]]; then
         # Not reported to the fleet service: a power cut must not count
         # toward suppressing a release. The operator still hears of it.
-        interruptions "$new_version" "$count"
         local outcome="not blocklisted; auto-update will retry it"
         if [[ "$count" -ge 2 ]]; then
             add_blocklist "$new_version" "$stage"
@@ -181,7 +185,6 @@ complete_rollback() {
         report_failure "$new_version" "$from_version" "$stage"
         send_notification "boxmunge ROLLBACK" "Rolled back $new_version (stage: $stage)"
     fi
-    rm -f "$(rollback_marker "$prev_slot")"
 
     log "Rollback complete: reverted to $from_version"
     exit 1

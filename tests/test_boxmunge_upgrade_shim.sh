@@ -6,7 +6,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Shared stand-ins for flock/timeout/visudo on hosts that lack them.
 # shellcheck source=tests/shim/lib.sh
 source "$SCRIPT_DIR/shim/lib.sh"
-SHIM="$SCRIPT_DIR/../scripts/boxmunge-upgrade"
 
 PASS=0
 FAIL=0

@@ -1,10 +1,8 @@
 # shellcheck shell=bash
-# state.sh — sourced by boxmunge-upgrade (root). Validation of everything
-# the shim reads, the active slot, the lock, the blocklist, interruption
-# counts, and the upgrade policy.
-# Must match the shim's UPGRADE_LIB_API; the shim refuses to run otherwise.
-# shellcheck disable=SC2034  # read by the shim's load_libs
-BM_LIB_API=1
+# state.sh — validation of everything the shim reads, the active slot, the
+# lock, the blocklist, interruption counts, and the upgrade policy.
+# Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
+# the shim that releases ship.
 
 # ---------------------------------------------------------------------------
 # Deploy-writable state.
@@ -46,8 +44,9 @@ replace_file() {
 # the deploy-writable active-slot file. Both must name a or b, and they must
 # agree: a forged active-slot would otherwise make the live venv look like
 # the standby, and the next upgrade would rm -rf it. The one exception is a
-# crash inside swap_to, proven by a root-owned upgrade-inflight marker: then
-# root's env-active is the truth and active-slot is rewritten to match it.
+# crash inside swap_to, proven by a root-owned upgrade-inflight or
+# rollback-inflight marker in either slot (both are written before any swap):
+# then root's env-active is the truth and active-slot is rewritten to match.
 load_active_slot() {
     local from_file="" from_link="" target
     refuse_symlink "$ACTIVE_SLOT_FILE"
@@ -64,9 +63,9 @@ load_active_slot() {
         esac
     fi
     if [[ -n "$from_file" && -n "$from_link" && "$from_file" != "$from_link" ]]; then
-        [[ -e "$(inflight_marker a)" || -e "$(inflight_marker b)" ]] \
+        [[ -e "$(inflight_marker a)" || -e "$(inflight_marker b)" || -e "$(rollback_marker a)" || -e "$(rollback_marker b)" ]] \
             || die "active-slot says '$from_file' but env-active points at env-$from_link; refusing to guess which venv is live"
-        log "WARN: active-slot disagrees with env-active after an interrupted upgrade; following env-active (slot $from_link)"
+        log "WARN: active-slot disagrees with env-active after an interrupted swap; following env-active (slot $from_link)"
         write_active_slot_file "$from_link"
     fi
     ACTIVE_SLOT="${from_link:-$from_file}"

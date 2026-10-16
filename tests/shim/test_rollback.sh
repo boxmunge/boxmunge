@@ -54,4 +54,27 @@ expect 2 "stash restore failed" "a failed stash restore is a partial rollback"
     || fail "re-apply ran after a failed restore: $(calls)"
 drop_root
 
+# The rollback is done once restore and re-apply succeed: a failure in the
+# bookkeeping after them must not make every later fire restore and re-apply
+# (restarting every project) again.
+probation_failure_setup() {
+    new_root a
+    mock_server a 'if [[ "$1" == "health" ]]; then exit 2; fi; exit 0'
+    mock_server b 'echo "$*" >> "$BOXMUNGE_ROOT/calls"; exit 0'
+    rm "$BOXMUNGE_ROOT/env-b/bin/python"
+    printf '#!/usr/bin/env bash\n[[ "$*" != *add_to_blocklist* ]] || exit 1\nexit 0\n' > "$BOXMUNGE_ROOT/env-b/bin/python"
+    chmod +x "$BOXMUNGE_ROOT/env-b/bin/python"
+    write_probation "1.2.3" "b" "$SOON"
+}
+probation_failure_setup
+run_shim check-probation
+[[ "$RC" -ne 0 && "$(calls)" == "stash restore --latest;upgrade --apply;" ]] \
+    && pass "rollback whose blocklist write fails still restored and re-applied" \
+    || fail "unexpected: rc=$RC calls=$(calls)"
+: > "$BOXMUNGE_ROOT/calls"
+run_shim check-probation
+[[ "$(calls)" != *"stash restore"* ]] && pass "a failed bookkeeping step does not repeat the restore" \
+    || fail "the next fire restored again: $(calls)"
+drop_root
+
 finish

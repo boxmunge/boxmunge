@@ -75,9 +75,10 @@ reads from that directory is checked before use:
 - The active slot must be exactly `a` or `b`, and must agree with the root-owned
   `env-active` symlink. A disagreement stops the shim rather than letting a
   forged `active-slot` turn the live venv into the "standby" that the next
-  upgrade deletes. The one exception is an upgrade killed mid-swap, proven by
-  the root-owned `upgrade-inflight` marker in the slot being installed: the
-  shim then follows `env-active` and rewrites `active-slot`.
+  upgrade deletes. The one exception is an upgrade or rollback killed
+  mid-swap, proven by a root-owned `upgrade-inflight` or `rollback-inflight`
+  marker in a venv slot: the shim then follows `env-active` and rewrites
+  `active-slot`.
 - `probation.json` must be a JSON object with a semver `version`, an
   ISO-8601 `expires_at` with a timezone, and a `previous_slot` of `a` or `b`
   that is the current standby slot and a working venv (promotion deletes
@@ -95,9 +96,7 @@ the file as `supervisor` and re-run.
 
 The shim deletes a venv slot only while the live one runs, and never the live
 one. State deploy must not influence is root-only: the crash-safety markers
-inside the venv slots, the interruption counts in `/opt/boxmunge/upgrade-root/`,
-and the shim's libraries in `/opt/boxmunge/bin/boxmunge-upgrade.d/`, which it
-refuses to source if anyone but their owner can write them.
+inside the venv slots and the interruption counts in `/opt/boxmunge/upgrade-root/`.
 
 ### Files root writes in deploy-writable directories
 

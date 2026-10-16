@@ -1,9 +1,8 @@
 # shellcheck shell=bash
-# system.sh — sourced by boxmunge-upgrade (root). Release signature check,
-# deploy's sudo rule, on-box docs, and the shim's own self-update.
-# Must match the shim's UPGRADE_LIB_API; the shim refuses to run otherwise.
-# shellcheck disable=SC2034  # read by the shim's load_libs
-BM_LIB_API=1
+# system.sh — release signature check, deploy's sudo rule, on-box docs, and
+# the shim's own self-update.
+# Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
+# the shim that releases ship.
 
 # Cosign verification pins. The release workflow keyless-signs SHA256SUMS via
 # Sigstore's Fulcio + Rekor. We pin the OIDC issuer and the workflow identity
@@ -136,35 +135,28 @@ refresh_docs_for_slot() {
     fi
 }
 
-# self_update_shim <bundle_dir>: install the bundle's shim libraries, then the
-# shim itself, so an installed shim never starts against libraries older than
-# it expects. Without this, shim fixes would take effect only on the upgrade
-# after they ship. Everything is gated on `bash -n` first: a syntactically
-# broken shim would brick `boxmunge-upgrade` until install.sh is re-run, so a
-# broken set leaves the running set in place (the venv install still goes
-# ahead; the fix is just deferred to the next release). A bundle without
-# libraries (a release from before the split) carries a self-contained shim.
+# self_update_shim <bundle_dir>: install the bundle's shim (and other bin/
+# wrappers) over the running ones. Without this, shim fixes would take effect
+# only on the upgrade after they ship. Gated on `bash -n`, and on the shim
+# being a built one: a syntactically broken or unbuilt shim would brick
+# `boxmunge-upgrade` until install.sh is re-run, so it is refused and the
+# running shim kept (the venv install still goes ahead; the fix is just
+# deferred to the next release).
 self_update_shim() {
-    local bundle="$1" new_shim="$1/scripts/boxmunge-upgrade" new_libs="$1/scripts/boxmunge-upgrade.d"
-    local f lib_files=() name
-    [[ -f "$new_shim" ]] || return 0
-    [[ ! -d "$new_libs" ]] || lib_files=("$new_libs"/*.sh)
-    for f in "$new_shim" "${lib_files[@]}"; do
-        if ! bash -n "$f" 2>/dev/null; then
-            log "ERROR: new shim file $(basename "$f") has syntax errors; refusing to install. Old shim retained."
-            bm_log error upgrade "shim self-update skipped: bash -n failed" "{\"file\": \"$(basename "$f")\"}"
-            return 0
+    local bundle="$1" new_shim="$1/scripts/boxmunge-upgrade" f name
+    if [[ -f "$new_shim" ]]; then
+        if ! bash -n "$new_shim" 2>/dev/null; then
+            log "ERROR: new shim has syntax errors; refusing to install. Old shim retained."
+            bm_log error upgrade "shim self-update skipped: bash -n failed" "{}"
+        elif grep -q '^# >>> boxmunge-upgrade.d:' "$new_shim"; then
+            log "ERROR: bundle carries an unbuilt source shim; refusing to install. Old shim retained."
+            bm_log error upgrade "shim self-update skipped: unbuilt shim" "{}"
+        else
+            log "Self-updating upgrade shim from bundle..."
+            install -m 0755 -o root -g root "$new_shim" "$BIN_DIR/boxmunge-upgrade"
+            bm_log info upgrade "shim self-updated" "{}"
         fi
-    done
-    log "Self-updating upgrade shim from bundle..."
-    if [[ ${#lib_files[@]} -gt 0 ]]; then
-        install -d -m 0755 -o root -g root "$UPGRADE_LIB_INSTALL_DIR"
-        for f in "${lib_files[@]}"; do
-            install -m 0644 -o root -g root "$f" "$UPGRADE_LIB_INSTALL_DIR/$(basename "$f")"
-        done
     fi
-    install -m 0755 -o root -g root "$new_shim" "$BIN_DIR/boxmunge-upgrade"
-    bm_log info upgrade "shim self-updated" "{}"
     # Other wrappers under bin/ the bundle ships. boxmunge-sftp is the SFTP
     # wrapper invoked by sshd (it refuses deploy).
     # shellcheck disable=SC2043  # one wrapper today; new bin/ wrappers go in this list

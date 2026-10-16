@@ -44,6 +44,10 @@ $(BUNDLE): $(BUNDLE_DEPS)
 	@find dist/.stage -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 	@find dist/.stage -name '*.pyc' -delete 2>/dev/null || true
 	@find dist/.stage -name '*.egg-info' -type d -exec rm -rf {} + 2>/dev/null || true
+	@# Ship the upgrade shim as one self-contained file: every installer of it,
+	@# older releases' shims included, copies only scripts/boxmunge-upgrade.
+	python3 scripts/build-shim.py scripts/boxmunge-upgrade dist/.stage/boxmunge/scripts/boxmunge-upgrade
+	rm -rf dist/.stage/boxmunge/scripts/boxmunge-upgrade.d
 	@for d in $(BUNDLE_STAGED_DIRS); do \
 	    if [ ! -d "dist/.stage/boxmunge/$$d" ]; then \
 	        echo "ERROR: bundle staging missing declared dir: $$d" >&2; exit 1; \

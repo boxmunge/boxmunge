@@ -32,14 +32,16 @@ stub "$FIXTURE/bin/sync" 'echo "sync link=$(readlink "$BOXMUNGE_ROOT/env-active"
 n=$(grep -c "^sync" "$BOXMUNGE_ROOT/calls")
 [[ "${KILL_AT:-}" != "sync$n" ]] || { '"$kill_shim"'; }'
 stub "$FIXTURE/bin/ln" "'$REAL_LN' \"\$@\" || exit
-[[ \"\${@: -1}\" != */env-active || \"\${KILL_AT:-}\" != link ]] || { $kill_shim; }"
+[[ \"\${@: -1}\" == */env-active ]] || exit 0
+echo link >> \"\$BOXMUNGE_ROOT/calls\"
+[[ \"\${KILL_AT:-}\" != \"link\$(grep -c '^link\$' \"\$BOXMUNGE_ROOT/calls\")\" ]] || { $kill_shim; }"
 
 # The new release's venv.
 stub "$FIXTURE/venv/bin/pip" 'exit 0'
 stub "$FIXTURE/venv/bin/boxmunge-server" 'case "$1 ${2:-}" in
     "--version "*) echo "boxmunge 1.5.0" ;;
     "upgrade --apply") [[ "${KILL_AT:-}" != apply ]] || { '"$kill_shim"'; }; [[ -z "${FAIL_APPLY:-}" ]] || exit 1 ;;
-    "health "*) [[ "${KILL_AT:-}" != health ]] || { '"$kill_shim"'; } ;;
+    "health "*) [[ "${KILL_AT:-}" != health ]] || { '"$kill_shim"'; }; [[ -z "${FAIL_HEALTH:-}" ]] || exit 2 ;;
 esac
 exit 0'
 stub "$FIXTURE/venv/bin/python" 'if [[ "$1" == "-" ]]; then
@@ -153,7 +155,7 @@ drop_root
 
 # --- killed after the swap: roll back --------------------------------------
 
-for point in link sync2 apply health probation; do
+for point in link1 sync2 apply health probation; do
     installed
     upgrade_killed_at "$point"
     [[ "$RC" -eq 137 && "$(live)" == b ]] && pass "$point: killed after the swap" \
@@ -221,9 +223,10 @@ drop_root
 
 # --- killed inside a rollback: the next check-probation finishes it --------
 # Apply fails, so upgrade_to rolls back; the rollback itself is killed.
-# sync3 is its marker (before the swap back), sync4 the swap back.
+# sync3 is its marker (before the swap back), link2 inside the swap back
+# (env-active switched, active-slot not yet), sync4 just after it.
 
-for point in sync3 sync4 restore reapply; do
+for point in sync3 link2 sync4 restore reapply; do
     installed
     RC=0
     OUT="$(FAIL_APPLY=1 KILL_AT="$point" bash -c 'echo $$ > "$BOXMUNGE_ROOT/shim.pid"; exec bash "$0" target 1.5.0' "$SHIM" 2>&1)" || RC=$?
@@ -244,6 +247,28 @@ for point in sync3 sync4 restore reapply; do
     proven_intact "rollback $point (after cleanup)"
     drop_root
 done
+
+# --- a probation rollback killed inside its own swap ------------------------
+# No upgrade-inflight marker exists by then; rollback-inflight alone must
+# prove the env-active/active-slot disagreement is an interrupted swap.
+
+installed
+upgrade_killed_at none
+RC=0
+OUT="$(FAIL_HEALTH=1 KILL_AT=link2 bash -c 'echo $$ > "$BOXMUNGE_ROOT/shim.pid"; exec bash "$0" check-probation' "$SHIM" 2>&1)" || RC=$?
+[[ "$RC" -eq 137 && "$(live)" == a && "$(cat "$BOXMUNGE_ROOT/upgrade-state/active-slot")" == b ]] \
+    && pass "probation rollback: killed between env-active and active-slot" || fail "probation rollback: rc=$RC live=$(live) $OUT"
+: > "$BOXMUNGE_ROOT/calls"
+run_shim check-probation
+expect 1 "Resuming the interrupted rollback of 1.5.0 (stage health_probation)" "probation rollback: check-probation resumes it"
+[[ "$(live)" == a && "$(cat "$BOXMUNGE_ROOT/upgrade-state/active-slot")" == a ]] \
+    && pass "probation rollback: env-active and active-slot agree on the proven slot" || fail "probation rollback: live=$(live)"
+grep -q "a: stash restore --latest" "$BOXMUNGE_ROOT/calls" && grep -q "a: upgrade --apply" "$BOXMUNGE_ROOT/calls" \
+    && pass "probation rollback: stash restore and re-apply ran" || fail "probation rollback: steps: $(cat "$BOXMUNGE_ROOT/calls")"
+run_shim check-probation
+expect 0 "orphan venv in inactive slot b" "probation rollback: the next check-probation clears the failed slot"
+proven_intact "probation rollback"
+drop_root
 
 # --- killed after probation was recorded: the upgrade stands ---------------
 
