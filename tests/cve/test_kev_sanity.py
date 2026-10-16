@@ -126,7 +126,7 @@ def test_future_fetched_at_is_stale():
 def test_fleet_scan_alerts_once_on_rejected_refresh(tmp_path, monkeypatch):
     """A rejected refresh fires the priority-1 KEV alert even though the
     kept cache is still fresh."""
-    from boxmunge.commands import security_actions, security_scan_core, security_scan_inputs
+    from boxmunge.commands import security_actions, security_scan_core
     from boxmunge.cve.kev import KevRefresh
     from tests.test_commands.cve_helpers import make_box, scan_result
 
@@ -138,7 +138,6 @@ def test_fleet_scan_alerts_once_on_rejected_refresh(tmp_path, monkeypatch):
         lambda p: KevRefresh(updated=False, rejected="feed returned 0 entries"),
     )
     monkeypatch.setattr(security_actions, "load_kev", lambda p: fresh)
-    monkeypatch.setattr(security_scan_inputs, "container_image_digest", lambda c: None)
     monkeypatch.setattr(security_scan_core, "scan_image", lambda r, timeout: scan_result(r))
     sent: list = []
     monkeypatch.setattr(security_actions, "send_alerts", lambda a, p: sent.extend(a))

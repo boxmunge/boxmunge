@@ -38,7 +38,7 @@ def _report_incomplete(project: str, scan: ProjectScan) -> None:
         _err(f"  - {reason}")
     _err(
         "  Fix the cause (Trivy DB or registry reachability, or a service "
-        "that was never built), then retry `boxmunge security resume "
+        "with no container), then retry `boxmunge security resume "
         f"{project}`."
     )
 

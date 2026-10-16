@@ -192,6 +192,7 @@ def compose_config(
     compose_files: list[str] | None = None,
     *,
     project_name: str,
+    all_profiles: bool = False,
 ) -> str:
     """Return `docker compose config --format json` output.
 
@@ -203,8 +204,13 @@ def compose_config(
     on bundles where on-box files such as secrets.env are absent, and never
     needs their values. Their paths still appear in the model, so env_file
     confinement is still checked.
+
+    The model holds the services `up` starts: a service behind a profile
+    that is not active is left out. ``all_profiles`` includes those too.
     """
     cmd = compose_command(project_name, compose_files)
+    if all_profiles:
+        cmd.extend(["--profile", "*"])
     cmd.extend(["config", "--format", "json", "--no-env-resolution"])
     result = _run(cmd, cwd=project_dir, capture=True)
     return result.stdout
@@ -438,24 +444,6 @@ def set_restart_policy(container_names: list[str], policy: str) -> None:
     """Run docker update --restart=<policy> on the named containers."""
     if container_names:
         _run(["docker", "update", f"--restart={policy}", *container_names])
-
-
-def container_image_id(container_name: str) -> str | None:
-    """The local image ID ("sha256:...") a container was created from.
-
-    Unlike container_image_digest this needs no registry digest, so it
-    identifies locally built images too. None if there is no such container.
-    """
-    try:
-        result = _run(
-            ["docker", "inspect", "--format", "{{.Image}}", container_name],
-            capture=True,
-            check=False,
-        )
-    except DockerError:
-        return None
-    image_id = result.stdout.strip()
-    return image_id if image_id.startswith("sha256:") else None
 
 
 def local_image_id(image_ref: str) -> str | None:

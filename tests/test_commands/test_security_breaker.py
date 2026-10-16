@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from boxmunge.commands import security_actions, security_scan_core, security_scan_inputs
+from boxmunge.commands import security_actions, security_scan_core
 from boxmunge.commands.security_actions import cmd_security_scan
 from boxmunge.cve.breaker import read_held
 from boxmunge.cve.kev import KevCatalog
@@ -22,7 +22,6 @@ def fleet(tmp_path, monkeypatch):
     """Three projects; every image carries the same quarantine-level CVE."""
     paths = make_box(tmp_path, projects=("aaa", "bbb", "ccc"))
     monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
-    monkeypatch.setattr(security_scan_inputs, "container_image_digest", lambda c: None)
     monkeypatch.setattr(
         security_scan_core, "scan_image",
         lambda ref, timeout: scan_result(ref, [finding(_SHARED)]),
@@ -101,7 +100,6 @@ def test_kev_quarantines_are_not_held(fleet, monkeypatch):
 def test_one_project_quarantines_normally(tmp_path, monkeypatch):
     paths = make_box(tmp_path, projects=("aaa", "bbb", "ccc"))
     monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
-    monkeypatch.setattr(security_scan_inputs, "container_image_digest", lambda c: None)
     monkeypatch.setattr(
         security_scan_core, "scan_image",
         lambda ref, timeout: scan_result(ref, [finding()] if ref.startswith("aaa") else []),

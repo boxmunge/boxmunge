@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from boxmunge.commands import security_resume, security_scan_core, security_scan_inputs
+from boxmunge.commands import security_resume, security_scan_core
 from boxmunge.commands.security_resume import cmd_security_resume
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.cve.scanner import ScannerError
@@ -24,7 +24,6 @@ def lift(monkeypatch):
     """Stub the lift primitives; record whether the lift ran."""
     calls: list[str] = []
     monkeypatch.setattr(security_resume, "refresh_db", lambda: None)
-    monkeypatch.setattr(security_scan_inputs, "container_image_digest", lambda c: None)
     monkeypatch.setattr(security_resume, "prepare_caddy_config", lambda p, m: None)
     monkeypatch.setattr(
         security_resume, "prepare_compose_override", lambda p, m, component=None: None,
@@ -76,7 +75,7 @@ def test_resume_refuses_when_a_service_image_is_unidentifiable(
     err = capsys.readouterr().err
     assert rc == 1
     assert lift == []
-    assert "service 'worker': no image could be identified" in err
+    assert "service 'worker': should be running but has no container" in err
 
 
 def test_resume_refuses_when_no_image_is_identifiable(tmp_path, monkeypatch, lift, capsys):
@@ -130,7 +129,6 @@ def test_resume_lifts_after_complete_clean_rescan(tmp_path, monkeypatch, lift, c
 def real_lift(monkeypatch):
     """Clean re-scan; real lift; Caddy/compose/restart-policy Docker calls faked."""
     monkeypatch.setattr(security_resume, "refresh_db", lambda: None)
-    monkeypatch.setattr(security_scan_inputs, "container_image_digest", lambda c: None)
     monkeypatch.setattr(security_scan_core, "scan_image", lambda ref, timeout: _sr(ref))
     rendered: list[str] = []
     monkeypatch.setattr(security_resume, "prepare_caddy_config",

@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from boxmunge.commands import security_actions, security_scan_core, security_scan_inputs
+from boxmunge.commands import security_actions, security_scan_core
 from boxmunge.commands.security_actions import cmd_security_scan
 from boxmunge.cve.scanner import ScannerError
 from tests.test_commands.cve_helpers import Pushover, make_box, scan_result
@@ -14,10 +14,9 @@ from tests.test_commands.cve_helpers import Pushover, make_box, scan_result
 
 @pytest.fixture
 def scanned(monkeypatch):
-    """Stub Trivy and container digests; record which images were scanned."""
+    """Stub Trivy; record which images were scanned."""
     seen: list[str] = []
     monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
-    monkeypatch.setattr(security_scan_inputs, "container_image_digest", lambda c: None)
 
     def scan(ref, timeout):
         seen.append(ref)
@@ -97,7 +96,7 @@ def test_unidentifiable_service_is_a_partial_failure(tmp_path, monkeypatch, scan
     pushover = Pushover(monkeypatch, paths)
     assert cmd_security_scan([], paths) == 1
     [(_, body, _)] = _failure_alerts(pushover)
-    assert "service 'worker': no image could be identified" in body
+    assert "service 'worker': should be running but has no container" in body
 
 
 def test_single_project_scan_failure_also_alerts(tmp_path, monkeypatch, scanned):

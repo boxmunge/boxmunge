@@ -57,25 +57,74 @@ def _no_writable_diagnostic_sleep(monkeypatch):
     )
 
 
-@pytest.fixture(autouse=True)
-def _no_docker_image_lookups(monkeypatch):
-    """Keep CVE image identification and restart-policy holds off the real
-    Docker daemon.
+class FakeContainers:
+    """Stands in for `docker_containers.project_containers`.
 
-    Tests stub container_image_digest themselves; the image-ID lookups
-    default to "no container, no local image" unless a test overrides them.
+    A project the test gave containers with ``run`` (or emptied with
+    ``remove``) has exactly those. Any other project is running as its
+    compose file says: one container per `image:` service of the model
+    `docker compose config` last resolved for it, and the fake names each
+    image by that compose reference, so tests see the refs they declared.
+    A build-only service has no container unless a test runs one.
     """
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_id", lambda c: None,
-    )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.local_image_id", lambda r: None,
-    )
+
+    def __init__(self) -> None:
+        self.by_project: dict[str, list] = {}
+        self.models: dict[str, dict] = {}
+
+    def run(self, project: str, service: str, image_id: str, *,
+            repo_digests: tuple[str, ...] = (), name: str | None = None,
+            running: bool = True, health: str | None = None, oneoff: bool = False):
+        from boxmunge.docker_containers import ProjectContainer
+
+        existing = self.by_project.setdefault(project, [])
+        container = ProjectContainer(
+            name=name or f"{project}-{service}-{len(existing) + 1}",
+            service=service, image_id=image_id, repo_digests=tuple(repo_digests),
+            running=running, health=health, oneoff=oneoff,
+        )
+        existing.append(container)
+        return container
+
+    def remove(self, project: str) -> None:
+        """The project has no containers at all."""
+        self.by_project[project] = []
+
+    def _as_declared(self, project: str) -> list:
+        import hashlib
+
+        from boxmunge.docker_containers import ProjectContainer
+
+        services = (self.models.get(project) or {}).get("services") or {}
+        return [
+            ProjectContainer(
+                name=f"{project}-{svc}-1", service=svc,
+                image_id="sha256:" + hashlib.sha256(spec["image"].encode()).hexdigest(),
+                repo_digests=(spec["image"],), running=True, health=None, oneoff=False,
+            )
+            for svc, spec in services.items()
+            if isinstance(spec, dict) and isinstance(spec.get("image"), str)
+        ]
+
+    def __call__(self, project_name: str) -> list:
+        if project_name in self.by_project:
+            return list(self.by_project[project_name])
+        return self._as_declared(project_name)
+
+
+@pytest.fixture(autouse=True)
+def fake_containers(request, monkeypatch) -> FakeContainers:
+    """Keep container discovery and restart-policy holds off the real Docker
+    daemon outside the integration tier."""
     # Quarantine and pause hold restart policies through boxmunge.restart_hold;
     # by default the project has no containers to hold.
     monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies",
         lambda *, project_name: {})
     monkeypatch.setattr("boxmunge.restart_hold.set_restart_policy", lambda n, p: None)
+    fake = FakeContainers()
+    if not request.node.get_closest_marker("integration"):
+        monkeypatch.setattr("boxmunge.docker_containers.project_containers", fake)
+    return fake
 
 
 @pytest.fixture(autouse=True)
@@ -118,7 +167,7 @@ def _no_kev_network(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _compose_config_without_docker(request, monkeypatch):
+def _compose_config_without_docker(request, monkeypatch, fake_containers):
     """Stand in for `docker compose config` outside the integration tier.
 
     The compose validator and overlay generator read the resolved model
@@ -136,13 +185,21 @@ def _compose_config_without_docker(request, monkeypatch):
 
     from boxmunge import docker
 
-    def _literal_config(project_dir, compose_files=None, *, project_name):
+    def _literal_config(project_dir, compose_files=None, *, project_name,
+                        all_profiles=False):
         docker.check_compose_project_name(project_name)
         path = Path(project_dir) / (compose_files or ["compose.yml"])[0]
         try:
             doc = yaml.safe_load(path.read_text())
         except (OSError, yaml.YAMLError) as e:
             raise docker.DockerError(f"compose config failed: {e}") from e
+        services = doc.get("services") if isinstance(doc, dict) else None
+        if not all_profiles and isinstance(services, dict):
+            # Like Compose, leave out services behind a profile.
+            doc["services"] = {n: s for n, s in services.items()
+                               if not (isinstance(s, dict) and s.get("profiles"))}
+        if not all_profiles and isinstance(doc, dict):
+            fake_containers.models[project_name] = doc
         return json.dumps(doc)
 
     monkeypatch.setattr(docker, "compose_config", _literal_config)

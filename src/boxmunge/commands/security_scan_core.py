@@ -22,7 +22,9 @@ from boxmunge.commands.security_scan_inputs import (
     hardening_profile,
     identify_images,
     load_all_suppressions,
+    load_inventory,
     load_project_meta,
+    load_user_model,
 )
 from boxmunge.commands.security_enforce import (
     Enforcement,
@@ -81,9 +83,10 @@ class ProjectScan:
     """Everything one project scan learned.
 
     ``failed_images`` errored in Trivy, ``skipped_images`` were cut by the
-    per-project budget, and ``unidentified_services`` had no image that
-    could be resolved. Any of the three means the scan is incomplete: the
-    decisions cover only part of what the project runs.
+    per-project budget, and ``unidentified_services`` should be running but
+    have no container whose image could be scanned. Any of the three means
+    the scan is incomplete: the decisions cover only part of what the
+    project runs.
     """
 
     project: str
@@ -117,8 +120,9 @@ def _unscanned(
     """One human line per image or service a scan did not cover."""
     out = [f"image {ref}: scan failed" for ref in failed]
     out += [f"image {ref}: skipped (scan budget exhausted)" for ref in skipped]
-    out += [f"service {svc!r}: no image could be identified (no container, "
-            f"no built image, and no image: in compose.yml)"
+    out += [f"service {svc!r}: should be running but has no container, so "
+            f"the image it runs cannot be identified; start the project "
+            f"(deploy, or resume) so it can be scanned"
             for svc in unidentified]
     return out
 
@@ -280,7 +284,7 @@ def _scan_one_project_locked(
                 f"project {project!r}: invalid security.runtimes in "
                 f"manifest: {e}"
             ) from e
-    profile = hardening_profile(meta)
+    profile = hardening_profile(meta, load_user_model(paths, project))
     # Host-scoped suppressions are for reviewed, accepted-risk findings; the
     # relevance gate handles "base-image package the project never invokes".
     supps = load_all_suppressions(paths, project)
@@ -289,14 +293,11 @@ def _scan_one_project_locked(
     scan_state_path = paths.project_scan_state(project)
     prior_decisions = _prior_decisions(paths, project)
 
-    inventory = identify_images(meta.manifest, meta.compose, project)
+    inventory = identify_images(meta.manifest, load_inventory(paths, project, meta))
     targets, unidentified = inventory.targets, inventory.unidentified
-    warnings = [
-        f"service {svc!r}: no container, no built image and no image: in "
-        f"compose — cannot be scanned"
-        for svc in unidentified
-    ] + [
-        f"service {svc!r}: compose-profile service not running — nothing to scan"
+    warnings = _unscanned(unidentified=unidentified) + [
+        f"service {svc!r}: behind an inactive compose profile and has no "
+        f"container — nothing to scan"
         for svc in inventory.not_started
     ]
     if not targets:

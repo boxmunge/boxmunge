@@ -634,19 +634,26 @@ audit trail.
 
 ## What is scanned
 
-Every service in the project's `compose.yml` is scanned — not only the
-services the manifest lists, so databases, caches and sidecars are covered
-too. For each service the scanner uses the most exact identity it can find:
+Every service the project runs is scanned — not only the services the
+manifest lists, so databases, caches and sidecars are covered too. Services
+are read from the model Compose resolves from every file the project is
+deployed with, so services that come from `include:`, settings inherited
+through `extends:`, and `${VAR:-default}` images all count.
 
-1. the container's image pinned by registry digest (`repo@sha256:…`);
-2. the container's local image ID (`sha256:…`), which is exactly what is
-   running and the only identity a locally built (`build:`) image has;
-3. the `image:` declared in `compose.yml`;
-4. the image compose built for the service (`<project>-<service>`).
+Containers are found by their Compose labels, so a custom `container_name`
+and every replica are found. Each container is scanned by the image it was
+created from: its registry digest (`repo@sha256:…`) when the image was
+pulled, otherwise its local image ID (`sha256:…`), the only identity a
+locally built (`build:`) image has. The `image:` tag is never scanned in
+place of a container, because a pull moves the tag without changing what
+runs.
 
 A stopped container (paused or quarantined project) still identifies its
-image. A compose service behind `profiles:` that is not running is not
-scanned and not counted as a failure: nothing of it is deployed.
+image. A service with no container at all cannot be scanned and makes the
+scan incomplete, except a service behind a `profiles:` entry that is not
+active: nothing of it is deployed, so it is not scanned and not counted as a
+failure. If such a service has a container (it was started with
+`--profile`), that container is scanned.
 
 ## Scan cadence
 
@@ -710,9 +717,10 @@ worst case while still letting normal scans complete in seconds.
 An image that is not scanned is not covered by quarantine, so a scan that
 did not cover everything is never reported as success. A project's scan is
 **incomplete** when an image fails to scan (Trivy error, registry or DB
-unreachable), the budget skips an image, or a service has no identifiable
-image at all (no container, no image built for it, and no `image:` in
-`compose.yml` — in practice a build-only service that was never built). A
+unreachable), the budget skips an image, or a service that should be
+running has no container, so what it runs cannot be identified (a project
+the health monitor stopped, or a container removed by hand). Start the
+project (deploy, or resume) and scan again. A
 project **fails** outright when one of its
 inputs is malformed: an unparseable manifest or `compose.yml`, an unknown
 `security.posture`, a non-boolean `dangerously_disable_quarantine`, a broken
@@ -942,8 +950,8 @@ closed (see "Recovering a quarantined project" below).
    - any image failed to scan (Trivy DB or registry unreachable, for
      example), or every image did;
    - the per-project scan budget ran out before every image was scanned;
-   - a service's image cannot be identified (no container, no image built
-     for it, and no `image:` in `compose.yml`).
+   - a service that should be running has no container, so its image
+     cannot be identified.
 
    The error lists each image or service that was not covered. Fix the
    cause and retry; an incomplete re-scan is never treated as clean.
