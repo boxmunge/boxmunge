@@ -95,7 +95,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y age
       - name: Install pinned dependencies
         run: |
-          pip install --require-hashes -r requirements.txt
+          # requirements-mcp.txt: every server install includes MCP, and
+          # test_mcp_integration.py talks to mcp-serve through it.
+          pip install --require-hashes -r requirements.txt -r requirements-mcp.txt
           pip install --require-hashes -r requirements-dev.txt
           pip install -e . --no-deps
       - name: Integration tests (real Docker)

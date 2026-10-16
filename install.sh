@@ -436,11 +436,13 @@ fi
 # bundle; the package itself installs without resolving anything further and
 # builds with the hash-pinned backend already in the venv. The venv's own pip
 # (from the distro's python3-venv) is used as is: upgrading it would be one
-# more unpinned download.
+# more unpinned download. MCP is always installed: it is how agents operate
+# the box, and every upgrade installs the same files into the new slot.
 if [[ "${FROM_UPGRADE_SHIM}" -eq 0 ]]; then
-    "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --require-hashes \
-        -r "${SCRIPT_DIR}/requirements-build.txt" -r "${SCRIPT_DIR}/requirements-tui.txt"
-    "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --no-deps --no-build-isolation "${SCRIPT_DIR}"
+    "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --no-cache-dir --require-hashes \
+        -r "${SCRIPT_DIR}/requirements-build.txt" -r "${SCRIPT_DIR}/requirements-tui.txt" \
+        -r "${SCRIPT_DIR}/requirements-mcp.txt"
+    "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --no-cache-dir --no-deps --no-build-isolation "${SCRIPT_DIR}"
 fi
 
 # pip install as root leaves root-owned build artifacts in the source directory.

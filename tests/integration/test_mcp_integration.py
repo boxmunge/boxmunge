@@ -6,6 +6,8 @@ import sys
 
 import pytest
 
+from tests.integration.conftest import REQUIRE_INTEGRATION
+
 pytestmark = [pytest.mark.integration]
 
 
@@ -16,6 +18,14 @@ def _mcp_available() -> bool:
     except ImportError:
         return False
 
+
+# Every server install includes mcp (requirements-mcp.txt), so CI installs it
+# too, and a missing package there is a failure, not a skip.
+if REQUIRE_INTEGRATION and not _mcp_available():
+    raise RuntimeError(
+        "BOXMUNGE_REQUIRE_INTEGRATION=1 but the mcp package is not installed "
+        "(pip install --require-hashes -r requirements-mcp.txt)"
+    )
 
 skip_no_mcp = pytest.mark.skipif(not _mcp_available(), reason="mcp package not installed")
 

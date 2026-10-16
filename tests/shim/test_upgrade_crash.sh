@@ -61,6 +61,7 @@ exit 0'
 # The release itself.
 echo "build==1" > "$FIXTURE/release/boxmunge/requirements-build.txt"
 echo "tui==1" > "$FIXTURE/release/boxmunge/requirements-tui.txt"
+echo "mcp==1" > "$FIXTURE/release/boxmunge/requirements-mcp.txt"
 echo "1.5.0 ops" > "$FIXTURE/release/boxmunge/on-server/OPERATIONS.md"
 tar czf "$FIXTURE/release/boxmunge-1.5.0.tar.gz" -C "$FIXTURE/release" boxmunge
 echo "0000  boxmunge-1.5.0.tar.gz" > "$FIXTURE/release/SHA256SUMS"
@@ -214,7 +215,7 @@ drop_root
 
 installed
 upgrade_killed_at apply
-mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+[[ -d "$BOXMUNGE_ROOT/upgrade-root" ]] || mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
 echo '{"1.5.0": "x"}' > "$BOXMUNGE_ROOT/upgrade-root/interrupted.json"
 run_shim check-probation
 expect 1 "interrupted.json is malformed" "a malformed interruption count stops recovery"

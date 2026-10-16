@@ -35,11 +35,12 @@ HASH_LINE_RE = re.compile(r"--hash=sha256:[0-9a-f]{64}")
 # Top-of-block package declaration: starts at column 0, not a comment,
 # and is one of:
 #   name==version            (pip-compile's standard pinned form)
+#   name[extra]==version     (the same, with extras, e.g. pyjwt[crypto])
 #   name @ url               (PEP 508 direct URL reference)
 #   -e <url-or-path>          (editable install)
 PKG_DECL_RE = re.compile(
     r"^(?:"
-    r"[A-Za-z][\w.\-]*\s*==\s*\S+"   # name==version
+    r"[A-Za-z][\w.\-]*(?:\[[\w,.\-]+\])?\s*==\s*\S+"   # name[extra]==version
     r"|[A-Za-z][\w.\-]*\s+@\s+\S+"    # name @ url
     r"|-e\s+\S+"                      # -e <ref>
     r")"
@@ -76,6 +77,12 @@ def test_requirements_file_uses_hashes(path: Path) -> None:
         + "\n  ".join(hashless)
         + "\nRun `make lock` to regenerate."
     )
+
+
+def test_a_package_with_extras_is_its_own_block() -> None:
+    """Otherwise `pyjwt[crypto]==...` (from requirements-mcp.txt) would be
+    read as part of the package above it and borrow that package's hashes."""
+    assert PKG_DECL_RE.match("pyjwt[crypto]==2.13.0 \\")
 
 
 WORKFLOWS = sorted((REPO / ".github" / "workflows").glob("*.yml"))

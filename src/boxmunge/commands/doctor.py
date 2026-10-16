@@ -67,6 +67,12 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
         except OSError as e:
             warn("SFTP subsystem wired", f"could not read {sshd_config}: {e}")
 
+    # MCP is part of every install; without it agents cannot operate the box.
+    from boxmunge.commands.mcp_serve_cmd import MCP_REPAIR, mcp_import_error
+    mcp_error = mcp_import_error()
+    check("MCP package installed", mcp_error is None,
+          "" if mcp_error is None else f"{mcp_error}. {MCP_REPAIR}")
+
     # Backup key
     key_path = paths.backup_key
     if key_path.exists():

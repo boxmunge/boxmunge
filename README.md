@@ -89,16 +89,9 @@ Your project is live at `https://myapp.example.com` with TLS, reverse proxy, and
 
 ### 3. Let your agent take over
 
-MCP needs the server's optional `mcp` package, which the installer does not include. As root on
-the server, install it into the active environment, and repeat this after each platform upgrade
-(an upgrade builds a fresh environment without it):
-
-```bash
-/opt/boxmunge/env-active/bin/pip install 'mcp>=1.0'
-```
-
-Then add boxmunge to your AI agent's MCP configuration. The client's `mcp-serve` relays the
-protocol over SSH to the server's `mcp-serve`:
+The server installs its MCP support with everything else, from hash-pinned requirements, and
+every platform upgrade installs it again. Add boxmunge to your AI agent's MCP configuration. The
+client's `mcp-serve` relays the protocol over SSH to the server's `mcp-serve`:
 
 ```json
 {

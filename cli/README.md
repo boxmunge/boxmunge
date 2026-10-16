@@ -135,7 +135,8 @@ MCP is server-wide, so name the server explicitly:
 
 `--port` and `--user` default to 922 and `deploy`; `--config PATH` reads a
 `.boxmunge` instead. The proxy never prompts (ssh BatchMode), so use an SSH key
-from your agent or an unencrypted key. The server needs its MCP extra installed.
+from your agent or an unencrypted key. The server installs its MCP support with the
+platform; if the server's `mcp-serve` reports it missing, its error says how to repair it.
 
 ## Versions
 

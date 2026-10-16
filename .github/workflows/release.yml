@@ -66,11 +66,10 @@ jobs:
           pip install --require-hashes -r requirements.txt
           pip install --require-hashes -r requirements-tui.txt
           pip install --require-hashes -r requirements-dev.txt
-          # requirements-mcp.txt is intentionally not installed: the mcp
-          # extra is for runtime users who run `boxmunge-server` as an MCP
-          # server. CI does not import the third-party `mcp` package
-          # (test_mcp_server.py only exercises in-tree boxmunge.mcp_tools).
-          # If a future test does import mcp, add the install above.
+          # requirements-mcp.txt is not needed here: the unit tests never
+          # import the third-party `mcp` package (ci.yml's integration job
+          # installs it to run mcp-serve end to end). The bundle ships it
+          # and every on-box install uses it.
           # Install boxmunge itself in editable mode without re-resolving deps
           # (already installed above).
           pip install -e . --no-deps

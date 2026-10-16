@@ -18,7 +18,7 @@ BUNDLE  := dist/boxmunge-$(VERSION).tar.gz
 # ---------------------------------------------------------------------------
 BUNDLE_DIRS         := bootstrap src systemd config scripts caddy canary system
 BUNDLE_RENAMED_DIRS := docs/on-server=on-server
-BUNDLE_TOP_FILES    := install.sh pyproject.toml requirements-tui.txt requirements-build.txt
+BUNDLE_TOP_FILES    := install.sh pyproject.toml requirements-build.txt requirements-tui.txt requirements-mcp.txt
 
 # Names as they appear in the staged bundle (used by the verify step).
 BUNDLE_STAGED_DIRS  := $(BUNDLE_DIRS) $(foreach pair,$(BUNDLE_RENAMED_DIRS),$(word 2,$(subst =, ,$(pair))))

@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # state.sh — validation of everything the shim reads, the active slot, the
-# lock, the blocklist, interruption counts, and the upgrade policy.
+# lock, the blocklist, per-version failure counts, and the upgrade policy.
 # Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
 # the shim that releases ship.
 
@@ -133,17 +133,28 @@ add_to_blocklist(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_REASON'])
 "
 }
 
-# interruptions <version> [<count>]: print how many times <version>'s upgrade
-# was interrupted after its venv swap, or set that count (0 forgets it). Kept
+# Failures that are rarely the release's fault are counted per version, so
+# the first one is retried and only a repeat blocklists:
+#   interruptions <version> [<count>]  the upgrade was interrupted after its
+#                                      venv swap (a power cut, a kill)
+#   pip_failures <version> [<count>]   its hash-pinned dependencies failed to
+#                                      install (a network blip, a full disk)
+# Each prints the count, or sets it (0 forgets it).
+interruptions() { failure_count "$INTERRUPTED_FILE" "$@"; }
+pip_failures() { failure_count "$PIP_FAILURES_FILE" "$@"; }
+
+# failure_count <file> <version> [<count>]: the counts behind the above. Kept
 # in a root-only directory, not deploy-writable upgrade-state/, so deploy
 # cannot wedge recovery with a malformed file. Written by fsync + rename +
 # directory fsync.
-interruptions() {
+failure_count() {
+    local file="$1"
+    shift
     refuse_symlink "$UPGRADE_ROOT_DIR"
-    refuse_symlink "$INTERRUPTED_FILE"
+    refuse_symlink "$file"
     [[ $# -eq 1 || -d "$UPGRADE_ROOT_DIR" ]] || mkdir -m 0700 "$UPGRADE_ROOT_DIR"
-    BM_VERSION="$1" BM_COUNT="${2:-}" BM_FILE="$INTERRUPTED_FILE" BM_SEMVER_RE="$SEMVER_RE" python3 - <<'PYINT' \
-        || die "$INTERRUPTED_FILE is malformed; inspect it and repair or remove it"
+    BM_VERSION="$1" BM_COUNT="${2:-}" BM_FILE="$file" BM_SEMVER_RE="$SEMVER_RE" python3 - <<'PYINT' \
+        || die "$file is malformed; inspect it and repair or remove it"
 import json, os, re, sys, tempfile
 path, version, count = os.environ["BM_FILE"], os.environ["BM_VERSION"], os.environ["BM_COUNT"]
 counts = {}
@@ -153,7 +164,7 @@ if os.path.exists(path):
 pattern = re.compile(os.environ["BM_SEMVER_RE"])
 if not isinstance(counts, dict) or not all(
         isinstance(k, str) and pattern.fullmatch(k) and type(v) is int for k, v in counts.items()):
-    sys.exit("interrupted.json is not an object of semver version -> count")
+    sys.exit(f"{os.path.basename(path)} is not an object of semver version -> count")
 if not count:
     print(counts.get(version, 0))
     sys.exit(0)
@@ -161,7 +172,7 @@ counts.pop(version, None)
 if int(count):
     counts[version] = int(count)
 directory = os.path.dirname(path)
-fd, tmp = tempfile.mkstemp(dir=directory, prefix=".interrupted.")
+fd, tmp = tempfile.mkstemp(dir=directory, prefix=f".{os.path.basename(path)}.")
 with os.fdopen(fd, "w") as f:
     json.dump(counts, f)
     f.flush()
@@ -203,10 +214,15 @@ installed_version() {
 }
 
 # check_policy <version> <mode>: mode is run (timer), target (deploy) or
-# force (operator). Only force may install a blocklisted or older version.
+# force (operator). Only force may install a blocklisted or older version,
+# and no mode a release from before the hash-pinned MCP requirements. That
+# refusal is about this shim, not the release, so it is never blocklisted.
 check_policy() {
     local version="$1" mode="$2" installed operator_hint
     require_semver "$version" "requested version"
+    if ! semver_lt "$LAST_RELEASE_WITHOUT_MCP_LOCK" "$version"; then
+        die "Bundle $version predates the hash-pinned requirements-mcp.txt every install needs; force-target cannot go below the first release after $LAST_RELEASE_WITHOUT_MCP_LOCK"
+    fi
     operator_hint="To override, run as supervisor: sudo $BIN_DIR/boxmunge-upgrade force-target $version"
     if [[ "$mode" == "force" ]]; then
         log "WARN: operator override: blocklist and downgrade floor not enforced for $version"
