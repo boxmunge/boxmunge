@@ -309,6 +309,10 @@ do_rollback() {
     bm_log warn upgrade "rollback initiated" "{\"version\": \"$new_version\", \"from_version\": \"$from_version\", \"stage\": \"$stage\"}"
 
     swap_to "$prev_slot"
+    # Any probation ended with this rollback. Left behind, it would name the
+    # now-live slot as previous_slot: check-probation would refuse every fire
+    # (never clearing the failed slot) and every later upgrade would defer.
+    rm -f "$PROBATION_FILE"
 
     # 1. Stash restore returns config + state to the pre-upgrade snapshot.
     local output rc=0

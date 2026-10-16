@@ -35,10 +35,17 @@ expect 1 "Rollback complete" "clean rollback exits 1"
     || fail "unexpected rollback calls: $(calls)"
 [[ "$(readlink "$BOXMUNGE_ROOT/env-active")" == "$BOXMUNGE_ROOT/env-b" ]] \
     && pass "rollback swapped back to the previous slot" || fail "env-active not swapped"
+[[ ! -e "$BOXMUNGE_ROOT/upgrade-state/probation.json" ]] && pass "rollback ends the probation" \
+    || fail "probation.json survived the rollback"
+run_shim check-probation
+expect 0 "orphan venv in inactive slot a" "the next check-probation clears the failed release's slot"
+[[ ! -d "$BOXMUNGE_ROOT/env-a" ]] && pass "failed release's slot removed" || fail "env-a left behind"
 drop_root
 
 probation_failure 0 1
 expect 2 "re-apply of the previous release failed" "a failed re-apply is a partial rollback"
+[[ ! -e "$BOXMUNGE_ROOT/upgrade-state/probation.json" ]] && pass "a partial rollback ends the probation" \
+    || fail "probation.json survived a partial rollback"
 drop_root
 
 probation_failure 1 0
