@@ -122,8 +122,9 @@ If a `prod-deploy` is interrupted or fails before the project's pre-deploy
 hook ran, `boxmunge prod-deploy --abandon` uploads nothing and runs
 `prod-deploy <project> --abandon` on the server: the previous release's files
 go back (a first deploy's code is removed), and containers and data were never
-touched. Once a hook may have run, use `boxmunge rollback` instead. Servers
-older than the release that added it refuse it as an unknown argument.
+touched. Once a hook may have run, use `boxmunge rollback` (or, for a first
+deploy, deploy a fix). Servers older than the release that added it refuse it
+as an unknown argument.
 
 ## MCP
 
