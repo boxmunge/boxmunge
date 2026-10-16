@@ -159,18 +159,19 @@ either rule is broken. To change a dependency, edit the matching `.in` file or `
    is breaking in `services/version-check/releases.json` (`"class": "feature"`, `"breakfix"` or
    `"security"`; `"breaking": true` or `false`), and tags `vX.Y.Z`. A unit test fails if the
    `pyproject.toml` version is not listed. The version-check service refuses to start if any entry
-   lacks either field.
+   lacks either field, and the release workflow refuses a breaking release whose version is not
+   `X.Y.0`.
 2. `.github/workflows/release.yml` checks the tag with `scripts/release-lint.py` (listed in
    `releases.json` with a valid class, matching `pyproject.toml`), then, in a read-only job, runs
    the tests, builds the installer and bundle, and generates an SBOM. A separate job holding the
    write and signing tokens signs `SHA256SUMS` with cosign (keyless, tied to this workflow and
-   tag), creates a draft release whose title and notes carry the class marker generated from
-   `releases.json`, verifies the draft classifies as listed, and publishes it. Any failure,
-   including signing, fails the workflow.
+   tag), creates a draft release whose title and notes carry the class marker (and `[breaking]`
+   for a breaking release) generated from `releases.json`, verifies the draft carries exactly
+   those markers, and publishes it. Any failure, including signing, fails the workflow.
 3. Once the release is published, the maintainer redeploys the version-check service so it serves
    the new `releases.json`. Do not redeploy it before then: it would offer a release boxes cannot
    download yet. Servers discover new releases through that service, with the GitHub releases
-   list (and its `[security]` / `[breakfix]` markers) as the fallback.
+   list (and its `[security]` / `[breakfix]` / `[breaking]` markers) as the fallback.
 4. `scripts/boxmunge-upgrade` downloads the release, verifies the cosign signature against this
    repository's release workflow identity, checks the checksums, installs into the standby venv,
    swaps, and watches a probation window. A release that fails probation is rolled back and

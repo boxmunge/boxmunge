@@ -92,12 +92,63 @@ class TestCheck:
             lint.plan_release(tag, files["releases"], files["pyproject"])
 
     def test_repository_releases_json_lists_pyproject_version(self):
-        """The checked-in tree must be releasable: whatever version
-        pyproject.toml declares is recorded in releases.json."""
+        """Whatever version pyproject.toml declares is recorded in a valid
+        releases.json. (The breaking-bumps-minor rule is checked when that
+        version is tagged; already-released versions are not re-judged.)"""
         import tomllib
         version = tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["version"]
-        plan = lint.plan_release(f"v{version}", lint.RELEASES_JSON, lint.PYPROJECT)
-        assert plan.release_class in ("feature", "breakfix", "security")
+        releases = lint._catalog().load_releases(lint.RELEASES_JSON)
+        assert version in {r["version"] for r in releases}
+
+
+class TestBreaking:
+    def test_breaking_release_gets_marker_in_title_and_notes(self, tmp_path):
+        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", "security", True)])
+        plan = lint.plan_release("v0.12.0", files["releases"], files["pyproject"])
+        assert plan.breaking is True
+        assert plan.title == "v0.12.0 [security] [breaking]"
+        assert "[security]" in plan.notes and "[breaking]" in plan.notes
+
+    def test_breaking_feature_release_title(self, tmp_path):
+        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", "feature", True)])
+        plan = lint.plan_release("v0.12.0", files["releases"], files["pyproject"])
+        assert plan.title == "v0.12.0 [breaking]"
+        assert lint.classify_release(plan.title, plan.notes) == "feature"
+
+    def test_non_breaking_release_carries_no_breaking_marker(self, tmp_path):
+        files = _write_tree(tmp_path, "0.12.1", [("0.12.1", "security", False)])
+        plan = lint.plan_release("v0.12.1", files["releases"], files["pyproject"])
+        assert plan.breaking is False
+        assert "[breaking]" not in plan.title.lower() + plan.notes.lower()
+
+    def test_breaking_patch_release_fails(self, tmp_path):
+        files = _write_tree(tmp_path, "0.12.1", [("0.12.1", "security", True)])
+        with pytest.raises(lint.ReleaseLintError, match="minor"):
+            lint.plan_release("v0.12.1", files["releases"], files["pyproject"])
+
+    def test_historical_breaking_patch_does_not_block_another_tag(self, tmp_path):
+        """The rule judges the tag being released, not earlier entries."""
+        files = _write_tree(tmp_path, "0.10.2", [("0.10.2", "breakfix"),
+                                                ("0.10.1", "security", True)])
+        plan = lint.plan_release("v0.10.2", files["releases"], files["pyproject"])
+        assert plan.release_class == "breakfix"
+
+    def test_entry_without_breaking_fails(self, tmp_path):
+        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", "feature")])
+        data = json.loads(files["releases"].read_text())
+        del data["releases"][0]["breaking"]
+        files["releases"].write_text(json.dumps(data))
+        with pytest.raises(lint.ReleaseLintError, match="breaking"):
+            lint.plan_release("v0.12.0", files["releases"], files["pyproject"])
+
+    @pytest.mark.parametrize("cls", ["security", "breakfix", "feature"])
+    @pytest.mark.parametrize("breaking", [True, False])
+    def test_generated_text_reads_back_as_listed(self, tmp_path, cls, breaking):
+        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", cls, breaking)])
+        plan = lint.plan_release("v0.12.0", files["releases"], files["pyproject"])
+        assert lint.classify_release(plan.title, plan.notes) == cls
+        assert lint.is_breaking(plan.title, plan.notes) is breaking
+        lint.verify_release(plan.title, plan.notes, cls, breaking)
 
 
 class TestVerify:
@@ -107,22 +158,43 @@ class TestVerify:
         ("v0.11.1", "Feature release.", "feature"),
     ])
     def test_matching_release_passes(self, name, body, expected):
-        lint.verify_release(name, body, expected)
+        lint.verify_release(name, body, expected, False)
+
+    def test_breaking_release_with_markers_passes(self):
+        lint.verify_release("v0.12.0 [security] [breaking]",
+                            "[security] x\n[breaking] y", "security", True)
+
+    def test_breaking_marker_missing_fails(self):
+        with pytest.raises(lint.ReleaseLintError, match="breaking"):
+            lint.verify_release("v0.12.0 [security]", "[security] x", "security", True)
+
+    def test_breaking_marker_missing_from_title_fails(self):
+        with pytest.raises(lint.ReleaseLintError, match="title"):
+            lint.verify_release("v0.12.0 [security]", "[security] x [breaking] y",
+                                "security", True)
+
+    def test_smuggled_breaking_marker_fails(self):
+        """A non-breaking release whose generated notes quote a PR titled
+        '[breaking] ...' would stop boxes crossing it via the GitHub fallback."""
+        body = "[security] x\n\n## What's Changed\n* [breaking] drop old flag by @dev"
+        with pytest.raises(lint.ReleaseLintError, match="breaking"):
+            lint.verify_release("v0.12.1 [security]", body, "security", False)
 
     def test_generated_notes_smuggling_a_marker_fail(self):
         """A feature release whose auto-generated notes quote a PR titled
         '[security] ...' would be auto-applied by GitHub-fallback boxes."""
         body = "Feature release.\n\n## What's Changed\n* [security] tighten X by @dev"
         with pytest.raises(lint.ReleaseLintError, match="security"):
-            lint.verify_release("v0.11.1", body, "feature")
+            lint.verify_release("v0.11.1", body, "feature", False)
 
     def test_breakfix_release_with_security_marker_fails(self):
         with pytest.raises(lint.ReleaseLintError):
-            lint.verify_release("v0.11.1 [breakfix]", "[breakfix]\n* [security] x", "breakfix")
+            lint.verify_release("v0.11.1 [breakfix]", "[breakfix]\n* [security] x", "breakfix",
+                                False)
 
     def test_missing_marker_fails(self):
         with pytest.raises(lint.ReleaseLintError, match="breakfix"):
-            lint.verify_release("v0.11.1", "notes", "breakfix")
+            lint.verify_release("v0.11.1", "notes", "breakfix", False)
 
     @pytest.mark.parametrize("name,body", [
         ("x [Security]", ""), ("x", "[BREAKFIX]"), ("x", "plain"), ("", "[breakfix] [security]"),
@@ -141,6 +213,7 @@ class TestCli:
                     "--github-output", str(out), "--notes-out", str(notes))
         assert proc.returncode == 0, proc.stderr
         assert "class=breakfix" in out.read_text()
+        assert "breaking=false" in out.read_text()
         assert "title=v0.11.1 [breakfix]" in out.read_text()
         assert notes.read_text().startswith("[breakfix]")
 
@@ -156,7 +229,8 @@ class TestCli:
         view = tmp_path / "release.json"
         view.write_text(json.dumps({"name": "v0.11.1", "body": "* [breakfix] x",
                                     "tagName": "v0.11.1", "isDraft": True}))
-        proc = _run("verify", "--release-json", str(view), "--class", "feature")
+        proc = _run("verify", "--release-json", str(view), "--class", "feature",
+                    "--breaking", "false")
         assert proc.returncode == 1
         assert "breakfix" in proc.stderr
 
@@ -164,8 +238,27 @@ class TestCli:
         view = tmp_path / "release.json"
         view.write_text(json.dumps({"name": "v0.11.1 [security]", "body": "[security]",
                                     "tagName": "v0.11.1", "isDraft": True}))
-        proc = _run("verify", "--release-json", str(view), "--class", "security")
+        proc = _run("verify", "--release-json", str(view), "--class", "security",
+                    "--breaking", "false")
         assert proc.returncode == 0, proc.stderr
+
+    def test_check_writes_breaking_output(self, tmp_path):
+        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", "feature", True)])
+        out = tmp_path / "gh_output"
+        proc = _run("check", "--tag", "v0.12.0", "--releases", str(files["releases"]),
+                    "--pyproject", str(files["pyproject"]),
+                    "--github-output", str(out), "--notes-out", str(tmp_path / "n"))
+        assert proc.returncode == 0, proc.stderr
+        assert "breaking=true" in out.read_text()
+        assert "title=v0.12.0 [breaking]" in out.read_text()
+
+    def test_verify_checks_breaking(self, tmp_path):
+        view = tmp_path / "release.json"
+        view.write_text(json.dumps({"name": "v0.12.0", "body": "Feature release."}))
+        proc = _run("verify", "--release-json", str(view), "--class", "feature",
+                    "--breaking", "true")
+        assert proc.returncode == 1
+        assert "breaking" in proc.stderr
 
 
 class TestWorkflowWiring:
@@ -196,6 +289,16 @@ class TestWorkflowWiring:
         verify = self._index(steps, "release-lint.py verify")
         publish = self._index(steps, "--draft=false")
         assert create < verify < publish
+
+    def test_verify_is_given_the_breaking_flag_from_the_gate(self):
+        import yaml
+        workflow = yaml.safe_load((REPO / ".github" / "workflows" / "release.yml").read_text())
+        build = workflow["jobs"]["build"]
+        assert build["outputs"]["breaking"] == "${{ steps.release_class.outputs.breaking }}"
+        steps = workflow["jobs"]["publish"]["steps"]
+        verify = steps[self._index(steps, "release-lint.py verify")]
+        assert '--breaking "$RELEASE_BREAKING"' in verify["run"]
+        assert verify["env"]["RELEASE_BREAKING"] == "${{ needs.build.outputs.breaking }}"
 
 
 class TestWorkflowPrivileges:

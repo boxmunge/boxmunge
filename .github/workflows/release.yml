@@ -32,6 +32,7 @@ jobs:
       contents: read
     outputs:
       release_class: ${{ steps.release_class.outputs.class }}
+      breaking: ${{ steps.release_class.outputs.breaking }}
       title: ${{ steps.release_class.outputs.title }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -46,9 +47,10 @@ jobs:
       - name: Release class gate (releases.json)
         id: release_class
         # The tag must match pyproject.toml and be listed in
-        # services/version-check/releases.json with a valid class. The
-        # release title and notes preamble (with the [security] or
-        # [breakfix] marker that GitHub-fallback boxes read) are generated
+        # services/version-check/releases.json with a valid class and
+        # `breaking` flag; a breaking release must be X.Y.0. The release
+        # title and notes preamble (with the [security] or [breakfix] and
+        # [breaking] markers that GitHub-fallback boxes read) are generated
         # from that entry, never typed by hand.
         run: >-
           python scripts/release-lint.py check
@@ -161,14 +163,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_CLASS: ${{ needs.build.outputs.release_class }}
+          RELEASE_BREAKING: ${{ needs.build.outputs.breaking }}
         run: |
           # Generated notes quote PR titles; a PR titled "[security] ..."
           # would otherwise turn a feature release into an auto-applied one
-          # for boxes that fall back to the GitHub API.
+          # for boxes that fall back to the GitHub API, and one titled
+          # "[breaking] ..." would stop them crossing a non-breaking release.
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --json name,body > "$RUNNER_TEMP/release.json"
           python3 scripts/release-lint.py verify \
-            --release-json "$RUNNER_TEMP/release.json" --class "$RELEASE_CLASS"
+            --release-json "$RUNNER_TEMP/release.json" --class "$RELEASE_CLASS" \
+            --breaking "$RELEASE_BREAKING"
 
       - name: Publish the release
         env:

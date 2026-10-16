@@ -211,12 +211,14 @@ included) is breaking, and never into a new major version. The
 version-check circuit breaker can hold a broken security or break-fix
 release fleet-wide.
 
-The class is decided from `releases.json` alone. The release workflow
-refuses to build a tag that is not listed there with a valid class, writes
-the matching `[security]` or `[breakfix]` marker into the GitHub release
-title and notes (which boxes read when the version-check service is
-unreachable), and publishes only after checking the release text classifies
-exactly as `releases.json` says.
+The class and the breaking flag are decided from `releases.json` alone. The
+release workflow refuses to build a tag that is not listed there with a
+valid class and breaking flag, or a breaking release that is not `X.Y.0`,
+writes the matching `[security]` or `[breakfix]` marker, and `[breaking]`
+for a breaking release, into the GitHub release title and notes (which boxes
+read when the version-check service is unreachable), and publishes only
+after checking the release text carries exactly the markers `releases.json`
+calls for.
 
 The `boxmunge upgrade` flow handles stashing, migration, and validation automatically. Release `SHA256SUMS` files are keyless-signed by the GitHub Actions release workflow (Sigstore Fulcio + Rekor), and the upgrade shim hard-requires a valid signature pinned to this repo's release workflow on a `vX.Y.Z` tag — an unsigned release is refused.
 
