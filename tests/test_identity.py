@@ -60,7 +60,7 @@ class TestDeployStatePreservesIdentity:
     def test_redeploy_with_a_different_ulid_is_refused(self, paths: BoxPaths, capsys) -> None:
         add_project("myapp", paths)
         place_bundle(paths, timestamp="2026-10-13T090000000000")
-        with patch("boxmunge.commands.deploy.compose_up"), \
+        with patch("boxmunge.compose_guard.compose_up"), \
                 patch("boxmunge.commands.deploy.caddy_reload"):
             assert run_deploy("myapp", paths) == 0
         before = tree_snapshot(paths.project_dir("myapp"))

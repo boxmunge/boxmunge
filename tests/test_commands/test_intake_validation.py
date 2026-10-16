@@ -20,7 +20,7 @@ def _deploy_working(paths) -> None:
     add_project("myapp", paths)
     place_bundle(paths, timestamp="2026-10-13T090000000000",
                  files={"VERSION": "v1-good\n"})
-    with patch("boxmunge.commands.deploy.compose_up"), \
+    with patch("boxmunge.compose_guard.compose_up"), \
             patch("boxmunge.commands.deploy.caddy_reload"):
         assert run_deploy("myapp", paths) == 0
 
@@ -34,7 +34,7 @@ class TestDeployRejectsBeforeTouchingLiveTree:
         bundle = place_bundle(paths, timestamp="2026-10-13T100000000000",
                               files={"compose.yml": HOSTILE_COMPOSE,
                                      "VERSION": "v2-bad\n"})
-        with patch("boxmunge.commands.deploy.compose_up") as up, \
+        with patch("boxmunge.compose_guard.compose_up") as up, \
                 patch("boxmunge.commands.deploy.caddy_reload"):
             rc = run_deploy("myapp", paths)
 
@@ -52,7 +52,7 @@ class TestDeployRejectsBeforeTouchingLiveTree:
 
         place_bundle(paths, timestamp="2026-10-13T100000000000",
                      files={"manifest.yml": "project: myapp\n"})
-        with patch("boxmunge.commands.deploy.compose_up") as up:
+        with patch("boxmunge.compose_guard.compose_up") as up:
             rc = run_deploy("myapp", paths)
 
         assert rc == 1
@@ -62,7 +62,7 @@ class TestDeployRejectsBeforeTouchingLiveTree:
     def test_rejected_first_deploy_leaves_no_project_tree(self, paths) -> None:
         add_project("myapp", paths)
         place_bundle(paths, files={"compose.yml": HOSTILE_COMPOSE})
-        with patch("boxmunge.commands.deploy.compose_up") as up:
+        with patch("boxmunge.compose_guard.compose_up") as up:
             rc = run_deploy("myapp", paths)
         assert rc == 3
         up.assert_not_called()
@@ -87,7 +87,7 @@ class TestStageRejectsBeforeTouchingLiveTree:
 
         place_bundle(paths, timestamp="2026-10-13T100000000000",
                      files={"compose.yml": HOSTILE_COMPOSE})
-        with patch("boxmunge.commands.stage_cmd.compose_up") as up, \
+        with patch("boxmunge.compose_guard.compose_up") as up, \
                 patch("boxmunge.commands.stage_cmd.caddy_reload"):
             rc = run_stage("myapp", paths)
 
@@ -101,7 +101,7 @@ class TestInstallFailureAdvice:
     def _fail_install(self, paths):
         with patch("boxmunge.commands.deploy.install_release",
                    side_effect=OSError("disk full")), \
-                patch("boxmunge.commands.deploy.compose_up") as up:
+                patch("boxmunge.compose_guard.compose_up") as up:
             rc = run_deploy("myapp", paths)
         up.assert_not_called()
         return rc

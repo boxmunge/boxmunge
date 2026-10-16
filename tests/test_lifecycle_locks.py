@@ -18,6 +18,7 @@ from boxmunge.paths import BoxPaths
 from boxmunge.state import write_state
 from boxmunge.commands.container_update_cmd import update_project
 from tests.lock_holder import hold_project_lock, project_lock_is_held
+from tests.deploy_helpers import mark_deployed
 
 NAME = "myapp"
 
@@ -37,6 +38,7 @@ def _setup(tmp_path: Path) -> BoxPaths:
         "services:\n  web:\n    image: nginx:1.25\n"
     )
     paths.project_caddy_site(NAME).write_text("# site\n")
+    mark_deployed(paths, NAME)
     return paths
 
 
@@ -105,11 +107,10 @@ def _resume_patches(paths: BoxPaths):
     from boxmunge.commands import resume_cmd
     return [
         patch.object(resume_cmd, "compose_pull", _Recorder(paths)),
-        patch.object(resume_cmd, "compose_up", _Recorder(paths)),
+        patch("boxmunge.compose_guard.compose_up", _Recorder(paths)),
         patch.object(resume_cmd, "caddy_reload", _Recorder(paths)),
         patch.object(resume_cmd, "prepare_caddy_config"),
         patch.object(resume_cmd, "prepare_compose_override"),
-        patch.object(resume_cmd, "validate_user_compose"),
         patch.object(resume_cmd, "run_smoke", return_value=(True, "")),
     ]
 
@@ -187,7 +188,7 @@ class TestResumeLock:
 def _recover_patches(paths: BoxPaths):
     from boxmunge.commands import recover_cmd
     return [
-        patch.object(recover_cmd, "compose_up", _Recorder(paths)),
+        patch("boxmunge.compose_guard.compose_up", _Recorder(paths)),
         patch.object(recover_cmd, "caddy_reload", _Recorder(paths)),
         patch.object(recover_cmd, "prepare_caddy_config"),
         patch.object(recover_cmd, "prepare_compose_override"),
@@ -286,7 +287,7 @@ class TestContainerUpdateLock:
         paths = _setup(tmp_path)
         pull, up, backup = _Recorder(paths), _Recorder(paths), _Recorder(paths, 0)
         with patch.object(cu, "compose_pull", pull), \
-             patch.object(cu, "compose_up", up), \
+             patch("boxmunge.compose_guard.compose_up", up), \
              patch.object(cu, "backup_locked", backup), \
              patch.object(cu, "detect_image_changes", return_value={"web": "sha256:new"}), \
              patch.object(cu, "_wait_healthy", return_value=(True, [])):
@@ -319,7 +320,7 @@ class TestContainerUpdateLock:
         with patch.object(cu, "is_blocked", recording_is_blocked), \
              patch.object(cu, "backup_locked", fake_backup), \
              patch.object(cu, "compose_pull", pull), \
-             patch.object(cu, "compose_up", up), \
+             patch("boxmunge.compose_guard.compose_up", up), \
              patch.object(cu, "tag_image", tag), \
              patch.object(cu, "_wait_healthy", health), \
              patch.object(cu, "detect_image_changes", return_value={"web": "sha256:new"}):
@@ -343,7 +344,7 @@ class TestContainerUpdateLock:
         paths = _setup(tmp_path)
         _quarantine(paths)
         pull, up = _Recorder(paths), _Recorder(paths)
-        with patch.object(cu, "compose_pull", pull), patch.object(cu, "compose_up", up):
+        with patch.object(cu, "compose_pull", pull), patch("boxmunge.compose_guard.compose_up", up):
             result = update_project(paths, _cu_target(paths), dry_run=False)
         assert result["status"] == "quarantined"
         assert pull.calls == [] and up.calls == []

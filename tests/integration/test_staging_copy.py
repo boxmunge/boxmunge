@@ -112,9 +112,9 @@ def test_restage_replaces_quiescent_staging_data_completely(paths, project) -> N
     seen_running: list[list[str]] = []
     real_copy = stage_cmd.copy_production_data
 
-    def copy(project_name, plan):
+    def copy(paths_, project_name, plan):
         seen_running.append(_running(stage))
-        real_copy(project_name, plan)
+        real_copy(paths_, project_name, plan)
 
     with _no_caddy(), patch("boxmunge.commands.stage_cmd.copy_production_data", copy):
         assert run_stage(project, paths, ref="2026-10-13T110000000000") == 0
@@ -197,29 +197,24 @@ def _with_config(release: dict[str, str], copy_data: bool) -> dict[str, str]:
             "manifest.yml": yaml.safe_dump(manifest)}
 
 
-@pytest.mark.parametrize("copy_data", [True, False], ids=["copy_data", "own copy"])
-def test_a_config_file_in_a_data_directory(paths, project, capsys, copy_data) -> None:
-    """Review of PR #65: staging's copy of the file did not exist yet when
-    Compose created staging's containers, so every stage failed."""
+def test_a_config_file_in_a_read_write_data_directory_is_refused(paths, project, capsys) -> None:
+    """A config file inside a directory a service mounts read-write could be
+    swapped by that container for a symlink to any host file, which Docker
+    would mount on the container's next start (a restart by its policy
+    included, which no boxmunge check sees). The deploy refuses it, before
+    anything is installed (PR #67 nesting rule)."""
     pdir = paths.project_dir(project)
     (pdir / "data").mkdir(parents=True)
     (pdir / "data" / "key.pem").write_text("production key")
-    release = _with_config(_release(project, "pgdata"), copy_data)
-    for ts in ("2026-10-13T090000000000", "2026-10-13T100000000000"):
-        place_bundle(paths, project, ts, release)
+    release = _with_config(_release(project, "pgdata"), copy_data=True)
+    place_bundle(paths, project, "2026-10-13T090000000000", release)
     with _no_caddy():
-        assert run_deploy(project, paths, ref="2026-10-13T090000000000") == 0
-        if not copy_data:
-            assert run_stage(project, paths, ref="2026-10-13T100000000000") == 1
-            err = capsys.readouterr().err
-            assert f"config key reads {pdir / 'data-staging' / 'key.pem'}" in err
-            assert "Nothing was changed" in err
-            (pdir / "data-staging").mkdir()
-            (pdir / "data-staging" / "key.pem").write_text("staging key")
-        assert run_stage(project, paths, ref="2026-10-13T100000000000") == 0
-    expected = "production key" if copy_data else "staging key"
-    assert docker("exec", f"{project}-staging-db-1", "cat", "/key") == expected
-    assert (pdir / "data" / "key.pem").read_text() == "production key"
+        assert run_deploy(project, paths, ref="2026-10-13T090000000000") == 3
+    err = capsys.readouterr().err
+    assert "configs key" in err and "lies inside" in err
+    assert "keep a secrets/configs file outside every directory" in err
+    assert not docker("ps", "-aq", "--filter",
+                      f"label=com.docker.compose.project={project}").strip()
 
 
 def _with_file_store(release: dict[str, str], source: str) -> dict[str, str]:

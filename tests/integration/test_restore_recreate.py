@@ -12,10 +12,12 @@ import uuid
 
 import pytest
 
+from tests.deploy_helpers import mark_deployed
+
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("system_container")]
 
 MANIFEST = """\
-schema_version: 1
+schema_version: 3
 id: 01JRESTRECREATE00000000000
 project: {project}
 source: bundle
@@ -23,6 +25,8 @@ hosts: [{project}.localhost]
 services:
   app:
     internal: true
+    writable:
+      external: true
 backup:
   type: custom
   service: app
@@ -73,6 +77,7 @@ def project(int_paths):
     project_dir.mkdir()
     (project_dir / "manifest.yml").write_text(MANIFEST.format(project=name))
     (project_dir / "compose.yml").write_text(COMPOSE)
+    mark_deployed(int_paths, name)
     try:
         _compose(project_dir, "up", "-d")
         yield int_paths, project_dir

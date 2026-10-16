@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 from boxmunge import backup
 from boxmunge.backup import BackupError
@@ -18,6 +19,7 @@ from boxmunge.system_container import SystemContainerError
 from boxmunge.commands.restore import run_restore
 from boxmunge.commands.test_restore_cmd import run_test_restore
 from boxmunge.paths import BoxPaths
+from tests.deploy_helpers import mark_deployed
 from tests.fake_system_container import FakeSystemContainer, host_path
 
 PROJECT = "myapp"
@@ -110,12 +112,19 @@ class TestRestore:
     def env(self, project: BoxPaths):
         project_dir = project.project_dir(PROJECT)
         manifest = {"backup": {"service": "web", "restore_command": "restore.sh"}}
+        (project_dir / "manifest.yml").write_text(yaml.safe_dump({
+            "schema_version": 2, "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ", "project": PROJECT,
+            "source": "bundle", "hosts": [f"{PROJECT}.example.com"],
+            "services": {"web": {"port": 3000, "routes": [{"path": "/"}]}},
+        }))
+        (project_dir / "compose.yml").write_text("services:\n  web:\n    image: nginx\n")
+        mark_deployed(project, PROJECT)
         with patch("boxmunge.commands.restore.refuse_if_blocked", return_value=False), \
              patch("boxmunge.commands.restore.clear_probation_if_active"), \
              patch("boxmunge.commands.restore.load_manifest", return_value=manifest), \
              patch("boxmunge.commands.restore.resolve_backup_service", return_value="web"), \
              patch("boxmunge.commands.restore.compose_down"), \
-             patch("boxmunge.commands.restore.compose_up") as up, \
+             patch("boxmunge.compose_guard.compose_up") as up, \
              patch("boxmunge.commands.restore.time.sleep"), \
              patch("boxmunge.commands.restore.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, stdout="running healthy", stderr="")
@@ -130,7 +139,8 @@ class TestRestore:
         restore_calls = [c for c in run.call_args_list if "exec" in c.args[0]]
         assert len(restore_calls) == 1
         assert _leftovers(project) == []
-        up.assert_called_once()
+        # The backup service for the restore, then every service.
+        assert [c.kwargs["services"] for c in up.call_args_list] == [["web"], None]
 
     def test_failed_decrypt_never_stops_the_project(self, project, env, monkeypatch) -> None:
         up, _ = env

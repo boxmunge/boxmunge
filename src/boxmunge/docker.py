@@ -93,11 +93,15 @@ def compose_up(
     project_name: str,
     force_recreate: bool = False,
     start: bool = True,
+    services: list[str] | None = None,
 ) -> None:
-    """Run docker compose up -d; force_recreate replaces unchanged containers too.
+    """Run docker compose up -d; force_recreate replaces unchanged containers
+    too, and `services` limits it to those services.
 
     ``start=False`` (``--no-start``) builds and creates the project's
     networks, volumes and containers without starting any of them.
+
+    Call it through boxmunge.compose_guard, which checks the project first.
     """
     cmd = compose_command(project_name, compose_files)
     cmd.extend(["up", "-d", "--remove-orphans"])
@@ -107,6 +111,7 @@ def compose_up(
         cmd.append("--build")
     if force_recreate:
         cmd.append("--force-recreate")
+    cmd.extend(services or [])
     _run(cmd, cwd=project_dir, timeout=_COMPOSE_UP_TIMEOUT)
 
 
@@ -135,16 +140,10 @@ def compose_stop(
     _run(cmd, cwd=project_dir)
 
 
-def compose_start(
-    project_dir: Path,
-    compose_files: list[str] | None = None,
-    *,
-    project_name: str,
-) -> None:
-    """Run docker compose start (restart previously stopped containers)."""
-    cmd = compose_command(project_name, compose_files)
-    cmd.append("start")
-    _run(cmd, cwd=project_dir)
+def start_containers(names: list[str]) -> None:
+    """Run docker start on existing containers (they mount what they were
+    created with). Call it through boxmunge.compose_guard."""
+    _run(["docker", "start", *names], capture=True)
 
 
 def compose_logs(

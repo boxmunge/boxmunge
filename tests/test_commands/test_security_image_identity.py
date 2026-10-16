@@ -121,6 +121,8 @@ def build_only_box(tmp_path, monkeypatch, fake_containers):
     compose = yaml.safe_load(compose_path.read_text())
     compose["services"]["db"] = {"image": "postgres:16-alpine"}
     compose_path.write_text(yaml.safe_dump(compose))
+    from tests.deploy_helpers import mark_deployed
+    mark_deployed(paths, "demo")
     fake_containers.run("demo", "web", _WEB_ID)
     fake_containers.run("demo", "db", _DB_ID, repo_digests=(f"postgres@{_DIGEST}",))
     scanned: list[str] = []

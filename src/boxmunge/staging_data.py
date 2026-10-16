@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from boxmunge import docker_containers
+from boxmunge.compose_guard import check_containers_start, start_containers_checked
 from boxmunge.docker import staging_compose_project
 from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.release import project_data_dirs
@@ -192,9 +193,10 @@ class ProductionDownError(DockerError):
     """Production was stopped for the copy and could not be started again."""
 
 
-def _start_again(stopped: list[str], cause: BaseException | None) -> None:
+def _start_again(paths: BoxPaths, project: str, stopped: list[str],
+                 cause: BaseException | None) -> None:
     try:
-        _run(["docker", "start", *stopped], capture=True)
+        start_containers_checked(paths, project, stopped, component="stage")
     except DockerError as e:
         names = " ".join(stopped)
         message = (f"PRODUCTION IS DOWN: its containers were stopped for the data "
@@ -205,12 +207,15 @@ def _start_again(stopped: list[str], cause: BaseException | None) -> None:
     print("  Production started again.")
 
 
-def copy_production_data(project: str, plan: CopyPlan) -> None:
+def copy_production_data(paths: BoxPaths, project: str, plan: CopyPlan) -> None:
     """Stop production, copy each pair, start production again.
 
     Raises StagingDataError or DockerError naming what failed. Production
     is started again whatever happens, including a failed or interrupted
-    stop; staging is left created but not started.
+    stop; staging is left created but not started. Both the stop and the
+    start are guarded by the start checks (compose_guard): production is
+    not stopped if its containers' mounts would not be started again, and
+    is left down, loudly, if they changed during the copy.
     """
     staging_running = _running(staging_compose_project(project))
     if staging_running:
@@ -219,6 +224,8 @@ def copy_production_data(project: str, plan: CopyPlan) -> None:
             f"refusing to replace their data underneath them.")
     kinds = verify_plan(plan)
     stopped = _running(project)
+    if stopped:
+        check_containers_start(paths, project, component="stage")
     cause: BaseException | None = None
     try:
         if stopped:
@@ -232,7 +239,7 @@ def copy_production_data(project: str, plan: CopyPlan) -> None:
         raise
     finally:
         if stopped:
-            _start_again(stopped, cause)
+            _start_again(paths, project, stopped, cause)
     for store in plan.fresh:
         print(f"  NOTE: staging {store.label} has no production source; it starts as it is.")
     for store in plan.unused:

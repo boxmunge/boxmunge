@@ -16,6 +16,7 @@ from boxmunge.manifest import CURRENT_SCHEMA_VERSION
 from boxmunge.pause import render_maintenance_caddy_config, write_paused_state
 from boxmunge.paths import BoxPaths
 from boxmunge.version import write_installed_version
+from tests.deploy_helpers import mark_deployed
 
 
 def _setup(tmp_path: Path) -> BoxPaths:
@@ -39,6 +40,7 @@ def _project(paths: BoxPaths, name: str, schema: int = CURRENT_SCHEMA_VERSION) -
     }))
     (pdir / "compose.yml").write_text("services:\n  web:\n    image: nginx:1.25\n")
     paths.project_caddy_site(name).write_text(f"# live config for {name}\n")
+    mark_deployed(paths, name)
 
 
 def _pause(paths: BoxPaths, name: str) -> None:
@@ -81,7 +83,7 @@ class TestPausedProjectsKeepMaintenancePage:
         assert "alpha" not in processed
 
     @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
-    @patch("boxmunge.commands.upgrade_steps.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_apply_keeps_paused_offline(self, mock_up, _reload, tmp_path: Path) -> None:
         paths = _setup(tmp_path)
         _project(paths, "alpha")
@@ -96,7 +98,7 @@ class TestPausedProjectsKeepMaintenancePage:
 
 class TestDryRunWritesNothing:
     @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
-    @patch("boxmunge.commands.upgrade_steps.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_no_file_is_created_or_changed(self, mock_up, mock_reload, tmp_path: Path) -> None:
         paths = _setup(tmp_path)
         _project(paths, "live")

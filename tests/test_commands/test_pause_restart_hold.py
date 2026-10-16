@@ -25,7 +25,7 @@ def box(tmp_path, monkeypatch):
     def up(*a, **k):
         order.append(f"up with web={fake.policies['demo-web-1']}")
 
-    monkeypatch.setattr(resume_cmd, "compose_up", up)
+    monkeypatch.setattr("boxmunge.compose_guard.compose_up", up)
     monkeypatch.setattr(resume_cmd, "compose_pull", lambda *a, **k: None)
     monkeypatch.setattr(resume_cmd, "prepare_caddy_config", lambda *a, **k: None)
     monkeypatch.setattr(resume_cmd, "prepare_compose_override", lambda *a, **k: None)
@@ -72,8 +72,7 @@ def test_quarantine_lifted_while_paused_keeps_the_hold_until_resume(box):
     seed_quarantine(paths, action_complete=False)
     q.reassert_quarantine("demo", paths, project_dir=paths.project_dir("demo"),
                           hosts=["demo.example.com"], compose_files=["compose.yml"])
-    q.lift_quarantine("demo", paths, project_dir=paths.project_dir("demo"),
-                      project_caddy_site_content=None, compose_files=[])
+    q.lift_quarantine("demo", paths, project_caddy_site_content=None, compose_files=[])
     assert fake.policies["demo-web-1"] == "no"
     assert read_paused_state("demo", paths)["restart_policies"]["demo-web-1"] == "always"
     run_resume("demo", paths, yes=True)

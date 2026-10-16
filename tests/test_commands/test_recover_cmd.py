@@ -5,6 +5,7 @@ import yaml
 
 from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state, write_state
+from tests.deploy_helpers import mark_deployed
 
 
 def _setup(tmp_path: Path, *, status: str = "critical_stopped") -> tuple[BoxPaths, str]:
@@ -22,6 +23,7 @@ def _setup(tmp_path: Path, *, status: str = "critical_stopped") -> tuple[BoxPath
         "services:\n  web:\n    image: nginx:1.25\n"
     )
     paths.project_caddy_site("myapp").write_text("# site\n")
+    mark_deployed(paths, "myapp")
     if status:
         write_state(paths.project_health_state("myapp"), {
             "status": status,
@@ -38,7 +40,7 @@ def _patched(fn):
     for target in (
         "boxmunge.commands.recover_cmd.run_smoke",
         "boxmunge.commands.recover_cmd.caddy_reload",
-        "boxmunge.commands.recover_cmd.compose_up",
+        "boxmunge.compose_guard.compose_up",
         "boxmunge.commands.recover_cmd.prepare_caddy_config",
         "boxmunge.commands.recover_cmd.prepare_compose_override",
     ):
@@ -73,9 +75,9 @@ class TestRunRecover:
         paths, name = _setup(tmp_path)
         rc = recover_cmd.run_recover(name, paths, yes=True)
         assert rc == 0
-        # compose_up called without a --build / pull flag.
+        # compose_up called without --build.
         _, kwargs = mock_up.call_args
-        assert "build" not in kwargs
+        assert kwargs["build"] is False
 
     @_patched
     def test_refuses_when_not_stopped(

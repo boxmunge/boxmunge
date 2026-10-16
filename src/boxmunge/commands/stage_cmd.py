@@ -9,11 +9,12 @@ from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.caddy_journal import write_site
 from boxmunge.commands.unstage_cmd import refuse_if_promotion_interrupted, teardown_staging
 from boxmunge.compose import ComposeError
+from boxmunge.compose_guard import compose_up_checked
 from boxmunge.compose_validate import ComposeSecurityError
 from boxmunge.data_dirs import SetAsideError, log_kept, set_aside_announcer
 from boxmunge.docker import (
     CaddyConfigRejected, DockerError, caddy_config_lock, caddy_reload, compose_down,
-    compose_up, staging_compose_project,
+    staging_compose_project,
 )
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.identity import register_project_identity
@@ -250,9 +251,10 @@ def _bring_up_staging(project_name: str, paths: BoxPaths,
             # copy into it while neither side runs.
             prepare_destinations(project_name, project_dir, plan)
             print("  Creating staging containers for the data copy...")
-            compose_up(project_dir, compose_files=STAGING_FILES,
-                       project_name=staging_project_name, start=False)
-            copy_production_data(project_name, plan)
+            compose_up_checked(paths, project_name, component="stage",
+                               compose_files=STAGING_FILES, staging=True, record=True,
+                               deploying=True, start=False)
+            copy_production_data(paths, project_name, plan)
             print("  Data copy complete.")
     except (*_STORAGE_ERRORS, DockerError) as e:
         print(f"  ERROR: Preparing staging's storage failed: {e}", file=sys.stderr)
@@ -264,8 +266,9 @@ def _bring_up_staging(project_name: str, paths: BoxPaths,
     # Start staging containers with separate project name
     print("  Starting staging containers...")
     try:
-        compose_up(project_dir, compose_files=STAGING_FILES,
-                   project_name=staging_project_name)
+        compose_up_checked(paths, project_name, component="stage",
+                           compose_files=STAGING_FILES, staging=True, record=True,
+                           deploying=True)
     except DockerError as e:
         print(f"  ERROR: {e}", file=sys.stderr)
         log_error("stage", f"Stage failed: {e}", paths, project=project_name)

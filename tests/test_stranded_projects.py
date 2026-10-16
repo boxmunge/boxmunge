@@ -10,6 +10,7 @@ import pytest
 from boxmunge.container_update_targets import build_targets
 from boxmunge.fleet import PROJECT_INPUT_ERRORS
 from boxmunge.paths import BoxPaths, InvalidProjectName, validate_project_name
+from tests.deploy_helpers import mark_deployed
 
 _MANIFEST = (
     "schema_version: 3\nid: 01TESTULID0000000000000000\nproject: {name}\n"
@@ -56,8 +57,9 @@ def test_upgrade_restart_skips_stranded_project(paths: BoxPaths, capsys) -> None
     from boxmunge.commands.upgrade_steps import restart_projects
 
     _project(paths, "shop")
+    mark_deployed(paths, "shop")
     _project(paths, "system")
-    with patch("boxmunge.commands.upgrade_steps.compose_up") as up:
+    with patch("boxmunge.compose_guard.compose_up") as up:
         r = restart_projects(paths, refused=())
         succeeded, failed, _ = r.succeeded, r.failed, r.skipped_locked
     assert succeeded == ["shop"] and failed == []

@@ -183,15 +183,20 @@ environments without copying any data:
 Production's running containers keep their configuration, but the staged release's `compose.yml`
 and `.env` are in the project directory while it is staged. A production `compose up` there (the
 restart after an upgrade, `recover`) resolves the staged `compose.yml`, not production's, and so
-recreates production from the staged release. Avoid those while a release is staged: promote or
-unstage first.
+recreates production from the staged release. boxmunge therefore refuses every production
+recreate while a release is staged: upgrade restarts, container updates, `recover`, `resume`,
+`security resume` and `restore` leave production's running containers as they are and raise a
+"start refused" alert (see Troubleshooting). Promote or unstage first; the next run picks it up.
 
 A bind mount, config or secret file in a data directory (any directory a release has mounted
 read-write) or another server-owned entry (`data/`, `secrets.env`) points staging at the entry's
 `-staging` copy: `./uploads/img` becomes `./uploads-staging/img`. Staging never reads
 production's copy, so a config or secret `file:` in a data directory (`./data/key.pem`) must exist
 in staging's copy (`./data-staging/key.pem`): `stage` copies it with `copy_data`, and without
-`copy_data` refuses, naming the file to put there.
+`copy_data` refuses, naming the file to put there. Such a file may not sit in a directory a service
+of the release mounts read-write: a container could replace it with a symlink to any host file,
+which Docker would mount on the container's next start, so validation refuses it (SECURITY.md,
+"Project isolation").
 
 Two behaviour changes in this release:
 
@@ -837,6 +842,55 @@ diff myapp
 ```
 
 If deeper investigation is needed (inspecting files, Docker state, system config), this requires the **supervisor** user.
+
+---
+
+### "start refused" alert
+
+Every start of a project's containers (deploy, stage, upgrade restarts,
+container updates, `recover`, `resume`, `security resume`, `restore`)
+first re-validates the project's files — the same check deploy runs, over
+every profile — checks each bind source without following symlinks, and
+confirms every file boxmunge reads (the compose files, the manifest,
+`.env`, the generated overlay, and whatever `compose.yml` includes,
+extends or names in `env_file`/`label_file`) still hashes to what deploy
+recorded. When a check fails, nothing is started or recreated, the running
+containers are left alone, and a high-priority alert names the reason. The
+alert for one project and reason repeats at most once a day (so a timer
+does not page every run); the refusal is logged every time:
+
+- **"a release is staged"** — while a release is staged the project
+  directory holds the staged release's files, so production is not
+  recreated from them (upgrade restarts, container updates, `recover`,
+  `resume`, `security resume` and `restore` all wait). Running containers
+  keep running. `promote` or `unstage`, and the next run picks it up.
+- **A compose or manifest error** — the files changed since the deploy, or
+  this boxmunge release validates more strictly. Fix the file and deploy.
+- **"... is a symlink", "is now a file", "does not exist", "is outside the
+  project"** — a bind source changed since the deploy. If nobody on the
+  box changed it, treat the project as compromised: inspect it as
+  `supervisor` before redeploying.
+- **"control file ... changed since the project was deployed"** — a file
+  boxmunge reads (compose, manifest, `.env`, the overlay, an include or
+  env/label file) is not what deploy recorded. A tampered manifest
+  (`security.profile: off`) or compose is caught here even when it still
+  validates. Redeploy to run the new content.
+- **"redeploy to replace it"** — the project's running containers mount
+  the project directory, or a file boxmunge reads, read-write (a project
+  deployed before this rule). A plain restart would re-run the compromised
+  mount; redeploy with the mount made read-only (see SECURITY.md).
+- **"was not mounted when the project was last deployed"** or **"no record
+  of the bind sources"** — the mounts differ from the last deploy (or the
+  project predates the record and no upgrade has run since). Deploy the
+  project to start it with its current mounts.
+
+A socket or FIFO an application keeps in a data directory is an allowed
+bind source. An in-project symlink used as a bind source is refused
+(fail-closed, since a container could repoint it); mount the real path.
+A control file that is a symlink staying inside the project (a git
+project's `compose.yml` and `manifest.yml` link into `repo/`) is hashed
+through its target, so repointing or rewriting it is caught; a control
+file linking outside the project is refused.
 
 ---
 

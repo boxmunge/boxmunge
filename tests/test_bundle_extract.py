@@ -116,7 +116,7 @@ def test_deploy_reports_escaping_symlink_cleanly(paths, capsys) -> None:
     add_project("myapp", paths)
     _bundle(paths.inbox / "myapp-2026-10-13T100000000000.tar.gz",
             lambda t: _link(t, "myapp/link", "/etc/passwd"))
-    with patch("boxmunge.commands.deploy.compose_up") as up:
+    with patch("boxmunge.compose_guard.compose_up") as up:
         rc = run_deploy("myapp", paths)
     assert rc == 1
     up.assert_not_called()

@@ -63,7 +63,7 @@ def git_project(tmp_path: Path) -> tuple[BoxPaths, Path]:
 
 @patch("boxmunge.project_alerts.notify", return_value=True)
 @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
-@patch("boxmunge.commands.upgrade_steps.compose_up")
+@patch("boxmunge.compose_guard.compose_up")
 def test_apply_keeps_symlink_and_uses_migrated_manifest(
     mock_up, _reload, mock_notify, git_project,
 ) -> None:
@@ -101,7 +101,7 @@ def test_apply_keeps_symlink_and_uses_migrated_manifest(
 
 @patch("boxmunge.project_alerts.notify", return_value=True)
 @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
-@patch("boxmunge.commands.upgrade_steps.compose_up")
+@patch("boxmunge.compose_guard.compose_up")
 def test_second_upgrade_does_not_alert_again(_up, _reload, mock_notify, git_project) -> None:
     paths, _ = git_project
     assert run_upgrade(paths, apply_only=True) == 0

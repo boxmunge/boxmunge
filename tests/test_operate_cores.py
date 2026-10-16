@@ -138,11 +138,11 @@ def test_pause_core(tmp_path, lock_attempts) -> None:
 def test_resume_core(tmp_path, lock_attempts) -> None:
     paths = _setup(tmp_path)
     write_paused_state(NAME, paths)
-    with patch.object(resume_cmd, "compose_pull"), patch.object(resume_cmd, "compose_up"), \
+    with patch.object(resume_cmd, "compose_pull"), \
+            patch("boxmunge.compose_guard.compose_up"), \
             patch.object(resume_cmd, "caddy_reload"), \
             patch.object(resume_cmd, "prepare_caddy_config"), \
             patch.object(resume_cmd, "prepare_compose_override"), \
-            patch.object(resume_cmd, "validate_user_compose"), \
             patch.object(resume_cmd, "release_restart_policies"), \
             patch.object(resume_cmd, "run_smoke", return_value=(True, "")):
         assert resume_cmd.resume_locked(NAME, paths, False) == (0, None)
@@ -152,7 +152,7 @@ def test_resume_core(tmp_path, lock_attempts) -> None:
 def test_recover_core(tmp_path, lock_attempts) -> None:
     paths = _setup(tmp_path)
     write_state(paths.project_health_state(NAME), {"status": "critical_stopped"})
-    with patch.object(recover_cmd, "compose_up"), patch.object(recover_cmd, "caddy_reload"), \
+    with patch("boxmunge.compose_guard.compose_up"), patch.object(recover_cmd, "caddy_reload"), \
             patch.object(recover_cmd, "prepare_caddy_config"), \
             patch.object(recover_cmd, "prepare_compose_override"), \
             patch.object(recover_cmd, "run_smoke", return_value=(True, "")):
@@ -186,7 +186,7 @@ def test_container_update_core(tmp_path, lock_attempts) -> None:
     paths = _setup(tmp_path)
     with patch.object(container_update, "backup_locked", return_value=0), \
             patch.object(container_update, "compose_pull"), \
-            patch.object(container_update, "compose_up") as up, \
+            patch("boxmunge.compose_guard.compose_up") as up, \
             patch.object(container_update, "_wait_healthy", return_value=(True, [])), \
             patch.object(container_update, "detect_image_changes",
                          return_value={"web": "sha256:new"}):
@@ -203,7 +203,7 @@ def test_container_update_core(tmp_path, lock_attempts) -> None:
 def test_upgrade_restart_core(tmp_path, lock_attempts) -> None:
     paths = _setup(tmp_path)
     result = upgrade_steps.Restart()
-    with patch.object(upgrade_steps, "compose_up") as up:
+    with patch("boxmunge.compose_guard.compose_up") as up:
         upgrade_steps._restart_locked(paths, paths.project_dir(NAME), NAME, (), result)
     up.assert_called_once()
     assert result.succeeded == [NAME]

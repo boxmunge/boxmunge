@@ -6,6 +6,7 @@ from boxmunge.paths import BoxPaths
 from boxmunge.container_update_targets import (
     UpdateTarget, build_targets, resolve_strategy,
 )
+from tests.deploy_helpers import mark_deployed
 
 
 @pytest.fixture
@@ -30,13 +31,15 @@ def _write_project(paths, name, manifest_extra=None, with_backup=False):
         "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
     }
     if with_backup:
-        manifest["backup"] = {"type": "postgres", "service": "db", "dump_command": "pg_dump x"}
+        manifest["backup"] = {"type": "postgres", "service": "db", "dump_command": "pg_dump x",
+                              "restore_command": "psql x"}
     if manifest_extra:
         manifest.update(manifest_extra)
     (pdir / "manifest.yml").write_text(yaml.dump(manifest))
     (pdir / "compose.yml").write_text(
         "services:\n  web:\n    image: nginx:1.25\n    container_name: " + name + "_web_1\n"
     )
+    mark_deployed(paths, name)
 
 
 class TestResolveStrategy:
@@ -154,7 +157,7 @@ class FakeDocker:
         import boxmunge.container_update as cu
         monkeypatch.setattr(cu, "compose_pull", self._pull)
         monkeypatch.setattr("boxmunge.docker.compose_pull", self._pull)  # the dry run's
-        monkeypatch.setattr(cu, "compose_up", self._up)
+        monkeypatch.setattr("boxmunge.compose_guard.compose_up", self._up)
         monkeypatch.setattr("boxmunge.docker_containers.local_image", self._local_image)
         monkeypatch.setattr(cu, "tag_image", self._tag)
         monkeypatch.setattr(cu, "_HEALTHCHECK_POLL_INTERVAL_SEC", 0)
@@ -379,7 +382,7 @@ class TestUpdateTarget:
         monkeypatch.setattr(cu, "detect_image_changes", lambda s, r: {"web": _NEW})
         order = []
         mock_backup.side_effect = lambda *a, **k: order.append("backup") or 0
-        monkeypatch.setattr(cu, "compose_up", lambda *a, **k: order.append("up"))
+        monkeypatch.setattr("boxmunge.compose_guard.compose_up", lambda *a, **k: order.append("up"))
         update_project(paths, target, dry_run=False)
         mock_backup.assert_called_once_with(
             "stateful", paths, kind=BackupKind.PREUPDATE,
@@ -394,7 +397,7 @@ class TestUpdateTarget:
         target = self._stateful(paths, monkeypatch, fake_containers)
         monkeypatch.setattr(cu, "detect_image_changes", lambda s, r: {"web": _NEW})
         up = MagicMock()
-        monkeypatch.setattr(cu, "compose_up", up)
+        monkeypatch.setattr("boxmunge.compose_guard.compose_up", up)
         result = update_project(paths, target, dry_run=False)
         assert result["status"] == "failed"
         assert "backup" in result.get("reason", "").lower()
@@ -490,7 +493,7 @@ class TestUpdateTargetSkipsQuarantined:
         pull.assert_not_called()
 
     @patch("boxmunge.container_update.compose_pull")
-    @patch("boxmunge.container_update.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     @patch("boxmunge.container_update.backup_locked")
     def test_quarantined_project_returns_quarantined_status(
         self, mock_backup, mock_up, mock_pull, paths,

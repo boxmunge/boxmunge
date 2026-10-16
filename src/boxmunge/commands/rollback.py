@@ -14,6 +14,7 @@ from pathlib import Path
 from boxmunge.commands.deploy import deploy_locked, redeploy_installed
 from boxmunge.commands.restore import restore_locked
 from boxmunge.compose import prepare_compose_override
+from boxmunge.compose_guard import ComposeRefused, check_start
 from boxmunge.data_dirs import log_kept, set_aside_announcer
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.intake import (
@@ -228,8 +229,18 @@ def _roll_back_release(project_name: str, paths: BoxPaths,
 
     if target.snapshot:
         # restore runs the restored release's compose; give it a matching
-        # overlay before it starts the backup service.
+        # overlay, and record its files and mounts as a deploy does (it was
+        # validated above), before restore checks and starts the backup
+        # service. Otherwise that check compares the old release with the
+        # record of the release it just replaced, and refuses.
         prepare_compose_override(paths, manifest, component="rollback")
+        try:
+            check_start(paths, project_name, component="rollback",
+                        compose_files=["compose.yml", "compose.boxmunge.yml"],
+                        record=True, deploying=True)
+        except ComposeRefused as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
         if not _restore_data(project_name, paths, target.snapshot):
             return 1
 

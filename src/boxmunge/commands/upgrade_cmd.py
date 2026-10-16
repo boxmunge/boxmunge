@@ -111,6 +111,8 @@ def _restart(paths: BoxPaths, step: int, total: int, refused: dict[str, str]) ->
               f"{', '.join(restart.monitor_stopped)}")
     if refused:
         print(f"  Not restarted (compose refused): {', '.join(sorted(refused))}")
+    if restart.start_refused:
+        print(f"  Not restarted (start checks refused): {', '.join(restart.start_refused)}")
     notify_locked_skips(paths, restart.skipped_locked)
     notify_refused(paths, refused)
     if restart.failed:
@@ -132,6 +134,7 @@ def _finish(paths: BoxPaths, label: str, migrated: ManifestMigration, regen: Reg
             "skipped_locked": restart.skipped_locked,
             "monitor_stopped": restart.monitor_stopped,
             "refused": sorted(regen.refused),
+            "start_refused": restart.start_refused,
             "failed": restart.failed,
         },
     )

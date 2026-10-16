@@ -9,6 +9,7 @@ import yaml
 
 from boxmunge.commands.security_cmd import cmd_security
 from boxmunge.manifest import CURRENT_SCHEMA_VERSION
+from tests.deploy_helpers import mark_deployed
 
 # Suppressions created through the CLI are capped at 90 days (B-15).
 _SOON = (date.today() + timedelta(days=30)).isoformat()
@@ -1335,13 +1336,10 @@ def _scan_paths(tmp_path, *, in_grace: bool = False):
     (proj / "manifest.yml").write_text(yaml.safe_dump(manifest))
     (proj / "compose.yml").write_text(yaml.safe_dump({
         "services": {
-            "web": {
-                "image": "myapp:1.0",
-                "read_only": True,
-                "security_opt": ["no-new-privileges:true"],
-            },
+            "web": {"image": "myapp:1.0", "read_only": True},
         },
     }))
+    mark_deployed(paths, "demo")
     (paths.state / "projects.txt").write_text("demo\n")
     _seed_grace(paths, in_grace=in_grace)
     return paths

@@ -15,7 +15,9 @@ from boxmunge.caddy import generate_caddy_config, prepare_caddy_config
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.compose import generate_compose_override, load_user_compose, prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
-from boxmunge.docker import compose_up, DockerError
+from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
+from boxmunge.release_staging import has_prestage
+from boxmunge.docker import DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
@@ -178,6 +180,35 @@ def _write_maintenance_site(paths: BoxPaths, name: str, manifest: dict[str, Any]
             f"Failed to re-render the maintenance page for {name}: {e}") from e
 
 
+def _compose_files(paths: BoxPaths, name: str) -> list[str]:
+    compose_files = ["compose.yml"]
+    if paths.project_compose_override(name).exists():
+        compose_files.append("compose.boxmunge.yml")
+    return compose_files
+
+
+def _record_bind_sources(paths: BoxPaths, name: str) -> str | None:
+    """Record the bind sources the project starts with, as deploy does;
+    return why the start checks refused it, or None.
+
+    The overlay this upgrade wrote may mount differently from the one the
+    project was deployed with, and a project deployed before boxmunge
+    recorded bind sources has no record; restart_projects and every later
+    start check against this one. The check logs and alerts a refusal.
+    While a release is staged the project directory holds the staged
+    release's files, so there is nothing of production's to record;
+    restart_projects refuses the project.
+    """
+    if has_prestage(paths, name):
+        return None
+    try:
+        check_start(paths, name, component="upgrade",
+                    compose_files=_compose_files(paths, name), record=True)
+    except ComposeRefused as e:
+        return str(e)
+    return None
+
+
 @dataclass
 class Regeneration:
     """What regenerate_configs did: projects whose live configs were
@@ -200,6 +231,8 @@ def _regenerate_project(
     if block:
         _write_maintenance_site(paths, name, manifest)
         log_operation("upgrade", block.skip_message, paths, project=name)
+        if not paths.project_bind_record(name).exists():
+            _record_bind_sources(paths, name)
         return
     # A compose.yml that predates a validator fix must not get a fresh
     # overlay, nor be rebuilt and re-run as root by restart_projects. Its
@@ -221,6 +254,10 @@ def _regenerate_project(
         # The project would restart on its old overlay; fail so the shim
         # rolls back instead of reporting a half-applied upgrade (D-07).
         raise UpgradeGateError(f"Failed to regenerate configs for {name}: {e}") from e
+    refusal = _record_bind_sources(paths, name)
+    if refusal is not None:
+        regen.refused[name] = refusal
+        return
     regen.processed.append(name)
 
 
@@ -339,6 +376,8 @@ class Restart:
     failed: list[str] = field(default_factory=list)
     skipped_locked: list[str] = field(default_factory=list)
     monitor_stopped: list[str] = field(default_factory=list)
+    # Refused by the start checks (compose_guard), which alerted for each.
+    start_refused: list[str] = field(default_factory=list)
 
 
 def restart_projects(paths: BoxPaths, *, refused: Collection[str]) -> Restart:
@@ -417,13 +456,15 @@ def _restart_locked(
                       paths, project=project_name)
         return
 
-    compose_files = ["compose.yml"]
-    if paths.project_compose_override(project_name).exists():
-        compose_files.append("compose.boxmunge.yml")
     try:
-        compose_up(project_dir, compose_files=compose_files,
-                   project_name=project_name)
+        compose_up_checked(paths, project_name, component="upgrade",
+                           compose_files=_compose_files(paths, project_name))
         result.succeeded.append(project_name)
+    except ComposeRefused:
+        # Logged and alerted by the check (its files or mounts changed since
+        # deploy). Not a failed upgrade: rolling back would only restore a
+        # release without the check.
+        result.start_refused.append(project_name)
     except DockerError as e:
         result.failed.append(project_name)
         log_error("upgrade", f"Failed to restart {project_name}: {e}",

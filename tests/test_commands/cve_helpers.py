@@ -22,6 +22,7 @@ from boxmunge.cve.scanner import (
 )
 from boxmunge.docker import DockerError
 from boxmunge.paths import BoxPaths
+from tests.deploy_helpers import mark_deployed
 
 
 def finding(
@@ -69,6 +70,7 @@ def write_project(
         s: ({"image": images[s]} if s in images else {"build": "."}) for s in services
     }
     (proj / "compose.yml").write_text(yaml.safe_dump({"services": compose_services}))
+    mark_deployed(paths, name)
 
 
 def make_box(tmp_path, projects=("demo",), **project_kwargs) -> BoxPaths:
@@ -133,8 +135,9 @@ class Docker:
         self.fail: dict[str, int] = {}
         # Restart policy of each project container, as `docker update` sets it.
         self.policies: dict[str, str] = {}
-        for name in ("caddy_reload", "compose_stop", "compose_up"):
+        for name in ("caddy_reload", "compose_stop"):
             monkeypatch.setattr(f"boxmunge.cve.quarantine.{name}", self._recorder(name))
+        monkeypatch.setattr("boxmunge.compose_guard.compose_up", self._recorder("compose_up"))
         monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies",
                             lambda *, project_name: {
                                 n: p for n, p in self.policies.items()

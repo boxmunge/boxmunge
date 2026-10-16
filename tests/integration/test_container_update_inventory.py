@@ -12,11 +12,13 @@ from __future__ import annotations
 import uuid
 
 import pytest
+import yaml
 
 import boxmunge.container_update as cu
 from boxmunge.commands.container_update_cmd import update_project
 from boxmunge.container_update_targets import UpdateTarget
 from boxmunge.paths import BoxPaths
+from tests.deploy_helpers import mark_deployed
 from tests.integration.conftest import skip_no_docker
 from tests.integration.docker_images import (
     BUSYBOX, build_image, compose, container_image_ids, docker, ensure_busybox,
@@ -50,6 +52,14 @@ def _pull_moves(monkeypatch, tag: str, new_source: str) -> None:
 
 
 def _target(name, project_dir, strategy="leave_broken"):
+    """The target, with the project as a deploy leaves it: a manifest and
+    the record of its bind sources, which the recreate is checked against."""
+    (project_dir / "manifest.yml").write_text(yaml.safe_dump({
+        "schema_version": 2, "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ", "project": name,
+        "source": "bundle", "hosts": [f"{name}.example.com"],
+        "services": {"web": {"internal": True}},
+    }))
+    mark_deployed(BoxPaths(root=project_dir.parents[1]), name)
     return UpdateTarget(name=name, project_dir=project_dir, compose_files=["compose.yml"],
                         strategy=strategy, has_backup=False)
 

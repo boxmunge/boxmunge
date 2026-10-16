@@ -204,14 +204,16 @@ def _include_entries(doc: dict[str, Any]) -> list[tuple[list[Any], list[Any], An
 
 class _ReferenceWalk:
     """Follow include/extends files from one compose file, checking every
-    host path they name stays inside the project."""
+    host path they name stays inside the project, and noting every file
+    Compose reads: compose, include, extends and env files."""
 
     def __init__(self, roots: tuple[Path, ...]) -> None:
         self.roots = roots
         self.problems: list[str] = []
+        self.files: list[Path] = []
         self._seen: set[str] = set()
 
-    def _confined(self, what: str, ref: Any, base: Path) -> bool:
+    def _confined(self, what: str, ref: Any, base: Path, *, read: bool = True) -> bool:
         if not isinstance(ref, str) or not ref:
             self.problems.append(f"{what} {ref!r} must be a file path")
             return False
@@ -234,6 +236,8 @@ class _ReferenceWalk:
                 f"label_file path inside the project."
             )
             return False
+        if read:
+            self.files.append(Path(host_path_forms(ref, base)[0]))
         return True
 
     def visit(self, path: Path) -> None:
@@ -241,6 +245,7 @@ class _ReferenceWalk:
         if key in self._seen or not path.is_file():
             return  # Compose itself reports a missing file.
         self._seen.add(key)
+        self.files.append(path)
         try:
             doc = yaml.safe_load(path.read_text())
         except yaml.YAMLError as e:
@@ -255,8 +260,12 @@ class _ReferenceWalk:
                     self.visit(Path(host_path_forms(ref, base)[0]))
             for ref in env_files:
                 self._confined(f"{path.name}: include env_file", ref, base)
-            if project_dir is not None:
-                self._confined(f"{path.name}: include project_directory", project_dir, base)
+            if project_dir is not None and self._confined(
+                f"{path.name}: include project_directory", project_dir, base, read=False,
+            ):
+                # Compose loads `.env` from an include's project_directory,
+                # so that file steers interpolation of the included model.
+                self.files.append(Path(host_path_forms(project_dir, base)[0]) / ".env")
         services = doc.get("services") or {}
         if not isinstance(services, dict):
             return
@@ -271,13 +280,16 @@ class _ReferenceWalk:
                 self.visit(Path(host_path_forms(ext_file, base)[0]))
             for ref in _env_file_paths(svc.get("env_file")):
                 self._confined(f"{path.name}: service {svc_name}: env_file", ref, base)
+            # label_file is read by the daemon, as root, like env_file.
             for ref in _as_list(svc.get("label_file")):
                 self._confined(f"{path.name}: service {svc_name}: label_file", ref, base)
 
 
-def reference_problems(compose_path: Path, roots: tuple[Path, ...]) -> list[str]:
-    """Return every include/extends/env_file/label_file reference that leaves
-    the project."""
+def walk_references(
+    compose_path: Path, roots: tuple[Path, ...],
+) -> tuple[list[str], list[Path]]:
+    """Return (every include/extends/env_file/label_file reference that
+    leaves the project, every file the compose file makes Compose read)."""
     walk = _ReferenceWalk(roots)
     walk.visit(compose_path)
-    return walk.problems
+    return walk.problems, walk.files

@@ -37,7 +37,7 @@ def _repo_project(paths, state: dict | None) -> dict:
 
 
 def _start(paths, manifest, ref, snapshot, smoke=True) -> int:
-    with patch.object(deploy, "compose_up"), patch.object(deploy, "caddy_reload"), \
+    with patch.object(deploy, "compose_up_checked"), patch.object(deploy, "caddy_reload"), \
             patch.object(deploy, "post_deploy_diagnostics"), \
             patch.object(deploy, "smoke_ok", return_value=smoke):
         return deploy.replace_release(NAME, paths, manifest, ref, snapshot)
@@ -89,7 +89,7 @@ def test_git_promote_failing_after_the_switch_says_so(paths, capsys) -> None:
             patch.object(deploy, "take_pre_deploy_snapshot", return_value="S1"), \
             patch.object(deploy, "prepare_caddy_config"), \
             patch.object(deploy, "prepare_compose_override"), \
-            patch.object(deploy, "compose_up"), patch.object(deploy, "caddy_reload"), \
+            patch.object(deploy, "compose_up_checked"), patch.object(deploy, "caddy_reload"), \
             patch.object(deploy, "post_deploy_diagnostics"), \
             patch.object(deploy, "smoke_ok", return_value=False):
         assert run_promote(NAME, paths) == 1

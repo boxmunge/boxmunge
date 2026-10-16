@@ -115,11 +115,17 @@ def deployed_fixture(int_paths: BoxPaths, fixture_project_dir: Path, test_port: 
     # Write test port — both as project.env and .env (Docker Compose reads .env automatically)
     (project_dir / "project.env").write_text(f"TEST_PORT={test_port}\n")
     (project_dir / ".env").write_text(f"TEST_PORT={test_port}\n")
+    # Stands in for the generated overlay, which publishes a manifest's
+    # security.published_ports on 127.0.0.1; compose.yml itself may not.
+    (project_dir / "compose.boxmunge.yml").write_text(
+        f"services:\n  web:\n    ports: [\"127.0.0.1:{test_port}:8080\"]\n")
+    from tests.deploy_helpers import mark_deployed
+    mark_deployed(int_paths, project_name)
 
     try:
         # Build and start containers
         subprocess.run(
-            ["docker", "compose", "-f", "compose.yml",
+            ["docker", "compose", "-f", "compose.yml", "-f", "compose.boxmunge.yml",
              "-p", compose_project,
              "up", "-d", "--build"],
             cwd=project_dir, check=True, capture_output=True, text=True,

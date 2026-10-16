@@ -35,7 +35,8 @@ from typing import Any
 
 from boxmunge.cve.policy import FindingDisposition
 from boxmunge import restart_hold
-from boxmunge.docker import DockerError, caddy_reload, compose_stop, compose_up
+from boxmunge.compose_guard import compose_up_checked
+from boxmunge.docker import DockerError, caddy_reload, compose_stop
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.pause import hand_over_restart_policies, render_maintenance_caddy_config
 from boxmunge.paths import BoxPaths
@@ -328,7 +329,6 @@ def lift_quarantine(
     project_name: str,
     paths: BoxPaths,
     *,
-    project_dir: Path,
     project_caddy_site_content: str | None,
     compose_files: list[str],
 ) -> None:
@@ -408,8 +408,8 @@ def lift_quarantine(
     # 3. Restart containers, with their own restart policies back.
     _restore_restart_policies(project_name, state)
     try:
-        compose_up(project_dir, compose_files=compose_files, build=False,
-                   project_name=project_name)
+        compose_up_checked(paths, project_name, component="security-resume",
+                           compose_files=compose_files, build=False)
     except DockerError as e:
         raise QuarantineError(
             f"Failed to restart containers for {project_name!r}: {e}",

@@ -15,13 +15,11 @@ import sys
 
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.compose import prepare_compose_override
-from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
+from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
 from boxmunge.deployed_inventory import (
     InventoryError, load_deployed_inventory, pulled_services,
 )
-from boxmunge.docker import (
-    compose_pull, compose_up, caddy_reload, DockerError,
-)
+from boxmunge.docker import compose_pull, caddy_reload, DockerError
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.lifecycle import BlockReason, is_blocked
@@ -30,7 +28,6 @@ from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import clear_paused_state, is_paused, release_restart_policies
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
-from boxmunge.security_overlay import services_with_off_profile
 from boxmunge.state import read_state, write_state
 
 
@@ -142,25 +139,15 @@ def resume_locked(
         return 1, None
     compose_files = _compose_files(project_name, paths)
 
-    # Validate user compose.yml against silent-floor-defeating keys BEFORE
-    # any container action. A hostile compose.yml introduced while the
-    # project was paused must not survive even an image pull or compose_up
-    # — reject before touching containers (audit A-NEW-1). Mirrors the
-    # ordering used in deploy/stage.
-    off_services = {svc for svc, _ in services_with_off_profile(manifest)}
+    # Check compose.yml and the bind sources BEFORE any container action. A
+    # hostile compose.yml introduced while the project was paused must not
+    # survive even an image pull or the release of its restart policies
+    # (audit A-NEW-1); the start below checks again.
     try:
-        validate_user_compose(
-            paths.project_compose(project_name), paths,
-            off_services=off_services,
-            project_name=project_name,
-            cve_policy=manifest.get("security"),
-            manifest_services=manifest.get("services"),
-        )
-    except ComposeSecurityError as e:
+        check_start(paths, project_name, component="resume", compose_files=compose_files)
+    except ComposeRefused as e:
         # Exit code 3 reserved for compose hardening rejections (audit H-N2).
         print(f"ERROR: {e}", file=sys.stderr)
-        log_error("resume", f"Compose validation rejected: {e}",
-                  paths, project=project_name)
         return 3, None
 
     # Pull images (unless overridden or no image: services).
@@ -189,8 +176,8 @@ def resume_locked(
     print("  Starting containers...")
     try:
         release_restart_policies(project_name, paths)
-        compose_up(project_dir, compose_files=compose_files,
-                   project_name=project_name)
+        compose_up_checked(paths, project_name, component="resume",
+                           compose_files=compose_files)
     except DockerError as e:
         print(f"ERROR: compose up failed: {e}", file=sys.stderr)
         log_error("resume", f"compose up failed: {e}", paths,

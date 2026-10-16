@@ -183,7 +183,7 @@ def _step_restore(report: SelfTestReport, paths: BoxPaths) -> bool:
     print("  [5/6] Restoring from backup...")
     try:
         from boxmunge.commands.restore import run_restore
-        result = run_restore(CANARY_PROJECT, paths, yes=True)
+        result = run_restore(CANARY_PROJECT, paths, yes=True, canary=True)
         if result != 0:
             report.steps.append(SelfTestStep("restore", False, "run_restore returned non-zero"))
             return False
