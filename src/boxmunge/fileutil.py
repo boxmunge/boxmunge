@@ -32,6 +32,7 @@ import fcntl
 import logging
 import os
 import pwd
+import stat
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -41,36 +42,87 @@ if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 
-def _chown_deploy(path: str) -> None:
-    """Best-effort chown to the deploy user when running as root.
+def _deploy_owner() -> tuple[int, int] | None:
+    """deploy's (uid, gid) when running as root and deploy exists, else None.
 
-    Audit I-NEW-1 / C-NEW-4: distinguish KeyError (deploy user not yet
-    created during bootstrap or in dev/test machines — silent return is
-    correct) from OSError (perms drift, ENOSPC, EROFS, EIO, file-vanished
-    races). OSError used to be silently swallowed alongside KeyError, which
-    masked the same class of bug we spent two releases fixing. Now it logs
-    a warning on the boxmunge logger so a forensic trail exists, but still
-    does not raise — the caller is using us in a "best-effort" mode and
-    the operational path should not fail because chown couldn't fix perms.
+    KeyError means no deploy user (bootstrap not done yet, or a dev/test
+    machine), where there is nothing to hand ownership to.
     """
     if os.getuid() != 0:
-        return
+        return None
     try:
         pw = pwd.getpwnam("deploy")
     except KeyError:
-        # No 'deploy' user — bootstrap hasn't created it yet, or this is a
-        # dev/test box where it isn't expected. Silent return preserves
-        # existing behaviour.
+        return None
+    return pw.pw_uid, pw.pw_gid
+
+
+def _warn_chown(what: str, e: OSError) -> None:
+    # Audit I-NEW-1 / C-NEW-4: perms drift, ENOSPC, EROFS, EIO and races
+    # are logged for a forensic trail but do not raise; the caller uses
+    # this best-effort and a real perms problem resurfaces where the file
+    # is needed.
+    logging.getLogger("boxmunge").warning("chown(%s, deploy) failed: %s", what, e)
+
+
+def _chown_deploy(path: str) -> None:
+    """Best-effort chown to the deploy user when running as root.
+
+    Never follows a symlink: these paths sit in directories the deploy user
+    can write, so deploy could swap the entry for a link between our
+    creating it and this call. On a link, only the link itself is
+    re-owned, which grants nothing.
+    """
+    owner = _deploy_owner()
+    if owner is None:
         return
     try:
-        os.chown(path, pw.pw_uid, pw.pw_gid)
+        os.chown(path, *owner, follow_symlinks=False)
     except OSError as e:
-        # Perms-related: log but don't raise — chown is best-effort. A
-        # genuine perms problem will surface again in the operational
-        # path that needs the file readable, with a more specific error.
-        logging.getLogger("boxmunge").warning(
-            "chown(%s, deploy) failed: %s", path, e,
+        _warn_chown(path, e)
+
+
+def _fchown_deploy(fd: int, what: str) -> None:
+    """Best-effort chown of an open descriptor to deploy (see _chown_deploy)."""
+    owner = _deploy_owner()
+    if owner is None:
+        return
+    try:
+        os.fchown(fd, *owner)
+    except OSError as e:
+        _warn_chown(what, e)
+
+
+def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
+    """os.open that refuses a symlink, a non-regular file or an extra hard link.
+
+    For root opening a name in a directory the deploy user can write: a
+    planted symlink (or a hard link to another file) would otherwise make
+    root read, write, chmod or chown a file outside it.
+    """
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        os.close(fd)
+        raise OSError(
+            f"{path} is not a plain regular file (mode {oct(st.st_mode)}, "
+            f"{st.st_nlink} links); refusing to use it. Remove it so it can be recreated."
         )
+    return fd
+
+
+def chmod_nofollow(path: Path, mode: int | None = None, add: int = 0) -> None:
+    """chmod through a no-follow descriptor (Linux has no lchmod).
+
+    Sets ``mode``, or adds ``add`` to the current bits. Raises on a symlink.
+    """
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(path, flags)
+    try:
+        current = stat.S_IMODE(os.fstat(fd).st_mode)
+        os.fchmod(fd, mode if mode is not None else current | add)
+    finally:
+        os.close(fd)
 
 
 def mkdir_p_deploy(path: Path) -> None:
@@ -147,12 +199,12 @@ def open_shared_lockfile(path: Path) -> int:
     Returns the fd. Caller is responsible for fcntl.flock and os.close.
     """
     mkdir_p_deploy(path.parent)
-    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o660)
+    fd = open_regular_nofollow(path, os.O_CREAT | os.O_RDWR, 0o660)
     try:
-        os.chmod(str(path), 0o660)
+        os.fchmod(fd, 0o660)
     except OSError:
-        pass
-    _chown_deploy(str(path))
+        pass  # not the owner: root, which owns it, set it up
+    _fchown_deploy(fd, str(path))
     return fd
 
 
@@ -177,7 +229,7 @@ def durable_rename(tmp_path: Path, path: Path) -> None:
     either the old content or the complete new content, never an empty or
     partial file, and never the old content once this has returned.
     """
-    fd = os.open(tmp_path, os.O_RDONLY)
+    fd = open_regular_nofollow(tmp_path, os.O_RDONLY)
     try:
         os.fsync(fd)
     finally:
@@ -191,12 +243,17 @@ def atomic_write_text(path: Path, content: str, mode: int | None = None) -> None
     atomic_write_bytes(path, content.encode("utf-8"), mode)
 
 
-def atomic_write_bytes(path: Path, content: bytes, mode: int | None = None) -> None:
+def atomic_write_bytes(
+    path: Path, content: bytes, mode: int | None = None,
+    owner: tuple[int, int] | None = None,
+) -> None:
     """Write bytes to path atomically and durably via temp file + rename.
 
-    Creates parent directories if needed. Mode and ownership are set on
-    the temp file, so the final file is never visible with the wrong
-    permissions. See durable_rename for the crash guarantee.
+    Creates parent directories if needed. Mode and ownership (``owner``, or
+    deploy when running as root) are set on the temp file's descriptor, so
+    the final file is never visible with the wrong permissions and a temp
+    swapped for a symlink cannot redirect them. See durable_rename for the
+    crash guarantee.
     """
     mkdir_p_deploy(path.parent)
 
@@ -207,9 +264,13 @@ def atomic_write_bytes(path: Path, content: bytes, mode: int | None = None) -> N
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(content)
-        if mode is not None:
-            os.chmod(tmp_path, mode)
-        _chown_deploy(tmp_name)
+            f.flush()
+            if mode is not None:
+                os.fchmod(f.fileno(), mode)
+            if owner is not None:
+                os.fchown(f.fileno(), *owner)
+            else:
+                _fchown_deploy(f.fileno(), tmp_name)
         durable_rename(tmp_path, path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)

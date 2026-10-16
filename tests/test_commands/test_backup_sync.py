@@ -35,10 +35,13 @@ class TestDumpOwnership:
         chowned = []
         with patch.object(backup_dump._backup, "chown_for_system_container",
                           side_effect=lambda p, _paths: chowned.append(p)), \
+             patch.object(backup_dump._backup, "fchown_for_system_container",
+                          side_effect=lambda fd, _paths: chowned.append("dump fd")), \
              patch("boxmunge.service_exec.subprocess.run",
                    return_value=subprocess.CompletedProcess([], 0, stderr=b"")):
             raw = backup_dump.execute_dump(paths, "myapp", "dump", "db")
-        assert chowned == [paths.project_backups("myapp"), raw]
+        assert chowned == [paths.project_backups("myapp"), "dump fd"]
+        assert raw.exists()
 
     def test_existing_backups_dir_is_left_alone(self, paths) -> None:
         from boxmunge import backup_dump
@@ -46,10 +49,13 @@ class TestDumpOwnership:
         chowned = []
         with patch.object(backup_dump._backup, "chown_for_system_container",
                           side_effect=lambda p, _paths: chowned.append(p)), \
+             patch.object(backup_dump._backup, "fchown_for_system_container",
+                          side_effect=lambda fd, _paths: chowned.append("dump fd")), \
              patch("boxmunge.service_exec.subprocess.run",
                    return_value=subprocess.CompletedProcess([], 0, stderr=b"")):
             raw = backup_dump.execute_dump(paths, "myapp", "dump", "db")
-        assert chowned == [raw]
+        assert chowned == ["dump fd"]
+        assert raw.exists()
 
 
 class TestBackupSync:

@@ -84,7 +84,8 @@ def project(tmp_path_factory):
 def test_timed_out_dump_leaves_nothing_running_or_on_disk(project, service, command) -> None:
     paths, project_dir = project
     with patch.object(backup_dump, "BACKUP_CMD_TIMEOUT", 3), \
-         patch.object(backup_dump._backup, "chown_for_system_container"):
+         patch.object(backup_dump._backup, "chown_for_system_container"), \
+         patch.object(backup_dump._backup, "fchown_for_system_container"):
         with pytest.raises(BackupError, match="timed out after 3s; it was stopped inside"):
             backup_dump.execute_dump(paths, PROJECT, command, service)
     assert _left_running(project_dir, service) == []

@@ -398,7 +398,46 @@ class TestDurability:
             real_rename(src, dst)
 
         with patch("boxmunge.fileutil.os.rename", rename), \
-             patch("boxmunge.fileutil._chown_deploy",
-                   side_effect=lambda p: seen.append(("chown", 0))):
+             patch("boxmunge.fileutil._fchown_deploy",
+                   side_effect=lambda fd, what: seen.append(("chown", 0))):
             atomic_write_text(target, "k: v", mode=0o600)
         assert seen == [("chown", 0), ("rename", 0o600)]
+
+
+class TestOpenRegularNofollow:
+    """Root opening names in deploy-writable dirs must not be redirected."""
+
+    @pytest.mark.parametrize("make", ["symlink", "hardlink", "fifo", "dir"])
+    def test_refuses_anything_but_a_plain_file(self, tmp_path: Path, make: str) -> None:
+        from boxmunge.fileutil import open_regular_nofollow
+        victim = tmp_path / "victim"
+        victim.write_text("keep")
+        name = tmp_path / "name"
+        {"symlink": lambda: name.symlink_to(victim),
+         "hardlink": lambda: os.link(victim, name),
+         "fifo": lambda: os.mkfifo(name),
+         "dir": lambda: name.mkdir()}[make]()
+        with pytest.raises(OSError):
+            os.close(open_regular_nofollow(name, os.O_RDONLY | os.O_NONBLOCK))
+        assert victim.read_text() == "keep"
+
+    def test_lock_file_planted_as_symlink_is_refused(self, tmp_path: Path) -> None:
+        victim = tmp_path / "victim"
+        victim.write_text("keep")
+        victim.chmod(0o600)
+        lock = tmp_path / ".x.lock"
+        lock.symlink_to(victim)
+        with pytest.raises(OSError):
+            open_shared_lockfile(lock)
+        assert victim.stat().st_mode & 0o777 == 0o600
+
+    def test_chmod_nofollow_refuses_a_symlink(self, tmp_path: Path) -> None:
+        from boxmunge.fileutil import chmod_nofollow
+        victim = tmp_path / "victim"
+        victim.write_text("x")
+        victim.chmod(0o600)
+        link = tmp_path / "link.sh"
+        link.symlink_to(victim)
+        with pytest.raises(OSError):
+            chmod_nofollow(link, add=0o755)
+        assert victim.stat().st_mode & 0o777 == 0o600

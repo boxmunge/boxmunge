@@ -9,10 +9,12 @@ current state that cannot be saved first, leaves production untouched.
 from __future__ import annotations
 
 import gzip
+import os
 import tarfile
 import zlib
 from pathlib import Path
 
+from boxmunge.fileutil import open_regular_nofollow
 from boxmunge.backup import BackupError, BackupKind, backup_filename, encrypt_file
 from boxmunge.backup_dump import execute_dump
 from boxmunge.paths import BoxPaths
@@ -32,21 +34,26 @@ def verify_plaintext(path: Path) -> None:
     (a plain SQL dump, say) can only be checked for size; the project's
     restore_command is the final judge of their contents.
     """
-    size = path.stat().st_size
-    if size == 0:
-        raise RestoreError("decrypted snapshot is empty")
-    with open(path, "rb") as f:
+    # One no-follow descriptor for every read: the private temp dir is owned
+    # by the deploy user (the system container's uid), so for a root-run
+    # restore its contents could be swapped for a link to a root-only file.
+    with os.fdopen(open_regular_nofollow(path, os.O_RDONLY), "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        if size == 0:
+            raise RestoreError("decrypted snapshot is empty")
         magic = f.read(2)
-    try:
-        if magic == b"\x1f\x8b":
-            with gzip.open(path, "rb") as g:
-                while g.read(_READ_CHUNK):
-                    pass
-        elif tarfile.is_tarfile(path):
-            with tarfile.open(path) as t:
-                t.getmembers()
-    except (OSError, EOFError, zlib.error, tarfile.TarError) as e:
-        raise RestoreError(f"decrypted snapshot does not unpack: {e}") from e
+        f.seek(0)
+        try:
+            if magic == b"\x1f\x8b":
+                with gzip.GzipFile(fileobj=f, mode="rb") as g:
+                    while g.read(_READ_CHUNK):
+                        pass
+            elif tarfile.is_tarfile(f):
+                f.seek(0)
+                with tarfile.open(fileobj=f) as t:
+                    t.getmembers()
+        except (OSError, EOFError, zlib.error, tarfile.TarError) as e:
+            raise RestoreError(f"decrypted snapshot does not unpack: {e}") from e
 
 
 def take_safety_snapshot(

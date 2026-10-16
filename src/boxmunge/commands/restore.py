@@ -14,6 +14,7 @@ Order of work, all under the project lock (audit C-09):
    of step 3, success or failure, including timeouts and permission errors.
 """
 
+import os
 import subprocess
 import sys
 import time
@@ -25,7 +26,7 @@ from boxmunge.backup import (
 )
 from boxmunge.commands.backup_cmd import list_snapshots, sweep_stale_dumps
 from boxmunge.docker import compose_command, compose_down, compose_up, DockerError
-from boxmunge.fileutil import project_lock, LockError
+from boxmunge.fileutil import LockError, open_regular_nofollow, project_lock
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
@@ -295,7 +296,8 @@ def _run_restore_command(
     project_dir: Path, project_name: str, service: str,
     restore_command: str, plaintext: Path,
 ) -> None:
-    with open(plaintext, "rb") as inf:
+    # No-follow: see verify_plaintext.
+    with os.fdopen(open_regular_nofollow(plaintext, os.O_RDONLY), "rb") as inf:
         try:
             result = run_in_service(
                 project_dir, project_name, service, restore_command,

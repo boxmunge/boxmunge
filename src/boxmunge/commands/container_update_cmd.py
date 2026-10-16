@@ -2,6 +2,7 @@
 """boxmunge container-update — daily container patch orchestrator."""
 
 import fcntl
+import os
 import sys
 from typing import Any
 
@@ -9,6 +10,7 @@ from boxmunge.config import load_config, ConfigError
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.container_update import SKIPPED_LOCKED, SKIPPED_MONITOR_STOPPED, update_target
 from boxmunge.container_update_targets import UpdateTarget, build_targets
+from boxmunge.fileutil import open_regular_nofollow
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.notify import notify
@@ -119,7 +121,10 @@ def run_container_update(
     """
     # Step 0: Lock
     paths.container_update_state.mkdir(parents=True, exist_ok=True)
-    lock_file = open(paths.container_update_lock, "w")
+    # state/ is deploy-writable: open("w") would follow a planted symlink and
+    # truncate its target as root. Same lock file and mode as before.
+    lock_file = os.fdopen(open_regular_nofollow(
+        paths.container_update_lock, os.O_WRONLY | os.O_CREAT, 0o644), "w")
     try:
         try:
             fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)

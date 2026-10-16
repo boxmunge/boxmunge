@@ -91,11 +91,22 @@ def chown_for_system_container(path: Path, paths: BoxPaths) -> None:
     Chown to that owner, not to the immediate directory's owner, which is
     root when root created the project tree. The mode is unchanged. A no-op
     when ownership already matches, the common deploy-invoked path.
+
+    The temps sit in the deploy-writable backups dir, so a symlink swapped
+    in after creation is re-owned itself, never followed.
     """
     uid, gid = platform_owner(paths)
-    st = os.stat(path)
+    st = os.lstat(path)
     if (st.st_uid, st.st_gid) != (uid, gid):
-        os.chown(path, uid, gid)
+        os.chown(path, uid, gid, follow_symlinks=False)
+
+
+def fchown_for_system_container(fd: int, paths: BoxPaths) -> None:
+    """chown_for_system_container on an open descriptor."""
+    uid, gid = platform_owner(paths)
+    st = os.fstat(fd)
+    if (st.st_uid, st.st_gid) != (uid, gid):
+        os.fchown(fd, uid, gid)
 
 
 def _read_recipient(tools: SystemTools) -> str:
@@ -177,12 +188,14 @@ def encrypt_file(input_path: Path, output_path: Path, paths: BoxPaths) -> None:
         fd, tmp_path_str = tempfile.mkstemp(
             dir=output_path.parent, prefix=".encrypt-", suffix=".tmp"
         )
-        os.close(fd)
         tmp_path = Path(tmp_path_str)
         try:
             # age (in the system container) writes this temp via -o; align its
             # ownership so a root-invoked backup's temp stays writable to it.
-            chown_for_system_container(tmp_path, paths)
+            try:
+                fchown_for_system_container(fd, paths)
+            finally:
+                os.close(fd)
             recipient = _read_recipient(tools)
             tools.run([
                 "age", "--encrypt", "-r", recipient,

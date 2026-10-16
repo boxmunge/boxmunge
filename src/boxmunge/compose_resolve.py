@@ -17,6 +17,7 @@ include and extends file they lead to.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -63,7 +64,10 @@ def _missing_env_files_present(compose_path: Path) -> Iterator[None]:
                 target = Path(host_path_forms(ref, base)[0])
                 if not target.exists() and not target.is_symlink():
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.touch()
+                    # O_EXCL|O_NOFOLLOW: a link planted after the check above
+                    # fails here instead of making root create its target.
+                    os.close(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                     | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644))
                     created.append(target)
         yield
     finally:

@@ -34,6 +34,8 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from boxmunge.fileutil import open_regular_nofollow
+
 ARCHIVE_DAYS = 90
 
 
@@ -86,7 +88,7 @@ def _open_lock(path: Path) -> int:
     every boxmunge write. Not fileutil.open_shared_lockfile: its best-effort
     chown logs a warning on failure, which would re-enter this handler.
     """
-    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o660)
+    fd = open_regular_nofollow(path, os.O_CREAT | os.O_RDWR, 0o660)
     try:
         st = os.fstat(fd)
         try:
@@ -133,7 +135,7 @@ def _rotation_locked(active: Path) -> Iterator[None]:
 
 def first_entry_day(active: Path) -> date | None:
     """UTC day of the file's first entry, or None while it is empty."""
-    with open(active, "rb") as f:
+    with os.fdopen(open_regular_nofollow(active, os.O_RDONLY), "rb") as f:
         line = f.readline()
     if not line:
         return None  # zero length: the record about to be written starts it
@@ -153,10 +155,11 @@ def _archive(active: Path, day: date, keep: int) -> None:
     Caller holds the logs directory lock.
     """
     target = archive_path(active, day)
-    if target.exists():
+    if os.path.lexists(target):
         # Only an old-version process, still running across an upgrade, can
         # have archived this day already. Merge rather than overwrite it.
-        with open(active, "rb") as src, open(target, "ab") as dst:
+        src = os.fdopen(open_regular_nofollow(active, os.O_RDONLY), "rb")
+        with src, os.fdopen(open_regular_nofollow(target, os.O_WRONLY | os.O_APPEND), "ab") as dst:
             shutil.copyfileobj(src, dst)
         os.unlink(active)
     else:
@@ -175,25 +178,31 @@ class SharedLogFileHandler(logging.handlers.WatchedFileHandler):
 
     def __init__(self, path: Path, keep: int = ARCHIVE_DAYS) -> None:
         self.keep = keep
-        super().__init__(path, encoding="utf-8")
+        # Opened on first write, inside emit's error handling: a log file
+        # that cannot be opened safely must be reported, not crash the command.
+        super().__init__(path, encoding="utf-8", delay=True)
 
     def _open(self):  # type: ignore[override]
-        old_umask = os.umask(0o002)
+        # The logs dir is deploy-writable and root writes here too: never
+        # follow a planted symlink or hard link, and set group and mode on
+        # the descriptor rather than the name.
+        fd = open_regular_nofollow(Path(self.baseFilename),
+                                   os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o664)
         try:
-            stream = super()._open()
-        finally:
-            os.umask(old_umask)
-        # Best-effort: a caller that is neither the owner nor root cannot
-        # change these, and the file is already open and writable for it.
-        try:
-            os.chown(self.baseFilename, -1, grp.getgrnam("deploy").gr_gid)
-        except (KeyError, OSError):
-            pass
-        try:
-            os.chmod(self.baseFilename, 0o664)
-        except OSError:
-            pass
-        return stream
+            # Best-effort: a caller that is neither the owner nor root cannot
+            # change these, and the file is already open and writable for it.
+            try:
+                os.fchown(fd, -1, grp.getgrnam("deploy").gr_gid)
+            except (KeyError, OSError):
+                pass
+            try:
+                os.fchmod(fd, 0o664)
+            except OSError:
+                pass
+            return os.fdopen(fd, "a", encoding=self.encoding, errors=self.errors)
+        except BaseException:
+            os.close(fd)
+            raise
 
     def _rotate_if_due(self, active: Path, record_day: date) -> None:
         # Read on every write, not cached per inode: an unlinked file's inode
@@ -211,6 +220,9 @@ class SharedLogFileHandler(logging.handlers.WatchedFileHandler):
         try:
             with _rotation_locked(active):
                 self._rotate_if_due(active, record_day)
+                if self.stream is None:
+                    self.stream = self._open()
+                    self._statstream()
                 super().emit(record)  # reopens first if the inode changed
         except Exception:
             self.handleError(record)

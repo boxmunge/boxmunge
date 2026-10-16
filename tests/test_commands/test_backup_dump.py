@@ -48,7 +48,8 @@ def _dumps_left(paths: BoxPaths) -> list[Path]:
 @pytest.fixture
 def project(paths: BoxPaths) -> BoxPaths:
     paths.project_dir("myapp").mkdir(parents=True)
-    with patch.object(backup_dump._backup, "chown_for_system_container"):
+    with patch.object(backup_dump._backup, "chown_for_system_container"), \
+         patch.object(backup_dump._backup, "fchown_for_system_container"):
         yield paths
 
 
@@ -144,6 +145,7 @@ def backup(args):
     backup_dump.execute_dump(paths, "myapp", "dump", "db")
 with patch.object(service_exec.subprocess, "run", side_effect=docker), \\
      patch.object(backup_dump._backup, "chown_for_system_container"), \\
+     patch.object(backup_dump._backup, "fchown_for_system_container"), \\
      patch.dict(boxmunge.cli.COMMANDS, {"backup": backup}), \\
      patch.object(sys, "argv", ["boxmunge-server", "backup", "myapp"]):
     boxmunge.cli.main()

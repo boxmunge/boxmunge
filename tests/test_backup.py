@@ -127,10 +127,15 @@ class TestChownForSystemContainer:
     def _chown_calls(self, paths, target, owners):
         from boxmunge import backup
         calls = []
-        with patch("boxmunge.backup.os.stat",
-                   side_effect=lambda p, **_: self._stat_with(*owners.get(str(p), (0, 0)))), \
-             patch("boxmunge.backup.os.chown",
-                   side_effect=lambda p, u, g: calls.append((str(p), u, g))):
+        def owner(p, **_):
+            return self._stat_with(*owners.get(str(p), (0, 0)))
+
+        def chown(p, u, g, *, follow_symlinks=True):
+            assert follow_symlinks is False, "a swapped-in symlink must not be followed"
+            calls.append((str(p), u, g))
+        with patch("boxmunge.backup.os.stat", side_effect=owner), \
+             patch("boxmunge.backup.os.lstat", side_effect=owner), \
+             patch("boxmunge.backup.os.chown", side_effect=chown):
             backup.chown_for_system_container(target, paths)
         return calls
 

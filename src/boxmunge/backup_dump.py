@@ -38,15 +38,17 @@ def execute_dump(
         # Created as root by a root-run backup, it would lock deploy out.
         _backup.chown_for_system_container(backups_dir, paths)
     fd, raw_path_str = tempfile.mkstemp(dir=backups_dir, prefix=DUMP_PREFIX, suffix=".tar.gz")
-    os.close(fd)
     raw_path = Path(raw_path_str)
     handed_off = False
     try:
+        # Written and chowned through mkstemp's descriptor, never reopened by
+        # name: the backups dir is deploy-writable, and a root-run backup
+        # reopening a swapped-in symlink would overwrite its target.
         # The dump is later read by age in the system container (the deploy
-        # uid). Align ownership so a root-invoked backup's 0600 dump is
+        # uid); align ownership so a root-invoked backup's 0600 dump is
         # readable to it.
-        _backup.chown_for_system_container(raw_path, paths)
-        with open(raw_path, "wb") as outf:
+        with os.fdopen(fd, "wb") as outf:
+            _backup.fchown_for_system_container(outf.fileno(), paths)
             try:
                 result = run_in_service(
                     project_dir, project_name, service, dump_command,
@@ -61,9 +63,14 @@ def execute_dump(
                 ) from e
             except OSError as e:
                 raise BackupError(f"Dump command could not run: {e}") from e
-        if result.returncode != 0:
-            stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
-            raise BackupError(f"Dump command failed: {stderr}")
+            if result.returncode != 0:
+                stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
+                raise BackupError(f"Dump command failed: {stderr}")
+            # The caller encrypts and removes the dump by name, so the name
+            # must still be the file written here.
+            written, named = os.fstat(outf.fileno()), os.lstat(raw_path)
+            if (written.st_dev, written.st_ino) != (named.st_dev, named.st_ino):
+                raise BackupError(f"{raw_path} was replaced while the dump ran; refusing to use it")
         handed_off = True
         return raw_path
     finally:

@@ -15,7 +15,7 @@ from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
-from boxmunge.fileutil import atomic_write_bytes
+from boxmunge.fileutil import atomic_write_bytes, open_regular_nofollow
 from boxmunge.log import log_operation, log_warning
 from boxmunge.paths import BoxPaths
 from boxmunge.secrets import SecretsFile
@@ -49,7 +49,12 @@ def create_stash(paths: BoxPaths) -> Path:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S")
     archive_path = paths.stashes / f"boxmunge-stash-{ts}.tar.gz"
 
-    with tarfile.open(archive_path, "w:gz") as tar:
+    # stashes/ is deploy-writable (root:deploy 770), and root creates stashes
+    # too: never follow a planted symlink at this predictable name.
+    raw = os.fdopen(open_regular_nofollow(
+        archive_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb")
+    os.fchmod(raw.fileno(), 0o600)
+    with raw, tarfile.open(fileobj=raw, mode="w:gz") as tar:
         for config_file in [paths.config_file, paths.host_secrets, paths.backup_key, paths.version_file]:
             if config_file.exists():
                 tar.add(config_file, arcname=f"config/{config_file.name}")
@@ -81,7 +86,6 @@ def create_stash(paths: BoxPaths) -> Path:
         meta_info.size = len(meta_bytes)
         tar.addfile(meta_info, io.BytesIO(meta_bytes))
 
-    os.chmod(archive_path, 0o600)
     log_operation(
         "stash",
         f"Stash created: {archive_path.name}",
@@ -275,10 +279,11 @@ def restore_stash(paths: BoxPaths, archive: Path | None = None) -> Path:
             if extracted is not None:
                 owner = _allowed_owner(member)
                 # Permission bits only: never setuid/setgid/sticky from an archive.
+                # Owner set on the temp's descriptor: chown by name after the
+                # rename would follow a symlink swapped in meanwhile.
                 with _secrets_lock(paths, member.name):
-                    atomic_write_bytes(target, extracted.read(), mode=member.mode & 0o777)
-                    if owner is not None:
-                        os.chown(str(target), *owner)
+                    atomic_write_bytes(target, extracted.read(), mode=member.mode & 0o777,
+                                       owner=owner)
 
     log_operation("stash", f"Stash restored from: {archive.name}", paths)
     return archive

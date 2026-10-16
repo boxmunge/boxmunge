@@ -273,7 +273,7 @@ def test_a_held_rotation_lock_loses_the_entry_loudly_instead_of_hanging(
         handler.close()
     err = capsys.readouterr().err
     assert ".boxmunge.log.lock has been held" in err and "fuser" in err
-    assert paths.log_file.read_text() == ""
+    assert not paths.log_file.exists()
 
 
 @pytest.mark.parametrize("first_line", ["\n", "   \n", "not json\n"])
@@ -290,3 +290,24 @@ def test_operational_log_check_passes_for_empty_and_normal_logs(paths: BoxPaths)
     assert check_operational_log(paths).status == "ok"
     paths.log_file.write_text(_entry("x", datetime.now(timezone.utc)))
     assert check_operational_log(paths).status == "ok"
+
+
+@pytest.mark.parametrize("planted", ["active", "archive"])
+def test_a_planted_symlink_is_refused_loudly(paths: BoxPaths, capsys, planted: str) -> None:
+    victim = paths.root / "victim"
+    victim.write_text("keep\n")
+    if planted == "active":
+        paths.log_file.symlink_to(victim)
+    else:
+        yesterday = _yesterday()
+        paths.log_file.write_text(_entry("old", yesterday))
+        archive_path(paths.log_file, yesterday.date()).symlink_to(victim)
+    handler = SharedLogFileHandler(paths.log_file)
+    handler.setFormatter(_JsonFormatter())
+    try:
+        handler.emit(_record("new", datetime.now(timezone.utc)))
+    finally:
+        handler.close()
+    assert victim.read_text() == "keep\n"
+    err = capsys.readouterr().err
+    assert "not a plain regular file" in err or "Too many levels of symbolic links" in err
