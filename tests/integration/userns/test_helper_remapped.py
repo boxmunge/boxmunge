@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -38,11 +39,9 @@ def test_copy_keeps_container_owners_and_daemon_creates_the_destination(
                                "echo s > /x/f && chown 999:999 /x/f && chmod 600 /x/f")
         dst = tmp_path / "dst-staging"
         data_helper.run_helper("t", [*data_helper.volume("hr_src", "/src", ro=True),
-                                     *data_helper.bind(dst, "/dst")], "cp -a /src/. /dst/")
+                                     "-v", f"{dst}:/dst"], "cp -a /src/. /dst/")
         assert (dst / "f").stat().st_uid == s + 999
         assert (dst / "f").stat().st_mode & 0o777 == 0o600
-        data_helper.chown_at("t", data_helper.volume("hr_fresh", "/x"), "/x", 10001, 10001,
-                             recursive=False)
         assert data_helper.volume_is_empty("t", "hr_fresh")
         assert not data_helper.volume_is_empty("t", "hr_src")
         data_helper.copy_into_volume("t", "hr_src", "hr_fresh")
@@ -65,3 +64,15 @@ def test_placeholders_belong_to_container_root(helper_image, tmp_path) -> None:
     for rel in ("store-staging", "store-staging/deep", "store-staging/deep/app.db"):
         assert (project_dir / rel).stat().st_uid == s, rel
     assert (project_dir / "store-staging/deep/app.db").is_file()
+
+
+def test_empty_under_reaches_s_plus_n_data(helper_image, tmp_path) -> None:
+    project = tmp_path / "proj"
+    (project / "data").mkdir(parents=True)
+    data_helper.run_helper("t", ["-v", f"{project / 'data' / 'pg'}:/x"],
+                           "mkdir /x/base && echo x > /x/base/f && chown -R 999:999 /x/base "
+                           "&& chmod -R go-rwx /x/base")
+    assert (project / "data" / "pg" / "base").stat().st_uid == helper_image + 999
+    data_helper.empty_under("t", project, Path("data/pg"))
+    assert list((project / "data" / "pg").iterdir()) == []
+

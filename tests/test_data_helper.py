@@ -88,10 +88,27 @@ def test_volume_is_empty_refuses_to_guess_on_other_failures(monkeypatch) -> None
         data_helper.volume_is_empty("x", "myapp_data")
 
 
-def test_chown_quotes_the_target(monkeypatch) -> None:
+def test_empty_under_mounts_the_root_and_resolves_inside_the_helper(monkeypatch,
+                                                                    tmp_path) -> None:
+    """The daemon follows links in a -v host path as root; the project
+    directory itself is one no container can write, so it is the mount, and
+    the walk below it happens inside the helper's own namespace."""
     docker = _Docker(monkeypatch)
-    data_helper.chown_at("x", [], "/x/a b", 10001, 10001, recursive=True)
-    assert docker.calls[0][-1] == "chown -h -R 10001:10001 '/x/a b'"
+    data_helper.empty_under("x", tmp_path, Path("data/my pg"))
+    run = docker.calls[0]
+    assert run[run.index("-v") + 1] == f"{tmp_path}:/p"
+    script = run[-1]
+    assert script.startswith("t='/p/data/my pg' && ")
+    assert '[ "$(readlink -f "$t")" = "$t" ]' in script
+    assert '"$t"/.[!.]*' in script and 'ls -A "$t"' in script
+
+
+@pytest.mark.parametrize("rel", ["", ".", "../other", "/etc", "data/../../x"])
+def test_empty_under_refuses_paths_outside_the_root(monkeypatch, tmp_path, rel) -> None:
+    docker = _Docker(monkeypatch)
+    with pytest.raises(ValueError):
+        data_helper.empty_under("x", tmp_path, Path(rel))
+    assert docker.calls == []
 
 
 def test_container_owned_dirs_finds_the_topmost_foreign_dirs(tmp_path: Path, monkeypatch) -> None:

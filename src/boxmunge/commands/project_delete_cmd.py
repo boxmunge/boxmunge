@@ -14,7 +14,8 @@ import sys
 from pathlib import Path
 
 from boxmunge.built_images import remove_built_images
-from boxmunge.data_helper import container_owned_dirs, empty_dir
+from boxmunge import docker_containers
+from boxmunge.data_helper import container_owned_dirs, empty_under
 from boxmunge.docker import compose_down, caddy_reload, DockerError
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.log import log_error, log_operation, log_warning
@@ -85,7 +86,7 @@ def _teardown(project_name: str, paths: BoxPaths) -> list[str]:
             compose_files.append("compose.boxmunge.yml")
         try:
             compose_down(project_dir, compose_files=compose_files,
-                         project_name=project_name)
+                         project_name=project_name, remove_orphans=True)
         except DockerError as e:
             failures.append(f"production: {e}")
     if paths.project_staging_compose_override(project_name).exists():
@@ -93,7 +94,7 @@ def _teardown(project_name: str, paths: BoxPaths) -> list[str]:
                 if (project_dir / "compose.staging-base.yml").exists() else "compose.yml")
         try:
             compose_down(project_dir, compose_files=[base, "compose.boxmunge-staging.yml"],
-                         project_name=f"{project_name}-staging")
+                         project_name=f"{project_name}-staging", remove_orphans=True)
         except DockerError as e:
             failures.append(f"staging: {e}")
     # Only the images the platform built for this project: their names
@@ -106,14 +107,35 @@ def _teardown(project_name: str, paths: BoxPaths) -> list[str]:
     return failures
 
 
-def _remove_project_dir(project_name: str, project_dir: Path, *, forced: bool) -> None:
+class ContainersLeft(Exception):
+    """Containers of the project still exist, so its data may still change."""
+
+
+def _containers_left(project_name: str) -> list[str]:
+    """Every container labelled for the project or its staging, whatever
+    the compose files on disk say: `compose down` leaves `compose run`
+    one-offs, and a retry after a forced delete has no files to go down."""
+    return [c.name for p in (project_name, f"{project_name}-staging")
+            for c in docker_containers.project_containers(p)]
+
+
+def _remove_project_dir(project_name: str, project_dir: Path) -> None:
     """Containers' data belongs to their users (S+N on a remapped box); the
-    helper empties it so the rest can be removed as deploy. Not after a
-    forced delete: a container still running could swap a walked directory
-    for a link, which the daemon would follow on the host as root."""
-    if not forced:
-        for owned in container_owned_dirs(project_dir):
-            empty_dir(f"{project_name}-delete", owned)
+    helper empties it so the rest can be removed as deploy. The helper
+    mounts only the project directory, which no container can write, so a
+    link a container planted in its data leads nowhere outside the project
+    (data_helper.empty_under); and it is not used at all while any of the
+    project's containers exists to plant one."""
+    owned = container_owned_dirs(project_dir)
+    if owned:
+        left = _containers_left(project_name)
+        if left:
+            raise ContainersLeft(
+                f"containers of '{project_name}' still exist ({', '.join(left)}) and could "
+                f"change its data while it is removed. Remove them (docker rm -f "
+                f"{' '.join(left)})")
+        for path in owned:
+            empty_under(f"{project_name}-delete", project_dir, path.relative_to(project_dir))
     shutil.rmtree(project_dir)
 
 
@@ -163,12 +185,10 @@ def delete_locked(project_name: str, paths: BoxPaths, force: bool) -> int:
     project_dir = paths.project_dir(project_name)
     if project_dir.exists():
         try:
-            _remove_project_dir(project_name, project_dir, forced=bool(failures))
-        except (DockerError, OSError) as e:
-            hint = (" The containers were not torn down, so the data they own was not "
-                    "handed to the data helper; remove them, then" if failures else "")
+            _remove_project_dir(project_name, project_dir)
+        except (ContainersLeft, DockerError, OSError) as e:
             print(f"ERROR: Could not remove {project_dir}: {e}\n  The project is still "
-                  f"registered.{hint} Fix the cause and run project-delete again.",
+                  f"registered. Fix the cause and run project-delete again.",
                   file=sys.stderr)
             log_error("project-delete", f"Removing the project directory failed: {e}",
                       paths, project=project_name)

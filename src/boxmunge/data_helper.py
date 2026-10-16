@@ -70,17 +70,31 @@ def run_helper(label: str, mounts: list[str], script: str, *, check: bool = True
                 raise
 
 
-def bind(host: Path, at: str, *, ro: bool = False) -> list[str]:
-    """A -v bind mount (the daemon creates a missing host path)."""
-    return ["-v", f"{host}:{at}" + (":ro" if ro else "")]
-
-
 def volume(name: str, at: str, *, ro: bool = False) -> list[str]:
     return ["--mount", f"type=volume,src={name},dst={at}" + (",readonly" if ro else "")]
 
 
 def empty_dir(label: str, path: Path) -> None:
-    run_helper(label, bind(path, "/x"), EMPTY_X)
+    """Empty `path`, mounted as it is: only for a path no container can
+    write on the way (a direct entry of the project directory, checked not
+    to be a link), since the daemon follows links in it on the host."""
+    run_helper(label, ["-v", f"{path}:/x"], EMPTY_X)
+
+
+def empty_under(label: str, root: Path, rel: Path) -> None:
+    """Empty `root`/`rel`, where `root` is a directory no container can
+    write (the project directory) and `rel` may lie in data containers
+    write. Docker resolves a -v source's links on the host as root, so only
+    `root` is mounted; `rel` is reached inside the helper, whose own
+    namespace is all a link there can lead to, and a link on the way is
+    refused."""
+    if rel.is_absolute() or not rel.parts or ".." in rel.parts or str(rel) == ".":
+        raise ValueError(f"{rel} is not a path inside {root}")
+    target = shlex.quote(f"/p/{rel.as_posix()}")
+    run_helper(label, ["-v", f"{root}:/p"],
+               f't={target} && [ "$(readlink -f "$t")" = "$t" ] '
+               f'|| {{ echo "$t is reached through a symlink; not emptied" >&2; exit 3; }}; '
+               f'rm -rf "$t"/* "$t"/.[!.]* "$t"/..?* && [ -z "$(ls -A "$t")" ]')
 
 
 def copy_into_volume(label: str, src: str, dst: str) -> None:
@@ -96,12 +110,6 @@ def volume_is_empty(label: str, name: str) -> bool:
     if rc not in (_EMPTY_RC, _NOT_EMPTY_RC):
         raise HelperError(f"could not tell whether volume {name} is empty (exit {rc})")
     return rc == _EMPTY_RC
-
-
-def chown_at(label: str, mounts: list[str], target: str, uid: int, gid: int, *,
-             recursive: bool) -> None:
-    flag = "-R " if recursive else ""
-    run_helper(label, mounts, f"chown -h {flag}{uid}:{gid} {shlex.quote(target)}")
 
 
 def container_owned_dirs(root: Path) -> list[Path]:

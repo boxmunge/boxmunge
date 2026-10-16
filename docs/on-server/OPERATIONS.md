@@ -732,8 +732,9 @@ supervisor user.
 Data the containers wrote belongs to their users, so directories you cannot remove yourself are
 emptied first by the data helper (the container `stage` copies data with). If that fails,
 `project-delete` stops with an error and the project stays registered; run it again once the cause
-is fixed. With `--force` after a failed teardown the helper is not used (a container still running
-could redirect it), so such data makes the delete fail until the containers are gone.
+is fixed. The helper is not used while any container of the project or its staging still exists
+(including `compose run` containers and ones a forced delete left behind): the delete then fails,
+naming them, until you remove them with `docker rm -f`.
 
 ## Naming an Anonymous Volume
 
@@ -754,7 +755,8 @@ platform gives it, `<project>_<entry name>` (`data adopt myapp db:/var/lib/postg
 myapp_pgdata` for an entry named `pgdata`); otherwise the deploy starts on a new, empty volume. The
 anonymous volume is left in place; remove it once the service runs on the named one. `data adopt`
 refuses a path that is already a named volume, and a target volume that exists with data or without
-Compose's labels. If the copy fails, the new volume is removed and the containers started again.
+Compose's labels. If the stop or the copy fails, the new volume is removed and the containers
+started again.
 
 ---
 

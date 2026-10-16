@@ -7,18 +7,21 @@ as the host user on the host side (CI on Linux is the authoritative run).
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from boxmunge import data_helper
 from tests.integration.conftest import skip_no_docker
+from tests.integration.docker_images import BUSYBOX, ensure_busybox
 
 pytestmark = [pytest.mark.integration, skip_no_docker]
 
 
 def _as_root(path, script: str) -> None:
+    ensure_busybox()
     subprocess.run(["docker", "run", "--rm", "--network", "none", "-v", f"{path}:/x",
-                    "busybox:1.36", "sh", "-c", script], check=True, capture_output=True)
+                    BUSYBOX, "sh", "-c", script], check=True, capture_output=True)
 
 
 def test_copies_and_empties_container_owned_data(helper_image, tmp_path) -> None:
@@ -26,10 +29,10 @@ def test_copies_and_empties_container_owned_data(helper_image, tmp_path) -> None
     src.mkdir()
     _as_root(src, "echo s > /x/f && chown 999:999 /x/f && chmod 600 /x/f && "
                   "mkdir /x/d && chown 70:70 /x/d && chmod 700 /x/d && touch /x/.hidden")
-    data_helper.run_helper("it", [*data_helper.bind(src, "/src", ro=True),
-                                  *data_helper.bind(dst, "/dst")], "cp -a /src/. /dst/")
+    data_helper.run_helper("it", ["-v", f"{src}:/src:ro", "-v", f"{dst}:/dst"],
+                           "cp -a /src/. /dst/")
     assert data_helper.run_helper(
-        "it", data_helper.bind(dst, "/x", ro=True),
+        "it", ["-v", f"{dst}:/x:ro"],
         '[ "$(stat -c %u:%a /x/f)" = 999:600 ] && [ "$(stat -c %u:%a /x/d)" = 70:700 ] '
         '&& [ -e /x/.hidden ]', check=False) == 0
     data_helper.empty_dir("it", dst)
@@ -47,8 +50,6 @@ def test_volume_operations(helper_image) -> None:
         data_helper.run_helper("it", data_helper.volume(src, "/x"),
                                "echo s > /x/f && chown 999:999 /x/f && chmod 600 /x/f")
         assert not data_helper.volume_is_empty("it", src)
-        data_helper.chown_at("it", data_helper.volume(dst, "/x"), "/x", 10001, 10001,
-                             recursive=False)
         data_helper.copy_into_volume("it", src, dst)
         rc = data_helper.run_helper(
             "it", data_helper.volume(dst, "/x", ro=True),
@@ -60,3 +61,30 @@ def test_volume_operations(helper_image) -> None:
 
 def test_the_helper_cannot_write_its_rootfs(helper_image) -> None:
     assert data_helper.run_helper("it", [], "touch /etc/x", check=False) != 0
+
+
+def test_a_link_in_container_data_cannot_redirect_the_emptying(helper_image, tmp_path) -> None:
+    """A container swaps its data directory for a link out of the project:
+    the helper reaches it inside its own namespace and refuses it, and
+    nothing outside the project is touched."""
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keep").write_text("not the project's")
+    project = tmp_path / "projects" / "myapp"
+    (project / "data").mkdir(parents=True)
+    for target in ("../../../victim", str(victim)):
+        (project / "data" / "pg").unlink(missing_ok=True)
+        (project / "data" / "pg").symlink_to(target)
+        with pytest.raises(data_helper.DockerError, match="through a symlink"):
+            data_helper.empty_under("it", project, Path("data/pg"))
+        assert (victim / "keep").read_text() == "not the project's"
+
+
+def test_empty_under_empties_container_owned_data(helper_image, tmp_path) -> None:
+    project = tmp_path / "myapp"
+    (project / "data" / "pg").mkdir(parents=True)
+    _as_root(project / "data" / "pg", "mkdir -p /x/base && echo x > /x/base/f && "
+             "touch /x/.hidden && chown -R 999:999 /x/base && chmod -R go-rwx /x/base")
+    data_helper.empty_under("it", project, Path("data/pg"))
+    assert list((project / "data" / "pg").iterdir()) == []
+

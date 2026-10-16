@@ -72,7 +72,7 @@ def _delete(paths: BoxPaths, down, reload_=None, **kw) -> int:
 class TestTeardownFailure:
     @pytest.mark.parametrize("failing", ["prod", "staging"])
     def test_failed_teardown_deletes_nothing(self, box, failing, capsys):
-        def down(project_dir, compose_files=None, project_name=None):
+        def down(project_dir, compose_files=None, project_name=None, remove_orphans=False):
             is_staging = project_name == f"{NAME}-staging"
             if (failing == "staging") == is_staging:
                 raise DockerError("daemon unreachable")
@@ -141,12 +141,12 @@ class TestContainerOwnedData:
         seen = []
         monkeypatch.setattr(pd, "container_owned_dirs", lambda root: [root / "pgdata"])
 
-        def empty(label, path):
-            seen.append((label, path, sorted(p.name for p in path.iterdir())))
-            (path / "PG_VERSION").unlink()
-        monkeypatch.setattr(pd, "empty_dir", empty)
+        def empty(label, root, rel):
+            seen.append((label, root, rel, sorted(p.name for p in (root / rel).iterdir())))
+            (root / rel / "PG_VERSION").unlink()
+        monkeypatch.setattr(pd, "empty_under", empty)
         assert _delete(box, MagicMock()) == 0
-        assert seen == [("myapp-delete", pdir / "pgdata", ["PG_VERSION"])]
+        assert seen == [("myapp-delete", pdir, Path("pgdata"), ["PG_VERSION"])]
         assert not pdir.exists()
 
     def test_a_failed_helper_keeps_the_project_for_a_retry(self, box, monkeypatch, capsys):
@@ -154,27 +154,57 @@ class TestContainerOwnedData:
         pdir = box.project_dir(NAME)
         monkeypatch.setattr(pd, "container_owned_dirs", lambda root: [root / "pgdata"])
 
-        def empty(label, path):
-            raise DockerError("rm: can't remove '/x/f': Permission denied")
-        monkeypatch.setattr(pd, "empty_dir", empty)
+        def empty(label, root, rel):
+            raise DockerError("rm: can't remove '/p/pgdata/f': Permission denied")
+        monkeypatch.setattr(pd, "empty_under", empty)
         assert _delete(box, MagicMock()) == 1
         assert pdir.exists() and is_registered(NAME, box)
         err = capsys.readouterr().err
         assert "Permission denied" in err and "project-delete" in err
 
+    def test_teardown_removes_orphans_too(self, box):
+        down = MagicMock()
+        assert _delete(box, down) == 0
+        assert down.call_count == 2
+        assert all(c.kwargs.get("remove_orphans") is True for c in down.call_args_list)
 
-def test_forced_delete_never_hands_the_helper_a_path(box, monkeypatch, capsys):
-    """After a failed teardown containers may still run and could swap a
-    walked directory for a link the daemon would follow as root."""
+
+def _no_helper(monkeypatch):
     from boxmunge.commands import project_delete_cmd as pd
-    monkeypatch.setattr(pd, "_teardown", lambda name, paths: ["production: boom"])
     monkeypatch.setattr(pd, "container_owned_dirs", lambda root: [root / "pgdata"])
-    monkeypatch.setattr(pd, "empty_dir", lambda label, path: pytest.fail("helper used"))
+    monkeypatch.setattr(pd, "empty_under", lambda *a: pytest.fail("helper used"))
 
-    def rmtree(path):
-        raise PermissionError(13, "Permission denied", str(path / "pgdata"))
-    monkeypatch.setattr(pd.shutil, "rmtree", rmtree)
-    assert pd.delete_locked(NAME, box, force=True) == 1
+
+def _refused(box, capsys, rc, name):
+    assert rc == 1
+    assert box.project_dir(NAME).exists() and is_registered(NAME, box)
     err = capsys.readouterr().err
-    assert "Permission denied" in err and "teardown" in err
-    assert is_registered(NAME, box)
+    assert name in err and "still exist" in err
+
+
+def test_a_one_off_survivor_is_refused(box, monkeypatch, capsys, fake_containers):
+    """`compose down` leaves `compose run` containers running."""
+    _no_helper(monkeypatch)
+    fake_containers.run(NAME, "db", "sha256:x", name="myapp-db-run-1a2b", oneoff=True)
+    _refused(box, capsys, _delete(box, MagicMock()), "myapp-db-run-1a2b")
+
+
+def test_a_retry_without_compose_files_is_refused_while_containers_exist(
+        box, monkeypatch, capsys, fake_containers):
+    """A retry after a partial forced delete runs no teardown at all."""
+    _no_helper(monkeypatch)
+    for f in ("compose.yml", "compose.boxmunge.yml", "compose.boxmunge-staging.yml"):
+        (box.project_dir(NAME) / f).unlink()
+    fake_containers.run(f"{NAME}-staging", "db", "sha256:x", running=False)
+    down = MagicMock()
+    _refused(box, capsys, _delete(box, down), "myapp-staging-db-1")
+    down.assert_not_called()
+
+
+def test_a_forced_delete_is_refused_while_containers_exist(box, monkeypatch, capsys,
+                                                           fake_containers):
+    from boxmunge.commands import project_delete_cmd as pd
+    _no_helper(monkeypatch)
+    monkeypatch.setattr(pd, "_teardown", lambda name, paths: ["production: boom"])
+    fake_containers.run(NAME, "db", "sha256:x")
+    _refused(box, capsys, pd.delete_locked(NAME, box, force=True), "myapp-db-1")
