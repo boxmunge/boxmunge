@@ -21,8 +21,10 @@ import sys
 
 from boxmunge.compose_guard import check_containers_start, start_containers_checked
 from boxmunge.data_helper import (
-    compose_volume_labels, copy_into_volume, is_anonymous, volume_is_empty, volume_labels,
+    COMPOSE_VOLUME_LABEL, compose_volume_labels, copy_into_volume, is_anonymous,
+    volume_is_empty, volume_labels,
 )
+from boxmunge.docker import COMPOSE_PROJECT_LABEL
 from boxmunge.docker_containers import container_mounts, project_containers
 from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.fileutil import LockError, project_lock
@@ -65,8 +67,7 @@ def _prepare_target(project: str, name: str) -> tuple[str, bool]:
     labels = volume_labels(target)
     if labels is None:
         return target, True
-    if (labels.get("com.docker.compose.project"), labels.get("com.docker.compose.volume")) \
-            != (project, name):
+    if (labels.get(COMPOSE_PROJECT_LABEL), labels.get(COMPOSE_VOLUME_LABEL)) != (project, name):
         raise DataError(f"volume {target} exists but is not labelled for Compose as "
                         f"{project}'s {name!r}; remove it or choose another name")
     if not volume_is_empty(f"{project}-adopt", target):

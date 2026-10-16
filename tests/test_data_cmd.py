@@ -161,3 +161,11 @@ def test_a_failed_restart_says_the_service_is_down(paths, monkeypatch, capsys) -
     assert data_cmd.run_data_adopt(paths, "myapp", "db", DEST, "pgdata") == 1
     err = capsys.readouterr().err
     assert "SERVICE db IS DOWN" in err and "docker start myapp-db-1" in err
+
+
+def test_compose_labels_need_a_valid_compose_project(monkeypatch) -> None:
+    monkeypatch.setattr(data_helper, "_compose_version", lambda: "2.40.0")
+    assert data_helper.compose_volume_labels("myapp", "pgdata")[:2] == [
+        "--label", "com.docker.compose.project=myapp"]
+    with pytest.raises(ValueError):
+        data_helper.compose_volume_labels("../other", "pgdata")

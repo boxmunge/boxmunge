@@ -24,6 +24,7 @@ import uuid
 from pathlib import Path
 
 from boxmunge.compose_images import built_image_name
+from boxmunge.docker import COMPOSE_PROJECT_LABEL, check_compose_project_name
 from boxmunge.docker_run import DockerError, run as _run
 
 # "system" is a reserved project name, so no project's build owns this name.
@@ -128,6 +129,7 @@ def container_owned_dirs(root: Path) -> list[Path]:
 
 
 _ANONYMOUS_NAME = re.compile(r"[0-9a-f]{64}")
+COMPOSE_VOLUME_LABEL = "com.docker.compose.volume"
 
 
 def is_anonymous(labels: dict | None, name: str) -> bool:
@@ -136,7 +138,7 @@ def is_anonymous(labels: dict | None, name: str) -> bool:
     is not anonymous, whatever its labels."""
     labels = labels or {}
     return "com.docker.volume.anonymous" in labels or (
-        "com.docker.compose.volume" not in labels and bool(_ANONYMOUS_NAME.fullmatch(name)))
+        COMPOSE_VOLUME_LABEL not in labels and bool(_ANONYMOUS_NAME.fullmatch(name)))
 
 
 def volume_labels(name: str) -> dict | None:
@@ -164,8 +166,8 @@ def _compose_version() -> str:
 def compose_volume_labels(compose_project: str, key: str) -> list[str]:
     """`--label` arguments that make Compose adopt a volume as its own
     (Compose >= 2.35 adopts these without its config-hash label)."""
-    labels = {"com.docker.compose.project": compose_project,
-              "com.docker.compose.volume": key,
+    check_compose_project_name(compose_project)
+    labels = {COMPOSE_PROJECT_LABEL: compose_project, COMPOSE_VOLUME_LABEL: key,
               "com.docker.compose.version": _compose_version()}
     return [arg for k, v in labels.items() for arg in ("--label", f"{k}={v}")]
 
