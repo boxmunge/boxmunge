@@ -12,6 +12,7 @@ from boxmunge.commands.deploy_steps import (
     snapshot_live_release, take_pre_deploy_snapshot, update_repo,
 )
 from boxmunge.compose import prepare_compose_override
+from boxmunge.data_dirs import SetAsideError, log_kept, set_aside_announcer
 from boxmunge.docker import CaddyConfigRejected, compose_up, caddy_reload, DockerError
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.identity import register_project_identity
@@ -107,8 +108,10 @@ def _deploy_bundle(
                     return _install_failed(project_name, paths, e, changed=False,
                                            first_deploy=is_new)
             try:
-                install_release(tree, paths.project_dir(project_name))
+                kept = install_release(tree, paths.project_dir(project_name),
+                                       set_aside_announcer(paths, project_name, "deploy"))
                 mark_live(paths, project_name, new_ref)
+                log_kept(paths, project_name, kept, "deploy")
             except (OSError, ValueError) as e:
                 return _install_failed(project_name, paths, e, changed=True,
                                        first_deploy=is_new)
@@ -130,6 +133,10 @@ def _install_failed(project_name: str, paths: BoxPaths, error: Exception,
     elif changed:
         print(f"  The project files may be partly updated. 'rollback "
               f"{project_name}' restores the previous release.", file=sys.stderr)
+    elif isinstance(error, SetAsideError):
+        print("  Only the old contents named above were moved; nothing else in "
+              "the project was changed. Deploy again once the cause is fixed.",
+              file=sys.stderr)
     else:
         print("  Nothing in the project was changed.", file=sys.stderr)
     log_error("deploy", f"Release install failed: {error}", paths, project=project_name)
@@ -189,7 +196,7 @@ def _promote_staged(
         try:
             discard_prestage(paths, project_name)
             discard_previous_release(paths, project_name)
-        except OSError as cleanup_error:
+        except (OSError, ReleaseStateError) as cleanup_error:
             print(f"ERROR: Could not remove .releases/prestage/: {cleanup_error}. "
                   f"Remove it by hand before running 'unstage {project_name}'.",
                   file=sys.stderr)

@@ -9,6 +9,7 @@ from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.caddy_journal import write_site
 from boxmunge.commands.unstage_cmd import teardown_staging
 from boxmunge.compose import generate_staging_compose_base, generate_staging_compose_override
+from boxmunge.data_dirs import SetAsideError, log_kept, set_aside_announcer
 from boxmunge.docker import (
     CaddyConfigRejected, DockerError, caddy_config_lock, caddy_reload, compose_up,
 )
@@ -58,12 +59,16 @@ def _intake_bundle(project_name: str, paths: BoxPaths, ref: str | None,
                 # into the previous release, unstage puts it back.
                 keep_prestage_release(paths, project_name, tree)
             except (OSError, ValueError) as e:
+                unchanged = ("Nothing else was changed" if isinstance(e, SetAsideError)
+                             else "Nothing was changed")
                 print(f"ERROR: Keeping the production release failed: {e}. "
-                      f"Nothing was changed.", file=sys.stderr)
+                      f"{unchanged}.", file=sys.stderr)
                 return 1
             try:
-                install_release(tree, project_dir)
+                kept = install_release(tree, project_dir,
+                                       set_aside_announcer(paths, project_name, "stage"))
                 mark_live(paths, project_name, bundle_ref(bundle_path))
+                log_kept(paths, project_name, kept, "stage")
             except (OSError, ValueError) as e:
                 print(f"ERROR: Installing the staged release failed: {e}",
                       file=sys.stderr)

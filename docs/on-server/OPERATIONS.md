@@ -170,6 +170,12 @@ For git-based projects, deploy pulls the latest code:
 prod-deploy myapp
 ```
 
+A release that stops bind-mounting a data directory (say `./uploads`) does not delete it: the
+deploy keeps it and prints `WARNING: uploads/ holds data but this release's compose.yml does not
+mount it`. Once neither the running release nor the rollback target needs that data, delete it on
+the server as root (`rm -rf /opt/boxmunge/projects/myapp/uploads`, and its `uploads-staging` copy if
+there is one). Until then, a bundle that ships an `uploads/` of its own is refused.
+
 ---
 
 ## Previewing Changes
