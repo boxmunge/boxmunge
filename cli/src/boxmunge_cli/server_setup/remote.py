@@ -7,6 +7,8 @@ import shlex
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from boxmunge_cli.ssh import scp_host
+
 
 def default_known_hosts() -> Path:
     return Path.home() / ".ssh" / "known_hosts"
@@ -37,7 +39,7 @@ class Target:
 
     def scp(self, local: str, remote_path: str) -> list[str]:
         return ["scp", "-P", str(self.port), *self.options(), "--",
-                local, f"{self.user}@{self.host}:{remote_path}"]
+                local, f"{self.user}@{scp_host(self.host)}:{remote_path}"]
 
     def at_port(self, port: int) -> Target:
         return replace(self, port=port)

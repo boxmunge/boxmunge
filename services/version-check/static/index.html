@@ -69,9 +69,10 @@ boxmunge server-setup you@your-server.example.com --email you@example.com</code>
 
     <p>Version checks store only a daily count per version. No IP addresses,
        hostnames, or machine identifiers are stored for them. If an upgrade
-       fails, the server reports the versions and the failed stage; the
-       sender's IP address is kept for one hour to filter duplicate reports,
-       then discarded.</p>
+       fails, the server reports the versions and the failed stage. To filter
+       duplicate reports, the sender's IP address (for IPv6, only its /64
+       network prefix) is kept for about six hours, then discarded. The failure
+       reports themselves are deleted after 90 days.</p>
 
     <p>The source code for this service is
        <a href="https://github.com/boxmunge/boxmunge/tree/main/services/version-check">open

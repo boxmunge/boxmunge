@@ -28,7 +28,7 @@ def releases_data():
 
 
 @pytest.fixture
-def app(tmp_path, releases_data):
+def app(tmp_path, releases_data, migrated_db):
     """Flask test client with test releases and temp SQLite."""
     releases_file = tmp_path / "releases.json"
     releases_file.write_text(json.dumps(releases_data))
@@ -163,27 +163,27 @@ def _make_app(tmp_path, releases: list[dict]):
 
 
 class TestStartupValidation:
-    def test_refuses_to_start_on_entry_without_class(self, tmp_path) -> None:
+    def test_refuses_to_start_on_entry_without_class(self, tmp_path, migrated_db) -> None:
         from release_catalog import ReleaseCatalogError
         bad = {"version": "0.3.0", "security": False,
                "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.3.0"}
         with pytest.raises(ReleaseCatalogError, match="class"):
             _make_app(tmp_path, [bad])
 
-    def test_refuses_to_start_on_entry_without_breaking(self, tmp_path) -> None:
+    def test_refuses_to_start_on_entry_without_breaking(self, tmp_path, migrated_db) -> None:
         from release_catalog import ReleaseCatalogError
         entry = _rel("0.3.0", "feature")
         del entry["breaking"]
         with pytest.raises(ReleaseCatalogError, match="breaking"):
             _make_app(tmp_path, [entry])
 
-    def test_refuses_to_start_on_non_boolean_breaking(self, tmp_path) -> None:
+    def test_refuses_to_start_on_non_boolean_breaking(self, tmp_path, migrated_db) -> None:
         from release_catalog import ReleaseCatalogError
         entry = {**_rel("0.3.0", "feature"), "breaking": "no"}
         with pytest.raises(ReleaseCatalogError, match="breaking"):
             _make_app(tmp_path, [entry])
 
-    def test_refuses_to_start_on_unknown_class(self, tmp_path) -> None:
+    def test_refuses_to_start_on_unknown_class(self, tmp_path, migrated_db) -> None:
         from release_catalog import ReleaseCatalogError
         with pytest.raises(ReleaseCatalogError, match="urgent"):
             _make_app(tmp_path, [_rel("0.3.0", "urgent")])
@@ -191,7 +191,7 @@ class TestStartupValidation:
 
 class TestBreakfixOffer:
     @pytest.fixture
-    def bf_client(self, tmp_path):
+    def bf_client(self, tmp_path, migrated_db):
         with patch("app.DB_PATH", tmp_path / "checks.db"):
             yield _make_app(tmp_path, [
                 _rel("0.4.0", "feature"),

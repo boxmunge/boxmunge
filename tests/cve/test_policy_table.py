@@ -80,10 +80,23 @@ _ROWS: list[tuple[str, Finding, dict, dict[Posture, Disposition]]] = [
     ("nvd-critical-debian-low",
      _f(sev=Severity.CRITICAL, vendor={"debian": Severity.LOW, "nvd": Severity.CRITICAL}),
      {}, {R: I, B: I, S: I, P: Q}),
-    # Trivy resolves Severity distro-first; paranoid is documented as NVD.
+    # Trivy resolves Severity distro-first; paranoid takes the highest rating
+    # any source gives, so a distro rating can never lower it (B-08).
     ("trivy-low-nvd-critical",
      _f(sev=Severity.LOW, vendor={"debian": Severity.LOW, "nvd": Severity.CRITICAL}),
      {}, {R: I, B: I, S: I, P: Q}),
+    ("trivy-unknown-nvd-high", _f(sev=Severity.UNKNOWN, vendor={"nvd": Severity.HIGH}),
+     {}, {R: I, B: I, S: I, P: Q}),
+    # No NVD rating: the highest other source decides under paranoid.
+    ("no-nvd-debian-low-ghsa-high",
+     _f(sev=Severity.LOW, vendor={"debian": Severity.LOW, "ghsa": Severity.HIGH}),
+     {}, {R: I, B: I, S: I, P: Q}),
+    # A lower NVD rating does not make paranoid laxer than strict.
+    ("debian-medium-nvd-low",
+     _f(sev=Severity.MEDIUM, vendor={"debian": Severity.MEDIUM, "nvd": Severity.LOW}),
+     {}, {R: I, B: I, S: Q, P: Q}),
+    ("all-sources-low", _f(sev=Severity.LOW, vendor={"debian": Severity.LOW, "nvd": Severity.LOW}),
+     {}, {R: I, B: I, S: I, P: I}),
     ("medium-penalty-1", _f(sev=Severity.MEDIUM), {"pen": 1}, {R: I, B: Q, S: Q, P: Q}),
     ("perl-base-python-project", _f(pkg="perl-base"), {}, {R: I, B: I, S: I, P: Q}),
     ("perl-base-kev", _f(pkg="perl-base"), {"kev": True}, {R: Q, B: Q, S: Q, P: Q}),
@@ -96,9 +109,7 @@ _ROWS: list[tuple[str, Finding, dict, dict[Posture, Disposition]]] = [
 # Cells where the code currently disagrees with CVE_POLICY.md, keyed by
 # (row id, posture) → audit finding ID. Remove an entry in the commit that
 # fixes it; strict xfail turns an unexpected pass into a failure.
-_KNOWN_WRONG: dict[tuple[str, Posture], str] = {
-    ("trivy-low-nvd-critical", P): "B-08: paranoid compares Trivy's resolved severity, not NVD",
-}
+_KNOWN_WRONG: dict[tuple[str, Posture], str] = {}
 
 
 def _evaluate(finding: Finding, posture: Posture, *, kev: bool = False,

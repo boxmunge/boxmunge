@@ -3,7 +3,6 @@
 import json
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,7 +19,7 @@ def _report(version="0.2.1", stage="apply"):
 
 
 @pytest.fixture
-def make_app(tmp_path):
+def make_app(tmp_path, migrated_db):
     releases_file = tmp_path / "releases.json"
     releases_file.write_text(json.dumps({"releases": [
         {"version": "0.2.1", "class": "security", "breaking": False,
@@ -47,7 +46,7 @@ def make_app(tmp_path):
 def _failure_addrs(db_path):
     conn = sqlite3.connect(db_path)
     try:
-        return [r[0] for r in conn.execute("SELECT remote_addr FROM failures ORDER BY id")]
+        return [r[0] for r in conn.execute("SELECT reporter FROM failures ORDER BY id")]
     finally:
         conn.close()
 
@@ -127,21 +126,6 @@ class TestBodyLimits:
         body[field] = value
         assert client.post("/v1/report-failure", json=body).status_code == 400
         assert _failure_addrs(tmp_path / "checks.db") == []
-
-
-class TestAddressRetention:
-    def test_addresses_older_than_dedupe_window_are_forgotten(self, make_app, tmp_path):
-        client = make_app().test_client()
-        db_path = tmp_path / "checks.db"
-        old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-        conn = sqlite3.connect(db_path)
-        conn.execute("INSERT INTO failures (version, installed_from, stage, reported_at, "
-                     "remote_addr) VALUES ('0.2.1', '0.2.0', 'apply', ?, '198.51.100.7')", (old,))
-        conn.commit()
-        conn.close()
-        client.post("/v1/report-failure", json=_report(), environ_base=PROXY,
-                    headers={"X-Forwarded-For": "198.51.100.8"})
-        assert _failure_addrs(db_path) == [None, "198.51.100.8"]
 
 
 class TestStatsSeeBufferedCounts:

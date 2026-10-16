@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 @pytest.fixture
-def app(tmp_path):
+def app(tmp_path, migrated_db):
     releases_file = tmp_path / "releases.json"
     releases_file.write_text(json.dumps({
         "releases": [
@@ -158,7 +158,7 @@ class TestAutoTrip:
         assert data["security"]["version"] == "0.2.1"
         assert data.get("held") is None
 
-    def test_auto_trip_when_threshold_reached(self, tmp_path):
+    def test_auto_trip_when_threshold_reached(self, tmp_path, migrated_db):
         releases_file = tmp_path / "threshold-releases.json"
         releases_file.write_text(json.dumps({"releases": [
             {"version": "0.2.1", "class": "security", "breaking": False,
@@ -180,7 +180,7 @@ class TestAutoTrip:
         assert data["held"] == [{"version": "0.2.1", "reason": "circuit_breaker"}]
 
     @pytest.mark.parametrize("value", ["three", "-1", "2.5"])
-    def test_invalid_threshold_stops_startup(self, tmp_path, value):
+    def test_invalid_threshold_stops_startup(self, tmp_path, migrated_db, value):
         releases_file = tmp_path / "threshold-releases.json"
         releases_file.write_text(json.dumps({"releases": [
             {"version": "0.2.1", "class": "security", "breaking": False,
@@ -223,7 +223,7 @@ class TestShimStages:
 
 class TestCircuitBreakerBreakfix:
     @pytest.fixture
-    def bf_app(self, tmp_path):
+    def bf_app(self, tmp_path, migrated_db):
         releases_file = tmp_path / "releases.json"
         releases_file.write_text(json.dumps({"releases": [
             {"version": v, "class": c, "breaking": False,

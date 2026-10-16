@@ -162,13 +162,21 @@ def explain_threshold(
     *,
     over_threshold: bool,
     dangerously_disabled: bool,
+    severity_sources: tuple[str, ...] = (),
 ) -> str:
-    """One-line explanation for posture-threshold dispositions."""
+    """One-line explanation for posture-threshold dispositions.
+
+    `severity_sources` names where `base` came from when it is not simply the
+    scanner's severity (paranoid's highest rating across sources).
+    """
+    rated = base.value
+    if severity_sources:
+        rated = f"{base.value} (highest rating, from {', '.join(severity_sources)})"
     if base == effective:
-        head = f"{base.value}, no upstream fix"
+        head = f"{rated}, no upstream fix"
     else:
         head = (
-            f"{base.value} → effective {effective.value} "
+            f"{rated} → effective {effective.value} "
             f"(hardening penalty: +{penalty}), no upstream fix"
         )
 

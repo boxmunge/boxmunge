@@ -5,10 +5,13 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
-COPY app.py release_catalog.py request_limits.py ./
+COPY app.py db_schema.py failure_store.py release_catalog.py request_limits.py ./
 COPY releases.json .
 COPY static/ static/
 
 EXPOSE 8147
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8147", "--workers", "2", "--access-logfile", "-", "app:create_app()"]
+# Migrate the database (and run the first sweep) once, before any worker
+# starts: workers only check the schema version. Not --preload: per-worker
+# state (check counter, sweeper thread) must be created after the fork.
+CMD ["sh", "-c", "python db_schema.py /data/checks.db && exec gunicorn --bind 0.0.0.0:8147 --workers 2 --access-logfile - 'app:create_app()'"]
