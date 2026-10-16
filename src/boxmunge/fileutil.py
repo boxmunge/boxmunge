@@ -136,8 +136,10 @@ def open_shared_lockfile(path: Path) -> int:
 
     This helper:
     - Creates the parent directory if needed.
-    - Opens the file with mode 0o664 (group-writable) so both root and any
-      uid in the deploy group can take the flock.
+    - Opens the file with mode 0o660 so both root and any uid in the deploy
+      group can take the flock, and nobody else can: flock needs only a
+      read-only descriptor, so a world-readable lock file would let any
+      local user hold it and stall boxmunge.
     - Chmods explicitly post-open in case umask narrowed the create mode.
     - Best-effort chgrp deploy when running as root, so a deploy uid can
       open the same file later.
@@ -145,9 +147,9 @@ def open_shared_lockfile(path: Path) -> int:
     Returns the fd. Caller is responsible for fcntl.flock and os.close.
     """
     mkdir_p_deploy(path.parent)
-    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o664)
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o660)
     try:
-        os.chmod(str(path), 0o664)
+        os.chmod(str(path), 0o660)
     except OSError:
         pass
     _chown_deploy(str(path))

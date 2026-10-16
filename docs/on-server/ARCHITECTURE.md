@@ -66,6 +66,7 @@ Key features:
   logs/                       # boxmunge operational logs (deploy:deploy 755)
     boxmunge.log              # today's entries (UTC); writers rotate it under a lock
     boxmunge.log.YYYY-MM-DD   # one archive per earlier day, 90 kept
+    .boxmunge.log.lock        # rotation lock (0660, deploy group only)
 ```
 
 For project-level conventions (manifest format, script contracts, env file conventions), run `agent-help conventions`.

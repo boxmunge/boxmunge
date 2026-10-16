@@ -7,8 +7,8 @@ owned a TimedRotatingFileHandler they rotated independently: one renamed the
 file while the others kept appending to the renamed archive, so new events
 vanished from every query of the active file.
 
-Here every write and every rotation happens under one flock on the logs
-directory. The active file holds one UTC day, the day of its first entry: a
+Here every write and every rotation happens under one flock on
+``logs/.boxmunge.log.lock`` (0660, deploy group). The active file holds one UTC day, the day of its first entry: a
 write stamped with a later day first renames it to ``boxmunge.log.<that day>``
 (the name TimedRotatingFileHandler used, so its archives keep counting).
 The day comes from the entries rather than the file's mtime, which is the
@@ -28,6 +28,7 @@ import logging.handlers
 import os
 import re
 import shutil
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -70,25 +71,72 @@ def log_files(active: Path, since: datetime | None = None) -> list[Path]:
     return files
 
 
-@contextmanager
-def _logs_dir_locked(directory: Path) -> Iterator[None]:
-    # Locking the directory rather than a lock file: every writer can already
-    # open it, so there is no third file whose ownership root and deploy must
-    # agree on.
-    fd = os.open(directory, os.O_RDONLY)
+_LOCK_WAIT_SECONDS = 5.0
+
+
+def _lock_path(active: Path) -> Path:
+    return active.with_name(f".{active.name}.lock")
+
+
+def _open_lock(path: Path) -> int:
+    """Open the rotation lock, readable only by its owner and the deploy group.
+
+    The logs dir and the log itself are world-readable, and flock needs only
+    a read-only descriptor, so locking either would let any local user stall
+    every boxmunge write. Not fileutil.open_shared_lockfile: its best-effort
+    chown logs a warning on failure, which would re-enter this handler.
+    """
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o660)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        st = os.fstat(fd)
+        try:
+            deploy_gid = grp.getgrnam("deploy").gr_gid
+        except KeyError:
+            deploy_gid = st.st_gid  # dev/test box without a deploy group
+        if st.st_gid != deploy_gid:
+            os.fchown(fd, -1, deploy_gid)
+        if st.st_mode & 0o777 != 0o660:
+            os.fchmod(fd, 0o660)
+    except OSError:
+        # Not the owner (deploy opening root's lock): root set it up.
+        pass
+    return fd
+
+
+@contextmanager
+def _rotation_locked(active: Path) -> Iterator[None]:
+    """Exclusive lock for one write, waited for a bounded time.
+
+    Logging must never hang its caller (a timer, the upgrade shim): if the
+    lock stays held, the entry is reported as lost instead.
+    """
+    path = _lock_path(active)
+    fd = _open_lock(path)
+    try:
+        deadline = time.monotonic() + _LOCK_WAIT_SECONDS
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"{path} has been held for over {_LOCK_WAIT_SECONDS:.0f}s, so "
+                        f"this log entry was not written; `fuser -v {path}` shows "
+                        "the holder"
+                    ) from None
+                time.sleep(0.01)
         yield
     finally:
         os.close(fd)
 
 
-def _first_entry_day(active: Path) -> date | None:
+def first_entry_day(active: Path) -> date | None:
     """UTC day of the file's first entry, or None while it is empty."""
     with open(active, "rb") as f:
         line = f.readline()
-    if not line.strip():
-        return None
+    if not line:
+        return None  # zero length: the record about to be written starts it
     try:
         return date.fromisoformat(json.loads(line)["ts"][:10])
     except (ValueError, KeyError, TypeError) as e:
@@ -151,7 +199,7 @@ class SharedLogFileHandler(logging.handlers.WatchedFileHandler):
         # Read on every write, not cached per inode: an unlinked file's inode
         # can be reused by the next active file. Writes are infrequent.
         try:
-            day = _first_entry_day(active)
+            day = first_entry_day(active)
         except FileNotFoundError:
             return
         if day is not None and day < record_day:
@@ -161,7 +209,7 @@ class SharedLogFileHandler(logging.handlers.WatchedFileHandler):
         active = Path(self.baseFilename)
         record_day = datetime.fromtimestamp(record.created, timezone.utc).date()
         try:
-            with _logs_dir_locked(active.parent):
+            with _rotation_locked(active):
                 self._rotate_if_due(active, record_day)
                 super().emit(record)  # reopens first if the inode changed
         except Exception:

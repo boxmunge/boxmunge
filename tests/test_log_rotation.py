@@ -9,12 +9,16 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 import boxmunge
+from boxmunge import log_rotation
+from boxmunge.health_checks.operational_log import check_operational_log
 from boxmunge.log import _JsonFormatter
 from boxmunge.log_rotation import SharedLogFileHandler, archive_path
 from boxmunge.paths import BoxPaths
@@ -156,7 +160,7 @@ def test_rotation_prunes_archives_beyond_ninety_days(paths: BoxPaths) -> None:
     paths.log_file.write_text(_entry("OLD", _yesterday()))
     subprocess.run([sys.executable, "-c", _BURST, str(paths.root), "new", "1"],
                    check=True, env=_env(), stderr=subprocess.DEVNULL)
-    archives = sorted(p.name for p in paths.logs.iterdir() if p != paths.log_file)
+    archives = sorted(p.name for p in paths.logs.glob("boxmunge.log.*"))
     assert len(archives) == 90
     assert archives[0] == archive_path(paths.log_file, today - timedelta(days=90)).name
     assert _msgs(archive_path(paths.log_file, today - timedelta(days=1))) == ["OLD"]
@@ -205,3 +209,84 @@ def test_an_unrecognisable_active_file_is_reported_not_rotated(paths: BoxPaths, 
         handler.close()
     assert "not a boxmunge log entry" in capsys.readouterr().err
     assert paths.log_file.read_text() == "not json\n"
+
+
+_READ_ONLY_HOLDER = """
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+fcntl.flock(fd, fcntl.LOCK_EX)
+print("held", flush=True)
+sys.stdin.read()
+"""
+
+
+class _Holder:
+    """Another process holding an flock through a read-only descriptor, as
+    any local user can on anything they can open for reading."""
+
+    def __init__(self, path: Path) -> None:
+        self.proc = subprocess.Popen([sys.executable, "-c", _READ_ONLY_HOLDER, str(path)],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        assert self.proc.stdout is not None
+        assert self.proc.stdout.readline().strip() == "held"
+
+    def release(self) -> None:
+        assert self.proc.stdin is not None
+        self.proc.stdin.close()
+        self.proc.wait(timeout=10)
+
+
+def test_locks_on_world_readable_paths_do_not_block_logging(paths: BoxPaths) -> None:
+    paths.log_file.write_text(_entry("first", datetime.now(timezone.utc)))
+    holders = [_Holder(paths.logs), _Holder(paths.log_file)]
+    try:
+        started = time.monotonic()
+        subprocess.run([sys.executable, "-c", _BURST, str(paths.root), "w", "1"],
+                       check=True, env=_env(), stderr=subprocess.DEVNULL, timeout=30)
+        assert time.monotonic() - started < 5
+    finally:
+        for holder in holders:
+            holder.release()
+    assert _msgs(paths.log_file) == ["first", "w-0"]
+
+
+def test_rotation_lock_is_not_readable_by_other_users(paths: BoxPaths) -> None:
+    subprocess.run([sys.executable, "-c", _BURST, str(paths.root), "w", "1"],
+                   check=True, env=_env(), stderr=subprocess.DEVNULL)
+    lock = paths.logs / ".boxmunge.log.lock"
+    assert lock.stat().st_mode & 0o777 == 0o660
+
+
+def test_a_held_rotation_lock_loses_the_entry_loudly_instead_of_hanging(
+        paths: BoxPaths, capsys) -> None:
+    handler = SharedLogFileHandler(paths.log_file)
+    handler.setFormatter(_JsonFormatter())
+    os.close(log_rotation._open_lock(paths.logs / ".boxmunge.log.lock"))
+    holder = _Holder(paths.logs / ".boxmunge.log.lock")
+    try:
+        with patch.object(log_rotation, "_LOCK_WAIT_SECONDS", 0.5):
+            started = time.monotonic()
+            handler.emit(_record("lost", datetime.now(timezone.utc)))
+            assert time.monotonic() - started < 5
+    finally:
+        holder.release()
+        handler.close()
+    err = capsys.readouterr().err
+    assert ".boxmunge.log.lock has been held" in err and "fuser" in err
+    assert paths.log_file.read_text() == ""
+
+
+@pytest.mark.parametrize("first_line", ["\n", "   \n", "not json\n"])
+def test_a_first_line_that_is_not_an_entry_is_reported(paths: BoxPaths, first_line: str) -> None:
+    paths.log_file.write_text(first_line + _entry("later", _yesterday()))
+    check = check_operational_log(paths)
+    assert check.status == "warn"
+    assert "not a boxmunge log entry" in check.detail and "Move the file aside" in check.detail
+
+
+def test_operational_log_check_passes_for_empty_and_normal_logs(paths: BoxPaths) -> None:
+    assert check_operational_log(paths).status == "ok"
+    paths.log_file.write_text("")
+    assert check_operational_log(paths).status == "ok"
+    paths.log_file.write_text(_entry("x", datetime.now(timezone.utc)))
+    assert check_operational_log(paths).status == "ok"

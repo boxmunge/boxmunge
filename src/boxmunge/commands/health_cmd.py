@@ -363,6 +363,9 @@ def collect_health(paths: BoxPaths) -> HealthReport:
     report.checks.append(check_config_drift(paths))
     report.checks.append(check_recent_errors(paths))
 
+    from boxmunge.health_checks.operational_log import check_operational_log
+    report.checks.append(check_operational_log(paths))
+
     from boxmunge.health_checks.alerts import check_alerts
     report.checks.append(check_alerts(paths))
 
