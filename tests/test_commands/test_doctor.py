@@ -50,3 +50,25 @@ class TestDoctorUnknownArg:
         err = capsys.readouterr().err
         assert "ERROR" in err
         assert "--not-a-flag" in err
+
+
+class TestDoctorTimers:
+    def test_checks_every_shipped_timer(self, paths: BoxPaths, monkeypatch) -> None:
+        """doctor checked three of the six timers install.sh enables."""
+        import subprocess
+        from pathlib import Path
+        from boxmunge.commands.doctor import run_doctor
+
+        asked: list[str] = []
+        real_run = subprocess.run
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[:2] == ["systemctl", "is-active"]:
+                asked.append(cmd[2])
+                return subprocess.CompletedProcess(cmd, 0, stdout="active\n", stderr="")
+            return real_run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr("boxmunge.commands.doctor.subprocess.run", fake_run)
+        run_doctor(paths, as_json=True)
+        shipped = {p.name for p in (Path(__file__).parents[2] / "systemd").glob("*.timer")}
+        assert set(asked) >= shipped

@@ -126,10 +126,12 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
             pass
 
     # Systemd timers (only on Linux)
-    for timer_name in ["boxmunge-health", "boxmunge-backup", "boxmunge-backup-sync"]:
+    from boxmunge.health_checks.hardening import BOXMUNGE_TIMERS
+    for timer in BOXMUNGE_TIMERS:
+        timer_name = timer.removesuffix(".timer")
         try:
             result = subprocess.run(
-                ["systemctl", "is-active", f"{timer_name}.timer"],
+                ["systemctl", "is-active", timer],
                 capture_output=True, text=True, check=False,
             )
             is_active = result.stdout.strip() == "active"

@@ -15,6 +15,14 @@ from boxmunge.commands.health_cmd import HealthCheck
 # dirs so binary resolution is independent of the caller's environment.
 _SBIN_DIRS = ["/usr/local/sbin", "/usr/sbin", "/sbin"]
 
+# Every timer install.sh enables (systemd/*.timer). `doctor` and the
+# `timers` health check both verify them.
+BOXMUNGE_TIMERS = (
+    "boxmunge-health.timer", "boxmunge-backup.timer",
+    "boxmunge-backup-sync.timer", "boxmunge-auto-update.timer",
+    "boxmunge-container-update.timer", "boxmunge-cve-scan.timer",
+)
+
 
 def _hardening_env() -> dict[str, str]:
     """A copy of the environment with the standard sbin dirs on PATH."""
@@ -185,13 +193,8 @@ def check_systemd_timers() -> HealthCheck:
     Each one is the only thing that runs its job: without auto-update, for
     example, neither security releases nor the OS-update alert happen.
     """
-    timers = [
-        "boxmunge-health.timer", "boxmunge-backup.timer",
-        "boxmunge-backup-sync.timer", "boxmunge-auto-update.timer",
-        "boxmunge-container-update.timer", "boxmunge-cve-scan.timer",
-    ]
     inactive = []
-    for timer in timers:
+    for timer in BOXMUNGE_TIMERS:
         try:
             result = _run(["systemctl", "is-active", timer], timeout=5)
             if result.returncode != 0:
