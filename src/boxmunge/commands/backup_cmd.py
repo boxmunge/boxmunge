@@ -212,6 +212,17 @@ def _attempt_locked_backup(name: str, paths: BoxPaths) -> BackupAttemptResult:
     return BackupAttemptResult.OK if rc == 0 else BackupAttemptResult.FAILED
 
 
+def _attempt_isolated(name: str, paths: BoxPaths) -> BackupAttemptResult:
+    """_attempt_locked_backup for a fleet loop: a project whose inputs cannot
+    be read is reported and FAILED, so the loop reaches every other project
+    and its retries and lock alert still run."""
+    try:
+        return _attempt_locked_backup(name, paths)
+    except PROJECT_INPUT_ERRORS as e:
+        report_project_failure("backup-all", name, e, paths)
+        return BackupAttemptResult.FAILED
+
+
 def _notify_persistent_locks(paths: BoxPaths, locked: list[str]) -> None:
     """Send a Pushover alert for projects that remained locked through retries.
 
@@ -279,11 +290,11 @@ def run_backup_all(paths: BoxPaths) -> int:
                     paths, project=name,
                 )
                 continue
-            result = _attempt_locked_backup(name, paths)
         except PROJECT_INPUT_ERRORS as e:
             report_project_failure("backup-all", name, e, paths)
             failed.append(name)
             continue
+        result = _attempt_isolated(name, paths)
         if result == BackupAttemptResult.OK:
             continue
         if result == BackupAttemptResult.LOCKED:
@@ -309,7 +320,7 @@ def run_backup_all(paths: BoxPaths) -> int:
                 continue
             outcome: BackupAttemptResult = BackupAttemptResult.LOCKED
             while time.monotonic() < deadline:
-                outcome = _attempt_locked_backup(name, paths)
+                outcome = _attempt_isolated(name, paths)
                 if outcome != BackupAttemptResult.LOCKED:
                     break
                 time.sleep(_LOCK_RETRY_INTERVAL_SECONDS)
