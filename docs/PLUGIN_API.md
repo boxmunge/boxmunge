@@ -47,6 +47,15 @@ HTTP/1.1 with JSON bodies over a unix socket. On a box the socket is
 - Requests with a body must send `Content-Length`; chunked bodies are refused. The limit is 64 KiB.
 - Responses are always `application/json` and always carry `api_version`.
 - Keep-alive works; the server closes the connection after any malformed request.
+- The server serves at most 16 connections at once. One more gets `503 unavailable` and is
+  closed.
+- A request (headers and body) must arrive whole within 30 seconds of the server starting to
+  read it, or the connection is closed. A kept-alive connection that sits idle for that long is
+  closed too, so a pooled socket can be gone when you next use it.
+
+Clients should keep a small connection pool (a handful of sockets, not one per request), and
+retry on `503` or on a connection reset or close, with a short backoff. Every observe action is
+safe to retry.
 
 Any language works. With curl: `curl --unix-socket ./api.sock http://boxmunge/v1/actions`. In
 Node, pass `socketPath` to `http.request`.
@@ -151,7 +160,7 @@ Parameter and result schemas use a small JSON Schema subset: `type`, `properties
 | `stale_approval` | 409 | The project changed after the operator approved; request a new approval |
 | `governed_change` | 403 | A plugin deploy would change the project's policy; the operator deploys it over SSH |
 | `failed` | 500 | The action ran and failed, or box state could not be read; the message says why |
-| `unavailable` | 503 | A dependency is down (Docker, the audit log) |
+| `unavailable` | 503 | A dependency is down (Docker, the audit log), a job action has no runner yet, or the server has too many connections open; retry shortly |
 
 A request the HTTP layer cannot parse (an over-long header line, say) gets its HTTP status, such
 as 400 or 431, with the same JSON envelope and code `invalid_params`.

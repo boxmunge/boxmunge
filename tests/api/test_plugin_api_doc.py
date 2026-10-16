@@ -70,3 +70,11 @@ def test_value_conventions_are_documented() -> None:
 def test_result_of_action_is_documented() -> None:
     assert "`x-result-of-action`" in DOC
     assert "treat `result` as any JSON value or null" in DOC
+
+
+def test_transport_limits_are_documented() -> None:
+    from boxmunge.api import server
+    assert f"at most {server.MAX_CONNECTIONS} connections at once" in DOC
+    assert f"within {server.REQUEST_TIMEOUT:g} seconds" in DOC
+    assert "retry on `503`" in DOC
+    assert "too many connections" in _error_row(ErrorCode.UNAVAILABLE)
