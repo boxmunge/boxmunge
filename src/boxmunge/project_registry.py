@@ -50,6 +50,16 @@ def load_registered_projects(paths: BoxPaths) -> set[str]:
     }
 
 
+def load_deployed_projects(paths: BoxPaths) -> list[str]:
+    """Registered projects that have been deployed (have a manifest), sorted.
+
+    A project registered but never deployed has no images to scan or watch,
+    so fleet-wide checks skip it rather than report it failing every run.
+    """
+    return sorted(name for name in load_registered_projects(paths)
+                  if (paths.project_dir(name) / "manifest.yml").exists())
+
+
 def add_project(name: str, paths: BoxPaths) -> None:
     """Register a project name. Raises ValueError for invalid names.
 

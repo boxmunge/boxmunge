@@ -132,3 +132,27 @@ class TestProjectRegistryConcurrency:
         assert set(names) <= registered, (
             f"Lost adds: missing {set(names) - registered}"
         )
+
+
+def test_deployed_projects_skip_registered_but_never_deployed(paths: BoxPaths) -> None:
+    """The nightly scan and the cve-scan health check walk this list; a
+    project registered ahead of its first deploy has nothing to scan and
+    must not be reported as a failed scan every night."""
+    from boxmunge.project_registry import add_project, load_deployed_projects
+    for name in ("live", "pending"):
+        add_project(name, paths)
+    live = paths.project_dir("live")
+    live.mkdir(parents=True)
+    (live / "manifest.yml").write_text("project: live\n")
+    paths.project_dir("pending").mkdir(parents=True)
+    assert load_deployed_projects(paths) == ["live"]
+
+
+def test_nightly_scan_targets_only_deployed_projects(paths: BoxPaths) -> None:
+    from boxmunge.commands.security_actions import _parse_scan_targets
+    from boxmunge.project_registry import add_project
+    add_project("pending", paths)
+    add_project("live", paths)
+    (paths.project_dir("live")).mkdir(parents=True)
+    (paths.project_dir("live") / "manifest.yml").write_text("project: live\n")
+    assert _parse_scan_targets([], paths) == ["live"]
