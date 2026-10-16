@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from boxmunge.health_checks import userns as hc
 from boxmunge.userns import offset
 from tests.userns_helpers import S, remap_box, remapped_info
@@ -65,3 +67,55 @@ def test_check_all_exits_critical_on_an_error_even_without_projects(paths, monke
     monkeypatch.setattr(hc, "notify", lambda *a, **kw: True)
     paths.projects.rmdir()
     assert run_check_all(paths, read_only=False) == 2
+
+
+def test_unreadable_config_on_an_unremapped_box_only_warns(paths) -> None:
+    paths.config_file.write_text("hostname: [unclosed\n")
+    check = hc.check_docker_userns(paths)
+    assert check.status == "warn" and "cannot tell" in check.detail
+
+
+def test_unreachable_daemon_on_an_unremapped_box_only_warns(paths, monkeypatch) -> None:
+    def down():
+        raise offset.RemapError("cannot ask the Docker daemon whether it is remapped: down")
+    monkeypatch.setattr(offset, "docker_info", down)
+    sent = []
+    monkeypatch.setattr(hc, "notify", lambda *a, **kw: sent.append(a) or True)
+    assert hc.alert_docker_userns(paths, now=T0).status == "warn"
+    assert sent == []
+
+
+def test_unreachable_daemon_on_a_remapped_box_is_an_error(paths, monkeypatch) -> None:
+    remap_box(paths, monkeypatch)
+    def down():
+        raise offset.RemapError("cannot ask the Docker daemon whether it is remapped: down")
+    monkeypatch.setattr(offset, "docker_info", down)
+    assert hc.check_docker_userns(paths).status == "error"
+
+
+def test_undelivered_alert_is_retried_on_the_next_run(paths, monkeypatch) -> None:
+    remap_box(paths, monkeypatch)
+    monkeypatch.setattr(offset, "docker_info", lambda: {**remapped_info(), "SecurityOptions": []})
+    delivered = iter([False, True, True])
+    sent = []
+    monkeypatch.setattr(hc, "notify",
+                        lambda *a, **kw: sent.append(a) or next(delivered))
+    hc.alert_docker_userns(paths, now=T0)
+    hc.alert_docker_userns(paths, now=T0 + timedelta(minutes=5))
+    hc.alert_docker_userns(paths, now=T0 + timedelta(minutes=10))
+    assert len(sent) == 2
+
+
+@pytest.mark.parametrize("content", ["{not json", '["a"]', '{"k": 5}', '{"k": "yesterday"}',
+                                     '{"k": "2026-10-16T00:00:00"}'])
+def test_unusable_alert_state_is_reported_and_replaced(paths, monkeypatch, capsys,
+                                                       content) -> None:
+    remap_box(paths, monkeypatch)
+    monkeypatch.setattr(offset, "docker_info", lambda: {**remapped_info(), "SecurityOptions": []})
+    (paths.state / "userns-alert.json").write_text(content)
+    sent = []
+    monkeypatch.setattr(hc, "notify", lambda *a, **kw: sent.append(a) or True)
+    assert hc.alert_docker_userns(paths, now=T0).status == "error"
+    assert len(sent) == 1 and "userns-alert.json" in capsys.readouterr().err
+    hc.alert_docker_userns(paths, now=T0 + timedelta(hours=1))
+    assert len(sent) == 1

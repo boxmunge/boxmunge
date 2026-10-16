@@ -29,6 +29,7 @@ from boxmunge.paths import BoxPaths
 REMAP_NAME = "boxmunge-remap"
 DAEMON_REMAP_VALUE = f"{REMAP_NAME}:{REMAP_NAME}"
 RANGE = 65536
+_INFO_TIMEOUT = 10  # seconds; as health's other daemon probes
 _FLOOR = 1_000_000
 _MAX_ID = 2**32 - 1
 ETC = Path("/etc")  # tests point this at a temporary directory
@@ -54,7 +55,7 @@ def read_subids(path: Path) -> list[SubRange]:
         text = path.read_text()
     except FileNotFoundError:
         return []
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
         raise RemapError(f"cannot read {path}: {e}") from e
     out = []
     for n, line in enumerate(text.splitlines(), 1):
@@ -108,7 +109,7 @@ def recorded_offset(paths: BoxPaths) -> int | None:
         doc = yaml.safe_load(paths.config_file.read_text()) or {}
     except FileNotFoundError:
         return None
-    except (OSError, yaml.YAMLError) as e:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
         raise RemapError(f"cannot read {paths.config_file}: {e}") from e
     block = doc.get("userns") if isinstance(doc, dict) else None
     if block is None:
@@ -155,7 +156,8 @@ def remove_offset_record(paths: BoxPaths, offset: int) -> None:
 def docker_info() -> dict[str, Any]:
     """`docker info` as a mapping. Raises RemapError when the daemon cannot say."""
     try:
-        out = _run(["docker", "info", "--format", "{{json .}}"], capture=True).stdout
+        out = _run(["docker", "info", "--format", "{{json .}}"], capture=True,
+                   timeout=_INFO_TIMEOUT).stdout
         doc = json.loads(out)
     except DockerError as e:
         raise RemapError(f"cannot ask the Docker daemon whether it is remapped: {e}") from e
@@ -173,7 +175,7 @@ def daemon_json_userns(etc: Path) -> str | None:
         raw = path.read_text()
     except FileNotFoundError:
         return None
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
         raise RemapError(f"cannot read {path}: {e}") from e
     try:
         doc = json.loads(raw) if raw.strip() else {}

@@ -122,6 +122,33 @@ def test_record_is_appended_keeping_comments_mode_and_owner(paths) -> None:
 def test_docker_info_must_be_a_json_object(monkeypatch) -> None:
     class Done:
         stdout = json.dumps(["not", "an", "object"])
-    monkeypatch.setattr(offset, "_run", lambda cmd, capture: Done())
+    monkeypatch.setattr(offset, "_run", lambda cmd, capture, timeout: Done())
     with pytest.raises(RemapError, match="not a JSON object"):
         REAL_DOCKER_INFO()  # the autouse fixture stubbed offset.docker_info itself
+
+
+def test_non_utf8_sources_are_refused(paths) -> None:
+    paths.config_file.write_bytes(b"hostname: \xff\n")
+    with pytest.raises(RemapError, match="cannot read"):
+        recorded_offset(paths)
+    (offset.ETC / "subuid").write_bytes(b"\xff:1:1\n")
+    with pytest.raises(RemapError, match="cannot read"):
+        offset.read_subids(offset.ETC / "subuid")
+    (offset.ETC / "docker").mkdir()
+    (offset.ETC / "docker" / "daemon.json").write_bytes(b"{\"\xff\": 1}")
+    with pytest.raises(RemapError, match="cannot read"):
+        offset.daemon_json_userns(offset.ETC)
+
+
+def test_docker_info_has_a_short_timeout(monkeypatch) -> None:
+    seen = {}
+
+    class Done:
+        stdout = "{}"
+
+    def fake(cmd, capture, timeout):
+        seen["timeout"] = timeout
+        return Done()
+    monkeypatch.setattr(offset, "_run", fake)
+    REAL_DOCKER_INFO()
+    assert seen["timeout"] <= 10

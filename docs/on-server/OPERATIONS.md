@@ -1100,7 +1100,7 @@ the exit code. The MCP `health` tool runs the same checks.
 | `alerts` | Pushover is not configured, so nothing on this box can alert you | see [Alerts not configured](#alerts-not-configured) |
 | `container-updates` | the daily container update failed for a target (also when a service it updates has no container, so its running image is unknown), or has not run for 48 hours | `log --component container-update`; the entry ends with the command's own error output |
 | `platform-updates` | a security or break-fix release cannot be installed automatically | see [Upgrading the Platform](#upgrading-the-platform) |
-| `docker-userns` | Docker does not remap user namespaces yet (warning); or the box records a remap that the daemon, `daemon.json` or `/etc/subuid`/`/etc/subgid` disagree with (error, alerted once a day) | see [User-namespace remapping](#user-namespace-remapping) |
+| `docker-userns` | Docker does not remap user namespaces yet, or a source cannot be read on a box nothing says is remapped (warning); or the record, the daemon, `daemon.json` and `/etc/subuid`/`/etc/subgid` disagree about a remap (error, alerted once a day) | see [User-namespace remapping](#user-namespace-remapping) |
 | `security-profiles` | a service runs with `profile: off` | review the reason in its manifest |
 | `cve-scan` | a deployed project has not been scanned for 36 hours, was never scanned, or its last scan was incomplete | `security scan <project>`; see `agent-help cve` |
 | `ufw`, `crowdsec`, `aide`, `auditd`, `sysctl` | a host hardening component is off or misconfigured | `doctor`, then the supervisor user |
