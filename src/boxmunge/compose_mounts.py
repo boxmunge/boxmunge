@@ -34,9 +34,13 @@ _SYSTEM_DENIED_PATHS: tuple[str, ...] = (
 
 _ENV_SUBSTITUTION_RE = re.compile(r"\$\w|\$\{")
 
-# Smoke-test mount injected by the overlay generator. Must be ignored
+# Smoke-test mount sources injected by the overlay generator: production
+# mounts its own copy of its release's scripts (see release.sync_live_scripts),
+# staging the staged release's scripts in the project dir. Must be ignored
 # when classifying user-compose volume entries.
-_SMOKE_MOUNT_SOURCES: frozenset[str] = frozenset({"./boxmunge-scripts"})
+PROD_SMOKE_SOURCE = "./.releases/live-scripts"
+STAGING_SMOKE_SOURCE = "./boxmunge-scripts"
+_SMOKE_MOUNT_SOURCES: frozenset[str] = frozenset({PROD_SMOKE_SOURCE, STAGING_SMOKE_SOURCE})
 
 
 def _is_path_like(src: str) -> bool:

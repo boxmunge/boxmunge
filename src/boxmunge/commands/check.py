@@ -101,8 +101,9 @@ def run_smoke_in_container(
     reading compose files — which would fail when the invoking user cannot
     read secrets.env.
 
-    The compose overlay mounts ./boxmunge-scripts into the container, so
-    localhost:PORT naturally reaches the service.
+    The compose overlay mounts the release's boxmunge-scripts/ at
+    /boxmunge-scripts (production its own copy, so a stage cannot change
+    it), and localhost:PORT naturally reaches the service.
 
     Returns the first failing result, or ok if all pass.
     """

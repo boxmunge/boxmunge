@@ -192,7 +192,7 @@ class TestNonRoutableServices:
 
 class TestSmokeScriptMount:
     def test_smoke_service_gets_volume_mount(self) -> None:
-        """A service with smoke gets boxmunge-scripts mounted."""
+        """Production mounts its own copy of the release's scripts."""
         manifest = {
             "project": "myapp",
             "services": {"web": {
@@ -202,7 +202,22 @@ class TestSmokeScriptMount:
         }
         content = generate_compose_override(manifest, user_compose={})
         parsed = yaml.safe_load(content)
-        assert "./boxmunge-scripts:/boxmunge-scripts:ro" in parsed["services"]["web"]["volumes"]
+        assert parsed["services"]["web"]["volumes"] == [
+            "./.releases/live-scripts:/boxmunge-scripts:ro"]
+
+    def test_staging_mounts_the_staged_scripts(self) -> None:
+        """Staging runs the staged release's scripts from the project dir."""
+        manifest = {
+            "project": "myapp",
+            "services": {"web": {
+                "port": 8080, "routes": [{"path": "/"}],
+                "smoke": "boxmunge-scripts/smoke.sh",
+            }},
+        }
+        content = generate_staging_compose_override(manifest, user_compose={})
+        parsed = yaml.safe_load(content)
+        assert parsed["services"]["web"]["volumes"] == [
+            "./boxmunge-scripts:/boxmunge-scripts:ro"]
 
     def test_only_smoke_services_get_mount(self) -> None:
         """Only services with smoke get the volume mount."""
@@ -295,6 +310,18 @@ services:
         parsed = yaml.safe_load(result)
         volumes = parsed["services"]["web"]["volumes"]
         assert "./data-staging:/app/data" in volumes
+
+    def test_anonymous_volume_left_alone(self, tmp_path: Path) -> None:
+        """`/app/cache` is a container path, not a host path to suffix."""
+        compose = self._write_compose(tmp_path, """
+services:
+  web:
+    image: nginx
+    volumes:
+      - /app/cache
+""")
+        parsed = yaml.safe_load(generate_staging_compose_base(compose))
+        assert parsed["services"]["web"]["volumes"] == ["/app/cache"]
 
     def test_relative_bind_mount_with_options(self, tmp_path: Path) -> None:
         compose = self._write_compose(tmp_path, """
@@ -736,7 +763,7 @@ class TestWritableOverlay:
         assert web["tmpfs"] == ["/tmp"]
         # Volumes are NOT introduced into State 1 services.
         assert "volumes" not in web or web.get("volumes") == [
-            "./boxmunge-scripts:/boxmunge-scripts:ro"
+            "./.releases/live-scripts:/boxmunge-scripts:ro"
         ]
 
     # --- State MANAGED ----------------------------------------------------
@@ -804,7 +831,7 @@ class TestWritableOverlay:
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         # Smoke mount must still be present.
-        assert "./boxmunge-scripts:/boxmunge-scripts:ro" in web["volumes"]
+        assert "./.releases/live-scripts:/boxmunge-scripts:ro" in web["volumes"]
         # And the persistent volume too.
         assert "demo_dbdata:/app/data" in web["volumes"]
 
@@ -859,7 +886,7 @@ class TestWritableOverlay:
         override = generate_compose_override(m, user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
-        assert "./boxmunge-scripts:/boxmunge-scripts:ro" in web.get(
+        assert "./.releases/live-scripts:/boxmunge-scripts:ro" in web.get(
             "volumes", []
         )
 

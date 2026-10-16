@@ -130,6 +130,17 @@ keeps the displaced production release as the `rollback` target. `unstage` puts 
 release's files back. While a release is staged, `prod-deploy` and `rollback` refuse: promote or
 unstage first.
 
+Production's smoke checks keep running the production release's own `boxmunge-scripts/` while a
+release is staged (production mounts a copy kept in `.releases/live-scripts/`), so a smoke check
+that only the staged release passes does not fail production. Production switches to the new
+scripts when `promote` deploys them.
+
+Staging keeps its own data. To start it from a copy of production's, set `staging: {copy_data: true}`
+in the manifest: `stage` then stops production briefly, copies every bind mount and named volume in
+`compose.yml` and every `writable.persistent` volume in the manifest into staging's, and starts
+production again. With `copy_data` set but no data declared anywhere, `stage` fails rather than
+staging on stale data.
+
 A stage that fails after installing its release (staging containers fail to start, the staging data
 copy fails, Caddy rejects the staging site) cleans up after itself: staging containers, the staging Caddy site and compose files are
 removed and the production release's files are put back. `unstage` removes whatever a stage left

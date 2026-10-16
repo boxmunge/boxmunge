@@ -8,8 +8,13 @@ from typing import Any
 
 import yaml
 
-from boxmunge.compose import is_bind_mount
+from boxmunge.compose import managed_volume_keys
+from boxmunge.compose_mounts import is_bind_entry, volume_source
 from boxmunge.docker import compose_stop, compose_start
+
+
+class StagingDataError(Exception):
+    """Raised when production data cannot be copied for staging."""
 
 
 def parse_volumes(
@@ -19,19 +24,20 @@ def parse_volumes(
 
     bind_mounts: list of (source_path, staging_path) tuples
     named_volumes: list of volume names
+    Anonymous volumes have no name to copy between projects and are skipped.
     """
     bind_mounts: dict[str, str] = {}
     named_volumes: set[str] = set()
 
     for svc in (compose.get("services") or {}).values():
-        for vol in svc.get("volumes", []):
-            parts = vol.split(":")
-            host_part = parts[0]
-            if is_bind_mount(vol):
-                if host_part not in bind_mounts:
-                    bind_mounts[host_part] = host_part + "-staging"
-            else:
-                named_volumes.add(host_part)
+        for vol in svc.get("volumes") or []:
+            if is_bind_entry(vol):
+                source = volume_source(vol)
+                bind_mounts.setdefault(source, source + "-staging")
+            elif isinstance(vol, str) and ":" in vol:
+                named_volumes.add(vol.split(":", 1)[0])
+            elif isinstance(vol, dict) and vol.get("source"):
+                named_volumes.add(vol["source"])
 
     return list(bind_mounts.items()), sorted(named_volumes)
 
@@ -104,20 +110,28 @@ def copy_named_volumes(
 def snapshot_prod_data(
     project_name: str,
     project_dir: Path,
-    compose_path: Path | str,
+    manifest: dict[str, Any],
 ) -> None:
     """Snapshot production data for staging use.
 
-    Stops production, copies all bind mounts and named volumes,
-    then restarts production. If copying fails, production is
-    still restarted before the exception propagates.
+    The data is every bind mount and named volume in compose.yml plus the
+    named volumes the manifest declares (``writable.persistent``), which
+    only the generated overlay mounts. Stops production, copies them all,
+    then restarts production. If copying fails, production is still
+    restarted before the exception propagates. Raises StagingDataError when
+    there is nothing to copy: copy_data was asked for, so that is a
+    misconfiguration, not a successful copy.
     """
-    raw = Path(compose_path).read_text()
-    compose = yaml.safe_load(raw)
+    compose = yaml.safe_load((project_dir / "compose.yml").read_text())
     bind_mounts, named_volumes = parse_volumes(compose)
+    named_volumes = sorted(set(named_volumes) | set(managed_volume_keys(manifest)))
 
     if not bind_mounts and not named_volumes:
-        return
+        raise StagingDataError(
+            "staging.copy_data is set, but the project declares no data to "
+            "copy: no volumes in compose.yml and no writable.persistent "
+            "entries in the manifest."
+        )
 
     prod_compose_files = ["compose.yml", "compose.boxmunge.yml"]
     compose_stop(project_dir, compose_files=prod_compose_files,

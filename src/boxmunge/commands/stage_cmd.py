@@ -204,10 +204,7 @@ def _bring_up_staging(project_name: str, paths: BoxPaths,
         print("  Snapshotting production data for staging...")
         from boxmunge.staging_data import snapshot_prod_data
         try:
-            snapshot_prod_data(
-                project_name, project_dir,
-                project_dir / "compose.yml",
-            )
+            snapshot_prod_data(project_name, project_dir, manifest)
             print("  Data snapshot complete.")
         except Exception as e:
             print(f"  ERROR: Data snapshot failed: {e}", file=sys.stderr)

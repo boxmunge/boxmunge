@@ -175,12 +175,10 @@ def real_system_container(integration_root: Path, tmp_path_factory):
 
     Mounts point at the integration root (the compose file's BOXMUNGE_CONFIG
     and BOXMUNGE_PROJECTS variables). Only the container name is overridden,
-    so a developer's real boxmunge-system is never touched, and the module's
-    CONTAINER_NAME points at it for the session. Yields the name.
+    so a developer's real boxmunge-system is never touched. Yields the name;
+    tests use ``system_container`` to point the module at it.
     """
     import uuid
-
-    import boxmunge.system_container as sc
 
     if not _docker_available():
         pytest.skip("Docker not available")
@@ -207,9 +205,18 @@ def real_system_container(integration_root: Path, tmp_path_factory):
                             capture_output=True, text=True, timeout=900, check=False)
         if up.returncode != 0:
             pytest.fail(f"system container failed to start:\n{up.stdout}\n{up.stderr}")
-        with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(sc, "CONTAINER_NAME", name)
-            yield name
+        yield name
     finally:
         subprocess.run(cmd + ["down", "--volumes", "--rmi", "local"], env=env,
                        capture_output=True, timeout=120, check=False)
+
+
+@pytest.fixture
+def system_container(real_system_container: str, monkeypatch) -> str:
+    """Point system_container.CONTAINER_NAME at the session's container for
+    one test only. A session-wide patch outlived the integration tests and
+    sent later unit tests to the wrong container name."""
+    import boxmunge.system_container as sc
+
+    monkeypatch.setattr(sc, "CONTAINER_NAME", real_system_container)
+    return real_system_container

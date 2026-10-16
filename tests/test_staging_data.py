@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from boxmunge.staging_data import (
+    StagingDataError,
     parse_volumes,
     copy_bind_mounts,
     copy_named_volumes,
@@ -147,7 +148,7 @@ class TestSnapshotProdData:
             "volumes": {"dbdata": None},
         }))
 
-        snapshot_prod_data("myapp", tmp_path, compose_path)
+        snapshot_prod_data("myapp", tmp_path, {"project": "myapp"})
 
         mock_stop.assert_called_once_with(
             tmp_path, compose_files=["compose.yml", "compose.boxmunge.yml"],
@@ -181,7 +182,63 @@ class TestSnapshotProdData:
         mock_copy_bind.side_effect = subprocess.CalledProcessError(1, "cp")
 
         with pytest.raises(subprocess.CalledProcessError):
-            snapshot_prod_data("myapp", tmp_path, compose_path)
+            snapshot_prod_data("myapp", tmp_path, {"project": "myapp"})
 
         # Even on failure, prod must be restarted
         mock_start.assert_called_once()
+
+    @patch("boxmunge.staging_data.copy_named_volumes")
+    @patch("boxmunge.staging_data.copy_bind_mounts")
+    @patch("boxmunge.staging_data.compose_start")
+    @patch("boxmunge.staging_data.compose_stop")
+    def test_copies_manifest_declared_volumes(
+        self, mock_stop: MagicMock, mock_start: MagicMock,
+        mock_copy_bind: MagicMock, mock_copy_named: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Volumes only the manifest declares (writable.persistent) are
+        mounted by the generated overlay, not compose.yml, and must still
+        be copied, with production stopped around the copy."""
+        (tmp_path / "compose.yml").write_text(yaml.dump({
+            "services": {"web": {"image": "nginx"}},
+        }))
+        manifest = {
+            "project": "myapp",
+            "services": {"web": {
+                "port": 8080, "routes": [{"path": "/"}],
+                "writable": {"persistent": [{"name": "data", "mount": "/app/data"}]},
+            }},
+        }
+
+        snapshot_prod_data("myapp", tmp_path, manifest)
+
+        mock_stop.assert_called_once()
+        mock_copy_named.assert_called_once_with(["myapp_data"], "myapp")
+        mock_copy_bind.assert_not_called()
+        mock_start.assert_called_once()
+
+    @patch("boxmunge.staging_data.compose_start")
+    @patch("boxmunge.staging_data.compose_stop")
+    def test_nothing_to_copy_is_an_error(
+        self, mock_stop: MagicMock, mock_start: MagicMock, tmp_path: Path,
+    ) -> None:
+        """copy_data with no data declared anywhere fails, not 'complete'."""
+        (tmp_path / "compose.yml").write_text(yaml.dump({
+            "services": {"web": {"image": "nginx"}},
+        }))
+        with pytest.raises(StagingDataError, match="copy_data"):
+            snapshot_prod_data("myapp", tmp_path, {"project": "myapp"})
+        mock_stop.assert_not_called()
+        mock_start.assert_not_called()
+
+
+class TestParseVolumeSyntaxes:
+    def test_long_syntax_and_anonymous_volumes(self) -> None:
+        compose = {"services": {"web": {"volumes": [
+            {"type": "bind", "source": "./uploads", "target": "/app/uploads"},
+            {"type": "volume", "source": "dbdata", "target": "/pgdata"},
+            "/app/cache",  # anonymous: nothing to copy
+        ]}}}
+        bind, named = parse_volumes(compose)
+        assert bind == [("./uploads", "./uploads-staging")]
+        assert named == ["dbdata"]

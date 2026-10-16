@@ -27,7 +27,7 @@ from boxmunge.probation import clear_probation_if_active
 from boxmunge.release import (
     ReleaseStateError, has_prestage, install_release, keep_previous_release,
     discard_prestage, discard_previous_release, live_ref, mark_live, prestage_ref,
-    prestage_to_previous, prestage_tree, previous_dir,
+    prestage_to_previous, prestage_tree, previous_dir, sync_live_scripts,
 )
 from boxmunge.source import (
     SourceError, bundle_ref, consume_bundle, resolve_bundle_source,
@@ -172,6 +172,8 @@ def _promote_staged(
     rc = _start_release(project_name, paths, manifest, staged_ref,
                         snapshot_name, component)
     if rc != 0:
+        # Production still runs the kept release: check it with its own scripts.
+        sync_live_scripts(paths, project_name, prestage_tree(paths, project_name))
         return rc
     try:
         prestage_to_previous(paths, project_name, snapshot_name, staged_ref)
@@ -288,7 +290,8 @@ def _start_release(
     prepare_caddy_config(paths, manifest)
 
     print("  Generating compose overlay...")
-    prepare_compose_override(paths, manifest, component=component)
+    prepare_compose_override(paths, manifest, component=component,
+                             release_root=project_dir)
 
     print("  Starting containers...")
     compose_files = ["compose.yml", "compose.boxmunge.yml"]

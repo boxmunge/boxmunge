@@ -7,9 +7,11 @@ from typing import Any
 import yaml
 
 from boxmunge import compose_resolve
+from boxmunge.compose_mounts import PROD_SMOKE_SOURCE, STAGING_SMOKE_SOURCE, is_bind_entry
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
 from boxmunge.published_ports import overlay_ports
+from boxmunge.release import production_release_root, sync_live_scripts
 from boxmunge.security_overlay import (
     resolve_security,
     render_compose_security_fragment,
@@ -204,7 +206,10 @@ def _build_service_override(
         # the user's compose.yml extends lists, never replaces).
         svc_volumes: list[str] = []
         if svc.get("smoke"):
-            svc_volumes.append("./boxmunge-scripts:/boxmunge-scripts:ro")
+            # Production mounts its own copy: `stage` overwrites the project
+            # dir's scripts while production keeps running.
+            source = PROD_SMOKE_SOURCE if alias_prefix is None else STAGING_SMOKE_SOURCE
+            svc_volumes.append(f"{source}:/boxmunge-scripts:ro")
 
         # Security hardening — silent defaults injected here.
         sec_fragment = _hardening_fragment(
@@ -279,20 +284,19 @@ def _build_service_override(
     return services
 
 
-def _build_top_level_volumes(manifest: dict[str, Any]) -> dict[str, dict]:
-    """Build the top-level `volumes:` block declaring named volumes the
-    overlay emitted for State MANAGED services.
+def managed_volume_keys(manifest: dict[str, Any]) -> list[str]:
+    """Compose keys (`<project>_<name>`) of the named volumes the overlay
+    emits for State MANAGED services' `writable.persistent` entries.
 
-    Each named volume gets an empty mapping — Docker auto-creates on
-    first deploy. Keys are `<project>_<name>`; see the note in
-    `_build_service_override` for the resulting Docker volume name.
+    See the note in `_build_service_override` for the resulting Docker
+    volume name.
     """
     project = manifest.get("project", "")
-    out: dict[str, dict] = {}
+    keys: list[str] = []
     services_block = manifest.get("services", {})
     if not isinstance(services_block, dict):
-        return out
-    for svc_name, svc in services_block.items():
+        return keys
+    for svc in services_block.values():
         if not isinstance(svc, dict):
             continue
         if classify_state(svc) is not WritableState.MANAGED:
@@ -302,9 +306,15 @@ def _build_top_level_volumes(manifest: dict[str, Any]) -> dict[str, dict]:
         for entry in persistent:
             if not isinstance(entry, dict):
                 continue
-            vol_name = f"{project}_{entry['name']}"
-            out[vol_name] = {}
-    return out
+            keys.append(f"{project}_{entry['name']}")
+    return keys
+
+
+def _build_top_level_volumes(manifest: dict[str, Any]) -> dict[str, dict]:
+    """Build the top-level `volumes:` block declaring the managed named
+    volumes. Each gets an empty mapping — Docker auto-creates on first deploy.
+    """
+    return {key: {} for key in managed_volume_keys(manifest)}
 
 
 def generate_compose_override(
@@ -366,14 +376,24 @@ def prepare_compose_override(
     paths: BoxPaths,
     manifest: dict[str, Any],
     component: str = "deploy",
+    release_root: Path | None = None,
 ) -> None:
-    """Generate compose.boxmunge.yml for a project.
+    """Generate compose.boxmunge.yml for a project, and refresh the copy of
+    the smoke scripts it mounts.
 
     `component` labels the SECURITY OFF log entry so callers from upgrade /
     resume don't misattribute the warning as "deploy". Lives here, not in
     commands/, to avoid `commands/`-to-`commands/` imports (audit A-2).
+
+    `release_root` holds the release production will run. Deploy passes the
+    project dir (a promote deploys the staged release there); everyone else
+    regenerates for the release production already runs, which during a
+    stage is the kept one, not the staged one in the project dir.
     """
     project_name = manifest["project"]
+    if release_root is None:
+        release_root = production_release_root(paths, project_name)
+    sync_live_scripts(paths, project_name, release_root)
     override_path = paths.project_compose_override(project_name)
     override_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -405,17 +425,11 @@ def prepare_compose_override(
     warn_published_ports(paths, manifest, component=component)
 
 
-def is_bind_mount(volume_str: str) -> bool:
-    """Check if a short-syntax volume string is a bind mount (starts with . / or ~)."""
-    host_part = volume_str.split(":")[0]
-    return host_part.startswith((".", "/", "~"))
-
-
 def _staging_volume(entry: Any) -> Any:
     """Point a bind mount (short or long syntax) at its -staging sibling."""
     if isinstance(entry, dict) and entry.get("type") == "bind":
         return {**entry, "source": f"{entry['source']}-staging"}
-    if isinstance(entry, str) and is_bind_mount(entry):
+    if isinstance(entry, str) and is_bind_entry(entry):
         return _rewrite_bind_mount(entry)
     return entry
 
