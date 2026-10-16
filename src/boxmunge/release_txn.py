@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -180,6 +181,24 @@ def stale_reason(paths: BoxPaths, project: str, txn: InstallTxn) -> str | None:
     if now["previous_json_sha256"] not in prev_ok and not keep_in_progress:
         problems.append("previous.json was changed by something other than this install")
     return "; ".join(problems) or None
+
+
+def refuse_if_install_open(paths: BoxPaths, project: str, *, component: str,
+                           txn: str | None = None) -> bool:
+    """For operator commands that must not run while an install is open:
+    print why and return True. Never alerts (compose_guard does, for starts)."""
+    from boxmunge.log import log_error
+    try:
+        open_txn = load_txn(paths, project)
+    except ReleaseStateError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return True
+    if open_txn is None or open_txn.id == txn:
+        return False
+    message = start_refusal(project, open_txn, stale_reason(paths, project, open_txn))
+    print(f"ERROR: {project}: {message}.", file=sys.stderr)
+    log_error(component, f"Refused: {message}", paths, project=project)
+    return True
 
 
 def rerun_command(project: str, txn: InstallTxn) -> str:

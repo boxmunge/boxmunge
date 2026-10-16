@@ -15,6 +15,10 @@ release's files, not production's, so a production start other than the
 promote that deploys it is refused too: it would recreate production from
 the staged release (and run its migrations on production data).
 
+While an install transaction is open (.releases/install.json), a
+production start is refused unless it is the core resuming that install:
+the project directory may hold a half-installed release.
+
 A start that fails a check does not happen: the refusal is logged, the
 operator is alerted, and the running containers are left as they are.
 ComposeRefused is a DockerError, so every caller already treats it as a
@@ -31,6 +35,7 @@ from typing import TYPE_CHECKING
 from boxmunge import bind_sources, compose_resolve, docker_containers
 from boxmunge.bind_sources import BindSourceError
 from boxmunge.compose_own_files import container_bind_problems
+from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import compose_up, staging_compose_project, start_containers
 from boxmunge.docker_run import DockerError
 from boxmunge.intake import IntakeError, validate_release_tree
@@ -38,6 +43,7 @@ from boxmunge.log import log_error
 from boxmunge.notify import notify
 from boxmunge.paths import RESERVED_PROJECT_NAMES
 from boxmunge.release_staging import has_prestage
+from boxmunge.release_txn import load_txn, stale_reason, start_refusal
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -80,28 +86,47 @@ def _record_alert(paths: BoxPaths, project_name: str, reason: str, now: datetime
     atomic_write_text(path, json.dumps(doc) + "\n")
 
 
-def _refused(paths: BoxPaths, project_name: str, component: str, reason: str) -> ComposeRefused:
+def _refused(paths: BoxPaths, project_name: str, component: str, reason: str,
+             *, tampering: bool = True) -> ComposeRefused:
     message = (f"Refused to start {project_name}: {reason}. Nothing was started "
                f"or recreated; its running containers were left as they are.")
     log_error(component, message, paths, project=project_name)
     now = datetime.now(timezone.utc)
     if not _alert_recently(paths, project_name, reason, now):
-        notify(paths, f"{project_name}: start refused",
-               f"{message} If you did not make this change, a container may have "
-               f"tampered with the project's files: inspect it before redeploying.",
+        hint = (" If you did not make this change, a container may have tampered with "
+                "the project's files: inspect it before redeploying." if tampering else "")
+        notify(paths, f"{project_name}: start refused", message + hint,
                component=component, project=project_name, priority=1)
         _record_alert(paths, project_name, reason, now)
     return ComposeRefused(message)
 
 
+def _refuse_if_install_open(paths: BoxPaths, project_name: str, component: str,
+                            txn: str | None) -> None:
+    """Production starts wait for an open install: only the core resuming it
+    (which passes its id) may start production. The reason names the
+    install's ref and phase, so the alert repeats once per transaction and
+    then every _ALERT_INTERVAL."""
+    try:
+        open_txn = load_txn(paths, project_name)
+    except ReleaseStateError as e:
+        raise _refused(paths, project_name, component, str(e), tampering=False) from e
+    if open_txn is None or open_txn.id == txn:
+        return
+    reason = start_refusal(project_name, open_txn, stale_reason(paths, project_name, open_txn))
+    raise _refused(paths, project_name, component, reason, tampering=False)
+
+
 def check_start(
     paths: BoxPaths, project_name: str, *, component: str, compose_files: list[str],
     staging: bool = False, record: bool = False, promoting: bool = False,
-    deploying: bool = False,
+    deploying: bool = False, txn: str | None = None,
 ) -> None:
     """Re-validate the project and check every bind source it would mount.
 
-    A production start while a release is staged is refused unless it is
+    A production start while an install transaction is open is refused
+    unless `txn` is that transaction's id (the core resuming it). A
+    production start while a release is staged is refused unless it is
     `promoting` that release.
 
     `record` (deploy, stage, upgrade) records the sources' kinds and the
@@ -120,6 +145,8 @@ def check_start(
     project_dir = paths.project_dir(project_name)
     compose_project = staging_compose_project(project_name) if staging else project_name
     record_path = paths.project_bind_record(project_name, staging=staging)
+    if not staging:
+        _refuse_if_install_open(paths, project_name, component, txn)
     if not (staging or promoting) and has_prestage(paths, project_name):
         raise _refused(paths, project_name, component,
                        "a release is staged, so the project directory holds the staged "
@@ -150,26 +177,29 @@ def compose_up_checked(
     paths: BoxPaths, project_name: str, *, component: str, compose_files: list[str],
     staging: bool = False, record: bool = False, promoting: bool = False,
     deploying: bool = False, build: bool = True, force_recreate: bool = False,
-    services: list[str] | None = None, start: bool = True,
+    services: list[str] | None = None, start: bool = True, txn: str | None = None,
 ) -> None:
     """check_start, then `docker compose up` (`start=False`: create without
     starting, which still mounts nothing yet but fixes every bind source in
     the containers it creates). Raises ComposeRefused or DockerError."""
     check_start(paths, project_name, component=component, compose_files=compose_files,
-                staging=staging, record=record, promoting=promoting, deploying=deploying)
+                staging=staging, record=record, promoting=promoting, deploying=deploying,
+                txn=txn)
     compose_up(paths.project_dir(project_name), compose_files=compose_files, build=build,
                project_name=staging_compose_project(project_name) if staging else project_name,
                force_recreate=force_recreate, services=services, start=start)
 
 
-def check_containers_start(paths: BoxPaths, project_name: str, *, component: str) -> None:
+def check_containers_start(paths: BoxPaths, project_name: str, *, component: str,
+                           txn: str | None = None) -> None:
     """Check what starting production's existing, stopped containers would
     mount. A `docker start` reads no compose file — it mounts what each
     container was created with, and during a stage the compose files on
     disk are the staged release's — so only the containers' own bind mounts
     are checked: the own-file and nesting rules, and each source walked
     without following links, of the kind recorded at deploy. Raises
-    ComposeRefused."""
+    ComposeRefused, also while an install other than `txn` is open."""
+    _refuse_if_install_open(paths, project_name, component, txn)
     project_dir = paths.project_dir(project_name)
     try:
         existing = docker_containers.container_bind_sources(project_name)
@@ -185,10 +215,11 @@ def check_containers_start(paths: BoxPaths, project_name: str, *, component: str
 
 def start_containers_checked(
     paths: BoxPaths, project_name: str, names: list[str], *, component: str,
+    txn: str | None = None,
 ) -> None:
     """check_containers_start, then `docker start` the named containers.
     Raises ComposeRefused or DockerError."""
-    check_containers_start(paths, project_name, component=component)
+    check_containers_start(paths, project_name, component=component, txn=txn)
     start_containers(names)
 
 
