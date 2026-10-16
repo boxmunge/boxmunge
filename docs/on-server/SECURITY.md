@@ -217,6 +217,8 @@ of a rejection. On a box whose Docker daemon remaps user namespaces
 `network_mode` or `ipc` set to `host` are refused even under `profile: "off"`:
 the remapped daemon cannot start them, so a service that needs them cannot run
 on a remapped box.
+A compose `user:` id above 65535 is refused there as well (a remapped daemon
+maps only container ids 0 to 65535); before the migration it is a warning.
 
 ### Project isolation
 
@@ -236,7 +238,7 @@ or the files boxmunge itself reads from the project directory. They apply to eve
 | A build input outside the project: the `build` context, any `build.additional_contexts` path, or the `build.dockerfile` (resolved against the context, symlinks followed) | Keep every build input inside the project. `https://` (or `git://`) git contexts, and `docker-image://<image>` or `service:<name>` additional contexts, are fine. |
 | Any other build context form (`oci-layout://`, `file://`, ...), an SSH git context (`git@...`, `ssh://...`), `build.ssh`, a `build.cache_from`/`cache_to` entry that is not a registry or inline cache with only that backend's options (entries are parsed as buildx does: CSV, keys in any case), a `build.network` naming a Docker network, or a build key boxmunge does not know | These read host files or credentials (an SSH context or `build.ssh` hands the build the deploying user's SSH agent), or reach another project's network. Use an `https://` git URL or vendor private dependencies into the project, use `type=registry` or `type=inline` caches, and leave `build.network` unset or `none`. |
 | A namespace join outside the file: `network_mode` other than `none`, `host` (a hardening rule above) or `service:<name>`; `pid` other than `host` or `service:<name>`; `ipc` other than `none`, `private`, `shareable`, `host` or `service:<name>`; `uts` other than `host`; `cgroup` other than `private` or `host` | `container:<name>`, or a network named directly (`bridge` included), joins a namespace or network that may be another project's. Use the project's own networks, or `service:<name>` for a service in the same file. |
-| `user:` with a numeric uid or gid above 65535 | A remapped daemon maps only container ids 0 to 65535. Use an id in that range. |
+| `user:` with a signed id (`+70000`, `-1`) | Docker reads a signed id as a number. Write the id without a sign. |
 | `userns_mode`, with any value | Remove it. Every project runs in the daemon's user namespace; `host` would make the service's root real host root on a remapped box. |
 | `build.tags` | boxmunge names every built image itself (below). Remove it. |
 | A reference to another project's built image (`boxmunge.invalid/<other>/...`) or an image by ID (`sha256:...`, or a bare hex string, which Docker resolves as an ID prefix) in an `image:`, a `type: image` mount, a `docker-image://` additional context, `build.dockerfile_inline`, `build.args`, or the Dockerfile | Compose runs a local image without pulling, so this would run or build from another project's image, with its code. Use a published image from a registry, or this project's own `boxmunge.invalid/<project>/<service>`. |

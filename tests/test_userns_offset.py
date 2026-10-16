@@ -152,3 +152,28 @@ def test_docker_info_has_a_short_timeout(monkeypatch) -> None:
     monkeypatch.setattr(offset, "_run", fake)
     REAL_DOCKER_INFO()
     assert seen["timeout"] <= 10
+
+
+def test_empty_userns_remap_is_dockers_off(paths) -> None:
+    (offset.ETC / "docker").mkdir()
+    (offset.ETC / "docker" / "daemon.json").write_text('{"userns-remap": ""}')
+    assert remap_offset(paths) == 0
+
+
+def test_ranges_match_the_remap_users_uid_as_docker_does(tmp_path) -> None:
+    (tmp_path / "passwd").write_text("root:x:0:0::/root:/bin/sh\n"
+                                     "boxmunge-remap:x:998:998::/:/sbin/nologin\n")
+    (tmp_path / "subuid").write_text("998:1048576:10\nboxmunge-remap:1048586:65526\n")
+    (tmp_path / "subgid").write_text("boxmunge-remap:1048576:65536\n")
+    uids, gids = offset.remap_ranges(tmp_path)
+    assert [(r.start, r.count) for r in uids] == [(1048576, 10), (1048586, 65526)]
+    assert [(r.start, r.count) for r in gids] == [(1048576, 65536)]
+    with pytest.raises(RemapError, match="already has subordinate ids"):
+        allocate_offset(tmp_path, host_ids=set())
+
+
+@pytest.mark.parametrize("line", ["boxmunge-remap:\u00b2:65536", "boxmunge-remap:1:+5"])
+def test_non_ascii_or_signed_digits_are_refused(tmp_path, line) -> None:
+    (tmp_path / "subuid").write_text(line + "\n")
+    with pytest.raises(RemapError, match="is not 'name:start:count'"):
+        offset.read_subids(tmp_path / "subuid")

@@ -26,7 +26,7 @@ from boxmunge.compose_service_rules import namespace_refusals, service_findings
 from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
 from boxmunge.published_ports import declared_ports
-from boxmunge.run_as import compose_user_problems
+from boxmunge.run_as import compose_user_problems, unmappable_users
 from boxmunge.security_overlay import (
     PROFILE_DEFAULT,
     PROFILE_OFF,
@@ -246,7 +246,7 @@ def _enforce_cve_rule(
 
 def _remapped(paths: BoxPaths) -> bool:
     try:
-        return userns_offset.remap_offset(paths) != 0
+        return userns_offset.daemon_remapped(paths)
     except userns_offset.RemapError as e:
         raise ComposeSecurityError(
             f"cannot tell whether this box remaps user namespaces: {e}") from e
@@ -372,7 +372,15 @@ def validate_user_compose(
     isolation += own_file_problems(doc, base_dir, paths.project_dir(project_name), read_files)
     if isolation:
         raise ComposeSecurityError(isolation[0] + _profile_note(services, isolation[0]))
+    remapped = _remapped(paths)
     user_problems = compose_user_problems(services, manifest_services)
+    if remapped:
+        user_problems += unmappable_users(services)
+    else:
+        for warning in unmappable_users(services):
+            log_warning("compose-validate", warning + "; the migration to user-namespace "
+                        "remapping refuses this project until it does", paths,
+                        project=project_name)
     if user_problems:
         raise ComposeSecurityError(user_problems[0] + _profile_note(services, user_problems[0]))
     for warning in image_warnings(services, project_name):
@@ -389,7 +397,6 @@ def validate_user_compose(
     if isinstance(manifest_services, dict) and (cve_policy or {}).get("profile") == PROFILE_OFF:
         off = off | {name for name in services if name not in manifest_services}
 
-    remapped = _remapped(paths)
     for svc_name, svc in services.items():
         if not isinstance(svc, dict):
             continue

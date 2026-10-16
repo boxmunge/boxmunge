@@ -52,9 +52,46 @@ def test_uts_and_cgroup_stay_relaxable_when_remapped(paths, monkeypatch, svc) ->
     _validate(paths, svc, off=True)
 
 
-def test_inconsistent_remap_state_refuses_validation(paths, monkeypatch) -> None:
+def test_record_the_daemon_disagrees_with_refuses_validation(paths, monkeypatch) -> None:
     from boxmunge.userns import offset
-    from tests.userns_helpers import remapped_info
-    monkeypatch.setattr(offset, "docker_info", lambda: remapped_info())  # no record
+    from tests.userns_helpers import UNREMAPPED_INFO
+    remap_box(paths, monkeypatch)
+    monkeypatch.setattr(offset, "docker_info", lambda: dict(UNREMAPPED_INFO))
     with pytest.raises(ComposeSecurityError, match="cannot tell whether this box remaps"):
         _validate(paths, {}, off=False)
+
+
+def test_unreadable_daemon_json_on_a_never_remapped_box_does_not_block(paths) -> None:
+    from boxmunge.userns import offset
+    (offset.ETC / "docker").mkdir()
+    (offset.ETC / "docker" / "daemon.json").write_text("{not json")
+    _validate(paths, {}, off=False)
+    _validate(paths, {"pid": "host"}, off=True)  # unremapped rules: a warning
+
+
+@pytest.mark.parametrize("value", ["default", "dockremap:dockremap", ""])
+def test_foreign_or_empty_userns_remap_does_not_block(paths, monkeypatch, value) -> None:
+    import json
+
+    from boxmunge.userns import offset
+    from tests.userns_helpers import remapped_info
+    (offset.ETC / "docker").mkdir()
+    (offset.ETC / "docker" / "daemon.json").write_text(json.dumps({"userns-remap": value}))
+    if value:
+        monkeypatch.setattr(offset, "docker_info", lambda: remapped_info(165536))
+    _validate(paths, {}, off=False)
+    if value:  # the running daemon is remapped, so it cannot start host namespaces
+        with pytest.raises(ComposeSecurityError, match="remaps user namespaces"):
+            _validate(paths, {"pid": "host"}, off=True)
+
+
+def test_unmappable_compose_user_refused_only_when_remapped(paths, monkeypatch) -> None:
+    _validate(paths, {"user": "70000"}, off=False)  # a warning before the migration
+    remap_box(paths, monkeypatch)
+    with pytest.raises(ComposeSecurityError, match="above 65535"):
+        _validate(paths, {"user": "70000"}, off=False)
+
+
+def test_signed_compose_user_refused_everywhere(paths) -> None:
+    with pytest.raises(ComposeSecurityError, match="without a sign"):
+        _validate(paths, {"user": "+70000"}, off=False)

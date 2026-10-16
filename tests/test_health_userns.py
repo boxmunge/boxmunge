@@ -119,3 +119,43 @@ def test_unusable_alert_state_is_reported_and_replaced(paths, monkeypatch, capsy
     assert len(sent) == 1 and "userns-alert.json" in capsys.readouterr().err
     hc.alert_docker_userns(paths, now=T0 + timedelta(hours=1))
     assert len(sent) == 1
+
+
+def test_foreign_remap_identity_warns_and_names_the_way_out(paths, monkeypatch) -> None:
+    (offset.ETC / "docker").mkdir()
+    (offset.ETC / "docker" / "daemon.json").write_text('{"userns-remap": "default"}')
+    monkeypatch.setattr(offset, "docker_info", lambda: remapped_info(165536))
+    check = hc.check_docker_userns(paths)
+    assert check.status == "warn" and "'default'" in check.detail
+    assert "OPERATIONS.md" in check.detail
+
+
+def test_unreadable_daemon_json_on_a_never_remapped_box_warns(paths) -> None:
+    (offset.ETC / "docker").mkdir()
+    (offset.ETC / "docker" / "daemon.json").write_text("{not json")
+    assert hc.check_docker_userns(paths).status == "warn"
+
+
+def test_symlinked_alert_state_is_not_followed(paths, monkeypatch, tmp_path, capsys) -> None:
+    remap_box(paths, monkeypatch)
+    monkeypatch.setattr(offset, "docker_info", lambda: {**remapped_info(), "SecurityOptions": []})
+    elsewhere = tmp_path / "elsewhere.json"
+    key = __import__("hashlib").sha256(hc.check_docker_userns(paths).detail.encode()).hexdigest()[:16]
+    elsewhere.write_text('{"%s": "%s"}' % (key, T0.isoformat()))
+    (paths.state / "userns-alert.json").symlink_to(elsewhere)
+    sent = []
+    monkeypatch.setattr(hc, "notify", lambda *a, **kw: sent.append(a) or True)
+    hc.alert_docker_userns(paths, now=T0 + timedelta(minutes=1))
+    assert len(sent) == 1 and "userns-alert.json" in capsys.readouterr().err
+    assert elsewhere.read_text().startswith('{"%s"' % key)  # never written through
+
+
+def test_future_alert_time_is_unusable_and_not_logged(paths, monkeypatch) -> None:
+    remap_box(paths, monkeypatch)
+    monkeypatch.setattr(offset, "docker_info", lambda: {**remapped_info(), "SecurityOptions": []})
+    (paths.state / "userns-alert.json").write_text('{"k": "2999-01-01T00:00:00+00:00"}')
+    sent = []
+    monkeypatch.setattr(hc, "notify", lambda *a, **kw: sent.append(a) or True)
+    hc.alert_docker_userns(paths, now=T0)
+    assert len(sent) == 1
+    assert "2999" not in paths.log_file.read_text()

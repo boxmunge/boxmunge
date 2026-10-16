@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import pytest
 
-from boxmunge.run_as import compose_user_problems, declared_user, validate_user_field
+from boxmunge.run_as import (
+    compose_user_problems, declared_user, unmappable_users, validate_user_field,
+)
 from boxmunge.security_overlay import SecurityValidationError, validate_security_block
 
 
@@ -41,11 +43,25 @@ def test_service_declaration_overrides_the_project_default() -> None:
 
 @pytest.mark.parametrize("user, ok", [
     ("1000", True), (1000, True), ("postgres", True), ("postgres:postgres", True),
-    ("0:0", True), ("65535:65535", True), ("70000", False), ("1000:70000", False), ("", False),
+    ("0:0", True), ("65535:65535", True), ("70000", True), ("", False),
+    ("+70000", False), ("-1", False), ("1000:+5", False), ("+0:0", False),
 ])
-def test_compose_user_ranges(user, ok) -> None:
+def test_compose_user_forms(user, ok) -> None:
     problems = compose_user_problems({"web": {"user": user}}, {"web": {}})
     assert (problems == []) is ok, problems
+
+
+@pytest.mark.parametrize("user, unmappable", [
+    ("65535:65535", False), ("70000", True), ("1000:70000", True), (70000, True),
+    ("postgres", False), ("\u00b2", False),
+])
+def test_unmappable_compose_users(user, unmappable) -> None:
+    assert bool(unmappable_users({"web": {"user": user}})) is unmappable
+
+
+def test_signed_id_is_refused_with_advice() -> None:
+    problems = compose_user_problems({"web": {"user": "+70000"}}, {"web": {}})
+    assert "without a sign" in problems[0]
 
 
 def test_compose_user_and_service_security_user_conflict() -> None:

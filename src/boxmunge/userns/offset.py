@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,8 @@ _INFO_TIMEOUT = 10  # seconds; as health's other daemon probes
 _FLOOR = 1_000_000
 _MAX_ID = 2**32 - 1
 ETC = Path("/etc")  # tests point this at a temporary directory
+# Ids are ASCII digits only: str.isdigit() also accepts "²", which int() refuses.
+_ID = re.compile(r"[0-9]+")
 
 
 class RemapError(Exception):
@@ -63,16 +66,37 @@ def read_subids(path: Path) -> list[SubRange]:
         if not line or line.startswith("#"):
             continue
         parts = line.split(":")
-        if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+        if len(parts) != 3 or not _ID.fullmatch(parts[1]) or not _ID.fullmatch(parts[2]):
             raise RemapError(f"{path}:{n} is not 'name:start:count': {line!r}")
         out.append(SubRange(parts[0], int(parts[1]), int(parts[2])))
     return out
 
 
+def _remap_uid(etc: Path) -> str | None:
+    """boxmunge-remap's uid from the passwd file, or None when it has none."""
+    path = etc / "passwd"
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as e:
+        raise RemapError(f"cannot read {path}: {e}") from e
+    for line in text.splitlines():
+        parts = line.split(":")
+        if len(parts) >= 3 and parts[0] == REMAP_NAME and _ID.fullmatch(parts[2]):
+            return parts[2]
+    return None
+
+
 def remap_ranges(etc: Path) -> tuple[list[SubRange], list[SubRange]]:
-    """boxmunge-remap's ranges in subuid and in subgid."""
-    return ([r for r in read_subids(etc / "subuid") if r.owner == REMAP_NAME],
-            [r for r in read_subids(etc / "subgid") if r.owner == REMAP_NAME])
+    """boxmunge-remap's ranges in subuid and in subgid, in file order.
+
+    Like Docker (idtools' lookupSubRangesFile, for both files), an entry is
+    the user's when it names the user or the user's numeric uid.
+    """
+    owners = {REMAP_NAME} | ({uid} if (uid := _remap_uid(etc)) else set())
+    return ([r for r in read_subids(etc / "subuid") if r.owner in owners],
+            [r for r in read_subids(etc / "subgid") if r.owner in owners])
 
 
 def allocate_offset(etc: Path, host_ids: set[int]) -> int:
@@ -169,7 +193,8 @@ def docker_info() -> dict[str, Any]:
 
 
 def daemon_json_userns(etc: Path) -> str | None:
-    """The userns-remap value in daemon.json, or None."""
+    """The userns-remap value in daemon.json, or None (also for "", which
+    Docker reads as remapping off)."""
     path = etc / "docker" / "daemon.json"
     try:
         raw = path.read_text()
@@ -186,7 +211,39 @@ def daemon_json_userns(etc: Path) -> str | None:
     value = doc.get("userns-remap")
     if value is not None and not isinstance(value, str):
         raise RemapError(f"{path}: userns-remap must be a string, got {value!r}")
-    return value
+    return value or None
+
+
+def _daemon_remapped(info: dict[str, Any]) -> bool:
+    return "name=userns" in (info.get("SecurityOptions") or [])
+
+
+def boxmunge_claims_remap(paths: BoxPaths) -> bool:
+    """Does a readable boxmunge source say this box is remapped: the
+    boxmunge.yml record, or daemon.json naming boxmunge's identity?
+
+    A source that cannot be read claims nothing here; remap_offset still
+    names it. A daemon remapped with another identity (Docker's "default")
+    is not boxmunge's remap: the migration refuses it (OPERATIONS.md).
+    """
+    try:
+        if recorded_offset(paths) is not None:
+            return True
+    except RemapError:
+        pass
+    try:
+        return daemon_json_userns(ETC) == DAEMON_REMAP_VALUE
+    except RemapError:
+        return False
+
+
+def daemon_remapped(paths: BoxPaths) -> bool:
+    """Does the running daemon remap user namespaces? The rules about what
+    it can start depend only on that. When boxmunge claims the remap, every
+    source must agree (remap_offset); otherwise only the daemon is asked."""
+    if boxmunge_claims_remap(paths):
+        return remap_offset(paths) != 0
+    return _daemon_remapped(docker_info())
 
 
 def remap_offset(paths: BoxPaths) -> int:
@@ -197,15 +254,15 @@ def remap_offset(paths: BoxPaths) -> int:
     record = recorded_offset(paths)
     configured = daemon_json_userns(ETC)
     info = docker_info()
-    daemon_remapped = "name=userns" in (info.get("SecurityOptions") or [])
-    if record is None and configured is None and not daemon_remapped:
+    remapped = _daemon_remapped(info)
+    if record is None and configured is None and not remapped:
         return 0
     problems = []
     if record is None:
         problems.append(f"{paths.config_file} has no userns record")
     if configured != DAEMON_REMAP_VALUE:
         problems.append(f"daemon.json userns-remap is {configured!r}, not {DAEMON_REMAP_VALUE!r}")
-    if not daemon_remapped:
+    if not remapped:
         problems.append("the running daemon is not remapped (docker info has no name=userns)")
     if info.get("Driver") != "overlay2":
         problems.append(f"the daemon's storage driver is {info.get('Driver')!r}, not 'overlay2'")
