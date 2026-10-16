@@ -7,7 +7,7 @@ import pytest
 from boxmunge.api.principal import Principal, Tier
 from boxmunge.api.registry import Action, Registry, RegistryError
 from boxmunge.api.result import ActionError, ErrorCode
-from boxmunge.api.schema import BOOLEAN, STRING, obj
+from boxmunge.api.schema import BOOLEAN, RESULT_OF_ACTION, STRING, obj
 
 
 def _action(name: str = "thing.get", tier: Tier = Tier.OBSERVE, **overrides) -> Action:
@@ -88,3 +88,12 @@ def test_catalog_entry_exposes_only_the_public_fields() -> None:
         "params": obj({"project": STRING}, optional=("project",)),
         "result": obj({"ok": BOOLEAN}), "job": False,
     }
+
+
+def test_result_of_action_is_refused_outside_a_job_records_result() -> None:
+    registry = Registry()
+    action = Action(name="thing.get", tier=Tier.OBSERVE, summary="Test.",
+                    params=obj({"result": RESULT_OF_ACTION}, optional=("result",)),
+                    result=obj({}), handler=lambda params, ctx: {})
+    with pytest.raises(RegistryError, match="x-result-of-action is allowed only"):
+        registry.register(action)

@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from boxmunge.api.schema import (
-    BOOLEAN, INTEGER, STRING, SchemaDefinitionError, arr, check_schema, enum,
-    nullable, obj, validate,
+    BOOLEAN, INTEGER, RESULT_OF_ACTION, STRING, SchemaDefinitionError, arr, check_schema,
+    enum, nullable, obj, validate,
 )
 
 PROJECT = {"type": "string", "pattern": "[a-z0-9][a-z0-9-]{0,62}"}
@@ -131,3 +131,57 @@ def test_obj_refuses_unknown_optional_names() -> None:
 def test_nullable_adds_null_to_type_and_enum() -> None:
     assert nullable(enum("x", "y")) == {"type": ["string", "null"], "enum": ["x", "y", None]}
     assert nullable(STRING) == {"type": ["string", "null"]}
+
+
+# ---------- x-result-of-action: a job record's result ----------
+
+
+JOB_LIKE = obj({"action": STRING, "result": RESULT_OF_ACTION})
+THING_RESULT = obj({"count": INTEGER})
+
+
+def _results(name: str):
+    return {"thing.get": THING_RESULT}.get(name)
+
+
+def test_result_of_action_is_accepted_beside_an_action_property() -> None:
+    check_schema(JOB_LIKE)
+    check_schema(arr(JOB_LIKE))
+
+
+@pytest.mark.parametrize("schema,message", [
+    (RESULT_OF_ACTION, "only on a result property beside an action property"),
+    (obj({"result": RESULT_OF_ACTION}), "only on a result property beside an action property"),
+    (obj({"action": STRING, "other": RESULT_OF_ACTION}),
+     "only on a result property beside an action property"),
+    (obj({"action": STRING, "result": {**RESULT_OF_ACTION, "x-result-of-action": "yes"}}),
+     "x-result-of-action must be true"),
+    (obj({"action": STRING, "result": {**RESULT_OF_ACTION, "type": "object"}}),
+     "x-result-of-action needs type [\"object\", \"null\"]"),
+    (obj({"action": STRING, "result": {**RESULT_OF_ACTION, "properties": {}}}),
+     "x-result-of-action takes no other validation keywords"),
+])
+def test_result_of_action_is_refused_anywhere_else(schema, message) -> None:
+    with pytest.raises(SchemaDefinitionError) as excinfo:
+        check_schema(schema)
+    assert message in str(excinfo.value)
+
+
+@pytest.mark.parametrize("value,problems", [
+    ({"action": "thing.get", "result": None}, []),
+    ({"action": "thing.get", "result": {"count": 3}}, []),
+    ({"action": "thing.get", "result": {"count": "3"}},
+     ["$.result.count: expected integer, got string"]),
+    ({"action": "thing.get", "result": {"count": 3, "extra": 1}},
+     ["$.result: unexpected property 'extra'"]),
+    ({"action": "nope.nope", "result": {}}, ["$.result: unknown action 'nope.nope'"]),
+    ({"action": "thing.get", "result": [1]}, ["$.result: expected object or null, got array"]),
+])
+def test_result_of_action_validates_against_the_named_action(value, problems) -> None:
+    assert validate(JOB_LIKE, value, result_schemas=_results) == problems
+
+
+def test_a_result_cannot_pass_unchecked_without_the_registry() -> None:
+    assert validate(JOB_LIKE, {"action": "thing.get", "result": None}) == []
+    assert validate(JOB_LIKE, {"action": "thing.get", "result": {"count": 3}}) == [
+        "$.result: no action registry to check it against"]

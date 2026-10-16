@@ -5,6 +5,12 @@ Keywords: type, properties, required, additionalProperties (false only),
 enum, pattern, minimum, maximum, minLength, maxLength, items, const.
 Annotations that never affect validation: description, secret.
 
+One keyword of our own, x-result-of-action, exists for job records: on a
+`result` property beside an `action` property it means "null, or the
+result of the action named by `action`", checked against that action's
+result schema through the resolver validate() is given. It is refused
+anywhere else.
+
 - check_schema(schema) raises SchemaDefinitionError unless the schema stays
   inside the subset: every schema names its type, every object schema
   declares its properties and sets additionalProperties: false, and every
@@ -21,14 +27,19 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any
+from typing import Any, Callable
+
+# Looks up an action's result schema by name; None for an unknown action.
+ResultSchemas = Callable[[str], "dict[str, Any] | None"]
 
 TYPES = ("object", "array", "string", "integer", "number", "boolean", "null")
 _KEYWORDS = frozenset({
     "type", "properties", "required", "additionalProperties", "enum",
     "pattern", "minimum", "maximum", "minLength", "maxLength", "items",
-    "const", "description", "secret",
+    "const", "description", "secret", "x-result-of-action",
 })
+_RESULT_OF_ACTION = "x-result-of-action"
+_RESULT_OF_ACTION_TYPES = ["object", "null"]
 _OBJECT_ONLY = ("properties", "required", "additionalProperties")
 _BOUNDS = ("minimum", "maximum", "minLength", "maxLength")
 
@@ -46,7 +57,7 @@ def schema_types(schema: dict[str, Any]) -> tuple[str, ...]:
 # ---------- schema definition checks ----------
 
 
-def check_schema(schema: Any, path: str = "$") -> None:
+def check_schema(schema: Any, path: str = "$", *, _result_slot: bool = False) -> None:
     """Raise SchemaDefinitionError unless *schema* stays inside the subset."""
     if not isinstance(schema, dict):
         raise SchemaDefinitionError(f"{path}: a schema must be a mapping")
@@ -54,6 +65,9 @@ def check_schema(schema: Any, path: str = "$") -> None:
     if unknown:
         raise SchemaDefinitionError(
             f"{path}: unsupported keyword(s): {', '.join(unknown)}")
+    if _RESULT_OF_ACTION in schema:
+        _check_result_of_action(schema, path, _result_slot)
+        return
     types = _checked_types(schema, path)
     if "object" in types:
         _check_object(schema, path)
@@ -91,7 +105,8 @@ def _check_object(schema: dict[str, Any], path: str) -> None:
     if not isinstance(properties, dict):
         raise SchemaDefinitionError(f"{path}: object schema must declare properties")
     for name, sub in properties.items():
-        check_schema(sub, f"{path}.{name}")
+        check_schema(sub, f"{path}.{name}",
+                     _result_slot=name == "result" and "action" in properties)
     required = schema.get("required", [])
     if not isinstance(required, list) or len(set(required)) != len(required):
         raise SchemaDefinitionError(f"{path}: required must be a list of distinct names")
@@ -99,6 +114,25 @@ def _check_object(schema: dict[str, Any], path: str) -> None:
     if missing:
         raise SchemaDefinitionError(
             f"{path}: required names undeclared properties: {', '.join(missing)}")
+
+
+def _check_result_of_action(schema: dict[str, Any], path: str, in_slot: bool) -> None:
+    if not in_slot:
+        raise SchemaDefinitionError(
+            f"{path}: {_RESULT_OF_ACTION} is allowed only on a result property beside an "
+            f"action property")
+    if schema[_RESULT_OF_ACTION] is not True:
+        raise SchemaDefinitionError(f"{path}: {_RESULT_OF_ACTION} must be true")
+    if schema.get("type") != _RESULT_OF_ACTION_TYPES:
+        raise SchemaDefinitionError(
+            f'{path}: {_RESULT_OF_ACTION} needs type ["object", "null"]')
+    others = sorted(set(schema) - {"type", "description", _RESULT_OF_ACTION})
+    if others:
+        raise SchemaDefinitionError(
+            f"{path}: {_RESULT_OF_ACTION} takes no other validation keywords "
+            f"({', '.join(others)})")
+    if "description" in schema and not isinstance(schema["description"], str):
+        raise SchemaDefinitionError(f"{path}: description must be a string")
 
 
 def _check_scalar_keywords(schema: dict[str, Any], path: str) -> None:
@@ -123,8 +157,13 @@ def _check_scalar_keywords(schema: dict[str, Any], path: str) -> None:
 # ---------- value validation ----------
 
 
-def validate(schema: dict[str, Any], value: Any, path: str = "$") -> list[str]:
-    """Every way *value* breaks *schema*, as "<path>: <problem>" strings."""
+def validate(schema: dict[str, Any], value: Any, path: str = "$", *,
+             result_schemas: ResultSchemas | None = None) -> list[str]:
+    """Every way *value* breaks *schema*, as "<path>: <problem>" strings.
+
+    *result_schemas* resolves x-result-of-action; without it, a non-null
+    result is a problem rather than something that passes unchecked.
+    """
     types = schema_types(schema)
     if not any(_matches_type(value, name) for name in types):
         return [f"{path}: expected {' or '.join(types)}, got {_json_type(value)}"]
@@ -140,9 +179,10 @@ def validate(schema: dict[str, Any], value: Any, path: str = "$") -> list[str]:
         problems.extend(_number_problems(schema, value, path))
     elif isinstance(value, list):
         for index, item in enumerate(value):
-            problems.extend(validate(schema["items"], item, f"{path}[{index}]"))
+            problems.extend(validate(schema["items"], item, f"{path}[{index}]",
+                                     result_schemas=result_schemas))
     elif isinstance(value, dict):
-        problems.extend(_object_problems(schema, value, path))
+        problems.extend(_object_problems(schema, value, path, result_schemas))
     return problems
 
 
@@ -166,7 +206,8 @@ def _number_problems(schema: dict[str, Any], value: float, path: str) -> list[st
     return problems
 
 
-def _object_problems(schema: dict[str, Any], value: dict[str, Any], path: str) -> list[str]:
+def _object_problems(schema: dict[str, Any], value: dict[str, Any], path: str,
+                     result_schemas: ResultSchemas | None) -> list[str]:
     properties = schema.get("properties", {})
     problems = [
         f"{path}: missing required property {name!r}"
@@ -178,9 +219,29 @@ def _object_problems(schema: dict[str, Any], value: dict[str, Any], path: str) -
             for name in value if name not in properties
         )
     for name, sub in properties.items():
-        if name in value:
-            problems.extend(validate(sub, value[name], f"{path}.{name}"))
+        if name not in value:
+            continue
+        if _RESULT_OF_ACTION in sub:
+            problems.extend(_result_problems(value.get("action"), value[name],
+                                             f"{path}.{name}", result_schemas))
+        else:
+            problems.extend(validate(sub, value[name], f"{path}.{name}",
+                                     result_schemas=result_schemas))
     return problems
+
+
+def _result_problems(action: Any, result: Any, path: str,
+                     result_schemas: ResultSchemas | None) -> list[str]:
+    if result is None:
+        return []
+    if not isinstance(result, dict):
+        return [f"{path}: expected object or null, got {_json_type(result)}"]
+    if result_schemas is None:
+        return [f"{path}: no action registry to check it against"]
+    schema = result_schemas(action) if isinstance(action, str) else None
+    if schema is None:
+        return [f"{path}: unknown action {action!r}"]
+    return validate(schema, result, path, result_schemas=result_schemas)
 
 
 def _is_number(value: Any) -> bool:
@@ -250,6 +311,14 @@ def obj(properties: dict[str, dict[str, Any]], *,
         "properties": dict(properties),
         "required": [name for name in properties if name not in optional],
     }
+
+
+# A job record's result: null, or the result of the record's action.
+RESULT_OF_ACTION: dict[str, Any] = {
+    "type": list(_RESULT_OF_ACTION_TYPES), _RESULT_OF_ACTION: True,
+    "description": "Null, or the result of the action named by the sibling action "
+                   "field, matching that action's catalog result schema.",
+}
 
 
 def arr(items: dict[str, Any]) -> dict[str, Any]:

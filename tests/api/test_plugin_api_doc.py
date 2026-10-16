@@ -65,3 +65,8 @@ def test_job_invocation_contract_is_documented() -> None:
 def test_value_conventions_are_documented() -> None:
     assert "ISO 8601 in UTC with a trailing `Z`" in DOC
     assert "Enum values are lowercase machine values" in DOC
+
+
+def test_result_of_action_is_documented() -> None:
+    assert "`x-result-of-action`" in DOC
+    assert "treat `result` as any JSON value or null" in DOC

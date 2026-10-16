@@ -113,7 +113,13 @@ POST /v1/actions/project.get
 
 Parameter and result schemas use a small JSON Schema subset: `type`, `properties`, `required`,
 `additionalProperties`, `enum`, `pattern`, `minimum`, `maximum`, `minLength`, `maxLength`, `items`,
-`const`, plus the annotations `description` and `secret`.
+`const`, plus the annotations `description` and `secret`, and one keyword of boxmunge's own:
+
+- `x-result-of-action: true` appears only on a job record's `result` property, beside its `action`
+  property. It means the value is null or the result of the action that `action` names, matching
+  that action's catalog `result` schema (an unknown action is invalid). Its `type` is
+  `["object", "null"]`. A client that does not understand the keyword can
+  treat `result` as any JSON value or null.
 
 - Every object schema sets `additionalProperties: false`. Unknown parameters are refused. The
   server checks every result it sends against the schema it publishes, but within `1.x` a
@@ -181,8 +187,8 @@ polling it. `project.get` and `status.get` report the result of the platform's o
 A job is the record of a long-running action. Its record has `id` (a ULID), `action`, `principal`,
 `project`, `state` (`queued`, `running`, `succeeded`, `failed`), `created_at`, `started_at`,
 `finished_at`, `error` (`{code, message}` or null) and `result` (the action's result once the job
-has succeeded, in the shape of that action's catalog `result` schema; null until then, and always
-null in this release). Events have `seq` (from 1), `ts` and `type`:
+has succeeded, in the shape of that action's catalog `result` schema, as `x-result-of-action`
+declares; null until then, and always null in this release). Events have `seq` (from 1), `ts` and `type`:
 
 - `log`: a line of output, in `message`;
 - `step`: a named step (`step`) that `started`, `succeeded` or `failed` (`status`), with an optional

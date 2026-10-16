@@ -128,7 +128,7 @@ class Invoker:
                 data = action.handler(params, ctx)
             except PROJECT_INPUT_ERRORS as e:
                 raise ActionError(ErrorCode.FAILED, str(e)) from e
-        violations = validate(action.result, data)
+        violations = validate(action.result, data, result_schemas=self._result_schema_of)
         if violations:
             log_error("api", f"{action.name} returned a result outside its schema",
                       self._paths, detail={"violations": violations})
@@ -139,6 +139,13 @@ class Invoker:
                 {"violations": violations[:20]},
             )
         return data
+
+    def _result_schema_of(self, name: str) -> dict[str, Any] | None:
+        """The result schema of action *name*, for x-result-of-action."""
+        try:
+            return self._registry.get(name).result
+        except ActionError:
+            return None
 
     def _refusal(self, principal: Principal, name: str, error: ActionError) -> None:
         record = audit_record(principal, _audited_name(name), "refused",

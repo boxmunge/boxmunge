@@ -17,7 +17,9 @@ import re
 from pathlib import Path
 from typing import Any
 
-from boxmunge.api.schema import NULLABLE_STRING, STRING, enum, nullable, obj, validate
+from boxmunge.api.schema import (
+    NULLABLE_STRING, RESULT_OF_ACTION, STRING, ResultSchemas, enum, nullable, obj, validate,
+)
 from boxmunge.api.timefmt import NULLABLE_TIMESTAMP, TIMESTAMP
 from boxmunge.paths import BoxPaths
 from boxmunge.state import StateError
@@ -39,11 +41,9 @@ JOB_SCHEMA = obj({
     "started_at": NULLABLE_TIMESTAMP,
     "finished_at": NULLABLE_TIMESTAMP,
     "error": nullable(obj({"code": STRING, "message": STRING})),
-    # The action's result once the job has succeeded, in the shape of that
-    # action's catalog result schema. No action runs as a job in this
-    # release, so it is always null; the job runner widens the type.
-    "result": {"type": "null",
-               "description": "The action's result once the job succeeds; null until then."},
+    # Null until the job has succeeded, then the action's result in the
+    # shape of that action's catalog result schema.
+    "result": RESULT_OF_ACTION,
 })
 
 EVENT_SCHEMA = obj({
@@ -58,15 +58,19 @@ EVENT_SCHEMA = obj({
 
 
 class JobStore:
-    def __init__(self, paths: BoxPaths) -> None:
+    """*result_schemas* resolves each record's action to its result schema,
+    so a non-null result is checked; without it, one is reported corrupt."""
+
+    def __init__(self, paths: BoxPaths, *, result_schemas: ResultSchemas | None = None) -> None:
         self._done = paths.jobs_dir
         self._queue = paths.jobs_queue
+        self._result_schemas = result_schemas
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         """The job's record, or None if there is no such job."""
         found = None
         for directory in (self._queue, self._done):
-            record = _load_record(directory / f"{job_id}.json", job_id)
+            record = _load_record(directory / f"{job_id}.json", job_id, self._result_schemas)
             if record is not None:
                 found = _prefer(found, record)
         return found
@@ -86,7 +90,7 @@ class JobStore:
             for path in directory.glob("*.json"):
                 if not _JOB_ID_RE.fullmatch(path.stem):
                     continue
-                record = _load_record(path, path.stem)
+                record = _load_record(path, path.stem, self._result_schemas)
                 if record is not None:
                     records[path.stem] = _prefer(records.get(path.stem), record)
         jobs = [r for r in records.values() if project is None or r["project"] == project]
@@ -123,7 +127,8 @@ def _prefer(current: dict[str, Any] | None, other: dict[str, Any]) -> dict[str, 
     return current
 
 
-def _load_record(path: Path, job_id: str) -> dict[str, Any] | None:
+def _load_record(path: Path, job_id: str,
+                 result_schemas: ResultSchemas | None) -> dict[str, Any] | None:
     """The record at *path*, or None if there is none there (any more)."""
     try:
         text = path.read_text()
@@ -135,7 +140,7 @@ def _load_record(path: Path, job_id: str) -> dict[str, Any] | None:
         record = json.loads(text)
     except ValueError as e:
         raise StateError(f"Job record {path} is not JSON: {e}") from e
-    violations = validate(JOB_SCHEMA, record)
+    violations = validate(JOB_SCHEMA, record, result_schemas=result_schemas)
     if violations:
         raise StateError(f"Job record {path} is corrupt: {'; '.join(violations)}")
     if record["id"] != job_id:

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from boxmunge.api.jobs import EVENT_SCHEMA, JOB_SCHEMA, JobStore
-from boxmunge.api.schema import check_schema
+from boxmunge.api.schema import INTEGER, check_schema, obj
 from boxmunge.state import StateError
 
 
@@ -147,3 +147,14 @@ def test_corrupt_event_lines_are_reported(paths, line, message) -> None:
     (paths.jobs_dir / f"{_id(1)}.events.jsonl").write_text(line + "\n")
     with pytest.raises(StateError, match=message):
         JobStore(paths).events(_id(1))
+
+
+def test_a_non_null_result_is_checked_against_its_action(paths) -> None:
+    _write(paths.jobs_dir, _record(1, result={"count": 3}))
+    with pytest.raises(StateError, match="no action registry to check it against"):
+        JobStore(paths).recent()
+    schemas = {"project.deploy": obj({"count": INTEGER})}.get
+    assert JobStore(paths, result_schemas=schemas).get(_id(1))["result"] == {"count": 3}
+    _write(paths.jobs_dir, _record(1, result={"count": "3"}))
+    with pytest.raises(StateError, match=r"\$.result.count: expected integer"):
+        JobStore(paths, result_schemas=schemas).get(_id(1))

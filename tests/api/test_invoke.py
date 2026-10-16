@@ -9,7 +9,7 @@ from boxmunge.api.invoke import Invoker
 from boxmunge.api.principal import Principal, Tier
 from boxmunge.api.registry import Action, Registry
 from boxmunge.api.result import ActionError, ErrorCode
-from boxmunge.api.schema import BOOLEAN, obj
+from boxmunge.api.schema import BOOLEAN, RESULT_OF_ACTION, STRING, obj
 from boxmunge.fileutil import project_lock
 from boxmunge.state import StateError
 from tests.api.fakes import StubHost, make_invoker, read_audit
@@ -275,3 +275,22 @@ def test_catalog_follows_grant_and_served_tiers(paths) -> None:
     assert [e["name"] for e in everything.catalog(WEBUI_OPERATE)] == ["observe.run", "operate.run"]
     observe_only = make_invoker(paths, registry=registry, served_tiers=frozenset({Tier.OBSERVE}))
     assert [e["name"] for e in observe_only.catalog(OPERATOR)] == ["observe.run"]
+
+
+@pytest.mark.parametrize("result,ok", [({"ok": True}, True), ({"ok": "yes"}, False)])
+def test_a_job_result_is_checked_against_the_named_actions_schema(paths, result, ok) -> None:
+    """x-result-of-action resolves through the registry the invoker holds."""
+    record = {"action": "thing.get", "result": result}
+    invoker = make_invoker(paths, registry=_registry(
+        _action("thing.get"),
+        _action("job.peek", result=obj({"action": STRING, "result": RESULT_OF_ACTION}),
+                handler=lambda params, ctx: record),
+    ))
+    if ok:
+        assert invoker.invoke("job.peek", {}, WEBUI).data == record
+        return
+    with pytest.raises(ActionError) as excinfo:
+        invoker.invoke("job.peek", {}, WEBUI)
+    assert excinfo.value.code is ErrorCode.FAILED
+    assert excinfo.value.details["violations"] == [
+        "$.result.ok: expected boolean, got string"]

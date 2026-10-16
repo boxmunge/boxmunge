@@ -48,7 +48,9 @@ def test_the_registry_holds_exactly_the_observe_actions() -> None:
 def test_every_object_schema_is_closed(action) -> None:
     for label, schema in (("params", action.params), ("result", action.result)):
         for path, sub in _subschemas(schema):
-            if "object" in schema_types(sub):
+            # A job record's result is closed by the named action's own
+            # result schema, which this same test walks.
+            if "object" in schema_types(sub) and "x-result-of-action" not in sub:
                 assert sub.get("additionalProperties") is False, f"{label} {path}"
 
 
@@ -144,3 +146,23 @@ def test_every_timestamp_any_action_returns_is_utc_with_a_z(fixture_paths) -> No
         bad += [(name, s) for s in _strings(data)
                 if _TIMESTAMPISH.match(s) and not _TIMESTAMP.fullmatch(s)]
     assert bad == []
+
+
+def _result_of_action_sites(schema: dict, path: str = "$", parent: dict | None = None,
+                            name: str | None = None):
+    if "x-result-of-action" in schema:
+        yield path, name, parent
+    for prop, sub in schema.get("properties", {}).items():
+        yield from _result_of_action_sites(sub, f"{path}.{prop}", schema, prop)
+    if "items" in schema:
+        yield from _result_of_action_sites(schema["items"], f"{path}[]", schema, None)
+
+
+def test_result_of_action_appears_only_on_job_records() -> None:
+    sites = {}
+    for action in REGISTRY.actions():
+        for label, schema in (("params", action.params), ("result", action.result)):
+            for path, name, parent in _result_of_action_sites(schema):
+                assert name == "result" and "action" in parent["properties"], (action.name, path)
+                sites.setdefault(action.name, []).append(f"{label} {path}")
+    assert sites == {"job.get": ["result $.result"], "jobs.list": ["result $.jobs[].result"]}
