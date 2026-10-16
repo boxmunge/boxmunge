@@ -2,7 +2,7 @@
 
 import sqlite3
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -114,6 +114,13 @@ class TestCheckCounter:
         assert _rows(db) == {}
         counter.record("0.3.1")
         assert len(_rows(db)) == 2
+
+    def test_days_are_utc_dates_whatever_the_local_zone(self, tmp_path, local_date_not_utc) -> None:
+        db = _db(tmp_path)
+        counter = CheckCounter(db, flush_interval=3600, max_pending=100, clock=FakeClock())
+        counter.record("0.3.0")
+        counter.flush()
+        assert _rows(db) == {(datetime.now(timezone.utc).date().isoformat(), "0.3.0"): 1}
 
     def test_empty_flush_does_not_touch_the_database(self, tmp_path) -> None:
         counter = CheckCounter(tmp_path / "absent" / "checks.db", flush_interval=60,

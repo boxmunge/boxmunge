@@ -8,7 +8,7 @@ the data is intentionally NOT public.
 import json
 import sqlite3
 import sys
-from datetime import date, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -58,11 +58,11 @@ def _seed_checks(db_path: Path, rows: list[tuple[str, str, int]]) -> None:
 
 
 def _today() -> str:
-    return date.today().isoformat()
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 def _days_ago(n: int) -> str:
-    return (date.today() - timedelta(days=n)).isoformat()
+    return (datetime.now(timezone.utc).date() - timedelta(days=n)).isoformat()
 
 
 class TestStatsEndpointAuth:
@@ -149,6 +149,15 @@ class TestStatsEndpointShape:
         assert "0.3.0" not in versions
         assert "0.4.2" in versions
         assert "0.4.1" in versions
+
+    def test_window_ends_on_the_utc_date_whatever_the_local_zone(
+        self, client, app, local_date_not_utc,
+    ):
+        app.config["STATS_SECRET"] = "s"
+        _seed_checks(app.config["DB_PATH"], [(_today(), "0.4.2", 5)])
+        data = client.get("/v1/admin/version-checks?token=s&last=1").get_json()
+        assert data["until"] == _today()
+        assert data["totals"] == [{"version": "0.4.2", "count": 5}]
 
     def test_custom_window_via_last_param(self, client, app):
         app.config["STATS_SECRET"] = "s"

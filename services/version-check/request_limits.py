@@ -17,9 +17,14 @@ import sqlite3
 import threading
 import time
 from collections import Counter
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable
+
+
+def utc_today() -> date:
+    """The day a check is counted under: UTC, like every other timestamp here."""
+    return datetime.now(timezone.utc).date()
 
 
 def client_key(remote_addr: str | None) -> str:
@@ -83,7 +88,7 @@ class CheckCounter:
 
     def __init__(self, db_path: Path, flush_interval: float, max_pending: int,
                  clock: Callable[[], float] = time.monotonic,
-                 today: Callable[[], date] = date.today) -> None:
+                 today: Callable[[], date] = utc_today) -> None:
         self.db_path = db_path
         self.flush_interval, self.max_pending = flush_interval, max_pending
         self._clock, self._today = clock, today

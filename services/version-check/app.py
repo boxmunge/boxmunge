@@ -25,7 +25,7 @@ Source: https://github.com/boxmunge/boxmunge/tree/main/services/version-check
 import hmac
 import os
 import sqlite3
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, request, jsonify
@@ -36,7 +36,7 @@ from db_schema import require_current
 from release_catalog import (
     VERSION_RE, apply_holds, check_response, find_blocked, load_releases, select_offers,
 )
-from request_limits import CheckCounter, RateLimiter, client_key
+from request_limits import CheckCounter, RateLimiter, client_key, utc_today
 
 SERVICE_DIR = Path(__file__).parent
 RELEASES_PATH = SERVICE_DIR / "releases.json"
@@ -180,7 +180,7 @@ def _query_version_checks(db_path: Path, days: int) -> dict:
         "by_date": [ {"date": "...", "version": "X", "count": N}, ... ]
       }
     """
-    until = date.today()
+    until = utc_today()
     since = until - timedelta(days=days - 1)  # inclusive of today
     since_iso = since.isoformat()
     until_iso = until.isoformat()
