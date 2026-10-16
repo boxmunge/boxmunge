@@ -80,7 +80,18 @@ class TestInterpretSmokeResult:
         assert result.status == "critical"
 
 
+_IMG = "sha256:" + "5" * 64
+
+
 class TestRunSmokeInContainer:
+    @pytest.fixture(autouse=True)
+    def _running(self, fake_containers):
+        """web and api run one container each, in production and staging."""
+        for project in ("myapp", "myapp-staging"):
+            for service in ("web", "api"):
+                fake_containers.run(project, service, _IMG)
+        self.containers = fake_containers
+
     MANIFEST = {
         "project": "myapp",
         "hosts": ["app.example.com"],
@@ -199,6 +210,38 @@ class TestRunSmokeInContainer:
         assert len(smoke_calls) == 1
         # The single smoke call targets web, not api.
         assert smoke_calls[0][0][0][2] == "myapp-web-1"
+
+
+    @patch("boxmunge.commands.check.subprocess.run")
+    def test_custom_container_name_is_found_by_label(self, mock_run, tmp_path) -> None:
+        self.containers.remove("myapp")
+        self.containers.run("myapp", "web", _IMG, name="my-custom-web")
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        assert run_smoke_in_container(tmp_path, self.MANIFEST, ["compose.yml"]).status == "ok"
+        assert mock_run.call_args[0][0][2] == "my-custom-web"
+
+    @patch("boxmunge.commands.check.subprocess.run")
+    def test_every_running_replica_is_tested(self, mock_run, tmp_path) -> None:
+        self.containers.run("myapp", "web", _IMG, name="myapp-web-2")
+        self.containers.run("myapp", "web", _IMG, name="myapp-web-3", running=False)
+        self.containers.run("myapp", "web", _IMG, name="myapp-web-run-x", oneoff=True)
+        mock_run.side_effect = [MagicMock(returncode=0, stderr=""),
+                                MagicMock(returncode=1, stderr="replica 2 down\n"),
+                                MagicMock(returncode=0, stdout="", stderr="")]  # log scan
+        result = run_smoke_in_container(tmp_path, self.MANIFEST, ["compose.yml"])
+        execs = [c[0][0][2] for c in mock_run.call_args_list if c[0][0][:2] == ["docker", "exec"]]
+        assert execs == ["myapp-web-1", "myapp-web-2"]
+        assert result.status == "warning" and "replica 2 down" in result.message
+
+    @patch("boxmunge.commands.check.subprocess.run")
+    def test_no_running_container_is_an_infrastructure_warning(self, mock_run, tmp_path) -> None:
+        """Never critical: a smoke that could not run says nothing about the app."""
+        self.containers.remove("myapp")
+        self.containers.run("myapp", "web", _IMG, running=False)
+        result = run_smoke_in_container(tmp_path, self.MANIFEST, ["compose.yml"])
+        assert result.status == "warning"
+        assert "no running container" in result.message
+        assert not [c for c in mock_run.call_args_list if c[0][0][:2] == ["docker", "exec"]]
 
 
 class TestRunCheckPreRegistered:

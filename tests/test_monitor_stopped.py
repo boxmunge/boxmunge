@@ -23,7 +23,8 @@ NO_CONTAINER = f"Error response from daemon: No such container: {NAME}-web-1"
 
 
 @pytest.fixture
-def paths(tmp_path: Path) -> BoxPaths:
+def paths(tmp_path: Path, fake_containers) -> BoxPaths:
+    fake_containers.run(NAME, "web", "sha256:" + "1" * 64)  # smoke finds it by label
     p = BoxPaths(root=tmp_path / "bm")
     for d in ["config", f"projects/{NAME}", "state/deploy", "state/health",
               "caddy/sites", "logs"]:
