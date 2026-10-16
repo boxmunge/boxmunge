@@ -142,5 +142,22 @@ def test_finding_severities_read_as_the_platform_reads_them(fixture_paths) -> No
     path.write_text(json.dumps(state))
     findings = _call(fixture_paths, "security.project", {"project": "shop"})["findings"]
     assert (findings[0]["base_severity"], findings[0]["effective_severity"]) == (
-        "Unknown", "Unknown")
-    assert findings[1]["effective_severity"] == "Unknown"
+        "unknown", "unknown")
+    assert findings[1]["effective_severity"] == "unknown"
+
+
+def test_every_enum_reads_as_a_lowercase_machine_value(fixture_paths) -> None:
+    path = fixture_paths.project_scan_state("shop")
+    state = json.loads(path.read_text())
+    finding = state["decisions"][0]["findings"][0]
+    finding.update(base_severity="High", effective_severity="Critical",
+                   attack_vector="Network", pkg_class="os-pkgs", status="will_not_fix")
+    path.write_text(json.dumps(state))
+    shown = _call(fixture_paths, "security.project", {"project": "shop"})["findings"][0]
+    assert (shown["base_severity"], shown["effective_severity"], shown["attack_vector"],
+            shown["pkg_class"], shown["status"]) == (
+        "high", "critical", "network", "os", "will_not_fix")
+    billing = _call(fixture_paths, "security.project", {"project": "billing"})["quarantine"]
+    assert (billing["severity"], billing["effective_severity"]) == ("critical", "critical")
+    summary = _call(fixture_paths, "security.summary")
+    assert [q["severity"] for q in summary["quarantined"]] == ["critical"]

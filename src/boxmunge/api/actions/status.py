@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from boxmunge.api import API_VERSION
-from boxmunge.api.actions._common import NO_PARAMS
+from boxmunge.api.actions._common import NO_PARAMS, SEVERITY, severity_value
 from boxmunge.api.context import ActionContext
 from boxmunge.api.principal import Tier
 from boxmunge.api.registry import Action
@@ -37,7 +37,7 @@ STATUS_ROW = obj({
     "last_check": NULLABLE_TIMESTAMP,
     "deployed_at": NULLABLE_TIMESTAMP,
     "quarantine": nullable(obj({
-        "cve_id": STRING, "severity": STRING, "explanation": STRING,
+        "cve_id": STRING, "severity": SEVERITY, "explanation": STRING,
         "quarantined_at": TIMESTAMP,
     })),
     "error": NULLABLE_STRING,
@@ -86,6 +86,7 @@ def _status_row(row: dict[str, Any], paths: BoxPaths) -> dict[str, Any]:
                 row["deployed_at"], f"{paths.project_deploy_state(name)} deployed_at"),
             "quarantine": None if quarantine is None else {
                 **quarantine,
+                "severity": severity_value(quarantine["severity"]),
                 "quarantined_at": utc_timestamp(
                     quarantine["quarantined_at"],
                     f"{paths.project_quarantine_state(name)} quarantined_at"),

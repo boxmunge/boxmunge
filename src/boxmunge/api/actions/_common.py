@@ -2,13 +2,16 @@
 """Pieces the action families share: parameter schemas and project lookup."""
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from boxmunge.api.result import ActionError, ErrorCode
-from boxmunge.api.schema import BOOLEAN, STRING, obj
+from boxmunge.api.schema import BOOLEAN, STRING, enum, obj
 from boxmunge.api.timefmt import TIMESTAMP, utc_timestamp
 from boxmunge.cve.quarantine import QUARANTINE_TEXT_FIELDS, checked_quarantine_record
+from boxmunge.cve.scan_state import severity_from_stored
+from boxmunge.cve.scanner import Severity
 from boxmunge.paths import BoxPaths, InvalidProjectName
 
 PROJECT_NAME_PATTERN = "[a-z0-9][a-z0-9-]{0,62}"
@@ -19,11 +22,30 @@ PROJECT_PARAM: dict[str, Any] = {
 NO_PARAMS = obj({})
 TAIL_MAX = 1000
 
+def machine_value(member: Enum) -> str:
+    """An enum member as the API publishes it: its name, lowercase. The
+    platform's stored values (Critical, Network, os-pkgs) stay its own."""
+    return member.name.lower()
+
+
+def machine_enum(members: type[Enum]) -> dict[str, Any]:
+    return enum(*(machine_value(member) for member in members))
+
+
+SEVERITY = machine_enum(Severity)
+
+
+def severity_value(stored: Any) -> str:
+    """A stored severity as the API publishes it, read as the platform
+    reads it (missing or unrecognised is unknown)."""
+    return machine_value(severity_from_stored(stored))
+
+
 QUARANTINE_SCHEMA = obj({
     "quarantined_at": TIMESTAMP,
     "cve_id": STRING,
-    "severity": STRING,
-    "effective_severity": STRING,
+    "severity": SEVERITY,
+    "effective_severity": SEVERITY,
     "explanation": STRING,
     "image_ref": STRING,
     "action_complete": BOOLEAN,
@@ -71,5 +93,7 @@ def quarantine_view(state: dict[str, Any] | None, path: Path) -> dict[str, Any]:
     return {
         **{key: record[key] for key in QUARANTINE_TEXT_FIELDS},
         "quarantined_at": utc_timestamp(record["quarantined_at"], f"{path} quarantined_at"),
+        "severity": severity_value(record["severity"]),
+        "effective_severity": severity_value(record["effective_severity"]),
         "action_complete": record.get("action_complete", False),
     }

@@ -166,3 +166,20 @@ def test_result_of_action_appears_only_on_job_records() -> None:
                 assert name == "result" and "action" in parent["properties"], (action.name, path)
                 sites.setdefault(action.name, []).append(f"{label} {path}")
     assert sites == {"job.get": ["result $.result"], "jobs.list": ["result $.jobs[].result"]}
+
+
+_ENUM_VALUE = re.compile(r"[a-z0-9_]+")
+
+
+@pytest.mark.parametrize("action", REGISTRY.actions(), ids=lambda a: a.name)
+def test_every_published_enum_value_is_a_lowercase_machine_value(action) -> None:
+    """Display spellings (Critical, NETWORK, at-risk) stay in the CLI; the
+    API publishes one spelling a client can switch on."""
+    bad = []
+    for label, schema in (("params", action.params), ("result", action.result)):
+        for path, sub in _subschemas(schema):
+            for value in [*sub.get("enum", []), *([sub["const"]] if "const" in sub else [])]:
+                if value is not None and not (isinstance(value, str)
+                                              and _ENUM_VALUE.fullmatch(value)):
+                    bad.append(f"{label} {path}: {value!r}")
+    assert bad == []

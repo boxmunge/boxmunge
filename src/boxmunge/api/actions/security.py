@@ -6,7 +6,8 @@ from __future__ import annotations
 from typing import Any
 
 from boxmunge.api.actions._common import (
-    NO_PARAMS, PROJECT_PARAM, QUARANTINE_SCHEMA, deployed_project, quarantine_view,
+    NO_PARAMS, PROJECT_PARAM, QUARANTINE_SCHEMA, SEVERITY, deployed_project, machine_enum,
+    machine_value, quarantine_view, severity_value,
 )
 from boxmunge.api.context import ActionContext
 from boxmunge.api.principal import Tier
@@ -23,8 +24,10 @@ from boxmunge.commands.security_views import project_cve_status
 from boxmunge.api.timefmt import NULLABLE_TIMESTAMP, utc_timestamp
 from boxmunge.cve.breaker import BreakerError, read_held
 from boxmunge.cve.policy import Disposition
-from boxmunge.cve.scan_state import stored_severities
-from boxmunge.cve.scanner import Severity
+from boxmunge.cve.scan_state import (
+    attack_vector_from_stored, pkg_class_from_stored, status_from_stored, stored_severities,
+)
+from boxmunge.cve.scanner import AttackVector, PkgClass, VulnStatus
 from boxmunge.paths import BoxPaths
 from boxmunge.security_overlay import services_with_off_profile
 
@@ -34,7 +37,7 @@ SUMMARY = obj({
     "projects_count": INTEGER,
     "posture_distribution": obj({posture: INTEGER for posture in POSTURES}),
     "quarantined": arr(obj({
-        "project": STRING, "cve_id": STRING, "severity": STRING, "since": NULLABLE_TIMESTAMP,
+        "project": STRING, "cve_id": STRING, "severity": SEVERITY, "since": NULLABLE_TIMESTAMP,
     })),
     "at_risk_running": arr(STRING),
     "active_suppressions_count": INTEGER,
@@ -59,8 +62,9 @@ SUMMARY = obj({
 _OPTIONAL_FINDING_KEYS: dict[str, dict[str, Any]] = {
     "explanation": NULLABLE_STRING, "package": NULLABLE_STRING, "title": NULLABLE_STRING,
     "installed_version": NULLABLE_STRING, "fixed_version": NULLABLE_STRING,
-    "primary_url": NULLABLE_STRING, "attack_vector": NULLABLE_STRING,
-    "status": NULLABLE_STRING, "pkg_class": NULLABLE_STRING, "pkg_type": NULLABLE_STRING,
+    "primary_url": NULLABLE_STRING, "attack_vector": nullable(machine_enum(AttackVector)),
+    "status": nullable(machine_enum(VulnStatus)), "pkg_class": nullable(machine_enum(PkgClass)),
+    "pkg_type": NULLABLE_STRING,
     "fix_available": NULLABLE_BOOLEAN, "kev_listed": NULLABLE_BOOLEAN,
     "fix_would_quarantine": NULLABLE_BOOLEAN, "hardening_penalty": NULLABLE_INTEGER,
 }
@@ -69,8 +73,8 @@ FINDING = obj({
     "image_ref": NULLABLE_STRING,
     "cve_id": STRING,
     "disposition": enum(*(d.value for d in Disposition)),
-    "base_severity": enum(*(s.value for s in Severity)),
-    "effective_severity": enum(*(s.value for s in Severity)),
+    "base_severity": SEVERITY,
+    "effective_severity": SEVERITY,
     **_OPTIONAL_FINDING_KEYS,
 })
 
@@ -96,6 +100,7 @@ def _security_summary(params: dict[str, Any], ctx: ActionContext) -> dict[str, A
     summary.setdefault("unreadable", [])  # the CLI omits it when empty; the API always has it
     summary["held_by_breaker"] = _held(ctx.paths)
     for entry in summary["quarantined"]:
+        entry["severity"] = severity_value(entry["severity"])
         entry["since"] = utc_timestamp(
             entry["since"], f"{ctx.paths.project_quarantine_state(entry['project'])} "
                             f"quarantined_at")
@@ -164,10 +169,27 @@ def _finding_view(finding: dict[str, Any], image_ref: str | None) -> dict[str, A
         "image_ref": image_ref,
         "cve_id": finding["cve_id"],
         "disposition": finding["disposition"],
-        "base_severity": base.value,
-        "effective_severity": effective.value,
+        "base_severity": machine_value(base),
+        "effective_severity": machine_value(effective),
         **{key: finding.get(key) for key in _OPTIONAL_FINDING_KEYS},
+        **{key: _machine(finding, key, read) for key, read in _ENUM_FINDING_KEYS.items()},
     }
+
+
+# Optional finding keys holding a stored enum, read as the platform reads them.
+_ENUM_FINDING_KEYS = {
+    "attack_vector": attack_vector_from_stored,
+    "status": status_from_stored,
+    "pkg_class": pkg_class_from_stored,
+}
+
+
+def _machine(finding: dict[str, Any], key: str, read: Any) -> str | None:
+    """A key older scan files lack stays null; otherwise its machine value."""
+    if finding.get(key) is None:
+        return None
+    member = read(finding[key])
+    return None if member is None else machine_value(member)
 
 
 ACTIONS = (

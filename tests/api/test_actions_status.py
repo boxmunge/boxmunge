@@ -174,3 +174,8 @@ def test_a_health_status_that_is_not_text_is_an_error_row(fixture_paths) -> None
     rows = {r["project"]: r for r in _call(fixture_paths, "status.get")["projects"]}
     assert rows["shop"]["status"] == "error"
     assert str(path) in rows["shop"]["error"]
+
+
+def test_quarantine_severity_is_a_lowercase_machine_value(fixture_paths) -> None:
+    rows = {r["project"]: r for r in _call(fixture_paths, "status.get")["projects"]}
+    assert rows["billing"]["quarantine"]["severity"] == "critical"
