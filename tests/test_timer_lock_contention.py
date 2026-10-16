@@ -59,8 +59,7 @@ class TestContainerUpdateContention:
         alert = MagicMock()
         with patch.object(cu, "compose_pull", fake_pull), \
              patch.object(cu, "compose_up"), \
-             patch.object(cu, "_capture_service_digests", return_value={}), \
-             patch.object(cu, "_detect_image_changes", return_value={}), \
+             patch.object(cu, "detect_image_changes", return_value={}), \
              patch("boxmunge.commands.container_update_cmd._send_summary_alert", alert):
             rc = run_container_update(paths)
         return rc, pulls, alert

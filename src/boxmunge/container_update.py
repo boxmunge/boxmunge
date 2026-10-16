@@ -2,23 +2,30 @@
 """Container auto-update — pull, recreate, healthcheck, and rollback for image: services.
 
 This module is invoked by `boxmunge container-update` (CLI) on a daily timer.
-For each enrolled target (Caddy + opt-in user projects), it captures the
-current image digest, pulls, recreates, and waits for healthcheck. On failure
-it applies the configured strategy (leave_broken or rollback_to_previous).
+For each enrolled target (Caddy + opt-in user projects), it records the image
+each service's containers run, pulls, recreates, and waits for healthcheck.
+On failure it applies the configured strategy (leave_broken or
+rollback_to_previous).
+
+Services and containers come from the deployed inventory: the resolved
+Compose model (so `include:`, `extends:` and `${VAR:-image}` resolve as `up`
+resolves them) and containers found by their Compose labels. Images are
+compared and restored by local image ID, the identity Docker commands
+accept; registry digests are kept for display only.
 """
 from __future__ import annotations
 
 import time
+from collections import defaultdict
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from boxmunge import docker_containers
 from boxmunge.container_update_targets import UpdateTarget, persist_result
-from boxmunge.docker import (
-    DockerError, compose_pull, compose_up,
-    container_image_digest, image_digest, tag_image, container_health,
-    container_running,
-)
+from boxmunge.deployed_inventory import DeployedService, InventoryError, load_deployed_inventory
+from boxmunge.docker import DockerError, compose_pull, compose_up, local_image_id, tag_image
+from boxmunge.docker_containers import ProjectContainer
 from boxmunge.backup import BackupKind
 from boxmunge.commands.backup_cmd import run_backup
 from boxmunge.fileutil import LockError, project_lock
@@ -41,167 +48,168 @@ _HEALTHCHECK_POLL_INTERVAL_SEC = 3
 _NO_HEALTHCHECK_GRACE_SEC = 30
 
 
-def _services_with_image(target: UpdateTarget) -> dict[str, str]:
-    """Return {service_name: container_name} for image: services in this target.
+class UpdateError(Exception):
+    """A service the update covers has no identifiable image."""
 
-    For Caddy, returns {"caddy": "boxmunge-caddy"}.
-    For user projects, parses the compose file(s) for services with `image:`
-    directives and uses the configured container_name (or "<project>_<service>_1"
-    convention if not set).
+
+def image_services(target: UpdateTarget) -> dict[str, DeployedService]:
+    """The services an update pulls and recreates: those `up` starts from a
+    registry image. Build services are excluded (pull skips them too).
+
+    Raises InventoryError when the deployed model or containers cannot be read.
     """
-    import yaml
-    services: dict[str, str] = {}
-    for cf in target.compose_files:
-        path = target.project_dir / cf
-        if not path.exists():
-            continue
-        try:
-            data = yaml.safe_load(path.read_text()) or {}
-        except yaml.YAMLError:
-            continue
-        for svc_name, svc in (data.get("services") or {}).items():
-            if not isinstance(svc, dict):
-                continue
-            if "image" not in svc:
-                continue  # build: services excluded in phase 1
-            cname = svc.get("container_name") or f"{target.name}-{svc_name}-1"
-            services[svc_name] = cname
-    return services
+    inventory = load_deployed_inventory(target.project_dir, target.compose_files, target.name)
+    return {
+        name: svc for name, svc in inventory.services.items()
+        if svc.expected and svc.image and not svc.buildable
+    }
 
 
-def _capture_service_digests(target: UpdateTarget) -> dict[str, str]:
-    """Snapshot the current image digest of each image: service in the target."""
-    digests: dict[str, str] = {}
-    for svc_name, container_name in _services_with_image(target).items():
-        d = container_image_digest(container_name)
-        if d:
-            digests[svc_name] = d
-    return digests
+def _managed(containers: tuple[ProjectContainer, ...] | list[ProjectContainer]) -> list[ProjectContainer]:
+    """Containers `up` manages; `compose run` one-offs are not recreated."""
+    return [c for c in containers if not c.oneoff]
 
 
-def _wait_healthy(target: UpdateTarget, timeout_sec: int = _HEALTHCHECK_TIMEOUT_SEC) -> tuple[bool, list[str]]:
-    """Poll until all image: services report healthy or timeout.
+def running_images(services: dict[str, DeployedService]) -> dict[str, ProjectContainer]:
+    """For each service, a container standing for the image all its replicas run.
 
-    Returns (all_healthy, list_of_unhealthy_service_names). Services with no
-    healthcheck defined are treated as healthy if the container has been
-    running for at least _NO_HEALTHCHECK_GRACE_SEC.
+    Raises UpdateError when a service has no container, or its replicas run
+    different images: then there is nothing reliable to compare a pull
+    against or to roll back to, and treating it as "no change" would hide it.
     """
-    deadline = time.monotonic() + timeout_sec
-    services = _services_with_image(target)
-    grace_start = time.monotonic()
+    running: dict[str, ProjectContainer] = {}
+    for name, svc in services.items():
+        managed = _managed(svc.containers)
+        if not managed:
+            raise UpdateError(
+                f"service {name!r} has no container, so the image it runs is "
+                f"unknown. Deploy or resume the project, then update again."
+            )
+        ids = sorted({c.image_id for c in managed})
+        if len(ids) > 1:
+            raise UpdateError(
+                f"the containers of service {name!r} run different images "
+                f"({', '.join(ids)}). Redeploy the project so they agree."
+            )
+        running[name] = managed[0]
+    return running
+
+
+def display_images(running: dict[str, ProjectContainer]) -> dict[str, str]:
+    """{service: readable image reference} for logs and the state file."""
+    return {name: c.image_ref for name, c in running.items()}
+
+
+def detect_image_changes(
+    services: dict[str, DeployedService], running: dict[str, ProjectContainer],
+) -> dict[str, str]:
+    """{service: pulled image ID} for services whose image reference now
+    names a different image than their containers run.
+
+    A pull does not restart containers, so the pulled image is read from the
+    local image store and compared with the running one by image ID.
+    """
+    changed: dict[str, str] = {}
+    for name, svc in services.items():
+        assert svc.image is not None  # image_services keeps image services only
+        pulled = local_image_id(svc.image)
+        if pulled is None:
+            raise UpdateError(
+                f"service {name!r}: image {svc.image} is not in the local image "
+                f"store after the pull."
+            )
+        if pulled != running[name].image_id:
+            changed[name] = pulled
+    return changed
+
+
+def _health_round(
+    target: UpdateTarget, services: list[str], *, in_grace: bool,
+) -> tuple[list[str], list[str]]:
+    """One look at the services' containers: (still settling, unhealthy).
+
+    A service without a container, or with one that is not running or
+    reports unhealthy, is unhealthy. One without a healthcheck settles once
+    the no-healthcheck grace period is over.
+    """
+    by_service: dict[str, list[ProjectContainer]] = defaultdict(list)
+    for container in _managed(docker_containers.project_containers(target.name)):
+        by_service[container.service].append(container)
+    settling: list[str] = []
+    unhealthy: list[str] = []
+    for name in services:
+        containers = by_service.get(name, [])
+        if not containers or any(
+            not c.running or c.health == "unhealthy" for c in containers
+        ):
+            unhealthy.append(name)
+        elif any(c.health == "starting" or (c.health is None and in_grace)
+                 for c in containers):
+            settling.append(name)
+    return settling, unhealthy
+
+
+def _wait_healthy(
+    target: UpdateTarget, services: list[str],
+    timeout_sec: int = _HEALTHCHECK_TIMEOUT_SEC,
+) -> tuple[bool, list[str]]:
+    """Poll until every service's containers are healthy, or timeout.
+
+    Returns (all_healthy, list_of_unhealthy_service_names). An unhealthy
+    verdict is final; services still settling at the deadline count as
+    unhealthy.
+    """
+    start = time.monotonic()
+    deadline = start + timeout_sec
+    settling = list(services)
     while time.monotonic() < deadline:
-        unhealthy: list[str] = []
-        all_ok = True
-        for svc_name, container_name in services.items():
-            status = container_health(container_name)
-            if status is None:
-                # None means either no healthcheck or container doesn't exist.
-                if not container_running(container_name):
-                    # Container is gone or never started — treat as unhealthy.
-                    unhealthy.append(svc_name)
-                    all_ok = False
-                else:
-                    # Container is running but has no healthcheck — apply grace period.
-                    if time.monotonic() - grace_start < _NO_HEALTHCHECK_GRACE_SEC:
-                        all_ok = False
-                    # After grace, treat as healthy.
-            elif status == "healthy":
-                pass
-            elif status in ("starting", "unhealthy"):
-                if status == "unhealthy":
-                    unhealthy.append(svc_name)
-                all_ok = False
-        if all_ok and not unhealthy:
-            return True, []
+        in_grace = time.monotonic() - start < _NO_HEALTHCHECK_GRACE_SEC
+        settling, unhealthy = _health_round(target, services, in_grace=in_grace)
         if unhealthy:
-            # An unhealthy verdict is final
             return False, unhealthy
+        if not settling:
+            return True, []
         time.sleep(_HEALTHCHECK_POLL_INTERVAL_SEC)
-    # Timed out — collect final status
-    final_unhealthy = [
-        svc for svc, cn in services.items()
-        if container_health(cn) != "healthy" and container_health(cn) is not None
-    ]
-    return False, final_unhealthy or list(services.keys())
+    return False, settling
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _detect_image_changes(
-    target: UpdateTarget,
-    before: dict[str, str],
-) -> dict[str, str]:
-    """Return {service_name: new_digest} for services whose locally-pulled
-    image digest differs from the running container's digest.
-
-    Compares the post-pull local image digest (image_digest of the compose
-    file's `image:` ref) against the pre-pull running container digest.
-    A pull does NOT restart containers, so we cannot detect changes by
-    re-snapshotting running containers — we must inspect the local image.
-    """
-    import yaml
-    changed: dict[str, str] = {}
-    for cf in target.compose_files:
-        path = target.project_dir / cf
-        if not path.exists():
-            continue
-        try:
-            data = yaml.safe_load(path.read_text()) or {}
-        except yaml.YAMLError:
-            continue
-        for svc_name, svc in (data.get("services") or {}).items():
-            if not isinstance(svc, dict) or "image" not in svc:
-                continue
-            local_digest = image_digest(svc["image"])
-            previous = before.get(svc_name)
-            if local_digest and local_digest != previous:
-                changed[svc_name] = local_digest
-    return changed
-
-
 def _maybe_rollback(
-    paths: "BoxPaths", target: UpdateTarget,
-    result: dict[str, Any], before: dict[str, str],
+    paths: "BoxPaths", target: UpdateTarget, result: dict[str, Any],
+    services: dict[str, DeployedService], running: dict[str, ProjectContainer],
+    changed: dict[str, str],
 ) -> None:
-    """If strategy is rollback_to_previous, retag previous digests and recreate."""
+    """If strategy is rollback_to_previous, point each changed service's image
+    reference back at the image its containers ran before, and recreate."""
     if target.strategy != "rollback_to_previous":
         return
 
     result["rollback_attempted"] = True
-    log_warning("container-update", f"Rolling back {target.name} to previous digests", paths, project=target.name)
+    log_warning("container-update", f"Rolling back {target.name} to previous images", paths, project=target.name)
 
-    import yaml
-    for cf in target.compose_files:
-        path = target.project_dir / cf
-        if not path.exists():
-            continue
-        data = yaml.safe_load(path.read_text()) or {}
-        for svc_name, svc in (data.get("services") or {}).items():
-            if not isinstance(svc, dict) or "image" not in svc:
-                continue
-            prev_digest = before.get(svc_name)
-            if not prev_digest:
-                continue
-            # Retag: image_ref:tag -> previous digest
-            try:
-                tag_image(prev_digest, svc["image"])
-            except DockerError as e:
-                log_error("container-update", f"Retag failed for {svc_name}: {e}", paths, project=target.name)
-                result["rollback_succeeded"] = False
-                return
+    for svc_name in changed:
+        image = services[svc_name].image
+        assert image is not None  # image_services keeps image services only
+        try:
+            tag_image(running[svc_name].image_id, image)
+        except DockerError as e:
+            log_error("container-update", f"Retag failed for {svc_name}: {e}", paths, project=target.name)
+            result["rollback_succeeded"] = False
+            return
 
     # Recreate from the now-retagged local images
     try:
         compose_up(target.project_dir, compose_files=target.compose_files, build=False,
                    project_name=target.name)
+        healthy, _ = _wait_healthy(target, list(services))
     except DockerError as e:
         log_error("container-update", f"Rollback recreate failed: {e}", paths, project=target.name)
         result["rollback_succeeded"] = False
         return
 
-    healthy, _ = _wait_healthy(target)
     result["rollback_succeeded"] = healthy
     if not healthy:
         log_error("container-update", f"Rollback unhealthy for {target.name}", paths, project=target.name)
@@ -267,13 +275,21 @@ def _update_locked(
             result["status"] = block.reason.value
             return result
 
+    # Step 1: What the target runs: its image services and the image each
+    # one's containers were created from.
+    try:
+        services = image_services(target)
+        running = running_images(services)
+    except (InventoryError, UpdateError) as e:
+        return _fail(paths, target, result, f"inventory_failed: {e}", before={})
+
     # Build-only projects (no image: services) have nothing to pull or
     # update. A `docker compose pull` on them errors ("no image to pull"),
     # which previously recorded the run as `failed` and surfaced a misleading
     # container-updates health warning. Record no_change with a fresh
     # timestamp — neither failed nor stale — and skip the pull/recreate. The
     # Caddy target always has an image: service, so it never short-circuits.
-    if not _services_with_image(target):
+    if not services:
         result["status"] = "no_change"
         result["current_digests"] = {}
         log_operation(
@@ -284,8 +300,7 @@ def _update_locked(
         persist_result(paths, target, result, before={})
         return result
 
-    # Step 1: Capture current digests
-    before = _capture_service_digests(target)
+    before = display_images(running)
     result["previous_digests"] = before
 
     # Step 2: Pull
@@ -293,18 +308,13 @@ def _update_locked(
         compose_pull(target.project_dir, compose_files=target.compose_files,
                      project_name=target.name)
     except DockerError as e:
-        result["status"] = "failed"
-        result["reason"] = f"pull_failed: {e}"
-        log_error(
-            "container-update", f"Pull failed for {target.name}: {e}",
-            paths, project=target.name,
-            detail={"strategy": target.strategy, "reason": str(e), "previous_digests": before},
-        )
-        persist_result(paths, target, result, before=before)
-        return result
+        return _fail(paths, target, result, f"pull_failed: {e}", before=before)
 
-    # Step 3: Detect what changed (compares local image digest vs running digest)
-    changed = _detect_image_changes(target, before)
+    # Step 3: Detect what changed (pulled local image vs running image, by ID)
+    try:
+        changed = detect_image_changes(services, running)
+    except (UpdateError, DockerError) as e:
+        return _fail(paths, target, result, f"inventory_failed: {e}", before=before)
     if not changed:
         result["status"] = "no_change"
         result["current_digests"] = before
@@ -320,15 +330,8 @@ def _update_locked(
             target.name, paths, kind=BackupKind.PREUPDATE, _lock_held=True,
         )
         if rc != 0:
-            result["status"] = "failed"
-            result["reason"] = "backup_failed"
-            log_error(
-                "container-update", f"Backup failed for {target.name}, aborting update",
-                paths, project=target.name,
-                detail={"strategy": target.strategy, "reason": "backup_failed"},
-            )
-            persist_result(paths, target, result, before=before)
-            return result
+            return _fail(paths, target, result, "backup_failed", before=before,
+                         message=f"Backup failed for {target.name}, aborting update")
 
     # Step 5: Recreate
     try:
@@ -342,20 +345,22 @@ def _update_locked(
             paths, project=target.name,
             detail={"strategy": target.strategy, "reason": str(e), "previous_digests": before},
         )
-        _maybe_rollback(paths, target, result, before)
+        _maybe_rollback(paths, target, result, services, running, changed)
         persist_result(paths, target, result, before=before)
         return result
 
-    # Step 6: Healthcheck wait
-    healthy, unhealthy = _wait_healthy(target)
-    # Capture digests after recreate — containers are now running the new images.
-    new_digests = _capture_service_digests(target)
+    # Step 6: Healthcheck wait, then record what the containers now run.
+    try:
+        healthy, unhealthy = _wait_healthy(target, list(services))
+        new_digests = _current_images(target, services)
+    except DockerError as e:
+        healthy, unhealthy, new_digests = False, [f"(docker: {e})"], {}
     result["current_digests"] = new_digests
 
     if not healthy:
         result["status"] = "failed"
         result["reason"] = f"unhealthy: {','.join(unhealthy)}"
-        _maybe_rollback(paths, target, result, before)
+        _maybe_rollback(paths, target, result, services, running, changed)
         log_error(
             "container-update",
             f"Healthcheck failed for {target.name} services: {unhealthy}",
@@ -375,5 +380,32 @@ def _update_locked(
             detail={"previous": before, "current": new_digests},
         )
 
+    persist_result(paths, target, result, before=before)
+    return result
+
+
+def _current_images(
+    target: UpdateTarget, services: dict[str, DeployedService],
+) -> dict[str, str]:
+    """{service: readable image reference} the services' containers run now."""
+    current: dict[str, str] = {}
+    for container in _managed(docker_containers.project_containers(target.name)):
+        if container.service in services:
+            current.setdefault(container.service, container.image_ref)
+    return current
+
+
+def _fail(
+    paths: "BoxPaths", target: UpdateTarget, result: dict[str, Any], reason: str,
+    *, before: dict[str, str], message: str | None = None,
+) -> dict[str, Any]:
+    """Record a failed run that changed nothing, and return its result."""
+    result["status"] = "failed"
+    result["reason"] = reason
+    log_error(
+        "container-update", message or f"Update failed for {target.name}: {reason}",
+        paths, project=target.name,
+        detail={"strategy": target.strategy, "reason": reason, "previous_digests": before},
+    )
     persist_result(paths, target, result, before=before)
     return result

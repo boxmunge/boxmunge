@@ -216,19 +216,6 @@ def compose_config(
     return result.stdout
 
 
-def container_health(container_name: str) -> str | None:
-    """Get the health status of a container. Returns None if no healthcheck."""
-    result = _run(
-        ["docker", "inspect", "--format", "{{.State.Health.Status}}", container_name],
-        capture=True,
-        check=False,
-    )
-    status = result.stdout.strip()
-    if not status or status == "<no value>":
-        return None
-    return status
-
-
 @contextmanager
 def caddy_config_lock(lock_dir: Path) -> Iterator[None]:
     """Global Caddy config flock. Blocking, bounded section.
@@ -336,48 +323,13 @@ def compose_pull(
     _run(cmd, cwd=project_dir, timeout=_COMPOSE_UP_TIMEOUT)
 
 
-def image_digest(image_ref: str) -> str | None:
-    """Return the local image digest for an image reference, or None.
-
-    Uses docker inspect on the image (not the container). Returns the
-    first RepoDigest if present.
-    """
-    try:
-        result = _run(
-            ["docker", "inspect", "--format", "{{index .RepoDigests 0}}", image_ref],
-            capture=True,
-        )
-    except DockerError:
-        return None
-    raw = result.stdout.strip()
-    if not raw or raw == "<no value>":
-        return None
-    if "@" in raw:
-        return raw.split("@", 1)[1]
-    return raw if raw.startswith("sha256:") else None
-
-
-def container_image_digest(container_name: str) -> str | None:
-    """Return the image digest the named container is currently running.
-
-    Returns None if the container doesn't exist or has no resolvable digest.
-    """
-    try:
-        result = _run(
-            ["docker", "inspect", "--format", "{{.Image}}", container_name],
-            capture=True,
-            check=False,
-        )
-    except DockerError:
-        return None
-    image_id = result.stdout.strip()
-    if not image_id or image_id == "<no value>":
-        return None
-    return image_digest(image_id)
-
-
 def tag_image(source: str, target: str) -> None:
-    """Run docker tag <source> <target>. Source can be a digest or tag."""
+    """Run docker tag <source> <target>.
+
+    Source is an image ID or a full reference (repo:tag, repo@sha256:...).
+    A bare registry digest is not one: Docker looks a bare "sha256:..." up
+    as an image ID, and a manifest digest is a different value.
+    """
     _run(["docker", "tag", source, target])
 
 
@@ -447,14 +399,23 @@ def set_restart_policy(container_names: list[str], policy: str) -> None:
 
 
 def local_image_id(image_ref: str) -> str | None:
-    """The local image ID for an image name, or None if it is not present."""
-    try:
-        result = _run(
-            ["docker", "image", "inspect", "--format", "{{.Id}}", image_ref],
-            capture=True,
-            check=False,
+    """The local image ID for an image reference, or None if it is not present.
+
+    Raises DockerError for any other failure, so "not present" is never a
+    guess made because Docker could not be asked.
+    """
+    result = _run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", image_ref],
+        capture=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        if "no such image" in (result.stderr or "").lower():
+            return None
+        raise DockerError(
+            f"docker image inspect {image_ref} failed: {(result.stderr or '').strip()}"
         )
-    except DockerError:
-        return None
     image_id = result.stdout.strip()
-    return image_id if image_id.startswith("sha256:") else None
+    if not image_id.startswith("sha256:"):
+        raise DockerError(f"docker image inspect {image_ref} returned {image_id!r}")
+    return image_id

@@ -7,13 +7,14 @@ import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 
 from boxmunge.docker import (
     compose_stop,
     compose_start,
     compose_pull,
-    image_digest,
-    container_image_digest,
+    local_image_id,
     tag_image,
     container_running,
     caddy_reload,
@@ -81,35 +82,27 @@ class TestComposePull:
         assert "compose.boxmunge.yml" in cmd
 
 
-class TestImageDigest:
-    @patch("boxmunge.docker._run")
-    def test_returns_digest(self, mock_run):
-        mock_result = MagicMock()
-        mock_result.stdout = "caddy@sha256:abc123\n"
-        mock_run.return_value = mock_result
-        assert image_digest("caddy:2-alpine") == "sha256:abc123"
-
-    @patch("boxmunge.docker._run")
-    def test_returns_none_on_no_digest(self, mock_run):
-        mock_result = MagicMock()
-        mock_result.stdout = "<no value>\n"
-        mock_run.return_value = mock_result
-        assert image_digest("caddy:2-alpine") is None
-
-    @patch("boxmunge.docker._run", side_effect=DockerError("not found"))
-    def test_returns_none_on_error(self, mock_run):
-        assert image_digest("nonexistent:tag") is None
+def _completed(returncode: int, stdout: str = "", stderr: str = "") -> MagicMock:
+    result = MagicMock()
+    result.returncode, result.stdout, result.stderr = returncode, stdout, stderr
+    return result
 
 
-class TestContainerImageDigest:
-    @patch("boxmunge.docker.image_digest")
-    @patch("boxmunge.docker._run")
-    def test_returns_digest_via_image_id(self, mock_run, mock_image_digest):
-        mock_result = MagicMock()
-        mock_result.stdout = "sha256:imgid\n"
-        mock_run.return_value = mock_result
-        mock_image_digest.return_value = "sha256:abc123"
-        assert container_image_digest("mycontainer") == "sha256:abc123"
+class TestLocalImageId:
+    @patch("boxmunge.docker._run", return_value=_completed(0, "sha256:abc\n"))
+    def test_returns_the_image_id(self, mock_run):
+        assert local_image_id("caddy:2-alpine") == "sha256:abc"
+
+    @patch("boxmunge.docker._run",
+           return_value=_completed(1, stderr="Error response from daemon: No such image: x:1"))
+    def test_absent_image_is_none(self, mock_run):
+        assert local_image_id("x:1") is None
+
+    @patch("boxmunge.docker._run",
+           return_value=_completed(1, stderr="Cannot connect to the Docker daemon"))
+    def test_other_failures_raise(self, mock_run):
+        with pytest.raises(DockerError, match="Cannot connect"):
+            local_image_id("x:1")
 
 
 class TestTagImage:

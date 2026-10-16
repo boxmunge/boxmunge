@@ -287,8 +287,7 @@ class TestContainerUpdateLock:
         with patch.object(cu, "compose_pull", pull), \
              patch.object(cu, "compose_up", up), \
              patch.object(cu, "run_backup", backup), \
-             patch.object(cu, "_capture_service_digests", return_value={"web": "sha256:old"}), \
-             patch.object(cu, "_detect_image_changes", return_value={"web": "sha256:new"}), \
+             patch.object(cu, "detect_image_changes", return_value={"web": "sha256:new"}), \
              patch.object(cu, "_wait_healthy", return_value=(True, [])):
             with hold_project_lock(NAME, paths):
                 result = cu.update_target(paths, _cu_target(paths, has_backup=True))
@@ -322,8 +321,7 @@ class TestContainerUpdateLock:
              patch.object(cu, "compose_up", up), \
              patch.object(cu, "tag_image", tag), \
              patch.object(cu, "_wait_healthy", health), \
-             patch.object(cu, "_capture_service_digests", return_value={"web": "sha256:old"}), \
-             patch.object(cu, "_detect_image_changes", return_value={"web": "sha256:new"}):
+             patch.object(cu, "detect_image_changes", return_value={"web": "sha256:new"}):
             result = cu.update_target(
                 paths, _cu_target(paths, has_backup=True, strategy="rollback_to_previous"),
             )
