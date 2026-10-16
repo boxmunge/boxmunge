@@ -216,7 +216,7 @@ def _compose_config_without_docker(request, monkeypatch, fake_containers):
     from boxmunge import docker
 
     def _literal_config(project_dir, compose_files=None, *, project_name,
-                        all_profiles=False):
+                        all_profiles=False, project_directory=None, env_file=None):
         docker.check_compose_project_name(project_name)
         path = Path(project_dir) / (compose_files or ["compose.yml"])[0]
         try:

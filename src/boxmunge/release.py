@@ -236,6 +236,15 @@ def live_code_entries(project_dir: Path, release_tree: Path | None = None) -> li
     return sorted(e for e in project_dir.iterdir() if e.name not in state)
 
 
+def project_data_dirs(project_dir: Path, release_tree: Path | None = None) -> DataDirs:
+    """The project's entries as the live release, or once ``release_tree``
+    is installed, classifies them (see module docstring)."""
+    dirs = _classify(project_dir, release_tree)
+    if release_tree is None:
+        return dirs
+    return dirs.after_install({e.name for e in release_tree.iterdir()})
+
+
 def install_release(tree: Path, project_dir: Path,
                     announce: Announce | None = None) -> KeptData:
     """Make the project's release code exactly ``tree``; keep box state.

@@ -105,19 +105,23 @@ def resolve_compose_config(compose_path: Path, project_name: str) -> dict[str, A
 
 def resolve_deployed_config(
     project_dir: Path, compose_files: list[str], project_name: str,
-    *, all_profiles: bool = False,
+    *, all_profiles: bool = False, project_directory: Path | None = None,
+    env_file: Path | None = None,
 ) -> dict[str, Any]:
     """Return the merged model a deployed project runs with.
 
     Resolves every compose file the project is deployed with, from its
     directory, the way `up` does. Unlike a bundle under validation, a
     deployed project has its on-box env files, so nothing is stood in for:
-    a missing one is the same error `up` would hit.
+    a missing one is the same error `up` would hit. ``project_directory``
+    and ``env_file`` are passed to Compose (see docker.compose_config).
     """
+    elsewhere = {k: v for k, v in (("project_directory", project_directory),
+                                   ("env_file", env_file)) if v is not None}
     try:
         out = docker.compose_config(
             project_dir, compose_files, project_name=project_name,
-            all_profiles=all_profiles,
+            all_profiles=all_profiles, **elsewhere,
         )
     except docker.DockerError as e:
         raise ComposeResolveError(

@@ -1,148 +1,239 @@
-"""Staging data snapshot — copy production data for staging use."""
+# SPDX-License-Identifier: Apache-2.0
+"""Copy production's data into staging's stores (``staging.copy_data``).
+
+The copy runs only while both sides are quiescent: production's running
+containers are stopped for it and started again afterwards, whatever
+happens, and staging must have no running container (its containers exist,
+created but not started, so Compose has made its volumes). Every source
+must exist: Docker would otherwise create an empty volume and the copy
+would "succeed" with no data. Each destination is emptied completely,
+hidden entries included, before the source is copied in.
+"""
 from __future__ import annotations
 
+import os
 import shlex
-import subprocess
+import sys
+import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import yaml
+from boxmunge import docker_containers
+from boxmunge.docker import staging_compose_project
+from boxmunge.docker_run import DockerError, run as _run
+from boxmunge.release import project_data_dirs
+from boxmunge.staging_copy_plan import (
+    CopyPlan, StagingDataError, Store, copy_sources, plan_copy, stores,
+)
+from boxmunge.staging_placeholders import make_placeholder
 
-from boxmunge.compose import managed_volume_keys
-from boxmunge.compose_mounts import is_bind_entry, volume_source
-from boxmunge.docker import compose_stop, compose_start
-from boxmunge.docker_run import docker_env
+if TYPE_CHECKING:
+    from boxmunge.paths import BoxPaths
 
+__all__ = ["ProductionDownError", "StagingDataError", "copy_production_data",
+           "plan_staging_copy", "prepare_destinations", "run_throwaway"]
 
-class StagingDataError(Exception):
-    """Raised when production data cannot be copied for staging."""
-
-
-def parse_volumes(
-    compose: dict[str, Any],
-) -> tuple[list[tuple[str, str]], list[str]]:
-    """Parse a compose dict and return (bind_mounts, named_volumes).
-
-    bind_mounts: list of (source_path, staging_path) tuples
-    named_volumes: list of volume names
-    Anonymous volumes have no name to copy between projects and are skipped.
-    """
-    bind_mounts: dict[str, str] = {}
-    named_volumes: set[str] = set()
-
-    for svc in (compose.get("services") or {}).values():
-        for vol in svc.get("volumes") or []:
-            if is_bind_entry(vol):
-                source = volume_source(vol)
-                bind_mounts.setdefault(source, source + "-staging")
-            elif isinstance(vol, str) and ":" in vol:
-                named_volumes.add(vol.split(":", 1)[0])
-            elif isinstance(vol, dict) and vol.get("source"):
-                named_volumes.add(vol["source"])
-
-    return list(bind_mounts.items()), sorted(named_volumes)
+COPY_IMAGE = "busybox:1.36"
+_COPY_TIMEOUT = 1800
+_STOP_TIMEOUT = 15
+# Empty /dst, hidden entries included, and prove it is empty.
+_EMPTY_DST = 'rm -rf /dst/* /dst/.[!.]* /dst/..?* && [ -z "$(ls -A /dst)" ]'
 
 
-def _run_in_system_container(cmd: str) -> None:
-    """Execute a command inside the boxmunge-system container."""
-    subprocess.run(
-        ["docker", "exec", "boxmunge-system", "sh", "-c", cmd],
-        check=True, capture_output=True, text=True,
-        timeout=300,
-        env=docker_env(),
-    )
-
-
-def _docker_run(cmd: list[str]) -> None:
-    """Run a short-lived Docker container."""
-    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300, env=docker_env())
-
-
-def copy_bind_mounts(
-    bind_mounts: list[tuple[str, str]], project_name: str,
-) -> None:
-    """Copy bind-mount directories via the system container.
-
-    The system container has /projects mounted, so relative paths like
-    ./data are resolved as /projects/{project}/data. Absolute paths
-    within the project tree are mapped to /projects/{project}/... as well.
-    """
-    project_prefix = f"/opt/boxmunge/projects/{project_name}/"
-    for source, dest in bind_mounts:
-        if source.startswith("./") or source.startswith("../"):
-            src_rel = source.removeprefix("./")
-            dst_rel = dest.removeprefix("./")
-            src_path = f"/projects/{project_name}/{src_rel}"
-            dst_path = f"/projects/{project_name}/{dst_rel}"
-        elif source.startswith(project_prefix):
-            src_path = "/projects/" + source.removeprefix("/opt/boxmunge/projects/")
-            dst_path = "/projects/" + dest.removeprefix("/opt/boxmunge/projects/")
-        else:
-            raise ValueError(
-                f"Cannot copy bind mount '{source}': absolute path outside "
-                f"project tree. Copy manually or use a relative path."
-            )
-        _run_in_system_container(
-            f"rm -rf {shlex.quote(dst_path)} && "
-            f"cp -a {shlex.quote(src_path)} {shlex.quote(dst_path)}"
-        )
-
-
-def copy_named_volumes(
-    named_volumes: list[str], project_name: str,
-) -> None:
-    """Copy named volumes via short-lived busybox containers.
-
-    Docker Compose names volumes as {project}_{volume}. The staging
-    project name is {project}-staging, so staging volumes are
-    {project}-staging_{volume}.
-    """
-    for vol in named_volumes:
-        prod_vol = f"{project_name}_{vol}"
-        staging_vol = f"{project_name}-staging_{vol}"
-        _docker_run([
-            "docker", "run", "--rm",
-            "-v", f"{prod_vol}:/src:ro",
-            "-v", f"{staging_vol}:/dst",
-            "busybox", "sh", "-c",
-            "rm -rf /dst/* && cp -a /src/. /dst/",
-        ])
-
-
-def snapshot_prod_data(
-    project_name: str,
-    project_dir: Path,
-    manifest: dict[str, Any],
-) -> None:
-    """Snapshot production data for staging use.
-
-    The data is every bind mount and named volume in compose.yml plus the
-    named volumes the manifest declares (``writable.persistent``), which
-    only the generated overlay mounts. Stops production, copies them all,
-    then restarts production. If copying fails, production is still
-    restarted before the exception propagates. Raises StagingDataError when
-    there is nothing to copy: copy_data was asked for, so that is a
-    misconfiguration, not a successful copy.
-    """
-    compose = yaml.safe_load((project_dir / "compose.yml").read_text())
-    bind_mounts, named_volumes = parse_volumes(compose)
-    named_volumes = sorted(set(named_volumes) | set(managed_volume_keys(manifest)))
-
-    if not bind_mounts and not named_volumes:
+def plan_staging_copy(paths: BoxPaths, project: str, manifest: dict[str, Any],
+                      prod_model: dict[str, Any], staging_model: dict[str, Any]) -> CopyPlan:
+    """Plan the copy from the two environments' resolved models."""
+    project_dir = paths.project_dir(project)
+    data = project_data_dirs(project_dir).box_state()
+    plan = plan_copy(
+        stores(prod_model, project, project_dir, data, staging=False),
+        stores(staging_model, staging_compose_project(project), project_dir, data,
+               staging=True),
+        copy_sources(manifest) or {}, project)
+    if not plan.pairs:
         raise StagingDataError(
-            "staging.copy_data is set, but the project declares no data to "
-            "copy: no volumes in compose.yml and no writable.persistent "
-            "entries in the manifest."
-        )
+            "staging.copy_data is set, but none of production's data is copied: "
+            "no volume or data directory of production's matches one the staged "
+            "release mounts. Remove copy_data, or map the stores with "
+            "staging.copy_data.sources.")
+    return plan
 
-    prod_compose_files = ["compose.yml", "compose.boxmunge.yml"]
-    compose_stop(project_dir, compose_files=prod_compose_files,
-                 project_name=project_name, timeout=15)
+
+def _volume_exists(name: str) -> bool:
     try:
-        if bind_mounts:
-            copy_bind_mounts(bind_mounts, project_name)
-        if named_volumes:
-            copy_named_volumes(named_volumes, project_name)
+        _run(["docker", "volume", "inspect", name], capture=True)
+    except DockerError as e:
+        if "no such volume" in str(e).lower():
+            return False
+        raise
+    return True
+
+
+def _is_file(store: Store, side: str) -> bool:
+    """Whether the store is a file; raises if a source (or a staging
+    volume, which Compose created) is missing."""
+    if store.kind == "volume":
+        if not _volume_exists(store.ref):
+            raise StagingDataError(
+                f"{side} volume {store.ref} ({store.key}) does not exist. Nothing "
+                f"was copied: copying from it would create an empty volume.")
+        return False
+    if not os.path.lexists(store.ref):
+        if side == "staging":
+            return False  # the copy creates it
+        raise StagingDataError(
+            f"production's {store.key} ({store.ref}) does not exist, so there is "
+            f"nothing to copy from it. Nothing was copied.")
+    if os.path.islink(store.ref):
+        raise StagingDataError(f"{store.ref} is a symlink; refusing to copy through it")
+    return os.path.isfile(store.ref)
+
+
+def verify_plan(plan: CopyPlan) -> list[bool]:
+    """Every source exists, and each pair copies a file to a file or a
+    directory to a directory. Returns, per pair, whether it is a file."""
+    kinds = []
+    for src, dest in plan.pairs:
+        src_file = _is_file(src, "production")
+        dest_file = _is_file(dest, "staging") if (
+            dest.kind == "volume" or os.path.lexists(dest.ref)) else src_file
+        if src_file != dest_file:
+            raise StagingDataError(
+                f"cannot copy {src.label} to staging's {dest.label}: one is a "
+                f"file and the other a directory.")
+        kinds.append(src_file)
+    return kinds
+
+
+def _mount(store: Store, at: str, ro: bool) -> list[str]:
+    return ["--mount", f"type={store.kind},src={store.ref},dst={at}" + (",readonly" if ro else "")]
+
+
+def run_throwaway(project: str, mounts: list[str], script: str) -> None:
+    """Run ``script`` in a named, networkless busybox container.
+
+    `docker run --rm` alone outlives an interrupted boxmunge (the CLI's
+    signals go to the container's PID 1, which ignores them), so the
+    container is named and always force-removed afterwards.
+    """
+    name = f"boxmunge-{staging_compose_project(project)}-copy-{uuid.uuid4().hex[:8]}"
+    try:
+        _run(["docker", "run", "--rm", "--name", name, "--network", "none", *mounts,
+              COPY_IMAGE, "sh", "-c", script], capture=True, timeout=_COPY_TIMEOUT)
     finally:
-        compose_start(project_dir, compose_files=prod_compose_files,
-                      project_name=project_name)
+        try:
+            _run(["docker", "rm", "-f", name], capture=True)
+        except DockerError as e:
+            if "no such container" not in str(e).lower():
+                raise
+
+
+def _copy(project: str, src: Store, dest: Store, is_file: bool) -> None:
+    source = _mount(src, "/src", True)
+    if is_file:
+        # Mount the destination's directory; the file is replaced whole.
+        name = shlex.quote(Path(dest.ref).name)
+        run_throwaway(project, [*source, "-v", f"{Path(dest.ref).parent}:/dst"],
+                      f"rm -rf /dst/{name} && cp -a /src /dst/{name}")
+        return
+    # A staging volume exists (verified); -v creates a missing directory.
+    dst = _mount(dest, "/dst", False) if dest.kind == "volume" else ["-v", f"{dest.ref}:/dst"]
+    run_throwaway(project, [*source, *dst], f"{_EMPTY_DST} && cp -a /src/. /dst/")
+
+
+def _remove_wrong_type(project: str, project_dir: Path, dest: Store, top: str,
+                       rest: str, want: str) -> None:
+    """Remove a staging destination of the wrong type: it is staging's own
+    copy, about to be replaced, and could only have been left by an earlier
+    failed copy (or by hand)."""
+    have = "a directory" if os.path.isdir(dest.ref) else "a file"
+    print(f"  NOTE: staging's {dest.ref} is {have}, but production's {dest.key} is "
+          f"{want}; removing staging's copy before the copy replaces it.")
+    if rest:
+        run_throwaway(project, ["-v", f"{project_dir / top}:/x"], f"rm -rf /x/{shlex.quote(rest)}")
+    elif os.path.isdir(dest.ref) and not os.path.islink(dest.ref):
+        run_throwaway(project, ["-v", f"{dest.ref}:/x"], _EMPTY_DST.replace("/dst", "/x"))
+        os.rmdir(dest.ref)
+    else:
+        os.unlink(dest.ref)
+
+
+def prepare_destinations(project: str, project_dir: Path, plan: CopyPlan) -> None:
+    """Make each bind destination exist, as the type production's source is,
+    before Compose creates staging's containers (it refuses a missing config
+    or secret file, and would create any other missing source as a
+    directory). The copy replaces these placeholders."""
+    for src, dest in plan.pairs:
+        if dest.kind != "bind":
+            continue
+        is_file = _is_file(src, "production")
+        top, _, rest = os.path.relpath(dest.ref, project_dir).partition(os.sep)
+        holder = project_dir / top
+        if rest and os.path.lexists(holder) and (holder.is_symlink() or not holder.is_dir()):
+            raise StagingDataError(
+                f"{holder} must be staging's directory of copies but is not a "
+                f"directory. Remove it (rm -rf {holder}) and stage again.")
+        if os.path.lexists(dest.ref):
+            right = os.path.isfile(dest.ref) if is_file else os.path.isdir(dest.ref)
+            if right and not os.path.islink(dest.ref):
+                continue
+            _remove_wrong_type(project, project_dir, dest, top, rest,
+                               "a file" if is_file else "a directory")
+        make_placeholder(project, project_dir, os.path.relpath(dest.ref, project_dir),
+                         is_file)
+
+
+def _running(compose_project: str) -> list[str]:
+    return [c.name for c in docker_containers.project_containers(compose_project)
+            if c.running]
+
+
+class ProductionDownError(DockerError):
+    """Production was stopped for the copy and could not be started again."""
+
+
+def _start_again(stopped: list[str], cause: BaseException | None) -> None:
+    try:
+        _run(["docker", "start", *stopped], capture=True)
+    except DockerError as e:
+        names = " ".join(stopped)
+        message = (f"PRODUCTION IS DOWN: its containers were stopped for the data "
+                   f"copy and starting them again failed: {e}. Start them with: "
+                   f"docker start {names}")
+        print(f"ERROR: {message}", file=sys.stderr)
+        raise ProductionDownError(message) from (cause or e)
+    print("  Production started again.")
+
+
+def copy_production_data(project: str, plan: CopyPlan) -> None:
+    """Stop production, copy each pair, start production again.
+
+    Raises StagingDataError or DockerError naming what failed. Production
+    is started again whatever happens, including a failed or interrupted
+    stop; staging is left created but not started.
+    """
+    staging_running = _running(staging_compose_project(project))
+    if staging_running:
+        raise StagingDataError(
+            f"staging containers are running ({', '.join(staging_running)}); "
+            f"refusing to replace their data underneath them.")
+    kinds = verify_plan(plan)
+    stopped = _running(project)
+    cause: BaseException | None = None
+    try:
+        if stopped:
+            print(f"  Stopping production for the copy: {', '.join(stopped)}")
+            _run(["docker", "stop", "-t", str(_STOP_TIMEOUT), *stopped], capture=True)
+        for (src, dest), is_file in zip(plan.pairs, kinds):
+            print(f"  Copying production {src.label} to staging {dest.label}...")
+            _copy(project, src, dest, is_file)
+    except BaseException as e:  # noqa: BLE001 - re-raised; kept as the cause
+        cause = e
+        raise
+    finally:
+        if stopped:
+            _start_again(stopped, cause)
+    for store in plan.fresh:
+        print(f"  NOTE: staging {store.label} has no production source; it starts as it is.")
+    for store in plan.unused:
+        print(f"  NOTE: production {store.label} is not mounted by the staged release; not copied.")

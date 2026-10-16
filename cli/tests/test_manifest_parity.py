@@ -53,6 +53,8 @@ CORPUS = {
     "security bad profile": _mut(lambda m: m.update(security={"profile": "bogus"})),
     "schema_version 4": _mut(lambda m: m.update(schema_version=4)),
     "staging.copy_data string": _mut(lambda m: m.update(staging={"copy_data": "yes"})),
+    "staging.copy_data sources": _mut(lambda m: m.update(
+        staging={"copy_data": {"sources": {"newdata": "pgdata", "cache": None}}})),
     "service without routes": _mut(lambda m: m["services"]["web"].pop("routes")),
     **{f"malformed: {k}": v for k, v in MALFORMED.items()},
 }

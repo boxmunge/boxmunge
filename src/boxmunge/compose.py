@@ -7,11 +7,13 @@ from typing import Any
 import yaml
 
 from boxmunge import compose_resolve
-from boxmunge.compose_mounts import PROD_SMOKE_SOURCE, STAGING_SMOKE_SOURCE, is_bind_entry
+from boxmunge.compose_mounts import PROD_SMOKE_SOURCE, STAGING_SMOKE_SOURCE
 from boxmunge.fileutil import atomic_write_text
+from boxmunge.live_mounts import LiveMounts, plan_live_mounts, sync_live_mounts
+from boxmunge.manifest import load_manifest
 from boxmunge.paths import BoxPaths
 from boxmunge.published_ports import overlay_ports
-from boxmunge.release import sync_live_scripts
+from boxmunge.release import project_data_dirs, sync_live_scripts
 from boxmunge.release_staging import production_release_root
 from boxmunge.compose_hardening import hardening_fragment
 from boxmunge.security_warn import (
@@ -223,6 +225,7 @@ def generate_compose_override(
     env_files: dict[str, str] | None = None,
     *,
     user_compose: dict[str, Any],
+    live_mounts: LiveMounts | None = None,
 ) -> str:
     """Generate compose.boxmunge.yml content.
 
@@ -233,8 +236,11 @@ def generate_compose_override(
     `user_compose`: the parsed user compose.yml dict, the same document
     `validate_user_compose` checked. Required: without it the overlay
     could not see compose-only services, and they would run unhardened.
+    `live_mounts`: production's mounts of release code re-pointed at its
+    own copies (see live_mounts).
     """
-    return _render_override(manifest, env_files, user_compose, alias_prefix=None)
+    return _render_override(manifest, env_files, user_compose, alias_prefix=None,
+                            live_mounts=live_mounts or LiveMounts())
 
 
 def _render_override(
@@ -242,17 +248,22 @@ def _render_override(
     env_files: dict[str, str] | None,
     user_compose: dict[str, Any],
     alias_prefix: str | None,
+    live_mounts: LiveMounts = LiveMounts(),
 ) -> str:
     env_file_list = _build_env_file_list(env_files)
     services = _build_service_override(
         manifest, env_file_list, user_compose=user_compose, alias_prefix=alias_prefix,
     )
+    for svc_name, entries in live_mounts.volumes.items():
+        svc = services.setdefault(svc_name, {})
+        svc["volumes"] = [*svc.get("volumes", []), *entries]
     override: dict[str, Any] = {"networks": {"boxmunge-proxy": {"external": True}}}
     if services:
         override["services"] = services
     top_level_volumes = _build_top_level_volumes(manifest)
     if top_level_volumes:
         override["volumes"] = top_level_volumes
+    override.update(live_mounts.files)
     return yaml.dump(override, default_flow_style=False, sort_keys=False)
 
 
@@ -289,11 +300,17 @@ def prepare_compose_override(
     `release_root` holds the release production will run. Deploy passes the
     project dir (a promote deploys the staged release there); everyone else
     regenerates for the release production already runs, which during a
-    stage is the kept one, not the staged one in the project dir.
+    stage is the kept one, not the staged one in the project dir. Its
+    compose.yml is the one production runs, and its mounted release code is
+    copied for production (see live_mounts).
     """
     project_name = manifest["project"]
+    project_dir = paths.project_dir(project_name)
     if release_root is None:
         release_root = production_release_root(paths, project_name)
+        if release_root != project_dir:
+            # The caller read the staged release's manifest from the project dir.
+            manifest = load_manifest(release_root / "manifest.yml")
     sync_live_scripts(paths, project_name, release_root)
     override_path = paths.project_compose_override(project_name)
     override_path.parent.mkdir(parents=True, exist_ok=True)
@@ -309,10 +326,13 @@ def prepare_compose_override(
     if project_secrets.exists():
         env_files["project_secrets"] = "./secrets.env"
 
-    user_compose = load_user_compose(paths.project_compose(project_name), project_name)
+    user_compose = load_user_compose(release_root / "compose.yml", project_name)
+    live_mounts = plan_live_mounts(user_compose, release_root, project_data_dirs(project_dir).box_state())
+    sync_live_mounts(project_dir, release_root, live_mounts)
 
     content = generate_compose_override(
         manifest, env_files=env_files or None, user_compose=user_compose,
+        live_mounts=live_mounts,
     )
     atomic_write_text(override_path, content)
 
@@ -324,75 +344,6 @@ def prepare_compose_override(
     # writable.external in manifest. Both repeated every deploy.
     warn_writable_state(paths, manifest, user_compose, component=component)
     warn_published_ports(paths, manifest, component=component)
-
-
-def _staging_volume(entry: Any) -> Any:
-    """Point a bind mount (short or long syntax) at its -staging sibling."""
-    if isinstance(entry, dict) and entry.get("type") == "bind":
-        return {**entry, "source": f"{entry['source']}-staging"}
-    if isinstance(entry, str) and is_bind_entry(entry):
-        return _rewrite_bind_mount(entry)
-    return entry
-
-
-def _rewrite_bind_mount(volume_str: str) -> str:
-    """Rewrite a bind-mount host path to add -staging suffix.
-
-    ./data:/app/data       -> ./data-staging:/app/data
-    ./data:/app/data:ro    -> ./data-staging:/app/data:ro
-    /abs/path:/container   -> /abs/path-staging:/container
-    """
-    parts = volume_str.split(":")
-    host_path = parts[0]
-    parts[0] = host_path + "-staging"
-    return ":".join(parts)
-
-
-def generate_staging_compose_base(compose_path: str | Path) -> str:
-    """Read compose.yml and return a copy with ports stripped and bind mounts rewritten.
-
-    Staging runs alongside production with a different project name.
-    Docker Compose list-merging means an override file cannot remove ports
-    declared in the base, so we generate a staging-specific base instead.
-    Bind-mount host paths get a -staging suffix to prevent data sharing.
-    Named volumes are left unchanged — Docker Compose's project naming
-    already isolates them. Services pulled in by `include:` or
-    `extends: {file: ...}` live in other files this rewrite cannot reach,
-    so those are refused rather than staged with production's mounts.
-    """
-    raw = Path(compose_path).read_text()
-    doc = yaml.safe_load(raw)
-    if not isinstance(doc, dict):
-        raise ComposeError(
-            f"compose.yml must be a YAML mapping at the top level "
-            f"(got {type(doc).__name__})"
-        )
-    services = doc.get("services")
-    if services is not None and not isinstance(services, dict):
-        raise ComposeError(
-            f"compose.yml 'services' must be a mapping "
-            f"(got {type(services).__name__})"
-        )
-    other_files = "include" in doc or any(
-        isinstance(svc, dict) and isinstance(svc.get("extends"), dict)
-        and "file" in svc["extends"] for svc in (services or {}).values()
-    )
-    if other_files:
-        raise ComposeError(
-            "stage cannot separate staging from production for services that "
-            "come from include: or extends: file: (their bind mounts would be "
-            "shared with production). Move those services into compose.yml to "
-            "use stage."
-        )
-    for svc in (services or {}).values():
-        if not isinstance(svc, dict):
-            # Malformed entry: leave it for Compose to reject.
-            continue
-        svc.pop("ports", None)
-        volumes = svc.get("volumes")
-        if volumes:
-            svc["volumes"] = [_staging_volume(v) for v in volumes]
-    return yaml.dump(doc, default_flow_style=False, sort_keys=False)
 
 
 def generate_staging_compose_override(

@@ -28,10 +28,12 @@ def _is_read_only(entry: Any) -> bool:
     return len(parts) >= 3 and "ro" in parts[2].split(",")
 
 
-def _top_dir(source: str, project_dir: Path) -> str | None:
-    """The project's top-level entry a bind source points into, if any."""
+def project_relative(source: str, project_dir: Path) -> str | None:
+    """A bind source's path inside the project dir ("." for the dir itself),
+    or None when it lies outside it."""
     if source.startswith("~"):
         return None
+    found: str | None = None
     # Compare both spelled and resolved paths: /opt may be a symlink.
     for base in {os.path.normpath(project_dir), os.path.realpath(project_dir)}:
         candidates = {os.path.normpath(os.path.join(base, source))}
@@ -39,9 +41,20 @@ def _top_dir(source: str, project_dir: Path) -> str | None:
             candidates.add(os.path.realpath(source))
         for path in candidates:
             rel = os.path.relpath(path, base)
-            if rel not in (".", "..") and not rel.startswith(".." + os.sep):
-                return rel.split(os.sep, 1)[0]
-    return None
+            if rel == ".." or rel.startswith(".." + os.sep):
+                continue
+            if rel != ".":
+                return rel
+            found = rel
+    return found
+
+
+def _top_dir(source: str, project_dir: Path) -> str | None:
+    """The project's top-level entry a bind source points into, if any."""
+    rel = project_relative(source, project_dir)
+    if rel is None or rel == ".":
+        return None
+    return rel.split(os.sep, 1)[0]
 
 
 def _entries(compose_path: Path) -> list[Any]:
