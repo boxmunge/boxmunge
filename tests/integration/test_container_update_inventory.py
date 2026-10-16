@@ -155,3 +155,42 @@ def test_scaled_to_zero_and_finished_one_shot_services_do_not_fail_the_update(
     assert result["status"] == "succeeded", result
     assert result["rollback_attempted"] is False
     assert container_image_ids(name, "web") == {new_id}
+
+
+def test_long_running_service_updated_to_exit_zero_is_rolled_back(project, monkeypatch):
+    """Restart "no" is Compose's default, so a service an update breaks into
+    exiting 0 (here, a new upstream CMD) must not pass as a finished one-shot."""
+    paths, name, project_dir, tags = project
+    tag, broken = f"{name}-web:1", f"{name}-web-exits:1"
+    tags += [tag, broken]
+    old_id = build_image(tag, f"{name}-serves", extra='CMD ["sleep", "3600"]\n')
+    build_image(broken, f"{name}-exits", extra='CMD ["true"]\n')
+    (project_dir / "compose.yml").write_text(
+        f"services:\n  web:\n    image: {tag}\n    network_mode: none\n")
+    compose(project_dir, name, "up", "-d")
+    _pull_moves(monkeypatch, tag, broken)
+
+    result = update_target(paths, _target(name, project_dir, "rollback_to_previous"))
+
+    assert result["status"] == "failed" and result["reason"] == "unhealthy: web", result
+    assert result["rollback_succeeded"] is True
+    assert container_image_ids(name, "web") == {old_id}
+
+
+def test_genuine_one_shot_stays_healthy_across_an_update(project, monkeypatch):
+    paths, name, project_dir, tags = project
+    tag, newer = f"{name}-migrate:1", f"{name}-migrate-new:1"
+    tags += [tag, newer]
+    build_image(tag, f"{name}-m1", extra='CMD ["true"]\n')
+    new_id = build_image(newer, f"{name}-m2", extra='CMD ["true"]\n')
+    (project_dir / "compose.yml").write_text(
+        f"services:\n  migrate:\n    image: {tag}\n    restart: 'no'\n"
+        "    network_mode: none\n")
+    compose(project_dir, name, "up", "-d")
+    docker("wait", f"{name}-migrate-1")  # it ran to completion before the update
+    _pull_moves(monkeypatch, tag, newer)
+
+    result = update_target(paths, _target(name, project_dir, "rollback_to_previous"))
+
+    assert result["status"] == "succeeded", result
+    assert container_image_ids(name, "migrate") == {new_id}

@@ -126,15 +126,31 @@ def detect_image_changes(
     return changed
 
 
+def one_shot_services(services: dict[str, DeployedService]) -> frozenset[str]:
+    """Services whose containers had all run to completion before the update
+    (exited 0, not restarted by their policy): a migration, say.
+
+    Judged on the pre-update snapshot, because Compose's default restart
+    policy is "no": a long-running service that an update makes exit 0 (a
+    wrong CMD, a help text) looks the same afterwards, and must fail.
+    """
+    return frozenset(
+        name for name, svc in services.items()
+        if (managed := _managed(svc.containers))
+        and all(c.finished_cleanly for c in managed)
+    )
+
+
 def _health_round(
-    target: UpdateTarget, services: list[str], *, in_grace: bool,
+    target: UpdateTarget, services: list[str], one_shots: frozenset[str],
+    *, in_grace: bool,
 ) -> tuple[list[str], list[str]]:
     """One look at the services' containers: (still settling, unhealthy).
 
     A service without a container, or with one that is not running or
-    reports unhealthy, is unhealthy, except a one-shot container that ran to
-    completion (exited 0, not restarted by its policy). One without a
-    healthcheck settles once the no-healthcheck grace period is over.
+    reports unhealthy, is unhealthy, except a container of a one-shot
+    service that ran to completion again. One without a healthcheck
+    settles once the no-healthcheck grace period is over.
     """
     by_service: dict[str, list[ProjectContainer]] = defaultdict(list)
     for container in _managed(docker_containers.project_containers(target.name)):
@@ -142,7 +158,8 @@ def _health_round(
     settling: list[str] = []
     unhealthy: list[str] = []
     for name in services:
-        containers = [c for c in by_service.get(name, []) if not c.finished_cleanly]
+        containers = [c for c in by_service.get(name, [])
+                      if not (name in one_shots and c.finished_cleanly)]
         if not by_service.get(name):
             unhealthy.append(name)
         elif any(not c.running or c.health == "unhealthy" for c in containers):
@@ -154,7 +171,7 @@ def _health_round(
 
 
 def _wait_healthy(
-    target: UpdateTarget, services: list[str],
+    target: UpdateTarget, services: list[str], one_shots: frozenset[str] = frozenset(),
     timeout_sec: int = _HEALTHCHECK_TIMEOUT_SEC,
 ) -> tuple[bool, list[str]]:
     """Poll until every service's containers are healthy, or timeout.
@@ -168,7 +185,7 @@ def _wait_healthy(
     settling = list(services)
     while time.monotonic() < deadline:
         in_grace = time.monotonic() - start < _NO_HEALTHCHECK_GRACE_SEC
-        settling, unhealthy = _health_round(target, services, in_grace=in_grace)
+        settling, unhealthy = _health_round(target, services, one_shots, in_grace=in_grace)
         if unhealthy:
             return False, unhealthy
         if not settling:
@@ -208,7 +225,7 @@ def _maybe_rollback(
     try:
         compose_up(target.project_dir, compose_files=target.compose_files, build=False,
                    project_name=target.name)
-        healthy, _ = _wait_healthy(target, list(services))
+        healthy, _ = _wait_healthy(target, list(services), one_shot_services(services))
     except DockerError as e:
         log_error("container-update", f"Rollback recreate failed: {e}", paths, project=target.name)
         result["rollback_succeeded"] = False
@@ -364,7 +381,7 @@ def _update_locked(
 
     # Step 6: Healthcheck wait, then record what the containers now run.
     try:
-        healthy, unhealthy = _wait_healthy(target, list(services))
+        healthy, unhealthy = _wait_healthy(target, list(services), one_shot_services(services))
         new_digests = _current_images(target, services)
     except DockerError as e:
         healthy, unhealthy, new_digests = False, [f"(docker: {e})"], {}

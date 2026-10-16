@@ -311,17 +311,42 @@ class TestUpdateTarget:
         fake_containers.run("caddy", "caddy", _OLD, name="boxmunge-caddy", running=False)
         assert _wait_healthy(_caddy_target(paths), ["caddy"]) == (False, ["caddy"])
 
-    def test_one_shot_that_finished_is_healthy(self, paths, caddy, fake_containers):
+    def test_one_shot_that_finished_again_is_healthy(self, paths, caddy, fake_containers):
         from boxmunge.container_update import _wait_healthy
         fake_containers.run("caddy", "migrate", _OLD, running=False, exit_code=0,
                             restart_policy="no")
-        assert _wait_healthy(_caddy_target(paths), ["caddy", "migrate"]) == (True, [])
+        assert _wait_healthy(_caddy_target(paths), ["caddy", "migrate"],
+                             frozenset({"migrate"})) == (True, [])
 
     def test_one_shot_that_failed_is_unhealthy(self, paths, caddy, fake_containers):
         from boxmunge.container_update import _wait_healthy
         fake_containers.run("caddy", "migrate", _OLD, running=False, exit_code=3,
                             restart_policy="no")
-        assert _wait_healthy(_caddy_target(paths), ["caddy", "migrate"]) == (False, ["migrate"])
+        assert _wait_healthy(_caddy_target(paths), ["caddy", "migrate"],
+                             frozenset({"migrate"})) == (False, ["migrate"])
+
+    def test_long_running_service_that_now_exits_zero_is_unhealthy(
+        self, paths, caddy, fake_containers,
+    ):
+        """Restart "no" is Compose's default: exit 0 is only fine for a
+        service that was a finished one-shot before the update too."""
+        from boxmunge.container_update import _wait_healthy
+        fake_containers.remove("caddy")
+        fake_containers.run("caddy", "caddy", _NEW, running=False, exit_code=0,
+                            restart_policy="no")
+        assert _wait_healthy(_caddy_target(paths), ["caddy"]) == (False, ["caddy"])
+
+    def test_one_shots_are_judged_on_the_pre_update_containers(self, fake_containers):
+        from boxmunge.container_update import one_shot_services
+        from boxmunge.deployed_inventory import DeployedService
+        done = fake_containers.run("p", "migrate", _OLD, running=False, exit_code=0,
+                                   restart_policy="no")
+        up = fake_containers.run("p", "web", _OLD)
+        services = {
+            "migrate": DeployedService("migrate", "m:1", False, True, (done,)),
+            "web": DeployedService("web", "w:1", False, True, (up,)),
+        }
+        assert one_shot_services(services) == {"migrate"}
 
     @staticmethod
     def _stateful(paths, monkeypatch, fake_containers):
