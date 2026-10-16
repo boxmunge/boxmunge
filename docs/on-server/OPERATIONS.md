@@ -1068,9 +1068,9 @@ How an upgrade is applied and undone:
    rolls back.
 
 If the upgrade is interrupted (crash, power loss) after the venvs swap but before probation
-starts, the next health-timer run rolls back to the previous release, stage `interrupted`, and
-blocklists the version; clear it with `clear-blocklist` to retry. Interrupted before the swap,
-the previous release simply stays live.
+starts, the next health-timer run rolls back to the previous release and reports stage
+`interrupted`. The first interruption of a version does not blocklist it, so auto-update retries;
+a second one does. Interrupted before the swap, the previous release simply stays live.
 
 A rollback swaps the venvs back, restores the stash, and re-runs `upgrade --apply` with the
 previous release, so its overlays and Caddy sites are regenerated and projects restarted on

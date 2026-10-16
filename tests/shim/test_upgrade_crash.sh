@@ -73,7 +73,7 @@ installed() {
     echo "proven" > "$BOXMUNGE_ROOT/env-a/known-good"
     mock_server a 'echo "a: $*" >> "$BOXMUNGE_ROOT/calls"; [[ "$1" != --version ]] || echo "boxmunge 1.4.0"'
     stub "$BOXMUNGE_ROOT/env-a/bin/python.new" 'if [[ "$1" == "-" ]]; then cat >/dev/null; echo "bm_log $BM_MSG" >> "$BOXMUNGE_ROOT/calls"; exit 0; fi
-printf "a-python: %s\n" "$*" >> "$BOXMUNGE_ROOT/calls"'
+printf "a-python: stage=%s %s\n" "${BM_STAGE:-}" "$*" >> "$BOXMUNGE_ROOT/calls"'
     mv "$BOXMUNGE_ROOT/env-a/bin/python.new" "$BOXMUNGE_ROOT/env-a/bin/python"
     : > "$BOXMUNGE_ROOT/calls"
 }
@@ -90,8 +90,13 @@ proven_intact() {  # proven_intact <description>
         && pass "$1: proven slot survives" || fail "$1: proven slot destroyed"
 }
 
+interruptions() { cat "$BOXMUNGE_ROOT/upgrade-state/interrupted.json" 2>/dev/null || true; }
+reports() { grep -c "a-python: stage=interrupted" "$BOXMUNGE_ROOT/calls" || true; }
+blocklisted() { grep -q "add_to_blocklist" "$BOXMUNGE_ROOT/calls"; }
+
 # expect_rolled_back <point>: check-probation finds the interrupted upgrade
-# live and returns the box to the proven release.
+# live and returns the box to the proven release. A first interruption is
+# reported but not blocklisted.
 expect_rolled_back() {
     run_shim check-probation
     expect 1 "interrupted after the venv swap" "$1: check-probation rolls back the interrupted upgrade"
@@ -100,8 +105,12 @@ expect_rolled_back() {
         && pass "$1: proven release is live again" || fail "$1: live slot is $(live)"
     grep -q "a: stash restore --latest" "$BOXMUNGE_ROOT/calls" && grep -q "a: upgrade --apply" "$BOXMUNGE_ROOT/calls" \
         && pass "$1: stash restored and previous release re-applied" || fail "$1: rollback steps missing: $(cat "$BOXMUNGE_ROOT/calls")"
-    grep -q "add_to_blocklist" "$BOXMUNGE_ROOT/calls" \
-        && pass "$1: interrupted version blocklisted" || fail "$1: interrupted version not blocklisted"
+    ! blocklisted && pass "$1: a first interruption is not blocklisted" \
+        || fail "$1: a first interruption blocklisted the version"
+    [[ "$(reports)" -eq 1 ]] && pass "$1: reported as stage interrupted" \
+        || fail "$1: $(reports) interrupted reports: $(cat "$BOXMUNGE_ROOT/calls")"
+    [[ "$(interruptions)" == '{"1.5.0": 1}' ]] && pass "$1: interruption counted" \
+        || fail "$1: interruption count is $(interruptions)"
     [[ ! -e "$BOXMUNGE_ROOT/upgrade-state/probation.json" ]] && pass "$1: no probation left" \
         || fail "$1: probation left behind"
     run_shim check-probation
@@ -148,6 +157,45 @@ for point in link sync2 apply health probation; do
     expect_rolled_back "$point"
     drop_root
 done
+
+# --- after a first interruption, the next upgrade proceeds -----------------
+
+installed
+upgrade_killed_at apply
+expect_rolled_back "retry"
+upgrade_killed_at none
+expect 0 "probation started" "retry: the next upgrade of the same version completes"
+[[ "$(live)" == b && -f "$BOXMUNGE_ROOT/upgrade-state/probation.json" ]] \
+    && pass "retry: 1.5.0 live and on probation" || fail "retry: live=$(live)"
+drop_root
+
+# --- a second interruption of the same version blocklists it ----------------
+
+installed
+upgrade_killed_at apply
+expect_rolled_back "twice"
+: > "$BOXMUNGE_ROOT/calls"
+upgrade_killed_at apply
+[[ "$RC" -eq 137 && "$(live)" == b ]] && pass "twice: second upgrade got as far as apply" \
+    || fail "twice: rc=$RC live=$(live) $OUT"
+run_shim check-probation
+expect 1 "interruption 2" "twice: the second interruption is rolled back"
+blocklisted && pass "twice: the second interruption blocklists the version" \
+    || fail "twice: version not blocklisted"
+[[ "$(reports)" -eq 1 && "$(interruptions)" == '{"1.5.0": 2}' ]] && pass "twice: reported and counted" \
+    || fail "twice: reports=$(reports) count=$(interruptions)"
+proven_intact "twice"
+drop_root
+
+# --- a malformed interruption count stops recovery without deleting ---------
+
+installed
+upgrade_killed_at apply
+echo '{"1.5.0": "x"}' > "$BOXMUNGE_ROOT/upgrade-state/interrupted.json"
+run_shim check-probation
+expect 1 "interrupted.json is malformed" "a malformed interruption count stops recovery"
+proven_intact "malformed count"
+drop_root
 
 # --- killed after probation was recorded: the upgrade stands ---------------
 

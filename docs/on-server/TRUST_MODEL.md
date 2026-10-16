@@ -82,6 +82,7 @@ reads from that directory is checked before use:
   ISO-8601 `expires_at` with a timezone, and a `previous_slot` of `a` or `b`
   that is the current standby slot (promotion deletes it).
 - `blocklist.json` must be a JSON object keyed by semver versions.
+- `interrupted.json` must be a JSON object mapping semver versions to integer counts.
 - None of these files, nor `upgrade.lock`, may be a symlink. The shim writes
   `active-slot` by rename, so a planted link is replaced rather than followed.
 

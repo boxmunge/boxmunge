@@ -24,6 +24,7 @@ LOCK_FILE="$STATE_DIR/upgrade.lock"
 ACTIVE_SLOT_FILE="$STATE_DIR/active-slot"
 BLOCKLIST_FILE="$STATE_DIR/blocklist.json"
 PROBATION_FILE="$STATE_DIR/probation.json"
+INTERRUPTED_FILE="$STATE_DIR/interrupted.json"
 BIN_DIR="$BOXMUNGE_ROOT/bin"
 VERSION_FILE="$BOXMUNGE_ROOT/config/version"
 SUDOERS_FILE="${BOXMUNGE_SUDOERS_FILE:-/etc/sudoers.d/boxmunge-deploy}"
@@ -324,8 +325,10 @@ Output (truncated): ${output:0:500}"
     exit 2
 }
 
+# do_rollback <new_version> <from_version> <stage> <prev_slot> [keep-version]
+# keep-version: report the failure but do not blocklist <new_version>.
 do_rollback() {
-    local new_version="$1" from_version="$2" stage="$3" prev_slot="$4"
+    local new_version="$1" from_version="$2" stage="$3" prev_slot="$4" keep="${5:-}"
     log "ROLLBACK: $new_version failed at stage=$stage, reverting to slot $prev_slot"
     bm_log warn upgrade "rollback initiated" "{\"version\": \"$new_version\", \"from_version\": \"$from_version\", \"stage\": \"$stage\"}"
 
@@ -352,7 +355,7 @@ do_rollback() {
         "re-apply of the previous release" "$rc" "$output"
 
     refresh_docs_for_slot "$prev_slot"
-    add_blocklist "$new_version" "$stage"
+    [[ "$keep" == keep-version ]] || add_blocklist "$new_version" "$stage"
     report_failure "$new_version" "$from_version" "$stage"
     send_notification "boxmunge ROLLBACK" "Rolled back $new_version (stage: $stage)"
 
@@ -834,7 +837,7 @@ write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT']
 # to the standby, the proven release. A marker left in the standby means the
 # swap never happened; the orphan cleanup that follows removes that slot.
 recover_interrupted_upgrade() {
-    local marker version from_version
+    local marker version from_version count keep=keep-version
     marker="$(inflight_marker "$ACTIVE_SLOT")"
     [[ -e "$marker" ]] || return 0
     version="$(cat "$marker")"
@@ -846,9 +849,46 @@ recover_interrupted_upgrade() {
             return 0
         fi
     fi
+    # A power cut or kill is rarely the release's fault, so the first one
+    # does not blocklist it; a release interrupted twice (an apply that
+    # reliably hangs or is killed) is, or auto-update would loop on it.
+    count="$(count_interruption "$version")" || exit 1
+    [[ "$count" -lt 2 ]] || keep=""
     from_version="$("$BOXMUNGE_ROOT/env-$(standby_slot)/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")"
-    log "Upgrade to $version was interrupted after the venv swap — rolling back"
-    do_rollback "$version" "$from_version" "interrupted" "$(standby_slot)"
+    log "Upgrade to $version was interrupted after the venv swap (interruption $count) — rolling back"
+    do_rollback "$version" "$from_version" "interrupted" "$(standby_slot)" $keep
+}
+
+# count_interruption <version>: durably add one to <version>'s count in
+# interrupted.json and print the new count. Validated like the blocklist.
+count_interruption() {
+    refuse_symlink "$INTERRUPTED_FILE"
+    BM_VERSION="$1" BM_FILE="$INTERRUPTED_FILE" BM_SEMVER_RE="$SEMVER_RE" python3 - <<'PYINT' \
+        || die "$INTERRUPTED_FILE is malformed; inspect it and repair or remove it"
+import json, os, re, sys, tempfile
+path, version = os.environ["BM_FILE"], os.environ["BM_VERSION"]
+counts = {}
+if os.path.exists(path):
+    with open(path) as f:
+        counts = json.load(f)
+pattern = re.compile(os.environ["BM_SEMVER_RE"])
+if not isinstance(counts, dict) or not all(
+        isinstance(k, str) and pattern.fullmatch(k) and type(v) is int for k, v in counts.items()):
+    sys.exit("interrupted.json is not an object of semver version -> count")
+counts[version] = counts.get(version, 0) + 1
+directory = os.path.dirname(path)
+fd, tmp = tempfile.mkstemp(dir=directory, prefix=".interrupted.")
+with os.fdopen(fd, "w") as f:
+    json.dump(counts, f)
+    f.flush()
+    os.fsync(f.fileno())
+os.chmod(tmp, 0o644)
+os.replace(tmp, path)
+dir_fd = os.open(directory, os.O_RDONLY)
+os.fsync(dir_fd)
+os.close(dir_fd)
+print(counts[version])
+PYINT
 }
 
 cmd_check_probation() {
