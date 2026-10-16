@@ -104,6 +104,12 @@ def test_malformed_bodies_are_invalid_params_and_the_server_carries_on(
      422, "the limit is 65536"),
     (b"POST /v1/actions/status.get HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n",
      422, "Chunked"),
+    (b"POST /v1/actions/status.get HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n"
+     b"Transfer-Encoding: chunked\r\n\r\n{}", 422, "Chunked"),
+    (b"GET /v1/actions HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}",
+     400, "GET takes no request body"),
+    (b"GET /v1/actions HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n",
+     400, "GET takes no request body"),
     # "\xb2" is a superscript two once headers are decoded as Latin-1: str.isdigit()
     # accepts it, int() does not.
     (b"POST /v1/actions/status.get HTTP/1.1\r\nHost: x\r\nContent-Length: \xb2\r\n\r\n",
@@ -115,6 +121,26 @@ def test_bad_framing_is_refused_and_the_server_carries_on(
     got_status, got = raw_exchange(served, request_bytes)
     assert got_status == status and message in got["error"]["message"]
     assert got["api_version"] == "1.0"
+    assert call(served, "GET", "/v1/actions")[0] == 200
+
+
+SMUGGLED = b"GET /v1/actions HTTP/1.1\r\nHost: x\r\n\r\n"
+
+
+@pytest.mark.parametrize("method", [b"GET", b"DELETE"])
+def test_a_body_on_a_bodiless_request_is_never_parsed_as_the_next_request(
+        served, method) -> None:
+    """On keep-alive, an unread body would be read as a second request:
+    a request-smuggling primitive once a proxy relays to apid."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(5)
+        sock.connect(str(served))
+        sock.sendall(method + b" /v1/actions HTTP/1.1\r\nHost: x\r\n"
+                     + f"Content-Length: {len(SMUGGLED)}\r\n\r\n".encode() + SMUGGLED)
+        chunks = []
+        while chunk := sock.recv(65536):
+            chunks.append(chunk)
+    assert b"".join(chunks).count(b"HTTP/1.1 ") == 1
     assert call(served, "GET", "/v1/actions")[0] == 200
 
 

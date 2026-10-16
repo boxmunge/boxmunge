@@ -136,7 +136,20 @@ class _RequestHandler(BaseHTTPRequestHandler):
     server: UnixHTTPServer
 
     def do_GET(self) -> None:
+        if self._declares_body():
+            # Never leave a body unread on a kept-alive connection: it would
+            # be parsed as the next request.
+            self.close_connection = True
+            self._respond(400, {"api_version": API_VERSION, "ok": False, "error": {
+                "code": ErrorCode.INVALID_PARAMS.value,
+                "message": "A GET takes no request body; send none.",
+            }})
+            return
         self._respond(*self.server.app.handle("GET", self.path, None))
+
+    def _declares_body(self) -> bool:
+        return (self.headers.get("Transfer-Encoding") is not None
+                or self.headers.get("Content-Length") not in (None, "0"))
 
     def do_POST(self) -> None:
         try:
