@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from boxmunge.commands.check import SmokeResult
+from boxmunge.commands.smoke_result import SmokeResult
 from boxmunge.commands.deploy import run_deploy
 from boxmunge.commands.promote_cmd import run_promote
 from boxmunge.commands.stage_cmd import run_stage

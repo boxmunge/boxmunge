@@ -3,7 +3,8 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from boxmunge.commands.check import SmokeResult, should_downgrade_smoke_failure
+from boxmunge.commands.check import should_downgrade_smoke_failure
+from boxmunge.commands.smoke_result import SmokeResult
 from boxmunge.commands.deploy import run_deploy
 from boxmunge.identity import register_project_identity
 from boxmunge.paths import BoxPaths
