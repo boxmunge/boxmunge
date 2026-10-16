@@ -39,6 +39,7 @@ import fcntl
 import logging
 import os
 import pwd
+import shutil
 import stat
 import tempfile
 from contextlib import contextmanager
@@ -308,6 +309,69 @@ def atomic_write_bytes(
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+DISCARDED = ".discarded"
+
+
+def sync_tree(path: Path) -> None:
+    """fsync every regular file and directory under ``path`` (itself
+    included) without following links, so a directory renamed into place
+    afterwards cannot come back from a power loss holding empty files."""
+    if os.path.islink(path):
+        raise OSError(f"{path} is a symlink; refusing to sync through it")
+    for root, _dirs, files in os.walk(path, followlinks=False):
+        for name in files:
+            full = os.path.join(root, name)
+            if not stat.S_ISREG(os.lstat(full).st_mode):
+                continue
+            try:
+                fd = os.open(full, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            except OSError as e:
+                raise OSError(e.errno, f"cannot sync {full}: {e.strerror}") from e
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        fsync_dir(Path(root))
+
+
+def durable_rename_dir(src: Path, dest: Path) -> None:
+    """Rename a directory to a name that must not exist, durably."""
+    if os.path.lexists(dest):
+        raise FileExistsError(f"{dest} already exists; refusing to replace it")
+    os.rename(src, dest)
+    fsync_dir(dest.parent)
+    if src.parent != dest.parent:
+        fsync_dir(src.parent)
+
+
+def _rmtree_real_dir(path: Path) -> None:
+    if os.path.islink(path) or not os.path.isdir(path):
+        raise OSError(f"{path} is not a directory; refusing to discard it")
+    shutil.rmtree(path)
+
+
+def discard_dir(path: Path) -> None:
+    """Remove a directory so that a crash never leaves it half-deleted under
+    its own name: renamed to ``<name>.discarded`` first, then removed. A
+    name already ending in ``.discarded`` (debris) is removed directly.
+    Never follows a link."""
+    if not os.path.lexists(path):
+        return
+    if path.name.endswith(DISCARDED):
+        _rmtree_real_dir(path)
+        fsync_dir(path.parent)
+        return
+    if os.path.islink(path) or not path.is_dir():
+        raise OSError(f"{path} is not a directory; refusing to discard it")
+    doomed = path.with_name(path.name + DISCARDED)
+    if os.path.lexists(doomed):
+        _rmtree_real_dir(doomed)
+    os.rename(path, doomed)
+    fsync_dir(path.parent)
+    _rmtree_real_dir(doomed)
+    fsync_dir(path.parent)
 
 
 class LockError(Exception):
