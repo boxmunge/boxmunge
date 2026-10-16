@@ -17,6 +17,7 @@ from boxmunge.commands.health_cmd import run_health
 from boxmunge.commands.self_test_cmd import run_self_test
 from boxmunge.commands.upgrade_steps import (
     Regeneration,
+    Restart,
     UpgradeGateError,
     check_upgrade,
     migrate_project_manifests,
@@ -86,41 +87,42 @@ def _migrate_regenerate_reload(
     return migrated, regen
 
 
-def _restart(
-    paths: BoxPaths, step: int, total: int, refused: dict[str, str],
-) -> tuple[list[str], list[str], list[str]]:
+def _restart(paths: BoxPaths, step: int, total: int, refused: dict[str, str]) -> Restart:
     print(f"[{step}/{total}] Restarting projects...")
-    succeeded, failed_projects, skipped_locked = restart_projects(paths, refused=refused)
-    if succeeded:
-        print(f"  Restarted: {', '.join(succeeded)}")
-    if skipped_locked:
-        print(f"  Skipped (locked): {', '.join(skipped_locked)}")
+    restart = restart_projects(paths, refused=refused)
+    if restart.succeeded:
+        print(f"  Restarted: {', '.join(restart.succeeded)}")
+    if restart.skipped_locked:
+        print(f"  Skipped (locked): {', '.join(restart.skipped_locked)}")
+    if restart.monitor_stopped:
+        print(f"  Not restarted (stopped by the health monitor; use `recover`): "
+              f"{', '.join(restart.monitor_stopped)}")
     if refused:
         print(f"  Not restarted (compose refused): {', '.join(sorted(refused))}")
-    notify_locked_skips(paths, skipped_locked)
+    notify_locked_skips(paths, restart.skipped_locked)
     notify_refused(paths, refused)
-    if failed_projects:
-        print(f"  FAILED: {', '.join(failed_projects)}", file=sys.stderr)
-    return succeeded, failed_projects, skipped_locked
+    if restart.failed:
+        print(f"  FAILED: {', '.join(restart.failed)}", file=sys.stderr)
+    return restart
 
 
 def _finish(paths: BoxPaths, label: str, migrated: list[str], regen: Regeneration,
-            restart: tuple[list[str], list[str], list[str]], new_version: str) -> int:
+            restart: Restart, new_version: str) -> int:
     """Record the new version, but only when every project restarted."""
-    succeeded, failed_projects, skipped_locked = restart
     log_operation(
         "upgrade", label, paths,
         detail={
             "migrated": migrated,
-            "restarted": succeeded,
-            "skipped_locked": skipped_locked,
+            "restarted": restart.succeeded,
+            "skipped_locked": restart.skipped_locked,
+            "monitor_stopped": restart.monitor_stopped,
             "refused": sorted(regen.refused),
-            "failed": failed_projects,
+            "failed": restart.failed,
         },
     )
-    if failed_projects:
+    if restart.failed:
         return _gate_failed(paths, UpgradeGateError(
-            f"projects failed to restart: {', '.join(failed_projects)}"))
+            f"projects failed to restart: {', '.join(restart.failed)}"))
     semver, commit = parse_version_string(new_version)
     write_installed_version(paths, semver, commit)
     return 0

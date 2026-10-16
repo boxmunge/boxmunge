@@ -16,7 +16,7 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge.commands.upgrade_cmd import run_upgrade
-from boxmunge.commands.upgrade_steps import regenerate_configs, restart_projects
+from boxmunge.commands.upgrade_steps import Restart, regenerate_configs, restart_projects
 from boxmunge.version import read_installed_version
 from tests.test_commands.test_upgrade_dry_run_and_pause import _project, _setup, _snapshot
 
@@ -58,9 +58,9 @@ def test_regenerate_leaves_refused_project_on_its_old_configs(paths) -> None:
 
 def test_restart_skips_refused_projects(paths) -> None:
     with patch("boxmunge.commands.upgrade_steps.compose_up") as up:
-        succeeded, failed, skipped = restart_projects(paths, refused={"bad": "x"})
+        restart = restart_projects(paths, refused={"bad": "x"})
     assert [c.kwargs["project_name"] for c in up.call_args_list] == ["good"]
-    assert (succeeded, failed, skipped) == (["good"], [], [])
+    assert restart == Restart(succeeded=["good"])
 
 
 @patch("boxmunge.commands.upgrade_cmd.caddy_reload")

@@ -110,7 +110,8 @@ class TestRestartRespectsLock:
         fd = os.open(str(alpha_lock), os.O_CREAT | os.O_RDWR)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
-            succeeded, failed, skipped = restart_projects(paths, refused=())
+            r = restart_projects(paths, refused=())
+            succeeded, failed, skipped = r.succeeded, r.failed, r.skipped_locked
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
@@ -131,7 +132,8 @@ class TestRestartRespectsLock:
         self._make_project(paths, "alpha")
         self._make_project(paths, "beta")
 
-        succeeded, failed, skipped = restart_projects(paths, refused=())
+        r = restart_projects(paths, refused=())
+        succeeded, failed, skipped = r.succeeded, r.failed, r.skipped_locked
 
         assert sorted(succeeded) == ["alpha", "beta"]
         assert failed == []
@@ -248,7 +250,8 @@ class TestSkipsQuarantined:
         self._make_project(paths, "beta")
         self._quarantine(paths, "alpha")
 
-        succeeded, failed, skipped = restart_projects(paths, refused=())
+        r = restart_projects(paths, refused=())
+        succeeded, failed, skipped = r.succeeded, r.failed, r.skipped_locked
 
         # alpha was quarantined, so compose_up MUST NOT have been called
         # for it — only beta should have been started.

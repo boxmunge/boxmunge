@@ -14,6 +14,7 @@ from typing import Any, Iterator
 import yaml
 
 from boxmunge.caddy import generate_caddy_config, prepare_caddy_config
+from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.compose import generate_compose_override, load_user_compose, prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.docker import compose_up, DockerError
@@ -270,25 +271,30 @@ def notify_refused(paths: BoxPaths, refused: dict[str, str]) -> None:
            component="upgrade", priority=1)
 
 
-def restart_projects(
-    paths: BoxPaths, *, refused: Collection[str],
-) -> tuple[list[str], list[str], list[str]]:
+@dataclass
+class Restart:
+    """What restart_projects did with each project it did not leave offline
+    on purpose (paused and quarantined projects are not listed)."""
+    succeeded: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+    skipped_locked: list[str] = field(default_factory=list)
+    monitor_stopped: list[str] = field(default_factory=list)
+
+
+def restart_projects(paths: BoxPaths, *, refused: Collection[str]) -> Restart:
     """Restart all deployed projects under per-project locks.
 
     Projects in `refused` (see regenerate_configs) are skipped: their old
     containers keep running untouched, never rebuilt from the refused file.
 
-    Returns (succeeded, failed, skipped_locked) lists. A project whose
-    project_lock is held by another operation is skipped (logged as a
-    warning), not retried and not raised — the v0.4 concurrency contract
-    is that all mutating compose ops hold project_lock; an upgrade that
-    races a deploy must defer to the deploy.
+    A project whose project_lock is held by another operation is skipped
+    (logged as a warning), not retried and not raised — the v0.4
+    concurrency contract is that all mutating compose ops hold
+    project_lock; an upgrade that races a deploy must defer to the deploy.
     """
-    succeeded: list[str] = []
-    failed: list[str] = []
-    skipped_locked: list[str] = []
+    result = Restart()
     if not paths.projects.exists():
-        return succeeded, failed, skipped_locked
+        return result
 
     for project_dir in sorted(paths.projects.iterdir()):
         if not project_dir.is_dir():
@@ -313,6 +319,16 @@ def restart_projects(
                     paths, project=project_name,
                 )
             continue
+        # The health monitor stopped it after a critical result. Starting
+        # it would leave the stop marker standing over a running project
+        # (nothing bumps last_started_at here); `recover`, or a deploy,
+        # brings it back deliberately.
+        if is_monitor_stopped(project_name, paths):
+            result.monitor_stopped.append(project_name)
+            log_operation("upgrade", f"Not restarting {project_name}: the health "
+                          f"monitor stopped it; run `recover {project_name}` once "
+                          f"it is fixed", paths, project=project_name)
+            continue
         if project_name in refused:
             log_operation("upgrade", f"Not restarting {project_name}: its compose.yml "
                           f"was refused; its containers are left as they are",
@@ -329,15 +345,15 @@ def restart_projects(
                 try:
                     compose_up(project_dir, compose_files=compose_files,
                                project_name=project_name)
-                    succeeded.append(project_name)
+                    result.succeeded.append(project_name)
                 except DockerError as e:
-                    failed.append(project_name)
+                    result.failed.append(project_name)
                     log_error(
                         "upgrade", f"Failed to restart {project_name}: {e}",
                         paths, project=project_name,
                     )
         except LockError:
-            skipped_locked.append(project_name)
+            result.skipped_locked.append(project_name)
             log_warning(
                 "upgrade",
                 f"Skipped restart of project {project_name} — held by another "
@@ -345,4 +361,4 @@ def restart_projects(
                 paths, project=project_name,
             )
 
-    return succeeded, failed, skipped_locked
+    return result

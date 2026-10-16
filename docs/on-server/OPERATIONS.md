@@ -808,7 +808,7 @@ If deeper Caddy investigation is needed (container logs, config file inspection)
 
 This state means the smoke test exited with code 2 -- a critical failure that caused boxmunge to stop the project containers. The project will not restart automatically.
 
-The stop is sticky. Later 5-minute health checks do not run smoke against the stopped project, do not change its recorded failure reason, and do not send more alerts. The daily `container-update` skips it rather than recreating it. `check-all` reports it as `CRITICAL (stopped by the health monitor ...)`, and `health` lists it under `lifecycle` as `monitor-stopped`. The stop stays in place until you run `recover`, or until a later deploy, rollback, or resume starts the project successfully.
+The stop is sticky. Later 5-minute health checks do not run smoke against the stopped project, do not change its recorded failure reason, and do not send more alerts. The daily `container-update` skips it rather than recreating it, and a platform upgrade does not restart it either (the upgrade output lists it under `Not restarted (stopped by the health monitor ...)`). `check-all` reports it as `CRITICAL (stopped by the health monitor ...)`, and `health` lists it under `lifecycle` as `monitor-stopped`. The stop stays in place until you run `recover`, or until a later deploy, rollback, or resume starts the project successfully.
 
 Check the dashboard to confirm the state:
 
@@ -1090,6 +1090,8 @@ How an upgrade is applied and undone:
    the refusal is logged as an error (`log <project>`), and one priority-1 Pushover alert
    lists every refused project. Fix the compose file and redeploy; until then the project
    keeps running its old containers.
+   Paused, quarantined and health-monitor-stopped projects are not restarted either; each
+   stays offline until `resume`, `security resume` or `recover` brings it back.
 4. A health check runs, then a 6-hour probation. A critical health result during probation
    rolls back.
 
