@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from boxmunge.built_images import remove_built_images
+from boxmunge.data_helper import container_owned_dirs, empty_dir
 from boxmunge.docker import compose_down, caddy_reload, DockerError
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.log import log_error, log_operation, log_warning
@@ -150,6 +151,18 @@ def delete_locked(project_name: str, paths: BoxPaths, force: bool) -> int:
 
     project_dir = paths.project_dir(project_name)
     if project_dir.exists():
+        # Containers' data belongs to their users (S+N on a remapped box);
+        # the helper empties it so the rest can be removed as deploy.
+        try:
+            for owned in container_owned_dirs(project_dir):
+                empty_dir(f"{project_name}-delete", owned)
+        except DockerError as e:
+            print(f"ERROR: Could not remove the data containers wrote in {project_dir}: "
+                  f"{e}\n  The project is still registered; fix the cause and run "
+                  f"project-delete again.", file=sys.stderr)
+            log_error("project-delete", f"Removing container-owned data failed: {e}",
+                      paths, project=project_name)
+            return 1
         shutil.rmtree(project_dir)
 
     if is_registered(project_name, paths):

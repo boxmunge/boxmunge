@@ -127,3 +127,37 @@ def test_bad_registry_line_neither_blocks_the_delete_nor_is_dropped(box):
     assert _delete(box, MagicMock()) == 0
     assert not box.project_dir(NAME).exists()
     assert registry.read_text() == "old-staging\n"
+
+
+class TestContainerOwnedData:
+    """Data a container wrote belongs to its user (S+N on a remapped box),
+    which deploy cannot remove; the helper empties it first."""
+
+    def test_is_emptied_by_the_helper_before_the_tree_goes(self, box, monkeypatch):
+        from boxmunge.commands import project_delete_cmd as pd
+        pdir = box.project_dir(NAME)
+        (pdir / "pgdata").mkdir()
+        (pdir / "pgdata" / "PG_VERSION").write_text("16")
+        seen = []
+        monkeypatch.setattr(pd, "container_owned_dirs", lambda root: [root / "pgdata"])
+
+        def empty(label, path):
+            seen.append((label, path, sorted(p.name for p in path.iterdir())))
+            (path / "PG_VERSION").unlink()
+        monkeypatch.setattr(pd, "empty_dir", empty)
+        assert _delete(box, MagicMock()) == 0
+        assert seen == [("myapp-delete", pdir / "pgdata", ["PG_VERSION"])]
+        assert not pdir.exists()
+
+    def test_a_failed_helper_keeps_the_project_for_a_retry(self, box, monkeypatch, capsys):
+        from boxmunge.commands import project_delete_cmd as pd
+        pdir = box.project_dir(NAME)
+        monkeypatch.setattr(pd, "container_owned_dirs", lambda root: [root / "pgdata"])
+
+        def empty(label, path):
+            raise DockerError("rm: can't remove '/x/f': Permission denied")
+        monkeypatch.setattr(pd, "empty_dir", empty)
+        assert _delete(box, MagicMock()) == 1
+        assert pdir.exists() and is_registered(NAME, box)
+        err = capsys.readouterr().err
+        assert "Permission denied" in err and "project-delete" in err
