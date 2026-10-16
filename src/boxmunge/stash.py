@@ -11,12 +11,14 @@ import json
 import os
 import pwd
 import tarfile
+from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
 from boxmunge.fileutil import atomic_write_bytes
 from boxmunge.log import log_operation, log_warning
 from boxmunge.paths import BoxPaths
+from boxmunge.secrets import SecretsFile
 from boxmunge.version import read_installed_version
 
 STASH_FORMAT_VERSION = 1
@@ -187,6 +189,17 @@ def _validate_meta(tar: tarfile.TarFile, archive: Path, paths: BoxPaths) -> None
         )
 
 
+def _secrets_lock(paths: BoxPaths, member_name: str) -> AbstractContextManager:
+    """The writer lock for a secrets file, so a restore cannot interleave
+    with a concurrent `secrets set` that would write back older contents."""
+    if member_name == f"config/{paths.host_secrets.name}":
+        return SecretsFile.host(paths).locked()
+    parts = member_name.split("/")
+    if len(parts) == 3 and parts[0] == "projects" and parts[2] == "secrets.env":
+        return SecretsFile.project(paths, parts[1]).locked()
+    return nullcontext()
+
+
 def restore_stash(paths: BoxPaths, archive: Path | None = None) -> Path:
     """Restore platform state from a stash archive.
 
@@ -262,9 +275,10 @@ def restore_stash(paths: BoxPaths, archive: Path | None = None) -> Path:
             if extracted is not None:
                 owner = _allowed_owner(member)
                 # Permission bits only: never setuid/setgid/sticky from an archive.
-                atomic_write_bytes(target, extracted.read(), mode=member.mode & 0o777)
-                if owner is not None:
-                    os.chown(str(target), *owner)
+                with _secrets_lock(paths, member.name):
+                    atomic_write_bytes(target, extracted.read(), mode=member.mode & 0o777)
+                    if owner is not None:
+                        os.chown(str(target), *owner)
 
     log_operation("stash", f"Stash restored from: {archive.name}", paths)
     return archive

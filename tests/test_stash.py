@@ -364,3 +364,35 @@ class TestStashLogging:
         # Verify "restored" message
         msgs = [c.args[1] for c in mock_log.call_args_list]
         assert any("restored" in m.lower() for m in msgs)
+
+
+class TestRestoreSecretsLocking:
+    """Restoring a secrets file takes the same lock as `secrets set`, so a
+    concurrent set cannot write the pre-restore contents back over it."""
+
+    @pytest.mark.parametrize("scope", ["host", "project"])
+    def test_restore_waits_for_the_secrets_lock(self, tmp_path: Path, scope: str) -> None:
+        import threading
+        from boxmunge.secrets import SecretsFile
+
+        paths = BoxPaths(root=tmp_path / "bm")
+        for d in ["config", "projects", "state/deploy", "stashes", "logs"]:
+            (paths.root / d).mkdir(parents=True)
+        write_installed_version(paths, "0.2.0", "abc1234")
+        _setup_project(paths, "myapp")
+        paths.host_secrets.write_text("HOST='v'\n")
+        secrets = (SecretsFile.host(paths) if scope == "host"
+                   else SecretsFile.project(paths, "myapp"))
+        original = secrets.path.read_text()
+        archive = create_stash(paths)
+        secrets.path.write_text("CHANGED='x'\n")
+
+        with secrets.locked():
+            restorer = threading.Thread(target=restore_stash, args=(paths, archive))
+            restorer.start()
+            restorer.join(timeout=0.5)
+            assert restorer.is_alive()
+            assert secrets.path.read_text() == "CHANGED='x'\n"
+        restorer.join(timeout=10)
+        assert not restorer.is_alive()
+        assert secrets.path.read_text() == original

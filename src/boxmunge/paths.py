@@ -103,6 +103,10 @@ class BoxPaths:
         self.inbox_tmp = self.inbox / ".tmp"
         self.inbox_consumed = self.inbox / ".consumed"
         self.host_secrets = self.config / "secrets.env"
+        # Writer locks for secrets files. Kept out of the project tree, which
+        # a release install prunes, so the lock file never vanishes mid-use.
+        self.secrets_locks = self.state / "secrets-locks"
+        self.host_secrets_lock = self.secrets_locks / ".host.lock"
         # Host-scoped CVE suppressions — applied across every project on
         # the box. Per-project files at <project>/security/suppressions.yml
         # remain authoritative for project-specific entries and take
@@ -141,6 +145,10 @@ class BoxPaths:
     def project_secrets(self, name: str) -> Path:
         name = _checked(name)
         return self.projects / name / "secrets.env"
+
+    def project_secrets_lock(self, name: str) -> Path:
+        name = _checked(name)
+        return self.secrets_locks / f"{name}.lock"
 
     def project_dir(self, name: str) -> Path:
         name = _checked(name)

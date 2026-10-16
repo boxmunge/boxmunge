@@ -205,6 +205,19 @@ newlines or other control characters, which would add lines to the env file. Eit
 violation is refused with an `ERROR:` and nothing is written. Store a multi-line value
 (a PEM key, say) base64-encoded and decode it in the app.
 
+Values are literal: the container receives exactly what you set, and `secrets get`
+prints exactly that. `$`, `${VAR}`, ` # `, quotes, backslashes and leading or trailing
+spaces are not interpreted. The one value Compose's env-file format cannot carry
+literally is one that ends in an odd number of backslashes or has an odd number of
+backslashes right before a `'`; `set` refuses it (base64-encode it instead).
+Concurrent `set`/`unset` calls on the same scope are serialised, so none is lost.
+
+Secrets set by boxmunge before literal values were stored unquoted, and Compose
+interpreted `$`, ` #`, surrounding quotes and spaces in them. Such a value is left
+exactly as stored, so containers keep receiving what they did, until you set it again.
+`secrets list` and `secrets set` warn which keys these are, and `secrets get` on one
+fails, showing the stored text: check what the app expects and `secrets set` it.
+
 The deploy shell parses each command with shell-style quoting. A command with an
 unbalanced quote is rejected (`ERROR: cannot parse command`) rather than guessed at, so
 quote a value containing spaces as a whole: `secrets set myapp 'GREETING=hello world'`.

@@ -496,7 +496,7 @@ secrets set myapp DATABASE_URL=postgres://user:pass@db:5432/myapp
 secrets set myapp SECRET_KEY=supersecretvalue
 ```
 
-Do not edit `secrets.env` manually. The CLI handles file creation, permissions, and format. Secrets set via the CLI are available to containers on the next deploy.
+Do not edit `secrets.env` manually. The CLI handles file creation, permissions, and format. Secrets set via the CLI are available to containers on the next deploy, byte for byte as set: `$`, `#`, quotes and spaces are not interpreted.
 
 ### project.env (ships with bundle)
 

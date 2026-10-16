@@ -1,145 +1,188 @@
-"""Tests for secrets dotenv file operations."""
+"""Tests for secrets env-file storage: literal values, legacy lines, locking."""
+import threading
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from boxmunge.secrets import read_dotenv, write_dotenv, set_key, get_key, unset_key, list_keys
+import boxmunge.secrets as secrets_mod
+from boxmunge.paths import BoxPaths
+from boxmunge.secrets import (
+    LegacySecretError, SecretsFile, SecretsFileError,
+    get_key, legacy_keys, list_keys, set_key, unset_key,
+)
+
+# Values the old unquoted format corrupted, and ones that need escaping.
+TRICKY_VALUES = [
+    "pa${UNSET_VAR}ss", "$HOME", "cost$$5", "alpha # omega", "#leading", "'quoted'",
+    '"double"', "it's", "back\\slash", "two\\\\x", "even\\\\", "esc\\\\'q",
+    "  padded  ", "\tleading tab", "a=b=c", "=leading", "café \U0001f600", "",
+    "postgres://u:p@h/db?a=1&b=2",
+]
 
 
-class TestReadDotenv:
-    def test_reads_key_value_pairs(self, tmp_path: Path) -> None:
-        env_file = tmp_path / "test.env"
-        env_file.write_text("KEY1=value1\nKEY2=value2\n")
-        result = read_dotenv(env_file)
-        assert result == {"KEY1": "value1", "KEY2": "value2"}
-
-    def test_ignores_comments(self, tmp_path: Path) -> None:
-        env_file = tmp_path / "test.env"
-        env_file.write_text("# comment\nKEY=value\n")
-        assert read_dotenv(env_file) == {"KEY": "value"}
-
-    def test_ignores_blank_lines(self, tmp_path: Path) -> None:
-        env_file = tmp_path / "test.env"
-        env_file.write_text("KEY1=value1\n\nKEY2=value2\n")
-        assert read_dotenv(env_file) == {"KEY1": "value1", "KEY2": "value2"}
-
-    def test_handles_values_with_equals(self, tmp_path: Path) -> None:
-        env_file = tmp_path / "test.env"
-        env_file.write_text("DB_URL=postgres://user:pass@host/db?opt=1\n")
-        assert read_dotenv(env_file)["DB_URL"] == "postgres://user:pass@host/db?opt=1"
-
-    def test_handles_quoted_values(self, tmp_path: Path) -> None:
-        env_file = tmp_path / "test.env"
-        env_file.write_text('KEY="value with spaces"\n')
-        assert read_dotenv(env_file)["KEY"] == "value with spaces"
-
-    def test_returns_empty_for_missing_file(self, tmp_path: Path) -> None:
-        assert read_dotenv(tmp_path / "nope.env") == {}
+@pytest.fixture
+def sf(tmp_path: Path) -> SecretsFile:
+    return SecretsFile(tmp_path / "secrets.env", tmp_path / "locks" / "secrets.lock")
 
 
-class TestWriteDotenv:
-    def test_writes_key_value_pairs(self, tmp_path: Path) -> None:
-        env_file = tmp_path / "test.env"
-        write_dotenv(env_file, {"KEY1": "value1", "KEY2": "value2"})
-        content = env_file.read_text()
-        assert "KEY1=value1\n" in content
-        assert "KEY2=value2\n" in content
+class TestLiteralRoundTrip:
+    @pytest.mark.parametrize("value", TRICKY_VALUES)
+    def test_get_returns_exactly_what_was_set(self, sf: SecretsFile, value: str) -> None:
+        set_key(sf, "KEY", value)
+        assert get_key(sf, "KEY") == value
 
-    def test_sorts_keys(self, tmp_path: Path) -> None:
-        env_file = tmp_path / "test.env"
-        write_dotenv(env_file, {"ZEBRA": "z", "ALPHA": "a"})
-        lines = env_file.read_text().strip().split("\n")
-        assert lines[0].startswith("ALPHA=")
-        assert lines[1].startswith("ZEBRA=")
+    def test_values_are_written_single_quoted(self, sf: SecretsFile) -> None:
+        set_key(sf, "A", "it's $x")
+        assert sf.path.read_text() == "A='it\\'s $x'\n"
 
+    def test_file_is_owner_only(self, sf: SecretsFile) -> None:
+        set_key(sf, "A", "x")
+        assert sf.path.stat().st_mode & 0o777 == 0o600
 
-class TestSetKey:
-    def test_sets_new_key(self, tmp_path: Path) -> None:
-        env_file = tmp_path / "test.env"
-        set_key(env_file, "KEY", "value")
-        assert get_key(env_file, "KEY") == "value"
+    def test_keys_are_sorted(self, sf: SecretsFile) -> None:
+        set_key(sf, "ZEBRA", "z")
+        set_key(sf, "ALPHA", "a")
+        assert sf.path.read_text().splitlines() == ["ALPHA='a'", "ZEBRA='z'"]
 
-    def test_overwrites_existing_key(self, tmp_path: Path) -> None:
-        env_file = tmp_path / "test.env"
-        set_key(env_file, "KEY", "old")
-        set_key(env_file, "KEY", "new")
-        assert get_key(env_file, "KEY") == "new"
-
-    def test_creates_file_if_missing(self, tmp_path: Path) -> None:
-        env_file = tmp_path / "new.env"
-        set_key(env_file, "KEY", "value")
-        assert env_file.exists()
-        assert get_key(env_file, "KEY") == "value"
+    @pytest.mark.parametrize("value", ["ends\\", "odd\\\\\\", "a\\'b", "x\\\\\\'y"])
+    def test_unrepresentable_values_are_refused(self, sf: SecretsFile, value: str) -> None:
+        set_key(sf, "SAFE", "kept")
+        with pytest.raises(ValueError, match="base64-encode"):
+            set_key(sf, "KEY", value)
+        assert sf.path.read_text() == "SAFE='kept'\n"
 
 
-class TestGetKey:
-    def test_returns_value(self, tmp_path: Path) -> None:
-        env_file = tmp_path / "test.env"
-        env_file.write_text("KEY=value\n")
-        assert get_key(env_file, "KEY") == "value"
+class TestBasics:
+    def test_missing_file(self, sf: SecretsFile) -> None:
+        assert get_key(sf, "KEY") is None
+        assert list_keys(sf) == []
 
-    def test_returns_none_for_missing_key(self, tmp_path: Path) -> None:
-        env_file = tmp_path / "test.env"
-        env_file.write_text("OTHER=value\n")
-        assert get_key(env_file, "KEY") is None
+    def test_overwrite_and_unset(self, sf: SecretsFile) -> None:
+        set_key(sf, "KEY", "old")
+        set_key(sf, "KEY", "new")
+        set_key(sf, "OTHER", "o")
+        assert get_key(sf, "KEY") == "new"
+        unset_key(sf, "KEY")
+        assert list_keys(sf) == ["OTHER"]
 
-    def test_returns_none_for_missing_file(self, tmp_path: Path) -> None:
-        assert get_key(tmp_path / "nope.env", "KEY") is None
+    def test_unset_missing_key_writes_nothing(self, sf: SecretsFile) -> None:
+        unset_key(sf, "NOPE")
+        assert not sf.path.exists()
+
+    def test_comments_and_blank_lines_are_ignored(self, sf: SecretsFile) -> None:
+        sf.path.write_text("# note\n\nKEY='v'\n")
+        assert list_keys(sf) == ["KEY"]
+
+    @pytest.mark.parametrize("content", ["garbage\n", "BAD-KEY=x\n", "A='1'\nA='2'\n"])
+    def test_lines_no_writer_produces_fail_loudly(self, sf: SecretsFile, content: str) -> None:
+        sf.path.write_text(content)
+        with pytest.raises(SecretsFileError, match="line"):
+            list_keys(sf)
+        with pytest.raises(SecretsFileError):
+            set_key(sf, "NEW", "x")
+        assert sf.path.read_text() == content
 
 
-class TestUnsetKey:
-    def test_removes_key(self, tmp_path: Path) -> None:
-        env_file = tmp_path / "test.env"
-        env_file.write_text("KEY1=a\nKEY2=b\n")
-        unset_key(env_file, "KEY1")
-        result = read_dotenv(env_file)
-        assert "KEY1" not in result
-        assert "KEY2" in result
+class TestLegacyUnquotedFiles:
+    """Files written before literal storage hold unquoted values."""
 
-    def test_noop_for_missing_key(self, tmp_path: Path) -> None:
-        env_file = tmp_path / "test.env"
-        env_file.write_text("KEY=value\n")
-        unset_key(env_file, "OTHER")
-        assert get_key(env_file, "KEY") == "value"
+    def test_plain_unquoted_values_read_literally(self, sf: SecretsFile) -> None:
+        sf.path.write_text("URL=postgres://u:p@h/db?a=1\nHASH=a#b\nEMPTY=\n")
+        assert get_key(sf, "URL") == "postgres://u:p@h/db?a=1"
+        assert get_key(sf, "HASH") == "a#b"
+        assert get_key(sf, "EMPTY") == ""
+        assert legacy_keys(sf) == []
 
+    def test_plain_lines_are_reencoded_on_next_write(self, sf: SecretsFile) -> None:
+        sf.path.write_text("OLD=plain\n")
+        assert set_key(sf, "NEW", "x") == ["OLD"]
+        assert sf.path.read_text() == "NEW='x'\nOLD='plain'\n"
 
-class TestListKeys:
-    def test_returns_sorted_keys(self, tmp_path: Path) -> None:
-        env_file = tmp_path / "test.env"
-        env_file.write_text("ZEBRA=z\nALPHA=a\n")
-        assert list_keys(env_file) == ["ALPHA", "ZEBRA"]
+    @pytest.mark.parametrize("stored", [
+        "pa${X}ss", "alpha # omega", '"abc"', "  padded  ", "trail ", "'unterminated",
+    ])
+    def test_ambiguous_lines_are_reported_not_guessed(self, sf: SecretsFile, stored: str) -> None:
+        sf.path.write_text(f"KEY={stored}\n")
+        assert legacy_keys(sf) == ["KEY"]
+        with pytest.raises(LegacySecretError) as exc:
+            get_key(sf, "KEY")
+        assert exc.value.stored == stored
 
-    def test_returns_empty_for_missing_file(self, tmp_path: Path) -> None:
-        assert list_keys(tmp_path / "nope.env") == []
+    def test_ambiguous_lines_survive_other_writes_byte_for_byte(self, sf: SecretsFile) -> None:
+        """Containers keep receiving what they did until the key is re-set."""
+        sf.path.write_text("KEY=pa${X}ss # note\n")
+        set_key(sf, "OTHER", "o")
+        assert sf.path.read_text() == "KEY=pa${X}ss # note\nOTHER='o'\n"
+
+    def test_setting_an_ambiguous_key_resolves_it(self, sf: SecretsFile) -> None:
+        sf.path.write_text("KEY=pa${X}ss\n")
+        set_key(sf, "KEY", "pa${X}ss")
+        assert get_key(sf, "KEY") == "pa${X}ss"
+        assert legacy_keys(sf) == []
+
+    def test_unsetting_an_ambiguous_key_removes_it(self, sf: SecretsFile) -> None:
+        sf.path.write_text("KEY=pa${X}ss\nOTHER='o'\n")
+        unset_key(sf, "KEY")
+        assert sf.path.read_text() == "OTHER='o'\n"
 
 
 class TestSetKeyRejectsInjection:
     """A-09: a key or value that would add or corrupt env-file lines is refused."""
 
     @pytest.mark.parametrize("key", [
-        "", "1KEY", "MY-KEY", "KEY=X", "KEY NAME", "KEY\nEVIL", "K\u00e9Y", " KEY",
+        "", "1KEY", "MY-KEY", "KEY=X", "KEY NAME", "KEY\nEVIL", "KéY", " KEY",
     ])
-    def test_rejects_bad_keys(self, tmp_path: Path, key: str) -> None:
-        env_file = tmp_path / "test.env"
+    def test_rejects_bad_keys(self, sf: SecretsFile, key: str) -> None:
         with pytest.raises(ValueError, match="key"):
-            set_key(env_file, key, "v")
-        assert not env_file.exists()
+            set_key(sf, key, "v")
+        assert not sf.path.exists()
 
     @pytest.mark.parametrize("value", [
         "line1\nINJECTED=1", "a\rb", "nul\x00byte", "esc\x1b[2J", "del\x7f",
     ])
-    def test_rejects_control_characters_in_values(self, tmp_path: Path, value: str) -> None:
-        env_file = tmp_path / "test.env"
-        set_key(env_file, "SAFE", "kept")
+    def test_rejects_control_characters_in_values(self, sf: SecretsFile, value: str) -> None:
+        set_key(sf, "SAFE", "kept")
         with pytest.raises(ValueError, match="value"):
-            set_key(env_file, "KEY", value)
-        assert read_dotenv(env_file) == {"SAFE": "kept"}
+            set_key(sf, "KEY", value)
+        assert list_keys(sf) == ["SAFE"]
 
-    @pytest.mark.parametrize("key,value", [
-        ("_PRIVATE", "x"), ("DB_URL", "postgres://u:p@h/db?a=1&b=2"),
-        ("TABBED", "a\tb"), ("SPACED", "hello world"), ("EMPTY", ""), ("UNICODE", "caf\u00e9"),
+
+class TestLocking:
+    def test_paths_put_locks_outside_the_project_tree(self, tmp_path: Path) -> None:
+        paths = BoxPaths(root=tmp_path)
+        assert SecretsFile.project(paths, "myapp").lock_path.parent == paths.state / "secrets-locks"
+        assert SecretsFile.host(paths).lock_path.parent == paths.state / "secrets-locks"
+
+    @pytest.mark.parametrize("ops", [
+        [("set", "ONE", "1"), ("set", "TWO", "2")],
+        [("set", "TWO", "2"), ("unset", "ONE", None)],
     ])
-    def test_accepts_ordinary_secrets(self, tmp_path: Path, key: str, value: str) -> None:
-        env_file = tmp_path / "test.env"
-        set_key(env_file, key, value)
-        assert get_key(env_file, key) == value
+    def test_concurrent_writers_do_not_lose_updates(self, sf: SecretsFile, ops) -> None:
+        """Both writers read before either writes unless the lock serialises
+        them. Under the lock the first reader's barrier wait times out (the
+        second writer is blocked on the lock), so the barrier never deadlocks."""
+        if ops[1][0] == "unset":
+            set_key(sf, "ONE", "1")
+        barrier = threading.Barrier(2, timeout=1)
+        real_parse = secrets_mod._parse
+
+        def parse_then_wait(path: Path):
+            result = real_parse(path)
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError:
+                pass
+            return result
+
+        def run(op: str, key: str, value: str | None) -> None:
+            set_key(sf, key, value) if op == "set" else unset_key(sf, key)
+
+        with patch.object(secrets_mod, "_parse", parse_then_wait):
+            threads = [threading.Thread(target=run, args=op) for op in ops]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        expected = sorted(k for op, k, _ in ops if op == "set")
+        assert list_keys(sf) == expected

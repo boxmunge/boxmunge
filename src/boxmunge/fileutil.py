@@ -16,9 +16,10 @@ To rule out deadlock, a process only ever acquires them in this order
    health tick. Non-blocking. A process holds **at most one** project lock
    and never acquires a second project lock while holding one.
 4. Short blocking locks, always innermost: ``state/.registry.lock``
-   (``registry_lock``), ``state/.caddy.lock`` (inside ``caddy_reload``), and
-   ``state/.cve-grace.lock``. None of them is held while acquiring any
-   other lock, and none is held across slow work.
+   (``registry_lock``), ``state/.caddy.lock`` (inside ``caddy_reload``),
+   ``state/.cve-grace.lock``, and ``state/secrets-locks/*.lock`` (one per
+   secrets file, around every write of it). None of them is held while
+   acquiring any other lock, and none is held across slow work.
 
 Gating checks (paused, quarantined, monitor-stopped) that decide whether a
 project may be mutated are made *after* taking the project lock, so a
@@ -257,7 +258,17 @@ def registry_lock(paths: "BoxPaths") -> Iterator[None]:
     add_project / remove_project, which the operator expects to succeed
     rather than fail with "try again".
     """
-    lock_path = paths.state / ".registry.lock"
+    with exclusive_lock(paths.state / ".registry.lock"):
+        yield
+
+
+@contextmanager
+def exclusive_lock(lock_path: Path) -> Iterator[None]:
+    """Hold an exclusive flock on lock_path for the block. Blocking.
+
+    For short critical sections only (a small file's read-modify-write),
+    so waiting is preferable to failing with "try again".
+    """
     fd = open_shared_lockfile(lock_path)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)

@@ -1,24 +1,25 @@
 """boxmunge secrets — set, get, list, unset secrets for projects and host."""
 
 import sys
-from pathlib import Path
 
 from boxmunge.log import log_operation
 from boxmunge.paths import BoxPaths
-from boxmunge.secrets import get_key, list_keys, set_key, unset_key
+from boxmunge.secrets import (
+    LegacySecretError, SecretsFile, get_key, legacy_keys, list_keys, set_key, unset_key,
+)
 
 
-def _resolve_secrets_path(
+def _resolve_secrets(
     args: list[str], paths: BoxPaths,
-) -> tuple[Path | None, list[str], str | None]:
-    """Return (secrets_path, remaining_args, project) from args.
+) -> tuple[SecretsFile | None, list[str], str | None]:
+    """Return (secrets_file, remaining_args, project) from args.
 
     `project` is the project name for log emission, or None for --host scope.
     For project secrets: creates the project directory if it doesn't exist.
     This allows setting secrets before first deploy (pre-registration).
     """
     if args and args[0] == "--host":
-        return paths.host_secrets, args[1:], None
+        return SecretsFile.host(paths), args[1:], None
     if args:
         project_name = args[0]
         from boxmunge.paths import validate_project_name
@@ -30,13 +31,42 @@ def _resolve_secrets_path(
         project_dir = paths.project_dir(project_name)
         if not project_dir.exists():
             project_dir.mkdir(parents=True)
-        return paths.project_secrets(project_name), args[1:], project_name
+        return SecretsFile.project(paths, project_name), args[1:], project_name
     return None, args, None
 
 
+def _scope(project: str | None) -> str:
+    return project if project is not None else "--host"
+
+
+def _warn_legacy(keys: list[str], project: str | None) -> None:
+    """Say which keys still hold values containers may not see as written."""
+    if keys:
+        print(
+            f"WARNING: {', '.join(keys)} in {_scope(project)} secrets "
+            "predate literal storage: Compose interprets $, ' #', quotes and "
+            "surrounding spaces in them, so containers may not receive the "
+            f"value as set. Check each with 'secrets get {_scope(project)} KEY' "
+            "and set it again.", file=sys.stderr,
+        )
+
+
+def _record_write(op: str, key: str, secrets: SecretsFile, paths: BoxPaths,
+                  project: str | None, migrated: list[str]) -> None:
+    msg = f"{op} {key}"
+    if migrated:
+        # Lossless: these keys' old unquoted lines already read literally.
+        msg += f"; re-encoded as literal values: {', '.join(migrated)}"
+    legacy = legacy_keys(secrets)
+    if legacy:
+        msg += f"; old unquoted values kept as stored: {', '.join(legacy)}"
+    log_operation("secrets", msg, paths, project=project)
+    _warn_legacy(legacy, project)
+
+
 def _cmd_set(args: list[str], paths: BoxPaths) -> int:
-    secrets_path, rest, project = _resolve_secrets_path(args, paths)
-    if secrets_path is None:
+    secrets, rest, project = _resolve_secrets(args, paths)
+    if secrets is None:
         return 1
     if not rest:
         print("ERROR: Missing KEY=VALUE argument", file=sys.stderr)
@@ -47,23 +77,36 @@ def _cmd_set(args: list[str], paths: BoxPaths) -> int:
         return 1
     key, _, value = assignment.partition("=")
     try:
-        set_key(secrets_path, key, value)
+        migrated = set_key(secrets, key, value)
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
-    log_operation("secrets", f"set {key}", paths, project=project)
+    _record_write("set", key, secrets, paths, project, migrated)
     return 0
 
 
 def _cmd_get(args: list[str], paths: BoxPaths) -> int:
-    secrets_path, rest, _ = _resolve_secrets_path(args, paths)
-    if secrets_path is None:
+    secrets, rest, project = _resolve_secrets(args, paths)
+    if secrets is None:
         return 1
     if not rest:
         print("ERROR: Missing KEY argument", file=sys.stderr)
         return 1
     key = rest[0]
-    value = get_key(secrets_path, key)
+    try:
+        value = get_key(secrets, key)
+    except LegacySecretError as e:
+        print(
+            f"ERROR: {key} predates literal storage and is stored unquoted as "
+            f"{e.stored!r}. Compose interprets $, ' #', quotes and surrounding "
+            "spaces in that text, so containers may not receive it as written. "
+            f"Set it again to store it literally: secrets set {_scope(project)} "
+            f"'{key}=<value>'", file=sys.stderr,
+        )
+        return 1
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
     if value is None:
         print(f"ERROR: Key '{key}' not found", file=sys.stderr)
         return 1
@@ -72,24 +115,34 @@ def _cmd_get(args: list[str], paths: BoxPaths) -> int:
 
 
 def _cmd_list(args: list[str], paths: BoxPaths) -> int:
-    secrets_path, _, _ = _resolve_secrets_path(args, paths)
-    if secrets_path is None:
+    secrets, _, project = _resolve_secrets(args, paths)
+    if secrets is None:
         return 1
-    for key in list_keys(secrets_path):
+    try:
+        keys = list_keys(secrets)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    for key in keys:
         print(key)
+    _warn_legacy(legacy_keys(secrets), project)
     return 0
 
 
 def _cmd_unset(args: list[str], paths: BoxPaths) -> int:
-    secrets_path, rest, project = _resolve_secrets_path(args, paths)
-    if secrets_path is None:
+    secrets, rest, project = _resolve_secrets(args, paths)
+    if secrets is None:
         return 1
     if not rest:
         print("ERROR: Missing KEY argument", file=sys.stderr)
         return 1
     key = rest[0]
-    unset_key(secrets_path, key)
-    log_operation("secrets", f"unset {key}", paths, project=project)
+    try:
+        migrated = unset_key(secrets, key)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    _record_write("unset", key, secrets, paths, project, migrated)
     return 0
 
 
