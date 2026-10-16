@@ -10,7 +10,7 @@ import pytest
 from boxmunge.paths import BoxPaths
 from boxmunge.userns import offset
 from tests.integration.userns.dockerd import (
-    ProcessDaemon, prior_daemon_json, write_daemon_json,
+    BUSYBOX, ProcessDaemon, prior_daemon_json, write_daemon_json,
 )
 
 IN_DIND = os.environ.get("BOXMUNGE_USERNS_DIND") == "1"
@@ -54,7 +54,7 @@ def remapped_daemon(tmp_path_factory):
                        "storage-driver": "overlay2",
                        "features": {"containerd-snapshotter": False}})
     daemon.start()
-    subprocess.run(["docker", "pull", "-q", "busybox:1.36"], check=True, capture_output=True)
+    subprocess.run(["docker", "pull", "-q", BUSYBOX], check=True, capture_output=True)
     yield s
     daemon.stop()
     write_daemon_json(prior_daemon_json())

@@ -9,6 +9,7 @@ from pathlib import Path
 DAEMON_JSON = Path("/etc/docker/daemon.json")
 PRIOR = Path("/etc/docker/daemon.json.prior")
 LOG = Path("/var/log/dockerd.log")
+BUSYBOX = "busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
 
 
 def _wait(ready, what: str, timeout: float = 60) -> None:

@@ -6,6 +6,8 @@
 # installs the runner and hands over to pytest. pytest imports boxmunge from
 # src/ (pyproject's pythonpath), so nothing is installed from the checkout.
 set -eu
+# Alpine packages are not version-pinned, as the integration job's apt
+# packages are not: Alpine offers no practical hash pinning.
 apk add -q python3 py3-pip bash age attr acl e2fsprogs-extra shadow shadow-subids >/dev/null
 cp -a /src /work
 cd /work
@@ -24,7 +26,6 @@ i=0
 until docker info >/dev/null 2>&1; do
     i=$((i + 1)); [ "$i" -lt 60 ] || { tail -50 /var/log/dockerd.log; exit 1; }; sleep 1
 done
-docker pull -q busybox:1.36 >/dev/null
 export BOXMUNGE_REQUIRE_INTEGRATION=1 BOXMUNGE_USERNS_DIND=1
 status=0
 /venv/bin/python -m pytest tests/integration/userns -m userns_dind -q -p no:cacheprovider || status=$?
