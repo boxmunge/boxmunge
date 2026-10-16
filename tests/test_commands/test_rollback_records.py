@@ -35,11 +35,13 @@ def test_rollback_with_a_snapshot_and_a_changed_compose_passes_restores_check(pa
     assert find_rollback_target(paths, "myapp").snapshot
     checked: list[str] = []
 
-    def restore_with_its_real_start_check(project_name, paths_, snapshot=None):
-        """The restore's own first step, then a restore that succeeds."""
+    def restore_with_its_real_start_check(project_name, paths_, snapshot=None, txn=None):
+        """The restore's own first step, then a restore that succeeds. The
+        rollback passes its install transaction's id, as to the real one."""
+        assert txn is not None
         try:
             check_start(paths_, project_name, component="restore",
-                        compose_files=_compose_files(paths_, project_name))
+                        compose_files=_compose_files(paths_, project_name), txn=txn)
         except ComposeRefused as e:
             checked.append(f"refused: {e}")
             return 1

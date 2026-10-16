@@ -98,19 +98,25 @@ class ServiceCommandTimeout(Exception):
         super().__init__(f"timed out after {timeout}s; {outcome}")
 
 
-def _exec(project_name: str, service: str, argv: list[str]) -> list[str]:
-    return ["docker", "compose", "-f", "compose.yml", "-p", project_name,
-            "exec", "-T", service, *argv]
+def _exec(project_name: str, service: str, argv: list[str],
+          compose_file: Path | None = None, project_dir: Path | None = None) -> list[str]:
+    """`compose_file` names the compose file of the release the containers
+    run when it is not the project dir's (during an open install); paths in
+    it still resolve against the project dir."""
+    files = (["-f", "compose.yml"] if compose_file is None else
+             ["--project-directory", str(project_dir), "-f", str(compose_file)])
+    return ["docker", "compose", *files, "-p", project_name, "exec", "-T", service, *argv]
 
 
 def _stop(project_dir: Path, project_name: str, service: str,
-          pid_name: str) -> tuple[str | None, str | None]:
+          pid_name: str, compose_file: Path | None = None) -> tuple[str | None, str | None]:
     """Kill the command's process group in the container.
 
     Returns (group id, None) once the group is verified gone, else
     (None, why not).
     """
-    cmd = _exec(project_name, service, ["sh", "-c", _STOP_SCRIPT, "boxmunge-stop", pid_name])
+    cmd = _exec(project_name, service, ["sh", "-c", _STOP_SCRIPT, "boxmunge-stop", pid_name],
+                compose_file, project_dir)
     try:
         result = subprocess.run(cmd, cwd=project_dir, capture_output=True,
                                 text=True, timeout=_STOP_TIMEOUT, env=docker_env())
@@ -124,7 +130,7 @@ def _stop(project_dir: Path, project_name: str, service: str,
 
 def run_in_service(
     project_dir: Path, project_name: str, service: str, command: str,
-    *, timeout: float, **run_kwargs: Any,
+    *, timeout: float, compose_file: Path | None = None, **run_kwargs: Any,
 ) -> subprocess.CompletedProcess:
     """``sh -c command`` in the service, bounded by ``timeout``.
 
@@ -133,15 +139,16 @@ def run_in_service(
     killed there too before the interruption propagates.
     """
     pid_name = f"boxmunge-exec-{secrets.token_hex(16)}.pid"
-    cmd = _exec(project_name, service, ["sh", "-c", _WRAPPER, _WRAPPER, pid_name, command])
+    cmd = _exec(project_name, service, ["sh", "-c", _WRAPPER, _WRAPPER, pid_name, command],
+                compose_file, project_dir)
     try:
         return subprocess.run(cmd, cwd=project_dir, timeout=timeout, env=docker_env(),
                               **run_kwargs)
     except subprocess.TimeoutExpired as e:
         raise ServiceCommandTimeout(
-            timeout, *_stop(project_dir, project_name, service, pid_name)) from e
+            timeout, *_stop(project_dir, project_name, service, pid_name, compose_file)) from e
     except OSError:
         raise  # nothing started
     except BaseException:
-        _stop(project_dir, project_name, service, pid_name)
+        _stop(project_dir, project_name, service, pid_name, compose_file)
         raise

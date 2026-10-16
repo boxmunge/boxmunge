@@ -21,9 +21,9 @@ aside while another one is staged is in boxmunge.release_staging.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,11 +33,12 @@ from boxmunge.bundle import (
 from boxmunge.compose_mounts import PROD_SMOKE_SOURCE
 from boxmunge.data_dirs import (
     Announce, DataDirs, KeptData, ReleaseStateError, classify, entry_label,
-    has_record, holds_data, naming_set_aside, record_path, save_record,
-    set_aside_announcer, start_record, warn_retained,
+    has_record, holds_data, record_path, save_record,
+    start_record, warn_retained,
 )
 from boxmunge.fileutil import (
-    atomic_write_text, chmod_nofollow, chown_tree_deploy, mkdir_p_deploy,
+    atomic_write_text, chmod_nofollow, chown_tree_deploy, discard_dir, fsync_dir,
+    mkdir_p_deploy, sync_entries,
 )
 
 if TYPE_CHECKING:
@@ -311,47 +312,24 @@ def live_ref(paths: BoxPaths, project_name: str) -> str:
     return ref
 
 
+def live_meta_text(ref: str) -> str:
+    """live.json's exact content for ``ref`` (release_txn hashes it)."""
+    return json.dumps({"ref": ref}) + "\n"
+
+
+def previous_meta_text(ref: str, data_snapshot: str | None, replaced_at: str,
+                       replaced_by: str) -> str:
+    """previous.json's exact content (release_txn hashes it)."""
+    return json.dumps({"ref": ref, "data_snapshot": data_snapshot or "",
+                       "replaced_at": replaced_at, "replaced_by": replaced_by},
+                      indent=2) + "\n"
+
+
 def mark_live(paths: BoxPaths, project_name: str, ref: str) -> None:
     """Record which release ref the project dir's code now is."""
     meta = _live_meta(paths, project_name)
     meta.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(meta, json.dumps({"ref": ref}) + "\n", mode=0o644)
-
-
-def keep_previous_release(
-    paths: BoxPaths, project_name: str, data_snapshot: str | None,
-    replaced_by: str, release_tree: Path | None = None,
-) -> None:
-    """Copy the live release code to ``.releases/previous/`` before an upgrade.
-
-    The copy is built beside the old one and swapped in only when complete,
-    so a failure here leaves the live tree and the old snapshot untouched.
-    """
-    project_dir = paths.project_dir(project_name)
-    releases = paths.project_releases(project_name)
-    building = releases / "previous.building"
-    _remove(building)
-    building.mkdir(parents=True)
-    for entry in live_code_entries(project_dir, release_tree):
-        _copy_entry(entry, building / entry.name)
-    # After the copy, so the kept release has any contents set aside too.
-    copies = _ensure_record(project_dir, release_tree,
-                            set_aside_announcer(paths, project_name, "deploy"))
-    with naming_set_aside(copies):
-        meta = {
-            "ref": live_ref(paths, project_name),
-            "data_snapshot": data_snapshot or "",
-            "replaced_at": datetime.now(timezone.utc).isoformat(),
-            "replaced_by": replaced_by,
-        }
-        # Drop the old metadata first: a crash mid-swap then leaves no previous
-        # release (rollback refuses) rather than old metadata on a new tree.
-        _remove(_previous_meta(paths, project_name))
-        target = previous_dir(paths, project_name)
-        _remove(target)
-        building.rename(target)
-        atomic_write_text(_previous_meta(paths, project_name),
-                          json.dumps(meta, indent=2) + "\n", mode=0o644)
+    atomic_write_text(meta, live_meta_text(ref), mode=0o644)
 
 
 def load_previous_release(paths: BoxPaths, project_name: str) -> PreviousRelease | None:
@@ -371,10 +349,23 @@ def load_previous_release(paths: BoxPaths, project_name: str) -> PreviousRelease
 
 
 def discard_previous_release(paths: BoxPaths, project_name: str) -> None:
-    """Drop the kept previous release (after a rollback has used it)."""
+    """Drop the kept previous release (after a rollback has used it).
+
+    The metadata goes first and durably: from then on there is no rollback
+    target, and a crash part-way through removing the tree leaves only
+    debris, never a half-removed release that still looks usable."""
     _ensure_record(paths.project_dir(project_name))
-    _remove(previous_dir(paths, project_name))
-    _remove(_previous_meta(paths, project_name))
+    meta = _previous_meta(paths, project_name)
+    if os.path.lexists(meta):
+        meta.unlink()
+        fsync_dir(meta.parent)
+    discard_dir(previous_dir(paths, project_name))
+
+
+def sync_release_code(project_dir: Path) -> None:
+    """Make the release code install_release wrote durable, before an
+    install records that it is in place."""
+    sync_entries(live_code_entries(project_dir), project_dir)
 
 
 # --- production smoke scripts ---------------------------------------------

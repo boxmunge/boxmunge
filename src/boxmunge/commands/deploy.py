@@ -8,11 +8,10 @@ from pathlib import Path
 
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.commands.deploy_steps import (
-    post_deploy_diagnostics, record_deploy_state, smoke_ok,
-    snapshot_live_release, take_pre_deploy_snapshot, update_repo,
+    post_deploy_diagnostics, record_deploy_state, smoke_ok, take_pre_deploy_snapshot,
+    update_repo,
 )
 from boxmunge.compose import prepare_compose_override
-from boxmunge.data_dirs import SetAsideError, log_kept, set_aside_announcer
 from boxmunge.compose_guard import compose_up_checked
 from boxmunge.docker import CaddyConfigRejected, caddy_reload, DockerError
 from boxmunge.fileutil import project_lock, LockError
@@ -26,10 +25,7 @@ from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
-from boxmunge.release import (
-    ReleaseStateError, install_release, keep_previous_release, live_ref, mark_live,
-    previous_dir,
-)
+from boxmunge.release import ReleaseStateError, live_ref, previous_dir
 from boxmunge.release_staging import has_prestage
 from boxmunge.source import (
     SourceError, bundle_ref, consume_bundle, resolve_bundle_source,
@@ -63,6 +59,24 @@ def _run_deploy_inner(
     try:
         bundle_path = resolve_bundle_source(project_name, paths, ref=ref)
     except SourceError as e:
+        from boxmunge.commands.deploy_tree import resume_without_bundle
+        from boxmunge.release_txn import load_txn
+        try:
+            txn = load_txn(paths, project_name)
+        except ReleaseStateError as err:
+            print(f"ERROR: {err}", file=sys.stderr)
+            return 1
+        if txn is not None and dry_run:
+            from boxmunge.commands.deploy_tree import bundle_resume_problem
+            problem = bundle_resume_problem(project_name, paths, txn, ref)
+            if problem:
+                print(f"ERROR: {problem}.", file=sys.stderr)
+                return 1
+            print(f"[DRY RUN] Would resume the open install of {txn.ref} "
+                  f"(phase {txn.phase}) from the project dir")
+            return 0
+        if txn is not None:
+            return resume_without_bundle(project_name, paths, txn, ref, component)
         if is_new or ref:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
@@ -78,14 +92,10 @@ def _deploy_bundle(
     project_name: str, paths: BoxPaths, bundle_path: Path, is_new: bool,
     no_snapshot: bool, dry_run: bool, component: str,
 ) -> int:
-    """Validate a bundle in .releases/incoming/, then install and start it.
-
-    The live tree is only touched once every check has passed (audit C-01).
-    On an upgrade the outgoing release and a snapshot of its data are kept
-    for `rollback` (audit C-02).
-    """
+    """Validate a bundle in .releases/incoming/, then install and start it
+    inside an install transaction (commands/deploy_tree.py)."""
+    from boxmunge.commands.deploy_tree import TreeDeploy, deploy_tree_locked
     new_ref = bundle_ref(bundle_path)
-    snapshot_name = None
     try:
         with incoming_workspace(paths, project_name) as workspace:
             tree = extract_candidate(bundle_path, workspace)
@@ -97,48 +107,16 @@ def _deploy_bundle(
                 return 0
             action = "Creating" if is_new else "Updating"
             print(f"{action} project '{project_name}' from {bundle_path.name}...")
-            if not is_new:
-                snapshot_name = snapshot_live_release(project_name, paths, no_snapshot)
-                try:
-                    keep_previous_release(paths, project_name, snapshot_name,
-                                          new_ref, release_tree=tree)
-                except (OSError, ReleaseStateError) as e:
-                    return _install_failed(project_name, paths, e, changed=False,
-                                           first_deploy=is_new)
-            try:
-                kept = install_release(tree, paths.project_dir(project_name),
-                                       set_aside_announcer(paths, project_name, "deploy"))
-                mark_live(paths, project_name, new_ref)
-                log_kept(paths, project_name, kept, "deploy")
-            except (OSError, ValueError) as e:
-                return _install_failed(project_name, paths, e, changed=True,
-                                       first_deploy=is_new)
+
+            def installed() -> None:
+                register_project_identity(project_name, manifest.get("id", ""), paths)
+                consume_bundle(bundle_path, project_name, paths)
+
+            return deploy_tree_locked(project_name, paths, TreeDeploy(
+                tree=tree, ref=new_ref, source="bundle", manifest=manifest,
+                component=component, no_snapshot=no_snapshot, on_installed=installed))
     except IntakeError as e:
         return report_refusal(e)
-
-    register_project_identity(project_name, manifest.get("id", ""), paths)
-    consume_bundle(bundle_path, project_name, paths)
-    return _start_release(project_name, paths, manifest, new_ref,
-                          snapshot_name, component)
-
-
-def _install_failed(project_name: str, paths: BoxPaths, error: Exception,
-                    changed: bool, first_deploy: bool) -> int:
-    print(f"ERROR: Installing the release failed: {error}", file=sys.stderr)
-    if changed and first_deploy:
-        print("  The project files may be partly written. Fix the cause and "
-              "deploy the bundle again.", file=sys.stderr)
-    elif changed:
-        print(f"  The project files may be partly updated. 'rollback "
-              f"{project_name}' restores the previous release.", file=sys.stderr)
-    elif isinstance(error, SetAsideError):
-        print("  Only the old contents named above were moved; nothing else in "
-              "the project was changed. Deploy again once the cause is fixed.",
-              file=sys.stderr)
-    else:
-        print("  Nothing in the project was changed.", file=sys.stderr)
-    log_error("deploy", f"Release install failed: {error}", paths, project=project_name)
-    return 1
 
 
 def redeploy_installed(
@@ -255,7 +233,8 @@ def generate_release_config(project_name: str, paths: BoxPaths, manifest: dict,
 
 def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
                     actual_ref: str, snapshot_name: str | None,
-                    component: str = "deploy", promoting: bool = False) -> int:
+                    component: str = "deploy", promoting: bool = False,
+                    txn: str | None = None) -> int:
     """Start the release in production, route it, smoke-test, record.
 
     From the container start on, production runs (or partly runs) this
@@ -265,12 +244,13 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
     fails records nothing, so a retry is still treated as a first deploy.
 
     `promoting` is true when the release is the staged one a `promote`
-    deploys: production may start from it even while it is staged.
+    deploys: production may start from it even while it is staged. `txn`
+    is the id of the install transaction this start finishes (release_txn).
     """
     first_deploy = "current_ref" not in read_state(paths.project_deploy_state(project_name))
     rc = 1
     try:
-        rc = _start_and_verify(project_name, paths, manifest, component, promoting)
+        rc = _start_and_verify(project_name, paths, manifest, component, promoting, txn)
     finally:
         if rc == 0 or not first_deploy:
             record_deploy_state(paths, project_name, actual_ref, snapshot_name)
@@ -287,14 +267,15 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
 
 
 def _start_and_verify(project_name: str, paths: BoxPaths, manifest: dict,
-                      component: str = "deploy", promoting: bool = False) -> int:
+                      component: str = "deploy", promoting: bool = False,
+                      txn: str | None = None) -> int:
     project_dir = paths.project_dir(project_name)
     print("  Starting containers...")
     compose_files = ["compose.yml", "compose.boxmunge.yml"]
     try:
         compose_up_checked(paths, project_name, component=component,
                            compose_files=compose_files, record=True, promoting=promoting,
-                           deploying=True)
+                           deploying=True, txn=txn)
     except DockerError as e:
         print(f"  ERROR: {e}", file=sys.stderr)
         log_error("deploy", f"Deploy failed: container start: {e}", paths, project=project_name)
@@ -395,12 +376,17 @@ def run_deploy(
 
 def cmd_deploy(args: list[str]) -> None:
     """CLI entry point for prod-deploy command."""
-    from boxmunge.commands.argv import parse_args, require_project_name
+    from boxmunge.commands.argv import parse_args, require_project_name, usage_error
     parsed = parse_args(
-        "prod-deploy", args, flags={"--no-snapshot", "--dry-run"},
+        "prod-deploy", args, flags={"--no-snapshot", "--dry-run", "--abandon"},
         options={"--ref"}, min_positional=1, max_positional=1,
     )
     project = require_project_name("prod-deploy", parsed.positional[0])
+    if parsed.has("--abandon"):
+        if parsed.get("--ref") or parsed.has("--no-snapshot") or parsed.has("--dry-run"):
+            usage_error("prod-deploy", "--abandon takes no other options")
+        from boxmunge.commands import install_abandon
+        sys.exit(install_abandon.run_abandon(project, BoxPaths()))
     sys.exit(run_deploy(project, BoxPaths(), ref=parsed.get("--ref"),
                         no_snapshot=parsed.has("--no-snapshot"),
                         dry_run=parsed.has("--dry-run")))

@@ -128,6 +128,7 @@ class TestAllowedCommands:
             "stash",             # Root-context only; reached via the upgrade shim.
             "container-update",  # Triggered by systemd timer, not by operators.
             "bundle",            # Local-dev only — packages a project on the developer's machine.
+            "install-txn",       # Operator-only: dropping a stale install record.
         }
 
         for cmd in COMMANDS:

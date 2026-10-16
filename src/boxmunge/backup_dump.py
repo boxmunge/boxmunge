@@ -25,8 +25,10 @@ DUMP_PREFIX = ".dump-"
 
 def execute_dump(
     paths: BoxPaths, project_name: str, dump_command: str, service: str,
+    compose_file: Path | None = None,
 ) -> Path:
     """Run the dump command inside the project container and capture output.
+    ``compose_file``: see service_exec.run_in_service.
 
     This function removes the plaintext on every failure; once it returns
     the path, removing it is the caller's job.
@@ -53,6 +55,7 @@ def execute_dump(
                 result = run_in_service(
                     project_dir, project_name, service, dump_command,
                     timeout=BACKUP_CMD_TIMEOUT, stdout=outf, stderr=subprocess.PIPE,
+                    compose_file=compose_file,
                 )
             except ServiceCommandTimeout as e:
                 # The project lock is held for the whole dump; without a bound

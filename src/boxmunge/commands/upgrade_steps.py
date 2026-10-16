@@ -17,6 +17,7 @@ from boxmunge.compose import generate_compose_override, load_user_compose, prepa
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
 from boxmunge.release_staging import has_prestage
+from boxmunge.release_txn import open_install_reason
 from boxmunge.docker import DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
 from boxmunge.lifecycle import BlockReason, is_blocked
@@ -100,6 +101,7 @@ class ManifestMigration:
     in_memory: list[str] = field(default_factory=list)
     skipped_locked: list[str] = field(default_factory=list)
     unlinked: dict[str, str] = field(default_factory=dict)
+    install_open: list[str] = field(default_factory=list)
 
 
 def _links_into_repository(project_dir: Path) -> bool:
@@ -138,6 +140,11 @@ def migrate_project_manifests(paths: BoxPaths) -> ManifestMigration:
             continue
         try:
             with project_lock(name, paths):
+                # The project dir may hold a half-installed release; the core
+                # that finishes or abandons the install migrates what it keeps.
+                if open_install_reason(paths, name):
+                    result.install_open.append(name)
+                    continue
                 write_manifest(project_dir / "manifest.yml", migrated)
         except LockError:
             result.skipped_locked.append(name)
@@ -215,12 +222,21 @@ class Regeneration:
     rewritten, and projects refused by the compose validator (name -> why)."""
     processed: list[str] = field(default_factory=list)
     refused: dict[str, str] = field(default_factory=dict)
+    install_open: dict[str, str] = field(default_factory=dict)
 
 
 def _regenerate_project(
     paths: BoxPaths, name: str, manifest: dict[str, Any], regen: Regeneration,
 ) -> None:
     """Write one project's Caddy site config and compose overlay."""
+    # An open install: the project dir may hold a half-installed release, so
+    # its configs are left as they are, for the install to write.
+    why = open_install_reason(paths, name)
+    if why:
+        regen.install_open[name] = why
+        log_warning("upgrade", f"Configs of {name} not regenerated and it is not "
+                    f"restarted: {why}", paths, project=name)
+        return
     # A paused or CVE-quarantined project is deliberately offline. Its Caddy
     # fragment must stay the maintenance page: regenerating live routing
     # would send visitors to stopped upstreams (502) instead of the page the
@@ -332,42 +348,6 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
     return report
 
 
-def notify_locked_skips(paths: BoxPaths, skipped_locked: list[str]) -> None:
-    """Send a Pushover summary when restart_projects skipped any projects.
-
-    The lock-skip is logged but, in non-interactive contexts (cron timer,
-    auto-update path), the operator never sees the warning. This raises
-    the visibility to the same channel as other upgrade-time alerts;
-    ``notify`` logs a non-delivery.
-    """
-    if not skipped_locked:
-        return
-    from boxmunge.notify import notify
-    names = ", ".join(skipped_locked)
-    notify(paths, "upgrade — projects skipped restart",
-           f"Upgrade applied but {len(skipped_locked)} project(s) skipped "
-           f"restart (locked): {names}. They will pick up new config on next "
-           f"deploy.", component="upgrade")
-
-
-def notify_refused(paths: BoxPaths, refused: dict[str, str]) -> None:
-    """One priority-1 alert per upgrade naming every refused project.
-
-    One summary rather than one alert per project; the dry run never
-    alerts, so an upgrade alerts once, and again on a later upgrade only
-    while the compose.yml is still refused.
-    """
-    if not refused:
-        return
-    from boxmunge.notify import notify
-    lines = "\n".join(f"- {name}: {why}" for name, why in sorted(refused.items()))
-    notify(paths, "upgrade — compose refused",
-           f"The upgrade's compose validator refused {len(refused)} project(s). "
-           f"They keep their previous configs and running containers and were "
-           f"not restarted. Fix compose.yml and redeploy:\n{lines}",
-           component="upgrade", priority=1)
-
-
 @dataclass
 class Restart:
     """What restart_projects did with each project it did not leave offline
@@ -378,6 +358,7 @@ class Restart:
     monitor_stopped: list[str] = field(default_factory=list)
     # Refused by the start checks (compose_guard), which alerted for each.
     start_refused: list[str] = field(default_factory=list)
+    install_open: list[str] = field(default_factory=list)
 
 
 def restart_projects(paths: BoxPaths, *, refused: Collection[str]) -> Restart:
@@ -449,6 +430,11 @@ def _restart_locked(
         log_operation("upgrade", f"Not restarting {project_name}: the health "
                       f"monitor stopped it; run `recover {project_name}` once "
                       f"it is fixed", paths, project=project_name)
+        return
+    if open_install_reason(paths, project_name):
+        result.install_open.append(project_name)
+        log_operation("upgrade", f"Not restarting {project_name}: an install is open",
+                      paths, project=project_name)
         return
     if project_name in refused:
         log_operation("upgrade", f"Not restarting {project_name}: its compose.yml "

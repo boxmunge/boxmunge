@@ -78,3 +78,18 @@ def test_import_is_not_a_command() -> None:
     assert "import" not in cli.COMMANDS
     with pytest.raises(ModuleNotFoundError):
         __import__("boxmunge.commands.import_cmd")
+
+
+def test_prod_deploy_abandon_reaches_run_abandon(no_run, monkeypatch) -> None:
+    from boxmunge.commands import install_abandon
+    called: list[str] = []
+    monkeypatch.setattr(install_abandon, "run_abandon", lambda p, _paths: called.append(p) or 0)
+    assert _main(["prod-deploy", "myapp", "--abandon"], monkeypatch) == 0
+    assert called == ["myapp"] and no_run == []
+
+
+@pytest.mark.parametrize("extra", [["--dry-run"], ["--no-snapshot"], ["--ref", "x"]])
+def test_prod_deploy_abandon_takes_no_other_options(extra, no_run, monkeypatch, capsys) -> None:
+    assert _main(["prod-deploy", "myapp", "--abandon", *extra], monkeypatch) == 2
+    assert no_run == []
+    assert "--abandon takes no other options" in capsys.readouterr().err

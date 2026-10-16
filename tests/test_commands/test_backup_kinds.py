@@ -38,7 +38,7 @@ def _seed(paths: BoxPaths, kind: BackupKind, days: range) -> list:
     return out
 
 
-def _fake_dump(paths, project_name, dump_command, service):
+def _fake_dump(paths, project_name, dump_command, service, compose_file=None):
     raw = paths.project_backups(project_name) / ".dump-x.tar.gz"
     raw.write_bytes(b"dump")
     return raw

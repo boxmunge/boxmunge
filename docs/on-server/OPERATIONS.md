@@ -644,9 +644,57 @@ Rollback refuses, with the reason, instead of doing half a rollback:
   to go back to; deploy a known-good bundle instead);
 - when the project has backups configured but no snapshot was taken before the last deploy (the
   backup failed or `--no-snapshot` was used), or that snapshot is no longer in `backups/`;
-- while a staged release is installed (`promote` or `unstage` first).
+- while a staged release is installed (`promote` or `unstage` first);
+- while an install is open whose pre-deploy hook has not run yet: nothing reached production's
+  containers or data, so `prod-deploy <project> --abandon` puts the old files back instead (see
+  "An interrupted or failed install").
 
 A project with `backup.type: none` rolls back its code only.
+
+A rollback records each step, so a rerun after a crash carries on where it
+stopped. One window remains: if the machine crashes in the seconds after the
+snapshot was restored but before that is recorded, the rerun restores the
+snapshot again, and anything written to the data in those seconds is lost.
+
+## An interrupted or failed install
+
+Every bundle production install (`prod-deploy`, `rollback`) is recorded in
+`<project>/.releases/install.json` until it finishes. While it is open, nothing
+else starts the project's containers: upgrades, `resume`, `recover`,
+container updates and `restore` refuse and say why, and `stage` and `promote`
+wait too. The alert names your options:
+
+- run the same command again (`prod-deploy <project> --ref <bundle>`, or
+  `rollback <project>`): it carries on from where it stopped, with the data
+  snapshot it took before it started (once the new release's containers may
+  have started, the pre-deploy hook is not run again);
+- `prod-deploy <project> --abandon`, while nothing has reached production's
+  data: the old release's files go back (a first deploy's code is removed);
+  containers and data were never touched. If it is interrupted, run it again;
+- `rollback <project>`, once a pre-deploy hook may have run (this install's,
+  or an earlier attempt's it replaced): the old release with the snapshot taken
+  before the first attempt;
+- or deploy a fix (another bundle): it keeps the same rollback target and
+  snapshot, and it can no longer be abandoned once an earlier attempt's hook
+  ran. This is also the way out of a first deploy whose hook keeps failing.
+
+A failure once the containers were started (compose, Caddy or the smoke test)
+closes the install as before: production may run the new release, and
+`rollback` returns to the old one.
+
+While an install is open, backups use the manifest and compose file of the
+release the containers still run, and are skipped with an alert when that is
+ambiguous (an attempt may have started its containers). A platform upgrade
+leaves the project alone: its configs are not regenerated and it is not
+restarted, and the upgrade alerts about it. The health check still reads the
+project directory's manifest, which may be the half-installed release's;
+finish the install promptly.
+
+If the record no longer matches the files (after a platform rollback, or a hand
+edit), it is reported as stale and nothing is resumed automatically: check that
+production is what `.releases/live.json` says, then, as root, run
+`boxmunge-server install-txn <project> --drop`. It refuses a record that still
+matches the files; use one of the options above for that.
 
 ---
 
@@ -864,6 +912,10 @@ does not page every run); the refusal is logged every time:
   recreated from them (upgrade restarts, container updates, `recover`,
   `resume`, `security resume` and `restore` all wait). Running containers
   keep running. `promote` or `unstage`, and the next run picks it up.
+- **"an install of <ref> ... is open at phase <phase>"** — a deploy or
+  rollback stopped part-way, so the project directory may hold a
+  half-installed release. The alert names the options for that phase; see
+  "An interrupted or failed install". This alert does not mean tampering.
 - **A compose or manifest error** — the files changed since the deploy, or
   this boxmunge release validates more strictly. Fix the file and deploy.
 - **"... is a symlink", "is now a file", "does not exist", "is outside the

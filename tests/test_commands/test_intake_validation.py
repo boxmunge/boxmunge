@@ -99,7 +99,7 @@ class TestStageRejectsBeforeTouchingLiveTree:
 
 class TestInstallFailureAdvice:
     def _fail_install(self, paths):
-        with patch("boxmunge.commands.deploy.install_release",
+        with patch("boxmunge.commands.deploy_tree.install_release",
                    side_effect=OSError("disk full")), \
                 patch("boxmunge.compose_guard.compose_up") as up:
             rc = run_deploy("myapp", paths)
@@ -114,8 +114,12 @@ class TestInstallFailureAdvice:
         assert "disk full" in err
         assert "rollback" not in err
 
-    def test_upgrade_advises_rollback(self, paths, capsys) -> None:
+    def test_upgrade_advises_abandon_not_rollback(self, paths, capsys) -> None:
+        """Nothing was started and the hook has not run: the replaced
+        release's files go back with --abandon; there is nothing to roll back."""
         _deploy_working(paths)
         place_bundle(paths, timestamp="2026-10-13T100000000000")
         assert self._fail_install(paths) == 1
-        assert "rollback myapp" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "prod-deploy myapp --abandon" in err
+        assert "rollback myapp" not in err
