@@ -197,6 +197,25 @@ def test_binding_over_an_existing_path_is_refused(fixture_app, sock_path) -> Non
     assert sorted(p.name for p in sock_path.parent.iterdir()) == [sock_path.name]
 
 
+def test_access_log_escapes_control_characters(fixture_app, sock_path, capfd) -> None:
+    """A request line is client-chosen; terminal escapes must not reach the
+    developer's terminal raw."""
+    server = UnixHTTPServer(sock_path, fixture_app, socket_mode=0o600, access_log=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05},
+                              daemon=True)
+    thread.start()
+    try:
+        raw_exchange(sock_path, b"GET /v1/\x1b[2Jx\x07 HTTP/1.1\r\nHost: x\r\n"
+                                b"Connection: close\r\n\r\n")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    err = capfd.readouterr().err
+    assert "\\x1b[2Jx\\x07" in err
+    assert "\x1b" not in err and "\x07" not in err
+
+
 def test_socket_is_private_to_its_owner(served) -> None:
     assert stat.S_IMODE(served.stat().st_mode) == 0o600
 

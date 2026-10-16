@@ -39,6 +39,9 @@ _CONTENT_LENGTH_RE = re.compile(r"[0-9]{1,9}")
 _BODY_KEYS = frozenset({"params", "approval"})
 _ACTIONS_PREFIX = "/v1/actions/"
 _JOBS_PREFIX = "/v1/jobs/"
+# Request lines are client-chosen: C0 controls and DEL are logged as \xNN so
+# no escape sequence reaches the developer's terminal.
+_CONTROL_ESCAPES = {c: f"\\x{c:02x}" for c in (*range(0x20), 0x7f)}
 
 
 class ServerError(Exception):
@@ -206,7 +209,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         if self.server.access_log:
-            sys.stderr.write(f"apid: {format % args}\n")
+            sys.stderr.write(f"apid: {(format % args).translate(_CONTROL_ESCAPES)}\n")
 
 
 class UnixHTTPServer(socketserver.ThreadingUnixStreamServer):
