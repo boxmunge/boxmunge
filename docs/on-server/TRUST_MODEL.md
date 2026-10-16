@@ -75,7 +75,9 @@ reads from that directory is checked before use:
 - The active slot must be exactly `a` or `b`, and must agree with the root-owned
   `env-active` symlink. A disagreement stops the shim rather than letting a
   forged `active-slot` turn the live venv into the "standby" that the next
-  upgrade deletes.
+  upgrade deletes. The one exception is an upgrade killed mid-swap, proven by
+  the root-owned `upgrade-inflight` marker in the slot being installed: the
+  shim then follows `env-active` and rewrites `active-slot`.
 - `probation.json` must be a JSON object with a semver `version`, an
   ISO-8601 `expires_at` with a timezone, and a `previous_slot` of `a` or `b`
   that is the current standby slot (promotion deletes it).

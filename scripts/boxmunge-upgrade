@@ -134,7 +134,9 @@ replace_file() {
 # load_active_slot: set ACTIVE_SLOT from the root-owned env-active symlink and
 # the deploy-writable active-slot file. Both must name a or b, and they must
 # agree: a forged active-slot would otherwise make the live venv look like
-# the standby, and the next upgrade would rm -rf it.
+# the standby, and the next upgrade would rm -rf it. The one exception is a
+# crash inside swap_to, proven by a root-owned upgrade-inflight marker: then
+# root's env-active is the truth and active-slot is rewritten to match it.
 load_active_slot() {
     local from_file="" from_link="" target
     refuse_symlink "$ACTIVE_SLOT_FILE"
@@ -151,7 +153,10 @@ load_active_slot() {
         esac
     fi
     if [[ -n "$from_file" && -n "$from_link" && "$from_file" != "$from_link" ]]; then
-        die "active-slot says '$from_file' but env-active points at env-$from_link; refusing to guess which venv is live"
+        [[ -e "$(inflight_marker a)" || -e "$(inflight_marker b)" ]] \
+            || die "active-slot says '$from_file' but env-active points at env-$from_link; refusing to guess which venv is live"
+        log "WARN: active-slot disagrees with env-active after an interrupted upgrade; following env-active (slot $from_link)"
+        write_active_slot_file "$from_link"
     fi
     ACTIVE_SLOT="${from_link:-$from_file}"
     [[ -n "$ACTIVE_SLOT" ]] || die "No active slot: neither $ACTIVE_SLOT_FILE nor $BOXMUNGE_ROOT/env-active exists"
@@ -266,15 +271,28 @@ send_notification(po.get('user_key',''), po.get('app_token',''), os.environ['BM_
 " 2>/dev/null || true
 }
 
-swap_to() {
-    local slot="$1" tmp
-    require_slot "$slot" "swap target"
-    ln -sfn "$BOXMUNGE_ROOT/env-$slot" "$BOXMUNGE_ROOT/env-active"
+# upgrade-inflight sits in the slot an upgrade is installing (root-owned, so
+# deploy cannot forge it) from just before the swap until probation is
+# recorded. While it is in the live slot, the standby is the proven release.
+inflight_marker() { echo "$BOXMUNGE_ROOT/env-$1/upgrade-inflight"; }
+
+write_active_slot_file() {
+    local tmp
     tmp="$(mktemp "$STATE_DIR/.active-slot.XXXXXX")"
-    echo "$slot" > "$tmp"
+    echo "$1" > "$tmp"
     chmod 0644 "$tmp"
     replace_file "$tmp" "$ACTIVE_SLOT_FILE"
+}
+
+swap_to() {
+    local slot="$1"
+    require_slot "$slot" "swap target"
+    ln -sfn "$BOXMUNGE_ROOT/env-$slot" "$BOXMUNGE_ROOT/env-active"
+    write_active_slot_file "$slot"
     ACTIVE_SLOT="$slot"
+    # Durable before anything runs on the new slot: an apply that migrated
+    # state must never come back after a crash under the other slot's code.
+    sync
     # The user-facing /opt/boxmunge/bin/boxmunge-server wrapper already routes
     # through env-active/bin/boxmunge-server, so the symlink swap above
     # is sufficient — no need to touch the wrapper itself.
@@ -516,6 +534,8 @@ cmd_run() {
 # <version>: no blocklist entry and no failure report, so auto-update retries.
 refuse_during_probation() {
     local version="$1" mode="$2" ends retry="Retry after the probation ends."
+    [[ ! -e "$(inflight_marker "$ACTIVE_SLOT")" ]] \
+        || die "Not upgrading to $version: an earlier upgrade was interrupted after its venv swap; the health timer's check-probation rolls it back within minutes. Retry after that."
     [[ -e "$PROBATION_FILE" || -L "$PROBATION_FILE" ]] || return 0
     read_probation
     ends="ends $PROB_EXPIRES_AT"
@@ -764,7 +784,11 @@ upgrade_to() {
         fi
     fi
 
-    # 4. SWAP
+    # 4. SWAP. Until probation is recorded, the marker is what keeps
+    # check-probation from deleting the previous slot as an orphan after a
+    # crash; it is synced to disk before the new slot can go live.
+    echo "$version" > "$(inflight_marker "$standby")"
+    sync
     log "Swapping to standby venv (slot $standby)..."
     swap_to "$standby"
 
@@ -796,6 +820,7 @@ from boxmunge.paths import BoxPaths
 write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT'], hours=6)
 "
     bm_log info upgrade "probation entered" "{\"version\": \"$version\", \"prev_slot\": \"$prev_slot\", \"hours\": 6}"
+    rm -f "$(inflight_marker "$ACTIVE_SLOT")"
     refresh_docs_for_slot "$ACTIVE_SLOT"
 
     send_notification "boxmunge security update applied" "Updated to $version (probation: 6h)"
@@ -803,9 +828,33 @@ write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT']
     exit 0
 }
 
+# recover_interrupted_upgrade: the live slot still carries upgrade-inflight,
+# so the shim died after the swap and before probation was recorded (unless
+# it died just after recording it). Apply may not have finished, so roll back
+# to the standby, the proven release. A marker left in the standby means the
+# swap never happened; the orphan cleanup that follows removes that slot.
+recover_interrupted_upgrade() {
+    local marker version from_version
+    marker="$(inflight_marker "$ACTIVE_SLOT")"
+    [[ -e "$marker" ]] || return 0
+    version="$(cat "$marker")"
+    require_semver "$version" "$marker"
+    if [[ -e "$PROBATION_FILE" || -L "$PROBATION_FILE" ]]; then
+        read_probation
+        if [[ "$PROB_VERSION" == "$version" ]]; then
+            rm -f "$marker"
+            return 0
+        fi
+    fi
+    from_version="$("$BOXMUNGE_ROOT/env-$(standby_slot)/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")"
+    log "Upgrade to $version was interrupted after the venv swap — rolling back"
+    do_rollback "$version" "$from_version" "interrupted" "$(standby_slot)"
+}
+
 cmd_check_probation() {
     load_active_slot
     acquire_lock skip  # an upgrade is in progress; retry on the next health-timer fire
+    recover_interrupted_upgrade
 
     # Orphan venv cleanup: if there's no probation file but the inactive slot
     # has a venv, it's leftover from a deploy-context probation promotion

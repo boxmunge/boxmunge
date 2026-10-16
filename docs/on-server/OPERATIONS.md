@@ -1067,6 +1067,11 @@ How an upgrade is applied and undone:
 4. A health check runs, then a 6-hour probation. A critical health result during probation
    rolls back.
 
+If the upgrade is interrupted (crash, power loss) after the venvs swap but before probation
+starts, the next health-timer run rolls back to the previous release, stage `interrupted`, and
+blocklists the version; clear it with `clear-blocklist` to retry. Interrupted before the swap,
+the previous release simply stays live.
+
 A rollback swaps the venvs back, restores the stash, and re-runs `upgrade --apply` with the
 previous release, so its overlays and Caddy sites are regenerated and projects restarted on
 them. Pause and quarantine markers are not restored from the stash: a project you resumed after
