@@ -8,18 +8,18 @@ keeps serving the old data (issue #3).
 import shutil
 import subprocess
 import time
+import uuid
 
 import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("system_container")]
 
-PROJECT = "rrtest"
-MANIFEST = f"""\
+MANIFEST = """\
 schema_version: 1
 id: 01JRESTRECREATE00000000000
-project: {PROJECT}
+project: {project}
 source: bundle
-hosts: [{PROJECT}.localhost]
+hosts: [{project}.localhost]
 services:
   app:
     internal: true
@@ -44,8 +44,9 @@ volumes:
 
 
 def _compose(project_dir, *args: str) -> str:
+    # The directory is named for the project, as on a box.
     result = subprocess.run(
-        ["docker", "compose", "-p", PROJECT, "-f", "compose.yml", *args],
+        ["docker", "compose", "-p", project_dir.name, "-f", "compose.yml", *args],
         cwd=project_dir, capture_output=True, text=True, timeout=120, check=True,
     )
     return result.stdout.strip()
@@ -63,18 +64,21 @@ def _loaded(project_dir) -> str:
 
 @pytest.fixture
 def project(int_paths):
-    project_dir = int_paths.project_dir(PROJECT)
+    # A name of its own per run: concurrent runs on one Docker daemon would
+    # otherwise share (and tear down) one another's containers and volume.
+    name = f"rrtest{uuid.uuid4().hex[:8]}"
+    project_dir = int_paths.project_dir(name)
     if project_dir.exists():
         shutil.rmtree(project_dir)
     project_dir.mkdir()
-    (project_dir / "manifest.yml").write_text(MANIFEST)
+    (project_dir / "manifest.yml").write_text(MANIFEST.format(project=name))
     (project_dir / "compose.yml").write_text(COMPOSE)
     try:
         _compose(project_dir, "up", "-d")
         yield int_paths, project_dir
     finally:
         subprocess.run(
-            ["docker", "compose", "-p", PROJECT, "-f", "compose.yml",
+            ["docker", "compose", "-p", name, "-f", "compose.yml",
              "down", "-v", "--remove-orphans"],
             cwd=project_dir, capture_output=True, timeout=60, check=False,
         )
@@ -85,14 +89,15 @@ def test_restored_data_is_loaded_by_the_backup_service(project) -> None:
     from boxmunge.commands.restore import run_restore
 
     paths, project_dir = project
+    name = project_dir.name
     assert _loaded(project_dir) == "original"
-    assert run_backup(PROJECT, paths) == 0
+    assert run_backup(name, paths) == 0
 
     _compose(project_dir, "exec", "-T", "app", "sh", "-c", "echo mutated > /data/value")
     _compose(project_dir, "restart", "app")
     assert _loaded(project_dir) == "mutated"
 
-    assert run_restore(PROJECT, paths, yes=True, safety_snapshot=False) == 0
+    assert run_restore(name, paths, yes=True, safety_snapshot=False) == 0
 
     assert _compose(project_dir, "exec", "-T", "app", "cat", "/data/value") == "original"
     assert _loaded(project_dir) == "original", "the app still runs on pre-restore data"

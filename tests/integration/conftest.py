@@ -97,7 +97,7 @@ def fixture_project_dir() -> Path:
 def deployed_fixture(int_paths: BoxPaths, fixture_project_dir: Path, test_port: int):
     """Deploy the fixture project and yield (paths, project_name, port).
 
-    Tears down containers after the test.
+    Tears down its containers, volumes and built image after the test.
     """
     # A name of its own per run: concurrent runs on one Docker daemon would
     # otherwise share (and tear down) one another's containers and network.
@@ -152,11 +152,12 @@ def deployed_fixture(int_paths: BoxPaths, fixture_project_dir: Path, test_port: 
         yield int_paths, project_name, test_port, compose_project
 
     finally:
-        # Tear down containers and volumes
+        # Tear down containers, volumes and the web image `up --build` made:
+        # each run's image is tagged for its own name, so they pile up.
         subprocess.run(
             ["docker", "compose", "-f", "compose.yml",
              "-p", compose_project,
-             "down", "-v", "--remove-orphans"],
+             "down", "-v", "--rmi", "local", "--remove-orphans"],
             cwd=project_dir, check=False, capture_output=True,
             timeout=60,
         )
