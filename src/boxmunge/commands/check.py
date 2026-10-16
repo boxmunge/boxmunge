@@ -12,6 +12,7 @@ from boxmunge.commands.health_state import (
     is_monitor_stopped, record_still_stopped, update_health_state,
 )
 from boxmunge.config import ConfigError, load_config
+from boxmunge.docker_run import docker_env
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.lifecycle import BlockReason, is_blocked
@@ -87,7 +88,8 @@ def interpret_smoke_result(exit_code: int, stderr: str) -> SmokeResult:
 def _smoke_one(container: str, script: str, svc_name: str) -> SmokeResult:
     cmd = ["docker", "exec", container, "sh", script, svc_name]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                                env=docker_env())
     except subprocess.TimeoutExpired:
         return SmokeResult(
             status="warning",

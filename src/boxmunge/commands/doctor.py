@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from boxmunge.config import load_config, ConfigError
+from boxmunge.docker_run import docker_env
 from boxmunge.paths import BoxPaths
 
 
@@ -110,6 +111,7 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
             result = subprocess.run(
                 ["docker", "compose", "ps", "-q", "caddy"],
                 cwd=paths.caddy, capture_output=True, text=True, check=False,
+                env=docker_env(),
             )
             caddy_running = bool(result.stdout.strip())
             check("Caddy container running", caddy_running)
@@ -123,6 +125,7 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
                 ["docker", "compose", "exec", "caddy", "caddy", "validate",
                  "--config", "/etc/caddy/Caddyfile"],
                 cwd=paths.caddy, capture_output=True, text=True, check=False,
+                env=docker_env(),
             )
             check("Caddy config valid", result.returncode == 0,
                   result.stderr.strip() if result.returncode != 0 else "")

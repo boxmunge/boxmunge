@@ -50,6 +50,8 @@ the shell and the `boxmunge-sftp` subsystem wrapper refuse it. Clients upload wi
 
 **Compose files** are confined to their own project. A project's `compose.yml` cannot set the compose project name, join or declare another project's networks (or `boxmunge-proxy`, so it cannot claim an alias there), use another project's named volumes, bind-mount or read files outside its own directory, or join another container's namespaces. See SECURITY.md, "What `compose.yml` may not do".
 
+**Compose interpolation** sees only the project. Compose fills `${VAR}` from the project's own `.env` and from the environment of the process that runs it. boxmunge runs every `docker` and `docker compose` command (validation, `config`, `up`, `pull`, `build`, `down`, `exec`, `run`, backup and restore, staging copies, the system container) with one fixed environment, `PATH` and `LANG=C.UTF-8` and nothing else, whoever started the command. A deploy over SSH, a root systemd timer, `sudo` and MCP therefore resolve a compose file to exactly the model that was validated: a file cannot test for a variable such as systemd's `INVOCATION_ID`, or `COMPOSE_PROFILES`, to behave differently once a timer runs it. `${HOME}`, `${USER}` and every other caller variable are unset. Put project values in the project's `.env`.
+
 **Logs and state** are per-project by default. The `boxmunge log` command scopes to a single project unless `--all` is passed. This prevents agent context pollution, not security isolation.
 
 ## What We Don't Isolate

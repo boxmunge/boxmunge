@@ -26,6 +26,7 @@ from boxmunge.backup import (
 )
 from boxmunge.commands.backup_cmd import list_snapshots, sweep_stale_dumps
 from boxmunge.docker import compose_command, compose_down, compose_up, DockerError
+from boxmunge.docker_run import docker_env
 from boxmunge.fileutil import LockError, open_regular_nofollow, project_lock
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_error
@@ -263,7 +264,7 @@ def _start_service(
     cmd = compose_command(project_name, compose_files)
     cmd.extend(["up", "-d", service])
     subprocess.run(cmd, cwd=project_dir, check=True, capture_output=True,
-                   text=True, timeout=_SERVICE_START_TIMEOUT)
+                   text=True, timeout=_SERVICE_START_TIMEOUT, env=docker_env())
 
 
 def _wait_ready(project_name: str, service: str) -> None:
@@ -276,6 +277,7 @@ def _wait_ready(project_name: str, service: str) -> None:
         result = subprocess.run(
             ["docker", "inspect", "--format", fmt, container],
             capture_output=True, text=True, check=False, timeout=10,
+            env=docker_env(),
         )
         last = result.stdout.strip() or result.stderr.strip()
         state, _, health = last.partition(" ")

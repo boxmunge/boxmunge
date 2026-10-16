@@ -3,6 +3,7 @@
 import subprocess
 import sys
 
+from boxmunge.docker_run import docker_env
 from boxmunge.paths import BoxPaths
 
 
@@ -15,6 +16,7 @@ def run_caddy_status(paths: BoxPaths) -> int:
         result = subprocess.run(
             ["docker", "compose", "ps", "--format", "json"],
             cwd=paths.caddy, capture_output=True, text=True, check=True,
+            env=docker_env(),
         )
         if "caddy" in result.stdout.lower():
             print("  Container: running")
@@ -42,6 +44,7 @@ def run_caddy_status(paths: BoxPaths) -> int:
             ["docker", "compose", "exec", "caddy",
              "caddy", "list-modules", "--versions"],
             cwd=paths.caddy, capture_output=True, text=True, check=False,
+            env=docker_env(),
         )
         if result.returncode == 0 and "tls" in result.stdout:
             print("\n  TLS module: active")

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
 from boxmunge.docker import compose_command
+from boxmunge.docker_run import docker_env
 from boxmunge.fleet import PROJECT_INPUT_ERRORS
 from boxmunge.lifecycle import is_blocked
 from boxmunge.pause import is_paused
@@ -77,6 +78,7 @@ def check_docker_running() -> HealthCheck:
         result = subprocess.run(
             ["docker", "info"],
             capture_output=True, text=True, check=False, timeout=10,
+            env=docker_env(),
         )
         if result.returncode == 0:
             return HealthCheck("docker", "ok", "Docker daemon running")
@@ -92,6 +94,7 @@ def check_caddy_container() -> HealthCheck:
             ["docker", "inspect", "--format",
              "{{.State.Health.Status}}", "boxmunge-caddy"],
             capture_output=True, text=True, check=False, timeout=10,
+            env=docker_env(),
         )
         status = result.stdout.strip()
         if status == "healthy":
@@ -193,6 +196,7 @@ def check_project_containers(paths: BoxPaths) -> HealthCheck:
             compose_cmd,
             cwd=paths.project_dir(name), capture_output=True, text=True,
             check=False, timeout=10,
+            env=docker_env(),
         )
         if result.returncode != 0 or not result.stdout.strip():
             down_projects.append(name)

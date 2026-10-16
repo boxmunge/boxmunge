@@ -11,6 +11,7 @@ from textual.widgets import (
 )
 
 from boxmunge.docker import compose_command
+from boxmunge.docker_run import docker_env
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state
@@ -201,6 +202,7 @@ class ProjectDetailScreen(Screen):
                 *cmd, cwd=project_dir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                env=docker_env(),
             )
             while True:
                 line = await process.stdout.readline()

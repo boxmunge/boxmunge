@@ -531,6 +531,10 @@ NODE_ENV=production
 
 `project.env` is part of the project source and is replaced on each bundle deploy. It should not contain credentials.
 
+### `${VAR}` in compose.yml
+
+Compose fills `${VAR}` in `compose.yml` only from the project's `.env` file. boxmunge runs Compose with a fixed environment (`PATH` and `LANG` only), so shell variables such as `${HOME}` or `${USER}`, and anything set in the deploy session, are unset and resolve to an empty string (or the `${VAR:-default}`). This gives the same result for a deploy and for a root timer. Put any value the compose file needs in `.env`.
+
 ---
 
 ## CVE Suppressions Convention

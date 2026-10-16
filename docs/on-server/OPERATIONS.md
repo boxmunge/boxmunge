@@ -639,6 +639,24 @@ List the project allowlist (registered project names):
 project-list
 ```
 
+### Private registry credentials
+
+boxmunge runs Compose without `HOME` or `DOCKER_CONFIG` (see TRUST_MODEL.md, "Compose interpolation"). So the docker CLI reads the registry credentials of the Unix user running the command, found through the password database. What the caller's environment says does not matter:
+
+| Who runs Compose | Credentials used |
+|---|---|
+| deploy (`deploy`, `stage`, `resume`, `restore`, ...) | `/home/deploy/.docker/config.json` |
+| root (the container-update and other timers, upgrades, `sudo boxmunge ...`) | `/root/.docker/config.json` |
+
+A project that pulls from a private registry needs a login for both users. Run these as `supervisor`:
+
+```bash
+sudo -u deploy -H docker login registry.example.com
+sudo -H docker login registry.example.com
+```
+
+A login missing for one user fails noisily ("pull access denied") on that user's runs. Nothing falls back to the other user's file. The two are kept separate on purpose: a single directory shared by both would have to be writable by deploy (buildx keeps state there), and root would then run plugins and credential helpers that deploy could replace.
+
 ---
 
 ## Troubleshooting

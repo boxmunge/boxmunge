@@ -4,6 +4,9 @@
 boxmunge.docker builds the commands. This module runs them, so every
 DockerError for a failed or timed-out command says why it failed: the tail
 of the command's stderr, which is where Compose writes its errors.
+
+Every docker command runs in DOCKER_ENV, never the caller's environment
+(see docker_env).
 """
 from __future__ import annotations
 
@@ -11,9 +14,37 @@ import subprocess
 import sys
 import threading
 from collections import deque
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 
 DEFAULT_TIMEOUT = 120
+
+# Compose interpolates `${VAR}` from the process environment, so the
+# environment is part of the model Compose runs. boxmunge is called from a
+# deploy user's SSH session, from root systemd timers (INVOCATION_ID,
+# JOURNAL_STREAM, ...), via sudo and from MCP; inheriting any of those let
+# a compose file validate as one model and run as another. Every docker
+# and compose command boxmunge makes runs in exactly this environment.
+#
+# HOME is deliberately absent. ${HOME} then resolves to nothing for every
+# caller, and the docker CLI finds its config directory (contexts, plugins,
+# registry credentials) from the password database for the user it runs
+# as: deploy's ~/.docker for deploy-run commands, /root/.docker for root.
+# A shared, fixed DOCKER_CONFIG would need to be writable by deploy (buildx
+# keeps state there), and a deploy-writable directory whose plugins and
+# credential helpers root executes is a path from deploy to root.
+# Project values belong in the project's own `.env`, which Compose reads
+# itself.
+DOCKER_ENV: Mapping[str, str] = MappingProxyType({
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "LANG": "C.UTF-8",
+})
+
+
+def docker_env() -> dict[str, str]:
+    """The environment for every docker and compose subprocess (a fresh copy)."""
+    return dict(DOCKER_ENV)
 
 
 class DockerError(Exception):
@@ -56,7 +87,7 @@ def _run_streaming(
     """
     kept: deque[str] = deque(maxlen=_STDERR_TAIL_LINES * 5)
     proc = subprocess.Popen(cmd, cwd=cwd, stderr=subprocess.PIPE, text=True,
-                            errors="replace")
+                            errors="replace", env=docker_env())
     assert proc.stderr is not None
 
     def pump() -> None:
@@ -93,7 +124,7 @@ def run(
     try:
         if capture:
             result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                                    check=False, timeout=timeout)
+                                    check=False, timeout=timeout, env=docker_env())
         else:
             result = _run_streaming(cmd, cwd, timeout)
     except subprocess.TimeoutExpired as e:
