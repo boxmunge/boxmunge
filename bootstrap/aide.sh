@@ -15,7 +15,10 @@ banner() {
 
 banner "Hardening: AIDE (file integrity monitoring)"
 
-apt-get install -y -qq aide
+# On Debian 13 the `aide` package ships only the binary. /etc/aide/, the
+# aide.conf.d/ drop-in directory and aideinit come from `aide-common`, which
+# aide merely Recommends, so a host that skips Recommends would lack them.
+apt-get install -y -qq aide aide-common
 
 cat > /etc/aide/aide.conf.d/90_boxmunge.conf <<EOF
 # boxmunge control plane
