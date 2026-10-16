@@ -77,4 +77,21 @@ run_shim check-probation
     || fail "the next fire restored again: $(calls)"
 drop_root
 
+# Likewise for the interruption count: a resumed rollback of an interrupted
+# upgrade whose interrupted.json is corrupt fails noisily, once.
+new_root a  # a: proven, already swapped back to; b: the interrupted release
+mock_server a 'echo "$*" >> "$BOXMUNGE_ROOT/calls"; exit 0'
+printf '1.5.0\ninterrupted\n1\n' > "$BOXMUNGE_ROOT/env-a/rollback-inflight"
+mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+echo 'not json' > "$BOXMUNGE_ROOT/upgrade-root/interrupted.json"
+run_shim check-probation
+[[ "$RC" -ne 0 && "$OUT" == *"interrupted.json is malformed"* && "$(calls)" == *"stash restore --latest;upgrade --apply;"* ]] \
+    && pass "a corrupt interruption count fails the bookkeeping after restore and re-apply" \
+    || fail "unexpected: rc=$RC calls=$(calls) $OUT"
+: > "$BOXMUNGE_ROOT/calls"
+run_shim check-probation
+[[ "$(calls)" != *"stash restore"* ]] && pass "a corrupt interruption count does not repeat the restore" \
+    || fail "the next fire restored again: $(calls)"
+drop_root
+
 finish

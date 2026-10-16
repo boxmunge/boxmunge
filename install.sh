@@ -46,6 +46,15 @@ if [[ "$(id -u)" -ne 0 ]]; then
     exit 1
 fi
 
+# The upgrade shim a release ships is built self-contained (scripts/build-shim.py
+# via `make bundle`). The unbuilt source shim needs scripts/boxmunge-upgrade.d/
+# beside it and would refuse every command once installed into bin/.
+if grep -q '^# >>> boxmunge-upgrade.d:' "${SCRIPT_DIR}/scripts/boxmunge-upgrade"; then
+    echo "ERROR: ${SCRIPT_DIR}/scripts/boxmunge-upgrade is the unbuilt source shim." >&2
+    echo "       Install from a release bundle (boxmunge-install.sh, or \`make bundle\`), not a source checkout." >&2
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # Docker Compose version.
 #

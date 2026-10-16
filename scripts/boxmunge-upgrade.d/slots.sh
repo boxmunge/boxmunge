@@ -165,11 +165,13 @@ complete_rollback() {
         "re-apply of the previous release" "$rc" "$output"
 
     refresh_docs_for_slot "$prev_slot"
-    [[ "$stage" != interrupted ]] || interruptions "$new_version" "$count"
-    # The box is back on the previous release. Drop the marker before the
-    # bookkeeping: if that fails, the next fire must not restore and re-apply
-    # (restarting every project) all over again.
+    # The box is back on the previous release. Drop the marker before any
+    # bookkeeping, the interruption count included: if that fails (a corrupt
+    # interrupted.json, say), the next fire must not restore and re-apply
+    # (restarting every project) all over again. A crash right here loses
+    # one interruption from the count: at worst one extra retry.
     rm -f "$(rollback_marker "$prev_slot")"
+    [[ "$stage" != interrupted ]] || interruptions "$new_version" "$count"
     if [[ "$stage" == interrupted ]]; then
         # Not reported to the fleet service: a power cut must not count
         # toward suppressing a release. The operator still hears of it.
