@@ -225,6 +225,11 @@ class BoxPaths:
         name = _checked(name)
         return self.staging_state / f"{name}.json"
 
+    def project_alerts_dir(self, name: str) -> Path:
+        """The once-only alerts last sent for a project (see project_alerts)."""
+        name = _checked(name)
+        return self.state / "project-alerts" / name
+
     def project_lock_file(self, name: str) -> Path:
         name = _checked(name)
         return self.state / f"{name}.lock"

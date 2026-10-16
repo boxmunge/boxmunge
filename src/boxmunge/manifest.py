@@ -1,87 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Load and validate project manifests (manifest.yml)."""
 
-import re
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-_VALID_SERVICE_NAME = re.compile(r'^[a-z0-9][a-z0-9\-]{0,62}$')
-
-# Hostnames flow into the Caddyfile via simple ``", ".join(hosts)``. Any
-# whitespace or Caddy directive metacharacter inside a host string would
-# allow injection of arbitrary directives. The regex enforces a strict
-# DNS-style label format (lowercase, hyphens between alphanumerics, TLD
-# of two or more letters), with `localhost` and `*.<domain>` allowed
-# explicitly. Wildcards additionally require ``allow_wildcard_hosts: true``
-# at the manifest top level (TLS wildcards need DNS-01 challenge wiring).
-_HOST_FORBIDDEN_CHARS = frozenset(';{}:()[]\'"`\\<>')
-_HOST_LABEL_RE = re.compile(
-    r'^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$'
+from boxmunge.fileutil import LinkedTargetError, atomic_write_text
+from boxmunge.manifest_fields import (
+    SERVICE_NAME_RE, host_problem, port_problem, route_path_problem,
 )
-_HOST_WILDCARD_RE = re.compile(
-    r'^\*\.([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$'
-)
-
-
-def _validate_host(entry: object) -> str | None:
-    """Return None if the host entry is acceptable, otherwise an error string.
-
-    Returns an error suffix to be combined with the entry name; the caller
-    composes the full error message including the offending value.
-    """
-    if not isinstance(entry, str):
-        return f"must be a string, got {type(entry).__name__}"
-    if any(ch.isspace() for ch in entry):
-        return "contains whitespace"
-    for bad in _HOST_FORBIDDEN_CHARS:
-        if bad in entry:
-            return f"contains forbidden character {bad!r}"
-    if entry != entry.lower():
-        return "must be lowercase (DNS is case-insensitive but the manifest format is not)"
-    if entry == "localhost":
-        return None
-    if entry.startswith("*."):
-        if _HOST_WILDCARD_RE.match(entry):
-            return "wildcard"  # sentinel — caller handles opt-in check
-        return "is not a valid wildcard hostname"
-    if _HOST_LABEL_RE.match(entry):
-        return None
-    return "is not a valid hostname"
-
-
-# Route paths and service ports are written into the Caddyfile. Anything
-# beyond a plain path (braces, whitespace, quotes, newlines) could inject
-# Caddy directives, so paths are limited to unreserved URL characters and
-# `/`, with an optional trailing `*` wildcard.
-_ROUTE_PATH_RE = re.compile(r'^/[A-Za-z0-9._~/-]*\*?$')
-_MAX_PORT = 65535
-
-
-def _route_path_problem(path: object) -> str | None:
-    """Return why a route path is unacceptable, or None if it is fine."""
-    if not isinstance(path, str):
-        return f"must be a string, got {type(path).__name__}"
-    if not _ROUTE_PATH_RE.fullmatch(path):
-        return (
-            "must start with '/' and contain only letters, digits, '.', '_', "
-            "'~', '-' and '/', with an optional trailing '*' (e.g. /api/*)"
-        )
-    return None
-
-
-def _port_problem(port: object) -> str | None:
-    """Return why a service port is unacceptable, or None if it is fine."""
-    if isinstance(port, bool) or not isinstance(port, int):
-        return (
-            f"must be an unquoted integer from 1 to {_MAX_PORT} "
-            f"(e.g. port: 8080), got {port!r}"
-        )
-    if not 1 <= port <= _MAX_PORT:
-        return f"must be from 1 to {_MAX_PORT}, got {port}"
-    return None
-
+from boxmunge.migration import MigrationError, migrate_manifest
 
 CURRENT_SCHEMA_VERSION = 3
 
@@ -90,8 +19,12 @@ class ManifestError(Exception):
     """Raised when a manifest file cannot be loaded."""
 
 
-def load_manifest(path: Path) -> dict[str, Any]:
-    """Load a manifest.yml file and return its contents as a dict.
+def load_manifest_as_written(path: Path) -> dict[str, Any]:
+    """Load a manifest.yml file exactly as written, without migrating it.
+
+    For checking the file an author wrote (validation, rewriting a source
+    manifest) and for the upgrade's on-disk migration. Everything else
+    reads through load_manifest.
 
     Raises ManifestError, naming the file, if it doesn't exist, can't be
     read, or can't be parsed.
@@ -111,6 +44,57 @@ def load_manifest(path: Path) -> dict[str, Any]:
         raise ManifestError(f"Manifest is not a YAML mapping: {path}")
 
     return data
+
+
+def at_current_schema(manifest: dict[str, Any], path: Path) -> dict[str, Any]:
+    """The manifest migrated in memory to CURRENT_SCHEMA_VERSION.
+
+    A git project's manifest.yml is a link into its checkout, which the
+    upgrade never rewrites, so it can stay at an older schema indefinitely.
+    A schema_version that is not a supported integer is returned unchanged
+    for validate_manifest to report, and an absent one stays absent: readers
+    that need it refuse to guess (security_cmd).
+    """
+    version = manifest.get("schema_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        return manifest
+    if not 1 <= version < CURRENT_SCHEMA_VERSION:
+        return manifest
+    try:
+        return migrate_manifest(manifest, CURRENT_SCHEMA_VERSION)
+    except MigrationError as e:
+        raise ManifestError(f"Cannot migrate manifest {path}: {e}") from e
+
+
+def load_manifest(path: Path) -> dict[str, Any]:
+    """Load a manifest.yml file at the current schema (see at_current_schema).
+
+    Raises ManifestError, naming the file, if it doesn't exist, can't be
+    read, parsed or migrated.
+    """
+    return at_current_schema(load_manifest_as_written(path), path)
+
+
+def write_manifest(path: Path, manifest: dict[str, Any]) -> None:
+    """Atomically replace a regular manifest.yml with `manifest`.
+
+    Refuses a symlink: a git project's manifest.yml links into its checkout,
+    and renaming a file over the link would silently detach the project from
+    its repository's manifest. Writing through the link is no better: the
+    checkout is the repository's content, which the next checkout overwrites
+    or conflicts with. The link is checked again right before the rename
+    (see atomic_write_bytes for the window that remains).
+    """
+    refusal = (f"{path} is a symlink (a git project's manifest.yml links into "
+               f"its repository); refusing to replace it. Change the manifest in "
+               f"the repository instead.")
+    if path.is_symlink():
+        raise ManifestError(refusal)
+    try:
+        atomic_write_text(path, yaml.dump(manifest, default_flow_style=False, sort_keys=False),
+                          refuse_link=True)
+    except LinkedTargetError as e:
+        raise ManifestError(refusal) from e
 
 
 def validate_manifest(
@@ -168,7 +152,7 @@ def validate_manifest(
     else:
         allow_wildcard = bool(manifest.get("allow_wildcard_hosts", False))
         for entry in hosts:
-            problem = _validate_host(entry)
+            problem = host_problem(entry)
             if problem is None:
                 continue
             if problem == "wildcard":
@@ -190,7 +174,7 @@ def validate_manifest(
         errors.append("'services' must define at least one service.")
     else:
         for svc_name, svc in services.items():
-            if not isinstance(svc_name, str) or not _VALID_SERVICE_NAME.fullmatch(svc_name):
+            if not isinstance(svc_name, str) or not SERVICE_NAME_RE.fullmatch(svc_name):
                 errors.append(f"Service name '{svc_name}' is invalid. Must be lowercase alphanumeric with hyphens.")
             if not isinstance(svc, dict):
                 errors.append(f"Service '{svc_name}' must be a mapping.")
@@ -202,7 +186,7 @@ def validate_manifest(
             # to give it a read-only rootfs and writable: paths; it needs no route.
             routeless = svc.get("internal") is True and not routes
             if "port" in svc:
-                problem = _port_problem(svc["port"])
+                problem = port_problem(svc["port"])
                 if problem:
                     errors.append(f"Service '{svc_name}' port {problem}.")
             elif not routeless:
@@ -225,7 +209,7 @@ def validate_manifest(
                         )
                         continue
                     path = route["path"]
-                    problem = _route_path_problem(path)
+                    problem = route_path_problem(path)
                     if problem:
                         errors.append(
                             f"Service '{svc_name}' route {i}: path "

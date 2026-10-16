@@ -2,13 +2,18 @@
 """Tests for boxmunge.commands.upgrade_steps internals."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import yaml
 
 from boxmunge.commands.upgrade_steps import migrate_project_manifests
-from boxmunge.manifest import ManifestError
+from boxmunge.manifest import (
+    CURRENT_SCHEMA_VERSION, ManifestError, load_manifest_as_written,
+)
+from boxmunge.project_alerts import alert_state
 from boxmunge.migration import (
     MigrationError, register_migration, _MIGRATIONS,
 )
@@ -25,6 +30,8 @@ def paths_stub(tmp_path, monkeypatch):
     paths.logs = tmp_path / "logs"
     paths.logs.mkdir()
     paths.log_file = paths.logs / "boxmunge.log"
+    paths.state = tmp_path / "state"
+    paths.state.mkdir()
     return paths
 
 
@@ -54,7 +61,8 @@ class TestMigratePostValidation:
 
         migrated = migrate_project_manifests(paths_stub)
 
-        assert migrated == ["demo"]
+        assert migrated.written == ["demo"]
+        assert migrated.in_memory == []
         on_disk = yaml.safe_load(mf.read_text())
         # migrate_project_manifests migrates to CURRENT_SCHEMA_VERSION, which
         # rolls forward with every release. Pin against the manifest module to
@@ -151,3 +159,82 @@ class TestMigrateFailLoud:
         finally:
             if original_v1_to_v2 is not None:
                 register_migration(1, 2, original_v1_to_v2)
+
+
+class TestGitManifestNeverWritten:
+    """D19: a git project's manifest.yml links into repo/. It is migrated in
+    memory by every reader; the upgrade never writes it, and alerts once."""
+
+    V2 = {
+        "schema_version": 2, "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+        "source": "git", "repo": "https://example.com/gitapp.git",
+        "project": "gitapp", "hosts": ["gitapp.example.com"],
+        "services": {"web": {"port": 3000, "routes": [{"path": "/"}]}},
+    }
+
+    @pytest.fixture
+    def linked(self, paths) -> Path:
+        repo = paths.project_dir("gitapp") / "repo"
+        repo.mkdir(parents=True)
+        target = repo / "manifest.yml"
+        target.write_text(yaml.safe_dump(self.V2))
+        paths.project_manifest("gitapp").symlink_to(target)
+        (repo / "compose.yml").write_text("services: {}\n")
+        paths.project_compose("gitapp").symlink_to(repo / "compose.yml")
+        return target
+
+    def _migrate(self, paths, delivered: bool = True):
+        with patch("boxmunge.project_alerts.notify",
+                   return_value=delivered) as notify:
+            result = migrate_project_manifests(paths)
+        return result, notify
+
+    def test_link_is_kept_and_alert_sent(self, paths, linked) -> None:
+        before = linked.read_bytes()
+        result, notify = self._migrate(paths)
+        assert (result.written, result.in_memory) == ([], ["gitapp"])
+        link = paths.project_manifest("gitapp")
+        assert link.is_symlink() and link.resolve() == linked.resolve()
+        assert linked.read_bytes() == before
+        notify.assert_called_once()
+        assert "schema 2" in notify.call_args.args[2]
+        assert "gitapp: the repository's manifest.yml uses schema 2" in paths.log_file.read_text()
+
+    def test_alerts_once(self, paths, linked) -> None:
+        self._migrate(paths)
+        _, notify = self._migrate(paths)
+        notify.assert_not_called()
+
+    def test_undelivered_alert_is_retried(self, paths, linked) -> None:
+        self._migrate(paths, delivered=False)
+        assert not alert_state(paths, "gitapp", "manifest-schema").exists()
+        _, notify = self._migrate(paths)
+        notify.assert_called_once()
+
+    def test_new_current_schema_alerts_again(self, paths, linked) -> None:
+        record = alert_state(paths, "gitapp", "manifest-schema")
+        record.parent.mkdir(parents=True)
+        record.write_text(json.dumps({"key": {
+            "repository_schema": 2, "current_schema": CURRENT_SCHEMA_VERSION - 1}}))
+        _, notify = self._migrate(paths)
+        notify.assert_called_once()
+
+    def test_unreadable_record_is_reported_and_replaced(self, paths, linked) -> None:
+        record = alert_state(paths, "gitapp", "manifest-schema")
+        record.parent.mkdir(parents=True)
+        record.write_text("{not json")
+        _, notify = self._migrate(paths)
+        notify.assert_called_once()
+        assert "is unreadable" in paths.log_file.read_text()
+        assert json.loads(record.read_text())["key"]["repository_schema"] == 2
+
+    def test_regular_manifest_is_still_written(self, paths) -> None:
+        pdir = paths.project_dir("bundled")
+        pdir.mkdir(parents=True)
+        (pdir / "manifest.yml").write_text(yaml.safe_dump(
+            {**self.V2, "source": "bundle", "project": "bundled"}))
+        result, notify = self._migrate(paths)
+        assert result.written == ["bundled"]
+        notify.assert_not_called()
+        on_disk = load_manifest_as_written(pdir / "manifest.yml")
+        assert on_disk["schema_version"] == CURRENT_SCHEMA_VERSION

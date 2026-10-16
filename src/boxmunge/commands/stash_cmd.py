@@ -3,7 +3,7 @@
 import sys
 
 from boxmunge.paths import BoxPaths
-from boxmunge.stash import create_stash, list_stashes, restore_stash
+from boxmunge.stash import StashError, create_stash, list_stashes, restore_stash
 
 
 def cmd_stash(args: list[str]) -> None:
@@ -16,7 +16,11 @@ def cmd_stash(args: list[str]) -> None:
     paths = BoxPaths()
 
     if subcmd == "create":
-        archive = create_stash(paths)
+        try:
+            archive = create_stash(paths)
+        except StashError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
         print(f"Stash created: {archive.name}")
         sys.exit(0)
 
@@ -25,7 +29,7 @@ def cmd_stash(args: list[str]) -> None:
             restored = restore_stash(paths)
             print(f"Restored from: {restored.name}")
             sys.exit(0)
-        except FileNotFoundError as e:
+        except (FileNotFoundError, StashError) as e:
             print(f"ERROR: {e}", file=sys.stderr)
             sys.exit(1)
 

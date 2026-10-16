@@ -30,3 +30,34 @@ class TestStashRestore:
             cmd_stash(["unknown"])
         # Unknown subcommand -> usage error -> exit 2
         assert exc.value.code == 2
+
+
+class TestStashErrors:
+    """A refused stash prints one ERROR line and exits 1; the shim shows it."""
+
+    def test_create_refusal_is_an_error_line(self, tmp_path, monkeypatch, capsys):
+        from boxmunge.paths import BoxPaths
+        paths = BoxPaths(root=tmp_path / "bm")
+        for d in ["config", "projects", "state/deploy", "stashes", "logs"]:
+            (paths.root / d).mkdir(parents=True)
+        (tmp_path / "elsewhere.env").write_text("X=1\n")
+        pdir = paths.project_dir("app")
+        pdir.mkdir()
+        (pdir / "secrets.env").symlink_to(tmp_path / "elsewhere.env")
+        monkeypatch.setattr("boxmunge.commands.stash_cmd.BoxPaths", lambda: paths)
+        with pytest.raises(SystemExit) as exc:
+            cmd_stash(["create"])
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert err.startswith("ERROR: Cannot stash")
+        assert str(pdir / "secrets.env") in err
+        assert "Traceback" not in err
+
+    def test_restore_refusal_is_an_error_line(self, capsys):
+        from boxmunge.stash import StashError
+        with patch("boxmunge.commands.stash_cmd.restore_stash",
+                   side_effect=StashError("refusing to extract member 'x'")):
+            with pytest.raises(SystemExit) as exc:
+                cmd_stash(["restore", "--latest"])
+        assert exc.value.code == 1
+        assert capsys.readouterr().err == "ERROR: refusing to extract member 'x'\n"

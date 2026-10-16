@@ -16,6 +16,7 @@ import sys
 from boxmunge.commands.health_cmd import run_health
 from boxmunge.commands.self_test_cmd import run_self_test
 from boxmunge.commands.upgrade_steps import (
+    ManifestMigration,
     Regeneration,
     Restart,
     UpgradeGateError,
@@ -61,13 +62,24 @@ def _gate_failed(paths: BoxPaths, error: Exception) -> int:
 
 def _migrate_regenerate_reload(
     paths: BoxPaths, step: int, total: int,
-) -> tuple[list[str], Regeneration]:
+) -> tuple[ManifestMigration, Regeneration]:
     """Steps shared by --apply and the full flow. Any failure raises: a
     project left on stale configs, or a Caddy that did not take the new
     ones, is not an upgrade that should report success."""
     print(f"[{step}/{total}] Migrating manifests...")
     migrated = migrate_project_manifests(paths)
-    print(f"  Migrated: {', '.join(migrated)}" if migrated else "  No migrations needed.")
+    if migrated.written:
+        print(f"  Migrated: {', '.join(migrated.written)}")
+    if migrated.in_memory:
+        print(f"  Update schema_version in the repository's manifest.yml (git): "
+              f"{', '.join(migrated.in_memory)}")
+    if migrated.skipped_locked:
+        print(f"  Not migrated on disk (locked; migrated in memory): "
+              f"{', '.join(migrated.skipped_locked)}")
+    for advice in migrated.unlinked.values():
+        print(f"  WARNING: {advice}", file=sys.stderr)
+    if not (migrated.written or migrated.in_memory or migrated.skipped_locked):
+        print("  No migrations needed.")
 
     print(f"[{step + 1}/{total}] Regenerating configs...")
     regen = regenerate_configs(paths)
@@ -106,13 +118,16 @@ def _restart(paths: BoxPaths, step: int, total: int, refused: dict[str, str]) ->
     return restart
 
 
-def _finish(paths: BoxPaths, label: str, migrated: list[str], regen: Regeneration,
+def _finish(paths: BoxPaths, label: str, migrated: ManifestMigration, regen: Regeneration,
             restart: Restart, new_version: str) -> int:
     """Record the new version, but only when every project restarted."""
     log_operation(
         "upgrade", label, paths,
         detail={
-            "migrated": migrated,
+            "migrated": migrated.written,
+            "migrated_in_memory": migrated.in_memory,
+            "migrate_skipped_locked": migrated.skipped_locked,
+            "git_unlinked": sorted(migrated.unlinked),
             "restarted": restart.succeeded,
             "skipped_locked": restart.skipped_locked,
             "monitor_stopped": restart.monitor_stopped,

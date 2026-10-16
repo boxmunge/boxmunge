@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from boxmunge.fileutil import atomic_write_bytes, open_regular_nofollow
+from boxmunge.git_layout import LINKED_FILES, links_into_repo
 from boxmunge.log import log_operation, log_warning
 from boxmunge.paths import BoxPaths
 from boxmunge.secrets import SecretsFile
@@ -37,11 +38,76 @@ def _meta_payload(paths: BoxPaths) -> dict:
     }
 
 
+_PROJECT_FILES = ("manifest.yml", "compose.yml", "project.env", "secrets.env")
+
+
+def _git_link(path: Path) -> bool:
+    """A git project's manifest.yml or compose.yml, linked into its checkout.
+
+    The link is the checkout's, not state to roll back: it is left out of
+    the stash, stays on disk, and restore never touches it.
+    """
+    return path.name in LINKED_FILES and links_into_repo(path.parent, path.name)
+
+
+def _stash_set(paths: BoxPaths) -> list[tuple[Path, str]]:
+    """(path, arcname) of every file to stash, all regular files.
+
+    Raises StashError, before anything is written, naming every other
+    symlink: a stash holds only file contents, so a rollback could not put
+    a link back, and refusing now (before the upgrade changes anything)
+    costs nothing.
+    """
+    found: list[tuple[Path, str]] = []
+    links: list[Path] = []
+
+    def take(path: Path, arcname: str) -> None:
+        if path.is_symlink():
+            links.append(path)
+        elif path.is_file():
+            found.append((path, arcname))
+
+    for config_file in [paths.config_file, paths.host_secrets, paths.backup_key, paths.version_file]:
+        take(config_file, f"config/{config_file.name}")
+    if paths.deploy_state.exists():
+        for state_file in sorted(paths.deploy_state.iterdir()):
+            take(state_file, f"state/deploy/{state_file.name}")
+    if paths.projects.exists():
+        for project_dir in sorted(paths.projects.iterdir()):
+            if project_dir.is_symlink():
+                links.append(project_dir)
+                continue
+            if not project_dir.is_dir():
+                continue
+            arcdir = f"projects/{project_dir.name}"
+            for filename in _PROJECT_FILES:
+                if not _git_link(project_dir / filename):
+                    take(project_dir / filename, f"{arcdir}/{filename}")
+            scripts_dir = project_dir / "boxmunge-scripts"
+            if scripts_dir.is_symlink():
+                links.append(scripts_dir)
+            elif scripts_dir.is_dir():
+                for script in sorted(scripts_dir.iterdir()):
+                    take(script, f"{arcdir}/boxmunge-scripts/{script.name}")
+    if links:
+        listed = "\n".join(f"  {link} -> {os.readlink(link)}" for link in links)
+        raise StashError(
+            f"Cannot stash: these are symlinks, and a stash holds only regular "
+            f"files (except a git project's manifest.yml and compose.yml linking "
+            f"into its repo/), so a rollback could not restore them:\n{listed}\n"
+            f"Replace each with what it points to (cp --remove-destination "
+            f"\"$(readlink -f <path>)\" <path>, or move the directory into place) "
+            f"or remove it, then retry. Nothing has been changed.")
+    return found
+
+
 def create_stash(paths: BoxPaths) -> Path:
     """Create a stash archive of the current platform state.
 
-    Returns the path to the created archive.
+    Returns the path to the created archive. Raises StashError, writing
+    nothing, if the state includes a symlink it cannot hold (_stash_set).
     """
+    members = _stash_set(paths)
     paths.stashes.mkdir(parents=True, exist_ok=True)
     # Directory ownership/perms are set by install.sh as root:deploy 770.
     # Do not chmod here — that fails when called from deploy context, and
@@ -55,29 +121,8 @@ def create_stash(paths: BoxPaths) -> Path:
         archive_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb")
     os.fchmod(raw.fileno(), 0o600)
     with raw, tarfile.open(fileobj=raw, mode="w:gz") as tar:
-        for config_file in [paths.config_file, paths.host_secrets, paths.backup_key, paths.version_file]:
-            if config_file.exists():
-                tar.add(config_file, arcname=f"config/{config_file.name}")
-
-        if paths.deploy_state.exists():
-            for state_file in paths.deploy_state.iterdir():
-                if state_file.is_file():
-                    tar.add(state_file, arcname=f"state/deploy/{state_file.name}")
-
-        if paths.projects.exists():
-            for project_dir in sorted(paths.projects.iterdir()):
-                if not project_dir.is_dir():
-                    continue
-                project_name = project_dir.name
-                for filename in ["manifest.yml", "compose.yml", "project.env", "secrets.env"]:
-                    filepath = project_dir / filename
-                    if filepath.exists():
-                        tar.add(filepath, arcname=f"projects/{project_name}/{filename}")
-                scripts_dir = project_dir / "boxmunge-scripts"
-                if scripts_dir.exists():
-                    for script in scripts_dir.iterdir():
-                        if script.is_file():
-                            tar.add(script, arcname=f"projects/{project_name}/boxmunge-scripts/{script.name}")
+        for path, arcname in members:
+            tar.add(path, arcname=arcname)
 
         # Schema-version marker — must be last so partial archives lack it
         # and are detected as legacy/corrupt by restore_stash.
@@ -236,6 +281,14 @@ def restore_stash(paths: BoxPaths, archive: Path | None = None) -> Path:
 
             _check_member_safe(member)
 
+            # Stashes made before links were left out hold a git project's
+            # manifest.yml and compose.yml as links into its checkout. The
+            # links are still on disk; refusing them would abort the rollback.
+            if member.issym():
+                log_warning("stash", f"Skipped symlink member {member.name!r} "
+                            f"(left as it is on disk)", paths)
+                continue
+
             if member.name.startswith("config/"):
                 target = paths.config / member.name.removeprefix("config/")
                 expected_root = config_root
@@ -273,6 +326,12 @@ def restore_stash(paths: BoxPaths, archive: Path | None = None) -> Path:
 
             if member.isdir():
                 target.mkdir(parents=True, exist_ok=True)
+                continue
+            # A stash made while an older upgrade had replaced the link with
+            # a file must not undo the operator's re-link.
+            if member.name.startswith("projects/") and _git_link(target):
+                log_warning("stash", f"Skipped {member.name!r}: on disk it links "
+                            f"into the project's repo/ (left as it is)", paths)
                 continue
 
             extracted = tar.extractfile(member)
