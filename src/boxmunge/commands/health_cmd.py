@@ -333,10 +333,9 @@ def check_config_drift(paths: BoxPaths) -> HealthCheck:
 
 def check_recent_errors(paths: BoxPaths) -> HealthCheck:
     """Scan operational log for recent errors."""
-    from boxmunge.commands.log_cmd import filter_log_entries, parse_log_file
+    from boxmunge.commands.log_cmd import query_log
 
-    entries = parse_log_file(paths.log_file)
-    errors = filter_log_entries(entries, level="error", since="24h")
+    errors = query_log(paths, level="error", since="24h")
 
     if len(errors) > 10:
         return HealthCheck(

@@ -238,11 +238,9 @@ def _tool_health() -> dict:
 def _tool_log(project: str | None = None, component: str | None = None,
               level: str | None = None, since: str | None = None,
               tail: int = 50) -> dict:
-    from boxmunge.commands.log_cmd import parse_log_file, filter_log_entries
-    paths = _get_paths()
-    entries = parse_log_file(paths.log_file)
-    filtered = filter_log_entries(
-        entries, project=project, component=component,
+    from boxmunge.commands.log_cmd import query_log
+    filtered = query_log(
+        _get_paths(), project=project, component=component,
         level=level, since=since, tail=tail)
     return {
         "success": True,

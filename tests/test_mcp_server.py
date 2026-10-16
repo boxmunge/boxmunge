@@ -104,10 +104,8 @@ class TestToolRegistration:
 
     def test_log_tool_returns_entries_in_data(self) -> None:
         from boxmunge.mcp_tools import _tool_log
-        with patch("boxmunge.commands.log_cmd.parse_log_file") as mock_parse, \
-             patch("boxmunge.commands.log_cmd.filter_log_entries") as mock_filter:
-            mock_parse.return_value = []
-            mock_filter.return_value = [{"ts": "2026-04-15", "level": "info", "msg": "ok"}]
+        with patch("boxmunge.commands.log_cmd.query_log") as mock_query:
+            mock_query.return_value = [{"ts": "2026-04-15", "level": "info", "msg": "ok"}]
             result = _tool_log()
         assert result["success"] is True
         assert len(result["data"]["entries"]) == 1

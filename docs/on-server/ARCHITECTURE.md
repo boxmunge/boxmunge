@@ -64,7 +64,8 @@ Key features:
     staging/                  # per-project staging state
   docs/                       # on-server documentation (root:root 755)
   logs/                       # boxmunge operational logs (deploy:deploy 755)
-    boxmunge.log
+    boxmunge.log              # today's entries (UTC); writers rotate it under a lock
+    boxmunge.log.YYYY-MM-DD   # one archive per earlier day, 90 kept
 ```
 
 For project-level conventions (manifest format, script contracts, env file conventions), run `agent-help conventions`.
