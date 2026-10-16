@@ -1078,6 +1078,12 @@ Probation ends early, promoting the upgrade, when you deploy, roll back, restore
 pre-update backup, self-test) does not end it, so container-update keeps waiting until
 probation is over.
 
+No other upgrade starts during probation: the standby venv holds the previous release, the
+only rollback target. `upgrade`, `upgrade --target` and `force-target` refuse with the time
+probation ends, without blocklisting anything; auto-update retries on its next run. To
+override, an operator ends the probation first (accepting the release on probation) by
+removing `/opt/boxmunge/upgrade-state/probation.json`.
+
 The docs served by `agent-help` (`/opt/boxmunge/docs`) are replaced with the installed
 release's on every upgrade, and put back to the previous release's on a rollback, so they
 always describe the code that is running.

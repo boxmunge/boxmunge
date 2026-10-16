@@ -200,9 +200,10 @@ PYBL
     esac
 }
 
-# read_probation: parse probation.json into PROB_VERSION, PROB_PREV_SLOT and
-# PROB_EXPIRED (yes/no). previous_slot must be the current standby slot,
-# because promotion rm -rf's it.
+# read_probation: parse probation.json into PROB_VERSION, PROB_PREV_SLOT,
+# PROB_EXPIRED (yes/no) and PROB_EXPIRES_AT (re-formatted in UTC, so safe to
+# print). previous_slot must be the current standby slot, because promotion
+# rm -rf's it.
 read_probation() {
     local out
     refuse_symlink "$PROBATION_FILE"
@@ -220,11 +221,13 @@ if expires.tzinfo is None:
 print(d["version"])
 print(d["previous_slot"])
 print("yes" if datetime.now(timezone.utc) >= expires else "no")
+print(expires.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
 PYPROB
 )" || die "$PROBATION_FILE is malformed; refusing to act on it"
     PROB_VERSION="$(echo "$out" | sed -n '1p')"
     PROB_PREV_SLOT="$(echo "$out" | sed -n '2p')"
     PROB_EXPIRED="$(echo "$out" | sed -n '3p')"
+    PROB_EXPIRES_AT="$(echo "$out" | sed -n '4p')"
     require_semver "$PROB_VERSION" "$PROBATION_FILE"
     require_slot "$PROB_PREV_SLOT" "$PROBATION_FILE"
     [[ "$PROB_PREV_SLOT" == "$(standby_slot)" ]] \
@@ -505,6 +508,24 @@ cmd_run() {
     upgrade_to "$version" run
 }
 
+# refuse_during_probation <version> <mode>: while a release is on probation,
+# the standby slot holds the last proven release and is the only rollback
+# target. Building another release there would leave nothing proven to fall
+# back to, so every entry point, force-target included, waits until
+# check-probation promotes or rolls back. This is a deferral, not a failure of
+# <version>: no blocklist entry and no failure report, so auto-update retries.
+refuse_during_probation() {
+    local version="$1" mode="$2" ends retry="Retry after the probation ends."
+    [[ -e "$PROBATION_FILE" || -L "$PROBATION_FILE" ]] || return 0
+    read_probation
+    ends="ends $PROB_EXPIRES_AT"
+    [[ "$PROB_EXPIRED" == "no" ]] || ends="has expired and the health timer promotes it within minutes"
+    [[ "$mode" != "force" ]] || retry="To accept $PROB_VERSION and give up that fallback now, remove $PROBATION_FILE and re-run."
+    bm_log warn upgrade "upgrade deferred: probation active" \
+        "{\"version\": \"$version\", \"probation_version\": \"$PROB_VERSION\", \"mode\": \"$mode\"}"
+    die "Not upgrading to $version: $PROB_VERSION is on probation (it $ends) and slot $PROB_PREV_SLOT holds the previous release, the only rollback target. $retry"
+}
+
 # upgrade_to <version> <mode>: the upgrade itself, after the policy check.
 upgrade_to() {
     local version="$1" mode="$2"
@@ -512,6 +533,7 @@ upgrade_to() {
     load_active_slot
     acquire_lock
     check_policy "$version" "$mode"
+    refuse_during_probation "$version" "$mode"
     cmd_install_sudoers
     seed_slot_docs "$ACTIVE_SLOT"
 
