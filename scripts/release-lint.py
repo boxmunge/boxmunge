@@ -80,7 +80,7 @@ def _catalog():
 
 def classify_release(name: str, body: str) -> str:
     """The class a box infers from GitHub release text. Mirrors
-    boxmunge.upgrade_discovery._github_release_class (tests cross-check)."""
+    boxmunge.release_selection.github_release_class (tests cross-check)."""
     text = f"{name or ''}\n{body or ''}".lower()
     if MARKERS["security"] in text:
         return "security"

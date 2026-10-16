@@ -889,8 +889,9 @@ entry names the class that was applied (`log --component auto-update`).
 
 Releases are discovered through the version-check service at boxmunge.dev.
 If it is unreachable or answers in an unexpected shape, auto-update falls
-back to the GitHub releases list (a release marked `[security]` or
-`[breakfix]` in its title or notes) and logs a warning.
+back to the GitHub releases list, applying the same rules to the markers in
+each release's title or notes (`[security]`, `[breakfix]`, `[breaking]`), and
+logs a warning.
 
 Pin to a specific release (for example to roll forward past a bad one):
 

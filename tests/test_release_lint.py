@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from boxmunge.upgrade_discovery import _github_release_class
+from boxmunge.release_selection import github_release_breaking, github_release_class
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "release-lint.py"
@@ -67,7 +67,7 @@ class TestCheck:
             files = _write_tree(tmp_path, "0.11.1", [("0.11.1", cls)])
             plan = lint.plan_release("v0.11.1", files["releases"], files["pyproject"])
             release = {"name": plan.title, "body": plan.notes}
-            assert _github_release_class(release) == cls
+            assert github_release_class(release) == cls
             assert lint.classify_release(plan.title, plan.notes) == cls
 
     def test_unlisted_version_fails(self, tmp_path):
@@ -200,7 +200,15 @@ class TestVerify:
         ("x [Security]", ""), ("x", "[BREAKFIX]"), ("x", "plain"), ("", "[breakfix] [security]"),
     ])
     def test_marker_rule_matches_box_side_rule(self, name, body):
-        assert lint.classify_release(name, body) == _github_release_class(
+        assert lint.classify_release(name, body) == github_release_class(
+            {"name": name, "body": body})
+
+    @pytest.mark.parametrize("name,body", [
+        ("x [Breaking]", ""), ("x", "notes\n[BREAKING] y"), ("x", "breaking change"),
+        ("", ""), ("v0.12.0 [security] [breaking]", "[security]"),
+    ])
+    def test_breaking_rule_matches_box_side_rule(self, name, body):
+        assert lint.is_breaking(name, body) == github_release_breaking(
             {"name": name, "body": body})
 
 
