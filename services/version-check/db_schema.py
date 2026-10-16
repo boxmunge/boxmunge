@@ -15,6 +15,7 @@ be cut short by a worker's busy or boot timeout.
 
 import sqlite3
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -109,8 +110,11 @@ def prepare(db_path: Path, now: datetime) -> None:
     The sweep's expiry delete runs here, not in a worker, so a backlog of old
     reports is deleted once before any request waits on the database.
     """
+    print(f"db_schema: preparing {db_path} (schema version {SCHEMA_VERSION})", flush=True)
+    started = time.monotonic()
     migrate(db_path)
     failure_store.sweep(db_path, now)
+    print(f"db_schema: {db_path} ready in {time.monotonic() - started:.1f}s", flush=True)
 
 
 def require_current(db_path: Path) -> None:

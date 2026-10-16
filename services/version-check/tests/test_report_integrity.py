@@ -194,7 +194,9 @@ class TestRetention:
         text = " ".join((SERVICE_DIR / "static" / "index.html").read_text().split())
         assert failure_store.REPORT_WINDOW == timedelta(hours=6)
         assert failure_store.RETENTION == timedelta(days=90)
-        assert "is kept for six hours, then discarded" in text
+        # Discarded by the next sweep after the window: about six hours.
+        assert failure_store.SWEEP_INTERVAL <= timedelta(minutes=5)
+        assert "is kept for about six hours, then discarded" in text
         assert "/64" in text
         assert "deleted after 90 days" in text
 

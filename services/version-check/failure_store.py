@@ -12,6 +12,7 @@ and the published privacy statement (static/index.html) holds.
 """
 
 import sqlite3
+import sys
 import threading
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -99,6 +100,8 @@ class Sweeper:
             try:
                 sweep(self.db_path, self._now())
             except Exception:
+                print(f"failure-sweeper: sweep of {self.db_path} failed; retrying in "
+                      f"{self.interval}", file=sys.stderr, flush=True)
                 traceback.print_exc()
 
 
