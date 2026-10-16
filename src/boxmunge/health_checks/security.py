@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING
 
 from boxmunge.commands.health_cmd import HealthCheck
 from boxmunge.manifest import ManifestError, load_manifest
-from boxmunge.project_registry import load_registered_projects
 
 # The scan runs daily (03:00-03:30); 36h tolerates one late or missed run's
 # worth of jitter without crying wolf, and catches a second missed night.
@@ -105,12 +104,24 @@ def _scan_problem(paths: BoxPaths, project: str, now: datetime) -> str | None:
     return None
 
 
+def _deployed_projects(paths: BoxPaths) -> list[str]:
+    """Projects with a directory and manifest: the ones with images to scan.
+
+    A project registered but never deployed has nothing to scan, so it can
+    never be "scanned" and must not hold the check at warn forever.
+    """
+    if not paths.projects.exists():
+        return []
+    return sorted(d.name for d in paths.projects.iterdir()
+                  if d.is_dir() and (d / "manifest.yml").exists())
+
+
 def check_cve_scan_freshness(paths: BoxPaths, *, now: datetime | None = None) -> HealthCheck:
-    """Warn when any registered project's CVE scan is stale or incomplete."""
+    """Warn when any deployed project's CVE scan is stale or incomplete."""
     now = now or datetime.now(timezone.utc)
-    projects = sorted(load_registered_projects(paths))
+    projects = _deployed_projects(paths)
     if not projects:
-        return HealthCheck(name="cve-scan", status="ok", detail="no projects registered")
+        return HealthCheck(name="cve-scan", status="ok", detail="no projects deployed")
     problems = [p for p in (_scan_problem(paths, name, now) for name in projects) if p]
     if problems:
         return HealthCheck(
@@ -119,6 +130,6 @@ def check_cve_scan_freshness(paths: BoxPaths, *, now: datetime | None = None) ->
         )
     return HealthCheck(
         name="cve-scan", status="ok",
-        detail=f"all {len(projects)} projects scanned within {int(SCAN_MAX_AGE.total_seconds() // 3600)}h",
+        detail=f"all {len(projects)} deployed projects scanned within {int(SCAN_MAX_AGE.total_seconds() // 3600)}h",
     )
 
