@@ -1084,12 +1084,13 @@ How an upgrade is applied and undone:
    restart) fails the upgrade and triggers a rollback.
    A project whose `compose.yml` the new release's compose validator refuses (a file that
    predates a validator fix) does not fail the upgrade. Rolling back would only bring back
-   the validator that let the file in. The project gets no new overlay or Caddy site, and it
-   is **not restarted**: its running containers are left exactly as they were, never rebuilt
-   or re-run from the refused file. The upgrade output prints `REFUSED: <project>: <reason>`,
-   the refusal is logged as an error (`log <project>`), and one priority-1 Pushover alert
-   lists every refused project. Fix the compose file and redeploy; until then the project
-   keeps running its old containers.
+   the validator that let the file in. The upgrade gives the project no new overlay or Caddy
+   site, and **does not restart or rebuild it**: the upgrade leaves its running containers as
+   they were. The upgrade output prints `REFUSED: <project>: <reason>`, the refusal is logged
+   as an error (`log <project>`), and one priority-1 Pushover alert lists every refused
+   project. Fix the compose file and redeploy. This covers the upgrade only. Other root-run
+   operations that recreate containers (the daily container-update, for one) do not consult
+   the upgrade's refusal.
    Paused, quarantined and health-monitor-stopped projects are not restarted either; each
    stays offline until `resume`, `security resume` or `recover` brings it back.
 4. A health check runs, then a 6-hour probation. A critical health result during probation

@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 import subprocess
 
+from boxmunge.docker_run import docker_env
+
 MIN_COMPOSE_VERSION = (2, 24, 0)
 # Same rule as install.sh's require_compose_version: trim ASCII whitespace,
 # then the whole output must be one version, optionally with a packaging
@@ -27,7 +29,8 @@ def compose_version_problem() -> str | None:
     want = ".".join(map(str, MIN_COMPOSE_VERSION))
     try:
         result = subprocess.run(["docker", "compose", "version", "--short"],
-                                capture_output=True, check=False, timeout=30)
+                                capture_output=True, check=False, timeout=30,
+                                env=docker_env())
     except (OSError, subprocess.TimeoutExpired) as e:
         return f"cannot run 'docker compose version --short': {e}"
     if result.returncode != 0:
