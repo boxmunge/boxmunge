@@ -19,12 +19,7 @@ import yaml
 
 from boxmunge.commands.project_delete_cmd import _teardown
 from boxmunge.commands.security_scan_inputs import identify_images, identify_startup_images
-from boxmunge.compose import (
-    generate_staging_compose_base,
-    generate_staging_compose_override,
-    load_user_compose,
-    prepare_compose_override,
-)
+from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose
 from boxmunge.commands.container_update_cmd import update_project
 from boxmunge.container_update_targets import UpdateTarget
@@ -32,6 +27,8 @@ from boxmunge.deployed_inventory import load_deployed_inventory
 from boxmunge.docker import compose_up
 from boxmunge.docker_containers import local_image
 from boxmunge.paths import BoxPaths
+from boxmunge.staging_compose import STAGING_FILES
+from boxmunge.staging_prepare import write_staging_files
 from tests.integration.conftest import skip_no_docker
 
 pytestmark = [pytest.mark.integration, skip_no_docker]
@@ -127,14 +124,8 @@ def test_deploy_stage_update_and_delete_use_platform_names(project) -> None:
     assert _container_image(f"{name}-web-1") == built
 
     # Staging builds under its own name and leaves production's alone.
-    user = load_user_compose(project_dir / "compose.yml", name)
-    (project_dir / "compose.boxmunge-staging.yml").write_text(
-        generate_staging_compose_override(manifest, user_compose=user))
-    (project_dir / "compose.staging-base.yml").write_text(
-        generate_staging_compose_base(project_dir / "compose.yml"))
-    compose_up(project_dir, compose_files=["compose.staging-base.yml",
-                                           "compose.boxmunge-staging.yml"],
-               project_name=f"{name}-staging")
+    write_staging_files(paths, name, manifest, project_dir, project_dir, box_state=set())
+    compose_up(project_dir, compose_files=STAGING_FILES, project_name=f"{name}-staging")
     assert _container_image(f"{name}-staging-web-1") == f"boxmunge.invalid/{name}-staging/web"
     assert local_image_id(built) is not None
 
