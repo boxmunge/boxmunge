@@ -16,7 +16,8 @@ rate-limited per client, request bodies are capped, and check counts are
 buffered in memory and flushed periodically rather than written per request.
 Failure reports are accepted only for listed releases and count once per
 reporter (IPv4 address or IPv6 /64) per version per six hours; see
-failure_store. The database schema changes only through db_schema migrations.
+failure_store. The database schema changes only through db_schema migrations,
+run once before gunicorn starts.
 
 Source: https://github.com/boxmunge/boxmunge/tree/main/services/version-check
 """
@@ -31,7 +32,7 @@ from flask import Flask, request, jsonify
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import failure_store
-from db_schema import init_db
+from db_schema import require_current
 from release_catalog import (
     VERSION_RE, apply_holds, check_response, find_blocked, load_releases, select_offers,
 )
@@ -243,7 +244,8 @@ def create_app() -> Flask:
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=TRUSTED_PROXY_HOPS)
     app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
 
-    init_db(DB_PATH)
+    # The pre-start step (db_schema.py, run by the image's CMD) migrates.
+    require_current(DB_PATH)
     # Raises ReleaseCatalogError on any invalid entry: a service that
     # cannot classify releases must not answer fleet update checks.
     releases = load_releases(RELEASES_PATH)
@@ -253,6 +255,9 @@ def create_app() -> Flask:
                           RATE_LIMIT_MAX_CLIENTS)
     counter = CheckCounter(DB_PATH, CHECK_FLUSH_SECONDS, CHECK_MAX_PENDING)
     app.extensions["check_counter"] = counter
+    sweeper = failure_store.Sweeper(DB_PATH, failure_store.SWEEP_INTERVAL)
+    sweeper.start()
+    app.extensions["failure_sweeper"] = sweeper
 
     @app.before_request
     def rate_limit():

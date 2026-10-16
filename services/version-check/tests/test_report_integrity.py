@@ -9,7 +9,9 @@ import json
 import os
 import sqlite3
 import sys
+import subprocess
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -21,6 +23,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import db_schema  # noqa: E402
 import failure_store  # noqa: E402
 
+SERVICE_DIR = Path(__file__).parent.parent
+
 PROXY = {"REMOTE_ADDR": "172.18.0.2"}
 
 
@@ -29,7 +33,7 @@ def _report(version="0.2.1", stage="apply"):
 
 
 @pytest.fixture
-def make_client(tmp_path):
+def make_client(tmp_path, migrated_db):
     releases_file = tmp_path / "releases.json"
     releases_file.write_text(json.dumps({"releases": [
         {"version": "0.2.1", "class": "security", "breaking": False,
@@ -135,22 +139,64 @@ class TestKnownVersions:
         assert client.post("/v1/report-failure", json=body).status_code == 400
 
 
+def _insert_aged(db_path, *ages_and_reporters):
+    now = datetime.now(timezone.utc)
+    conn = sqlite3.connect(db_path)
+    conn.executemany(
+        "INSERT INTO failures (version, installed_from, stage, reported_at, reporter) "
+        "VALUES ('0.2.1', '0.2.0', 'apply', ?, ?)",
+        [((now - age).isoformat(), reporter) for age, reporter in ages_and_reporters])
+    conn.commit()
+    conn.close()
+
+
+AGED = (
+    (failure_store.RETENTION + timedelta(minutes=1), None),          # expired
+    (failure_store.RETENTION - timedelta(days=1), None),             # kept
+    (failure_store.REPORT_WINDOW + timedelta(minutes=1), "198.51.100.7"),  # forgotten
+    (failure_store.REPORT_WINDOW - timedelta(minutes=1), "198.51.100.8"),  # still deduping
+)
+SWEPT = [(None,), (None,), ("198.51.100.8",)]
+
+
 class TestRetention:
-    def test_reports_older_than_retention_are_deleted(self, make_client, tmp_path):
+    def test_sweep_expires_reports_and_forgets_reporters(self, migrated_db):
+        _insert_aged(migrated_db, *AGED)
+        failure_store.sweep(migrated_db, datetime.now(timezone.utc))
+        assert _rows(migrated_db, "reporter") == SWEPT
+
+    def test_pre_start_step_sweeps(self, migrated_db):
+        _insert_aged(migrated_db, *AGED)
+        subprocess.run([sys.executable, "db_schema.py", str(migrated_db)],
+                       cwd=SERVICE_DIR, check=True)
+        assert _rows(migrated_db, "reporter") == SWEPT
+
+    def test_workers_sweep_without_waiting_for_reports(self, migrated_db):
+        _insert_aged(migrated_db, *AGED)
+        sweeper = failure_store.Sweeper(migrated_db, timedelta(milliseconds=10))
+        sweeper.start()
+        try:
+            deadline = time.monotonic() + 5
+            while _rows(migrated_db, "reporter") != SWEPT and time.monotonic() < deadline:
+                time.sleep(0.01)
+        finally:
+            sweeper.stop()
+        assert _rows(migrated_db, "reporter") == SWEPT
+
+    def test_app_starts_a_sweeper(self, make_client):
         client = make_client()
-        db_path = tmp_path / "checks.db"
-        expired = datetime.now(timezone.utc) - failure_store.RETENTION - timedelta(minutes=1)
-        kept = datetime.now(timezone.utc) - failure_store.RETENTION + timedelta(days=1)
-        conn = sqlite3.connect(db_path)
-        conn.executemany(
-            "INSERT INTO failures (version, installed_from, stage, reported_at) "
-            "VALUES ('0.2.1', '0.2.0', 'apply', ?)",
-            [(expired.isoformat(),), (kept.isoformat(),)])
-        conn.commit()
-        conn.close()
-        _post(client, "198.51.100.1")
-        assert [r[0] for r in _rows(db_path, "reported_at")][:1] == [kept.isoformat()]
-        assert len(_rows(db_path)) == 2
+        sweeper = client.application.extensions["failure_sweeper"]
+        assert sweeper.interval == failure_store.SWEEP_INTERVAL
+        assert sweeper._thread.is_alive()
+
+    def test_privacy_statement_matches_retention(self):
+        """static/index.html is the published promise about reporter data."""
+        text = " ".join((SERVICE_DIR / "static" / "index.html").read_text().split())
+        assert failure_store.REPORT_WINDOW == timedelta(hours=6)
+        assert failure_store.RETENTION == timedelta(days=90)
+        assert "is kept for six hours, then discarded" in text
+        assert "/64" in text
+        assert "deleted after 90 days" in text
 
     @pytest.mark.parametrize("sql", [
         failure_store.DUPLICATE_SQL, failure_store.FORGET_SQL,
@@ -182,21 +228,25 @@ class TestSchemaMigration:
     def _legacy_db(self, db_path):
         conn = sqlite3.connect(db_path)
         conn.executescript(LEGACY_SCHEMA)
-        now = datetime.now(timezone.utc).isoformat()
+        moment = datetime.now(timezone.utc)
+        now = moment.isoformat()
         conn.executemany(
             "INSERT INTO failures (version, installed_from, stage, reported_at, remote_addr) "
             "VALUES ('0.2.1', '0.2.0', 'apply', ?, ?)",
-            [(now, "2001:db8::5"), (now, "198.51.100.4"), (now, None)])
+            [(now, "2001:db8::5"), (now, "198.51.100.4"), (now, None),
+             ((moment - timedelta(hours=7)).isoformat(), "198.51.100.5"),
+             ((moment - timedelta(days=91)).isoformat(), None)])
         conn.execute("INSERT INTO circuit_breaker VALUES ('0.2.1', 1, 'api', ?)", (now,))
         conn.commit()
         conn.close()
 
     def test_legacy_database_is_migrated_in_place(self, tmp_path):
-        db_path = tmp_path / "checks.db"
+        db_path = tmp_path / "legacy.db"
         self._legacy_db(db_path)
-        db_schema.init_db(db_path)
+        db_schema.migrate(db_path)
         assert _rows(db_path) == [
-            ("0.2.1", "2001:db8::/64"), ("0.2.1", "198.51.100.4"), ("0.2.1", None)]
+            ("0.2.1", "2001:db8::/64"), ("0.2.1", "198.51.100.4"), ("0.2.1", None),
+            ("0.2.1", None)]
         conn = sqlite3.connect(db_path)
         try:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == db_schema.SCHEMA_VERSION
@@ -207,8 +257,8 @@ class TestSchemaMigration:
     def test_migrated_and_fresh_schemas_match(self, tmp_path):
         legacy, fresh = tmp_path / "legacy.db", tmp_path / "fresh.db"
         self._legacy_db(legacy)
-        db_schema.init_db(legacy)
-        db_schema.init_db(fresh)
+        db_schema.migrate(legacy)
+        db_schema.migrate(fresh)
 
         def schema(path):
             conn = sqlite3.connect(path)
@@ -220,19 +270,50 @@ class TestSchemaMigration:
         assert schema(legacy) == schema(fresh)
         assert ("index", "failures_by_reporter") in schema(fresh)
 
-    def test_init_is_idempotent(self, tmp_path):
-        db_path = tmp_path / "checks.db"
-        db_schema.init_db(db_path)
-        failure_store.record_failure(db_path, "0.2.1", "0.2.0", "apply", "198.51.100.1",
+    def test_migrate_is_idempotent(self, migrated_db):
+        failure_store.record_failure(migrated_db, "0.2.1", "0.2.0", "apply", "198.51.100.1",
                                      datetime.now(timezone.utc))
-        db_schema.init_db(db_path)
-        assert _rows(db_path) == [("0.2.1", "198.51.100.1")]
+        db_schema.migrate(migrated_db)
+        assert _rows(migrated_db) == [("0.2.1", "198.51.100.1")]
 
-    def test_newer_database_refuses_to_start(self, tmp_path):
-        db_path = tmp_path / "checks.db"
-        db_schema.init_db(db_path)
-        conn = sqlite3.connect(db_path)
+    def test_newer_database_refuses_to_migrate(self, migrated_db):
+        conn = sqlite3.connect(migrated_db)
         conn.execute(f"PRAGMA user_version = {db_schema.SCHEMA_VERSION + 1}")
         conn.close()
         with pytest.raises(db_schema.SchemaError, match="newer"):
-            db_schema.init_db(db_path)
+            db_schema.migrate(migrated_db)
+
+
+class TestWorkersDoNotMigrate:
+    """A worker that migrated could be killed mid-way by gunicorn's timeouts
+    and roll back for ever; only the pre-start step migrates."""
+
+    @pytest.mark.parametrize("version", [0, db_schema.SCHEMA_VERSION - 1,
+                                         db_schema.SCHEMA_VERSION + 1])
+    def test_worker_refuses_a_database_at_another_version(self, make_client, migrated_db,
+                                                          version):
+        conn = sqlite3.connect(migrated_db)
+        conn.execute(f"PRAGMA user_version = {version}")
+        conn.close()
+        with pytest.raises(db_schema.SchemaError, match="run `python db_schema.py"):
+            make_client()
+        conn = sqlite3.connect(migrated_db)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == version
+        finally:
+            conn.close()
+
+    def test_worker_refuses_a_missing_database(self, make_client, migrated_db):
+        migrated_db.unlink()
+        with pytest.raises(db_schema.SchemaError, match="does not exist"):
+            make_client()
+        assert not migrated_db.exists()
+
+    def test_image_migrates_once_before_gunicorn(self):
+        import app
+        cmd_line = next(line for line in (SERVICE_DIR / "Dockerfile").read_text().splitlines()
+                        if line.startswith("CMD "))
+        argv = json.loads(cmd_line[len("CMD "):])
+        assert argv[:2] == ["sh", "-c"]
+        assert argv[2].startswith(f"python db_schema.py {app.DB_PATH} && exec gunicorn ")
+        assert "--preload" not in argv[2]

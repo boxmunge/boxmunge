@@ -6,15 +6,21 @@ addresses one host owns count once. A reporter counts once per version per
 REPORT_WINDOW, and the auto-trip threshold counts reports in that same
 window, so the threshold is a number of distinct reporters. Reporter
 identities are forgotten once outside the window; reports are deleted after
-RETENTION, so the table stays bounded however long the service runs.
+RETENTION. Both happen in sweep(): once before the service starts, then
+every SWEEP_INTERVAL in each worker, so neither depends on reports arriving
+and the published privacy statement (static/index.html) holds.
 """
 
 import sqlite3
-from datetime import datetime, timedelta
+import threading
+import traceback
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 REPORT_WINDOW = timedelta(hours=6)
 RETENTION = timedelta(days=90)
+SWEEP_INTERVAL = timedelta(minutes=5)
 
 DUPLICATE_SQL = ("SELECT 1 FROM failures WHERE reporter = ? AND version = ? "
                  "AND reported_at > ? LIMIT 1")
@@ -27,6 +33,8 @@ def record_failure(db_path: Path, version: str, installed_from: str, stage: str,
                    reporter: str, now: datetime) -> bool:
     """Store a report; False if `reporter` already reported `version` in the window.
 
+    The DUPLICATE_SQL time bound makes this correct between sweeps.
+
     The duplicate check and the insert share one IMMEDIATE transaction, so
     concurrent reports from one reporter (one per gunicorn worker) store one.
     """
@@ -35,8 +43,6 @@ def record_failure(db_path: Path, version: str, installed_from: str, stage: str,
     try:
         conn.execute("BEGIN IMMEDIATE")
         try:
-            conn.execute(EXPIRE_SQL, ((now - RETENTION).isoformat(),))
-            conn.execute(FORGET_SQL, (window_start,))
             duplicate = conn.execute(DUPLICATE_SQL, (reporter, version, window_start)).fetchone()
             if duplicate is None:
                 conn.execute(
@@ -50,6 +56,50 @@ def record_failure(db_path: Path, version: str, installed_from: str, stage: str,
     finally:
         conn.close()
     return duplicate is None
+
+
+def sweep(db_path: Path, now: datetime) -> None:
+    """Forget reporters outside the window and delete reports past retention."""
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(FORGET_SQL, ((now - REPORT_WINDOW).isoformat(),))
+            conn.execute(EXPIRE_SQL, ((now - RETENTION).isoformat(),))
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+
+class Sweeper:
+    """Runs sweep() every `interval` on a daemon thread, one per worker.
+
+    A failed sweep is logged with its traceback and retried on the next tick;
+    stopping the sweeper would quietly break the retention promise.
+    """
+
+    def __init__(self, db_path: Path, interval: timedelta,
+                 now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> None:
+        self.db_path, self.interval, self._now = db_path, interval, now
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="failure-sweeper", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval.total_seconds()):
+            try:
+                sweep(self.db_path, self._now())
+            except Exception:
+                traceback.print_exc()
 
 
 def count_recent(db_path: Path, version: str, now: datetime) -> int:

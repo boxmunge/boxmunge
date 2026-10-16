@@ -11,4 +11,7 @@ COPY static/ static/
 
 EXPOSE 8147
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8147", "--workers", "2", "--access-logfile", "-", "app:create_app()"]
+# Migrate the database (and run the first sweep) once, before any worker
+# starts: workers only check the schema version. Not --preload: per-worker
+# state (check counter, sweeper thread) must be created after the fork.
+CMD ["sh", "-c", "python db_schema.py /data/checks.db && exec gunicorn --bind 0.0.0.0:8147 --workers 2 --access-logfile - 'app:create_app()'"]
