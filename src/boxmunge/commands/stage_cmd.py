@@ -139,26 +139,32 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
                       f"run 'unstage {project_name}'.", file=sys.stderr)
 
 
+def _staging_auth(project_name: str, paths: BoxPaths) -> tuple[str, str] | None:
+    """(user, bcrypt hash) from STAGING_AUTH_USER/PASS, or None if unset."""
+    from boxmunge.secrets import SecretsFile, get_internal_key
+    # boxmunge's own keys (Caddy basic auth), not the app's.
+    secrets = SecretsFile.project(paths, project_name)
+    auth_user = get_internal_key(secrets, "STAGING_AUTH_USER")
+    auth_pass = get_internal_key(secrets, "STAGING_AUTH_PASS")
+    if not (auth_user and auth_pass):
+        return None
+    import bcrypt
+    hashed = bcrypt.hashpw(auth_pass.encode(), bcrypt.gensalt()).decode()
+    print(f"  Staging auth enabled for user '{auth_user}'")
+    return auth_user, hashed
+
+
 def _bring_up_staging(project_name: str, paths: BoxPaths,
                       manifest: dict[str, Any], ref: str | None) -> int:
     """Write staging config, start staging containers, smoke-test, record."""
     project_dir = paths.project_dir(project_name)
     print(f"Staging {project_name}...")
     # Staging auth — inject basicauth if secrets are set
-    staging_auth = None
-    project_secrets_path = paths.project_secrets(project_name)
-    if project_secrets_path.exists():
-        from boxmunge.secrets import read_dotenv
-        secrets = read_dotenv(project_secrets_path)
-        auth_user = secrets.get("STAGING_AUTH_USER")
-        auth_pass = secrets.get("STAGING_AUTH_PASS")
-        if auth_user and auth_pass:
-            import bcrypt
-            hashed = bcrypt.hashpw(
-                auth_pass.encode(), bcrypt.gensalt()
-            ).decode()
-            staging_auth = (auth_user, hashed)
-            print(f"  Staging auth enabled for user '{auth_user}'")
+    try:
+        staging_auth = _staging_auth(project_name, paths)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
 
     # Journaled like production's site: if Caddy rejects it, the reload
     # restores the last accepted config instead of leaving it to break the

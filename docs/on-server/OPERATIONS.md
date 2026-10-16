@@ -211,6 +211,31 @@ newlines or other control characters, which would add lines to the env file. Eit
 violation is refused with an `ERROR:` and nothing is written. Store a multi-line value
 (a PEM key, say) base64-encoded and decode it in the app.
 
+Values are literal: the container receives exactly what you set, and `secrets get`
+prints exactly that. `$`, `${VAR}`, ` # `, quotes, backslashes and leading or trailing
+spaces are not interpreted. The one value Compose's env-file format cannot carry
+literally is one that ends in an odd number of backslashes or has an odd number of
+backslashes right before a `'`; `set` refuses it (base64-encode it instead).
+Concurrent `set`/`unset` calls on the same scope are serialised, so none is lost.
+This needs Docker Compose 2.24 or newer (older releases mis-read the stored form):
+`install.sh` refuses to install or upgrade with an older one, and `doctor` reports it.
+Upgrade with `apt-get install --only-upgrade docker-compose-plugin`.
+
+Secrets set by boxmunge before literal values were stored unquoted, and Compose
+interpreted `$`, ` #`, surrounding quotes and spaces in them. Such a value is left
+exactly as stored, so containers keep receiving what they did, until you set it again.
+`secrets list` and `secrets set` warn which keys these are, and `secrets get` on one
+fails, showing the stored text: check what the app expects and `secrets set` it.
+(`STAGING_AUTH_USER`/`STAGING_AUTH_PASS` are read, and printed by `get`, as before, so
+stage keeps working.) An old value whose quote does not close exactly at the end of its
+line can make Compose read the following lines into it. While one exists, other writes
+to that scope are refused, since they could alter what containers receive; the error
+lists each such key with the `secrets unset`/`secrets set` commands that clear it, one
+at a time.
+Keys stored before key names were validated (`MY-KEY`, `app.key`) are kept too, since
+Compose still passes them on; `list` warns about them. Set the value under a valid name,
+update the app, then remove the old one by its exact name: `secrets unset myapp 'MY-KEY'`.
+
 The deploy shell parses each command with shell-style quoting. A command with an
 unbalanced quote is rejected (`ERROR: cannot parse command`) rather than guessed at, so
 quote a value containing spaces as a whole: `secrets set myapp 'GREETING=hello world'`.

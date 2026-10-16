@@ -72,3 +72,16 @@ class TestDoctorTimers:
         run_doctor(paths, as_json=True)
         shipped = {p.name for p in (Path(__file__).parents[2] / "systemd").glob("*.timer")}
         assert set(asked) >= shipped
+
+
+class TestDoctorComposeVersion:
+    def test_old_compose_fails_doctor(self, paths: BoxPaths, monkeypatch, capsys) -> None:
+        from boxmunge.commands.doctor import run_doctor
+        monkeypatch.setattr("boxmunge.compose_version.compose_version_problem",
+                            lambda: "Docker Compose 2.23.0 is older than 2.24.0")
+        monkeypatch.setattr("boxmunge.commands.doctor.shutil.which", lambda _: "/usr/bin/docker")
+        assert run_doctor(paths, as_json=True) == 1
+        results = {r["name"]: r for r in json.loads(capsys.readouterr().out)}
+        line = results["Docker Compose version supported"]
+        assert line["status"] == "FAIL"
+        assert "older than 2.24.0" in line["detail"]

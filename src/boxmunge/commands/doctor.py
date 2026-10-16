@@ -91,6 +91,10 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
     # Docker
     docker_available = shutil.which("docker") is not None
     check("Docker available", docker_available)
+    if docker_available:
+        from boxmunge.compose_version import compose_version_problem
+        problem = compose_version_problem()
+        check("Docker Compose version supported", problem is None, problem or "")
 
     # age and rclone run only inside the system container (no host fallback)
     from boxmunge.system_container import connect, SystemContainerError
