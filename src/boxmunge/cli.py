@@ -4,6 +4,7 @@
 import sys
 from typing import Callable
 
+from boxmunge.termination import Terminated, sigterm_unwinds
 from boxmunge.commands.argv import HELP_FLAGS
 from boxmunge.commands.usage import usage_for
 from boxmunge.commands.add_git_project_cmd import cmd_add_git_project
@@ -124,4 +125,9 @@ def main() -> None:
         print(usage_for(command))
         sys.exit(0)
 
-    handler(command_args)
+    try:
+        with sigterm_unwinds():
+            handler(command_args)
+    except Terminated as e:
+        print(f"boxmunge {command}: stopped by signal {e.signum}", file=sys.stderr)
+        sys.exit(128 + e.signum)

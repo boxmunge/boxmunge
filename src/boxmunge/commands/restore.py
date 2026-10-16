@@ -23,7 +23,7 @@ from boxmunge.backup import (
     SNAPSHOT_RETENTION, BackupError, BackupKind, decrypted_snapshot, prune_backups,
     resolve_backup_service,
 )
-from boxmunge.commands.backup_cmd import list_snapshots
+from boxmunge.commands.backup_cmd import list_snapshots, sweep_stale_dumps
 from boxmunge.docker import compose_command, compose_down, compose_up, DockerError
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.lifecycle import is_blocked
@@ -32,6 +32,7 @@ from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
 from boxmunge.restore_safety import RestoreError, take_safety_snapshot, verify_plaintext
+from boxmunge.service_exec import ServiceCommandTimeout, run_in_service
 
 RESTORE_COMMAND_TIMEOUT = 600  # seconds; matches the backup dump budget
 _SERVICE_START_TIMEOUT = 120
@@ -101,6 +102,7 @@ def run_restore(
         return 1
 
     def inner() -> int:
+        sweep_stale_dumps(paths, project_name)
         # Checked under the lock: restore is operator-initiated and mutates
         # compose state. REFUSE if the project is paused or CVE-quarantined
         # — the operator must explicitly resume / security-resume first.
@@ -293,23 +295,14 @@ def _run_restore_command(
     project_dir: Path, project_name: str, service: str,
     restore_command: str, plaintext: Path,
 ) -> None:
-    cmd = [
-        "docker", "compose",
-        "-f", "compose.yml",
-        "-p", project_name,
-        "exec", "-T", service,
-        "sh", "-c", restore_command,
-    ]
     with open(plaintext, "rb") as inf:
         try:
-            result = subprocess.run(
-                cmd, cwd=project_dir, stdin=inf, capture_output=True,
-                text=True, timeout=RESTORE_COMMAND_TIMEOUT,
+            result = run_in_service(
+                project_dir, project_name, service, restore_command,
+                timeout=RESTORE_COMMAND_TIMEOUT, stdin=inf, capture_output=True, text=True,
             )
-        except subprocess.TimeoutExpired as e:
-            raise RestoreError(
-                f"restore_command timed out after {RESTORE_COMMAND_TIMEOUT}s"
-            ) from e
+        except ServiceCommandTimeout as e:
+            raise RestoreError(f"restore_command {e}") from e
     if result.returncode != 0:
         raise RestoreError(f"restore_command failed: {result.stderr.strip()}")
 

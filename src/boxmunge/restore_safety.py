@@ -14,7 +14,7 @@ import zlib
 from pathlib import Path
 
 from boxmunge.backup import BackupError, BackupKind, backup_filename, encrypt_file
-from boxmunge.commands.backup_cmd import _execute_dump
+from boxmunge.backup_dump import execute_dump
 from boxmunge.paths import BoxPaths
 
 _READ_CHUNK = 1 << 20
@@ -66,7 +66,7 @@ def take_safety_snapshot(
             "without one)"
         )
     try:
-        raw = _execute_dump(paths, project_name, dump_command, service)
+        raw = execute_dump(paths, project_name, dump_command, service)
     except BackupError as e:
         raise RestoreError(
             f"pre-restore safety snapshot failed: {e} (fix the service, or "

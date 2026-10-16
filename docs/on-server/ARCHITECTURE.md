@@ -252,7 +252,7 @@ If `type` is anything other than `none`, both `dump_command` and `restore_comman
 
 Backup flow:
 
-1. Run the dump command from the manifest, with a 10-minute limit. Its output goes to a private (0600) `.dump-*` file in the project's `backups/` directory: the plaintext touches disk until step 2 finishes
+1. Run the dump command from the manifest, with a 10-minute limit (on overrun or interruption its processes are killed inside the container). Its output goes to a private (0600) `.dump-*` file in the project's `backups/` directory: the plaintext touches disk until step 2 finishes
 2. Encrypt with age using the backup key, then remove the plaintext dump (also on any failure or timeout)
 3. Write atomically to `<project>/backups/<project>-<ISO8601>-<kind>.tar.gz.age`, where kind is `nightly`, `predeploy`, `preupdate` or `manual`
 4. Prune local archives of the same kind beyond that kind's retention count (see OPERATIONS.md)

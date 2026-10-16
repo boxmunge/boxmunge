@@ -88,6 +88,9 @@ class Box:
 
     def docker_run(self, cmd, cwd=None, stdin=None, stdout=None, **kw):
         """Stands in for subprocess.run (one module object, patched once)."""
+        if "boxmunge-stop" in cmd:
+            self.events.append("stop-in-container")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
         if "exec" in cmd and cmd[-1] == "pg_dump app":
             return self.dump_run(cmd, cwd=cwd, stdout=stdout, **kw)
         if cmd[:2] == ["docker", "compose"] and "up" in cmd:
@@ -130,6 +133,13 @@ def _restore(box: Box, **kw) -> int:
 
 
 class TestVerifiedBeforeStop:
+    def test_stale_plaintext_dump_is_swept_under_the_lock(self, box):
+        stale = box.paths.project_backups(PROJECT) / ".dump-killed.tar.gz"
+        stale.write_bytes(b"plaintext from a SIGKILLed backup")
+        assert _restore(box) == 0
+        assert not stale.exists()
+        assert "Removed stale plaintext dump" in box.paths.log_file.read_text()
+
     def test_success_order_and_safety_snapshot(self, box):
         assert _restore(box) == 0
         assert box.events == ["decrypt", "dump", "encrypt", "down", "start-db",
@@ -189,6 +199,8 @@ class TestAlwaysRestarted:
         assert _restore(box) == 1
         assert box.events[-1] == "up-all"
         assert box.events.index("down") < box.events.index("up-all")
+        if isinstance(value, subprocess.TimeoutExpired) and attr == "restore_error":
+            assert "stop-in-container" in box.events, "a timed-out restore is killed in the container"
         err = capsys.readouterr().err
         assert "-prerestore.tar.gz.age" in err, "operator is pointed at the safety snapshot"
         assert box.leftovers() == []
@@ -198,6 +210,7 @@ class TestAlwaysRestarted:
         with pytest.raises(RuntimeError):
             _restore(box)
         assert box.events[-1] == "up-all"
+        assert "stop-in-container" in box.events, "an interrupted restore is killed in the container"
 
 
 class TestRestoredDataIsLoaded:
