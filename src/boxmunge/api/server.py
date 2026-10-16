@@ -14,11 +14,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import socket
 import socketserver
 import stat
 import sys
-import tempfile
 import traceback
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -226,18 +226,26 @@ class UnixHTTPServer(socketserver.ThreadingUnixStreamServer):
         """Bind inside a fresh 0700 directory, set the socket's mode there,
         then link it to the published path. Binding at the path directly
         would expose the socket with the process umask until a chmod. The
-        link fails, leaving the path alone, if anything already holds it."""
+        link fails, leaving the path alone, if anything already holds it.
+        The staging directory sits beside the target and is named relative
+        to it as given, so a relative path stays short under AF_UNIX's
+        ~104-byte limit however deep the working directory is."""
         target = str(self.server_address)
-        private = tempfile.mkdtemp(prefix=".apid-", dir=os.path.dirname(target) or ".")
+        private = os.path.join(os.path.dirname(target), f".apid-{secrets.token_hex(6)}")
         staged = os.path.join(private, "s")
         try:
-            self.socket.bind(staged)
-            os.chmod(staged, self._socket_mode)
-            os.link(staged, target)
-        finally:
-            if os.path.lexists(staged):
-                os.unlink(staged)
-            os.rmdir(private)
+            os.mkdir(private, 0o700)
+            os.chmod(private, 0o700)
+            try:
+                self.socket.bind(staged)
+                os.chmod(staged, self._socket_mode)
+                os.link(staged, target)
+            finally:
+                if os.path.lexists(staged):
+                    os.unlink(staged)
+                os.rmdir(private)
+        except OSError as e:
+            raise ServerError(f"cannot listen on {target}: {e}") from e
         self.server_address = target
 
 

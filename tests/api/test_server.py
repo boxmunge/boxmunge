@@ -6,6 +6,7 @@ import os
 import socket
 import stat
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -189,9 +190,29 @@ def test_socket_never_appears_with_the_process_umask(
         server.server_close()
 
 
+def test_a_relative_socket_path_works_under_a_long_working_directory(
+        fixture_app, tmp_path, monkeypatch) -> None:
+    """AF_UNIX paths are limited to about 104 bytes. The quick start passes
+    ./api.sock, so staging must stay relative to the path as given."""
+    deep = tmp_path.joinpath(*(["d" * 60] * 3))
+    deep.mkdir(parents=True)
+    monkeypatch.chdir(deep)
+    with serving(fixture_app, Path("api.sock")):
+        assert call(Path("api.sock"), "GET", "/v1/actions")[0] == 200
+    assert sorted(p.name for p in deep.iterdir()) == []
+
+
+def test_a_socket_path_that_is_too_long_is_refused_naming_it(fixture_app, tmp_path) -> None:
+    target = tmp_path.joinpath(*(["d" * 60] * 3)) / "api.sock"
+    target.parent.mkdir(parents=True)
+    with pytest.raises(ServerError, match="cannot listen on .*api.sock"):
+        UnixHTTPServer(target, fixture_app, socket_mode=0o600)
+    assert list(target.parent.iterdir()) == []
+
+
 def test_binding_over_an_existing_path_is_refused(fixture_app, sock_path) -> None:
     sock_path.write_text("not a socket")
-    with pytest.raises(FileExistsError):
+    with pytest.raises(ServerError, match=str(sock_path)):
         UnixHTTPServer(sock_path, fixture_app, socket_mode=0o600)
     assert sock_path.read_text() == "not a socket"
     assert sorted(p.name for p in sock_path.parent.iterdir()) == [sock_path.name]
