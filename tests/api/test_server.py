@@ -2,10 +2,12 @@
 """apid's HTTP transport, over real unix sockets."""
 from __future__ import annotations
 
+import json
 import os
 import socket
 import stat
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -110,6 +112,8 @@ def test_malformed_bodies_are_invalid_params_and_the_server_carries_on(
      b"Transfer-Encoding: chunked\r\n\r\n{}", 422, "Chunked"),
     (b"GET /v1/actions HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}",
      400, "GET takes no request body"),
+    (b"POST /v1/actions/status.get HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n"
+     b"Content-Length: 40\r\n\r\n{}", 400, "one Content-Length header"),
     (b"GET /v1/actions HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n",
      400, "GET takes no request body"),
     # "\xb2" is a superscript two once headers are decoded as Latin-1: str.isdigit()
@@ -235,6 +239,65 @@ def test_access_log_escapes_control_characters(fixture_app, sock_path, capfd) ->
     err = capfd.readouterr().err
     assert "\\x1b[2Jx\\x07" in err
     assert "\x1b" not in err and "\x07" not in err
+
+
+def test_deeply_nested_json_is_invalid_params_not_a_crash(served, fixture_paths) -> None:
+    status, got = call(served, "POST", "/v1/actions/status.get",
+                       b'{"params": ' + b"[" * 30000 + b"]" * 30000 + b"}")
+    assert status == 422 and "nested too deeply" in got["error"]["message"]
+    assert call(served, "GET", "/v1/actions")[0] == 200
+    logged = [json.loads(line) for line in fixture_paths.log_file.read_text().splitlines()]
+    assert [entry for entry in logged if entry["component"] == "apid"] == []
+
+
+def test_a_client_trickling_bytes_is_dropped_at_the_request_deadline(
+        served, monkeypatch) -> None:
+    """Each byte arrives well within the per-read timeout, but the whole
+    request must arrive within REQUEST_TIMEOUT."""
+    monkeypatch.setattr(server_module, "REQUEST_TIMEOUT", 0.8)
+    monkeypatch.setattr(server_module._RequestHandler, "timeout", 0.5)
+    request = b"POST /v1/actions/status.get HTTP/1.1\r\nHost: x\r\nX-Pad: " + b"a" * 200
+    started = time.monotonic()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(5)
+        sock.connect(str(served))
+        try:
+            for byte in request:
+                sock.sendall(bytes([byte]))
+                time.sleep(0.05)
+                if time.monotonic() - started > 4:
+                    break
+            closed = sock.recv(65536) == b""
+        except (BrokenPipeError, ConnectionResetError):
+            closed = True
+    assert closed and time.monotonic() - started < 3
+    assert call(served, "GET", "/v1/actions")[0] == 200
+
+
+def test_connections_beyond_the_cap_get_503_and_the_server_recovers(
+        fixture_app, sock_path, monkeypatch) -> None:
+    monkeypatch.setattr(server_module, "MAX_CONNECTIONS", 2)
+    with serving(fixture_app, sock_path):
+        held = []
+        for _ in range(2):
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(str(sock_path))
+            held.append(sock)
+        time.sleep(0.2)  # let the server accept and start both
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(5)
+            sock.connect(str(sock_path))
+            chunks = []
+            while chunk := sock.recv(65536):
+                chunks.append(chunk)
+        head, _, body = b"".join(chunks).partition(b"\r\n\r\n")
+        status, got = int(head.split(b" ", 2)[1]), json.loads(body)
+        assert status == 503 and got["error"]["code"] == "unavailable"
+        assert "connections" in got["error"]["message"]
+        for sock in held:
+            sock.close()
+        time.sleep(0.2)
+        assert call(sock_path, "GET", "/v1/actions")[0] == 200
 
 
 def test_socket_is_private_to_its_owner(served) -> None:

@@ -19,6 +19,7 @@ import socket
 import socketserver
 import stat
 import sys
+import threading
 import traceback
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -35,6 +36,8 @@ MAX_BODY_BYTES = 64 * 1024
 # Seconds a connection may sit without sending: a client that stalls
 # mid-body or idles on keep-alive is dropped rather than pinning a thread.
 REQUEST_TIMEOUT = 30.0
+# Connections served at once; one more is answered 503 and closed.
+MAX_CONNECTIONS = 16
 _CONTENT_LENGTH_RE = re.compile(r"[0-9]{1,9}")
 _BODY_KEYS = frozenset({"params", "approval"})
 _ACTIONS_PREFIX = "/v1/actions/"
@@ -46,6 +49,15 @@ _CONTROL_ESCAPES = {c: f"\\x{c:02x}" for c in (*range(0x20), 0x7f)}
 
 class ServerError(Exception):
     """The server cannot start on the requested socket."""
+
+
+class _BadFraming(Exception):
+    """A request the HTTP layer refuses before any action is looked up."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
 
 
 class ApiApp:
@@ -114,6 +126,9 @@ def parse_invoke_body(body: bytes | None) -> tuple[dict[str, Any], dict[str, Any
     except (UnicodeDecodeError, ValueError) as e:
         raise ActionError(ErrorCode.INVALID_PARAMS,
                           f"The request body is not valid JSON: {e}") from e
+    except RecursionError as e:
+        raise ActionError(ErrorCode.INVALID_PARAMS,
+                          "The request body is nested too deeply.") from e
     if not isinstance(doc, dict):
         raise ActionError(ErrorCode.INVALID_PARAMS, "The request body must be a JSON object.")
     unknown = sorted(set(doc) - _BODY_KEYS)
@@ -139,15 +154,35 @@ class _RequestHandler(BaseHTTPRequestHandler):
     timeout = REQUEST_TIMEOUT
     server: UnixHTTPServer
 
+    def handle_one_request(self) -> None:
+        """Serve one request, which must arrive whole (headers and body)
+        within REQUEST_TIMEOUT. The per-read timeout alone would let a
+        client trickling a byte at a time hold the thread indefinitely."""
+        self._watchdog = threading.Timer(REQUEST_TIMEOUT, self._expire)
+        self._watchdog.daemon = True
+        self._watchdog.start()
+        try:
+            super().handle_one_request()
+        finally:
+            self._watchdog.cancel()
+
+    def _expire(self) -> None:
+        try:
+            self.connection.shutdown(socket.SHUT_RD)  # pending reads see EOF
+        except OSError:
+            pass
+
+    def _refuse(self, status: int, message: str) -> None:
+        self.close_connection = True
+        self._respond(status, {"api_version": API_VERSION, "ok": False, "error": {
+            "code": ErrorCode.INVALID_PARAMS.value, "message": message}})
+
     def do_GET(self) -> None:
+        self._watchdog.cancel()
         if self._declares_body():
             # Never leave a body unread on a kept-alive connection: it would
             # be parsed as the next request.
-            self.close_connection = True
-            self._respond(400, {"api_version": API_VERSION, "ok": False, "error": {
-                "code": ErrorCode.INVALID_PARAMS.value,
-                "message": "A GET takes no request body; send none.",
-            }})
+            self._refuse(400, "A GET takes no request body; send none.")
             return
         self._respond(*self.server.app.handle("GET", self.path, None))
 
@@ -158,13 +193,19 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             body = self._read_body()
+        except _BadFraming as e:
+            self._refuse(e.status, e.message)
+            return
         except ActionError as e:
             self.close_connection = True
             self._respond(e.http_status, error_body(e))
             return
+        finally:
+            self._watchdog.cancel()
         self._respond(*self.server.app.handle("POST", self.path, body))
 
     def _not_served(self) -> None:
+        self._watchdog.cancel()
         self.close_connection = True  # any body is left unread
         self._respond(*self.server.app.handle(self.command, self.path, None))
 
@@ -174,6 +215,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if self.headers.get("Transfer-Encoding") is not None:
             raise ActionError(ErrorCode.INVALID_PARAMS,
                               "Chunked request bodies are not supported; send Content-Length.")
+        if len(self.headers.get_all("Content-Length") or []) > 1:
+            raise _BadFraming(400, "Send exactly one Content-Length header.")
         raw = self.headers.get("Content-Length")
         if raw is None or not _CONTENT_LENGTH_RE.fullmatch(raw):
             raise ActionError(ErrorCode.INVALID_PARAMS,
@@ -184,7 +227,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
             raise ActionError(ErrorCode.INVALID_PARAMS,
                               f"The request body is {length} bytes; the limit is "
                               f"{MAX_BODY_BYTES}.")
-        return self.rfile.read(length)
+        body = self.rfile.read(length)
+        if len(body) < length:
+            raise _BadFraming(408, f"The request did not arrive whole within "
+                                   f"{REQUEST_TIMEOUT:g} seconds.")
+        return body
 
     def _respond(self, status: int, body: dict[str, Any]) -> None:
         payload = (json.dumps(body) + "\n").encode()
@@ -220,7 +267,41 @@ class UnixHTTPServer(socketserver.ThreadingUnixStreamServer):
         self.app = app
         self.access_log = access_log
         self._socket_mode = socket_mode
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        self._max_connections = MAX_CONNECTIONS
         super().__init__(str(socket_path), _RequestHandler)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._slots.acquire(blocking=False):
+            self._refuse_busy(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    def _refuse_busy(self, request: Any) -> None:
+        error = ActionError(ErrorCode.UNAVAILABLE,
+                            f"apid is already serving {self._max_connections} connections; "
+                            f"retry shortly.")
+        payload = (json.dumps(error_body(error)) + "\n").encode()
+        head = (f"HTTP/1.1 {error.http_status} Service Unavailable\r\n"
+                f"Content-Type: application/json\r\nContent-Length: {len(payload)}\r\n"
+                f"Connection: close\r\n\r\n").encode()
+        try:
+            request.settimeout(1)
+            request.sendall(head + payload)
+        except OSError:
+            pass
+        finally:
+            self.shutdown_request(request)
 
     def server_bind(self) -> None:
         """Bind inside a fresh 0700 directory, set the socket's mode there,
