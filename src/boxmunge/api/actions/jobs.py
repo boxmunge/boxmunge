@@ -18,17 +18,24 @@ JOB_ID_PARAM: dict[str, Any] = {"type": "string", "pattern": JOB_ID_PATTERN,
 
 
 def _jobs_list(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
-    jobs = JobStore(ctx.paths).recent(project=params.get("project"),
-                                      limit=params.get("limit", JOBS_LIMIT_DEFAULT))
-    return {"jobs": jobs}
+    listing = _store(ctx).recent(project=params.get("project"),
+                                 limit=params.get("limit", JOBS_LIMIT_DEFAULT))
+    result: dict[str, Any] = {"jobs": listing.jobs}
+    if listing.unreadable:
+        result["unreadable"] = listing.unreadable
+    return result
+
+
+def _store(ctx: ActionContext) -> JobStore:
+    return JobStore(ctx.paths, result_schemas=ctx.result_schemas)
 
 
 def _job_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
-    return _require_job(JobStore(ctx.paths), params["id"])
+    return _require_job(_store(ctx), params["id"])
 
 
 def _job_events(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
-    store = JobStore(ctx.paths)
+    store = _store(ctx)
     job_id = params["id"]
     _require_job(store, job_id)
     return {"id": job_id, "events": store.events(job_id, after=params.get("after", 0))}
@@ -51,7 +58,12 @@ ACTIONS = (
             "limit": {"type": "integer", "minimum": 1, "maximum": 200,
                       "description": f"At most this many jobs. Default {JOBS_LIMIT_DEFAULT}."},
         }, optional=("project", "limit")),
-        result=obj({"jobs": arr(JOB_SCHEMA)}), handler=_jobs_list, mcp=True,
+        result=obj({
+            "jobs": arr(JOB_SCHEMA),
+            "unreadable": {**arr(obj({"id": STRING, "problem": STRING})),
+                           "description": "Job records that could not be read, each "
+                                          "with the problem; present only when any are."},
+        }, optional=("unreadable",)), handler=_jobs_list, mcp=True,
     ),
     Action(
         name="job.get", tier=Tier.OBSERVE,

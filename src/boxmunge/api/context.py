@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from boxmunge.api.principal import Principal
+from boxmunge.api.schema import ResultSchemas
 from boxmunge.paths import BoxPaths
 
 
@@ -34,4 +35,7 @@ class ActionContext:
     principal: Principal
     paths: BoxPaths
     host: HostProbe
+    # Resolves an action name to its result schema (None if unknown), for
+    # checking the results stored in job records.
+    result_schemas: ResultSchemas
     emit: Emit | None = None

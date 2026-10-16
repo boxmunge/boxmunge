@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -57,45 +58,64 @@ EVENT_SCHEMA = obj({
 }, optional=("message", "step", "status", "state"))
 
 
-class JobStore:
-    """*result_schemas* resolves each record's action to its result schema,
-    so a non-null result is checked; without it, one is reported corrupt."""
+@dataclass(frozen=True)
+class JobListing:
+    """Jobs newest first, and the records that could not be read: each
+    {"id", "problem"}, the problem naming the file."""
 
-    def __init__(self, paths: BoxPaths, *, result_schemas: ResultSchemas | None = None) -> None:
+    jobs: list[dict[str, Any]]
+    unreadable: list[dict[str, str]]
+
+
+class JobStore:
+    """*result_schemas* resolves an action to its result schema, so a
+    non-null result is checked against the action that produced it."""
+
+    def __init__(self, paths: BoxPaths, *, result_schemas: ResultSchemas) -> None:
         self._done = paths.jobs_dir
         self._queue = paths.jobs_queue
         self._result_schemas = result_schemas
 
     def get(self, job_id: str) -> dict[str, Any] | None:
-        """The job's record, or None if there is no such job."""
+        """The job's record, or None if there is no such job. A record that
+        cannot be read raises StateError naming the file."""
         found = None
         for directory in (self._queue, self._done):
-            record = _load_record(directory / f"{job_id}.json", job_id, self._result_schemas)
+            record = self._load(directory / f"{job_id}.json", job_id)
             if record is not None:
                 found = _prefer(found, record)
         return found
 
-    def recent(self, *, project: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    def recent(self, *, project: str | None = None, limit: int = 50) -> JobListing:
         """Jobs newest first, optionally for one project.
 
         queue/ is scanned before jobs/: finishing a job links its record
         into jobs/ before unlinking it from queue/, so a job that moves
         while we look is found in one place or the other, never missed. A
-        file that vanishes between listing and reading has moved on.
+        file that vanishes between listing and reading has moved on. A
+        record that cannot be read is listed as unreadable (its project is
+        unknowable, so whatever the filter) and never hides the others.
         """
         records: dict[str, dict[str, Any]] = {}
+        problems: dict[str, str] = {}
         for directory in (self._queue, self._done):
             if not directory.is_dir():
                 continue
             for path in directory.glob("*.json"):
                 if not _JOB_ID_RE.fullmatch(path.stem):
                     continue
-                record = _load_record(path, path.stem, self._result_schemas)
+                try:
+                    record = self._load(path, path.stem)
+                except StateError as e:
+                    problems.setdefault(path.stem, str(e))
+                    continue
                 if record is not None:
                     records[path.stem] = _prefer(records.get(path.stem), record)
         jobs = [r for r in records.values() if project is None or r["project"] == project]
         jobs.sort(key=lambda r: (r["created_at"], r["id"]), reverse=True)
-        return jobs[:limit]
+        unreadable = [{"id": job_id, "problem": problem}
+                      for job_id, problem in sorted(problems.items()) if job_id not in records]
+        return JobListing(jobs=jobs[:limit], unreadable=unreadable)
 
     def events(self, job_id: str, *, after: int = 0) -> list[dict[str, Any]]:
         """The job's events with seq greater than *after*, in order."""
@@ -108,14 +128,42 @@ class JobStore:
                 continue
             try:
                 event = json.loads(line)
+                violations = validate(EVENT_SCHEMA, event)
             except ValueError as e:
                 raise StateError(f"{path}:{lineno}: not JSON: {e}") from e
-            violations = validate(EVENT_SCHEMA, event)
+            except RecursionError as e:
+                raise StateError(f"{path}:{lineno}: nested too deeply") from e
             if violations:
                 raise StateError(f"{path}:{lineno}: {'; '.join(violations)}")
             if event["seq"] > after:
                 events.append(event)
         return events
+
+    def _load(self, path: Path, job_id: str) -> dict[str, Any] | None:
+        """The record at *path*, or None if there is none there (any more)."""
+        try:
+            text = path.read_text()
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            raise StateError(f"Cannot read job record {path}: {e}") from e
+        try:
+            record = json.loads(text)
+            violations = validate(JOB_SCHEMA, record, result_schemas=self._result_schemas)
+        except ValueError as e:
+            raise StateError(f"Job record {path} is not JSON: {e}") from e
+        except RecursionError as e:
+            raise StateError(f"Job record {path} is nested too deeply") from e
+        action = record.get("action") if isinstance(record, dict) else None
+        if (isinstance(action, str) and record.get("result") is not None
+                and self._result_schemas(action) is None):
+            raise StateError(f"Job record {path}: action {action} is no longer registered, "
+                             f"so its result cannot be checked")
+        if violations:
+            raise StateError(f"Job record {path} is corrupt: {'; '.join(violations)}")
+        if record["id"] != job_id:
+            raise StateError(f"Job record {path} holds the id {record['id']}")
+        return record
 
 
 def _prefer(current: dict[str, Any] | None, other: dict[str, Any]) -> dict[str, Any]:
@@ -125,24 +173,3 @@ def _prefer(current: dict[str, Any] | None, other: dict[str, Any]) -> dict[str, 
                            and current["state"] not in TERMINAL_STATES):
         return other
     return current
-
-
-def _load_record(path: Path, job_id: str,
-                 result_schemas: ResultSchemas | None) -> dict[str, Any] | None:
-    """The record at *path*, or None if there is none there (any more)."""
-    try:
-        text = path.read_text()
-    except FileNotFoundError:
-        return None
-    except OSError as e:
-        raise StateError(f"Cannot read job record {path}: {e}") from e
-    try:
-        record = json.loads(text)
-    except ValueError as e:
-        raise StateError(f"Job record {path} is not JSON: {e}") from e
-    violations = validate(JOB_SCHEMA, record, result_schemas=result_schemas)
-    if violations:
-        raise StateError(f"Job record {path} is corrupt: {'; '.join(violations)}")
-    if record["id"] != job_id:
-        raise StateError(f"Job record {path} holds the id {record['id']}")
-    return record

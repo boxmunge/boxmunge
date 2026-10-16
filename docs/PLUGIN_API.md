@@ -174,7 +174,7 @@ The catalog is the authority on parameters and result fields; this table is the 
 | `security.project` | `project` | `status` (normal, quarantined, at_risk_running), `findings` with dispositions, `quarantine`, `active_suppressions`, `off_services` |
 | `backups.list` | `project` | `snapshots`, newest first: `name`, `kind`, `taken_at`, `size` |
 | `inbox.list` | `project`? | `bundles` uploaded and not yet deployed |
-| `jobs.list` | `project`?, `limit`? (1-200, default 50) | `jobs`, newest first |
+| `jobs.list` | `project`?, `limit`? (1-200, default 50) | `jobs`, newest first; `unreadable` (`id`, `problem`), present only when some job record cannot be read |
 | `job.get` | `id` | One job record |
 | `job.events` | `id`, `after`? (default 0) | `events` with `seq` greater than `after` |
 

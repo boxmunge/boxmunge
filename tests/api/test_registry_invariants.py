@@ -15,7 +15,7 @@ from boxmunge.api.dev.fixture_host import FixtureHost
 from boxmunge.api.jobs import JobStore
 from boxmunge.api.principal import Principal, PrincipalKind, Tier, refusal
 from boxmunge.api.schema import schema_types
-from tests.api.fakes import make_invoker
+from tests.api.fakes import make_invoker, registry_results
 
 REPO = Path(__file__).resolve().parents[2]
 API_SRC = REPO / "src" / "boxmunge" / "api"
@@ -97,7 +97,7 @@ def test_api_code_never_prints_or_exits() -> None:
 
 
 def _sweep_calls(paths) -> list[tuple[str, dict]]:
-    job_id = JobStore(paths).recent()[0]["id"]
+    job_id = JobStore(paths, result_schemas=registry_results).recent().jobs[0]["id"]
     return [
         ("platform.info", {}), ("status.get", {}), ("projects.list", {}), ("health.get", {}),
         ("project.get", {"project": "shop"}), ("project.get", {"project": "newapp"}),

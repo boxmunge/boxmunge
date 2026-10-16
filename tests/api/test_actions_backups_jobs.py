@@ -2,6 +2,8 @@
 """backups.list, jobs.list, job.get and job.events."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from boxmunge.api.dev.fixture_host import FixtureHost
@@ -72,3 +74,50 @@ def test_unknown_and_malformed_job_ids(fixture_paths) -> None:
                   {"id": UNKNOWN_JOB}).code is ErrorCode.NOT_FOUND
     assert _error(fixture_paths, "job.get",
                   {"id": "../../etc/passwd"}).code is ErrorCode.INVALID_PARAMS
+
+
+def _job_file(paths, action: str):
+    """The fixture's job record for *action*, and the record itself."""
+    for path in paths.jobs_dir.glob("*.json"):
+        record = json.loads(path.read_text())
+        if record["action"] == action:
+            return path, record
+    raise AssertionError(f"no fixture job for {action}")
+
+
+def _rewrite(path, record, **changes) -> str:
+    record.update(changes)
+    path.write_text(json.dumps(record))
+    return record["id"]
+
+
+def test_a_job_result_is_served_when_it_matches_its_action(fixture_paths) -> None:
+    path, record = _job_file(fixture_paths, "project.deploy")
+    job_id = _rewrite(path, record, action="projects.list", result={"projects": ["shop"]})
+    assert _call(fixture_paths, "job.get", {"id": job_id})["result"] == {"projects": ["shop"]}
+    listing = _call(fixture_paths, "jobs.list")
+    assert job_id in [j["id"] for j in listing["jobs"]] and "unreadable" not in listing
+
+
+@pytest.mark.parametrize("changes,problem", [
+    ({"action": "projects.list", "result": {"projects": "shop"}}, "expected array"),
+    ({"result": {"ok": True}}, "action project.deploy is no longer registered"),
+    ({"state": "finished"}, "must be one of"),
+])
+def test_one_bad_job_record_does_not_fail_the_list(fixture_paths, changes, problem) -> None:
+    path, record = _job_file(fixture_paths, "project.deploy")
+    job_id = _rewrite(path, record, **changes)
+    listing = _call(fixture_paths, "jobs.list")
+    assert [j["action"] for j in listing["jobs"]] == ["project.backup"]
+    assert [u["id"] for u in listing["unreadable"]] == [job_id]
+    assert problem in listing["unreadable"][0]["problem"]
+    assert str(path) in listing["unreadable"][0]["problem"]
+    error = _error(fixture_paths, "job.get", {"id": job_id})
+    assert error.code is ErrorCode.FAILED and str(path) in error.message
+
+
+def test_a_job_record_that_is_not_json_is_unreadable(fixture_paths) -> None:
+    path, record = _job_file(fixture_paths, "project.deploy")
+    path.write_text("{not json")
+    listing = _call(fixture_paths, "jobs.list")
+    assert [u["id"] for u in listing["unreadable"]] == [record["id"]]

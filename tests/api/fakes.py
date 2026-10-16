@@ -51,3 +51,9 @@ def read_audit(paths: BoxPaths) -> list[dict[str, Any]]:
     if not paths.audit_log.exists():
         return []
     return [json.loads(line) for line in paths.audit_log.read_text().splitlines()]
+
+
+def registry_results(name: str) -> dict | None:
+    """The full registry's result schema for *name*, as invoke() resolves it."""
+    from boxmunge.api.actions import build_registry
+    return {a.name: a.result for a in build_registry().actions()}.get(name)

@@ -19,7 +19,7 @@ from boxmunge.api.principal import Principal, Tier
 from boxmunge.api.registry import Action, Registry
 from boxmunge.api.schema import BOOLEAN, obj
 from boxmunge.api.server import ApiApp, ServerError, UnixHTTPServer, prepare_socket_path
-from tests.api.fakes import make_invoker
+from tests.api.fakes import make_invoker, registry_results
 from tests.api.unix_http import call, raw_exchange, serving
 
 WEBUI = Principal.plugin("webui", Tier.OBSERVE)
@@ -65,7 +65,7 @@ def test_invoke(served) -> None:
 
 
 def test_job_route(served, fixture_paths) -> None:
-    job_id = JobStore(fixture_paths).recent()[0]["id"]
+    job_id = JobStore(fixture_paths, result_schemas=registry_results).recent().jobs[0]["id"]
     status, body = call(served, "GET", f"/v1/jobs/{job_id}")
     assert status == 200 and body["data"]["id"] == job_id
 

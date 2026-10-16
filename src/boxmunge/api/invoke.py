@@ -115,7 +115,8 @@ class Invoker:
 
     def _run(self, action: Action, params: dict[str, Any],
              principal: Principal) -> dict[str, Any]:
-        ctx = ActionContext(principal=principal, paths=self._paths, host=self._host)
+        ctx = ActionContext(principal=principal, paths=self._paths, host=self._host,
+                            result_schemas=self._result_schema_of)
         with ExitStack() as stack:
             if "project" in action.locks:
                 project = params["project"]
