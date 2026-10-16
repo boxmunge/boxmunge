@@ -59,11 +59,28 @@ def _builds_docker_command(func: ast.AST) -> bool:
     return False
 
 
+# `docker volume create` and `docker network create` start no container.
+_NOT_CONTAINER_OBJECTS = {"volume", "network"}
+
+
 def _start_verbs(func: ast.AST) -> list[int]:
     """Lines where a start verb is a literal element of an argv list."""
     return [elt.lineno for node in ast.walk(func) if isinstance(node, (ast.List, ast.Tuple))
-            for elt in node.elts
-            if isinstance(elt, ast.Constant) and elt.value in _START_VERBS]
+            for prev, elt in zip([None, *node.elts], node.elts)
+            if isinstance(elt, ast.Constant) and elt.value in _START_VERBS
+            and not (isinstance(prev, ast.Constant) and prev.value in _NOT_CONTAINER_OBJECTS)]
+
+
+@pytest.mark.parametrize("argv, flagged", [
+    ('["docker", "volume", "create", x]', False),
+    ('["docker", "network", "create", x]', False),
+    ('["docker", "create", x]', True),
+    ('["docker", "container", "create", x]', True),
+    ('["docker", "compose", "-p", p, "up", "-d"]', True),
+])
+def test_the_scan_tells_container_starts_from_other_creates(argv, flagged) -> None:
+    func = ast.parse(f"def f():\n    run({argv})\n").body[0]
+    assert _builds_docker_command(func) and bool(_start_verbs(func)) is flagged
 
 
 def test_only_the_guard_calls_the_compose_start_primitives() -> None:
@@ -108,7 +125,7 @@ def test_the_scan_finds_the_checked_call_sites() -> None:
     sites = sorted({rel for rel, tree in _modules() if rel != GUARD
                     for _ in _calls(tree, names)})
     assert sites == [
-        "commands/deploy.py", "commands/recover_cmd.py", "commands/restore.py",
+        "commands/data_cmd.py", "commands/deploy.py", "commands/recover_cmd.py", "commands/restore.py",
         "commands/resume_cmd.py", "commands/rollback.py", "commands/security_resume.py",
         "commands/stage_cmd.py",
         "commands/upgrade_steps.py", "container_update.py", "cve/quarantine.py",

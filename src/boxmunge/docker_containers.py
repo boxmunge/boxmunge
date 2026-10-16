@@ -198,6 +198,27 @@ def container_bind_sources(project_name: str) -> list[tuple[str, bool]]:
     return sources
 
 
+def container_mounts(project_name: str) -> list[tuple[str, str, dict[str, Any]]]:
+    """(container name, compose service, Mounts entry) for every mount of
+    every container `up` manages in the compose project, stopped ones
+    included (`compose run` one-offs are not the service's)."""
+    listed = _run(["docker", "ps", "-a", "--no-trunc", *compose_project_filter(project_name),
+                   "--format", "{{.ID}}"], capture=True)
+    ids = listed.stdout.split()
+    if not ids:
+        return []
+    out = []
+    for doc in _inspect(["docker", "container", "inspect", *ids]):
+        labels = (doc.get("Config") or {}).get("Labels") or {}
+        if str(labels.get(_ONEOFF_LABEL, "")).lower() == "true":
+            continue
+        name = str(doc.get("Name", "")).lstrip("/")
+        for mount in doc.get("Mounts") or []:
+            if isinstance(mount, dict):
+                out.append((name, labels.get(_SERVICE_LABEL, ""), mount))
+    return out
+
+
 # Docker Desktop (macOS) reports a host bind source as /host_mnt/<host path>;
 # the Linux daemon reports the host path itself.
 _DESKTOP_HOST_PREFIX = "/host_mnt/"

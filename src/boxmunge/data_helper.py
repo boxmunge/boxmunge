@@ -15,7 +15,9 @@ reach only the CLI.
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 import shlex
 import stat
 import uuid
@@ -123,3 +125,47 @@ def container_owned_dirs(root: Path) -> list[Path]:
         with os.scandir(path) as it:
             stack.extend(Path(e.path) for e in it if e.is_dir(follow_symlinks=False))
     return sorted(found)
+
+
+_ANONYMOUS_NAME = re.compile(r"[0-9a-f]{64}")
+
+
+def is_anonymous(labels: dict | None, name: str) -> bool:
+    """An anonymous volume: Docker's own marker, or Docker's 64-hex name with
+    no Compose volume label. A hand-made named volume (an `external:` one)
+    is not anonymous, whatever its labels."""
+    labels = labels or {}
+    return "com.docker.volume.anonymous" in labels or (
+        "com.docker.compose.volume" not in labels and bool(_ANONYMOUS_NAME.fullmatch(name)))
+
+
+def volume_labels(name: str) -> dict | None:
+    """A volume's labels, or None when it does not exist."""
+    try:
+        out = _run(["docker", "volume", "inspect", "--format", "{{json .Labels}}", name],
+                   capture=True).stdout
+    except DockerError as e:
+        if "no such volume" in str(e).lower():
+            return None
+        raise
+    labels = json.loads(out)
+    if labels is not None and not isinstance(labels, dict):
+        raise DockerError(f"docker volume inspect {name}: labels are not an object: {out!r}")
+    return labels or {}
+
+
+def _compose_version() -> str:
+    out = _run(["docker", "compose", "version", "--short"], capture=True).stdout.strip()
+    if not out:
+        raise DockerError("docker compose version --short printed nothing")
+    return out.removeprefix("v")
+
+
+def compose_volume_labels(compose_project: str, key: str) -> list[str]:
+    """`--label` arguments that make Compose adopt a volume as its own
+    (Compose >= 2.35 adopts these without its config-hash label)."""
+    labels = {"com.docker.compose.project": compose_project,
+              "com.docker.compose.volume": key,
+              "com.docker.compose.version": _compose_version()}
+    return [arg for k, v in labels.items() for arg in ("--label", f"{k}={v}")]
+

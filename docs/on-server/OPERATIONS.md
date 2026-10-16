@@ -729,6 +729,29 @@ project-delete myapp --force
 `--force` warns that containers named `myapp-*` may still be running. Check with `docker ps` as the
 supervisor user.
 
+Data the containers wrote belongs to their users, so directories you cannot remove yourself are
+emptied first by the data helper (the container `stage` copies data with). If that fails,
+`project-delete` stops with an error and the project stays registered; run it again once the cause
+is fixed.
+
+## Naming an Anonymous Volume
+
+A service that mounts a path with no volume name (`- /var/lib/postgresql/data`, or an image
+`VOLUME` no named mount covers) keeps its data in an anonymous volume, which survives only because
+Compose hands it from one container to the next; `compose down -v` or a recreate elsewhere loses
+it. Give it a name without losing the data:
+
+```
+data adopt myapp db:/var/lib/postgresql/data pgdata
+```
+
+This stops the service's containers, creates the volume `myapp_pgdata` labelled as Compose labels
+its own, copies the anonymous volume into it (owners kept), and starts the containers again. Then
+add `pgdata:/var/lib/postgresql/data` to the service's `volumes` (and `pgdata: {}` under top-level
+`volumes`), or a `writable.persistent` entry named `pgdata`, and deploy. The anonymous volume is
+left in place; remove it once the service runs on the named one. `data adopt` refuses a path that
+is already a named volume, and a target volume that exists with data or without Compose's labels.
+
 ---
 
 ## Concurrent Operations

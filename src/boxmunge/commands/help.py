@@ -34,6 +34,8 @@ Project lifecycle:
   project-add <name>      Register a project name in the allowlist
   project-list            List registered project names
   project-delete <p>      Destructive: stop, remove files, deregister (with confirm)
+  data adopt <p> <svc>:<path> <name>
+                          Copy an anonymous volume into a named one deploy adopts
 
 Inbox & secrets:
   inbox [project]         List uploaded bundles

@@ -24,6 +24,7 @@ rollback <p>         restore previous deployment
 pause <project>      take offline with maintenance page
 resume <project>     bring back online (pulls latest images first)
 project-delete <p>   destructive removal (containers + files + registry)
+data adopt <p> <svc>:<path> <name>  copy an anonymous volume into a named one
 
 diff <project>       preview changes before deploying
 add-git-project      register a git-based project

@@ -30,6 +30,8 @@ ALLOWED_COMMANDS: set[str] = {
     "prod-deploy", "rollback", "project-delete", "diff",
     "project-add", "project-list",
     "pause", "resume", "recover",
+    # Data: `data adopt` names an anonymous volume
+    "data",
     # Inbox
     "inbox",
     # Secrets
