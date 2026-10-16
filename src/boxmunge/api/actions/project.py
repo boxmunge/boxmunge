@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from boxmunge.api.actions._common import (
-    PROJECT_PARAM, QUARANTINE_SCHEMA, deployed_project, existing_project, quarantine_view,
+    PROJECT_PARAM, QUARANTINE_SCHEMA, deployed_project, project_not_found, project_path,
+    quarantine_view,
 )
 from boxmunge.api.context import ActionContext
 from boxmunge.api.principal import Tier
@@ -18,10 +19,12 @@ from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.inbox_cmd import collect_inbox
 from boxmunge.cve.quarantine import read_quarantine_state
 from boxmunge.pause import read_paused_state
+from boxmunge.project_registry import load_registered_projects
 from boxmunge.paths import BoxPaths
 from boxmunge.state import StateError, read_state
 
-LIFECYCLES = ("pre_registered", "quarantined", "paused", "monitor_stopped", "running")
+LIFECYCLES = ("registered", "pre_registered", "quarantined", "paused", "monitor_stopped",
+              "running")
 
 PROJECT_VIEW = obj({
     "project": STRING,
@@ -57,7 +60,11 @@ BUNDLE = obj({"name": STRING, "project": STRING, "size": INTEGER, "mtime": STRIN
 def _project_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
     name = params["project"]
     paths = ctx.paths
-    deployed = (existing_project(paths, name) / "manifest.yml").exists()
+    project_dir = project_path(paths, name)
+    has_dir = project_dir.is_dir()
+    if not has_dir and name not in load_registered_projects(paths):
+        raise project_not_found(name)
+    deployed = has_dir and (project_dir / "manifest.yml").exists()
     deploy = read_state(paths.project_deploy_state(name))
     health = read_state(paths.project_health_state(name))
     staging = read_state(paths.project_staging_state(name))
@@ -69,7 +76,7 @@ def _project_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
     staged = bool(staging.get("active", False))
     return {
         "project": name,
-        "lifecycle": _lifecycle(name, paths, deployed=deployed,
+        "lifecycle": _lifecycle(name, paths, has_dir=has_dir, deployed=deployed,
                                 paused=paused is not None,
                                 quarantined=quarantine is not None),
         "health": {
@@ -95,9 +102,13 @@ def _project_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
     }
 
 
-def _lifecycle(name: str, paths: BoxPaths, *, deployed: bool, paused: bool,
+def _lifecycle(name: str, paths: BoxPaths, *, has_dir: bool, deployed: bool, paused: bool,
                quarantined: bool) -> str:
-    """Quarantine wins over pause, as in lifecycle.is_blocked."""
+    """Quarantine wins over pause, as in lifecycle.is_blocked. "registered"
+    is a name project-add recorded before any directory exists;
+    "pre_registered" has a directory (secrets set) but no manifest yet."""
+    if not has_dir:
+        return "registered"
     if not deployed:
         return "pre_registered"
     if quarantined:

@@ -29,17 +29,27 @@ QUARANTINE_SCHEMA = obj({
 })
 
 
+def project_path(paths: BoxPaths, name: str) -> Path:
+    """Where the project's directory is or would be. A reserved or invalid
+    name is invalid_params and is never looked up."""
+    try:
+        return paths.project_dir(name)
+    except InvalidProjectName as e:
+        raise ActionError(ErrorCode.INVALID_PARAMS, str(e)) from e
+
+
+def project_not_found(name: str) -> ActionError:
+    return ActionError(ErrorCode.NOT_FOUND,
+                       f"Project not found: {name}. projects.list names the projects "
+                       f"on this box.")
+
+
 def existing_project(paths: BoxPaths, name: str) -> Path:
     """The project's directory. A reserved or invalid name is invalid_params;
     a project that does not exist is not_found."""
-    try:
-        project_dir = paths.project_dir(name)
-    except InvalidProjectName as e:
-        raise ActionError(ErrorCode.INVALID_PARAMS, str(e)) from e
+    project_dir = project_path(paths, name)
     if not project_dir.is_dir():
-        raise ActionError(ErrorCode.NOT_FOUND,
-                          f"Project not found: {name}. projects.list names the projects "
-                          f"on this box.")
+        raise project_not_found(name)
     return project_dir
 
 

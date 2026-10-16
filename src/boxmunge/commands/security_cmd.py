@@ -32,7 +32,7 @@ from boxmunge.cve.policy import Disposition
 from boxmunge.cve.grace import GraceError, read_grace_state
 from boxmunge.cve.scan_state import read_scan_state
 from boxmunge.cve.quarantine import (
-    checked_quarantine_record, is_quarantined, read_quarantine_state,
+    QuarantineError, checked_quarantine_record, is_quarantined, read_quarantine_state,
 )
 from boxmunge.cve.suppressions import (
     SCOPE_HOST,
@@ -45,6 +45,7 @@ from boxmunge.log import log_error
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import load_registered_projects
+from boxmunge.state import StateError
 
 
 USAGE = """\
@@ -92,7 +93,8 @@ class ProjectSecurity:
 
 def load_project_security(project: str, paths: BoxPaths) -> ProjectSecurity:
     """Read a project's security state. Raises SecurityViewError, with the
-    message the CLI prints, when the manifest or suppressions are unusable."""
+    message the CLI prints, when the manifest, quarantine record, scan
+    state or suppressions are unusable."""
     try:
         manifest = load_manifest(paths.project_manifest(project))
     except ManifestError as e:
@@ -103,8 +105,13 @@ def load_project_security(project: str, paths: BoxPaths) -> ProjectSecurity:
 
     sec_block = manifest.get("security") or {}
     quarantined = is_quarantined(project, paths)
-    qstate = read_quarantine_state(project, paths) if quarantined else None
-    scan_state = read_scan_state(paths.project_scan_state(project))
+    try:
+        qstate = checked_quarantine_record(
+            read_quarantine_state(project, paths), paths.project_quarantine_state(project),
+        ) if quarantined else None
+        scan_state = read_scan_state(paths.project_scan_state(project))
+    except (QuarantineError, StateError) as e:
+        raise SecurityViewError(str(e)) from e
     try:
         supps = load_suppressions(_suppressions_path(paths, project))
     except SuppressionsError as e:

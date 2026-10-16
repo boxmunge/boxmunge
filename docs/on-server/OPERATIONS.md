@@ -313,6 +313,12 @@ A project whose manifest or state files cannot be read does not stop the others 
 `check-all`, `status` and `health` print an `ERROR:` line naming the project and the file, write
 an error entry to the operational log, and carry on with the rest of the fleet. `status` shows the
 project as `ERROR` (`"raw_status": "error"` with an `error` field in `--json`) and exits 1.
+This includes a quarantine record (`state/deploy/<project>.quarantined.json`) that is not JSON or
+lacks a field boxmunge writes (`quarantined_at`, `cve_id`, `severity`, `effective_severity`,
+`explanation`, `image_ref`): `status`, `security` and `security <project>` all name the file in
+an `ERROR:` line and exit 1, where `status` used to show the row with `-` placeholders. A scan
+does not rewrite an existing record, and lifting the quarantine needs the restart policies it
+holds, so repair the file or restore it from a backup.
 `check-all` exits at least 1, and records an unreadable manifest in the project's health state so
 the normal threshold alert fires with the cause. `check-all` also reports an unreadable host
 config (`boxmunge.yml`), since alerts cannot be sent without it, and still runs the checks.

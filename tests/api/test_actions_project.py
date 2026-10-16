@@ -133,3 +133,13 @@ def test_a_quarantine_record_with_a_null_field_fails_naming_the_file(fixture_pat
     _rewrite_json(path, explanation=None)
     error = _code(fixture_paths, "project.get", {"project": "billing"})
     assert error.code is ErrorCode.FAILED and str(path) in error.message
+
+
+def test_a_registered_project_with_no_directory_yet_is_registered(fixture_paths) -> None:
+    """project-add records the name before anything else exists."""
+    registry = fixture_paths.state / "projects.txt"
+    registry.write_text(registry.read_text() + "fresh\n")
+    fresh = _call(fixture_paths, "project.get", {"project": "fresh"})
+    assert fresh["lifecycle"] == "registered"
+    assert fresh["deploy"] == {"current_ref": None, "deployed_at": None, "history": []}
+    assert fresh["paused"] is None and fresh["quarantine"] is None
