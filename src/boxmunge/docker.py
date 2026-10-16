@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, NamedTuple
 
-from boxmunge.caddy_journal import commit_sites, restore_sites
+from boxmunge.caddy_journal import JournalError, commit_sites, restore_sites
 from boxmunge.compose_images import BUILT_IMAGE_HOST
 from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.fileutil import open_shared_lockfile
@@ -290,11 +290,16 @@ def caddy_reload(caddy_compose_dir: Path, lock_dir: Path) -> None:
                     "Caddy is not running, so the new site config could not "
                     "be validated or loaded. Start Caddy and run `doctor`."
                 )
-            restored = restore_sites(caddy_compose_dir)
+            refused = ""
+            try:
+                restored = restore_sites(caddy_compose_dir)
+            except JournalError as e:
+                restored = e.restored
+                refused = f" Refused to restore from:\n{e}"
             raise CaddyConfigRejected(
                 "Caddy config validation failed — reload aborted to prevent "
                 "downtime. Restored the last accepted site config for: "
-                f"{', '.join(restored) or '(none journaled)'}.",
+                f"{', '.join(restored) or '(none journaled)'}.{refused}",
                 restored,
             )
         commit_sites(caddy_compose_dir)

@@ -120,6 +120,8 @@ If a project contains `caddy.override.conf`, boxmunge uses it verbatim instead o
 
 Caddy validates the whole configuration before every reload. If it rejects the new config, boxmunge puts back each site file (production or staging) written since Caddy last accepted a config (kept in `caddy/.site-journal/`) and the operation fails with an `ERROR` naming the rejected site, so one bad site file cannot stop Caddy reloading or restarting for every other project. A `prod-deploy` that fails this way leaves the new release's containers running behind the restored previous routing: fix the site config and deploy again, or `rollback` when a previous release exists. A `stage` that fails this way is cleaned up like any failed stage. If Caddy is not running, nothing can be validated and the new files stay in place until it starts. `unstage` deletes the staging site and drops its journal entry, so a later restore never brings back routing to torn-down staging containers.
 
+The journal is writable by `deploy`, and restoring runs as root, so its entries are not trusted. An entry may only name the site file in `caddy/sites/` that its own file name names (`<site>.conf.json` for `<site>.conf`), neither may be a symlink, and it must hold exactly what boxmunge writes. Any other entry is refused and left in place: the other entries are still restored, and the error names the refused entry. Delete it as root, then check the site files in `caddy/sites/`.
+
 ---
 
 ## Privilege Model
