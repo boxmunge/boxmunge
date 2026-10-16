@@ -19,11 +19,12 @@ from typing import Any
 
 from boxmunge.api.schema import NULLABLE_STRING, STRING, enum, nullable, obj, validate
 from boxmunge.paths import BoxPaths
-from boxmunge.state import StateError, read_state
+from boxmunge.state import StateError
 
 JOB_ID_PATTERN = "[0-9A-HJKMNP-TV-Z]{26}"
 _JOB_ID_RE = re.compile(JOB_ID_PATTERN)
 JOB_STATES = ("queued", "running", "succeeded", "failed")
+TERMINAL_STATES = frozenset({"succeeded", "failed"})
 EVENT_TYPES = ("log", "step", "state")
 STEP_STATUSES = ("started", "succeeded", "failed")
 
@@ -37,6 +38,11 @@ JOB_SCHEMA = obj({
     "started_at": NULLABLE_STRING,
     "finished_at": NULLABLE_STRING,
     "error": nullable(obj({"code": STRING, "message": STRING})),
+    # The action's result once the job has succeeded, in the shape of that
+    # action's catalog result schema. No action runs as a job in this
+    # release, so it is always null; the job runner widens the type.
+    "result": {"type": "null",
+               "description": "The action's result once the job succeeds; null until then."},
 })
 
 EVENT_SCHEMA = obj({
@@ -57,23 +63,31 @@ class JobStore:
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         """The job's record, or None if there is no such job."""
+        found = None
         for directory in (self._queue, self._done):
-            path = directory / f"{job_id}.json"
-            if path.exists():
-                return _load_record(path, job_id)
-        return None
+            record = _load_record(directory / f"{job_id}.json", job_id)
+            if record is not None:
+                found = _prefer(found, record)
+        return found
 
     def recent(self, *, project: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
-        """Jobs newest first, optionally for one project."""
+        """Jobs newest first, optionally for one project.
+
+        queue/ is scanned before jobs/: finishing a job links its record
+        into jobs/ before unlinking it from queue/, so a job that moves
+        while we look is found in one place or the other, never missed. A
+        file that vanishes between listing and reading has moved on.
+        """
         records: dict[str, dict[str, Any]] = {}
-        # A job being finished can briefly sit in both directories; the
-        # queue copy is written first, so it wins.
-        for directory in (self._done, self._queue):
+        for directory in (self._queue, self._done):
             if not directory.is_dir():
                 continue
             for path in directory.glob("*.json"):
-                if _JOB_ID_RE.fullmatch(path.stem):
-                    records[path.stem] = _load_record(path, path.stem)
+                if not _JOB_ID_RE.fullmatch(path.stem):
+                    continue
+                record = _load_record(path, path.stem)
+                if record is not None:
+                    records[path.stem] = _prefer(records.get(path.stem), record)
         jobs = [r for r in records.values() if project is None or r["project"] == project]
         jobs.sort(key=lambda r: (r["created_at"], r["id"]), reverse=True)
         return jobs[:limit]
@@ -99,8 +113,27 @@ class JobStore:
         return events
 
 
-def _load_record(path: Path, job_id: str) -> dict[str, Any]:
-    record = read_state(path)
+def _prefer(current: dict[str, Any] | None, other: dict[str, Any]) -> dict[str, Any]:
+    """Of two copies of one job, the terminal one: while a job is being
+    finished its record can briefly exist in both directories."""
+    if current is None or (other["state"] in TERMINAL_STATES
+                           and current["state"] not in TERMINAL_STATES):
+        return other
+    return current
+
+
+def _load_record(path: Path, job_id: str) -> dict[str, Any] | None:
+    """The record at *path*, or None if there is none there (any more)."""
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise StateError(f"Cannot read job record {path}: {e}") from e
+    try:
+        record = json.loads(text)
+    except ValueError as e:
+        raise StateError(f"Job record {path} is not JSON: {e}") from e
     violations = validate(JOB_SCHEMA, record)
     if violations:
         raise StateError(f"Job record {path} is corrupt: {'; '.join(violations)}")

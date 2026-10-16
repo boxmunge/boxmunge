@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -21,7 +22,7 @@ def _record(n: int, **fields) -> dict:
         "project": "shop", "state": "succeeded",
         "created_at": f"2026-10-14T0{n}:00:00+00:00",
         "started_at": f"2026-10-14T0{n}:00:05+00:00",
-        "finished_at": f"2026-10-14T0{n}:01:30+00:00", "error": None,
+        "finished_at": f"2026-10-14T0{n}:01:30+00:00", "error": None, "result": None,
     }
     record.update(fields)
     return record
@@ -57,10 +58,46 @@ def test_recent_is_newest_first_filtered_and_limited(paths) -> None:
     assert [j["id"] for j in store.recent(limit=1)] == [_id(3)]
 
 
-def test_queue_copy_wins_while_a_job_is_being_finished(paths) -> None:
+def test_the_terminal_copy_wins_while_a_job_is_being_finished(paths) -> None:
     _write(paths.jobs_dir, _record(1))
     _write(paths.jobs_queue, _record(1, state="running", finished_at=None))
-    assert [j["state"] for j in JobStore(paths).recent()] == ["running"]
+    store = JobStore(paths)
+    assert [j["state"] for j in store.recent()] == ["succeeded"]
+    assert store.get(_id(1))["state"] == "succeeded"
+
+
+def test_a_job_finishing_between_the_two_scans_is_never_missed(paths, monkeypatch) -> None:
+    """The finish step links the record into jobs/ and then unlinks it from
+    queue/. Scanning queue/ first means a job that moves mid-listing is
+    found in jobs/ afterwards."""
+    _write(paths.jobs_queue, _record(1, state="running", finished_at=None))
+    real_glob = Path.glob
+
+    def glob_then_finish(self, pattern):
+        found = list(real_glob(self, pattern))
+        if self == paths.jobs_queue and (paths.jobs_queue / f"{_id(1)}.json").exists():
+            _write(paths.jobs_dir, _record(1))
+            (paths.jobs_queue / f"{_id(1)}.json").unlink()
+        return iter(found)
+
+    monkeypatch.setattr(Path, "glob", glob_then_finish)
+    assert [(j["id"], j["state"]) for j in JobStore(paths).recent()] == [(_id(1), "succeeded")]
+
+
+def test_a_record_that_vanishes_before_it_is_read_is_absent(paths) -> None:
+    paths.jobs_queue.mkdir(parents=True)
+    (paths.jobs_queue / f"{_id(1)}.json").symlink_to(paths.jobs_queue / "gone.json")
+    store = JobStore(paths)
+    assert store.recent() == []
+    assert store.get(_id(1)) is None
+
+
+def test_a_record_without_its_result_field_is_corrupt(paths) -> None:
+    record = _record(1)
+    del record["result"]
+    _write(paths.jobs_dir, record)
+    with pytest.raises(StateError, match="missing required property 'result'"):
+        JobStore(paths).recent()
 
 
 def test_no_job_directories_means_no_jobs(paths) -> None:

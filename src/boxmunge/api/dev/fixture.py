@@ -154,6 +154,7 @@ def _write_jobs(paths: BoxPaths, now: datetime) -> None:
             "state": state, "created_at": iso(created),
             "started_at": iso(created + timedelta(seconds=5)),
             "finished_at": iso(created + timedelta(seconds=90)), "error": error,
+            "result": None,
         })
         lines = [
             json.dumps({"seq": seq, "ts": iso(created + timedelta(seconds=5 + 10 * seq)),

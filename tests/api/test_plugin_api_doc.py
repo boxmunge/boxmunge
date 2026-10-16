@@ -40,3 +40,23 @@ def test_a_missing_approval_is_documented_as_approval_required() -> None:
 
 def test_project_health_is_documented_as_running_smoke_checks() -> None:
     assert "not free of side effects" in DOC.split("`project.health`", 2)[2]
+
+
+@pytest.mark.parametrize("rule", [
+    "MUST ignore result fields they do not know",
+    "MUST treat an enum value they do not know as \"other\"",
+    "MUST ignore `details` keys they do not know",
+    "MUST treat an error code they do not know as `failed`",
+    "`api_version` is `1.<minor>`",
+])
+def test_client_tolerance_and_versioning_are_pinned(rule) -> None:
+    assert rule in DOC
+
+
+def test_the_closed_schema_claim_is_internal_only() -> None:
+    assert "a result never carries a field its schema does not declare" not in DOC
+
+
+def test_job_invocation_contract_is_documented() -> None:
+    assert "HTTP 202" in DOC and "`data` is the job record" in DOC
+    assert "`result`" in DOC.split("### Jobs", 1)[1]

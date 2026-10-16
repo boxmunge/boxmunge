@@ -4,8 +4,20 @@ This is the contract between boxmunge and its plugins: a web UI, an assistant, o
 runs on a box and reads or drives the platform. It covers what this release serves and, marked as
 **planned**, the parts that arrive in later releases, so you can design for them now.
 
-API version: **1.0**. Within `1.x` every change is additive: new actions, new optional parameters,
-new result fields, new endpoints. Nothing you rely on is renamed or removed.
+API version: **1.0**.
+
+### Versioning and what your client must tolerate
+
+`api_version` is `1.<minor>`, carried by every response, the catalog included. The minor number goes
+up with any addition: new actions, new optional parameters, new result fields, new enum values, new
+`details` keys, new error codes, new endpoints. The major number changes only for a breaking change,
+and nothing you rely on is renamed or removed within `1.x`. So that additions never break you,
+clients:
+
+- MUST ignore result fields they do not know;
+- MUST treat an enum value they do not know as "other" (for example, an unfamiliar `lifecycle`);
+- MUST ignore `details` keys they do not know;
+- MUST treat an error code they do not know as `failed`.
 
 ## Concepts
 
@@ -82,8 +94,10 @@ An endpoint that is not served yet answers `404 not_found`. Until the event stre
                        "params": {...}, "result": {...}, "job": false}]}}
 ```
 
-`mode` is `dev` when the server is serving a fixture box. `job: true` marks an action that returns
-a job id instead of a result (planned: every operate action is a job).
+`mode` is `dev` when the server is serving a fixture box. `job: true` marks an action that runs as
+a job (planned: every operate action is a job). Invoking one returns HTTP 202, and
+`data` is the job record (`id`, `action`, `state` `"queued"`, timestamps; see "Jobs"). For such an action the
+catalog's `result` schema describes the job record's `result` field once the job succeeds.
 
 ### Invoking
 
@@ -101,8 +115,10 @@ Parameter and result schemas use a small JSON Schema subset: `type`, `properties
 `additionalProperties`, `enum`, `pattern`, `minimum`, `maximum`, `minLength`, `maxLength`, `items`,
 `const`, plus the annotations `description` and `secret`.
 
-- Every object schema sets `additionalProperties: false`. Unknown parameters are refused, and a
-  result never carries a field its schema does not declare.
+- Every object schema sets `additionalProperties: false`. Unknown parameters are refused. The
+  server checks every result it sends against the schema it publishes, but within `1.x` a
+  published result schema may gain optional fields and enum values: read results tolerantly, as
+  "Versioning" above says.
 - `type` may be a list, such as `["string", "null"]`, for a value that can be null.
 - `pattern` must match the **whole** string, as if written `^...$`. Anchor it yourself if you
   reuse it in JavaScript.
@@ -159,7 +175,9 @@ polling it. `project.get` and `status.get` report the result of the platform's o
 
 A job is the record of a long-running action. Its record has `id` (a ULID), `action`, `principal`,
 `project`, `state` (`queued`, `running`, `succeeded`, `failed`), `created_at`, `started_at`,
-`finished_at` and `error` (`{code, message}` or null). Events have `seq` (from 1), `ts` and `type`:
+`finished_at`, `error` (`{code, message}` or null) and `result` (the action's result once the job
+has succeeded, in the shape of that action's catalog `result` schema; null until then, and always
+null in this release). Events have `seq` (from 1), `ts` and `type`:
 
 - `log`: a line of output, in `message`;
 - `step`: a named step (`step`) that `started`, `succeeded` or `failed` (`status`), with an optional
