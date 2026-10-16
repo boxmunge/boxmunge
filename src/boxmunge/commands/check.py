@@ -302,16 +302,21 @@ def run_check_all(paths: BoxPaths, *, read_only: bool) -> int:
     rest. An unusable host config is reported the same way.
 
     Returns the worst per-project status (0 ok, 1 warning, 2 critical),
-    and at least 1 if any project could not be checked.
+    at least 1 if any project could not be checked, and 2 if the Docker
+    daemon's user-namespace remapping is broken (docker-userns).
     """
     worst = 0
     failed: list[str] = []
     if not read_only and not _host_config_usable(paths):
         worst = 1
+    if not read_only:
+        from boxmunge.health_checks.userns import alert_docker_userns
+        if alert_docker_userns(paths).status == "error":
+            worst = 2
     projects_dir = paths.projects
     if not projects_dir.exists():
         print("No projects directory.")
-        return 0
+        return worst
 
     projects = sorted(
         p.name for p in projects_dir.iterdir()

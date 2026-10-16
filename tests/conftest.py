@@ -276,3 +276,16 @@ def tmp_root(tmp_path: Path) -> Path:
 def paths(tmp_root: Path) -> BoxPaths:
     """BoxPaths pointing at a temporary root."""
     return BoxPaths(root=tmp_root)
+
+
+@pytest.fixture(autouse=True)
+def _unremapped_daemon(request, monkeypatch, tmp_path_factory):
+    """Outside the integration tier the box is not remapped: an empty /etc
+    and a daemon reporting no userns. tests.userns_helpers.remap_box makes
+    one test's box remapped."""
+    if request.node.get_closest_marker("integration"):
+        return
+    from tests.userns_helpers import UNREMAPPED_INFO
+
+    monkeypatch.setattr("boxmunge.userns.offset.ETC", tmp_path_factory.mktemp("etc"))
+    monkeypatch.setattr("boxmunge.userns.offset.docker_info", lambda: dict(UNREMAPPED_INFO))

@@ -189,6 +189,13 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
              + ". Avoid service names in the shorter project that start with the "
                "longer one's suffix (e.g. bar-* in foo next to foo-bar).")
 
+    from boxmunge.health_checks.userns import check_docker_userns
+    userns = check_docker_userns(paths)
+    if userns.status == "warn":
+        warn("Docker userns remap", userns.detail)
+    else:
+        check("Docker userns remap", userns.status == "ok", userns.detail)
+
     # Report
     if as_json:
         print(json.dumps(results, indent=2))

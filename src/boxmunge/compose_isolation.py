@@ -145,7 +145,8 @@ _MODELS_PROBLEM = (
 
 # Namespace modes that stay inside the project. `host` is a hardening
 # question (compose_service_rules); every other value, `container:<name>`
-# above all, joins a namespace outside this compose file. Matched exactly,
+# above all, joins a namespace outside this compose file. userns_mode is
+# refused with any value (compose_service_rules.namespace_refusals). Matched exactly,
 # as Docker matches them: `Host` would name a network. `service:<name>`
 # stays in the project (Compose refuses a service the project does not
 # define) where Compose supports it.
@@ -154,14 +155,13 @@ _CONTAINED_MODES: dict[str, tuple[frozenset[str], bool]] = {
     "pid": (frozenset({"host"}), True),
     "ipc": (frozenset({"none", "private", "shareable", "host"}), True),
     "uts": (frozenset({"host"}), False),
-    "userns_mode": (frozenset({"host"}), False),
     "cgroup": (frozenset({"host", "private"}), False),
 }
 
 
 def _check_namespace_joins(svc_name: str, svc: dict[str, Any]) -> list[str]:
     """network_mode accepts any Docker network name, and the daemon accepts
-    `container:<name>` for pid, ipc and userns_mode."""
+    `container:<name>` for pid and ipc."""
     problems: list[str] = []
     for key, (allowed, service_ok) in _CONTAINED_MODES.items():
         mode = svc.get(key)

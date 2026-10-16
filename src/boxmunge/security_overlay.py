@@ -341,6 +341,9 @@ def validate_security_block(
                     f"Valid runtimes: {sorted(VALID_ECOSYSTEMS)}."
                 )
 
+    from boxmunge.run_as import validate_user_field  # run_as imports this module
+    validate_user_field(block, context)
+
 
 def _effective_profile(
     project_security: dict[str, Any] | None,
