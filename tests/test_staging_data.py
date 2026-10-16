@@ -29,11 +29,11 @@ def _model(project_dir: Path, volumes: dict[str, str], binds: list[str] = (),
             "volumes": {k: {"name": f"{compose_project}_{k}"} for k in volumes}}
 
 
-def _stores(project_dir: Path, volumes=(), binds=(), *, staging=False) -> list[Store]:
+def _stores(project_dir: Path, volumes=(), binds=(), *, staging=False,
+            data=("data", "uploads", ".releases")) -> list[Store]:
     project = "myapp-staging" if staging else "myapp"
     model = _model(project_dir, dict.fromkeys(volumes, ""), binds, project)
-    return stores(model, project, project_dir, {"data", "uploads", ".releases"},
-                  staging=staging)
+    return stores(model, project, project_dir, set(data), staging=staging)
 
 
 def test_stores_are_production_data_and_staging_copies(tmp_path: Path) -> None:
@@ -133,6 +133,7 @@ class _Docker:
         self.running = running or {}
         self.fail_copy = False
         monkeypatch.setattr(staging_data, "_run", self)
+        monkeypatch.setattr("boxmunge.data_helper._run", self)
         monkeypatch.setattr("boxmunge.docker._run", self)
         monkeypatch.setattr(staging_data, "_running",
                             lambda project: list(self.running.get(project, [])))
@@ -146,7 +147,7 @@ class _Docker:
 
     fail_stop = fail_start = False
 
-    def __call__(self, cmd, capture=False, timeout=None):
+    def __call__(self, cmd, capture=False, check=True, timeout=None):
         self.calls.append(cmd)
         if cmd[:3] == ["docker", "volume", "inspect"] and cmd[3] not in self.volumes:
             raise DockerError("Error response from daemon: get x: no such volume")
@@ -158,6 +159,11 @@ class _Docker:
             raise DockerError("container myapp-web-1 did not stop")
         if cmd[:2] == ["docker", "start"] and self.fail_start:
             raise DockerError("Cannot connect to the Docker daemon")
+
+        class Done:
+            returncode = 0
+            stdout = ""
+        return Done()
 
     def verbs(self) -> list[str]:
         return [c[1] for c in self.calls if c[1] != "rm"]
@@ -238,3 +244,49 @@ def test_running_staging_is_refused(tmp_path, monkeypatch) -> None:
     with pytest.raises(StagingDataError, match="myapp-staging-db-1"):
         staging_data.copy_production_data(BoxPaths(tmp_path / "bm"), "myapp", _plan(tmp_path))
     assert docker.calls == []
+
+
+def test_copies_run_in_the_helper_image(tmp_path, monkeypatch) -> None:
+    from boxmunge.data_helper import HELPER_IMAGE
+    docker = _Docker(monkeypatch, volumes={"myapp_pgdata", "myapp-staging_pgdata"})
+    staging_data.copy_production_data(BoxPaths(tmp_path / "bm"), "myapp", _plan(tmp_path))
+    runs = [c for c in docker.calls if c[1] == "run"]
+    assert len(runs) == 2
+    assert all(HELPER_IMAGE in c and "busybox:1.36" not in c and "--read-only" in c
+               for c in runs)
+
+
+def _file_store_plan(paths: BoxPaths):
+    project_dir = paths.project_dir("myapp")
+    project_dir.mkdir(parents=True)
+    (project_dir / "app.db").write_text("x")
+    return project_dir, plan_copy(
+        _stores(project_dir, [], ["app.db"], data=["app.db"]),
+        _stores(project_dir, [], ["app.db-staging"], staging=True, data=["app.db"]),
+        {}, "myapp")
+
+
+def test_top_level_file_store_is_refused_on_a_remapped_box(tmp_path, monkeypatch) -> None:
+    from tests.userns_helpers import remap_box
+    paths = BoxPaths(tmp_path / "bm")
+    remap_box(paths, monkeypatch)
+    project_dir, plan = _file_store_plan(paths)
+    docker = _Docker(monkeypatch, running={"myapp": ["myapp-web-1"]})
+    with pytest.raises(StagingDataError, match="single-file store ./app.db"):
+        staging_data.prepare_destinations(paths, "myapp", plan)
+    assert not (project_dir / "app.db-staging").exists()
+    with pytest.raises(StagingDataError, match="single-file store ./app.db"):
+        staging_data.copy_production_data(paths, "myapp", plan)
+    assert not [c for c in docker.calls if c[1] in ("run", "stop")]
+
+
+def test_top_level_file_store_is_copied_on_an_unremapped_box(tmp_path, monkeypatch) -> None:
+    paths = BoxPaths(tmp_path / "bm")
+    project_dir, plan = _file_store_plan(paths)
+    docker = _Docker(monkeypatch)
+    staging_data.prepare_destinations(paths, "myapp", plan)
+    assert (project_dir / "app.db-staging").is_file()
+    staging_data.copy_production_data(paths, "myapp", plan)
+    run, = [c for c in docker.calls if c[1] == "run"]
+    assert run[-1] == "rm -rf /dst/app.db-staging && cp -a /src /dst/app.db-staging"
+

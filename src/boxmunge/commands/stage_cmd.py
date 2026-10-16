@@ -254,7 +254,7 @@ def _bring_up_staging(project_name: str, paths: BoxPaths,
         if plan is not None:
             # Create staging (and so its volumes) without starting it, then
             # copy into it while neither side runs.
-            prepare_destinations(project_name, project_dir, plan)
+            prepare_destinations(paths, project_name, plan)
             print("  Creating staging containers for the data copy...")
             compose_up_checked(paths, project_name, component="stage",
                                compose_files=STAGING_FILES, staging=True, record=True,

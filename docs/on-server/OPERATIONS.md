@@ -235,6 +235,14 @@ Staging keeps its own data between stages. To start it from a copy of production
    `PRODUCTION IS DOWN` and the `docker start` command to run;
 5. starts staging only after every copy succeeded.
 
+The copies run in the data helper, a short-lived container from the box's own `boxmunge-system`
+image (`boxmunge.invalid/system/system`, never pulled) running as root with no network, a read-only
+root filesystem and only the capabilities a copy needs, so owners and 0600 files carry over;
+production's stores are mounted read-only. If that image is missing, `stage` says to build it with
+`docker compose -f /opt/boxmunge/system/compose.yml build`. On a box with user-namespace remapping, a
+single-file store directly in the project directory (`./app.db`) is refused before anything stops:
+mount a directory holding the file instead (`./db/app.db`).
+
 If the staged release renames a store (production uses `pgdata`, the staged release `newdata`),
 `stage` refuses until the manifest says where the data comes from:
 

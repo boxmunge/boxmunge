@@ -29,15 +29,15 @@ from boxmunge.bind_mounts import project_relative
 from boxmunge.bundle import BOX_OWNED_ENTRIES
 from boxmunge.compose_mounts import is_bind_entry, volume_source
 from boxmunge.data_dirs import holds_data
+from boxmunge.data_helper import empty_dir
+from boxmunge.docker import staging_compose_project
 from boxmunge.log import log_operation, log_warning
 from boxmunge.release import project_data_dirs
-from boxmunge.staging_data import run_throwaway
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 _SUFFIX = "-staging"
-_EMPTY = 'rm -rf /x/* /x/.[!.]* /x/..?* && [ -z "$(ls -A /x)" ]'
 
 
 def _production_sources(project_dir: Path) -> list[str]:
@@ -98,14 +98,14 @@ def old_layout_copies(project_dir: Path) -> list[Path]:
 
 def _remove(project_name: str, path: Path) -> None:
     """Remove a staging copy. Its contents were written by containers, often
-    as other users, so a throwaway container empties a directory first."""
+    as other users, so the data helper empties a directory first."""
     if path.is_dir() and not path.is_symlink():
         try:
             occupied = holds_data(path)
         except PermissionError:
             occupied = True  # a copy of production data, owned by a container user
         if occupied:
-            run_throwaway(project_name, ["-v", f"{path}:/x"], _EMPTY)
+            empty_dir(f"{staging_compose_project(project_name)}-cleanup", path)
         path.rmdir()
     elif os.path.lexists(path):
         path.unlink()

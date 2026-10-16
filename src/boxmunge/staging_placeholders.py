@@ -11,8 +11,14 @@ host, as the calling user (deploy, or root handing them to deploy), so the
 deploy user can replace and remove them later. Every step goes through a
 directory descriptor opened without following links. Only when a directory
 on the way belongs to someone else (a copy of production data owned by a
-container user) is the rest made in a throwaway container, and then handed
-to the same owner explicitly.
+container user) is the rest made in the data helper, and then handed to
+the same owner explicitly.
+
+On a remapped box container root cannot write a deploy-owned directory, so
+the copy could not fill a placeholder deploy made. There the daemon creates
+a ``-staging`` directory (owned by container root, from a bind mount of the
+missing path) and the helper makes the rest inside it; nothing is handed to
+deploy, which removes the copies through the helper later (staging_cleanup).
 """
 from __future__ import annotations
 
@@ -20,6 +26,9 @@ import os
 import pwd
 import shlex
 from pathlib import Path
+
+from boxmunge.data_helper import run_helper
+from boxmunge.docker import staging_compose_project
 
 _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -71,21 +80,37 @@ def _on_host(project_dir: Path, parts: list[str], is_file: bool) -> bool:
         os.close(fd)
 
 
-def make_placeholder(project: str, project_dir: Path, rel: str, is_file: bool) -> None:
+def copy_label(project: str) -> str:
+    """The name the helper runs of a project's staging copy carry."""
+    return f"{staging_compose_project(project)}-copy"
+
+
+def _not_a_link(path: Path) -> None:
+    """The daemon follows a bind source's links on the host; refuse one."""
+    if path.is_symlink():
+        raise OSError(f"{path} is a symlink; refusing to mount it for the staging copy")
+
+
+def make_placeholder(project: str, project_dir: Path, rel: str, is_file: bool, *,
+                     remapped: bool) -> None:
     """Make the destination ``rel`` (a project-relative path whose first
     component is a ``-staging`` entry) as an empty file or directory."""
     parts = rel.split(os.sep)
-    if _on_host(project_dir, parts, is_file):
+    if not remapped and _on_host(project_dir, parts, is_file):
         return
+    top = project_dir / parts[0]
+    _not_a_link(top)
     if len(parts) == 1:
-        raise PermissionError(f"cannot create {project_dir / rel}: the project "
-                              f"directory is not writable by this user")
-    from boxmunge.staging_data import run_throwaway
-
-    top, rest = parts[0], parts[1:]
-    uid, gid = _owner()
+        if remapped and not is_file:
+            run_helper(copy_label(project), ["-v", f"{top}:/x"], "true")
+            return
+        raise PermissionError(f"cannot create {top}: the project directory is not "
+                              f"writable by this user" + (" or by containers" if remapped else ""))
+    rest = parts[1:]
     chain = ["/x/" + "/".join(rest[:i + 1]) for i in range(len(rest))]
     make = (f"mkdir -p {shlex.quote(os.path.dirname(chain[-1]))} && touch "
             if is_file else "mkdir -p ") + shlex.quote(chain[-1])
-    run_throwaway(project, ["-v", f"{project_dir / top}:/x"],
-                  f"{make} && chown -h {uid}:{gid} {' '.join(map(shlex.quote, chain))}")
+    if not remapped:
+        uid, gid = _owner()
+        make += f" && chown -h {uid}:{gid} {' '.join(map(shlex.quote, chain))}"
+    run_helper(copy_label(project), ["-v", f"{top}:/x"], make)

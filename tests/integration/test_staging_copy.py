@@ -31,6 +31,8 @@ from tests.integration.docker_images import BUSYBOX, docker, ensure_busybox
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(shutil.which("docker") is None, reason="docker CLI not on PATH"),
+    # Copies, placeholders and cleanup run in the data helper.
+    pytest.mark.usefixtures("helper_image"),
 ]
 
 _DB = ["sh", "-c", "trap 'exit 0' TERM; while :; do sleep 1; done"]
