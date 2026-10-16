@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from boxmunge.commands import security_scan_core, security_scan_inputs
+from boxmunge.commands import security_scan_core
 from boxmunge.commands.security_scan_core import scan_one_project
 from boxmunge.cve import quarantine as q
 from boxmunge.cve.scanner import ScannerError
@@ -24,7 +24,6 @@ from tests.test_commands.cve_helpers import (
 
 @pytest.fixture
 def docker(monkeypatch):
-    monkeypatch.setattr(security_scan_inputs, "container_image_digest", lambda c: None)
     monkeypatch.setattr(
         "boxmunge.notify.send_notification", lambda *a, **k: True,
     )

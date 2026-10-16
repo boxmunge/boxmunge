@@ -84,9 +84,26 @@ def interpret_smoke_result(exit_code: int, stderr: str) -> SmokeResult:
         return SmokeResult(status="warning", message=message)
 
 
-def _container_name(project_name: str, svc_name: str) -> str:
-    """Derive the Docker container name from project and service name."""
-    return f"{project_name}-{svc_name}-1"
+def _smoke_one(container: str, script: str, svc_name: str) -> SmokeResult:
+    cmd = ["docker", "exec", container, "sh", script, svc_name]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return SmokeResult(
+            status="warning",
+            message=f"Smoke test for {svc_name} timed out (60s)",
+        )
+    except OSError as e:
+        return SmokeResult(status="warning", message=f"Smoke test for {svc_name}: {e}")
+    return interpret_smoke_result(result.returncode, result.stderr)
+
+
+def _cannot_run(message: str) -> SmokeResult:
+    """A smoke that could not be run says nothing about the app's health."""
+    return SmokeResult(
+        status="warning",
+        message=f"smoke could not run (infrastructure, not app): {message}",
+    )
 
 
 def run_smoke_in_container(
@@ -95,11 +112,12 @@ def run_smoke_in_container(
     compose_files: list[str],
     project_name: str | None = None,
 ) -> SmokeResult:
-    """Execute per-service smoke tests inside their respective containers.
+    """Execute per-service smoke tests inside their running containers.
 
     Uses ``docker exec`` directly (not ``docker compose exec``) to avoid
     reading compose files — which would fail when the invoking user cannot
-    read secrets.env.
+    read secrets.env. Containers are found by their Compose labels, which
+    needs no compose file either; every running replica is tested.
 
     The compose overlay mounts the release's boxmunge-scripts/ at
     /boxmunge-scripts (production its own copy, so a stage cannot change
@@ -107,35 +125,33 @@ def run_smoke_in_container(
 
     Returns the first failing result, or ok if all pass.
     """
+    from boxmunge.docker_containers import running_by_service
+    from boxmunge.docker_run import DockerError
+
     services = manifest.get("services", {})
     compose_project = project_name or manifest.get("project", project_dir.name)
+    smoke_services = {n: s["smoke"] for n, s in services.items() if s.get("smoke")}
+    if not smoke_services:
+        return SmokeResult(status="ok", message="")
+    try:
+        targets = running_by_service(compose_project)
+    except DockerError as e:
+        return _cannot_run(f"cannot list the containers of {compose_project}: {e}")
 
-    for svc_name, svc in services.items():
-        smoke = svc.get("smoke", "")
-        if not smoke:
-            continue
-
-        script_name = Path(smoke).name
-        container_script = f"/boxmunge-scripts/{script_name}"
-        container = _container_name(compose_project, svc_name)
-
-        cmd = ["docker", "exec", container, "sh", container_script, svc_name]
-
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=60,
+    for svc_name, smoke in smoke_services.items():
+        script = f"/boxmunge-scripts/{Path(smoke).name}"
+        containers = targets.get(svc_name)
+        if not containers:
+            sr = _cannot_run(
+                f"service {svc_name!r} has no running container in compose "
+                f"project {compose_project!r}"
             )
-            sr = interpret_smoke_result(result.returncode, result.stderr)
-        except subprocess.TimeoutExpired:
-            sr = SmokeResult(
-                status="warning",
-                message=f"Smoke test for {svc_name} timed out (60s)",
-            )
-        except OSError as e:
-            sr = SmokeResult(
-                status="warning",
-                message=f"Smoke test for {svc_name}: {e}",
-            )
+        else:
+            sr = SmokeResult(status="ok", message="")
+            for container in containers:
+                sr = _smoke_one(container, script, svc_name)
+                if sr.status != "ok":
+                    break
 
         if sr.status != "ok":
             # v0.9: enrich the failure message with a writable hint when

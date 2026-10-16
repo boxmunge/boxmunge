@@ -12,8 +12,6 @@ from boxmunge.docker import (
     compose_stop,
     compose_start,
     compose_pull,
-    image_digest,
-    container_image_digest,
     tag_image,
     container_running,
     caddy_reload,
@@ -79,37 +77,6 @@ class TestComposePull:
         cmd = mock_run.call_args[0][0]
         assert "compose.yml" in cmd
         assert "compose.boxmunge.yml" in cmd
-
-
-class TestImageDigest:
-    @patch("boxmunge.docker._run")
-    def test_returns_digest(self, mock_run):
-        mock_result = MagicMock()
-        mock_result.stdout = "caddy@sha256:abc123\n"
-        mock_run.return_value = mock_result
-        assert image_digest("caddy:2-alpine") == "sha256:abc123"
-
-    @patch("boxmunge.docker._run")
-    def test_returns_none_on_no_digest(self, mock_run):
-        mock_result = MagicMock()
-        mock_result.stdout = "<no value>\n"
-        mock_run.return_value = mock_result
-        assert image_digest("caddy:2-alpine") is None
-
-    @patch("boxmunge.docker._run", side_effect=DockerError("not found"))
-    def test_returns_none_on_error(self, mock_run):
-        assert image_digest("nonexistent:tag") is None
-
-
-class TestContainerImageDigest:
-    @patch("boxmunge.docker.image_digest")
-    @patch("boxmunge.docker._run")
-    def test_returns_digest_via_image_id(self, mock_run, mock_image_digest):
-        mock_result = MagicMock()
-        mock_result.stdout = "sha256:imgid\n"
-        mock_run.return_value = mock_result
-        mock_image_digest.return_value = "sha256:abc123"
-        assert container_image_digest("mycontainer") == "sha256:abc123"
 
 
 class TestTagImage:

@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 import yaml
 
-from boxmunge.commands import security_scan_core, security_scan_inputs
+from boxmunge.commands import security_scan_core
 from boxmunge.commands.security_scan_core import scan_one_project
 from boxmunge.commands.security_suppress import cmd_security_suppress
 from boxmunge.cve import kev as kev_module
@@ -37,7 +37,6 @@ def _suppress(paths, cve: str = _CVE) -> None:
 @pytest.fixture
 def box(tmp_path, monkeypatch):
     paths = make_box(tmp_path)
-    monkeypatch.setattr(security_scan_inputs, "container_image_digest", lambda c: None)
     monkeypatch.setattr(
         security_scan_core, "scan_image", lambda ref, timeout: scan_result(ref, [CRIT]),
     )
@@ -134,7 +133,6 @@ def test_kev_on_opted_out_project_keeps_running_and_alerts_every_scan(
     from tests.test_commands.cve_helpers import finding
 
     paths = make_box(tmp_path, security={"dangerously_disable_quarantine": True})
-    monkeypatch.setattr(security_scan_inputs, "container_image_digest", lambda c: None)
     monkeypatch.setattr(core, "scan_image",
                         lambda ref, timeout: scan_result(ref, [finding(_CVE, fix=fix)]))
     docker = Docker(monkeypatch)
@@ -166,7 +164,6 @@ def test_fleet_view_lists_at_risk_only_with_findings(tmp_path, monkeypatch, caps
     write_project(paths, "quiet", security={"dangerously_disable_quarantine": True})
     (paths.state / "projects.txt").write_text("exposed\nquiet\n")
     monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
-    monkeypatch.setattr(security_scan_inputs, "container_image_digest", lambda c: None)
     monkeypatch.setattr(
         security_scan_core, "scan_image",
         lambda ref, timeout: scan_result(ref, [CRIT] if ref.startswith("exposed") else []),

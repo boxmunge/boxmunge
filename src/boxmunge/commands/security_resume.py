@@ -16,6 +16,7 @@ from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project
 from boxmunge.compose import prepare_compose_override
 from boxmunge.cve.policy import Disposition, FindingDisposition
 from boxmunge.cve.quarantine import QuarantineError, is_quarantined, lift_quarantine
+from boxmunge.cve.scan_state import BASIS_STARTUP_IMAGES
 from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.health_checks.smoke import run_smoke
@@ -38,7 +39,7 @@ def _report_incomplete(project: str, scan: ProjectScan) -> None:
         _err(f"  - {reason}")
     _err(
         "  Fix the cause (Trivy DB or registry reachability, or a service "
-        "that was never built), then retry `boxmunge security resume "
+        "image that is not in the local image store), then retry `boxmunge security resume "
         f"{project}`."
     )
 
@@ -112,7 +113,9 @@ def cmd_security_resume(args: list[str], paths: BoxPaths) -> int:
         _report_blocking(project, blocking)
         return 1
 
-    print("  Re-scan: clear (every image scanned, no quarantine-level findings)")
+    what = ("every image the lift will start" if scan.basis == BASIS_STARTUP_IMAGES
+            else "every container's image")
+    print(f"  Re-scan: clear ({what} scanned, no quarantine-level findings)")
     print(f"Resuming {project}...")
 
     # Audit A-2: the lift holds the per-project lock so config-regen +

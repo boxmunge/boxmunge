@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from boxmunge.commands import security_scan_core, security_scan_inputs
+from boxmunge.commands import security_scan_core
 from boxmunge.commands.security_scan_core import scan_one_project
 from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.policy import Disposition
@@ -24,7 +24,6 @@ def _kev(*ids: str) -> KevCatalog:
 def box(tmp_path, monkeypatch):
     def build(posture: str, findings):
         paths = make_box(tmp_path, security={"posture": posture})
-        monkeypatch.setattr(security_scan_inputs, "container_image_digest", lambda c: None)
         monkeypatch.setattr(
             security_scan_core, "scan_image", lambda ref, timeout: scan_result(ref, findings),
         )

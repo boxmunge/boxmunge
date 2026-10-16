@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any
 
 from boxmunge.cve.policy import Disposition
+from boxmunge.cve.scan_state import BASIS_STARTUP_IMAGES
 from boxmunge.security_overlay import (
     PROFILE_DEFAULT,
     resolve_security,
@@ -61,6 +62,13 @@ def _project_status(
             if f.get("disposition") == Disposition.STILL_RUNNING_AT_RISK.value:
                 return "AT_RISK_RUNNING" if dangerously_disable else "NORMAL"
     return "NORMAL"
+
+
+def _basis_text(scan_state: dict[str, Any]) -> str:
+    if scan_state.get("basis") == BASIS_STARTUP_IMAGES:
+        return (f"images `compose up` would start "
+                f"(project {scan_state.get('stopped_reason')})")
+    return "images the project's containers run"
 
 
 def _format_findings_block(scan_state: dict[str, Any]) -> list[str]:
@@ -181,6 +189,7 @@ def format_project_text(
             f"  last scan:                        "
             f"{_format_iso_compact(scan_state.get('scanned_at'))}"
         )
+        lines.append(f"  scanned:                          {_basis_text(scan_state)}")
         lines.append("")
         lines.extend(_format_findings_block(scan_state))
 
@@ -252,6 +261,8 @@ def format_project_json(
         "dangerously_disable_quarantine": dangerously_disable_quarantine,
         "status": status,
         "last_scan": (scan_state or {}).get("scanned_at"),
+        "scan_basis": (scan_state or {}).get("basis"),
+        "stopped_reason": (scan_state or {}).get("stopped_reason"),
         "findings": findings_payload,
         "quarantine": quarantine_state if quarantined else None,
         "active_suppressions": [

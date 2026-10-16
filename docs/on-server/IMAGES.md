@@ -78,8 +78,10 @@ docker buildx imagetools inspect python:3.13-slim
 ```
 
 Pinning means you choose when to take upstream fixes, so rebuild regularly. `container-update`
-refreshes services that use a published `image:`. Services that `build:` from your Dockerfile only
-change when you rebuild and redeploy.
+refreshes services that use a published `image:` (including ones from `include:` files or
+`${VAR:-image}`); with `strategy: rollback_to_previous` an unhealthy update is rolled back to the
+exact image that ran before. Services that
+`build:` from your Dockerfile only change when you rebuild and redeploy.
 
 ## Also remember
 

@@ -1314,10 +1314,6 @@ def test_scan_clean_image_persists_state(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
-    )
     sr = ScanResult(
         image_ref="myapp:1.0",
         findings=(),
@@ -1347,10 +1343,6 @@ def test_scan_quarantine_finding_triggers_quarantine_action(
     paths = _scan_paths(tmp_path)
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
-    )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
     )
     finding = Finding(
         cve_id="CVE-2026-9999",
@@ -1401,10 +1393,6 @@ def test_scan_does_not_quarantine_unused_runtime_package(
     paths = _scan_paths(tmp_path)
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
-    )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
     )
     perl = Finding(
         cve_id="CVE-2026-13221",
@@ -1475,10 +1463,6 @@ def test_scan_quarantines_runtime_the_project_actually_uses(
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
-    )
     python_os_pkg = Finding(
         cve_id="CVE-2026-13222",
         severity=Severity.CRITICAL,
@@ -1534,10 +1518,6 @@ def test_scan_invalid_declared_runtimes_fails_loudly(
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
-    )
     scan_called = {"n": 0}
     def fake_scan_image(*args, **kwargs):
         scan_called["n"] += 1
@@ -1565,10 +1545,6 @@ def test_scan_logs_unrecognised_lang_type_once(monkeypatch, tmp_path) -> None:
     paths = _scan_paths(tmp_path)
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
-    )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -1614,10 +1590,6 @@ def test_scan_warns_on_empty_inferred_runtime_deescalation(
     paths = _scan_paths(tmp_path)
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
-    )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
     )
     python_os_pkg = Finding(
         cve_id="CVE-2026-13333",
@@ -1699,10 +1671,6 @@ def test_scan_does_not_warn_when_deescalation_is_over_determined(
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
-    )
     perl_will_not_fix = Finding(
         cve_id="CVE-2026-13334",
         severity=Severity.CRITICAL,
@@ -1758,10 +1726,6 @@ def test_scan_does_not_warn_when_runtimes_declared(
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
-    )
     python_os_pkg = Finding(
         cve_id="CVE-2026-13335",
         severity=Severity.CRITICAL,
@@ -1816,10 +1780,6 @@ def test_scan_does_not_warn_under_paranoid_posture(
     manifest_path.write_text(yaml.safe_dump(manifest))
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
-    )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
     )
     python_os_pkg = Finding(
         cve_id="CVE-2026-13336",
@@ -1900,10 +1860,6 @@ def test_scan_per_project_budget_skips_remaining_images(
 
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
-    )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
     )
 
     # Scripted monotonic clock — patching security_scan_core.time.monotonic
@@ -1991,10 +1947,6 @@ def test_resume_blocked_when_finding_still_quarantines(
     monkeypatch.setattr(
         "boxmunge.commands.security_resume.refresh_db", lambda: None,
     )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
-    )
     finding = Finding(
         cve_id="CVE-2026-9999",
         severity=Severity.CRITICAL,
@@ -2043,10 +1995,6 @@ def test_scan_invokes_emit_scan_alerts_after_persist(
     paths = _scan_paths(tmp_path)
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
-    )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
     )
     finding = Finding(
         cve_id="CVE-2026-9999",
@@ -2105,10 +2053,6 @@ def test_scan_passes_prior_decision_on_second_scan(monkeypatch, tmp_path) -> Non
     paths = _scan_paths(tmp_path)
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
-    )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
     )
     finding = Finding(
         cve_id="CVE-2026-9999",
@@ -2170,10 +2114,6 @@ def _grace_quarantine_scan(monkeypatch, paths) -> None:
     )
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
-    )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
     )
     finding = Finding(
         cve_id="CVE-2026-9999",
@@ -2437,10 +2377,6 @@ def _wire_clean_scan(monkeypatch, paths) -> None:
     )
     monkeypatch.setattr(
         "boxmunge.commands.security_resume.refresh_db", lambda: None,
-    )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -2767,10 +2703,6 @@ def test_resume_audit_only_does_not_take_quarantine_action(
     monkeypatch.setattr(
         "boxmunge.commands.security_resume.refresh_db", lambda: None,
     )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
-    )
     finding = Finding(
         cve_id="CVE-2026-9999",
         severity=Severity.CRITICAL,
@@ -2824,10 +2756,6 @@ def test_resume_audit_only_still_detects_blocking_findings(
     _seed_quarantine(paths, cve_id="CVE-2026-1111")
     monkeypatch.setattr(
         "boxmunge.commands.security_resume.refresh_db", lambda: None,
-    )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
     )
     finding = Finding(
         cve_id="CVE-2026-2222",
@@ -3033,10 +2961,6 @@ def test_kev_listed_cve_quarantines_via_scan_flow(
     paths = _scan_one_project_paths(tmp_path)
     _seed_grace(paths, in_grace=False)  # past grace so quarantine fires
 
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
-    )
 
     # A finding that would be INFORMATIONAL without the KEV signal:
     # NOT_AFFECTED status, network-reachable, no fix, vendor says LOW.
@@ -3121,10 +3045,6 @@ def test_fleet_scan_fires_priority1_kev_stale_alert(
 
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
-    )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_inputs.container_image_digest",
-        lambda c: None,
     )
     # Return a clean scan so the project doesn't quarantine — we only care
     # about the KEV-stale alert path.

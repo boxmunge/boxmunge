@@ -6,10 +6,11 @@ import sys
 from typing import Any
 
 from boxmunge.config import load_config, ConfigError
-from boxmunge.container_update import SKIPPED_LOCKED, update_target
+from boxmunge.commands.health_state import is_monitor_stopped
+from boxmunge.container_update import SKIPPED_LOCKED, SKIPPED_MONITOR_STOPPED, update_target
 from boxmunge.container_update_targets import UpdateTarget, build_targets
 from boxmunge.lifecycle import BlockReason, is_blocked
-from boxmunge.log import log_operation, log_error
+from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 
@@ -20,22 +21,36 @@ def _dry_run_target(paths: BoxPaths, target: UpdateTarget) -> dict[str, Any]:
     Returns a result dict with status='would_change' or 'no_change' or 'failed'.
     """
     from boxmunge.container_update import (
-        _capture_service_digests, _detect_image_changes, _services_with_image,
+        UpdateError, detect_image_changes, display_images, image_services,
+        running_images,
     )
+    from boxmunge.deployed_inventory import InventoryError
     from boxmunge.docker import compose_pull, DockerError
+    try:
+        services = image_services(target)
+        running = running_images(services)
+    except (InventoryError, UpdateError) as e:
+        return {"name": target.name, "status": "failed",
+                "reason": f"inventory_failed: {e}",
+                "previous_digests": {}, "current_digests": {}}
     # Build-only projects have no image: services to pull — a pull would
     # error. Report no_change without attempting it (mirrors update_target).
-    if not _services_with_image(target):
+    if not services:
         return {"name": target.name, "status": "no_change",
                 "previous_digests": {}, "current_digests": {}}
-    before = _capture_service_digests(target)
+    before = display_images(running)
     try:
         compose_pull(target.project_dir, compose_files=target.compose_files,
                      project_name=target.name)
     except DockerError as e:
         return {"name": target.name, "status": "failed", "reason": f"pull_failed: {e}",
                 "previous_digests": before, "current_digests": before}
-    changed = _detect_image_changes(target, before)
+    try:
+        changed = detect_image_changes(services, running)
+    except (UpdateError, DockerError) as e:
+        return {"name": target.name, "status": "failed",
+                "reason": f"inventory_failed: {e}",
+                "previous_digests": before, "current_digests": before}
     if changed:
         return {"name": target.name, "status": "would_change",
                 "previous_digests": before, "current_digests": changed}
@@ -195,10 +210,19 @@ def run_container_update(
                     }
                 pending = sorted((paused_result.get("current_digests") or {}).keys()
                                  if paused_result.get("status") == "would_change" else [])
+                checked = paused_result.get("status") != "failed"
                 # Reframe status to 'paused' so the run summary doesn't count it as failed.
                 paused_result["status"] = "paused"
                 paused_result["pending_services"] = pending
                 results.append(paused_result)
+                if not checked:
+                    log_warning(
+                        "container-update",
+                        f"Skipped paused project; could not check for pending "
+                        f"updates: {paused_result.get('reason')}",
+                        paths, project=target.name,
+                    )
+                    continue
                 if pending:
                     msg = f"Skipped paused project (pending updates: {', '.join(pending)})"
                 else:
@@ -208,6 +232,19 @@ def run_container_update(
                     project=target.name,
                     detail={"pending_services": pending},
                 )
+                continue
+            if is_monitor_stopped(target.name, paths):
+                # Pulling and recreating would undo the health monitor's
+                # critical stop; `recover` is the way back.
+                log_operation(
+                    "container-update",
+                    "Skipped project stopped by the health monitor",
+                    paths, project=target.name,
+                )
+                results.append({
+                    "name": target.name, "status": SKIPPED_MONITOR_STOPPED,
+                    "previous_digests": {}, "current_digests": {},
+                })
                 continue
             results.append(_update_one(paths, target, dry_run))
 

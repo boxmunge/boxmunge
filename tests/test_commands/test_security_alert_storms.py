@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 import yaml
 
-from boxmunge.commands import security_actions, security_scan_core, security_scan_inputs
+from boxmunge.commands import security_actions, security_scan_core
 from boxmunge.commands.security_actions import cmd_security_scan
 from boxmunge.commands.security_scan_core import scan_one_project
 from boxmunge.cve.policy import ProjectDecision
@@ -24,14 +24,20 @@ from tests.test_commands.cve_helpers import (
 
 
 @pytest.fixture
-def stubs(monkeypatch):
+def stubs(monkeypatch, fake_containers):
+    """Returns ``redeploy(c)``: each project's web container now runs the
+    pulled image whose registry digest is ``sha256:<c * 64>``."""
     monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
     Docker(monkeypatch)
-    digests = {"value": "sha256:" + "a" * 64}
-    monkeypatch.setattr(
-        security_scan_inputs, "container_image_digest", lambda c: digests["value"],
-    )
-    return digests
+
+    def redeploy(c: str) -> None:
+        for name in ("demo", "aaa", "bbb", "ccc"):
+            fake_containers.remove(name)
+            fake_containers.run(name, "web", "sha256:" + c * 64,
+                                repo_digests=(f"{name}-web@sha256:{c * 64}",))
+
+    redeploy("a")
+    return redeploy
 
 
 def _scan_returns(monkeypatch, findings) -> None:
@@ -66,7 +72,7 @@ def test_digest_change_does_not_re_alert(tmp_path, monkeypatch, stubs):
     scan_one_project(paths, "demo", in_grace=False)
     assert len(pushover.sent) == 1  # one digest on the first scan
     pushover.clear()
-    stubs["value"] = "sha256:" + "b" * 64
+    stubs("b")
     scan_one_project(paths, "demo", in_grace=False)
     assert pushover.sent == []
 

@@ -20,9 +20,10 @@ from boxmunge.commands.security_scan_inputs import (
     ProjectMeta,
     ScanTarget,
     hardening_profile,
-    identify_images,
+    identify,
     load_all_suppressions,
     load_project_meta,
+    load_user_model,
 )
 from boxmunge.commands.security_enforce import (
     Enforcement,
@@ -45,6 +46,7 @@ from boxmunge.cve.relevance import (
     unrecognised_lang_types,
 )
 from boxmunge.cve.scan_state import (
+    BASIS_CONTAINERS,
     decisions_from_scan_state,
     read_scan_state,
     write_scan_state,
@@ -81,9 +83,13 @@ class ProjectScan:
     """Everything one project scan learned.
 
     ``failed_images`` errored in Trivy, ``skipped_images`` were cut by the
-    per-project budget, and ``unidentified_services`` had no image that
-    could be resolved. Any of the three means the scan is incomplete: the
-    decisions cover only part of what the project runs.
+    per-project budget, and ``unidentified`` maps each service whose image
+    could not be identified to why. Any of the three means the scan is
+    incomplete: the decisions cover only part of what the project runs.
+
+    ``basis`` says what was scanned: the images of the project's containers,
+    or, while the platform has it stopped (``stopped_reason``), the images
+    `compose up` would start.
     """
 
     project: str
@@ -93,11 +99,17 @@ class ProjectScan:
     warnings: tuple[str, ...]
     failed_images: tuple[str, ...] = ()
     skipped_images: tuple[str, ...] = ()
-    unidentified_services: tuple[str, ...] = ()
+    unidentified: tuple[tuple[str, str], ...] = ()
+    basis: str = BASIS_CONTAINERS
+    stopped_reason: str | None = None
     headline: tuple[ProjectDecision, FindingDisposition] | None = None
     # Host-scope suppressions that expired since the last scan; the fleet
     # run alerts them once rather than once per project (audit B-14).
     host_expired: tuple[Suppression, ...] = ()
+
+    @property
+    def unidentified_services(self) -> tuple[str, ...]:
+        return tuple(svc for svc, _ in self.unidentified)
 
     @property
     def complete(self) -> bool:
@@ -108,18 +120,16 @@ class ProjectScan:
     def incomplete_reasons(self) -> list[str]:
         """One human line per unscanned image or service."""
         return _unscanned(self.failed_images, self.skipped_images,
-                          self.unidentified_services)
+                          dict(self.unidentified))
 
 
 def _unscanned(
-    failed=(), skipped=(), unidentified=(),
+    failed=(), skipped=(), unidentified: dict[str, str] | None = None,
 ) -> list[str]:
     """One human line per image or service a scan did not cover."""
     out = [f"image {ref}: scan failed" for ref in failed]
     out += [f"image {ref}: skipped (scan budget exhausted)" for ref in skipped]
-    out += [f"service {svc!r}: no image could be identified (no container, "
-            f"no built image, and no image: in compose.yml)"
-            for svc in unidentified]
+    out += [f"service {svc!r}: {why}" for svc, why in (unidentified or {}).items()]
     return out
 
 
@@ -280,7 +290,7 @@ def _scan_one_project_locked(
                 f"project {project!r}: invalid security.runtimes in "
                 f"manifest: {e}"
             ) from e
-    profile = hardening_profile(meta)
+    profile = hardening_profile(meta, load_user_model(paths, project))
     # Host-scoped suppressions are for reviewed, accepted-risk findings; the
     # relevance gate handles "base-image package the project never invokes".
     supps = load_all_suppressions(paths, project)
@@ -289,14 +299,12 @@ def _scan_one_project_locked(
     scan_state_path = paths.project_scan_state(project)
     prior_decisions = _prior_decisions(paths, project)
 
-    inventory = identify_images(meta.manifest, meta.compose, project)
+    inventory = identify(paths, project, meta)
     targets, unidentified = inventory.targets, inventory.unidentified
-    warnings = [
-        f"service {svc!r}: no container, no built image and no image: in "
-        f"compose — cannot be scanned"
-        for svc in unidentified
-    ] + [
-        f"service {svc!r}: compose-profile service not running — nothing to scan"
+    basis = {"basis": inventory.basis, "stopped_reason": inventory.stopped_reason}
+    warnings = _unscanned(unidentified=unidentified) + [
+        f"service {svc!r}: not started by `compose up` (inactive profile or "
+        f"zero replicas) and has no container — nothing to scan"
         for svc in inventory.not_started
     ]
     if not targets:
@@ -306,13 +314,13 @@ def _scan_one_project_locked(
             outcome = _enforce(paths, project, meta, None, in_grace=in_grace)
             write_scan_state(
                 scan_state_path, decisions=(),
-                unscanned=tuple(_unscanned(unidentified=unidentified)),
+                unscanned=tuple(_unscanned(unidentified=unidentified)), **basis,
             )
             raise_enforcement_error(outcome.error)
         return ProjectScan(
             project=project, posture=meta.posture_str, dangerously=dangerously,
             decisions=(), warnings=tuple(warnings),
-            unidentified_services=tuple(unidentified),
+            unidentified=tuple(unidentified.items()), **basis,
         )
 
     results, failed, skipped, scan_warnings = _scan_targets(paths, project, targets)
@@ -373,7 +381,7 @@ def _scan_one_project_locked(
     if not audit_only:
         write_scan_state(
             scan_state_path, decisions=tuple(decisions),
-            unscanned=tuple(_unscanned(failed, skipped, unidentified)),
+            unscanned=tuple(_unscanned(failed, skipped, unidentified)), **basis,
         )
 
     # Transition alerts are best-effort; during grace the operator gets the
@@ -396,7 +404,8 @@ def _scan_one_project_locked(
         warnings=tuple(warnings),
         failed_images=tuple(failed),
         skipped_images=tuple(skipped),
-        unidentified_services=tuple(unidentified),
+        unidentified=tuple(unidentified.items()),
+        **basis,
         headline=headline,
         host_expired=host_expired,
     )

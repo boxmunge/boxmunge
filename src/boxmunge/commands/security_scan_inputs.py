@@ -2,23 +2,30 @@
 """Inputs to a per-project CVE scan: manifest meta, images, suppressions.
 
 Split from security_scan_core.py so the scan body stays focused on
-evaluating and persisting. Everything here reads on-box files and turns
-them into validated values. A malformed per-project input raises
+evaluating and persisting. Everything here reads on-box files, Compose's
+resolved model and Docker's containers, and turns them into validated
+values. A malformed per-project input raises
 ProjectScanError (a RuntimeError) naming the project, so the fleet scan can
 report that one project and carry on with the rest (audit B-12).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from boxmunge import docker_containers
+from boxmunge.commands.health_state import is_monitor_stopped
+from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
 from boxmunge.cve.hardening import HardeningProfile, hardening_profile_from_compose
 from boxmunge.cve.policy import PolicyError, Posture, parse_posture
+from boxmunge.cve.scan_state import BASIS_CONTAINERS, BASIS_STARTUP_IMAGES
 from boxmunge.cve.suppressions import Suppression, SuppressionsError, load_suppressions
-from boxmunge.docker import container_image_digest, container_image_id, local_image_id
+from boxmunge.deployed_inventory import (
+    DeployedInventory, InventoryError, load_deployed_inventory, startup_image_ref,
+)
+from boxmunge.docker_run import DockerError
+from boxmunge.lifecycle import is_blocked
 from boxmunge.manifest import load_manifest
 from boxmunge.paths import BoxPaths
 from boxmunge.security_overlay import services_with_off_profile
@@ -30,10 +37,9 @@ class ProjectScanError(RuntimeError):
 
 @dataclass(frozen=True)
 class ProjectMeta:
-    """The manifest/compose facts a scan needs, validated once."""
+    """The manifest facts a scan needs, validated once."""
 
     manifest: dict[str, Any]
-    compose: dict[str, Any]
     posture_str: str
     posture: Posture
     dangerously: bool
@@ -62,31 +68,9 @@ def project_compose_files(paths: BoxPaths, project: str) -> list[str]:
     return files
 
 
-def container_name(project: str, service: str) -> str:
-    """Replicate the convention used in commands/check.py."""
-    return f"{project}-{service}-1"
-
-
-def load_compose(project_dir: Path) -> dict[str, Any]:
-    """Load the user compose.yml as a parsed dict. Missing file → {}."""
-    path = project_dir / "compose.yml"
-    if not path.exists():
-        return {}
-    try:
-        data = yaml.safe_load(path.read_text()) or {}
-    except yaml.YAMLError as e:
-        raise ProjectScanError(f"Failed to parse compose.yml: {e}") from e
-    if not isinstance(data, dict):
-        raise ProjectScanError(
-            f"compose.yml must be a mapping, got {type(data).__name__}"
-        )
-    return data
-
-
 def load_project_meta(paths: BoxPaths, project: str) -> ProjectMeta:
-    """Load manifest + compose, validate the security: block."""
+    """Load the manifest, validate the security: block."""
     manifest = load_manifest(paths.project_manifest(project))
-    compose = load_compose(paths.project_dir(project))
     sec_block = manifest.get("security") or {}
     if not isinstance(sec_block, dict):
         raise ProjectScanError(
@@ -106,7 +90,6 @@ def load_project_meta(paths: BoxPaths, project: str) -> ProjectMeta:
         )
     return ProjectMeta(
         manifest=manifest,
-        compose=compose,
         posture_str=posture_str,
         posture=posture,
         dangerously=ddq,
@@ -116,18 +99,28 @@ def load_project_meta(paths: BoxPaths, project: str) -> ProjectMeta:
     )
 
 
-def hardening_profile(meta: ProjectMeta) -> HardeningProfile:
+def hardening_profile(meta: ProjectMeta, user_model: dict[str, Any]) -> HardeningProfile:
     """Overlay-aware hardening profile for the penalty calculation.
 
-    Services with profile != off get boxmunge's hardening overlay applied at
-    runtime, so the policy does not penalise a project for relying on overlay
-    defaults (e.g. no-new-privileges) it did not redeclare in compose.yml.
+    ``user_model`` is compose.yml as Compose resolves it, so a setting that
+    arrives through `include:` or `extends:` counts. Services with profile
+    != off get boxmunge's hardening overlay applied at runtime, so the
+    policy does not penalise a project for relying on overlay defaults
+    (e.g. no-new-privileges) it did not redeclare in compose.yml.
     """
     off_services = {svc for svc, _ in services_with_off_profile(meta.manifest)}
-    overlay_services = set((meta.compose.get("services") or {}).keys()) - off_services
+    overlay_services = set((user_model.get("services") or {}).keys()) - off_services
     return hardening_profile_from_compose(
-        meta.compose, services_with_overlay=overlay_services,
+        user_model, services_with_overlay=overlay_services,
     )
+
+
+def load_user_model(paths: BoxPaths, project: str) -> dict[str, Any]:
+    """compose.yml resolved on its own: the user's settings, before the overlay."""
+    try:
+        return resolve_deployed_config(paths.project_dir(project), ["compose.yml"], project)
+    except ComposeResolveError as e:
+        raise ProjectScanError(f"project {project!r}: {e}") from e
 
 
 def load_all_suppressions(paths: BoxPaths, project: str) -> tuple[Suppression, ...]:
@@ -145,64 +138,119 @@ def load_all_suppressions(paths: BoxPaths, project: str) -> tuple[Suppression, .
     return project_supps + host_supps
 
 
-def _strip_tag(ref: str) -> str:
-    """Drop a :tag from an image reference, keeping a registry :port."""
-    name, sep, tag = ref.rpartition(":")
-    return name if sep and "/" not in tag else ref
-
-
 @dataclass(frozen=True)
 class ImageInventory:
     """What to scan for one project, and what could not be scanned."""
 
-    targets: list[ScanTarget]
-    # No container, no local image, no image: in compose — cannot be scanned.
-    unidentified: list[str]
-    # Compose-profile services that are not running: nothing deployed to scan.
-    not_started: list[str]
+    basis: str
+    # Why the platform has the project stopped (startup-images basis only).
+    stopped_reason: str | None
+    targets: list[ScanTarget] = field(default_factory=list)
+    # service → why its image cannot be identified.
+    unidentified: dict[str, str] = field(default_factory=dict)
+    # Services `up` does not start (inactive profile, zero replicas) that
+    # have no container.
+    not_started: list[str] = field(default_factory=list)
 
 
-def _image_for(project: str, service: str, svc_compose: dict[str, Any]) -> str | None:
-    """The image to scan for one service, most exact first.
+def stopped_reason(paths: BoxPaths, project: str) -> str | None:
+    """Why the platform has the project stopped on purpose, or None.
 
-    1. The container's image pinned by registry digest (repo@sha256:...).
-    2. The container's local image ID — what is actually running, and the
-       only identity a locally built image has (audit B-10).
-    3. The compose-declared image tag.
-    4. The image compose builds for the service (<project>-<service>).
+    Read from boxmunge's own state (pause, quarantine and health-monitor
+    stop markers), never inferred from which containers happen to exist.
     """
-    cname = container_name(project, service)
-    base_ref = svc_compose.get("image")
-    digest = container_image_digest(cname)
-    if digest and base_ref and "@" not in base_ref:
-        return f"{_strip_tag(base_ref)}@{digest}"
-    return (
-        container_image_id(cname)
-        or base_ref
-        or local_image_id(f"{project}-{service}")
-    )
+    block = is_blocked(project, paths)
+    if block:
+        return block.reason.value
+    if is_monitor_stopped(project, paths):
+        return "stopped by the health monitor"
+    return None
 
 
-def identify_images(
-    manifest: dict[str, Any], compose: dict[str, Any], project: str,
-) -> ImageInventory:
-    """Find the image of every service the project runs.
-
-    Every compose service is scanned, not only those the manifest lists:
-    databases, caches and sidecars run too (audit B-10).
-    """
-    compose_services = compose.get("services") or {}
+def _manifest_first(manifest: dict[str, Any], deployed: DeployedInventory) -> list[str]:
     names = list(manifest.get("services") or {})
-    names += [n for n in compose_services if n not in names]
-    inventory = ImageInventory([], [], [])
-    for service in names:
-        svc_compose = compose_services.get(service)
-        svc_compose = svc_compose if isinstance(svc_compose, dict) else {}
-        image = _image_for(project, service, svc_compose)
-        if image:
-            inventory.targets.append(ScanTarget(service, image))
-        elif svc_compose.get("profiles"):
-            inventory.not_started.append(service)
-        else:
-            inventory.unidentified.append(service)
+    return names + [n for n in deployed.services if n not in names]
+
+
+def identify_images(manifest: dict[str, Any], deployed: DeployedInventory) -> ImageInventory:
+    """The image of every container the project has, by service.
+
+    Every service is covered, not only those the manifest lists: databases,
+    caches and sidecars run too (audit B-10), wherever the resolved model
+    defines them. Each container is scanned by the image it was created
+    from, never by the image its tag names now, since a pull moves the tag
+    without touching running containers. A service with no container is
+    inactive only when `up` does not start it (an inactive profile, zero
+    replicas); otherwise it is unidentified, so the scan is incomplete
+    rather than silently smaller.
+    """
+    inventory = ImageInventory(BASIS_CONTAINERS, None)
+    for service in _manifest_first(manifest, deployed):
+        deployed_svc = deployed.services.get(service)
+        if deployed_svc is None or not deployed_svc.containers:
+            if deployed_svc is not None and not deployed_svc.expected:
+                inventory.not_started.append(service)
+            else:
+                inventory.unidentified[service] = (
+                    "should be running but has no container, so the image it "
+                    "runs cannot be identified; redeploy the project so it can "
+                    "be scanned"
+                )
+            continue
+        refs = dict.fromkeys(c.image_ref for c in deployed_svc.containers)
+        inventory.targets.extend(ScanTarget(service, ref) for ref in refs)
     return inventory
+
+
+def identify_startup_images(
+    manifest: dict[str, Any], deployed: DeployedInventory, reason: str,
+) -> ImageInventory:
+    """For a project the platform stopped on purpose (paused, quarantined,
+    stopped by the health monitor): the image of every container it still
+    has, plus the images `compose up` would start.
+
+    Such a project's containers may be gone (a monitor stop removes them; a
+    prune removes stopped ones), and a pull may have moved its tags since
+    they were created. Bringing it back (resume, recover) starts what each
+    service's image reference names now, so that is scanned, and a resume
+    re-scan checks exactly what the resume will run. A stop marker does not
+    prove nothing runs (a stop can fail after the marker is written; `stop`
+    leaves one-off containers), so every existing container is scanned too:
+    the scan never covers less than what is running.
+    """
+    inventory = ImageInventory(BASIS_STARTUP_IMAGES, reason)
+    for service in _manifest_first(manifest, deployed):
+        deployed_svc = deployed.services.get(service)
+        if deployed_svc is None:
+            inventory.unidentified[service] = (
+                "is in the manifest but not in the resolved compose model, so "
+                "no image would be started for it"
+            )
+            continue
+        refs = dict.fromkeys(c.image_ref for c in deployed_svc.containers)
+        if deployed_svc.expected:
+            ref = startup_image_ref(deployed.project, deployed_svc)
+            image = docker_containers.local_image(ref)
+            if image is None:
+                inventory.unidentified[service] = (
+                    f"the image `compose up` would start ({ref}) is not in the "
+                    f"local image store; pull or build it, then scan again"
+                )
+            else:
+                refs[image.image_ref] = None
+        elif not refs:
+            inventory.not_started.append(service)
+        inventory.targets.extend(ScanTarget(service, r) for r in refs)
+    return inventory
+
+
+def identify(paths: BoxPaths, project: str, meta: ProjectMeta) -> ImageInventory:
+    """What to scan for one project, by the rule its lifecycle state selects."""
+    try:
+        deployed = load_deployed_inventory(paths.project_dir(project), meta.compose_files, project)
+        reason = stopped_reason(paths, project)
+        if reason is None:
+            return identify_images(meta.manifest, deployed)
+        return identify_startup_images(meta.manifest, deployed, reason)
+    except (InventoryError, DockerError) as e:
+        raise ProjectScanError(f"project {project!r}: {e}") from e

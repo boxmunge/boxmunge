@@ -71,17 +71,7 @@ def _missing_env_files_present(compose_path: Path) -> Iterator[None]:
             path.unlink(missing_ok=True)
 
 
-def resolve_compose_config(compose_path: Path, project_name: str) -> dict[str, Any]:
-    """Return the fully resolved compose model for one compose file."""
-    try:
-        with _missing_env_files_present(compose_path):
-            out = docker.compose_config(
-                compose_path.parent, [compose_path.name], project_name=project_name,
-            )
-    except docker.DockerError as e:
-        raise ComposeResolveError(
-            f"`docker compose config` could not resolve {compose_path.name}: {e}"
-        ) from e
+def _parse_config(out: str) -> dict[str, Any]:
     try:
         doc = json.loads(out)
     except json.JSONDecodeError as e:
@@ -93,6 +83,43 @@ def resolve_compose_config(compose_path: Path, project_name: str) -> dict[str, A
             f"`docker compose config` returned {type(doc).__name__}, not a mapping"
         )
     return doc
+
+
+def resolve_compose_config(compose_path: Path, project_name: str) -> dict[str, Any]:
+    """Return the fully resolved compose model for one compose file."""
+    try:
+        with _missing_env_files_present(compose_path):
+            out = docker.compose_config(
+                compose_path.parent, [compose_path.name], project_name=project_name,
+            )
+    except docker.DockerError as e:
+        raise ComposeResolveError(
+            f"`docker compose config` could not resolve {compose_path.name}: {e}"
+        ) from e
+    return _parse_config(out)
+
+
+def resolve_deployed_config(
+    project_dir: Path, compose_files: list[str], project_name: str,
+    *, all_profiles: bool = False,
+) -> dict[str, Any]:
+    """Return the merged model a deployed project runs with.
+
+    Resolves every compose file the project is deployed with, from its
+    directory, the way `up` does. Unlike a bundle under validation, a
+    deployed project has its on-box env files, so nothing is stood in for:
+    a missing one is the same error `up` would hit.
+    """
+    try:
+        out = docker.compose_config(
+            project_dir, compose_files, project_name=project_name,
+            all_profiles=all_profiles,
+        )
+    except docker.DockerError as e:
+        raise ComposeResolveError(
+            f"`docker compose config` could not resolve {', '.join(compose_files)}: {e}"
+        ) from e
+    return _parse_config(out)
 
 
 def _as_list(value: Any) -> list[Any]:

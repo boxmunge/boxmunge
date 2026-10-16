@@ -192,6 +192,7 @@ def compose_config(
     compose_files: list[str] | None = None,
     *,
     project_name: str,
+    all_profiles: bool = False,
 ) -> str:
     """Return `docker compose config --format json` output.
 
@@ -203,24 +204,16 @@ def compose_config(
     on bundles where on-box files such as secrets.env are absent, and never
     needs their values. Their paths still appear in the model, so env_file
     confinement is still checked.
+
+    The model holds the services `up` starts: a service behind a profile
+    that is not active is left out. ``all_profiles`` includes those too.
     """
     cmd = compose_command(project_name, compose_files)
+    if all_profiles:
+        cmd.extend(["--profile", "*"])
     cmd.extend(["config", "--format", "json", "--no-env-resolution"])
     result = _run(cmd, cwd=project_dir, capture=True)
     return result.stdout
-
-
-def container_health(container_name: str) -> str | None:
-    """Get the health status of a container. Returns None if no healthcheck."""
-    result = _run(
-        ["docker", "inspect", "--format", "{{.State.Health.Status}}", container_name],
-        capture=True,
-        check=False,
-    )
-    status = result.stdout.strip()
-    if not status or status == "<no value>":
-        return None
-    return status
 
 
 @contextmanager
@@ -330,48 +323,13 @@ def compose_pull(
     _run(cmd, cwd=project_dir, timeout=_COMPOSE_UP_TIMEOUT)
 
 
-def image_digest(image_ref: str) -> str | None:
-    """Return the local image digest for an image reference, or None.
-
-    Uses docker inspect on the image (not the container). Returns the
-    first RepoDigest if present.
-    """
-    try:
-        result = _run(
-            ["docker", "inspect", "--format", "{{index .RepoDigests 0}}", image_ref],
-            capture=True,
-        )
-    except DockerError:
-        return None
-    raw = result.stdout.strip()
-    if not raw or raw == "<no value>":
-        return None
-    if "@" in raw:
-        return raw.split("@", 1)[1]
-    return raw if raw.startswith("sha256:") else None
-
-
-def container_image_digest(container_name: str) -> str | None:
-    """Return the image digest the named container is currently running.
-
-    Returns None if the container doesn't exist or has no resolvable digest.
-    """
-    try:
-        result = _run(
-            ["docker", "inspect", "--format", "{{.Image}}", container_name],
-            capture=True,
-            check=False,
-        )
-    except DockerError:
-        return None
-    image_id = result.stdout.strip()
-    if not image_id or image_id == "<no value>":
-        return None
-    return image_digest(image_id)
-
-
 def tag_image(source: str, target: str) -> None:
-    """Run docker tag <source> <target>. Source can be a digest or tag."""
+    """Run docker tag <source> <target>.
+
+    Source is an image ID or a full reference (repo:tag, repo@sha256:...).
+    A bare registry digest is not one: Docker looks a bare "sha256:..." up
+    as an image ID, and a manifest digest is a different value.
+    """
     _run(["docker", "tag", source, target])
 
 
@@ -438,35 +396,3 @@ def set_restart_policy(container_names: list[str], policy: str) -> None:
     """Run docker update --restart=<policy> on the named containers."""
     if container_names:
         _run(["docker", "update", f"--restart={policy}", *container_names])
-
-
-def container_image_id(container_name: str) -> str | None:
-    """The local image ID ("sha256:...") a container was created from.
-
-    Unlike container_image_digest this needs no registry digest, so it
-    identifies locally built images too. None if there is no such container.
-    """
-    try:
-        result = _run(
-            ["docker", "inspect", "--format", "{{.Image}}", container_name],
-            capture=True,
-            check=False,
-        )
-    except DockerError:
-        return None
-    image_id = result.stdout.strip()
-    return image_id if image_id.startswith("sha256:") else None
-
-
-def local_image_id(image_ref: str) -> str | None:
-    """The local image ID for an image name, or None if it is not present."""
-    try:
-        result = _run(
-            ["docker", "image", "inspect", "--format", "{{.Id}}", image_ref],
-            capture=True,
-            check=False,
-        )
-    except DockerError:
-        return None
-    image_id = result.stdout.strip()
-    return image_id if image_id.startswith("sha256:") else None
