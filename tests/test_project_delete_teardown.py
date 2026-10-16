@@ -121,14 +121,9 @@ class TestCompleteRemoval:
         assert "caddy validate failed" in capsys.readouterr().err
 
 
-def test_damaged_registry_refused_before_anything_is_deleted(box, capsys):
-    """Deregistering is the last step; a registry it cannot rewrite must stop
-    the delete before the first one, not after the files are gone."""
+def test_bad_registry_line_neither_blocks_the_delete_nor_is_dropped(box):
     registry = box.state / "projects.txt"
-    registry.write_text(f"{NAME}\n../x\n")
-    down = MagicMock()
-    assert _delete(box, down) == 1
-    assert f"{registry}:2: " in capsys.readouterr().err
-    down.assert_not_called()
-    assert box.project_dir(NAME).is_dir()
-    assert all(f.exists() for f in _state_files(box))
+    registry.write_text(f"{NAME}\nold-staging\n")
+    assert _delete(box, MagicMock()) == 0
+    assert not box.project_dir(NAME).exists()
+    assert registry.read_text() == "old-staging\n"

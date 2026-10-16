@@ -440,9 +440,11 @@ The project registry, `state/projects.txt`, holds one project name per line. Eve
 as a project name when it is read. A line that is not one (`../etc`, a reserved name such as
 `caddy` or `<x>-staging`) is reported as `projects.txt:<line>` with the reason. The nightly
 `security scan` still scans every valid project, then alerts on the bad line and exits 1;
-`security`, `health` and `doctor` name it too. Commands that would rewrite or trust the registry
-(`project-add`, `project-delete`, `project-list`, a single-project scan) refuse until the line is
-corrected or deleted, which needs root.
+`security`, `health` and `doctor` name it too. Every valid project keeps working: deploys, stages
+and the other per-project commands only ask whether their own name is registered, and
+`project-add`/`project-delete` keep the bad line as it is when they rewrite the file. Listings
+(`project-list`, `projects.list`) fail naming the line rather than list the registry with it left
+out. Correct or delete the line as root.
 
 An alert counts as sent only when Pushover accepts it. If it is not delivered, the health check logs why (an `error` entry when the config cannot be read or the Pushover request fails, a `warn` entry when Pushover is not configured) and tries again on the next 5-minute tick until it gets through. Without Pushover keys the `warn` entry is written at most once a day, because the retry would otherwise repeat it every tick; `health` reports the missing keys as the `alerts` warning for as long as they are missing. The same applies to the critical alert for a stopped project and to the RECOVERED notice. Find these entries with `log --component health`.
 

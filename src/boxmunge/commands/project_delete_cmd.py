@@ -18,9 +18,7 @@ from boxmunge.fileutil import LockError, project_lock
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.paths import BoxPaths
 from boxmunge.project_alerts import ALERT_KINDS, alert_state
-from boxmunge.project_registry import (
-    RegistryError, is_registered, remove_project as registry_remove,
-)
+from boxmunge.project_registry import is_registered, remove_project as registry_remove
 
 
 def project_state_files(paths: BoxPaths, name: str) -> list[Path]:
@@ -47,14 +45,7 @@ def run_project_delete(
 ) -> int:
     """Delete a project: stop containers, remove Caddy config, delete files, deregister."""
     project_dir = paths.project_dir(project_name)
-    # Read the registry before anything is torn down: deregistering is the
-    # last step, and a registry it refuses must not leave a half-deleted project.
-    try:
-        registered = is_registered(project_name, paths)
-    except RegistryError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
-    if not project_dir.exists() and not registered:
+    if not project_dir.exists() and not is_registered(project_name, paths):
         print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
         return 1
 

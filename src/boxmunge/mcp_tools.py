@@ -308,9 +308,13 @@ def _tool_project_delete(name: str, yes: bool = False) -> dict:
 
 
 def _tool_project_list_mcp() -> dict:
-    from boxmunge.project_registry import load_registered_projects
+    from boxmunge.project_registry import ProjectRegistryError, load_registered_projects
     paths = _get_paths()
-    projects = sorted(load_registered_projects(paths))
+    try:
+        projects = sorted(load_registered_projects(paths))
+    except ProjectRegistryError as e:
+        return {"success": False, "exit_code": 1, "data": {},
+                "messages": [f"ERROR: {e}"]}
     return {
         "success": True,
         "exit_code": 0,

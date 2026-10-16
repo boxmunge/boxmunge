@@ -10,7 +10,9 @@ import sys
 from boxmunge.commands.argv import parse_args
 from boxmunge.log import log_operation
 from boxmunge.paths import BoxPaths
-from boxmunge.project_registry import RegistryError, add_project, load_registered_projects
+from boxmunge.project_registry import (
+    ProjectRegistryError, add_project, load_registered_projects,
+)
 
 
 def cmd_project_add(args: list[str]) -> None:
@@ -33,7 +35,7 @@ def cmd_project_list(args: list[str]) -> None:
     paths = BoxPaths()
     try:
         projects = sorted(load_registered_projects(paths))
-    except RegistryError as e:
+    except ProjectRegistryError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
     if as_json:

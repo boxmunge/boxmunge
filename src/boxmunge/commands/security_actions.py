@@ -40,7 +40,7 @@ from boxmunge.log import log_warning
 from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import (
-    RegistryError, deployed_among, is_registered, read_registry,
+    deployed_among, is_registered, read_registry,
     registry_problem_message,
 )
 
@@ -193,8 +193,7 @@ def _parse_scan_targets(
     lookup exit code.
 
     A fleet scan scans every valid registered project and carries each bad
-    registry line forward to be reported; a single-project scan refuses a
-    damaged registry. Usage errors exit 2 from parse_args.
+    registry line forward to be reported. Usage errors exit 2 from parse_args.
     """
     from boxmunge.commands.argv import parse_args, require_project_name
     parsed = parse_args("security", args, max_positional=1)
@@ -202,12 +201,7 @@ def _parse_scan_targets(
         registry = read_registry(paths)
         return deployed_among(registry.names, paths), registry.problems
     project = require_project_name("security", parsed.positional[0])
-    try:
-        registered = is_registered(project, paths)
-    except RegistryError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
-    if not registered:
+    if not is_registered(project, paths):
         print(f"ERROR: project '{project}' is not registered.", file=sys.stderr)
         return 1
     return [project], ()

@@ -21,7 +21,7 @@ from boxmunge.commands.inbox_cmd import collect_inbox
 from boxmunge.commands.status import HEALTH_STATES
 from boxmunge.cve.quarantine import read_quarantine_state
 from boxmunge.pause import read_paused_state
-from boxmunge.project_registry import load_registered_projects
+from boxmunge.project_registry import is_registered
 from boxmunge.paths import BoxPaths
 from boxmunge.state import StateError, read_state
 
@@ -64,7 +64,7 @@ def _project_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
     paths = ctx.paths
     project_dir = project_path(paths, name)
     has_dir = project_dir.is_dir()
-    if not has_dir and name not in load_registered_projects(paths):
+    if not has_dir and not is_registered(name, paths):
         raise project_not_found(name)
     deployed = has_dir and (project_dir / "manifest.yml").exists()
     deploy = read_state(paths.project_deploy_state(name))
