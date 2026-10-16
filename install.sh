@@ -57,23 +57,35 @@ fi
 # installed Docker.
 # ---------------------------------------------------------------------------
 MIN_COMPOSE_VERSION="2.24.0"
+# Same rule as compose_version.py: trim ASCII whitespace, then the whole
+# output must be one version with an optional packaging suffix; anything
+# else is reported as unreadable, never guessed at.
 require_compose_version() {
-    local found
-    if ! found="$(docker compose version --short 2>/dev/null)"; then
-        echo "ERROR: 'docker compose' is not available. Install docker-compose-plugin" \
-             "${MIN_COMPOSE_VERSION} or newer from Docker's apt repository." >&2
+    local ws=$' \t\r\n\v\f' raw found
+    if ! raw="$(docker compose version --short 2>/dev/null)"; then
+        echo "ERROR: 'docker compose version --short' failed. Install" \
+             "docker-compose-plugin ${MIN_COMPOSE_VERSION} or newer from Docker's apt repository." >&2
         exit 1
     fi
-    found="${found#v}"
-    found="${found%%[-+]*}"
-    if [[ ! "${found}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
-       [[ "$(printf '%s\n%s\n' "${MIN_COMPOSE_VERSION}" "${found}" | sort -V | head -1)" \
-          != "${MIN_COMPOSE_VERSION}" ]]; then
-        echo "ERROR: Docker Compose '${found}' is older than ${MIN_COMPOSE_VERSION}," \
-             "which boxmunge needs to pass secrets to containers unchanged." \
-             "Upgrade it: apt-get install --only-upgrade docker-compose-plugin" >&2
+    found="${raw#"${raw%%[!${ws}]*}"}"
+    found="${found%"${found##*[!${ws}]}"}"
+    local re='^v?([0-9]+)\.([0-9]+)\.([0-9]+)([-+][^'"${ws}"']*)?$'
+    if [[ ! "${found}" =~ ${re} ]]; then
+        echo "ERROR: could not read the Docker Compose version from" \
+             "'docker compose version --short', which printed: $(printf '%q' "${raw}")" >&2
         exit 1
     fi
+    local have=( "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" )
+    local want=( ${MIN_COMPOSE_VERSION//./ } ) i
+    for i in 0 1 2; do
+        (( 10#${have[i]} > 10#${want[i]} )) && return 0
+        if (( 10#${have[i]} < 10#${want[i]} )); then
+            echo "ERROR: Docker Compose ${found} is older than ${MIN_COMPOSE_VERSION}," \
+                 "which boxmunge needs to pass secrets to containers unchanged." \
+                 "Upgrade it: apt-get install --only-upgrade docker-compose-plugin" >&2
+            exit 1
+        fi
+    done
 }
 if [[ -f "${BOXMUNGE_ROOT}/config/boxmunge.yml" ]]; then
     require_compose_version

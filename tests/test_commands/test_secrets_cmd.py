@@ -252,6 +252,16 @@ class TestSecretsLegacyFiles:
         assert run_secrets(["unset", "--host", "MY-KEY"], paths) == 0
         assert paths.host_secrets.read_text() == ""
 
+    def test_old_staging_auth_keys_get_a_note_not_a_warning(self, paths, capsys) -> None:
+        paths.project_dir("myapp").mkdir(parents=True)
+        paths.project_secrets("myapp").write_text("STAGING_AUTH_PASS=Xk9$qL2#z\n")
+        assert run_secrets(["list", "myapp"], paths) == 0
+        err = capsys.readouterr().err
+        assert "WARNING" not in err
+        assert "stage reads them as before" in err
+        assert run_secrets(["get", "myapp", "STAGING_AUTH_PASS"], paths) == 0
+        assert capsys.readouterr().out == "Xk9$qL2#z\n"
+
     def test_corrupt_file_is_an_error_for_every_subcommand(self, paths, capsys) -> None:
         paths.config.mkdir(parents=True, exist_ok=True)
         paths.host_secrets.write_text("not an assignment\n")

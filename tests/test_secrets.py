@@ -110,6 +110,31 @@ class TestLegacyUnquotedFiles:
             get_key(sf, "KEY")
         assert exc.value.stored == stored
 
+    @pytest.mark.parametrize("stored", ["s3cr3t\\", "C:\\data\\", "a\\'b", "x\\\\\\"])
+    def test_plain_looking_values_the_quoted_form_cannot_carry_stay_verbatim(
+            self, sf: SecretsFile, stored: str) -> None:
+        """Re-encoding these would leave an unterminated quote."""
+        sf.path.write_text(f"KEY={stored}\nOTHER=plain\n")
+        assert inventory(sf).legacy == ["KEY"]
+        set_key(sf, "NEW", "n")
+        assert sf.path.read_text() == f"KEY={stored}\nNEW='n'\nOTHER='plain'\n"
+
+    @pytest.mark.parametrize("stored", ["'abc", '"abc', " 'abc", "'it\\'s"])
+    def test_quote_left_open_blocks_writes_that_would_shift_other_keys(
+            self, sf: SecretsFile, stored: str) -> None:
+        content = f"A={stored}\nB=x'\n"
+        sf.path.write_text(content)
+        with pytest.raises(SecretsFileError, match="opens a quote"):
+            set_key(sf, "C", "c")
+        assert sf.path.read_text() == content
+        unset_key(sf, "A")
+        assert get_key(sf, "B") == "x'"
+
+    def test_quote_closed_on_its_line_does_not_block(self, sf: SecretsFile) -> None:
+        sf.path.write_text('A="abc" # c\n')
+        set_key(sf, "B", "b")
+        assert sf.path.read_text() == "A=\"abc\" # c\nB='b'\n"
+
     def test_ambiguous_lines_survive_other_writes_byte_for_byte(self, sf: SecretsFile) -> None:
         """Containers keep receiving what they did until the key is re-set."""
         sf.path.write_text("KEY=pa${X}ss # note\n")
@@ -173,19 +198,24 @@ class TestInternalKeys:
     """boxmunge's own keys keep the old reader's meaning for old lines."""
 
     @pytest.mark.parametrize("line,expected", [
-        ("PW=Xk9$qL2#z", "Xk9$qL2#z"),
-        ("PW=alpha # omega  ", "alpha # omega"),
-        ('PW="quoted"', "quoted"),
-        ("PW=  lead", "  lead"),
+        ("Xk9$qL2#z", "Xk9$qL2#z"),
+        ("alpha # omega  ", "alpha # omega"),
+        ('"quoted"', "quoted"),
+        ("  lead", "  lead"),
+        ("ends\\", "ends\\"),
     ])
     def test_old_lines_read_as_the_old_reader_did(self, sf, line: str, expected: str) -> None:
-        sf.path.write_text(line + "\n")
-        assert get_internal_key(sf, "PW") == expected
+        sf.path.write_text(f"STAGING_AUTH_PASS={line}\n")
+        assert get_internal_key(sf, "STAGING_AUTH_PASS") == expected
 
     def test_new_lines_read_literally(self, sf: SecretsFile) -> None:
-        set_key(sf, "PW", " 'x' ")
-        assert get_internal_key(sf, "PW") == " 'x' "
-        assert get_internal_key(sf, "NOPE") is None
+        set_key(sf, "STAGING_AUTH_PASS", " 'x' ")
+        assert get_internal_key(sf, "STAGING_AUTH_PASS") == " 'x' "
+        assert get_internal_key(sf, "STAGING_AUTH_USER") is None
+
+    def test_only_for_boxmunges_own_keys(self, sf: SecretsFile) -> None:
+        with pytest.raises(ValueError, match="own keys"):
+            get_internal_key(sf, "DB_PASS")
 
 
 class TestSetKeyRejectsInjection:

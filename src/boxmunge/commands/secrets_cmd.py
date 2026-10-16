@@ -5,8 +5,8 @@ import sys
 from boxmunge.log import log_operation
 from boxmunge.paths import BoxPaths
 from boxmunge.secrets import (
-    Inventory, LegacySecretError, SecretsFile, get_key, inventory, set_key, unset_key,
-    valid_key,
+    INTERNAL_KEYS, Inventory, LegacySecretError, SecretsFile, get_internal_key, get_key,
+    inventory, set_key, unset_key, valid_key,
 )
 
 
@@ -43,9 +43,17 @@ def _scope(project: str | None) -> str:
 def _warn_unvouched(inv: Inventory, project: str | None) -> None:
     """Say which stored keys containers may not receive as boxmunge reports."""
     scope = _scope(project)
-    if inv.legacy:
+    own = [k for k in inv.legacy if k in INTERNAL_KEYS]
+    app = [k for k in inv.legacy if k not in INTERNAL_KEYS]
+    if own:
         print(
-            f"WARNING: {', '.join(inv.legacy)} in {scope} secrets predate literal "
+            f"NOTE: {', '.join(own)} in {scope} secrets predate literal storage; "
+            "stage reads them as before. 'secrets set' them again to store them "
+            "literally.", file=sys.stderr,
+        )
+    if app:
+        print(
+            f"WARNING: {', '.join(app)} in {scope} secrets predate literal "
             "storage: Compose interprets $, ' #', quotes and surrounding spaces "
             "in them, so containers may not receive the value as set. Check "
             f"each with 'secrets get {scope} KEY' and set it again.",
@@ -104,7 +112,8 @@ def _cmd_get(args: list[str], paths: BoxPaths) -> int:
         return 1
     key = rest[0]
     try:
-        value = get_key(secrets, key)
+        # boxmunge's own keys print what stage uses, old format or not.
+        value = get_internal_key(secrets, key) if key in INTERNAL_KEYS else get_key(secrets, key)
     except LegacySecretError as e:
         if not valid_key(key):
             print(

@@ -9,7 +9,8 @@ escaped. A value that form cannot carry (one ending in an odd run of
 backslashes, or with such a run before a quote) is refused.
 
 Older boxmunge wrote values unquoted. Such a line is read literally when
-Compose reads it as written (*plain*), and re-encoded on the next write.
+Compose reads it as written and the quoted form can carry it (*plain*), and
+is re-encoded on the next write.
 Any other unquoted line is *legacy*: what containers receive from it depends
 on Compose's interpretation, which can draw on the environment, so it is
 kept byte for byte (containers keep receiving what they did) until the
@@ -55,6 +56,10 @@ class LegacySecretError(ValueError):
             super().__init__(f"{key!r} is not a valid secret key name")
         self.key = key
         self.stored = stored
+
+
+# boxmunge's own keys (staging basic auth for Caddy), not the app's.
+INTERNAL_KEYS = frozenset({"STAGING_AUTH_USER", "STAGING_AUTH_PASS"})
 
 
 @dataclass(frozen=True)
@@ -121,10 +126,38 @@ def _decode_single_quoted(text: str) -> str | None:
     return None
 
 
-def _reads_literally_unquoted(text: str) -> bool:
-    """True if Compose reads this unquoted value exactly as written."""
+def _plain_unquoted(text: str) -> bool:
+    """True if Compose reads this unquoted value exactly as written, and the
+    quoted form a rewrite would give it means the same to Compose.
+
+    A plain-looking value that the quoted form cannot carry (an odd run of
+    backslashes at its end or before a quote) is not plain: re-encoding it
+    would leave an unterminated quote that breaks the whole file.
+    """
     return ("$" not in text and " #" not in text and text == text.strip()
-            and not text.startswith(("'", '"')))
+            and not text.startswith(("'", '"'))
+            and _decode_single_quoted(_encode(text)) == text)
+
+
+def _quote_left_open(raw: str) -> bool:
+    """True if raw opens a quote it does not close on this line.
+
+    Compose then reads the following lines into the value until a closing
+    quote, so what it makes of every later line depends on the file's
+    exact layout.
+    """
+    text = raw.lstrip()
+    if not text.startswith(("'", '"')):
+        return False
+    escaped = False
+    for ch in text[1:]:
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == text[0]:
+            return False
+    return True
 
 
 def validate_secret(key: str, value: str) -> None:
@@ -180,7 +213,7 @@ def _parse(path: Path) -> dict[str, _Entry]:
         elif raw.startswith("'"):
             value = _decode_single_quoted(raw)
         else:
-            value = raw if _reads_literally_unquoted(raw) else None
+            value = raw if _plain_unquoted(raw) else None
         entries[key] = _Entry(line, value)
     return entries
 
@@ -206,13 +239,15 @@ def get_key(secrets: SecretsFile, key: str) -> str | None:
 
 
 def get_internal_key(secrets: SecretsFile, key: str) -> str | None:
-    """Like get_key, for boxmunge's own keys (staging auth), not the app's.
+    """Like get_key, for INTERNAL_KEYS: boxmunge's own, not the app's.
 
     What such a key meant was defined by boxmunge's old reader, not by
     Compose, so its old unquoted line was never ambiguous: that reading
     (line stripped, then one pair of matching surrounding quotes removed)
     is kept for it, and stage keeps working after an upgrade.
     """
+    if key not in INTERNAL_KEYS:
+        raise ValueError(f"{key} is not one of boxmunge's own keys")
     entry = _parse(secrets.path).get(key)
     if entry is None:
         return None
@@ -240,6 +275,15 @@ def _rewrite(secrets: SecretsFile, key: str, value: str | None) -> Inventory:
     """
     with secrets.locked():
         entries = _parse(secrets.path)
+        for k, entry in entries.items():
+            if k != key and entry.value is None and _quote_left_open(entry.line.partition("=")[2]):
+                raise SecretsFileError(
+                    f"{secrets.path}: the stored value of {k} opens a quote that its "
+                    "line does not close, so Compose reads the lines after it into "
+                    "that value and any change to the file could change other "
+                    f"secrets. Set or unset {k} first (or fix the file by hand), "
+                    "then retry."
+                )
         removed = entries.pop(key, None)
         migrated = []
         for k, entry in entries.items():

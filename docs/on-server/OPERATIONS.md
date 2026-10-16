@@ -220,7 +220,10 @@ interpreted `$`, ` #`, surrounding quotes and spaces in them. Such a value is le
 exactly as stored, so containers keep receiving what they did, until you set it again.
 `secrets list` and `secrets set` warn which keys these are, and `secrets get` on one
 fails, showing the stored text: check what the app expects and `secrets set` it.
-(`STAGING_AUTH_USER`/`STAGING_AUTH_PASS` are read as before, so stage keeps working.)
+(`STAGING_AUTH_USER`/`STAGING_AUTH_PASS` are read, and printed by `get`, as before, so
+stage keeps working.) One old value that opens a quote it never closes makes Compose read
+the following lines into it; writes to that scope are refused until you set or unset that
+key, since any other change could alter what containers receive.
 Keys stored before key names were validated (`MY-KEY`, `app.key`) are kept too, since
 Compose still passes them on; `list` warns about them. Set the value under a valid name,
 update the app, then remove the old one by its exact name: `secrets unset myapp 'MY-KEY'`.
