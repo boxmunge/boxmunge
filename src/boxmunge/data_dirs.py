@@ -12,7 +12,10 @@ state: installs never remove, overwrite or copy it into a kept release.
 A project that has no record yet (it was deployed before the record
 existed) starts one from its kept releases' compose files too, before any
 kept release is replaced: a mount the live release dropped may survive only
-there.
+there. An entry such a kept release mounted read-write but the live
+release mounts read-only and the incoming release ships becomes code; its
+old contents are first moved aside to ``.releases/retained/``, so even that
+once-per-project judgement call loses nothing.
 
 An entry leaves the record only while neither it nor its ``-staging`` copy
 holds anything: when no compose file mounts it any more, or when a release
@@ -23,12 +26,13 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
 from boxmunge.bind_mounts import BindMountError, bind_mounted_dirs
-from boxmunge.bundle import BOX_OWNED_ENTRIES, BOXMUNGE_ENTRIES
+from boxmunge.bundle import BOX_OWNED_ENTRIES, BOXMUNGE_ENTRIES, is_placeholder
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.log import log_warning
 
@@ -116,6 +120,7 @@ class DataDirs:
     recorded: frozenset[str]  # entries that are data, mounted or not
     mounted: frozenset[str]   # every bind-mounted entry of live + incoming
     seeded: frozenset[str] = frozenset()  # recorded only because a kept release mounts it
+    adopted: frozenset[str] = frozenset()  # kept release mounted it rw; now shipped as code
 
     def box_state(self) -> set[str]:
         """Entries that are never release code."""
@@ -169,15 +174,17 @@ def classify(project_dir: Path, release_tree: Path | None,
     shipped: set[str] = set()
     if release_tree is not None:
         release_binds = bind_dirs(release_tree / "compose.yml", project_dir)
-        shipped = {e.name for e in release_tree.iterdir()}
+        shipped = {e.name for e in release_tree.iterdir() if not is_placeholder(e)}
     release = {d for d, rw in release_binds.items() if rw}
     live_rw = {d for d, rw in live_binds.items() if rw}
     stored = _load_record(project_dir)
     kept: set[str] = set()
+    adopted: set[str] = set()
     if stored is None:
         for tree in kept_trees:
             kept |= _read_write(tree / "compose.yml", project_dir)
-        kept -= (set(live_binds) - live_rw) & shipped
+        adopted = kept & (set(live_binds) - live_rw) & shipped
+        kept -= adopted
     candidates = (stored or set()) | live_rw | kept
     dirs = DataDirs(
         project_dir=project_dir,
@@ -189,7 +196,8 @@ def classify(project_dir: Path, release_tree: Path | None,
         n for n in candidates if dirs.occupied(n)}
     recorded -= set(BOX_OWNED_ENTRIES) | set(BOXMUNGE_ENTRIES)
     seeded = recorded - release - live_rw - (stored or set())
-    return replace(dirs, recorded=frozenset(recorded), seeded=frozenset(seeded))
+    return replace(dirs, recorded=frozenset(recorded), seeded=frozenset(seeded),
+                   adopted=frozenset(adopted - recorded))
 
 
 def save_record(dirs: DataDirs) -> None:
@@ -198,6 +206,46 @@ def save_record(dirs: DataDirs) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     doc = {"version": RECORD_VERSION, "data_dirs": sorted(dirs.recorded)}
     atomic_write_text(path, json.dumps(doc) + "\n", mode=0o644)
+
+
+def _set_aside(project_dir: Path, name: str) -> Path:
+    """Move ``name``'s contents into a new ``.releases/retained/`` dir."""
+    entry = project_dir / name
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    dest = project_dir / ".releases" / "retained" / f"{name}-{stamp}"
+    dest.mkdir(parents=True)
+    if entry.is_dir() and not entry.is_symlink():
+        # Move the contents, not the directory: a running container's
+        # read-only bind mount resolves to the directory's inode.
+        for child in sorted(entry.iterdir()):
+            child.rename(dest / child.name)
+    else:
+        entry.rename(dest / name)
+    print(f"  WARNING: {name} was bind-mounted read-write by an older release "
+          f"(kept in .releases/), so it may hold data, and this release ships "
+          f"it as code. Its previous contents are kept in {dest}. When nothing "
+          f"needs them, an operator deletes them on the server with: rm -rf {dest}")
+    return dest
+
+
+def start_record(dirs: DataDirs) -> list[Path]:
+    """Start the record of a project that has none; returns the copies set aside.
+
+    The record is written after the moves: a crash part-way leaves no
+    record, so the next deploy moves what is left instead of installing
+    code over it.
+    """
+    copies = [_set_aside(dirs.project_dir, n) for n in sorted(dirs.adopted)
+              if holds_data(dirs.project_dir / n)]
+    save_record(dirs)
+    return copies
+
+
+@dataclass(frozen=True)
+class KeptData:
+    """What an install kept that the operator must hear about."""
+    retained: list[str] = field(default_factory=list)  # data the release does not mount
+    copies: list[Path] = field(default_factory=list)   # contents moved to .releases/retained/
 
 
 def entry_label(path: Path) -> str:
@@ -215,14 +263,19 @@ def warn_retained(dirs: DataDirs, names: list[str]) -> None:
               f"server with: rm -rf {' '.join(str(p) for p in occupied)}")
 
 
-def log_retained(paths: BoxPaths, project_name: str, names: list[str],
-                 component: str) -> None:
-    """Log the entries install_release kept although the release dropped them."""
-    if not names:
-        return
+def log_kept(paths: BoxPaths, project_name: str, kept: KeptData,
+             component: str) -> None:
+    """Log what an install kept: retired data, and contents set aside."""
     project_dir = paths.project_dir(project_name)
-    labels = ", ".join(entry_label(project_dir / n) for n in names)
-    log_warning(component,
-                f"Kept data the installed release no longer mounts: {labels}. "
-                f"An operator deletes it on the server once nothing needs it.",
-                paths, project=project_name, detail={"retained": names})
+    if kept.retained:
+        labels = ", ".join(entry_label(project_dir / n) for n in kept.retained)
+        log_warning(component,
+                    f"Kept data the installed release no longer mounts: {labels}. "
+                    f"An operator deletes it on the server once nothing needs it.",
+                    paths, project=project_name, detail={"retained": kept.retained})
+    for copy in kept.copies:
+        log_warning(component,
+                    f"Set aside the old contents of an entry an older release "
+                    f"mounted read-write, now release code: {copy}. An operator "
+                    f"deletes it on the server once nothing needs it.",
+                    paths, project=project_name, detail={"set_aside": str(copy)})

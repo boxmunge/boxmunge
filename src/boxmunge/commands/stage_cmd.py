@@ -9,7 +9,7 @@ from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.caddy_journal import write_site
 from boxmunge.commands.unstage_cmd import teardown_staging
 from boxmunge.compose import generate_staging_compose_base, generate_staging_compose_override
-from boxmunge.data_dirs import log_retained
+from boxmunge.data_dirs import log_kept
 from boxmunge.docker import (
     CaddyConfigRejected, DockerError, caddy_config_lock, caddy_reload, compose_up,
 )
@@ -63,9 +63,9 @@ def _intake_bundle(project_name: str, paths: BoxPaths, ref: str | None,
                       f"Nothing was changed.", file=sys.stderr)
                 return 1
             try:
-                retained = install_release(tree, project_dir)
+                kept = install_release(tree, project_dir)
                 mark_live(paths, project_name, bundle_ref(bundle_path))
-                log_retained(paths, project_name, retained, "stage")
+                log_kept(paths, project_name, kept, "stage")
             except (OSError, ValueError) as e:
                 print(f"ERROR: Installing the staged release failed: {e}",
                       file=sys.stderr)

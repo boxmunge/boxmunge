@@ -31,8 +31,8 @@ from boxmunge.bundle import (
 )
 from boxmunge.compose_mounts import PROD_SMOKE_SOURCE
 from boxmunge.data_dirs import (
-    DataDirs, ReleaseStateError, classify, entry_label, has_record, holds_data,
-    log_retained, record_path, save_record, warn_retained,
+    DataDirs, KeptData, ReleaseStateError, classify, entry_label, has_record,
+    holds_data, log_kept, record_path, save_record, start_record, warn_retained,
 )
 from boxmunge.fileutil import atomic_write_text, chown_tree_deploy, mkdir_p_deploy
 
@@ -85,16 +85,18 @@ def _classify(project_dir: Path, release_tree: Path | None) -> DataDirs:
     return classify(project_dir, release_tree, _kept_trees(project_dir))
 
 
-def _ensure_record(project_dir: Path, release_tree: Path | None = None) -> None:
+def _ensure_record(project_dir: Path, release_tree: Path | None = None) -> list[Path]:
     """Start the data-dir record before anything can change a kept release.
 
     A project deployed before the record existed may know a retired data
     directory only from a kept release's compose.yml; every function that
     replaces or drops a kept release, and install_release, calls this first,
-    passing the incoming release when there is one.
+    passing the incoming release when there is one. Returns the contents it
+    set aside (see data_dirs.start_record).
     """
-    if not has_record(project_dir):
-        save_record(_classify(project_dir, release_tree))
+    if has_record(project_dir):
+        return []
+    return start_record(_classify(project_dir, release_tree))
 
 
 def check_install(tree: Path, project_dir: Path) -> None:
@@ -227,18 +229,19 @@ def live_code_entries(project_dir: Path, release_tree: Path | None = None) -> li
     return sorted(e for e in project_dir.iterdir() if e.name not in state)
 
 
-def install_release(tree: Path, project_dir: Path) -> list[str]:
+def install_release(tree: Path, project_dir: Path) -> KeptData:
     """Make the project's release code exactly ``tree``; keep box state.
 
     Nothing changes if the release is refused. The data-dir record is
     written before anything else, so every entry that holds data stays box
     state from now on. A data entry the release ships only an empty
-    placeholder for is kept. Returns the entries holding data that the
-    release no longer mounts (kept, with a warning), for the caller to log.
+    placeholder for is kept. Returns what was kept with a warning (data the
+    release no longer mounts, contents set aside), for the caller to log.
     """
     dirs = _classify(project_dir, tree)
     _check(tree, dirs)
     project_dir.mkdir(parents=True, exist_ok=True)
+    copies = [] if has_record(project_dir) else start_record(dirs)
 
     # Classify everything before changing anything.
     shipped = {e.name for e in tree.iterdir()}
@@ -267,7 +270,7 @@ def install_release(tree: Path, project_dir: Path) -> list[str]:
     _make_scripts_executable(installed)
     retained = dirs.retained()
     warn_retained(dirs, retained)
-    return retained
+    return KeptData(retained=retained, copies=copies)
 
 
 def live_ref(paths: BoxPaths, project_name: str) -> str:
@@ -307,13 +310,15 @@ def keep_previous_release(
     so a failure here leaves the live tree and the old snapshot untouched.
     """
     project_dir = paths.project_dir(project_name)
-    _ensure_record(project_dir, release_tree)
     releases = paths.project_releases(project_name)
     building = releases / "previous.building"
     _remove(building)
     building.mkdir(parents=True)
     for entry in live_code_entries(project_dir, release_tree):
         _copy_entry(entry, building / entry.name)
+    # After the copy, so the kept release has any contents set aside too.
+    copies = _ensure_record(project_dir, release_tree)
+    log_kept(paths, project_name, KeptData(copies=copies), "deploy")
 
     meta = {
         "ref": live_ref(paths, project_name),
@@ -386,7 +391,6 @@ def keep_prestage_release(paths: BoxPaths, project_name: str,
     if has_prestage(paths, project_name):
         return
     project_dir = paths.project_dir(project_name)
-    _ensure_record(project_dir, release_tree)
     deployed = (project_dir / "manifest.yml").exists()
     building = paths.project_releases(project_name) / "prestage.building"
     _remove(building)
@@ -394,6 +398,8 @@ def keep_prestage_release(paths: BoxPaths, project_name: str,
     if deployed:
         for entry in live_code_entries(project_dir, release_tree):
             _copy_entry(entry, building / "release" / entry.name)
+    copies = _ensure_record(project_dir, release_tree)
+    log_kept(paths, project_name, KeptData(copies=copies), "stage")
     meta = {"ref": live_ref(paths, project_name) if deployed else None}
     atomic_write_text(building / "meta.json", json.dumps(meta) + "\n", mode=0o644)
     building.rename(_prestage(paths, project_name))
@@ -474,9 +480,9 @@ def sync_live_scripts(paths: BoxPaths, project_name: str, release_root: Path) ->
 def restore_prestage(paths: BoxPaths, project_name: str) -> None:
     """Put the kept production release back (unstage, or a failed stage)."""
     ref = prestage_ref(paths, project_name)
-    retained = install_release(prestage_tree(paths, project_name),
-                               paths.project_dir(project_name))
-    log_retained(paths, project_name, retained, "unstage")
+    kept = install_release(prestage_tree(paths, project_name),
+                           paths.project_dir(project_name))
+    log_kept(paths, project_name, kept, "unstage")
     if ref is None:
         _remove(_live_meta(paths, project_name))
     else:

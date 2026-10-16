@@ -76,14 +76,14 @@ class TestRetiredMountKeepsItsData:
         self, tmp_path: Path, project: Path, capsys,
     ) -> None:
         b = _release(tmp_path, "b", NO_MOUNTS)
-        assert install_release(b, project) == ["uploads"]
+        assert install_release(b, project).retained == ["uploads"]
         out = capsys.readouterr().out
         assert "WARNING" in out and "uploads/" in out
         assert f"rm -rf {project / 'uploads'}" in out
-        assert install_release(b, project) == ["uploads"]
+        assert install_release(b, project).retained == ["uploads"]
 
     def test_mounted_data_is_not_reported(self, tmp_path: Path, project: Path) -> None:
-        assert install_release(tmp_path / "a", project) == []
+        assert install_release(tmp_path / "a", project).retained == []
 
     def test_staging_copy_of_a_retired_dir_is_kept(
         self, tmp_path: Path, project: Path,
@@ -114,7 +114,7 @@ class TestRetiredMountKeepsItsData:
         install_release(b, project)
         shutil.rmtree(project / "uploads")
         c = _release(tmp_path, "c", NO_MOUNTS, {"uploads/index.html": "CODE"})
-        assert install_release(c, project) == []
+        assert install_release(c, project).retained == []
         assert (project / "uploads" / "index.html").read_text() == "CODE"
         assert json.loads(_record(project).read_text())["data_dirs"] == []
 
@@ -146,7 +146,7 @@ class TestEmptyDataDirCanBecomeCode:
         (project / "uploads").mkdir()  # created by Docker, never written
         for n, page in enumerate(("v1", "v2")):
             tree = _release(tmp_path, f"b{n}", self.RO, {"uploads/index.html": page})
-            assert install_release(tree, project) == []
+            assert install_release(tree, project).retained == []
             assert (project / "uploads" / "index.html").read_text() == page
         assert json.loads(_record(project).read_text())["data_dirs"] == []
 
@@ -431,7 +431,7 @@ class TestKeptReleasesOnlySeedTheRecord:
         project = _live_with_old_rollback_target(tmp_path, CONF_RO)
         for n in range(2):
             tree = _release(tmp_path, f"c{n}", CONF_RO, {"conf/app.conf": f"conf {n}"})
-            assert install_release(tree, project) == []
+            assert install_release(tree, project).retained == []
             assert (project / "conf" / "app.conf").read_text() == f"conf {n}"
         assert json.loads(_record(project).read_text())["data_dirs"] == []
 
@@ -477,8 +477,90 @@ def test_staging_copy_alone_is_kept_without_a_warning_each_deploy(
     (project / "uploads-staging" / "photo.jpg").write_text("STAGING COPY")
     shutil.rmtree(project / "uploads")
     b = _release(tmp_path, "b", NO_MOUNTS)
-    assert install_release(b, project) == []
-    assert install_release(b, project) == []
+    assert install_release(b, project).retained == []
+    assert install_release(b, project).retained == []
     assert "WARNING" not in capsys.readouterr().out
     assert (project / "uploads-staging" / "photo.jpg").exists()
     assert json.loads(_record(project).read_text())["data_dirs"] == ["uploads"]
+
+
+class TestEdgeCasesOfStartingTheRecord:
+    READS_UPLOADS = ("services:\n  web:\n    image: nginx\n"
+                     "    volumes: [\"./uploads:/uploads:ro\"]\n")
+
+    def test_placeholder_does_not_make_read_only_data_code(self, paths) -> None:
+        """B mounts ./uploads:ro and ships only uploads/.gitkeep."""
+        deploy = _deployer(paths)
+        pdir = paths.project_dir("myapp")
+        assert deploy(9, MOUNTS_UPLOADS) == 0
+        (pdir / "uploads").mkdir()
+        (pdir / "uploads" / "photo.jpg").write_text("USER UPLOAD")
+        from tests.bundle_helpers import place_bundle
+        from boxmunge.commands.deploy import run_deploy
+        files = {"compose.yml": self.READS_UPLOADS, "uploads/.gitkeep": ""}
+        place_bundle(paths, timestamp="2026-10-13T100000000000", files=files)
+        with _docker():
+            assert run_deploy("myapp", paths) == 0
+        _record(pdir).unlink()
+        for hour in (11, 12):
+            place_bundle(paths, timestamp=f"2026-10-13T{hour}0000000000", files=files)
+            with _docker():
+                assert run_deploy("myapp", paths) == 0
+            assert (pdir / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
+
+    def _code_once_mounted_rw(self, paths) -> Path:
+        """Pre-upgrade box: A mounted ./conf rw (never written), B mounts it
+        :ro and ships it, A is kept for rollback, no record."""
+        from tests.bundle_helpers import place_bundle
+        from boxmunge.commands.deploy import run_deploy
+        _deployer(paths)  # registers the project
+        pdir = paths.project_dir("myapp")
+        for hour, files in ((9, {"compose.yml": CONF_RW}),
+                            (10, {"compose.yml": CONF_RO, "conf/app.conf": "old conf"})):
+            place_bundle(paths, timestamp=f"2026-10-13T{hour:02d}0000000000", files=files)
+            with _docker():
+                assert run_deploy("myapp", paths) == 0
+        _record(pdir).unlink()
+        place_bundle(paths, timestamp="2026-10-13T110000000000",
+                     files={"compose.yml": CONF_RO, "conf/app.conf": "new conf"})
+        return pdir
+
+    def _retained(self, pdir: Path) -> list[Path]:
+        root = pdir / ".releases" / "retained"
+        return sorted(root.iterdir()) if root.exists() else []
+
+    def test_code_once_mounted_rw_installs_and_keeps_a_copy(self, paths, capsys) -> None:
+        from boxmunge.commands.deploy import run_deploy
+        pdir = self._code_once_mounted_rw(paths)
+        inode = (pdir / "conf").stat().st_ino
+        with _docker():
+            assert run_deploy("myapp", paths) == 0
+        assert (pdir / "conf" / "app.conf").read_text() == "new conf"
+        assert (pdir / "conf").stat().st_ino == inode
+        [copy] = self._retained(pdir)
+        assert copy.name.startswith("conf-")
+        assert (copy / "app.conf").read_text() == "old conf"
+        assert f"rm -rf {copy}" in capsys.readouterr().out
+        previous = paths.project_releases("myapp") / "previous" / "conf" / "app.conf"
+        assert previous.read_text() == "old conf"
+        log = [json.loads(line) for line in paths.log_file.read_text().splitlines()]
+        assert any(e["level"] == "warn" and str(copy) in e["msg"] for e in log)
+        assert "retained" not in {e.name for e in live_code_entries(pdir)}
+
+    def test_crash_between_the_move_and_the_install(self, paths) -> None:
+        from boxmunge.commands.deploy import run_deploy
+        pdir = self._code_once_mounted_rw(paths)
+        with _docker(), patch("boxmunge.commands.deploy.install_release",
+                              side_effect=OSError("power cut")):
+            assert run_deploy("myapp", paths) == 1
+        assert json.loads(_record(pdir).read_text())["data_dirs"] == []
+        [copy] = self._retained(pdir)
+        assert (copy / "app.conf").read_text() == "old conf"
+        from tests.bundle_helpers import place_bundle
+        place_bundle(paths, timestamp="2026-10-13T120000000000",
+                     files={"compose.yml": CONF_RO, "conf/app.conf": "newer conf"})
+        with _docker():
+            assert run_deploy("myapp", paths) == 0
+        assert (pdir / "conf" / "app.conf").read_text() == "newer conf"
+        assert [p.name for p in self._retained(pdir)] == [copy.name]
+        assert (copy / "app.conf").read_text() == "old conf"
