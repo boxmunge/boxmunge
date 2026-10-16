@@ -15,6 +15,13 @@ Debian 13 with apt 3.0 and unattended-upgrades 2.12):
 - apt.systemd.daily swallows a failed ``apt-get update``, so apt-daily.service
   still ends in ``Result=success``. The units' last results are checked as
   well, because they catch the script or the unit failing outright.
+- ``/var/lib/apt/periodic/upgrade-stamp`` is touched only after
+  unattended-upgrade itself exited 0. Its age is the evidence that updates
+  are being installed: the unit still ends in ``Result=success`` when
+  unattended-upgrade crashes (as it did on every run on hosts whose
+  bootstrap wrote a malformed origins list).
+- A missing stamp is expected only on a host configured for automatic
+  updates less than ``STAMP_MAX_AGE`` ago (the age of ``20auto-upgrades``).
 - unattended-upgrades must still be active.
 
 Everything here is readable without root: the stamp directory is 0755 and
@@ -30,9 +37,12 @@ from pathlib import Path
 from typing import Callable
 
 UPDATE_STAMP = Path("/var/lib/apt/periodic/update-stamp")
+UPGRADE_STAMP = Path("/var/lib/apt/periodic/upgrade-stamp")
+AUTO_UPGRADES_CONF = Path("/etc/apt/apt.conf.d/20auto-upgrades")
 # apt-daily.timer fires twice a day with up to 12h of random delay, and
 # apt.systemd.daily refreshes at most once per calendar day, so a healthy
 # stamp is under ~36h old. 48h means at least one day's refresh has failed.
+# apt-daily-upgrade.timer fires daily, so the same limit holds for upgrades.
 STAMP_MAX_AGE = timedelta(hours=48)
 APT_UNITS = ("apt-daily.service", "apt-daily-upgrade.service")
 UNATTENDED_UNIT = "unattended-upgrades"
@@ -57,14 +67,19 @@ class Problem:
 class OsUpdateStatus:
     problems: tuple[Problem, ...] = field(default_factory=tuple)
     stamp_age: timedelta | None = None
+    upgrade_age: timedelta | None = None
 
     def summary(self) -> str:
         """One line: the problems with their hints, or the evidence of health."""
         if self.problems:
             return "; ".join(f"{p.text} — {p.hint}" for p in self.problems)
-        assert self.stamp_age is not None
         return (f"unattended-upgrades active; package lists refreshed "
-                f"{format_age(self.stamp_age)} ago; last apt-daily runs succeeded")
+                f"{_ago(self.stamp_age)}; updates installed {_ago(self.upgrade_age)}; "
+                f"last apt-daily runs succeeded")
+
+
+def _ago(age: timedelta | None) -> str:
+    return "not yet (first run pending)" if age is None else f"{format_age(age)} ago"
 
 
 def format_age(age: timedelta) -> str:
@@ -101,20 +116,54 @@ def _unattended_problem(run: Runner) -> Problem | None:
     return None
 
 
-def _stamp_problem(stamp: Path, now: datetime) -> tuple[Problem | None, timedelta | None]:
-    hint = "as root, `apt-get update` shows the failing source"
+@dataclass(frozen=True)
+class _Stamp:
+    key: str        # problem-key prefix
+    done: str       # what a fresh stamp proves happened
+    failing: str    # what a stale stamp means
+    hint: str
+
+
+_UPDATE = _Stamp("stamp", "package lists refreshed",
+                 "OS security updates are not being fetched",
+                 "as root, `apt-get update` shows the failing source")
+_UPGRADE = _Stamp("upgrade-stamp", "unattended-upgrade succeeded",
+                  "OS security updates are not being installed",
+                  "/var/log/unattended-upgrades/unattended-upgrades.log shows why")
+
+
+def _age(path: Path, now: datetime) -> timedelta:
+    return now - datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+
+
+def _configured_recently(conf: Path, now: datetime) -> bool | Problem:
+    """Whether automatic updates were set up too recently to have run yet."""
     try:
-        mtime = stamp.stat().st_mtime
+        return _age(conf, now) <= STAMP_MAX_AGE
     except FileNotFoundError:
-        return Problem("stamp:missing", f"package lists have never been refreshed "
-                       f"successfully ({stamp} is missing)", hint), None
+        return Problem("auto-upgrades:unconfigured", f"automatic updates are not "
+                       f"configured ({conf} is missing)",
+                       "re-run the boxmunge installer's unattended-upgrades step")
     except OSError as e:
-        return Problem("stamp:unreadable", f"cannot read {stamp}: {e}", hint), None
-    age = now - datetime.fromtimestamp(mtime, timezone.utc)
+        return Problem("auto-upgrades:unreadable", f"cannot read {conf}: {e}",
+                       f"as root, check {conf}")
+
+
+def _stamp_problem(kind: _Stamp, stamp: Path, now: datetime,
+                   recent: bool | Problem) -> tuple[Problem | None, timedelta | None]:
+    try:
+        age = _age(stamp, now)
+    except FileNotFoundError:
+        if recent is True:
+            return None, None
+        return Problem(f"{kind.key}:missing", f"never recorded that {kind.done} "
+                       f"({stamp} is missing), so {kind.failing}", kind.hint), None
+    except OSError as e:
+        return Problem(f"{kind.key}:unreadable", f"cannot read {stamp}: {e}",
+                       kind.hint), None
     if age > STAMP_MAX_AGE:
-        return Problem("stamp:stale", f"package lists last refreshed successfully "
-                       f"{format_age(age)} ago, so OS security updates are not being "
-                       f"fetched", hint), age
+        return Problem(f"{kind.key}:stale", f"last recorded that {kind.done} "
+                       f"{format_age(age)} ago, so {kind.failing}", kind.hint), age
     return None, age
 
 
@@ -151,6 +200,8 @@ def _unit_problem(run: Runner, unit: str) -> Problem | None:
 
 
 def inspect_os_updates(*, now: datetime | None = None, stamp: Path = UPDATE_STAMP,
+                       upgrade_stamp: Path = UPGRADE_STAMP,
+                       auto_conf: Path = AUTO_UPGRADES_CONF,
                        run: Runner = _systemctl) -> OsUpdateStatus:
     """Gather the evidence. Never raises for a probe failure: it is a problem."""
     now = now or datetime.now(timezone.utc)
@@ -158,11 +209,17 @@ def inspect_os_updates(*, now: datetime | None = None, stamp: Path = UPDATE_STAM
     unattended = _unattended_problem(run)
     if unattended:
         problems.append(unattended)
-    stamp_issue, age = _stamp_problem(stamp, now)
+    recent = _configured_recently(auto_conf, now)
+    if isinstance(recent, Problem):
+        problems.append(recent)
+    stamp_issue, age = _stamp_problem(_UPDATE, stamp, now, recent)
     if stamp_issue:
         problems.append(stamp_issue)
+    upgrade_issue, upgrade_age = _stamp_problem(_UPGRADE, upgrade_stamp, now, recent)
+    if upgrade_issue:
+        problems.append(upgrade_issue)
     for unit in APT_UNITS:
         issue = _unit_problem(run, unit)
         if issue:
             problems.append(issue)
-    return OsUpdateStatus(problems=tuple(problems), stamp_age=age)
+    return OsUpdateStatus(problems=tuple(problems), stamp_age=age, upgrade_age=upgrade_age)

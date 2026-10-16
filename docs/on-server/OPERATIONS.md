@@ -865,9 +865,22 @@ service is enabled:
   warns when it is missing or older than 48 hours. A single broken apt source (for example a
   third-party repository with no release for this Debian version) makes every `apt-get update`
   fail, and no security update is fetched while unattended-upgrades still reports itself active.
+- `/var/lib/apt/periodic/upgrade-stamp` is refreshed only after `unattended-upgrade` itself exits
+  cleanly. The check warns when it is missing or older than 48 hours. `apt-daily-upgrade.service`
+  still reports success when `unattended-upgrade` crashes, so this stamp is the evidence that
+  updates are being installed. `/var/log/unattended-upgrades/unattended-upgrades.log` shows why
+  it failed.
+- On a box set up less than 48 hours ago (by the age of `/etc/apt/apt.conf.d/20auto-upgrades`), a
+  stamp that does not exist yet is expected and not reported. A missing `20auto-upgrades` is.
 - The last runs of `apt-daily.service` and `apt-daily-upgrade.service` must have succeeded. A
   failure is reported with the unit, its result and exit status.
 - `unattended-upgrades` must be active.
+
+Boxes bootstrapped by releases before 0.10.2 got a `50unattended-upgrades` whose origins list
+crashed `unattended-upgrade` on every run, so they installed no OS security updates. Upgrading
+replaces that file, if it is unedited, with the bundled
+`bootstrap/50unattended-upgrades-debian`. The next daily run then installs the backlog and, if a
+package needs it, reboots in the maintenance window.
 
 The check never runs `apt-get update` itself. To see the cause, as the supervisor user run
 `sudo apt-get update`: the failing source is named in its `E:` and `W:` lines. Fix or remove that
@@ -877,7 +890,8 @@ manual `apt-get update` does not refresh the stamp; the next daily run does, or 
 
 Because `health` is not scheduled, the auto-update timer (every 6 hours) runs the same check. When
 it finds a problem it logs a warning (`log --component auto-update`) and sends a priority-1 Pushover
-alert, "[boxmunge] OS updates are not being installed". The alert repeats at most once a day while
+alert, "[<hostname>] OS updates are not being installed". Every boxmunge alert title starts
+with the box's hostname. The alert repeats at most once a day while
 the same problems persist, and straight away when they change. An alert Pushover did not accept is
 retried on the next run. Its state is in `/opt/boxmunge/state/os-updates.json`.
 

@@ -295,7 +295,7 @@ Recurring operations run via systemd timers:
 
 All timers use `Persistent=true` so a missed run (e.g., server was rebooted) executes on next start rather than being silently skipped.
 
-Host security patching is handled by unattended-upgrades, configured to install security updates automatically and reboot during a configurable maintenance window (default 04:00). Because an enabled service proves nothing about updates arriving, the `auto-updates` health check and every `auto-update` run look for evidence (a recent successful `apt-get update`, successful apt-daily runs), and `auto-update` sends a Pushover alert when it is missing.
+Host security patching is handled by unattended-upgrades, configured to install security updates automatically and reboot during a configurable maintenance window (default 04:00). Because an enabled service proves nothing about updates arriving, the `auto-updates` health check and every `auto-update` run look for evidence (a recent successful `apt-get update`, a recent successful `unattended-upgrade` run, successful apt-daily runs), and `auto-update` sends a Pushover alert when it is missing.
 
 `doctor` and the `timers` health check verify that every timer above is active.
 
