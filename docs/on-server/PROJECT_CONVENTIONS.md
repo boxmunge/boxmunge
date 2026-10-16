@@ -120,7 +120,10 @@ services:
     port: 3000
 
     # REQUIRED for type:web. At least one route required.
-    # Routes are dicts with a `path` key.
+    # Routes are dicts with a `path` key. `/` catches every request no other
+    # route matches. Any other path is an exact match unless it ends in `*`:
+    # `/api/*` routes everything under /api/, while `/api/` routes only the
+    # literal path /api/.
     routes:
       - path: /
 
@@ -144,8 +147,8 @@ services:
     type: web
     port: 8000
     routes:
-      - path: /api/
-      - path: /admin/
+      - path: /api/*
+      - path: /admin/*
     internal: false
     health: /api/health/
     limits:
@@ -197,7 +200,7 @@ boxmunge validates `manifest.yml` on every deploy and rejects invalid manifests 
 4. **`source` is required** and must be `bundle` or `git`.
 5. **`repo` is required if `source: git`**. The `ref` field defaults to `main` if omitted.
 6. **`hosts` is required** and must contain at least one hostname. Wildcard hosts (e.g. `*.example.com`) are rejected unless the manifest top level sets `allow_wildcard_hosts: true` — see SECURITY.md for the trade-off.
-7. **Each `web` service must have `port`** and **at least one entry in `routes`**, unless it sets `internal: true` (a service Caddy does not route to, declared to give it a read-only root filesystem and `writable:` paths), which may omit both. `internal` must be `true` or `false`. Routes must be dicts with a `path` key. Both values are written into the Caddy config, so they are checked strictly: `port` is an unquoted integer from 1 to 65535, and `path` starts with `/` and contains only letters, digits, `.`, `_`, `~`, `-`, and `/`, with an optional trailing `*` (`/`, `/api/*`, `/static*`). Spaces, braces, quotes, and wildcards in the middle of a path are rejected.
+7. **Each `web` service must have `port`** and **at least one entry in `routes`**, unless it sets `internal: true` (a service Caddy does not route to, declared to give it a read-only root filesystem and `writable:` paths), which may omit both. `internal` must be `true` or `false`. Routes must be dicts with a `path` key. Both values are written into the Caddy config, so they are checked strictly: `port` is an unquoted integer from 1 to 65535, and `path` starts with `/` and contains only letters, digits, `.`, `_`, `~`, `-`, and `/`, with an optional trailing `*` (`/`, `/api/*`, `/static*`). Spaces, braces, quotes, and wildcards in the middle of a path are rejected. `/` is the catch-all; every other path matches exactly unless it ends in `*`, so a path ending in `/` without `*` (such as `/api/`) draws a warning: it would not route `/api/health`.
 8. **`limits`** fields are optional per service. `limits.memory` accepts Docker memory format (e.g., `256m`, `1g`). `limits.cpus` accepts a numeric string (e.g., `"0.5"`, `"2.0"`).
 9. **If `backup.type` is not `none`**, both `dump_command` and `restore_command` are mandatory. A backup you cannot restore is not a backup.
 10. **Per-service `smoke` is strongly recommended.** Each service can declare a `smoke: boxmunge-scripts/smoke.sh` field. The script is exec'd inside the running container, so `localhost:PORT` naturally works. boxmunge warns if no services have a smoke test.
