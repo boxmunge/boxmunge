@@ -117,17 +117,23 @@ def test_every_caller_environment_resolves_identically(
         "dbg": {"image": "busybox", "privileged": True, "profiles": ["debug"]},
     }}, dotenv="IMAGE_TAG=1.25\n")
 
-    models = []
+    validated, executed = [], []
     for env in (DEPLOY_SESSION, SYSTEMD_TIMER):
         _with_parent_env(monkeypatch, env)
-        models.append(resolve_compose_config(compose, _PROJECT))
-        models.append(_execution_model(compose, capfd))
+        validated.append(resolve_compose_config(compose, _PROJECT))
+        executed.append(_execution_model(compose, capfd))
 
-    assert all(m == models[0] for m in models)
-    web = models[0]["services"]["web"]
+    assert all(m == validated[0] for m in validated)
+    assert all(m == executed[0] for m in executed)
+    # Validation resolves every profile (a profiled service still starts
+    # when named); execution starts only the active ones. Otherwise the
+    # models agree, whoever the caller.
+    assert "dbg" in validated[0]["services"]
+    assert "dbg" not in executed[0]["services"]
+    assert validated[0]["services"]["web"] == executed[0]["services"]["web"]
+    web = executed[0]["services"]["web"]
     # The project's own .env still interpolates; nothing from a caller does.
     assert web["image"] == "nginx:1.25"
     assert web["environment"] == {
         "SEEN_HOME": "unset", "SEEN_USER": "unset", "SEEN_JOURNAL": "unset",
     }
-    assert "dbg" not in models[0]["services"]

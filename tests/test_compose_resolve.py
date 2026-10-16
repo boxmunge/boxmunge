@@ -34,7 +34,7 @@ def _project(paths: BoxPaths, files: dict[str, object]) -> Path:
 def _resolved_as(monkeypatch, resolved: dict) -> None:
     monkeypatch.setattr(
         docker, "compose_config",
-        lambda project_dir, compose_files=None, *, project_name: json.dumps(resolved),
+        lambda project_dir, compose_files=None, *, project_name, **_kw: json.dumps(resolved),
     )
 
 
@@ -183,3 +183,31 @@ def test_overlay_refuses_unresolvable_compose(paths: BoxPaths) -> None:
         load_user_compose(paths.project_dir("myapp") / "compose.yml", "myapp")
 
 
+def test_service_missing_from_resolved_model_fails_closed(paths: BoxPaths, monkeypatch) -> None:
+    """A Compose that ignored `--profile '*'` would leave profiled services
+    out of the model, unchecked and unhardened; resolution refuses instead."""
+    compose = _project(paths, {"compose.yml": {"services": {
+        "web": {"image": "nginx"}, "ops": {"image": "alpine", "profiles": ["ops"]},
+    }}})
+    _resolved_as(monkeypatch, _resolved_service())
+    with pytest.raises(ComposeSecurityError, match="left out service.s. ops"):
+        _validate(compose, paths)
+
+
+@pytest.mark.parametrize("name", ["on", "yes", "off", "no", "123"])
+def test_service_name_yaml_reads_as_non_text_refused(paths: BoxPaths, name: str) -> None:
+    """PyYAML (YAML 1.1) reads `on:` as True; Compose reads it as "on"."""
+    project_dir = paths.project_dir("myapp")
+    project_dir.mkdir(parents=True)
+    compose = project_dir / "compose.yml"
+    compose.write_text(f"services:\n  {name}:\n    image: nginx\n")
+    with pytest.raises(ComposeSecurityError, match="Quote the service name"):
+        _validate(compose, paths)
+
+
+def test_quoted_yaml_keyword_service_name_accepted(paths: BoxPaths) -> None:
+    project_dir = paths.project_dir("myapp")
+    project_dir.mkdir(parents=True)
+    compose = project_dir / "compose.yml"
+    compose.write_text("services:\n  'on':\n    image: nginx\n")
+    _validate(compose, paths)

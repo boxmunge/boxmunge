@@ -6,7 +6,8 @@ from typing import Any
 
 import yaml
 
-from boxmunge import compose_resolve
+from boxmunge import compose_resolve, docker
+from boxmunge.compose_images import built_image_name
 from boxmunge.compose_mounts import PROD_SMOKE_SOURCE, STAGING_SMOKE_SOURCE
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.live_mounts import LiveMounts, plan_live_mounts, sync_live_mounts
@@ -190,6 +191,12 @@ def _build_service_override(
         if fragment:
             services[svc_name] = {**services.get(svc_name, {}), **fragment}
 
+    # The platform names every built image (see compose_images); `prefix` is
+    # the compose project, so staging builds never replace production's.
+    for svc_name, user_svc in user_services.items():
+        if isinstance(user_svc, dict) and user_svc.get("build") is not None:
+            services.setdefault(svc_name, {})["image"] = built_image_name(prefix, svc_name)
+
     return services
 
 
@@ -341,6 +348,17 @@ def prepare_compose_override(
         live_mounts=live_mounts,
     )
     atomic_write_text(override_path, content)
+    # Before the overlay named built images under boxmunge.invalid/, Compose
+    # tagged them `<project>-<service>` or the service's own `image:`, names
+    # any other project could run. Drop those names from images whose
+    # Compose labels prove this project built them; a running container keeps
+    # its image, and the next up rebuilds under the new name.
+    services = _user_services(user_compose)
+    build_services = {name: svc.get("image") for name, svc in services.items()
+                      if isinstance(svc, dict) and svc.get("build") is not None}
+    for compose_project in (project_name, f"{project_name}-staging"):
+        docker.untag_old_built_names(
+            compose_project, build_services, set(services) - set(build_services))
 
     # Deploy-time warning for any service resolving to profile: off.
     # Repeated by design — see spec §"Deploy-time warning".

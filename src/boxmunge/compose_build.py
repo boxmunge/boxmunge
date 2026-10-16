@@ -5,10 +5,12 @@ A build runs on the host's builder, as whoever runs the deploy, so every
 input it reads from the host must stay inside the project: the context,
 each named additional context, the Dockerfile (resolved against the
 context, the way the builder resolves it), and any cache directory. The
-non-path forms that read nothing from this host stay allowed: remote git
-and HTTP(S) contexts, `docker-image://` and `service:` additional
-contexts, registry and inline caches. Anything else, including build keys
-this module does not know, is refused, because it cannot be checked.
+non-path forms that read nothing from this host stay allowed: HTTP(S)
+and `git://` contexts, `docker-image://` and `service:` additional
+contexts, registry and inline caches. SSH git contexts (`git@`, `ssh://`)
+are refused: Compose forwards the deploying user's SSH agent to fetch
+them, as with `build.ssh`. Anything else, including build keys this
+module does not know, is refused, because it cannot be checked.
 
 Build privileges (`network: host`, `privileged`, `entitlements`) are
 hardening questions and live in compose_service_rules; these rules are not
@@ -16,29 +18,41 @@ relaxed by `security.profile: off`.
 """
 from __future__ import annotations
 
+import csv
 import posixpath
 from pathlib import Path
 from typing import Any
 
 from boxmunge.compose_mounts import host_path_forms, outside_roots
 
-_REMOTE_PREFIXES = ("https://", "http://", "git://", "ssh://", "git@")
+_REMOTE_PREFIXES = ("https://", "http://", "git://")
+_SSH_PREFIXES = ("ssh://", "git@")
 _ADDITIONAL_PREFIXES = _REMOTE_PREFIXES + ("docker-image://", "service:")
-_SAFE_CACHE_TYPES = frozenset({"registry", "inline"})
+# Cache backends that read and write only a registry, with the keys each
+# accepts (buildx parses entries as CSV with case-insensitive keys).
+_SAFE_CACHE_KEYS: dict[str, frozenset[str]] = {
+    "registry": frozenset({
+        "type", "ref", "mode", "image-manifest", "oci-mediatypes", "compression",
+        "compression-level", "force-compression", "ignore-error",
+    }),
+    "inline": frozenset({"type"}),
+}
 _ALLOWED_BUILD_NETWORKS = frozenset({"", "default", "none", "host"})
 
 # Keys that read nothing from the host and grant nothing beyond an ordinary
-# build. `secrets` only names top-level secrets, whose files are confined
-# by compose_isolation.
+# build.
 _PLAIN_KEYS = frozenset({
-    "args", "dockerfile_inline", "extra_hosts", "isolation", "labels",
+    "args", "extra_hosts", "isolation", "labels",
     "no_cache", "no_cache_filter", "platforms", "provenance", "pull", "sbom",
-    "secrets", "shm_size", "tags", "target", "ulimits",
+    "shm_size", "target", "ulimits",
 })
-# Checked here or (privileges) in compose_service_rules.
+# Checked here, in compose_images (`tags`, `dockerfile_inline` images) or
+# (privileges) in compose_service_rules. `secrets` names top-level secrets,
+# which compose_isolation keeps to files inside the project.
 _CHECKED_KEYS = frozenset({
     "context", "dockerfile", "additional_contexts", "network", "cache_from",
-    "cache_to", "ssh", "entitlements", "privileged",
+    "cache_to", "ssh", "entitlements", "privileged", "secrets", "tags",
+    "dockerfile_inline",
 })
 
 _KEEP_INSIDE = "Keep every build input inside the project directory."
@@ -50,6 +64,32 @@ def _is_remote(ref: str) -> bool:
 
 def _has_scheme(ref: str) -> bool:
     return "://" in ref
+
+
+def _is_ssh(ref: str) -> bool:
+    return ref.startswith(_SSH_PREFIXES)
+
+
+_SSH_ADVICE = (
+    "is fetched over SSH, so Compose hands the build the deploying user's "
+    "SSH agent. Use an https:// git URL, or vendor the code into the project."
+)
+
+
+def _cache_problem(entry: Any) -> bool:
+    """True unless the entry is a plain registry ref or a registry/inline
+    cache using only that backend's keys."""
+    text = str(entry)
+    if "=" not in text and "," not in text and '"' not in text:
+        return False  # a bare registry reference
+    fields: dict[str, str] = {}
+    for field in next(csv.reader([text]), []):
+        key, sep, value = field.partition("=")
+        if not sep:
+            return True
+        fields[key.strip().lower()] = value.strip()
+    allowed = _SAFE_CACHE_KEYS.get(fields.get("type", "registry").lower())
+    return allowed is None or not set(fields) <= allowed
 
 
 class _BuildCheck:
@@ -73,6 +113,9 @@ class _BuildCheck:
             return "."
         if not isinstance(context, str) or not context:
             self.problems.append(f"{self.prefix} build context {context!r} must be a path")
+            return None
+        if _is_ssh(context):
+            self.problems.append(f"{self.prefix} build context {context!r} {_SSH_ADVICE}")
             return None
         if _is_remote(context):
             return None
@@ -110,6 +153,8 @@ class _BuildCheck:
             label = f"build.additional_contexts.{name} {ref!r}"
             if not isinstance(ref, str) or not ref:
                 self.problems.append(f"{self.prefix} {label} must be a path")
+            elif _is_ssh(ref):
+                self.problems.append(f"{self.prefix} {label} {_SSH_ADVICE}")
             elif ref.startswith(_ADDITIONAL_PREFIXES):
                 continue
             elif _has_scheme(ref):
@@ -124,13 +169,7 @@ class _BuildCheck:
 
     def caches(self, key: str, entries: Any) -> None:
         for entry in entries if isinstance(entries, list) else [entries]:
-            if entry is None:
-                continue
-            fields = dict(
-                part.split("=", 1) for part in str(entry).split(",") if "=" in part
-            )
-            kind = fields.get("type", "registry").strip().lower()
-            if kind not in _SAFE_CACHE_TYPES or {"src", "dest"} & set(fields):
+            if entry is not None and _cache_problem(entry):
                 self.problems.append(
                     f"{self.prefix} build.{key} entry {entry!r} uses a cache that "
                     f"reads or writes host paths or a store boxmunge cannot check. "
@@ -165,6 +204,25 @@ class _BuildCheck:
                 f"{self.prefix} build.{key} is not a build option boxmunge "
                 f"knows how to check. Remove it."
             )
+
+
+def local_dockerfile(build: Any, base_dir: Path, roots: tuple[Path, ...]) -> Path | None:
+    """The Dockerfile a build reads from this host, if it is inside the
+    project (anything else is refused by build_problems, and not read)."""
+    build = {"context": build} if isinstance(build, str) else build
+    if not isinstance(build, dict) or build.get("dockerfile_inline") is not None:
+        return None
+    context = build.get("context", ".")
+    dockerfile = build.get("dockerfile") or "Dockerfile"
+    if not isinstance(context, str) or not isinstance(dockerfile, str):
+        return None
+    if not dockerfile.startswith("/"):
+        if _has_scheme(context) or _is_ssh(context) or _is_remote(context):
+            return None
+        dockerfile = posixpath.join(host_path_forms(context, base_dir)[0], dockerfile)
+    if outside_roots(dockerfile, base_dir, roots):
+        return None
+    return Path(host_path_forms(dockerfile, base_dir)[0])
 
 
 def build_problems(

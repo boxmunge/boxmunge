@@ -89,18 +89,65 @@ def _parse_config(out: str) -> dict[str, Any]:
     return doc
 
 
+def _literal_service_names(path: Path, root: Path, seen: set[Path]) -> set[str]:
+    """Service names a compose file and the files it includes declare."""
+    if path in seen or not path.is_file():
+        return set()
+    seen.add(path)
+    try:
+        doc = yaml.safe_load(path.read_text())
+    except yaml.YAMLError:
+        return set()  # Compose reports the real problem when it resolves.
+    if not isinstance(doc, dict):
+        return set()
+    services = doc.get("services")
+    names = set(services) if isinstance(services, dict) else set()
+    for name in names:
+        if not isinstance(name, str):
+            raise ComposeResolveError(
+                f"{path.name}: service name {name!r} is not text to boxmunge's "
+                f"YAML reader, which (YAML 1.1) reads unquoted on/off/yes/no as "
+                f"booleans and bare digits as numbers, while Compose reads the "
+                f"name as text. Quote the service name (for example 'on':) or "
+                f"rename the service."
+            )
+    for compose_paths, _env, _dir in _include_entries(doc):
+        for ref in compose_paths:
+            if isinstance(ref, str) and not outside_roots(ref, path.parent, (root,)):
+                names |= _literal_service_names(
+                    Path(host_path_forms(ref, path.parent)[0]), root, seen)
+    return names
+
+
 def resolve_compose_config(compose_path: Path, project_name: str) -> dict[str, Any]:
-    """Return the fully resolved compose model for one compose file."""
+    """Return the fully resolved compose model for one compose file, with
+    every profile: validation and the overlay cover profiled services too.
+
+    Fails closed: a service the literal files declare (with their includes)
+    but the model lacks would go unchecked and unhardened, for example on a
+    Compose that ignored `--profile '*'`."""
     try:
         with _missing_env_files_present(compose_path):
             out = docker.compose_config(
                 compose_path.parent, [compose_path.name], project_name=project_name,
+                all_profiles=True,
             )
     except docker.DockerError as e:
         raise ComposeResolveError(
             f"`docker compose config` could not resolve {compose_path.name}: {e}"
         ) from e
-    return _parse_config(out)
+    model = _parse_config(out)
+    resolved = model.get("services")
+    missing = _literal_service_names(compose_path, compose_path.parent, set()) - {
+        str(name) for name in (resolved if isinstance(resolved, dict) else ())}
+    if missing:
+        raise ComposeResolveError(
+            f"`docker compose config` left out service(s) {', '.join(sorted(missing))}, "
+            f"which {compose_path.name} declares, so they cannot be checked or "
+            f"hardened. Upgrade Docker Compose (it must resolve every profile), "
+            f"or remove the services."
+        )
+    return model
 
 
 def resolve_deployed_config(

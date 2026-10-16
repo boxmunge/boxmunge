@@ -132,3 +132,15 @@ class TestErrorOutputGoesToStderr:
         # Usage prints to stderr
         assert "Usage" in captured.err
         assert captured.out == ""
+
+
+class TestOverlappingName:
+    @patch("boxmunge.commands.add_git_project_cmd.subprocess.run")
+    def test_name_extending_a_registered_project_refused_before_clone(
+        self, mock_run: MagicMock, paths: BoxPaths, capsys,
+    ) -> None:
+        from boxmunge.project_registry import add_project
+        add_project("testapp", paths)
+        assert run_add_git_project("testapp-admin", "git@example.com:o/r.git", paths) == 1
+        assert "container names" in capsys.readouterr().err
+        mock_run.assert_not_called()

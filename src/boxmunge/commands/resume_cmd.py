@@ -11,13 +11,14 @@ only when the operator explicitly accepts the risk (e.g., registry outage).
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
-import yaml
 
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
+from boxmunge.deployed_inventory import (
+    InventoryError, load_deployed_inventory, pulled_services,
+)
 from boxmunge.docker import (
     compose_pull, compose_up, caddy_reload, DockerError,
 )
@@ -33,21 +34,13 @@ from boxmunge.security_overlay import services_with_off_profile
 from boxmunge.state import read_state, write_state
 
 
-def _has_image_services(project_dir: Path, compose_files: list[str]) -> bool:
-    """True if any service in any of the compose files declares `image:`."""
-    for cf in compose_files:
-        path = project_dir / cf
-        if not path.exists():
-            continue
-        try:
-            data = yaml.safe_load(path.read_text()) or {}
-        except yaml.YAMLError:
-            continue
-        services = data.get("services", {})
-        for svc in services.values():
-            if isinstance(svc, dict) and svc.get("image"):
-                return True
-    return False
+def _services_to_pull(project_name: str, paths: BoxPaths) -> list[str]:
+    """The services a resume pulls: those `up` starts from a registry image
+    (deployed_inventory.pulled_services). Raises InventoryError."""
+    inventory = load_deployed_inventory(
+        paths.project_dir(project_name), _compose_files(project_name, paths), project_name,
+    )
+    return sorted(pulled_services(inventory))
 
 
 def _refuse_unless_resumable(project_name: str, paths: BoxPaths) -> bool:
@@ -98,9 +91,11 @@ def run_resume(
         return 1
 
     if not yes:
-        pull_image_services = _has_image_services(
-            project_dir, _compose_files(project_name, paths),
-        )
+        try:
+            pull_image_services = _services_to_pull(project_name, paths)
+        except InventoryError as e:
+            print(f"ERROR: cannot read the project's services: {e}", file=sys.stderr)
+            return 1
         print(f"This will resume '{project_name}':")
         if skip_security_checks:
             print("  - SKIPPING image pull (--skip-security-checks set)")
@@ -146,7 +141,6 @@ def resume_locked(
         print(f"ERROR: {e}", file=sys.stderr)
         return 1, None
     compose_files = _compose_files(project_name, paths)
-    pull_image_services = _has_image_services(project_dir, compose_files)
 
     # Validate user compose.yml against silent-floor-defeating keys BEFORE
     # any container action. A hostile compose.yml introduced while the
@@ -170,11 +164,18 @@ def resume_locked(
         return 3, None
 
     # Pull images (unless overridden or no image: services).
-    if pull_image_services and not skip_security_checks:
+    try:
+        pull_image_services = [] if skip_security_checks else _services_to_pull(
+            project_name, paths)
+    except InventoryError as e:
+        print(f"ERROR: cannot read the project's services: {e}", file=sys.stderr)
+        log_error("resume", f"Inventory failed: {e}", paths, project=project_name)
+        return 1, None
+    if pull_image_services:
         print("  Pulling latest images...")
         try:
             compose_pull(project_dir, compose_files=compose_files,
-                         project_name=project_name)
+                         project_name=project_name, services=pull_image_services)
         except DockerError as e:
             print(f"ERROR: Image pull failed: {e}", file=sys.stderr)
             print("       Use --skip-security-checks to resume without "

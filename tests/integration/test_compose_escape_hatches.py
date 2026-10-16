@@ -145,21 +145,47 @@ REJECTED: dict[str, tuple[dict[str, Any], dict | None, str]] = {
     # pid/ipc joins outside the project are isolation, not hardening.
     "pid joins container": ({"pid": "container:projb-db-1"}, None, "pid"),
     "ipc joins container": ({"ipc": "container:projb-db-1"}, None, "ipc"),
-    # A build may only tag names in the project's image namespace.
-    "build tags a public image": (
-        {"build": ".", "image": "postgres:16-alpine"}, None, "image namespace",
+    "userns joins container": ({"userns_mode": "container:projb-db-1"}, None, "userns_mode"),
+    # Built images are named by the platform; nothing may reach another's.
+    "build tags": (
+        {"build": {"context": ".", "tags": ["myapp-web:2"]}}, None, "build.tags",
     ),
-    "build tags the platform proxy image": (
-        {"build": ".", "image": "caddy:2-alpine"}, None, "myapp-<name>",
+    "image of another project's build": (
+        {"image": "boxmunge.invalid/projb/web:latest"}, None, "another project's",
     ),
-    "build tags the platform system image": (
-        {"build": ".", "image": "system-system"}, None, "image namespace",
+    "image by ID": ({"image": "sha256:" + "a" * 64}, None, "image ID"),
+    "image mount of another project's build": (
+        {"volumes": [{"type": "image", "source": "boxmunge.invalid/projb/web",
+                      "target": "/m"}]}, None, "image mount",
     ),
-    "build tag with registry host": (
-        {"build": ".", "image": "registry.example.com/myapp-web"}, None, "no registry host",
+    "additional context of another project's build": (
+        {"build": {"context": ".", "additional_contexts": {
+            "b": "docker-image://boxmunge.invalid/projb/web"}}}, None, "additional_contexts.b",
     ),
-    "extra build tag outside namespace": (
-        {"build": {"context": ".", "tags": ["myapp-web:2", "redis:7"]}}, None, "'redis:7'",
+    "inline Dockerfile FROM another project's build": (
+        {"build": {"context": ".", "dockerfile_inline": "FROM boxmunge.invalid/projb/web\n"}},
+        None, "dockerfile_inline",
+    ),
+    # Review: SSH git contexts forward the deployer's agent; buildx parses
+    # cache entries case-insensitively; build secrets must be files.
+    "ssh git context": ({"build": "git@github.com:example/app.git"}, None, "SSH agent"),
+    "cache to local dir, mixed case": (
+        {"build": {"context": ".", "cache_to": ["Type=local,Dest=/var/tmp/x"]}}, None,
+        "cache_to",
+    ),
+    "build secret from environment": (
+        {"build": {"context": ".", "secrets": ["token"]}},
+        {"secrets": {"token": {"environment": "HOME"}}}, "platform's own process environment",
+    ),
+    "runtime secret from environment": (
+        {"secrets": ["token"]},
+        {"secrets": {"token": {"environment": "HOME"}}}, "secrets set",
+    ),
+    # Review: a service in an inactive profile still starts when named
+    # (restore's `up <backup.service>`), so it is validated like any other.
+    "profiled privileged service": (
+        {"profiles": ["ops"], "privileged": True, "use_api_socket": True}, None,
+        r"privileged.*profile\(s\) ops.*out of the deployed bundle",
     ),
 }
 
@@ -175,7 +201,8 @@ ISOLATION_EVEN_WHEN_OFF = [
     "additional context absolute host path", "dockerfile absolute outside",
     "cache from local dir", "build ssh agent", "build on named network", "provider",
     "network_mode other project", "pid joins container", "ipc joins container",
-    "build tags a public image", "extra build tag outside namespace",
+    "userns joins container", "build tags", "image of another project's build",
+    "image by ID", "ssh git context", "build secret from environment",
 ]
 
 
@@ -255,10 +282,13 @@ ACCEPTED: dict[str, tuple[dict[str, Any], dict | None]] = {
     ),
     "ipc private": ({"ipc": "private"}, None),
     "build with default image name": ({"build": "."}, None),
-    "build with namespaced names": (
-        {"build": {"context": ".", "tags": ["myapp_web:1", "myapp/web:2"]},
-         "image": "myapp-web-local:latest"}, None,
+    "build with a user image name (overridden, warned)": (
+        {"build": ".", "image": "postgres:16-alpine"}, None,
     ),
+    "own built image reused": (
+        {"image": "boxmunge.invalid/myapp/web"}, {"services": {"api": {"build": "."}}},
+    ),
+    "https git context": ({"build": "https://example.com/app.git#main"}, None),
 }
 
 
@@ -274,42 +304,31 @@ def test_api_socket_relaxed_with_warning_under_profile_off(tmp_path: Path) -> No
     _validate(paths, compose, off=True)
 
 
-def _with_projects(tmp_path: Path, *names: str) -> None:
-    for name in names:
-        (tmp_path / "bm" / "projects" / name).mkdir(parents=True)
-
-
-def test_default_build_name_in_another_projects_namespace_refused(tmp_path: Path) -> None:
-    """Compose's default name counts too: service bar-web builds myapp-bar-web."""
-    paths, compose = _project(tmp_path, {"image": "alpine"},
-                              {"services": {"bar-web": {"build": "."}}})
-    _with_projects(tmp_path, "myapp-bar")
-    with pytest.raises(ComposeSecurityError, match="service bar-web: .*'myapp-bar'"):
+def test_unused_top_level_models_rejected(tmp_path: Path) -> None:
+    """`config` drops models no service uses; the literal file still has them."""
+    paths, compose = _project(tmp_path, {}, {"models": {"llm": {"model": "ai/smollm2"}}})
+    with pytest.raises(ComposeSecurityError, match="top-level models"):
         _validate(paths, compose)
 
 
-@pytest.mark.parametrize("svc,others,match", [
-    # foo-bar-web is in both namespaces; the longer project name owns it.
-    ({"build": ".", "image": "myapp-bar-web"}, ["myapp-bar"], "'myapp-bar'"),
-    # The reverse: running an image another project builds.
-    ({"image": "projb-web:latest"}, ["projb"], "Compose could run that project"),
-    ({"image": "docker.io/library/projb-web"}, ["projb"], "'projb'"),
-    ({"image": "system-system"}, [], "'system'"),
-])
-def test_image_namespace_of_other_projects_refused(
-    tmp_path: Path, svc: dict, others: list[str], match: str,
-) -> None:
-    paths, compose = _project(tmp_path, svc)
-    _with_projects(tmp_path, *others)
-    with pytest.raises(ComposeSecurityError, match=match):
-        _validate(paths, compose, off=True)
+def test_dockerfile_naming_another_projects_build_rejected(tmp_path: Path) -> None:
+    paths, compose = _project(tmp_path, {"build": "."}, files={
+        "Dockerfile": "ARG BASE=boxmunge.invalid/projb/web\nFROM ${BASE}\n",
+    })
+    with pytest.raises(ComposeSecurityError, match="Dockerfile"):
+        _validate(paths, compose)
 
 
-def test_public_and_own_images_run_alongside_other_projects(tmp_path: Path) -> None:
-    paths, compose = _project(
-        tmp_path, {"image": "myapp-worker"},
-        {"services": {"db": {"image": "postgres:16-alpine"},
-                      "cache": {"image": "ghcr.io/projb/cache:1"}}},
-    )
-    _with_projects(tmp_path, "projb", "postgres-tools")
+def test_user_image_on_build_service_warns_with_the_platform_name(tmp_path: Path) -> None:
+    paths, compose = _project(tmp_path, {"build": ".", "image": "myapp-web-local"})
+    paths.log_file.parent.mkdir(parents=True)
     _validate(paths, compose)
+    assert "tags this build boxmunge.invalid/myapp/web" in paths.log_file.read_text()
+
+
+def test_yaml_keyword_service_name_refused_with_real_compose(tmp_path: Path) -> None:
+    """Compose reads `on:` as the name "on"; PyYAML reads it as True."""
+    paths, compose = _project(tmp_path, {})
+    compose.write_text("services:\n  on:\n    image: alpine\n")
+    with pytest.raises(ComposeSecurityError, match="Quote the service name"):
+        _validate(paths, compose)

@@ -22,7 +22,9 @@ from typing import TYPE_CHECKING, Any
 
 from boxmunge import docker_containers
 from boxmunge.container_update_targets import UpdateTarget, persist_result
-from boxmunge.deployed_inventory import DeployedService, InventoryError, load_deployed_inventory
+from boxmunge.deployed_inventory import (
+    DeployedService, InventoryError, load_deployed_inventory, pulled_services,
+)
 from boxmunge.docker import DockerError, compose_pull, compose_up, tag_image
 from boxmunge.docker_containers import ProjectContainer
 from boxmunge.backup import BackupKind
@@ -55,15 +57,12 @@ class UpdateError(Exception):
 
 def image_services(target: UpdateTarget) -> dict[str, DeployedService]:
     """The services an update pulls and recreates: those `up` starts from a
-    registry image. Build services are excluded (pull skips them too).
+    registry image (deployed_inventory.pulled_services).
 
     Raises InventoryError when the deployed model or containers cannot be read.
     """
-    inventory = load_deployed_inventory(target.project_dir, target.compose_files, target.name)
-    return {
-        name: svc for name, svc in inventory.services.items()
-        if svc.expected and svc.image and not svc.buildable
-    }
+    return pulled_services(
+        load_deployed_inventory(target.project_dir, target.compose_files, target.name))
 
 
 def _managed(containers: tuple[ProjectContainer, ...] | list[ProjectContainer]) -> list[ProjectContainer]:
@@ -341,7 +340,7 @@ def _update_locked(
     # Step 2: Pull
     try:
         compose_pull(target.project_dir, compose_files=target.compose_files,
-                     project_name=target.name)
+                     project_name=target.name, services=sorted(services))
     except DockerError as e:
         return _fail(paths, target, result, f"pull_failed: {e}", before=before)
 

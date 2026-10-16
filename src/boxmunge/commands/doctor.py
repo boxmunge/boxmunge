@@ -168,6 +168,16 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
     except OSError:
         pass
 
+    # Pairs like `foo` / `foo-bar` registered before project-add refused them
+    # can share container names (project_registry.name_collisions).
+    from boxmunge.project_registry import load_registered_projects, overlapping_pairs
+    pairs = overlapping_pairs(load_registered_projects(paths))
+    if pairs:
+        warn("Project names", "overlapping names can share container names: "
+             + ", ".join(f"{a} / {b}" for a, b in pairs)
+             + ". Avoid service names in the shorter project that start with the "
+               "longer one's suffix (e.g. bar-* in foo next to foo-bar).")
+
     # Report
     if as_json:
         print(json.dumps(results, indent=2))

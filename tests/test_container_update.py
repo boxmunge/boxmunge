@@ -437,6 +437,24 @@ class TestImageServices:
         )
         assert list(image_services(target)) == ["web"]
 
+    def test_service_running_the_projects_own_build_is_not_pulled(self, paths):
+        """`image: boxmunge.invalid/<p>/web` names this server's build; no
+        registry serves it, and asking for it failed the whole pull."""
+        from boxmunge.container_update import image_services
+        pdir = paths.project_dir("myapp")
+        pdir.mkdir(parents=True)
+        (pdir / "compose.yml").write_text(
+            "services:\n"
+            "  web:\n    build: .\n"
+            "  worker:\n    image: boxmunge.invalid/myapp/web\n"
+            "  cache:\n    image: redis:7\n"
+        )
+        target = UpdateTarget(
+            name="myapp", project_dir=pdir, compose_files=["compose.yml"],
+            strategy="leave_broken", has_backup=False,
+        )
+        assert list(image_services(target)) == ["cache"]
+
 
 class TestTargetStateErrors:
     def test_read_target_state_raises_on_corrupt(self, paths):

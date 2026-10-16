@@ -52,7 +52,7 @@ def test_unknown_build_key_refused(project: Path) -> None:
 
 def test_extension_and_plain_keys_accepted(project: Path) -> None:
     build = {"context": ".", "x-note": 1, "args": {"A": "1"}, "target": "prod",
-             "tags": ["example.com/app:1"], "secrets": ["token"]}
+             "secrets": ["token"], "dockerfile_inline": "FROM alpine\n"}
     assert _problems(build, project) == []
 
 
@@ -90,3 +90,31 @@ def test_unchecked_mount_types_refused(paths: BoxPaths, project: Path, entry: di
 def test_image_mount_accepted(paths: BoxPaths, project: Path) -> None:
     entry = {"type": "image", "source": "alpine:3", "target": "/img"}
     assert _findings({"volumes": [entry]}, paths, project) == []
+
+
+@pytest.mark.parametrize("entry", [
+    "type=local,src=/etc", "Type=local,Dest=/var/tmp/x", "TYPE=LOCAL,src=/etc",
+    '"type=local,dest=/x"', '"type=registry",dest=/x', "type=registry,dest=/x",
+    "type=gha", "type=inline,src=/etc", "ref=x,dest=/y",
+])
+def test_cache_entries_parsed_like_buildx(project: Path, entry: str) -> None:
+    [problem] = _problems({"context": ".", "cache_to": [entry]}, project)
+    assert "type=registry,ref=<image> or type=inline" in problem
+
+
+@pytest.mark.parametrize("entry", [
+    "example.com/app:cache", "type=registry,ref=example.com/app:c,mode=max",
+    "Type=Registry,Ref=example.com/app:c", "type=inline",
+])
+def test_registry_and_inline_caches_accepted(project: Path, entry: str) -> None:
+    assert _problems({"context": ".", "cache_from": [entry]}, project) == []
+
+
+@pytest.mark.parametrize("build", [
+    {"context": "git@github.com:example/app.git"},
+    {"context": "ssh://git@example.com/app.git"},
+    {"context": ".", "additional_contexts": {"lib": "git@github.com:example/lib.git"}},
+])
+def test_ssh_git_contexts_refused(project: Path, build: dict) -> None:
+    [problem] = _problems(build, project)
+    assert "SSH agent" in problem and "https://" in problem

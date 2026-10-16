@@ -84,6 +84,6 @@ def test_compose_pull_ignores_buildable_services():
     """`build:` plus a local `image:` name made pull ask Docker Hub for the
     local name ("pull access denied") and fail the update every day."""
     with patch("boxmunge.docker._run") as run:
-        compose_pull(Path("/projects/myapp"), project_name="myapp")
+        compose_pull(Path("/projects/myapp"), project_name="myapp", services=["db"])
     cmd = run.call_args[0][0]
-    assert cmd[cmd.index("pull"):] == ["pull", "--ignore-buildable"]
+    assert cmd[cmd.index("pull"):] == ["pull", "--ignore-buildable", "db"]

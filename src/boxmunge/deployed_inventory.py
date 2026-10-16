@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from boxmunge import docker_containers
+from boxmunge.compose_images import is_platform_image
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
 from boxmunge.docker_containers import ProjectContainer
 from boxmunge.docker_run import DockerError
@@ -75,9 +76,27 @@ def _scaled_to_zero(svc: dict[str, Any]) -> bool:
 
 
 def startup_image_ref(project: str, svc: DeployedService) -> str:
-    """The image reference `compose up` starts ``svc`` from: its `image:`,
-    or for a build-only service the image Compose built for it."""
+    """The image reference `compose up` starts ``svc`` from: its `image:`.
+
+    The overlay gives every build service an `image:` (the platform's
+    boxmunge.invalid/ name, see compose_images), so a build service without
+    one belongs to a project still on an overlay generated before that
+    rename. Compose then named the build `<project>-<service>`; this is the
+    only place that old name is still looked up, and it goes away with the
+    project's next overlay regeneration."""
     return svc.image or f"{project}-{svc.name}"
+
+
+def pulled_services(inventory: DeployedInventory) -> dict[str, DeployedService]:
+    """The services `up` starts from a registry image, the ones a pull
+    refreshes. Build services are excluded, and so is a service running this
+    project's own build by its platform name (boxmunge.invalid/...): no
+    registry serves it, and pulling it fails."""
+    return {
+        name: svc for name, svc in inventory.services.items()
+        if svc.expected and svc.image and not svc.buildable
+        and not is_platform_image(svc.image)
+    }
 
 
 def load_deployed_inventory(

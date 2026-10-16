@@ -6,7 +6,8 @@ import yaml
 from boxmunge.paths import BoxPaths
 
 
-def _setup_paused(tmp_path: Path, *, with_image_service: bool = True) -> tuple[BoxPaths, str]:
+def _setup_paused(tmp_path: Path, *, with_image_service: bool = True,
+                  compose: str | None = None) -> tuple[BoxPaths, str]:
     paths = BoxPaths(root=tmp_path / "bm")
     for d in ["config", "projects/myapp", "state/deploy",
               "state/health", "caddy/sites", "logs"]:
@@ -18,7 +19,9 @@ def _setup_paused(tmp_path: Path, *, with_image_service: bool = True) -> tuple[B
         "source": "bundle", "hosts": ["myapp.test"],
         "services": services,
     }))
-    if with_image_service:
+    if compose is not None:
+        (paths.project_dir("myapp") / "compose.yml").write_text(compose)
+    elif with_image_service:
         (paths.project_dir("myapp") / "compose.yml").write_text(
             "services:\n  web:\n    image: nginx:1.25\n"
         )
@@ -75,6 +78,24 @@ class TestRunResume:
         rc = run_resume(name, paths, yes=True)
         assert rc == 0
         mock_pull.assert_not_called()
+
+    @patch("boxmunge.commands.resume_cmd.prepare_compose_override")
+    @patch("boxmunge.commands.resume_cmd.prepare_caddy_config")
+    @patch("boxmunge.commands.resume_cmd.compose_pull")
+    @patch("boxmunge.commands.resume_cmd.compose_up")
+    @patch("boxmunge.commands.resume_cmd.caddy_reload")
+    @patch("boxmunge.commands.resume_cmd.run_smoke")
+    def test_pulls_only_registry_images(self, mock_smoke, _reload, _up, mock_pull, _caddy, _override, tmp_path):
+        """A service running this project's build by its boxmunge.invalid/
+        name has nothing to pull; naming it failed the pull and the resume."""
+        mock_smoke.return_value = (True, "ok")
+        from boxmunge.commands.resume_cmd import run_resume
+        paths, name = _setup_paused(tmp_path, compose=(
+            "services:\n  web:\n    build: .\n"
+            "  worker:\n    image: boxmunge.invalid/myapp/web\n"
+            "  cache:\n    image: redis:7\n"))
+        assert run_resume(name, paths, yes=True) == 0
+        assert mock_pull.call_args.kwargs["services"] == ["cache"]
 
     @patch("boxmunge.commands.resume_cmd.prepare_compose_override")
     @patch("boxmunge.commands.resume_cmd.prepare_caddy_config")

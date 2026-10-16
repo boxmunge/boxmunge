@@ -158,6 +158,18 @@ def fake_containers(request, monkeypatch) -> FakeContainers:
 
 
 @pytest.fixture(autouse=True)
+def _no_built_image_removal(request, monkeypatch):
+    """Overlay generation drops pre-boxmunge.invalid built-image names and
+    project-delete removes a project's built images; outside the integration
+    tier neither touches the Docker daemon."""
+    if request.node.get_closest_marker("integration"):
+        return
+    monkeypatch.setattr("boxmunge.docker.untag_old_built_names", lambda project, build_services, image_services: [])
+    monkeypatch.setattr("boxmunge.commands.project_delete_cmd.remove_built_images",
+                        lambda compose_project: [])
+
+
+@pytest.fixture(autouse=True)
 def _no_kev_network(monkeypatch):
     """Prevent any test from hitting the CISA KEV feed over the network.
 
@@ -224,6 +236,14 @@ def _compose_config_without_docker(request, monkeypatch, fake_containers):
         except (OSError, yaml.YAMLError) as e:
             raise docker.DockerError(f"compose config failed: {e}") from e
         services = doc.get("services") if isinstance(doc, dict) else None
+        # Like Compose, bring in the services of included files (one level),
+        # so the resolver's literal-versus-resolved service check holds.
+        includes = doc.get("include") if isinstance(doc, dict) else None
+        for ref in includes if isinstance(includes, list) else []:
+            inc = path.parent / (ref if isinstance(ref, str) else "")
+            if isinstance(ref, str) and inc.is_file() and isinstance(services, dict):
+                inc_doc = yaml.safe_load(inc.read_text()) or {}
+                services.update(inc_doc.get("services") or {})
         if not all_profiles and isinstance(services, dict):
             # Like Compose, leave out services behind a profile.
             doc["services"] = {n: s for n, s in services.items()

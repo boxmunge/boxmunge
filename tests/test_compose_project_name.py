@@ -7,6 +7,8 @@ volumes.
 """
 from __future__ import annotations
 
+import functools
+
 import ast
 from pathlib import Path
 from unittest.mock import patch
@@ -26,7 +28,7 @@ COMPOSE_FUNCS = {
     "compose_logs": docker.compose_logs,
     "compose_logs_capture": docker.compose_logs_capture,
     "compose_ps": docker.compose_ps,
-    "compose_pull": docker.compose_pull,
+    "compose_pull": functools.partial(docker.compose_pull, services=["web"]),
 }
 
 
@@ -57,7 +59,7 @@ def test_platform_caddy_stack_name_accepted(tmp_path: Path) -> None:
     # container-update recreates the platform Caddy stack as compose
     # project "caddy"; user projects cannot take that name.
     with patch("boxmunge.docker._run") as run:
-        docker.compose_pull(tmp_path, project_name="caddy")
+        docker.compose_pull(tmp_path, project_name="caddy", services=["caddy"])
     assert run.call_args[0][0][:4] == ["docker", "compose", "-p", "caddy"]
 
 

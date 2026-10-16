@@ -800,3 +800,22 @@ class TestWritableOverlay:
         assert "tmpfs" not in web
 
 
+class TestBuiltImageNames:
+    """The overlay names every built image (see compose_images)."""
+
+    _MANIFEST = {"project": "myapp", "services": {"web": {"port": 80}}}
+    _USER = {"services": {"web": {"build": ".", "image": "postgres:16"},
+                          "worker": {"build": "./worker"},
+                          "db": {"image": "postgres:16"}}}
+
+    def test_production_names_every_build_service(self) -> None:
+        services = yaml.safe_load(
+            generate_compose_override(self._MANIFEST, user_compose=self._USER))["services"]
+        assert services["web"]["image"] == "boxmunge.invalid/myapp/web"
+        assert services["worker"]["image"] == "boxmunge.invalid/myapp/worker"
+        assert "image" not in services["db"]
+
+    def test_staging_builds_under_its_own_compose_project(self) -> None:
+        services = yaml.safe_load(generate_staging_compose_override(
+            self._MANIFEST, user_compose=self._USER))["services"]
+        assert services["web"]["image"] == "boxmunge.invalid/myapp-staging/web"

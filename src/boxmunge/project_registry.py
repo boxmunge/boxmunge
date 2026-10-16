@@ -29,6 +29,16 @@ def _auto_migrate(paths: BoxPaths, registry: Path) -> set[str]:
                 names.add(d.name)
     if names:
         _save(registry, names)
+        # Already on disk, so registered anyway; add_project refuses new ones.
+        pairs = overlapping_pairs(names)
+        if pairs:
+            from boxmunge.log import log_warning
+            log_warning(
+                "project-registry",
+                "overlapping project names can share container names: "
+                + ", ".join(f"{a} / {b}" for a, b in pairs),
+                paths,
+            )
     return names
 
 
@@ -60,8 +70,41 @@ def load_deployed_projects(paths: BoxPaths) -> list[str]:
                   if (paths.project_dir(name) / "manifest.yml").exists())
 
 
+def name_collisions(name: str, others: set[str]) -> list[str]:
+    """Other project names that `name` extends with `-<anything>`, or that
+    extend it. Compose names containers `<project>-<service>-1`, so project
+    `foo` with service `bar-web` and project `foo-bar` with service `web`
+    would both own `foo-bar-web-1`."""
+    return sorted(
+        other for other in others
+        if other != name and (other.startswith(name + "-") or name.startswith(other + "-"))
+    )
+
+
+def overlapping_pairs(names: set[str]) -> list[tuple[str, str]]:
+    """Every registered pair whose names collide (name_collisions)."""
+    return sorted({tuple(sorted((n, c))) for n in names for c in name_collisions(n, names)})
+
+
+def check_new_name(name: str, paths: BoxPaths) -> None:
+    """Raise ValueError if a new project `name` collides with a registered
+    one (name_collisions)."""
+    clashes = name_collisions(name, load_registered_projects(paths))
+    if clashes:
+        raise ValueError(
+            f"Project name '{name}' overlaps registered project "
+            f"{', '.join(repr(c) for c in clashes)}: one name is the other "
+            f"plus '-<something>'. Compose names containers "
+            f"'<project>-<service>-1', so a service in one project could "
+            f"take the other's container names. Choose a name that neither "
+            f"starts with '<existing>-' nor is the start of one."
+        )
+
+
 def add_project(name: str, paths: BoxPaths) -> None:
-    """Register a project name. Raises ValueError for invalid names.
+    """Register a project name. Raises ValueError for invalid names, and
+    for a new name that collides with a registered one (check_new_name).
+    Pairs registered before that rule keep working; doctor warns about them.
 
     The load -> mutate -> save sequence is wrapped in a registry-wide flock
     so concurrent add/remove calls cannot lose each other's writes.
@@ -70,6 +113,9 @@ def add_project(name: str, paths: BoxPaths) -> None:
     with registry_lock(paths):
         registry = _registry_path(paths)
         projects = load_registered_projects(paths)
+        if name in projects:
+            return
+        check_new_name(name, paths)
         projects.add(name)
         _save(registry, projects)
 

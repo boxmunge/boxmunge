@@ -25,7 +25,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from boxmunge.compose_build import build_problems
+from boxmunge.compose_build import build_problems, local_dockerfile
 from boxmunge.compose_images import image_problems
 from boxmunge.compose_mounts import host_path_forms, outside_roots
 
@@ -109,13 +109,22 @@ def _check_volumes(doc: dict[str, Any], project: str) -> list[str]:
 
 
 def _check_file_refs(doc: dict[str, Any], base_dir: Path, roots: tuple[Path, ...]) -> list[str]:
-    """Top-level secrets and configs read host files; keep them in the project."""
+    """Top-level secrets and configs read host files or the environment of
+    whoever runs compose; keep them to files in the project."""
     problems: list[str] = []
     for section in ("secrets", "configs"):
         entries = doc.get(section) or {}
         if not isinstance(entries, dict):
             continue
         for key, decl in entries.items():
+            if isinstance(decl, dict) and "environment" in decl:
+                problems.append(
+                    f"top-level {section} {key!r} reads environment variable "
+                    f"{decl['environment']!r} from the platform's own process "
+                    f"environment, not the project's. Use a file: inside the "
+                    f"project, or `secrets set` for secret values."
+                )
+                continue
             path = decl.get("file") if isinstance(decl, dict) else None
             if isinstance(path, str) and outside_roots(path, base_dir, roots):
                 norm, _ = host_path_forms(path, base_dir)
@@ -134,34 +143,40 @@ _MODELS_PROBLEM = (
 )
 
 
-# Namespace joins that stay inside the project. `host` is a hardening
+# Namespace modes that stay inside the project. `host` is a hardening
 # question (compose_service_rules); every other value, `container:<name>`
 # above all, joins a namespace outside this compose file. Matched exactly,
-# as Docker matches them: `Host` would name a network.
-_CONTAINED_MODES: dict[str, frozenset[str]] = {
-    "network_mode": frozenset({"none", "host"}),
-    "pid": frozenset({"host"}),
-    "ipc": frozenset({"none", "private", "shareable", "host"}),
+# as Docker matches them: `Host` would name a network. `service:<name>`
+# stays in the project (Compose refuses a service the project does not
+# define) where Compose supports it.
+_CONTAINED_MODES: dict[str, tuple[frozenset[str], bool]] = {
+    "network_mode": (frozenset({"none", "host"}), True),
+    "pid": (frozenset({"host"}), True),
+    "ipc": (frozenset({"none", "private", "shareable", "host"}), True),
+    "uts": (frozenset({"host"}), False),
+    "userns_mode": (frozenset({"host"}), False),
+    "cgroup": (frozenset({"host", "private"}), False),
 }
 
 
 def _check_namespace_joins(svc_name: str, svc: dict[str, Any]) -> list[str]:
-    """network_mode accepts any Docker network name, and pid/ipc any
-    `container:<name>`. `service:<name>` stays in the project: Compose
-    refuses a service the project does not define."""
+    """network_mode accepts any Docker network name, and the daemon accepts
+    `container:<name>` for pid, ipc and userns_mode."""
     problems: list[str] = []
-    for key, allowed in _CONTAINED_MODES.items():
+    for key, (allowed, service_ok) in _CONTAINED_MODES.items():
         mode = svc.get(key)
         if mode is None or (isinstance(mode, str) and (
-                mode in allowed or mode.startswith("service:"))):
+                mode in allowed or (service_ok and mode.startswith("service:")))):
             continue
-        what = "network or container" if key == "network_mode" else "container's namespace"
+        instead = sorted(allowed - {"host"})
+        if service_ok:
+            instead.append("service:<name> for a service in this file")
+        if key == "network_mode":
+            instead.insert(0, "the project's own networks (remove it)")
+        advice = f"Use {', or '.join(instead)}." if instead else "Remove it."
         problems.append(
-            f"service {svc_name}: {key} {mode!r} joins a {what} outside this "
-            f"compose file, which may be another project's. Use "
-            f"service:<name> for a service in this file"
-            + (", the project's own networks, or none." if key == "network_mode"
-               else ", or remove it.")
+            f"service {svc_name}: {key} {mode!r} joins a namespace or network "
+            f"outside this compose file, which may be another project's. {advice}"
         )
     return problems
 
@@ -225,12 +240,8 @@ def _check_service(
 
 def isolation_problems(
     doc: dict[str, Any], project: str, base_dir: Path, roots: tuple[Path, ...],
-    other_projects: frozenset[str],
 ) -> list[str]:
-    """Return every cross-project isolation violation in a compose document.
-
-    `other_projects` are the names whose image namespaces this project may
-    not build into or run from (see compose_images)."""
+    """Return every cross-project isolation violation in a compose document."""
     problems = _check_networks(doc, project) + _check_volumes(doc, project)
     problems += _check_file_refs(doc, base_dir, roots)
     if doc.get("models"):
@@ -242,5 +253,10 @@ def isolation_problems(
         if isinstance(svc, dict):
             problems += _check_service(svc_name, svc, declared, base_dir, roots)
     if isinstance(services, dict):
-        problems += image_problems(services, project, other_projects)
+        dockerfiles = {
+            name: local_dockerfile(svc.get("build"), base_dir, roots)
+            for name, svc in services.items()
+            if isinstance(svc, dict) and svc.get("build") is not None
+        }
+        problems += image_problems(services, project, dockerfiles)
     return problems
