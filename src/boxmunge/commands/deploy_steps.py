@@ -61,9 +61,9 @@ def take_pre_deploy_snapshot(
         return None
     print("  Taking pre-deploy snapshot...")
     from boxmunge.backup import BackupKind
-    from boxmunge.commands.backup_cmd import list_snapshots, run_backup
-    if run_backup(project_name, paths, _lock_held=True,
-                  kind=BackupKind.PREDEPLOY, manifest=manifest) != 0:
+    from boxmunge.commands.backup_cmd import backup_locked, list_snapshots
+    if backup_locked(project_name, paths, kind=BackupKind.PREDEPLOY,
+                     manifest=manifest) != 0:
         print("  WARN: Pre-deploy backup failed — continuing deploy. "
               "A rollback of this deploy will not be able to restore data.")
         return None

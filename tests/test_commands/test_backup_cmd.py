@@ -109,7 +109,7 @@ class TestBackupRefusesPaused:
 
 
 class TestBackupAllSkipsPaused:
-    @patch("boxmunge.commands.backup_cmd.run_backup")
+    @patch("boxmunge.commands.backup_cmd.backup_locked")
     def test_skips_paused_in_all(
         self, mock_backup: MagicMock, paths: BoxPaths, capsys
     ) -> None:
@@ -157,7 +157,7 @@ class TestBackupSkipsQuarantined:
         mock_dump.assert_not_called()
         mock_encrypt.assert_not_called()
 
-    @patch("boxmunge.commands.backup_cmd.run_backup")
+    @patch("boxmunge.commands.backup_cmd.backup_locked")
     def test_skips_quarantined_in_all(
         self, mock_backup: MagicMock, paths: BoxPaths, capsys,
     ) -> None:
@@ -205,7 +205,7 @@ class TestBackupAllLockSkip:
         return fd
 
     @patch("boxmunge.commands.backup_cmd._notify_persistent_locks")
-    @patch("boxmunge.commands.backup_cmd.run_backup")
+    @patch("boxmunge.commands.backup_cmd.backup_locked")
     def test_locked_project_is_retried_then_alerted(
         self, mock_backup: MagicMock, mock_notify: MagicMock,
         paths: BoxPaths, monkeypatch,
@@ -240,7 +240,7 @@ class TestBackupAllLockSkip:
         assert rc == 1
 
     @patch("boxmunge.commands.backup_cmd._notify_persistent_locks")
-    @patch("boxmunge.commands.backup_cmd.run_backup")
+    @patch("boxmunge.commands.backup_cmd.backup_locked")
     def test_locked_project_recovers_within_budget(
         self, mock_backup: MagicMock, mock_notify: MagicMock,
         paths: BoxPaths, monkeypatch,
@@ -272,7 +272,7 @@ class TestBackupAllLockSkip:
         assert rc == 0
 
     @patch("boxmunge.commands.backup_cmd._notify_persistent_locks")
-    @patch("boxmunge.commands.backup_cmd.run_backup")
+    @patch("boxmunge.commands.backup_cmd.backup_locked")
     def test_real_failure_not_treated_as_lock_skip(
         self, mock_backup: MagicMock, mock_notify: MagicMock,
         paths: BoxPaths,
@@ -281,7 +281,7 @@ class TestBackupAllLockSkip:
         Pushover lock-skip alert must NOT fire for ordinary backup failures."""
         self._setup_two_projects(paths)
         # alpha "fails" with rc=1 (e.g. dump error); beta succeeds.
-        def side(name, paths_, _lock_held=False, kind=None):
+        def side(name, paths_, kind=None):
             return 1 if name == "alpha" else 0
         mock_backup.side_effect = side
 
@@ -292,7 +292,7 @@ class TestBackupAllLockSkip:
 
     @patch("boxmunge.commands.backup_cmd.log_operation")
     @patch("boxmunge.commands.backup_cmd._notify_persistent_locks")
-    @patch("boxmunge.commands.backup_cmd.run_backup")
+    @patch("boxmunge.commands.backup_cmd.backup_locked")
     def test_first_pass_lock_logs_retry_intent(
         self, mock_backup: MagicMock, mock_notify: MagicMock,
         mock_log_op: MagicMock,
@@ -321,7 +321,7 @@ class TestBackupAllLockSkip:
 
     @patch("boxmunge.commands.backup_cmd.log_operation")
     @patch("boxmunge.commands.backup_cmd._notify_persistent_locks")
-    @patch("boxmunge.commands.backup_cmd.run_backup")
+    @patch("boxmunge.commands.backup_cmd.backup_locked")
     def test_retry_success_emits_log_entry(
         self, mock_backup: MagicMock, mock_notify: MagicMock,
         mock_log_op: MagicMock,

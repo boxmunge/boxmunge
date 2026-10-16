@@ -25,9 +25,14 @@ def is_paused(project_name: str, paths: BoxPaths) -> bool:
 def write_paused_state(
     project_name: str, paths: BoxPaths, reason: str | None = None,
 ) -> None:
-    """Mark the project as paused. Records UTC timestamp; reason optional."""
+    """Mark the project as paused. Records UTC timestamp; reason optional.
+
+    The record says ``action_complete: false`` until mark_pause_complete:
+    the maintenance page, the stop and the restart-policy hold all landed.
+    """
     data: dict[str, Any] = {
         "paused_at": datetime.now(timezone.utc).isoformat(),
+        "action_complete": False,
     }
     if reason is not None:
         data["reason"] = reason
@@ -48,6 +53,17 @@ def _update_paused_state(project_name: str, paths: BoxPaths, **fields: Any) -> N
         paths.project_paused_state(project_name),
         json.dumps({**state, **fields}, indent=2) + "\n",
     )
+
+
+def pause_action_complete(project_name: str, paths: BoxPaths) -> bool:
+    """True iff the pause record says every step of the pause landed. A
+    record without the field is incomplete, so pausing again finishes it."""
+    state = read_paused_state(project_name, paths)
+    return bool(state and state.get("action_complete") is True)
+
+
+def mark_pause_complete(project_name: str, paths: BoxPaths) -> None:
+    _update_paused_state(project_name, paths, action_complete=True)
 
 
 def hold_restart_policies(project_name: str, paths: BoxPaths) -> None:

@@ -423,6 +423,21 @@ def prestage_ref(paths: BoxPaths, project_name: str) -> str | None:
     return ref
 
 
+def mark_prestage_replaced(paths: BoxPaths, project_name: str) -> None:
+    """Promote is starting the staged release in production: from now on the
+    kept release is no longer what production runs, and must never be put
+    back under the new containers."""
+    meta_path = _prestage(paths, project_name) / "meta.json"
+    meta = {**_read_meta(meta_path), "production_replaced": True}
+    atomic_write_text(meta_path, json.dumps(meta) + "\n", mode=0o644)
+
+
+def prestage_replaced(paths: BoxPaths, project_name: str) -> bool:
+    """True if a promote started the staged release over the kept one."""
+    meta = _read_meta(_prestage(paths, project_name) / "meta.json")
+    return meta.get("production_replaced") is True
+
+
 def discard_prestage(paths: BoxPaths, project_name: str) -> None:
     _ensure_record(paths.project_dir(project_name))
     _remove(_prestage(paths, project_name))

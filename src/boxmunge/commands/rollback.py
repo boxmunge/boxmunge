@@ -11,15 +11,15 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from boxmunge.commands.deploy import redeploy_installed, run_deploy
-from boxmunge.commands.restore import run_restore
+from boxmunge.commands.deploy import deploy_locked, redeploy_installed
+from boxmunge.commands.restore import restore_locked
 from boxmunge.compose import prepare_compose_override
 from boxmunge.data_dirs import log_kept, set_aside_announcer
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.intake import (
     IntakeError, check_installable, report_refusal, validate_release_tree,
 )
-from boxmunge.lifecycle import is_blocked
+from boxmunge.lifecycle import refuse_if_blocked
 from boxmunge.log import log_error, log_operation
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.paths import BoxPaths
@@ -111,11 +111,8 @@ def find_rollback_target(paths: BoxPaths, project_name: str) -> RollbackTarget:
 
 
 def run_rollback(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
-    """Undo the last deploy: restore its predecessor's code and data."""
-    clear_probation_if_active(paths, "rollback")
-    block = is_blocked(project_name, paths)
-    if block:
-        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
+    """rollback: show the plan, confirm, take the project lock and roll back."""
+    if refuse_if_blocked(project_name, paths):
         return 1
     try:
         target = find_rollback_target(paths, project_name)
@@ -138,25 +135,38 @@ def run_rollback(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
 
     try:
         with project_lock(project_name, paths):
-            # Re-read the target inside the lock to avoid TOCTOU
-            try:
-                locked = find_rollback_target(paths, project_name)
-            except RollbackUnavailable as e:
-                print(f"ERROR: Cannot roll back {project_name}: {e}", file=sys.stderr)
-                return 1
-            if locked != target:
-                print("ERROR: Deploy state changed before the lock was acquired.",
-                      file=sys.stderr)
-                return 1
-            return _run_rollback_inner(project_name, paths, target)
+            return rollback_locked(project_name, paths, expected=target)
     except LockError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
 
+def rollback_locked(project_name: str, paths: BoxPaths,
+                    expected: RollbackTarget | None = None) -> int:
+    """The rollback core. Caller holds the project lock; never takes it.
+
+    Eligibility and the target are worked out here, under the lock.
+    ``expected`` is the plan the operator confirmed: if the deploy state
+    changed since, nothing is done.
+    """
+    if refuse_if_blocked(project_name, paths):
+        return 1
+    try:
+        target = find_rollback_target(paths, project_name)
+    except RollbackUnavailable as e:
+        print(f"ERROR: Cannot roll back {project_name}: {e}", file=sys.stderr)
+        return 1
+    if expected is not None and target != expected:
+        print("ERROR: Deploy state changed before the lock was acquired.",
+              file=sys.stderr)
+        return 1
+    clear_probation_if_active(paths, "rollback")
+    return _run_rollback_inner(project_name, paths, target)
+
+
 def _restore_data(project_name: str, paths: BoxPaths, snapshot: str) -> bool:
     print("\n--- Restoring data ---")
-    if run_restore(project_name, paths, snapshot=snapshot, yes=True, _lock_held=True) != 0:
+    if restore_locked(project_name, paths, snapshot=snapshot) != 0:
         print(f"ERROR: Restoring {snapshot} failed — rollback incomplete.",
               file=sys.stderr)
         log_error("rollback", f"Data restore failed: {snapshot}", paths,
@@ -172,8 +182,8 @@ def _run_rollback_inner(
         if target.snapshot and not _restore_data(project_name, paths, target.snapshot):
             return 1
         print("\n--- Redeploying previous version ---")
-        rc = run_deploy(project_name, paths, ref=target.ref, no_snapshot=True,
-                        _lock_held=True, component="rollback")
+        rc = deploy_locked(project_name, paths, ref=target.ref, no_snapshot=True,
+                           component="rollback")
     else:
         rc = _roll_back_release(project_name, paths, target, target.tree)
     if rc != 0:

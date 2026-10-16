@@ -58,11 +58,24 @@ def list_snapshots(paths: BoxPaths, project_name: str) -> list[Path]:
 
 
 def run_backup(
-    project_name: str, paths: BoxPaths, _lock_held: bool = False,
+    project_name: str, paths: BoxPaths, kind: BackupKind = BackupKind.MANUAL,
+) -> int:
+    """backup: take the project lock and back up. Returns 0 on success, 1 on
+    failure."""
+    try:
+        with project_lock(project_name, paths):
+            return backup_locked(project_name, paths, kind=kind)
+    except LockError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+
+def backup_locked(
+    project_name: str, paths: BoxPaths,
     kind: BackupKind = BackupKind.MANUAL,
     manifest: dict | None = None,
 ) -> int:
-    """Run backup for a project. Returns 0 on success, 1 on failure.
+    """The backup core. Caller holds the project lock; never takes it.
 
     ``kind`` tags the snapshot and selects its retention: the manifest's
     ``backup.retention`` for nightly backups, SNAPSHOT_RETENTION otherwise.
@@ -140,15 +153,6 @@ def run_backup(
         print(f"ERROR: Backup encryption key not found: {key_path}", file=sys.stderr)
         return 1
 
-    if not _lock_held:
-        try:
-            with project_lock(project_name, paths):
-                return _run_backup_inner(
-                    project_name, paths, dump_command, service, kind, retention,
-                )
-        except LockError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
-            return 1
     return _run_backup_inner(
         project_name, paths, dump_command, service, kind, retention,
     )
@@ -201,7 +205,7 @@ def _attempt_locked_backup(name: str, paths: BoxPaths) -> BackupAttemptResult:
     """
     try:
         with project_lock(name, paths):
-            rc = run_backup(name, paths, _lock_held=True, kind=BackupKind.NIGHTLY)
+            rc = backup_locked(name, paths, kind=BackupKind.NIGHTLY)
     except LockError:
         return BackupAttemptResult.LOCKED
     return BackupAttemptResult.OK if rc == 0 else BackupAttemptResult.FAILED

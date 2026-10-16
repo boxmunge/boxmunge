@@ -23,6 +23,7 @@ from boxmunge.compose import prepare_compose_override
 from boxmunge.docker import DockerError
 from boxmunge.manifest import load_manifest
 from boxmunge.project_registry import add_project
+from boxmunge.release import has_prestage
 
 from tests.bundle_helpers import manifest_text, place_bundle
 
@@ -91,10 +92,35 @@ def test_promote_switches_production_to_the_staged_script(staged) -> None:
     assert _prod_smoke(staged) == "staged check\n"
 
 
-def test_failed_promote_keeps_production_on_its_own_script(staged) -> None:
+def test_promote_failing_before_any_start_keeps_production_on_its_own_script(
+    paths,
+) -> None:
+    """A pre-deploy hook that fails runs before any container is touched:
+    production still runs its own release, so it keeps its own script."""
+    add_project("myapp", paths)
+    _bundle(paths, V1, "prod check\n")
+    with _docker():
+        assert run_deploy("myapp", paths) == 0
+    place_bundle(paths, timestamp=V2, files={
+        "manifest.yml": SMOKE_MANIFEST + "deploy:\n  pre_deploy: \"false\"\n",
+        "boxmunge-scripts/smoke.sh": "staged check\n",
+    })
+    with _docker():
+        assert run_stage("myapp", paths) == 0
+        assert run_promote("myapp", paths) == 1
+    assert _prod_smoke(paths) == "prod check\n"
+    assert has_prestage(paths, "myapp")
+
+
+def test_promote_failing_once_containers_started_runs_the_staged_script(
+    staged,
+) -> None:
+    """A failed `compose up` may have recreated some services: production is
+    taken to run the staged release, which it is then checked with."""
     with _docker(deploy_up=DockerError("boom")):
         assert run_promote("myapp", staged) == 1
-    assert _prod_smoke(staged) == "prod check\n"
+    assert _prod_smoke(staged) == "staged check\n"
+    assert not has_prestage(staged, "myapp")
 
 
 def test_unstage_keeps_production_on_its_own_script(staged) -> None:

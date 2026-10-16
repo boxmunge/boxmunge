@@ -9,8 +9,8 @@ from boxmunge.fileutil import LockError, atomic_write_text, project_lock
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import (
-    hold_restart_policies, is_paused, write_paused_state,
-    render_maintenance_caddy_config,
+    hold_restart_policies, is_paused, mark_pause_complete, pause_action_complete,
+    render_maintenance_caddy_config, write_paused_state,
 )
 from boxmunge.paths import BoxPaths
 
@@ -21,7 +21,8 @@ def run_pause(
     yes: bool = False,
     reason: str | None = None,
 ) -> int:
-    """Pause a project. Returns 0 on success, 1 on failure.
+    """pause: confirm, take the project lock and pause. Returns 0 on
+    success, 1 on failure.
 
     Checks and the confirmation prompt run first; the pause itself runs
     under the project lock so it cannot interleave with a deploy, restore,
@@ -32,9 +33,7 @@ def run_pause(
         print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
         return 1
 
-    if is_paused(project_name, paths):
-        print(f"ERROR: Project '{project_name}' is already paused.",
-              file=sys.stderr)
+    if _refuse_if_already_paused(project_name, paths):
         return 1
 
     hosts = _manifest_hosts(project_name, paths)
@@ -53,10 +52,20 @@ def run_pause(
 
     try:
         with project_lock(project_name, paths):
-            return _pause_locked(project_name, paths, reason)
+            return pause_locked(project_name, paths, reason)
     except LockError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
+
+
+def _refuse_if_already_paused(project_name: str, paths: BoxPaths) -> bool:
+    """A completed pause refuses; an incomplete one is finished by pausing
+    again."""
+    if is_paused(project_name, paths) and pause_action_complete(project_name, paths):
+        print(f"ERROR: Project '{project_name}' is already paused.",
+              file=sys.stderr)
+        return True
+    return False
 
 
 def _manifest_hosts(project_name: str, paths: BoxPaths) -> list[str] | None:
@@ -74,20 +83,28 @@ def _manifest_hosts(project_name: str, paths: BoxPaths) -> list[str] | None:
     return hosts
 
 
-def _pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int:
-    """Pause the project. Caller holds the project lock."""
-    # Re-check under the lock: a pause or deploy may have landed while the
-    # operator was answering the prompt.
-    if is_paused(project_name, paths):
-        print(f"ERROR: Project '{project_name}' is already paused.",
-              file=sys.stderr)
+def pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int:
+    """The pause core. Caller holds the project lock; never takes it.
+
+    The pause record is written first, marked incomplete, so automation
+    (health checks, backups, updates, upgrade restarts) leaves the project
+    alone from the start. It is marked complete only once the maintenance
+    page is live, the containers are stopped and their restart policies
+    held. If a step fails the record stays incomplete and says so, and
+    running pause again finishes it.
+    """
+    # Re-check under the lock: a pause may have landed while the operator
+    # was answering the prompt.
+    if _refuse_if_already_paused(project_name, paths):
         return 1
     hosts = _manifest_hosts(project_name, paths)
     if hosts is None:
         return 1
 
-    # Write paused.json FIRST so any subsequent failure leaves status as PAUSED.
-    write_paused_state(project_name, paths, reason=reason)
+    if is_paused(project_name, paths):
+        print(f"Finishing the incomplete pause of '{project_name}'...")
+    else:
+        write_paused_state(project_name, paths, reason=reason)
 
     # Swap Caddy site config BEFORE stopping containers — visitors should
     # never see "504 Bad Gateway" between container stop and config swap.
@@ -97,36 +114,27 @@ def _pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int
                           site_conf, mode=0o644)
         caddy_reload(paths.caddy, paths.state)
     except (DockerError, OSError) as e:
-        print(f"ERROR: Failed to swap Caddy config: {e}", file=sys.stderr)
-        log_error("pause", f"Caddy swap failed: {e}", paths,
-                  project=project_name)
-        return 1
+        return _pause_incomplete(
+            project_name, paths, f"swapping in the maintenance page failed: {e}")
 
-    # Now stop the containers.
     project_dir = paths.project_dir(project_name)
     compose_files = ["compose.yml"]
-    override = paths.project_compose_override(project_name)
-    if override.exists():
+    if paths.project_compose_override(project_name).exists():
         compose_files.append("compose.boxmunge.yml")
     try:
         compose_stop(project_dir, compose_files=compose_files,
                      project_name=project_name)
     except DockerError as e:
-        print(f"WARN: compose stop reported errors: {e}", file=sys.stderr)
-        log_error("pause", f"compose stop warning: {e}", paths,
-                  project=project_name)
-
+        return _pause_incomplete(
+            project_name, paths, f"stopping the containers failed: {e}")
     # Keep it stopped across a Docker restart or reboot (B-19 for pause).
     try:
         hold_restart_policies(project_name, paths)
     except DockerError as e:
-        print(f"ERROR: Project paused, but its restart policies could not be "
-              f"disabled: {e}\n       A Docker restart may start "
-              f"`restart: always` services. Run 'resume {project_name}' and "
-              f"pause again.", file=sys.stderr)
-        log_error("pause", f"restart-policy hold failed: {e}", paths,
-                  project=project_name)
-        return 1
+        return _pause_incomplete(
+            project_name, paths, f"its restart policies could not be disabled: "
+            f"{e}; a Docker restart may start `restart: always` services")
+    mark_pause_complete(project_name, paths)
 
     log_operation("pause", "Project paused", paths,
                   project=project_name,
@@ -135,6 +143,16 @@ def _pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int
     print(f"  Visitors to {', '.join(hosts)} see the maintenance page.")
     print(f"  Run 'resume {project_name}' to bring back online.")
     return 0
+
+
+def _pause_incomplete(project_name: str, paths: BoxPaths, what: str) -> int:
+    print(f"ERROR: Pausing '{project_name}' is incomplete: {what}.\n"
+          f"       It is marked paused, so health checks, backups and updates "
+          f"skip it, but it may still be serving or running. Fix the cause "
+          f"and run 'pause {project_name}' again to finish, or 'resume "
+          f"{project_name}' to bring it back.", file=sys.stderr)
+    log_error("pause", f"Pause incomplete: {what}", paths, project=project_name)
+    return 1
 
 
 def cmd_pause(args: list[str]) -> None:

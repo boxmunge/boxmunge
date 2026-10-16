@@ -346,21 +346,6 @@ def _host_config_usable(paths: BoxPaths) -> bool:
 
 def _check_project(name: str, paths: BoxPaths, read_only: bool) -> int:
     """Check one project unless it is blocked or locked. Returns its status."""
-    # A blocked (paused or CVE-quarantined) project is intentionally
-    # stopped. Running smoke (which depends on a live container)
-    # would fail, escalate to alerts via update_health_state, and
-    # possibly call compose_down on an already-stopped project.
-    # Quarantine adds a structured log entry; paused historically
-    # did not (preserved).
-    block = is_blocked(name, paths)
-    if block:
-        if block.reason is BlockReason.QUARANTINED:
-            log_operation(
-                "check-all", block.skip_message,
-                paths, project=name,
-            )
-        return 0
-
     # Maintenance window: a deploy/stage/promote/restore in progress
     # holds the project lock. Stage transiently stops the prod container
     # to snapshot its data; a smoke run racing that transient state
@@ -388,6 +373,21 @@ def _check_one(name: str, paths: BoxPaths, read_only: bool) -> int:
     instead of the project silently dropping out of monitoring), then
     re-raised for the fleet loop to report.
     """
+    # A blocked (paused or CVE-quarantined) project is intentionally
+    # stopped. Running smoke (which depends on a live container)
+    # would fail, escalate to alerts via update_health_state, and
+    # possibly call compose_down on an already-stopped project. Checked
+    # under the lock, so a pause that completed while this tick waited
+    # is seen. Quarantine adds a structured log entry; paused
+    # historically did not (preserved).
+    block = is_blocked(name, paths)
+    if block:
+        if block.reason is BlockReason.QUARANTINED:
+            log_operation(
+                "check-all", block.skip_message,
+                paths, project=name,
+            )
+        return 0
     # The monitor removed this project's containers after a critical
     # result. Running smoke now would only report "No such container" and
     # overwrite the real stop reason; the stop stands until recover or a

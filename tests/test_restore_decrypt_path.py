@@ -110,7 +110,7 @@ class TestRestore:
     def env(self, project: BoxPaths):
         project_dir = project.project_dir(PROJECT)
         manifest = {"backup": {"service": "web", "restore_command": "restore.sh"}}
-        with patch("boxmunge.commands.restore.is_blocked", return_value=None), \
+        with patch("boxmunge.commands.restore.refuse_if_blocked", return_value=False), \
              patch("boxmunge.commands.restore.clear_probation_if_active"), \
              patch("boxmunge.commands.restore.load_manifest", return_value=manifest), \
              patch("boxmunge.commands.restore.resolve_backup_service", return_value="web"), \

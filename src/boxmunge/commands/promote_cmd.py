@@ -2,10 +2,10 @@
 from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING
-from boxmunge.commands.deploy import run_deploy
-from boxmunge.commands.unstage_cmd import run_unstage
+from boxmunge.commands.deploy import deploy_locked
+from boxmunge.commands.unstage_cmd import unstage_locked
 from boxmunge.fileutil import project_lock, LockError
-from boxmunge.lifecycle import is_blocked
+from boxmunge.lifecycle import refuse_if_blocked
 from boxmunge.log import log_operation
 from boxmunge.state import read_state
 
@@ -14,30 +14,31 @@ if TYPE_CHECKING:
 
 
 def run_promote(project_name: str, paths: BoxPaths, dry_run: bool = False) -> int:
-    block = is_blocked(project_name, paths)
-    if block:
-        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
+    """promote: take the project lock and promote staging to production."""
+    try:
+        with project_lock(project_name, paths):
+            return promote_locked(project_name, paths, dry_run)
+    except LockError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+
+def promote_locked(project_name: str, paths: BoxPaths, dry_run: bool = False) -> int:
+    """The promote core. Caller holds the project lock; never takes it.
+
+    Deploy and unstage run as cores under the same lock, so nothing can
+    land between production going live and staging being torn down.
+    """
+    if refuse_if_blocked(project_name, paths):
         return 1
     staging_state = read_state(paths.project_staging_state(project_name))
     if not staging_state.get("active"):
         print(f"ERROR: No active staging for '{project_name}'.", file=sys.stderr)
         return 1
-
     if dry_run:
         print(f"[DRY RUN] Would promote '{project_name}' from staging to production")
         return 0
-
-    try:
-        with project_lock(project_name, paths):
-            # Re-read state inside the lock to avoid TOCTOU
-            staging_state = read_state(paths.project_staging_state(project_name))
-            if not staging_state.get("active"):
-                print(f"ERROR: Staging was torn down before lock was acquired.", file=sys.stderr)
-                return 1
-            return _run_promote_inner(project_name, paths, staging_state)
-    except LockError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
+    return _run_promote_inner(project_name, paths, staging_state)
 
 
 def _run_promote_inner(
@@ -52,9 +53,8 @@ def _run_promote_inner(
     print("  Deploying to production...")
     # staged=True: deploy the release `stage` installed, never a newer
     # inbox bundle. The ref only matters for git-sourced projects.
-    deploy_result = run_deploy(
-        project_name, paths, ref=ref_arg, _lock_held=True,
-        component="promote", staged=True,
+    deploy_result = deploy_locked(
+        project_name, paths, ref=ref_arg, component="promote", staged=True,
     )
     if deploy_result != 0:
         print("ERROR: Production deploy failed. Staging is still live.", file=sys.stderr)
@@ -64,7 +64,7 @@ def _run_promote_inner(
 
     # Only tear down staging after successful production deploy
     print("  Tearing down staging...")
-    unstage_result = run_unstage(project_name, paths, _lock_held=True)
+    unstage_result = unstage_locked(project_name, paths)
     if unstage_result != 0:
         print("  WARN: Unstage had issues (production is live)")
 

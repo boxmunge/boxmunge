@@ -90,13 +90,13 @@ def run_recover(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
 
     try:
         with project_lock(project_name, paths):
-            return _recover_locked(project_name, paths)
+            return recover_locked(project_name, paths)
     except LockError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
 
-def _recover_locked(project_name: str, paths: BoxPaths) -> int:
+def recover_locked(project_name: str, paths: BoxPaths) -> int:
     """Restart the stopped build. Caller holds the project lock."""
     health = _monitor_stopped_health(project_name, paths)
     if health is None:

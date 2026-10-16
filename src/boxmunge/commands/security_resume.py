@@ -12,11 +12,12 @@ from __future__ import annotations
 import sys
 
 from boxmunge.caddy import prepare_caddy_config
-from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project
+from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project_locked
 from boxmunge.compose import prepare_compose_override
 from boxmunge.cve.policy import Disposition, FindingDisposition
 from boxmunge.cve.quarantine import QuarantineError, is_quarantined, lift_quarantine
 from boxmunge.cve.scan_state import BASIS_STARTUP_IMAGES
+from boxmunge.cve.kev import load_kev
 from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.health_checks.smoke import run_smoke
@@ -89,13 +90,29 @@ def cmd_security_resume(args: list[str], paths: BoxPaths) -> int:
         _err(f"ERROR: {e}")
         return 1
 
-    # audit_only=True (audit A-3): the pre-lift scan must not mutate
-    # scan_state.json or emit transition alerts.
+    # One lock for the re-scan and the lift: no deploy or container update
+    # can change the images between the scan that clears them and the lift
+    # that starts them.
     try:
-        scan = scan_one_project(paths, project, audit_only=True)
+        with project_lock(project, paths):
+            return security_resume_locked(paths, project)
     except LockError:
         _err(f"ERROR: Another operation is in progress for '{project}'. Try again shortly.")
         return 1
+
+
+def security_resume_locked(paths: BoxPaths, project: str) -> int:
+    """The security-resume core: re-scan, then lift. Caller holds the
+    project lock; never takes it."""
+    if not is_quarantined(project, paths):
+        _err(f"ERROR: project '{project}' is not quarantined.")
+        return 1
+    # audit_only=True (audit A-3): the pre-lift scan must not mutate
+    # scan_state.json or emit transition alerts.
+    try:
+        scan = scan_one_project_locked(
+            paths, project, in_grace=False, kev=load_kev(paths), audit_only=True,
+        )
     except (TrivyNotInstalledError, RuntimeError, ManifestError) as e:
         _err(f"ERROR: {e}")
         _err("  The quarantine stays in place until a re-scan succeeds.")
@@ -117,15 +134,7 @@ def cmd_security_resume(args: list[str], paths: BoxPaths) -> int:
             else "every container's image")
     print(f"  Re-scan: clear ({what} scanned, no quarantine-level findings)")
     print(f"Resuming {project}...")
-
-    # Audit A-2: the lift holds the per-project lock so config-regen +
-    # compose_up + state-clear cannot interleave with a concurrent deploy.
-    try:
-        with project_lock(project, paths):
-            return _resume_lift(paths, project)
-    except LockError:
-        _err(f"ERROR: Another operation is in progress for '{project}'. Try again shortly.")
-        return 1
+    return _resume_lift(paths, project)
 
 
 def _lift_keeping_pause(paths: BoxPaths, project: str) -> int:

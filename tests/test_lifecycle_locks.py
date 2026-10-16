@@ -286,7 +286,7 @@ class TestContainerUpdateLock:
         pull, up, backup = _Recorder(paths), _Recorder(paths), _Recorder(paths, 0)
         with patch.object(cu, "compose_pull", pull), \
              patch.object(cu, "compose_up", up), \
-             patch.object(cu, "run_backup", backup), \
+             patch.object(cu, "backup_locked", backup), \
              patch.object(cu, "detect_image_changes", return_value={"web": "sha256:new"}), \
              patch.object(cu, "_wait_healthy", return_value=(True, [])):
             with hold_project_lock(NAME, paths):
@@ -316,7 +316,7 @@ class TestContainerUpdateLock:
         pull, up, tag = _Recorder(paths), _Recorder(paths), _Recorder(paths)
         health = _Recorder(paths, (False, ["web"]))
         with patch.object(cu, "is_blocked", recording_is_blocked), \
-             patch.object(cu, "run_backup", fake_backup), \
+             patch.object(cu, "backup_locked", fake_backup), \
              patch.object(cu, "compose_pull", pull), \
              patch.object(cu, "compose_up", up), \
              patch.object(cu, "tag_image", tag), \
@@ -328,7 +328,7 @@ class TestContainerUpdateLock:
         assert result["rollback_attempted"] is True
         assert gate.calls == [True], "quarantine/pause check must run under the lock"
         assert backup_rec.calls == [True]
-        assert backup_kwargs == [{"kind": BackupKind.PREUPDATE, "_lock_held": True}]
+        assert backup_kwargs == [{"kind": BackupKind.PREUPDATE}]
         assert pull.calls == [True]
         assert up.calls == [True, True]  # recreate + rollback recreate
         assert tag.calls == [True]

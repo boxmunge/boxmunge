@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from boxmunge.backup import (
@@ -28,7 +29,7 @@ from boxmunge.commands.backup_cmd import list_snapshots, sweep_stale_dumps
 from boxmunge.docker import compose_command, compose_down, compose_up, DockerError
 from boxmunge.docker_run import docker_env
 from boxmunge.fileutil import LockError, open_regular_nofollow, project_lock
-from boxmunge.lifecycle import is_blocked
+from boxmunge.lifecycle import refuse_if_blocked
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
@@ -43,25 +44,28 @@ _READY_INTERVAL = 1.0
 _NO_HEALTHCHECK_GRACE = 2.0
 
 
-def run_restore(
-    project_name: str,
-    paths: BoxPaths,
-    snapshot: str | None = None,
-    yes: bool = False,
-    _lock_held: bool = False,
-    safety_snapshot: bool = True,
-) -> int:
-    """Restore a project from a backup snapshot. Returns 0 on success, 1 on failure."""
+@dataclass(frozen=True)
+class _RestorePlan:
+    snapshot_path: Path
+    service: str
+    restore_command: str
+    dump_command: str
+
+
+def _restore_plan(project_name: str, paths: BoxPaths,
+                  snapshot: str | None) -> _RestorePlan | None:
+    """What a restore would do, from the manifest on disk. None (after
+    printing why) if it cannot."""
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists():
         print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
-        return 1
+        return None
 
     try:
         manifest = load_manifest(paths.project_manifest(project_name))
     except ManifestError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        return 1
+        return None
 
     backup_conf = manifest.get("backup", {})
     if not backup_conf:
@@ -71,12 +75,12 @@ def run_restore(
             f"`backup.restore_command`.",
             file=sys.stderr,
         )
-        return 1
+        return None
     try:
         service = resolve_backup_service(manifest)
     except BackupError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        return 1
+        return None
     restore_command = backup_conf.get("restore_command", "")
     if not restore_command:
         print(
@@ -84,48 +88,68 @@ def run_restore(
             f"{project_name}.",
             file=sys.stderr,
         )
-        return 1
+        return None
 
     snapshot_path = _choose_snapshot(paths, project_name, snapshot)
     if snapshot_path is None:
+        return None
+    if not paths.backup_key.exists():
+        print(f"ERROR: Backup key not found: {paths.backup_key}", file=sys.stderr)
+        return None
+    return _RestorePlan(snapshot_path, service, restore_command,
+                        backup_conf.get("dump_command", ""))
+
+
+def run_restore(
+    project_name: str,
+    paths: BoxPaths,
+    snapshot: str | None = None,
+    yes: bool = False,
+    safety_snapshot: bool = True,
+) -> int:
+    """restore: confirm, take the project lock and restore. Returns 0 on
+    success, 1 on failure."""
+    plan = _restore_plan(project_name, paths, snapshot)
+    if plan is None:
         return 1
 
     if not yes:
-        print(f"\nWill restore {project_name} from {snapshot_path.name}")
+        print(f"\nWill restore {project_name} from {plan.snapshot_path.name}")
         print("This will STOP the project and overwrite current data.")
         response = input("Proceed? [y/N] ")
         if response.lower() != "y":
             print("Aborted.")
             return 1
 
-    key_path = paths.backup_key
-    if not key_path.exists():
-        print(f"ERROR: Backup key not found: {key_path}", file=sys.stderr)
-        return 1
-
-    def inner() -> int:
-        sweep_stale_dumps(paths, project_name)
-        # Checked under the lock: restore is operator-initiated and mutates
-        # compose state. REFUSE if the project is paused or CVE-quarantined
-        # — the operator must explicitly resume / security-resume first.
-        block = is_blocked(project_name, paths)
-        if block:
-            print(f"ERROR: {block.refuse_message}", file=sys.stderr)
-            return 1
-        clear_probation_if_active(paths, "restore")
-        return _run_restore_inner(
-            project_name, paths, snapshot_path, service, restore_command,
-            backup_conf.get("dump_command", "") if safety_snapshot else None,
-        )
-
-    if _lock_held:
-        return inner()
     try:
         with project_lock(project_name, paths):
-            return inner()
+            # The snapshot the operator confirmed, not whatever is newest now.
+            return restore_locked(project_name, paths, plan.snapshot_path.name,
+                                  safety_snapshot)
     except LockError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
+
+
+def restore_locked(project_name: str, paths: BoxPaths, snapshot: str | None,
+                   safety_snapshot: bool = True) -> int:
+    """The restore core. Caller holds the project lock; never takes it.
+
+    Refuses a paused or CVE-quarantined project — the operator must resume
+    or security-resume first — and reads the backup config, checked under
+    the lock immediately before production is touched.
+    """
+    sweep_stale_dumps(paths, project_name)
+    if refuse_if_blocked(project_name, paths):
+        return 1
+    plan = _restore_plan(project_name, paths, snapshot)
+    if plan is None:
+        return 1
+    clear_probation_if_active(paths, "restore")
+    return _run_restore_inner(
+        project_name, paths, plan.snapshot_path, plan.service,
+        plan.restore_command, plan.dump_command if safety_snapshot else None,
+    )
 
 
 def _choose_snapshot(paths: BoxPaths, project_name: str, snapshot: str | None) -> Path | None:

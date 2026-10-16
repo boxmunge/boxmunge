@@ -130,6 +130,15 @@ keeps the displaced production release as the `rollback` target. `unstage` puts 
 release's files back. While a release is staged, `prod-deploy` and `rollback` refuse: promote or
 unstage first.
 
+A `promote` that fails before any production container is touched (a failing `pre_deploy` hook)
+leaves the stage as it was. Once it has started the staged release's containers, production runs
+that release even if a later step fails (`compose up` errors part-way, Caddy rejects the site, smoke
+fails): the error says `production now runs <ref>`, the displaced production release becomes the
+previous release, exactly as after a failed `prod-deploy`, and `rollback` returns to it with the data
+snapshot taken before the promotion. `unstage` then only removes staging; it never puts the old
+release's files back under the new containers. If a promote is killed after starting production,
+`unstage` and `stage` refuse until `promote` is run again to finish it.
+
 Production's smoke checks keep running the production release's own `boxmunge-scripts/` while a
 release is staged (production mounts a copy kept in `.releases/live-scripts/`), so a smoke check
 that only the staged release passes does not fail production. Production switches to the new
@@ -145,7 +154,9 @@ A stage that fails after installing its release (staging containers fail to star
 copy fails, Caddy rejects the staging site) cleans up after itself: staging containers, the staging Caddy site and compose files are
 removed and the production release's files are put back. `unstage` removes whatever a stage left
 behind even if that stage never got as far as recording itself active, so it can always be used to
-clean up; with nothing staged it reports `No staging found` and exits 1.
+clean up; with nothing staged it reports `No staging found` and exits 1. If the staging containers
+cannot be removed (Docker errors), nothing else is removed: the staging compose files and site stay,
+the staging state records `cleanup_incomplete`, and running `unstage` again retries.
 
 Staging is useful for:
 - Verifying a new bundle before it goes live
@@ -550,7 +561,10 @@ ERROR: Another operation is in progress for 'myapp'. Try again shortly.
 
 Confirmation prompts are answered before the lock is taken, and the checks that decide whether the
 command may act (paused, CVE-quarantined, monitor-stopped) are repeated once the lock is held. A
-quarantine that lands while you are answering the prompt therefore still wins.
+pause or quarantine that lands while you are answering the prompt, or that finishes just before a
+waiting command gets the lock, therefore still wins: `prod-deploy`, `stage`, `promote`, `rollback`,
+`restore` and `backup` refuse, and the upgrade restart and health check leave the project alone.
+A `promote` holds the one lock across its deploy and the staging teardown that follows it.
 
 Timers treat a held lock as routine, not as a failure. The 5-minute health check skips the project
 for that tick. `container-update` logs a warning (`Skipped myapp: project lock held by another
@@ -582,6 +596,13 @@ Containers are stopped via `docker compose stop`, so state is preserved on disk 
 - `backup-sync` continues (it only copies; existing off-box snapshots are never removed)
 - Platform upgrades keep it paused: the maintenance page stays in place and the containers stay stopped
 - A Docker restart or reboot keeps it stopped: pause sets each container's restart policy to `no` (saving the original), and `resume` restores the originals before starting the containers
+
+The pause is recorded first, so automation leaves the project alone from the start, but it is only
+marked complete once the maintenance page is live, the containers are stopped and their restart
+policies are held. If a step fails (Caddy cannot reload, `docker compose stop` errors), `pause`
+exits 1 with `ERROR: Pausing 'myapp' is incomplete: ...`: the project counts as paused, but may
+still be serving or running. Fix the cause and run `pause myapp` again to finish it (an incomplete
+pause is the one case where pausing a paused project is accepted), or `resume myapp`.
 
 To bring it back:
 

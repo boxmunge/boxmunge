@@ -358,7 +358,7 @@ class TestUpdateTarget:
             has_backup=True, is_caddy=False,
         )
 
-    @patch("boxmunge.container_update.run_backup")
+    @patch("boxmunge.container_update.backup_locked")
     def test_no_backup_when_no_image_changed(
         self, mock_backup, paths, monkeypatch, fake_containers,
     ):
@@ -369,7 +369,7 @@ class TestUpdateTarget:
         assert result["status"] == "no_change"
         mock_backup.assert_not_called()
 
-    @patch("boxmunge.container_update.run_backup", return_value=0)
+    @patch("boxmunge.container_update.backup_locked", return_value=0)
     def test_preupdate_backup_runs_before_recreate(
         self, mock_backup, paths, monkeypatch, fake_containers,
     ):
@@ -382,11 +382,11 @@ class TestUpdateTarget:
         monkeypatch.setattr(cu, "compose_up", lambda *a, **k: order.append("up"))
         cu.update_target(paths, target)
         mock_backup.assert_called_once_with(
-            "stateful", paths, kind=BackupKind.PREUPDATE, _lock_held=True,
+            "stateful", paths, kind=BackupKind.PREUPDATE,
         )
         assert order[:2] == ["backup", "up"]
 
-    @patch("boxmunge.container_update.run_backup", return_value=1)
+    @patch("boxmunge.container_update.backup_locked", return_value=1)
     def test_aborts_before_recreate_when_backup_fails(
         self, mock_backup, paths, monkeypatch, fake_containers,
     ):
@@ -473,7 +473,7 @@ class TestUpdateTargetSkipsQuarantined:
 
     @patch("boxmunge.container_update.compose_pull")
     @patch("boxmunge.container_update.compose_up")
-    @patch("boxmunge.container_update.run_backup")
+    @patch("boxmunge.container_update.backup_locked")
     def test_quarantined_project_returns_quarantined_status(
         self, mock_backup, mock_up, mock_pull, paths,
     ):

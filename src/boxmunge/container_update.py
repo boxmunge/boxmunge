@@ -27,7 +27,7 @@ from boxmunge.deployed_inventory import DeployedService, InventoryError, load_de
 from boxmunge.docker import DockerError, compose_pull, compose_up, tag_image
 from boxmunge.docker_containers import ProjectContainer
 from boxmunge.backup import BackupKind
-from boxmunge.commands.backup_cmd import run_backup
+from boxmunge.commands.backup_cmd import backup_locked
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.lifecycle import is_blocked
@@ -356,9 +356,7 @@ def _update_locked(
     # leaves running containers untouched, so this still captures the data
     # as the current images left it; a no-change run takes no backup.
     if target.has_backup:
-        rc = run_backup(
-            target.name, paths, kind=BackupKind.PREUPDATE, _lock_held=True,
-        )
+        rc = backup_locked(target.name, paths, kind=BackupKind.PREUPDATE)
         if rc != 0:
             return _fail(paths, target, result, "backup_failed", before=before,
                          message=f"Backup failed for {target.name}, aborting update")

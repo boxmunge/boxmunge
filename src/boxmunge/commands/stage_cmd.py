@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.caddy_journal import write_site
-from boxmunge.commands.unstage_cmd import teardown_staging
+from boxmunge.commands.unstage_cmd import refuse_if_promotion_interrupted, teardown_staging
 from boxmunge.compose import generate_staging_compose_base, generate_staging_compose_override
 from boxmunge.data_dirs import SetAsideError, log_kept, set_aside_announcer
 from boxmunge.docker import (
@@ -19,7 +19,7 @@ from boxmunge.intake import (
     IntakeError, check_installable, extract_candidate, incoming_workspace,
     report_refusal, validate_release_tree,
 )
-from boxmunge.lifecycle import is_blocked
+from boxmunge.lifecycle import refuse_if_blocked
 from boxmunge.log import log_operation, log_error
 from boxmunge.project_registry import is_registered
 from boxmunge.release import install_release, keep_prestage_release, live_ref, mark_live
@@ -109,9 +109,21 @@ def _checkout_repo(project_name: str, paths: BoxPaths, ref: str | None,
     return manifest
 
 
-def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
-                     dry_run: bool = False) -> int:
-    """Inner stage logic — caller must hold the project lock."""
+def stage_locked(project_name: str, paths: BoxPaths, ref: str | None = None,
+                 dry_run: bool = False) -> int:
+    """The stage core. Caller holds the project lock; never takes it.
+
+    Eligibility is checked here, under the lock, immediately before
+    anything changes.
+    """
+    if refuse_if_blocked(project_name, paths):
+        return 1
+    if not is_registered(project_name, paths):
+        print(f"ERROR: Project '{project_name}' is not registered on this server. "
+              f"Run: project-add {project_name}", file=sys.stderr)
+        return 1
+    if refuse_if_promotion_interrupted(project_name, paths):
+        return 1
     project_dir = paths.project_dir(project_name)
     is_new = not (project_dir / "manifest.yml").exists()
 
@@ -287,19 +299,10 @@ def _bring_up_staging(project_name: str, paths: BoxPaths,
 
 def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
               dry_run: bool = False) -> int:
-    """Stage a project. Returns 0 on success, 1 on failure."""
-    block = is_blocked(project_name, paths)
-    if block:
-        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
-        return 1
-    if not is_registered(project_name, paths):
-        print(f"ERROR: Project '{project_name}' is not registered on this server. "
-              f"Run: project-add {project_name}", file=sys.stderr)
-        return 1
-
+    """stage: take the project lock and stage. Returns 0 on success, 1 on failure."""
     try:
         with project_lock(project_name, paths):
-            return _run_stage_inner(project_name, paths, ref, dry_run)
+            return stage_locked(project_name, paths, ref, dry_run)
     except LockError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

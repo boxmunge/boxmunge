@@ -1933,7 +1933,7 @@ def test_scan_per_project_budget_skips_remaining_images(
     # affects time.monotonic for the whole test (the import binding is shared).
     # Sequence covers ALL time.monotonic() calls during the scan, in order:
     #   1. cmd_security_scan: start = time.monotonic()                       -> 0
-    #   2. _scan_one_project_locked: project_start = time.monotonic()        -> 0
+    #   2. scan_one_project_locked: project_start = time.monotonic()        -> 0
     #   3. loop iter 0: elapsed = monotonic() - project_start                -> 100   (remaining=500, scan runs)
     #   4. loop iter 1: elapsed = monotonic() - project_start                -> 700   (remaining=-100, break)
     #   5. cmd_security_scan: elapsed = monotonic() - start                  -> 800

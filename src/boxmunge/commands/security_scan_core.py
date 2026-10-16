@@ -187,7 +187,7 @@ def scan_one_project(
     if kev is None:
         kev = load_kev(paths)
     with project_lock(project, paths):
-        return _scan_one_project_locked(
+        return scan_one_project_locked(
             paths, project, in_grace=in_grace, audit_only=audit_only, kev=kev,
             defer_new=defer_new,
         )
@@ -267,7 +267,7 @@ def _scan_targets(
     return results, failed, skipped, warnings
 
 
-def _scan_one_project_locked(
+def scan_one_project_locked(
     paths: BoxPaths, project: str, *,
     in_grace: bool,
     kev: KevCatalog,
