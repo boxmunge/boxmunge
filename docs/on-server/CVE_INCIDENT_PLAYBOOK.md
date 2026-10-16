@@ -12,7 +12,8 @@ matrix, suppression file format), see `agent-help cve`.
 
 ## Triage
 
-The things that produce a CVE alert:
+The things that produce a CVE alert. Every title starts with the box's hostname in brackets,
+which the per-project titles below show after it:
 
 | Alert title prefix | What it means |
 |---|---|
@@ -20,10 +21,10 @@ The things that produce a CVE alert:
 | `[boxmunge:<p>] [STILL RUNNING — quarantine disabled by config]` | Would have quarantined but `dangerously_disable_quarantine: true`. Project is up at known risk. With `ACTIVELY EXPLOITED … (CISA KEV)` it repeats every scan: escalate. |
 | `[boxmunge:<p>] ACTIVELY EXPLOITED — <CVE> fix available but not running` | `relaxed` project with a fixable KEV CVE. Still up. Repeats every scan until the image is rebuilt. Escalate the rebuild. |
 | `[boxmunge:<p>] <N> new CVE findings (informational)` | New findings below the quarantine gate. One digest per scan. |
-| `[boxmunge:<p>] Suppression expired` / `[boxmunge] Host suppression expired` | A previously-suppressed CVE is an active finding again. |
-| `[boxmunge] CVE scan incomplete` | Some images were not scanned. They are unprotected until a scan succeeds. |
-| `[boxmunge] Circuit breaker held <N> quarantines` | Many projects would have quarantined at once for the same CVE(s). They are still running. Escalate: applying (`security scan --apply-held`) or host-suppressing is an operator decision. |
-| `[boxmunge] CVE policy enforcement begins in <N>h` | One-time migration grace heads-up after upgrade. Affects the whole fleet. |
+| `[boxmunge:<p>] Suppression expired` / `[<hostname>] Host suppression expired` | A previously-suppressed CVE is an active finding again. |
+| `[<hostname>] CVE scan incomplete` | Some images were not scanned. They are unprotected until a scan succeeds. |
+| `[<hostname>] Circuit breaker held <N> quarantines` | Many projects would have quarantined at once for the same CVE(s). They are still running. Escalate: applying (`security scan --apply-held`) or host-suppressing is an operator decision. |
+| `[<hostname>] CVE policy enforcement begins in <N>h` | One-time migration grace heads-up after upgrade. Affects the whole fleet. |
 
 If you got an alert, run these two commands first — they tell you everything.
 

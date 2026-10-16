@@ -89,3 +89,49 @@ def test_install_sh_removes_the_dead_crowdsec_repo_on_trixie() -> None:
         "apt-get update -qq 2>&1 || { echo APT_UPDATE_FAILED; exit 1; }\n"
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# What bootstraps before the fix wrote: an Origins-Pattern match inside the
+# legacy Allowed-Origins list.
+_BROKEN_ORIGINS = (
+    "Unattended-Upgrade::Allowed-Origins {\n"
+    '    "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";\n'
+    "};\n"
+)
+
+
+def test_install_sh_repairs_the_crashing_unattended_upgrades_origins_on_trixie() -> None:
+    """Hosts bootstrapped by earlier releases never installed an OS security
+    update: unattended-upgrade crashed on the origins list on every run.
+    install.sh (run on every upgrade) puts the bundled config in its place."""
+    result = _run_on_trixie(
+        "apt-get install -y -qq unattended-upgrades >/dev/null\n"
+        f"printf '%s' '{_BROKEN_ORIGINS}' > /etc/apt/apt.conf.d/50unattended-upgrades\n"
+        "unattended-upgrade --dry-run > /tmp/before.log 2>&1"
+        " && { echo BROKEN_CONFIG_DID_NOT_CRASH; exit 1; }\n"
+        "grep -q 'not enough values to unpack' /tmp/before.log"
+        " || { cat /tmp/before.log; exit 1; }\n"
+        "SCRIPT_DIR=/\n"
+        "eval \"$(sed -n '/^repair_unattended_origins() {/,/^}/p' /install.sh)\"\n"
+        "repair_unattended_origins\n"
+        "cmp /bootstrap/50unattended-upgrades-debian /etc/apt/apt.conf.d/50unattended-upgrades\n"
+        "unattended-upgrade --dry-run --debug > /tmp/after.log 2>&1"
+        " || { tail -20 /tmp/after.log; exit 1; }\n"
+        "grep -m1 'Allowed origins are' /tmp/after.log\n"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "label=Debian-Security" in result.stdout
+
+
+def test_install_sh_leaves_an_edited_unattended_upgrades_config_alone_on_trixie() -> None:
+    result = _run_on_trixie(
+        "printf '// mine\\nUnattended-Upgrade::Allowed-Origins {\\n"
+        "    \"Debian:${distro_codename}-security\";\\n};\\n'"
+        " > /etc/apt/apt.conf.d/50unattended-upgrades\n"
+        "cp /etc/apt/apt.conf.d/50unattended-upgrades /tmp/orig\n"
+        "SCRIPT_DIR=/\n"
+        "eval \"$(sed -n '/^repair_unattended_origins() {/,/^}/p' /install.sh)\"\n"
+        "repair_unattended_origins\n"
+        "cmp /tmp/orig /etc/apt/apt.conf.d/50unattended-upgrades\n"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

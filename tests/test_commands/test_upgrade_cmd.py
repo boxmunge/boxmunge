@@ -159,7 +159,7 @@ class TestLockSkipPushoverNotification:
 
     @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
     @patch("boxmunge.commands.upgrade_steps.compose_up")
-    @patch("boxmunge.pushover.send_notification")
+    @patch("boxmunge.notify.send_notification")
     def test_pushover_fires_when_apply_skips_locked_project(
         self, mock_pushover, mock_up, mock_reload, tmp_path
     ) -> None:
@@ -195,7 +195,7 @@ class TestLockSkipPushoverNotification:
 
     @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
     @patch("boxmunge.commands.upgrade_steps.compose_up")
-    @patch("boxmunge.pushover.send_notification")
+    @patch("boxmunge.notify.send_notification")
     def test_pushover_silent_when_no_skips(
         self, mock_pushover, mock_up, mock_reload, tmp_path
     ) -> None:

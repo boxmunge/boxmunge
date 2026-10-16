@@ -10,7 +10,6 @@ from boxmunge.health_checks.hardening import (
     check_sysctl_hardening,
     check_systemd_timers,
     check_ufw,
-    check_unattended_upgrades,
 )
 
 
@@ -163,20 +162,6 @@ class TestCheckSysctl:
         assert check.status == "warn"
 
 
-class TestCheckUnattendedUpgrades:
-    @patch("boxmunge.health_checks.hardening.subprocess.run")
-    def test_active(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(returncode=0)
-        check = check_unattended_upgrades()
-        assert check.status == "ok"
-
-    @patch("boxmunge.health_checks.hardening.subprocess.run")
-    def test_inactive(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(returncode=3)
-        check = check_unattended_upgrades()
-        assert check.status == "warn"
-
-
 class TestCheckTimers:
     @patch("boxmunge.health_checks.hardening.subprocess.run")
     def test_all_active(self, mock_run: MagicMock) -> None:
@@ -196,3 +181,16 @@ class TestCheckTimers:
         check = check_systemd_timers()
         assert check.status == "warn"
         assert "backup" in check.detail
+
+    @patch("boxmunge.health_checks.hardening.subprocess.run")
+    def test_every_shipped_timer_is_checked(self, mock_run: MagicMock) -> None:
+        """A disabled auto-update timer would silence platform security
+        releases and the OS-update alert, so every timer install.sh enables
+        is checked."""
+        from pathlib import Path
+        mock_run.return_value = MagicMock(returncode=0)
+        check_systemd_timers()
+        checked = {c.args[0][-1] for c in mock_run.call_args_list}
+        shipped = {p.name for p in (Path(__file__).parents[2] / "systemd").glob("*.timer")}
+        assert "boxmunge-auto-update.timer" in shipped
+        assert checked == shipped

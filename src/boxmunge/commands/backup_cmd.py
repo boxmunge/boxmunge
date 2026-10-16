@@ -253,42 +253,20 @@ def _notify_persistent_locks(paths: BoxPaths, locked: list[str]) -> None:
     is the operator's only out-of-band channel; failures here must surface
     in the log.
 
-    Audit D-NEW-3: send_notification returns False when Pushover keys are
-    empty. Without surfacing that, the operator can't tell "alert sent" from
-    "alert silently dropped". Both branches now leave a forensic trail.
+    Audit D-NEW-3: the operator must be able to tell "alert sent" from
+    "alert dropped"; ``notify`` logs every non-delivery and why.
     """
     if not locked:
         return
-    try:
-        from boxmunge.pushover import send_notification
-        cfg = load_config(paths)
-        po = cfg.get("pushover", {})
-        names = ", ".join(locked)
-        sent = send_notification(
-            po.get("user_key", ""), po.get("app_token", ""),
-            "boxmunge backup-all SKIPPED (locked)",
-            f"Backup skipped for projects: {names}. They were locked at backup "
-            f"time and remained locked through retries — likely a stuck deploy "
-            f"or a long-running maintenance op.",
-        )
-    except (ConfigError, OSError) as e:
-        log_error(
-            "backup", f"Pushover lock-skip alert failed: {e}", paths,
-            detail={"locked": locked},
-        )
-        return
-
-    if sent:
+    from boxmunge.notify import notify
+    names = ", ".join(locked)
+    if notify(paths, "backup-all SKIPPED (locked)",
+              f"Backup skipped for projects: {names}. They were locked at backup "
+              f"time and remained locked through retries — likely a stuck deploy "
+              f"or a long-running maintenance op.", component="backup"):
         log_operation(
             "backup",
             f"Pushover sent for {len(locked)} persistent locks",
-            paths, detail={"locked": locked},
-        )
-    else:
-        log_warning(
-            "backup",
-            f"persistent backup locks ({len(locked)}); "
-            "Pushover not configured — alert dropped",
             paths, detail={"locked": locked},
         )
 

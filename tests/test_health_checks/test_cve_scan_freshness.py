@@ -60,4 +60,30 @@ def test_health_report_includes_the_check():
     import inspect
 
     from boxmunge.commands import health_cmd
-    assert "check_cve_scan_freshness(paths)" in inspect.getsource(health_cmd.run_health)
+    assert "check_cve_scan_freshness(paths)" in inspect.getsource(health_cmd.collect_health)
+
+
+def test_registered_but_never_deployed_project_is_not_never_scanned(tmp_path):
+    """A project registered in state/projects.txt but never deployed has no
+    images to scan, so "never scanned" could never clear."""
+    paths = make_box(tmp_path, projects=("aaa",))
+    with (paths.state / "projects.txt").open("a") as f:
+        f.write("ghost\n")
+    _scanned(paths, "aaa", hours_ago=1)
+    result = check_cve_scan_freshness(paths, now=_NOW)
+    assert result.status == "ok", result.detail
+    assert "all 1 deployed projects" in result.detail
+
+
+def test_deployed_project_never_scanned_still_warns(tmp_path):
+    paths = make_box(tmp_path, projects=("aaa", "bbb"))
+    _scanned(paths, "aaa", hours_ago=1)
+    result = check_cve_scan_freshness(paths, now=_NOW)
+    assert result.status == "warn" and "bbb: never scanned" in result.detail
+
+
+def test_no_deployed_projects_is_ok(tmp_path):
+    paths = make_box(tmp_path, projects=())
+    (paths.state / "projects.txt").write_text("ghost\n")
+    result = check_cve_scan_freshness(paths, now=_NOW)
+    assert result.status == "ok" and "no projects deployed" in result.detail

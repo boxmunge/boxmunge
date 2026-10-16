@@ -286,7 +286,7 @@ project as `ERROR` (`"raw_status": "error"` with an `error` field in `--json`) a
 the normal threshold alert fires with the cause. `check-all` also reports an unreadable host
 config (`boxmunge.yml`), since alerts cannot be sent without it, and still runs the checks.
 
-An alert counts as sent only when Pushover accepts it. If it is not delivered, the health check logs why (an `error` entry when the config cannot be read or the Pushover request fails, a `warn` entry when Pushover is not configured) and tries again on the next 5-minute tick until it gets through. The same applies to the critical alert for a stopped project and to the RECOVERED notice. Find these entries with `log --component health`.
+An alert counts as sent only when Pushover accepts it. If it is not delivered, the health check logs why (an `error` entry when the config cannot be read or the Pushover request fails, a `warn` entry when Pushover is not configured) and tries again on the next 5-minute tick until it gets through. Without Pushover keys the `warn` entry is written at most once a day, because the retry would otherwise repeat it every tick; `health` reports the missing keys as the `alerts` warning for as long as they are missing. The same applies to the critical alert for a stopped project and to the RECOVERED notice. Find these entries with `log --component health`.
 
 ---
 
@@ -816,7 +816,84 @@ health
 health --json
 ```
 
-Exit codes: 0 = healthy, 1 = warnings, 2 = issues requiring attention.
+Exit codes: 0 = healthy, 1 = warnings, 2 = issues requiring attention. `health` is not run on a
+schedule; run it after any change to the box and whenever an alert arrives. A check that cannot run
+(for example one that needs root, run from the deploy shell) reports `SKIP`, which does not affect
+the exit code. The MCP `health` tool runs the same checks.
+
+| Check | Warns (or errors) when | What to do |
+|---|---|---|
+| `docker`, `caddy`, `system-container` | Docker, the Caddy container or the boxmunge-system container is not running (error) | `doctor`, then the supervisor user restarts the component |
+| `permissions`, `age-key` | the backup key or host secrets have the wrong mode, or the backup key is missing or invalid | fix as the supervisor user |
+| `project-containers`, `lifecycle` | a deployed project has no running containers, or is quarantined or stopped by the health monitor | `check <project>`, `logs <project>`, `recover <project>` |
+| `config-drift` | a project's Caddy site config differs from what its manifest generates | redeploy the project |
+| `recent-errors` | more than 10 errors in the log in the last 24 hours | `log --level error --since 24h` |
+| `alerts` | Pushover is not configured, so nothing on this box can alert you | see [Alerts not configured](#alerts-not-configured) |
+| `container-updates` | the daily container update failed for a target, or has not run for 48 hours | `log --component container-update`; the entry ends with the command's own error output |
+| `platform-updates` | a security or break-fix release cannot be installed automatically | see [Upgrading the Platform](#upgrading-the-platform) |
+| `security-profiles` | a service runs with `profile: off` | review the reason in its manifest |
+| `cve-scan` | a deployed project has not been scanned for 36 hours, was never scanned, or its last scan was incomplete | `security scan <project>`; see `agent-help cve` |
+| `ufw`, `crowdsec`, `aide`, `auditd`, `sysctl` | a host hardening component is off or misconfigured | `doctor`, then the supervisor user |
+| `auto-updates` | OS security updates are not being fetched or installed | see [OS security updates](#os-security-updates) |
+| `timers` | any boxmunge timer (health, backup, backup-sync, auto-update, container-update, cve-scan) is inactive | the supervisor user runs `systemctl enable --now <timer>` |
+
+Every new check warns rather than errors. `health` exiting 2 during the probation after a platform
+upgrade rolls the upgrade back, so only a broken platform reports an error.
+
+### Alerts not configured
+
+`alerts` warns when `pushover.user_key` or `pushover.app_token` is missing from
+`/opt/boxmunge/config/boxmunge.yml`. Until both are set, health failures, CVE quarantines, failed
+container updates, blocked security releases and failing OS updates reach nobody. They are still
+logged, and the "Pushover is not configured" log line appears at most once a day. Set the keys as
+the supervisor user:
+
+```yaml
+pushover:
+  user_key: <your user key>
+  app_token: <the application token>
+```
+
+Then run `test-alert` to confirm a notification arrives.
+
+### OS security updates
+
+`auto-updates` looks for evidence that Debian's unattended upgrades are working, not just that the
+service is enabled:
+
+- `/var/lib/apt/periodic/update-stamp` is refreshed only after `apt-get update` succeeds. The check
+  warns when it is missing or older than 48 hours. A single broken apt source (for example a
+  third-party repository with no release for this Debian version) makes every `apt-get update`
+  fail, and no security update is fetched while unattended-upgrades still reports itself active.
+- `/var/lib/apt/periodic/upgrade-stamp` is refreshed only after `unattended-upgrade` itself exits
+  cleanly. The check warns when it is missing or older than 48 hours. `apt-daily-upgrade.service`
+  still reports success when `unattended-upgrade` crashes, so this stamp is the evidence that
+  updates are being installed. `/var/log/unattended-upgrades/unattended-upgrades.log` shows why
+  it failed.
+- On a box set up less than 48 hours ago (by the age of `/etc/apt/apt.conf.d/20auto-upgrades`), a
+  stamp that does not exist yet is expected and not reported. A missing `20auto-upgrades` is.
+- The last runs of `apt-daily.service` and `apt-daily-upgrade.service` must have succeeded. A
+  failure is reported with the unit, its result and exit status.
+- `unattended-upgrades` must be active.
+
+Boxes bootstrapped by releases before 0.10.2 got a `50unattended-upgrades` whose origins list
+crashed `unattended-upgrade` on every run, so they installed no OS security updates. Upgrading
+replaces that file, if it is unedited, with the bundled
+`bootstrap/50unattended-upgrades-debian`. The next daily run then installs the backlog and, if a
+package needs it, reboots in the maintenance window.
+
+The check never runs `apt-get update` itself. To see the cause, as the supervisor user run
+`sudo apt-get update`: the failing source is named in its `E:` and `W:` lines. Fix or remove that
+source under `/etc/apt/sources.list.d/` and run `sudo apt-get update` again until it succeeds. A
+manual `apt-get update` does not refresh the stamp; the next daily run does, or start it now with
+`sudo systemctl start apt-daily.service`. For a failed unit, `journalctl -u <unit>` shows why.
+
+Because `health` is not scheduled, the auto-update timer (every 6 hours) runs the same check. When
+it finds a problem it logs a warning (`log --component auto-update`) and sends a priority-1 Pushover
+alert, "[<hostname>] OS updates are not being installed". Every boxmunge alert title starts
+with the box's hostname. The alert repeats at most once a day while
+the same problems persist, and straight away when they change. An alert Pushover did not accept is
+retried on the next run. Its state is in `/opt/boxmunge/state/os-updates.json`.
 
 ## Command Exit Codes
 

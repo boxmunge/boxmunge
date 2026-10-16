@@ -398,8 +398,8 @@ def test_send_alerts_calls_send_notification_per_alert(
     sent = send_alerts(alerts, paths)
     assert sent == 3
     assert len(calls) == 3
-    assert calls[0] == ("u", "a", "t1", "b1", 1)
-    assert calls[2] == ("u", "a", "t3", "b3", 0)
+    assert calls[0] == ("u", "a", "[host.example.com] t1", "b1", 1)
+    assert calls[2] == ("u", "a", "[host.example.com] t3", "b3", 0)
 
 
 def test_send_alerts_continues_on_failure(monkeypatch, tmp_path, capsys) -> None:

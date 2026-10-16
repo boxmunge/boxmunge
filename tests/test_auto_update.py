@@ -12,6 +12,16 @@ BASE = "hostname: t\nadmin_email: a@b\n"
 URL = "https://github.com/boxmunge/boxmunge/releases/tag/v0.3.6"
 
 
+@pytest.fixture(autouse=True)
+def healthy_os_updates(monkeypatch) -> None:
+    """These tests are about platform releases; OS updates are tested in
+    test_os_update_alert.py."""
+    from datetime import timedelta
+    from boxmunge.os_updates import OsUpdateStatus
+    monkeypatch.setattr("boxmunge.os_updates.inspect_os_updates",
+                        lambda: OsUpdateStatus(stamp_age=timedelta(hours=1)))
+
+
 @pytest.fixture
 def box(paths: BoxPaths) -> BoxPaths:
     paths.config_file.write_text(BASE)

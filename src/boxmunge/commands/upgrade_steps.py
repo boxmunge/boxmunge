@@ -217,33 +217,17 @@ def notify_locked_skips(paths: BoxPaths, skipped_locked: list[str]) -> None:
 
     The lock-skip is logged but, in non-interactive contexts (cron timer,
     auto-update path), the operator never sees the warning. This raises
-    the visibility to the same channel as other upgrade-time alerts.
-    Pushover failures degrade gracefully to log_error — same I-2b pattern
-    as container_update_cmd._send_summary_alert.
+    the visibility to the same channel as other upgrade-time alerts;
+    ``notify`` logs a non-delivery.
     """
     if not skipped_locked:
         return
-    title = "boxmunge upgrade — projects skipped restart"
+    from boxmunge.notify import notify
     names = ", ".join(skipped_locked)
-    body = (
-        f"Upgrade applied but {len(skipped_locked)} project(s) skipped "
-        f"restart (locked): {names}. They will pick up new config on next "
-        f"deploy."
-    )
-    try:
-        from boxmunge.config import load_config
-        from boxmunge.pushover import send_notification
-        cfg = load_config(paths)
-        po = cfg.get("pushover", {})
-        send_notification(
-            po.get("user_key", ""), po.get("app_token", ""),
-            title, body,
-        )
-    except Exception as e:
-        log_error(
-            "upgrade", f"Pushover lock-skip alert failed: {e}", paths,
-            detail={"skipped_locked": skipped_locked},
-        )
+    notify(paths, "upgrade — projects skipped restart",
+           f"Upgrade applied but {len(skipped_locked)} project(s) skipped "
+           f"restart (locked): {names}. They will pick up new config on next "
+           f"deploy.", component="upgrade")
 
 
 def restart_projects(

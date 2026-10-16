@@ -11,6 +11,17 @@ import urllib.parse
 _LOGGER = logging.getLogger("boxmunge")
 
 PUSHOVER_API_URL = "https://api.pushover.net/1/messages.json"
+# Pushover's documented limits.
+MESSAGE_LIMIT = 1024
+TITLE_LIMIT = 250
+_TRUNCATED = "\n... (truncated; see the boxmunge log)"
+
+
+def _fit(text: str, limit: int, marker: str) -> str:
+    """text, cut to limit characters with a marker saying it was cut."""
+    if len(text) <= limit:
+        return text
+    return text[:limit - len(marker)] + marker
 
 
 def _post_pushover(data: dict) -> bool:
@@ -57,7 +68,7 @@ def send_notification(
     return _post_pushover({
         "user": user_key,
         "token": app_token,
-        "title": title,
-        "message": message,
+        "title": _fit(title, TITLE_LIMIT, "..."),
+        "message": _fit(message, MESSAGE_LIMIT, _TRUNCATED),
         "priority": priority,
     })

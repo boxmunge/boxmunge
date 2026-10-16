@@ -356,7 +356,7 @@ class TestSshPortLookup:
                 "boxmunge.health_checks.hardening.check_crowdsec",
                 "boxmunge.health_checks.hardening.check_aide_status",
                 "boxmunge.health_checks.hardening.check_auditd",
-                "boxmunge.health_checks.hardening.check_unattended_upgrades",
+                "boxmunge.health_checks.os_updates.check_os_updates",
                 "boxmunge.health_checks.hardening.check_sysctl_hardening",
                 "boxmunge.health_checks.hardening.check_systemd_timers",
             ]:

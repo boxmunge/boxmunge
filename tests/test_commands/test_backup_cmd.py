@@ -357,61 +357,36 @@ class TestBackupAllLockSkip:
 class TestNotifyPersistentLocks:
     """Audit D-NEW-3: distinguish Pushover-sent vs Pushover-not-configured."""
 
+    def _config(self, paths: BoxPaths, pushover: str) -> None:
+        paths.config_file.parent.mkdir(parents=True, exist_ok=True)
+        paths.config_file.write_text(
+            f"hostname: box.example\nadmin_email: t@t\n{pushover}")
+
     @patch("boxmunge.commands.backup_cmd.log_operation")
-    @patch("boxmunge.commands.backup_cmd.log_warning")
-    @patch("boxmunge.pushover.send_notification")
-    @patch("boxmunge.commands.backup_cmd.load_config")
+    @patch("boxmunge.notify.send_notification", return_value=True)
     def test_pushover_sent_logs_operation(
-        self, mock_load: MagicMock, mock_send: MagicMock,
-        mock_log_warn: MagicMock, mock_log_op: MagicMock,
-        paths: BoxPaths,
+        self, mock_send: MagicMock, mock_log_op: MagicMock, paths: BoxPaths,
     ) -> None:
         from boxmunge.commands.backup_cmd import _notify_persistent_locks
-        mock_load.return_value = {
-            "pushover": {"user_key": "u", "app_token": "t"},
-        }
-        mock_send.return_value = True
+        self._config(paths, "pushover:\n  user_key: u\n  app_token: t\n")
         _notify_persistent_locks(paths, ["alpha"])
-        sent_logs = [
-            c for c in mock_log_op.call_args_list
-            if "Pushover sent" in c.args[1]
-        ]
+        assert mock_send.call_args.args[2] == "[box.example] backup-all SKIPPED (locked)"
+        assert "alpha" in mock_send.call_args.args[3]
+        sent_logs = [c for c in mock_log_op.call_args_list if "Pushover sent" in c.args[1]]
         assert len(sent_logs) == 1
-        # No warning when alert was actually delivered.
-        warn_logs = [
-            c for c in mock_log_warn.call_args_list
-            if "alert dropped" in c.args[1]
-        ]
-        assert warn_logs == []
 
     @patch("boxmunge.commands.backup_cmd.log_operation")
-    @patch("boxmunge.commands.backup_cmd.log_warning")
-    @patch("boxmunge.pushover.send_notification")
-    @patch("boxmunge.commands.backup_cmd.load_config")
+    @patch("boxmunge.notify.send_notification")
     def test_pushover_unconfigured_logs_warning(
-        self, mock_load: MagicMock, mock_send: MagicMock,
-        mock_log_warn: MagicMock, mock_log_op: MagicMock,
-        paths: BoxPaths,
+        self, mock_send: MagicMock, mock_log_op: MagicMock, paths: BoxPaths,
     ) -> None:
         from boxmunge.commands.backup_cmd import _notify_persistent_locks
-        # Empty pushover config -> send_notification returns False.
-        mock_load.return_value = {"pushover": {}}
-        mock_send.return_value = False
+        self._config(paths, "")
         _notify_persistent_locks(paths, ["alpha", "beta"])
-
-        dropped = [
-            c for c in mock_log_warn.call_args_list
-            if "alert dropped" in c.args[1]
-        ]
-        assert len(dropped) == 1
-        assert "Pushover not configured" in dropped[0].args[1]
-        # No "Pushover sent" log entry on the unconfigured branch.
-        sent_logs = [
-            c for c in mock_log_op.call_args_list
-            if "Pushover sent" in c.args[1]
-        ]
-        assert sent_logs == []
-
+        mock_send.assert_not_called()
+        log = paths.log_file.read_text()
+        assert "Alert not sent (backup-all SKIPPED (locked)): Pushover is not configured" in log
+        assert not [c for c in mock_log_op.call_args_list if "Pushover sent" in c.args[1]]
 
 class TestListSnapshots:
     def test_lists_existing_snapshots(self, paths: BoxPaths) -> None:

@@ -50,7 +50,8 @@ validate <project>   validate project config
 - Secrets are managed via the CLI (`secrets`), not by editing files
 - Backups are encrypted (age) and restore-tested before being considered valid
 - Health checks run on a schedule and send alerts via Pushover on failure
-- The host applies unattended security patches automatically
+- The host applies unattended security patches automatically, and alerts you when they stop
+  arriving
 
 ---
 

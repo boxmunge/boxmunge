@@ -65,6 +65,26 @@ remove_dead_crowdsec_repo() {
 remove_dead_crowdsec_repo
 
 # ---------------------------------------------------------------------------
+# Broken unattended-upgrades origins.
+#
+# Earlier bootstraps put an Origins-Pattern match inside the legacy
+# Allowed-Origins list, which crashes unattended-upgrade on every run, so
+# those hosts never installed an OS security update. A file still carrying
+# that exact line is replaced with the bundled config; one an operator has
+# edited since is left alone (`health` reports the failing runs).
+# ---------------------------------------------------------------------------
+repair_unattended_origins() {
+    local conf=/etc/apt/apt.conf.d/50unattended-upgrades
+    [[ -f "${conf}" ]] || return 0
+    grep -q '^Unattended-Upgrade::Allowed-Origins {$' "${conf}" || return 0
+    grep -q '^    "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";$' \
+        "${conf}" || return 0
+    echo "  Repairing ${conf}: unattended-upgrade has been crashing on its origins list"
+    install -m 0644 "${SCRIPT_DIR}/bootstrap/50unattended-upgrades-debian" "${conf}"
+}
+repair_unattended_origins
+
+# ---------------------------------------------------------------------------
 # Install cosign (used by the upgrade shim to verify release signatures).
 #
 # Idempotent: if the pinned version is already installed, this is a no-op.

@@ -210,59 +210,8 @@ def _tool_self_test(as_json: bool = False) -> dict:
 
 def _run_health_checks(paths: BoxPaths) -> tuple[int, dict]:
     """Run all health checks, return (exit_code, data_dict)."""
-    from boxmunge.commands.health_cmd import (
-        HealthReport,
-        check_age_key,
-        check_caddy_container,
-        check_config_drift,
-        check_docker_running,
-        check_file_permissions,
-        check_lifecycle_blocked,
-        check_project_containers,
-        check_recent_errors,
-        check_system_container,
-    )
-    report = HealthReport()
-    report.checks.append(check_docker_running())
-    report.checks.append(check_caddy_container())
-    report.checks.append(check_system_container(paths))
-    report.checks.append(check_file_permissions(paths))
-    report.checks.append(check_age_key(paths))
-    report.checks.append(check_project_containers(paths))
-    report.checks.append(check_lifecycle_blocked(paths))
-    report.checks.append(check_config_drift(paths))
-    report.checks.append(check_recent_errors(paths))
-
-    from boxmunge.health_checks.hardening import (
-        check_aide_status,
-        check_auditd,
-        check_crowdsec,
-        check_sysctl_hardening,
-        check_systemd_timers,
-        check_ufw,
-        check_unattended_upgrades,
-    )
-    from boxmunge.config import ConfigError, load_config
-    from boxmunge.log import log_warning
-    try:
-        config = load_config(paths)
-        ssh_port = config.get("ssh_port", 922)
-    except ConfigError as e:
-        log_warning(
-            "health",
-            f"could not load config, defaulting ssh_port=922: {e}",
-            paths,
-        )
-        ssh_port = 922
-
-    report.checks.append(check_ufw(ssh_port=ssh_port))
-    report.checks.append(check_crowdsec())
-    report.checks.append(check_aide_status())
-    report.checks.append(check_auditd())
-    report.checks.append(check_unattended_upgrades())
-    report.checks.append(check_sysctl_hardening())
-    report.checks.append(check_systemd_timers())
-
+    from boxmunge.commands.health_cmd import collect_health
+    report = collect_health(paths)
     data = {
         "healthy": report.exit_code == 0,
         "checks": [

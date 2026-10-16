@@ -50,3 +50,23 @@ class TestSendNotification:
     def test_missing_credentials_returns_false(self) -> None:
         result = send_notification("", "", "Test", "Hello")
         assert result is False
+
+
+class TestLimits:
+    """Pushover caps a message at 1024 characters and a title at 250.
+    Failure reasons now carry command stderr, so bodies can exceed that."""
+
+    @patch("boxmunge.pushover._post_pushover", return_value=True)
+    def test_long_message_and_title_are_truncated_with_a_marker(self, mock_post) -> None:
+        send_notification("u", "a", "T" * 400, "first line\n" + "x" * 3000)
+        data = mock_post.call_args[0][0]
+        assert len(data["title"]) <= 250
+        assert len(data["message"]) <= 1024
+        assert data["message"].startswith("first line")
+        assert data["message"].endswith("(truncated; see the boxmunge log)")
+
+    @patch("boxmunge.pushover._post_pushover", return_value=True)
+    def test_short_message_is_untouched(self, mock_post) -> None:
+        send_notification("u", "a", "title", "body")
+        data = mock_post.call_args[0][0]
+        assert (data["title"], data["message"]) == ("title", "body")

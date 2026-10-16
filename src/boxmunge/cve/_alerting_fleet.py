@@ -29,10 +29,10 @@ def format_kev_stale_alert(
     """
     when = fetched_at.isoformat() if fetched_at else "never fetched"
     if stale:
-        title = "[boxmunge] CISA KEV feed stale — exploitation defense degraded"
+        title = "CISA KEV feed stale — exploitation defense degraded"
         state = "The cached CISA Known Exploited Vulnerabilities catalog is stale or missing."
     else:
-        title = "[boxmunge] CISA KEV refresh rejected — previous catalog kept"
+        title = "CISA KEV refresh rejected — previous catalog kept"
         state = (
             "The cached CISA Known Exploited Vulnerabilities catalog is still "
             "fresh, but it will go stale if the feed stays broken."
@@ -59,7 +59,7 @@ def format_scan_failure_alert(problems: dict[str, list[str]]) -> Alert:
     """
     n = len(problems)
     title = (
-        f"[boxmunge] CVE scan incomplete — {n} project"
+        f"CVE scan incomplete — {n} project"
         f"{'s' if n != 1 else ''} not fully scanned"
     )
     lines: list[str] = []
@@ -112,7 +112,7 @@ def format_breaker_held_alert(
     ]
     return Alert(
         kind="breaker_held",
-        title=f"[boxmunge] Circuit breaker held {n} quarantine{'s' if n != 1 else ''}",
+        title=f"Circuit breaker held {n} quarantine{'s' if n != 1 else ''}",
         body="\n".join(lines), priority=1,
     )
 
@@ -122,7 +122,7 @@ def format_host_suppression_expired_alert(suppressions: Sequence[Suppression]) -
     per project per image (audit B-14). Priority 1."""
     sups = sorted(suppressions, key=lambda s: s.cve_id)
     more = f" (+{len(sups) - 1} more)" if len(sups) > 1 else ""
-    title = f"[boxmunge] Host suppression expired — {sups[0].cve_id}{more}"
+    title = f"Host suppression expired — {sups[0].cve_id}{more}"
     lines = ["Host-scope suppressions (they applied to every project) expired:"]
     for s in sups:
         lines.append(f"- {s.cve_id}: added {s.added.isoformat()}, "
@@ -196,7 +196,7 @@ def format_grace_heads_up_alert(
     delta = expires_at - now
     hours_remaining = max(1, math.ceil(delta.total_seconds() / 3600))
     title = (
-        f"[boxmunge] CVE policy enforcement begins in {hours_remaining}h"
+        f"CVE policy enforcement begins in {hours_remaining}h"
     )
 
     # Bucket projects.

@@ -331,14 +331,8 @@ Unattended-Upgrade::MinimalSteps "true";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
 EOF
     else
-        cat > /etc/apt/apt.conf.d/50unattended-upgrades <<'EOF'
-Unattended-Upgrade::Allowed-Origins {
-    "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
-};
-Unattended-Upgrade::AutoFixInterruptedDpkg "true";
-Unattended-Upgrade::MinimalSteps "true";
-Unattended-Upgrade::Remove-Unused-Dependencies "true";
-EOF
+        install -m 0644 "$(dirname "$0")/50unattended-upgrades-debian" \
+            /etc/apt/apt.conf.d/50unattended-upgrades
     fi
 
     cat > /etc/apt/apt.conf.d/20auto-upgrades <<EOF

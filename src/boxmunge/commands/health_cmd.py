@@ -351,8 +351,8 @@ def check_recent_errors(paths: BoxPaths) -> HealthCheck:
     return HealthCheck("recent-errors", "ok", "No errors in last 24h")
 
 
-def run_health(paths: BoxPaths, *, as_json: bool = False) -> int:
-    """Run all health checks and report."""
+def collect_health(paths: BoxPaths) -> HealthReport:
+    """Run every health check. `health` and the MCP health tool both use this."""
     report = HealthReport()
     report.checks.append(check_docker_running())
     report.checks.append(check_caddy_container())
@@ -363,6 +363,9 @@ def run_health(paths: BoxPaths, *, as_json: bool = False) -> int:
     report.checks.append(check_lifecycle_blocked(paths))
     report.checks.append(check_config_drift(paths))
     report.checks.append(check_recent_errors(paths))
+
+    from boxmunge.health_checks.alerts import check_alerts
+    report.checks.append(check_alerts(paths))
 
     from boxmunge.health_checks.container_updates import check_container_updates
     report.checks.append(check_container_updates(paths))
@@ -385,8 +388,8 @@ def run_health(paths: BoxPaths, *, as_json: bool = False) -> int:
         check_sysctl_hardening,
         check_systemd_timers,
         check_ufw,
-        check_unattended_upgrades,
     )
+    from boxmunge.health_checks.os_updates import check_os_updates
 
     from boxmunge.config import ConfigError, load_config
     from boxmunge.log import log_warning
@@ -417,10 +420,15 @@ def run_health(paths: BoxPaths, *, as_json: bool = False) -> int:
     report.checks.append(_safe("crowdsec", check_crowdsec))
     report.checks.append(_safe("aide", check_aide_status))
     report.checks.append(_safe("auditd", check_auditd))
-    report.checks.append(_safe("auto-updates", check_unattended_upgrades))
+    report.checks.append(_safe("auto-updates", check_os_updates))
     report.checks.append(_safe("sysctl", check_sysctl_hardening))
     report.checks.append(_safe("timers", check_systemd_timers))
+    return report
 
+
+def run_health(paths: BoxPaths, *, as_json: bool = False) -> int:
+    """Run all health checks and report."""
+    report = collect_health(paths)
     if as_json:
         print(report.format_json())
     else:

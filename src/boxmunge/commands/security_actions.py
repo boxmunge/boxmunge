@@ -39,7 +39,7 @@ from boxmunge.fileutil import LockError, open_shared_lockfile
 from boxmunge.log import log_warning
 from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
-from boxmunge.project_registry import is_registered, load_registered_projects
+from boxmunge.project_registry import is_registered, load_deployed_projects
 
 
 # ---------- helpers ----------
@@ -186,7 +186,7 @@ def _parse_scan_targets(args: list[str], paths: BoxPaths) -> list[str] | int:
     from boxmunge.commands.argv import parse_args, require_project_name
     parsed = parse_args("security", args, max_positional=1)
     if not parsed.positional:
-        return sorted(load_registered_projects(paths))
+        return load_deployed_projects(paths)
     project = require_project_name("security", parsed.positional[0])
     if not is_registered(project, paths):
         print(f"ERROR: project '{project}' is not registered.", file=sys.stderr)

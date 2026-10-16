@@ -15,6 +15,14 @@ from boxmunge.commands.health_cmd import HealthCheck
 # dirs so binary resolution is independent of the caller's environment.
 _SBIN_DIRS = ["/usr/local/sbin", "/usr/sbin", "/sbin"]
 
+# Every timer install.sh enables (systemd/*.timer). `doctor` and the
+# `timers` health check both verify them.
+BOXMUNGE_TIMERS = (
+    "boxmunge-health.timer", "boxmunge-backup.timer",
+    "boxmunge-backup-sync.timer", "boxmunge-auto-update.timer",
+    "boxmunge-container-update.timer", "boxmunge-cve-scan.timer",
+)
+
 
 def _hardening_env() -> dict[str, str]:
     """A copy of the environment with the standard sbin dirs on PATH."""
@@ -151,23 +159,6 @@ def check_auditd() -> HealthCheck:
         return HealthCheck("auditd", "warn", "Auditd status timed out")
 
 
-def check_unattended_upgrades() -> HealthCheck:
-    """Check if unattended-upgrades is enabled."""
-    try:
-        result = _run(["systemctl", "is-active", "unattended-upgrades"], timeout=10)
-        if result.returncode == 0:
-            return HealthCheck(
-                "auto-updates", "ok", "Unattended upgrades active",
-            )
-        return HealthCheck(
-            "auto-updates", "warn", "Unattended upgrades not active",
-        )
-    except FileNotFoundError:
-        return HealthCheck("auto-updates", "warn", "systemctl not available")
-    except subprocess.TimeoutExpired:
-        return HealthCheck("auto-updates", "warn", "Check timed out")
-
-
 def check_sysctl_hardening() -> HealthCheck:
     """Check critical kernel hardening parameters."""
     expected = {
@@ -197,10 +188,13 @@ def check_sysctl_hardening() -> HealthCheck:
 
 
 def check_systemd_timers() -> HealthCheck:
-    """Check that boxmunge systemd timers are active."""
-    timers = ["boxmunge-health.timer", "boxmunge-backup.timer"]
+    """Check that every boxmunge systemd timer install.sh enables is active.
+
+    Each one is the only thing that runs its job: without auto-update, for
+    example, neither security releases nor the OS-update alert happen.
+    """
     inactive = []
-    for timer in timers:
+    for timer in BOXMUNGE_TIMERS:
         try:
             result = _run(["systemctl", "is-active", timer], timeout=5)
             if result.returncode != 0:
