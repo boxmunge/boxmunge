@@ -357,8 +357,9 @@ def check_recent_errors(paths: BoxPaths) -> HealthCheck:
     if read.torn:
         return HealthCheck(
             "recent-errors", "warn",
-            f"{len(read.torn)} torn line(s) in the operational log, so errors "
-            f"may be missing (first: {read.torn[0]}); `log --since 24h` lists them",
+            f"{len(errors)} error(s) in last 24h, and {len(read.torn)} torn "
+            f"line(s) in the operational log that may have been errors (first: "
+            f"{read.torn[0]}); `log --since 24h` lists them",
         )
     if len(errors) > 10:
         return HealthCheck(

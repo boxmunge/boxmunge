@@ -71,6 +71,7 @@ def test_torn_lines_make_recent_errors_warn(paths: BoxPaths, midnight: datetime)
         log.write('{"ts": "2026-\n')
     check = check_recent_errors(paths)
     assert check.status == "warn"
+    assert check.detail.startswith("2 error(s) in last 24h, and 1 torn line(s)")
     assert f"{paths.log_file}:2: " in check.detail
 
 
