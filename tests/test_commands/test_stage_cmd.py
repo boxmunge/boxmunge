@@ -35,7 +35,7 @@ def _place_real_bundle(paths: BoxPaths, timestamp: str = "2026-03-31T09150000000
 
 class TestRunStage:
     @patch("boxmunge.commands.stage_cmd.caddy_reload")
-    @patch("boxmunge.commands.stage_cmd.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_generates_staging_caddy_config(self, mock_up, mock_reload, paths):
         add_project("testapp", paths)
         _place_real_bundle(paths)
@@ -46,7 +46,7 @@ class TestRunStage:
         assert "staging.testapp.example.com" in content
 
     @patch("boxmunge.commands.stage_cmd.caddy_reload")
-    @patch("boxmunge.commands.stage_cmd.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_generates_staging_compose_override(self, mock_up, mock_reload, paths):
         add_project("testapp", paths)
         _place_real_bundle(paths)
@@ -57,7 +57,7 @@ class TestRunStage:
         assert "testapp-staging-web" in content
 
     @patch("boxmunge.commands.stage_cmd.caddy_reload")
-    @patch("boxmunge.commands.stage_cmd.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_starts_staging_containers_with_project_name(self, mock_up, mock_reload, paths):
         add_project("testapp", paths)
         _place_real_bundle(paths)
@@ -67,7 +67,7 @@ class TestRunStage:
         assert kwargs.get("project_name") == "testapp-staging"
 
     @patch("boxmunge.commands.stage_cmd.caddy_reload")
-    @patch("boxmunge.commands.stage_cmd.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_records_staging_state(self, mock_up, mock_reload, paths):
         add_project("testapp", paths)
         _place_real_bundle(paths)
@@ -76,7 +76,7 @@ class TestRunStage:
         assert state.get("active") is True
 
     @patch("boxmunge.commands.stage_cmd.caddy_reload")
-    @patch("boxmunge.commands.stage_cmd.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_creates_project_dir_if_new(self, mock_up, mock_reload, paths):
         add_project("testapp", paths)
         _place_real_bundle(paths)
@@ -91,7 +91,7 @@ class TestRunStage:
         assert result == 1
 
     @patch("boxmunge.commands.stage_cmd.caddy_reload")
-    @patch("boxmunge.commands.stage_cmd.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_moves_bundle_to_consumed(self, mock_up, mock_reload, paths):
         add_project("testapp", paths)
         bundle = _place_real_bundle(paths)
@@ -101,7 +101,7 @@ class TestRunStage:
         assert len(consumed) == 1
 
     @patch("boxmunge.commands.stage_cmd.caddy_reload")
-    @patch("boxmunge.commands.stage_cmd.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_staging_files_world_readable_for_caddy(self, mock_up, mock_reload, paths):
         """Caddy site config + staging compose files must be 0o644 so the
         Caddy container (different uid inside the container) can read them.
@@ -128,7 +128,7 @@ class TestRunStage:
             f"Staging compose base must be 0o644; got {oct(os.stat(staging_base).st_mode & 0o777)}"
 
     @patch("boxmunge.commands.stage_cmd.caddy_reload")
-    @patch("boxmunge.commands.stage_cmd.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_copies_smoke_scripts(self, mock_up, mock_reload, paths):
         add_project("testapp", paths)
         manifest_with_smoke = VALID_MANIFEST.replace(
@@ -156,7 +156,7 @@ class TestRunStage:
 
 class TestProjectRegistrationEnforcement:
     @patch("boxmunge.commands.stage_cmd.caddy_reload")
-    @patch("boxmunge.commands.stage_cmd.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_rejects_unregistered_project(self, mock_up, mock_reload, paths, capsys):
         # Place bundle but DON'T register the project
         _place_real_bundle(paths)
@@ -166,7 +166,7 @@ class TestProjectRegistrationEnforcement:
         assert "not registered" in captured.err
 
     @patch("boxmunge.commands.stage_cmd.caddy_reload")
-    @patch("boxmunge.commands.stage_cmd.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_accepts_registered_project(self, mock_up, mock_reload, paths):
         add_project("testapp", paths)
         _place_real_bundle(paths)
@@ -190,7 +190,7 @@ class TestRefusesQuarantined:
     """Wave 1: stage must refuse a CVE-quarantined project."""
 
     @patch("boxmunge.commands.stage_cmd.caddy_reload")
-    @patch("boxmunge.commands.stage_cmd.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_refuses_quarantined_project(self, mock_up, mock_reload, paths, capsys):
         add_project("testapp", paths)
         _place_real_bundle(paths)
@@ -211,7 +211,7 @@ class TestStageComposeRejectionExit3:
     """Audit H-N2: hardening rejection returns exit code 3, not 1."""
 
     @patch("boxmunge.commands.stage_cmd.caddy_reload")
-    @patch("boxmunge.commands.stage_cmd.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_hostile_compose_returns_3(self, mock_up, mock_reload, paths):
         from boxmunge.compose_validate import ComposeSecurityError
         add_project("testapp", paths)
@@ -259,7 +259,7 @@ class TestCvePolicyValidatorWiring:
             tar.add(staging, arcname="testapp")
 
     @patch("boxmunge.commands.stage_cmd.caddy_reload")
-    @patch("boxmunge.commands.stage_cmd.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_stage_passes_security_block_as_cve_policy(
         self, _up, _reload, paths: BoxPaths,
     ) -> None:

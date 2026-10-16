@@ -24,8 +24,7 @@ V2 = "2026-10-13T100000000000"
 
 @contextmanager
 def _containers():
-    with patch("boxmunge.commands.deploy.compose_up"), \
-            patch("boxmunge.commands.stage_cmd.compose_up"), \
+    with patch("boxmunge.compose_guard.compose_up"), \
             patch("boxmunge.commands.unstage_cmd.compose_down"):
         yield
 

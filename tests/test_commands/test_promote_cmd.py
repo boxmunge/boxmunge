@@ -155,7 +155,7 @@ class TestPromoteComponentTagging:
         monkeypatch.setattr(
             deploy_mod, "prepare_compose_override", fake_prepare_compose_override,
         )
-        monkeypatch.setattr(deploy_mod, "compose_up", lambda *a, **k: None)
+        monkeypatch.setattr("boxmunge.compose_guard.compose_up", lambda *a, **k: None)
         monkeypatch.setattr(deploy_mod, "caddy_reload", lambda *a, **k: None)
         # Avoid any git/snapshot work by passing no_snapshot=True and no ref.
         monkeypatch.setattr(deploy_mod.subprocess, "run", MagicMock(

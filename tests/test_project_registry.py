@@ -205,7 +205,7 @@ class TestDamagedRegistry:
         registry = paths.state / "projects.txt"
         registry.write_text(registry.read_text() + "old-staging\n")
         place_bundle(paths)
-        with patch("boxmunge.commands.deploy.compose_up"), \
+        with patch("boxmunge.compose_guard.compose_up"), \
                 patch("boxmunge.commands.deploy.caddy_reload"):
             assert run_deploy("myapp", paths) == 0
         assert "old-staging\n" in registry.read_text()

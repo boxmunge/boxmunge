@@ -86,7 +86,8 @@ def _promote(project_name: str, paths: BoxPaths) -> Promotion:
     # Recorded before the containers start: see the module docstring.
     mark_prestage_replaced(paths, project_name, snapshot)
     return _switch(project_name, paths, staged_ref, snapshot,
-                   lambda: replace_release(project_name, paths, manifest, staged_ref, snapshot),
+                   lambda: replace_release(project_name, paths, manifest, staged_ref,
+                                           snapshot, component=COMPONENT, promoting=True),
                    certain=True)
 
 
@@ -107,7 +108,8 @@ def _finish_switched(project_name: str, paths: BoxPaths) -> Promotion:
         except IntakeError as e:
             return report_refusal(e)
         generate_release_config(project_name, paths, manifest, COMPONENT)
-        return replace_release(project_name, paths, manifest, staged_ref, snapshot)
+        return replace_release(project_name, paths, manifest, staged_ref, snapshot,
+                               component=COMPONENT, promoting=True)
 
     try:
         # The killed run may or may not have reached its first container

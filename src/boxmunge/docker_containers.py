@@ -173,3 +173,37 @@ def local_image(ref: str) -> LocalImage | None:
     if not isinstance(image_id, str) or not image_id.startswith("sha256:"):
         raise DockerError(f"docker image inspect {ref} reports image ID {image_id!r}")
     return LocalImage(image_id=image_id, repo_digests=tuple(digests))
+
+
+def container_bind_sources(project_name: str) -> list[tuple[str, bool]]:
+    """(host source, read-write) of every bind mount of the project's
+    containers, which is what a recreate or `docker compose start` mounts
+    again. Raises DockerError when Docker cannot be asked."""
+    listed = _run(
+        ["docker", "ps", "-a", "--no-trunc", *compose_project_filter(project_name),
+         "--format", "{{.ID}}"],
+        capture=True,
+    )
+    ids = listed.stdout.split()
+    if not ids:
+        return []
+    sources = []
+    for doc in _inspect(["docker", "container", "inspect", *ids]):
+        for mount in doc.get("Mounts") or []:
+            if isinstance(mount, dict) and mount.get("Type") == "bind":
+                source = mount.get("Source")
+                if not isinstance(source, str) or not source:
+                    raise DockerError(f"container {doc.get('Name')}: bind mount without a source")
+                sources.append((_host_path(source), mount.get("RW") is not False))
+    return sources
+
+
+# Docker Desktop (macOS) reports a host bind source as /host_mnt/<host path>;
+# the Linux daemon reports the host path itself.
+_DESKTOP_HOST_PREFIX = "/host_mnt/"
+
+
+def _host_path(source: str) -> str:
+    if source.startswith(_DESKTOP_HOST_PREFIX):
+        return source[len(_DESKTOP_HOST_PREFIX) - 1:]
+    return source

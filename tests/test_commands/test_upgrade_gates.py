@@ -40,7 +40,7 @@ def test_maintenance_render_failure_raises(paths) -> None:
 
 
 @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
-@patch("boxmunge.commands.upgrade_steps.compose_up")
+@patch("boxmunge.compose_guard.compose_up")
 def test_apply_regen_failure_fails_without_restarting(mock_up, _reload, paths, capsys) -> None:
     with patch("boxmunge.commands.upgrade_steps.prepare_compose_override",
                side_effect=RuntimeError("generator bug")):
@@ -51,7 +51,7 @@ def test_apply_regen_failure_fails_without_restarting(mock_up, _reload, paths, c
 
 
 @patch("boxmunge.commands.upgrade_cmd.caddy_reload", side_effect=DockerError("caddy down"))
-@patch("boxmunge.commands.upgrade_steps.compose_up")
+@patch("boxmunge.compose_guard.compose_up")
 def test_apply_caddy_reload_failure_fails(mock_up, _reload, paths) -> None:
     assert run_upgrade(paths, apply_only=True) == 1
     mock_up.assert_not_called()
@@ -59,7 +59,7 @@ def test_apply_caddy_reload_failure_fails(mock_up, _reload, paths) -> None:
 
 
 @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
-@patch("boxmunge.commands.upgrade_steps.compose_up", side_effect=DockerError("boom"))
+@patch("boxmunge.compose_guard.compose_up", side_effect=DockerError("boom"))
 def test_apply_restart_failure_does_not_record_version(_up, _reload, paths) -> None:
     assert run_upgrade(paths, apply_only=True) == 1
     assert read_installed_version(paths) == OLD
@@ -68,7 +68,7 @@ def test_apply_restart_failure_does_not_record_version(_up, _reload, paths) -> N
 @patch("boxmunge.commands.upgrade_cmd.run_health", return_value=0)
 @patch("boxmunge.commands.upgrade_cmd.run_self_test", return_value=1)
 @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
-@patch("boxmunge.commands.upgrade_steps.compose_up")
+@patch("boxmunge.compose_guard.compose_up")
 def test_full_self_test_failure_fails(_up, _reload, _self_test, _health, paths, capsys) -> None:
     assert run_upgrade(paths) == 1
     assert read_installed_version(paths) == OLD
@@ -79,7 +79,7 @@ def test_full_self_test_failure_fails(_up, _reload, _self_test, _health, paths, 
 @patch("boxmunge.commands.upgrade_cmd.run_health", return_value=0)
 @patch("boxmunge.commands.upgrade_cmd.run_self_test", return_value=0)
 @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
-@patch("boxmunge.commands.upgrade_steps.compose_up")
+@patch("boxmunge.compose_guard.compose_up")
 def test_full_success_records_version(_up, _reload, _st, _health, _ver, paths, capsys) -> None:
     assert run_upgrade(paths) == 0
     assert read_installed_version(paths) == "0.3.0"

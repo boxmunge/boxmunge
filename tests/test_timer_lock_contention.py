@@ -13,6 +13,7 @@ import yaml
 from boxmunge.fileutil import project_lock
 from boxmunge.paths import BoxPaths
 from tests.lock_holder import hold_project_lock, project_lock_is_held
+from tests.deploy_helpers import mark_deployed
 
 
 def _paths(tmp_path: Path) -> BoxPaths:
@@ -39,6 +40,7 @@ def _project(paths: BoxPaths, name: str) -> None:
         "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
     }))
     (pdir / "compose.yml").write_text("services:\n  web:\n    image: nginx:1.25\n")
+    mark_deployed(paths, name)
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +60,7 @@ class TestContainerUpdateContention:
 
         alert = MagicMock()
         with patch.object(cu, "compose_pull", fake_pull), \
-             patch.object(cu, "compose_up"), \
+             patch("boxmunge.compose_guard.compose_up"), \
              patch.object(cu, "detect_image_changes", return_value={}), \
              patch("boxmunge.commands.container_update_cmd._send_summary_alert", alert):
             rc = run_container_update(paths)
@@ -176,11 +178,10 @@ class TestResumeAlertOutsideLock:
             return True
 
         with patch.object(resume_cmd, "compose_pull"), \
-             patch.object(resume_cmd, "compose_up"), \
+             patch("boxmunge.compose_guard.compose_up"), \
              patch.object(resume_cmd, "caddy_reload"), \
              patch.object(resume_cmd, "prepare_caddy_config"), \
              patch.object(resume_cmd, "prepare_compose_override"), \
-             patch.object(resume_cmd, "validate_user_compose"), \
              patch.object(resume_cmd, "run_smoke", return_value=(False, "boom")), \
              patch("boxmunge.notify.send_notification", fake_send):
             rc = resume_cmd.run_resume("app", paths, yes=True)

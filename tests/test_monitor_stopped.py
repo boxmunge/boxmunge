@@ -17,6 +17,7 @@ import yaml
 
 from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state, write_state
+from tests.deploy_helpers import mark_deployed
 
 NAME = "myapp"
 NO_CONTAINER = f"Error response from daemon: No such container: {NAME}-web-1"
@@ -40,6 +41,7 @@ def paths(tmp_path: Path, fake_containers) -> BoxPaths:
                              "routes": [{"path": "/"}]}},
     }))
     (p.project_dir(NAME) / "compose.yml").write_text("services:\n  web:\n    image: nginx\n")
+    mark_deployed(p, NAME)
     write_state(p.project_deploy_state(NAME), {
         "current_ref": "r1",
         "last_started_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
@@ -94,7 +96,7 @@ class TestStickyCriticalStop:
         assert push.call_count == 1, "no 'infrastructure' re-alert"
 
         from boxmunge.commands import recover_cmd
-        with patch.object(recover_cmd, "compose_up"), \
+        with patch("boxmunge.compose_guard.compose_up"), \
              patch.object(recover_cmd, "caddy_reload"), \
              patch.object(recover_cmd, "prepare_caddy_config"), \
              patch.object(recover_cmd, "prepare_compose_override"), \

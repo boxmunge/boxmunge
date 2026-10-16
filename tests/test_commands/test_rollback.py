@@ -27,7 +27,7 @@ V2 = "2026-10-13T100000000000"
 
 @contextmanager
 def _docker():
-    with patch("boxmunge.commands.deploy.compose_up") as up, \
+    with patch("boxmunge.compose_guard.compose_up") as up, \
             patch("boxmunge.commands.deploy.caddy_reload"):
         yield up
 

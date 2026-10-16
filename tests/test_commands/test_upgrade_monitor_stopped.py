@@ -39,7 +39,7 @@ def paths(tmp_path: Path):
 
 
 def test_restart_leaves_monitor_stopped_project_stopped(paths) -> None:
-    with patch("boxmunge.commands.upgrade_steps.compose_up") as up:
+    with patch("boxmunge.compose_guard.compose_up") as up:
         restart = restart_projects(paths, refused=())
     assert [c.kwargs["project_name"] for c in up.call_args_list] == ["live"]
     assert restart == Restart(succeeded=["live"], monitor_stopped=["stopped"])
@@ -53,14 +53,14 @@ def test_restart_starts_a_project_whose_stop_was_superseded(paths) -> None:
     write_state(paths.project_deploy_state("stopped"), {
         "last_started_at": (stopped_at + timedelta(minutes=5)).isoformat(),
     })
-    with patch("boxmunge.commands.upgrade_steps.compose_up") as up:
+    with patch("boxmunge.compose_guard.compose_up") as up:
         restart = restart_projects(paths, refused=())
     assert sorted(c.kwargs["project_name"] for c in up.call_args_list) == ["live", "stopped"]
     assert restart.monitor_stopped == []
 
 
 @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
-@patch("boxmunge.commands.upgrade_steps.compose_up")
+@patch("boxmunge.compose_guard.compose_up")
 def test_apply_names_monitor_stopped_projects(up, _reload, paths, capsys) -> None:
     assert run_upgrade(paths, apply_only=True) == 0
     assert [c.kwargs["project_name"] for c in up.call_args_list] == ["live"]

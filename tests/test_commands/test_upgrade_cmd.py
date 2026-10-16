@@ -9,6 +9,7 @@ import pytest
 from boxmunge.paths import BoxPaths
 from boxmunge.version import write_installed_version
 from boxmunge.commands.upgrade_cmd import run_upgrade
+from tests.deploy_helpers import mark_deployed
 
 
 def _setup_paths(tmp_path: Path) -> BoxPaths:
@@ -45,7 +46,7 @@ class TestDryRun:
         run_upgrade(paths, dry_run=True)
         mock_reload.assert_not_called()
 
-    @patch("boxmunge.commands.upgrade_steps.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_dry_run_does_notrestart_projects(self, mock_up, tmp_path):
         paths = _setup_paths(tmp_path)
         run_upgrade(paths, dry_run=True)
@@ -85,12 +86,14 @@ class TestRestartRespectsLock:
         pdir = paths.project_dir(name)
         pdir.mkdir(parents=True)
         (pdir / "manifest.yml").write_text(yaml.dump({
-            "schema_version": 2, "project": name,
+            "schema_version": 2, "project": name, "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
             "source": "bundle", "hosts": [f"{name}.test"],
             "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
         }))
+        (pdir / "compose.yml").write_text("services:\n  web:\n    image: nginx:1.25\n")
+        mark_deployed(paths, name)
 
-    @patch("boxmunge.commands.upgrade_steps.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_locked_project_is_skipped_not_raised(
         self, mock_up, tmp_path
     ) -> None:
@@ -122,7 +125,7 @@ class TestRestartRespectsLock:
         # compose_up was only called for beta.
         assert mock_up.call_count == 1
 
-    @patch("boxmunge.commands.upgrade_steps.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_no_locks_held_returns_all_succeeded(
         self, mock_up, tmp_path
     ) -> None:
@@ -161,7 +164,7 @@ class TestLockSkipPushoverNotification:
         (pdir / "compose.yml").write_text("services:\n  web:\n    image: nginx:1.25\n")
 
     @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
-    @patch("boxmunge.commands.upgrade_steps.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     @patch("boxmunge.notify.send_notification")
     def test_pushover_fires_when_apply_skips_locked_project(
         self, mock_pushover, mock_up, mock_reload, tmp_path
@@ -197,7 +200,7 @@ class TestLockSkipPushoverNotification:
         assert "alpha" in message
 
     @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
-    @patch("boxmunge.commands.upgrade_steps.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     @patch("boxmunge.notify.send_notification")
     def test_pushover_silent_when_no_skips(
         self, mock_pushover, mock_up, mock_reload, tmp_path
@@ -228,13 +231,14 @@ class TestSkipsQuarantined:
         pdir = paths.project_dir(name)
         pdir.mkdir(parents=True)
         (pdir / "manifest.yml").write_text(yaml.dump({
-            "schema_version": 2, "project": name,
+            "schema_version": 2, "project": name, "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
             "source": "bundle", "hosts": [f"{name}.test"],
             "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
         }))
         (pdir / "compose.yml").write_text(
             "services:\n  web:\n    image: nginx:1.25\n"
         )
+        mark_deployed(paths, name)
 
     def _quarantine(self, paths: BoxPaths, name: str) -> None:
         paths.project_quarantine_state(name).parent.mkdir(
@@ -242,7 +246,7 @@ class TestSkipsQuarantined:
         )
         paths.project_quarantine_state(name).write_text("{}")
 
-    @patch("boxmunge.commands.upgrade_steps.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_restart_skips_quarantined_project(self, mock_up, tmp_path):
         from boxmunge.commands.upgrade_steps import restart_projects
         paths = _setup_paths(tmp_path)
@@ -264,7 +268,7 @@ class TestSkipsQuarantined:
         assert "alpha" not in skipped
         assert mock_up.call_count == 1
 
-    @patch("boxmunge.commands.upgrade_steps.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     def test_restart_logs_quarantine_skip(self, mock_up, tmp_path):
         from boxmunge.commands.upgrade_steps import restart_projects
         paths = _setup_paths(tmp_path)

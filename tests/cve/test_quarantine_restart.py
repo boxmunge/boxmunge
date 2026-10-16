@@ -66,8 +66,7 @@ def test_lift_restores_policies_before_starting(box):
     _reassert(paths)
     fake.calls.clear()
     q.lift_quarantine(
-        "demo", paths, project_dir=paths.project_dir("demo"),
-        project_caddy_site_content="demo.example.com {}\n",
+        "demo", paths, project_caddy_site_content="demo.example.com {}\n",
         compose_files=["compose.yml"],
     )
     assert fake.policies == {"demo-web-1": "unless-stopped", "demo-worker-1": "always",

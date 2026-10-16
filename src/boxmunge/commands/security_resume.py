@@ -14,6 +14,7 @@ import sys
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project_locked
 from boxmunge.compose import prepare_compose_override
+from boxmunge.compose_guard import ComposeRefused, check_start
 from boxmunge.cve.policy import Disposition, FindingDisposition
 from boxmunge.cve.quarantine import QuarantineError, is_quarantined, lift_quarantine
 from boxmunge.cve.scan_state import BASIS_STARTUP_IMAGES
@@ -137,6 +138,13 @@ def security_resume_locked(paths: BoxPaths, project: str) -> int:
     return _resume_lift(paths, project)
 
 
+def _compose_files(paths: BoxPaths, project: str) -> list[str]:
+    compose_files = ["compose.yml"]
+    if paths.project_compose_override(project).exists():
+        compose_files.append("compose.boxmunge.yml")
+    return compose_files
+
+
 def _lift_keeping_pause(paths: BoxPaths, project: str) -> int:
     """Lift the quarantine of a project that is also paused (B-20).
 
@@ -146,8 +154,7 @@ def _lift_keeping_pause(paths: BoxPaths, project: str) -> int:
     """
     try:
         lift_quarantine(
-            project, paths, project_dir=paths.project_dir(project),
-            project_caddy_site_content=None, compose_files=[],
+            project, paths, project_caddy_site_content=None, compose_files=[],
         )
     except QuarantineError as e:
         _err(f"ERROR: lift_quarantine failed: {e}")
@@ -167,6 +174,14 @@ def _resume_lift(paths: BoxPaths, project: str) -> int:
     except ManifestError as e:
         _err(f"ERROR: {e}")
         return 1
+    # Checked before the live Caddy config is rewritten: a refused project
+    # keeps its quarantine and its maintenance page.
+    try:
+        check_start(paths, project, component="security-resume",
+                    compose_files=_compose_files(paths, project))
+    except ComposeRefused as e:
+        _err(f"ERROR: {e}")
+        return 1
     try:
         prepare_caddy_config(paths, manifest)
         prepare_compose_override(paths, manifest, component="security-resume")
@@ -177,15 +192,11 @@ def _resume_lift(paths: BoxPaths, project: str) -> int:
 
     site_path = paths.project_caddy_site(project)
     site_content = site_path.read_text() if site_path.exists() else ""
-    compose_files = ["compose.yml"]
-    if paths.project_compose_override(project).exists():
-        compose_files.append("compose.boxmunge.yml")
     try:
         lift_quarantine(
             project, paths,
-            project_dir=paths.project_dir(project),
             project_caddy_site_content=site_content,
-            compose_files=compose_files,
+            compose_files=_compose_files(paths, project),
         )
     except QuarantineError as e:
         _err(f"ERROR: lift_quarantine failed: {e}")

@@ -26,6 +26,7 @@ def _staging_files(project_name: str, paths: BoxPaths) -> list[Path]:
         paths.project_staging_caddy_site(project_name),
         paths.project_staging_compose_override(project_name),
         paths.project_dir(project_name) / "compose.staging-base.yml",
+        paths.project_bind_record(project_name, staging=True),
     ]
 
 

@@ -20,7 +20,8 @@ from datetime import datetime, timezone
 
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.compose import prepare_compose_override
-from boxmunge.docker import compose_up, caddy_reload, DockerError
+from boxmunge.compose_guard import compose_up_checked
+from boxmunge.docker import caddy_reload, DockerError
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.lifecycle import BlockReason, is_blocked
@@ -101,7 +102,6 @@ def recover_locked(project_name: str, paths: BoxPaths) -> int:
     health = _monitor_stopped_health(project_name, paths)
     if health is None:
         return 1
-    project_dir = paths.project_dir(project_name)
     try:
         manifest = load_manifest(paths.project_manifest(project_name))
     except ManifestError as e:
@@ -117,8 +117,8 @@ def recover_locked(project_name: str, paths: BoxPaths) -> int:
     # version change).
     print("  Starting containers...")
     try:
-        compose_up(project_dir, compose_files=compose_files,
-                   project_name=project_name)
+        compose_up_checked(paths, project_name, component="recover",
+                           compose_files=compose_files, build=False)
     except DockerError as e:
         print(f"ERROR: compose up failed: {e}", file=sys.stderr)
         log_error("recover", f"compose up failed: {e}", paths,

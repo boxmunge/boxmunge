@@ -64,7 +64,7 @@ def test_deploy_never_starts_once_blocked(paths, marker) -> None:
     with _docker():
         assert deploy.run_deploy(NAME, paths, ref=V1) == 0
     place_bundle(paths, timestamp=V2, files={"VERSION": "v2\n"})
-    with _docker(), patch.object(deploy, "compose_up") as up, \
+    with _docker(), patch("boxmunge.compose_guard.compose_up") as up, \
             _marker_at_lock(deploy, marker):
         assert deploy.run_deploy(NAME, paths, ref=V2) == 1
     up.assert_not_called()
@@ -78,7 +78,7 @@ def test_stage_never_starts_once_blocked(paths, marker) -> None:
     with _docker():
         assert deploy.run_deploy(NAME, paths, ref=V1) == 0
     place_bundle(paths, timestamp=V2, files={"VERSION": "v2\n"})
-    with _docker(), patch.object(stage_cmd, "compose_up") as up, \
+    with _docker(), patch("boxmunge.compose_guard.compose_up") as up, \
             _marker_at_lock(stage_cmd, marker):
         assert stage_cmd.run_stage(NAME, paths, ref=V2) == 1
     up.assert_not_called()
@@ -89,7 +89,7 @@ def test_stage_never_starts_once_blocked(paths, marker) -> None:
 @MARKERS
 def test_promote_never_starts_once_blocked(paths, marker) -> None:
     _prod_v1_staged_v2(paths)
-    with _docker(), patch.object(deploy, "compose_up") as up, \
+    with _docker(), patch("boxmunge.compose_guard.compose_up") as up, \
             _marker_at_lock(promote_cmd, marker):
         assert promote_cmd.run_promote(NAME, paths) == 1
     up.assert_not_called()
@@ -104,7 +104,7 @@ def test_rollback_never_starts_once_blocked(paths, marker) -> None:
     with _docker():
         assert deploy.run_deploy(NAME, paths, ref=V1) == 0
         assert deploy.run_deploy(NAME, paths, ref=V2) == 0
-    with _docker(), patch.object(deploy, "compose_up") as up, \
+    with _docker(), patch("boxmunge.compose_guard.compose_up") as up, \
             _marker_at_lock(rollback, marker):
         assert rollback.run_rollback(NAME, paths, yes=True) == 1
     up.assert_not_called()
@@ -140,7 +140,7 @@ def _deployed(paths) -> None:
 def test_upgrade_restart_never_starts_once_blocked(paths, marker) -> None:
     """The upgrade restart recorded success with the marker present."""
     _deployed(paths)
-    with patch.object(upgrade_steps, "compose_up") as up, \
+    with patch("boxmunge.compose_guard.compose_up") as up, \
             patch.object(upgrade_steps, "_addressable", return_value=True), \
             _marker_at_lock(upgrade_steps, marker):
         result = upgrade_steps.restart_projects(paths, refused=())

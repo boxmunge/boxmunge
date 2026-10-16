@@ -24,7 +24,6 @@ COMPOSE_FUNCS = {
     "compose_up": docker.compose_up,
     "compose_down": docker.compose_down,
     "compose_stop": docker.compose_stop,
-    "compose_start": docker.compose_start,
     "compose_logs": docker.compose_logs,
     "compose_logs_capture": docker.compose_logs_capture,
     "compose_ps": docker.compose_ps,
@@ -131,7 +130,7 @@ def test_project_compose_commands_all_name_the_project() -> None:
 
 # Helpers that act on one project's containers; every call must name it.
 _PROJECT_SCOPED = {
-    "compose_up", "compose_down", "compose_stop", "compose_start", "compose_logs",
+    "compose_up", "compose_down", "compose_stop", "compose_logs",
     "compose_logs_capture", "compose_ps", "compose_pull", "compose_config",
     "project_restart_policies",
 }

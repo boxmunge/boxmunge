@@ -21,6 +21,7 @@ from boxmunge import compose_resolve
 from boxmunge.compose_images import image_warnings
 from boxmunge.compose_isolation import isolation_problems
 from boxmunge.compose_mounts import has_named_volume
+from boxmunge.compose_own_files import own_file_problems
 from boxmunge.compose_service_rules import service_findings
 from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
@@ -348,7 +349,7 @@ def validate_user_compose(
 
     # include/extends/env_file references only exist in the literal files;
     # everything else is checked on the model Compose will actually run.
-    references = compose_resolve.reference_problems(compose_path, roots)
+    references, read_files = compose_resolve.walk_references(compose_path, roots)
     if references:
         raise ComposeSecurityError(references[0])
     try:
@@ -358,6 +359,7 @@ def validate_user_compose(
     services = doc.get("services") or {}
 
     isolation = isolation_problems(doc, project_name, base_dir, roots)
+    isolation += own_file_problems(doc, base_dir, paths.project_dir(project_name), read_files)
     if isolation:
         raise ComposeSecurityError(isolation[0] + _profile_note(services, isolation[0]))
     for warning in image_warnings(services, project_name):

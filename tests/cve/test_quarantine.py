@@ -414,12 +414,11 @@ class TestLiftQuarantineHappyPath:
             "boxmunge.cve.quarantine.caddy_reload",
             side_effect=lambda *a, **kw: call_order.append("caddy_reload"),
         ), patch(
-            "boxmunge.cve.quarantine.compose_up",
+            "boxmunge.cve.quarantine.compose_up_checked",
             side_effect=lambda *a, **kw: call_order.append("compose_up"),
         ):
             lift_quarantine(
                 "myapp", paths,
-                project_dir=project_dir,
                 project_caddy_site_content="NORMAL CADDY CONFIG",
                 compose_files=["compose.yml"],
             )
@@ -454,12 +453,11 @@ class TestLiftQuarantineHappyPath:
         with patch(
             "boxmunge.cve.quarantine.caddy_reload",
         ), patch(
-            "boxmunge.cve.quarantine.compose_up",
+            "boxmunge.cve.quarantine.compose_up_checked",
             side_effect=_check_state,
         ):
             lift_quarantine(
                 "myapp", paths,
-                project_dir=project_dir,
                 project_caddy_site_content="NORMAL",
                 compose_files=["compose.yml"],
             )
@@ -487,13 +485,12 @@ class TestLiftQuarantineFailures:
         with patch(
             "boxmunge.cve.quarantine.caddy_reload",
         ), patch(
-            "boxmunge.cve.quarantine.compose_up",
+            "boxmunge.cve.quarantine.compose_up_checked",
             side_effect=DockerError("compose up failed"),
         ):
             with pytest.raises(QuarantineError):
                 lift_quarantine(
                     "myapp", paths,
-                    project_dir=project_dir,
                     project_caddy_site_content="NORMAL",
                     compose_files=["compose.yml"],
                 )
@@ -509,11 +506,10 @@ class TestLiftQuarantineFailures:
         with patch(
             "boxmunge.cve.quarantine.caddy_reload",
         ) as mock_reload, patch(
-            "boxmunge.cve.quarantine.compose_up",
+            "boxmunge.cve.quarantine.compose_up_checked",
         ) as mock_up:
             lift_quarantine(
                 "myapp", paths,
-                project_dir=project_dir,
                 project_caddy_site_content="NORMAL",
                 compose_files=["compose.yml"],
             )
@@ -617,11 +613,10 @@ class TestStructuredLogging:
             ), patch(
                 "boxmunge.cve.quarantine.caddy_reload",
             ), patch(
-                "boxmunge.cve.quarantine.compose_up",
+                "boxmunge.cve.quarantine.compose_up_checked",
             ):
                 lift_quarantine(
                     "myapp", paths,
-                    project_dir=project_dir,
                     project_caddy_site_content="NORMAL",
                     compose_files=["compose.yml"],
                 )

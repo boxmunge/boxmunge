@@ -44,7 +44,7 @@ def _failing_promote(paths) -> list[str]:
 
     def up(*args, project_name, **kwargs):
         running.append(_version(paths))
-    with _docker(), patch("boxmunge.commands.deploy.compose_up", up), \
+    with _docker(), patch("boxmunge.compose_guard.compose_up", up), \
             patch("boxmunge.commands.deploy.smoke_ok", return_value=False):
         assert run_promote(NAME, paths) == 1
     return running

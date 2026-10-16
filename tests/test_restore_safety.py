@@ -17,10 +17,12 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.deploy_helpers import mark_deployed
 from tests.fake_system_container import FakeSystemContainer
 
 from boxmunge.commands.backup_cmd import list_snapshots
 from boxmunge.commands.restore import run_restore
+from boxmunge.docker_run import DockerError
 from boxmunge.paths import BoxPaths
 
 PROJECT = "myapp"
@@ -61,6 +63,7 @@ class Box:
         pdir.mkdir(parents=True)
         (pdir / "manifest.yml").write_text(MANIFEST)
         (pdir / "compose.yml").write_text("services:\n  db:\n    image: postgres\n")
+        mark_deployed(paths, PROJECT)
         paths.project_backups(PROJECT).mkdir()
         (paths.project_backups(PROJECT) / SNAPSHOT).write_bytes(b"encrypted")
         paths.backup_key.write_text("# public key: age1test\nAGE-SECRET-KEY-1TEST\n")
@@ -93,11 +96,6 @@ class Box:
             return subprocess.CompletedProcess(cmd, 0, "42\n", "")
         if "exec" in cmd and cmd[-1] == "pg_dump app":
             return self.dump_run(cmd, cwd=cwd, stdout=stdout, **kw)
-        if cmd[:2] == ["docker", "compose"] and "up" in cmd:
-            self.events.append("start-db")
-            if self.start_error:
-                raise self.start_error
-            return subprocess.CompletedProcess(cmd, 0, "", "")
         if cmd[:2] == ["docker", "inspect"]:
             return subprocess.CompletedProcess(cmd, 0, self.inspect_out, "")
         if "exec" in cmd:
@@ -107,6 +105,15 @@ class Box:
                 raise self.restore_error
             return subprocess.CompletedProcess(cmd, self.restore_rc, "", "psql: error")
         raise AssertionError(f"unexpected command {cmd}")
+
+    def compose_up(self, *_args, **kwargs) -> None:
+        if kwargs.get("services"):
+            self.events.append("start-db")
+            if self.start_error:
+                raise self.start_error
+            return
+        self.events.append("up-all")
+        self.up_kwargs.append(kwargs)
 
     def leftovers(self) -> list[str]:
         return sorted(p.name for p in self.paths.project_backups(PROJECT).iterdir()
@@ -122,9 +129,7 @@ def box(paths: BoxPaths, monkeypatch: pytest.MonkeyPatch):
          patch("boxmunge.commands.restore.clear_probation_if_active"), \
          patch("boxmunge.commands.restore.compose_down",
                side_effect=lambda *a, **k: b.events.append("down")), \
-         patch("boxmunge.commands.restore.compose_up",
-               side_effect=lambda *a, **k: (b.events.append("up-all"),
-                                            b.up_kwargs.append(k))):
+         patch("boxmunge.compose_guard.compose_up", side_effect=b.compose_up):
         yield b
 
 
@@ -187,8 +192,8 @@ class TestVerifiedBeforeStop:
 
 class TestAlwaysRestarted:
     @pytest.mark.parametrize("attr,value", [
-        ("start_error", subprocess.TimeoutExpired(["docker"], 120)),
-        ("start_error", subprocess.CalledProcessError(1, ["docker"])),
+        ("start_error", DockerError("Command timed out after 300s: docker compose up")),
+        ("start_error", DockerError("Command failed: docker compose up")),
         ("restore_error", PermissionError(13, "Permission denied")),
         ("restore_error", subprocess.TimeoutExpired(["docker"], 600)),
         ("restore_rc", 1),

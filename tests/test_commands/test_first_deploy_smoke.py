@@ -49,7 +49,7 @@ class TestDeployJoin:
             "boxmunge-scripts/smoke.sh": "#!/bin/sh\nexit 1\n",
         })
         failing = SmokeResult(status="warning", message="not ready yet")
-        with patch("boxmunge.commands.deploy.compose_up"), \
+        with patch("boxmunge.compose_guard.compose_up"), \
                 patch("boxmunge.commands.deploy.caddy_reload"), \
                 patch("boxmunge.commands.check.run_smoke_in_container",
                       return_value=failing):

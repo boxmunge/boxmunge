@@ -224,7 +224,7 @@ class TestBadRecordFailsNoisily:
 
 @contextmanager
 def _docker():
-    with patch("boxmunge.commands.deploy.compose_up"), \
+    with patch("boxmunge.compose_guard.compose_up"), \
             patch("boxmunge.commands.deploy.caddy_reload"):
         yield
 
@@ -244,7 +244,7 @@ def test_deploy_and_rollback_keep_retired_data(paths) -> None:
             assert run_deploy("myapp", paths) == 0
 
     deploy("2026-10-13T090000000000", MOUNTS_UPLOADS)
-    (pdir / "uploads").mkdir()
+    assert (pdir / "uploads").is_dir()  # deploy creates missing bind sources
     (pdir / "uploads" / "photo.jpg").write_text("USER UPLOAD")
     deploy("2026-10-13T100000000000", NO_MOUNTS)
     deploy("2026-10-13T110000000000", NO_MOUNTS)
@@ -278,7 +278,7 @@ def test_stage_unstage_and_promote_keep_retired_data(paths, capsys) -> None:
                  files={"compose.yml": MOUNTS_UPLOADS})
     with _stage_docker():
         assert run_deploy("myapp", paths) == 0
-    (pdir / "uploads").mkdir()
+    assert (pdir / "uploads").is_dir()  # deploy creates missing bind sources
     (pdir / "uploads" / "photo.jpg").write_text("USER UPLOAD")
 
     def without_mount(hour: int) -> str:
@@ -322,7 +322,7 @@ def _pre_upgrade_box(paths) -> Path:
     deploy = _deployer(paths)
     pdir = paths.project_dir("myapp")
     assert deploy(9, MOUNTS_UPLOADS) == 0
-    (pdir / "uploads").mkdir()
+    assert (pdir / "uploads").is_dir()  # deploy creates missing bind sources
     (pdir / "uploads" / "photo.jpg").write_text("USER UPLOAD")
     assert deploy(10, NO_MOUNTS) == 0
     _record(pdir).unlink()
@@ -370,7 +370,7 @@ class TestPreUpgradeProjects:
         deploy = _deployer(paths)
         pdir = paths.project_dir("myapp")
         assert deploy(9, MOUNTS_UPLOADS) == 0
-        (pdir / "uploads").mkdir()
+        assert (pdir / "uploads").is_dir()  # deploy creates missing bind sources
         (pdir / "uploads" / "photo.jpg").write_text("USER UPLOAD")
         for hour in (10, 11):
             place_bundle(paths, timestamp=f"2026-10-13T{hour}0000000000",
@@ -395,7 +395,7 @@ class TestPreUpgradeProjects:
         deploy = _deployer(paths)
         pdir = paths.project_dir("myapp")
         assert deploy(9, MOUNTS_UPLOADS) == 0
-        (pdir / "uploads").mkdir()
+        assert (pdir / "uploads").is_dir()  # deploy creates missing bind sources
         (pdir / "uploads" / "photo.jpg").write_text("USER UPLOAD")
         assert deploy(10, reads_uploads) == 0
         _record(pdir).unlink()
@@ -493,7 +493,7 @@ class TestEdgeCasesOfStartingTheRecord:
         deploy = _deployer(paths)
         pdir = paths.project_dir("myapp")
         assert deploy(9, MOUNTS_UPLOADS) == 0
-        (pdir / "uploads").mkdir()
+        assert (pdir / "uploads").is_dir()  # deploy creates missing bind sources
         (pdir / "uploads" / "photo.jpg").write_text("USER UPLOAD")
         from tests.bundle_helpers import place_bundle
         from boxmunge.commands.deploy import run_deploy

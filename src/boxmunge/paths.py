@@ -201,6 +201,12 @@ class BoxPaths:
         name = _checked(name)
         return self.deploy_state / f"{name}.json"
 
+    def project_bind_record(self, name: str, *, staging: bool = False) -> Path:
+        """Bind sources (and their kinds) a project, or its staging copy,
+        was last deployed with. Outside the project: no container reaches it."""
+        name = _checked(name)
+        return self.deploy_state / f"{name}{STAGING_SUFFIX if staging else ''}.binds.json"
+
     def project_paused_state(self, name: str) -> Path:
         name = _checked(name)
         return self.deploy_state / f"{name}.paused.json"

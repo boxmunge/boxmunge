@@ -42,11 +42,15 @@ def _bundle(paths, timestamp: str, smoke: str) -> None:
 
 @contextmanager
 def _docker(deploy_up=None):
-    with patch("boxmunge.commands.deploy.compose_up", side_effect=deploy_up), \
+    def up(*_args, project_name, **_kwargs):
+        # `deploy_up` fails production's start; staging's still succeeds.
+        if deploy_up is not None and project_name == "myapp":
+            raise deploy_up
+
+    with patch("boxmunge.compose_guard.compose_up", side_effect=up), \
             patch("boxmunge.commands.deploy.caddy_reload"), \
             patch("boxmunge.commands.check.run_smoke_in_container",
                   return_value=SmokeResult("ok", "")), \
-            patch("boxmunge.commands.stage_cmd.compose_up"), \
             patch("boxmunge.commands.stage_cmd.caddy_reload"), \
             patch("boxmunge.commands.unstage_cmd.compose_down"), \
             patch("boxmunge.commands.unstage_cmd.caddy_reload"):

@@ -109,7 +109,7 @@ def _place_deploy_bundle(paths, timestamp="2026-03-31T091500000000"):
 
 
 class TestBundleSourceDeploy:
-    @patch("boxmunge.commands.deploy.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     @patch("boxmunge.commands.deploy.caddy_reload")
     def test_deploy_from_inbox(self, mock_reload, mock_up, paths):
         add_project("testapp", paths)
@@ -144,7 +144,7 @@ class TestRefusesQuarantined:
     does not silently undo a security action on the next operator-driven
     flow. Mirrors the paused-refusal pattern."""
 
-    @patch("boxmunge.commands.deploy.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     @patch("boxmunge.commands.deploy.caddy_reload")
     def test_refuses_quarantined_project(
         self, mock_reload, mock_up, paths: BoxPaths, capsys,
@@ -203,7 +203,7 @@ class TestCvePolicyValidatorWiring:
         with tarfile.open(bundle_path, "w:gz") as tar:
             tar.add(staging, arcname="testapp")
 
-    @patch("boxmunge.commands.deploy.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     @patch("boxmunge.commands.deploy.caddy_reload")
     def test_deploy_passes_security_block_as_cve_policy(
         self, _reload, _up, paths: BoxPaths,
@@ -248,7 +248,7 @@ class TestDeployComposeRejectionExit3:
             "boxmunge.intake.validate_user_compose",
             side_effect=ComposeSecurityError("simulated hostile key: privileged"),
         ):
-            with patch("boxmunge.commands.deploy.compose_up"):
+            with patch("boxmunge.compose_guard.compose_up"):
                 with patch("boxmunge.commands.deploy.caddy_reload"):
                     rc = run_deploy("testapp", paths)
         assert rc == 3

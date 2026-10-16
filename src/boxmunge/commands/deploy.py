@@ -13,7 +13,8 @@ from boxmunge.commands.deploy_steps import (
 )
 from boxmunge.compose import prepare_compose_override
 from boxmunge.data_dirs import SetAsideError, log_kept, set_aside_announcer
-from boxmunge.docker import CaddyConfigRejected, compose_up, caddy_reload, DockerError
+from boxmunge.compose_guard import compose_up_checked
+from boxmunge.docker import CaddyConfigRejected, caddy_reload, DockerError
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.identity import register_project_identity
 from boxmunge.intake import (
@@ -208,18 +209,21 @@ def _start_release(
     actual_ref: str,
     snapshot_name: str | None,
     component: str,
+    promoting: bool = False,
 ) -> int:
     """Run pre-deploy, generate config, start, smoke-test, record.
 
     The release on disk has already passed validate_release_tree and its
-    pre-deploy snapshot (if any) has been taken.
+    pre-deploy snapshot (if any) has been taken. `promoting`: it is the
+    staged release, which production may start from while it is staged.
     """
     print(f"Deploying {project_name} (ref: {actual_ref})...")
     rc = run_pre_deploy_hook(project_name, paths, manifest)
     if rc != 0:
         return rc
     generate_release_config(project_name, paths, manifest, component)
-    return replace_release(project_name, paths, manifest, actual_ref, snapshot_name)
+    return replace_release(project_name, paths, manifest, actual_ref, snapshot_name,
+                           component=component, promoting=promoting)
 
 
 def run_pre_deploy_hook(project_name: str, paths: BoxPaths, manifest: dict) -> int:
@@ -250,7 +254,8 @@ def generate_release_config(project_name: str, paths: BoxPaths, manifest: dict,
 
 
 def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
-                    actual_ref: str, snapshot_name: str | None) -> int:
+                    actual_ref: str, snapshot_name: str | None,
+                    component: str = "deploy", promoting: bool = False) -> int:
     """Start the release in production, route it, smoke-test, record.
 
     From the container start on, production runs (or partly runs) this
@@ -258,11 +263,14 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
     either way: the release it replaced becomes the rollback target, paired
     with the snapshot taken before this deploy. Only a first deploy that
     fails records nothing, so a retry is still treated as a first deploy.
+
+    `promoting` is true when the release is the staged one a `promote`
+    deploys: production may start from it even while it is staged.
     """
     first_deploy = "current_ref" not in read_state(paths.project_deploy_state(project_name))
     rc = 1
     try:
-        rc = _start_and_verify(project_name, paths, manifest)
+        rc = _start_and_verify(project_name, paths, manifest, component, promoting)
     finally:
         if rc == 0 or not first_deploy:
             record_deploy_state(paths, project_name, actual_ref, snapshot_name)
@@ -278,13 +286,15 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
     return 0
 
 
-def _start_and_verify(project_name: str, paths: BoxPaths, manifest: dict) -> int:
+def _start_and_verify(project_name: str, paths: BoxPaths, manifest: dict,
+                      component: str = "deploy", promoting: bool = False) -> int:
     project_dir = paths.project_dir(project_name)
     print("  Starting containers...")
     compose_files = ["compose.yml", "compose.boxmunge.yml"]
     try:
-        compose_up(project_dir, compose_files=compose_files,
-                   project_name=project_name)
+        compose_up_checked(paths, project_name, component=component,
+                           compose_files=compose_files, record=True, promoting=promoting,
+                           deploying=True)
     except DockerError as e:
         print(f"  ERROR: {e}", file=sys.stderr)
         log_error("deploy", f"Deploy failed: container start: {e}", paths, project=project_name)

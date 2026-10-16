@@ -27,7 +27,7 @@ backup:
 
 
 class TestDeployEnvFiles:
-    @patch("boxmunge.commands.deploy.compose_up")
+    @patch("boxmunge.compose_guard.compose_up")
     @patch("boxmunge.commands.deploy.caddy_reload")
     def test_compose_override_includes_env_files(self, mock_reload, mock_up, paths):
         pdir = paths.project_dir("testapp")
@@ -63,6 +63,7 @@ class TestComposeOverrideEmitsOffWarning:
         paths.project_dir = lambda name: proj
         paths.project_releases = lambda name: proj / ".releases"
         paths.project_secrets = lambda name: proj / "secrets.env"
+        paths.project_bind_record = lambda name, staging=False: tmp_path / "no-record.json"
         # get_logger reads paths.logs; the deploy warning path logs, and
         # a pristine logger (no warm cache) triggers a cold build.
         paths.logs = tmp_path / "logs"
@@ -95,6 +96,7 @@ class TestComposeOverrideEmitsOffWarning:
         paths.project_dir = lambda name: proj
         paths.project_releases = lambda name: proj / ".releases"
         paths.project_secrets = lambda name: proj / "secrets.env"
+        paths.project_bind_record = lambda name, staging=False: tmp_path / "no-record.json"
         # get_logger reads paths.logs; the deploy warning path logs, and
         # a pristine logger (no warm cache) triggers a cold build.
         paths.logs = tmp_path / "logs"
@@ -123,6 +125,7 @@ class TestComposeOverrideEmitsOffWarning:
         paths.project_dir = lambda name: proj
         paths.project_releases = lambda name: proj / ".releases"
         paths.project_secrets = lambda name: proj / "secrets.env"
+        paths.project_bind_record = lambda name, staging=False: tmp_path / "no-record.json"
         # get_logger reads paths.logs; the deploy warning path logs, and
         # a pristine logger (no warm cache) triggers a cold build.
         paths.logs = tmp_path / "logs"

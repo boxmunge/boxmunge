@@ -34,6 +34,7 @@ from boxmunge.commands.backup_cmd import list_snapshots, run_backup, run_backup_
 from boxmunge.commands.restore import run_restore
 from boxmunge.commands.test_restore_cmd import run_test_restore
 from boxmunge.paths import BoxPaths
+from tests.deploy_helpers import mark_deployed
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("system_container")]
 
@@ -84,7 +85,7 @@ def tripwire(int_paths: BoxPaths, monkeypatch):
 
 
 MANIFEST = """\
-schema_version: 1
+schema_version: 3
 id: 01SYSTEMTIER0000000000000
 project: {name}
 source: bundle
@@ -95,6 +96,8 @@ services:
     port: 8080
     routes:
       - path: /
+    writable:
+      external: true
 backup:
   type: custom
   service: app
@@ -137,6 +140,7 @@ def tiny_project(int_paths: BoxPaths, request):
     project_dir.mkdir()
     (project_dir / "manifest.yml").write_text(MANIFEST.format(name=name))
     (project_dir / "compose.yml").write_text(COMPOSE)
+    mark_deployed(int_paths, name)
     try:
         subprocess.run(["docker", "compose", "-p", name, "-f", "compose.yml", "up", "-d"],
                        cwd=project_dir, check=True, capture_output=True, timeout=180)

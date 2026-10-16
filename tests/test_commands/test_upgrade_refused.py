@@ -57,7 +57,7 @@ def test_regenerate_leaves_refused_project_on_its_old_configs(paths) -> None:
 
 
 def test_restart_skips_refused_projects(paths) -> None:
-    with patch("boxmunge.commands.upgrade_steps.compose_up") as up:
+    with patch("boxmunge.compose_guard.compose_up") as up:
         restart = restart_projects(paths, refused={"bad": "x"})
     assert [c.kwargs["project_name"] for c in up.call_args_list] == ["good"]
     assert restart == Restart(succeeded=["good"])
@@ -65,7 +65,7 @@ def test_restart_skips_refused_projects(paths) -> None:
 
 @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
 @patch("boxmunge.notify.send_notification", return_value=True)
-@patch("boxmunge.commands.upgrade_steps.compose_up")
+@patch("boxmunge.compose_guard.compose_up")
 def test_apply_does_not_rebuild_or_rerun_refused_project(
     up, pushover, _reload, paths, capsys,
 ) -> None:
@@ -90,7 +90,7 @@ def test_apply_does_not_rebuild_or_rerun_refused_project(
 
 @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
 @patch("boxmunge.notify.send_notification", return_value=True)
-@patch("boxmunge.commands.upgrade_steps.compose_up")
+@patch("boxmunge.compose_guard.compose_up")
 def test_no_alert_when_nothing_is_refused(up, pushover, _reload, paths) -> None:
     paths.project_compose("bad").write_text("services:\n  web:\n    image: nginx:1.25\n")
     assert run_upgrade(paths, apply_only=True) == 0
@@ -99,7 +99,7 @@ def test_no_alert_when_nothing_is_refused(up, pushover, _reload, paths) -> None:
 
 
 @patch("boxmunge.notify.send_notification", return_value=True)
-@patch("boxmunge.commands.upgrade_steps.compose_up")
+@patch("boxmunge.compose_guard.compose_up")
 def test_dry_run_reports_projects_the_new_validator_refuses(
     up, pushover, paths, capsys,
 ) -> None:

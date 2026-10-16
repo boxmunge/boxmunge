@@ -7,6 +7,7 @@ from typing import Any
 import yaml
 
 from boxmunge import built_images, compose_resolve
+from boxmunge.bind_sources import refresh_overlay_hash
 from boxmunge.compose_images import built_image_name
 from boxmunge.compose_mounts import PROD_SMOKE_SOURCE, STAGING_SMOKE_SOURCE
 from boxmunge.fileutil import atomic_write_text
@@ -348,6 +349,7 @@ def prepare_compose_override(
         live_mounts=live_mounts,
     )
     atomic_write_text(override_path, content)
+    refresh_overlay_hash(project_dir, paths.project_bind_record(project_name))
     # Before the overlay named built images under boxmunge.invalid/, Compose
     # tagged them `<project>-<service>` or the service's own `image:`, names
     # any other project could run. Drop those names from images whose

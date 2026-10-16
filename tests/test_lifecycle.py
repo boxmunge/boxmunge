@@ -111,7 +111,7 @@ class TestComposeUpCallersUseIsBlocked:
         for py in src_root.rglob("*.py"):
             text = py.read_text()
             if (
-                re.search(r"\bcompose_up\(", text)
+                re.search(r"\bcompose_up(?:_checked)?\(", text)
                 or re.search(r"\bcompose_pull\(", text)
             ):
                 callers.append(py)
@@ -125,6 +125,8 @@ class TestComposeUpCallersUseIsBlocked:
             "boxmunge/cve/quarantine.py",
             # Wrapper module — defines compose_up/compose_pull.
             "boxmunge/docker.py",
+            # Start checks — callers above it gate on is_blocked.
+            "boxmunge/compose_guard.py",
         }
 
         missing: list[str] = []

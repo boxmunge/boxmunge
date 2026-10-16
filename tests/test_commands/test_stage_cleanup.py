@@ -28,9 +28,13 @@ V2 = "2026-10-13T100000000000"
 
 @contextmanager
 def _docker(stage_up=None):
-    with patch("boxmunge.commands.deploy.compose_up"), \
+    def up(*_args, project_name, **_kwargs):
+        # `stage_up` fails the staging start; production's still succeeds.
+        if stage_up is not None and project_name.endswith("-staging"):
+            raise stage_up
+
+    with patch("boxmunge.compose_guard.compose_up", side_effect=up), \
             patch("boxmunge.commands.deploy.caddy_reload"), \
-            patch("boxmunge.commands.stage_cmd.compose_up", side_effect=stage_up), \
             patch("boxmunge.commands.stage_cmd.caddy_reload"), \
             patch("boxmunge.commands.unstage_cmd.compose_down") as down, \
             patch("boxmunge.commands.unstage_cmd.caddy_reload"):

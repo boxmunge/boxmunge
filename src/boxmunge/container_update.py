@@ -22,10 +22,11 @@ from typing import TYPE_CHECKING, Any
 
 from boxmunge import docker_containers
 from boxmunge.container_update_targets import UpdateTarget, persist_result
+from boxmunge.compose_guard import ComposeRefused, compose_up_checked, compose_up_platform
 from boxmunge.deployed_inventory import (
     DeployedService, InventoryError, load_deployed_inventory, pulled_services,
 )
-from boxmunge.docker import DockerError, compose_pull, compose_up, tag_image
+from boxmunge.docker import DockerError, compose_pull, tag_image
 from boxmunge.docker_containers import ProjectContainer
 from boxmunge.backup import BackupKind
 from boxmunge.commands.backup_cmd import backup_locked
@@ -195,6 +196,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _recreate(paths: "BoxPaths", target: UpdateTarget) -> None:
+    """Recreate the target's containers from its local images. A user
+    project goes through the start checks. Raises DockerError."""
+    if target.is_caddy:
+        compose_up_platform(target.project_dir, target.compose_files, target.name, build=False)
+    else:
+        compose_up_checked(paths, target.name, component="container-update",
+                           compose_files=target.compose_files, build=False)
+
+
 def _maybe_rollback(
     paths: "BoxPaths", target: UpdateTarget, result: dict[str, Any],
     services: dict[str, DeployedService], running: dict[str, ProjectContainer],
@@ -220,8 +231,7 @@ def _maybe_rollback(
 
     # Recreate from the now-retagged local images
     try:
-        compose_up(target.project_dir, compose_files=target.compose_files, build=False,
-                   project_name=target.name)
+        _recreate(paths, target)
         healthy, _ = _wait_healthy(target, list(services), one_shot_services(services))
     except DockerError as e:
         log_error("container-update", f"Rollback recreate failed: {e}", paths, project=target.name)
@@ -367,8 +377,10 @@ def _update_locked(
 
     # Step 5: Recreate
     try:
-        compose_up(target.project_dir, compose_files=target.compose_files, build=False,
-                   project_name=target.name)
+        _recreate(paths, target)
+    except ComposeRefused as e:
+        # Nothing was recreated, so there is nothing to roll back.
+        return _fail(paths, target, result, f"refused: {e}", before=before)
     except DockerError as e:
         result["status"] = "failed"
         result["reason"] = f"recreate_failed: {e}"
