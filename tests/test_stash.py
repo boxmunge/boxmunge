@@ -471,3 +471,58 @@ class TestRestoreSecretsLocking:
         restorer.join(timeout=10)
         assert not restorer.is_alive()
         assert secrets.path.read_text() == original
+
+
+class TestOtherSymlinksRefused:
+    """Only a git project's links into repo/ are left out; any other symlink
+    in the stash set stops the stash before anything is written."""
+
+    @pytest.mark.parametrize("where", [
+        "projects/app/secrets.env", "projects/app/manifest.yml",
+        "projects/app/boxmunge-scripts", "projects/app/boxmunge-scripts/smoke.sh",
+        "state/deploy/app.json", "config/boxmunge.yml",
+    ])
+    def test_refused_with_the_path(self, tmp_path: Path, where: str) -> None:
+        paths = _make_paths(tmp_path)
+        _setup_project(paths, "app")
+        (paths.project_dir("app") / "boxmunge-scripts").mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "f").write_text("x\n")
+        link = paths.root / where
+        if link.is_dir():
+            link.rename(tmp_path / "moved")
+        else:
+            link.unlink(missing_ok=True)
+        link.symlink_to(elsewhere if where.endswith("scripts") else elsewhere / "f")
+        with pytest.raises(StashError, match="symlinks") as exc:
+            create_stash(paths)
+        assert str(link) in str(exc.value)
+        assert "Nothing has been changed" in str(exc.value)
+        assert list(paths.stashes.iterdir()) == []
+
+    def test_git_named_link_outside_repo_is_refused(self, tmp_path: Path) -> None:
+        paths = _make_paths(tmp_path)
+        pdir = paths.project_dir("gitapp")
+        (pdir / "repo").mkdir(parents=True)
+        (tmp_path / "other.yml").write_text("x: 1\n")
+        (pdir / "compose.yml").symlink_to(tmp_path / "other.yml")
+        with pytest.raises(StashError, match="compose.yml"):
+            create_stash(paths)
+
+    def test_restore_leaves_a_relinked_git_file(self, tmp_path: Path) -> None:
+        """A stash taken while the link was a frozen file does not undo a re-link."""
+        paths = _make_paths(tmp_path)
+        pdir = paths.project_dir("gitapp")
+        repo = pdir / "repo"
+        repo.mkdir(parents=True)
+        (repo / "manifest.yml").write_text("# repository\n")
+        frozen = tarfile.TarInfo(name="projects/gitapp/manifest.yml")
+        frozen.mode = 0o644
+        archive = paths.stashes / "boxmunge-stash-frozen.tar.gz"
+        _build_malicious_archive(archive, [(frozen, b"# frozen copy\n")])
+        (pdir / "manifest.yml").symlink_to("repo/manifest.yml")
+        restore_stash(paths, archive)
+        assert (pdir / "manifest.yml").is_symlink()
+        assert (repo / "manifest.yml").read_text() == "# repository\n"
+        assert "links into the project's repo/" in paths.log_file.read_text()

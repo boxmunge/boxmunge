@@ -96,7 +96,19 @@ A git project's `manifest.yml` and `compose.yml` are symlinks into `repo/`, so e
 reads the repository's files. boxmunge never writes them. When an upgrade raises the manifest
 schema, a git project's manifest is migrated in memory each time it is read, and the upgrade
 logs a warning and sends one alert (per schema change) asking you to set `schema_version` to
-the current version in the repository. Nothing breaks in the meantime.
+the current version in the repository. Nothing breaks in the meantime. If the repository's
+manifest has no `schema_version` at all, the alert asks you to add one.
+
+Upgrades by earlier releases replaced a git project's `manifest.yml` link with a regular file, after
+which deploys read that frozen copy instead of the repository. `upgrade --dry-run`, `upgrade`
+(once, with an alert), `check <project>` and `doctor` report such a project with the commands
+that fix it. Compare the two files first, and re-link once the repository's file is the one to
+use:
+
+```
+diff /opt/boxmunge/projects/myapp/manifest.yml /opt/boxmunge/projects/myapp/repo/manifest.yml
+ln -sfn repo/manifest.yml /opt/boxmunge/projects/myapp/manifest.yml
+```
 
 ---
 
@@ -1215,9 +1227,11 @@ How an upgrade is applied and undone:
    it; a second in a row blocklists it. A successful install and `clear-blocklist` reset the
    count.
 2. Platform state is stashed: config, deploy state, and each project's manifest, compose file,
-   env files and `boxmunge-scripts/`, with their modes and owners. Symlinks are not stashed
-   (a git project's `manifest.yml` and `compose.yml` link into `repo/`), and a restore leaves
-   them as they are on disk, skipping with a log line any link an older stash holds.
+   env files and `boxmunge-scripts/`, with their modes and owners. A git project's
+   `manifest.yml` and `compose.yml` links into `repo/` are left out, and a restore never
+   touches them (it skips, with a log line, any link an older stash holds). Any other symlink
+   among these files stops the upgrade before anything changes, naming each link: replace it
+   with the file it points to, or remove it, and retry.
 3. The venvs swap and `upgrade --apply` migrates manifests, regenerates every project's Caddy
    site and compose overlay, reloads Caddy and restarts projects. A bundle project's manifest
    is rewritten at the new schema. A git project's is not: its `manifest.yml` links into
