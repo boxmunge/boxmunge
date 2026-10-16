@@ -2,7 +2,7 @@
 """Per-service hostile-key rules for user compose files.
 
 Compose's multi-file merge lets some user keys win over boxmunge's overlay
-(privileged/pid/network_mode/userns_mode/ipc/cgroupns_mode overwrite;
+(privileged/pid/network_mode/userns_mode/ipc/cgroup overwrite;
 cap_add/volumes/security_opt/devices/device_cgroup_rules extend). Each
 rule here inspects one service mapping and reports the keys that would
 defeat the default hardening. Values are normalised before comparison
@@ -37,13 +37,12 @@ class Finding(NamedTuple):
 # string "true") is rejected outright rather than interpreted.
 _STRICT_BOOL_KEYS: tuple[str, ...] = ("privileged", "read_only", "init")
 
-# Namespace keys: the value `host` shares the host's namespace, and
-# `container:<name>` joins another container's (possibly another
-# project's) namespace. Keys listed in _CONTAINER_JOIN_KEYS reject both.
+# Namespace keys: the value `host` shares the host's namespace. Joining
+# another container's namespace (`container:<name>`, a network by name) is
+# an isolation question, answered in compose_isolation.
 _NAMESPACE_KEYS: tuple[str, ...] = (
-    "pid", "ipc", "network_mode", "uts", "userns_mode", "cgroupns_mode",
+    "pid", "ipc", "network_mode", "uts", "userns_mode", "cgroup",
 )
-_CONTAINER_JOIN_KEYS: frozenset[str] = frozenset({"pid", "ipc", "network_mode"})
 
 _SECCOMP_DEFAULTS: frozenset[str] = frozenset({"runtime/default", "builtin"})
 
@@ -76,26 +75,75 @@ def _check_namespaces(svc: dict[str, Any]) -> list[Finding]:
                 key, repr(raw), "must be a string; remove it or quote the value",
             ))
             continue
-        value = raw.strip().lower()
-        if value == "host":
+        if raw.strip().lower() == "host":
             hits.append(Finding(key, raw))
-        elif key in _CONTAINER_JOIN_KEYS and value.startswith("container:"):
-            hits.append(Finding(
-                key, raw,
-                "joins another container's namespace, which may belong to "
-                "another project; use service:<name> for a service in this "
-                "compose file, or remove it",
-            ))
     return hits
 
 
 def _check_devices(svc: dict[str, Any]) -> list[Finding]:
-    """Any `devices` or `device_cgroup_rules` entry grants host devices."""
+    """Any `devices`, `device_cgroup_rules`, `gpus` or reserved device
+    grants host devices."""
+    deploy = svc.get("deploy")
+    resources = deploy.get("resources") if isinstance(deploy, dict) else None
+    reservations = resources.get("reservations") if isinstance(resources, dict) else None
+    candidates = {key: svc.get(key) for key in ("devices", "device_cgroup_rules", "gpus")}
+    if isinstance(reservations, dict):
+        candidates["deploy.resources.reservations.devices"] = reservations.get("devices")
     hits: list[Finding] = []
-    for key in ("devices", "device_cgroup_rules"):
-        entries = svc.get(key)
+    for key, entries in candidates.items():
         if isinstance(entries, list) and entries:
             hits.append(Finding(key, str(entries[0])))
+        elif isinstance(entries, str) and entries:
+            hits.append(Finding(key, entries))
+    return hits
+
+
+_API_SOCKET_ADVICE = (
+    "hands the container the Docker daemon's API, which can start privileged "
+    "containers with any host path mounted; remove it (boxmunge runs the "
+    "project's containers itself), or set security.profile: off with reason"
+)
+
+_PRIVILEGED_HOOK_ADVICE = (
+    "runs the hook with full privileges, regaining every capability the "
+    "hardening drops; remove privileged: (hooks run with the service's own "
+    "privileges), or set security.profile: off with reason"
+)
+
+
+def _check_daemon_access(svc: dict[str, Any]) -> list[Finding]:
+    """`use_api_socket` mounts the daemon socket without a volume entry."""
+    value = svc.get("use_api_socket")
+    if value is None or value is False:
+        return []
+    return [Finding("use_api_socket", repr(value), _API_SOCKET_ADVICE)]
+
+
+def _hook_entries(svc: dict[str, Any]) -> list[tuple[str, Any]]:
+    """Every lifecycle hook as (label, hook): post_start, pre_stop, and the
+    `exec` hook of `develop.watch` sync+exec rules."""
+    hooks: list[tuple[str, Any]] = []
+    for key in ("post_start", "pre_stop"):
+        entries = svc.get(key)
+        if isinstance(entries, list):
+            hooks += [(f"{key}[{i}]", hook) for i, hook in enumerate(entries)]
+    develop = svc.get("develop")
+    watch = develop.get("watch") if isinstance(develop, dict) else None
+    if isinstance(watch, list):
+        hooks += [
+            (f"develop.watch[{i}].exec", rule.get("exec"))
+            for i, rule in enumerate(watch)
+            if isinstance(rule, dict) and "exec" in rule
+        ]
+    return hooks
+
+
+def _check_hooks(svc: dict[str, Any]) -> list[Finding]:
+    hits: list[Finding] = []
+    for label, hook in _hook_entries(svc):
+        value = hook.get("privileged") if isinstance(hook, dict) else None
+        if value is not None and value is not False:
+            hits.append(Finding(f"{label}.privileged", repr(value), _PRIVILEGED_HOOK_ADVICE))
     return hits
 
 
@@ -175,12 +223,20 @@ def _check_build(svc: dict[str, Any]) -> list[Finding]:
         ))
     if build.get("privileged") is not None and build.get("privileged") is not False:
         hits.append(Finding("build.privileged", repr(build.get("privileged"))))
+    if build.get("entitlements"):
+        hits.append(Finding(
+            "build.entitlements", repr(build["entitlements"]),
+            "grants build steps privileges beyond an ordinary container "
+            "(network.host, security.insecure); remove it, or set "
+            "security.profile: off with reason",
+        ))
     return hits
 
 
 _RULES = (
-    _check_strict_bools, _check_namespaces, _check_devices,
-    _check_cgroup_parent, _check_security_opt, _check_cap_add, _check_build,
+    _check_strict_bools, _check_namespaces, _check_devices, _check_daemon_access,
+    _check_hooks, _check_cgroup_parent, _check_security_opt, _check_cap_add,
+    _check_build,
 )
 
 

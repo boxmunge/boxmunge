@@ -833,15 +833,16 @@ services:
             validate_user_compose(compose, paths, project_name="myapp")
 
 
-class TestRejectsCgroupnsHost:
-    def test_cgroupns_mode_host_rejected(self, tmp_path: Path, paths) -> None:
+class TestRejectsCgroupHost:
+    def test_cgroup_host_rejected(self, tmp_path: Path, paths) -> None:
+        # Compose's key is `cgroup`; `cgroupns_mode` is not a Compose key.
         compose = _write(tmp_path / "compose.yml", """
 services:
   web:
     image: nginx
-    cgroupns_mode: host
+    cgroup: host
 """)
-        with pytest.raises(ComposeSecurityError, match="cgroupns_mode"):
+        with pytest.raises(ComposeSecurityError, match="cgroup = host"):
             validate_user_compose(compose, paths, project_name="myapp")
 
 

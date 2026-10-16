@@ -6,11 +6,15 @@ keep one project's compose file from reaching another project: it may
 declare and join only its own networks (any alias is fine there: a
 project-local network cannot collide with another project's), use only
 its own named volumes, and
-read host files (secrets, configs, build contexts) only from inside its
-own directory. It may not publish ports on the host either; a port that
-must be published is declared in the manifest (see `published_ports`). The shared `boxmunge-proxy` network is attached by
-boxmunge's overlay for routed services; a compose file may not join it
-itself.
+read host files (secrets, configs, build inputs; see compose_build) only
+from inside its own directory. It may not publish ports on the host
+either; a port that must be published is declared in the manifest (see
+`published_ports`). Nor may it hand a service to anything outside its
+containers (`provider`, `models`). The shared `boxmunge-proxy` network is
+attached by boxmunge's overlay for routed services; a compose file may
+not join it itself, by `networks:` or by `network_mode`, nor join another
+container's pid or ipc namespace. Images it builds stay in its own image
+namespace (see compose_images).
 
 Unlike the hardening rules, these are not relaxed by `security.profile:
 off`: opting a service out of container hardening does not entitle it to
@@ -21,6 +25,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from boxmunge.compose_build import build_problems, local_dockerfile
+from boxmunge.compose_images import image_problems
 from boxmunge.compose_mounts import host_path_forms, outside_roots
 
 PROXY_NETWORK = "boxmunge-proxy"
@@ -103,13 +109,22 @@ def _check_volumes(doc: dict[str, Any], project: str) -> list[str]:
 
 
 def _check_file_refs(doc: dict[str, Any], base_dir: Path, roots: tuple[Path, ...]) -> list[str]:
-    """Top-level secrets and configs read host files; keep them in the project."""
+    """Top-level secrets and configs read host files or the environment of
+    whoever runs compose; keep them to files in the project."""
     problems: list[str] = []
     for section in ("secrets", "configs"):
         entries = doc.get(section) or {}
         if not isinstance(entries, dict):
             continue
         for key, decl in entries.items():
+            if isinstance(decl, dict) and "environment" in decl:
+                problems.append(
+                    f"top-level {section} {key!r} reads environment variable "
+                    f"{decl['environment']!r} from the platform's own process "
+                    f"environment, not the project's. Use a file: inside the "
+                    f"project, or `secrets set` for secret values."
+                )
+                continue
             path = decl.get("file") if isinstance(decl, dict) else None
             if isinstance(path, str) and outside_roots(path, base_dir, roots):
                 norm, _ = host_path_forms(path, base_dir)
@@ -118,6 +133,51 @@ def _check_file_refs(doc: dict[str, Any], base_dir: Path, roots: tuple[Path, ...
                     f"project directory. Keep the file inside the project "
                     f"directory, or use `secrets set` for secret values."
                 )
+    return problems
+
+
+_MODELS_PROBLEM = (
+    "{where} models: runs AI models through Docker Model Runner, outside the "
+    "project's containers, which boxmunge does not manage. Remove it and run "
+    "the model server as an ordinary service from an image."
+)
+
+
+# Namespace modes that stay inside the project. `host` is a hardening
+# question (compose_service_rules); every other value, `container:<name>`
+# above all, joins a namespace outside this compose file. Matched exactly,
+# as Docker matches them: `Host` would name a network. `service:<name>`
+# stays in the project (Compose refuses a service the project does not
+# define) where Compose supports it.
+_CONTAINED_MODES: dict[str, tuple[frozenset[str], bool]] = {
+    "network_mode": (frozenset({"none", "host"}), True),
+    "pid": (frozenset({"host"}), True),
+    "ipc": (frozenset({"none", "private", "shareable", "host"}), True),
+    "uts": (frozenset({"host"}), False),
+    "userns_mode": (frozenset({"host"}), False),
+    "cgroup": (frozenset({"host", "private"}), False),
+}
+
+
+def _check_namespace_joins(svc_name: str, svc: dict[str, Any]) -> list[str]:
+    """network_mode accepts any Docker network name, and the daemon accepts
+    `container:<name>` for pid, ipc and userns_mode."""
+    problems: list[str] = []
+    for key, (allowed, service_ok) in _CONTAINED_MODES.items():
+        mode = svc.get(key)
+        if mode is None or (isinstance(mode, str) and (
+                mode in allowed or (service_ok and mode.startswith("service:")))):
+            continue
+        instead = sorted(allowed - {"host"})
+        if service_ok:
+            instead.append("service:<name> for a service in this file")
+        if key == "network_mode":
+            instead.insert(0, "the project's own networks (remove it)")
+        advice = f"Use {', or '.join(instead)}." if instead else "Remove it."
+        problems.append(
+            f"service {svc_name}: {key} {mode!r} joins a namespace or network "
+            f"outside this compose file, which may be another project's. {advice}"
+        )
     return problems
 
 
@@ -165,14 +225,16 @@ def _check_service(
                 f"container's volumes, which may be another project's. Name a "
                 f"service in this compose file instead."
             )
-    build = svc.get("build")
-    context = build.get("context") if isinstance(build, dict) else build
-    if isinstance(context, str) and "://" not in context and not context.startswith("git@"):
-        if outside_roots(context, base_dir, roots):
-            problems.append(
-                f"service {svc_name}: build context {context!r} is outside the "
-                f"project directory. Keep the build context inside the project."
-            )
+    problems += _check_namespace_joins(svc_name, svc)
+    if "provider" in svc:
+        problems.append(
+            f"service {svc_name}: provider: hands the service to an executable "
+            f"on the host, which runs outside any container as whoever runs the "
+            f"deploy. Remove it and run the service from an image."
+        )
+    if "models" in svc:
+        problems.append(_MODELS_PROBLEM.format(where=f"service {svc_name}:"))
+    problems += build_problems(svc_name, svc.get("build"), base_dir, roots)
     return problems
 
 
@@ -182,10 +244,19 @@ def isolation_problems(
     """Return every cross-project isolation violation in a compose document."""
     problems = _check_networks(doc, project) + _check_volumes(doc, project)
     problems += _check_file_refs(doc, base_dir, roots)
+    if doc.get("models"):
+        problems.append(_MODELS_PROBLEM.format(where="top-level"))
     networks = doc.get("networks")
     declared = set(networks) if isinstance(networks, dict) else set()
     services = doc.get("services") or {}
     for svc_name, svc in services.items():
         if isinstance(svc, dict):
             problems += _check_service(svc_name, svc, declared, base_dir, roots)
+    if isinstance(services, dict):
+        dockerfiles = {
+            name: local_dockerfile(svc.get("build"), base_dir, roots)
+            for name, svc in services.items()
+            if isinstance(svc, dict) and svc.get("build") is not None
+        }
+        problems += image_problems(services, project, dockerfiles)
     return problems

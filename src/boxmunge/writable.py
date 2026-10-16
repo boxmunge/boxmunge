@@ -19,6 +19,7 @@ The three states are mutually exclusive. Validation enforces that.
 """
 from __future__ import annotations
 
+import posixpath
 import re
 from enum import Enum
 from typing import Any
@@ -47,6 +48,7 @@ NAME_PATTERN = r"^[a-z0-9][a-z0-9-]{0,30}$"
 _NAME_RE = re.compile(NAME_PATTERN)
 
 _MAX_PATH_LEN = 256
+_FORBIDDEN_PATH_CHARS = re.compile(r"[\x00-\x1f\x7f:,]")
 _KNOWN_KEYS: frozenset[str] = frozenset({"ephemeral", "persistent", "external"})
 
 
@@ -133,8 +135,20 @@ def writable_json(svc: Any) -> dict[str, Any]:
     return out
 
 
+def _canonical(path: str) -> str:
+    """The single spelling of an absolute container path: no `.` or `..`
+    segments, no repeated or trailing slash."""
+    return "/" + posixpath.normpath(path).lstrip("/")
+
+
 def _validate_path(path: Any, context: str) -> str:
     """Validate a single container path. Returns the path on success.
+
+    Only the canonical spelling is accepted, so the reserved-root,
+    ephemeral-only and duplicate checks below can compare exactly: `/etc/.`
+    and `//etc` would otherwise slip past a check for `/etc`. `:` and `,`
+    are refused because Compose reads them as mount options, and control
+    characters because no real directory needs them.
 
     `context` flows into the error message so the operator can locate
     the offending entry.
@@ -147,13 +161,24 @@ def _validate_path(path: Any, context: str) -> str:
         raise WritableValidationError(
             f"{context}: path {path!r} must be absolute (start with '/')"
         )
-    if ".." in path.split("/"):
-        raise WritableValidationError(
-            f"{context}: path {path!r} contains '..'"
-        )
     if len(path) > _MAX_PATH_LEN:
         raise WritableValidationError(
             f"{context}: path {path!r} too long (max {_MAX_PATH_LEN} chars)"
+        )
+    bad = _FORBIDDEN_PATH_CHARS.search(path)
+    if bad:
+        raise WritableValidationError(
+            f"{context}: path {path!r} contains {bad.group()!r}; container "
+            f"paths may not contain ':', ',' or control characters (Compose "
+            f"reads ':' and ',' as mount options). Use a plain directory path "
+            f"such as /app/data."
+        )
+    canonical = _canonical(path)
+    if path != canonical:
+        raise WritableValidationError(
+            f"{context}: path {path!r} is not canonical (no '.' or '..' "
+            f"segments, repeated '/' or trailing slash); write it as "
+            f"{canonical!r}"
         )
     return path
 
@@ -202,10 +227,6 @@ def _validate_persistent_entry(
             f"starting with letter or digit)"
         )
     mount = _validate_path(entry["mount"], f"{ctx}.mount")
-    if mount.endswith("/") and mount != "/":
-        raise WritableValidationError(
-            f"{ctx}: mount {mount!r} must not have a trailing slash"
-        )
     if mount in RESERVED_ROOTS:
         raise WritableValidationError(
             f"{ctx}: mount {mount!r} is a reserved root — mounting a "

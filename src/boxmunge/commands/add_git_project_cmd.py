@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from boxmunge.identity import check_project_identity, register_project_identity
 from boxmunge.log import log_operation
 from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
+from boxmunge.project_registry import check_new_name
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -21,6 +22,11 @@ def run_add_git_project(
 
     if project_dir.exists() and (project_dir / "manifest.yml").exists():
         print(f"ERROR: Project '{name}' already exists.", file=sys.stderr)
+        return 1
+    try:
+        check_new_name(name, paths)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
     repo_dir = project_dir / "repo"

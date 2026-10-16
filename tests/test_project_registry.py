@@ -156,3 +156,46 @@ def test_nightly_scan_targets_only_deployed_projects(paths: BoxPaths) -> None:
     (paths.project_dir("live")).mkdir(parents=True)
     (paths.project_dir("live") / "manifest.yml").write_text("project: live\n")
     assert _parse_scan_targets([], paths) == ["live"]
+
+
+class TestOverlappingNames:
+    """`foo` and `foo-bar` can share container names (foo's service bar-web
+    and foo-bar's web both become foo-bar-web-1), so new pairs are refused."""
+
+    @pytest.mark.parametrize("existing,new", [("foo", "foo-bar"), ("foo-bar", "foo"),
+                                              ("mongo", "mongo-express")])
+    def test_new_overlapping_name_refused(self, paths: BoxPaths, existing, new) -> None:
+        from boxmunge.project_registry import add_project, load_registered_projects
+        add_project(existing, paths)
+        with pytest.raises(ValueError, match="container names"):
+            add_project(new, paths)
+        assert new not in load_registered_projects(paths)
+
+    @pytest.mark.parametrize("a,b", [("foo", "foobar"), ("foo-bar", "foo-baz"), ("bar", "foo-bar")])
+    def test_names_that_do_not_extend_each_other_accepted(self, paths: BoxPaths, a, b) -> None:
+        from boxmunge.project_registry import add_project
+        add_project(a, paths)
+        add_project(b, paths)
+
+    def test_existing_pair_keeps_working_and_doctor_warns(self, paths: BoxPaths) -> None:
+        from boxmunge.commands.doctor import run_doctor
+        from boxmunge.project_registry import add_project, load_registered_projects
+        (paths.state / "projects.txt").write_text("foo\nfoo-bar\n")
+        add_project("foo-bar", paths)  # already registered: no error
+        assert load_registered_projects(paths) == {"foo", "foo-bar"}
+        import io, json, contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            run_doctor(paths, as_json=True)
+        [warning] = [r for r in json.loads(out.getvalue()) if r["name"] == "Project names"]
+        assert warning["status"] == "WARN" and "foo / foo-bar" in warning["detail"]
+
+
+def test_auto_migrate_registers_on_disk_overlaps_with_a_warning(paths: BoxPaths) -> None:
+    from boxmunge.project_registry import load_registered_projects
+    paths.log_file.parent.mkdir(parents=True, exist_ok=True)
+    for name in ("foo", "foo-bar"):
+        (paths.project_dir(name)).mkdir(parents=True)
+        (paths.project_dir(name) / "manifest.yml").write_text("project: x\n")
+    assert load_registered_projects(paths) == {"foo", "foo-bar"}
+    assert "foo / foo-bar" in paths.log_file.read_text()

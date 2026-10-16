@@ -13,7 +13,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from boxmunge.docker import compose_down, caddy_reload, DockerError
+from boxmunge.docker import compose_down, caddy_reload, remove_built_images, DockerError
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.paths import BoxPaths
@@ -69,7 +69,8 @@ def run_project_delete(
 
 
 def _teardown(project_name: str, paths: BoxPaths) -> list[str]:
-    """compose down production and staging. Returns the failures."""
+    """compose down production and staging, and remove the images built for
+    them. Returns the failures."""
     project_dir = paths.project_dir(project_name)
     failures: list[str] = []
     if paths.project_compose(project_name).exists():
@@ -89,6 +90,13 @@ def _teardown(project_name: str, paths: BoxPaths) -> list[str]:
                          project_name=f"{project_name}-staging")
         except DockerError as e:
             failures.append(f"staging: {e}")
+    # Only the images the platform built for this project: their names
+    # (boxmunge.invalid/<compose-project>/...) belong to no one else.
+    for compose_project in (project_name, f"{project_name}-staging"):
+        try:
+            remove_built_images(compose_project)
+        except DockerError as e:
+            failures.append(f"built images of {compose_project}: {e}")
     return failures
 
 

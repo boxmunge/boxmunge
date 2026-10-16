@@ -57,7 +57,7 @@ def _prod_smoke(paths) -> str:
     """The smoke.sh production's container sees at /boxmunge-scripts."""
     pdir = paths.project_dir("myapp")
     overlay = yaml.safe_load(paths.project_compose_override("myapp").read_text())
-    source = overlay["services"]["web"]["volumes"][0].split(":")[0]
+    source = overlay["services"]["web"]["volumes"][0]["source"]
     return (pdir / source / "smoke.sh").read_text()
 
 

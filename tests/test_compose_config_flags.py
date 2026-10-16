@@ -38,9 +38,9 @@ def test_missing_env_file_exists_only_during_resolution(tmp_path: Path) -> None:
     (tmp_path / "project.env").write_text("MODE=prod\n")
     during: list[bool] = []
 
-    def fake_config(project_dir, compose_files=None, *, project_name):
+    def fake_config(project_dir, compose_files=None, *, project_name, **_kw):
         during.append((project_dir / "secrets.env").exists())
-        return "{}"
+        return '{"services": {"web": {"image": "nginx"}}}'
 
     with patch.object(compose_resolve.docker, "compose_config", side_effect=fake_config):
         compose_resolve.resolve_compose_config(tmp_path / "compose.yml", "myapp")

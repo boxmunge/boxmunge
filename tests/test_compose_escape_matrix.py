@@ -18,7 +18,9 @@ from boxmunge.security_overlay import SecurityValidationError, validate_security
 
 
 def _validate(paths: BoxPaths, svc: dict[str, Any], top: dict | None = None) -> None:
-    doc: dict[str, Any] = {"services": {"web": {"image": "alpine", **svc}}}
+    # A build takes Compose's default image name; tagging `alpine` is refused.
+    base = {} if "build" in svc else {"image": "alpine"}
+    doc: dict[str, Any] = {"services": {"web": {**base, **svc}}}
     doc.update(top or {})
     project_dir = paths.project_dir("myapp")
     project_dir.mkdir(parents=True, exist_ok=True)

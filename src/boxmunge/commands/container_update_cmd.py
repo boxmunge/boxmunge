@@ -46,7 +46,7 @@ def _dry_run_target(paths: BoxPaths, target: UpdateTarget) -> dict[str, Any]:
     before = display_images(running)
     try:
         compose_pull(target.project_dir, compose_files=target.compose_files,
-                     project_name=target.name)
+                     project_name=target.name, services=sorted(services))
     except DockerError as e:
         return {"name": target.name, "status": "failed", "reason": f"pull_failed: {e}",
                 "previous_digests": before, "current_digests": before}

@@ -55,6 +55,37 @@ class TestPathValidation:
         with pytest.raises(WritableValidationError, match="trailing slash"):
             validate_writable_block(block, "web")
 
+    # Finding 28: only the canonical spelling is accepted, so exact
+    # comparisons against reserved roots and duplicates cannot be dodged.
+    @pytest.mark.parametrize("mount,canonical", [
+        ("/etc/.", "/etc"), ("//etc", "/etc"), ("/tmp/.", "/tmp"),
+        ("/app//data", "/app/data"), ("/app/./data", "/app/data"),
+    ])
+    def test_non_canonical_mount_rejected_with_canonical_spelling(
+        self, mount: str, canonical: str,
+    ) -> None:
+        block = {"persistent": [{"name": "data", "mount": mount}]}
+        with pytest.raises(WritableValidationError, match=f"write it as '{canonical}'"):
+            validate_writable_block(block, "web")
+
+    def test_non_canonical_ephemeral_rejected(self) -> None:
+        with pytest.raises(WritableValidationError, match="not canonical"):
+            validate_writable_block({"ephemeral": ["/data", "/data/."]}, "web")
+
+    @pytest.mark.parametrize("path", [
+        "/data:ro", "/data,readonly", "/data\n", "/da\x00ta", "/data\x7f",
+    ])
+    def test_option_and_control_characters_rejected(self, path: str) -> None:
+        for block in ({"ephemeral": [path]},
+                      {"persistent": [{"name": "data", "mount": path}]}):
+            with pytest.raises(WritableValidationError, match="such as /app/data"):
+                validate_writable_block(block, "web")
+
+    def test_root_is_canonical_but_reserved(self) -> None:
+        block = {"persistent": [{"name": "root", "mount": "/"}]}
+        with pytest.raises(WritableValidationError, match="reserved"):
+            validate_writable_block(block, "web")
+
     def test_persistent_reserved_root_rejected(self) -> None:
         block = {"persistent": [{"name": "etc", "mount": "/etc"}]}
         with pytest.raises(WritableValidationError, match="reserved"):

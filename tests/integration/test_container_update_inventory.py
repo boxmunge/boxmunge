@@ -44,7 +44,7 @@ def project(tmp_path, monkeypatch):
 
 def _pull_moves(monkeypatch, tag: str, new_source: str) -> None:
     """Stand in for `docker compose pull`: the tag now names a newer image."""
-    def pull(project_dir, compose_files=None, *, project_name):
+    def pull(project_dir, compose_files=None, *, project_name, services):
         docker("tag", new_source, tag)
     monkeypatch.setattr(cu, "compose_pull", pull)
 

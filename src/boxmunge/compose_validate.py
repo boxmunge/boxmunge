@@ -18,6 +18,7 @@ from typing import Any
 import yaml
 
 from boxmunge import compose_resolve
+from boxmunge.compose_images import image_warnings
 from boxmunge.compose_isolation import isolation_problems
 from boxmunge.compose_mounts import has_named_volume
 from boxmunge.compose_service_rules import service_findings
@@ -240,6 +241,21 @@ def _enforce_cve_rule(
 
 
 
+def _profile_note(services: dict[str, Any], message: str) -> str:
+    """Explain a refusal of a service that only runs under a profile."""
+    for name, svc in services.items():
+        if isinstance(svc, dict) and svc.get("profiles") and message.startswith(f"service {name}:"):
+            return (
+                f" (Service {name} is in Compose profile(s) "
+                f"{', '.join(map(str, svc['profiles']))}, which do not start by "
+                f"default, but boxmunge checks every profile: restore and other "
+                f"commands can start a profiled service by name. Move dev-only "
+                f"services out of the deployed bundle, for example into a "
+                f"compose file you do not ship.)"
+            )
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -316,6 +332,14 @@ def validate_user_compose(
             f"the top-level name: line."
         )
 
+    if "models" in doc:
+        # Checked on the literal file: `config` drops unused top-level models.
+        raise ComposeSecurityError(
+            "compose.yml declares top-level models:, which Docker Model Runner "
+            "runs outside the project's containers. Remove it and run the model "
+            "server as an ordinary service from an image."
+        )
+
     if not isinstance(doc.get("services") or {}, dict):
         raise ComposeSecurityError(
             f"could not parse compose.yml: 'services' must be a mapping, "
@@ -335,7 +359,9 @@ def validate_user_compose(
 
     isolation = isolation_problems(doc, project_name, base_dir, roots)
     if isolation:
-        raise ComposeSecurityError(isolation[0])
+        raise ComposeSecurityError(isolation[0] + _profile_note(services, isolation[0]))
+    for warning in image_warnings(services, project_name):
+        log_warning("compose-validate", warning, paths, project=project_name)
     for entry in declared_ports(cve_policy):
         if entry["service"] not in services:
             raise ComposeSecurityError(
@@ -368,9 +394,8 @@ def validate_user_compose(
             continue
 
         first = findings[0]
-        raise ComposeSecurityError(
-            f"service {svc_name}: {first.key} = {first.value} {first.advice}"
-        )
+        message = f"service {svc_name}: {first.key} = {first.value} {first.advice}"
+        raise ComposeSecurityError(message + _profile_note(services, message))
 
     # Compose-merge dedupe defense-in-depth. Reject any user-declared
     # security_opt entry that the boxmunge overlay would also emit for a
