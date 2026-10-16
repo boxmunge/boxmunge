@@ -51,6 +51,9 @@ class ServerError(Exception):
     """The server cannot start on the requested socket."""
 
 
+_DUPLICATE_LENGTH = "Send exactly one Content-Length header."
+
+
 class _BadFraming(Exception):
     """A request the HTTP layer refuses before any action is looked up."""
 
@@ -179,12 +182,18 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self._watchdog.cancel()
+        if self._duplicate_length():
+            self._refuse(400, _DUPLICATE_LENGTH)
+            return
         if self._declares_body():
             # Never leave a body unread on a kept-alive connection: it would
             # be parsed as the next request.
             self._refuse(400, "A GET takes no request body; send none.")
             return
         self._respond(*self.server.app.handle("GET", self.path, None))
+
+    def _duplicate_length(self) -> bool:
+        return len(self.headers.get_all("Content-Length") or []) > 1
 
     def _declares_body(self) -> bool:
         return (self.headers.get("Transfer-Encoding") is not None
@@ -215,8 +224,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if self.headers.get("Transfer-Encoding") is not None:
             raise ActionError(ErrorCode.INVALID_PARAMS,
                               "Chunked request bodies are not supported; send Content-Length.")
-        if len(self.headers.get_all("Content-Length") or []) > 1:
-            raise _BadFraming(400, "Send exactly one Content-Length header.")
+        if self._duplicate_length():
+            raise _BadFraming(400, _DUPLICATE_LENGTH)
         raw = self.headers.get("Content-Length")
         if raw is None or not _CONTENT_LENGTH_RE.fullmatch(raw):
             raise ActionError(ErrorCode.INVALID_PARAMS,

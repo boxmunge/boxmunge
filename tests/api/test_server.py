@@ -114,6 +114,10 @@ def test_malformed_bodies_are_invalid_params_and_the_server_carries_on(
      400, "GET takes no request body"),
     (b"POST /v1/actions/status.get HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n"
      b"Content-Length: 40\r\n\r\n{}", 400, "one Content-Length header"),
+    (b"GET /v1/actions HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n"
+     b"Content-Length: 40\r\n\r\n", 400, "one Content-Length header"),
+    (b"GET /v1/actions HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n"
+     b"Content-Length: 0\r\n\r\n", 400, "one Content-Length header"),
     (b"GET /v1/actions HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n",
      400, "GET takes no request body"),
     # "\xb2" is a superscript two once headers are decoded as Latin-1: str.isdigit()
