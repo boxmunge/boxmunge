@@ -6,9 +6,11 @@ from typing import Any
 
 import yaml
 
+from boxmunge.fileutil import atomic_write_text
 from boxmunge.manifest_fields import (
     SERVICE_NAME_RE, host_problem, port_problem, route_path_problem,
 )
+from boxmunge.migration import MigrationError, migrate_manifest
 
 CURRENT_SCHEMA_VERSION = 3
 
@@ -17,8 +19,12 @@ class ManifestError(Exception):
     """Raised when a manifest file cannot be loaded."""
 
 
-def load_manifest(path: Path) -> dict[str, Any]:
-    """Load a manifest.yml file and return its contents as a dict.
+def load_manifest_as_written(path: Path) -> dict[str, Any]:
+    """Load a manifest.yml file exactly as written, without migrating it.
+
+    For checking the file an author wrote (validation, rewriting a source
+    manifest) and for the upgrade's on-disk migration. Everything else
+    reads through load_manifest.
 
     Raises ManifestError, naming the file, if it doesn't exist, can't be
     read, or can't be parsed.
@@ -38,6 +44,52 @@ def load_manifest(path: Path) -> dict[str, Any]:
         raise ManifestError(f"Manifest is not a YAML mapping: {path}")
 
     return data
+
+
+def at_current_schema(manifest: dict[str, Any], path: Path) -> dict[str, Any]:
+    """The manifest migrated in memory to CURRENT_SCHEMA_VERSION.
+
+    A git project's manifest.yml is a link into its checkout, which the
+    upgrade never rewrites, so it can stay at an older schema indefinitely.
+    A schema_version that is not a supported integer is returned unchanged
+    for validate_manifest to report, and an absent one stays absent: readers
+    that need it refuse to guess (security_cmd).
+    """
+    version = manifest.get("schema_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        return manifest
+    if not 1 <= version < CURRENT_SCHEMA_VERSION:
+        return manifest
+    try:
+        return migrate_manifest(manifest, CURRENT_SCHEMA_VERSION)
+    except MigrationError as e:
+        raise ManifestError(f"Cannot migrate manifest {path}: {e}") from e
+
+
+def load_manifest(path: Path) -> dict[str, Any]:
+    """Load a manifest.yml file at the current schema (see at_current_schema).
+
+    Raises ManifestError, naming the file, if it doesn't exist, can't be
+    read, parsed or migrated.
+    """
+    return at_current_schema(load_manifest_as_written(path), path)
+
+
+def write_manifest(path: Path, manifest: dict[str, Any]) -> None:
+    """Atomically replace a regular manifest.yml with `manifest`.
+
+    Refuses a symlink: a git project's manifest.yml links into its checkout,
+    and renaming a file over the link would silently detach the project from
+    its repository's manifest. Writing through the link is no better: the
+    checkout is the repository's content, which the next checkout overwrites
+    or conflicts with.
+    """
+    if path.is_symlink():
+        raise ManifestError(
+            f"{path} is a symlink (a git project's manifest.yml links into "
+            f"its repository); refusing to replace it. Change the manifest in "
+            f"the repository instead.")
+    atomic_write_text(path, yaml.dump(manifest, default_flow_style=False, sort_keys=False))
 
 
 def validate_manifest(

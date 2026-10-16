@@ -5,7 +5,7 @@ import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 import yaml
-from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
+from boxmunge.manifest import load_manifest_as_written, validate_manifest, ManifestError
 from boxmunge.ulid import generate_ulid
 
 
@@ -77,7 +77,7 @@ def run_bundle(project_dir_str: str, output: str | None = None,
         return 1
 
     try:
-        manifest = load_manifest(manifest_path)
+        manifest = load_manifest_as_written(manifest_path)
     except ManifestError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

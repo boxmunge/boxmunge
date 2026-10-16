@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from boxmunge.commands.security_cmd import cmd_security
+from boxmunge.manifest import CURRENT_SCHEMA_VERSION
 
 # Suppressions created through the CLI are capped at 90 days (B-15).
 _SOON = (date.today() + timedelta(days=30)).isoformat()
@@ -45,7 +46,8 @@ def test_security_default_lists_full_payload(project_with_default) -> None:
         cmd_security(["demo"])
     out = buf.getvalue()
     assert "demo" in out
-    assert "schema_version: 2" in out
+    # Shown at the schema boxmunge applies: manifests migrate on load.
+    assert f"schema_version: {CURRENT_SCHEMA_VERSION}" in out
     assert "service: web" in out
     assert "no-new-privileges:true" in out
     assert "pids_limit" in out and "512" in out

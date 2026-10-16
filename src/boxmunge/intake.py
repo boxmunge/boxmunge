@@ -20,7 +20,9 @@ from boxmunge.bundle import check_bundle_contents, extract_bundle
 from boxmunge.compose_validate import ComposeSecurityError, validate_user_compose
 from boxmunge.identity import check_project_identity
 from boxmunge.log import log_error
-from boxmunge.manifest import ManifestError, load_manifest, validate_manifest
+from boxmunge.manifest import (
+    ManifestError, at_current_schema, load_manifest_as_written, validate_manifest,
+)
 from boxmunge.security_overlay import services_with_off_profile
 
 if TYPE_CHECKING:
@@ -94,17 +96,23 @@ def validate_release_tree(
         raise IntakeError("Release is missing manifest.yml")
     if not (tree / "compose.yml").exists():
         raise IntakeError("Release is missing compose.yml")
+    # Validated as written, so the schema gates (a block that needs a newer
+    # schema_version) apply to the author's file; used at the current schema.
     try:
-        manifest = load_manifest(manifest_path)
+        written = load_manifest_as_written(manifest_path)
     except ManifestError as e:
         raise IntakeError(str(e)) from e
 
-    errors, warnings = validate_manifest(manifest, project_name)
+    errors, warnings = validate_manifest(written, project_name)
     if errors:
         detail = "\n".join(f"  {err}" for err in errors)
         raise IntakeError(f"Manifest validation failed:\n{detail}")
     for w in warnings:
         print(f"  WARN: {w}")
+    try:
+        manifest = at_current_schema(written, manifest_path)
+    except ManifestError as e:
+        raise IntakeError(str(e)) from e
 
     try:
         check_project_identity(project_name, manifest.get("id", ""), paths)

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from boxmunge.identity import check_project_identity, register_project_identity
 from boxmunge.log import log_operation
-from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
+from boxmunge.manifest import load_manifest_as_written, validate_manifest, ManifestError
 from boxmunge.project_registry import check_new_name
 
 if TYPE_CHECKING:
@@ -47,7 +47,7 @@ def run_add_git_project(
         return 1
 
     try:
-        manifest = load_manifest(manifest_path)
+        manifest = load_manifest_as_written(manifest_path)
     except ManifestError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

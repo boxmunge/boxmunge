@@ -6,12 +6,10 @@ upgrade_cmd sequences these for --apply and the full flow; check_upgrade is
 the write-nothing rendering behind --dry-run.
 """
 
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
-
-import yaml
 
 from boxmunge.caddy import generate_caddy_config, prepare_caddy_config
 from boxmunge.commands.health_state import is_monitor_stopped
@@ -21,7 +19,11 @@ from boxmunge.docker import compose_up, DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
-from boxmunge.manifest import load_manifest, validate_manifest, CURRENT_SCHEMA_VERSION
+from boxmunge.manifest import (
+    CURRENT_SCHEMA_VERSION, load_manifest, load_manifest_as_written, validate_manifest,
+    write_manifest,
+)
+from boxmunge.manifest_schema_alert import alert_outdated_repository_manifest
 from boxmunge.migration import migrate_manifest, MigrationError
 from boxmunge.pause import render_maintenance_caddy_config
 from boxmunge.fleet import report_project_failure
@@ -33,8 +35,11 @@ class UpgradeGateError(Exception):
     """A step the upgrade cannot succeed without failed; the shim rolls back."""
 
 
-def _project_manifests(paths: BoxPaths) -> Iterator[tuple[Path, dict[str, Any]]]:
-    """Yield (project_dir, manifest) for every project that has a manifest.
+def _project_manifests(
+    paths: BoxPaths, load: Callable[[Path], dict[str, Any]],
+) -> Iterator[tuple[Path, dict[str, Any]]]:
+    """Yield (project_dir, load(manifest.yml)) for every project that has a
+    manifest: load_manifest_as_written to migrate it, load_manifest to use it.
 
     ManifestError propagates. A corrupted manifest means the project never
     gets its schema bumped or overlay regenerated; skipping it would let the
@@ -45,7 +50,7 @@ def _project_manifests(paths: BoxPaths) -> Iterator[tuple[Path, dict[str, Any]]]
     for project_dir in sorted(paths.projects.iterdir()):
         manifest_path = project_dir / "manifest.yml"
         if project_dir.is_dir() and manifest_path.exists() and _addressable(project_dir, paths):
-            yield project_dir, load_manifest(manifest_path)
+            yield project_dir, load(manifest_path)
 
 
 def _addressable(project_dir: Path, paths: BoxPaths) -> bool:
@@ -81,13 +86,28 @@ def _migrated(project_dir: Path, manifest: dict[str, Any]) -> dict[str, Any] | N
     return migrated
 
 
-def migrate_project_manifests(paths: BoxPaths) -> list[str]:
+@dataclass
+class ManifestMigration:
+    """Projects whose manifest is older than the current schema: `written`
+    were migrated on disk; `in_memory` are git projects, whose manifest.yml
+    links into the repository and is migrated by every reader instead."""
+    written: list[str] = field(default_factory=list)
+    in_memory: list[str] = field(default_factory=list)
+
+
+def _links_into_repository(project_dir: Path) -> bool:
+    return (project_dir / "manifest.yml").is_symlink()
+
+
+def migrate_project_manifests(paths: BoxPaths) -> ManifestMigration:
     """Migrate all project manifests to the current schema version.
 
-    Returns list of project names that were migrated.
+    A git project's manifest.yml is never written: replacing its link with
+    a file would detach the project from its repository's manifest. Its
+    operator is alerted, once, to update the file in the repository.
     """
-    migrated_names = []
-    for project_dir, manifest in _project_manifests(paths):
+    result = ManifestMigration()
+    for project_dir, manifest in _project_manifests(paths, load_manifest_as_written):
         try:
             migrated = _migrated(project_dir, manifest)
         except MigrationError as e:
@@ -96,12 +116,14 @@ def migrate_project_manifests(paths: BoxPaths) -> list[str]:
             raise
         if migrated is None:
             continue
-        atomic_write_text(
-            project_dir / "manifest.yml",
-            yaml.dump(migrated, default_flow_style=False, sort_keys=False),
-        )
-        migrated_names.append(project_dir.name)
-    return migrated_names
+        if _links_into_repository(project_dir):
+            alert_outdated_repository_manifest(
+                paths, project_dir.name, manifest.get("schema_version", 1))
+            result.in_memory.append(project_dir.name)
+            continue
+        write_manifest(project_dir / "manifest.yml", migrated)
+        result.written.append(project_dir.name)
+    return result
 
 
 def _compose_refusal(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> str | None:
@@ -187,7 +209,7 @@ def regenerate_configs(paths: BoxPaths) -> Regeneration:
     operation holding it (a deploy, say) writes its own configs.
     """
     regen = Regeneration()
-    for project_dir, manifest in _project_manifests(paths):
+    for project_dir, manifest in _project_manifests(paths, load_manifest):
         name = manifest.get("project", project_dir.name)
         try:
             with project_lock(name, paths):
@@ -207,12 +229,18 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
     nothing is written, locked or logged. Raises on anything that would make
     --apply fail. Returns one report line per project."""
     report = []
-    for project_dir, manifest in _project_manifests(paths):
+    for project_dir, manifest in _project_manifests(paths, load_manifest_as_written):
         name = manifest.get("project", project_dir.name)
         migrated = _migrated(project_dir, manifest)
         if migrated is not None:
-            report.append(f"{name}: migration OK (schema v{manifest.get('schema_version', 1)} "
-                          f"-> v{CURRENT_SCHEMA_VERSION})")
+            written = manifest.get("schema_version", 1)
+            if _links_into_repository(project_dir):
+                report.append(f"{name}: repository manifest.yml uses schema v{written}; "
+                              f"migrated in memory to v{CURRENT_SCHEMA_VERSION} (the "
+                              f"upgrade will alert to update it in the repository)")
+            else:
+                report.append(f"{name}: migration OK (schema v{written} "
+                              f"-> v{CURRENT_SCHEMA_VERSION})")
             manifest = migrated
         block = is_blocked(name, paths)
         if block:

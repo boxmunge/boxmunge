@@ -3,7 +3,7 @@
 import json
 import sys
 
-from boxmunge.manifest import load_manifest, validate_manifest, ManifestError
+from boxmunge.manifest import load_manifest_as_written, validate_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 
 
@@ -36,7 +36,7 @@ def _gather_validation(
         return errors, warnings
 
     try:
-        manifest = load_manifest(manifest_path)
+        manifest = load_manifest_as_written(manifest_path)
     except ManifestError as e:
         errors.append(str(e))
         return errors, warnings

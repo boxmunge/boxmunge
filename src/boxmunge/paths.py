@@ -225,6 +225,11 @@ class BoxPaths:
         name = _checked(name)
         return self.staging_state / f"{name}.json"
 
+    def manifest_schema_alert_state(self, name: str) -> Path:
+        """The old-schema repository manifest alert last sent for a git project."""
+        name = _checked(name)
+        return self.state / "manifest-schema" / f"{name}.json"
+
     def project_lock_file(self, name: str) -> Path:
         name = _checked(name)
         return self.state / f"{name}.lock"
