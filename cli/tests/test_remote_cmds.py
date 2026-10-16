@@ -77,6 +77,21 @@ def test_prod_deploy_forwards_its_flags(project, fake_remote) -> None:
     assert _remote_commands(fake_remote)[-1].endswith("prod-deploy myapp --dry-run --no-snapshot")
 
 
+def test_prod_deploy_abandon_forwards_without_bundling(project, fake_remote) -> None:
+    assert run_cli(["prod-deploy", "--abandon"]) == 0
+    assert fake_remote.calls("scp") == []
+    assert _remote_commands(fake_remote) == ["handshake", "prod-deploy myapp --abandon"]
+    assert not list(project.glob("*.tar.gz"))
+
+
+@pytest.mark.parametrize("flag", ["--dry-run", "--no-snapshot"])
+def test_prod_deploy_abandon_takes_no_other_options(project, fake_remote, flag,
+                                                    capsys) -> None:
+    assert run_cli(["prod-deploy", "--abandon", flag]) == 2
+    assert fake_remote.calls() == []
+    assert "--abandon takes no other options" in capsys.readouterr().err
+
+
 def test_server_failure_is_the_exit_code(project, fake_remote) -> None:
     fake_remote.respond("ssh", "prod-deploy", stderr="ERROR: boom\n", rc=1)
     assert run_cli(["prod-deploy"]) == 1

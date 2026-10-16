@@ -53,6 +53,7 @@ on the server's console), or be confirmed at the terminal. An IP target needs
 | `stage [--dry-run]` | Bundle, upload, stage |
 | `promote [--dry-run]` | Promote staging to production |
 | `prod-deploy [--dry-run] [--no-snapshot]` | Bundle, upload, deploy to production |
+| `prod-deploy --abandon` | Undo an interrupted install before its pre-deploy hook ran |
 | `rollback [--yes]` | Roll production back to the previous deploy |
 | `status [--json]` | The server's project dashboard |
 | `logs [SERVICE] [--tail N] [--follow]` | This project's logs |
@@ -116,6 +117,13 @@ This needs OpenSSH 8.7 or newer on your machine. To upload by hand, use
 The client checks only the manifest's shape. The server validates the full
 manifest on `stage` and `prod-deploy` before it changes anything; add
 `--dry-run` to run that check without deploying.
+
+If a `prod-deploy` is interrupted or fails before the project's pre-deploy
+hook ran, `boxmunge prod-deploy --abandon` uploads nothing and runs
+`prod-deploy <project> --abandon` on the server: the previous release's files
+go back (a first deploy's code is removed), and containers and data were never
+touched. Once a hook may have run, use `boxmunge rollback` instead. Servers
+older than the release that added it refuse it as an unknown argument.
 
 ## MCP
 
