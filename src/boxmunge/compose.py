@@ -11,7 +11,8 @@ from boxmunge.compose_mounts import PROD_SMOKE_SOURCE, STAGING_SMOKE_SOURCE, is_
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
 from boxmunge.published_ports import overlay_ports
-from boxmunge.release import production_release_root, sync_live_scripts
+from boxmunge.release import sync_live_scripts
+from boxmunge.release_staging import production_release_root
 from boxmunge.security_overlay import (
     resolve_security,
     render_compose_security_fragment,

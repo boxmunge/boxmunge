@@ -133,11 +133,18 @@ unstage first.
 A `promote` that fails before any production container is touched (a failing `pre_deploy` hook)
 leaves the stage as it was. Once it has started the staged release's containers, production runs
 that release even if a later step fails (`compose up` errors part-way, Caddy rejects the site, smoke
-fails): the error says `production now runs <ref>`, the displaced production release becomes the
-previous release, exactly as after a failed `prod-deploy`, and `rollback` returns to it with the data
-snapshot taken before the promotion. `unstage` then only removes staging; it never puts the old
-release's files back under the new containers. If a promote is killed after starting production,
-`unstage` and `stage` refuse until `promote` is run again to finish it.
+fails): the error says `production now runs <ref>` and what `rollback` would do, and the displaced
+production release becomes the previous release, exactly as after a failed `prod-deploy`. `rollback`
+returns to it with the data snapshot taken before the promotion (it refuses, and says so, if the
+project keeps backups but that snapshot could not be taken). Staging is left up: `unstage` removes
+it, and never puts the old release's files back under the new containers. If staging cannot be
+torn down after a successful promotion, `promote` exits 1 and asks you to run `unstage`.
+
+If a promote is killed after it started production, `unstage`, `stage` and `prod-deploy` refuse
+until `promote` is run again. That rerun finishes the switch: it does not run the `pre_deploy` hook
+again or take a new snapshot (production data may already have changed), and however it ends, even
+if it fails, the displaced release becomes the previous release with the snapshot taken before the
+first attempt. After that, `unstage`, `rollback` and `prod-deploy` work as after any failed deploy.
 
 Production's smoke checks keep running the production release's own `boxmunge-scripts/` while a
 release is staged (production mounts a copy kept in `.releases/live-scripts/`), so a smoke check
@@ -514,6 +521,11 @@ hardening), installs it, restores the snapshot, and starts it. Secrets, suppress
 release, the previous release is the production release that `stage` displaced. A git project
 restores the snapshot and checks out the previous ref.
 
+A deploy that fails after it started the new release's containers still counts as having replaced
+the old one, since production may be running the new code: rollback returns to the release it
+replaced, with the snapshot taken just before. Deploying the same release again (a retry) keeps that
+pairing, rather than pairing the old release with data the new one may already have changed.
+
 Rollback refuses, with the reason, instead of doing half a rollback:
 
 - after a first deploy, or once a rollback has used the previous release (there is no older release
@@ -608,7 +620,9 @@ marked complete once the maintenance page is live, the containers are stopped an
 policies are held. If a step fails (Caddy cannot reload, `docker compose stop` errors), `pause`
 exits 1 with `ERROR: Pausing 'myapp' is incomplete: ...`: the project counts as paused, but may
 still be serving or running. Fix the cause and run `pause myapp` again to finish it (an incomplete
-pause is the one case where pausing a paused project is accepted), or `resume myapp`.
+pause is the one case where pausing a paused project is accepted), or `resume myapp`. Until then
+`status` shows it as `PAUSED (incomplete)`, `health` warns about it under `lifecycle`, and
+`container-update` logs that it may still be serving on images it does not update while paused.
 
 To bring it back:
 

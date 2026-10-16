@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from contextlib import ExitStack
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -238,15 +237,8 @@ def _maybe_rollback(
         log_operation("container-update", f"Rollback succeeded for {target.name}", paths, project=target.name)
 
 
-def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
-    """Update a single target. Returns a result dict suitable for logging.
-
-    A user project's whole update (lifecycle check, pre-update backup,
-    pull, recreate, health wait, rollback) runs under its project lock, so
-    it cannot interleave with a deploy, stage, restore, CVE quarantine, or
-    health tick. Caddy is not a project and has no project lock.
-    """
-    result: dict[str, Any] = {
+def _new_result(target: UpdateTarget) -> dict[str, Any]:
+    return {
         "name": target.name,
         "ts": _now(),
         "status": "succeeded",
@@ -256,24 +248,47 @@ def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
         "current_digests": {},
         "reason": None,
     }
-    with ExitStack() as stack:
-        if not target.is_caddy:
-            try:
-                stack.enter_context(project_lock(target.name, paths))
-            except LockError:
-                # Contention with a deploy, scan, or health tick is routine
-                # on a busy box, not a failure: skip (the caller retries
-                # once) and record nothing, so a project skipped day after
-                # day goes stale in the container-updates health check.
-                result["status"] = SKIPPED_LOCKED
-                result["reason"] = "project lock held by another operation"
-                log_warning(
-                    "container-update",
-                    f"Skipped {target.name}: project lock held by another operation",
-                    paths, project=target.name,
-                )
-                return result
-        return _update_locked(paths, target, result)
+
+
+def lock_skipped(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
+    """The result for a user project whose project lock is held.
+
+    Contention with a deploy, scan, or health tick is routine on a busy
+    box, not a failure: skip (the caller retries once) and record nothing,
+    so a project skipped day after day goes stale in the container-updates
+    health check.
+    """
+    result = _new_result(target)
+    result["status"] = SKIPPED_LOCKED
+    result["reason"] = "project lock held by another operation"
+    log_warning(
+        "container-update",
+        f"Skipped {target.name}: project lock held by another operation",
+        paths, project=target.name,
+    )
+    return result
+
+
+def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
+    """Update a single target. Returns a result dict suitable for logging.
+
+    A user project's whole update (lifecycle check, pre-update backup,
+    pull, recreate, health wait, rollback) runs under its project lock, so
+    it cannot interleave with a deploy, stage, restore, CVE quarantine, or
+    health tick. Caddy is not a project and has no project lock.
+    """
+    if target.is_caddy:
+        return update_target_locked(paths, target)
+    try:
+        with project_lock(target.name, paths):
+            return update_target_locked(paths, target)
+    except LockError:
+        return lock_skipped(paths, target)
+
+
+def update_target_locked(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
+    """The update core. Caller holds the project lock (user projects)."""
+    return _update_locked(paths, target, _new_result(target))
 
 
 def _update_locked(

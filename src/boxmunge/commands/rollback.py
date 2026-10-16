@@ -25,9 +25,10 @@ from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
 from boxmunge.release import (
-    ReleaseStateError, discard_previous_release, has_prestage, install_release,
+    ReleaseStateError, discard_previous_release, install_release,
     load_previous_release, mark_live,
 )
+from boxmunge.release_staging import has_prestage
 from boxmunge.state import read_state
 
 

@@ -34,7 +34,7 @@ from boxmunge import fileutil
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.pause import is_paused, write_paused_state
 from boxmunge.project_registry import add_project
-from boxmunge.release import has_prestage
+from boxmunge.release_staging import has_prestage
 from boxmunge.state import write_state
 
 from tests.bundle_helpers import place_bundle

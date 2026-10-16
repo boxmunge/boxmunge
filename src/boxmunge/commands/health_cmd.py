@@ -16,7 +16,7 @@ from boxmunge.docker import compose_command
 from boxmunge.docker_run import docker_env
 from boxmunge.fleet import PROJECT_INPUT_ERRORS
 from boxmunge.lifecycle import is_blocked
-from boxmunge.pause import is_paused
+from boxmunge.pause import is_paused, pause_incomplete
 from boxmunge.paths import BoxPaths
 
 
@@ -244,6 +244,7 @@ def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
     quarantined: list[tuple[str, str]] = []
     unreadable: list[str] = []
     stopped: list[str] = []
+    incomplete: list[str] = []
     for proj_dir in sorted(paths.projects.iterdir()):
         if not proj_dir.is_dir() or not (proj_dir / "manifest.yml").exists():
             continue
@@ -258,6 +259,8 @@ def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
                 continue
             cve = qstate.get("cve_id", "?")
             quarantined.append((name, cve))
+        elif pause_incomplete(name, paths):
+            incomplete.append(name)
         elif is_paused(name, paths):
             paused.append(name)
         elif is_monitor_stopped(name, paths):
@@ -275,13 +278,19 @@ def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
             "monitor-stopped: " + ", ".join(stopped)
             + " (run `recover <project>` once fixed)"
         )
+    if incomplete:
+        parts.append(
+            "pause incomplete: " + ", ".join(incomplete)
+            + " (may still be serving; run `pause <project>` again to finish, "
+            "or `resume <project>`)"
+        )
     if paused:
         parts.append("paused: " + ", ".join(paused))
     if unreadable:
         return HealthCheck("lifecycle", "error", "; ".join(parts))
     # Warn, never error: an app's critical stop is not a platform failure,
     # and `health` exit 2 rolls back a platform upgrade in probation.
-    if quarantined or stopped:
+    if quarantined or stopped or incomplete:
         return HealthCheck("lifecycle", "warn", "; ".join(parts))
     if paused:
         return HealthCheck("lifecycle", "ok", "; ".join(parts))

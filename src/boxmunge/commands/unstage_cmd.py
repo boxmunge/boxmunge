@@ -12,7 +12,7 @@ from boxmunge.caddy_journal import remove_site
 from boxmunge.docker import caddy_config_lock, compose_down, caddy_reload, DockerError
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.log import log_error, log_operation
-from boxmunge.release import has_prestage, prestage_replaced, restore_prestage
+from boxmunge.release_staging import has_prestage, prestage_replaced, restore_prestage
 from boxmunge.state import read_state, write_state
 
 if TYPE_CHECKING:

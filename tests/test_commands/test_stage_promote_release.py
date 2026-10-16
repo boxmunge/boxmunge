@@ -98,9 +98,9 @@ def test_failure_keeping_previous_after_promote_never_lets_unstage_revert(
     release must not linger: unstage would put old files under the running
     new release."""
     from boxmunge.commands.unstage_cmd import run_unstage
-    from boxmunge.release import has_prestage
+    from boxmunge.release_staging import has_prestage
     pdir = _prod_v1_staged_v2(paths)
-    with _docker(), patch("boxmunge.commands.deploy.prestage_to_previous",
+    with _docker(), patch("boxmunge.commands.promote_release.prestage_to_previous",
                           side_effect=OSError("disk full")):
         assert run_promote("myapp", paths) == 1
     assert not has_prestage(paths, "myapp")

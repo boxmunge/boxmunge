@@ -216,10 +216,11 @@ class TestQuarantineProjectHappyPath:
                 image_ref="myapp:1.2.3",
             )
 
-        # The record is written first (incomplete) and again last, marked
+        # The record is written first (incomplete), again with the original
+        # restart policies before any is changed, and last, marked
         # action_complete only once the page is routed and the stop landed.
         assert call_order == [
-            "state", "caddy_site", "caddy_reload", "compose_stop", "state",
+            "state", "caddy_site", "caddy_reload", "compose_stop", "state", "state",
         ]
 
     def test_caddy_site_is_maintenance_html(self, tmp_path: Path) -> None:

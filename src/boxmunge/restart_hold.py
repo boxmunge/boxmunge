@@ -12,23 +12,27 @@ pause record). Both functions raise DockerError; callers fail loudly.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from boxmunge.docker import project_restart_policies, set_restart_policy
 
 
-def hold(project_name: str, saved: Mapping[str, str]) -> dict[str, str]:
+def hold(project_name: str, saved: Mapping[str, str],
+         persist: Callable[[dict[str, str]], None]) -> dict[str, str]:
     """Set every project container's restart policy to "no".
 
-    Returns ``saved`` plus the original policy of each container not yet in
-    it. A policy already saved is kept: re-holding sees "no" everywhere and
-    must not overwrite "always" with it.
+    The originals (``saved`` plus the policy of each container not yet in
+    it) are handed to ``persist`` before any policy changes, so a hold that
+    fails part-way, then a re-run that sees "no", never saves "no" as an
+    original. A policy already saved is kept for the same reason. Returns
+    the originals.
     """
     current = project_restart_policies(project_name=project_name)
-    set_restart_policy(sorted(n for n, p in current.items() if p != "no"), "no")
     merged = dict(saved)
     for name, policy in current.items():
         merged.setdefault(name, policy)
+    persist(merged)
+    set_restart_policy(sorted(n for n, p in current.items() if p != "no"), "no")
     return merged
 
 

@@ -22,7 +22,8 @@ from boxmunge.intake import (
 from boxmunge.lifecycle import refuse_if_blocked
 from boxmunge.log import log_operation, log_error
 from boxmunge.project_registry import is_registered
-from boxmunge.release import install_release, keep_prestage_release, live_ref, mark_live
+from boxmunge.release import install_release, live_ref, mark_live
+from boxmunge.release_staging import keep_prestage_release
 from boxmunge.security_warn import warn_off_services, warn_writable_state
 from boxmunge.source import SourceError, bundle_ref, consume_bundle, resolve_bundle_source
 from boxmunge.state import write_state

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING
 from boxmunge.commands.deploy import deploy_locked
+from boxmunge.commands.promote_release import Promotion, deploy_staged_locked
 from boxmunge.commands.unstage_cmd import unstage_locked
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.lifecycle import refuse_if_blocked
@@ -46,27 +47,30 @@ def _run_promote_inner(
 ) -> int:
     print(f"Promoting {project_name} from staging to production...")
 
-    staged_ref = staging_state.get("ref")
-    ref_arg = staged_ref if staged_ref and staged_ref != "latest" else None
-
     # Deploy to production FIRST — staging stays live as fallback
     print("  Deploying to production...")
-    # staged=True: deploy the release `stage` installed, never a newer
-    # inbox bundle. The ref only matters for git-sourced projects.
-    deploy_result = deploy_locked(
-        project_name, paths, ref=ref_arg, component="promote", staged=True,
-    )
-    if deploy_result != 0:
-        print("ERROR: Production deploy failed. Staging is still live.", file=sys.stderr)
+    deployed = _deploy_to_production(project_name, paths, staging_state)
+    if deployed.rc != 0:
+        if deployed.switched:
+            print(f"ERROR: Production deploy failed after the switch (see above). "
+                  f"Staging is still up; run 'unstage {project_name}' to remove "
+                  f"it.", file=sys.stderr)
+        else:
+            print("ERROR: Production deploy failed. Staging is still live.",
+                  file=sys.stderr)
         # Preserve hardening-rejection exit code (3) so operators can
         # distinguish security policy failures from generic deploy errors.
-        return deploy_result if deploy_result == 3 else 1
+        return deployed.rc if deployed.rc == 3 else 1
 
     # Only tear down staging after successful production deploy
     print("  Tearing down staging...")
-    unstage_result = unstage_locked(project_name, paths)
-    if unstage_result != 0:
-        print("  WARN: Unstage had issues (production is live)")
+    if unstage_locked(project_name, paths) != 0:
+        print(f"ERROR: {project_name} is live in production, but tearing down "
+              f"staging failed (see above). Run 'unstage {project_name}' to "
+              f"finish.", file=sys.stderr)
+        log_operation("promote", "Promoted; staging teardown incomplete", paths,
+                      project=project_name)
+        return 1
 
     log_operation("promote", "Promoted from staging to production", paths, project=project_name)
     print(f"{project_name}: promoted to production successfully.")
@@ -75,6 +79,18 @@ def _run_promote_inner(
     webhook_safe("promote", project_name, paths)
 
     return 0
+
+
+def _deploy_to_production(project_name: str, paths: BoxPaths,
+                          staging_state: dict) -> Promotion:
+    """A bundle project deploys the release `stage` installed, never a newer
+    inbox bundle; a git project deploys the staged ref."""
+    if (paths.project_dir(project_name) / "repo").exists():
+        staged_ref = staging_state.get("ref")
+        ref_arg = staged_ref if staged_ref and staged_ref != "latest" else None
+        rc = deploy_locked(project_name, paths, ref=ref_arg, component="promote")
+        return Promotion(rc, switched=False)
+    return deploy_staged_locked(project_name, paths)
 
 
 def cmd_promote(args: list[str]) -> None:

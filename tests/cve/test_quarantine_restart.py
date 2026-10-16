@@ -89,6 +89,29 @@ def test_pinning_failure_leaves_the_action_incomplete(box, monkeypatch):
     assert not q.quarantine_action_complete("demo", paths)
 
 
+def test_a_partly_applied_hold_never_saves_no_as_an_original(box, monkeypatch):
+    """`docker update` set one container to "no" and then failed. The
+    re-assert that follows sees "no" there: it must still restore the
+    original policy on lift."""
+    paths, fake = box
+    seed_quarantine(paths, action_complete=False)
+    real = fake._set_policy
+
+    def partial(names, policy):
+        real(names[:1], policy)
+        raise DockerError("daemon went away")
+
+    monkeypatch.setattr("boxmunge.restart_hold.set_restart_policy", partial)
+    with pytest.raises(q.QuarantineError):
+        _reassert(paths)
+    assert fake.policies["demo-web-1"] == "no"
+    monkeypatch.setattr("boxmunge.restart_hold.set_restart_policy", real)
+    _reassert(paths)
+    assert q.read_quarantine_state("demo", paths)["restart_policies"] == {
+        "demo-web-1": "unless-stopped", "demo-worker-1": "always", "demo-cron-1": "no",
+    }
+
+
 # ---------- docker primitives (output parsing; Docker itself stubbed) ----------
 
 

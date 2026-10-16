@@ -20,7 +20,7 @@ from boxmunge.commands import (
 )
 from boxmunge.pause import write_paused_state
 from boxmunge.project_registry import add_project
-from boxmunge.release import has_prestage
+from boxmunge.release_staging import has_prestage
 from boxmunge.state import write_state
 
 from tests.bundle_helpers import place_bundle
@@ -156,3 +156,17 @@ def test_health_tick_never_checks_once_blocked(paths, marker) -> None:
     with patch.object(check, "run_check", run_check), _marker_at_lock(check, marker):
         assert check._check_project(NAME, paths, read_only=False) == 0
     run_check.assert_not_called()
+
+
+@MARKERS
+def test_container_update_never_recreates_once_blocked(tmp_path, marker) -> None:
+    from boxmunge.commands import container_update_cmd
+    from tests.test_lifecycle_locks import _cu_target, _setup
+    paths = _setup(tmp_path)
+    with patch.object(container_update_cmd, "update_target_locked") as update, \
+            patch.object(container_update_cmd, "_dry_run_target",
+                         return_value={"status": "no_change"}), \
+            _marker_at_lock(container_update_cmd, marker):
+        result = container_update_cmd._user_target(paths, _cu_target(paths), dry_run=False)
+    update.assert_not_called()
+    assert result["status"] in ("quarantined", "paused")

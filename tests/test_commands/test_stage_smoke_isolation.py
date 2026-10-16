@@ -23,7 +23,7 @@ from boxmunge.compose import prepare_compose_override
 from boxmunge.docker import DockerError
 from boxmunge.manifest import load_manifest
 from boxmunge.project_registry import add_project
-from boxmunge.release import has_prestage
+from boxmunge.release_staging import has_prestage
 
 from tests.bundle_helpers import manifest_text, place_bundle
 
