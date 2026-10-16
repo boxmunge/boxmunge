@@ -47,7 +47,7 @@ def make_app(tmp_path):
 def _failure_addrs(db_path):
     conn = sqlite3.connect(db_path)
     try:
-        return [r[0] for r in conn.execute("SELECT remote_addr FROM failures ORDER BY id")]
+        return [r[0] for r in conn.execute("SELECT reporter FROM failures ORDER BY id")]
     finally:
         conn.close()
 
@@ -133,10 +133,10 @@ class TestAddressRetention:
     def test_addresses_older_than_dedupe_window_are_forgotten(self, make_app, tmp_path):
         client = make_app().test_client()
         db_path = tmp_path / "checks.db"
-        old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(hours=7)).isoformat()
         conn = sqlite3.connect(db_path)
         conn.execute("INSERT INTO failures (version, installed_from, stage, reported_at, "
-                     "remote_addr) VALUES ('0.2.1', '0.2.0', 'apply', ?, '198.51.100.7')", (old,))
+                     "reporter) VALUES ('0.2.1', '0.2.0', 'apply', ?, '198.51.100.7')", (old,))
         conn.commit()
         conn.close()
         client.post("/v1/report-failure", json=_report(), environ_base=PROXY,

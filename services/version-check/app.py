@@ -14,6 +14,9 @@ Abuse limits (F-12): the client address is taken from the X-Forwarded-For
 header set by the boxmunge Caddy proxy (one trusted hop), every request is
 rate-limited per client, request bodies are capped, and check counts are
 buffered in memory and flushed periodically rather than written per request.
+Failure reports are accepted only for listed releases and count once per
+reporter (IPv4 address or IPv6 /64) per version per six hours; see
+failure_store. The database schema changes only through db_schema migrations.
 
 Source: https://github.com/boxmunge/boxmunge/tree/main/services/version-check
 """
@@ -27,6 +30,8 @@ from pathlib import Path
 from flask import Flask, request, jsonify
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+import failure_store
+from db_schema import init_db
 from release_catalog import (
     VERSION_RE, apply_holds, check_response, find_blocked, load_releases, select_offers,
 )
@@ -68,87 +73,11 @@ CHECK_MAX_PENDING = 1000
 # Versions not in releases.json are counted under one bucket, so arbitrary
 # caller input cannot grow the version_checks table.
 UNLISTED_VERSION = "unlisted"
-# Failure-report addresses are kept only for the duplicate filter's window.
-REPORT_DEDUPE_HOURS = 1
 
 
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
-
-def _init_db(db_path: Path) -> None:
-    """Create all tables if they don't exist."""
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS version_checks (
-                date    TEXT NOT NULL,
-                version TEXT NOT NULL,
-                count   INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (date, version)
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS failures (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                version       TEXT NOT NULL,
-                installed_from TEXT NOT NULL,
-                stage         TEXT NOT NULL,
-                reported_at   TEXT NOT NULL,
-                remote_addr   TEXT
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS circuit_breaker (
-                version    TEXT PRIMARY KEY,
-                tripped    INTEGER NOT NULL DEFAULT 1,
-                tripped_by TEXT,
-                tripped_at TEXT NOT NULL
-            )
-        """)
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def _record_failure(db_path, version, installed_from, stage, reported_at, remote_addr):
-    """Store a failure report and forget addresses older than the dedupe window."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=REPORT_DEDUPE_HOURS)).isoformat()
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.execute(
-            "INSERT INTO failures (version, installed_from, stage, reported_at, remote_addr) VALUES (?, ?, ?, ?, ?)",
-            (version, installed_from, stage, reported_at, remote_addr))
-        conn.execute(
-            "UPDATE failures SET remote_addr = NULL WHERE remote_addr IS NOT NULL AND reported_at <= ?",
-            (cutoff,))
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def _query_failures(db_path, version):
-    conn = sqlite3.connect(db_path)
-    try:
-        rows = conn.execute(
-            "SELECT stage, COUNT(*) FROM failures WHERE version = ? GROUP BY stage",
-            (version,)).fetchall()
-        time_range = conn.execute(
-            "SELECT MIN(reported_at), MAX(reported_at) FROM failures WHERE version = ?",
-            (version,)).fetchone()
-    finally:
-        conn.close()
-    by_stage = {row[0]: row[1] for row in rows}
-    total = sum(by_stage.values())
-    return {
-        "version": version,
-        "total": total,
-        "by_stage": by_stage,
-        "first_seen": time_range[0] if total > 0 else None,
-        "last_seen": time_range[1] if total > 0 else None,
-    }
-
 
 def _is_circuit_broken(db_path, version):
     conn = sqlite3.connect(db_path)
@@ -185,7 +114,7 @@ def _reset_circuit_breaker(db_path, version):
 
 
 def _auto_trip_threshold() -> int:
-    """CIRCUIT_BREAKER_AUTO_THRESHOLD: failures in 6 hours that trip a version.
+    """CIRCUIT_BREAKER_AUTO_THRESHOLD: distinct reporters in 6 hours that trip a version.
 
     0 (the default) disables auto-trip. Anything that is not a non-negative
     integer stops the service from starting, rather than silently leaving
@@ -202,22 +131,11 @@ def _auto_trip_threshold() -> int:
     return threshold
 
 
-def _maybe_auto_trip(db_path: Path, version: str, threshold: int) -> None:
+def _maybe_auto_trip(db_path: Path, version: str, threshold: int, now: datetime) -> None:
     """Auto-trip circuit breaker if failure threshold is exceeded."""
     if threshold == 0:
         return
-
-    six_hours_ago = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
-    conn = sqlite3.connect(db_path)
-    try:
-        count = conn.execute(
-            "SELECT COUNT(*) FROM failures WHERE version = ? AND reported_at > ?",
-            (version, six_hours_ago),
-        ).fetchone()[0]
-    finally:
-        conn.close()
-
-    if count >= threshold:
+    if failure_store.count_recent(db_path, version, now) >= threshold:
         _trip_circuit_breaker(db_path, version, "auto")
 
 
@@ -325,7 +243,7 @@ def create_app() -> Flask:
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=TRUSTED_PROXY_HOPS)
     app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
 
-    _init_db(DB_PATH)
+    init_db(DB_PATH)
     # Raises ReleaseCatalogError on any invalid entry: a service that
     # cannot classify releases must not answer fleet update checks.
     releases = load_releases(RELEASES_PATH)
@@ -373,30 +291,24 @@ def create_app() -> Flask:
             return jsonify({"error": "missing required field: version"}), 400
         if not isinstance(version, str) or not VERSION_RE.match(version):
             return jsonify({"error": "version must be X.Y.Z"}), 400
-        if stage not in VALID_STAGES:
+        if version not in listed_versions:
+            # Only published releases can be held, so reports for anything
+            # else would only grow the table.
+            return jsonify({"error": f"version {version} is not a release listed in "
+                                     "releases.json; report failures of published "
+                                     "releases only"}), 400
+        if not isinstance(stage, str) or stage not in VALID_STAGES:
             return jsonify({"error": f"invalid stage; must be one of {sorted(VALID_STAGES)}"}), 400
         installed_from = body.get("installed_from", "")
         if not isinstance(installed_from, str) or len(installed_from) > 64:
             return jsonify({"error": "installed_from must be a string of at most 64 characters"}), 400
-        timestamp = datetime.now(timezone.utc).isoformat()
-
-        # Check rate limit: max 1 report per version per IP per hour
-        one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-        conn = sqlite3.connect(DB_PATH)
-        try:
-            existing = conn.execute(
-                "SELECT COUNT(*) FROM failures WHERE version = ? AND remote_addr = ? AND reported_at > ?",
-                (version, request.remote_addr, one_hour_ago),
-            ).fetchone()
-        finally:
-            conn.close()
-
-        if existing and existing[0] > 0:
-            return "", 204  # Silently accept but don't store (rate limited)
-
-        _record_failure(DB_PATH, version, installed_from, stage, timestamp,
-                        request.remote_addr)
-        _maybe_auto_trip(DB_PATH, version, auto_trip_threshold)
+        now = datetime.now(timezone.utc)
+        # A repeat from the same reporter is accepted but not stored: the
+        # box needs no different answer, and storing it would let one host
+        # count several times towards the auto-trip threshold.
+        if failure_store.record_failure(DB_PATH, version, installed_from, stage,
+                                        client_key(request.remote_addr), now):
+            _maybe_auto_trip(DB_PATH, version, auto_trip_threshold, now)
         return "", 204
 
     @app.route("/v1/failures")
@@ -404,7 +316,7 @@ def create_app() -> Flask:
         version = _version_arg("version")
         if version is None:
             return jsonify({"error": "missing or malformed version parameter (want X.Y.Z)"}), 400
-        return jsonify(_query_failures(DB_PATH, version))
+        return jsonify(failure_store.query_failures(DB_PATH, version))
 
     @app.route("/v1/circuit-breaker/trip", methods=["POST"])
     def cb_trip():

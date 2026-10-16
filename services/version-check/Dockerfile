@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
-COPY app.py release_catalog.py request_limits.py ./
+COPY app.py db_schema.py failure_store.py release_catalog.py request_limits.py ./
 COPY releases.json .
 COPY static/ static/
 
