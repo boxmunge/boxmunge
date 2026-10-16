@@ -71,15 +71,23 @@ def staging_compose_project(project: str) -> str:
     return f"{project}{STAGING_SUFFIX}"
 
 
-def compose_command(project_name: str, compose_files: list[str] | None) -> list[str]:
-    """Return `docker compose -p <project> -f ...` for a validated project.
+def compose_command(project_name: str, compose_files: list[str] | None, *,
+                    project_directory: Path | None = None,
+                    env_file: Path | None = None) -> list[str]:
+    """Return `docker compose -p <project> [--project-directory D] [--env-file E] -f ...`.
 
     Use this for every compose invocation, including ones run outside this
     module (exec, streaming logs), so none relies on Compose's own
-    project-name inference.
+    project-name inference. ``project_directory`` resolves relative paths
+    in the compose files against that directory (staging runs from its
+    slot), and ``env_file`` names the interpolation file.
     """
     check_compose_project_name(project_name)
     cmd = ["docker", "compose", "-p", project_name]
+    if project_directory is not None:
+        cmd.extend(["--project-directory", str(project_directory)])
+    if env_file is not None:
+        cmd.extend(["--env-file", str(env_file)])
     for f in (compose_files or ["compose.yml"]):
         cmd.extend(["-f", f])
     return cmd
@@ -91,6 +99,8 @@ def compose_up(
     build: bool = True,
     *,
     project_name: str,
+    project_directory: Path | None = None,
+    env_file: Path | None = None,
     force_recreate: bool = False,
     start: bool = True,
     services: list[str] | None = None,
@@ -103,7 +113,8 @@ def compose_up(
 
     Call it through boxmunge.compose_guard, which checks the project first.
     """
-    cmd = compose_command(project_name, compose_files)
+    cmd = compose_command(project_name, compose_files,
+                          project_directory=project_directory, env_file=env_file)
     cmd.extend(["up", "-d", "--remove-orphans"])
     if not start:
         cmd.append("--no-start")
@@ -121,10 +132,13 @@ def compose_down(
     *,
     project_name: str,
     remove_orphans: bool = False,
+    project_directory: Path | None = None,
+    env_file: Path | None = None,
 ) -> None:
     """Run docker compose down in the project directory (`remove_orphans`:
     also containers of services the files no longer define)."""
-    cmd = compose_command(project_name, compose_files)
+    cmd = compose_command(project_name, compose_files,
+                          project_directory=project_directory, env_file=env_file)
     cmd.append("down")
     if remove_orphans:
         cmd.append("--remove-orphans")
@@ -136,10 +150,13 @@ def compose_stop(
     compose_files: list[str] | None = None,
     *,
     project_name: str,
+    project_directory: Path | None = None,
+    env_file: Path | None = None,
     timeout: int = 15,
 ) -> None:
     """Run docker compose stop (without removing containers or volumes)."""
-    cmd = compose_command(project_name, compose_files)
+    cmd = compose_command(project_name, compose_files,
+                          project_directory=project_directory, env_file=env_file)
     cmd.extend(["stop", "-t", str(timeout)])
     _run(cmd, cwd=project_dir)
 
@@ -158,9 +175,12 @@ def compose_logs(
     compose_files: list[str] | None = None,
     *,
     project_name: str,
+    project_directory: Path | None = None,
+    env_file: Path | None = None,
 ) -> None:
     """Show docker compose logs."""
-    cmd = compose_command(project_name, compose_files)
+    cmd = compose_command(project_name, compose_files,
+                          project_directory=project_directory, env_file=env_file)
     cmd.extend(["logs", f"--tail={tail}"])
     if follow:
         cmd.append("--follow")
@@ -176,9 +196,12 @@ def compose_logs_capture(
     compose_files: list[str] | None = None,
     *,
     project_name: str,
+    project_directory: Path | None = None,
+    env_file: Path | None = None,
 ) -> str:
     """Capture docker compose logs as a string."""
-    cmd = compose_command(project_name, compose_files)
+    cmd = compose_command(project_name, compose_files,
+                          project_directory=project_directory, env_file=env_file)
     cmd.extend(["logs", f"--tail={tail}", "--no-color"])
     if service:
         cmd.append(service)
@@ -191,9 +214,12 @@ def compose_ps(
     compose_files: list[str] | None = None,
     *,
     project_name: str,
+    project_directory: Path | None = None,
+    env_file: Path | None = None,
 ) -> str:
     """Get docker compose ps output."""
-    cmd = compose_command(project_name, compose_files)
+    cmd = compose_command(project_name, compose_files,
+                          project_directory=project_directory, env_file=env_file)
     cmd.extend(["ps", "--format", "json"])
     result = _run(cmd, cwd=project_dir, capture=True)
     return result.stdout
@@ -225,15 +251,12 @@ def compose_config(
     still starts when something names it (restore runs
     `up <backup.service>`), so it must be validated and hardened too.
 
-    ``project_directory`` and ``env_file`` resolve compose files kept
-    elsewhere (production's release during a stage) as if they were in the
-    project directory, interpolated from that release's own ``.env``.
+    ``project_directory`` and ``env_file`` (see compose_command) resolve
+    compose files kept elsewhere as if they were in that directory,
+    interpolated from its own ``.env``.
     """
-    cmd = compose_command(project_name, compose_files)
-    if project_directory is not None:
-        cmd.extend(["--project-directory", str(project_directory)])
-    if env_file is not None:
-        cmd.extend(["--env-file", str(env_file)])
+    cmd = compose_command(project_name, compose_files,
+                          project_directory=project_directory, env_file=env_file)
     if all_profiles:
         cmd.extend(["--profile", "*"])
     cmd.extend(["config", "--format", "json", "--no-env-resolution"])
@@ -339,6 +362,8 @@ def compose_pull(
     compose_files: list[str] | None = None,
     *,
     project_name: str,
+    project_directory: Path | None = None,
+    env_file: Path | None = None,
     services: list[str],
 ) -> None:
     """Pull the images of the named services (deployed_inventory.
@@ -349,7 +374,8 @@ def compose_pull(
     """
     if not services:
         raise ValueError("compose_pull needs at least one service to pull")
-    cmd = compose_command(project_name, compose_files)
+    cmd = compose_command(project_name, compose_files,
+                          project_directory=project_directory, env_file=env_file)
     cmd.extend(["pull", "--ignore-buildable", *services])
     _run(cmd, cwd=project_dir, timeout=_COMPOSE_UP_TIMEOUT)
 
