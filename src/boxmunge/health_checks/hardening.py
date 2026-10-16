@@ -151,23 +151,6 @@ def check_auditd() -> HealthCheck:
         return HealthCheck("auditd", "warn", "Auditd status timed out")
 
 
-def check_unattended_upgrades() -> HealthCheck:
-    """Check if unattended-upgrades is enabled."""
-    try:
-        result = _run(["systemctl", "is-active", "unattended-upgrades"], timeout=10)
-        if result.returncode == 0:
-            return HealthCheck(
-                "auto-updates", "ok", "Unattended upgrades active",
-            )
-        return HealthCheck(
-            "auto-updates", "warn", "Unattended upgrades not active",
-        )
-    except FileNotFoundError:
-        return HealthCheck("auto-updates", "warn", "systemctl not available")
-    except subprocess.TimeoutExpired:
-        return HealthCheck("auto-updates", "warn", "Check timed out")
-
-
 def check_sysctl_hardening() -> HealthCheck:
     """Check critical kernel hardening parameters."""
     expected = {

@@ -10,7 +10,6 @@ from boxmunge.health_checks.hardening import (
     check_sysctl_hardening,
     check_systemd_timers,
     check_ufw,
-    check_unattended_upgrades,
 )
 
 
@@ -160,20 +159,6 @@ class TestCheckSysctl:
             returncode=0, stdout="0\n",
         )
         check = check_sysctl_hardening()
-        assert check.status == "warn"
-
-
-class TestCheckUnattendedUpgrades:
-    @patch("boxmunge.health_checks.hardening.subprocess.run")
-    def test_active(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(returncode=0)
-        check = check_unattended_upgrades()
-        assert check.status == "ok"
-
-    @patch("boxmunge.health_checks.hardening.subprocess.run")
-    def test_inactive(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(returncode=3)
-        check = check_unattended_upgrades()
         assert check.status == "warn"
 
 

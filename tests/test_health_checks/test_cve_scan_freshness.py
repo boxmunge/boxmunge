@@ -60,4 +60,4 @@ def test_health_report_includes_the_check():
     import inspect
 
     from boxmunge.commands import health_cmd
-    assert "check_cve_scan_freshness(paths)" in inspect.getsource(health_cmd.run_health)
+    assert "check_cve_scan_freshness(paths)" in inspect.getsource(health_cmd.collect_health)
