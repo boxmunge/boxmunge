@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 # Every command the deploy shell accepts. This is the complete allowlist.
 ALLOWED_COMMANDS: set[str] = {
@@ -132,43 +136,45 @@ def handle_scp_upload(args: list[str]) -> None:
     """Handle an scp upload by receiving to a temp dir, then filing to inbox.
 
     Delegates to the real scp binary for protocol handling, with the
-    destination rewritten to the inbox temp directory. After scp completes,
-    the received file is processed by the reception handler.
+    destination rewritten to a private directory for this session under the
+    inbox temp area. Concurrent uploads share that area, so this session
+    files and removes only what it received itself. The client's own target
+    path is ignored.
     """
     from boxmunge.paths import BoxPaths
     from boxmunge.reception import receive_bundle
 
     paths = BoxPaths()
     paths.inbox_tmp.mkdir(parents=True, exist_ok=True)
-
-    scp_args = ["/usr/bin/scp", "-t", str(paths.inbox_tmp)]
-    result = subprocess.run(scp_args, check=False)
-
-    if result.returncode != 0:
-        # Clean temp before exiting
-        for leftover in paths.inbox_tmp.iterdir():
-            leftover.unlink(missing_ok=True)
-        print("ERROR: scp upload failed.", file=sys.stderr)
-        sys.exit(1)
-
-    received_files = list(paths.inbox_tmp.iterdir())
-    if not received_files:
-        print("ERROR: No file received.", file=sys.stderr)
-        sys.exit(1)
-
+    session_dir = Path(tempfile.mkdtemp(dir=paths.inbox_tmp, prefix="scp-"))
+    # A hangup or kill mid-transfer would otherwise skip the cleanup below and
+    # strand this session's partial upload; no other session will remove it.
+    for signum in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(signum, _exit_on_signal)
     try:
+        result = subprocess.run(["/usr/bin/scp", "-t", str(session_dir)], check=False)
+        if result.returncode != 0:
+            print("ERROR: scp upload failed.", file=sys.stderr)
+            sys.exit(1)
+
+        received_files = sorted(session_dir.iterdir())
+        if not received_files:
+            print("ERROR: No file received.", file=sys.stderr)
+            sys.exit(1)
+
         for received in received_files:
             try:
                 dest = receive_bundle(received, paths)
                 print(f"Received: {dest.name}")
             except ValueError as e:
                 print(f"ERROR: {e}", file=sys.stderr)
-                received.unlink(missing_ok=True)
                 sys.exit(1)
     finally:
-        # Clean any remaining temp files
-        for leftover in paths.inbox_tmp.iterdir():
-            leftover.unlink(missing_ok=True)
+        shutil.rmtree(session_dir)
+
+
+def _exit_on_signal(signum: int, _frame: object) -> None:
+    sys.exit(128 + signum)
 
 
 def run_command(command: str, args: list[str]) -> int:
