@@ -191,9 +191,10 @@ def _fleet_facts(name: str, paths: BoxPaths, today) -> _FleetFacts:
 def fleet_summary(paths: BoxPaths) -> dict:
     """Aggregate state across all registered projects.
 
-    A project whose files cannot be read is listed under "unreadable" with
-    the reason, never silently left out of the counts. A pre-registered
-    project (no manifest yet) has no security state to count.
+    A project whose files cannot be read is listed under "unreadable" (a
+    key present only when something is) with the reason, never silently
+    left out of the counts. A registered project with no manifest yet, with
+    or without a directory, is not deployed and has no security state.
     """
     projects = sorted(load_registered_projects(paths))
     posture_dist = {"relaxed": 0, "balanced": 0, "strict": 0, "paranoid": 0}
@@ -208,7 +209,7 @@ def fleet_summary(paths: BoxPaths) -> dict:
 
     for name in projects:
         try:
-            if paths.is_project_pre_registered(name):
+            if not paths.project_manifest(name).exists():
                 continue
             facts = _fleet_facts(name, paths, today)
         except (*PROJECT_INPUT_ERRORS, SuppressionsError) as e:
@@ -239,7 +240,7 @@ def fleet_summary(paths: BoxPaths) -> dict:
         unreadable.append({"project": None, "error": str(e)})
     active_host = active_suppressions(host_supps, today=today)
 
-    return {
+    summary = {
         "projects_count": len(projects),
         "posture_distribution": posture_dist,
         "quarantined": quarantined_list,
@@ -254,8 +255,10 @@ def fleet_summary(paths: BoxPaths) -> dict:
         "last_fleet_scan": max(last_scans) if last_scans else None,
         "grace": grace_payload,
         "held_by_breaker": _held_payload(paths),
-        "unreadable": unreadable,
     }
+    if unreadable:
+        summary["unreadable"] = unreadable
+    return summary
 
 
 def _report_unreadable(unreadable: list[dict], paths: BoxPaths) -> None:
@@ -372,7 +375,7 @@ def cmd_security(args: list[str]) -> None:
             print(format_fleet_json(summary))
         else:
             print(format_fleet_text(summary))
-        if summary["unreadable"]:
+        if summary.get("unreadable"):
             _report_unreadable(summary["unreadable"], paths)
             sys.exit(1)
         return

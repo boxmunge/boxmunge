@@ -92,6 +92,7 @@ PROJECT_SECURITY = obj({
 
 def _security_summary(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
     summary = fleet_summary(ctx.paths)
+    summary.setdefault("unreadable", [])  # the CLI omits it when empty; the API always has it
     summary["held_by_breaker"] = _held(ctx.paths)
     return summary
 

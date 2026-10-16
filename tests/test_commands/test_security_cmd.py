@@ -362,6 +362,24 @@ def test_fleet_summary_reports_unreadable_projects_instead_of_skipping(
     assert "ERROR: security: gamma:" in captured.err
 
 
+@pytest.mark.parametrize("make_dir", [False, True])
+def test_fleet_summary_counts_a_registered_undeployed_project_as_not_deployed(
+        monkeypatch, tmp_path, capsys, make_dir) -> None:
+    """project-add registers a name before any directory or manifest exists;
+    that project is simply not deployed, never an unreadable one."""
+    paths = _fleet_box(monkeypatch, tmp_path, ["alpha"])
+    (paths.state / "projects.txt").write_text("alpha\nfresh\n")
+    if make_dir:
+        paths.project_dir("fresh").mkdir()
+    cmd_security(["--json"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["projects_count"] == 2
+    assert sum(payload["posture_distribution"].values()) == 1
+    assert "unreadable" not in payload
+    assert captured.err == ""
+
+
 def test_fleet_summary_reports_unreadable_host_suppressions(
         monkeypatch, tmp_path, capsys) -> None:
     paths = _fleet_box(monkeypatch, tmp_path, ["alpha"])
