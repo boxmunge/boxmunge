@@ -1167,12 +1167,15 @@ The agent will discover all available tools automatically. Available tools inclu
 (optionally with `version` for `upgrade --target`). Each result's `messages` carries the
 command's stdout and stderr.
 
-Requires the `mcp` package on the server. It is not installed by default — add it
-to the server's environment with:
+Requires the `mcp` package on the server. It is not installed by default — as root,
+add it to the server's active environment with:
 
 ```
 /opt/boxmunge/env-active/bin/pip install 'mcp>=1.0'
 ```
+
+Every platform upgrade (manual or auto-update) builds a fresh environment without it, so
+repeat the install after each upgrade. Until then `mcp-serve` exits 1 with this instruction.
 
 Note: `boxmunge` on PyPI is the *client* CLI. The server package is
 `boxmunge-server` and is installed from GitHub releases, not PyPI.
