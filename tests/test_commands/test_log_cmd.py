@@ -31,24 +31,25 @@ class TestParseLogFile:
     def test_parses_all_entries(self, tmp_path: Path) -> None:
         log_file = tmp_path / "boxmunge.log"
         _write_log_entries(log_file, SAMPLE_ENTRIES)
-        entries = parse_log_file(log_file)
-        assert len(entries) == 4
+        read = parse_log_file(log_file)
+        assert len(read.entries) == 4 and read.torn == []
 
-    def test_skips_malformed_lines(self, tmp_path: Path) -> None:
+    def test_reports_each_torn_line_by_file_and_line(self, tmp_path: Path) -> None:
+        """A line torn by a crash, or hand-edited, is reported, never dropped."""
         log_file = tmp_path / "boxmunge.log"
-        log_file.write_text('{"level": "info", "msg": "ok"}\nnot json\n')
-        entries = parse_log_file(log_file)
-        assert len(entries) == 1
+        log_file.write_text('{"level": "info", "msg": "ok"}\nnot json\n\n[1]\n{"msg": "x"}\n')
+        read = parse_log_file(log_file)
+        assert [e["msg"] for e in read.entries] == ["ok", "x"]
+        assert [t.split(": ")[0] for t in read.torn] == [f"{log_file}:2", f"{log_file}:4"]
+        assert "not json" in read.torn[0]
 
     def test_empty_file(self, tmp_path: Path) -> None:
         log_file = tmp_path / "boxmunge.log"
         log_file.write_text("")
-        entries = parse_log_file(log_file)
-        assert entries == []
+        assert parse_log_file(log_file).entries == []
 
     def test_missing_file(self, tmp_path: Path) -> None:
-        entries = parse_log_file(tmp_path / "nope.log")
-        assert entries == []
+        assert parse_log_file(tmp_path / "nope.log").entries == []
 
 
 class TestFilterLogEntries:
@@ -112,3 +113,35 @@ class TestFilterLogEntries:
         """Test that _parse_since raises ValueError for unknown unit."""
         with pytest.raises(ValueError, match="Unknown unit"):
             _parse_since("5x")
+
+
+class TestRunLogTornLines:
+    """`log` warns once per torn line and exits 1, after showing every entry
+    it could read; stdout stays parseable for --json."""
+
+    def _box(self, tmp_path: Path):
+        from boxmunge.paths import BoxPaths
+        paths = BoxPaths(root=tmp_path)
+        paths.log_file.parent.mkdir(parents=True)
+        good = json.dumps(SAMPLE_ENTRIES[0])
+        paths.log_file.write_text(f"{good}\n{{\"ts\": \"2026-04-15T10:0\n{good}\n")
+        return paths
+
+    @pytest.mark.parametrize("as_json", [False, True])
+    def test_warns_per_torn_line_and_exits_1(self, tmp_path: Path, capsys, as_json) -> None:
+        from boxmunge.commands.log_cmd import run_log
+        paths = self._box(tmp_path)
+        assert run_log(paths, as_json=as_json) == 1
+        captured = capsys.readouterr()
+        assert captured.out.count("Deploy completed") == 2
+        if as_json:
+            assert all(json.loads(line) for line in captured.out.splitlines())
+        [warning] = captured.err.splitlines()
+        assert warning.startswith(f"WARNING: {paths.log_file}:2: ")
+
+    def test_clean_log_exits_0(self, tmp_path: Path, capsys) -> None:
+        from boxmunge.commands.log_cmd import run_log
+        paths = self._box(tmp_path)
+        _write_log_entries(paths.log_file, SAMPLE_ENTRIES)
+        assert run_log(paths) == 0
+        assert capsys.readouterr().err == ""

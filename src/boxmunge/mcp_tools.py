@@ -239,14 +239,15 @@ def _tool_log(project: str | None = None, component: str | None = None,
               level: str | None = None, since: str | None = None,
               tail: int = 50) -> dict:
     from boxmunge.commands.log_cmd import query_log
-    filtered = query_log(
+    read = query_log(
         _get_paths(), project=project, component=component,
         level=level, since=since, tail=tail)
+    # As the CLI's `log`: torn lines are reported and fail the call.
     return {
-        "success": True,
-        "exit_code": 0,
-        "data": {"entries": filtered},
-        "messages": [],
+        "success": not read.torn,
+        "exit_code": 1 if read.torn else 0,
+        "data": {"entries": read.entries},
+        "messages": [f"WARNING: {torn}" for torn in read.torn],
     }
 
 

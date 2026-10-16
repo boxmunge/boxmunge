@@ -484,6 +484,8 @@ The operational log records every boxmunge action with timestamp, level, project
 
 It lives in `/opt/boxmunge/logs/boxmunge.log`. The first write of each UTC day moves the previous day's file to `boxmunge.log.YYYY-MM-DD`; 90 days of archives are kept. `logs --boxmunge`, `log` and the health check's 24-hour error count read the archives their window or `--tail` reaches into, so nothing drops out at midnight. Writers take `logs/.boxmunge.log.lock`; if it stays held for 5 seconds the entry is dropped with an error on stderr naming the lock, rather than hanging the command. `health` warns (`operational-log`) if the active file's first line is not a log entry, which stops all logging until the file is moved aside.
 
+A line in a log file that is not a JSON entry (torn by a crash, or hand-edited) is never skipped silently. `log` prints every entry it can read, then a `WARNING: <file>:<line>: ...` on stderr for each torn line, and exits 1, so `--json` output stays parseable and scripts still notice. The MCP `log` tool returns the same warnings and fails, the action API's `oplog.query` fails naming the line, and the health check's `recent-errors` warns, since a torn line may have been an error. Repair or delete the line named.
+
 ---
 
 ## Backups

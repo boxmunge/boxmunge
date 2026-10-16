@@ -47,21 +47,44 @@ def _write_days(paths: BoxPaths, midnight: datetime, level: str = "info") -> Non
 
 def test_since_window_reaches_into_archives(paths: BoxPaths, midnight: datetime) -> None:
     _write_days(paths, midnight)
-    assert [e["msg"] for e in query_log(paths, since="24h")] == ["day-1", "today"]
-    assert [e["msg"] for e in query_log(paths, since="7d")] == ["day-2", "day-1", "today"]
+    assert [e["msg"] for e in query_log(paths, since="24h").entries] == ["day-1", "today"]
+    assert [e["msg"] for e in query_log(paths, since="7d").entries] == ["day-2", "day-1", "today"]
 
 
 def test_tail_without_since_continues_into_archives(paths: BoxPaths, midnight: datetime) -> None:
     _write_days(paths, midnight)
-    assert [e["msg"] for e in query_log(paths, tail=2)] == ["day-1", "today"]
-    assert [e["msg"] for e in query_log(paths)] == ["day-2", "day-1", "today"]
-    assert query_log(paths, tail=0) == []
+    assert [e["msg"] for e in query_log(paths, tail=2).entries] == ["day-1", "today"]
+    assert [e["msg"] for e in query_log(paths).entries] == ["day-2", "day-1", "today"]
+    assert query_log(paths, tail=0).entries == []
 
 
 def test_recent_errors_count_yesterdays_archive(paths: BoxPaths, midnight: datetime) -> None:
     _write_days(paths, midnight, level="error")
     check = check_recent_errors(paths)
     assert check.detail.startswith("2 error(s) in last 24h"), check.detail
+
+
+def test_torn_lines_make_recent_errors_warn(paths: BoxPaths, midnight: datetime) -> None:
+    """A torn line may have been an error entry: the count is not trustworthy."""
+    _write_days(paths, midnight, level="error")
+    with paths.log_file.open("a") as log:
+        log.write('{"ts": "2026-\n')
+    check = check_recent_errors(paths)
+    assert check.status == "warn"
+    assert f"{paths.log_file}:2: " in check.detail
+
+
+def test_mcp_log_tool_reports_torn_lines(paths: BoxPaths, midnight: datetime, monkeypatch) -> None:
+    from boxmunge import mcp_tools
+    _write_days(paths, midnight)
+    with paths.log_file.open("a") as log:
+        log.write("garbage\n")
+    monkeypatch.setattr(mcp_tools, "_get_paths", lambda: paths)
+    result = mcp_tools._tool_log(since="24h")
+    assert result["success"] is False and result["exit_code"] == 1
+    assert [e["msg"] for e in result["data"]["entries"]] == ["day-1", "today"]
+    [warning] = result["messages"]
+    assert warning.startswith(f"WARNING: {paths.log_file}:2: ")
 
 
 def test_boxmunge_logs_tail_spans_rotation(paths: BoxPaths, midnight: datetime, capsys) -> None:
