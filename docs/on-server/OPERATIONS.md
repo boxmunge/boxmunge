@@ -1076,14 +1076,20 @@ sudo /opt/boxmunge/bin/boxmunge-upgrade force-target 0.11.1   # ignore blocklist
 sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist 0.11.1  # forget a failed version
 ```
 
-Neither is available from the deploy shell or MCP.
+Neither is available from the deploy shell or MCP. `force-target` cannot go below the first
+release after 0.10.1: older bundles have no hash-pinned `requirements-mcp.txt`, which every
+install needs. It refuses them before downloading anything, without blocklisting.
 
 How an upgrade is applied and undone:
 
 1. The new release is downloaded, its signature and checksum verified, and it is installed
    into the standby venv, built from scratch with every hash-pinned dependency the release
    ships (MCP included); the upgrade needs 250MB free under `/opt/boxmunge`.
-   `upgrade --dry-run` runs against it as a pre-flight.
+   `upgrade --dry-run` runs against it as a pre-flight. If pip cannot install the
+   dependencies (a network blip, a full disk), the standby is dropped and a local alert sent.
+   The first such failure of a version is not blocklisted or reported, so auto-update retries
+   it; a second in a row blocklists it. A successful install and `clear-blocklist` reset the
+   count.
 2. Platform state is stashed: config, deploy state, and each project's manifest, compose file,
    env files and `boxmunge-scripts/`, with their modes and owners.
 3. The venvs swap and `upgrade --apply` migrates manifests, regenerates every project's Caddy

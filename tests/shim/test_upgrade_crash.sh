@@ -215,7 +215,7 @@ drop_root
 
 installed
 upgrade_killed_at apply
-mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+[[ -d "$BOXMUNGE_ROOT/upgrade-root" ]] || mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
 echo '{"1.5.0": "x"}' > "$BOXMUNGE_ROOT/upgrade-root/interrupted.json"
 run_shim check-probation
 expect 1 "interrupted.json is malformed" "a malformed interruption count stops recovery"

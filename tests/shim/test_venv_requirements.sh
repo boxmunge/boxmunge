@@ -2,8 +2,9 @@
 # tests/shim/test_venv_requirements.sh — the standby venv an upgrade builds
 # gets every hash-pinned requirements file the bundle ships, MCP included,
 # so nothing installed into the old venv by hand is lost on the swap. A
-# bundle without one of them, or a pip failure on any of them, fails the
-# upgrade's preflight with the proven release still live.
+# bundle without one of them fails the upgrade's preflight with the proven
+# release still live. A pip failure is retried once before it blocklists, and
+# releases from before the MCP lock are refused without blocklisting.
 # pass() always returns 0, so "cond && pass || fail" is a safe if/else here.
 # shellcheck disable=SC2015,SC2016  # SC2016: stub bodies are literal bash
 set -euo pipefail
@@ -22,7 +23,7 @@ stub() {  # stub <path> <bash body>
 }
 stub "$FIXTURE/bin/python3" "if [[ \"\$1 \$2\" == '-m venv' ]]; then mkdir -p \"\$3\"; cp -R '$FIXTURE/venv/bin' \"\$3/\"; exit 0; fi
 exec '$REAL_PYTHON3' \"\$@\""
-stub "$FIXTURE/bin/curl" 'cp "$RELEASE/$(basename "${@: -1}")" "$3"'
+stub "$FIXTURE/bin/curl" 'echo "curl ${*: -1}" >> "$BOXMUNGE_ROOT/calls"; cp "$RELEASE/$(basename "${@: -1}")" "$3"'
 stub "$FIXTURE/bin/cosign" 'exit 0'
 stub "$FIXTURE/bin/sha256sum" 'cat >/dev/null; exit 0'
 stub "$FIXTURE/venv/bin/pip" 'echo "pip $0 $*" >> "$BOXMUNGE_ROOT/calls"
@@ -58,12 +59,20 @@ installed() {
     mock_server a '[[ "$1" != --version ]] || echo "boxmunge 1.4.0"; exit 0'
     rm "$BOXMUNGE_ROOT/env-a/bin/python"
     stub "$BOXMUNGE_ROOT/env-a/bin/python" '[[ "$1" != "-" ]] || cat >/dev/null
-echo "a-python: reason=${BM_REASON:-} $*" >> "$BOXMUNGE_ROOT/calls"'
+echo "a-python: reason=${BM_REASON:-} stage=${BM_STAGE:-} msg=${BM_MESSAGE:-} $*" >> "$BOXMUNGE_ROOT/calls"'
     : > "$BOXMUNGE_ROOT/calls"
 }
 
 live() { readlink "$BOXMUNGE_ROOT/env-active" | sed 's|.*/env-||'; }
 dep_installs() { grep -- "--require-hashes" "$BOXMUNGE_ROOT/calls" || true; }
+blocklisted() { grep -q "add_to_blocklist" "$BOXMUNGE_ROOT/calls"; }
+reported() { grep -q "a-python: .*stage=preflight " "$BOXMUNGE_ROOT/calls"; }
+pip_failures() { cat "$BOXMUNGE_ROOT/upgrade-root/pip-failures.json" 2>/dev/null || true; }
+upgrade_failing_pip() {  # upgrade_failing_pip <file pip fails on, or empty>
+    : > "$BOXMUNGE_ROOT/calls"
+    RC=0
+    OUT="$(FAIL_PIP_ON="$1" bash "$SHIM" target 1.5.0 2>&1)" || RC=$?
+}
 
 ALL=(requirements-build.txt requirements-tui.txt requirements-mcp.txt)
 
@@ -101,19 +110,54 @@ expect 1 "no hash-pinned requirements-mcp.txt" "a bundle without requirements-mc
 drop_root
 rm -rf "$RELEASE"
 
-# --- a failed MCP install fails preflight, like any other dependency ----------
+# --- a failed dependency install is retried once, then blocklisted ----------
 
 release "${ALL[@]}"
 installed
-RC=0
-OUT="$(FAIL_PIP_ON=requirements-mcp.txt bash "$SHIM" target 1.5.0 2>&1)" || RC=$?
-expect 1 "Failed to install hash-pinned dependencies" "a failed MCP install fails preflight"
+upgrade_failing_pip requirements-mcp.txt
+expect 1 "not blocklisted, auto-update will retry 1.5.0" "a first failed MCP install fails the upgrade"
 [[ "$(live)" == a && ! -e "$BOXMUNGE_ROOT/env-b" ]] \
-    && pass "failed MCP install: proven release live, standby dropped" || fail "live=$(live)"
-grep -q "a-python: reason=preflight_failed: pip_install_deps -c" "$BOXMUNGE_ROOT/calls" \
-    && pass "failed MCP install blocklists the version" || fail "not blocklisted: $(cat "$BOXMUNGE_ROOT/calls")"
+    && pass "first pip failure: proven release live, standby dropped" || fail "live=$(live)"
+! blocklisted && ! reported && pass "first pip failure: neither blocklisted nor reported" \
+    || fail "first pip failure blocklisted or reported: $(cat "$BOXMUNGE_ROOT/calls")"
+grep -q "msg=Could not install the dependencies of 1.5.0 (not blocklisted" "$BOXMUNGE_ROOT/calls" \
+    && pass "first pip failure: operator alerted locally" || fail "no local alert: $(cat "$BOXMUNGE_ROOT/calls")"
+[[ "$(pip_failures)" == '{"1.5.0": 1}' ]] && pass "first pip failure: counted" \
+    || fail "pip failure count is $(pip_failures)"
+upgrade_failing_pip requirements-mcp.txt
+expect 1 "2 times in a row" "a second failed install in a row fails the upgrade"
+blocklisted && reported && pass "second pip failure: blocklisted and reported" \
+    || fail "second pip failure not blocklisted and reported: $(cat "$BOXMUNGE_ROOT/calls")"
+[[ "$(live)" == a && ! -e "$BOXMUNGE_ROOT/env-b" && "$(cat "$BOXMUNGE_ROOT/env-a/known-good")" == proven ]] \
+    && pass "second pip failure: proven release live, standby dropped" || fail "live=$(live)"
+run_shim clear-blocklist 1.5.0
+[[ "$(pip_failures)" == "{}" ]] && pass "clear-blocklist forgets the pip failure count" \
+    || fail "count after clear-blocklist: $(pip_failures)"
+drop_root
+
+installed
+upgrade_failing_pip requirements-tui.txt
+upgrade_failing_pip ""
+expect 0 "probation started" "after one pip failure the retry completes"
+[[ "$(pip_failures)" == "{}" ]] && pass "a successful install forgets the pip failure count" \
+    || fail "count after success: $(pip_failures)"
+! blocklisted && pass "a failure followed by success is never blocklisted" || fail "blocklisted: $(cat "$BOXMUNGE_ROOT/calls")"
 drop_root
 rm -rf "$RELEASE"
+
+# --- releases from before the MCP lock are refused, not blocklisted ----------
+
+for v in 0.10.1 0.9.16; do
+    installed
+    run_shim force-target "$v"
+    expect 1 "Bundle $v predates the hash-pinned requirements-mcp.txt every install needs; force-target cannot go below the first release after 0.10.1" \
+        "force-target $v is refused"
+    ! blocklisted && ! reported && ! grep -q "^curl" "$BOXMUNGE_ROOT/calls" \
+        && pass "force-target $v: not downloaded, blocklisted or reported" || fail "force-target $v: $(cat "$BOXMUNGE_ROOT/calls")"
+    [[ "$(live)" == a && "$(cat "$BOXMUNGE_ROOT/env-a/known-good")" == proven ]] && pass "force-target $v: proven release untouched" \
+        || fail "force-target $v: live=$(live)"
+    drop_root
+done
 
 rm -rf "$FIXTURE"
 finish

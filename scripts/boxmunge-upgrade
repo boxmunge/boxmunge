@@ -34,9 +34,13 @@ LOCK_FILE="$STATE_DIR/upgrade.lock"
 ACTIVE_SLOT_FILE="$STATE_DIR/active-slot"
 BLOCKLIST_FILE="$STATE_DIR/blocklist.json"
 PROBATION_FILE="$STATE_DIR/probation.json"
-# Root-only (BOXMUNGE_ROOT is root:root 0755); see interruptions in state.sh.
+# Root-only (BOXMUNGE_ROOT is root:root 0755); see failure_count in state.sh.
 UPGRADE_ROOT_DIR="$BOXMUNGE_ROOT/upgrade-root"
 INTERRUPTED_FILE="$UPGRADE_ROOT_DIR/interrupted.json"
+PIP_FAILURES_FILE="$UPGRADE_ROOT_DIR/pip-failures.json"
+# The last release whose bundle has no requirements-mcp.txt. Every install
+# needs it, so this shim cannot install that release or any before it.
+LAST_RELEASE_WITHOUT_MCP_LOCK="0.10.1"
 PROBATION_HOURS=6
 BIN_DIR="$BOXMUNGE_ROOT/bin"
 VERSION_FILE="$BOXMUNGE_ROOT/config/version"
@@ -94,6 +98,24 @@ preflight_fail() {
     exit 1
 }
 
+# dependency_install_failed <version> <from_version>: pip could not install
+# the bundle's hash-pinned dependencies. That is rarely the release's fault
+# (a network blip, the disk filling mid-install), so, as for an interrupted
+# upgrade, the first failure of a version is not blocklisted or reported to
+# the fleet service and auto-update retries it; a second in a row is.
+dependency_install_failed() {
+    local version="$1" from_version="$2" count
+    count=$(( $(pip_failures "$version") + 1 ))
+    pip_failures "$version" "$count"
+    [[ "$count" -lt 2 ]] || preflight_fail "$version" "$from_version" "preflight_failed: pip_install_deps" \
+        "Failed to install hash-pinned dependencies from bundle ($count times in a row); blocklisting $version"
+    log "Failed to install hash-pinned dependencies from bundle; not blocklisted, auto-update will retry $version"
+    remove_slot "$(standby_slot)"
+    bm_log warn upgrade "dependency install failed" "{\"version\": \"$version\", \"failures\": $count}"
+    send_notification "boxmunge upgrade failed" "Could not install the dependencies of $version (not blocklisted; auto-update will retry it)"
+    exit 1
+}
+
 TMP_DOWNLOAD=""
 cleanup_download() { [[ -z "$TMP_DOWNLOAD" ]] || rm -rf "$TMP_DOWNLOAD"; }
 
@@ -121,8 +143,9 @@ upgrade_to() {
 
     # 1. PREPARE
     log "Preparing standby venv (slot $standby)..."
-    # A slot is about 90MB on Debian, MCP included, and pip caches the wheels
-    # it downloads (about 20MB more); the rest is headroom for the stash.
+    # A slot is about 90MB on Debian, MCP included. pip runs with
+    # --no-cache-dir, so no wheel cache builds up under /root; the rest is
+    # headroom for the stash.
     local avail_mb
     avail_mb=$(df -m "$BOXMUNGE_ROOT" | awk 'NR==2{print $4}')
     [[ "$avail_mb" -lt 250 ]] && die "Insufficient disk space: ${avail_mb}MB available, need 250MB"
@@ -210,10 +233,10 @@ upgrade_to() {
                 "Bundle has no hash-pinned $req; refusing an unpinned install"
         reqs+=(-r "$bundle/$req")
     done
-    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --require-hashes "${reqs[@]}" \
-        || preflight_fail "$version" "$from_version" "preflight_failed: pip_install_deps" \
-            "Failed to install hash-pinned dependencies from bundle"
-    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --no-deps --no-build-isolation "$bundle" \
+    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --no-cache-dir --require-hashes "${reqs[@]}" \
+        || dependency_install_failed "$version" "$from_version"
+    pip_failures "$version" 0
+    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --no-cache-dir --no-deps --no-build-isolation "$bundle" \
         || preflight_fail "$version" "$from_version" "preflight_failed: pip_install" \
             "Failed to install boxmunge from bundle"
     compgen -G "$tmp_download/boxmunge/on-server/*.md" >/dev/null \
@@ -416,6 +439,7 @@ from boxmunge.paths import BoxPaths
 remove_from_blocklist(BoxPaths(), os.environ['BM_VERSION'])
 "
     interruptions "$version" 0
+    pip_failures "$version" 0
     log "Cleared $version from blocklist"
 }
 
