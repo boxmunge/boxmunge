@@ -13,7 +13,8 @@ workflow, and recovery.
 - **Posture per project (default `balanced`).** Four tiers form a trust ladder
   — `relaxed` quarantines only on CISA KEV, `balanced` (default) quarantines
   on KEV or a distro-acknowledged High + AV:N finding, `strict` extends that
-  net to Medium, `paranoid` uses NVD severity with no distro trust.
+  net to Medium, `paranoid` uses the highest severity any source (NVD,
+  the distro, GHSA) reports, with no distro trust.
   Set in the manifest under `security.posture`.
 - **Trust the distro.** Below `paranoid`, the engine treats the distro's own
   triage as authoritative. A CVE the distro marked `will_not_fix`,
@@ -64,16 +65,16 @@ its actual packaged versions and marks findings it judges low-risk as
 the distro's own verdict without additional evidence.
 
 `relaxed` is the strongest expression of that trust: the site only goes dark
-for active exploitation. `paranoid` is the opposite: it behaves like the
-pre-trust-ladder engine, using NVD severity with no distro trust and no AV
-filter.
+for active exploitation. `paranoid` is the opposite: no distro trust and no
+AV filter, and the severity is the highest any source reports, so neither
+the distro's triage nor a lower NVD rating can lower it.
 
 | Posture | Quarantines when (no fix, not suppressed) | Severity source |
 |---|---|---|
 | **relaxed** | CVE is on **CISA KEV** — nothing else. Pure last resort. | — |
 | **balanced** *(default)* | On **KEV** OR distro `Status: affected` + **distro** severity ≥ High + `AV:N` | Debian/vendor |
 | **strict** | On **KEV** OR distro `Status: affected` + **distro** severity ≥ Medium + `AV:N` | Debian/vendor |
-| **paranoid** | Anything ≥ Medium over threshold — no AV filter, no distro trust, NVD severity (pre-trust-ladder behavior). KEV can still escalate. | NVD |
+| **paranoid** | Anything ≥ Medium over threshold — no AV filter, no distro trust. KEV can still escalate. | Highest of NVD and every vendor rating |
 
 `balanced` stays the out-of-the-box default. The residual net it keeps
 (distro-acknowledged High, AV:N, no fix) is genuine: Debian issues a DSA
@@ -86,9 +87,8 @@ unpatched, network-reachable CVE takes a `balanced` site down but not a
 
 ### When to use `paranoid`
 
-Use `paranoid` when you want the pre-trust-ladder behavior: every
-above-threshold finding quarantines regardless of attack vector or distro
-verdict. Suitable for:
+Use `paranoid` when every above-threshold finding should quarantine
+regardless of attack vector or distro verdict. Suitable for:
 
 - Services running locally-attackable code paths exposed via privileged
   guest invocation (e.g. the web container shells out into another pid
@@ -131,8 +131,14 @@ For every finding, `evaluate_finding` runs these gates in order:
 4. **Unknown severity** → `INFORMATIONAL`. The engine cannot reason about a
    severity it does not recognize; reporting only.
 5. **Paranoid short-circuit** — under `paranoid`, skip steps 6–10 and compare
-   the NVD severity directly against the Medium threshold with no AV filter.
-   This is the pre-trust-ladder behavior, unchanged.
+   the highest severity any source reports (NVD, the distro, GHSA, and the
+   scanner's own rating) against the Medium threshold with no AV filter.
+   An NVD Critical over a distro Low is Critical, and a lower NVD rating
+   never overrides a higher distro one, so `paranoid` never decides on a
+   lower severity than `strict`. With no NVD rating the other sources still
+   decide; with no rating from any source the finding is unknown severity
+   (step 4, `INFORMATIONAL`). The explanation names the source(s) of the
+   rating used.
 6. **Relaxed short-circuit** — under `relaxed`, quarantine is KEV-only (already
    handled at step 3). Every non-KEV finding is `INFORMATIONAL` regardless of
    distro severity — the most hands-off tier, for operators who accept
@@ -176,7 +182,7 @@ For every finding, `evaluate_finding` runs these gates in order:
 | Fix available upstream (not KEV) | `IGNORED_FIXED` — alerted once (rebuild to apply) |
 | Active suppression matches the CVE | `SUPPRESSED` — skip until expiry |
 | Severity unknown | `INFORMATIONAL` |
-| Posture is `paranoid` | NVD threshold gate (step 5 above) |
+| Posture is `paranoid` | Highest-rating threshold gate (step 5 above) |
 | Posture is `relaxed` (non-KEV finding) | `INFORMATIONAL` — relaxed is KEV-only |
 | Package is a language runtime this project never invokes | `INFORMATIONAL` — irrelevant runtime |
 | Distro marked `will_not_fix` / `fix_deferred` / `not_affected` / `under_investigation` | `INFORMATIONAL` — distro deprioritized |
@@ -370,8 +376,7 @@ the mapping table, or declare `security.runtimes`, to close the gap.
   regardless of runtime relevance — active exploitation bypasses this gate
   the same way it bypasses the AV filter and distro-status routing.
 - **`paranoid` does not consult it at all.** The paranoid short-circuit
-  (step 5) runs before this gate; paranoid stays byte-for-byte its
-  pre-relevance-gate behavior.
+  (step 5) runs before this gate.
 - **The gate only ever de-escalates.** It has exactly one output,
   `INFORMATIONAL`; it can never turn a finding that would otherwise be
   informational into a quarantine.
@@ -401,7 +406,8 @@ explanation show the elevation reason explicitly so you can see why a
 Medium CVE quarantined a project running on `strict` posture.
 
 For non-paranoid postures, the penalty applies to the **distro** severity
-at step 11. For `paranoid`, the penalty applies to the **NVD** severity.
+at step 11. For `paranoid`, the penalty applies to the highest severity any
+source reports (step 5).
 
 Rationale: running with read-only rootfs disabled means a Medium CVE
 behaves more like a High one in practice — the policy treats it that way.

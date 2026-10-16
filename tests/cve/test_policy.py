@@ -1378,3 +1378,29 @@ def test_explain_irrelevant_runtime_empty_runtimes_uses_no_runtime_wording():
     assert "perl-base" in d.explanation
     assert "no language runtime" in d.explanation
     assert "strict" in d.explanation
+
+
+# --- Paranoid severity: highest rating across sources (audit B-08) ---
+def test_paranoid_reports_the_severity_and_source_it_decided_on() -> None:
+    f = _finding(severity=Severity.LOW,
+                 vendor_severities={"debian": Severity.LOW, "nvd": Severity.CRITICAL})
+    decision = _eval_ladder(f, Posture.PARANOID)
+    assert decision.disposition is Disposition.QUARANTINE
+    assert decision.base_severity is Severity.CRITICAL
+    assert decision.effective_severity is Severity.CRITICAL
+    assert "nvd" in decision.explanation
+
+
+def test_paranoid_without_any_rating_is_informational() -> None:
+    f = _finding(severity=Severity.UNKNOWN, vendor_severities={"nvd": Severity.UNKNOWN})
+    decision = _eval_ladder(f, Posture.PARANOID)
+    assert decision.disposition is Disposition.INFORMATIONAL
+    assert decision.base_severity is Severity.UNKNOWN
+
+
+def test_balanced_still_decides_on_the_distro_severity() -> None:
+    f = _finding(severity=Severity.LOW,
+                 vendor_severities={"debian": Severity.LOW, "nvd": Severity.CRITICAL})
+    decision = _eval_ladder(f, Posture.BALANCED)
+    assert decision.disposition is Disposition.INFORMATIONAL
+    assert decision.effective_severity is Severity.LOW

@@ -15,8 +15,8 @@ The trust ladder (non-paranoid postures trust the distro's own triage):
     balanced → KEV OR distro status:affected + distro severity ≥ High + AV:N.
     strict   → KEV OR distro status:affected + distro severity ≥ Medium + AV:N.
     paranoid → anything ≥ Medium over threshold; no distro trust, no AV
-               filter, NVD severity (the pre-trust-ladder behavior). KEV can
-               still escalate.
+               filter, the highest severity any source reports (NVD, the
+               distro, GHSA, ...). KEV can still escalate.
 
 KEV is the first gate: an actively exploited CVE quarantines regardless of
 posture, distro status, attack vector, threshold, an operator suppression
@@ -39,6 +39,12 @@ package belongs to a language runtime the project does not use (a Perl bug
 cannot run in a Python-only image). This gate consults only
 positively-identified runtime families, so ordinary system libraries such
 as openssl remain quarantinable.
+
+Paranoid's severity is the highest any source reports, so neither the
+distro's triage nor a lower NVD rating can relax it: NVD Critical over a
+distro Low is Critical (audit B-08), and paranoid never decides on a lower
+severity than strict does. With no NVD rating the other sources still
+count; with no rating from any source the finding is UNKNOWN (step 4).
 
 Effective severity = the severity the decision was made on, elevated by a
 hardening penalty (capped at Critical). The penalty captures deviations from
@@ -119,6 +125,19 @@ _DEPRIORITIZED_STATUS: frozenset[VulnStatus] = frozenset({
 # ---------- evaluation ----------
 
 
+def _paranoid_severity(finding: Finding) -> tuple[Severity, tuple[str, ...]]:
+    """The highest severity any source reports, and the sources reporting it.
+
+    Trivy's own resolved severity counts too (as "trivy"), but is named only
+    when no vendor source gives the same rating.
+    """
+    ratings = finding.vendor_severities
+    highest = max((finding.severity, *ratings.values()), key=_SEVERITY_RANK.__getitem__)
+    sources = sorted((src for src, sev in ratings.items() if sev is highest),
+                     key=lambda src: (src != "nvd", src))
+    return highest, tuple(sources) or ("trivy",)
+
+
 def _informational(
     finding: Finding,
     base: Severity,
@@ -147,12 +166,14 @@ def _threshold_disposition(
     *,
     compare_sev: Severity,
     dangerously_disable_quarantine: bool,
+    severity_sources: tuple[str, ...] = (),
 ) -> FindingDisposition:
     """Compare `compare_sev` against the posture threshold and dispose.
 
     `effective` is what the operator sees on the disposition (the severity the
-    decision was made on): NVD-effective under paranoid, distro-effective on a
-    non-paranoid quarantine. `compare_sev` is the value actually compared.
+    decision was made on): highest-rating-effective under paranoid, named by
+    `severity_sources`, distro-effective on a non-paranoid quarantine.
+    `compare_sev` is the value actually compared.
     """
     threshold = _POSTURE_THRESHOLDS[posture]
     over = _SEVERITY_RANK[compare_sev] >= _SEVERITY_RANK[threshold]
@@ -177,6 +198,7 @@ def _threshold_disposition(
             threshold.value,
             over_threshold=over,
             dangerously_disabled=dangerously_disable_quarantine,
+            severity_sources=severity_sources,
         ),
     )
 
@@ -197,13 +219,16 @@ def evaluate_finding(
     Order of checks (see the module docstring for the rationale of each):
     KEV override → QUARANTINE (fixable KEV under relaxed → IGNORED_FIXED);
     fix → IGNORED_FIXED; suppression → SUPPRESSED;
-    UNKNOWN severity → INFORMATIONAL; paranoid → NVD threshold; relaxed →
+    UNKNOWN severity → INFORMATIONAL; paranoid → highest-rating threshold; relaxed →
     INFORMATIONAL (KEV-only, handled above); else (balanced/strict)
     irrelevant-runtime / distro-deprioritized / no-distro-verdict /
     non-network AV → INFORMATIONAL; else distro-severity threshold →
     QUARANTINE / STILL_RUNNING_AT_RISK / INFORMATIONAL.
     """
-    base = finding.severity
+    if posture is Posture.PARANOID:
+        base, sources = _paranoid_severity(finding)
+    else:
+        base, sources = finding.severity, ()
     effective = elevate_severity(base, hardening_penalty)
 
     suppression = find_active_suppression(suppressions, finding.cve_id, today=today)
@@ -298,8 +323,8 @@ def evaluate_finding(
             "Unknown severity from scanner; reporting only.",
         )
 
-    # 5. Paranoid: no distro trust, no AV filter — NVD severity vs. threshold
-    # (byte-for-byte today's behavior).
+    # 5. Paranoid: no distro trust, no AV filter — the highest severity any
+    # source reports vs. threshold.
     if posture is Posture.PARANOID:
         return _threshold_disposition(
             finding,
@@ -309,6 +334,7 @@ def evaluate_finding(
             posture,
             compare_sev=effective,
             dangerously_disable_quarantine=dangerously_disable_quarantine,
+            severity_sources=sources,
         )
 
     # 6. Relaxed: KEV is the ONLY quarantine trigger (already handled at step
