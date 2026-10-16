@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # Every command the deploy shell accepts. This is the complete allowlist.
@@ -145,13 +146,16 @@ def handle_scp_upload(args: list[str]) -> None:
     from boxmunge.reception import receive_bundle
 
     paths = BoxPaths()
-    paths.inbox_tmp.mkdir(parents=True, exist_ok=True)
-    session_dir = Path(tempfile.mkdtemp(dir=paths.inbox_tmp, prefix="scp-"))
     # A hangup or kill mid-transfer would otherwise skip the cleanup below and
-    # strand this session's partial upload; no other session will remove it.
+    # strand this session's partial upload. Installed before the directory
+    # exists, so no window leaves one behind.
     for signum in (signal.SIGHUP, signal.SIGTERM):
         signal.signal(signum, _exit_on_signal)
+    session_dir: Path | None = None
     try:
+        paths.inbox_tmp.mkdir(parents=True, exist_ok=True)
+        _sweep_abandoned_uploads(paths.inbox_tmp)
+        session_dir = Path(tempfile.mkdtemp(dir=paths.inbox_tmp, prefix="scp-"))
         result = subprocess.run(["/usr/bin/scp", "-t", str(session_dir)], check=False)
         if result.returncode != 0:
             print("ERROR: scp upload failed.", file=sys.stderr)
@@ -170,7 +174,37 @@ def handle_scp_upload(args: list[str]) -> None:
                 print(f"ERROR: {e}", file=sys.stderr)
                 sys.exit(1)
     finally:
-        shutil.rmtree(session_dir)
+        if session_dir is not None:
+            shutil.rmtree(session_dir)
+
+
+# Uploads untouched for this long were abandoned by a session that could not
+# clean up (SIGKILL, power loss). A live transfer writes continuously, so its
+# newest mtime is always recent.
+_ABANDONED_UPLOAD_SECONDS = 24 * 3600
+
+
+def _newest_mtime(path: Path) -> float:
+    newest = path.lstat().st_mtime
+    if path.is_dir() and not path.is_symlink():
+        for child in path.rglob("*"):
+            newest = max(newest, child.lstat().st_mtime)
+    return newest
+
+
+def _sweep_abandoned_uploads(inbox_tmp: Path) -> None:
+    """Remove session dirs, and flat files from the old shared layout, idle for a day."""
+    cutoff = time.time() - _ABANDONED_UPLOAD_SECONDS
+    for entry in inbox_tmp.iterdir():
+        try:
+            if _newest_mtime(entry) >= cutoff:
+                continue
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        except FileNotFoundError:
+            continue  # its own session finished and cleaned up meanwhile
 
 
 def _exit_on_signal(signum: int, _frame: object) -> None:

@@ -167,3 +167,31 @@ def test_terminated_upload_removes_its_partial_file(paths: BoxPaths) -> None:
     first.send_rest()
     rc, err = first.finish()
     assert rc == 0, err
+
+
+def test_upload_sweeps_only_abandoned_leftovers(paths: BoxPaths) -> None:
+    """Session dirs and old-layout flat files idle for over a day are removed;
+    anything recent may belong to a live session and is left alone."""
+    paths.inbox_tmp.mkdir(parents=True)
+    day_old = time.time() - 25 * 3600
+    abandoned_dir = paths.inbox_tmp / "scp-abandoned"
+    abandoned_dir.mkdir()
+    (abandoned_dir / "bundle.tar.gz").write_bytes(b"partial")
+    abandoned_flat = paths.inbox_tmp / "old-layout.tar.gz"
+    abandoned_flat.write_bytes(b"partial")
+    for p in (abandoned_dir / "bundle.tar.gz", abandoned_dir, abandoned_flat):
+        os.utime(p, (day_old, day_old))
+    # Old directory, but a file in it is still being written.
+    live_dir = paths.inbox_tmp / "scp-live"
+    live_dir.mkdir()
+    (live_dir / "bundle.tar.gz").write_bytes(b"partial")
+    os.utime(live_dir, (day_old, day_old))
+    live_flat = paths.inbox_tmp / "in-flight.tar.gz"
+    live_flat.write_bytes(b"partial")
+
+    upload = _Upload(paths.root, _bundle("alpha"))
+    upload.send_first_half()
+    upload.send_rest()
+    rc, err = upload.finish()
+    assert rc == 0, err
+    assert sorted(p.name for p in paths.inbox_tmp.iterdir()) == ["in-flight.tar.gz", "scp-live"]
