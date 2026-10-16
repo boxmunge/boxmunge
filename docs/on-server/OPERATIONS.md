@@ -401,6 +401,8 @@ non-empty, a gzip stream must decompress to the end, and a tar archive must list
 safety snapshot of the current data, named `myapp-<timestamp>-prerestore.tar.gz.age` (the three newest are kept). If either
 step fails, production is left running and untouched. Only then does it stop the project, restore
 the data (the `restore_command` is limited to 10 minutes), and start every service again. The
+backup service, which ran the `restore_command`, is recreated rather than left running, so an
+application that holds its data open (SQLite, say) starts over on the restored files. The
 services are started again whether the restore succeeded or failed. When it fails, the error names
 the safety snapshot so you can put the previous data back:
 

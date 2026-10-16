@@ -9,8 +9,9 @@ Order of work, all under the project lock (audit C-09):
    ``--no-safety-snapshot``). Production is still running.
 3. Stop the project, start the backup service, wait until it is ready,
    and pipe the plaintext into ``restore_command`` (bounded by a timeout).
-4. Start every service again. This runs on every path out of step 3,
-   success or failure, including timeouts and permission errors.
+4. Start every service again, recreating the backup service so its
+   process starts over on the restored data. This runs on every path out
+   of step 3, success or failure, including timeouts and permission errors.
 """
 
 import subprocess
@@ -314,9 +315,12 @@ def _run_restore_command(
 
 
 def _start_all(project_dir: Path, compose_files: list[str], project_name: str) -> bool:
+    """Start every service. The backup service is still running from the
+    restore and may hold the pre-restore data open or in memory, so it is
+    recreated rather than left as it is."""
     try:
         compose_up(project_dir, compose_files=compose_files,
-                   project_name=project_name)
+                   project_name=project_name, force_recreate=True)
     except DockerError as e:
         print(f"  ERROR: Start failed: {e}", file=sys.stderr)
         return False
