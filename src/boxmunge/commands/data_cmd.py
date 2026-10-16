@@ -55,7 +55,11 @@ def _anonymous_source(project: str, service: str, path: str) -> str:
                         f"({', '.join(sorted(names))}), one per replica; scale it to one "
                         f"replica and remove the others' containers first")
     source = names.pop()
-    if not is_anonymous(volume_labels(source), source):
+    labels = volume_labels(source)
+    if labels is None:
+        raise DataError(f"volume {source} at {path} of service {service} does not exist; "
+                        f"copying from it would create an empty one")
+    if not is_anonymous(labels, source):
         raise DataError(f"{path} of service {service} is already a named volume ({source}); "
                         f"there is nothing to adopt")
     return source
@@ -85,6 +89,18 @@ def _start_again(paths: BoxPaths, project: str, service: str, stopped: list[str]
                         f"docker start {' '.join(stopped)}") from e
 
 
+def _remove_partial(target: str) -> None:
+    """A half-filled target carries the labels that make the next deploy
+    adopt it without a word; it was created by adopt or verified empty, so
+    it goes."""
+    try:
+        _run(["docker", "volume", "rm", target], capture=True)
+    except DockerError as e:
+        print(f"  WARN: the copy failed and {target} holds part of it, but removing it "
+              f"failed: {e}. Remove it before deploying: docker volume rm {target}",
+              file=sys.stderr)
+
+
 def adopt_locked(paths: BoxPaths, project: str, service: str, path: str, name: str) -> None:
     """The adopt core. Caller holds the project lock. Raises DataError,
     DockerError or ComposeRefused (a DockerError) naming what failed."""
@@ -104,16 +120,22 @@ def adopt_locked(paths: BoxPaths, project: str, service: str, path: str, name: s
             print(f"  Stopping {', '.join(stopped)} for the copy...")
             _run(["docker", "stop", "-t", str(_STOP_TIMEOUT), *stopped], capture=True)
         print(f"  Copying {path} ({source[:12]}) into {target}...")
-        copy_into_volume(f"{project}-adopt", source, target)
+        try:
+            copy_into_volume(f"{project}-adopt", source, target)
+        except BaseException:
+            _remove_partial(target)
+            raise
     finally:
         if stopped:
             _start_again(paths, project, service, stopped)
     log_operation("data-adopt", f"Copied {service}:{path} into volume {target}", paths,
                   project=project, detail={"source": source, "target": target})
     print(f"Adopted {service}:{path} as volume {target}. Now add `{name}:{path}` to the "
-          f"service's volumes (and `{name}: {{}}` under top-level volumes), or a "
-          f"writable.persistent entry named {name}, and deploy. The anonymous volume "
-          f"{source} is left in place; remove it once the service runs on {target}.")
+          f"service's volumes (and `{name}: {{}}` under top-level volumes) and deploy. "
+          f"(For a writable.persistent entry instead, which the platform names "
+          f"{project}_<entry name>, adopt with the name {project}_<entry name>.) The "
+          f"anonymous volume {source} is left in place; remove it once the service runs "
+          f"on {target}.")
 
 
 def run_data_adopt(paths: BoxPaths, project: str, service: str, path: str, name: str) -> int:

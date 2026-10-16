@@ -161,3 +161,20 @@ class TestContainerOwnedData:
         assert pdir.exists() and is_registered(NAME, box)
         err = capsys.readouterr().err
         assert "Permission denied" in err and "project-delete" in err
+
+
+def test_forced_delete_never_hands_the_helper_a_path(box, monkeypatch, capsys):
+    """After a failed teardown containers may still run and could swap a
+    walked directory for a link the daemon would follow as root."""
+    from boxmunge.commands import project_delete_cmd as pd
+    monkeypatch.setattr(pd, "_teardown", lambda name, paths: ["production: boom"])
+    monkeypatch.setattr(pd, "container_owned_dirs", lambda root: [root / "pgdata"])
+    monkeypatch.setattr(pd, "empty_dir", lambda label, path: pytest.fail("helper used"))
+
+    def rmtree(path):
+        raise PermissionError(13, "Permission denied", str(path / "pgdata"))
+    monkeypatch.setattr(pd.shutil, "rmtree", rmtree)
+    assert pd.delete_locked(NAME, box, force=True) == 1
+    err = capsys.readouterr().err
+    assert "Permission denied" in err and "teardown" in err
+    assert is_registered(NAME, box)

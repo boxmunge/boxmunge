@@ -169,3 +169,32 @@ def test_compose_labels_need_a_valid_compose_project(monkeypatch) -> None:
         "--label", "com.docker.compose.project=myapp"]
     with pytest.raises(ValueError):
         data_helper.compose_volume_labels("../other", "pgdata")
+
+
+def test_the_advice_names_the_persistent_entry_correctly(paths, monkeypatch, capsys) -> None:
+    """The overlay keys writable.persistent entry X as <project>_X, so adopt's
+    bare name would leave a persistent entry on a fresh, empty volume."""
+    _Box(monkeypatch)
+    data_cmd.adopt_locked(paths, "myapp", "db", DEST, "pgdata")
+    out = capsys.readouterr().out
+    assert "writable.persistent entry named pgdata" not in out
+    assert "adopt with the name myapp_<entry name>" in out
+
+
+def test_a_failed_copy_removes_the_half_filled_target(paths, monkeypatch) -> None:
+    box = _Box(monkeypatch)
+
+    def boom(label, src, dst):
+        raise data_cmd.DockerError("cp: no space")
+    monkeypatch.setattr(data_cmd, "copy_into_volume", boom)
+    with pytest.raises(data_cmd.DockerError):
+        data_cmd.adopt_locked(paths, "myapp", "db", DEST, "pgdata")
+    assert ["docker", "volume", "rm", "myapp_pgdata"] in box.calls
+
+
+def test_a_vanished_source_volume_is_refused(paths, monkeypatch) -> None:
+    box = _Box(monkeypatch)
+    monkeypatch.setattr(data_cmd, "volume_labels", lambda n: None if n == ANON else box.existing)
+    with pytest.raises(data_cmd.DataError, match="does not exist"):
+        data_cmd.adopt_locked(paths, "myapp", "db", DEST, "pgdata")
+    assert box.calls == []

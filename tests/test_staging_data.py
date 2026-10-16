@@ -290,3 +290,16 @@ def test_top_level_file_store_is_copied_on_an_unremapped_box(tmp_path, monkeypat
     run, = [c for c in docker.calls if c[1] == "run"]
     assert run[-1] == "rm -rf /dst/app.db-staging && cp -a /src /dst/app.db-staging"
 
+
+
+def test_an_inconsistent_remap_state_refuses_the_copy(tmp_path, monkeypatch) -> None:
+    """A RemapError would escape stage's cleanup as a traceback."""
+    from tests.userns_helpers import remap_box
+    from tests.userns_helpers import UNREMAPPED_INFO
+    paths = BoxPaths(tmp_path / "bm")
+    remap_box(paths, monkeypatch)
+    monkeypatch.setattr("boxmunge.userns.offset.docker_info", lambda: dict(UNREMAPPED_INFO))
+    _project_dir, plan = _file_store_plan(paths)
+    _Docker(monkeypatch)
+    with pytest.raises(StagingDataError, match="whether the box is remapped.*not remapped"):
+        staging_data.prepare_destinations(paths, "myapp", plan)

@@ -106,6 +106,17 @@ def _teardown(project_name: str, paths: BoxPaths) -> list[str]:
     return failures
 
 
+def _remove_project_dir(project_name: str, project_dir: Path, *, forced: bool) -> None:
+    """Containers' data belongs to their users (S+N on a remapped box); the
+    helper empties it so the rest can be removed as deploy. Not after a
+    forced delete: a container still running could swap a walked directory
+    for a link, which the daemon would follow on the host as root."""
+    if not forced:
+        for owned in container_owned_dirs(project_dir):
+            empty_dir(f"{project_name}-delete", owned)
+    shutil.rmtree(project_dir)
+
+
 def delete_locked(project_name: str, paths: BoxPaths, force: bool) -> int:
     """Tear down and remove the project. Caller holds the project lock."""
     failures = _teardown(project_name, paths)
@@ -151,19 +162,17 @@ def delete_locked(project_name: str, paths: BoxPaths, force: bool) -> int:
 
     project_dir = paths.project_dir(project_name)
     if project_dir.exists():
-        # Containers' data belongs to their users (S+N on a remapped box);
-        # the helper empties it so the rest can be removed as deploy.
         try:
-            for owned in container_owned_dirs(project_dir):
-                empty_dir(f"{project_name}-delete", owned)
-        except DockerError as e:
-            print(f"ERROR: Could not remove the data containers wrote in {project_dir}: "
-                  f"{e}\n  The project is still registered; fix the cause and run "
-                  f"project-delete again.", file=sys.stderr)
-            log_error("project-delete", f"Removing container-owned data failed: {e}",
+            _remove_project_dir(project_name, project_dir, forced=bool(failures))
+        except (DockerError, OSError) as e:
+            hint = (" The containers were not torn down, so the data they own was not "
+                    "handed to the data helper; remove them, then" if failures else "")
+            print(f"ERROR: Could not remove {project_dir}: {e}\n  The project is still "
+                  f"registered.{hint} Fix the cause and run project-delete again.",
+                  file=sys.stderr)
+            log_error("project-delete", f"Removing the project directory failed: {e}",
                       paths, project=project_name)
             return 1
-        shutil.rmtree(project_dir)
 
     if is_registered(project_name, paths):
         registry_remove(project_name, paths)

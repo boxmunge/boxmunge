@@ -31,7 +31,7 @@ from boxmunge.staging_copy_plan import (
     CopyPlan, StagingDataError, Store, copy_sources, plan_copy, stores,
 )
 from boxmunge.staging_placeholders import copy_label, make_placeholder
-from boxmunge.userns.offset import remap_offset
+from boxmunge.userns.offset import RemapError, remap_offset
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -112,6 +112,14 @@ def _mount(store: Store, at: str, ro: bool) -> list[str]:
     return ["--mount", f"type={store.kind},src={store.ref},dst={at}" + (",readonly" if ro else "")]
 
 
+def _remapped(paths: BoxPaths) -> bool:
+    try:
+        return remap_offset(paths) != 0
+    except RemapError as e:
+        raise StagingDataError(f"cannot tell whether the box is remapped, so nothing was "
+                               f"copied: {e}") from e
+
+
 def _refuse_top_level_files(paths: BoxPaths, project: str, plan: CopyPlan,
                             kinds: list[bool]) -> None:
     """A single-file store directly in the project directory is copied by
@@ -120,7 +128,7 @@ def _refuse_top_level_files(paths: BoxPaths, project: str, plan: CopyPlan,
     project_dir = paths.project_dir(project)
     files = [src.key for (src, dest), is_file in zip(plan.pairs, kinds)
              if is_file and dest.kind == "bind" and Path(dest.ref).parent == project_dir]
-    if files and remap_offset(paths) != 0:
+    if files and _remapped(paths):
         raise StagingDataError(
             f"staging cannot copy production's single-file store {', '.join(files)} on a "
             f"remapped box: the copy would have to write into the project directory, "
@@ -167,7 +175,7 @@ def prepare_destinations(paths: BoxPaths, project: str, plan: CopyPlan) -> None:
     project_dir = paths.project_dir(project)
     kinds = [_is_file(src, "production") for src, _dest in plan.pairs]
     _refuse_top_level_files(paths, project, plan, kinds)
-    remapped = remap_offset(paths) != 0
+    remapped = _remapped(paths)
     for (src, dest), is_file in zip(plan.pairs, kinds):
         if dest.kind != "bind":
             continue

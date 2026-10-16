@@ -732,7 +732,8 @@ supervisor user.
 Data the containers wrote belongs to their users, so directories you cannot remove yourself are
 emptied first by the data helper (the container `stage` copies data with). If that fails,
 `project-delete` stops with an error and the project stays registered; run it again once the cause
-is fixed.
+is fixed. With `--force` after a failed teardown the helper is not used (a container still running
+could redirect it), so such data makes the delete fail until the containers are gone.
 
 ## Naming an Anonymous Volume
 
@@ -748,9 +749,12 @@ data adopt myapp db:/var/lib/postgresql/data pgdata
 This stops the service's containers, creates the volume `myapp_pgdata` labelled as Compose labels
 its own, copies the anonymous volume into it (owners kept), and starts the containers again. Then
 add `pgdata:/var/lib/postgresql/data` to the service's `volumes` (and `pgdata: {}` under top-level
-`volumes`), or a `writable.persistent` entry named `pgdata`, and deploy. The anonymous volume is
-left in place; remove it once the service runs on the named one. `data adopt` refuses a path that
-is already a named volume, and a target volume that exists with data or without Compose's labels.
+`volumes`) and deploy. To use a `writable.persistent` entry instead, adopt with the name the
+platform gives it, `<project>_<entry name>` (`data adopt myapp db:/var/lib/postgresql/data
+myapp_pgdata` for an entry named `pgdata`); otherwise the deploy starts on a new, empty volume. The
+anonymous volume is left in place; remove it once the service runs on the named one. `data adopt`
+refuses a path that is already a named volume, and a target volume that exists with data or without
+Compose's labels. If the copy fails, the new volume is removed and the containers started again.
 
 ---
 
