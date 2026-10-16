@@ -1,19 +1,21 @@
 """Tests for the `boxmunge security <project>` introspection command."""
 import io
 import json
-from datetime import date, timedelta
+from datetime import timedelta
 from contextlib import redirect_stdout
 
 import pytest
 import yaml
 
 from boxmunge.commands.security_cmd import cmd_security
+from boxmunge.commands.security_suppress_targets import utc_today
 from boxmunge.manifest import CURRENT_SCHEMA_VERSION
 from tests.deploy_helpers import mark_deployed
 
-# Suppressions created through the CLI are capped at 90 days (B-15).
-_SOON = (date.today() + timedelta(days=30)).isoformat()
-_LATER = (date.today() + timedelta(days=60)).isoformat()
+# Suppressions created through the CLI are capped at 90 days (B-15),
+# counted from the UTC date the command uses.
+_SOON = (utc_today() + timedelta(days=30)).isoformat()
+_LATER = (utc_today() + timedelta(days=60)).isoformat()
 
 
 @pytest.fixture

@@ -2,7 +2,7 @@
 """A suppression never hides a KEV-listed CVE (audit B-07)."""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import yaml
@@ -10,6 +10,7 @@ import yaml
 from boxmunge.commands import security_scan_core
 from boxmunge.commands.security_scan_core import scan_one_project
 from boxmunge.commands.security_suppress import cmd_security_suppress
+from boxmunge.commands.security_suppress_targets import utc_today
 from boxmunge.cve import kev as kev_module
 from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.policy import Disposition
@@ -25,12 +26,12 @@ def _kev(*ids: str) -> KevCatalog:
 
 
 def _suppress(paths, cve: str = _CVE) -> None:
-    until = (date.today() + timedelta(days=30)).isoformat()
+    until = (utc_today() + timedelta(days=30)).isoformat()
     path = paths.project_dir("demo") / "security" / "suppressions.yml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump({"suppressions": [{
         "cve": cve, "until": until, "reason": "reviewed: endpoint not exposed",
-        "reviewed_by": "ops", "added": date.today().isoformat(),
+        "reviewed_by": "ops", "added": utc_today().isoformat(),
     }]}))
 
 
@@ -84,7 +85,7 @@ def _seed_kev_cache(paths, *ids: str) -> None:
 
 
 def _suppress_args(*extra: str) -> list[str]:
-    until = (date.today() + timedelta(days=30)).isoformat()
+    until = (utc_today() + timedelta(days=30)).isoformat()
     return [*extra, "--project", "demo", "--until", until, "--reason", "reviewed"]
 
 
@@ -111,7 +112,7 @@ def test_suppress_current_skips_kev_listed_and_suppresses_the_rest(
         posture=Posture.BALANCED,
         hardening_profile=HardeningProfile(True, True, False, False),
         dangerously_disable_quarantine=False, suppressions=(),
-        today=date.today(), kev_lookup=lambda c: c == _CVE,
+        today=utc_today(), kev_lookup=lambda c: c == _CVE,
     )
     write_scan_state(box.project_scan_state("demo"), decisions=(decision,))
     _seed_kev_cache(box, _CVE)
