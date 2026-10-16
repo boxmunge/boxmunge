@@ -12,6 +12,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # Named so the data helper (boxmunge.data_helper) runs exactly this
+    # locally built image; boxmunge.invalid never resolves to a registry.
+    image: boxmunge.invalid/system/system
     container_name: boxmunge-system
     restart: unless-stopped
     # Must be the deploy user (owner of projects/): age reads its 0600 temp

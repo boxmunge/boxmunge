@@ -390,7 +390,7 @@ fi
 # (blast-radius containment). There is no host fallback: while the container
 # is absent, backups, restores and backup-sync fail loudly. A transient
 # build/network failure still must not block an upgrade, so warn and carry
-# on. Rebuild only when the definition changed or the container isn't
+# on. Rebuild (tagging boxmunge.invalid/system/system, the data helper's image) only when the definition changed or the container isn't
 # running, mirroring the caddy block.
 if [[ -d "${SCRIPT_DIR}/system" ]]; then
     SYSTEM_CHANGED=0
