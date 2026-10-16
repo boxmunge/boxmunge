@@ -311,11 +311,24 @@ def live_ref(paths: BoxPaths, project_name: str) -> str:
     return ref
 
 
+def live_meta_text(ref: str) -> str:
+    """live.json's exact content for ``ref`` (release_txn hashes it)."""
+    return json.dumps({"ref": ref}) + "\n"
+
+
+def previous_meta_text(ref: str, data_snapshot: str | None, replaced_at: str,
+                       replaced_by: str) -> str:
+    """previous.json's exact content (release_txn hashes it)."""
+    return json.dumps({"ref": ref, "data_snapshot": data_snapshot or "",
+                       "replaced_at": replaced_at, "replaced_by": replaced_by},
+                      indent=2) + "\n"
+
+
 def mark_live(paths: BoxPaths, project_name: str, ref: str) -> None:
     """Record which release ref the project dir's code now is."""
     meta = _live_meta(paths, project_name)
     meta.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(meta, json.dumps({"ref": ref}) + "\n", mode=0o644)
+    atomic_write_text(meta, live_meta_text(ref), mode=0o644)
 
 
 def keep_previous_release(
@@ -338,20 +351,15 @@ def keep_previous_release(
     copies = _ensure_record(project_dir, release_tree,
                             set_aside_announcer(paths, project_name, "deploy"))
     with naming_set_aside(copies):
-        meta = {
-            "ref": live_ref(paths, project_name),
-            "data_snapshot": data_snapshot or "",
-            "replaced_at": datetime.now(timezone.utc).isoformat(),
-            "replaced_by": replaced_by,
-        }
+        meta = previous_meta_text(live_ref(paths, project_name), data_snapshot,
+                                  datetime.now(timezone.utc).isoformat(), replaced_by)
         # Drop the old metadata first: a crash mid-swap then leaves no previous
         # release (rollback refuses) rather than old metadata on a new tree.
         _remove(_previous_meta(paths, project_name))
         target = previous_dir(paths, project_name)
         _remove(target)
         building.rename(target)
-        atomic_write_text(_previous_meta(paths, project_name),
-                          json.dumps(meta, indent=2) + "\n", mode=0o644)
+        atomic_write_text(_previous_meta(paths, project_name), meta, mode=0o644)
 
 
 def load_previous_release(paths: BoxPaths, project_name: str) -> PreviousRelease | None:
