@@ -104,3 +104,14 @@ def test_oplog_line_that_is_not_json_fails_naming_the_line(fixture_paths) -> Non
     error = _error(fixture_paths, "oplog.query", {})
     assert error.code is ErrorCode.FAILED
     assert f"{fixture_paths.log_file}:{lines + 1}" in error.message
+
+
+@pytest.mark.parametrize("since", ["999999d", "3651d", "87601h"])
+def test_since_reaching_back_more_than_ten_years_is_invalid(fixture_paths, since) -> None:
+    error = _error(fixture_paths, "oplog.query", {"since": since})
+    assert error.code is ErrorCode.INVALID_PARAMS
+    assert "at most 3650 days" in error.message
+
+
+def test_since_of_exactly_ten_years_is_served(fixture_paths) -> None:
+    assert len(_call(fixture_paths, "oplog.query", {"since": "3650d"})["entries"]) > 0

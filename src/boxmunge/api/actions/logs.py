@@ -23,6 +23,8 @@ OPLOG_TAIL_DEFAULT = 50
 SERVICE_PATTERN = "[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}"
 LEVELS = ("debug", "info", "warn", "error")
 _ENTRY_KEYS = frozenset({"ts", "level", "component", "msg"})
+SINCE_MAX_DAYS = 3650
+_MINUTES_PER = {"m": 1, "h": 60, "d": 24 * 60}
 
 
 def _tail(default: int) -> dict[str, Any]:
@@ -47,7 +49,8 @@ OPLOG_PARAMS = obj({
                   "description": "Only entries from this component: deploy, backup, health..."},
     "level": {**enum(*LEVELS), "description": "Only entries at exactly this level."},
     "since": {"type": "string", "pattern": "[0-9]{1,6}[mhd]",
-              "description": "Only entries newer than this: 30m, 6h, 7d."},
+              "description": f"Only entries newer than this: 30m, 6h, 7d. At most "
+                             f"{SINCE_MAX_DAYS} days."},
     "tail": _tail(OPLOG_TAIL_DEFAULT),
 }, optional=("project", "component", "level", "since", "tail"))
 
@@ -79,6 +82,11 @@ def _project_logs(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
 
 
 def _oplog_query(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
+    since = params.get("since")
+    if since is not None and int(since[:-1]) * _MINUTES_PER[since[-1]] > SINCE_MAX_DAYS * 24 * 60:
+        raise ActionError(ErrorCode.INVALID_PARAMS,
+                          f"since may reach back at most {SINCE_MAX_DAYS} days "
+                          f"({SINCE_MAX_DAYS}d); {since!r} is further.")
     entries = filter_log_entries(
         _entries(ctx.paths),
         project=params.get("project"), component=params.get("component"),
