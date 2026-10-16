@@ -2,10 +2,10 @@
 """Action definitions, grouped by family, and the default registry."""
 from __future__ import annotations
 
-from boxmunge.api.actions import status
+from boxmunge.api.actions import project, status
 from boxmunge.api.registry import Registry
 
-FAMILIES = (status,)
+FAMILIES = (status, project)
 
 
 def build_registry() -> Registry:
