@@ -40,6 +40,11 @@ REQUIRED_BUNDLE_DIRS = [
 REQUIRED_BUNDLE_FILES = [
     "install.sh",
     "pyproject.toml",
+    # The hash-pinned dependencies install.sh and the upgrade shim install;
+    # MCP among them, so it survives every upgrade.
+    "requirements-build.txt",
+    "requirements-tui.txt",
+    "requirements-mcp.txt",
 ]
 
 

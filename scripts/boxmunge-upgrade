@@ -121,9 +121,11 @@ upgrade_to() {
 
     # 1. PREPARE
     log "Preparing standby venv (slot $standby)..."
+    # A slot is about 90MB on Debian, MCP included, and pip caches the wheels
+    # it downloads (about 20MB more); the rest is headroom for the stash.
     local avail_mb
     avail_mb=$(df -m "$BOXMUNGE_ROOT" | awk 'NR==2{print $4}')
-    [[ "$avail_mb" -lt 100 ]] && die "Insufficient disk space: ${avail_mb}MB available, need 100MB"
+    [[ "$avail_mb" -lt 250 ]] && die "Insufficient disk space: ${avail_mb}MB available, need 250MB"
 
     remove_slot "$standby"
     python3 -m venv "$BOXMUNGE_ROOT/env-$standby"
@@ -199,13 +201,16 @@ upgrade_to() {
     # Dependencies only from the bundle's hash-pinned requirements (covered by
     # the signed SHA256SUMS); the package itself with no further resolution,
     # built by the hash-pinned backend. No pip self-upgrade: one more
-    # unpinned download.
-    local bundle="$tmp_download/boxmunge"
-    [[ -f "$bundle/requirements-tui.txt" && -f "$bundle/requirements-build.txt" ]] \
-        || preflight_fail "$version" "$from_version" "preflight_failed: no_pinned_requirements" \
-            "Bundle has no hash-pinned requirements files; refusing an unpinned install"
-    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --require-hashes \
-        -r "$bundle/requirements-build.txt" -r "$bundle/requirements-tui.txt" \
+    # unpinned download. MCP is part of every install: the slot is built from
+    # scratch, so anything not installed here is gone after the swap.
+    local bundle="$tmp_download/boxmunge" req reqs=()
+    for req in requirements-build.txt requirements-tui.txt requirements-mcp.txt; do
+        [[ -f "$bundle/$req" ]] \
+            || preflight_fail "$version" "$from_version" "preflight_failed: no_pinned_requirements" \
+                "Bundle has no hash-pinned $req; refusing an unpinned install"
+        reqs+=(-r "$bundle/$req")
+    done
+    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --require-hashes "${reqs[@]}" \
         || preflight_fail "$version" "$from_version" "preflight_failed: pip_install_deps" \
             "Failed to install hash-pinned dependencies from bundle"
     "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --no-deps --no-build-isolation "$bundle" \

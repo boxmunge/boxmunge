@@ -337,9 +337,10 @@ compromise of any single one cannot silently propagate.
 
 13. **Installation.** Only after both signature and checksum verify does
     the shim extract the bundle and install it into the standby venv.
-    Dependencies come only from the hash-pinned `requirements-tui.txt`
-    and `requirements-build.txt` inside the bundle (so covered by the
-    signed `SHA256SUMS`), installed with `pip install --require-hashes`;
+    Dependencies come only from the hash-pinned `requirements-build.txt`,
+    `requirements-tui.txt` and `requirements-mcp.txt` inside the bundle
+    (so covered by the signed `SHA256SUMS`), installed with
+    `pip install --require-hashes`;
     the package itself is installed with `--no-deps --no-build-isolation`,
     so pip resolves and downloads nothing else. The venv's pip is not
     self-upgraded. `install.sh` installs the same way. A bundle without

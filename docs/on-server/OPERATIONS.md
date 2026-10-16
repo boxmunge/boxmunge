@@ -1081,7 +1081,9 @@ Neither is available from the deploy shell or MCP.
 How an upgrade is applied and undone:
 
 1. The new release is downloaded, its signature and checksum verified, and it is installed
-   into the standby venv. `upgrade --dry-run` runs against it as a pre-flight.
+   into the standby venv, built from scratch with every hash-pinned dependency the release
+   ships (MCP included); the upgrade needs 250MB free under `/opt/boxmunge`.
+   `upgrade --dry-run` runs against it as a pre-flight.
 2. Platform state is stashed: config, deploy state, and each project's manifest, compose file,
    env files and `boxmunge-scripts/`, with their modes and owners.
 3. The venvs swap and `upgrade --apply` migrates manifests, regenerates every project's Caddy
@@ -1233,15 +1235,18 @@ The agent will discover all available tools automatically. Available tools inclu
 (optionally with `version` for `upgrade --target`). Each result's `messages` carries the
 command's stdout and stderr.
 
-Requires the `mcp` package on the server. It is not installed by default — as root,
-add it to the server's active environment with:
+The server's `mcp` package is part of every install. `install.sh` and every platform upgrade
+(manual or auto-update) install it into the new environment from the release's hash-pinned
+`requirements-mcp.txt`, together with the other dependencies, so it survives upgrades. An upgrade
+whose bundle lacks that file, or whose MCP install fails, stops at pre-flight with the current
+release still live, like any other dependency failure.
 
-```
-/opt/boxmunge/env-active/bin/pip install 'mcp>=1.0'
-```
-
-Every platform upgrade (manual or auto-update) builds a fresh environment without it, so
-repeat the install after each upgrade. Until then `mcp-serve` exits 1 with this instruction.
+If the package is missing anyway, `mcp-serve` exits 1 and `doctor` fails its "MCP package
+installed" check, both with the repair: as root, re-run the installer of the installed release
+(`sudo bash boxmunge-install.sh`, from that version's GitHub release). Do not `pip install` it
+by hand: that is unpinned, and the next upgrade builds a fresh environment without it. The
+first upgrade from 0.10.1 or earlier is run by that release's upgrade shim, which does not
+install MCP; the upgrade after it does, or re-run the installer to have it now.
 
 Note: `boxmunge` on PyPI is the *client* CLI. The server package is
 `boxmunge-server` and is installed from GitHub releases, not PyPI.

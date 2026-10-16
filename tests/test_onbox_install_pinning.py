@@ -53,3 +53,31 @@ def test_shim_keeps_install_sh_out_of_the_venvs() -> None:
     assert 'bash "$new_install_sh" --upgrade-shim' in shim
     install = (REPO / "install.sh").read_text()
     assert 'if [[ "${FROM_UPGRADE_SHIM}" -eq 0 ]]; then' in install
+
+
+# Every slot is built from scratch, so a dependency left out of these files is
+# lost on each upgrade. MCP is part of every install (docs/on-server/OPERATIONS.md).
+ONBOX_REQUIREMENTS = ["requirements-build.txt", "requirements-tui.txt", "requirements-mcp.txt"]
+
+
+@pytest.mark.parametrize("script", ONBOX_SCRIPTS, ids=lambda p: p.name)
+def test_every_onbox_venv_gets_the_mcp_requirements(script: Path) -> None:
+    used = set(re.findall(r"(requirements[\w-]*\.txt)", script.read_text()))
+    assert set(ONBOX_REQUIREMENTS) <= used, f"{script.name} installs only {sorted(used)}"
+
+
+def _pins(path: Path) -> dict[str, str]:
+    return {
+        m.group(1).lower(): m.group(2)
+        for m in re.finditer(r"^([A-Za-z][\w.\-]*)(?:\[[^\]]*\])?==(\S+)", path.read_text(), re.M)
+    }
+
+
+def test_onbox_requirements_agree_where_they_overlap() -> None:
+    """They are installed in one pip run; a package pinned to two versions
+    would make every install and upgrade fail. `make lock` keeps them in step."""
+    seen: dict[str, tuple[str, str]] = {}
+    for name in ONBOX_REQUIREMENTS:
+        for pkg, version in _pins(REPO / name).items():
+            first = seen.setdefault(pkg, (version, name))
+            assert first[0] == version, f"{pkg}: {first[0]} in {first[1]}, {version} in {name}"

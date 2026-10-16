@@ -61,6 +61,7 @@ exit 0'
 # The release itself.
 echo "build==1" > "$FIXTURE/release/boxmunge/requirements-build.txt"
 echo "tui==1" > "$FIXTURE/release/boxmunge/requirements-tui.txt"
+echo "mcp==1" > "$FIXTURE/release/boxmunge/requirements-mcp.txt"
 echo "1.5.0 ops" > "$FIXTURE/release/boxmunge/on-server/OPERATIONS.md"
 tar czf "$FIXTURE/release/boxmunge-1.5.0.tar.gz" -C "$FIXTURE/release" boxmunge
 echo "0000  boxmunge-1.5.0.tar.gz" > "$FIXTURE/release/SHA256SUMS"

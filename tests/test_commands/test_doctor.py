@@ -2,6 +2,7 @@
 """Tests for boxmunge doctor command — host health diagnostic."""
 
 import json
+import sys
 
 import pytest
 
@@ -85,3 +86,22 @@ class TestDoctorComposeVersion:
         line = results["Docker Compose version supported"]
         assert line["status"] == "FAIL"
         assert "older than 2.35.0" in line["detail"]
+
+
+class TestDoctorMcp:
+    """MCP is part of every install; an environment without it is broken."""
+
+    def _mcp_line(self, paths: BoxPaths, capsys) -> dict:
+        from boxmunge.commands.doctor import run_doctor
+        run_doctor(paths, as_json=True)
+        return {r["name"]: r for r in json.loads(capsys.readouterr().out)}["MCP package installed"]
+
+    def test_missing_mcp_fails_doctor_with_the_repair(self, paths: BoxPaths, monkeypatch, capsys) -> None:
+        monkeypatch.setitem(sys.modules, "mcp", None)
+        line = self._mcp_line(paths, capsys)
+        assert line["status"] == "FAIL"
+        assert "boxmunge-install.sh" in line["detail"]
+
+    def test_installed_mcp_passes(self, paths: BoxPaths, monkeypatch, capsys) -> None:
+        monkeypatch.setattr("boxmunge.commands.mcp_serve_cmd.mcp_import_error", lambda: None)
+        assert self._mcp_line(paths, capsys)["status"] == "PASS"
