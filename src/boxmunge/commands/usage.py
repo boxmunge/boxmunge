@@ -70,8 +70,11 @@ Usage: boxmunge unstage <project> [--dry-run]
 Tear down staging.""",
     "prod-deploy": """\
 Usage: boxmunge prod-deploy <project> [--ref REF] [--no-snapshot] [--dry-run]
+       boxmunge prod-deploy <project> --abandon
 
-Deploy directly to production (skips staging).""",
+Deploy directly to production (skips staging). --abandon undoes an install
+that stopped before its pre-deploy hook ran: the replaced release's files
+go back; containers and data are not touched.""",
     "rollback": """\
 Usage: boxmunge rollback <project> [--yes]
 
