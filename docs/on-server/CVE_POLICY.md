@@ -648,12 +648,22 @@ locally built (`build:`) image has. The `image:` tag is never scanned in
 place of a container, because a pull moves the tag without changing what
 runs.
 
-A stopped container (paused or quarantined project) still identifies its
-image. A service with no container at all cannot be scanned and makes the
-scan incomplete, except a service behind a `profiles:` entry that is not
-active: nothing of it is deployed, so it is not scanned and not counted as a
-failure. If such a service has a container (it was started with
-`--profile`), that container is scanned.
+A service of a running project that has no container cannot be scanned
+and makes the scan incomplete, except a service behind a `profiles:` entry
+that is not active: nothing of it is deployed, so it is not scanned and not
+counted as a failure. If such a service has a container (it was started
+with `--profile`), that container is scanned.
+
+A project the platform stopped on purpose (paused, CVE-quarantined, or
+stopped by the health monitor, as boxmunge's own state records) is scanned
+differently. Its containers may be gone (a monitor stop removes them, a
+prune removes stopped ones) and a pull may have moved its tags, so the scan
+checks the images `compose up` would start when it comes back: whatever
+each service's `image:` names in the local image store now, or for a
+`build:` service the `<project>-<service>` image Compose built. `security
+resume` therefore re-scans exactly what the lift will start. An image that
+is not in the local store makes the scan incomplete. `security status
+<project>` shows which of the two the last scan checked.
 
 ## Scan cadence
 
@@ -717,10 +727,10 @@ worst case while still letting normal scans complete in seconds.
 An image that is not scanned is not covered by quarantine, so a scan that
 did not cover everything is never reported as success. A project's scan is
 **incomplete** when an image fails to scan (Trivy error, registry or DB
-unreachable), the budget skips an image, or a service that should be
-running has no container, so what it runs cannot be identified (a project
-the health monitor stopped, or a container removed by hand). Start the
-project (deploy, or resume) and scan again. A
+unreachable), the budget skips an image, a service of a running project
+has no container (removed by hand, for example; redeploy the project), or
+an image a stopped project would start is not in the local image store
+(pull or build it, then scan again). A
 project **fails** outright when one of its
 inputs is malformed: an unparseable manifest or `compose.yml`, an unknown
 `security.posture`, a non-boolean `dangerously_disable_quarantine`, a broken
@@ -950,8 +960,7 @@ closed (see "Recovering a quarantined project" below).
    - any image failed to scan (Trivy DB or registry unreachable, for
      example), or every image did;
    - the per-project scan budget ran out before every image was scanned;
-   - a service that should be running has no container, so its image
-     cannot be identified.
+   - an image the lift would start is not in the local image store.
 
    The error lists each image or service that was not covered. Fix the
    cause and retry; an incomplete re-scan is never treated as clean.

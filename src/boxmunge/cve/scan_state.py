@@ -57,23 +57,36 @@ def _serialize_decision(decision: ProjectDecision) -> dict[str, Any]:
     }
 
 
+# What a scan's targets were: the images the project's containers run, or,
+# for a project the platform stopped on purpose, the images `compose up`
+# would start when it comes back.
+BASIS_CONTAINERS = "containers"
+BASIS_STARTUP_IMAGES = "startup_images"
+
+
 def write_scan_state(
     path: Path,
     *,
     decisions: tuple[ProjectDecision, ...],
     scanned_at: datetime | None = None,
     unscanned: tuple[str, ...] = (),
+    basis: str = BASIS_CONTAINERS,
+    stopped_reason: str | None = None,
 ) -> None:
     """Persist the result of a project scan.
 
     `decisions` is one ProjectDecision per scanned image (most projects have
     one image, multi-service projects can have several). `scanned_at`
     defaults to "now" when omitted. `unscanned` names each image or service
-    the scan did not cover, for the scan-freshness health check.
+    the scan did not cover, for the scan-freshness health check. `basis`
+    records what was scanned (`stopped_reason` says why a project scanned
+    by BASIS_STARTUP_IMAGES is stopped).
     """
     when = scanned_at or datetime.now(timezone.utc)
     data: dict[str, Any] = {
         "scanned_at": when.isoformat(),
+        "basis": basis,
+        "stopped_reason": stopped_reason,
         "decisions": [_serialize_decision(d) for d in decisions],
         "unscanned": list(unscanned),
     }

@@ -154,7 +154,7 @@ class FakeDocker:
         monkeypatch.setattr(cu, "compose_pull", self._pull)
         monkeypatch.setattr("boxmunge.docker.compose_pull", self._pull)  # the dry run's
         monkeypatch.setattr(cu, "compose_up", self._up)
-        monkeypatch.setattr(cu, "local_image_id", self.tags.get)
+        monkeypatch.setattr("boxmunge.docker_containers.local_image", self._local_image)
         monkeypatch.setattr(cu, "tag_image", self._tag)
         monkeypatch.setattr(cu, "_HEALTHCHECK_POLL_INTERVAL_SEC", 0)
         self._recreate()
@@ -166,6 +166,11 @@ class FakeDocker:
             self.containers.run(self.project, svc, image, health=self.health[image],
                                 repo_digests=(f"{ref.split(':')[0]}@sha256:{'9' * 64}",)
                                 if image == _OLD else ())
+
+    def _local_image(self, ref):
+        from boxmunge.docker_containers import LocalImage
+        image = self.tags.get(ref)
+        return None if image is None else LocalImage(image_id=image, repo_digests=())
 
     def _pull(self, *args, **kwargs):
         self.tags.update(self.pulled)
@@ -262,7 +267,7 @@ class TestUpdateTarget:
 
     def test_image_missing_after_pull_fails(self, paths, caddy, monkeypatch):
         import boxmunge.container_update as cu
-        monkeypatch.setattr(cu, "local_image_id", lambda ref: None)
+        monkeypatch.setattr("boxmunge.docker_containers.local_image", lambda ref: None)
         result = cu.update_target(paths, _caddy_target(paths))
         assert result["status"] == "failed"
         assert "not in the local image store" in result["reason"]
@@ -410,6 +415,23 @@ class TestUpdateTargetSkipsQuarantined:
     """Wave 1 defense-in-depth: update_target itself refuses to pull/recreate
     a CVE-quarantined user project, even if a future caller forgets to
     pre-filter. Caddy is exempt — it has no quarantine state."""
+
+    def test_monitor_stopped_project_is_refused_under_the_lock(self, paths, monkeypatch):
+        import boxmunge.container_update as cu
+        from boxmunge.state import write_state
+        _write_project(paths, "stopped-app")
+        write_state(paths.project_health_state("stopped-app"), {
+            "status": "critical_stopped", "stopped_at": "2026-10-01T03:00:00+00:00",
+        })
+        pull = MagicMock()
+        monkeypatch.setattr(cu, "compose_pull", pull)
+        target = UpdateTarget(
+            name="stopped-app", project_dir=paths.project_dir("stopped-app"),
+            compose_files=["compose.yml"], strategy="leave_broken",
+            has_backup=False, is_caddy=False,
+        )
+        assert cu.update_target(paths, target)["status"] == cu.SKIPPED_MONITOR_STOPPED
+        pull.assert_not_called()
 
     @patch("boxmunge.container_update.compose_pull")
     @patch("boxmunge.container_update.compose_up")

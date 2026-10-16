@@ -24,10 +24,11 @@ from typing import TYPE_CHECKING, Any
 from boxmunge import docker_containers
 from boxmunge.container_update_targets import UpdateTarget, persist_result
 from boxmunge.deployed_inventory import DeployedService, InventoryError, load_deployed_inventory
-from boxmunge.docker import DockerError, compose_pull, compose_up, local_image_id, tag_image
+from boxmunge.docker import DockerError, compose_pull, compose_up, tag_image
 from boxmunge.docker_containers import ProjectContainer
 from boxmunge.backup import BackupKind
 from boxmunge.commands.backup_cmd import run_backup
+from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_warning, log_error
@@ -42,6 +43,8 @@ if TYPE_CHECKING:
 
 # Result status for a user project whose project lock was held.
 SKIPPED_LOCKED = "skipped_locked"
+# Result status for a user project the health monitor stopped.
+SKIPPED_MONITOR_STOPPED = "monitor_stopped"
 
 _HEALTHCHECK_TIMEOUT_SEC = 90
 _HEALTHCHECK_POLL_INTERVAL_SEC = 3
@@ -103,8 +106,8 @@ def display_images(running: dict[str, ProjectContainer]) -> dict[str, str]:
 def detect_image_changes(
     services: dict[str, DeployedService], running: dict[str, ProjectContainer],
 ) -> dict[str, str]:
-    """{service: pulled image ID} for services whose image reference now
-    names a different image than their containers run.
+    """{service: pulled image reference} for services whose image reference
+    now names a different image than their containers run.
 
     A pull does not restart containers, so the pulled image is read from the
     local image store and compared with the running one by image ID.
@@ -112,14 +115,14 @@ def detect_image_changes(
     changed: dict[str, str] = {}
     for name, svc in services.items():
         assert svc.image is not None  # image_services keeps image services only
-        pulled = local_image_id(svc.image)
+        pulled = docker_containers.local_image(svc.image)
         if pulled is None:
             raise UpdateError(
                 f"service {name!r}: image {svc.image} is not in the local image "
                 f"store after the pull."
             )
-        if pulled != running[name].image_id:
-            changed[name] = pulled
+        if pulled.image_id != running[name].image_id:
+            changed[name] = pulled.image_ref
     return changed
 
 
@@ -273,6 +276,15 @@ def _update_locked(
                 paths, project=target.name,
             )
             result["status"] = block.reason.value
+            return result
+        if is_monitor_stopped(target.name, paths):
+            # A recreate would undo the health monitor's critical stop.
+            log_operation(
+                "container-update",
+                f"Refused to update '{target.name}': stopped by the health monitor",
+                paths, project=target.name,
+            )
+            result["status"] = SKIPPED_MONITOR_STOPPED
             return result
 
     # Step 1: What the target runs: its image services and the image each

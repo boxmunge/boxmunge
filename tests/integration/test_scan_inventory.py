@@ -26,7 +26,7 @@ from tests.integration.conftest import skip_no_docker
 from tests.integration.docker_images import (
     build_image, compose, container_image_ids, docker, image_id, tear_down,
 )
-from tests.test_commands.cve_helpers import make_box, scan_result
+from tests.test_commands.cve_helpers import make_box, scan_result, seed_quarantine
 
 pytestmark = [pytest.mark.integration, skip_no_docker]
 
@@ -162,3 +162,40 @@ def test_hardening_counts_settings_from_included_files(tmp_path):
         "include:\n  - db.yml\nservices:\n  web:\n    image: nginx:1\n")
     meta = load_project_meta(paths, name)
     assert hardening_profile(meta, load_user_model(paths, name)).extra_caps_added
+
+
+def test_quarantined_project_without_containers_scans_what_resume_starts(tmp_path):
+    """Containers pruned, and the web tag moved since they were created: the
+    resume re-scan checks the images `compose up` would start now, including
+    the image Compose built for a build-only service."""
+    name = f"bminv-{uuid.uuid4().hex[:8]}"
+    paths = make_box(tmp_path, projects=(name,))
+    project_dir = paths.project_dir(name)
+    web, newer = f"{name}-img-web:1", f"{name}-img-web-new:1"
+    build_image(web, f"{name}-web")
+    (project_dir / "Dockerfile").write_text(f"FROM busybox:1.36\nLABEL bm.test={name}-app\n")
+    (project_dir / "compose.yml").write_text(
+        "services:\n"
+        f"  web:\n    image: {web}\n    command: [sleep, '3600']\n"
+        "  app:\n    build: .\n    command: [sleep, '3600']\n")
+    try:
+        compose(project_dir, name, "up", "-d", "--build")
+        compose(project_dir, name, "down")
+        new_id = build_image(newer, f"{name}-web-new")
+        docker("tag", newer, web)
+        seed_quarantine(paths, name)
+        scanned: list[str] = []
+        mp = pytest.MonkeyPatch()
+        mp.setattr(security_scan_core, "scan_image",
+                   lambda ref, timeout: scanned.append(ref) or scan_result(ref))
+        try:
+            result = scan_one_project(
+                paths, name, audit_only=True,
+                kev=KevCatalog(cve_ids=frozenset(), fetched_at=datetime.now(timezone.utc)),
+            )
+        finally:
+            mp.undo()
+        assert result.complete and result.stopped_reason == "quarantined"
+        assert {_identity(ref) for ref in scanned} == {new_id, image_id(f"{name}-app")}
+    finally:
+        tear_down(project_dir, name, [web, newer, f"{name}-app"])

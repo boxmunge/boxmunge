@@ -66,11 +66,17 @@ class FakeContainers:
     `docker compose config` last resolved for it, and the fake names each
     image by that compose reference, so tests see the refs they declared.
     A build-only service has no container unless a test runs one.
+
+    ``local_image`` stands in for `docker_containers.local_image` the same
+    way: a ref set in ``images`` (to a LocalImage, or None for absent) is
+    that; any other ref is present when it is the `image:` of a service in
+    a resolved model, again named by that reference.
     """
 
     def __init__(self) -> None:
         self.by_project: dict[str, list] = {}
         self.models: dict[str, dict] = {}
+        self.images: dict[str, object] = {}
 
     def run(self, project: str, service: str, image_id: str, *,
             repo_digests: tuple[str, ...] = (), name: str | None = None,
@@ -78,8 +84,9 @@ class FakeContainers:
         from boxmunge.docker_containers import ProjectContainer
 
         existing = self.by_project.setdefault(project, [])
+        replica = 1 + sum(1 for c in existing if c.service == service)
         container = ProjectContainer(
-            name=name or f"{project}-{service}-{len(existing) + 1}",
+            name=name or f"{project}-{service}-{replica}",
             service=service, image_id=image_id, repo_digests=tuple(repo_digests),
             running=running, health=health, oneoff=oneoff,
         )
@@ -90,21 +97,38 @@ class FakeContainers:
         """The project has no containers at all."""
         self.by_project[project] = []
 
-    def _as_declared(self, project: str) -> list:
+    @staticmethod
+    def _declared_id(ref: str) -> str:
         import hashlib
+        return "sha256:" + hashlib.sha256(ref.encode()).hexdigest()
 
+    def _as_declared(self, project: str) -> list:
         from boxmunge.docker_containers import ProjectContainer
 
         services = (self.models.get(project) or {}).get("services") or {}
         return [
             ProjectContainer(
                 name=f"{project}-{svc}-1", service=svc,
-                image_id="sha256:" + hashlib.sha256(spec["image"].encode()).hexdigest(),
+                image_id=self._declared_id(spec["image"]),
                 repo_digests=(spec["image"],), running=True, health=None, oneoff=False,
             )
             for svc, spec in services.items()
             if isinstance(spec, dict) and isinstance(spec.get("image"), str)
         ]
+
+    def local_image(self, ref: str):
+        from boxmunge.docker_containers import LocalImage
+
+        if ref in self.images:
+            return self.images[ref]
+        declared = {
+            spec.get("image") for model in self.models.values()
+            for spec in ((model or {}).get("services") or {}).values()
+            if isinstance(spec, dict)
+        }
+        if ref in declared:
+            return LocalImage(image_id=self._declared_id(ref), repo_digests=(ref,))
+        return None
 
     def __call__(self, project_name: str) -> list:
         if project_name in self.by_project:
@@ -124,6 +148,7 @@ def fake_containers(request, monkeypatch) -> FakeContainers:
     fake = FakeContainers()
     if not request.node.get_closest_marker("integration"):
         monkeypatch.setattr("boxmunge.docker_containers.project_containers", fake)
+        monkeypatch.setattr("boxmunge.docker_containers.local_image", fake.local_image)
     return fake
 
 

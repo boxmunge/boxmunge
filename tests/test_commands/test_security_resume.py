@@ -68,14 +68,16 @@ def test_resume_refuses_when_budget_skips_an_image(tmp_path, monkeypatch, lift, 
 def test_resume_refuses_when_a_service_image_is_unidentifiable(
     tmp_path, monkeypatch, lift, capsys,
 ):
-    """worker is build-only with no container digest: nothing to scan."""
+    """worker is build-only and its build tag is not in the local image store:
+    nothing shows what the lift would start for it."""
     paths = make_paths(tmp_path, images={"web": "demo-web:1"})
     monkeypatch.setattr(security_scan_core, "scan_image", lambda ref, timeout: _sr(ref))
     rc = cmd_security_resume(["demo"], paths)
     err = capsys.readouterr().err
     assert rc == 1
     assert lift == []
-    assert "service 'worker': should be running but has no container" in err
+    assert ("service 'worker': the image `compose up` would start (demo-worker) "
+            "is not in the local image store") in err
 
 
 def test_resume_refuses_when_no_image_is_identifiable(tmp_path, monkeypatch, lift, capsys):
@@ -119,7 +121,7 @@ def test_resume_lifts_after_complete_clean_rescan(tmp_path, monkeypatch, lift, c
     rc = cmd_security_resume(["demo"], paths)
     assert rc == 0
     assert lift == ["lift"]
-    assert "every image scanned" in capsys.readouterr().out
+    assert "every image the lift will start scanned" in capsys.readouterr().out
 
 
 # ---------- B-20: the lift itself (real lift_quarantine, Docker stubbed) ----------

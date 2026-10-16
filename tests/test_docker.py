@@ -7,14 +7,11 @@ import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-import pytest
-
 
 from boxmunge.docker import (
     compose_stop,
     compose_start,
     compose_pull,
-    local_image_id,
     tag_image,
     container_running,
     caddy_reload,
@@ -80,29 +77,6 @@ class TestComposePull:
         cmd = mock_run.call_args[0][0]
         assert "compose.yml" in cmd
         assert "compose.boxmunge.yml" in cmd
-
-
-def _completed(returncode: int, stdout: str = "", stderr: str = "") -> MagicMock:
-    result = MagicMock()
-    result.returncode, result.stdout, result.stderr = returncode, stdout, stderr
-    return result
-
-
-class TestLocalImageId:
-    @patch("boxmunge.docker._run", return_value=_completed(0, "sha256:abc\n"))
-    def test_returns_the_image_id(self, mock_run):
-        assert local_image_id("caddy:2-alpine") == "sha256:abc"
-
-    @patch("boxmunge.docker._run",
-           return_value=_completed(1, stderr="Error response from daemon: No such image: x:1"))
-    def test_absent_image_is_none(self, mock_run):
-        assert local_image_id("x:1") is None
-
-    @patch("boxmunge.docker._run",
-           return_value=_completed(1, stderr="Cannot connect to the Docker daemon"))
-    def test_other_failures_raise(self, mock_run):
-        with pytest.raises(DockerError, match="Cannot connect"):
-            local_image_id("x:1")
 
 
 class TestTagImage:

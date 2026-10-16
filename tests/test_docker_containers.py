@@ -10,8 +10,9 @@ import pytest
 from boxmunge import docker_containers
 from boxmunge.docker_run import DockerError
 
-# Bound at import: conftest's fake_containers replaces the module attribute.
+# Bound at import: conftest's fake_containers replaces the module attributes.
 project_containers = docker_containers.project_containers
+local_image = docker_containers.local_image
 
 _IMG = "sha256:" + "a" * 64
 
@@ -95,3 +96,29 @@ def test_docker_failure_is_not_an_empty_answer(monkeypatch):
     monkeypatch.setattr(docker_containers, "_run", run)
     with pytest.raises(DockerError):
         project_containers("demo")
+
+
+def _completed(returncode: int, stdout: str = "", stderr: str = "") -> MagicMock:
+    result = MagicMock()
+    result.returncode, result.stdout, result.stderr = returncode, stdout, stderr
+    return result
+
+
+def test_local_image_names_the_image_a_ref_points_at(monkeypatch):
+    out = json.dumps([{"Id": _IMG, "RepoDigests": ["nginx@sha256:" + "c" * 64]}])
+    monkeypatch.setattr(docker_containers, "_run", lambda cmd, **k: _completed(0, out))
+    image = local_image("nginx:1")
+    assert image.image_id == _IMG and image.image_ref == "nginx@sha256:" + "c" * 64
+
+
+def test_absent_local_image_is_none(monkeypatch):
+    monkeypatch.setattr(docker_containers, "_run", lambda cmd, **k: _completed(
+        1, stderr="Error response from daemon: No such image: x:1"))
+    assert local_image("x:1") is None
+
+
+def test_other_local_image_failures_raise(monkeypatch):
+    monkeypatch.setattr(docker_containers, "_run", lambda cmd, **k: _completed(
+        1, stderr="Cannot connect to the Docker daemon"))
+    with pytest.raises(DockerError, match="Cannot connect"):
+        local_image("x:1")

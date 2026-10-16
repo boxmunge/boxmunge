@@ -381,3 +381,41 @@ class TestLock:
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
             f.close()
+
+
+class TestDeliberatelyStoppedProjects:
+    """A paused, quarantined or monitor-stopped project has no running
+    containers by design: container-update skips it, never fails it."""
+
+    def test_paused_project_without_containers_is_skipped_with_a_warning(
+        self, paths, fake_containers,
+    ):
+        _make_paused_project(paths, "paused-app")
+        fake_containers.remove("paused-app")
+        warnings: list = []
+        with patch("boxmunge.commands.container_update_cmd.update_target",
+                   return_value={"name": "caddy", "status": "succeeded"}), \
+             patch("boxmunge.commands.container_update_cmd.log_warning",
+                   side_effect=lambda c, m, *a, **k: warnings.append(m)):
+            rc = run_container_update(paths)
+        assert rc == 0
+        assert len(warnings) == 1
+        assert "could not check for pending updates" in warnings[0]
+        assert "has no container" in warnings[0]
+
+    def test_monitor_stopped_project_is_not_pulled_or_recreated(self, paths):
+        from boxmunge.state import write_state
+        _make_quarantined_project(paths, "stopped-app")
+        paths.project_quarantine_state("stopped-app").unlink()
+        write_state(paths.project_health_state("stopped-app"), {
+            "status": "critical_stopped", "stopped_at": "2026-10-01T03:00:00+00:00",
+        })
+        updated: list[str] = []
+        with patch("boxmunge.commands.container_update_cmd.update_target",
+                   side_effect=lambda p, t: updated.append(t.name) or
+                   {"name": t.name, "status": "succeeded"}), \
+             patch("boxmunge.commands.container_update_cmd._dry_run_target") as dry:
+            rc = run_container_update(paths)
+        assert rc == 0
+        assert updated == ["caddy"]
+        dry.assert_not_called()

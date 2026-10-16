@@ -15,6 +15,7 @@ from boxmunge.commands.security_resume import cmd_security_resume
 from boxmunge.commands.security_scan_inputs import identify_images
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.deployed_inventory import load_deployed_inventory
+from boxmunge.docker_containers import LocalImage
 from tests.test_commands.cve_helpers import Docker, Pushover, make_box, scan_result, seed_quarantine
 
 _WEB_ID = "sha256:" + "1" * 64
@@ -44,7 +45,7 @@ def _targets(inventory):
 def test_build_only_service_is_scanned_by_image_id(tmp_path, running):
     running("web", _WEB_ID)
     inv = _identify(tmp_path, {"services": {"web": {"build": "."}}}, "web")
-    assert _targets(inv) == [("web", _WEB_ID)] and inv.unidentified == []
+    assert _targets(inv) == [("web", _WEB_ID)] and inv.unidentified == {}
 
 
 def test_registry_digest_is_preferred_and_keeps_a_registry_port(tmp_path, running):
@@ -79,18 +80,18 @@ def test_compose_only_services_are_scanned(tmp_path, running):
 def test_service_without_container_is_unidentified_not_scanned_by_tag(tmp_path, running):
     """The tag names whatever was pulled last, not what is deployed."""
     inv = _identify(tmp_path, {"services": {"web": {"image": "nginx:1"}}}, "web")
-    assert inv.targets == [] and inv.unidentified == ["web"]
+    assert inv.targets == [] and list(inv.unidentified) == ["web"]
 
 
 def test_manifest_service_missing_from_the_model_is_unidentified(tmp_path, running):
     inv = _identify(tmp_path, {"services": {}}, "web")
-    assert inv.unidentified == ["web"]
+    assert list(inv.unidentified) == ["web"]
 
 
 def test_profile_service_without_container_is_inactive(tmp_path, running):
     compose = {"services": {"migrate": {"image": "tools:1", "profiles": ["tools"]}}}
     inv = _identify(tmp_path, compose)
-    assert inv.targets == [] and inv.unidentified == [] and inv.not_started == ["migrate"]
+    assert inv.targets == [] and inv.unidentified == {} and inv.not_started == ["migrate"]
 
 
 def test_profile_service_with_a_container_is_scanned(tmp_path, running):
@@ -135,7 +136,9 @@ def test_nightly_scan_of_a_build_only_project_is_complete(build_only_box, monkey
     assert [t for t in pushover.titles() if "scan incomplete" in t] == []
 
 
-def test_resume_lifts_a_build_only_project(build_only_box, monkeypatch):
+def test_resume_lifts_a_build_only_project(build_only_box, monkeypatch, fake_containers):
+    """Quarantined, so the re-scan checks what the lift starts: the build tag."""
+    fake_containers.images["demo-web"] = LocalImage(image_id=_WEB_ID, repo_digests=())
     seed_quarantine(build_only_box)
     Docker(monkeypatch)
     monkeypatch.setattr(security_resume, "prepare_caddy_config", lambda p, m: None)

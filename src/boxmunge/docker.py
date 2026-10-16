@@ -396,26 +396,3 @@ def set_restart_policy(container_names: list[str], policy: str) -> None:
     """Run docker update --restart=<policy> on the named containers."""
     if container_names:
         _run(["docker", "update", f"--restart={policy}", *container_names])
-
-
-def local_image_id(image_ref: str) -> str | None:
-    """The local image ID for an image reference, or None if it is not present.
-
-    Raises DockerError for any other failure, so "not present" is never a
-    guess made because Docker could not be asked.
-    """
-    result = _run(
-        ["docker", "image", "inspect", "--format", "{{.Id}}", image_ref],
-        capture=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        if "no such image" in (result.stderr or "").lower():
-            return None
-        raise DockerError(
-            f"docker image inspect {image_ref} failed: {(result.stderr or '').strip()}"
-        )
-    image_id = result.stdout.strip()
-    if not image_id.startswith("sha256:"):
-        raise DockerError(f"docker image inspect {image_ref} returned {image_id!r}")
-    return image_id

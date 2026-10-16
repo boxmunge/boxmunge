@@ -45,7 +45,24 @@ class ProjectContainer:
     def image_ref(self) -> str:
         """A reference that names exactly this image, readable where possible:
         its registry repo@digest when it was pulled, else its image ID."""
-        return self.repo_digests[0] if self.repo_digests else self.image_id
+        return _exact_ref(self.image_id, self.repo_digests)
+
+
+@dataclass(frozen=True)
+class LocalImage:
+    """An image in the local image store."""
+
+    image_id: str
+    repo_digests: tuple[str, ...]
+
+    @property
+    def image_ref(self) -> str:
+        """As ProjectContainer.image_ref."""
+        return _exact_ref(self.image_id, self.repo_digests)
+
+
+def _exact_ref(image_id: str, repo_digests: tuple[str, ...]) -> str:
+    return repo_digests[0] if repo_digests else image_id
 
 
 def _inspect(cmd: list[str]) -> list[dict[str, Any]]:
@@ -106,3 +123,35 @@ def project_containers(project_name: str) -> list[ProjectContainer]:
     if missing:
         raise DockerError(f"docker image inspect did not describe {', '.join(missing)}")
     return sorted((_container(d, images) for d in docs), key=lambda c: c.name)
+
+
+def running_by_service(project_name: str) -> dict[str, list[str]]:
+    """{service: names of its running containers}, `run` one-offs excluded."""
+    running: dict[str, list[str]] = {}
+    for c in project_containers(project_name):
+        if c.running and not c.oneoff:
+            running.setdefault(c.service, []).append(c.name)
+    return running
+
+
+def local_image(ref: str) -> LocalImage | None:
+    """The local image a reference (repo:tag, or a build tag) names now, or
+    None when the local image store has no such image.
+
+    Raises DockerError for any other failure, so "not present" is never a
+    guess made because Docker could not be asked.
+    """
+    cmd = ["docker", "image", "inspect", ref]
+    result = _run(cmd, capture=True, check=False)
+    if result.returncode != 0:
+        if "no such image" in (result.stderr or "").lower():
+            return None
+        raise DockerError(f"docker image inspect {ref} failed: {(result.stderr or '').strip()}")
+    try:
+        (doc,) = json.loads(result.stdout)
+        image_id, digests = doc["Id"], doc.get("RepoDigests") or []
+    except (json.JSONDecodeError, ValueError, TypeError, KeyError) as e:
+        raise DockerError(f"docker image inspect {ref} returned unexpected output: {e}") from e
+    if not isinstance(image_id, str) or not image_id.startswith("sha256:"):
+        raise DockerError(f"docker image inspect {ref} reports image ID {image_id!r}")
+    return LocalImage(image_id=image_id, repo_digests=tuple(digests))
