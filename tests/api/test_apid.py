@@ -2,6 +2,7 @@
 """boxmunge-apid: the dev-mode command line, end to end over a real socket."""
 from __future__ import annotations
 
+import ast
 import json
 import os
 import signal
@@ -122,11 +123,28 @@ def test_pyproject_declares_the_entry_point() -> None:
     assert 'boxmunge-apid = "boxmunge.api.apid:main"' in (REPO / "pyproject.toml").read_text()
 
 
-def test_no_production_frontend_reaches_the_api_yet() -> None:
-    """Phase A ships inert: the CLI, the deploy shell and MCP do not route
-    through boxmunge.api or know about apid, so production boxes behave
-    exactly as before. Update this deliberately when a frontend converts."""
+def _imports_of_the_api(path: Path) -> list[str]:
+    found = []
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names = [node.module] + [f"{node.module}.{alias.name}" for alias in node.names]
+        else:
+            continue
+        found += [f"{path.name}:{node.lineno} {name}" for name in names
+                  if name == "boxmunge.api" or name.startswith("boxmunge.api.")]
+    return found
+
+
+def test_nothing_outside_the_api_package_imports_it() -> None:
+    """Phase A ships inert: no CLI command, shell, MCP tool or timer routes
+    through boxmunge.api, so production boxes behave exactly as before. The
+    only way in is the boxmunge-apid console script. Update this
+    deliberately when a frontend converts."""
     src = REPO / "src" / "boxmunge"
+    outside = [p for p in src.rglob("*.py") if (src / "api") not in p.parents]
+    assert len(outside) > 50
+    assert [hit for module in outside for hit in _imports_of_the_api(module)] == []
     for module in ("cli.py", "shell.py", "mcp_server.py", "mcp_tools.py"):
-        text = (src / module).read_text()
-        assert "boxmunge.api" not in text and "apid" not in text, module
+        assert "apid" not in (src / module).read_text(), module
