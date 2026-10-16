@@ -15,9 +15,9 @@ def app(tmp_path):
     releases_file = tmp_path / "releases.json"
     releases_file.write_text(json.dumps({
         "releases": [
-            {"version": "0.2.1", "class": "security",
+            {"version": "0.2.1", "class": "security", "breaking": False,
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.1"},
-            {"version": "0.2.0", "class": "feature",
+            {"version": "0.2.0", "class": "feature", "breaking": False,
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.0"},
         ]
     }))
@@ -161,7 +161,7 @@ class TestAutoTrip:
     def test_auto_trip_when_threshold_reached(self, tmp_path):
         releases_file = tmp_path / "threshold-releases.json"
         releases_file.write_text(json.dumps({"releases": [
-            {"version": "0.2.1", "class": "security",
+            {"version": "0.2.1", "class": "security", "breaking": False,
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.1"},
         ]}))
         with patch("app.RELEASES_PATH", releases_file), \
@@ -183,7 +183,7 @@ class TestAutoTrip:
     def test_invalid_threshold_stops_startup(self, tmp_path, value):
         releases_file = tmp_path / "threshold-releases.json"
         releases_file.write_text(json.dumps({"releases": [
-            {"version": "0.2.1", "class": "security",
+            {"version": "0.2.1", "class": "security", "breaking": False,
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.1"},
         ]}))
         with patch("app.RELEASES_PATH", releases_file), \
@@ -226,7 +226,7 @@ class TestCircuitBreakerBreakfix:
     def bf_app(self, tmp_path):
         releases_file = tmp_path / "releases.json"
         releases_file.write_text(json.dumps({"releases": [
-            {"version": v, "class": c,
+            {"version": v, "class": c, "breaking": False,
              "url": f"https://github.com/boxmunge/boxmunge/releases/tag/v{v}"}
             for v, c in [("0.2.2", "breakfix"), ("0.2.1", "security"), ("0.2.0", "feature")]
         ]}))

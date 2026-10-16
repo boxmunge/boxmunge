@@ -15,13 +15,13 @@ def releases_data():
     """Multi-version release data for testing."""
     return {
         "releases": [
-            {"version": "0.3.0", "class": "feature",
+            {"version": "0.3.0", "class": "feature", "breaking": True,
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.3.0"},
-            {"version": "0.2.1", "class": "security",
+            {"version": "0.2.1", "class": "security", "breaking": False,
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.1"},
-            {"version": "0.2.0", "class": "feature",
+            {"version": "0.2.0", "class": "feature", "breaking": True,
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.0"},
-            {"version": "0.1.0", "class": "feature",
+            {"version": "0.1.0", "class": "feature", "breaking": False,
              "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.1.0"},
         ]
     }
@@ -94,13 +94,22 @@ class TestCheckEndpoint:
         resp = client.get("/v1/check?v=0.2.0")
         assert resp.headers.get("Cache-Control") == "no-cache"
 
-    def test_security_only_same_minor_line(self, client) -> None:
-        """v0.1.0 should NOT see v0.2.1 as a security update."""
+    def test_security_not_offered_across_a_breaking_release(self, client) -> None:
+        """v0.1.0 must not be offered v0.2.1: v0.2.0 between them is breaking."""
         resp = client.get("/v1/check?v=0.1.0")
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["security"] is None
         assert data["latest"]["version"] == "0.3.0"
+        assert data["blocked"] == {
+            "version": "0.2.1", "class": "security",
+            "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.1",
+            "reason": {"breaking_release": "0.2.0"},
+        }
+
+    def test_blocked_is_null_when_nothing_is_blocked(self, client) -> None:
+        data = client.get("/v1/check?v=0.2.0").get_json()
+        assert data["blocked"] is None
 
 
 def _check_counts(db_path) -> dict:
@@ -138,7 +147,7 @@ class TestCounter:
 
 
 def _rel(version: str, cls: str) -> dict:
-    return {"version": version, "class": cls,
+    return {"version": version, "class": cls, "breaking": False,
             "url": f"https://github.com/boxmunge/boxmunge/releases/tag/v{version}"}
 
 
@@ -160,6 +169,19 @@ class TestStartupValidation:
                "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.3.0"}
         with pytest.raises(ReleaseCatalogError, match="class"):
             _make_app(tmp_path, [bad])
+
+    def test_refuses_to_start_on_entry_without_breaking(self, tmp_path) -> None:
+        from release_catalog import ReleaseCatalogError
+        entry = _rel("0.3.0", "feature")
+        del entry["breaking"]
+        with pytest.raises(ReleaseCatalogError, match="breaking"):
+            _make_app(tmp_path, [entry])
+
+    def test_refuses_to_start_on_non_boolean_breaking(self, tmp_path) -> None:
+        from release_catalog import ReleaseCatalogError
+        entry = {**_rel("0.3.0", "feature"), "breaking": "no"}
+        with pytest.raises(ReleaseCatalogError, match="breaking"):
+            _make_app(tmp_path, [entry])
 
     def test_refuses_to_start_on_unknown_class(self, tmp_path) -> None:
         from release_catalog import ReleaseCatalogError

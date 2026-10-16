@@ -109,7 +109,7 @@ command means touching several places, listed below.
 |---|---|---|
 | `/opt/boxmunge/config/` | root:deploy | `boxmunge.yml`, backup key, host secrets, suppressions |
 | `/opt/boxmunge/projects/<p>/` | deploy | manifest, compose files, generated overlay, secrets, backups, data |
-| `/opt/boxmunge/state/` | deploy | registry, locks, health, deploy, staging, scan, KEV, container-update state |
+| `/opt/boxmunge/state/` | deploy | registry, locks, health, deploy, staging, scan, KEV, container-update and platform-update state |
 | `/opt/boxmunge/upgrade-state/` | root:deploy | active venv slot, probation, blocklist |
 | `/opt/boxmunge/logs/boxmunge.log` | deploy, group-writable | structured JSON-lines operational log, written by root and deploy |
 | `/opt/boxmunge/caddy/` | root:deploy | Caddyfile and generated `sites/*.conf` |
@@ -155,20 +155,26 @@ either rule is broken. To change a dependency, edit the matching `.in` file or `
 
 ## How a release reaches a server
 
-1. A maintainer bumps `version` in `pyproject.toml`, records the release and its class in
-   `services/version-check/releases.json` (`"class": "feature"`, `"breakfix"` or `"security"`), and
-   tags `vX.Y.Z`. A unit test fails if the `pyproject.toml` version is not listed.
+1. A maintainer bumps `version` in `pyproject.toml`, records the release, its class and whether it
+   is breaking in `services/version-check/releases.json` (`"class": "feature"`, `"breakfix"` or
+   `"security"`; `"breaking": true` or `false`), and tags `vX.Y.Z`. A unit test fails if the
+   `pyproject.toml` version is not listed. The version-check service refuses to start if any entry
+   lacks either field, and the release workflow refuses a breaking release whose version is not
+   `X.Y.0`.
 2. `.github/workflows/release.yml` checks the tag with `scripts/release-lint.py` (listed in
    `releases.json` with a valid class, matching `pyproject.toml`), then, in a read-only job, runs
    the tests, builds the installer and bundle, and generates an SBOM. A separate job holding the
    write and signing tokens signs `SHA256SUMS` with cosign (keyless, tied to this workflow and
-   tag), creates a draft release whose title and notes carry the class marker generated from
-   `releases.json`, verifies the draft classifies as listed, and publishes it. Any failure,
-   including signing, fails the workflow.
+   tag), creates a draft release whose title and notes carry the class marker (and `[breaking]`
+   for a breaking release) generated from `releases.json`, verifies the draft carries exactly
+   those markers, and publishes it. Any failure, including signing, fails the workflow.
 3. Once the release is published, the maintainer redeploys the version-check service so it serves
    the new `releases.json`. Do not redeploy it before then: it would offer a release boxes cannot
    download yet. Servers discover new releases through that service, with the GitHub releases
-   list (and its `[security]` / `[breakfix]` markers) as the fallback.
+   list (and its `[security]` / `[breakfix]` / `[breaking]` markers) as the fallback. If you
+   change an existing entry in `releases.json`, edit that release's title on GitHub to match, and
+   confirm with `python scripts/release-lint.py audit --github-releases FILE`, where FILE is the
+   output of `gh api --paginate --slurp 'repos/boxmunge/boxmunge/releases?per_page=100'`.
 4. `scripts/boxmunge-upgrade` downloads the release, verifies the cosign signature against this
    repository's release workflow identity, checks the checksums, installs into the standby venv,
    swaps, and watches a probation window. A release that fails probation is rolled back and
@@ -178,6 +184,13 @@ Security releases apply automatically. Break-fix releases (critical non-security
 automatically unless the box sets `auto_update.breakfix: false` in `boxmunge.yml`. Feature releases
 wait for the operator to run `upgrade`. Use `breakfix` only for a fix that cannot wait for the
 operator; a fix for a vulnerability is always `security`.
+
+Set `"breaking": true` on any release that changes an operator workflow, or could make an existing
+project, manifest, compose file, command line or upload method fail. A breaking release bumps the
+minor version (`X.Y.0`). Automatic security and break-fix updates cross minor lines, but never a
+breaking release and never a major version: a box behind a breaking release is told to upgrade by
+hand instead. So mark honestly. A breaking release marked `false` would be installed on boxes
+unattended, and a fix marked `breaking` stops reaching older lines automatically.
 The full trust chain is in `docs/on-server/TRUST_MODEL.md`.
 
 The client is published to PyPI by `.github/workflows/publish-cli.yml` on a `cli-v*` tag, using

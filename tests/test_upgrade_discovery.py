@@ -32,9 +32,13 @@ def _offer(version, cls):
     return {"version": version, "url": f"{GH}v{version}", "class": cls}
 
 
-def _endpoint(security=None, breakfix=None, latest=None, status="up_to_date"):
+def _endpoint(security=None, breakfix=None, latest=None, status="up_to_date", blocked=None):
     return _response({"status": status, "security": security,
-                      "breakfix": breakfix, "latest": latest})
+                      "breakfix": breakfix, "latest": latest, "blocked": blocked})
+
+
+def _blocked(version="0.4.2", cls="security", reason=None):
+    return {**_offer(version, cls), "reason": reason or {"breaking_release": "0.4.0"}}
 
 
 def _gh_release(version, title="", body="", **extra):
@@ -58,7 +62,7 @@ class TestEndpointSelection:
         mock_open.return_value = _endpoint()
         result = discover_update(_setup(tmp_path), mode="latest")
         assert result == {"action": "up_to_date", "current_version": "0.3.0",
-                          "source": "endpoint"}
+                          "blocked": None, "source": "endpoint"}
 
     @pytest.mark.parametrize("mode,version,cls", [
         ("security", "0.3.2", "security"),
@@ -70,7 +74,8 @@ class TestEndpointSelection:
         mock_open.return_value = _endpoint(**FULL)
         result = discover_update(_setup(tmp_path), mode=mode)
         assert result == {"action": "upgrade", "version": version,
-                          "url": f"{GH}v{version}", "class": cls, "source": "endpoint"}
+                          "url": f"{GH}v{version}", "class": cls, "source": "endpoint",
+                          "current_version": "0.3.0", "blocked": None}
 
     @patch("urllib.request.urlopen")
     def test_security_mode_ignores_breakfix(self, mock_open, tmp_path):
@@ -94,7 +99,24 @@ class TestEndpointSelection:
         paths.blocklist.write_text(json.dumps({"0.3.3": "preflight_failed"}))
         result = discover_update(paths, mode="breakfix")
         assert result == {"action": "blocklisted", "version": "0.3.3",
-                          "class": "breakfix", "source": "endpoint"}
+                          "class": "breakfix", "source": "endpoint",
+                          "current_version": "0.3.0", "blocked": None}
+
+    @pytest.mark.parametrize("reason", [{"breaking_release": "0.4.0"}, {"major": 1}])
+    @patch("urllib.request.urlopen")
+    def test_blocked_is_passed_through(self, mock_open, tmp_path, reason):
+        mock_open.return_value = _endpoint(blocked=_blocked(reason=reason))
+        result = discover_update(_setup(tmp_path), mode="breakfix")
+        assert result["action"] == "up_to_date"
+        assert result["blocked"] == _blocked(reason=reason)
+        assert result["source"] == "endpoint"
+
+    @patch("urllib.request.urlopen")
+    def test_blocked_rides_along_with_an_upgrade(self, mock_open, tmp_path):
+        mock_open.return_value = _endpoint(**FULL, blocked=_blocked())
+        result = discover_update(_setup(tmp_path), mode="breakfix")
+        assert result["action"] == "upgrade"
+        assert result["blocked"]["version"] == "0.4.2"
 
     @patch("urllib.request.urlopen")
     def test_offer_not_newer_than_installed_is_up_to_date(self, mock_open, tmp_path):
@@ -119,6 +141,35 @@ class TestEndpointContract:
         assert result["version"] == "0.3.1"
         assert result["source"] == "github"
         assert "breakfix" in result["endpoint_error"]
+
+    @patch("urllib.request.urlopen")
+    def test_missing_blocked_field_falls_back_to_github(self, mock_open, tmp_path):
+        stale = _response({"status": "up_to_date", "security": None, "breakfix": None,
+                           "latest": None})
+        mock_open.side_effect = [stale, _github([])]
+        result = discover_update(_setup(tmp_path), mode="breakfix")
+        assert result["source"] == "github"
+        assert "blocked" in result["endpoint_error"]
+
+    @pytest.mark.parametrize("blocked", [
+        "0.4.2",
+        {**_offer("0.4.2", "security")},
+        {**_offer("0.4.2", "feature"), "reason": {"major": 1}},
+        {**_offer("0.4", "security"), "reason": {"major": 1}},
+        {**_offer("0.4.2", "security"), "reason": {}},
+        {**_offer("0.4.2", "security"), "reason": {"major": "1"}},
+        {**_offer("0.4.2", "security"), "reason": {"major": True}},
+        {**_offer("0.4.2", "security"), "reason": {"breaking_release": "x"}},
+        {**_offer("0.4.2", "security"), "reason": {"held": "0.4.0"}},
+        {**_offer("0.4.2", "security"),
+         "reason": {"major": 1, "breaking_release": "0.4.0"}},
+    ])
+    @patch("urllib.request.urlopen")
+    def test_malformed_blocked_is_rejected(self, mock_open, tmp_path, blocked):
+        mock_open.side_effect = [_endpoint(blocked=blocked), _github([])]
+        result = discover_update(_setup(tmp_path), mode="security")
+        assert result["source"] == "github"
+        assert "blocked" in result["endpoint_error"]
 
     @patch("urllib.request.urlopen")
     def test_offer_of_wrong_class_is_rejected(self, mock_open, tmp_path):
@@ -178,9 +229,37 @@ class TestGitHubFallback:
                            "breakfix")
         assert result["class"] == "security"
 
-    def test_auto_modes_stay_on_the_minor_line(self, tmp_path):
-        result = self._run(tmp_path, [_gh_release("0.4.1", body="[security]")], "breakfix")
+    def test_auto_modes_cross_minor_lines_when_nothing_breaks(self, tmp_path):
+        releases = [_gh_release("0.4.1", body="[security]"), _gh_release("0.4.0")]
+        result = self._run(tmp_path, releases, "breakfix")
+        assert result["action"] == "upgrade"
+        assert result["version"] == "0.4.1"
+        assert result["blocked"] is None
+
+    def test_breaking_marker_blocks_crossing(self, tmp_path):
+        releases = [_gh_release("0.4.1", body="[security]"),
+                    _gh_release("0.4.0", title="v0.4.0 [breaking]")]
+        result = self._run(tmp_path, releases, "security")
         assert result["action"] == "up_to_date"
+        assert result["blocked"] == {"version": "0.4.1", "url": f"{GH}v0.4.1",
+                                     "class": "security",
+                                     "reason": {"breaking_release": "0.4.0"}}
+
+    def test_breaking_candidate_itself_is_blocked(self, tmp_path):
+        releases = [_gh_release("0.4.0", title="v0.4.0 [breakfix] [Breaking]")]
+        result = self._run(tmp_path, releases, "breakfix")
+        assert result["action"] == "up_to_date"
+        assert result["blocked"]["reason"] == {"breaking_release": "0.4.0"}
+
+    def test_never_crosses_a_major_version(self, tmp_path):
+        result = self._run(tmp_path, [_gh_release("1.0.1", body="[security]")], "security")
+        assert result["action"] == "up_to_date"
+        assert result["blocked"]["reason"] == {"major": 1}
+
+    def test_breaking_draft_does_not_block(self, tmp_path):
+        releases = [_gh_release("0.4.1", body="[security]"),
+                    _gh_release("0.4.0", title="[breaking]", draft=True)]
+        assert self._run(tmp_path, releases, "security")["version"] == "0.4.1"
 
     def test_latest_mode_crosses_lines_like_the_endpoint(self, tmp_path):
         result = self._run(tmp_path, [_gh_release("0.4.0"), _gh_release("0.3.1")], "latest")

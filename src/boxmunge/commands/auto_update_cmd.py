@@ -3,7 +3,10 @@
 
 Security releases are always applied. Break-fix releases (critical
 non-security fixes) are applied unless boxmunge.yml sets
-``auto_update.breakfix: false``. Feature releases are never applied here.
+``auto_update.breakfix: false``. Feature releases are never applied here,
+and neither is any release across a breaking release or into a new major
+version. When such a security or break-fix release is all there is, the
+operator is alerted instead (boxmunge.blocked_update).
 
 Thin orchestration layer: delegates discovery to upgrade_discovery and hands
 off the upgrade itself to the boxmunge-upgrade shim via os.execvp, which
@@ -28,6 +31,7 @@ def run_auto_update(paths: BoxPaths) -> int:
     Delegates discovery to boxmunge.upgrade_discovery.discover_update.
     Hands off to the boxmunge-upgrade shim via os.execvp on success.
     """
+    from boxmunge.blocked_update import record_blocked
     from boxmunge.upgrade_discovery import auto_update_mode, discover_update
     from boxmunge.upgrade_state import UpgradeInProgress, upgrade_lock
     try:
@@ -58,6 +62,7 @@ def run_auto_update(paths: BoxPaths) -> int:
 
     if action == "up_to_date":
         print(f"No {scope} updates available.")
+        record_blocked(paths, result)
         return 0
     if action == "blocklisted":
         version = result["version"]
@@ -65,6 +70,7 @@ def run_auto_update(paths: BoxPaths) -> int:
         log_operation("auto-update",
                       f"Skipped blocklisted version: {version}", paths,
                       detail={"version": version, "class": result["class"]})
+        record_blocked(paths, result)
         return 0
     if action == "error":
         msg = result.get("message", "unknown")

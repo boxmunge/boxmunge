@@ -2,23 +2,33 @@
 # SPDX-License-Identifier: Apache-2.0
 """Release class gate for .github/workflows/release.yml.
 
-Two subcommands, both exit 1 with an ERROR: line on any violation:
+Three subcommands, each exits 1 with an ERROR: line on any violation:
 
   check  --tag vX.Y.Z --github-output FILE --notes-out FILE
          [--releases PATH] [--pyproject PATH]
       Before building: the tag must be vX.Y.Z, match pyproject.toml's version,
       and be listed in services/version-check/releases.json with a valid class
-      (validated by the service's own release_catalog rules). Writes `class`
-      and `title` to the GitHub step output file and the release-notes
-      preamble to --notes-out. The class marker ([security] or [breakfix]) is
-      generated from releases.json, so the notes cannot disagree with it.
+      and `breaking` flag (validated by the service's own release_catalog
+      rules). A breaking release must be X.Y.0: breaking changes bump the
+      minor version. Writes `class`, `breaking` and `title` to the GitHub step
+      output file and the release-notes preamble to --notes-out. The markers
+      ([security] or [breakfix], and [breaking]) are generated from
+      releases.json, so the notes cannot disagree with it.
 
-  verify --release-json FILE --class CLASS
+  verify --release-json FILE --class CLASS --breaking true|false
       After creating the draft release: FILE is `gh release view --json
-      name,body`. Boxes that fall back to the GitHub API classify a release by
-      the markers in its title and notes, so the draft must classify exactly as
-      CLASS. This catches auto-generated notes that quote a PR title
-      containing a marker.
+      name,body`. Boxes that fall back to the GitHub API classify a release,
+      and decide whether it is breaking, by the markers in its title and
+      notes, so the draft must read exactly as CLASS and BREAKING. This
+      catches auto-generated notes that quote a PR title containing a marker.
+
+  audit --github-releases FILE [--releases PATH]
+      Maintenance check, run by hand: FILE is
+      `gh api --paginate --slurp 'repos/boxmunge/boxmunge/releases?per_page=100'`.
+      Every release in releases.json must be published on GitHub with text
+      that reads as its class and breaking flag, so GitHub-fallback boxes
+      select exactly as the version-check service does. Edit the title of
+      any release it reports.
 
 Stdlib only, so it runs before any dependency is installed.
 """
@@ -40,15 +50,20 @@ CATALOG_MODULE = REPO / "services" / "version-check" / "release_catalog.py"
 TAG_RE = re.compile(r"^v(\d+\.\d+\.\d+)$")
 
 MARKERS = {"security": "[security]", "breakfix": "[breakfix]"}
+BREAKING_MARKER = "[breaking]"
+_REACH = ("Boxes on {major}.x apply it automatically when no breaking release (this one "
+          "included) lies between their version and this one")
 PREAMBLE = {
-    "security": ("[security] Security release. Every box on the {line} line applies it "
-                 "automatically."),
-    "breakfix": ("[breakfix] Break-fix release: a critical non-security fix. Boxes on the "
-                 "{line} line apply it automatically unless boxmunge.yml sets "
-                 "auto_update.breakfix: false."),
+    "security": "[security] Security release. " + _REACH + ".",
+    "breakfix": ("[breakfix] Break-fix release: a critical non-security fix. " + _REACH
+                 + ", unless boxmunge.yml sets auto_update.breakfix: false."),
     "feature": ("Feature release. Boxes do not apply it automatically; operators run "
                 "`upgrade` when ready."),
 }
+BREAKING_PREAMBLE = (
+    "[breaking] Breaking release: it changes operator workflows or can make existing "
+    "projects fail. Boxes never install it, or any later release across it, "
+    "automatically. Read these notes, make the changes they describe, then run `upgrade`.")
 
 
 class ReleaseLintError(Exception):
@@ -59,6 +74,7 @@ class ReleaseLintError(Exception):
 class ReleasePlan:
     version: str
     release_class: str
+    breaking: bool
     title: str
     notes: str
 
@@ -72,13 +88,19 @@ def _catalog():
 
 def classify_release(name: str, body: str) -> str:
     """The class a box infers from GitHub release text. Mirrors
-    boxmunge.upgrade_discovery._github_release_class (tests cross-check)."""
+    boxmunge.release_selection.github_release_class (tests cross-check)."""
     text = f"{name or ''}\n{body or ''}".lower()
     if MARKERS["security"] in text:
         return "security"
     if MARKERS["breakfix"] in text:
         return "breakfix"
     return "feature"
+
+
+def is_breaking(name: str, body: str) -> bool:
+    """Whether a box reads GitHub release text as breaking. Mirrors
+    boxmunge.release_selection.github_release_breaking (tests cross-check)."""
+    return BREAKING_MARKER in f"{name or ''}\n{body or ''}".lower()
 
 
 def plan_release(tag: str, releases_path: Path, pyproject_path: Path) -> ReleasePlan:
@@ -100,14 +122,21 @@ def plan_release(tag: str, releases_path: Path, pyproject_path: Path) -> Release
         raise ReleaseLintError(
             f"{version} is not listed in {releases_path}; add it with its class "
             f"(feature, breakfix or security) before tagging")
-    cls = entry["class"]
-    line = ".".join(version.split(".")[:2])
-    marker = MARKERS.get(cls)
-    title = f"v{version} {marker}" if marker else f"v{version}"
-    return ReleasePlan(version, cls, title, PREAMBLE[cls].format(line=line) + "\n")
+    cls, breaking = entry["class"], entry["breaking"]
+    major, _minor, patch = version.split(".")
+    if breaking and patch != "0":
+        raise ReleaseLintError(
+            f"{version} is marked breaking, but breaking changes bump the minor version; "
+            f"release them as X.Y.0, or set \"breaking\": false if nothing breaks")
+    markers = [m for m in (MARKERS.get(cls), BREAKING_MARKER if breaking else None) if m]
+    title = " ".join([f"v{version}", *markers])
+    notes = [PREAMBLE[cls].format(major=major)]
+    if breaking:
+        notes.append(BREAKING_PREAMBLE)
+    return ReleasePlan(version, cls, breaking, title, "\n\n".join(notes) + "\n")
 
 
-def verify_release(name: str, body: str, expected: str) -> None:
+def verify_release(name: str, body: str, expected: str, expected_breaking: bool) -> None:
     found = classify_release(name, body)
     if found != expected:
         raise ReleaseLintError(
@@ -116,20 +145,80 @@ def verify_release(name: str, body: str, expected: str) -> None:
             f"Edit the draft's title/notes so only the {expected} marker appears.")
     if expected in MARKERS and MARKERS[expected] not in (name or "").lower():
         raise ReleaseLintError(f"release title {name!r} lacks {MARKERS[expected]}")
+    found_breaking = is_breaking(name, body)
+    if found_breaking != expected_breaking:
+        state = "breaking" if found_breaking else "not breaking"
+        fix = (f"put {BREAKING_MARKER} in the title" if expected_breaking
+               else f"remove every {BREAKING_MARKER}")
+        raise ReleaseLintError(
+            f"release text reads as {state}, but releases.json says breaking: "
+            f"{str(expected_breaking).lower()}; boxes using the GitHub fallback would "
+            f"treat it as {state}. Edit the draft's title/notes to {fix}.")
+    if expected_breaking and BREAKING_MARKER not in (name or "").lower():
+        raise ReleaseLintError(f"release title {name!r} lacks {BREAKING_MARKER}")
+
+
+def audit_releases(releases_path: Path, github: list[dict]) -> None:
+    """Raise listing every releases.json entry whose published GitHub release
+    is missing or reads differently from its entry."""
+    catalog = _catalog()
+    try:
+        releases = catalog.load_releases(Path(releases_path))
+    except catalog.ReleaseCatalogError as e:
+        raise ReleaseLintError(str(e)) from e
+    published = {r.get("tag_name"): r for r in github
+                 if not r.get("draft") and not r.get("prerelease")}
+    problems = []
+    for entry in releases:
+        tag = f"v{entry['version']}"
+        release = published.get(tag)
+        if release is None:
+            problems.append(f"{tag}: no published GitHub release")
+            continue
+        name, body = release.get("name") or "", release.get("body") or ""
+        found = classify_release(name, body)
+        if found != entry["class"]:
+            problems.append(f"{tag}: GitHub text reads as {found}, releases.json says "
+                            f"{entry['class']}")
+        if is_breaking(name, body) != entry["breaking"]:
+            want = "add" if entry["breaking"] else "remove"
+            problems.append(f"{tag}: GitHub text {'lacks' if entry['breaking'] else 'has'} "
+                            f"{BREAKING_MARKER}, releases.json says breaking: "
+                            f"{str(entry['breaking']).lower()} ({want} it)")
+    if problems:
+        raise ReleaseLintError(
+            f"{len(problems)} release(s) on GitHub disagree with releases.json:\n  "
+            + "\n  ".join(problems))
 
 
 def _cmd_check(args: argparse.Namespace) -> None:
     plan = plan_release(args.tag, Path(args.releases), Path(args.pyproject))
     Path(args.notes_out).write_text(plan.notes)
     with open(args.github_output, "a") as out:
-        out.write(f"class={plan.release_class}\ntitle={plan.title}\n")
-    print(f"{args.tag}: class {plan.release_class}, title {plan.title!r}")
+        out.write(f"class={plan.release_class}\n"
+                  f"breaking={str(plan.breaking).lower()}\ntitle={plan.title}\n")
+    print(f"{args.tag}: class {plan.release_class}, breaking {plan.breaking}, "
+          f"title {plan.title!r}")
 
 
 def _cmd_verify(args: argparse.Namespace) -> None:
     view = json.loads(Path(args.release_json).read_text())
-    verify_release(view.get("name") or "", view.get("body") or "", args.release_class)
-    print(f"release text classifies as {args.release_class}")
+    breaking = args.breaking == "true"
+    verify_release(view.get("name") or "", view.get("body") or "", args.release_class,
+                   breaking)
+    print(f"release text classifies as {args.release_class}, breaking {breaking}")
+
+
+def _cmd_audit(args: argparse.Namespace) -> None:
+    github = json.loads(Path(args.github_releases).read_text())
+    if not isinstance(github, list):
+        raise ReleaseLintError(f"{args.github_releases}: expected a JSON list of releases")
+    if github and all(isinstance(page, list) for page in github):
+        github = [r for page in github for r in page]  # gh api --slurp pages
+    if not all(isinstance(r, dict) for r in github):
+        raise ReleaseLintError(f"{args.github_releases}: expected release objects")
+    audit_releases(Path(args.releases), github)
+    print(f"every release in {args.releases} reads the same on GitHub")
 
 
 def main(argv: list[str]) -> int:
@@ -145,9 +234,13 @@ def main(argv: list[str]) -> int:
     verify.add_argument("--release-json", required=True)
     verify.add_argument("--class", dest="release_class", required=True,
                         choices=("feature", "breakfix", "security"))
+    verify.add_argument("--breaking", required=True, choices=("true", "false"))
+    audit = sub.add_parser("audit")
+    audit.add_argument("--github-releases", required=True)
+    audit.add_argument("--releases", default=str(RELEASES_JSON))
     args = parser.parse_args(argv)
     try:
-        {"check": _cmd_check, "verify": _cmd_verify}[args.command](args)
+        {"check": _cmd_check, "verify": _cmd_verify, "audit": _cmd_audit}[args.command](args)
     except ReleaseLintError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

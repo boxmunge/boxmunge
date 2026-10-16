@@ -7,11 +7,21 @@ Every release has a class:
   (``auto_update.breakfix`` in boxmunge.yml, default on).
 - ``security`` — always auto-applied. A security release is also a break-fix.
 
+Every release also says whether it is ``breaking``: it changed an operator
+workflow, or could make an existing project, manifest, compose file, command
+line or upload method fail. Auto-update never installs across a breaking
+release or into a new major version; the operator does that with ``upgrade``.
+
 ``/v1/check`` offers three candidates, each newer than the caller:
 
-- ``security`` — newest same-line security release (the field deployed boxes read);
-- ``breakfix`` — newest same-line breakfix-or-security release;
+- ``security`` — newest reachable security release (the field deployed boxes read);
+- ``breakfix`` — newest reachable breakfix-or-security release;
 - ``latest``   — newest release of any class on any line.
+
+A release is reachable from the caller when it has the caller's major
+version and no release in (caller, release] is breaking. It may be on a
+newer minor line. ``blocked`` names the newest security or break-fix release
+that is not reachable, and why, so the box can alert its operator.
 
 This module is pure (no Flask, no database) so the release lint
 (scripts/release_lint.py) validates releases.json with exactly these rules.
@@ -24,7 +34,7 @@ from typing import Callable
 
 RELEASE_CLASSES = ("feature", "breakfix", "security")
 BREAKFIX_CLASSES = frozenset({"breakfix", "security"})
-ENTRY_KEYS = frozenset({"version", "class", "url"})
+ENTRY_KEYS = frozenset({"version", "class", "breaking", "url"})
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 RELEASE_URL_PREFIX = "https://github.com/boxmunge/boxmunge/releases/tag/v"
 HOLD_REASON = "circuit_breaker"
@@ -85,6 +95,9 @@ def _validate_entry(entry: object, where: str) -> None:
     if not isinstance(cls, str) or cls not in RELEASE_CLASSES:
         raise ReleaseCatalogError(
             f"{where}: class {cls!r} is not one of {', '.join(RELEASE_CLASSES)}")
+    if not isinstance(entry["breaking"], bool):
+        raise ReleaseCatalogError(
+            f"{where}: breaking {entry['breaking']!r} must be true or false")
     expected_url = f"{RELEASE_URL_PREFIX}{version}"
     if entry["url"] != expected_url:
         raise ReleaseCatalogError(f"{where}: url must be {expected_url}")
@@ -100,14 +113,6 @@ def parse_version(v: str) -> tuple[int, ...] | None:
         return tuple(int(x) for x in v.split("."))
     except ValueError:
         return None
-
-
-def same_minor_line(a: str, b: str) -> bool:
-    """True if two versions share major.minor."""
-    pa, pb = parse_version(a), parse_version(b)
-    if pa is None or pb is None or len(pa) < 2 or len(pb) < 2:
-        return False
-    return pa[:2] == pb[:2]
 
 
 def version_gt(a: str, b: str) -> bool:
@@ -131,19 +136,59 @@ def _newest(releases: list[dict], keep: Callable[[dict], bool]) -> dict | None:
     return best
 
 
+def block_reason(releases: list[dict], caller: str, target: str) -> dict | None:
+    """Why auto-update must not move ``caller`` to ``target``; None if it may.
+
+    ``{"major": N}`` when ``target`` is in another major version, else
+    ``{"breaking_release": V}`` naming the oldest breaking release in
+    (caller, target], the target itself included.
+    """
+    pc, pt = parse_version(caller), parse_version(target)
+    if pc is None or pt is None:
+        raise ValueError(f"cannot compare versions {caller!r} and {target!r}")
+    if pt[0] != pc[0]:
+        return {"major": pt[0]}
+    breaking = [r for r in releases
+                if r["breaking"] and version_gt(r["version"], caller)
+                and not version_gt(r["version"], target)]
+    if not breaking:
+        return None
+    first = min(breaking, key=lambda r: parse_version(r["version"]))
+    return {"breaking_release": first["version"]}
+
+
 def select_offers(releases: list[dict], caller: str) -> dict[str, dict | None]:
     """Pick the security, breakfix and latest candidates for a caller version."""
-    def same_line_newer(r: dict) -> bool:
-        return same_minor_line(r["version"], caller) and version_gt(r["version"], caller)
+    def reachable(r: dict) -> bool:
+        return (version_gt(r["version"], caller)
+                and block_reason(releases, caller, r["version"]) is None)
 
     latest = _newest(releases, lambda r: True)
     return {
         "security": _newest(
-            releases, lambda r: r["class"] == "security" and same_line_newer(r)),
+            releases, lambda r: r["class"] == "security" and reachable(r)),
         "breakfix": _newest(
-            releases, lambda r: r["class"] in BREAKFIX_CLASSES and same_line_newer(r)),
+            releases, lambda r: r["class"] in BREAKFIX_CLASSES and reachable(r)),
         "latest": latest if latest and version_gt(latest["version"], caller) else None,
     }
+
+
+def find_blocked(releases: list[dict], caller: str) -> dict | None:
+    """The newest security or break-fix release newer than ``caller`` that
+    auto-update may not install, with the reason; None if there is none.
+
+    Reachability only ever shrinks as versions rise (a breaking release or a
+    major bump stays on the path of every later release), so when the newest
+    such release is reachable, every older one is too.
+    """
+    newest = _newest(releases, lambda r: r["class"] in BREAKFIX_CLASSES
+                     and version_gt(r["version"], caller))
+    if newest is None:
+        return None
+    reason = block_reason(releases, caller, newest["version"])
+    if reason is None:
+        return None
+    return {**_offer(newest), "reason": reason}
 
 
 def apply_holds(
@@ -177,7 +222,9 @@ def _offer(release: dict | None) -> dict | None:
     return {"version": release["version"], "url": release["url"], "class": release["class"]}
 
 
-def check_response(offers: dict[str, dict | None], held: list[dict]) -> dict:
+def check_response(
+    offers: dict[str, dict | None], held: list[dict], blocked: dict | None,
+) -> dict:
     """Build the /v1/check response body."""
     if offers["security"]:
         status = "security_update_available"
@@ -192,6 +239,7 @@ def check_response(offers: dict[str, dict | None], held: list[dict]) -> dict:
         "security": _offer(offers["security"]),
         "breakfix": _offer(offers["breakfix"]),
         "latest": _offer(offers["latest"]),
+        "blocked": blocked,
     }
     if held:
         body["held"] = held
