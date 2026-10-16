@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import socketserver
 import stat
@@ -30,6 +31,10 @@ from boxmunge.api.result import ActionError, ErrorCode
 from boxmunge.log import log_error
 
 MAX_BODY_BYTES = 64 * 1024
+# Seconds a connection may sit without sending: a client that stalls
+# mid-body or idles on keep-alive is dropped rather than pinning a thread.
+REQUEST_TIMEOUT = 30.0
+_CONTENT_LENGTH_RE = re.compile(r"[0-9]{1,9}")
 _BODY_KEYS = frozenset({"params", "approval"})
 _ACTIONS_PREFIX = "/v1/actions/"
 _JOBS_PREFIX = "/v1/jobs/"
@@ -127,6 +132,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "boxmunge-apid"
     sys_version = ""
+    timeout = REQUEST_TIMEOUT
     server: UnixHTTPServer
 
     def do_GET(self) -> None:
@@ -152,9 +158,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
             raise ActionError(ErrorCode.INVALID_PARAMS,
                               "Chunked request bodies are not supported; send Content-Length.")
         raw = self.headers.get("Content-Length")
-        if raw is None or not raw.isdigit():
+        if raw is None or not _CONTENT_LENGTH_RE.fullmatch(raw):
             raise ActionError(ErrorCode.INVALID_PARAMS,
-                              "A POST needs a Content-Length header.")
+                              "A POST needs a Content-Length header giving the body size "
+                              "in decimal digits.")
         length = int(raw)
         if length > MAX_BODY_BYTES:
             raise ActionError(ErrorCode.INVALID_PARAMS,

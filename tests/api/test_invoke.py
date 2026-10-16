@@ -79,6 +79,17 @@ def test_unknown_action_is_refused_and_audited(paths) -> None:
     assert (record["principal"], record["action"]) == ("plugin:webui", "nope.nope")
 
 
+def test_an_oversized_unknown_name_is_audited_truncated(paths) -> None:
+    """A client-chosen name is written to the audit log; one request must
+    not be able to append tens of kilobytes to an append-only file."""
+    invoker = make_invoker(paths, registry=_registry())
+    with pytest.raises(ActionError):
+        invoker.invoke("x" * 60000, {}, WEBUI)
+    record = _refused(paths, ErrorCode.NOT_FOUND)
+    assert record["action"] == "x" * 128 + "...(59872 more characters)"
+    assert len(paths.audit_log.read_bytes()) < 1024
+
+
 def test_grant_refusal_runs_nothing(paths) -> None:
     calls = Calls()
     invoker = make_invoker(paths, registry=_registry(

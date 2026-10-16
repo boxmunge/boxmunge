@@ -8,6 +8,7 @@ import threading
 
 import pytest
 
+from boxmunge.api import server as server_module
 from boxmunge.api.dev.fixture_host import FixtureHost
 from boxmunge.api.jobs import JobStore
 from boxmunge.api.principal import Principal, Tier
@@ -103,6 +104,10 @@ def test_malformed_bodies_are_invalid_params_and_the_server_carries_on(
      422, "the limit is 65536"),
     (b"POST /v1/actions/status.get HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n",
      422, "Chunked"),
+    # "\xb2" is a superscript two once headers are decoded as Latin-1: str.isdigit()
+    # accepts it, int() does not.
+    (b"POST /v1/actions/status.get HTTP/1.1\r\nHost: x\r\nContent-Length: \xb2\r\n\r\n",
+     422, "Content-Length"),
     (b"GET /v1/actions HTTP/1.1\r\nX-Long: " + b"a" * 70000 + b"\r\n\r\n", 431, "Line too long"),
 ])
 def test_bad_framing_is_refused_and_the_server_carries_on(
@@ -110,6 +115,23 @@ def test_bad_framing_is_refused_and_the_server_carries_on(
     got_status, got = raw_exchange(served, request_bytes)
     assert got_status == status and message in got["error"]["message"]
     assert got["api_version"] == "1.0"
+    assert call(served, "GET", "/v1/actions")[0] == 200
+
+
+def test_a_stalled_client_is_dropped_and_the_server_carries_on(
+        served, monkeypatch) -> None:
+    """A body shorter than its Content-Length, or an idle keep-alive
+    connection, must not hold a server thread forever. The production
+    timeout is shortened here so the test is quick."""
+    assert 0 < server_module.REQUEST_TIMEOUT <= 60
+    assert server_module._RequestHandler.timeout == server_module.REQUEST_TIMEOUT
+    monkeypatch.setattr(server_module._RequestHandler, "timeout", 0.3)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(5)
+        sock.connect(str(served))
+        sock.sendall(b"POST /v1/actions/status.get HTTP/1.1\r\nHost: x\r\n"
+                     b"Content-Length: 100\r\n\r\n{}")
+        assert sock.recv(65536) == b""  # closed by the server, not by our timeout
     assert call(served, "GET", "/v1/actions")[0] == 200
 
 

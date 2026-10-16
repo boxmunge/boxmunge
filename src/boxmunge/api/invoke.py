@@ -35,6 +35,8 @@ from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 
 ALL_TIERS = frozenset(Tier)
+# A refused name is client-chosen; the audit log keeps only its head.
+MAX_AUDITED_NAME = 128
 
 
 class Invoker:
@@ -139,7 +141,7 @@ class Invoker:
         return data
 
     def _refusal(self, principal: Principal, name: str, error: ActionError) -> None:
-        record = audit_record(principal, name, "refused",
+        record = audit_record(principal, _audited_name(name), "refused",
                               code=error.code.value, message=error.message)
         try:
             self._audit.append(record)
@@ -159,6 +161,12 @@ class Invoker:
             notify(self._paths, "boxmunge: audit log write failed",
                    f"The outcome ({outcome}) of {name} by {principal.id} was not "
                    f"recorded: {e}", component="audit", priority=1)
+
+
+def _audited_name(name: str) -> str:
+    if len(name) <= MAX_AUDITED_NAME:
+        return name
+    return f"{name[:MAX_AUDITED_NAME]}...({len(name) - MAX_AUDITED_NAME} more characters)"
 
 
 def _check_approval(action: Action, principal: Principal,
