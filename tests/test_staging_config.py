@@ -4,7 +4,7 @@ from contextlib import redirect_stdout
 
 import yaml
 from boxmunge.caddy import generate_staging_caddy_config
-from boxmunge.compose import generate_staging_compose_base, generate_staging_compose_override
+from boxmunge.compose import generate_staging_compose_override
 
 MANIFEST = {
     "project": "myapp",
@@ -78,36 +78,6 @@ class TestStagingComposeOverride:
         parsed = yaml.safe_load(content)
         db = parsed["services"].get("db", {})
         assert "networks" not in db
-
-
-class TestStagingComposeBase:
-    def test_strips_ports(self, tmp_path) -> None:
-        """Staging base must strip ports to avoid conflicts with production."""
-        compose = tmp_path / "compose.yml"
-        compose.write_text(yaml.dump({
-            "services": {
-                "web": {"build": ".", "ports": ["8080:8080"]},
-                "db": {"image": "postgres:16"},
-            },
-        }))
-        parsed = yaml.safe_load(generate_staging_compose_base(compose))
-        assert "ports" not in parsed["services"]["web"]
-        assert parsed["services"]["db"]["image"] == "postgres:16"
-
-    def test_preserves_other_fields(self, tmp_path) -> None:
-        compose = tmp_path / "compose.yml"
-        compose.write_text(yaml.dump({
-            "services": {
-                "web": {
-                    "build": ".",
-                    "ports": ["8080:8080"],
-                    "environment": {"FOO": "bar"},
-                },
-            },
-        }))
-        parsed = yaml.safe_load(generate_staging_compose_base(compose))
-        assert parsed["services"]["web"]["environment"] == {"FOO": "bar"}
-        assert parsed["services"]["web"]["build"] == "."
 
 
 class TestStagingEmitsOffWarning:

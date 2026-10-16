@@ -56,6 +56,8 @@ Key features:
         previous/             # code of the release the last deploy replaced (rollback target)
         previous.json         # its bundle name and pre-deploy data snapshot
         prestage/             # production code displaced by `stage`, until promote/unstage
+        live-mounts/          # production's copies of the release code it bind-mounts
+        live-scripts/         # production's copy of boxmunge-scripts/ (smoke checks)
         live.json             # bundle name of the installed release
   inbox/                      # uploaded bundles awaiting deployment
   state/                      # operational state (deploy:deploy 755)
@@ -103,7 +105,7 @@ Project containers are reachable from Caddy using project-scoped network aliases
 
 ### Staging Network
 
-When a project is staged, its containers run alongside production on a separate staging network. Caddy routes `staging.<hostname>` to the staged containers. Promoting tears down staging and replaces production. Unstaging tears down staging without affecting production.
+When a project is staged, its containers run alongside production as compose project `<project>-staging`, on its own networks with its own volumes, container names, image tags and `-staging` data directories; `stage` proves with `docker compose config` that the two environments share none of them before starting anything. Caddy routes `staging.<hostname>` to the staged containers. Promoting tears down staging and replaces production. Unstaging tears down staging without affecting production.
 
 ### Config Generation
 

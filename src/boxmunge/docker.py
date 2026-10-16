@@ -90,10 +90,17 @@ def compose_up(
     *,
     project_name: str,
     force_recreate: bool = False,
+    start: bool = True,
 ) -> None:
-    """Run docker compose up -d; force_recreate replaces unchanged containers too."""
+    """Run docker compose up -d; force_recreate replaces unchanged containers too.
+
+    ``start=False`` (``--no-start``) builds and creates the project's
+    networks, volumes and containers without starting any of them.
+    """
     cmd = compose_command(project_name, compose_files)
     cmd.extend(["up", "-d", "--remove-orphans"])
+    if not start:
+        cmd.append("--no-start")
     if build:
         cmd.append("--build")
     if force_recreate:
@@ -193,6 +200,8 @@ def compose_config(
     *,
     project_name: str,
     all_profiles: bool = False,
+    project_directory: Path | None = None,
+    env_file: Path | None = None,
 ) -> str:
     """Return `docker compose config --format json` output.
 
@@ -207,8 +216,16 @@ def compose_config(
 
     The model holds the services `up` starts: a service behind a profile
     that is not active is left out. ``all_profiles`` includes those too.
+
+    ``project_directory`` and ``env_file`` resolve compose files kept
+    elsewhere (production's release during a stage) as if they were in the
+    project directory, interpolated from that release's own ``.env``.
     """
     cmd = compose_command(project_name, compose_files)
+    if project_directory is not None:
+        cmd.extend(["--project-directory", str(project_directory)])
+    if env_file is not None:
+        cmd.extend(["--env-file", str(env_file)])
     if all_profiles:
         cmd.extend(["--profile", "*"])
     cmd.extend(["config", "--format", "json", "--no-env-resolution"])

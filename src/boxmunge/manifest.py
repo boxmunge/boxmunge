@@ -414,13 +414,28 @@ def validate_manifest(
         unknown_staging = set(staging.keys()) - _STAGING_KEYS
         for key in sorted(unknown_staging):
             warnings.append(f"Unknown key in 'staging': '{key}'")
-        copy_data = staging.get("copy_data")
-        if copy_data is not None and not isinstance(copy_data, bool):
-            errors.append(
-                f"'staging.copy_data' must be a boolean, got {type(copy_data).__name__}."
-            )
+        errors.extend(_copy_data_errors(staging.get("copy_data")))
 
     return errors, warnings
+
+
+def _copy_data_errors(copy_data: Any) -> list[str]:
+    """`copy_data` is a boolean, or {sources: {staged store: production store or null}}."""
+    if copy_data is None or isinstance(copy_data, bool):
+        return []
+    shape = ("Use true, or {sources: {<staged store>: <production store or null>}}; "
+             "a store is a compose volume key, a writable.persistent name, or ./path.")
+    if not isinstance(copy_data, dict) or set(copy_data) != {"sources"}:
+        return [f"'staging.copy_data' must be a boolean or a mapping with only "
+                f"'sources'. {shape}"]
+    sources = copy_data["sources"]
+    if not isinstance(sources, dict) or not sources or not all(
+        isinstance(k, str) and k and (v is None or (isinstance(v, str) and v))
+        for k, v in sources.items()
+    ):
+        return [f"'staging.copy_data.sources' must map store names to store names "
+                f"or null. {shape}"]
+    return []
 
 
 def get_routable_services(

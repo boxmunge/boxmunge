@@ -8,12 +8,14 @@ from typing import TYPE_CHECKING, Any
 from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.caddy_journal import write_site
 from boxmunge.commands.unstage_cmd import refuse_if_promotion_interrupted, teardown_staging
-from boxmunge.compose import generate_staging_compose_base, generate_staging_compose_override
+from boxmunge.compose import ComposeError
+from boxmunge.compose_validate import ComposeSecurityError
 from boxmunge.data_dirs import SetAsideError, log_kept, set_aside_announcer
 from boxmunge.docker import (
-    CaddyConfigRejected, DockerError, caddy_config_lock, caddy_reload, compose_up,
+    CaddyConfigRejected, DockerError, caddy_config_lock, caddy_reload, compose_down,
+    compose_up, staging_compose_project,
 )
-from boxmunge.fileutil import atomic_write_text, project_lock, LockError
+from boxmunge.fileutil import project_lock, LockError
 from boxmunge.identity import register_project_identity
 from boxmunge.intake import (
     IntakeError, check_installable, extract_candidate, incoming_workspace,
@@ -22,14 +24,27 @@ from boxmunge.intake import (
 from boxmunge.lifecycle import refuse_if_blocked
 from boxmunge.log import log_operation, log_error
 from boxmunge.project_registry import is_registered
-from boxmunge.release import install_release, live_ref, mark_live
+from boxmunge.release import (
+    ReleaseStateError, install_release, live_ref, mark_live, project_data_dirs,
+)
 from boxmunge.release_staging import keep_prestage_release
 from boxmunge.security_warn import warn_off_services, warn_writable_state
 from boxmunge.source import SourceError, bundle_ref, consume_bundle, resolve_bundle_source
+from boxmunge.staging_compose import STAGING_BASE, STAGING_FILES, STAGING_OVERLAY
+from boxmunge.staging_copy_plan import StagingDataError
+from boxmunge.staging_data import copy_production_data, prepare_destinations
+from boxmunge.staging_isolation import StagingIsolationError
+from boxmunge.staging_prepare import (
+    check_staging_storage, precheck_candidate, write_staging_files,
+)
 from boxmunge.state import write_state
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
+
+# Failures generating or checking staging's compose files.
+_STORAGE_ERRORS = (ComposeError, ComposeSecurityError, OSError, ReleaseStateError,
+                   StagingDataError, StagingIsolationError)
 
 
 def _intake_bundle(project_name: str, paths: BoxPaths, ref: str | None,
@@ -50,6 +65,13 @@ def _intake_bundle(project_name: str, paths: BoxPaths, ref: str | None,
             tree = extract_candidate(bundle_path, workspace)
             manifest = validate_release_tree(tree, project_name, paths, "stage")
             check_installable(tree, project_dir)
+            if not is_new:
+                try:
+                    precheck_candidate(paths, project_name, manifest, tree, workspace)
+                except _STORAGE_ERRORS as e:
+                    print(f"ERROR: {e}\nNothing was changed.", file=sys.stderr)
+                    log_error("stage", f"Stage refused: {e}", paths, project=project_name)
+                    return 1
             if dry_run:
                 print(f"[DRY RUN] Would stage '{project_name}'")
                 return 0
@@ -167,11 +189,28 @@ def _staging_auth(project_name: str, paths: BoxPaths) -> tuple[str, str] | None:
     return auth_user, hashed
 
 
+def _retire_previous_staging(project_name: str, paths: BoxPaths) -> None:
+    """A re-stage replaces staging: take the running one down (its data is
+    kept) before its compose files are rewritten and its data replaced."""
+    project_dir = paths.project_dir(project_name)
+    if not (project_dir / STAGING_OVERLAY).exists():
+        return
+    base = STAGING_BASE if (project_dir / STAGING_BASE).exists() else "compose.yml"
+    print("  Stopping the previous staging...")
+    compose_down(project_dir, compose_files=[base, STAGING_OVERLAY],
+                 project_name=staging_compose_project(project_name))
+
+
 def _bring_up_staging(project_name: str, paths: BoxPaths,
                       manifest: dict[str, Any], ref: str | None) -> int:
     """Write staging config, start staging containers, smoke-test, record."""
     project_dir = paths.project_dir(project_name)
     print(f"Staging {project_name}...")
+    try:
+        _retire_previous_staging(project_name, paths)
+    except DockerError as e:
+        print(f"ERROR: Stopping the previous staging failed: {e}", file=sys.stderr)
+        return 1
     # Staging auth — inject basicauth if secrets are set
     try:
         staging_auth = _staging_auth(project_name, paths)
@@ -188,29 +227,14 @@ def _bring_up_staging(project_name: str, paths: BoxPaths,
         write_site(paths.caddy, staging_conf,
                    generate_staging_caddy_config(manifest, auth=staging_auth))
 
-    # Build env_files for staging (same as production)
-    staging_env_files = {}
-    if paths.host_secrets.exists():
-        staging_env_files["host_secrets"] = str(paths.host_secrets)
-    project_env = project_dir / "project.env"
-    if project_env.exists():
-        staging_env_files["project_env"] = "./project.env"
-    project_secrets = paths.project_secrets(project_name)
-    if project_secrets.exists():
-        staging_env_files["project_secrets"] = "./secrets.env"
-
-    staging_override = paths.project_staging_compose_override(project_name)
-    # mode=0o644: read by `docker compose` which runs in deploy/root contexts
-    # but the file is also read inside the Caddy/compose toolchain — keep
-    # consistent with the site config above.
-    # v0.8: thread the user compose through so the overlay can omit
-    # read_only/tmpfs defaults on services where the user already declared them.
-    from boxmunge.compose import load_user_compose
-    user_compose = load_user_compose(project_dir / "compose.yml", project_name)
-    atomic_write_text(staging_override, generate_staging_compose_override(
-        manifest, env_files=staging_env_files or None,
-        user_compose=user_compose,
-    ), mode=0o644)
+    # The staging files: compose.yml and its overlay, sharing no resource
+    # with production (checked below, before anything starts).
+    try:
+        user_compose = write_staging_files(paths, project_name, manifest, project_dir,
+                                           project_dir, project_data_dirs(project_dir).box_state())
+    except _STORAGE_ERRORS as e:
+        print(f"  ERROR: Writing staging's compose files failed: {e}", file=sys.stderr)
+        return 1
 
     # Deploy-time warning for any service resolving to profile: off.
     # Repeated by design — see spec §"Deploy-time warning".
@@ -218,29 +242,29 @@ def _bring_up_staging(project_name: str, paths: BoxPaths,
     # v0.9: writable surface visibility (read_only:false WARN, external INFO).
     warn_writable_state(paths, manifest, user_compose, component="stage")
 
-    # Generate staging base (compose.yml with ports stripped to avoid conflicts)
-    staging_base = project_dir / "compose.staging-base.yml"
-    # mode=0o644: same rationale as the override above.
-    atomic_write_text(staging_base, generate_staging_compose_base(project_dir / "compose.yml"), mode=0o644)
-
-    # Copy production data to staging if opted in
-    if manifest.get("staging", {}).get("copy_data"):
-        print("  Snapshotting production data for staging...")
-        from boxmunge.staging_data import snapshot_prod_data
-        try:
-            snapshot_prod_data(project_name, project_dir, manifest)
-            print("  Data snapshot complete.")
-        except Exception as e:
-            print(f"  ERROR: Data snapshot failed: {e}", file=sys.stderr)
-            log_error("stage", f"Data snapshot failed: {e}", paths, project=project_name)
-            return 1
+    staging_project_name = staging_compose_project(project_name)
+    try:
+        plan = check_staging_storage(paths, project_name, manifest)
+        if plan is not None:
+            # Create staging (and so its volumes) without starting it, then
+            # copy into it while neither side runs.
+            prepare_destinations(project_name, project_dir, plan)
+            print("  Creating staging containers for the data copy...")
+            compose_up(project_dir, compose_files=STAGING_FILES,
+                       project_name=staging_project_name, start=False)
+            copy_production_data(project_name, plan)
+            print("  Data copy complete.")
+    except (*_STORAGE_ERRORS, DockerError) as e:
+        print(f"  ERROR: Preparing staging's storage failed: {e}", file=sys.stderr)
+        print("  Staging was not started.", file=sys.stderr)
+        log_error("stage", f"Preparing staging storage failed: {e}", paths,
+                  project=project_name)
+        return 1
 
     # Start staging containers with separate project name
     print("  Starting staging containers...")
-    staging_project_name = f"{project_name}-staging"
-    compose_files = ["compose.staging-base.yml", "compose.boxmunge-staging.yml"]
     try:
-        compose_up(project_dir, compose_files=compose_files,
+        compose_up(project_dir, compose_files=STAGING_FILES,
                    project_name=staging_project_name)
     except DockerError as e:
         print(f"  ERROR: {e}", file=sys.stderr)
@@ -267,9 +291,8 @@ def _bring_up_staging(project_name: str, paths: BoxPaths,
     if has_smoke:
         print("  Running smoke tests in containers...")
         from boxmunge.commands.check import run_smoke_in_container
-        staging_compose_files = ["compose.staging-base.yml", "compose.boxmunge-staging.yml"]
         smoke_result = run_smoke_in_container(
-            project_dir, manifest, staging_compose_files,
+            project_dir, manifest, STAGING_FILES,
             project_name=staging_project_name,
         )
         if smoke_result.status == "ok":

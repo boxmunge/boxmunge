@@ -13,6 +13,7 @@ from boxmunge.docker import caddy_config_lock, compose_down, caddy_reload, Docke
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.log import log_error, log_operation
 from boxmunge.release_staging import has_prestage, prestage_replaced, restore_prestage
+from boxmunge.staging_cleanup import remove_retired_staging_data
 from boxmunge.state import read_state, write_state
 
 if TYPE_CHECKING:
@@ -106,6 +107,17 @@ def teardown_staging(project_name: str, paths: BoxPaths) -> bool:
             print(f"ERROR: Restoring the production release files failed: {e}",
                   file=sys.stderr)
             log_error("unstage", f"Restoring the production release failed: {e}",
+                      paths, project=project_name)
+            ok = False
+
+    # Only once staging is down and production's release is back: which
+    # copies are retired depends on what production's compose.yml mounts.
+    if ok:
+        try:
+            remove_retired_staging_data(paths, project_name)
+        except (OSError, ValueError, DockerError) as e:
+            print(f"ERROR: Removing retired staging data failed: {e}", file=sys.stderr)
+            log_error("unstage", f"Removing retired staging data failed: {e}",
                       paths, project=project_name)
             ok = False
 

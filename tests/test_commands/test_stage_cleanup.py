@@ -75,9 +75,13 @@ class TestFailedStageCleansUp:
         before = tree_snapshot(prod)
         manifest = (prod / "manifest.yml").read_text() + "staging:\n  copy_data: true\n"
         place_bundle(paths, timestamp=V2, files={"manifest.yml": manifest})
-        with _docker(), patch("boxmunge.staging_data.snapshot_prod_data",
-                              side_effect=RuntimeError("disk full")):
+        with _docker() as down, \
+                patch("boxmunge.commands.stage_cmd.check_staging_storage"), \
+                patch("boxmunge.commands.stage_cmd.copy_production_data",
+                      side_effect=DockerError("disk full")) as copy:
             assert run_stage("myapp", paths) == 1
+        copy.assert_called_once()
+        down.assert_called_once()  # the created, never started staging is removed
         assert _staging_artefacts(paths) == []
         assert tree_snapshot(prod) == before
 

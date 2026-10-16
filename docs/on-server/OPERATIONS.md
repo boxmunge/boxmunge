@@ -146,16 +146,92 @@ again or take a new snapshot (production data may already have changed), and how
 if it fails, the displaced release becomes the previous release with the snapshot taken before the
 first attempt. After that, `unstage`, `rollback` and `prod-deploy` work as after any failed deploy.
 
+Staging and production share no Docker resource. Before installing anything, `stage` resolves
+both with `docker compose config` (`-p myapp` and `-p myapp-staging`) and refuses if they would
+share a volume, network, network alias, container name or bind-mount source, or if staging would
+build an image tag production runs. It checks again before starting anything. The staging copy of
+`compose.yml` drops explicit volume and network `name:` lines (validation only allows the project's
+own name, which Compose would choose anyway), `container_name:` and `ports:`. Bind mounts of release
+code and configuration (`./appconfig:/etc/app:ro`, config and secret `file:` entries) work in both
+environments without copying any data:
+
+- production mounts its own copy of each, kept in `.releases/live-mounts/` and refreshed from
+  production's release whenever its compose overlay is generated (deploy, rollback, resume,
+  upgrade). A refresh never removes a file production is reading: changed files are replaced
+  whole, and a file that is itself a mount source is rewritten in place. Installing a staged
+  release does not touch these copies;
+- staging mounts the staged release itself.
+
+Production's running containers keep their configuration, but the staged release's `compose.yml`
+and `.env` are in the project directory while it is staged. A production `compose up` there (the
+restart after an upgrade, `recover`) resolves the staged `compose.yml`, not production's, and so
+recreates production from the staged release. Avoid those while a release is staged: promote or
+unstage first.
+
+A bind mount, config or secret file in a data directory (any directory a release has mounted
+read-write) or another server-owned entry (`data/`, `secrets.env`) points staging at the entry's
+`-staging` copy: `./uploads/img` becomes `./uploads-staging/img`. Staging never reads
+production's copy, so a config or secret `file:` in a data directory (`./data/key.pem`) must exist
+in staging's copy (`./data-staging/key.pem`): `stage` copies it with `copy_data`, and without
+`copy_data` refuses, naming the file to put there.
+
+Two behaviour changes in this release:
+
+- staging's copy of a nested data mount moved: `./data/db` used to become `./data/db-staging`
+  (inside production's `data/`), and now becomes `./data-staging/db`. The old copies are not used
+  any more. Nor are the old `-staging` copies of release code (`appconfig-staging`): staging now
+  mounts the staged release itself. `unstage` lists any of either it finds, with the command to
+  delete them, but does not delete them itself: inside production's data directory boxmunge
+  cannot tell them from the app's own files, and a code copy may hold what an operator put there;
+- `stage` refuses a service that mounts the whole project directory (`.:/app`), which staging and
+  production cannot each have a copy of. Mount the subdirectories the service needs instead.
+
+A production overlay written by an older boxmunge still mounts release code from the project
+directory. `stage` refuses to run beside it, before installing anything, and names the mount;
+an upgrade or a redeploy of production regenerates the overlay.
+
 Production's smoke checks keep running the production release's own `boxmunge-scripts/` while a
 release is staged (production mounts a copy kept in `.releases/live-scripts/`), so a smoke check
 that only the staged release passes does not fail production. Production switches to the new
 scripts when `promote` deploys them.
 
-Staging keeps its own data. To start it from a copy of production's, set `staging: {copy_data: true}`
-in the manifest: `stage` then stops production briefly, copies every bind mount and named volume in
-`compose.yml` and every `writable.persistent` volume in the manifest into staging's, and starts
-production again. With `copy_data` set but no data declared anywhere, `stage` fails rather than
-staging on stale data.
+Staging keeps its own data between stages. To start it from a copy of production's, set
+`staging: {copy_data: true}` in the manifest. `stage` then:
+
+1. stops the previous staging (re-stage) and creates the new one without starting it;
+2. pairs every data store the staged release mounts with production's store of the same name:
+   named volumes (including `writable.persistent` ones), bind-mounted data paths and config or
+   secret files in data directories, taken from the release production actually runs, not the
+   staged one;
+3. checks every production source exists (a missing volume is never created empty) and refuses if
+   any staging container is running;
+4. stops production's running containers, empties each staging destination completely (hidden
+   files included), copies production's data in, and starts production again whatever happened,
+   even if it was interrupted. If production cannot be started again, `stage` fails with
+   `PRODUCTION IS DOWN` and the `docker start` command to run;
+5. starts staging only after every copy succeeded.
+
+If the staged release renames a store (production uses `pgdata`, the staged release `newdata`),
+`stage` refuses until the manifest says where the data comes from:
+
+```yaml
+staging:
+  copy_data:
+    sources:
+      newdata: pgdata   # staged store: production store
+      cache: null       # not copied: staging keeps its own
+```
+
+Name a volume as `compose.yml` names it, a `writable.persistent` entry by its `name`, or a bind
+mount as `./path`. A staged store with no production counterpart is left as staging has it, as
+long as every production store is copied somewhere. If a copy fails, production is started again,
+staging is not started and the stage cleans up like any failed stage; run `stage` again to retry
+(each destination is emptied first) or `unstage`. With `copy_data` set but nothing to copy, `stage`
+fails rather than staging on stale data.
+
+`unstage` (and `promote`, which ends with it) removes `-staging` copies of data directories the
+production release no longer mounts, logging each one; copies of directories production still
+mounts are kept for the next stage. Staging's named volumes are kept.
 
 A stage that fails after installing its release (staging containers fail to start, the staging data
 copy fails, Caddy rejects the staging site) cleans up after itself: staging containers, the staging Caddy site and compose files are

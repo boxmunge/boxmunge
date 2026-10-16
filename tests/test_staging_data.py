@@ -1,244 +1,230 @@
-"""Tests for boxmunge.staging_data — staging data snapshot logic."""
+# SPDX-License-Identifier: Apache-2.0
+"""Planning and running the production -> staging data copy.
 
-import subprocess
+The models are shaped like `docker compose config` output (long syntax,
+absolute bind sources). Docker commands are recorded, not run; the copy
+itself against real Docker is in tests/integration/test_staging_copy.py.
+"""
+from __future__ import annotations
+
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 import pytest
-import yaml
 
-from boxmunge.staging_data import (
-    StagingDataError,
-    parse_volumes,
-    copy_bind_mounts,
-    copy_named_volumes,
-    snapshot_prod_data,
+from boxmunge import staging_data
+from boxmunge.docker_run import DockerError
+from boxmunge.manifest import validate_manifest
+from boxmunge.staging_copy_plan import (
+    StagingDataError, Store, copy_sources, plan_copy, stores,
 )
 
 
-class TestParseVolumes:
-    def test_detects_bind_mounts(self) -> None:
-        compose = {
-            "services": {
-                "web": {"volumes": ["./data:/app/data"]},
-            },
-        }
-        bind, named = parse_volumes(compose)
-        assert bind == [("./data", "./data-staging")]
-        assert named == []
-
-    def test_detects_named_volumes(self) -> None:
-        compose = {
-            "services": {
-                "db": {"volumes": ["dbdata:/var/lib/postgresql/data"]},
-            },
-            "volumes": {"dbdata": None},
-        }
-        bind, named = parse_volumes(compose)
-        assert bind == []
-        assert named == ["dbdata"]
-
-    def test_mixed_volumes(self) -> None:
-        compose = {
-            "services": {
-                "app": {
-                    "volumes": [
-                        "./uploads:/app/uploads",
-                        "cache:/app/cache",
-                        "./logs:/app/logs:ro",
-                    ],
-                },
-            },
-            "volumes": {"cache": None},
-        }
-        bind, named = parse_volumes(compose)
-        assert ("./uploads", "./uploads-staging") in bind
-        assert ("./logs", "./logs-staging") in bind
-        assert "cache" in named
-
-    def test_no_volumes(self) -> None:
-        compose = {"services": {"web": {"image": "nginx"}}}
-        bind, named = parse_volumes(compose)
-        assert bind == []
-        assert named == []
-
-    def test_deduplicates(self) -> None:
-        compose = {
-            "services": {
-                "web": {"volumes": ["./data:/app/data"]},
-                "worker": {"volumes": ["./data:/worker/data"]},
-            },
-        }
-        bind, named = parse_volumes(compose)
-        assert len(bind) == 1
+def _model(project_dir: Path, volumes: dict[str, str], binds: list[str] = (),
+           compose_project: str = "myapp") -> dict:
+    mounts = [{"type": "volume", "source": key, "target": f"/{key}"} for key in volumes]
+    mounts += [{"type": "bind", "source": str(project_dir / b), "target": f"/b/{b}"}
+               for b in binds]
+    return {"services": {"web": {"image": "x", "volumes": mounts}},
+            "volumes": {k: {"name": f"{compose_project}_{k}"} for k in volumes}}
 
 
-class TestCopyBindMountsAbsolutePaths:
-    @patch("boxmunge.staging_data._run_in_system_container")
-    def test_absolute_path_in_project_tree(self, mock_run: MagicMock) -> None:
-        bind_mounts = [
-            ("/opt/boxmunge/projects/myapp/data",
-             "/opt/boxmunge/projects/myapp/data-staging"),
-        ]
-        copy_bind_mounts(bind_mounts, "myapp")
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args[0][0]
-        assert "/projects/myapp/data" in cmd
-        assert "/projects/myapp/data-staging" in cmd
-
-    def test_absolute_path_outside_project_tree_raises(self) -> None:
-        bind_mounts = [("/var/lib/other", "/var/lib/other-staging")]
-        with pytest.raises(ValueError, match="outside project tree"):
-            copy_bind_mounts(bind_mounts, "myapp")
+def _stores(project_dir: Path, volumes=(), binds=(), *, staging=False) -> list[Store]:
+    project = "myapp-staging" if staging else "myapp"
+    model = _model(project_dir, dict.fromkeys(volumes, ""), binds, project)
+    return stores(model, project, project_dir, {"data", "uploads", ".releases"},
+                  staging=staging)
 
 
-class TestCopyBindMounts:
-    @patch("boxmunge.staging_data._run_in_system_container")
-    def test_copies_via_system_container(self, mock_run: MagicMock) -> None:
-        bind_mounts = [("./data", "./data-staging")]
-        copy_bind_mounts(bind_mounts, "myapp")
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args[0][0]
-        assert "cp" in cmd
-        assert "/projects/myapp/data" in cmd
-        assert "/projects/myapp/data-staging" in cmd
-
-    @patch("boxmunge.staging_data._run_in_system_container")
-    def test_multiple_bind_mounts(self, mock_run: MagicMock) -> None:
-        bind_mounts = [
-            ("./data", "./data-staging"),
-            ("./uploads", "./uploads-staging"),
-        ]
-        copy_bind_mounts(bind_mounts, "myapp")
-        assert mock_run.call_count == 2
+def test_stores_are_production_data_and_staging_copies(tmp_path: Path) -> None:
+    prod = _stores(tmp_path, ["pgdata", "myapp_files"],
+                   ["data/db", "data", "uploads/img", "appconfig", ".releases/live-mounts/x"])
+    assert [(s.kind, s.key, s.ref) for s in prod] == [
+        ("bind", "./data", str(tmp_path / "data")),  # data/db lies inside it
+        ("bind", "./uploads/img", str(tmp_path / "uploads/img")),
+        ("volume", "myapp_files", "myapp_myapp_files"),
+        ("volume", "pgdata", "myapp_pgdata"),
+    ]
+    staging = _stores(tmp_path, ["pgdata"], ["data-staging", "appconfig"], staging=True)
+    assert [(s.key, s.ref) for s in staging] == [
+        ("./data", str(tmp_path / "data-staging")), ("pgdata", "myapp-staging_pgdata")]
 
 
-class TestCopyNamedVolumes:
-    @patch("boxmunge.staging_data._docker_run")
-    def test_copies_via_busybox(self, mock_run: MagicMock) -> None:
-        copy_named_volumes(["dbdata"], "myapp")
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args[0][0]
-        assert "busybox" in cmd
-        assert "myapp_dbdata" in " ".join(cmd)
-        assert "myapp-staging_dbdata" in " ".join(cmd)
-
-    @patch("boxmunge.staging_data._docker_run")
-    def test_multiple_volumes(self, mock_run: MagicMock) -> None:
-        copy_named_volumes(["dbdata", "cache"], "myapp")
-        assert mock_run.call_count == 2
+def test_stores_are_paired_by_name(tmp_path: Path) -> None:
+    plan = plan_copy(_stores(tmp_path, ["pgdata"], ["data"]),
+                     _stores(tmp_path, ["pgdata"], ["data-staging"], staging=True), {}, "myapp")
+    assert [(s.ref, d.ref) for s, d in plan.pairs] == [
+        (str(tmp_path / "data"), str(tmp_path / "data-staging")),
+        ("myapp_pgdata", "myapp-staging_pgdata")]
 
 
-class TestSnapshotProdData:
-    @patch("boxmunge.staging_data.copy_named_volumes")
-    @patch("boxmunge.staging_data.copy_bind_mounts")
-    @patch("boxmunge.staging_data.compose_start")
-    @patch("boxmunge.staging_data.compose_stop")
-    def test_full_flow(
-        self, mock_stop: MagicMock, mock_start: MagicMock,
-        mock_copy_bind: MagicMock, mock_copy_named: MagicMock,
-        tmp_path: Path,
-    ) -> None:
-        compose_path = tmp_path / "compose.yml"
-        compose_path.write_text(yaml.dump({
-            "services": {
-                "web": {"image": "nginx", "volumes": ["./data:/app/data"]},
-                "db": {"image": "postgres", "volumes": ["dbdata:/pgdata"]},
-            },
-            "volumes": {"dbdata": None},
-        }))
-
-        snapshot_prod_data("myapp", tmp_path, {"project": "myapp"})
-
-        mock_stop.assert_called_once_with(
-            tmp_path, compose_files=["compose.yml", "compose.boxmunge.yml"],
-            project_name="myapp", timeout=15,
-        )
-        mock_copy_bind.assert_called_once()
-        mock_copy_named.assert_called_once()
-        mock_start.assert_called_once_with(
-            tmp_path, compose_files=["compose.yml", "compose.boxmunge.yml"],
-            project_name="myapp",
-        )
-
-        # Ordering is structurally guaranteed by the try/finally in snapshot_prod_data
-
-    @patch("boxmunge.staging_data.copy_named_volumes")
-    @patch("boxmunge.staging_data.copy_bind_mounts")
-    @patch("boxmunge.staging_data.compose_start")
-    @patch("boxmunge.staging_data.compose_stop")
-    def test_prod_restarted_on_copy_failure(
-        self, mock_stop: MagicMock, mock_start: MagicMock,
-        mock_copy_bind: MagicMock, mock_copy_named: MagicMock,
-        tmp_path: Path,
-    ) -> None:
-        """Production must be restarted even if copying fails."""
-        compose_path = tmp_path / "compose.yml"
-        compose_path.write_text(yaml.dump({
-            "services": {
-                "web": {"image": "nginx", "volumes": ["./data:/app/data"]},
-            },
-        }))
-        mock_copy_bind.side_effect = subprocess.CalledProcessError(1, "cp")
-
-        with pytest.raises(subprocess.CalledProcessError):
-            snapshot_prod_data("myapp", tmp_path, {"project": "myapp"})
-
-        # Even on failure, prod must be restarted
-        mock_start.assert_called_once()
-
-    @patch("boxmunge.staging_data.copy_named_volumes")
-    @patch("boxmunge.staging_data.copy_bind_mounts")
-    @patch("boxmunge.staging_data.compose_start")
-    @patch("boxmunge.staging_data.compose_stop")
-    def test_copies_manifest_declared_volumes(
-        self, mock_stop: MagicMock, mock_start: MagicMock,
-        mock_copy_bind: MagicMock, mock_copy_named: MagicMock,
-        tmp_path: Path,
-    ) -> None:
-        """Volumes only the manifest declares (writable.persistent) are
-        mounted by the generated overlay, not compose.yml, and must still
-        be copied, with production stopped around the copy."""
-        (tmp_path / "compose.yml").write_text(yaml.dump({
-            "services": {"web": {"image": "nginx"}},
-        }))
-        manifest = {
-            "project": "myapp",
-            "services": {"web": {
-                "port": 8080, "routes": [{"path": "/"}],
-                "writable": {"persistent": [{"name": "data", "mount": "/app/data"}]},
-            }},
-        }
-
-        snapshot_prod_data("myapp", tmp_path, manifest)
-
-        mock_stop.assert_called_once()
-        mock_copy_named.assert_called_once_with(["myapp_data"], "myapp")
-        mock_copy_bind.assert_not_called()
-        mock_start.assert_called_once()
-
-    @patch("boxmunge.staging_data.compose_start")
-    @patch("boxmunge.staging_data.compose_stop")
-    def test_nothing_to_copy_is_an_error(
-        self, mock_stop: MagicMock, mock_start: MagicMock, tmp_path: Path,
-    ) -> None:
-        """copy_data with no data declared anywhere fails, not 'complete'."""
-        (tmp_path / "compose.yml").write_text(yaml.dump({
-            "services": {"web": {"image": "nginx"}},
-        }))
-        with pytest.raises(StagingDataError, match="copy_data"):
-            snapshot_prod_data("myapp", tmp_path, {"project": "myapp"})
-        mock_stop.assert_not_called()
-        mock_start.assert_not_called()
+def test_a_rename_without_a_mapping_is_refused(tmp_path: Path) -> None:
+    """Review finding 26: the staged name is not production's store."""
+    with pytest.raises(StagingDataError, match=r"sources: \{newdata: proddata\}"):
+        plan_copy(_stores(tmp_path, ["myapp_proddata"]),
+                  _stores(tmp_path, ["myapp_newdata"], staging=True), {}, "myapp")
 
 
-class TestParseVolumeSyntaxes:
-    def test_long_syntax_and_anonymous_volumes(self) -> None:
-        compose = {"services": {"web": {"volumes": [
-            {"type": "bind", "source": "./uploads", "target": "/app/uploads"},
-            {"type": "volume", "source": "dbdata", "target": "/pgdata"},
-            "/app/cache",  # anonymous: nothing to copy
-        ]}}}
-        bind, named = parse_volumes(compose)
-        assert bind == [("./uploads", "./uploads-staging")]
-        assert named == ["dbdata"]
+def test_a_rename_is_copied_from_the_mapped_production_store(tmp_path: Path) -> None:
+    plan = plan_copy(_stores(tmp_path, ["myapp_proddata"]),
+                     _stores(tmp_path, ["myapp_newdata"], staging=True),
+                     {"newdata": "proddata"}, "myapp")
+    assert [(s.ref, d.ref) for s, d in plan.pairs] == [
+        ("myapp_myapp_proddata", "myapp-staging_myapp_newdata")]
+
+
+def test_null_leaves_a_store_uncopied(tmp_path: Path) -> None:
+    plan = plan_copy(_stores(tmp_path, ["pgdata", "old"]),
+                     _stores(tmp_path, ["pgdata", "cache"], staging=True),
+                     {"cache": None}, "myapp")
+    assert [d.key for _, d in plan.pairs] == ["pgdata"]
+    assert [s.key for s in plan.fresh] == ["cache"]
+    assert [s.key for s in plan.unused] == ["old"]
+
+
+def test_new_stores_need_no_mapping_when_every_production_store_is_copied(tmp_path) -> None:
+    plan = plan_copy(_stores(tmp_path, ["pgdata"]),
+                     _stores(tmp_path, ["pgdata", "cache"], staging=True), {}, "myapp")
+    assert [s.key for s in plan.fresh] == ["cache"]
+
+
+@pytest.mark.parametrize("sources,match", [
+    ({"nosuch": "pgdata"}, "names none of the staged"),
+    ({"pgdata": "nosuch"}, "names none of the production"),
+    ({"./data": "./nosuch"}, "names none of the production"),
+])
+def test_unknown_store_names_are_refused(tmp_path: Path, sources, match) -> None:
+    with pytest.raises(StagingDataError, match=match):
+        plan_copy(_stores(tmp_path, ["pgdata"], ["data"]),
+                  _stores(tmp_path, ["pgdata"], ["data-staging"], staging=True),
+                  sources, "myapp")
+
+
+def _manifest(copy_data) -> dict:
+    return {"id": "01TESTULID0000000000000000", "project": "myapp", "source": "bundle",
+            "hosts": ["myapp.example.com"],
+            "services": {"web": {"port": 80, "routes": [{"path": "/"}]}},
+            "staging": {"copy_data": copy_data}}
+
+
+@pytest.mark.parametrize("copy_data,expected", [
+    (True, {}), (False, None), ({"sources": {"new": "old", "cache": None}},
+                                {"new": "old", "cache": None}),
+])
+def test_copy_sources_from_the_manifest(copy_data, expected) -> None:
+    assert validate_manifest(_manifest(copy_data), "myapp")[0] == []
+    assert copy_sources(_manifest(copy_data)) == expected
+
+
+@pytest.mark.parametrize("copy_data", [
+    "yes", {"sources": {}}, {"sources": {"a": 1}}, {"map": {"a": "b"}}, {"sources": ["a"]},
+])
+def test_malformed_copy_data_is_refused(copy_data) -> None:
+    errors, _ = validate_manifest(_manifest(copy_data), "myapp")
+    assert any("copy_data" in e for e in errors)
+
+
+class _Docker:
+    """Records docker commands; volumes and containers as the test says."""
+
+    def __init__(self, monkeypatch, volumes=(), running=None) -> None:
+        self.calls: list[list[str]] = []
+        self.volumes = set(volumes)
+        self.running = running or {}
+        self.fail_copy = False
+        monkeypatch.setattr(staging_data, "_run", self)
+        monkeypatch.setattr(staging_data, "_running",
+                            lambda project: list(self.running.get(project, [])))
+
+    fail_stop = fail_start = False
+
+    def __call__(self, cmd, capture=False, timeout=None):
+        self.calls.append(cmd)
+        if cmd[:3] == ["docker", "volume", "inspect"] and cmd[3] not in self.volumes:
+            raise DockerError("Error response from daemon: get x: no such volume")
+        if cmd[:2] == ["docker", "run"] and self.fail_copy:
+            raise DockerError("cp: write error: No space left on device")
+        if cmd[:2] == ["docker", "rm"]:
+            raise DockerError("Error response from daemon: No such container: x")
+        if cmd[:2] == ["docker", "stop"] and self.fail_stop:
+            raise DockerError("container myapp-web-1 did not stop")
+        if cmd[:2] == ["docker", "start"] and self.fail_start:
+            raise DockerError("Cannot connect to the Docker daemon")
+
+    def verbs(self) -> list[str]:
+        return [c[1] for c in self.calls if c[1] != "rm"]
+
+
+def _plan(tmp_path: Path):
+    (tmp_path / "data").mkdir()
+    return plan_copy(_stores(tmp_path, ["pgdata"], ["data"]),
+                     _stores(tmp_path, ["pgdata"], ["data-staging"], staging=True), {}, "myapp")
+
+
+def test_copy_stops_production_around_a_complete_replacement(tmp_path, monkeypatch) -> None:
+    docker = _Docker(monkeypatch, volumes={"myapp_pgdata", "myapp-staging_pgdata"},
+                     running={"myapp": ["myapp-web-1"]})
+    staging_data.copy_production_data("myapp", _plan(tmp_path))
+    assert docker.verbs()[-4:] == ["stop", "run", "run", "start"]
+    runs = [c for c in docker.calls if c[1] == "run"]
+    copy = " ".join(runs[-1])
+    assert "type=volume,src=myapp_pgdata,dst=/src,readonly" in copy
+    assert "type=volume,src=myapp-staging_pgdata,dst=/dst" in copy
+    # Hidden entries are removed too, and the destination proven empty.
+    assert "/dst/.[!.]*" in copy and 'ls -A /dst' in copy
+
+
+def test_production_restarts_when_a_copy_fails(tmp_path, monkeypatch) -> None:
+    docker = _Docker(monkeypatch, volumes={"myapp_pgdata", "myapp-staging_pgdata"},
+                     running={"myapp": ["myapp-web-1"]})
+    docker.fail_copy = True
+    with pytest.raises(DockerError, match="No space"):
+        staging_data.copy_production_data("myapp", _plan(tmp_path))
+    assert docker.calls[-1][:2] == ["docker", "start"]
+
+
+def test_a_missing_production_volume_is_never_created(tmp_path, monkeypatch) -> None:
+    docker = _Docker(monkeypatch, volumes={"myapp-staging_pgdata"})
+    with pytest.raises(StagingDataError, match="myapp_pgdata .* does not exist"):
+        staging_data.copy_production_data("myapp", _plan(tmp_path))
+    assert not [c for c in docker.calls if c[1] in ("run", "stop")]
+
+
+def test_each_copy_container_is_named_and_force_removed(tmp_path, monkeypatch) -> None:
+    """An interrupted boxmunge must not leave a copy writing into staging."""
+    docker = _Docker(monkeypatch, volumes={"myapp_pgdata", "myapp-staging_pgdata"})
+    docker.fail_copy = True
+    with pytest.raises(DockerError):
+        staging_data.copy_production_data("myapp", _plan(tmp_path))
+    run, rm = docker.calls[-2:]
+    name = run[run.index("--name") + 1]
+    assert name.startswith("boxmunge-myapp-staging-copy-")
+    assert rm == ["docker", "rm", "-f", name]
+
+
+def test_production_restarts_when_stopping_it_fails(tmp_path, monkeypatch) -> None:
+    docker = _Docker(monkeypatch, volumes={"myapp_pgdata", "myapp-staging_pgdata"},
+                     running={"myapp": ["myapp-web-1", "myapp-db-1"]})
+    docker.fail_stop = True
+    with pytest.raises(DockerError, match="did not stop"):
+        staging_data.copy_production_data("myapp", _plan(tmp_path))
+    assert docker.calls[-1] == ["docker", "start", "myapp-web-1", "myapp-db-1"]
+
+
+def test_production_left_down_is_said_loudly(tmp_path, monkeypatch, capsys) -> None:
+    docker = _Docker(monkeypatch, volumes={"myapp_pgdata", "myapp-staging_pgdata"},
+                     running={"myapp": ["myapp-web-1"]})
+    docker.fail_copy = docker.fail_start = True
+    with pytest.raises(staging_data.ProductionDownError) as raised:
+        staging_data.copy_production_data("myapp", _plan(tmp_path))
+    assert "No space" in str(raised.value.__cause__)
+    err = capsys.readouterr().err
+    assert "PRODUCTION IS DOWN" in err and "docker start myapp-web-1" in err
+
+
+def test_running_staging_is_refused(tmp_path, monkeypatch) -> None:
+    """Review finding 11: never replace data under a running staging DB."""
+    docker = _Docker(monkeypatch, volumes={"myapp_pgdata", "myapp-staging_pgdata"},
+                     running={"myapp-staging": ["myapp-staging-db-1"]})
+    with pytest.raises(StagingDataError, match="myapp-staging-db-1"):
+        staging_data.copy_production_data("myapp", _plan(tmp_path))
+    assert docker.calls == []

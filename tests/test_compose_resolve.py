@@ -15,7 +15,6 @@ import yaml
 from boxmunge import docker
 from boxmunge.compose import (
     ComposeError,
-    generate_staging_compose_base,
     load_user_compose,
 )
 from boxmunge.compose_validate import ComposeSecurityError, validate_user_compose
@@ -184,25 +183,3 @@ def test_overlay_refuses_unresolvable_compose(paths: BoxPaths) -> None:
         load_user_compose(paths.project_dir("myapp") / "compose.yml", "myapp")
 
 
-@pytest.mark.parametrize("doc", [
-    {"include": ["parts/db.yml"], "services": {"web": {"image": "x"}}},
-    {"services": {"web": {"extends": {"file": "base.yml", "service": "app"}}}},
-], ids=["include", "extends file"])
-def test_staging_base_refuses_services_from_other_files(paths: BoxPaths, doc: dict) -> None:
-    compose = _project(paths, {"compose.yml": doc})
-    with pytest.raises(ComposeError, match="Move those services into compose.yml"):
-        generate_staging_compose_base(compose)
-
-
-def test_staging_base_rewrites_long_syntax_bind_mounts(paths: BoxPaths) -> None:
-    compose = _project(paths, {"compose.yml": {"services": {"web": {
-        "image": "x",
-        "volumes": [
-            {"type": "bind", "source": "./data", "target": "/data"},
-            {"type": "volume", "source": "cache", "target": "/cache"},
-        ],
-    }}}})
-    staged = yaml.safe_load(generate_staging_compose_base(compose))
-    vols = staged["services"]["web"]["volumes"]
-    assert vols[0]["source"] == "./data-staging"
-    assert vols[1]["source"] == "cache"

@@ -35,8 +35,8 @@ Each bundle deploy makes the project's code exactly the bundle: a file or direct
 release had but the new bundle does not is removed (it stays in the previous-release copy that
 `rollback` restores). So anything the project needs on the server, including `project.env`, must
 ship in every bundle. Server-owned entries (below), data directories (any directory a release has
-bind-mounted read-write, see below), and `-staging` copies of bind-mounted directories are never
-touched by a deploy.
+bind-mounted read-write, see below), and `-staging` copies of data directories are never
+touched by a deploy (`unstage` removes the copies of directories production no longer mounts).
 
 Some entries belong to the server, and a bundle that carries any of them is refused before anything
 on the server changes (`ERROR:` naming each entry, exit 1):
