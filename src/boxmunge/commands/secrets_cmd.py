@@ -5,8 +5,8 @@ import sys
 from boxmunge.log import log_operation
 from boxmunge.paths import BoxPaths
 from boxmunge.secrets import (
-    INTERNAL_KEYS, Inventory, LegacySecretError, SecretsFile, get_internal_key, get_key,
-    inventory, set_key, unset_key, valid_key,
+    INTERNAL_KEYS, Inventory, LegacySecretError, QuoteSpanError, SecretsFile,
+    get_internal_key, get_key, inventory, set_key, unset_key, valid_key,
 )
 
 
@@ -69,6 +69,20 @@ def _warn_unvouched(inv: Inventory, project: str | None) -> None:
         )
 
 
+def _report_quote_span(e: QuoteSpanError, project: str | None) -> None:
+    scope = _scope(project)
+    print(
+        f"ERROR: {', '.join(e.keys)} in {scope} secrets were stored by an older "
+        "boxmunge with a quote their line does not close, so Compose can read "
+        "the lines after them into those values; until they are cleared, any "
+        "other change could alter what containers receive. Clear each one, "
+        "either removing it or setting it again, then retry:", file=sys.stderr,
+    )
+    for k in e.keys:
+        print(f"  secrets unset {scope} {k}    or    secrets set {scope} '{k}=<value>'",
+              file=sys.stderr)
+
+
 def _record_write(op: str, key: str, inv: Inventory, paths: BoxPaths,
                   project: str | None) -> None:
     msg = f"{op} {key}"
@@ -96,6 +110,9 @@ def _cmd_set(args: list[str], paths: BoxPaths) -> int:
     key, _, value = assignment.partition("=")
     try:
         inv = set_key(secrets, key, value)
+    except QuoteSpanError as e:
+        _report_quote_span(e, project)
+        return 1
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
@@ -166,6 +183,9 @@ def _cmd_unset(args: list[str], paths: BoxPaths) -> int:
     key = rest[0]
     try:
         inv = unset_key(secrets, key)
+    except QuoteSpanError as e:
+        _report_quote_span(e, project)
+        return 1
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

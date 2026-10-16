@@ -8,7 +8,7 @@ import pytest
 import boxmunge.secrets as secrets_mod
 from boxmunge.paths import BoxPaths
 from boxmunge.secrets import (
-    LegacySecretError, SecretsFile, SecretsFileError,
+    LegacySecretError, QuoteSpanError, SecretsFile, SecretsFileError,
     get_internal_key, get_key, inventory, list_keys, set_key, unset_key,
 )
 
@@ -119,21 +119,34 @@ class TestLegacyUnquotedFiles:
         set_key(sf, "NEW", "n")
         assert sf.path.read_text() == f"KEY={stored}\nNEW='n'\nOTHER='plain'\n"
 
-    @pytest.mark.parametrize("stored", ["'abc", '"abc', " 'abc", "'it\\'s"])
-    def test_quote_left_open_blocks_writes_that_would_shift_other_keys(
+    @pytest.mark.parametrize("stored", [
+        "'abc", '"abc', " 'abc", "'it\\'s", "'\"{'='", '"abc" # c', "'a' 'b'",
+    ])
+    def test_quote_not_closed_at_line_end_blocks_other_writes(
             self, sf: SecretsFile, stored: str) -> None:
         content = f"A={stored}\nB=x'\n"
         sf.path.write_text(content)
-        with pytest.raises(SecretsFileError, match="opens a quote"):
+        with pytest.raises(QuoteSpanError) as exc:
             set_key(sf, "C", "c")
+        assert exc.value.keys == ["A"]
         assert sf.path.read_text() == content
         unset_key(sf, "A")
         assert get_key(sf, "B") == "x'"
 
-    def test_quote_closed_on_its_line_does_not_block(self, sf: SecretsFile) -> None:
-        sf.path.write_text('A="abc" # c\n')
+    def test_quote_closed_at_line_end_does_not_block(self, sf: SecretsFile) -> None:
+        sf.path.write_text('A="abc"\n')
         set_key(sf, "B", "b")
-        assert sf.path.read_text() == "A=\"abc\" # c\nB='b'\n"
+        assert sf.path.read_text() == "A=\"abc\"\nB='b'\n"
+
+    def test_several_open_quotes_can_be_cleared_one_at_a_time(self, sf: SecretsFile) -> None:
+        sf.path.write_text("A='abc\nB=x'\nC=\"def\nD=y\"\n")
+        with pytest.raises(QuoteSpanError) as exc:
+            set_key(sf, "E", "e")
+        assert exc.value.keys == ["A", "C"]
+        unset_key(sf, "A")
+        set_key(sf, "C", "fixed")
+        set_key(sf, "E", "e")
+        assert get_key(sf, "C") == "fixed" and get_key(sf, "E") == "e"
 
     def test_ambiguous_lines_survive_other_writes_byte_for_byte(self, sf: SecretsFile) -> None:
         """Containers keep receiving what they did until the key is re-set."""

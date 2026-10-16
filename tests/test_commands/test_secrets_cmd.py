@@ -1,6 +1,8 @@
 """Tests for boxmunge secrets command."""
 import json
 
+import pytest
+
 from boxmunge.commands.secrets_cmd import run_secrets
 from boxmunge.log import _reset_logger
 from boxmunge.paths import BoxPaths
@@ -261,6 +263,26 @@ class TestSecretsLegacyFiles:
         assert "stage reads them as before" in err
         assert run_secrets(["get", "myapp", "STAGING_AUTH_PASS"], paths) == 0
         assert capsys.readouterr().out == "Xk9$qL2#z\n"
+
+    @pytest.mark.parametrize("scope", ["myapp", "--host"])
+    def test_two_open_quote_keys_are_cleared_one_at_a_time(self, paths, capsys, scope) -> None:
+        if scope == "--host":
+            paths.config.mkdir(parents=True, exist_ok=True)
+            path = paths.host_secrets
+        else:
+            paths.project_dir("myapp").mkdir(parents=True)
+            path = paths.project_secrets("myapp")
+        path.write_text("A='abc\nB=x'\nC=\"def\nD=y\"\n")
+        assert run_secrets(["set", scope, "NEW=n"], paths) == 1
+        err = capsys.readouterr().err
+        assert "A, C" in err and "by hand" not in err
+        for k in ("A", "C"):
+            assert f"secrets unset {scope} {k}" in err
+            assert f"secrets set {scope} '{k}=<value>'" in err
+        assert run_secrets(["unset", scope, "A"], paths) == 0
+        assert run_secrets(["set", scope, "C=fixed"], paths) == 0
+        assert run_secrets(["set", scope, "NEW=n"], paths) == 0
+        assert path.read_text() == "B='x\\''\nC='fixed'\nD='y\"'\nNEW='n'\n"
 
     def test_corrupt_file_is_an_error_for_every_subcommand(self, paths, capsys) -> None:
         paths.config.mkdir(parents=True, exist_ok=True)

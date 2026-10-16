@@ -46,6 +46,19 @@ class SecretsFileError(ValueError):
     """A secrets file holds a line that cannot be read as KEY=VALUE."""
 
 
+class QuoteSpanError(SecretsFileError):
+    """Old values whose quotes can make Compose read later lines into them."""
+
+    def __init__(self, path: Path, keys: list[str]) -> None:
+        super().__init__(
+            f"{path}: the stored values of {', '.join(keys)} open a quote that "
+            "their line does not close, so Compose can read the lines after them "
+            "into those values and any other change could alter other secrets. "
+            "Set or unset each of them first."
+        )
+        self.keys = keys
+
+
 class LegacySecretError(ValueError):
     """The key's stored line is not literal, so its true value is unknown."""
 
@@ -139,24 +152,25 @@ def _plain_unquoted(text: str) -> bool:
             and _decode_single_quoted(_encode(text)) == text)
 
 
-def _quote_left_open(raw: str) -> bool:
-    """True if raw opens a quote it does not close on this line.
+def _may_span_lines(raw: str) -> bool:
+    """True unless raw is unquoted or one quoted value closing at line end.
 
-    Compose then reads the following lines into the value until a closing
-    quote, so what it makes of every later line depends on the file's
-    exact layout.
+    A value that opens a quote and does not close it exactly at the end of
+    its line (left open, or closed early and reopened) can make Compose read
+    the following lines into it, so what it makes of every later line
+    depends on the file's exact layout.
     """
     text = raw.lstrip()
     if not text.startswith(("'", '"')):
         return False
     escaped = False
-    for ch in text[1:]:
+    for i, ch in enumerate(text[1:], start=1):
         if escaped:
             escaped = False
         elif ch == "\\":
             escaped = True
         elif ch == text[0]:
-            return False
+            return i != len(text) - 1
     return True
 
 
@@ -275,15 +289,11 @@ def _rewrite(secrets: SecretsFile, key: str, value: str | None) -> Inventory:
     """
     with secrets.locked():
         entries = _parse(secrets.path)
-        for k, entry in entries.items():
-            if k != key and entry.value is None and _quote_left_open(entry.line.partition("=")[2]):
-                raise SecretsFileError(
-                    f"{secrets.path}: the stored value of {k} opens a quote that its "
-                    "line does not close, so Compose reads the lines after it into "
-                    "that value and any change to the file could change other "
-                    f"secrets. Set or unset {k} first (or fix the file by hand), "
-                    "then retry."
-                )
+        spanning = sorted(k for k, e in entries.items()
+                          if e.value is None and _may_span_lines(e.line.partition("=")[2]))
+        # Clearing one of them is always allowed, so they can go one at a time.
+        if spanning and key not in spanning:
+            raise QuoteSpanError(secrets.path, spanning)
         removed = entries.pop(key, None)
         migrated = []
         for k, entry in entries.items():

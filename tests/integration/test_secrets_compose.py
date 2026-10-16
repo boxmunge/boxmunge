@@ -18,7 +18,7 @@ import pytest
 
 from boxmunge.commands.secrets_cmd import run_secrets
 from boxmunge.paths import BoxPaths
-from boxmunge.secrets import SecretsFile, get_key, inventory, list_keys, set_key
+from boxmunge.secrets import QuoteSpanError, SecretsFile, get_key, list_keys, set_key
 
 pytestmark = [
     pytest.mark.integration,
@@ -132,22 +132,53 @@ def test_whatever_boxmunge_reads_as_a_value_compose_reads_the_same(tmp_path: Pat
     assert _compose_environment(tmp_path, ["secrets.env"]) == ours
 
 
+def _closes_early(raw: str) -> bool:
+    """A quoted value whose first quote closes before the end of the line."""
+    return len(raw) > 2 and raw[0] in "'\"" and raw[0] in raw[1:-1].replace("\\" + raw[0], "")
+
+
+def test_quoted_old_lines_kept_as_safe_never_swallow_neighbours(tmp_path: Path) -> None:
+    """Every old line starting with a quote that writes do not refuse must
+    leave the lines around it alone: sentinels between them read unchanged."""
+    sf = SecretsFile(tmp_path / "secrets.env", tmp_path / "secrets.lock")
+    alphabet = [c for c in _FUZZ_ALPHABET if c not in "{}"]
+    kept = []
+    for line in _fuzz_lines(4242, 600, alphabet):
+        key, _, raw = line.partition("=")
+        if raw.lstrip()[:1] not in ("'", '"'):
+            continue
+        sf.path.write_text(f"{line}\n")
+        try:
+            set_key(sf, "ZZ_PROBE", "p")
+        except QuoteSpanError:
+            continue
+        kept.append(line)
+    assert len(kept) > 50
+    body = "".join(f"{line}\nS{i}='s{i}'\n" for i, line in enumerate(kept))
+    sf.path.write_text(body)
+    seen = _compose_environment(tmp_path, ["secrets.env"])
+    assert {k: v for k, v in seen.items() if k.startswith("S")} == {
+        f"S{i}": f"s{i}" for i in range(len(kept))}
+
+
 def test_a_write_changes_nothing_compose_reads_for_other_keys(tmp_path: Path) -> None:
     """Fuzz write-then-read over a mix of literal and legacy lines: after a
     `set`, Compose reads every other key exactly as before, and every key
     boxmunge reads literally matches Compose."""
     sf = SecretsFile(tmp_path / "secrets.env", tmp_path / "secrets.lock")
-    lines = []
     # No braces: an unclosed ${ is a template error Compose refuses outright,
     # so no deployed box can hold one.
-    for line in _fuzz_lines(2611, 400, [c for c in _FUZZ_ALPHABET if c not in "{}"]):
-        # A quote left open spans lines, and writes refuse such a file
-        # (unit-tested); everything else must survive a write.
-        if line.partition("=")[2].lstrip()[:1] in ("'", '"'):
-            sf.path.write_text(line + "\n")
-            if inventory(sf).legacy:
-                continue
-        lines.append(line)
+    lines = _fuzz_lines(2611, 400, [c for c in _FUZZ_ALPHABET if c not in "{}"])
+    sf.path.write_text("".join(sorted(line + "\n" for line in lines)))
+    # Lines whose quote is not closed exactly at line end can make Compose
+    # read their neighbours into them; writes refuse such a file.
+    with pytest.raises(QuoteSpanError) as exc:
+        set_key(sf, "ZZ_PROBE", "p")
+    spanning = set(exc.value.keys)
+    reopened = [line for line in lines if line.partition("=")[0] in spanning
+                and _closes_early(line.partition("=")[2])]
+    assert reopened, "fuzz should include a quote closed early and reopened"
+    lines = [line for line in lines if line.partition("=")[0] not in spanning]
     sf.path.write_text("".join(sorted(line + "\n" for line in lines)))
     before = _compose_environment(tmp_path, ["secrets.env"])
     inv = set_key(sf, "ZZ_NEW", "it's $new")
