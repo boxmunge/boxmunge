@@ -35,8 +35,12 @@ def _project(tmp_path: Path, svc: dict[str, Any], top: dict | None = None,
         path = project_dir / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
-    doc: dict[str, Any] = {"services": {"web": {"image": "alpine", **svc}}}
-    doc.update(top or {})
+    # A build service takes Compose's default image name: tagging `alpine`
+    # would itself be refused (see the image-namespace cases).
+    base = {} if "build" in svc else {"image": "alpine"}
+    top = dict(top or {})
+    doc: dict[str, Any] = {"services": {"web": {**base, **svc}, **top.pop("services", {})}}
+    doc.update(top)
     compose = project_dir / "compose.yml"
     compose.write_text(yaml.safe_dump(doc))
     return paths, compose
@@ -138,6 +142,25 @@ REJECTED: dict[str, tuple[dict[str, Any], dict | None, str]] = {
         {"network_mode": "projb_default"}, None, "network_mode",
     ),
     "network_mode default bridge": ({"network_mode": "bridge"}, None, "network_mode"),
+    # pid/ipc joins outside the project are isolation, not hardening.
+    "pid joins container": ({"pid": "container:projb-db-1"}, None, "pid"),
+    "ipc joins container": ({"ipc": "container:projb-db-1"}, None, "ipc"),
+    # A build may only tag names in the project's image namespace.
+    "build tags a public image": (
+        {"build": ".", "image": "postgres:16-alpine"}, None, "image namespace",
+    ),
+    "build tags the platform proxy image": (
+        {"build": ".", "image": "caddy:2-alpine"}, None, "myapp-<name>",
+    ),
+    "build tags the platform system image": (
+        {"build": ".", "image": "system-system"}, None, "image namespace",
+    ),
+    "build tag with registry host": (
+        {"build": ".", "image": "registry.example.com/myapp-web"}, None, "no registry host",
+    ),
+    "extra build tag outside namespace": (
+        {"build": {"context": ".", "tags": ["myapp-web:2", "redis:7"]}}, None, "'redis:7'",
+    ),
 }
 
 
@@ -151,7 +174,8 @@ def test_escape_hatch_rejected(tmp_path: Path, svc: dict, top: dict | None, matc
 ISOLATION_EVEN_WHEN_OFF = [
     "additional context absolute host path", "dockerfile absolute outside",
     "cache from local dir", "build ssh agent", "build on named network", "provider",
-    "network_mode other project",
+    "network_mode other project", "pid joins container", "ipc joins container",
+    "build tags a public image", "extra build tag outside namespace",
 ]
 
 
@@ -225,6 +249,16 @@ ACCEPTED: dict[str, tuple[dict[str, Any], dict | None]] = {
     "build network none": ({"build": {"context": ".", "network": "none"}}, None),
     "network_mode none": ({"network_mode": "none"}, None),
     "network_mode sibling": ({"network_mode": "service:db"}, {"services": {"db": {"image": "x"}}}),
+    "pid and ipc with sibling": (
+        {"pid": "service:db", "ipc": "service:db"},
+        {"services": {"db": {"image": "x", "ipc": "shareable"}}},
+    ),
+    "ipc private": ({"ipc": "private"}, None),
+    "build with default image name": ({"build": "."}, None),
+    "build with namespaced names": (
+        {"build": {"context": ".", "tags": ["myapp_web:1", "myapp/web:2"]},
+         "image": "myapp-web-local:latest"}, None,
+    ),
 }
 
 
@@ -238,3 +272,44 @@ def test_contained_forms_accepted(tmp_path: Path, svc: dict, top: dict | None) -
 def test_api_socket_relaxed_with_warning_under_profile_off(tmp_path: Path) -> None:
     paths, compose = _project(tmp_path, {"use_api_socket": True})
     _validate(paths, compose, off=True)
+
+
+def _with_projects(tmp_path: Path, *names: str) -> None:
+    for name in names:
+        (tmp_path / "bm" / "projects" / name).mkdir(parents=True)
+
+
+def test_default_build_name_in_another_projects_namespace_refused(tmp_path: Path) -> None:
+    """Compose's default name counts too: service bar-web builds myapp-bar-web."""
+    paths, compose = _project(tmp_path, {"image": "alpine"},
+                              {"services": {"bar-web": {"build": "."}}})
+    _with_projects(tmp_path, "myapp-bar")
+    with pytest.raises(ComposeSecurityError, match="service bar-web: .*'myapp-bar'"):
+        _validate(paths, compose)
+
+
+@pytest.mark.parametrize("svc,others,match", [
+    # foo-bar-web is in both namespaces; the longer project name owns it.
+    ({"build": ".", "image": "myapp-bar-web"}, ["myapp-bar"], "'myapp-bar'"),
+    # The reverse: running an image another project builds.
+    ({"image": "projb-web:latest"}, ["projb"], "Compose could run that project"),
+    ({"image": "docker.io/library/projb-web"}, ["projb"], "'projb'"),
+    ({"image": "system-system"}, [], "'system'"),
+])
+def test_image_namespace_of_other_projects_refused(
+    tmp_path: Path, svc: dict, others: list[str], match: str,
+) -> None:
+    paths, compose = _project(tmp_path, svc)
+    _with_projects(tmp_path, *others)
+    with pytest.raises(ComposeSecurityError, match=match):
+        _validate(paths, compose, off=True)
+
+
+def test_public_and_own_images_run_alongside_other_projects(tmp_path: Path) -> None:
+    paths, compose = _project(
+        tmp_path, {"image": "myapp-worker"},
+        {"services": {"db": {"image": "postgres:16-alpine"},
+                      "cache": {"image": "ghcr.io/projb/cache:1"}}},
+    )
+    _with_projects(tmp_path, "projb", "postgres-tools")
+    _validate(paths, compose)

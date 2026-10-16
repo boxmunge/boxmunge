@@ -37,15 +37,12 @@ class Finding(NamedTuple):
 # string "true") is rejected outright rather than interpreted.
 _STRICT_BOOL_KEYS: tuple[str, ...] = ("privileged", "read_only", "init")
 
-# Namespace keys: the value `host` shares the host's namespace, and
-# `container:<name>` joins another container's (possibly another
-# project's) namespace. Keys listed in _CONTAINER_JOIN_KEYS reject both.
-# Every other network_mode value is an isolation question, answered in
-# compose_isolation.
+# Namespace keys: the value `host` shares the host's namespace. Joining
+# another container's namespace (`container:<name>`, a network by name) is
+# an isolation question, answered in compose_isolation.
 _NAMESPACE_KEYS: tuple[str, ...] = (
     "pid", "ipc", "network_mode", "uts", "userns_mode", "cgroup",
 )
-_CONTAINER_JOIN_KEYS: frozenset[str] = frozenset({"pid", "ipc"})
 
 _SECCOMP_DEFAULTS: frozenset[str] = frozenset({"runtime/default", "builtin"})
 
@@ -78,16 +75,8 @@ def _check_namespaces(svc: dict[str, Any]) -> list[Finding]:
                 key, repr(raw), "must be a string; remove it or quote the value",
             ))
             continue
-        value = raw.strip().lower()
-        if value == "host":
+        if raw.strip().lower() == "host":
             hits.append(Finding(key, raw))
-        elif key in _CONTAINER_JOIN_KEYS and value.startswith("container:"):
-            hits.append(Finding(
-                key, raw,
-                "joins another container's namespace, which may belong to "
-                "another project; use service:<name> for a service in this "
-                "compose file, or remove it",
-            ))
     return hits
 
 

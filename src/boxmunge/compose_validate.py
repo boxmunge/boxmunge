@@ -22,7 +22,12 @@ from boxmunge.compose_isolation import isolation_problems
 from boxmunge.compose_mounts import has_named_volume
 from boxmunge.compose_service_rules import service_findings
 from boxmunge.log import log_warning
-from boxmunge.paths import BoxPaths
+from boxmunge.paths import (
+    RESERVED_PROJECT_NAMES,
+    BoxPaths,
+    InvalidProjectName,
+    validate_project_name,
+)
 from boxmunge.published_ports import declared_ports
 from boxmunge.security_overlay import (
     PROFILE_DEFAULT,
@@ -240,6 +245,21 @@ def _enforce_cve_rule(
 
 
 
+def _other_projects(paths: BoxPaths, project_name: str) -> frozenset[str]:
+    """Every other project on the server, and the platform's own stacks:
+    the image namespaces this project may not build into or run from."""
+    names = set(RESERVED_PROJECT_NAMES)
+    if paths.projects.is_dir():
+        for entry in paths.projects.iterdir():
+            try:
+                validate_project_name(entry.name)
+            except InvalidProjectName:
+                continue
+            if entry.is_dir():
+                names.add(entry.name)
+    return frozenset(names - {project_name})
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -333,7 +353,9 @@ def validate_user_compose(
         raise ComposeSecurityError(f"could not resolve compose.yml: {e}") from e
     services = doc.get("services") or {}
 
-    isolation = isolation_problems(doc, project_name, base_dir, roots)
+    isolation = isolation_problems(
+        doc, project_name, base_dir, roots, _other_projects(paths, project_name),
+    )
     if isolation:
         raise ComposeSecurityError(isolation[0])
     for entry in declared_ports(cve_policy):

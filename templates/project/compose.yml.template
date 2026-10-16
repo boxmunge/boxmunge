@@ -6,7 +6,8 @@
 services:
   frontend:
     build: ./repo/frontend
-    # image: your-registry/__PROJECT_NAME__-frontend:latest
+    # The build is tagged __PROJECT_NAME__-frontend. To run a published image
+    # instead, replace build: with image: your-registry/__PROJECT_NAME__-frontend:latest
     restart: unless-stopped
     env_file:
       - project.env

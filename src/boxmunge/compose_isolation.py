@@ -12,7 +12,9 @@ either; a port that must be published is declared in the manifest (see
 `published_ports`). Nor may it hand a service to anything outside its
 containers (`provider`, `models`). The shared `boxmunge-proxy` network is
 attached by boxmunge's overlay for routed services; a compose file may
-not join it itself, by `networks:` or by `network_mode`.
+not join it itself, by `networks:` or by `network_mode`, nor join another
+container's pid or ipc namespace. Images it builds stay in its own image
+namespace (see compose_images).
 
 Unlike the hardening rules, these are not relaxed by `security.profile:
 off`: opting a service out of container hardening does not entitle it to
@@ -24,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from boxmunge.compose_build import build_problems
+from boxmunge.compose_images import image_problems
 from boxmunge.compose_mounts import host_path_forms, outside_roots
 
 PROXY_NETWORK = "boxmunge-proxy"
@@ -131,21 +134,36 @@ _MODELS_PROBLEM = (
 )
 
 
-def _check_network_mode(svc_name: str, svc: dict[str, Any]) -> list[str]:
-    """network_mode accepts any Docker network name, so only `none`,
-    `service:<name>` and `host` (a hardening question) stay in the project.
-    Matched exactly, as Docker matches them: `Host` would name a network."""
-    mode = svc.get("network_mode")
-    if mode is None:
-        return []
-    if isinstance(mode, str) and (mode in ("none", "host") or mode.startswith("service:")):
-        return []
-    return [
-        f"service {svc_name}: network_mode {mode!r} joins a network or "
-        f"container outside this compose file, which may be another "
-        f"project's. Remove it and use the project's own networks, or use "
-        f"service:<name> for a service in this file, or none."
-    ]
+# Namespace joins that stay inside the project. `host` is a hardening
+# question (compose_service_rules); every other value, `container:<name>`
+# above all, joins a namespace outside this compose file. Matched exactly,
+# as Docker matches them: `Host` would name a network.
+_CONTAINED_MODES: dict[str, frozenset[str]] = {
+    "network_mode": frozenset({"none", "host"}),
+    "pid": frozenset({"host"}),
+    "ipc": frozenset({"none", "private", "shareable", "host"}),
+}
+
+
+def _check_namespace_joins(svc_name: str, svc: dict[str, Any]) -> list[str]:
+    """network_mode accepts any Docker network name, and pid/ipc any
+    `container:<name>`. `service:<name>` stays in the project: Compose
+    refuses a service the project does not define."""
+    problems: list[str] = []
+    for key, allowed in _CONTAINED_MODES.items():
+        mode = svc.get(key)
+        if mode is None or (isinstance(mode, str) and (
+                mode in allowed or mode.startswith("service:"))):
+            continue
+        what = "network or container" if key == "network_mode" else "container's namespace"
+        problems.append(
+            f"service {svc_name}: {key} {mode!r} joins a {what} outside this "
+            f"compose file, which may be another project's. Use "
+            f"service:<name> for a service in this file"
+            + (", the project's own networks, or none." if key == "network_mode"
+               else ", or remove it.")
+        )
+    return problems
 
 
 def _service_networks(svc: dict[str, Any]) -> dict[str, Any]:
@@ -192,7 +210,7 @@ def _check_service(
                 f"container's volumes, which may be another project's. Name a "
                 f"service in this compose file instead."
             )
-    problems += _check_network_mode(svc_name, svc)
+    problems += _check_namespace_joins(svc_name, svc)
     if "provider" in svc:
         problems.append(
             f"service {svc_name}: provider: hands the service to an executable "
@@ -207,8 +225,12 @@ def _check_service(
 
 def isolation_problems(
     doc: dict[str, Any], project: str, base_dir: Path, roots: tuple[Path, ...],
+    other_projects: frozenset[str],
 ) -> list[str]:
-    """Return every cross-project isolation violation in a compose document."""
+    """Return every cross-project isolation violation in a compose document.
+
+    `other_projects` are the names whose image namespaces this project may
+    not build into or run from (see compose_images)."""
     problems = _check_networks(doc, project) + _check_volumes(doc, project)
     problems += _check_file_refs(doc, base_dir, roots)
     if doc.get("models"):
@@ -219,4 +241,6 @@ def isolation_problems(
     for svc_name, svc in services.items():
         if isinstance(svc, dict):
             problems += _check_service(svc_name, svc, declared, base_dir, roots)
+    if isinstance(services, dict):
+        problems += image_problems(services, project, other_projects)
     return problems
