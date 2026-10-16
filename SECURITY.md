@@ -20,6 +20,7 @@ Include:
 - **Assessment and fix timeline** communicated within 1 week
 - **Security releases** tagged with `[security]` and auto-applied to deployed instances within 12 hours via `boxmunge auto-update`
 - **Break-fix releases** (critical non-security fixes) tagged with `[breakfix]` and auto-applied the same way, unless an operator has set `auto_update.breakfix: false`. A fix for a vulnerability always ships as a security release, never as a break-fix, so it reaches every box
+- **Automatic updates cross minor versions, but never a breaking release.** A box on 0.10.x is automatically moved to a 0.11.x security release, as long as no release between them is marked breaking (one that changes operator workflows or could make an existing project, manifest, compose file, command line or upload method fail). Breaking releases bump the minor version. Automatic updates never cross a major version
 
 ## Scope
 
@@ -45,3 +46,7 @@ attack surface are offered as explicit opt-in choices or plugins instead. See th
 ## Supported Versions
 
 Only the latest release is supported with security fixes. We don't backport to older versions — upgrade to get the fix.
+
+When a breaking release stands between a box and a security or break-fix release, auto-update
+cannot install the fix, because doing so could break the box's projects. The operator reads the
+breaking release's notes, makes any changes it asks for, and runs `upgrade`.

@@ -23,7 +23,7 @@ def _report(version="0.2.1", stage="apply"):
 def make_app(tmp_path):
     releases_file = tmp_path / "releases.json"
     releases_file.write_text(json.dumps({"releases": [
-        {"version": "0.2.1", "class": "security",
+        {"version": "0.2.1", "class": "security", "breaking": False,
          "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.1"},
     ]}))
     patches = [patch("app.RELEASES_PATH", releases_file),

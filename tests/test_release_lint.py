@@ -28,10 +28,13 @@ def _load_module():
 lint = _load_module()
 
 
-def _write_tree(tmp_path: Path, version: str, releases: list[tuple[str, str]]) -> dict:
+def _write_tree(tmp_path: Path, version: str, releases: list[tuple]) -> dict:
+    """releases: (version, class) or (version, class, breaking) tuples."""
     releases_json = tmp_path / "releases.json"
     releases_json.write_text(json.dumps({"releases": [
-        {"version": v, "class": c, "url": f"{GH}{v}"} for v, c in releases
+        {"version": r[0], "class": r[1], "breaking": r[2] if len(r) > 2 else False,
+         "url": f"{GH}{r[0]}"}
+        for r in releases
     ]}))
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(f'[project]\nname = "boxmunge-server"\nversion = "{version}"\n')

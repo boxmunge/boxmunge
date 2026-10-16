@@ -1,7 +1,8 @@
 """boxmunge version-check service.
 
 Serves:
-1. GET  /v1/check?v=X                    — security/breakfix/update offers for the given version
+1. GET  /v1/check?v=X                    — security/breakfix/update offers (and any blocked
+                                            auto-update) for the given version
 2. POST /v1/report-failure               — record an upgrade failure
 3. GET  /v1/failures?version=X           — query failure summary for a version
 4. POST /v1/circuit-breaker/trip?version=X   — suppress a broken release (auth required)
@@ -27,7 +28,7 @@ from flask import Flask, request, jsonify
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from release_catalog import (
-    VERSION_RE, apply_holds, check_response, load_releases, select_offers,
+    VERSION_RE, apply_holds, check_response, find_blocked, load_releases, select_offers,
 )
 from request_limits import CheckCounter, RateLimiter, client_key
 
@@ -354,7 +355,7 @@ def create_app() -> Flask:
             select_offers(releases, version),
             lambda v: _is_circuit_broken(DB_PATH, v),
         )
-        result = check_response(offers, held)
+        result = check_response(offers, held, find_blocked(releases, version))
         counter.record(version if version in listed_versions else UNLISTED_VERSION)
 
         response = jsonify(result)

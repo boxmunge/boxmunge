@@ -865,8 +865,13 @@ install without you:
 | `breakfix` (a critical non-security fix) | Yes, unless `auto_update.breakfix` is `false` in `boxmunge.yml`. |
 | `feature` | Never. Run `upgrade` when ready. |
 
-Automatic updates stay on the box's own `major.minor` line (a 0.11.x box
-gets 0.11.y, never 0.12.0). To take security releases only, set this in
+Every release is also marked breaking or not. A breaking release changes an
+operator workflow, or could make an existing project, manifest, compose file,
+command line or upload method fail; it always bumps the minor version, and
+its release notes say what to change. Automatic updates may cross minor
+lines, but never a breaking release: a 0.10.3 box takes security release
+0.11.2 automatically only if neither 0.11.0, 0.11.1 nor 0.11.2 is breaking.
+They never cross a major version. To take security releases only, set this in
 `/opt/boxmunge/config/boxmunge.yml`:
 
 ```yaml

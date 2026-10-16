@@ -204,9 +204,12 @@ Every release has a class recorded in the version-check service's
 `feature`. Security releases are applied automatically within 12 hours.
 Break-fix releases are applied the same way unless the box sets
 `auto_update.breakfix: false` in `boxmunge.yml`. Feature releases are never
-applied automatically. Automatic updates stay on the box's `major.minor`
-line, and the version-check circuit breaker can hold a broken security or
-break-fix release fleet-wide.
+applied automatically. Each release is also marked `breaking` or not.
+Automatic updates may move a box to a newer minor line, but only when no
+release between the box's version and the candidate (the candidate
+included) is breaking, and never into a new major version. The
+version-check circuit breaker can hold a broken security or break-fix
+release fleet-wide.
 
 The class is decided from `releases.json` alone. The release workflow
 refuses to build a tag that is not listed there with a valid class, writes
