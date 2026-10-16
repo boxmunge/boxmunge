@@ -129,3 +129,18 @@ def test_a_quarantine_record_with_a_null_severity_fails_naming_the_file(fixture_
     assert error.code is ErrorCode.FAILED and str(path) in error.message
     summary = _call(fixture_paths, "security.summary")
     assert [u["project"] for u in summary["unreadable"]] == ["billing"]
+
+
+def test_finding_severities_read_as_the_platform_reads_them(fixture_paths) -> None:
+    """A missing or unrecognised stored severity is "Unknown", exactly as
+    scan_state.decisions_from_scan_state reads it for enforcement."""
+    path = fixture_paths.project_scan_state("shop")
+    state = json.loads(path.read_text())
+    first, second = state["decisions"][0]["findings"][:2]
+    del first["base_severity"], first["effective_severity"]
+    second["effective_severity"] = "Catastrophic"
+    path.write_text(json.dumps(state))
+    findings = _call(fixture_paths, "security.project", {"project": "shop"})["findings"]
+    assert (findings[0]["base_severity"], findings[0]["effective_severity"]) == (
+        "Unknown", "Unknown")
+    assert findings[1]["effective_severity"] == "Unknown"

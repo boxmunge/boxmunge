@@ -22,6 +22,8 @@ from boxmunge.commands.security_cmd import (
 from boxmunge.commands.security_views import project_cve_status
 from boxmunge.cve.breaker import BreakerError, read_held
 from boxmunge.cve.policy import Disposition
+from boxmunge.cve.scan_state import stored_severities
+from boxmunge.cve.scanner import Severity
 from boxmunge.paths import BoxPaths
 from boxmunge.security_overlay import services_with_off_profile
 
@@ -66,8 +68,8 @@ FINDING = obj({
     "image_ref": NULLABLE_STRING,
     "cve_id": STRING,
     "disposition": enum(*(d.value for d in Disposition)),
-    "base_severity": STRING,
-    "effective_severity": STRING,
+    "base_severity": enum(*(s.value for s in Severity)),
+    "effective_severity": enum(*(s.value for s in Severity)),
     **_OPTIONAL_FINDING_KEYS,
 })
 
@@ -145,12 +147,13 @@ def _security_project(params: dict[str, Any], ctx: ActionContext) -> dict[str, A
 
 
 def _finding_view(finding: dict[str, Any], image_ref: str | None) -> dict[str, Any]:
+    base, effective = stored_severities(finding)
     return {
         "image_ref": image_ref,
         "cve_id": finding["cve_id"],
         "disposition": finding["disposition"],
-        "base_severity": finding["base_severity"],
-        "effective_severity": finding["effective_severity"],
+        "base_severity": base.value,
+        "effective_severity": effective.value,
         **{key: finding.get(key) for key in _OPTIONAL_FINDING_KEYS},
     }
 

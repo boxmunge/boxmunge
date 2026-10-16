@@ -142,6 +142,13 @@ def _deserialize_severity(value: str) -> Severity:
     return Severity.UNKNOWN
 
 
+def stored_severities(raw: dict[str, Any]) -> tuple[Severity, Severity]:
+    """A stored finding's (base, effective) severities. A missing or
+    unrecognised value reads as UNKNOWN."""
+    return (_deserialize_severity(raw.get("base_severity", "Unknown")),
+            _deserialize_severity(raw.get("effective_severity", "Unknown")))
+
+
 def _deserialize_status(value: Any) -> VulnStatus:
     """Map a stored status string back to VulnStatus.
 
@@ -223,10 +230,7 @@ def decisions_from_scan_state(
         quarantine_required = False
         at_risk_running = False
         for raw in raw_decision.get("findings", []) or []:
-            base = _deserialize_severity(raw.get("base_severity", "Unknown"))
-            effective = _deserialize_severity(
-                raw.get("effective_severity", "Unknown"),
-            )
+            base, effective = stored_severities(raw)
             disposition = _deserialize_disposition(raw["disposition"])
             finding = Finding(
                 cve_id=raw.get("cve_id", ""),
