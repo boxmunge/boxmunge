@@ -37,6 +37,17 @@ def _meta_payload(paths: BoxPaths) -> dict:
     }
 
 
+def _add(tar: tarfile.TarFile, path: Path, arcname: str) -> None:
+    """Add path unless it is a symlink.
+
+    A git project's manifest.yml and compose.yml link into its checkout.
+    The link is the checkout's, not state to roll back: it stays on disk,
+    and restore never touches it.
+    """
+    if not path.is_symlink():
+        tar.add(path, arcname=arcname)
+
+
 def create_stash(paths: BoxPaths) -> Path:
     """Create a stash archive of the current platform state.
 
@@ -57,12 +68,12 @@ def create_stash(paths: BoxPaths) -> Path:
     with raw, tarfile.open(fileobj=raw, mode="w:gz") as tar:
         for config_file in [paths.config_file, paths.host_secrets, paths.backup_key, paths.version_file]:
             if config_file.exists():
-                tar.add(config_file, arcname=f"config/{config_file.name}")
+                _add(tar, config_file, f"config/{config_file.name}")
 
         if paths.deploy_state.exists():
             for state_file in paths.deploy_state.iterdir():
                 if state_file.is_file():
-                    tar.add(state_file, arcname=f"state/deploy/{state_file.name}")
+                    _add(tar, state_file, f"state/deploy/{state_file.name}")
 
         if paths.projects.exists():
             for project_dir in sorted(paths.projects.iterdir()):
@@ -72,12 +83,12 @@ def create_stash(paths: BoxPaths) -> Path:
                 for filename in ["manifest.yml", "compose.yml", "project.env", "secrets.env"]:
                     filepath = project_dir / filename
                     if filepath.exists():
-                        tar.add(filepath, arcname=f"projects/{project_name}/{filename}")
+                        _add(tar, filepath, f"projects/{project_name}/{filename}")
                 scripts_dir = project_dir / "boxmunge-scripts"
                 if scripts_dir.exists():
                     for script in scripts_dir.iterdir():
                         if script.is_file():
-                            tar.add(script, arcname=f"projects/{project_name}/boxmunge-scripts/{script.name}")
+                            _add(tar, script, f"projects/{project_name}/boxmunge-scripts/{script.name}")
 
         # Schema-version marker — must be last so partial archives lack it
         # and are detected as legacy/corrupt by restore_stash.
@@ -235,6 +246,14 @@ def restore_stash(paths: BoxPaths, archive: Path | None = None) -> Path:
                 continue
 
             _check_member_safe(member)
+
+            # Stashes made before links were left out hold a git project's
+            # manifest.yml and compose.yml as links into its checkout. The
+            # links are still on disk; refusing them would abort the rollback.
+            if member.issym():
+                log_warning("stash", f"Skipped symlink member {member.name!r} "
+                            f"(left as it is on disk)", paths)
+                continue
 
             if member.name.startswith("config/"):
                 target = paths.config / member.name.removeprefix("config/")

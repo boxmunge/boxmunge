@@ -241,15 +241,90 @@ class TestStashTraversalGuards:
         restore_stash(paths, archive)
         assert (paths.config / "foo..bar").read_bytes() == b"hello"
 
-    def test_rejects_symlink_member(self, tmp_path: Path) -> None:
+    def test_symlink_member_is_never_created(self, tmp_path: Path) -> None:
+        """A link member is skipped, not extracted: nothing is created at its
+        name and its target is never touched."""
         paths = _make_paths(tmp_path)
+        victim = tmp_path / "victim"
+        victim.write_text("untouched")
         archive = paths.stashes / "symlink.tar.gz"
         info = tarfile.TarInfo(name="config/evil")
         info.type = tarfile.SYMTYPE
+        info.linkname = str(victim)
+        _build_malicious_archive(archive, [(info, None)])
+        restore_stash(paths, archive)
+        assert not (paths.config / "evil").exists()
+        assert not (paths.config / "evil").is_symlink()
+        assert victim.read_text() == "untouched"
+
+    def test_symlink_member_with_traversal_name_still_refused(self, tmp_path: Path) -> None:
+        paths = _make_paths(tmp_path)
+        archive = paths.stashes / "symlink.tar.gz"
+        info = tarfile.TarInfo(name="config/../../evil")
+        info.type = tarfile.SYMTYPE
         info.linkname = "/etc/passwd"
         _build_malicious_archive(archive, [(info, None)])
-        with pytest.raises(StashError):
+        with pytest.raises(StashError, match="suspicious"):
             restore_stash(paths, archive)
+
+
+class TestGitProjectLinks:
+    """A git project's manifest.yml and compose.yml are symlinks into repo/.
+    They are never stashed, and restore leaves them alone: an older stash
+    that holds them as link members must not abort a rollback."""
+
+    def _git_project(self, paths: BoxPaths) -> Path:
+        pdir = paths.project_dir("gitapp")
+        repo = pdir / "repo"
+        repo.mkdir(parents=True)
+        for name in ("manifest.yml", "compose.yml"):
+            (repo / name).write_text(f"# {name} from the repository\n")
+            (pdir / name).symlink_to(repo / name)
+        (pdir / "secrets.env").write_text("SECRET=stashed\n")
+        (pdir / "project.env").write_text("MODE=stashed\n")
+        return repo
+
+    def test_stash_holds_no_link_members(self, tmp_path: Path) -> None:
+        paths = _make_paths(tmp_path)
+        self._git_project(paths)
+        with tarfile.open(create_stash(paths)) as tar:
+            members = {m.name: m for m in tar.getmembers()}
+        assert not [m.name for m in members.values() if m.issym() or m.islnk()]
+        assert "projects/gitapp/manifest.yml" not in members
+        assert "projects/gitapp/secrets.env" in members
+        assert "projects/gitapp/project.env" in members
+
+    def test_round_trip_keeps_links_and_restores_files(self, tmp_path: Path) -> None:
+        paths = _make_paths(tmp_path)
+        repo = self._git_project(paths)
+        archive = create_stash(paths)
+        pdir = paths.project_dir("gitapp")
+        (pdir / "secrets.env").write_text("SECRET=changed\n")
+        (repo / "manifest.yml").write_text("# moved on in the repository\n")
+        restore_stash(paths, archive)
+        for name in ("manifest.yml", "compose.yml"):
+            assert (pdir / name).is_symlink()
+            assert (pdir / name).resolve() == (repo / name).resolve()
+        assert (repo / "manifest.yml").read_text() == "# moved on in the repository\n"
+        assert (pdir / "secrets.env").read_text() == "SECRET=stashed\n"
+
+    def test_older_stash_with_link_members_restores(self, tmp_path: Path) -> None:
+        paths = _make_paths(tmp_path)
+        repo = self._git_project(paths)
+        pdir = paths.project_dir("gitapp")
+        link = tarfile.TarInfo(name="projects/gitapp/manifest.yml")
+        link.type = tarfile.SYMTYPE
+        link.linkname = str(repo / "manifest.yml")
+        secrets = tarfile.TarInfo(name="projects/gitapp/secrets.env")
+        secrets.mode = 0o600
+        archive = paths.stashes / "boxmunge-stash-old.tar.gz"
+        _build_malicious_archive(archive, [(link, None), (secrets, b"SECRET=old\n")])
+        restore_stash(paths, archive)
+        assert (pdir / "manifest.yml").is_symlink()
+        assert (pdir / "manifest.yml").resolve() == (repo / "manifest.yml").resolve()
+        assert (pdir / "secrets.env").read_text() == "SECRET=old\n"
+        log = paths.log_file.read_text()
+        assert "projects/gitapp/manifest.yml" in log and "symlink" in log
 
 
 class TestStashAtomicWrites:

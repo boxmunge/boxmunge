@@ -1215,7 +1215,9 @@ How an upgrade is applied and undone:
    it; a second in a row blocklists it. A successful install and `clear-blocklist` reset the
    count.
 2. Platform state is stashed: config, deploy state, and each project's manifest, compose file,
-   env files and `boxmunge-scripts/`, with their modes and owners.
+   env files and `boxmunge-scripts/`, with their modes and owners. Symlinks are not stashed
+   (a git project's `manifest.yml` and `compose.yml` link into `repo/`), and a restore leaves
+   them as they are on disk, skipping with a log line any link an older stash holds.
 3. The venvs swap and `upgrade --apply` migrates manifests, regenerates every project's Caddy
    site and compose overlay, reloads Caddy and restarts projects. A bundle project's manifest
    is rewritten at the new schema. A git project's is not: its `manifest.yml` links into
