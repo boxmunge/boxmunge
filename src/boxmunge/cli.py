@@ -97,6 +97,32 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
 }
 
 
+# Commands whose interruption must run their cleanup: temp files with
+# plaintext, commands running inside project containers, half-applied
+# deploy or upgrade state. SIGTERM unwinds these (see boxmunge.termination).
+# Long-running servers (mcp-serve, console) keep the default SIGTERM action:
+# unwinding them would leave the interpreter waiting on their non-daemon
+# I/O threads, so they would only stop on SIGKILL.
+UNWIND_ON_SIGTERM = frozenset({
+    "prod-deploy", "stage", "promote", "unstage", "rollback", "project-delete",
+    "add-git-project", "pause", "resume", "recover",
+    "backup", "backup-all", "restore", "test-restore", "self-test",
+    "check-all", "security", "container-update", "upgrade", "auto-update",
+})
+
+
+def _run(command: str, handler: Callable[[list[str]], None], args: list[str]) -> None:
+    if command not in UNWIND_ON_SIGTERM:
+        handler(args)
+        return
+    try:
+        with sigterm_unwinds():
+            handler(args)
+    except Terminated as e:
+        print(f"boxmunge {command}: stopped by signal {e.signum}", file=sys.stderr)
+        sys.exit(128 + e.signum)
+
+
 def main() -> None:
     """Main entry point for the boxmunge CLI."""
     args = sys.argv[1:]
@@ -125,9 +151,4 @@ def main() -> None:
         print(usage_for(command))
         sys.exit(0)
 
-    try:
-        with sigterm_unwinds():
-            handler(command_args)
-    except Terminated as e:
-        print(f"boxmunge {command}: stopped by signal {e.signum}", file=sys.stderr)
-        sys.exit(128 + e.signum)
+    _run(command, handler, command_args)
