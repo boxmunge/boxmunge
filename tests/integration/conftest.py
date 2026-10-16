@@ -3,6 +3,7 @@
 import os
 import random
 import shutil
+import uuid
 import subprocess
 import time
 from pathlib import Path
@@ -98,14 +99,18 @@ def deployed_fixture(int_paths: BoxPaths, fixture_project_dir: Path, test_port: 
 
     Tears down containers after the test.
     """
-    project_name = "inttest"
+    # A name of its own per run: concurrent runs on one Docker daemon would
+    # otherwise share (and tear down) one another's containers and network.
+    project_name = f"inttest{uuid.uuid4().hex[:8]}"
     compose_project = project_name  # Must match what boxmunge uses for -p
     project_dir = int_paths.project_dir(project_name)
 
-    # Copy fixture into project dir
+    # Copy fixture into project dir, renamed to this run's project
     if project_dir.exists():
         shutil.rmtree(project_dir)
     shutil.copytree(fixture_project_dir, project_dir)
+    manifest = project_dir / "manifest.yml"
+    manifest.write_text(manifest.read_text().replace("inttest", project_name))
 
     # Write test port — both as project.env and .env (Docker Compose reads .env automatically)
     (project_dir / "project.env").write_text(f"TEST_PORT={test_port}\n")
