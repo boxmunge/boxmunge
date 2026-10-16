@@ -132,6 +132,8 @@ class BoxPaths:
         self.platform_update_state = self.state / "platform-updates.json"
         # Last OS-update check by auto-update, and the alert sent for it.
         self.os_update_state = self.state / "os-updates.json"
+        # When notify() last logged that Pushover is not configured.
+        self.alerts_unconfigured_state = self.state / "alerts-unconfigured.json"
 
     def container_update_target_state(self, name: str) -> Path:
         return self.container_update_state / f"{name}.json"
