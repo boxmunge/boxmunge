@@ -122,12 +122,15 @@ def compose_up(
     build: bool = True,
     *,
     project_name: str,
+    force_recreate: bool = False,
 ) -> None:
-    """Run docker compose up -d in the project directory."""
+    """Run docker compose up -d; force_recreate replaces unchanged containers too."""
     cmd = compose_command(project_name, compose_files)
     cmd.extend(["up", "-d", "--remove-orphans"])
     if build:
         cmd.append("--build")
+    if force_recreate:
+        cmd.append("--force-recreate")
     _run(cmd, cwd=project_dir, timeout=_COMPOSE_UP_TIMEOUT)
 
 

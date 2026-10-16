@@ -224,11 +224,18 @@ def validate_manifest(
                             f"got: {route!r}"
                         )
                         continue
-                    problem = _route_path_problem(route["path"])
+                    path = route["path"]
+                    problem = _route_path_problem(path)
                     if problem:
                         errors.append(
                             f"Service '{svc_name}' route {i}: path "
-                            f"{route['path']!r} {problem}."
+                            f"{path!r} {problem}."
+                        )
+                    elif path != "/" and path.endswith("/"):
+                        warnings.append(
+                            f"Service '{svc_name}' route {i}: path {path!r} is an "
+                            f"exact match in Caddy, so requests below it go to "
+                            f"another route. Use {path + '*'!r} to route them here."
                         )
 
             if "limits" not in svc:

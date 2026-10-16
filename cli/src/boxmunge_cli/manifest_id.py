@@ -18,9 +18,11 @@ import yaml
 
 from boxmunge_cli.ulid import generate_ulid
 
-# A top-level `id:` key whose value is empty or null, with an optional comment.
+# A top-level `id:` key whose value is empty or null, with an optional comment,
+# which is kept when the id is filled in.
 _EMPTY_ID_LINE = re.compile(
-    r"^id:[ \t]*(?:null|Null|NULL|~|''|\"\")?[ \t]*(?:#.*)?$", re.MULTILINE
+    r"^id:(?:[ \t]*(?:null|Null|NULL|~|''|\"\"))?(?P<comment>[ \t]+#.*)?[ \t]*$",
+    re.MULTILINE,
 )
 
 
@@ -34,7 +36,7 @@ def _with_id(text: str, ulid: str) -> str:
         raise ManifestIdError("manifest.yml has more than one top-level 'id:' line.")
     if matches:
         m = matches[0]
-        return text[: m.start()] + f"id: {ulid}" + text[m.end():]
+        return text[: m.start()] + f"id: {ulid}" + (m["comment"] or "") + text[m.end():]
     if re.search(r"^id:", text, re.MULTILINE):
         raise ManifestIdError(
             "manifest.yml has an 'id:' line this client cannot rewrite safely. "

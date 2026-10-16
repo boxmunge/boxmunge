@@ -47,6 +47,24 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Dead CrowdSec apt source.
+#
+# Earlier bootstraps added CrowdSec's packagecloud repository, which has no
+# Debian 13 (trixie) release: its apt source makes every `apt-get update` on
+# the host fail, including the ones this installer runs. CrowdSec comes from
+# Debian's own archive, so on trixie the source and its key are removed.
+# Runs before anything below calls apt-get.
+# ---------------------------------------------------------------------------
+remove_dead_crowdsec_repo() {
+    local list=/etc/apt/sources.list.d/crowdsec_crowdsec.list
+    [[ -f "${list}" ]] || return 0
+    grep -q '^VERSION_CODENAME=trixie$' /etc/os-release || return 0
+    echo "  Removing CrowdSec's packagecloud apt source (it has no trixie release)"
+    rm -f "${list}" /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg
+}
+remove_dead_crowdsec_repo
+
+# ---------------------------------------------------------------------------
 # Install cosign (used by the upgrade shim to verify release signatures).
 #
 # Idempotent: if the pinned version is already installed, this is a no-op.

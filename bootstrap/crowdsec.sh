@@ -18,17 +18,13 @@ banner "Hardening: CrowdSec (community threat intelligence)"
 if command -v cscli &>/dev/null; then
     echo "CrowdSec already installed — skipping."
 else
-    # Add CrowdSec apt repository (signed, no curl-to-bash)
-    curl -fsSL --proto '=https' --tlsv1.2 \
-        https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh \
-        -o /tmp/crowdsec-repo.sh
-    bash /tmp/crowdsec-repo.sh
-    rm -f /tmp/crowdsec-repo.sh
+    # Both packages come from the distribution's own archive. Do not add
+    # CrowdSec's packagecloud repository: it publishes no trixie release, so
+    # its apt source breaks every later `apt-get update` on Debian 13.
     # Debian 13 (trixie) ships the unified bouncer as `crowdsec-firewall-bouncer`
     # (it autodetects iptables/nftables). The old `-iptables` package name does
     # NOT exist on trixie — installing it aborts the whole apt transaction, so
-    # neither crowdsec nor the bouncer get installed. The unified package is in
-    # Debian main, so this resolves even where the packagecloud repo lacks trixie.
+    # neither crowdsec nor the bouncer get installed.
     apt-get install -y -qq crowdsec crowdsec-firewall-bouncer
 fi
 

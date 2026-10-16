@@ -56,6 +56,7 @@ class Box:
         self.inspect_out = "running healthy"
         self.restore_error: Exception | None = None
         self.restore_rc = 0
+        self.up_kwargs: list[dict] = []
         pdir = paths.project_dir(PROJECT)
         pdir.mkdir(parents=True)
         (pdir / "manifest.yml").write_text(MANIFEST)
@@ -119,7 +120,8 @@ def box(paths: BoxPaths, monkeypatch: pytest.MonkeyPatch):
          patch("boxmunge.commands.restore.compose_down",
                side_effect=lambda *a, **k: b.events.append("down")), \
          patch("boxmunge.commands.restore.compose_up",
-               side_effect=lambda *a, **k: b.events.append("up-all")):
+               side_effect=lambda *a, **k: (b.events.append("up-all"),
+                                            b.up_kwargs.append(k))):
         yield b
 
 
@@ -196,3 +198,16 @@ class TestAlwaysRestarted:
         with pytest.raises(RuntimeError):
             _restore(box)
         assert box.events[-1] == "up-all"
+
+
+class TestRestoredDataIsLoaded:
+    """The backup service ran the restore and may still hold the old data open
+    (an SQLite file, an in-memory cache); it must start over (issue #3)."""
+
+    @pytest.mark.parametrize("attr,value", [(None, None), ("restore_rc", 1)])
+    def test_final_start_recreates_running_containers(self, box, attr, value):
+        if attr:
+            setattr(box, attr, value)
+        _restore(box)
+        assert box.events[-1] == "up-all"
+        assert box.up_kwargs[-1].get("force_recreate") is True

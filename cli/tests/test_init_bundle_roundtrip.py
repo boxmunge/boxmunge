@@ -5,6 +5,7 @@ import re
 import tarfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 from boxmunge_cli.bundle_cmd import run_bundle
@@ -78,6 +79,23 @@ def test_null_id_is_replaced_in_place_keeping_comments(tmp_path: Path) -> None:
     assert text.endswith(_BODY)  # everything else byte-identical
     new_id = lines[1].split(": ", 1)[1]
     assert _bundle_manifest(next(out.glob("*.tar.gz")), "myapp")["id"] == new_id
+
+
+@pytest.mark.parametrize("id_line,comment", [
+    ("id: null   # filled in by bundle", "   # filled in by bundle"),
+    ("id: ~ # pinned on first bundle", " # pinned on first bundle"),
+    ("id:  # set me", "  # set me"),
+])
+def test_comment_on_the_id_line_is_kept(tmp_path: Path, id_line: str, comment: str) -> None:
+    project = _write_project(tmp_path, f"{id_line}\n" + _BODY)
+    out = tmp_path / "out"
+    out.mkdir()
+
+    assert run_bundle(str(project), output=str(out)) == 0
+
+    first, rest = (project / "manifest.yml").read_text().split("\n", 1)
+    assert re.fullmatch(r"id: [0-9A-HJKMNP-TV-Z]{26}" + re.escape(comment), first)
+    assert rest == _BODY
 
 
 def test_missing_id_is_inserted_as_first_line(tmp_path: Path) -> None:

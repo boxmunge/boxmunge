@@ -189,6 +189,23 @@ def test_missing_output_dir_is_an_error_not_a_traceback(tmp_path: Path, capsys) 
     assert "ERROR:" in capsys.readouterr().err
 
 
+def test_nested_env_files_and_deps_never_ship(tmp_path: Path, capsys) -> None:
+    # A typical app repo: env files and installed dependencies below the top
+    # level, as in a server/ or web/ subproject.
+    project = _project(tmp_path)
+    for rel in ["server/.env", "server/.env.local", "web/node_modules/x/i.js",
+                "server/.venv/bin/python", "server/main.py", "server/.env.example"]:
+        _touch(project, rel)
+
+    rc, names = _bundle(project, tmp_path / "out")
+
+    assert rc == 0
+    assert [n for n in names if n.startswith("myapp/server/") or n.startswith("myapp/web/")] \
+        == ["myapp/server/.env.example", "myapp/server/main.py"]
+    err = capsys.readouterr().err
+    assert "server/.env " in err and "web/node_modules/" in err
+
+
 def test_excluded_paths_are_reported(tmp_path: Path, capsys) -> None:
     project = _project(tmp_path)
     _touch(project, "node_modules/x/i.js")
