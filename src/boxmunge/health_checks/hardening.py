@@ -180,8 +180,16 @@ def check_sysctl_hardening() -> HealthCheck:
 
 
 def check_systemd_timers() -> HealthCheck:
-    """Check that boxmunge systemd timers are active."""
-    timers = ["boxmunge-health.timer", "boxmunge-backup.timer"]
+    """Check that every boxmunge systemd timer install.sh enables is active.
+
+    Each one is the only thing that runs its job: without auto-update, for
+    example, neither security releases nor the OS-update alert happen.
+    """
+    timers = [
+        "boxmunge-health.timer", "boxmunge-backup.timer",
+        "boxmunge-backup-sync.timer", "boxmunge-auto-update.timer",
+        "boxmunge-container-update.timer", "boxmunge-cve-scan.timer",
+    ]
     inactive = []
     for timer in timers:
         try:

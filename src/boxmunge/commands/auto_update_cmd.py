@@ -6,7 +6,9 @@ non-security fixes) are applied unless boxmunge.yml sets
 ``auto_update.breakfix: false``. Feature releases are never applied here,
 and neither is any release across a breaking release or into a new major
 version. When such a security or break-fix release is all there is, the
-operator is alerted instead (boxmunge.blocked_update).
+operator is alerted instead (boxmunge.blocked_update). Every run also checks
+that OS security updates are arriving and alerts when they are not
+(boxmunge.os_update_alert).
 
 Thin orchestration layer: delegates discovery to upgrade_discovery and hands
 off the upgrade itself to the boxmunge-upgrade shim via os.execvp, which
@@ -32,8 +34,14 @@ def run_auto_update(paths: BoxPaths) -> int:
     Hands off to the boxmunge-upgrade shim via os.execvp on success.
     """
     from boxmunge.blocked_update import record_blocked
+    from boxmunge.os_update_alert import record_os_updates
+    from boxmunge.os_updates import inspect_os_updates
     from boxmunge.upgrade_discovery import auto_update_mode, discover_update
     from boxmunge.upgrade_state import UpgradeInProgress, upgrade_lock
+    # `health` is not scheduled, so this timer is where a box notices that
+    # its OS updates stopped arriving. Checked first: an upgrade below execs
+    # the shim and never returns.
+    record_os_updates(paths, inspect_os_updates())
     try:
         mode = auto_update_mode(load_config(paths))
     except ConfigError as e:
