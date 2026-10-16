@@ -2,15 +2,19 @@
 """Project registry — allowlist of known project names on this server.
 
 Storage: /opt/boxmunge/state/projects.txt (one name per line, deploy-writable).
+Being deploy-writable, a line can hold anything; every line is validated as
+a project name on read, never trusted.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from boxmunge.fileutil import registry_lock
-from boxmunge.paths import validate_project_name
+from boxmunge.paths import InvalidProjectName, validate_project_name
+from boxmunge.state import StateError
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -48,26 +52,78 @@ def _save(registry: Path, names: set[str]) -> None:
     atomic_write_text(registry, content)
 
 
-def load_registered_projects(paths: BoxPaths) -> set[str]:
-    """Load the set of registered project names."""
+class RegistryError(StateError, ValueError):
+    """projects.txt has lines that are not valid project names. A ValueError
+    too, like the other refusals add_project and remove_project raise."""
+
+
+@dataclass(frozen=True)
+class RegistryRead:
+    """The registry's valid names, and one `<file>:<line>: <reason>` per
+    line that is not one."""
+
+    names: frozenset[str]
+    problems: tuple[str, ...]
+
+
+def read_registry(paths: BoxPaths) -> RegistryRead:
+    """Every valid registered name, with a problem for each invalid line.
+
+    For fleet loops, which must report a damaged line and still reach every
+    valid project. Everything else calls load_registered_projects, which
+    refuses a damaged registry.
+    """
     registry = _registry_path(paths)
     if not registry.exists():
-        return _auto_migrate(paths, registry)
-    return {
-        line.strip()
-        for line in registry.read_text().splitlines()
-        if line.strip()
-    }
+        return RegistryRead(frozenset(_auto_migrate(paths, registry)), ())
+    names: set[str] = set()
+    problems: list[str] = []
+    for lineno, line in enumerate(registry.read_text().splitlines(), 1):
+        name = line.strip()
+        if not name:
+            continue
+        try:
+            validate_project_name(name)
+        except InvalidProjectName as e:
+            problems.append(f"{registry}:{lineno}: {e}")
+            continue
+        names.add(name)
+    return RegistryRead(frozenset(names), tuple(problems))
 
 
-def load_deployed_projects(paths: BoxPaths) -> list[str]:
-    """Registered projects that have been deployed (have a manifest), sorted.
+def registry_problem_message(problems: tuple[str, ...]) -> str:
+    """What is wrong with the registry, and what to do about it."""
+    return (
+        "the project registry has lines that are not project names:\n  "
+        + "\n  ".join(problems)
+        + "\nIt holds one project name per line. Correct or delete each line "
+          "listed (as root), then re-run."
+    )
+
+
+def load_registered_projects(paths: BoxPaths) -> set[str]:
+    """The set of registered project names. Raises RegistryError, naming
+    each bad line, if the registry holds anything that is not one."""
+    read = read_registry(paths)
+    if read.problems:
+        raise RegistryError(registry_problem_message(read.problems))
+    return set(read.names)
+
+
+def deployed_among(names: frozenset[str] | set[str], paths: BoxPaths) -> list[str]:
+    """Those of `names` that have been deployed (have a manifest), sorted.
 
     A project registered but never deployed has no images to scan or watch,
     so fleet-wide checks skip it rather than report it failing every run.
     """
-    return sorted(name for name in load_registered_projects(paths)
+    return sorted(name for name in names
                   if (paths.project_dir(name) / "manifest.yml").exists())
+
+
+def load_deployed_projects(paths: BoxPaths) -> list[str]:
+    """Registered projects that have been deployed (deployed_among), sorted.
+    Raises RegistryError as load_registered_projects does."""
+    return deployed_among(load_registered_projects(paths), paths)
 
 
 def name_collisions(name: str, others: set[str]) -> list[str]:

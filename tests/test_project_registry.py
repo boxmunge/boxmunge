@@ -155,7 +155,59 @@ def test_nightly_scan_targets_only_deployed_projects(paths: BoxPaths) -> None:
     add_project("live", paths)
     (paths.project_dir("live")).mkdir(parents=True)
     (paths.project_dir("live") / "manifest.yml").write_text("project: live\n")
-    assert _parse_scan_targets([], paths) == ["live"]
+    assert _parse_scan_targets([], paths) == (["live"], ())
+
+
+class TestDamagedRegistry:
+    """projects.txt is deploy-writable: any line can hold anything."""
+
+    @pytest.mark.parametrize("bad", ["../etc", "BAD NAME", "caddy", "foo-staging", "a/b"])
+    def test_load_names_the_file_and_line(self, paths: BoxPaths, bad) -> None:
+        from boxmunge.project_registry import RegistryError, load_registered_projects
+        registry = paths.state / "projects.txt"
+        registry.write_text(f"alpha\n\n{bad}\nbeta\n")
+        with pytest.raises(RegistryError) as exc:
+            load_registered_projects(paths)
+        assert f"{registry}:3: " in str(exc.value) and repr(bad) in str(exc.value)
+        assert "Correct or delete each line" in str(exc.value)
+
+    def test_read_registry_keeps_every_valid_name(self, paths: BoxPaths) -> None:
+        from boxmunge.project_registry import read_registry
+        registry = paths.state / "projects.txt"
+        registry.write_text("alpha\n../x\nbeta\nBAD\n")
+        read = read_registry(paths)
+        assert read.names == {"alpha", "beta"}
+        assert [p.split(": ")[0] for p in read.problems] == [f"{registry}:2", f"{registry}:4"]
+
+    def test_add_and_remove_refuse_a_damaged_registry(self, paths: BoxPaths) -> None:
+        """Rewriting the file would silently drop the bad line."""
+        from boxmunge.project_registry import add_project, remove_project
+        registry = paths.state / "projects.txt"
+        registry.write_text("alpha\n../x\n")
+        with pytest.raises(ValueError, match=":2: "):
+            add_project("gamma", paths)
+        with pytest.raises(ValueError, match=":2: "):
+            remove_project("alpha", paths)
+        assert registry.read_text() == "alpha\n../x\n"
+
+    def test_doctor_fails_naming_the_line(self, paths: BoxPaths) -> None:
+        import contextlib
+        import io
+        import json
+        from boxmunge.commands.doctor import run_doctor
+        registry = paths.state / "projects.txt"
+        registry.write_text("alpha\n../x\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            assert run_doctor(paths, as_json=True) == 1
+        [result] = [r for r in json.loads(out.getvalue()) if r["name"] == "Project registry"]
+        assert result["status"] == "FAIL" and f"{registry}:2: " in result["detail"]
+
+    def test_single_project_scan_refuses_a_damaged_registry(self, paths: BoxPaths, capsys) -> None:
+        from boxmunge.commands.security_actions import _parse_scan_targets
+        (paths.state / "projects.txt").write_text("alpha\n../x\n")
+        assert _parse_scan_targets(["alpha"], paths) == 1
+        assert ":2: " in capsys.readouterr().err
 
 
 class TestOverlappingNames:

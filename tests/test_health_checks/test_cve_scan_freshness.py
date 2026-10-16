@@ -87,3 +87,15 @@ def test_no_deployed_projects_is_ok(tmp_path):
     (paths.state / "projects.txt").write_text("ghost\n")
     result = check_cve_scan_freshness(paths, now=_NOW)
     assert result.status == "ok" and "no projects deployed" in result.detail
+
+
+def test_malformed_registry_line_warns_and_the_rest_are_still_checked(tmp_path):
+    """A bad projects.txt line is named, and does not hide the valid projects."""
+    paths = make_box(tmp_path, projects=("aaa", "bbb"))
+    registry = paths.state / "projects.txt"
+    registry.write_text("aaa\nBAD NAME\nbbb\n")
+    _scanned(paths, "aaa", hours_ago=1)
+    result = check_cve_scan_freshness(paths, now=_NOW)
+    assert result.status == "warn"
+    assert f"{registry}:2" in result.detail
+    assert "bbb: never scanned" in result.detail

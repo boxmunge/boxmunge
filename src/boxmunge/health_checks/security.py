@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 from boxmunge.commands.health_cmd import HealthCheck
 from boxmunge.manifest import ManifestError, load_manifest
-from boxmunge.project_registry import load_deployed_projects
+from boxmunge.project_registry import deployed_among, read_registry
 
 # The scan runs daily (03:00-03:30); 36h tolerates one late or missed run's
 # worth of jitter without crying wolf, and catches a second missed night.
@@ -108,10 +108,13 @@ def _scan_problem(paths: BoxPaths, project: str, now: datetime) -> str | None:
 def check_cve_scan_freshness(paths: BoxPaths, *, now: datetime | None = None) -> HealthCheck:
     """Warn when any deployed project's CVE scan is stale or incomplete."""
     now = now or datetime.now(timezone.utc)
-    projects = load_deployed_projects(paths)
-    if not projects:
+    registry = read_registry(paths)
+    projects = deployed_among(registry.names, paths)
+    if not projects and not registry.problems:
         return HealthCheck(name="cve-scan", status="ok", detail="no projects deployed")
-    problems = [p for p in (_scan_problem(paths, name, now) for name in projects) if p]
+    # A bad registry line may be a project the scan cannot see.
+    problems = [f"not a project name, so never scanned: {p}" for p in registry.problems]
+    problems += [p for p in (_scan_problem(paths, name, now) for name in projects) if p]
     if problems:
         return HealthCheck(
             name="cve-scan", status="warn",

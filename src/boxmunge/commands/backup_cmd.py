@@ -13,6 +13,7 @@ from boxmunge.backup import (
 from boxmunge.backup_dump import execute_dump, remove_stale_dumps
 from boxmunge.config import load_config, ConfigError
 from boxmunge.fileutil import project_lock, LockError
+from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
@@ -266,18 +267,23 @@ def run_backup_all(paths: BoxPaths) -> int:
     # cleanly — quarantined gets a structured log entry; paused historically
     # only printed (preserved).
     for name in projects:
-        block = is_blocked(name, paths)
-        if block and block.reason is BlockReason.PAUSED:
-            print(f"  Skipping {name}: paused.")
+        try:
+            block = is_blocked(name, paths)
+            if block and block.reason is BlockReason.PAUSED:
+                print(f"  Skipping {name}: paused.")
+                continue
+            if block and block.reason is BlockReason.QUARANTINED:
+                print(f"  Skipping {name}: CVE-quarantined.")
+                log_operation(
+                    "backup", block.skip_message,
+                    paths, project=name,
+                )
+                continue
+            result = _attempt_locked_backup(name, paths)
+        except PROJECT_INPUT_ERRORS as e:
+            report_project_failure("backup-all", name, e, paths)
+            failed.append(name)
             continue
-        if block and block.reason is BlockReason.QUARANTINED:
-            print(f"  Skipping {name}: CVE-quarantined.")
-            log_operation(
-                "backup", block.skip_message,
-                paths, project=name,
-            )
-            continue
-        result = _attempt_locked_backup(name, paths)
         if result == BackupAttemptResult.OK:
             continue
         if result == BackupAttemptResult.LOCKED:

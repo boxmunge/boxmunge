@@ -402,3 +402,30 @@ class TestListSnapshots:
         _setup_project(paths, MANIFEST_WITH_BACKUP)
         snaps = list_snapshots(paths, "myapp")
         assert snaps == []
+
+
+class TestBackupAllIsolation:
+    """One project whose name or state cannot be used must not stop the
+    nightly backup of the others, and must not vanish either."""
+
+    @patch("boxmunge.commands.backup_cmd.backup_locked")
+    def test_stranded_reserved_name_and_corrupt_state_do_not_stop_the_fleet(
+        self, mock_backup: MagicMock, paths: BoxPaths, capsys,
+    ) -> None:
+        for name in ("aaa-staging", "bbb", "ccc"):
+            pdir = paths.projects / name
+            pdir.mkdir(parents=True)
+            (pdir / "manifest.yml").write_text(
+                MANIFEST_WITH_BACKUP.replace("project: myapp", f"project: {name}")
+            )
+        paused = paths.project_paused_state("bbb")
+        paused.parent.mkdir(parents=True, exist_ok=True)
+        paused.write_text("{truncated")
+        mock_backup.return_value = 0
+
+        assert run_backup_all(paths) == 1
+
+        assert [call.args[0] for call in mock_backup.call_args_list] == ["ccc"]
+        err = capsys.readouterr().err
+        assert "ERROR: backup-all: aaa-staging: " in err and "reserved" in err
+        assert "ERROR: backup-all: bbb: " in err and str(paused) in err

@@ -39,7 +39,10 @@ from boxmunge.fileutil import LockError, open_shared_lockfile
 from boxmunge.log import log_warning
 from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
-from boxmunge.project_registry import is_registered, load_deployed_projects
+from boxmunge.project_registry import (
+    RegistryError, deployed_among, is_registered, read_registry,
+    registry_problem_message,
+)
 
 
 # ---------- helpers ----------
@@ -178,20 +181,49 @@ class FleetRun:
     held: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
-def _parse_scan_targets(args: list[str], paths: BoxPaths) -> list[str] | int:
-    """Resolve the projects to scan, or return a lookup exit code.
+# FleetRun.problems key for a damaged project registry: a fleet-level
+# problem, since a bad line names no project that can be scanned.
+REGISTRY_PROBLEM = "(project registry)"
 
-    Usage errors exit 2 from parse_args.
+
+def _parse_scan_targets(
+    args: list[str], paths: BoxPaths,
+) -> tuple[list[str], tuple[str, ...]] | int:
+    """Resolve the projects to scan and any registry problems, or return a
+    lookup exit code.
+
+    A fleet scan scans every valid registered project and carries each bad
+    registry line forward to be reported; a single-project scan refuses a
+    damaged registry. Usage errors exit 2 from parse_args.
     """
     from boxmunge.commands.argv import parse_args, require_project_name
     parsed = parse_args("security", args, max_positional=1)
     if not parsed.positional:
-        return load_deployed_projects(paths)
+        registry = read_registry(paths)
+        return deployed_among(registry.names, paths), registry.problems
     project = require_project_name("security", parsed.positional[0])
-    if not is_registered(project, paths):
+    try:
+        registered = is_registered(project, paths)
+    except RegistryError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    if not registered:
         print(f"ERROR: project '{project}' is not registered.", file=sys.stderr)
         return 1
-    return [project]
+    return [project], ()
+
+
+def _report_registry_problems(
+    paths: BoxPaths, run: FleetRun, problems: tuple[str, ...],
+) -> None:
+    """Carry each bad registry line into the run's problems: printed, logged,
+    alerted, and failing the exit code like any project that went unscanned."""
+    if not problems:
+        return
+    message = registry_problem_message(problems)
+    print(f"ERROR: {message}", file=sys.stderr)
+    log_warning("cve-scan", message, paths, detail={"problems": list(problems)})
+    run.problems[REGISTRY_PROBLEM] = list(problems)
 
 
 def _scan_each(
@@ -324,10 +356,11 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
     """boxmunge security scan [project] | --apply-held."""
     if args == ["--apply-held"]:
         return _cmd_apply_held(paths)
-    targets = _parse_scan_targets(args, paths)
-    if isinstance(targets, int):
-        return targets
-    if not targets:
+    parsed = _parse_scan_targets(args, paths)
+    if isinstance(parsed, int):
+        return parsed
+    targets, registry_problems = parsed
+    if not targets and not registry_problems:
         print("No projects registered.")
         return 0
 
@@ -360,6 +393,7 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
     except TrivyNotInstalledError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
+    _report_registry_problems(paths, run, registry_problems)
     _enforce_fleet(paths, run, in_grace=in_grace)
 
     # The one-time heads-up needs the whole fleet: fleet scans only.

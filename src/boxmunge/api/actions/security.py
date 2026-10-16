@@ -54,7 +54,8 @@ SUMMARY = obj({
         "error": NULLABLE_STRING,
     }),
     # Projects left out of the counts because a file could not be read; a
-    # null project is the box-wide host suppressions file.
+    # null project is a box-wide file (host suppressions, the project
+    # registry), which the error names.
     "unreadable": arr(obj({"project": NULLABLE_STRING, "error": STRING})),
 })
 

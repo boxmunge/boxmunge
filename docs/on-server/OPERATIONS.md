@@ -423,7 +423,7 @@ status --json
 Health checks also run automatically every 5 minutes via a systemd timer. Failures trigger Pushover alerts after the configured threshold.
 
 A project whose manifest or state files cannot be read does not stop the others being checked.
-`check-all`, `status` and `health` print an `ERROR:` line naming the project and the file, write
+`check-all`, `backup-all`, `status` and `health` print an `ERROR:` line naming the project and the file, write
 an error entry to the operational log, and carry on with the rest of the fleet. `status` shows the
 project as `ERROR` (`"raw_status": "error"` with an `error` field in `--json`) and exits 1.
 This includes a quarantine record (`state/deploy/<project>.quarantined.json`) that is not JSON or
@@ -435,6 +435,14 @@ holds, so repair the file or restore it from a backup.
 `check-all` exits at least 1, and records an unreadable manifest in the project's health state so
 the normal threshold alert fires with the cause. `check-all` also reports an unreadable host
 config (`boxmunge.yml`), since alerts cannot be sent without it, and still runs the checks.
+
+The project registry, `state/projects.txt`, holds one project name per line. Every line is checked
+as a project name when it is read. A line that is not one (`../etc`, a reserved name such as
+`caddy` or `<x>-staging`) is reported as `projects.txt:<line>` with the reason. The nightly
+`security scan` still scans every valid project, then alerts on the bad line and exits 1;
+`security`, `health` and `doctor` name it too. Commands that would rewrite or trust the registry
+(`project-add`, `project-delete`, `project-list`, a single-project scan) refuse until the line is
+corrected or deleted, which needs root.
 
 An alert counts as sent only when Pushover accepts it. If it is not delivered, the health check logs why (an `error` entry when the config cannot be read or the Pushover request fails, a `warn` entry when Pushover is not configured) and tries again on the next 5-minute tick until it gets through. Without Pushover keys the `warn` entry is written at most once a day, because the retry would otherwise repeat it every tick; `health` reports the missing keys as the `alerts` warning for as long as they are missing. The same applies to the critical alert for a stopped project and to the RECOVERED notice. Find these entries with `log --component health`.
 
