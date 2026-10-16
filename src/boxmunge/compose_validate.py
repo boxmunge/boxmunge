@@ -26,6 +26,7 @@ from boxmunge.compose_service_rules import namespace_refusals, service_findings
 from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
 from boxmunge.published_ports import declared_ports
+from boxmunge.run_as import compose_user_problems
 from boxmunge.security_overlay import (
     PROFILE_DEFAULT,
     PROFILE_OFF,
@@ -371,6 +372,9 @@ def validate_user_compose(
     isolation += own_file_problems(doc, base_dir, paths.project_dir(project_name), read_files)
     if isolation:
         raise ComposeSecurityError(isolation[0] + _profile_note(services, isolation[0]))
+    user_problems = compose_user_problems(services, manifest_services)
+    if user_problems:
+        raise ComposeSecurityError(user_problems[0] + _profile_note(services, user_problems[0]))
     for warning in image_warnings(services, project_name):
         log_warning("compose-validate", warning, paths, project=project_name)
     for entry in declared_ports(cve_policy):
