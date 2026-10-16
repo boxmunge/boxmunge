@@ -35,6 +35,9 @@ services:
   nogrep:
     image: {NOGREP_IMAGE}
     <<: *hardened
+  debian:
+    image: debian:trixie
+    <<: *hardened
 """
 # A parent shell with a forked child, both outliving the timeout.
 HANGS = "printf SECRET-ROW; sleep 3001 & sleep 3002; wait"
@@ -50,9 +53,12 @@ def _compose(project_dir, *args: str, **kwargs) -> subprocess.CompletedProcess:
 
 
 def _left_running(project_dir, service: str) -> list[str]:
-    ps = _compose(project_dir, "exec", "-T", service, "ps", "-o", "args")
+    # /proc rather than ps, which Debian images lack.
+    listing = "for f in /proc/[0-9]*/cmdline; do tr '\\0' ' ' < $f; echo; done"
+    ps = _compose(project_dir, "exec", "-T", service, "sh", "-c", listing)
     assert ps.returncode == 0, ps.stderr
-    return [line for line in ps.stdout.splitlines() if "sleep 300" in line]
+    return [line for line in ps.stdout.splitlines()
+            if "sleep 300" in line and "cmdline" not in line]
 
 
 @pytest.fixture(scope="module")
@@ -79,52 +85,71 @@ def project(tmp_path_factory):
         shutil.rmtree(project_dir, ignore_errors=True)
 
 
-@pytest.mark.parametrize("service", ["db", "nogrep"])
+SERVICES = ["db", "nogrep", "debian"]
+STOPPED = r"timed out after 3s; it was stopped inside the container \(process group \d+\)"
+
+
+@pytest.mark.parametrize("service", SERVICES)
 @pytest.mark.parametrize("command", COMMANDS.values(), ids=COMMANDS.keys())
 def test_timed_out_dump_leaves_nothing_running_or_on_disk(project, service, command) -> None:
     paths, project_dir = project
     with patch.object(backup_dump, "BACKUP_CMD_TIMEOUT", 3), \
          patch.object(backup_dump._backup, "chown_for_system_container"), \
          patch.object(backup_dump._backup, "fchown_for_system_container"):
-        with pytest.raises(BackupError, match="timed out after 3s; it was stopped inside"):
+        with pytest.raises(BackupError, match=STOPPED):
             backup_dump.execute_dump(paths, PROJECT, command, service)
     assert _left_running(project_dir, service) == []
     assert list(paths.project_backups(PROJECT).glob(".dump-*")) == []
 
 
-def test_timed_out_restore_command_leaves_nothing_running(project) -> None:
+@pytest.mark.parametrize("service", SERVICES)
+def test_timed_out_restore_command_leaves_nothing_running(project, service) -> None:
     _, project_dir = project
-    with pytest.raises(ServiceCommandTimeout) as exc:
-        run_in_service(project_dir, PROJECT, "db", "cat >/dev/null; " + HANGS,
+    with pytest.raises(ServiceCommandTimeout, match=STOPPED) as exc:
+        run_in_service(project_dir, PROJECT, service, "cat >/dev/null; " + HANGS,
                        timeout=3, stdin=subprocess.DEVNULL, capture_output=True)
     assert exc.value.stop_error is None
-    assert _left_running(project_dir, "db") == []
+    assert _left_running(project_dir, service) == []
 
 
-def test_a_command_that_does_not_lead_its_group_is_moved_into_its_own(project) -> None:
+@pytest.mark.parametrize("service", SERVICES)
+def test_a_command_that_does_not_lead_its_group_is_moved_into_its_own(project, service) -> None:
     """Outside `docker exec` the wrapper may start as a group member; it then
     re-executes under setsid so the group it records is its own."""
     _, project_dir = project
     pid_name = f"boxmunge-exec-{uuid.uuid4().hex}.pid"
     nested = 'sh -c "$1" "$1" "$2" "$3" & wait'
     outer = subprocess.Popen(
-        ["docker", "compose", "-p", PROJECT, "-f", "compose.yml", "exec", "-T", "db",
+        ["docker", "compose", "-p", PROJECT, "-f", "compose.yml", "exec", "-T", service,
          "sh", "-c", nested, "outer", service_exec._WRAPPER, pid_name, HANGS],
         cwd=project_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         deadline = time.monotonic() + 30
-        while len(_left_running(project_dir, "db")) < 2:
+        while len(_left_running(project_dir, service)) < 2:
             assert time.monotonic() < deadline, "the nested command never started"
             time.sleep(0.5)
-        assert service_exec._stop(project_dir, PROJECT, "db", pid_name) is None
-        assert _left_running(project_dir, "db") == []
+        group, error = service_exec._stop(project_dir, PROJECT, service, pid_name)
+        assert error is None and group is not None
+        assert _left_running(project_dir, service) == []
     finally:
         outer.kill()
         outer.wait(timeout=30)
 
 
-def test_a_stop_it_cannot_verify_is_reported_as_failed(project) -> None:
+@pytest.mark.parametrize("service", SERVICES)
+def test_a_stop_it_cannot_verify_is_reported_as_failed(project, service) -> None:
     _, project_dir = project
-    error = service_exec._stop(project_dir, PROJECT, "db", "boxmunge-exec-unknown.pid")
-    assert error is not None and "no record" in error
-    assert "may still be running" in str(ServiceCommandTimeout(3, error))
+    group, error = service_exec._stop(project_dir, PROJECT, service, "boxmunge-exec-unknown.pid")
+    assert group is None and error is not None and "no record" in error
+    assert "may still be running" in str(ServiceCommandTimeout(3, None, error))
+
+
+@pytest.mark.parametrize("record", ["1", "0", "-1", "12abc", ""])
+def test_a_pid_record_that_is_not_a_group_id_is_refused(project, record) -> None:
+    _, project_dir = project
+    pid_name = f"boxmunge-exec-{uuid.uuid4().hex}.pid"
+    write = _compose(project_dir, "exec", "-T", "debian", "sh", "-c",
+                     'printf "%s\\n" "$1" > /dev/shm/"$2"', "w", record, pid_name)
+    assert write.returncode == 0, write.stderr
+    group, error = service_exec._stop(project_dir, PROJECT, "debian", pid_name)
+    assert group is None and error is not None, "a bogus record must never be killed"

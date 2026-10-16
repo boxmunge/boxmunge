@@ -90,7 +90,7 @@ class Box:
         """Stands in for subprocess.run (one module object, patched once)."""
         if "boxmunge-stop" in cmd:
             self.events.append("stop-in-container")
-            return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.CompletedProcess(cmd, 0, "42\n", "")
         if "exec" in cmd and cmd[-1] == "pg_dump app":
             return self.dump_run(cmd, cwd=cwd, stdout=stdout, **kw)
         if cmd[:2] == ["docker", "compose"] and "up" in cmd:

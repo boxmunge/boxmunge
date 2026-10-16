@@ -36,7 +36,7 @@ class _Docker:
     def __call__(self, cmd, **kwargs):
         if "boxmunge-stop" in cmd:
             self.stops.append(cmd)
-            return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.CompletedProcess(cmd, 0, "42\n", "")
         assert any(a.startswith("boxmunge-exec-") for a in cmd), cmd
         return _real_run(self.dump_argv, **{k: v for k, v in kwargs.items() if k != "cwd"})
 
@@ -62,7 +62,7 @@ def test_a_hung_dump_times_out_is_stopped_and_leaves_no_plaintext(project: BoxPa
     docker = _Docker(["sh", "-c", "printf 'SECRET-ROW'; exec sleep 60"])
     with patch.object(backup_dump, "BACKUP_CMD_TIMEOUT", 1):
         started = time.monotonic()
-        with pytest.raises(BackupError, match="timed out after 1s; it was stopped inside"):
+        with pytest.raises(BackupError, match=r"timed out after 1s; it was stopped inside the container \(process group 42\)"):
             _run_dump(project, docker)
     assert time.monotonic() - started < 30
     assert len(docker.stops) == 1
@@ -138,7 +138,7 @@ real_run = service_exec.subprocess.run
 def docker(cmd, **kw):
     if "boxmunge-stop" in cmd:
         marker.write_text("stopped")
-        return real_run(["true"])
+        return real_run(["echo", "42"], capture_output=True, text=True)
     return real_run(["sh", "-c", "printf SECRET-ROW; exec sleep 60"],
                     **{k: v for k, v in kw.items() if k != "cwd"})
 def backup(args):

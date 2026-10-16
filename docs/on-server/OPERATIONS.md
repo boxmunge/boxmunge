@@ -363,8 +363,10 @@ It lives in `/opt/boxmunge/logs/boxmunge.log`. The first write of each UTC day m
 
 Back up a single project (dump, encrypt, store locally). The dump command has 10 minutes
 (as does a restore's `restore_command`). Past that the backup fails, the command's process
-group is killed inside the container (the error says so if that could not be verified, and the
-command may then still be running), and the project lock is released. Killing the client side
+group is killed inside the container (the error names the group, or says the kill could not be
+verified and the command may still be running), and the project lock is released. A dump command
+that starts its own session (`setsid`) leaves that group and escapes the kill: keep dump commands
+in the foreground. Killing the client side
 narrows but does not eliminate server-side lock collisions: a database such as Postgres
 notices the dead client only on its next socket I/O, so its locks can outlive the kill briefly. A backup stopped by SIGTERM
 (`systemctl stop`, shutdown) cleans up the same way. A plaintext dump left by a process that
