@@ -47,6 +47,39 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Docker Compose version.
+#
+# Secrets reach containers as single-quoted env-file values with \' for a
+# quote, which Compose reads literally only from 2.24 on (2.20-2.23 keep the
+# backslash; older releases fail to parse). Keep in step with
+# MIN_COMPOSE_VERSION in src/boxmunge/compose_version.py. An upgrade checks
+# before anything is changed; a fresh install right after the bootstrap has
+# installed Docker.
+# ---------------------------------------------------------------------------
+MIN_COMPOSE_VERSION="2.24.0"
+require_compose_version() {
+    local found
+    if ! found="$(docker compose version --short 2>/dev/null)"; then
+        echo "ERROR: 'docker compose' is not available. Install docker-compose-plugin" \
+             "${MIN_COMPOSE_VERSION} or newer from Docker's apt repository." >&2
+        exit 1
+    fi
+    found="${found#v}"
+    found="${found%%[-+]*}"
+    if [[ ! "${found}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
+       [[ "$(printf '%s\n%s\n' "${MIN_COMPOSE_VERSION}" "${found}" | sort -V | head -1)" \
+          != "${MIN_COMPOSE_VERSION}" ]]; then
+        echo "ERROR: Docker Compose '${found}' is older than ${MIN_COMPOSE_VERSION}," \
+             "which boxmunge needs to pass secrets to containers unchanged." \
+             "Upgrade it: apt-get install --only-upgrade docker-compose-plugin" >&2
+        exit 1
+    fi
+}
+if [[ -f "${BOXMUNGE_ROOT}/config/boxmunge.yml" ]]; then
+    require_compose_version
+fi
+
+# ---------------------------------------------------------------------------
 # Dead CrowdSec apt source.
 #
 # Earlier bootstraps added CrowdSec's packagecloud repository, which has no
@@ -180,6 +213,7 @@ if [[ ! -f "${BOXMUNGE_ROOT}/config/boxmunge.yml" ]]; then
         exit 1
     fi
     bash "${SCRIPT_DIR}/bootstrap/init-host.sh" "$@"
+    require_compose_version
 else
     echo "Existing installation detected — upgrading boxmunge package only."
 fi

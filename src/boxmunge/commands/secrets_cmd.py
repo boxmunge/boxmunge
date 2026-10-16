@@ -5,7 +5,8 @@ import sys
 from boxmunge.log import log_operation
 from boxmunge.paths import BoxPaths
 from boxmunge.secrets import (
-    LegacySecretError, SecretsFile, get_key, legacy_keys, list_keys, set_key, unset_key,
+    Inventory, LegacySecretError, SecretsFile, get_key, inventory, set_key, unset_key,
+    valid_key,
 )
 
 
@@ -39,29 +40,38 @@ def _scope(project: str | None) -> str:
     return project if project is not None else "--host"
 
 
-def _warn_legacy(keys: list[str], project: str | None) -> None:
-    """Say which keys still hold values containers may not see as written."""
-    if keys:
+def _warn_unvouched(inv: Inventory, project: str | None) -> None:
+    """Say which stored keys containers may not receive as boxmunge reports."""
+    scope = _scope(project)
+    if inv.legacy:
         print(
-            f"WARNING: {', '.join(keys)} in {_scope(project)} secrets "
-            "predate literal storage: Compose interprets $, ' #', quotes and "
-            "surrounding spaces in them, so containers may not receive the "
-            f"value as set. Check each with 'secrets get {_scope(project)} KEY' "
-            "and set it again.", file=sys.stderr,
+            f"WARNING: {', '.join(inv.legacy)} in {scope} secrets predate literal "
+            "storage: Compose interprets $, ' #', quotes and surrounding spaces "
+            "in them, so containers may not receive the value as set. Check "
+            f"each with 'secrets get {scope} KEY' and set it again.",
+            file=sys.stderr,
+        )
+    if inv.misnamed:
+        print(
+            f"WARNING: {', '.join(repr(k) for k in inv.misnamed)} in {scope} "
+            "secrets are not valid key names (letters, digits and underscores, "
+            "not starting with a digit); Compose still passes them to "
+            f"containers. Set each under a valid name, update the app, then "
+            f"'secrets unset {scope} <old name>'.", file=sys.stderr,
         )
 
 
-def _record_write(op: str, key: str, secrets: SecretsFile, paths: BoxPaths,
-                  project: str | None, migrated: list[str]) -> None:
+def _record_write(op: str, key: str, inv: Inventory, paths: BoxPaths,
+                  project: str | None) -> None:
     msg = f"{op} {key}"
-    if migrated:
+    if inv.migrated:
         # Lossless: these keys' old unquoted lines already read literally.
-        msg += f"; re-encoded as literal values: {', '.join(migrated)}"
-    legacy = legacy_keys(secrets)
-    if legacy:
-        msg += f"; old unquoted values kept as stored: {', '.join(legacy)}"
+        msg += f"; re-encoded as literal values: {', '.join(inv.migrated)}"
+    kept = inv.legacy + inv.misnamed
+    if kept:
+        msg += f"; old lines kept as stored: {', '.join(kept)}"
     log_operation("secrets", msg, paths, project=project)
-    _warn_legacy(legacy, project)
+    _warn_unvouched(inv, project)
 
 
 def _cmd_set(args: list[str], paths: BoxPaths) -> int:
@@ -77,11 +87,11 @@ def _cmd_set(args: list[str], paths: BoxPaths) -> int:
         return 1
     key, _, value = assignment.partition("=")
     try:
-        migrated = set_key(secrets, key, value)
+        inv = set_key(secrets, key, value)
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
-    _record_write("set", key, secrets, paths, project, migrated)
+    _record_write("set", key, inv, paths, project)
     return 0
 
 
@@ -96,6 +106,14 @@ def _cmd_get(args: list[str], paths: BoxPaths) -> int:
     try:
         value = get_key(secrets, key)
     except LegacySecretError as e:
+        if not valid_key(key):
+            print(
+                f"ERROR: {key!r} is not a valid key name, stored by an older "
+                f"boxmunge as {e.stored!r} (Compose's reading of it may differ). "
+                f"Set it under a valid name, then 'secrets unset {_scope(project)} "
+                f"{key}'.", file=sys.stderr,
+            )
+            return 1
         print(
             f"ERROR: {key} predates literal storage and is stored unquoted as "
             f"{e.stored!r}. Compose interprets $, ' #', quotes and surrounding "
@@ -119,13 +137,13 @@ def _cmd_list(args: list[str], paths: BoxPaths) -> int:
     if secrets is None:
         return 1
     try:
-        keys = list_keys(secrets)
+        inv = inventory(secrets)
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
-    for key in keys:
+    for key in inv.keys:
         print(key)
-    _warn_legacy(legacy_keys(secrets), project)
+    _warn_unvouched(inv, project)
     return 0
 
 
@@ -138,11 +156,11 @@ def _cmd_unset(args: list[str], paths: BoxPaths) -> int:
         return 1
     key = rest[0]
     try:
-        migrated = unset_key(secrets, key)
+        inv = unset_key(secrets, key)
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
-    _record_write("unset", key, secrets, paths, project, migrated)
+    _record_write("unset", key, inv, paths, project)
     return 0
 
 

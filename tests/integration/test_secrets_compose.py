@@ -44,6 +44,7 @@ VALUES = {
     "TABS": "\ta\tb\t",
     "EQUALS": "=a=b=",
     "UNICODE": "caf\u00e9 \u00a0\U0001f600",
+    "LINE_SEPARATORS": "a\u2028b\u2029c\u0085d",
     "EMPTY": "",
     "URL": "postgres://u:p@h:5432/db?sslmode=require&x=1",
 }

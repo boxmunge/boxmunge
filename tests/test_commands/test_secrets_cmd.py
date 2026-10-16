@@ -183,6 +183,16 @@ class TestSecretsLiteralValues:
         assert run_secrets(["get", "--host", "KEY"], paths) == 0
         assert capsys.readouterr().out == value + "\n"
 
+    def test_unicode_line_separator_in_a_value_is_stored_and_read_back(
+            self, paths: BoxPaths, capsys) -> None:
+        assert run_secrets(["set", "--host", "A=x\u2028y"], paths) == 0
+        assert run_secrets(["set", "--host", "B=z"], paths) == 0
+        capsys.readouterr()
+        assert run_secrets(["get", "--host", "A"], paths) == 0
+        assert capsys.readouterr().out == "x\u2028y\n"
+        assert run_secrets(["list", "--host"], paths) == 0
+        assert capsys.readouterr().out == "A\nB\n"
+
     def test_set_refuses_a_value_it_cannot_store_literally(self, paths: BoxPaths, capsys) -> None:
         assert run_secrets(["set", "--host", "KEY=trailing\\"], paths) == 1
         assert "base64-encode" in capsys.readouterr().err
@@ -217,7 +227,7 @@ class TestSecretsLegacyFiles:
         assert run_secrets(["set", "--host", "OTHER=x"], paths) == 0
         assert "WARNING: PW" in capsys.readouterr().err
         entries = [e for e in _read_log_entries(paths) if e.get("component") == "secrets"]
-        assert entries[-1]["msg"] == "set OTHER; old unquoted values kept as stored: PW"
+        assert entries[-1]["msg"] == "set OTHER; old lines kept as stored: PW"
         assert paths.host_secrets.read_text() == "OTHER='x'\nPW=pa$word\n"
         assert run_secrets(["set", "--host", "PW=pa$word"], paths) == 0
         assert "WARNING" not in capsys.readouterr().err
@@ -229,6 +239,18 @@ class TestSecretsLegacyFiles:
         entries = [e for e in _read_log_entries(paths) if e.get("component") == "secrets"]
         assert [e["msg"] for e in entries] == ["set NEW; re-encoded as literal values: OLD"]
         assert "plain" not in json.dumps(entries)
+
+    def test_misnamed_keys_are_listed_with_a_warning_and_can_be_unset(self, paths, capsys) -> None:
+        paths.config.mkdir(parents=True, exist_ok=True)
+        paths.host_secrets.write_text("MY-KEY=x\n")
+        assert run_secrets(["list", "--host"], paths) == 0
+        captured = capsys.readouterr()
+        assert captured.out == "MY-KEY\n"
+        assert "'MY-KEY'" in captured.err and "not valid key names" in captured.err
+        assert run_secrets(["get", "--host", "MY-KEY"], paths) == 1
+        assert "not a valid key name" in capsys.readouterr().err
+        assert run_secrets(["unset", "--host", "MY-KEY"], paths) == 0
+        assert paths.host_secrets.read_text() == ""
 
     def test_corrupt_file_is_an_error_for_every_subcommand(self, paths, capsys) -> None:
         paths.config.mkdir(parents=True, exist_ok=True)

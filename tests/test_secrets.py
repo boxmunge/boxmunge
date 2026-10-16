@@ -9,7 +9,7 @@ import boxmunge.secrets as secrets_mod
 from boxmunge.paths import BoxPaths
 from boxmunge.secrets import (
     LegacySecretError, SecretsFile, SecretsFileError,
-    get_key, legacy_keys, list_keys, set_key, unset_key,
+    get_internal_key, get_key, inventory, list_keys, set_key, unset_key,
 )
 
 # Values the old unquoted format corrupted, and ones that need escaping.
@@ -17,7 +17,8 @@ TRICKY_VALUES = [
     "pa${UNSET_VAR}ss", "$HOME", "cost$$5", "alpha # omega", "#leading", "'quoted'",
     '"double"', "it's", "back\\slash", "two\\\\x", "even\\\\", "esc\\\\'q",
     "  padded  ", "\tleading tab", "a=b=c", "=leading", "café \U0001f600", "",
-    "postgres://u:p@h/db?a=1&b=2",
+    "postgres://u:p@h/db?a=1&b=2", "line\u2028sep", "para\u2029sep", "nel\u0085x",
+    "\u2028",
 ]
 
 
@@ -74,7 +75,7 @@ class TestBasics:
         sf.path.write_text("# note\n\nKEY='v'\n")
         assert list_keys(sf) == ["KEY"]
 
-    @pytest.mark.parametrize("content", ["garbage\n", "BAD-KEY=x\n", "A='1'\nA='2'\n"])
+    @pytest.mark.parametrize("content", ["garbage\n", "A='1'\nA='2'\n"])
     def test_lines_no_writer_produces_fail_loudly(self, sf: SecretsFile, content: str) -> None:
         sf.path.write_text(content)
         with pytest.raises(SecretsFileError, match="line"):
@@ -92,11 +93,11 @@ class TestLegacyUnquotedFiles:
         assert get_key(sf, "URL") == "postgres://u:p@h/db?a=1"
         assert get_key(sf, "HASH") == "a#b"
         assert get_key(sf, "EMPTY") == ""
-        assert legacy_keys(sf) == []
+        assert inventory(sf).legacy == []
 
     def test_plain_lines_are_reencoded_on_next_write(self, sf: SecretsFile) -> None:
         sf.path.write_text("OLD=plain\n")
-        assert set_key(sf, "NEW", "x") == ["OLD"]
+        assert set_key(sf, "NEW", "x").migrated == ["OLD"]
         assert sf.path.read_text() == "NEW='x'\nOLD='plain'\n"
 
     @pytest.mark.parametrize("stored", [
@@ -104,7 +105,7 @@ class TestLegacyUnquotedFiles:
     ])
     def test_ambiguous_lines_are_reported_not_guessed(self, sf: SecretsFile, stored: str) -> None:
         sf.path.write_text(f"KEY={stored}\n")
-        assert legacy_keys(sf) == ["KEY"]
+        assert inventory(sf).legacy == ["KEY"]
         with pytest.raises(LegacySecretError) as exc:
             get_key(sf, "KEY")
         assert exc.value.stored == stored
@@ -119,12 +120,72 @@ class TestLegacyUnquotedFiles:
         sf.path.write_text("KEY=pa${X}ss\n")
         set_key(sf, "KEY", "pa${X}ss")
         assert get_key(sf, "KEY") == "pa${X}ss"
-        assert legacy_keys(sf) == []
+        assert inventory(sf).legacy == []
 
     def test_unsetting_an_ambiguous_key_removes_it(self, sf: SecretsFile) -> None:
         sf.path.write_text("KEY=pa${X}ss\nOTHER='o'\n")
         unset_key(sf, "KEY")
         assert sf.path.read_text() == "OTHER='o'\n"
+
+
+class TestLineBreaksInsideValues:
+    """Compose splits env files on "\\n" only; so must the reader."""
+
+    @pytest.mark.parametrize("char", ["\u2028", "\u2029", "\u0085", "\u2028\u2029"])
+    def test_unicode_separators_round_trip_and_keep_the_file_readable(
+            self, sf: SecretsFile, char: str) -> None:
+        set_key(sf, "FIRST", f"a{char}b")
+        set_key(sf, "SECOND", "x")
+        assert get_key(sf, "FIRST") == f"a{char}b"
+        assert list_keys(sf) == ["FIRST", "SECOND"]
+
+    def test_write_reports_inventory_without_rereading(self, sf: SecretsFile) -> None:
+        inv = set_key(sf, "A", "x\u2028y")
+        assert (inv.keys, inv.legacy, inv.misnamed, inv.migrated) == (["A"], [], [], [])
+
+
+class TestMisnamedLegacyKeys:
+    """Before v0.10.1 any key name was accepted, and Compose passes such
+    names to containers, so their lines are kept rather than refused."""
+
+    def test_kept_verbatim_listed_and_flagged(self, sf: SecretsFile) -> None:
+        sf.path.write_text("MY-KEY=x\napp.key=y\n")
+        set_key(sf, "GOOD", "g")
+        assert sf.path.read_text() == "GOOD='g'\nMY-KEY=x\napp.key=y\n"
+        inv = inventory(sf)
+        assert inv.keys == ["GOOD", "MY-KEY", "app.key"]
+        assert inv.misnamed == ["MY-KEY", "app.key"]
+        assert inv.legacy == []
+        with pytest.raises(LegacySecretError, match="not a valid secret key name"):
+            get_key(sf, "MY-KEY")
+
+    def test_unset_removes_one_by_exact_name(self, sf: SecretsFile) -> None:
+        sf.path.write_text("MY-KEY=x\napp.key=y\n")
+        unset_key(sf, "app.key")
+        assert sf.path.read_text() == "MY-KEY=x\n"
+
+    def test_set_still_refuses_such_names(self, sf: SecretsFile) -> None:
+        with pytest.raises(ValueError, match="invalid secret key"):
+            set_key(sf, "MY-KEY", "x")
+
+
+class TestInternalKeys:
+    """boxmunge's own keys keep the old reader's meaning for old lines."""
+
+    @pytest.mark.parametrize("line,expected", [
+        ("PW=Xk9$qL2#z", "Xk9$qL2#z"),
+        ("PW=alpha # omega  ", "alpha # omega"),
+        ('PW="quoted"', "quoted"),
+        ("PW=  lead", "  lead"),
+    ])
+    def test_old_lines_read_as_the_old_reader_did(self, sf, line: str, expected: str) -> None:
+        sf.path.write_text(line + "\n")
+        assert get_internal_key(sf, "PW") == expected
+
+    def test_new_lines_read_literally(self, sf: SecretsFile) -> None:
+        set_key(sf, "PW", " 'x' ")
+        assert get_internal_key(sf, "PW") == " 'x' "
+        assert get_internal_key(sf, "NOPE") is None
 
 
 class TestSetKeyRejectsInjection:

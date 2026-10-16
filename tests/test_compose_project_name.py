@@ -118,7 +118,8 @@ def test_project_compose_commands_all_name_the_project() -> None:
         if rel in _PLATFORM_CADDY_FILES:
             continue
         for lineno, consts in _literal_compose_calls(path):
-            if "-p" not in consts:
+            # `docker compose version` reads no project.
+            if "-p" not in consts and consts[2:3] != ["version"]:
                 offenders.append(f"{rel}:{lineno}")
     assert offenders == [], (
         "compose invocations without -p; build them with docker.compose_command: "

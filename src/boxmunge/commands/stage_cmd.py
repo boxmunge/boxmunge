@@ -136,16 +136,11 @@ def _run_stage_inner(project_name: str, paths: BoxPaths, ref: str | None = None,
 
 def _staging_auth(project_name: str, paths: BoxPaths) -> tuple[str, str] | None:
     """(user, bcrypt hash) from STAGING_AUTH_USER/PASS, or None if unset."""
-    from boxmunge.secrets import LegacySecretError, SecretsFile, get_key
+    from boxmunge.secrets import SecretsFile, get_internal_key
+    # boxmunge's own keys (Caddy basic auth), not the app's.
     secrets = SecretsFile.project(paths, project_name)
-    try:
-        auth_user = get_key(secrets, "STAGING_AUTH_USER")
-        auth_pass = get_key(secrets, "STAGING_AUTH_PASS")
-    except LegacySecretError as e:
-        raise ValueError(
-            f"{e}, so its value is ambiguous. Set it again: "
-            f"secrets set {project_name} '{e.key}=<value>'"
-        ) from e
+    auth_user = get_internal_key(secrets, "STAGING_AUTH_USER")
+    auth_pass = get_internal_key(secrets, "STAGING_AUTH_PASS")
     if not (auth_user and auth_pass):
         return None
     import bcrypt

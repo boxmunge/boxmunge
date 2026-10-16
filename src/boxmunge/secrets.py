@@ -13,7 +13,10 @@ Compose reads it as written (*plain*), and re-encoded on the next write.
 Any other unquoted line is *legacy*: what containers receive from it depends
 on Compose's interpretation, which can draw on the environment, so it is
 kept byte for byte (containers keep receiving what they did) until the
-operator sets or unsets that key, and ``get`` refuses to report it.
+operator sets or unsets that key, and ``get`` refuses to report it. So is a
+line whose key name boxmunge no longer accepts (Compose still passes it on);
+``unset`` removes it by its exact name. boxmunge's own staging-auth keys
+keep the old reader's meaning instead (see get_internal_key).
 
 Every read-modify-write holds the file's lock, so concurrent ``set`` and
 ``unset`` calls from SSH and MCP clients cannot lose each other's changes.
@@ -22,7 +25,7 @@ from __future__ import annotations
 
 import re
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
 
@@ -39,16 +42,29 @@ _FORBIDDEN_IN_VALUE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 
 
 class SecretsFileError(ValueError):
-    """A secrets file holds a line no boxmunge version writes."""
+    """A secrets file holds a line that cannot be read as KEY=VALUE."""
 
 
 class LegacySecretError(ValueError):
-    """The key's stored value is not literal, so its true value is unknown."""
+    """The key's stored line is not literal, so its true value is unknown."""
 
     def __init__(self, key: str, stored: str) -> None:
-        super().__init__(f"{key} is stored in the old unquoted format")
+        if valid_key(key):
+            super().__init__(f"{key} is stored in the old unquoted format")
+        else:
+            super().__init__(f"{key!r} is not a valid secret key name")
         self.key = key
         self.stored = stored
+
+
+@dataclass(frozen=True)
+class Inventory:
+    """What a secrets file holds, by how far boxmunge can vouch for it."""
+
+    keys: list[str]       # every key, sorted
+    legacy: list[str]     # valid names whose old unquoted value is ambiguous
+    misnamed: list[str]   # names current boxmunge refuses (kept as stored)
+    migrated: list[str] = field(default_factory=list)  # re-encoded by this write
 
 
 @dataclass(frozen=True)
@@ -126,33 +142,57 @@ def validate_secret(key: str, value: str) -> None:
         )
     if _decode_single_quoted(_encode(value)) != value:
         raise ValueError(
-            f"invalid secret value for {key}: a value that ends in a backslash, "
-            "or has an odd number of backslashes before a single quote, cannot "
-            "be passed to containers unchanged; base64-encode it and decode it "
+            f"invalid secret value for {key}: a value with an odd number of "
+            "backslashes at its end or right before a single quote cannot be "
+            "passed to containers unchanged; base64-encode it and decode it "
             "in the app"
         )
+
+
+def valid_key(key: str) -> bool:
+    return _KEY_RE.fullmatch(key) is not None
 
 
 def _parse(path: Path) -> dict[str, _Entry]:
     if not path.exists():
         return {}
     entries: dict[str, _Entry] = {}
-    for lineno, line in enumerate(path.read_text().splitlines(), start=1):
+    # Split on "\n" only, as Compose does: a value may hold U+2028 and kin,
+    # which str.splitlines() would treat as line breaks, and bytes are read
+    # untranslated so a stray CR stays visible to the checks below.
+    for lineno, line in enumerate(path.read_bytes().decode("utf-8").split("\n"), start=1):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         key, sep, raw = line.partition("=")
-        if not sep or not _KEY_RE.fullmatch(key) or key in entries:
-            problem = "repeats key " + key if key in entries else "is not KEY=VALUE"
+        if not sep:
             raise SecretsFileError(
-                f"{path} line {lineno} {problem}, which boxmunge never writes. "
-                "Edit the file to fix or remove that line, then retry."
+                f"{path} line {lineno} has no '=' (older versions let a newline "
+                "into a key or value). Edit the file to fix or remove that "
+                "line, then retry."
             )
-        if raw.startswith("'"):
+        if key in entries:
+            raise SecretsFileError(
+                f"{path} line {lineno} sets {key!r} a second time. Edit the "
+                "file to keep only the line you want, then retry."
+            )
+        if not valid_key(key):
+            value = None
+        elif raw.startswith("'"):
             value = _decode_single_quoted(raw)
         else:
             value = raw if _reads_literally_unquoted(raw) else None
         entries[key] = _Entry(line, value)
     return entries
+
+
+def _inventory(entries: dict[str, _Entry], migrated: list[str] | None = None) -> Inventory:
+    unknown = sorted(k for k, e in entries.items() if e.value is None)
+    return Inventory(
+        keys=sorted(entries),
+        legacy=[k for k in unknown if valid_key(k)],
+        misnamed=[k for k in unknown if not valid_key(k)],
+        migrated=sorted(migrated or []),
+    )
 
 
 def get_key(secrets: SecretsFile, key: str) -> str | None:
@@ -165,19 +205,38 @@ def get_key(secrets: SecretsFile, key: str) -> str | None:
     return entry.value
 
 
+def get_internal_key(secrets: SecretsFile, key: str) -> str | None:
+    """Like get_key, for boxmunge's own keys (staging auth), not the app's.
+
+    What such a key meant was defined by boxmunge's old reader, not by
+    Compose, so its old unquoted line was never ambiguous: that reading
+    (line stripped, then one pair of matching surrounding quotes removed)
+    is kept for it, and stage keeps working after an upgrade.
+    """
+    entry = _parse(secrets.path).get(key)
+    if entry is None:
+        return None
+    if entry.value is not None:
+        return entry.value
+    value = entry.line.strip().partition("=")[2]
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        value = value[1:-1]
+    return value
+
+
 def list_keys(secrets: SecretsFile) -> list[str]:
     return sorted(_parse(secrets.path))
 
 
-def legacy_keys(secrets: SecretsFile) -> list[str]:
-    """Keys stored unquoted in a form Compose does not read literally."""
-    return sorted(k for k, e in _parse(secrets.path).items() if e.value is None)
+def inventory(secrets: SecretsFile) -> Inventory:
+    return _inventory(_parse(secrets.path))
 
 
-def _rewrite(secrets: SecretsFile, key: str, value: str | None) -> list[str]:
+def _rewrite(secrets: SecretsFile, key: str, value: str | None) -> Inventory:
     """Set (or with None, remove) key under the lock.
 
-    Returns the other keys whose plain unquoted lines were re-encoded.
+    Returns the file's inventory after the write, with the other keys whose
+    plain unquoted lines were re-encoded, so callers need not re-read it.
     """
     with secrets.locked():
         entries = _parse(secrets.path)
@@ -187,21 +246,20 @@ def _rewrite(secrets: SecretsFile, key: str, value: str | None) -> list[str]:
             if entry.value is not None and entry.line != f"{k}={_encode(entry.value)}":
                 entries[k] = _Entry(f"{k}={_encode(entry.value)}", entry.value)
                 migrated.append(k)
-        if value is None and removed is None and not migrated:
-            return []
         if value is not None:
             entries[key] = _Entry(f"{key}={_encode(value)}", value)
-        content = "".join(entries[k].line + "\n" for k in sorted(entries))
-        atomic_write_text(secrets.path, content, mode=0o600)
-    return sorted(migrated)
+        if value is not None or removed is not None or migrated:
+            content = "".join(entries[k].line + "\n" for k in sorted(entries))
+            atomic_write_text(secrets.path, content, mode=0o600)
+    return _inventory(entries, migrated)
 
 
-def set_key(secrets: SecretsFile, key: str, value: str) -> list[str]:
-    """Store value literally. Returns keys re-encoded from the old format."""
+def set_key(secrets: SecretsFile, key: str, value: str) -> Inventory:
+    """Store value literally."""
     validate_secret(key, value)
     return _rewrite(secrets, key, value)
 
 
-def unset_key(secrets: SecretsFile, key: str) -> list[str]:
-    """Remove key if present. Returns keys re-encoded from the old format."""
+def unset_key(secrets: SecretsFile, key: str) -> Inventory:
+    """Remove key if present, by its exact stored name."""
     return _rewrite(secrets, key, None)
