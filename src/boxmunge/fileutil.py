@@ -153,64 +153,63 @@ def open_shared_lockfile(path: Path) -> int:
     return fd
 
 
-def atomic_write_text(path: Path, content: str, mode: int | None = None) -> None:
-    """Write content to path atomically via temp file + rename.
+def fsync_dir(path: Path) -> None:
+    """fsync a directory, making the names created or renamed in it durable.
 
-    Creates parent directories if needed. Uses fsync for durability
-    and os.rename for atomicity (same-filesystem guarantee).
-    If mode is provided, the temp file is chmod'd before rename so
-    the final file is never visible with wrong permissions.
+    A rename() or link() is atomic but not durable: until the directory is
+    synced, a power loss can bring back the old name or lose the new one.
     """
-    mkdir_p_deploy(path.parent)
-
-    fd, tmp_path = tempfile.mkstemp(
-        dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp"
-    )
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        if mode is not None:
-            os.chmod(tmp_path, mode)
-        os.rename(tmp_path, path)
-        _chown_deploy(str(path))
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def durable_rename(tmp_path: Path, path: Path) -> None:
+    """Rename a fully written temp file over path, durably.
+
+    The temp file must be in path's directory. Its data is synced before
+    the rename and the directory after it, so after a crash path holds
+    either the old content or the complete new content, never an empty or
+    partial file, and never the old content once this has returned.
+    """
+    fd = os.open(tmp_path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.rename(tmp_path, path)
+    fsync_dir(path.parent)
+
+
+def atomic_write_text(path: Path, content: str, mode: int | None = None) -> None:
+    """Write UTF-8 text to path atomically and durably (see atomic_write_bytes)."""
+    atomic_write_bytes(path, content.encode("utf-8"), mode)
 
 
 def atomic_write_bytes(path: Path, content: bytes, mode: int | None = None) -> None:
-    """Write bytes to path atomically via temp file + rename.
+    """Write bytes to path atomically and durably via temp file + rename.
 
-    Binary counterpart of atomic_write_text. Creates parent directories
-    if needed. Uses fsync for durability and os.rename for atomicity
-    (same-filesystem guarantee). If mode is provided, the temp file is
-    chmod'd before rename so the final file is never visible with wrong
-    permissions.
+    Creates parent directories if needed. Mode and ownership are set on
+    the temp file, so the final file is never visible with the wrong
+    permissions. See durable_rename for the crash guarantee.
     """
     mkdir_p_deploy(path.parent)
 
-    fd, tmp_path = tempfile.mkstemp(
+    fd, tmp_name = tempfile.mkstemp(
         dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp"
     )
+    tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
         if mode is not None:
             os.chmod(tmp_path, mode)
-        os.rename(tmp_path, path)
-        _chown_deploy(str(path))
+        _chown_deploy(tmp_name)
+        durable_rename(tmp_path, path)
     except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        tmp_path.unlink(missing_ok=True)
         raise
 
 
