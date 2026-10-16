@@ -644,9 +644,39 @@ Rollback refuses, with the reason, instead of doing half a rollback:
   to go back to; deploy a known-good bundle instead);
 - when the project has backups configured but no snapshot was taken before the last deploy (the
   backup failed or `--no-snapshot` was used), or that snapshot is no longer in `backups/`;
-- while a staged release is installed (`promote` or `unstage` first).
+- while a staged release is installed (`promote` or `unstage` first);
+- while an install is open whose pre-deploy hook has not run yet: nothing reached production's
+  containers or data, so `prod-deploy <project> --abandon` puts the old files back instead (see
+  "An interrupted or failed install").
 
 A project with `backup.type: none` rolls back its code only.
+
+## An interrupted or failed install
+
+Every bundle production install (`prod-deploy`, `rollback`) is recorded in
+`<project>/.releases/install.json` until it finishes. While it is open, nothing
+else starts the project's containers: upgrades, `resume`, `recover`,
+container updates and `restore` refuse and say why. The alert names your options:
+
+- run the same command again: it carries on from where it stopped, with the
+  data snapshot it took before it started (once the new release's containers
+  may have started, the pre-deploy hook is not run again);
+- `prod-deploy <project> --abandon`, before the pre-deploy hook ran: the old
+  release's files go back; containers and data were never touched;
+- `rollback <project>`, once the hook may have run: the old release with the
+  snapshot taken before this install;
+- or deploy a fix (another bundle): it keeps the same rollback target. This is
+  also the way out of a first deploy whose hook keeps failing.
+
+A failure once the containers were started (compose, Caddy or the smoke test)
+closes the install as before: production may run the new release, and
+`rollback` returns to the old one. Backups taken while an install is open use
+the manifest of the release the containers still run.
+
+If the record no longer matches the files (after a platform rollback, or a hand
+edit), it is reported as stale and nothing is resumed automatically: check that
+production is what `.releases/live.json` says, then run
+`boxmunge-server install-txn <project> --drop`.
 
 ---
 
@@ -864,6 +894,10 @@ does not page every run); the refusal is logged every time:
   recreated from them (upgrade restarts, container updates, `recover`,
   `resume`, `security resume` and `restore` all wait). Running containers
   keep running. `promote` or `unstage`, and the next run picks it up.
+- **"an install of <ref> ... is open at phase <phase>"** — a deploy or
+  rollback stopped part-way, so the project directory may hold a
+  half-installed release. The alert names the options for that phase; see
+  "An interrupted or failed install". This alert does not mean tampering.
 - **A compose or manifest error** — the files changed since the deploy, or
   this boxmunge release validates more strictly. Fix the file and deploy.
 - **"... is a symlink", "is now a file", "does not exist", "is outside the

@@ -55,6 +55,8 @@ Key features:
         incoming/             # a bundle being validated (transient)
         previous/             # code of the release the last deploy replaced (rollback target)
         previous.json         # its bundle name and pre-deploy data snapshot
+        install.json          # the open install transaction (only while an install runs)
+        previous.superseded/  # the rollback target an open install replaced, until it closes
         prestage/             # production code displaced by `stage`, until promote/unstage
         live-mounts/          # production's copies of the release code it bind-mounts
         live-scripts/         # production's copy of boxmunge-scripts/ (smoke checks)
@@ -201,6 +203,8 @@ boxmunge supports two project sources, declared in `manifest.yml` via the `sourc
 A bundle that fails validation stays in the inbox (it is not moved to `.consumed/`) and the command exits non-zero: 3 for a compose hardening rejection, 1 otherwise. `stage` uses the same unpack-validate-install path, but keeps the production release in `.releases/prestage/` instead of step 5 and takes no snapshot.
 
 If any step fails, the deploy stops and reports the failure. No automatic rollback -- the operator or agent decides what to do next.
+
+Steps 5 to 9 of a bundle deploy, and every bundle rollback, run inside an install transaction (`release_txn`, `.releases/install.json`). It records the release being installed, the one it replaces, the snapshot that pairs with it, and the phase reached: `committed`, `previous_kept` (the keep moves the old rollback target to `previous.superseded/` rather than deleting it), `installed`, `hook_started` and `switching` (a rollback has `data_restored` instead of `previous_kept`). Each phase is written durably before or after the step it names, so a rerun resumes from it with the same snapshot; `prod-deploy <project> --abandon` undoes it before `hook_started`; a different deploy fixes forward and inherits the rollback pairing. While it is open, `compose_guard` refuses every production start except the one passing the transaction's id, so an upgrade restart or `resume` cannot start a half-installed release. The record also holds the hashes of `live.json` and `previous.json`; a mismatch none of its own steps explains marks it stale, and nothing is resumed automatically.
 
 ### Staging Flow
 
