@@ -5,6 +5,17 @@ import yaml
 from boxmunge.compose import generate_compose_override, generate_staging_compose_override
 
 
+# The overlay writes long-syntax mounts so a path is never read as options.
+_PROD_SMOKE_MOUNT = {"type": "bind", "source": "./.releases/live-scripts",
+                     "target": "/boxmunge-scripts", "read_only": True,
+                     "bind": {"create_host_path": True}}
+_STAGING_SMOKE_MOUNT = {**_PROD_SMOKE_MOUNT, "source": "./boxmunge-scripts"}
+
+
+def _volume(source: str, target: str) -> dict[str, str]:
+    return {"type": "volume", "source": source, "target": target}
+
+
 FULL_MANIFEST = {
     "project": "myapp",
     "hosts": ["myapp.example.com"],
@@ -201,7 +212,7 @@ class TestSmokeScriptMount:
         content = generate_compose_override(manifest, user_compose={})
         parsed = yaml.safe_load(content)
         assert parsed["services"]["web"]["volumes"] == [
-            "./.releases/live-scripts:/boxmunge-scripts:ro"]
+            _PROD_SMOKE_MOUNT]
 
     def test_staging_mounts_the_staged_scripts(self) -> None:
         """Staging runs the staged release's scripts from the project dir."""
@@ -215,7 +226,7 @@ class TestSmokeScriptMount:
         content = generate_staging_compose_override(manifest, user_compose={})
         parsed = yaml.safe_load(content)
         assert parsed["services"]["web"]["volumes"] == [
-            "./boxmunge-scripts:/boxmunge-scripts:ro"]
+            _STAGING_SMOKE_MOUNT]
 
     def test_only_smoke_services_get_mount(self) -> None:
         """Only services with smoke get the volume mount."""
@@ -644,7 +655,7 @@ class TestWritableOverlay:
         assert web["tmpfs"] == ["/tmp"]
         # Volumes are NOT introduced into State 1 services.
         assert "volumes" not in web or web.get("volumes") == [
-            "./.releases/live-scripts:/boxmunge-scripts:ro"
+            _PROD_SMOKE_MOUNT
         ]
 
     # --- State MANAGED ----------------------------------------------------
@@ -676,7 +687,7 @@ class TestWritableOverlay:
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         vols = web["volumes"]
-        assert "demo_dbdata:/app/data" in vols
+        assert _volume("demo_dbdata", "/app/data") in vols
 
     def test_persistent_emits_top_level_volumes_block(self) -> None:
         override = generate_compose_override(self._manifest(writable={
@@ -698,8 +709,8 @@ class TestWritableOverlay:
         }), user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
-        assert "demo_dbdata:/app/data" in web["volumes"]
-        assert "demo_uploads:/app/uploads" in web["volumes"]
+        assert _volume("demo_dbdata", "/app/data") in web["volumes"]
+        assert _volume("demo_uploads", "/app/uploads") in web["volumes"]
         assert "demo_dbdata" in parsed["volumes"]
         assert "demo_uploads" in parsed["volumes"]
 
@@ -712,9 +723,9 @@ class TestWritableOverlay:
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         # Smoke mount must still be present.
-        assert "./.releases/live-scripts:/boxmunge-scripts:ro" in web["volumes"]
+        assert _PROD_SMOKE_MOUNT in web["volumes"]
         # And the persistent volume too.
-        assert "demo_dbdata:/app/data" in web["volumes"]
+        assert _volume("demo_dbdata", "/app/data") in web["volumes"]
 
     def test_managed_both_ephemeral_and_persistent(self) -> None:
         override = generate_compose_override(self._manifest(writable={
@@ -724,7 +735,7 @@ class TestWritableOverlay:
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         assert "/var/run" in web["tmpfs"]
-        assert "demo_dbdata:/app/data" in web["volumes"]
+        assert _volume("demo_dbdata", "/app/data") in web["volumes"]
 
     # --- State EXTERNAL ---------------------------------------------------
 
@@ -767,7 +778,7 @@ class TestWritableOverlay:
         override = generate_compose_override(m, user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
-        assert "./.releases/live-scripts:/boxmunge-scripts:ro" in web.get(
+        assert _PROD_SMOKE_MOUNT in web.get(
             "volumes", []
         )
 

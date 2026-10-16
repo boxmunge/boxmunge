@@ -107,12 +107,17 @@ def _build_service_override(
         # Collect service-level volumes here so smoke + persistent
         # writable entries can coexist on one list (Compose merge with
         # the user's compose.yml extends lists, never replaces).
-        svc_volumes: list[str] = []
+        # Long syntax throughout: a path is never re-read as `src:dst:opts`.
+        # create_host_path keeps the short syntax's behaviour for the smoke
+        # mount (an absent scripts dir surfaces as a smoke failure).
+        svc_volumes: list[dict[str, Any]] = []
         if svc.get("smoke"):
             # Production mounts its own copy: `stage` overwrites the project
             # dir's scripts while production keeps running.
             source = PROD_SMOKE_SOURCE if alias_prefix is None else STAGING_SMOKE_SOURCE
-            svc_volumes.append(f"{source}:/boxmunge-scripts:ro")
+            svc_volumes.append({"type": "bind", "source": source,
+                                "target": "/boxmunge-scripts", "read_only": True,
+                                "bind": {"create_host_path": True}})
 
         # Security hardening — silent defaults injected here.
         sec_fragment = hardening_fragment(
@@ -149,7 +154,8 @@ def _build_service_override(
                 if not isinstance(entry, dict):
                     continue
                 vol_name = f"{project}_{entry['name']}"
-                svc_volumes.append(f"{vol_name}:{entry['mount']}")
+                svc_volumes.append({"type": "volume", "source": vol_name,
+                                    "target": entry["mount"]})
 
         if svc_volumes:
             svc_override["volumes"] = svc_volumes

@@ -357,7 +357,7 @@ services:
 
 #### Validation rules
 
-- All paths must be absolute, no `..`, max 256 chars.
+- All paths must be absolute and canonical (no `.` or `..` segments, repeated `/`, or trailing slash: write `/app/data`, not `/app/./data/`), max 256 chars, with no `:`, `,` or control characters (Compose would read `:` and `,` as mount options). The error names the canonical spelling to use.
 - `ephemeral` entries: list of strings, no duplicates within the list.
 - `persistent` entries: `{name, mount}` mappings. **Names must be unique project-wide** (across all services), not just within one service — the overlay declares each volume as `<project>_<name>`, so two services declaring the same `name` would alias to the same physical volume. Docker Compose then prefixes the compose project name, so the Docker volume on the host is `<project>_<project>_<name>` (staging's is `<project>-staging_<project>_<name>`). Mounts unique within the service.
 - A path cannot appear in both `ephemeral` and `persistent` for the same service.
