@@ -215,8 +215,9 @@ Run the auto-update probation/promotion cycle.""",
     "container-update": """\
 Usage: boxmunge container-update [target] [--force] [--dry-run]
 
-Pull and recreate Caddy and project image: containers. --dry-run pulls and
-reports what would change without recreating anything.""",
+Pull and recreate Caddy and project image: containers. A service that also
+declares build: is not pulled: its image: names the local build. --dry-run
+pulls and reports what would change without recreating anything.""",
     "_discover-update": """\
 Usage: boxmunge _discover-update --json [--auto]
 

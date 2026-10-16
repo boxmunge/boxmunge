@@ -8,13 +8,13 @@ simple and avoids the Docker SDK dependency.
 import fcntl
 import logging
 import os
-import subprocess
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
 from boxmunge.caddy_journal import commit_sites, restore_sites
+from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.fileutil import open_shared_lockfile
 from boxmunge.paths import (
     RESERVED_PROJECT_NAMES,
@@ -22,7 +22,6 @@ from boxmunge.paths import (
     validate_project_name,
 )
 
-_DEFAULT_TIMEOUT = 120
 _COMPOSE_UP_TIMEOUT = 300
 _CADDY_RELOAD_TIMEOUT = 30
 # Audit D-NEW-2: caddy_validate previously inherited the 120s default. Under
@@ -37,10 +36,6 @@ _CADDY_LOCK_WAIT_WARN_SECONDS = 0.1
 _CADDY_CONTAINER = "boxmunge-caddy"
 
 
-class DockerError(Exception):
-    """Raised when a Docker/Compose operation fails."""
-
-
 class CaddyConfigRejected(DockerError):
     """Caddy rejected the config; the journaled site files were put back.
 
@@ -50,34 +45,6 @@ class CaddyConfigRejected(DockerError):
     def __init__(self, message: str, restored: list[str]) -> None:
         super().__init__(message)
         self.restored = restored
-
-
-def _run(
-    cmd: list[str],
-    cwd: Path | None = None,
-    capture: bool = False,
-    check: bool = True,
-    timeout: int = _DEFAULT_TIMEOUT,
-) -> subprocess.CompletedProcess:
-    """Run a command, optionally capturing output. Raises DockerError on failure."""
-    try:
-        return subprocess.run(
-            cmd,
-            cwd=cwd,
-            capture_output=capture,
-            text=True,
-            check=check,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as e:
-        raise DockerError(
-            f"Command timed out after {timeout}s: {' '.join(cmd)}"
-        ) from e
-    except subprocess.CalledProcessError as e:
-        stderr = e.stderr or ""
-        raise DockerError(
-            f"Command failed: {' '.join(cmd)}\n{stderr.strip()}"
-        ) from e
 
 
 def check_compose_project_name(name: str) -> None:
@@ -352,11 +319,14 @@ def compose_pull(
 ) -> None:
     """Run docker compose pull in the project directory.
 
-    Pulls latest images for all services with image: directives.
-    Build: services are unaffected.
+    Pulls the latest images for services with an image: directive.
+    ``--ignore-buildable`` skips services that also declare build:, whose
+    image: is the local name compose tags the build with; pulling it asks a
+    registry for a name that only exists on this box ("pull access denied").
+    The flag exists in Compose v2 (2.24 and later checked) and v5.
     """
     cmd = compose_command(project_name, compose_files)
-    cmd.append("pull")
+    cmd.extend(["pull", "--ignore-buildable"])
     _run(cmd, cwd=project_dir, timeout=_COMPOSE_UP_TIMEOUT)
 
 
