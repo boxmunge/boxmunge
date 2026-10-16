@@ -1,0 +1,64 @@
+"""Daemon and timer control for the dind job (no systemd there)."""
+from __future__ import annotations
+
+import json
+import subprocess
+import time
+from pathlib import Path
+
+DAEMON_JSON = Path("/etc/docker/daemon.json")
+PRIOR = Path("/etc/docker/daemon.json.prior")
+LOG = Path("/var/log/dockerd.log")
+
+
+def _wait(ready, what: str, timeout: float = 60) -> None:
+    deadline = time.monotonic() + timeout
+    while not ready():
+        if time.monotonic() > deadline:
+            tail = LOG.read_text(errors="replace")[-4000:] if LOG.exists() else ""
+            raise RuntimeError(f"timed out waiting for {what}\n{tail}")
+        time.sleep(0.5)
+
+
+def _quiet(*cmd: str) -> int:
+    return subprocess.run(list(cmd), capture_output=True, check=False).returncode
+
+
+class ProcessDaemon:
+    """dockerd as a child process; the same stop/start contract as systemd."""
+
+    def stop(self) -> None:
+        _quiet("pkill", "-TERM", "-x", "dockerd")
+        _wait(lambda: _quiet("pgrep", "-x", "dockerd") != 0, "dockerd to exit")
+
+    def start(self) -> None:
+        with LOG.open("ab") as log:
+            subprocess.Popen(["dind", "dockerd"], stdout=log, stderr=subprocess.STDOUT,
+                             start_new_session=True)
+        _wait(lambda: _quiet("docker", "info") == 0, "dockerd to answer")
+
+
+class FakeTimers:
+    """Records what the engine stops and restores."""
+
+    def __init__(self, enabled: dict[str, bool] | None = None) -> None:
+        self.enabled = dict(enabled or {"boxmunge-health.timer": True,
+                                        "boxmunge-backup.timer": True})
+        self.calls: list[tuple[str, str]] = []
+
+    def state(self) -> dict[str, bool]:
+        return dict(self.enabled)
+
+    def stop_all(self) -> None:
+        self.calls.append(("stop", "*"))
+
+    def restore(self, state: dict[str, bool]) -> None:
+        self.calls.append(("restore", json.dumps(state, sort_keys=True)))
+
+
+def write_daemon_json(doc: dict) -> None:
+    DAEMON_JSON.write_text(json.dumps(doc, indent=2) + "\n")
+
+
+def prior_daemon_json() -> dict:
+    return json.loads(PRIOR.read_text())

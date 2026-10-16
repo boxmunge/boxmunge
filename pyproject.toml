@@ -31,6 +31,7 @@ boxmunge = ["tui/*.tcss"]
 [tool.pytest.ini_options]
 markers = [
     "integration: integration tests requiring Docker",
+    "userns_dind: needs a daemon the test can remap and restart (the privileged dind CI job)",
 ]
 testpaths = ["tests"]
 pythonpath = ["src"]
