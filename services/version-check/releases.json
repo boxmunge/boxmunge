@@ -177,7 +177,7 @@
     {
       "version": "0.4.0",
       "class": "security",
-      "breaking": false,
+      "breaking": true,
       "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.4.0"
     },
     {
