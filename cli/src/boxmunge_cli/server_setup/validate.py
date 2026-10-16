@@ -12,7 +12,7 @@ import ipaddress
 import re
 
 _LABEL = r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
-# A public name, as the server's own host rule (src/boxmunge/manifest.py
+# A public name, as the server's own host rule (src/boxmunge/manifest_fields.py
 # _HOST_LABEL_RE) accepts it, and the looser RFC 1123 form for test setups.
 _DNS_NAME = re.compile(rf"({_LABEL}\.)+[a-z]{{2,}}")
 _RFC1123_NAME = re.compile(rf"{_LABEL}(\.{_LABEL})*")

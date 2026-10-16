@@ -33,7 +33,7 @@ _VALID_PROJECT_NAME = re.compile(r"[a-z0-9][a-z0-9\-]{0,62}")
 
 # init scaffolds this until the user names a real host; bundling refuses it.
 PLACEHOLDER_HOST_SUFFIX = ".change-me.invalid"
-# The server's host rule (src/boxmunge/manifest.py _HOST_LABEL_RE), for init --host.
+# The server's host rule (src/boxmunge/manifest_fields.py _HOST_LABEL_RE), for init --host.
 _HOST_RE = re.compile(r"([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}")
 
 
