@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import boxmunge.backup as _backup
+from boxmunge.backup_source import backup_source
 from boxmunge.backup import (
     SNAPSHOT_RETENTION, BackupError, BackupKind, backup_filename, prune_backups,
     resolve_backup_service,
@@ -16,9 +17,11 @@ from boxmunge.fileutil import project_lock, LockError
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
-from boxmunge.manifest import load_manifest, ManifestError
+from boxmunge.manifest import ManifestError
+from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
+from boxmunge.release import ReleaseStateError
 
 # Total wall-clock budget for retrying lock-held projects in run_backup_all.
 # Bounded so a stuck deploy doesn't keep nightly backup running forever.
@@ -81,8 +84,11 @@ def backup_locked(
     ``kind`` tags the snapshot and selects its retention: the manifest's
     ``backup.retention`` for nightly backups, SNAPSHOT_RETENTION otherwise.
 
-    ``manifest`` overrides the one on disk: promote backs up production data
-    with the production release's backup config while the staged release's
+    Without ``manifest``, the backup uses the manifest of the release the
+    containers run (backup_source: during an open install that may not be
+    the project dir's). ``manifest`` overrides the choice: the pre-deploy
+    snapshot passes production's own, read before any install starts, and
+    promote passes the production release's while the staged release's
     files are on disk.
 
     Paused projects refuse with rc=1 (operator-driven backup against a
@@ -120,10 +126,19 @@ def backup_locked(
 
     if manifest is None:
         try:
-            manifest = load_manifest(paths.project_manifest(project_name))
-        except ManifestError as e:
+            source = backup_source(paths, project_name)
+        except (ManifestError, ReleaseStateError) as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
+        if source.manifest is None:
+            print(f"{project_name}: backup skipped: {source.skip}")
+            log_operation("backup", f"Backup skipped: {source.skip}", paths,
+                          project=project_name)
+            if source.alert:
+                notify(paths, f"{project_name}: backup skipped", source.skip,
+                       component="backup", project=project_name, priority=1)
+            return 0
+        manifest = source.manifest
 
     backup_conf = manifest.get("backup", {})
     backup_type = backup_conf.get("type", "none")
