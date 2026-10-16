@@ -1068,9 +1068,11 @@ How an upgrade is applied and undone:
    rolls back.
 
 If the upgrade is interrupted (crash, power loss) after the venvs swap but before probation
-starts, the next health-timer run rolls back to the previous release and reports stage
-`interrupted`. The first interruption of a version does not blocklist it, so auto-update retries;
-a second one does. Interrupted before the swap, the previous release simply stays live.
+starts, the next health-timer run rolls back to the previous release and sends a "ROLLBACK"
+alert. An interruption is not reported as a release failure. The first one of a version does not
+blocklist it, so auto-update retries; a second one does. Promotion and `clear-blocklist` reset the
+count. Interrupted before the swap, the previous release simply stays live. A rollback that is
+itself interrupted is finished by the next health-timer run.
 
 A rollback swaps the venvs back, restores the stash, and re-runs `upgrade --apply` with the
 previous release, so its overlays and Caddy sites are regenerated and projects restarted on
@@ -1084,10 +1086,12 @@ pre-update backup, self-test) does not end it, so container-update keeps waiting
 probation is over.
 
 No other upgrade starts during probation: the standby venv holds the previous release, the
-only rollback target. `upgrade`, `upgrade --target` and `force-target` refuse with the time
-probation ends, without blocklisting anything; auto-update retries on its next run. To
-override, an operator ends the probation first (accepting the release on probation) by
-removing `/opt/boxmunge/upgrade-state/probation.json`.
+only rollback target. `upgrade --target` and `force-target` refuse with the time probation
+ends, without blocklisting anything; `upgrade` and auto-update report the deferral, exit 0
+and retry later. To override, an operator ends the probation first (accepting the release on
+probation) by removing `/opt/boxmunge/upgrade-state/probation.json`. A `probation.json` that
+names the live venv as the previous release (left by an older release's rollback) is stale
+and is removed with a warning.
 
 The docs served by `agent-help` (`/opt/boxmunge/docs`) are replaced with the installed
 release's on every upgrade, and put back to the previous release's on a rollback, so they

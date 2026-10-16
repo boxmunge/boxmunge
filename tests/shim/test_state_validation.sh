@@ -9,7 +9,7 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
 PAST="2000-01-01T00:00:00+00:00"
-FUTURE="2999-01-01T00:00:00+00:00"
+FUTURE="$SOON"
 
 # --- active-slot ----------------------------------------------------------
 
@@ -80,13 +80,17 @@ for bad_slot in "../env-a" "a/../../etc" "c" "a"; do
     write_probation "1.2.3" "$bad_slot" "$PAST"
     run_shim check-probation
     if [[ "$bad_slot" == "a" ]]; then
-        expect 1 "is the live slot" "probation previous_slot naming the live slot is refused"
+        # Left by an older shim's rollback: stale, removed, and the standby
+        # (the failed release) is then an orphan.
+        expect 0 "removing stale" "probation previous_slot naming the live slot is removed as stale"
+        [[ -d "$BOXMUNGE_ROOT/env-a" && ! -e "$BOXMUNGE_ROOT/upgrade-state/probation.json" ]] \
+            && pass "stale probation removed, live venv kept" || fail "stale probation handling: $OUT"
     else
         expect 1 "Invalid slot" "probation previous_slot '$bad_slot' is refused"
+        [[ -d "$BOXMUNGE_ROOT/env-a" && -d "$BOXMUNGE_ROOT/env-b" ]] \
+            && pass "no venv removed for previous_slot '$bad_slot'" \
+            || fail "a venv was removed for previous_slot '$bad_slot'"
     fi
-    [[ -d "$BOXMUNGE_ROOT/env-a" && -d "$BOXMUNGE_ROOT/env-b" ]] \
-        && pass "no venv removed for previous_slot '$bad_slot'" \
-        || fail "a venv was removed for previous_slot '$bad_slot'"
     drop_root
 done
 

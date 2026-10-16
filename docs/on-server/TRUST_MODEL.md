@@ -80,15 +80,24 @@ reads from that directory is checked before use:
   shim then follows `env-active` and rewrites `active-slot`.
 - `probation.json` must be a JSON object with a semver `version`, an
   ISO-8601 `expires_at` with a timezone, and a `previous_slot` of `a` or `b`
-  that is the current standby slot (promotion deletes it).
+  that is the current standby slot and a working venv (promotion deletes
+  it; a rollback swaps to it). One naming the live slot is stale and is
+  removed. An `expires_at` later than a fresh probation's 6 hours (plus 15
+  minutes for clock steps) counts as expired, so a forged far-future value
+  cannot hold off upgrades.
 - `blocklist.json` must be a JSON object keyed by semver versions.
-- `interrupted.json` must be a JSON object mapping semver versions to integer counts.
 - None of these files, nor `upgrade.lock`, may be a symlink. The shim writes
   `active-slot` by rename, so a planted link is replaced rather than followed.
 
 Any violation stops the shim with a non-zero exit and an error naming the
 file, before the value reaches a path, a URL, or an `rm -rf`. Repair or remove
 the file as `supervisor` and re-run.
+
+The shim deletes a venv slot only while the live one runs, and never the live
+one. State deploy must not influence is root-only: the crash-safety markers
+inside the venv slots, the interruption counts in `/opt/boxmunge/upgrade-root/`,
+and the shim's libraries in `/opt/boxmunge/bin/boxmunge-upgrade.d/`, which it
+refuses to source if anyone but their owner can write them.
 
 ### Files root writes in deploy-writable directories
 

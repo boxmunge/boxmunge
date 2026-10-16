@@ -38,7 +38,7 @@ stub "$FIXTURE/bin/ln" "'$REAL_LN' \"\$@\" || exit
 stub "$FIXTURE/venv/bin/pip" 'exit 0'
 stub "$FIXTURE/venv/bin/boxmunge-server" 'case "$1 ${2:-}" in
     "--version "*) echo "boxmunge 1.5.0" ;;
-    "upgrade --apply") [[ "${KILL_AT:-}" != apply ]] || { '"$kill_shim"'; } ;;
+    "upgrade --apply") [[ "${KILL_AT:-}" != apply ]] || { '"$kill_shim"'; }; [[ -z "${FAIL_APPLY:-}" ]] || exit 1 ;;
     "health "*) [[ "${KILL_AT:-}" != health ]] || { '"$kill_shim"'; } ;;
 esac
 exit 0'
@@ -50,7 +50,7 @@ fi
 case "$2" in
     *write_probation*)
         [[ "${KILL_AT:-}" != probation ]] || { '"$kill_shim"'; }
-        printf "{\"version\": \"%s\", \"previous_slot\": \"%s\", \"expires_at\": \"2999-01-01T00:00:00+00:00\"}\n" \
+        printf "{\"version\": \"%s\", \"previous_slot\": \"%s\", \"expires_at\": \"'"$SOON"'\"}\n" \
             "$BM_VERSION" "$BM_PREV_SLOT" > "$BOXMUNGE_ROOT/upgrade-state/probation.json" ;;
     *get_build_version*) echo "1.5.0" ;;
 esac
@@ -71,9 +71,13 @@ installed() {
     new_root a
     echo "1.4.0" > "$BOXMUNGE_ROOT/config/version"
     echo "proven" > "$BOXMUNGE_ROOT/env-a/known-good"
-    mock_server a 'echo "a: $*" >> "$BOXMUNGE_ROOT/calls"; [[ "$1" != --version ]] || echo "boxmunge 1.4.0"'
+    mock_server a 'echo "a: $*" >> "$BOXMUNGE_ROOT/calls"; [[ "$1" != --version ]] || echo "boxmunge 1.4.0"
+case "$1 ${2:-}" in
+    "stash restore") [[ "${KILL_AT:-}" != restore ]] || { '"$kill_shim"'; } ;;
+    "upgrade --apply") [[ "${KILL_AT:-}" != reapply ]] || { '"$kill_shim"'; } ;;
+esac'
     stub "$BOXMUNGE_ROOT/env-a/bin/python.new" 'if [[ "$1" == "-" ]]; then cat >/dev/null; echo "bm_log $BM_MSG" >> "$BOXMUNGE_ROOT/calls"; exit 0; fi
-printf "a-python: stage=%s %s\n" "${BM_STAGE:-}" "$*" >> "$BOXMUNGE_ROOT/calls"'
+printf "a-python: stage=%s msg=%s %s\n" "${BM_STAGE:-}" "${BM_MESSAGE:-}" "$*" >> "$BOXMUNGE_ROOT/calls"'
     mv "$BOXMUNGE_ROOT/env-a/bin/python.new" "$BOXMUNGE_ROOT/env-a/bin/python"
     : > "$BOXMUNGE_ROOT/calls"
 }
@@ -90,13 +94,14 @@ proven_intact() {  # proven_intact <description>
         && pass "$1: proven slot survives" || fail "$1: proven slot destroyed"
 }
 
-interruptions() { cat "$BOXMUNGE_ROOT/upgrade-state/interrupted.json" 2>/dev/null || true; }
+interruptions() { cat "$BOXMUNGE_ROOT/upgrade-root/interrupted.json" 2>/dev/null || true; }
 reports() { grep -c "a-python: stage=interrupted" "$BOXMUNGE_ROOT/calls" || true; }
 blocklisted() { grep -q "add_to_blocklist" "$BOXMUNGE_ROOT/calls"; }
 
 # expect_rolled_back <point>: check-probation finds the interrupted upgrade
 # live and returns the box to the proven release. A first interruption is
-# reported but not blocklisted.
+# counted and alerted locally, but neither blocklisted nor reported to the
+# fleet service (a power cut must not count toward suppressing a release).
 expect_rolled_back() {
     run_shim check-probation
     expect 1 "interrupted after the venv swap" "$1: check-probation rolls back the interrupted upgrade"
@@ -107,8 +112,10 @@ expect_rolled_back() {
         && pass "$1: stash restored and previous release re-applied" || fail "$1: rollback steps missing: $(cat "$BOXMUNGE_ROOT/calls")"
     ! blocklisted && pass "$1: a first interruption is not blocklisted" \
         || fail "$1: a first interruption blocklisted the version"
-    [[ "$(reports)" -eq 1 ]] && pass "$1: reported as stage interrupted" \
-        || fail "$1: $(reports) interrupted reports: $(cat "$BOXMUNGE_ROOT/calls")"
+    [[ "$(reports)" -eq 0 ]] && pass "$1: not reported to the fleet service" \
+        || fail "$1: interruption reported: $(cat "$BOXMUNGE_ROOT/calls")"
+    grep -q "msg=Rolled back 1.5.0: the upgrade was interrupted (not blocklisted" "$BOXMUNGE_ROOT/calls" \
+        && pass "$1: operator alerted locally" || fail "$1: no local alert: $(cat "$BOXMUNGE_ROOT/calls")"
     [[ "$(interruptions)" == '{"1.5.0": 1}' ]] && pass "$1: interruption counted" \
         || fail "$1: interruption count is $(interruptions)"
     [[ ! -e "$BOXMUNGE_ROOT/upgrade-state/probation.json" ]] && pass "$1: no probation left" \
@@ -152,7 +159,7 @@ for point in link sync2 apply health probation; do
     [[ "$RC" -eq 137 && "$(live)" == b ]] && pass "$point: killed after the swap" \
         || fail "$point: rc=$RC live=$(live) $OUT"
     upgrade_killed_at none  # an upgrade before recovery must not recycle the proven slot
-    expect 1 "was interrupted after its venv swap" "$point: a new upgrade waits for recovery"
+    expect 1 "an earlier upgrade or rollback was interrupted" "$point: a new upgrade waits for recovery"
     proven_intact "$point (upgrade before recovery)"
     expect_rolled_back "$point"
     drop_root
@@ -167,6 +174,19 @@ upgrade_killed_at none
 expect 0 "probation started" "retry: the next upgrade of the same version completes"
 [[ "$(live)" == b && -f "$BOXMUNGE_ROOT/upgrade-state/probation.json" ]] \
     && pass "retry: 1.5.0 live and on probation" || fail "retry: live=$(live)"
+write_probation "1.5.0" "a" "2000-01-01T00:00:00+00:00"
+run_shim check-probation
+expect 0 "promoted" "retry: 1.5.0 is promoted"
+[[ "$(interruptions)" == "{}" ]] && pass "promotion forgets the interruption count" \
+    || fail "count after promotion: $(interruptions)"
+drop_root
+
+installed
+upgrade_killed_at apply
+run_shim check-probation
+run_shim clear-blocklist 1.5.0
+[[ "$(interruptions)" == "{}" ]] && pass "clear-blocklist forgets the interruption count" \
+    || fail "count after clear-blocklist: $(interruptions)"
 drop_root
 
 # --- a second interruption of the same version blocklists it ----------------
@@ -179,10 +199,11 @@ upgrade_killed_at apply
 [[ "$RC" -eq 137 && "$(live)" == b ]] && pass "twice: second upgrade got as far as apply" \
     || fail "twice: rc=$RC live=$(live) $OUT"
 run_shim check-probation
-expect 1 "interruption 2" "twice: the second interruption is rolled back"
-blocklisted && pass "twice: the second interruption blocklists the version" \
-    || fail "twice: version not blocklisted"
-[[ "$(reports)" -eq 1 && "$(interruptions)" == '{"1.5.0": 2}' ]] && pass "twice: reported and counted" \
+expect 1 "Rollback complete" "twice: the second interruption is rolled back"
+blocklisted && grep -q "msg=.*interrupted 2 times, now blocklisted" "$BOXMUNGE_ROOT/calls" \
+    && pass "twice: the second interruption blocklists the version, and says so" \
+    || fail "twice: version not blocklisted: $(cat "$BOXMUNGE_ROOT/calls")"
+[[ "$(reports)" -eq 0 && "$(interruptions)" == '{"1.5.0": 2}' ]] && pass "twice: counted, not reported" \
     || fail "twice: reports=$(reports) count=$(interruptions)"
 proven_intact "twice"
 drop_root
@@ -191,11 +212,38 @@ drop_root
 
 installed
 upgrade_killed_at apply
-echo '{"1.5.0": "x"}' > "$BOXMUNGE_ROOT/upgrade-state/interrupted.json"
+mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+echo '{"1.5.0": "x"}' > "$BOXMUNGE_ROOT/upgrade-root/interrupted.json"
 run_shim check-probation
 expect 1 "interrupted.json is malformed" "a malformed interruption count stops recovery"
 proven_intact "malformed count"
 drop_root
+
+# --- killed inside a rollback: the next check-probation finishes it --------
+# Apply fails, so upgrade_to rolls back; the rollback itself is killed.
+# sync3 is its marker (before the swap back), sync4 the swap back.
+
+for point in sync3 sync4 restore reapply; do
+    installed
+    RC=0
+    OUT="$(FAIL_APPLY=1 KILL_AT="$point" bash -c 'echo $$ > "$BOXMUNGE_ROOT/shim.pid"; exec bash "$0" target 1.5.0' "$SHIM" 2>&1)" || RC=$?
+    [[ "$RC" -eq 137 && -e "$BOXMUNGE_ROOT/env-a/rollback-inflight" ]] \
+        && pass "rollback $point: killed with the rollback marker in the proven slot" || fail "rollback $point: rc=$RC $OUT"
+    : > "$BOXMUNGE_ROOT/calls"
+    run_shim check-probation
+    expect 1 "Resuming the interrupted rollback of 1.5.0 (stage apply)" "rollback $point: check-probation resumes it"
+    [[ "$(live)" == a && ! -e "$BOXMUNGE_ROOT/env-a/rollback-inflight" ]] \
+        && pass "rollback $point: proven release live, marker cleared" || fail "rollback $point: live=$(live) $OUT"
+    grep -q "a: stash restore --latest" "$BOXMUNGE_ROOT/calls" && grep -q "a: upgrade --apply" "$BOXMUNGE_ROOT/calls" \
+        && pass "rollback $point: stash restore and re-apply redone" || fail "rollback $point: steps: $(cat "$BOXMUNGE_ROOT/calls")"
+    blocklisted && grep -q "a-python: stage=apply" "$BOXMUNGE_ROOT/calls" \
+        && pass "rollback $point: the failed apply is blocklisted and reported" || fail "rollback $point: bookkeeping missing"
+    proven_intact "rollback $point"
+    run_shim check-probation
+    expect 0 "orphan venv in inactive slot b" "rollback $point: the next check-probation clears the failed slot"
+    proven_intact "rollback $point (after cleanup)"
+    drop_root
+done
 
 # --- killed after probation was recorded: the upgrade stands ---------------
 

@@ -22,7 +22,7 @@ exit 0"
     rm "$BOXMUNGE_ROOT/env-b/bin/python"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$BOXMUNGE_ROOT/env-b/bin/python"
     chmod +x "$BOXMUNGE_ROOT/env-b/bin/python"
-    write_probation "1.2.3" "b" "2999-01-01T00:00:00+00:00"
+    write_probation "1.2.3" "b" "$SOON"
     run_shim check-probation
 }
 

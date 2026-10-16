@@ -494,9 +494,15 @@ fi
 
 # ---------------------------------------------------------------------------
 # Install the boxmunge-upgrade shim (orchestrates auto-updates)
+#
+# Libraries first: the shim refuses to run against missing or mismatched
+# ones. A shim from before the split self-updates only the shim file, then
+# runs this script (--upgrade-shim) because it changed, which is how the
+# libraries reach a box on that first hop.
 # ---------------------------------------------------------------------------
-cp "${SCRIPT_DIR}/scripts/boxmunge-upgrade" "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade"
-chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade"
+install -d -m 755 -o root -g root "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade.d"
+install -m 644 -o root -g root "${SCRIPT_DIR}/scripts/boxmunge-upgrade.d/"*.sh "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade.d/"
+install -m 755 -o root -g root "${SCRIPT_DIR}/scripts/boxmunge-upgrade" "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade"
 
 # Symlink into /usr/local/bin so boxmunge works in non-interactive SSH sessions
 ln -sf "${BOXMUNGE_ROOT}/bin/boxmunge" /usr/local/bin/boxmunge

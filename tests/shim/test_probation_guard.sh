@@ -28,15 +28,16 @@ on_probation() {
         'if [[ "$1" == "-" ]]; then cat >/dev/null; echo "bm_log $BM_LEVEL $BM_MSG" >> "$BOXMUNGE_ROOT/calls"; exit 0; fi' \
         'printf "%s\n" "$*" >> "$BOXMUNGE_ROOT/calls"' > "$BOXMUNGE_ROOT/env-a/bin/python"
     chmod +x "$BOXMUNGE_ROOT/env-a/bin/python"
-    write_probation "1.4.0" "b" "${1:-2999-01-01T00:00:00+00:00}"
+    write_probation "1.4.0" "b" "${1:-$SOON}"
 }
 
 calls() { cat "$BOXMUNGE_ROOT/calls" 2>/dev/null || true; }
 
-# expect_deferred <description>: the last run_shim refused without touching
-# either slot, the probation, the blocklist or the failure report.
+# expect_deferred <description> [rc]: the last run_shim refused without
+# touching either slot, the probation, the blocklist or the failure report.
+# The timer's `run` (and deploy's `auto`, which shares its policy) exits 0.
 expect_deferred() {
-    expect 1 "1.4.0 is on probation" "$1 is refused during probation"
+    expect "${2:-1}" "1.4.0 is on probation" "$1 is refused during probation"
     [[ "$OUT" == *"slot b holds the previous release"* ]] && pass "$1: refusal names the protected slot" \
         || fail "$1: refusal does not name the protected slot: $OUT"
     [[ "$(cat "$BOXMUNGE_ROOT/env-b/known-good" 2>/dev/null)" == "proven" ]] \
@@ -57,20 +58,22 @@ expect_deferred() {
 
 on_probation
 run_shim run 1.5.0 https://example.com/x security
-expect_deferred "auto-update (run)"
-[[ "$OUT" == *"ends 2999-01-01 00:00 UTC"* && "$OUT" == *"Retry after the probation ends"* ]] \
-    && pass "refusal says when to retry" || fail "refusal lacks the retry time: $OUT"
+expect_deferred "auto-update (run)" 0
+[[ "$OUT" == *"(it ends 20"*" UTC)"* && "$OUT" == *"auto-update retries on its next run"* ]] \
+    && pass "deferral says when probation ends" || fail "deferral lacks the end time: $OUT"
 drop_root
 
 on_probation
 mock_server a 'if [[ "$1" == "_discover-update" ]]; then echo "{\"action\": \"upgrade\", \"version\": \"1.5.0\"}"; fi'
 run_shim auto
-expect_deferred "auto (deploy)"
+expect_deferred "auto (deploy)" 0
 drop_root
 
 on_probation
 run_shim target 1.5.0
 expect_deferred "target"
+[[ "$OUT" == *"Retry after the probation ends"* ]] && pass "target refusal says when to retry" \
+    || fail "target refusal lacks the retry hint: $OUT"
 drop_root
 
 on_probation
@@ -87,6 +90,17 @@ run_shim target 1.5.0
 expect_deferred "target (probation expired, not yet promoted)"
 [[ "$OUT" == *"health timer promotes it"* ]] && pass "expired refusal says promotion is imminent" \
     || fail "expired refusal lacks the promotion note: $OUT"
+drop_root
+
+# A forged far-future expiry cannot defer upgrades for good: beyond a fresh
+# probation's length it counts as expired, so check-probation promotes it.
+on_probation "2999-01-01T00:00:00+00:00"
+run_shim target 1.5.0
+expect_deferred "target (expiry beyond the cap)"
+[[ "$OUT" == *"beyond a 6h probation; treating it as expired"* && "$OUT" == *"health timer promotes it"* ]] \
+    && pass "beyond-cap expiry is treated as expired, with a warning" || fail "beyond-cap expiry: $OUT"
+run_shim check-probation
+expect 0 "promoted" "check-probation promotes a beyond-cap probation"
 drop_root
 
 on_probation
