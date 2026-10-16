@@ -148,7 +148,7 @@ def backup_filename(project_name: str, kind: BackupKind) -> str:
     return f"{project_name}-{ts}-{kind.value}.tar.gz.age"
 
 
-def _parse_snapshot(path: Path, project_name: str) -> tuple[str, BackupKind] | None:
+def parse_snapshot(path: Path, project_name: str) -> tuple[str, BackupKind] | None:
     """(timestamp, kind) of a snapshot name, or None if it is not one.
 
     Archives written before kinds existed (``<project>-<ts>.tar.gz.age``) count
@@ -170,7 +170,7 @@ def _parse_snapshot(path: Path, project_name: str) -> tuple[str, BackupKind] | N
 
 def snapshot_kind(path: Path, project_name: str) -> BackupKind | None:
     """The kind of a snapshot file, or None if the name is not a snapshot."""
-    parsed = _parse_snapshot(path, project_name)
+    parsed = parse_snapshot(path, project_name)
     return parsed[1] if parsed else None
 
 
@@ -258,7 +258,7 @@ def prune_backups(
         )
     snapshots = sorted(
         (parsed[0], f) for f in backups_dir.iterdir()
-        if (parsed := _parse_snapshot(f, project_name)) and parsed[1] is kind
+        if (parsed := parse_snapshot(f, project_name)) and parsed[1] is kind
     )
     to_prune = [f for _, f in snapshots[:-retention]]
     for f in to_prune:

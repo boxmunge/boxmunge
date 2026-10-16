@@ -115,3 +115,12 @@ class TestProjectQuarantineState:
         paths = BoxPaths(root=Path("/tmp/test-bm"))
         assert paths.project_quarantine_state("myapp") == \
             Path("/tmp/test-bm/state/deploy/myapp.quarantined.json")
+
+
+class TestActionApiPaths:
+    def test_audit_log(self, paths: BoxPaths) -> None:
+        assert paths.audit_log == paths.root / "logs" / "audit.jsonl"
+
+    def test_jobs_dirs(self, paths: BoxPaths) -> None:
+        assert paths.jobs_dir == paths.root / "state" / "jobs"
+        assert paths.jobs_queue == paths.root / "state" / "jobs" / "queue"

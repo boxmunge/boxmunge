@@ -14,6 +14,7 @@ from typing import Any
 from boxmunge import restart_hold
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
+from boxmunge.state import read_state
 
 
 def is_paused(project_name: str, paths: BoxPaths) -> bool:
@@ -85,11 +86,15 @@ def clear_paused_state(project_name: str, paths: BoxPaths) -> None:
 def read_paused_state(
     project_name: str, paths: BoxPaths,
 ) -> dict[str, Any] | None:
-    """Return the paused.json contents, or None if not paused."""
+    """Return the paused.json contents, or None if not paused.
+
+    Raises StateError, naming the file, if it is unreadable or not a JSON
+    object.
+    """
     path = paths.project_paused_state(project_name)
     if not path.exists():
         return None
-    return json.loads(path.read_text())
+    return read_state(path)
 
 
 def render_maintenance_caddy_config(hosts: list[str]) -> str:

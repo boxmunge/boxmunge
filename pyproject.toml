@@ -16,6 +16,7 @@ mcp = ["mcp>=1.0"]
 boxmunge-server = "boxmunge.cli:main"
 boxmunge-shell = "boxmunge.shell:main"
 boxmunge-sftp = "boxmunge.sftp_receive:main"
+boxmunge-apid = "boxmunge.api.apid:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]

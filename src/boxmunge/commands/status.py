@@ -2,14 +2,19 @@
 
 import json
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 from boxmunge.commands.argv import parse_args
-from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
+from boxmunge.commands.health_state import MONITOR_STOPPED
+from boxmunge.cve.quarantine import (
+    checked_quarantine_record, is_quarantined, read_quarantine_state,
+)
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.paths import BoxPaths
 from boxmunge.pause import is_paused
-from boxmunge.state import read_state
+from boxmunge.state import StateError, read_state
 
 
 def _short_ts(raw: str) -> str:
@@ -27,17 +32,45 @@ def _short_ts(raw: str) -> str:
     return ts.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def run_status(paths: BoxPaths, as_json: bool = False) -> int:
-    """Show status dashboard for all projects.
+# Health states the health checks write; a missing state is "unknown".
+HEALTH_STATES = ("ok", "failing", MONITOR_STOPPED, "unknown")
+# Every value a row's "state" takes.
+ROW_STATES = (*HEALTH_STATES, "quarantined", "paused", "pre_registered", "error")
+_LABELS = {"ok": "OK", MONITOR_STOPPED: "CRITICAL (stopped)", "failing": "FAILING",
+           "unknown": "UNKNOWN", "quarantined": "QUARANTINED", "paused": "PAUSED",
+           "pre_registered": "PRE-REGISTERED", "error": "ERROR"}
 
-    A project whose state files cannot be read gets an ERROR row (and an
-    ERROR line on stderr); the rest of the dashboard still renders. Returns
-    1 if any project failed, else 0.
+
+@dataclass
+class StatusSnapshot:
+    """Every project's dashboard row, and the projects that could not be read.
+
+    Rows hold machine values: "state" is one of ROW_STATES, timestamps are
+    as stored or None when absent, "quarantine" and "error" are None unless
+    they apply. display_rows() turns them into what `status` prints.
+    """
+
+    projects_dir_exists: bool
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    failures: list[tuple[str, Exception]] = field(default_factory=list)
+
+
+def _row(name: str, state: str, *, last_check: str | None = None,
+         deployed_at: str | None = None, quarantine: dict[str, str] | None = None,
+         error: str | None = None) -> dict[str, Any]:
+    return {"project": name, "state": state, "last_check": last_check,
+            "deployed_at": deployed_at, "quarantine": quarantine, "error": error}
+
+
+def collect_status(paths: BoxPaths) -> StatusSnapshot:
+    """Build the dashboard rows without printing anything.
+
+    A project whose state files cannot be read gets an "error" row and an
+    entry in ``failures``; the other rows are still built.
     """
     projects_dir = paths.projects
     if not projects_dir.exists():
-        print("No projects directory found.")
-        return 0
+        return StatusSnapshot(projects_dir_exists=False)
 
     deployed = sorted(
         p.name for p in projects_dir.iterdir()
@@ -48,96 +81,92 @@ def run_status(paths: BoxPaths, as_json: bool = False) -> int:
         if p.is_dir() and not (p / "manifest.yml").exists()
     )
 
-    if not deployed and not pre_registered:
+    snapshot = StatusSnapshot(projects_dir_exists=True)
+    for name in deployed:
+        try:
+            snapshot.rows.append(_project_row(name, paths))
+        except PROJECT_INPUT_ERRORS as e:
+            snapshot.failures.append((name, e))
+            snapshot.rows.append(_row(name, "error", error=f"{name}: {e}"))
+
+    for name in pre_registered:
+        snapshot.rows.append(_row(name, "pre_registered"))
+    return snapshot
+
+
+def display_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """The rows as `status` and `status --json` print them: display labels,
+    "-" for an absent value, and raw_status alongside."""
+    shown = []
+    for row in rows:
+        state = row["state"]
+        item = {
+            "project": row["project"],
+            "status": _LABELS[state],
+            "last_check": row["last_check"] or "-",
+            "deployed_at": row["deployed_at"] or "-",
+            "raw_status": "pre-registered" if state == "pre_registered" else state,
+        }
+        if row["quarantine"] is not None:
+            item.update(row["quarantine"])
+        if row["error"] is not None:
+            item["error"] = row["error"]
+        shown.append(item)
+    return shown
+
+
+def run_status(paths: BoxPaths, as_json: bool = False) -> int:
+    """Show status dashboard for all projects.
+
+    A project whose state files cannot be read gets an ERROR row (and an
+    ERROR line on stderr); the rest of the dashboard still renders. Returns
+    1 if any project failed, else 0.
+    """
+    snapshot = collect_status(paths)
+    if not snapshot.projects_dir_exists:
+        print("No projects directory found.")
+        return 0
+    if not snapshot.rows:
         print("No projects registered.")
         return 0
 
-    rows = []
-    failed = False
-    for name in deployed:
-        try:
-            rows.append(_project_row(name, paths))
-        except PROJECT_INPUT_ERRORS as e:
-            report_project_failure("status", name, e, paths)
-            failed = True
-            rows.append({
-                "project": name,
-                "status": "ERROR",
-                "last_check": "-",
-                "deployed_at": "-",
-                "raw_status": "error",
-                "error": f"{name}: {e}",
-            })
+    for name, error in snapshot.failures:
+        report_project_failure("status", name, error, paths)
 
-    for name in pre_registered:
-        rows.append({
-            "project": name,
-            "status": "PRE-REGISTERED",
-            "last_check": "-",
-            "deployed_at": "-",
-            "raw_status": "pre-registered",
-        })
-
+    rows = display_rows(snapshot.rows)
     if as_json:
         # JSON output keeps full-precision timestamps for machine consumption.
         print(json.dumps(rows, indent=2))
     else:
         _print_table(rows)
 
-    return 1 if failed else 0
+    return 1 if snapshot.failures else 0
 
 
-def _project_row(name: str, paths: BoxPaths) -> dict[str, str]:
+def _project_row(name: str, paths: BoxPaths) -> dict[str, Any]:
     """Build one deployed project's dashboard row from its state files."""
+    deploy = read_state(paths.project_deploy_state(name))
+    deployed_at = deploy.get("deployed_at")
     # Quarantine takes precedence over pause if both markers exist
     # (mirrors lifecycle.is_blocked ordering — the security action is
     # the more specific one).
     if is_quarantined(name, paths):
-        qstate = read_quarantine_state(name, paths) or {}
-        deploy = read_state(paths.project_deploy_state(name))
-        return {
-            "project": name,
-            "status": "QUARANTINED",
-            "last_check": "-",
-            "deployed_at": deploy.get("deployed_at", "-"),
-            "raw_status": "quarantined",
-            "cve_id": qstate.get("cve_id", "-"),
-            "severity": (
-                qstate.get("effective_severity")
-                or qstate.get("severity", "-")
-            ),
-            "explanation": qstate.get("explanation", ""),
-            "quarantined_at": qstate.get("quarantined_at", "-"),
-        }
+        qstate = checked_quarantine_record(
+            read_quarantine_state(name, paths), paths.project_quarantine_state(name))
+        return _row(name, "quarantined", deployed_at=deployed_at, quarantine={
+            "cve_id": qstate["cve_id"],
+            "severity": qstate["effective_severity"] or qstate["severity"],
+            "explanation": qstate["explanation"],
+            "quarantined_at": qstate["quarantined_at"],
+        })
     if is_paused(name, paths):
-        deploy = read_state(paths.project_deploy_state(name))
-        return {
-            "project": name,
-            "status": "PAUSED",
-            "last_check": "-",
-            "deployed_at": deploy.get("deployed_at", "-"),
-            "raw_status": "paused",
-        }
+        return _row(name, "paused", deployed_at=deployed_at)
     health = read_state(paths.project_health_state(name))
-    deploy = read_state(paths.project_deploy_state(name))
-
-    status = health.get("status", "unknown")
-    if status == "ok":
-        display_status = "OK"
-    elif status == "critical_stopped":
-        display_status = "CRITICAL (stopped)"
-    elif status == "failing":
-        display_status = "FAILING"
-    else:
-        display_status = status.upper()
-
-    return {
-        "project": name,
-        "status": display_status,
-        "last_check": health.get("last_check", "-"),
-        "deployed_at": deploy.get("deployed_at", "-"),
-        "raw_status": status,
-    }
+    state = health.get("status", "unknown")
+    if state not in HEALTH_STATES:
+        raise StateError(f"Health state {paths.project_health_state(name)} has the status "
+                         f"{state!r}; boxmunge writes one of {', '.join(HEALTH_STATES)}")
+    return _row(name, state, last_check=health.get("last_check"), deployed_at=deployed_at)
 
 
 def _print_table(rows: list[dict[str, str]]) -> None:

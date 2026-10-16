@@ -2,10 +2,13 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from boxmunge.paths import BoxPaths
 from boxmunge.pause import (
     is_paused, write_paused_state, clear_paused_state, read_paused_state,
 )
+from boxmunge.state import StateError
 
 
 def _setup(tmp_path: Path) -> BoxPaths:
@@ -71,6 +74,14 @@ class TestReadPausedState:
     def test_returns_none_when_not_paused(self, tmp_path: Path) -> None:
         paths = _setup(tmp_path)
         assert read_paused_state("myapp", paths) is None
+
+    @pytest.mark.parametrize("content", ["{not json", "[]"])
+    def test_unreadable_state_names_the_file(self, tmp_path: Path, content: str) -> None:
+        paths = _setup(tmp_path)
+        write_paused_state("myapp", paths, reason="x")
+        paths.project_paused_state("myapp").write_text(content)
+        with pytest.raises(StateError, match=str(paths.project_paused_state("myapp"))):
+            read_paused_state("myapp", paths)
 
 
 class TestRenderMaintenanceCaddyConfig:

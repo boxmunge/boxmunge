@@ -4,6 +4,8 @@
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision
 from boxmunge.cve.scanner import AttackVector, Finding, PkgClass, Severity, VulnStatus
 
@@ -154,3 +156,14 @@ def test_scan_state_legacy_file_without_pkg_class_defaults_unknown(tmp_path):
     restored = decisions_from_scan_state(state, project_name="p")
     assert restored[0].findings[0].finding.pkg_class is PkgClass.UNKNOWN
     assert restored[0].findings[0].finding.pkg_type is None
+
+
+@pytest.mark.parametrize("content", ["{not json", "[]"])
+def test_unreadable_scan_state_names_the_file(tmp_path, content):
+    from boxmunge.cve.scan_state import read_scan_state
+    from boxmunge.state import StateError
+
+    path = tmp_path / "state.json"
+    path.write_text(content)
+    with pytest.raises(StateError, match=str(path)):
+        read_scan_state(path)

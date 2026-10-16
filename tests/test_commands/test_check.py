@@ -6,12 +6,11 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from boxmunge.commands.check import (
-    parse_smoke_stderr,
-    interpret_smoke_result,
-    run_check,
-    run_smoke_in_container,
+from boxmunge.commands.check import run_check, run_smoke_in_container
+from boxmunge.commands.smoke_result import (
     SmokeResult,
+    interpret_smoke_result,
+    parse_smoke_stderr,
 )
 from boxmunge.paths import BoxPaths
 

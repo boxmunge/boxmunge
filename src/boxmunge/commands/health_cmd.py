@@ -61,15 +61,18 @@ class HealthReport:
             lines.append("RESULT: ISSUES FOUND")
         return "\n".join(lines)
 
-    def format_json(self) -> str:
-        return json.dumps({
+    def to_dict(self) -> dict:
+        return {
             "healthy": self.exit_code == 0,
             "exit_code": self.exit_code,
             "checks": [
                 {"name": c.name, "status": c.status, "detail": c.detail}
                 for c in self.checks
             ],
-        }, indent=2)
+        }
+
+    def format_json(self) -> str:
+        return json.dumps(self.to_dict(), indent=2)
 
 
 def check_docker_running() -> HealthCheck:

@@ -3,7 +3,6 @@
 import json
 import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +10,7 @@ from boxmunge.commands.argv import parse_args, require_project_name
 from boxmunge.commands.health_state import (
     is_monitor_stopped, record_still_stopped, update_health_state,
 )
+from boxmunge.commands.smoke_result import SmokeResult, interpret_smoke_result
 from boxmunge.config import ConfigError, load_config
 from boxmunge.docker_run import docker_env
 from boxmunge.fileutil import project_lock, LockError
@@ -19,70 +19,6 @@ from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_error, log_operation
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
-
-
-@dataclass
-class SmokeResult:
-    status: str  # "ok", "warning", "critical"
-    message: str
-
-
-def parse_smoke_stderr(stderr: str) -> str:
-    """Parse smoke test stderr according to the boxmunge contract."""
-    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
-
-    if not lines:
-        return "Smoke check failed (no detail provided)"
-    if len(lines) == 1:
-        return lines[0]
-    return "Manual failure analysis required (smoke script produced multiple lines)"
-
-
-# Stderr signatures that mean the smoke test could not be RUN — the container
-# is gone/renamed/not running, or `sh` could not open the script — as opposed
-# to the app's smoke test running and reporting a problem. These are harness /
-# infrastructure failures: they carry no signal about app health, so they must
-# never escalate to CRITICAL (which stops+removes the container via the health
-# monitor). Note `sh` exits 2 when it cannot open a script — colliding with the
-# app-critical exit code — so exit code alone cannot distinguish them.
-_HARNESS_FAILURE_SIGNATURES = (
-    "no such container",
-    "is not running",
-    "is restarting",
-    "cannot open",
-    "can't open",
-    "exec failed",
-    "executable file not found",
-    "oci runtime",
-)
-
-
-def _is_harness_failure(stderr: str) -> bool:
-    """True if stderr indicates the smoke could not be run (not app-critical)."""
-    low = stderr.lower()
-    return any(sig in low for sig in _HARNESS_FAILURE_SIGNATURES)
-
-
-def interpret_smoke_result(exit_code: int, stderr: str) -> SmokeResult:
-    """Interpret a smoke test exit code and stderr into a SmokeResult."""
-    message = parse_smoke_stderr(stderr)
-
-    if exit_code == 0:
-        return SmokeResult(status="ok", message="")
-    # A failure whose stderr shows the smoke could not even run (container
-    # gone, script unopenable) is downgraded to WARNING regardless of exit
-    # code: it is an infrastructure fault, not evidence the app is unhealthy,
-    # and must not trip the CRITICAL -> compose_down path that takes prod
-    # offline. Surfaced (not silenced) so the operator still gets an alert.
-    if exit_code != 0 and _is_harness_failure(stderr):
-        return SmokeResult(
-            status="warning",
-            message=f"smoke could not run (infrastructure, not app): {message}",
-        )
-    if exit_code == 2:
-        return SmokeResult(status="critical", message=message)
-    else:
-        return SmokeResult(status="warning", message=message)
 
 
 def _smoke_one(container: str, script: str, svc_name: str) -> SmokeResult:
@@ -272,13 +208,15 @@ def run_check(project_name: str, paths: BoxPaths, verbose: bool = True) -> int:
 _STATUS_FROM_EXIT = {0: "ok", 1: "warning", 2: "critical"}
 
 
-def _run_check_json(project_name: str, paths: BoxPaths) -> int:
-    """Run health check and emit a single JSON object on stdout.
+def collect_check(project_name: str, paths: BoxPaths) -> dict[str, Any]:
+    """Run the project's smoke checks and return the `check --json` payload.
 
     Schema:
-      {"project": "X", "exit_code": 0, "smoke": {"status": "...", "message": "..."}}
+      {"project": "X", "exit_code": 0, "status": "ok", "smoke": {"status": "...", "message": "..."}}
 
     The smoke object is omitted when no service in the manifest declares one.
+    A project that cannot be checked gets exit_code 1 and an "error" message
+    instead of status and smoke.
     """
     project_dir = paths.project_dir(project_name)
     manifest_path = paths.project_manifest(project_name)
@@ -287,8 +225,7 @@ def _run_check_json(project_name: str, paths: BoxPaths) -> int:
     if not project_dir.exists():
         payload["exit_code"] = 1
         payload["error"] = f"Project not found: {project_name}"
-        print(json.dumps(payload))
-        return 1
+        return payload
 
     if paths.is_project_pre_registered(project_name):
         payload["exit_code"] = 1
@@ -296,16 +233,14 @@ def _run_check_json(project_name: str, paths: BoxPaths) -> int:
             f"Project '{project_name}' is pre-registered (secrets set) but "
             f"not yet deployed."
         )
-        print(json.dumps(payload))
-        return 1
+        return payload
 
     try:
         manifest = load_manifest(manifest_path)
     except ManifestError as e:
         payload["exit_code"] = 1
         payload["error"] = str(e)
-        print(json.dumps(payload))
-        return 1
+        return payload
 
     has_smoke = any(svc.get("smoke") for svc in manifest.get("services", {}).values())
     smoke_obj: dict[str, str] | None = None
@@ -323,8 +258,14 @@ def _run_check_json(project_name: str, paths: BoxPaths) -> int:
     payload["status"] = _STATUS_FROM_EXIT.get(worst, "unknown")
     if smoke_obj is not None:
         payload["smoke"] = smoke_obj
+    return payload
+
+
+def _run_check_json(project_name: str, paths: BoxPaths) -> int:
+    """Emit the check payload as a single JSON object on stdout."""
+    payload = collect_check(project_name, paths)
     print(json.dumps(payload))
-    return worst
+    return payload["exit_code"]
 
 
 def cmd_check(args: list[str]) -> None:

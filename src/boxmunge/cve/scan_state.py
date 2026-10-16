@@ -19,6 +19,7 @@ from boxmunge.cve.policy import (
 )
 from boxmunge.cve.scanner import AttackVector, Finding, PkgClass, Severity, VulnStatus
 from boxmunge.fileutil import atomic_write_text
+from boxmunge.state import read_state
 
 
 def _serialize_disposition(d: Any) -> dict[str, Any]:
@@ -97,11 +98,12 @@ def read_scan_state(path: Path) -> dict[str, Any] | None:
     """Read a previously-written scan state file.
 
     Returns None when the file does not exist (the "no scan ever ran"
-    signal). Raises on malformed JSON — fail loud.
+    signal). Raises StateError, naming the file, when it is unreadable or
+    not a JSON object — fail loud.
     """
     if not path.exists():
         return None
-    return json.loads(path.read_text())
+    return read_state(path)
 
 
 def headline_from_scan_state(state: dict[str, Any]) -> dict[str, Any] | None:
@@ -132,7 +134,7 @@ def headline_from_scan_state(state: dict[str, Any]) -> dict[str, Any] | None:
     return headline
 
 
-def _deserialize_severity(value: str) -> Severity:
+def severity_from_stored(value: str) -> Severity:
     """Map a stored severity string back to the enum. Unknown → UNKNOWN."""
     for sev in Severity:
         if sev.value == value:
@@ -140,11 +142,18 @@ def _deserialize_severity(value: str) -> Severity:
     return Severity.UNKNOWN
 
 
-def _deserialize_status(value: Any) -> VulnStatus:
+def stored_severities(raw: dict[str, Any]) -> tuple[Severity, Severity]:
+    """A stored finding's (base, effective) severities. A missing or
+    unrecognised value reads as UNKNOWN."""
+    return (severity_from_stored(raw.get("base_severity", "Unknown")),
+            severity_from_stored(raw.get("effective_severity", "Unknown")))
+
+
+def status_from_stored(value: Any) -> VulnStatus:
     """Map a stored status string back to VulnStatus.
 
     Missing/None (legacy pre-rebalance files) or unrecognized → UNKNOWN,
-    matching the backward-compat posture of _deserialize_attack_vector.
+    matching the backward-compat posture of attack_vector_from_stored.
     """
     if value is None:
         return VulnStatus.UNKNOWN
@@ -154,11 +163,11 @@ def _deserialize_status(value: Any) -> VulnStatus:
     return VulnStatus.UNKNOWN
 
 
-def _deserialize_pkg_class(value: Any) -> PkgClass:
+def pkg_class_from_stored(value: Any) -> PkgClass:
     """Map a stored pkg_class string back to the enum.
 
     Missing/unrecognised → UNKNOWN, matching the backward-compat posture of
-    _deserialize_attack_vector. State written before the relevance gate has
+    attack_vector_from_stored. State written before the relevance gate has
     no pkg_class; UNKNOWN keeps such findings out of the gate entirely.
     """
     if not isinstance(value, str):
@@ -166,7 +175,7 @@ def _deserialize_pkg_class(value: Any) -> PkgClass:
     return PkgClass.from_trivy_string(value)
 
 
-def _deserialize_attack_vector(value: Any) -> AttackVector | None:
+def attack_vector_from_stored(value: Any) -> AttackVector | None:
     """Map a stored attack_vector string back to the enum.
 
     Accepts None or missing field for backward compatibility with scan_state
@@ -221,10 +230,7 @@ def decisions_from_scan_state(
         quarantine_required = False
         at_risk_running = False
         for raw in raw_decision.get("findings", []) or []:
-            base = _deserialize_severity(raw.get("base_severity", "Unknown"))
-            effective = _deserialize_severity(
-                raw.get("effective_severity", "Unknown"),
-            )
+            base, effective = stored_severities(raw)
             disposition = _deserialize_disposition(raw["disposition"])
             finding = Finding(
                 cve_id=raw.get("cve_id", ""),
@@ -234,11 +240,11 @@ def decisions_from_scan_state(
                 fixed_version=raw.get("fixed_version"),
                 title=raw.get("title", "") or "",
                 primary_url=raw.get("primary_url"),
-                attack_vector=_deserialize_attack_vector(
+                attack_vector=attack_vector_from_stored(
                     raw.get("attack_vector"),
                 ),
-                status=_deserialize_status(raw.get("status")),
-                pkg_class=_deserialize_pkg_class(raw.get("pkg_class")),
+                status=status_from_stored(raw.get("status")),
+                pkg_class=pkg_class_from_stored(raw.get("pkg_class")),
                 pkg_type=raw.get("pkg_type"),
             )
             findings.append(

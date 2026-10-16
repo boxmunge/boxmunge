@@ -38,7 +38,10 @@ workflow, and recovery.
 - **Suppress with operator review:**
   `boxmunge security suppress <CVE> --project <name> --until <YYYY-MM-DD> --reason <text>`.
 - **Inspect state:** `boxmunge security` (fleet) or `boxmunge security <project>`
-  (per-project). Both accept `--json`.
+  (per-project). Both accept `--json`. A project whose manifest, scan state or
+  suppressions file cannot be read is listed with the reason (`unreadable` in
+  JSON, an `ERROR:` line on stderr) and the command exits 1; fix or restore
+  that file rather than reading the counts as complete.
 - **Recover with `boxmunge security resume <project>`** after a fix lands or
   you've added a suppression.
 
