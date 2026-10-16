@@ -76,11 +76,18 @@ def test_unknown_project_is_not_found(fixture_paths) -> None:
     assert "projects.list" in error.message
 
 
-def test_corrupt_state_fails_naming_the_file(fixture_paths) -> None:
-    fixture_paths.project_health_state("shop").write_text("{not json")
-    error = _code(fixture_paths, "project.get", {"project": "shop"})
+@pytest.mark.parametrize("state_file,content", [
+    ("project_health_state", "{not json"),
+    ("project_paused_state", "{not json"),
+    ("project_paused_state", "[]"),
+    ("project_paused_state", "{}"),
+])
+def test_corrupt_state_fails_naming_the_file(fixture_paths, state_file, content) -> None:
+    path = getattr(fixture_paths, state_file)("blog")
+    path.write_text(content)
+    error = _code(fixture_paths, "project.get", {"project": "blog"})
     assert error.code is ErrorCode.FAILED
-    assert str(fixture_paths.project_health_state("shop")) in error.message
+    assert str(path) in error.message
 
 
 def test_project_health_reports_the_check(fixture_paths) -> None:

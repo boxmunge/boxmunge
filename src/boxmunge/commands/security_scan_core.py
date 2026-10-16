@@ -62,6 +62,7 @@ from boxmunge.cve.scanner import (
 from boxmunge.fileutil import project_lock
 from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
+from boxmunge.state import StateError
 
 
 # Per-project aggregate scan budget.
@@ -199,7 +200,7 @@ def _prior_decisions(paths: BoxPaths, project: str) -> tuple[ProjectDecision, ..
         if prior_state is None:
             return ()
         return decisions_from_scan_state(prior_state, project_name=project)
-    except (ValueError, KeyError, TypeError, AttributeError) as e:
+    except (StateError, ValueError, KeyError, TypeError, AttributeError) as e:
         # Audit B-12: a truncated or hand-mangled file (JSON errors are
         # ValueErrors) must not stop this project's scan, let alone the
         # fleet's; this scan overwrites it.

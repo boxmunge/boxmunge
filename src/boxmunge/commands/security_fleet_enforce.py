@@ -32,6 +32,7 @@ from boxmunge.fileutil import LockError, project_lock
 from boxmunge.log import log_operation, log_warning
 from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
+from boxmunge.state import StateError
 
 
 @dataclass
@@ -147,7 +148,7 @@ def apply_held(paths: BoxPaths) -> PhaseTwo:
         try:
             state = read_scan_state(paths.project_scan_state(project))
             decisions = decisions_from_scan_state(state, project_name=project) if state else ()
-        except (ValueError, KeyError, TypeError, OSError) as e:
+        except (StateError, ValueError, KeyError, TypeError, OSError) as e:
             result.errors[project] = f"scan state unreadable: {e}"
             still_held[project] = cves
             continue

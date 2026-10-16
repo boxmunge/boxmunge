@@ -93,3 +93,10 @@ def test_manifest_without_schema_version_fails(fixture_paths) -> None:
 def test_pre_registered_project_has_no_security_view(fixture_paths) -> None:
     assert _error(fixture_paths, "security.project",
                   {"project": "newapp"}).code is ErrorCode.CONFLICT
+
+
+def test_corrupt_scan_state_fails_naming_the_file(fixture_paths) -> None:
+    path = fixture_paths.project_scan_state("shop")
+    path.write_text("{not json")
+    error = _error(fixture_paths, "security.project", {"project": "shop"})
+    assert error.code is ErrorCode.FAILED and str(path) in error.message

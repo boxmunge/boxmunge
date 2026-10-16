@@ -19,7 +19,7 @@ from boxmunge.commands.inbox_cmd import collect_inbox
 from boxmunge.cve.quarantine import read_quarantine_state
 from boxmunge.pause import read_paused_state
 from boxmunge.paths import BoxPaths
-from boxmunge.state import read_state
+from boxmunge.state import StateError, read_state
 
 LIFECYCLES = ("pre_registered", "quarantined", "paused", "monitor_stopped", "running")
 
@@ -62,6 +62,9 @@ def _project_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
     health = read_state(paths.project_health_state(name))
     staging = read_state(paths.project_staging_state(name))
     paused = read_paused_state(name, paths)
+    if paused is not None and not isinstance(paused.get("paused_at"), str):
+        raise StateError(f"Paused state {paths.project_paused_state(name)} has no paused_at "
+                         f"timestamp; resume the project or rewrite the file.")
     quarantine = read_quarantine_state(name, paths)
     staged = bool(staging.get("active", False))
     return {

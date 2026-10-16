@@ -19,6 +19,7 @@ from boxmunge.cve.policy import (
 )
 from boxmunge.cve.scanner import AttackVector, Finding, PkgClass, Severity, VulnStatus
 from boxmunge.fileutil import atomic_write_text
+from boxmunge.state import read_state
 
 
 def _serialize_disposition(d: Any) -> dict[str, Any]:
@@ -97,11 +98,12 @@ def read_scan_state(path: Path) -> dict[str, Any] | None:
     """Read a previously-written scan state file.
 
     Returns None when the file does not exist (the "no scan ever ran"
-    signal). Raises on malformed JSON — fail loud.
+    signal). Raises StateError, naming the file, when it is unreadable or
+    not a JSON object — fail loud.
     """
     if not path.exists():
         return None
-    return json.loads(path.read_text())
+    return read_state(path)
 
 
 def headline_from_scan_state(state: dict[str, Any]) -> dict[str, Any] | None:
