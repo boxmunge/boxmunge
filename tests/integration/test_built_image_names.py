@@ -264,9 +264,14 @@ def test_untag_does_not_depend_on_repo_digests(project, local_registry) -> None:
         ["docker", "image", "inspect", "--format", "{{len .RepoDigests}}", f"{name}-custom"],
         capture_output=True, text=True, check=True).stdout.strip()
     assert digests != "0"
-    prepare_compose_override(paths, manifest, release_root=project_dir)
-    assert local_image_id(f"{name}-custom") is None
-    assert local_image_id(pushed) is None
+    try:
+        prepare_compose_override(paths, manifest, release_root=project_dir)
+        # The name this project gave its build goes, digests or not. (The
+        # registry name is the test's own, not one this project produced, so
+        # whether it goes depends on whether Compose labelled the build.)
+        assert local_image_id(f"{name}-custom") is None
+    finally:
+        subprocess.run(["docker", "image", "rm", "-f", pushed], capture_output=True, check=False)
 
 
 def test_unlabelled_build_is_owned_through_the_projects_container(project) -> None:
