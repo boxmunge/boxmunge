@@ -95,10 +95,16 @@ class BoxPaths:
         self.health_state = self.state / "health"
         self.deploy_state = self.state / "deploy"
         self.staging_state = self.state / "staging"
+        # Action API jobs: finished records and event logs here, every
+        # unfinished (queued or running) record under queue/.
+        self.jobs_dir = self.state / "jobs"
+        self.jobs_queue = self.jobs_dir / "queue"
         self.templates = root / "templates" / "project"
         self.docs = root / "docs"
         self.logs = root / "logs"
         self.log_file = self.logs / "boxmunge.log"
+        # Action API audit log: one JSON object per line, append-only.
+        self.audit_log = self.logs / "audit.jsonl"
         self.inbox = root / "inbox"
         self.inbox_tmp = self.inbox / ".tmp"
         self.inbox_consumed = self.inbox / ".consumed"
