@@ -1096,6 +1096,13 @@ How an upgrade is applied and undone:
 4. A health check runs, then a 6-hour probation. A critical health result during probation
    rolls back.
 
+If the upgrade is interrupted (crash, power loss) after the venvs swap but before probation
+starts, the next health-timer run rolls back to the previous release and sends a "ROLLBACK"
+alert. An interruption is not reported as a release failure. The first one of a version does not
+blocklist it, so auto-update retries; a second one does. Promotion and `clear-blocklist` reset the
+count. Interrupted before the swap, the previous release simply stays live. A rollback that is
+itself interrupted is finished by the next health-timer run.
+
 A rollback swaps the venvs back, restores the stash, and re-runs `upgrade --apply` with the
 previous release, so its overlays and Caddy sites are regenerated and projects restarted on
 them. Pause and quarantine markers are not restored from the stash: a project you resumed after
@@ -1106,6 +1113,14 @@ Probation ends early, promoting the upgrade, when you deploy, roll back, restore
 `backup` yourself. Timer-driven work (the nightly `backup-all`, container-update's
 pre-update backup, self-test) does not end it, so container-update keeps waiting until
 probation is over.
+
+No other upgrade starts during probation: the standby venv holds the previous release, the
+only rollback target. `upgrade --target` and `force-target` refuse with the time probation
+ends, without blocklisting anything; `upgrade` and auto-update report the deferral, exit 0
+and retry later. To override, an operator ends the probation first (accepting the release on
+probation) by removing `/opt/boxmunge/upgrade-state/probation.json`. A `probation.json` that
+names the live venv as the previous release (left by an older release's rollback) is stale
+and is removed with a warning.
 
 The docs served by `agent-help` (`/opt/boxmunge/docs`) are replaced with the installed
 release's on every upgrade, and put back to the previous release's on a rollback, so they

@@ -16,9 +16,12 @@ REPO = Path(__file__).resolve().parents[1]
 HARD_LIMIT = 650
 SOURCE_ROOTS = [REPO / "src" / "boxmunge", REPO / "cli" / "src" / "boxmunge_cli"]
 
+# The root upgrade shim and its libraries are bash, but just as much source.
+SHIM_FILES = [REPO / "scripts" / "boxmunge-upgrade", *(REPO / "scripts" / "boxmunge-upgrade.d").glob("*.sh")]
+
 SOURCE_FILES = sorted(
-    path for root in SOURCE_ROOTS for path in root.rglob("*.py")
-    if "__pycache__" not in path.parts
+    [path for root in SOURCE_ROOTS for path in root.rglob("*.py") if "__pycache__" not in path.parts]
+    + SHIM_FILES
 )
 
 

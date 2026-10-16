@@ -1,0 +1,909 @@
+#!/usr/bin/env bash
+# boxmunge-upgrade — orchestrates platform upgrades with rollback safety.
+#
+# This script is intentionally simple and self-contained. It NEVER imports
+# Python code — it only calls Python commands as subprocesses and checks
+# exit codes. This ensures rollback works even if the new code is broken.
+#
+# Entry points (deploy may sudo only the two marked *; see install-sudoers):
+# * auto                       discover the latest release and upgrade to it
+# * target <version>           upgrade to a specific newer, non-blocklisted version
+#   force-target <version>     operator only: ignore the blocklist and downgrade floor
+#   run <version> <url>        auto-update timer: upgrade to a discovered version
+#                              (the bundle URL is always derived from <version>)
+#   check-probation            health timer: promote or roll back a probation
+#   clear-blocklist <version>  operator only: forget a failed version
+#   install-sudoers            install.sh and upgrades: (re)write deploy's sudo rule
+#   install-docs <dir>         install.sh and upgrades: replace docs/ with <dir>/*.md
+
+set -euo pipefail
+
+BOXMUNGE_ROOT="${BOXMUNGE_ROOT:-/opt/boxmunge}"
+STATE_DIR="$BOXMUNGE_ROOT/upgrade-state"
+LOCK_FILE="$STATE_DIR/upgrade.lock"
+ACTIVE_SLOT_FILE="$STATE_DIR/active-slot"
+BLOCKLIST_FILE="$STATE_DIR/blocklist.json"
+PROBATION_FILE="$STATE_DIR/probation.json"
+BIN_DIR="$BOXMUNGE_ROOT/bin"
+VERSION_FILE="$BOXMUNGE_ROOT/config/version"
+SUDOERS_FILE="${BOXMUNGE_SUDOERS_FILE:-/etc/sudoers.d/boxmunge-deploy}"
+
+log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) boxmunge-upgrade: $*" >&2; }
+die() { log "FATAL: $*"; exit 1; }
+
+# bm_log <level> <component> <msg> [<detail-json>]
+#
+# Best-effort write to /opt/boxmunge/logs/boxmunge.log via the active venv's
+# Python (so `boxmunge log` surfaces shim phase events alongside everything
+# else). The shim is the operator's only recovery surface — a logging
+# failure must not crash the upgrade — so the body is wrapped in
+# `2>/dev/null || true`.
+#
+# Levels: info | warn | error. Detail JSON defaults to {}.
+bm_log() {
+    local level="$1" component="$2" msg="$3" detail="${4:-"{}"}"
+    BM_LEVEL="$level" BM_COMPONENT="$component" BM_MSG="$msg" BM_DETAIL="$detail" \
+        "$(active_venv)/bin/python" - <<'PYBM' 2>/dev/null || true
+import json, os
+from boxmunge.paths import BoxPaths
+from boxmunge.log import log_operation, log_warning, log_error
+fns = {"info": log_operation, "warn": log_warning, "error": log_error}
+fn = fns.get(os.environ["BM_LEVEL"], log_operation)
+try:
+    detail = json.loads(os.environ["BM_DETAIL"])
+except Exception:
+    detail = {"raw": os.environ.get("BM_DETAIL", "")}
+fn(os.environ["BM_COMPONENT"], os.environ["BM_MSG"], BoxPaths(), detail=detail)
+PYBM
+}
+
+# Cosign verification pins. The release workflow keyless-signs SHA256SUMS via
+# Sigstore's Fulcio + Rekor. We pin the OIDC issuer and the workflow identity
+# so a signature from any other workflow (or any other repo) is rejected.
+COSIGN_CERT_IDENTITY_REGEXP='^https://github\.com/boxmunge/boxmunge/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
+COSIGN_OIDC_ISSUER='https://token.actions.githubusercontent.com'
+
+# verify_release_signature <download_dir>
+#
+# Verifies $download_dir/SHA256SUMS against $download_dir/SHA256SUMS.sig with
+# certificate $download_dir/SHA256SUMS.cert, pinning the certificate identity
+# to this repo's release workflow on a vX.Y.Z tag.
+#
+# Hard-requires cosign on PATH; aborts noisily if missing. Returns 0 on success
+# and non-zero on any failure (cosign missing, signature/cert files missing,
+# verification failed).
+verify_release_signature() {
+    local download_dir="${1:?usage: verify_release_signature <download_dir>}"
+    if ! command -v cosign >/dev/null 2>&1; then
+        log "ERROR: cosign required for upgrade verification but not installed."
+        log "       Re-run install.sh on this host, or install cosign manually."
+        return 1
+    fi
+    local sums="$download_dir/SHA256SUMS"
+    local sig="$download_dir/SHA256SUMS.sig"
+    local cert="$download_dir/SHA256SUMS.cert"
+    if [[ ! -f "$sig" || ! -f "$cert" ]]; then
+        log "ERROR: cosign signature/certificate not found in release artifacts"
+        log "       missing: $([[ -f "$sig" ]] || echo "SHA256SUMS.sig") $([[ -f "$cert" ]] || echo "SHA256SUMS.cert")"
+        return 1
+    fi
+    cosign verify-blob \
+        --certificate-identity-regexp "$COSIGN_CERT_IDENTITY_REGEXP" \
+        --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+        --signature "$sig" \
+        --certificate "$cert" \
+        "$sums" >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
+# Deploy-writable state.
+#
+# upgrade-state/ is root:deploy 0770 so the deploy shell can end probation
+# early. Everything read from it is therefore untrusted input to this root
+# process. Each value is checked against a strict allowlist before it can
+# reach an executable path, a URL, or an rm -rf, and anything else stops the
+# shim. Symlinks are refused, and writes go through rename(2), so a planted
+# link is replaced rather than followed.
+# ---------------------------------------------------------------------------
+SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+ACTIVE_SLOT=""
+LOCK_HELD=0
+
+printable() { local s="${1:0:80}"; printf '%s' "${s//[^[:alnum:]._+-]/?}"; }
+
+require_slot() {  # require_slot <value> <where>
+    [[ "$1" == "a" || "$1" == "b" ]] \
+        || die "Invalid slot '$(printable "$1")' in $2 (expected a or b); refusing to continue"
+}
+
+require_semver() {  # require_semver <value> <where>
+    [[ "$1" =~ $SEMVER_RE ]] \
+        || die "Invalid version '$(printable "$1")' in $2 (expected semver like 0.3.5 or 0.3.5-rc.1)"
+}
+
+refuse_symlink() {
+    [[ ! -L "$1" ]] || die "$1 is a symlink; refusing to use it as root"
+}
+
+# replace_file <src> <dest>: rename(2), which never follows a link at <dest>.
+# (GNU mv would move <src> INTO <dest> if <dest> were a link to a directory.)
+replace_file() {
+    python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$1" "$2"
+}
+
+# load_active_slot: set ACTIVE_SLOT from the root-owned env-active symlink and
+# the deploy-writable active-slot file. Both must name a or b, and they must
+# agree: a forged active-slot would otherwise make the live venv look like
+# the standby, and the next upgrade would rm -rf it.
+load_active_slot() {
+    local from_file="" from_link="" target
+    refuse_symlink "$ACTIVE_SLOT_FILE"
+    if [[ -f "$ACTIVE_SLOT_FILE" ]]; then
+        from_file="$(cat "$ACTIVE_SLOT_FILE")"
+        require_slot "$from_file" "$ACTIVE_SLOT_FILE"
+    fi
+    if [[ -L "$BOXMUNGE_ROOT/env-active" ]]; then
+        target="$(readlink "$BOXMUNGE_ROOT/env-active")"
+        case "$target" in
+            "$BOXMUNGE_ROOT/env-a") from_link="a" ;;
+            "$BOXMUNGE_ROOT/env-b") from_link="b" ;;
+            *) die "env-active points at '$(printable "$target")', not env-a or env-b" ;;
+        esac
+    fi
+    if [[ -n "$from_file" && -n "$from_link" && "$from_file" != "$from_link" ]]; then
+        die "active-slot says '$from_file' but env-active points at env-$from_link; refusing to guess which venv is live"
+    fi
+    ACTIVE_SLOT="${from_link:-$from_file}"
+    [[ -n "$ACTIVE_SLOT" ]] || die "No active slot: neither $ACTIVE_SLOT_FILE nor $BOXMUNGE_ROOT/env-active exists"
+}
+
+standby_slot() { [[ "$ACTIVE_SLOT" == "a" ]] && echo "b" || echo "a"; }
+active_venv() { echo "$BOXMUNGE_ROOT/env-$ACTIVE_SLOT"; }
+
+# acquire_lock [skip]: take upgrade.lock once per run. With "skip", a busy
+# lock exits 0 (the health timer retries on its next fire); otherwise it dies.
+acquire_lock() {
+    [[ "$LOCK_HELD" -eq 1 ]] && return 0
+    mkdir -p "$STATE_DIR"
+    refuse_symlink "$LOCK_FILE"
+    exec 9>>"$LOCK_FILE"
+    if ! flock -n 9; then
+        [[ "${1:-}" == "skip" ]] && { log "Another upgrade is in progress; skipping"; exit 0; }
+        die "Another upgrade is in progress"
+    fi
+    LOCK_HELD=1
+}
+
+# is_blocklisted <version>: 0 if listed, 1 if not. A blocklist that is not a
+# JSON object keyed by semver strings is corrupt or tampered with: stop.
+is_blocklisted() {
+    local rc=0
+    refuse_symlink "$BLOCKLIST_FILE"
+    [[ -f "$BLOCKLIST_FILE" ]] || return 1
+    BM_VERSION="$1" BM_BLOCKLIST="$BLOCKLIST_FILE" BM_SEMVER_RE="$SEMVER_RE" python3 - <<'PYBL' || rc=$?
+import json, os, re, sys
+try:
+    with open(os.environ["BM_BLOCKLIST"]) as f:
+        bl = json.load(f)
+except (OSError, ValueError) as e:
+    print(f"blocklist unreadable: {e}", file=sys.stderr)
+    sys.exit(3)
+pattern = re.compile(os.environ["BM_SEMVER_RE"])
+if not isinstance(bl, dict) or not all(isinstance(k, str) and pattern.fullmatch(k) for k in bl):
+    print("blocklist is not an object keyed by semver versions", file=sys.stderr)
+    sys.exit(3)
+sys.exit(0 if os.environ["BM_VERSION"] in bl else 1)
+PYBL
+    case "$rc" in
+        0|1) return "$rc" ;;
+        *) die "$BLOCKLIST_FILE is malformed; inspect it and repair or remove it" ;;
+    esac
+}
+
+# read_probation: parse probation.json into PROB_VERSION, PROB_PREV_SLOT and
+# PROB_EXPIRED (yes/no). previous_slot must be the current standby slot,
+# because promotion rm -rf's it.
+read_probation() {
+    local out
+    refuse_symlink "$PROBATION_FILE"
+    out="$(BM_PROBATION_FILE="$PROBATION_FILE" python3 - <<'PYPROB'
+import json, os, sys
+from datetime import datetime, timezone
+with open(os.environ["BM_PROBATION_FILE"]) as f:
+    d = json.load(f)
+keys = ("version", "previous_slot", "expires_at")
+if not isinstance(d, dict) or not all(isinstance(d.get(k), str) and "\n" not in d[k] for k in keys):
+    sys.exit("probation.json must hold string version, previous_slot and expires_at")
+expires = datetime.fromisoformat(d["expires_at"])
+if expires.tzinfo is None:
+    sys.exit("probation.json expires_at has no timezone")
+print(d["version"])
+print(d["previous_slot"])
+print("yes" if datetime.now(timezone.utc) >= expires else "no")
+PYPROB
+)" || die "$PROBATION_FILE is malformed; refusing to act on it"
+    PROB_VERSION="$(echo "$out" | sed -n '1p')"
+    PROB_PREV_SLOT="$(echo "$out" | sed -n '2p')"
+    PROB_EXPIRED="$(echo "$out" | sed -n '3p')"
+    require_semver "$PROB_VERSION" "$PROBATION_FILE"
+    require_slot "$PROB_PREV_SLOT" "$PROBATION_FILE"
+    [[ "$PROB_PREV_SLOT" == "$(standby_slot)" ]] \
+        || die "$PROBATION_FILE previous_slot '$PROB_PREV_SLOT' is the live slot; refusing to act on it"
+}
+
+add_blocklist() {
+    local version="$1" reason="$2"
+    BM_VERSION="$version" BM_REASON="$reason" "$(active_venv)/bin/python" -c "
+import os
+from boxmunge.upgrade_state import add_to_blocklist
+from boxmunge.paths import BoxPaths
+add_to_blocklist(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_REASON'])
+"
+}
+
+report_failure() {
+    local version="$1" from_version="$2" stage="$3"
+    BM_VERSION="$version" BM_FROM_VERSION="$from_version" BM_STAGE="$stage" "$(active_venv)/bin/python" -c "
+import os
+from boxmunge.report_failure import report_failure
+report_failure(os.environ['BM_VERSION'], os.environ['BM_FROM_VERSION'], os.environ['BM_STAGE'])
+" 2>/dev/null || true
+}
+
+send_notification() {
+    local title="$1" message="$2"
+    BM_TITLE="$title" BM_MESSAGE="$message" "$(active_venv)/bin/python" -c "
+import os
+from boxmunge.config import load_config
+from boxmunge.pushover import send_notification
+from boxmunge.paths import BoxPaths
+config = load_config(BoxPaths())
+po = config.get('pushover', {})
+send_notification(po.get('user_key',''), po.get('app_token',''), os.environ['BM_TITLE'], os.environ['BM_MESSAGE'])
+" 2>/dev/null || true
+}
+
+swap_to() {
+    local slot="$1" tmp
+    require_slot "$slot" "swap target"
+    ln -sfn "$BOXMUNGE_ROOT/env-$slot" "$BOXMUNGE_ROOT/env-active"
+    tmp="$(mktemp "$STATE_DIR/.active-slot.XXXXXX")"
+    echo "$slot" > "$tmp"
+    chmod 0644 "$tmp"
+    replace_file "$tmp" "$ACTIVE_SLOT_FILE"
+    ACTIVE_SLOT="$slot"
+    # The user-facing /opt/boxmunge/bin/boxmunge-server wrapper already routes
+    # through env-active/bin/boxmunge-server, so the symlink swap above
+    # is sufficient — no need to touch the wrapper itself.
+    log "Swapped active to slot $slot"
+}
+
+# rollback_partial <new_version> <from_version> <stage> <prev_slot> <step> <exit> <output>
+#
+# The venv is back on the previous slot but disk state may be partly
+# upgraded, a hybrid the old code is not guaranteed to handle. Hard failure
+# demanding operator attention; exit 2 so monitoring can tell it from a
+# clean rollback (exit 1).
+rollback_partial() {
+    local new_version="$1" from_version="$2" stage="$3" prev_slot="$4" step="$5" rc="$6" output="$7"
+    log "ERROR: $step failed during rollback (exit $rc)"
+    log "ERROR: $step output: $output"
+    bm_log error upgrade "rollback partial — manual intervention required" \
+        "{\"version\": \"$new_version\", \"stage\": \"$stage\", \"step\": \"$step\", \"exit\": $rc}"
+    add_blocklist "$new_version" "${stage}_partial_rollback"
+    report_failure "$new_version" "$from_version" "apply_partial_rollback"
+    # Truncate output in the alert body — Pushover messages are length-limited.
+    send_notification "boxmunge ROLLBACK PARTIAL" \
+        "ROLLBACK PARTIAL — manual intervention required.
+Version: $new_version
+Stage: $stage
+Failed step: $step (exit $rc)
+Output (truncated): ${output:0:500}"
+    log "Rollback PARTIAL: venv reverted to slot $prev_slot but $step failed"
+    exit 2
+}
+
+do_rollback() {
+    local new_version="$1" from_version="$2" stage="$3" prev_slot="$4"
+    log "ROLLBACK: $new_version failed at stage=$stage, reverting to slot $prev_slot"
+    bm_log warn upgrade "rollback initiated" "{\"version\": \"$new_version\", \"from_version\": \"$from_version\", \"stage\": \"$stage\"}"
+
+    swap_to "$prev_slot"
+
+    # 1. Stash restore returns config + state to the pre-upgrade snapshot.
+    local output rc=0
+    output="$("$(active_venv)/bin/boxmunge-server" stash restore --latest 2>&1)" || rc=$?
+    [[ "$rc" -eq 0 ]] || rollback_partial "$new_version" "$from_version" "$stage" "$prev_slot" \
+        "stash restore" "$rc" "$output"
+
+    # 2. Re-apply with the previous release's code. The stash holds inputs
+    #    (manifests, compose, secrets), not generated output: the overlays and
+    #    Caddy sites on disk, and the running containers, are still the new
+    #    release's. --apply regenerates both with the old code, reloads Caddy
+    #    and restarts projects, so a generator regression is really undone.
+    rc=0
+    output="$("$(active_venv)/bin/boxmunge-server" upgrade --apply 2>&1)" || rc=$?
+    [[ "$rc" -eq 0 ]] || rollback_partial "$new_version" "$from_version" "$stage" "$prev_slot" \
+        "re-apply of the previous release" "$rc" "$output"
+
+    refresh_docs_for_slot "$prev_slot"
+    add_blocklist "$new_version" "$stage"
+    report_failure "$new_version" "$from_version" "$stage"
+    send_notification "boxmunge ROLLBACK" "Rolled back $new_version (stage: $stage)"
+
+    log "Rollback complete: reverted to $from_version"
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Upgrade policy: what each entry point may install.
+# ---------------------------------------------------------------------------
+
+# semver_lt <a> <b>: true when <a> has lower semver precedence than <b>.
+semver_lt() {
+    BM_A="$1" BM_B="$2" python3 - <<'PYSV'
+import os, sys
+def key(v):
+    core, _, pre = v.partition("-")
+    nums = tuple(int(x) for x in core.split("."))
+    if not pre:
+        return nums, 1, ()
+    return nums, 0, tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split("."))
+sys.exit(0 if key(os.environ["BM_A"]) < key(os.environ["BM_B"]) else 1)
+PYSV
+}
+
+# installed_version: the semver recorded in config/version (root-owned; the
+# config dir is not deploy-writable).
+installed_version() {
+    local v
+    [[ -f "$VERSION_FILE" ]] || die "No installed version recorded at $VERSION_FILE"
+    v="$(cat "$VERSION_FILE")"
+    v="${v%%+*}"
+    require_semver "$v" "$VERSION_FILE"
+    echo "$v"
+}
+
+# check_policy <version> <mode>: mode is run (timer), target (deploy) or
+# force (operator). Only force may install a blocklisted or older version.
+check_policy() {
+    local version="$1" mode="$2" installed operator_hint
+    require_semver "$version" "requested version"
+    operator_hint="To override, run as supervisor: sudo $BIN_DIR/boxmunge-upgrade force-target $version"
+    if [[ "$mode" == "force" ]]; then
+        log "WARN: operator override: blocklist and downgrade floor not enforced for $version"
+        return 0
+    fi
+    if is_blocklisted "$version"; then
+        if [[ "$mode" == "run" ]]; then
+            log "Version $version is blocklisted, skipping"
+            exit 0
+        fi
+        die "Version $version is blocklisted on this box (it failed an earlier upgrade). $operator_hint"
+    fi
+    installed="$(installed_version)"
+    if semver_lt "$version" "$installed"; then
+        die "Refusing to downgrade from $installed to $version. $operator_hint"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# deploy's sudo rule. Owned here so install.sh and every upgrade write the
+# same text; a box whose rule predates a tightening is fixed on its next
+# upgrade. `target *` cannot reach force-target or any other subcommand:
+# sudo matches the whole argument string against the pattern.
+# ---------------------------------------------------------------------------
+sudoers_rule() {
+    cat <<EOF
+# Managed by boxmunge-upgrade install-sudoers; rewritten on every install and upgrade.
+deploy ALL=(root) NOPASSWD: $BIN_DIR/boxmunge-upgrade auto, $BIN_DIR/boxmunge-upgrade target *
+EOF
+}
+
+cmd_install_sudoers() {
+    local tmp
+    if [[ -f "$SUDOERS_FILE" && ! -L "$SUDOERS_FILE" ]] && cmp -s <(sudoers_rule) "$SUDOERS_FILE"; then
+        return 0
+    fi
+    # A dot in the name keeps sudo from reading the temp file mid-write.
+    tmp="$(mktemp "$(dirname "$SUDOERS_FILE")/.boxmunge-deploy.XXXXXX")"
+    sudoers_rule > "$tmp"
+    chmod 0440 "$tmp"
+    if ! visudo -cqf "$tmp" >/dev/null; then
+        rm -f "$tmp"
+        die "Generated sudoers rule failed visudo; $SUDOERS_FILE left unchanged"
+    fi
+    replace_file "$tmp" "$SUDOERS_FILE"
+    log "Wrote deploy sudo rule to $SUDOERS_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# On-box docs (served by agent-help). Each venv slot keeps the docs of the
+# release it holds in env-<slot>/boxmunge-docs, so a rollback can put the
+# matching docs back. docs/ is a symlink to a versioned sibling directory and
+# is swapped by rename: a reader sees the old set or the new set, never a
+# partial or empty one. Doc files missing from the new set disappear.
+# ---------------------------------------------------------------------------
+slot_docs() { echo "$BOXMUNGE_ROOT/env-$1/boxmunge-docs"; }
+
+# install_docs <dir>: returns non-zero (and changes nothing) if <dir> has no
+# *.md files.
+install_docs() {
+    local src="$1" docs="$BOXMUNGE_ROOT/docs" stage link previous old=""
+    if ! compgen -G "$src/*.md" >/dev/null; then
+        log "ERROR: no *.md docs in $src; $docs left unchanged"
+        return 1
+    fi
+    stage="$(mktemp -d "$BOXMUNGE_ROOT/.docs.XXXXXX")"
+    cp "$src"/*.md "$stage/"
+    chmod 0644 "$stage"/*.md
+    chmod 0755 "$stage"
+    if [[ "$(id -u)" -eq 0 ]]; then chown -R root:root "$stage"; fi
+    link="$stage.link"
+    ln -s "$(basename "$stage")" "$link"
+    previous="$(readlink "$docs" 2>/dev/null || true)"
+    if [[ -d "$docs" && ! -L "$docs" ]]; then
+        # One-time move from a plain directory (installs before this change).
+        old="$stage.old"
+        mv "$docs" "$old"
+    fi
+    replace_file "$link" "$docs"
+    [[ -z "$old" ]] || rm -rf "$old"
+    if [[ "$previous" =~ ^\.docs\.[A-Za-z0-9]+$ ]]; then rm -rf "${BOXMUNGE_ROOT:?}/$previous"; fi
+    log "Installed docs from $src"
+}
+
+cmd_install_docs() {
+    install_docs "${1:?Usage: boxmunge-upgrade install-docs <dir>}" || die "install-docs failed"
+}
+
+# seed_slot_docs <slot>: a slot installed by install.sh (or an older shim)
+# has no docs copy; record the live docs as its own so a rollback to it
+# restores them.
+seed_slot_docs() {
+    local dest
+    dest="$(slot_docs "$1")"
+    if [[ ! -d "$dest" ]] && compgen -G "$BOXMUNGE_ROOT/docs/*.md" >/dev/null; then
+        mkdir -p "$dest"
+        cp "$BOXMUNGE_ROOT/docs/"*.md "$dest/"
+    fi
+}
+
+# refresh_docs_for_slot <slot>: best effort, because a docs failure must not
+# undo an upgrade or a rollback. Logged loudly so it is not missed.
+refresh_docs_for_slot() {
+    local src
+    src="$(slot_docs "$1")"
+    if [[ ! -d "$src" ]] || ! install_docs "$src"; then
+        log "ERROR: docs not refreshed for slot $1 ($src missing or empty); agent-help may be stale"
+        bm_log error upgrade "docs refresh failed" "{\"slot\": \"$1\"}"
+    fi
+}
+
+# preflight_fail <version> <from_version> <blocklist_reason> <message> [stage]
+#
+# Abort before the slot swap: drop the half-built standby venv, blocklist
+# the version so auto-update stops retrying it, and report the failure.
+preflight_fail() {
+    log "$4"
+    rm -rf "$BOXMUNGE_ROOT/env-$(standby_slot)"
+    add_blocklist "$1" "$3"
+    report_failure "$1" "$2" "${5:-preflight}"
+    exit 1
+}
+
+TMP_DOWNLOAD=""
+cleanup_download() { [[ -z "$TMP_DOWNLOAD" ]] || rm -rf "$TMP_DOWNLOAD"; }
+
+cmd_run() {
+    local version="${1:?Usage: boxmunge-upgrade run <version> <url>}"
+    : "${2:?Usage: boxmunge-upgrade run <version> <url>}"
+    upgrade_to "$version" run
+}
+
+# upgrade_to <version> <mode>: the upgrade itself, after the policy check.
+upgrade_to() {
+    local version="$1" mode="$2"
+
+    load_active_slot
+    acquire_lock
+    check_policy "$version" "$mode"
+    cmd_install_sudoers
+    seed_slot_docs "$ACTIVE_SLOT"
+
+    local prev_slot from_version standby
+    prev_slot="$ACTIVE_SLOT"
+    from_version="$("$(active_venv)/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")"
+    standby="$(standby_slot)"
+
+    # 1. PREPARE
+    log "Preparing standby venv (slot $standby)..."
+    local avail_mb
+    avail_mb=$(df -m "$BOXMUNGE_ROOT" | awk 'NR==2{print $4}')
+    [[ "$avail_mb" -lt 100 ]] && die "Insufficient disk space: ${avail_mb}MB available, need 100MB"
+
+    rm -rf "$BOXMUNGE_ROOT/env-$standby"
+    python3 -m venv "$BOXMUNGE_ROOT/env-$standby"
+
+    # Download bundle from GitHub release
+    local tmp_download
+    TMP_DOWNLOAD="$(mktemp -d)"
+    tmp_download="$TMP_DOWNLOAD"
+    trap cleanup_download EXIT
+    local release_base="https://github.com/boxmunge/boxmunge/releases/download/v${version}"
+    local bundle_url="${release_base}/boxmunge-${version}.tar.gz"
+    local sums_url="${release_base}/SHA256SUMS"
+    local sums_sig_url="${release_base}/SHA256SUMS.sig"
+    local sums_cert_url="${release_base}/SHA256SUMS.cert"
+
+    log "Downloading bundle from ${bundle_url}"
+    curl -sLf -o "$tmp_download/boxmunge-${version}.tar.gz" "$bundle_url" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: bundle_download" \
+            "Failed to download bundle"
+    curl -sLf -o "$tmp_download/SHA256SUMS" "$sums_url" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: checksum_download" \
+            "Failed to download SHA256SUMS"
+    curl -sLf -o "$tmp_download/SHA256SUMS.sig" "$sums_sig_url" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: signature_download" \
+            "Failed to download SHA256SUMS.sig (release is unsigned or sig artifact missing)"
+    curl -sLf -o "$tmp_download/SHA256SUMS.cert" "$sums_cert_url" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: certificate_download" \
+            "Failed to download SHA256SUMS.cert (release is unsigned or cert artifact missing)"
+
+    # Verify cosign signature on SHA256SUMS BEFORE running sha256sum -c.
+    #
+    # This breaks the circularity of the prior design (where SHA256SUMS and
+    # the bundle came from the same release URL — an attacker who replaced
+    # the bundle could replace SHA256SUMS in lockstep). Cosign's keyless
+    # signature chains to a Fulcio cert tying SHA256SUMS to the release
+    # workflow on a tagged release of this exact repo; without the OIDC
+    # issuer pinning the attacker would need to compromise GitHub Actions
+    # OIDC, not just the release artifacts.
+    #
+    # cosign is hard-required: if the host is missing it, abort.
+    if ! verify_release_signature "$tmp_download"; then
+        preflight_fail "$version" "$from_version" "preflight_failed: cosign_verify" \
+            "Cosign verification of SHA256SUMS FAILED — refusing to install."
+    fi
+    log "Cosign signature on SHA256SUMS verified (release-workflow identity)"
+    bm_log info upgrade "signature verified" "{\"version\": \"$version\"}"
+
+    # Verify checksum.
+    #
+    # SHA256SUMS lines are produced by `sha256sum <file>` and have the
+    # canonical form: `<64-hex-hash>  <filename>` (two spaces, bare filename
+    # — the release workflow takes care to write bare filenames).
+    #
+    # We do NOT pass --ignore-missing: it makes `sha256sum -c` succeed when
+    # the SHA256SUMS file lists zero matching files. An adversary who could
+    # publish a SHA256SUMS without a line for our bundle would then pass
+    # verification trivially. So instead we (a) require that SHA256SUMS
+    # contains a line for the exact bundle filename we just downloaded, and
+    # (b) run the full check.
+    local expected_filename="boxmunge-${version}.tar.gz"
+    if ! grep -q "  ${expected_filename}\$" "${tmp_download}/SHA256SUMS"; then
+        preflight_fail "$version" "$from_version" "preflight_failed: checksum_missing_entry" \
+            "Checksum verification FAILED: SHA256SUMS does not list ${expected_filename}"
+    fi
+    # SHA256SUMS may also list boxmunge-install.sh and other release artefacts
+    # we did not download; restrict the check to just the bundle line.
+    (cd "$tmp_download" && grep "  ${expected_filename}\$" SHA256SUMS | sha256sum -c -) \
+        || preflight_fail "$version" "$from_version" "preflight_failed: checksum_mismatch" \
+            "Checksum verification FAILED"
+
+    # Extract and pip install
+    tar xzf "$tmp_download/boxmunge-${version}.tar.gz" -C "$tmp_download"
+    # Dependencies only from the bundle's hash-pinned requirements (covered by
+    # the signed SHA256SUMS); the package itself with no further resolution,
+    # built by the hash-pinned backend. No pip self-upgrade: one more
+    # unpinned download.
+    local bundle="$tmp_download/boxmunge"
+    [[ -f "$bundle/requirements-tui.txt" && -f "$bundle/requirements-build.txt" ]] \
+        || preflight_fail "$version" "$from_version" "preflight_failed: no_pinned_requirements" \
+            "Bundle has no hash-pinned requirements files; refusing an unpinned install"
+    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --require-hashes \
+        -r "$bundle/requirements-build.txt" -r "$bundle/requirements-tui.txt" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: pip_install_deps" \
+            "Failed to install hash-pinned dependencies from bundle"
+    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --no-deps --no-build-isolation "$bundle" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: pip_install" \
+            "Failed to install boxmunge from bundle"
+    compgen -G "$tmp_download/boxmunge/on-server/*.md" >/dev/null \
+        || preflight_fail "$version" "$from_version" "preflight_failed: bundle_docs" \
+            "Bundle has no on-server/*.md docs"
+    mkdir -p "$(slot_docs "$standby")"
+    cp "$tmp_download/boxmunge/on-server/"*.md "$(slot_docs "$standby")/"
+
+    # 2. PRE-FLIGHT
+    log "Running pre-flight checks..."
+
+    # Pre-flight import test: verify the new venv can import boxmunge and
+    # report a non-empty version. v0.9.0 dropped the stale
+    # `boxmunge.__version__` constant (drift-prone, not actually the source
+    # of truth) — read from `boxmunge.version.get_build_version()` instead,
+    # which has been the canonical accessor since v0.5.
+    "$BOXMUNGE_ROOT/env-$standby/bin/python" -c "from boxmunge.version import get_build_version; print(get_build_version())" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: import" \
+            "Pre-flight FAILED: import test"
+
+    "$BOXMUNGE_ROOT/env-$standby/bin/boxmunge-server" --version >/dev/null 2>&1 \
+        || preflight_fail "$version" "$from_version" "preflight_failed: cli_version" \
+            "Pre-flight FAILED: CLI version check"
+
+    "$BOXMUNGE_ROOT/env-$standby/bin/boxmunge-server" upgrade --dry-run \
+        || preflight_fail "$version" "$from_version" "preflight_failed: dry_run" \
+            "Pre-flight FAILED: dry-run upgrade"
+
+    log "Pre-flight passed"
+
+    # 3. STASH (using active/trusted venv)
+    log "Creating platform stash..."
+    "$(active_venv)/bin/boxmunge-server" stash create || die "Stash creation failed, aborting"
+
+    # 3a. Refresh tree-level templates that aren't shipped in the venv.
+    # Today: the canary project, used by `boxmunge self-test`. Without this,
+    # an auto-updated host has no /opt/boxmunge/canary and self-test errors.
+    # Runs as root; perms aren't a concern. Overwrite any prior dir.
+    if [[ -d "$tmp_download/boxmunge/canary" ]]; then
+        log "Refreshing /opt/boxmunge/canary from bundle..."
+        rm -rf "$BOXMUNGE_ROOT/canary"
+        cp -r "$tmp_download/boxmunge/canary" "$BOXMUNGE_ROOT/canary"
+        chown -R root:root "$BOXMUNGE_ROOT/canary"
+        bm_log info upgrade "canary refreshed" "{\"version\": \"$version\"}"
+    fi
+
+    # 3b. Self-update the upgrade shim itself.
+    # Without this, shim improvements (cosign verify, new install steps,
+    # bug fixes) take effect only on the upgrade AFTER they ship —
+    # because the running shim was the one shipped with the prior version.
+    # The shim runs as root and lives at $BIN_DIR; copy in place atomically.
+    #
+    # Gate on `bash -n` first: if a future release ships a syntactically
+    # broken shim, the install would overwrite the working shim and brick
+    # `boxmunge-upgrade` until install.sh is re-run. The venv install still
+    # happens; the fix in the new shim is just deferred to the next release.
+    local new_shim="$tmp_download/boxmunge/scripts/boxmunge-upgrade"
+    if [[ -f "$new_shim" ]]; then
+        if bash -n "$new_shim" 2>/dev/null; then
+            log "Self-updating upgrade shim from bundle..."
+            install -m 0755 -o root -g root "$new_shim" "$BIN_DIR/boxmunge-upgrade"
+            bm_log info upgrade "shim self-updated" "{\"version\": \"$version\"}"
+        else
+            log "ERROR: new shim has syntax errors; refusing to install. Old shim retained."
+            bm_log error upgrade "shim self-update skipped: bash -n failed" "{\"version\": \"$version\"}"
+        fi
+        # Also refresh any other shims under bin/ if the bundle ships them.
+        # boxmunge-sftp is the SFTP wrapper invoked by sshd (it refuses deploy).
+        # shellcheck disable=SC2043  # one wrapper today; new bin/ wrappers go in this list
+        for shim_name in boxmunge-sftp; do
+            shim_src="$tmp_download/boxmunge/scripts/$shim_name"
+            if [[ -f "$shim_src" ]]; then
+                if bash -n "$shim_src" 2>/dev/null; then
+                    install -m 0755 -o root -g root "$shim_src" "$BIN_DIR/$shim_name"
+                    bm_log info upgrade "wrapper self-updated" "{\"name\": \"$shim_name\", \"version\": \"$version\"}"
+                else
+                    log "ERROR: new $shim_name has syntax errors; refusing to install. Old wrapper retained."
+                    bm_log error upgrade "wrapper self-update skipped: bash -n failed" "{\"name\": \"$shim_name\", \"version\": \"$version\"}"
+                fi
+            fi
+        done
+    fi
+
+    # 3c. System upgrade (install.sh re-run).
+    #
+    # Closes the v0.6.x gap where new system deps (Trivy, new systemd timers,
+    # apt packages) silently required a manual install.sh re-run after every
+    # auto-update. install.sh writes its own sha256 to state/installer.sha256
+    # at the end of every successful run — when the bundled install.sh differs
+    # from the on-disk fingerprint, we re-invoke it BEFORE the slot swap so
+    # system-level dependencies are in place by the time the new venv goes
+    # active. install.sh is hard-gated on `bash -n` for the same reason as
+    # the shim self-update above: a syntactically broken install.sh in a
+    # future release must NOT brick this host.
+    #
+    # On install.sh failure: fail noisily before the swap, blocklist this
+    # version, and exit. The prior venv stays active and the prior shim
+    # stays in place (we already swapped the shim above, but the new shim
+    # is meant to be backwards-compatible with the old layout). Operator
+    # diagnoses, fixes manually, and clears the blocklist.
+    #
+    # Missing-fingerprint case (first upgrade past this feature): treated
+    # as "needs upgrade" — install.sh re-runs, writes the fingerprint, and
+    # subsequent upgrades only re-run when the bundle changes install.sh.
+    local new_install_sh="$tmp_download/boxmunge/install.sh"
+    local installer_hash_file="$BOXMUNGE_ROOT/state/installer.sha256"
+    if [[ -f "$new_install_sh" ]]; then
+        if ! bash -n "$new_install_sh" 2>/dev/null; then
+            bm_log error upgrade "system upgrade skipped: bash -n failed" "{\"version\": \"$version\"}"
+            preflight_fail "$version" "$from_version" "system_upgrade_failed: install_sh_syntax" \
+                "ERROR: bundled install.sh has syntax errors; refusing to run system upgrade" system_upgrade
+        fi
+        local new_hash current_hash
+        new_hash="$(sha256sum "$new_install_sh" | awk '{print $1}')"
+        current_hash="$(cat "$installer_hash_file" 2>/dev/null || echo "")"
+        if [[ "$new_hash" != "$current_hash" ]]; then
+            log "install.sh changed (current=${current_hash:0:8}, new=${new_hash:0:8}); running system upgrade..."
+            bm_log info upgrade "system upgrade started" "{\"new_hash\": \"${new_hash:0:16}\", \"prev_hash\": \"${current_hash:0:16}\"}"
+            local sysup_exit=0
+            bash "$new_install_sh" --upgrade-shim || sysup_exit=$?
+            if [[ "$sysup_exit" -eq 0 ]]; then
+                bm_log info upgrade "system upgrade completed" "{\"hash\": \"${new_hash:0:16}\"}"
+            else
+                bm_log error upgrade "system upgrade failed" "{\"exit_code\": $sysup_exit}"
+                preflight_fail "$version" "$from_version" "system_upgrade_failed: install_sh_exit_${sysup_exit}" \
+                    "ERROR: install.sh failed (exit ${sysup_exit}); aborting upgrade before slot swap" system_upgrade
+            fi
+        else
+            log "install.sh unchanged (${new_hash:0:8}); skipping system upgrade"
+        fi
+    fi
+
+    # 4. SWAP
+    log "Swapping to standby venv (slot $standby)..."
+    swap_to "$standby"
+
+    # 5. APPLY (using new active venv)
+    log "Applying upgrade..."
+    "$(active_venv)/bin/boxmunge-server" upgrade --apply || {
+        do_rollback "$version" "$from_version" "apply" "$prev_slot"
+    }
+
+    # 6. VERIFY
+    log "Running health check..."
+    # Bound the immediate post-swap health check. A wedged docker socket
+    # or stuck subprocess could otherwise hang here indefinitely. Use
+    # --kill-after=10 to escalate SIGTERM -> SIGKILL if the process refuses
+    # to die. Budget is shorter than probation's 180s because this is the
+    # post-swap quick check; probation does the long-running validation.
+    local health_exit=0
+    timeout --kill-after=10 60 "$(active_venv)/bin/boxmunge-server" health --json >/dev/null 2>&1 || health_exit=$?
+    if [[ "$health_exit" -eq 2 ]]; then
+        do_rollback "$version" "$from_version" "health_immediate" "$prev_slot"
+    fi
+
+    # 7. ENTER PROBATION
+    log "Entering probation for $version..."
+    BM_VERSION="$version" BM_PREV_SLOT="$prev_slot" "$(active_venv)/bin/python" -c "
+import os
+from boxmunge.upgrade_state import write_probation
+from boxmunge.paths import BoxPaths
+write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT'], hours=6)
+"
+    bm_log info upgrade "probation entered" "{\"version\": \"$version\", \"prev_slot\": \"$prev_slot\", \"hours\": 6}"
+    refresh_docs_for_slot "$ACTIVE_SLOT"
+
+    send_notification "boxmunge security update applied" "Updated to $version (probation: 6h)"
+    log "Upgrade to $version complete, probation started"
+    exit 0
+}
+
+cmd_check_probation() {
+    load_active_slot
+    acquire_lock skip  # an upgrade is in progress; retry on the next health-timer fire
+
+    # Orphan venv cleanup: if there's no probation file but the inactive slot
+    # has a venv, it's leftover from a deploy-context probation promotion
+    # (the deploy user cleared probation.json but couldn't rmtree root-owned dirs).
+    # Clean it up here in root context.
+    local inactive
+    inactive="$(standby_slot)"
+    if [[ ! -e "$PROBATION_FILE" && ! -L "$PROBATION_FILE" && -d "$BOXMUNGE_ROOT/env-$inactive" ]]; then
+        log "Cleaning up orphan venv in inactive slot $inactive"
+        rm -rf "$BOXMUNGE_ROOT/env-$inactive"
+    fi
+
+    [[ -e "$PROBATION_FILE" || -L "$PROBATION_FILE" ]] || exit 0
+
+    read_probation
+    local version="$PROB_VERSION" prev_slot="$PROB_PREV_SLOT"
+
+    if [[ "$PROB_EXPIRED" == "yes" ]]; then
+        log "Probation expired for $version — promoting"
+        rm -rf "$BOXMUNGE_ROOT/env-$prev_slot"
+        rm -f "$PROBATION_FILE"
+        log "Version $version promoted"
+        bm_log info upgrade "probation passed" "{\"version\": \"$version\"}"
+        exit 0
+    fi
+
+    # Probation health check semantics:
+    #   exit 2     -> CRITICAL: real health regression -> rollback
+    #   exit 124+  -> OPERATIONAL: timed out / killed (e.g. multiple sequential
+    #                 docker subprocess timeouts on a busy host can exceed our
+    #                 budget without any platform regression). Skip rollback;
+    #                 the next health-timer fire will retry. do_rollback is
+    #                 idempotent in the sense that a real regression will be
+    #                 caught on the next tick.
+    #   else        -> healthy (or warnings only) -> continue probation
+    # --kill-after=10 escalates SIGTERM -> SIGKILL if the health subprocess
+    # ignores the initial SIGTERM (e.g. wedged docker socket). Without it,
+    # `timeout 180` waits indefinitely for an unresponsive process and
+    # successive timer fires stack stuck health invocations.
+    local health_exit=0
+    timeout --kill-after=10 180 "$(active_venv)/bin/boxmunge-server" health --json >/dev/null 2>&1 || health_exit=$?
+
+    if [[ "$health_exit" -eq 2 ]]; then
+        local from_version
+        from_version="$("$BOXMUNGE_ROOT/env-$prev_slot/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")"
+        log "CRITICAL health failure during probation for $version — rolling back"
+        do_rollback "$version" "$from_version" "health_probation" "$prev_slot"
+    elif [[ "$health_exit" -ge 124 ]]; then
+        log "WARN: probation health check timed out (exit $health_exit) for $version — skipping rollback, next health-timer will retry"
+    fi
+
+    exit 0
+}
+
+cmd_auto() {
+    local result action version msg
+    load_active_slot
+    acquire_lock  # before discovery, and held through the upgrade itself
+    result="$("$(active_venv)/bin/boxmunge-server" _discover-update --json 2>/dev/null)" || \
+        die "Discovery failed (boxmunge-server _discover-update returned non-zero)"
+
+    action="$(echo "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("action",""))')"
+
+    case "$action" in
+        upgrade)
+            version="$(echo "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+            log "Manual upgrade: discovered $(printable "$version")"
+            upgrade_to "$version" run
+            ;;
+        up_to_date)
+            log "Already on latest version"
+            exit 0
+            ;;
+        blocklisted)
+            log "Latest version is blocklisted on this box; nothing to do"
+            exit 0
+            ;;
+        error)
+            msg="$(echo "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("message","(no message)"))')"
+            die "Discovery error: $msg"
+            ;;
+        *)
+            die "Unknown action from _discover-update: $action"
+            ;;
+    esac
+}
+
+# target <version>: reachable by deploy through sudo, so exactly one argument
+# (sudo's `target *` would otherwise let extra words through).
+cmd_target() {
+    [[ $# -eq 1 ]] || die "Usage: boxmunge-upgrade target <version>"
+    require_semver "$1" "requested version"
+    log "Targeted upgrade: $1"
+    upgrade_to "$1" target
+}
+
+cmd_force_target() {
+    [[ $# -eq 1 ]] || die "Usage: boxmunge-upgrade force-target <version>"
+    require_semver "$1" "requested version"
+    log "Operator-forced upgrade: $1"
+    upgrade_to "$1" force
+}
+
+cmd_clear_blocklist() {
+    local version="${1:?Usage: boxmunge-upgrade clear-blocklist <version>}"
+    require_semver "$version" "requested version"
+    load_active_slot
+    BM_VERSION="$version" "$(active_venv)/bin/python" -c "
+import os
+from boxmunge.upgrade_state import remove_from_blocklist
+from boxmunge.paths import BoxPaths
+remove_from_blocklist(BoxPaths(), os.environ['BM_VERSION'])
+"
+    log "Cleared $version from blocklist"
+}
+
+case "${1:-}" in
+    run)             shift; cmd_run "$@" ;;
+    auto)            [[ $# -eq 1 ]] || die "Usage: boxmunge-upgrade auto"; cmd_auto ;;
+    target)          shift; cmd_target "$@" ;;
+    force-target)    shift; cmd_force_target "$@" ;;
+    check-probation) cmd_check_probation ;;
+    clear-blocklist) shift; cmd_clear_blocklist "$@" ;;
+    install-sudoers) cmd_install_sudoers ;;
+    install-docs)    shift; cmd_install_docs "$@" ;;
+    *)               die "Usage: boxmunge-upgrade {run|auto|target|force-target|check-probation|clear-blocklist|install-sudoers|install-docs} [args]" ;;
+esac

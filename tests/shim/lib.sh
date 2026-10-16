@@ -97,6 +97,11 @@ mock_server() {
     chmod +x "$BOXMUNGE_ROOT/env-$1/bin/boxmunge-server"
 }
 
+# SOON: an expiry inside a fresh probation's length. The shim treats one
+# further out than that as forged, i.e. already expired.
+# shellcheck disable=SC2034  # used by the sourcing tests
+SOON="$(python3 -c 'from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) + timedelta(hours=1)).isoformat())')"
+
 # write_probation <version> <previous_slot> <expires_at>
 write_probation() {
     printf '{"version": "%s", "previous_slot": "%s", "started_at": "2026-01-01T00:00:00+00:00", "expires_at": "%s"}\n' \

@@ -95,10 +95,13 @@ def test_bad_tags_are_refused(tmp_path: Path, fake_remote, tag: str) -> None:
 
 
 def test_pins_match_the_server_upgrade_shim() -> None:
-    shim = Path(__file__).resolve().parents[3] / "scripts" / "boxmunge-upgrade"
+    scripts = Path(__file__).resolve().parents[3] / "scripts"
+    shim = scripts / "boxmunge-upgrade"
     if not shim.is_file():
         pytest.skip("server source tree not present (sdist)")
-    text = shim.read_text()
+    # The shim's source is split into libraries the bundle build inlines.
+    parts = [shim, *sorted((scripts / "boxmunge-upgrade.d").glob("*.sh"))]
+    text = "\n".join(p.read_text() for p in parts)
     regexp = re.search(r"^COSIGN_CERT_IDENTITY_REGEXP='([^']+)'", text, re.M).group(1)
     issuer = re.search(r"^COSIGN_OIDC_ISSUER='([^']+)'", text, re.M).group(1)
     assert regexp == COSIGN_CERT_IDENTITY_REGEXP

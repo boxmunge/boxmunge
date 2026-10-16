@@ -46,6 +46,15 @@ if [[ "$(id -u)" -ne 0 ]]; then
     exit 1
 fi
 
+# The upgrade shim a release ships is built self-contained (scripts/build-shim.py
+# via `make bundle`). The unbuilt source shim needs scripts/boxmunge-upgrade.d/
+# beside it and would refuse every command once installed into bin/.
+if grep -q '^# >>> boxmunge-upgrade.d:' "${SCRIPT_DIR}/scripts/boxmunge-upgrade"; then
+    echo "ERROR: ${SCRIPT_DIR}/scripts/boxmunge-upgrade is the unbuilt source shim." >&2
+    echo "       Install from a release bundle (boxmunge-install.sh, or \`make bundle\`), not a source checkout." >&2
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # Docker Compose version.
 #
@@ -494,9 +503,14 @@ fi
 
 # ---------------------------------------------------------------------------
 # Install the boxmunge-upgrade shim (orchestrates auto-updates)
+#
+# The bundle's shim is built self-contained (scripts/build-shim.py). A
+# pre-release build of this change installed its libraries separately into
+# bin/boxmunge-upgrade.d/; nothing reads that any more.
 # ---------------------------------------------------------------------------
 cp "${SCRIPT_DIR}/scripts/boxmunge-upgrade" "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade"
 chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade"
+rm -rf "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade.d"
 
 # Symlink into /usr/local/bin so boxmunge works in non-interactive SSH sessions
 ln -sf "${BOXMUNGE_ROOT}/bin/boxmunge" /usr/local/bin/boxmunge

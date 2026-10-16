@@ -6,7 +6,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Shared stand-ins for flock/timeout/visudo on hosts that lack them.
 # shellcheck source=tests/shim/lib.sh
 source "$SCRIPT_DIR/shim/lib.sh"
-SHIM="$SCRIPT_DIR/../scripts/boxmunge-upgrade"
 
 PASS=0
 FAIL=0
@@ -55,8 +54,12 @@ if command -v flock >/dev/null 2>&1; then
     BOXMUNGE_ROOT="$(mktemp -d)"
     export BOXMUNGE_ROOT
     mkdir -p "$BOXMUNGE_ROOT/upgrade-state"
-    # Active slot is "a" (default), so standby is "b"
+    # Active slot is "a" (default), so standby is "b". The live slot must be
+    # a working venv, or the shim refuses to delete the other one.
     echo "a" > "$BOXMUNGE_ROOT/upgrade-state/active-slot"
+    mkdir -p "$BOXMUNGE_ROOT/env-a/bin"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$BOXMUNGE_ROOT/env-a/bin/boxmunge-server"
+    chmod +x "$BOXMUNGE_ROOT/env-a/bin/boxmunge-server"
     mkdir -p "$BOXMUNGE_ROOT/env-b/bin"  # simulate orphan standby venv
     assert_exit 0 "check-probation cleans up orphan standby venv" bash "$SHIM" check-probation
     if [[ -d "$BOXMUNGE_ROOT/env-b" ]]; then
