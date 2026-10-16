@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Release class gate for .github/workflows/release.yml.
 
-Two subcommands, both exit 1 with an ERROR: line on any violation:
+Three subcommands, each exits 1 with an ERROR: line on any violation:
 
   check  --tag vX.Y.Z --github-output FILE --notes-out FILE
          [--releases PATH] [--pyproject PATH]
@@ -21,6 +21,14 @@ Two subcommands, both exit 1 with an ERROR: line on any violation:
       and decide whether it is breaking, by the markers in its title and
       notes, so the draft must read exactly as CLASS and BREAKING. This
       catches auto-generated notes that quote a PR title containing a marker.
+
+  audit --github-releases FILE [--releases PATH]
+      Maintenance check, run by hand: FILE is
+      `gh api --paginate --slurp 'repos/boxmunge/boxmunge/releases?per_page=100'`.
+      Every release in releases.json must be published on GitHub with text
+      that reads as its class and breaking flag, so GitHub-fallback boxes
+      select exactly as the version-check service does. Edit the title of
+      any release it reports.
 
 Stdlib only, so it runs before any dependency is installed.
 """
@@ -150,6 +158,39 @@ def verify_release(name: str, body: str, expected: str, expected_breaking: bool)
         raise ReleaseLintError(f"release title {name!r} lacks {BREAKING_MARKER}")
 
 
+def audit_releases(releases_path: Path, github: list[dict]) -> None:
+    """Raise listing every releases.json entry whose published GitHub release
+    is missing or reads differently from its entry."""
+    catalog = _catalog()
+    try:
+        releases = catalog.load_releases(Path(releases_path))
+    except catalog.ReleaseCatalogError as e:
+        raise ReleaseLintError(str(e)) from e
+    published = {r.get("tag_name"): r for r in github
+                 if not r.get("draft") and not r.get("prerelease")}
+    problems = []
+    for entry in releases:
+        tag = f"v{entry['version']}"
+        release = published.get(tag)
+        if release is None:
+            problems.append(f"{tag}: no published GitHub release")
+            continue
+        name, body = release.get("name") or "", release.get("body") or ""
+        found = classify_release(name, body)
+        if found != entry["class"]:
+            problems.append(f"{tag}: GitHub text reads as {found}, releases.json says "
+                            f"{entry['class']}")
+        if is_breaking(name, body) != entry["breaking"]:
+            want = "add" if entry["breaking"] else "remove"
+            problems.append(f"{tag}: GitHub text {'lacks' if entry['breaking'] else 'has'} "
+                            f"{BREAKING_MARKER}, releases.json says breaking: "
+                            f"{str(entry['breaking']).lower()} ({want} it)")
+    if problems:
+        raise ReleaseLintError(
+            f"{len(problems)} release(s) on GitHub disagree with releases.json:\n  "
+            + "\n  ".join(problems))
+
+
 def _cmd_check(args: argparse.Namespace) -> None:
     plan = plan_release(args.tag, Path(args.releases), Path(args.pyproject))
     Path(args.notes_out).write_text(plan.notes)
@@ -168,6 +209,18 @@ def _cmd_verify(args: argparse.Namespace) -> None:
     print(f"release text classifies as {args.release_class}, breaking {breaking}")
 
 
+def _cmd_audit(args: argparse.Namespace) -> None:
+    github = json.loads(Path(args.github_releases).read_text())
+    if not isinstance(github, list):
+        raise ReleaseLintError(f"{args.github_releases}: expected a JSON list of releases")
+    if github and all(isinstance(page, list) for page in github):
+        github = [r for page in github for r in page]  # gh api --slurp pages
+    if not all(isinstance(r, dict) for r in github):
+        raise ReleaseLintError(f"{args.github_releases}: expected release objects")
+    audit_releases(Path(args.releases), github)
+    print(f"every release in {args.releases} reads the same on GitHub")
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -182,9 +235,12 @@ def main(argv: list[str]) -> int:
     verify.add_argument("--class", dest="release_class", required=True,
                         choices=("feature", "breakfix", "security"))
     verify.add_argument("--breaking", required=True, choices=("true", "false"))
+    audit = sub.add_parser("audit")
+    audit.add_argument("--github-releases", required=True)
+    audit.add_argument("--releases", default=str(RELEASES_JSON))
     args = parser.parse_args(argv)
     try:
-        {"check": _cmd_check, "verify": _cmd_verify}[args.command](args)
+        {"check": _cmd_check, "verify": _cmd_verify, "audit": _cmd_audit}[args.command](args)
     except ReleaseLintError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

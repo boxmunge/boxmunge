@@ -349,3 +349,50 @@ class TestWorkflowPrivileges:
                       if "action-gh-release" in (s.get("uses") or ""))
         assert sign < create
         assert steps[create]["with"]["fail_on_unmatched_files"] is True
+
+
+def _gh(version: str, name: str = "", body: str = "", **extra) -> dict:
+    return {"tag_name": f"v{version}", "name": name or f"v{version}", "body": body,
+            "draft": False, "prerelease": False, **extra}
+
+
+class TestAudit:
+    """Published GitHub release text must read as releases.json says, or
+    GitHub-fallback boxes would select differently from the service."""
+
+    def test_matching_releases_pass(self, tmp_path):
+        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", "security", True),
+                                                ("0.11.0", "feature")])
+        lint.audit_releases(files["releases"], [
+            _gh("0.12.0", "v0.12.0 [security] [breaking]"), _gh("0.11.0")])
+
+    def test_reports_every_mismatch(self, tmp_path):
+        files = _write_tree(tmp_path, "0.12.1", [
+            ("0.12.1", "breakfix"), ("0.12.0", "feature", True), ("0.11.0", "feature")])
+        with pytest.raises(lint.ReleaseLintError) as err:
+            lint.audit_releases(files["releases"], [
+                _gh("0.12.1", "v0.12.1"), _gh("0.12.0", "v0.12.0")])
+        message = str(err.value)
+        assert "v0.12.1" in message and "breakfix" in message
+        assert "v0.12.0" in message and "[breaking]" in message
+        assert "v0.11.0" in message and "no published" in message
+
+    def test_drafts_do_not_count_as_published(self, tmp_path):
+        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", "feature")])
+        with pytest.raises(lint.ReleaseLintError, match="no published"):
+            lint.audit_releases(files["releases"], [_gh("0.12.0", draft=True)])
+
+    def test_cli_accepts_slurped_pages(self, tmp_path):
+        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", "feature"), ("0.11.0", "feature")])
+        gh = tmp_path / "gh.json"
+        gh.write_text(json.dumps([[_gh("0.12.0")], [_gh("0.11.0")]]))
+        proc = _run("audit", "--github-releases", str(gh), "--releases", str(files["releases"]))
+        assert proc.returncode == 0, proc.stderr
+
+    def test_cli_failure_is_loud(self, tmp_path):
+        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", "feature", True)])
+        gh = tmp_path / "gh.json"
+        gh.write_text(json.dumps([_gh("0.12.0")]))
+        proc = _run("audit", "--github-releases", str(gh), "--releases", str(files["releases"]))
+        assert proc.returncode == 1
+        assert proc.stderr.startswith("ERROR:")
