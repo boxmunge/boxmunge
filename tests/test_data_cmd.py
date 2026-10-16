@@ -198,3 +198,17 @@ def test_a_vanished_source_volume_is_refused(paths, monkeypatch) -> None:
     with pytest.raises(data_cmd.DataError, match="does not exist"):
         data_cmd.adopt_locked(paths, "myapp", "db", DEST, "pgdata")
     assert box.calls == []
+
+
+def test_a_failed_stop_removes_the_created_target(paths, monkeypatch) -> None:
+    box = _Box(monkeypatch)
+
+    def run(cmd, **kw):
+        box.calls.append(cmd)
+        if cmd[:2] == ["docker", "stop"]:
+            raise data_cmd.DockerError("container myapp-db-1 did not stop")
+    monkeypatch.setattr(data_cmd, "_run", run)
+    with pytest.raises(data_cmd.DockerError, match="did not stop"):
+        data_cmd.adopt_locked(paths, "myapp", "db", DEST, "pgdata")
+    assert ["docker", "volume", "rm", "myapp_pgdata"] in box.calls
+    assert box.calls[-1] == ("start", ["myapp-db-1"])

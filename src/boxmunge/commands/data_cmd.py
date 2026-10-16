@@ -90,14 +90,15 @@ def _start_again(paths: BoxPaths, project: str, service: str, stopped: list[str]
 
 
 def _remove_partial(target: str) -> None:
-    """A half-filled target carries the labels that make the next deploy
-    adopt it without a word; it was created by adopt or verified empty, so
-    it goes."""
+    """The adopt failed before the copy completed. The target, created by
+    adopt or verified empty, may hold part of the copy under the labels that
+    make the next deploy adopt it without a word, so it goes."""
     try:
         _run(["docker", "volume", "rm", target], capture=True)
     except DockerError as e:
-        print(f"  WARN: the copy failed and {target} holds part of it, but removing it "
-              f"failed: {e}. Remove it before deploying: docker volume rm {target}",
+        print(f"  WARN: the adopt failed and {target} may hold part of the copy, but "
+              f"removing it failed: {e}. Remove it before deploying: docker volume rm "
+              f"{target}",
               file=sys.stderr)
 
 
@@ -116,11 +117,11 @@ def adopt_locked(paths: BoxPaths, project: str, service: str, path: str, name: s
         _run(["docker", "volume", "create", *compose_volume_labels(project, name), target],
              capture=True)
     try:
-        if stopped:
-            print(f"  Stopping {', '.join(stopped)} for the copy...")
-            _run(["docker", "stop", "-t", str(_STOP_TIMEOUT), *stopped], capture=True)
-        print(f"  Copying {path} ({source[:12]}) into {target}...")
         try:
+            if stopped:
+                print(f"  Stopping {', '.join(stopped)} for the copy...")
+                _run(["docker", "stop", "-t", str(_STOP_TIMEOUT), *stopped], capture=True)
+            print(f"  Copying {path} ({source[:12]}) into {target}...")
             copy_into_volume(f"{project}-adopt", source, target)
         except BaseException:
             _remove_partial(target)
