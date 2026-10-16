@@ -100,7 +100,11 @@ def _remove(project_name: str, path: Path) -> None:
     """Remove a staging copy. Its contents were written by containers, often
     as other users, so a throwaway container empties a directory first."""
     if path.is_dir() and not path.is_symlink():
-        if holds_data(path):
+        try:
+            occupied = holds_data(path)
+        except PermissionError:
+            occupied = True  # a copy of production data, owned by a container user
+        if occupied:
             run_throwaway(project_name, ["-v", f"{path}:/x"], _EMPTY)
         path.rmdir()
     elif os.path.lexists(path):

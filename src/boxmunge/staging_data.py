@@ -25,6 +25,7 @@ from boxmunge.release import project_data_dirs
 from boxmunge.staging_copy_plan import (
     CopyPlan, StagingDataError, Store, copy_sources, plan_copy, stores,
 )
+from boxmunge.staging_placeholders import make_placeholder
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -178,20 +179,8 @@ def prepare_destinations(project: str, project_dir: Path, plan: CopyPlan) -> Non
                 continue
             _remove_wrong_type(project, project_dir, dest, top, rest,
                                "a file" if is_file else "a directory")
-        if not rest:
-            # The entry itself, directly in the project dir, which the
-            # deploy user owns: made here, never auto-created by Docker.
-            if is_file:
-                os.close(os.open(dest.ref, os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                                 | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600))
-            else:
-                os.mkdir(dest.ref)
-            continue
-        # Inside the entry's -staging directory, which may belong to root.
-        parent = os.path.dirname(rest)
-        script = (f"mkdir -p /x/{shlex.quote(parent or '.')} && touch /x/{shlex.quote(rest)}"
-                  if is_file else f"mkdir -p /x/{shlex.quote(rest)}")
-        run_throwaway(project, ["-v", f"{project_dir / top}:/x"], script)
+        make_placeholder(project, project_dir, os.path.relpath(dest.ref, project_dir),
+                         is_file)
 
 
 def _running(compose_project: str) -> list[str]:
