@@ -1100,6 +1100,7 @@ the exit code. The MCP `health` tool runs the same checks.
 | `alerts` | Pushover is not configured, so nothing on this box can alert you | see [Alerts not configured](#alerts-not-configured) |
 | `container-updates` | the daily container update failed for a target (also when a service it updates has no container, so its running image is unknown), or has not run for 48 hours | `log --component container-update`; the entry ends with the command's own error output |
 | `platform-updates` | a security or break-fix release cannot be installed automatically | see [Upgrading the Platform](#upgrading-the-platform) |
+| `docker-userns` | Docker does not remap user namespaces yet (warning); or the box records a remap that the daemon, `daemon.json` or `/etc/subuid`/`/etc/subgid` disagree with (error, alerted once a day) | see [User-namespace remapping](#user-namespace-remapping) |
 | `security-profiles` | a service runs with `profile: off` | review the reason in its manifest |
 | `cve-scan` | a deployed project has not been scanned for 36 hours, was never scanned, or its last scan was incomplete | `security scan <project>`; see `agent-help cve` |
 | `ufw`, `crowdsec`, `aide`, `auditd`, `sysctl` | a host hardening component is off or misconfigured | `doctor`, then the supervisor user |
@@ -1108,6 +1109,29 @@ the exit code. The MCP `health` tool runs the same checks.
 
 Every new check warns rather than errors. `health` exiting 2 during the probation after a platform
 upgrade rolls the upgrade back, so only a broken platform reports an error.
+
+### User-namespace remapping
+
+When Docker remaps user namespaces, container uid N is host uid S+N, where S is the start of the
+`boxmunge-remap` user's one range of 65536 ids in `/etc/subuid` and `/etc/subgid`. A container's
+root is then an unprivileged host user. The box records S in `/opt/boxmunge/config/boxmunge.yml`:
+
+```yaml
+userns:
+  name: boxmunge-remap
+  offset: 1048576
+```
+
+Only root writes this record. `docker-userns` (in `health` and `doctor`) checks it against every
+other source on each run: `/etc/subuid` and `/etc/subgid` (exactly one range of 65536 at S),
+`userns-remap` in `/etc/docker/daemon.json` (`boxmunge-remap:boxmunge-remap`), and the running
+daemon (remapped, `overlay2` storage, data root ending in `/S.S`). A box that has not migrated
+warns. Any disagreement is an error naming each source, and the compose validator refuses to deploy
+until it is fixed, because it cannot tell which rules apply. The usual cause is a daemon restarted
+with another `daemon.json`; restore the file and restart Docker as the supervisor user.
+
+On a remapped box, `privileged: true` and `pid`, `network_mode` or `ipc` set to `host` are refused
+even under `profile: "off"`: the remapped daemon cannot start such a container.
 
 ### Alerts not configured
 

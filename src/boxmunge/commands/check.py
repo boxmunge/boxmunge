@@ -308,10 +308,14 @@ def run_check_all(paths: BoxPaths, *, read_only: bool) -> int:
     failed: list[str] = []
     if not read_only and not _host_config_usable(paths):
         worst = 1
+    if not read_only:
+        from boxmunge.health_checks.userns import alert_docker_userns
+        if alert_docker_userns(paths).status == "error":
+            worst = 2
     projects_dir = paths.projects
     if not projects_dir.exists():
         print("No projects directory.")
-        return 0
+        return worst
 
     projects = sorted(
         p.name for p in projects_dir.iterdir()
