@@ -22,9 +22,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from boxmunge.data_dirs import ReleaseStateError
-from boxmunge.fileutil import atomic_write_text, discard_dir, fsync_dir
+from boxmunge.fileutil import atomic_write_text, fsync_dir
 from boxmunge.release import live_meta_text
-from boxmunge.release_keep import kept_previous_text, superseded_paths
+from boxmunge.release_keep import discard_superseded, kept_previous_text, superseded_paths
 from boxmunge.ulid import generate_ulid
 
 if TYPE_CHECKING:
@@ -150,10 +150,7 @@ def advance(paths: BoxPaths, project: str, txn: InstallTxn, phase: str) -> Insta
 
 def close_txn(paths: BoxPaths, project: str, txn: InstallTxn) -> None:
     """The install is over: drop the superseded previous release and the record."""
-    sup_dir, sup_meta = superseded_paths(paths, project)
-    discard_dir(sup_dir)
-    if os.path.lexists(sup_meta):
-        sup_meta.unlink()
+    discard_superseded(paths, project)
     path = txn_path(paths, project)
     if os.path.lexists(path):
         path.unlink()
