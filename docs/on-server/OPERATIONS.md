@@ -1231,7 +1231,9 @@ How an upgrade is applied and undone:
    `manifest.yml` and `compose.yml` links into `repo/` are left out, and a restore never
    touches them (it skips, with a log line, any link an older stash holds). Any other symlink
    among these files stops the upgrade before anything changes, naming each link: replace it
-   with the file it points to, or remove it, and retry.
+   with the file it points to, or remove it, and retry. A stash that fails, for this or any
+   reason, is logged as an error and sends a local alert; the standby venv is dropped and the
+   release is not blocklisted, so auto-update retries it once the box is fixed.
 3. The venvs swap and `upgrade --apply` migrates manifests, regenerates every project's Caddy
    site and compose overlay, reloads Caddy and restarts projects. A bundle project's manifest
    is rewritten at the new schema. A git project's is not: its `manifest.yml` links into

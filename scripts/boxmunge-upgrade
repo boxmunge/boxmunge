@@ -116,6 +116,22 @@ dependency_install_failed() {
     exit 1
 }
 
+# stash_failed <version> <output>: the platform stash was refused (a symlink
+# it cannot hold) or failed (a full disk) before anything changed. That is the
+# box's doing, not the release's, so the version is not blocklisted or
+# reported; the standby is dropped and the operator alerted, so an unattended
+# auto-update stopping here every run is seen.
+stash_failed() {
+    local version="$1" output="$2"
+    log "Stash creation failed, aborting; $version not blocklisted: $output"
+    remove_slot "$(standby_slot)"
+    bm_log error upgrade "upgrade to $version aborted before any change: stash creation failed: $output" \
+        "{\"version\": \"$version\"}"
+    send_notification "boxmunge upgrade failed" \
+        "The platform stash failed, so the upgrade to $version stopped before changing anything (not blocklisted; auto-update will retry it). Fix this and retry: $output"
+    exit 1
+}
+
 TMP_DOWNLOAD=""
 cleanup_download() { [[ -z "$TMP_DOWNLOAD" ]] || rm -rf "$TMP_DOWNLOAD"; }
 
@@ -269,7 +285,10 @@ upgrade_to() {
 
     # 3. STASH (using active/trusted venv)
     log "Creating platform stash..."
-    "$(active_venv)/bin/boxmunge-server" stash create || die "Stash creation failed, aborting"
+    local stash_out
+    stash_out="$("$(active_venv)/bin/boxmunge-server" stash create 2>&1)" \
+        || stash_failed "$version" "$stash_out"
+    log "$stash_out"
 
     # 3a. Refresh tree-level templates that aren't shipped in the venv.
     # Today: the canary project, used by `boxmunge self-test`. Without this,
