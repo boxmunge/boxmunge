@@ -887,6 +887,10 @@ does not page every run); the refusal is logged every time:
 A socket or FIFO an application keeps in a data directory is an allowed
 bind source. An in-project symlink used as a bind source is refused
 (fail-closed, since a container could repoint it); mount the real path.
+A control file that is a symlink staying inside the project (a git
+project's `compose.yml` and `manifest.yml` link into `repo/`) is hashed
+through its target, so repointing or rewriting it is caught; a control
+file linking outside the project is refused.
 
 ---
 

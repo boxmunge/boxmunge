@@ -138,8 +138,11 @@ def control_hashes(project_dir: Path, read_files: Iterable[Path]) -> dict[str, s
     project-relative path: the control files (compose, manifest, env files,
     the generated overlays) and the compose/include/extends/env/label files
     `read_files` names. An absent tracked file is `None`, so one created
-    after deploy is a mismatch. A control file replaced by a symlink is
-    refused here, since it cannot be hashed without following it."""
+    after deploy is a mismatch. A control file that is a symlink (a git
+    project's compose.yml and manifest.yml link into repo/) is hashed
+    through its target, together with the target's path, as long as the
+    fully resolved target stays inside the project; a link out of it is
+    refused."""
     hashes: dict[str, str | None] = {}
     candidates: dict[str, Path] = {e: project_dir / e for e in _CONTROL_FILES}
     for path in read_files:
@@ -148,21 +151,34 @@ def control_hashes(project_dir: Path, read_files: Iterable[Path]) -> dict[str, s
         except BindSourceError:
             continue  # outside the project; the reference walk already refused it
     for rel in sorted(candidates):
-        hashes[rel] = _hash_file(candidates[rel], rel)
+        hashes[rel] = _hash_file(project_dir, candidates[rel], rel)
     return hashes
 
 
-def _hash_file(path: Path, rel: str) -> str | None:
+def _hash_file(project_dir: Path, path: Path, rel: str) -> str | None:
     try:
-        fd = open_regular_nofollow(path, os.O_RDONLY)
+        st = os.lstat(path)
     except FileNotFoundError:
         return None
-    except OSError as e:
-        raise BindSourceError(
-            f"control file {rel} cannot be read as a regular file ({e}); a "
-            f"container may have replaced it with a symlink or special file") from e
+    h = hashlib.sha256()
+    if stat.S_ISLNK(st.st_mode):
+        root = os.path.realpath(project_dir)
+        real = os.path.realpath(path)
+        if real == root or not real.startswith(root + os.sep):
+            raise BindSourceError(
+                f"control file {rel} is a symlink that resolves to {real}, outside "
+                f"the project directory; boxmunge only follows links that stay inside it")
+        target = os.path.relpath(real, root)
+        h.update(b"link:" + target.encode() + b"\0")
+        fd = _open_in_project(root, target, rel)
+    else:
+        try:
+            fd = open_regular_nofollow(path, os.O_RDONLY)
+        except OSError as e:
+            raise BindSourceError(
+                f"control file {rel} cannot be read as a regular file ({e}); a "
+                f"container may have replaced it with a special file") from e
     try:
-        h = hashlib.sha256()
         with os.fdopen(fd, "rb") as f:
             for chunk in iter(lambda: f.read(1 << 16), b""):
                 h.update(chunk)
@@ -180,8 +196,33 @@ def refresh_overlay_hash(project_dir: Path, path: Path) -> None:
     if not path.exists():
         return
     doc = read_record(path)
-    doc["control"][OVERLAY] = _hash_file(project_dir / OVERLAY, OVERLAY)
+    doc["control"][OVERLAY] = _hash_file(project_dir, project_dir / OVERLAY, OVERLAY)
     atomic_write_text(path, json.dumps(doc, indent=2) + "\n")
+def _open_in_project(root: str, target: str, rel: str) -> int:
+    """Open a control file's resolved target, one component at a time from
+    the project root with O_NOFOLLOW, so a link swapped in after the
+    realpath cannot redirect the read. The target must be a plain regular
+    file."""
+    parts = target.split(os.sep)
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts[:-1]:
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        out = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+    except OSError as e:
+        raise BindSourceError(
+            f"control file {rel}: its link target {target} cannot be opened "
+            f"without following a further link ({e})") from e
+    finally:
+        os.close(fd)
+    st = os.fstat(out)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        os.close(out)
+        raise BindSourceError(
+            f"control file {rel}: its link target {target} is not a plain regular file")
+    return out
 
 
 def read_record(path: Path) -> dict[str, Any]:

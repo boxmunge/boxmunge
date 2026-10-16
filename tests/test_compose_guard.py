@@ -335,3 +335,75 @@ def test_secrets_set_between_deploys_does_not_refuse_a_start(box) -> None:
     (project_dir / "secrets.env").write_text("A=2\n")
     _restart(paths)
     assert up.call_count == 2 and sent == []
+# ---------------------------------------------------------------------------
+# Git projects: compose.yml and manifest.yml are symlinks into repo/
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def git_box(box):
+    """The box's project turned into a git project: its compose.yml and
+    manifest.yml live in repo/ and are linked from the project root, as
+    add-git-project leaves them."""
+    paths, project_dir, up, start, sent = box
+    repo = project_dir / "repo"
+    repo.mkdir()
+    for name in ("compose.yml", "manifest.yml"):
+        (project_dir / name).rename(repo / name)
+        os.symlink(repo / name, project_dir / name)
+    return box
+
+
+def test_git_project_records_and_restarts_through_its_links(git_box) -> None:
+    paths, project_dir, up, _, sent = git_box
+    _deploy(paths)
+    record = json.loads(paths.project_bind_record(NAME).read_text())
+    assert record["control"]["compose.yml"] and record["control"]["manifest.yml"]
+    _restart(paths)
+    assert up.call_count == 2
+    assert sent == []
+
+
+def test_git_project_link_target_rewritten_is_refused(git_box) -> None:
+    paths, project_dir, *_ = git_box
+    _deploy(paths)
+    manifest = yaml.safe_load((project_dir / "repo" / "manifest.yml").read_text())
+    manifest["security"] = {"profile": "off", "reason": "attacker-supplied"}
+    (project_dir / "repo" / "manifest.yml").write_text(yaml.safe_dump(manifest))
+    _refused(git_box, "control file manifest.yml changed")
+
+
+def test_git_project_link_repointed_inside_the_project_is_refused(git_box) -> None:
+    paths, project_dir, *_ = git_box
+    _deploy(paths)
+    copy = project_dir / "repo" / "other.yml"
+    copy.write_text((project_dir / "repo" / "compose.yml").read_text())
+    (project_dir / "compose.yml").unlink()
+    os.symlink(copy, project_dir / "compose.yml")
+    _refused(git_box, "control file compose.yml changed")
+
+
+def test_control_file_linking_out_of_the_project_is_refused(box, tmp_path) -> None:
+    paths, project_dir, *_ = box
+    _deploy(paths)
+    outside = tmp_path / "elsewhere.env"
+    outside.write_text("A=1\n")
+    os.symlink(outside, project_dir / ".env")
+    _refused(box, "resolves to .* outside the project directory")
+
+
+def test_refusal_state_is_outside_every_project(box) -> None:
+    """The alert-dedupe state lives under state/, which no bind mount may
+    reach: validation refuses any source in the boxmunge root outside
+    projects/."""
+    from boxmunge.compose_mounts import denied_host_path
+    paths, project_dir, *_ = box
+    _deploy(paths)
+    (project_dir / "manifest.yml").write_text(yaml.safe_dump({"project": "other"}))
+    with pytest.raises(ComposeRefused):
+        _restart(paths)
+    state = paths.state / "start-refused" / f"{NAME}.json"
+    assert state.exists()
+    assert not str(state).startswith(str(paths.projects) + os.sep)
+    assert denied_host_path(str(paths.state), project_dir, paths) == str(paths.root)
+    assert denied_host_path("../../state/start-refused", project_dir, paths) == str(paths.root)

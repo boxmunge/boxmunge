@@ -233,3 +233,32 @@ def test_legacy_container_mounting_the_project_rw_is_refused(tmp_path, compose_c
     finally:
         subprocess.run(["docker", "rm", "-f", f"{compose_project}-web-1"],
                        capture_output=True, timeout=60)
+
+
+def test_git_project_deploys_and_restarts_through_its_links(tmp_path, alerts) -> None:
+    """add-git-project links compose.yml and manifest.yml into repo/; the
+    record and every later check follow those in-project links (real
+    `docker compose config`), and a link out of the project is refused."""
+    from boxmunge.compose_guard import ComposeRefused, check_start
+    paths = _paths(tmp_path)
+    project_dir = paths.project_dir(PROJECT)
+    repo = project_dir / "repo"
+    (repo / "data").mkdir(parents=True)
+    (repo / "manifest.yml").write_text(yaml.safe_dump(_manifest()))
+    (repo / "compose.yml").write_text(yaml.safe_dump({"services": {"web": {
+        "image": "nginx:1.27-alpine", "network_mode": "none",
+        "volumes": ["./repo/data:/d"]}}}))
+    os.symlink(repo / "compose.yml", project_dir / "compose.yml")
+    os.symlink(repo / "manifest.yml", project_dir / "manifest.yml")
+    check_start(paths, PROJECT, component="deploy", compose_files=["compose.yml"],
+                record=True, deploying=True)
+    check_start(paths, PROJECT, component="upgrade", compose_files=["compose.yml"])
+    assert alerts == []
+
+    outside = tmp_path / "outside-compose.yml"
+    outside.write_text((repo / "compose.yml").read_text())
+    (project_dir / "compose.yml").unlink()
+    os.symlink(outside, project_dir / "compose.yml")
+    with pytest.raises(ComposeRefused):
+        check_start(paths, PROJECT, component="upgrade", compose_files=["compose.yml"])
+    assert alerts
