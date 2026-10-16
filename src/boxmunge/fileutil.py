@@ -257,14 +257,20 @@ def durable_rename(tmp_path: Path, path: Path) -> None:
     fsync_dir(path.parent)
 
 
-def atomic_write_text(path: Path, content: str, mode: int | None = None) -> None:
+class LinkedTargetError(OSError):
+    """The destination of a write that refuses links is a symlink."""
+
+
+def atomic_write_text(
+    path: Path, content: str, mode: int | None = None, *, refuse_link: bool = False,
+) -> None:
     """Write UTF-8 text to path atomically and durably (see atomic_write_bytes)."""
-    atomic_write_bytes(path, content.encode("utf-8"), mode)
+    atomic_write_bytes(path, content.encode("utf-8"), mode, refuse_link=refuse_link)
 
 
 def atomic_write_bytes(
     path: Path, content: bytes, mode: int | None = None,
-    owner: tuple[int, int] | None = None,
+    owner: tuple[int, int] | None = None, *, refuse_link: bool = False,
 ) -> None:
     """Write bytes to path atomically and durably via temp file + rename.
 
@@ -273,6 +279,12 @@ def atomic_write_bytes(
     the final file is never visible with the wrong permissions and a temp
     swapped for a symlink cannot redirect them. See durable_rename for the
     crash guarantee.
+
+    With ``refuse_link``, a symlink at path raises LinkedTargetError instead
+    of being replaced. It is checked after the temp is written, right before
+    the rename; rename(2) cannot refuse a symlink itself, so a link created in
+    the instant between the two is still replaced. Only a writer of path's
+    directory can do that, and it could replace the file anyway.
     """
     mkdir_p_deploy(path.parent)
 
@@ -290,6 +302,8 @@ def atomic_write_bytes(
                 os.fchown(f.fileno(), *owner)
             else:
                 _fchown_deploy(f.fileno(), tmp_name)
+        if refuse_link and path.is_symlink():
+            raise LinkedTargetError(f"{path} is a symlink; refusing to replace it")
         durable_rename(tmp_path, path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)

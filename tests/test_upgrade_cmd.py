@@ -13,6 +13,7 @@ from boxmunge.commands.upgrade_steps import migrate_project_manifests
 from boxmunge.manifest import (
     CURRENT_SCHEMA_VERSION, ManifestError, load_manifest_as_written,
 )
+from boxmunge.project_alerts import alert_state
 from boxmunge.migration import (
     MigrationError, register_migration, _MIGRATIONS,
 )
@@ -29,6 +30,8 @@ def paths_stub(tmp_path, monkeypatch):
     paths.logs = tmp_path / "logs"
     paths.logs.mkdir()
     paths.log_file = paths.logs / "boxmunge.log"
+    paths.state = tmp_path / "state"
+    paths.state.mkdir()
     return paths
 
 
@@ -176,10 +179,12 @@ class TestGitManifestNeverWritten:
         target = repo / "manifest.yml"
         target.write_text(yaml.safe_dump(self.V2))
         paths.project_manifest("gitapp").symlink_to(target)
+        (repo / "compose.yml").write_text("services: {}\n")
+        paths.project_compose("gitapp").symlink_to(repo / "compose.yml")
         return target
 
     def _migrate(self, paths, delivered: bool = True):
-        with patch("boxmunge.manifest_schema_alert.notify",
+        with patch("boxmunge.project_alerts.notify",
                    return_value=delivered) as notify:
             result = migrate_project_manifests(paths)
         return result, notify
@@ -202,26 +207,26 @@ class TestGitManifestNeverWritten:
 
     def test_undelivered_alert_is_retried(self, paths, linked) -> None:
         self._migrate(paths, delivered=False)
-        assert not paths.manifest_schema_alert_state("gitapp").exists()
+        assert not alert_state(paths, "gitapp", "manifest-schema").exists()
         _, notify = self._migrate(paths)
         notify.assert_called_once()
 
     def test_new_current_schema_alerts_again(self, paths, linked) -> None:
-        record = paths.manifest_schema_alert_state("gitapp")
+        record = alert_state(paths, "gitapp", "manifest-schema")
         record.parent.mkdir(parents=True)
-        record.write_text(json.dumps({"repository_schema": 2,
-                                      "current_schema": CURRENT_SCHEMA_VERSION - 1}))
+        record.write_text(json.dumps({"key": {
+            "repository_schema": 2, "current_schema": CURRENT_SCHEMA_VERSION - 1}}))
         _, notify = self._migrate(paths)
         notify.assert_called_once()
 
     def test_unreadable_record_is_reported_and_replaced(self, paths, linked) -> None:
-        record = paths.manifest_schema_alert_state("gitapp")
+        record = alert_state(paths, "gitapp", "manifest-schema")
         record.parent.mkdir(parents=True)
         record.write_text("{not json")
         _, notify = self._migrate(paths)
         notify.assert_called_once()
         assert "is unreadable" in paths.log_file.read_text()
-        assert json.loads(record.read_text())["repository_schema"] == 2
+        assert json.loads(record.read_text())["key"]["repository_schema"] == 2
 
     def test_regular_manifest_is_still_written(self, paths) -> None:
         pdir = paths.project_dir("bundled")

@@ -61,7 +61,7 @@ def git_project(tmp_path: Path) -> tuple[BoxPaths, Path]:
     return paths, origin
 
 
-@patch("boxmunge.manifest_schema_alert.notify", return_value=True)
+@patch("boxmunge.project_alerts.notify", return_value=True)
 @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
 @patch("boxmunge.commands.upgrade_steps.compose_up")
 def test_apply_keeps_symlink_and_uses_migrated_manifest(
@@ -99,7 +99,7 @@ def test_apply_keeps_symlink_and_uses_migrated_manifest(
     assert manifest["schema_version"] == CURRENT_SCHEMA_VERSION
 
 
-@patch("boxmunge.manifest_schema_alert.notify", return_value=True)
+@patch("boxmunge.project_alerts.notify", return_value=True)
 @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
 @patch("boxmunge.commands.upgrade_steps.compose_up")
 def test_second_upgrade_does_not_alert_again(_up, _reload, mock_notify, git_project) -> None:

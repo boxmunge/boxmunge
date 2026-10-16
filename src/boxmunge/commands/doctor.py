@@ -155,6 +155,12 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
         except FileNotFoundError:
             pass  # Not on systemd — skip silently
 
+    # Git projects whose manifest.yml or compose.yml no longer links into
+    # repo/ (replaced by earlier releases' upgrades) deploy a frozen copy.
+    from boxmunge.git_layout import unlinked_projects
+    for name, problem in unlinked_projects(paths).items():
+        check(f"Git project {name} linked to its repository", False, problem)
+
     # Disk space
     try:
         usage = shutil.disk_usage(paths.root)

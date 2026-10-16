@@ -17,6 +17,7 @@ from boxmunge.docker import compose_down, caddy_reload, remove_built_images, Doc
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.paths import BoxPaths
+from boxmunge.project_alerts import ALERT_KINDS, alert_state
 from boxmunge.project_registry import is_registered, remove_project as registry_remove
 
 
@@ -35,6 +36,7 @@ def project_state_files(paths: BoxPaths, name: str) -> list[Path]:
         paths.project_scan_state(name),
         paths.project_staging_state(name),
         paths.container_update_target_state(name),
+        *(alert_state(paths, name, kind) for kind in ALERT_KINDS),
     ]
 
 
@@ -139,6 +141,9 @@ def delete_locked(project_name: str, paths: BoxPaths, force: bool) -> int:
 
     for state_file in project_state_files(paths, project_name):
         state_file.unlink(missing_ok=True)
+    alerts_dir = paths.project_alerts_dir(project_name)
+    if alerts_dir.is_dir():
+        alerts_dir.rmdir()  # fails loudly on a record kind ALERT_KINDS lacks
 
     project_dir = paths.project_dir(project_name)
     if project_dir.exists():

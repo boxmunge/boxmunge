@@ -23,7 +23,7 @@ from boxmunge.manifest import (
     CURRENT_SCHEMA_VERSION, load_manifest, load_manifest_as_written, validate_manifest,
     write_manifest,
 )
-from boxmunge.manifest_schema_alert import alert_outdated_repository_manifest
+from boxmunge.git_layout import alert_old_schema, alert_unlinked, relink_advice, unlinked_files
 from boxmunge.migration import migrate_manifest, MigrationError
 from boxmunge.pause import render_maintenance_caddy_config
 from boxmunge.fleet import report_project_failure
@@ -90,9 +90,14 @@ def _migrated(project_dir: Path, manifest: dict[str, Any]) -> dict[str, Any] | N
 class ManifestMigration:
     """Projects whose manifest is older than the current schema: `written`
     were migrated on disk; `in_memory` are git projects, whose manifest.yml
-    links into the repository and is migrated by every reader instead."""
+    links into the repository and is migrated by every reader instead;
+    `skipped_locked` were held by another operation and are migrated in
+    memory until the next upgrade. `unlinked` maps each git project whose
+    manifest.yml or compose.yml is not a link into repo/ to the fix."""
     written: list[str] = field(default_factory=list)
     in_memory: list[str] = field(default_factory=list)
+    skipped_locked: list[str] = field(default_factory=list)
+    unlinked: dict[str, str] = field(default_factory=dict)
 
 
 def _links_into_repository(project_dir: Path) -> bool:
@@ -104,25 +109,41 @@ def migrate_project_manifests(paths: BoxPaths) -> ManifestMigration:
 
     A git project's manifest.yml is never written: replacing its link with
     a file would detach the project from its repository's manifest. Its
-    operator is alerted, once, to update the file in the repository.
+    operator is alerted, once, to update the file in the repository, and
+    once about a git project whose links an older upgrade replaced.
+
+    Each write is under the project lock. A project whose lock is held is
+    left at its schema on disk: every reader migrates it in memory, and the
+    next upgrade writes it.
     """
     result = ManifestMigration()
     for project_dir, manifest in _project_manifests(paths, load_manifest_as_written):
+        name = project_dir.name
+        unlinked = alert_unlinked(paths, project_dir, manifest)
+        if unlinked:
+            result.unlinked[name] = relink_advice(project_dir, unlinked)
         try:
             migrated = _migrated(project_dir, manifest)
         except MigrationError as e:
             log_error("upgrade", f"{e}. Original manifest left in place.",
-                      paths, project=project_dir.name)
+                      paths, project=name)
             raise
         if migrated is None:
             continue
         if _links_into_repository(project_dir):
-            alert_outdated_repository_manifest(
-                paths, project_dir.name, manifest.get("schema_version", 1))
-            result.in_memory.append(project_dir.name)
+            alert_old_schema(paths, name, manifest.get("schema_version"))
+            result.in_memory.append(name)
             continue
-        write_manifest(project_dir / "manifest.yml", migrated)
-        result.written.append(project_dir.name)
+        try:
+            with project_lock(name, paths):
+                write_manifest(project_dir / "manifest.yml", migrated)
+        except LockError:
+            result.skipped_locked.append(name)
+            log_warning("upgrade", f"Manifest of {name} not migrated on disk: held "
+                        f"by another operation. It is migrated in memory until the "
+                        f"next upgrade", paths, project=name)
+            continue
+        result.written.append(name)
     return result
 
 
@@ -224,6 +245,16 @@ def regenerate_configs(paths: BoxPaths) -> Regeneration:
     return regen
 
 
+def _in_memory_line(name: str, written: object) -> str:
+    if written is None:
+        return (f"{name}: repository manifest.yml has no schema_version; the "
+                f"upgrade will alert to set it to {CURRENT_SCHEMA_VERSION} in the "
+                f"repository")
+    return (f"{name}: repository manifest.yml uses schema v{written}; migrated in "
+            f"memory to v{CURRENT_SCHEMA_VERSION} (the upgrade will alert to update "
+            f"it in the repository)")
+
+
 def check_upgrade(paths: BoxPaths) -> list[str]:
     """Dry run of migrate + regenerate: everything is rendered in memory and
     nothing is written, locked or logged. Raises on anything that would make
@@ -232,14 +263,15 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
     for project_dir, manifest in _project_manifests(paths, load_manifest_as_written):
         name = manifest.get("project", project_dir.name)
         migrated = _migrated(project_dir, manifest)
+        unlinked = unlinked_files(project_dir, manifest)
+        if unlinked:
+            report.append(f"WARNING {relink_advice(project_dir, unlinked)}")
         if migrated is not None:
-            written = manifest.get("schema_version", 1)
+            written = manifest.get("schema_version")
             if _links_into_repository(project_dir):
-                report.append(f"{name}: repository manifest.yml uses schema v{written}; "
-                              f"migrated in memory to v{CURRENT_SCHEMA_VERSION} (the "
-                              f"upgrade will alert to update it in the repository)")
+                report.append(_in_memory_line(name, written))
             else:
-                report.append(f"{name}: migration OK (schema v{written} "
+                report.append(f"{name}: migration OK (schema v{written or 1} "
                               f"-> v{CURRENT_SCHEMA_VERSION})")
             manifest = migrated
         block = is_blocked(name, paths)

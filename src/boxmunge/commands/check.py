@@ -151,6 +151,12 @@ def run_check(project_name: str, paths: BoxPaths, verbose: bool = True) -> int:
 
     if verbose:
         print(f"{project_name}: checking...")
+        # Not a health result: the running containers are fine, the next
+        # deploy is not. Reported on every check until it is re-linked.
+        from boxmunge.git_layout import relink_advice, unlinked_files
+        unlinked = unlinked_files(project_dir, manifest)
+        if unlinked:
+            print(f"  git:      WARNING {relink_advice(project_dir, unlinked)}")
 
     worst_status = 0
 

@@ -71,9 +71,14 @@ def _migrate_regenerate_reload(
     if migrated.written:
         print(f"  Migrated: {', '.join(migrated.written)}")
     if migrated.in_memory:
-        print(f"  Migrated in memory (git; update manifest.yml in the repository): "
+        print(f"  Update schema_version in the repository's manifest.yml (git): "
               f"{', '.join(migrated.in_memory)}")
-    if not migrated.written and not migrated.in_memory:
+    if migrated.skipped_locked:
+        print(f"  Not migrated on disk (locked; migrated in memory): "
+              f"{', '.join(migrated.skipped_locked)}")
+    for advice in migrated.unlinked.values():
+        print(f"  WARNING: {advice}", file=sys.stderr)
+    if not (migrated.written or migrated.in_memory or migrated.skipped_locked):
         print("  No migrations needed.")
 
     print(f"[{step + 1}/{total}] Regenerating configs...")
@@ -121,6 +126,8 @@ def _finish(paths: BoxPaths, label: str, migrated: ManifestMigration, regen: Reg
         detail={
             "migrated": migrated.written,
             "migrated_in_memory": migrated.in_memory,
+            "migrate_skipped_locked": migrated.skipped_locked,
+            "git_unlinked": sorted(migrated.unlinked),
             "restarted": restart.succeeded,
             "skipped_locked": restart.skipped_locked,
             "monitor_stopped": restart.monitor_stopped,

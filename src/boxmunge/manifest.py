@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 
-from boxmunge.fileutil import atomic_write_text
+from boxmunge.fileutil import LinkedTargetError, atomic_write_text
 from boxmunge.manifest_fields import (
     SERVICE_NAME_RE, host_problem, port_problem, route_path_problem,
 )
@@ -82,14 +82,19 @@ def write_manifest(path: Path, manifest: dict[str, Any]) -> None:
     and renaming a file over the link would silently detach the project from
     its repository's manifest. Writing through the link is no better: the
     checkout is the repository's content, which the next checkout overwrites
-    or conflicts with.
+    or conflicts with. The link is checked again right before the rename
+    (see atomic_write_bytes for the window that remains).
     """
+    refusal = (f"{path} is a symlink (a git project's manifest.yml links into "
+               f"its repository); refusing to replace it. Change the manifest in "
+               f"the repository instead.")
     if path.is_symlink():
-        raise ManifestError(
-            f"{path} is a symlink (a git project's manifest.yml links into "
-            f"its repository); refusing to replace it. Change the manifest in "
-            f"the repository instead.")
-    atomic_write_text(path, yaml.dump(manifest, default_flow_style=False, sort_keys=False))
+        raise ManifestError(refusal)
+    try:
+        atomic_write_text(path, yaml.dump(manifest, default_flow_style=False, sort_keys=False),
+                          refuse_link=True)
+    except LinkedTargetError as e:
+        raise ManifestError(refusal) from e
 
 
 def validate_manifest(
