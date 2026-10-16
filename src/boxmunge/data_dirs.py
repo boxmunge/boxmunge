@@ -157,14 +157,19 @@ def classify(project_dir: Path, release_tree: Path | None,
 
     ``kept_trees`` (the rollback target, production's release during a
     stage) are read only while the project has no record. An entry the live
-    compose.yml mounts read-only is the live release's code, whatever an
-    older release once mounted. Raises ReleaseStateError for an unreadable
-    compose file or record.
+    compose.yml mounts read-only and the incoming release ships is code,
+    whatever an older release once mounted; one it only reads (the release
+    ships nothing for it) still holds the older release's data. Without an
+    incoming release, every kept mount counts: at worst a later bundle is
+    refused, never is data deleted. Raises ReleaseStateError for an
+    unreadable compose file or record.
     """
     live_binds = bind_dirs(project_dir / "compose.yml", project_dir)
     release_binds: dict[str, bool] = {}
+    shipped: set[str] = set()
     if release_tree is not None:
         release_binds = bind_dirs(release_tree / "compose.yml", project_dir)
+        shipped = {e.name for e in release_tree.iterdir()}
     release = {d for d, rw in release_binds.items() if rw}
     live_rw = {d for d, rw in live_binds.items() if rw}
     stored = _load_record(project_dir)
@@ -172,7 +177,7 @@ def classify(project_dir: Path, release_tree: Path | None,
     if stored is None:
         for tree in kept_trees:
             kept |= _read_write(tree / "compose.yml", project_dir)
-        kept -= set(live_binds) - live_rw
+        kept -= (set(live_binds) - live_rw) & shipped
     candidates = (stored or set()) | live_rw | kept
     dirs = DataDirs(
         project_dir=project_dir,

@@ -383,6 +383,30 @@ class TestPreUpgradeProjects:
         assert (pdir / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
 
 
+    def test_data_the_live_release_reads_read_only_survives_the_upgrade(
+        self, paths,
+    ) -> None:
+        """B mounts ./uploads:ro and ships nothing for it: the data is still
+        A's, and the read-only mount must not make it code."""
+        from boxmunge.commands.deploy import run_deploy
+        from tests.bundle_helpers import place_bundle
+        reads_uploads = ("services:\n  web:\n    image: nginx\n"
+                         "    volumes: [\"./uploads:/uploads:ro\"]\n")
+        deploy = _deployer(paths)
+        pdir = paths.project_dir("myapp")
+        assert deploy(9, MOUNTS_UPLOADS) == 0
+        (pdir / "uploads").mkdir()
+        (pdir / "uploads" / "photo.jpg").write_text("USER UPLOAD")
+        assert deploy(10, reads_uploads) == 0
+        _record(pdir).unlink()
+        for hour in (11, 12):
+            place_bundle(paths, timestamp=f"2026-10-13T{hour}0000000000",
+                         files={"compose.yml": reads_uploads})
+            with _docker():
+                assert run_deploy("myapp", paths) == 0
+            assert (pdir / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
+
+
 CONF_RW = ("services:\n  web:\n    image: nginx\n"
            "    volumes: [\"./conf:/etc/conf\"]\n")
 CONF_RO = ("services:\n  web:\n    image: nginx\n"
@@ -425,6 +449,18 @@ class TestKeptReleasesOnlySeedTheRecord:
         _record(project).write_text('{"version": 1, "data_dirs": []}')
         install_release(tree, project)
         assert (project / "conf" / "app.conf").read_text() == "new conf"
+
+    def test_without_an_incoming_release_a_kept_mount_counts(self, tmp_path: Path) -> None:
+        """prestage_to_previous / discard_* know no incoming release: they
+        must not drop data the live release only reads."""
+        from boxmunge.data_dirs import classify
+        project = _live_with_old_rollback_target(tmp_path, CONF_RO)
+        kept = [project / ".releases" / "previous"]
+        assert "conf" in classify(project, None, kept).recorded
+        ships_conf = _release(tmp_path, "c", CONF_RO, {"conf/app.conf": "x"})
+        assert "conf" not in classify(project, ships_conf, kept).recorded
+        reads_conf = _release(tmp_path, "d", CONF_RO)
+        assert "conf" in classify(project, reads_conf, kept).recorded
 
     def test_record_wins_over_kept_releases_once_it_exists(self, tmp_path: Path) -> None:
         project = _live_with_old_rollback_target(tmp_path, NO_MOUNTS)

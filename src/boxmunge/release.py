@@ -85,15 +85,16 @@ def _classify(project_dir: Path, release_tree: Path | None) -> DataDirs:
     return classify(project_dir, release_tree, _kept_trees(project_dir))
 
 
-def _ensure_record(project_dir: Path) -> None:
+def _ensure_record(project_dir: Path, release_tree: Path | None = None) -> None:
     """Start the data-dir record before anything can change a kept release.
 
     A project deployed before the record existed may know a retired data
     directory only from a kept release's compose.yml; every function that
-    replaces or drops a kept release, and install_release, calls this first.
+    replaces or drops a kept release, and install_release, calls this first,
+    passing the incoming release when there is one.
     """
     if not has_record(project_dir):
-        save_record(_classify(project_dir, None))
+        save_record(_classify(project_dir, release_tree))
 
 
 def check_install(tree: Path, project_dir: Path) -> None:
@@ -306,7 +307,7 @@ def keep_previous_release(
     so a failure here leaves the live tree and the old snapshot untouched.
     """
     project_dir = paths.project_dir(project_name)
-    _ensure_record(project_dir)
+    _ensure_record(project_dir, release_tree)
     releases = paths.project_releases(project_name)
     building = releases / "previous.building"
     _remove(building)
@@ -385,7 +386,7 @@ def keep_prestage_release(paths: BoxPaths, project_name: str,
     if has_prestage(paths, project_name):
         return
     project_dir = paths.project_dir(project_name)
-    _ensure_record(project_dir)
+    _ensure_record(project_dir, release_tree)
     deployed = (project_dir / "manifest.yml").exists()
     building = paths.project_releases(project_name) / "prestage.building"
     _remove(building)
