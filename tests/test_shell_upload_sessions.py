@@ -195,3 +195,27 @@ def test_upload_sweeps_only_abandoned_leftovers(paths: BoxPaths) -> None:
     rc, err = upload.finish()
     assert rc == 0, err
     assert sorted(p.name for p in paths.inbox_tmp.iterdir()) == ["in-flight.tar.gz", "scp-live"]
+
+
+def test_an_unremovable_leftover_is_logged_and_the_upload_proceeds(paths: BoxPaths) -> None:
+    if os.getuid() == 0:
+        pytest.skip("root removes anything; the permission failure cannot be staged")
+    paths.inbox_tmp.mkdir(parents=True)
+    paths.logs.mkdir(parents=True)
+    stuck = paths.inbox_tmp / "scp-stuck"
+    stuck.mkdir()
+    (stuck / "bundle.tar.gz").write_bytes(b"partial")
+    day_old = time.time() - 25 * 3600
+    os.utime(stuck / "bundle.tar.gz", (day_old, day_old))
+    os.utime(stuck, (day_old, day_old))
+    stuck.chmod(0o500)  # its contents cannot be deleted
+    try:
+        upload = _Upload(paths.root, _bundle("alpha"))
+        upload.send_first_half()
+        upload.send_rest()
+        rc, err = upload.finish()
+    finally:
+        stuck.chmod(0o700)
+    assert rc == 0, err
+    assert len(_inbox_bundles(paths, "alpha")) == 1
+    assert "cannot remove abandoned upload" in paths.log_file.read_text()

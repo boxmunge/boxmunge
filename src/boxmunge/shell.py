@@ -16,6 +16,10 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from boxmunge.paths import BoxPaths
 
 # Every command the deploy shell accepts. This is the complete allowlist.
 ALLOWED_COMMANDS: set[str] = {
@@ -154,7 +158,7 @@ def handle_scp_upload(args: list[str]) -> None:
     session_dir: Path | None = None
     try:
         paths.inbox_tmp.mkdir(parents=True, exist_ok=True)
-        _sweep_abandoned_uploads(paths.inbox_tmp)
+        _sweep_abandoned_uploads(paths)
         session_dir = Path(tempfile.mkdtemp(dir=paths.inbox_tmp, prefix="scp-"))
         result = subprocess.run(["/usr/bin/scp", "-t", str(session_dir)], check=False)
         if result.returncode != 0:
@@ -192,10 +196,15 @@ def _newest_mtime(path: Path) -> float:
     return newest
 
 
-def _sweep_abandoned_uploads(inbox_tmp: Path) -> None:
-    """Remove session dirs, and flat files from the old shared layout, idle for a day."""
+def _sweep_abandoned_uploads(paths: BoxPaths) -> None:
+    """Remove session dirs, and flat files from the old shared layout, idle for a day.
+
+    An entry that cannot be removed is logged and left; it must not stop
+    this upload.
+    """
+    from boxmunge.log import log_warning
     cutoff = time.time() - _ABANDONED_UPLOAD_SECONDS
-    for entry in inbox_tmp.iterdir():
+    for entry in paths.inbox_tmp.iterdir():
         try:
             if _newest_mtime(entry) >= cutoff:
                 continue
@@ -205,6 +214,8 @@ def _sweep_abandoned_uploads(inbox_tmp: Path) -> None:
                 entry.unlink()
         except FileNotFoundError:
             continue  # its own session finished and cleaned up meanwhile
+        except OSError as e:
+            log_warning("upload", f"cannot remove abandoned upload {entry}: {e}", paths)
 
 
 def _exit_on_signal(signum: int, _frame: object) -> None:
