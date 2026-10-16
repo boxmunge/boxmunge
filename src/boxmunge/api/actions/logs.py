@@ -12,7 +12,7 @@ from boxmunge.api.principal import Tier
 from boxmunge.api.registry import Action
 from boxmunge.api.result import ActionError, ErrorCode
 from boxmunge.api.schema import INTEGER, NULLABLE_STRING, STRING, arr, enum, obj
-from boxmunge.commands.log_cmd import filter_log_entries, parse_log_file
+from boxmunge.commands.log_cmd import filter_log_entries
 from boxmunge.docker import DockerError
 from boxmunge.manifest import load_manifest
 from boxmunge.paths import BoxPaths
@@ -89,11 +89,26 @@ def _oplog_query(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
 
 
 def _entries(paths: BoxPaths) -> list[dict[str, Any]]:
-    entries = parse_log_file(paths.log_file)
-    for entry in entries:
-        if not isinstance(entry, dict) or not _ENTRY_KEYS <= entry.keys():
-            raise StateError(f"{paths.log_file} holds a line that is not an operational "
-                             f"log entry: {str(entry)[:200]}")
+    """Every operational log entry. Unlike the CLI's `log`, a line that is
+    not an entry (torn by a crash, or hand-edited) fails the query, naming
+    the line, rather than vanishing from what a dashboard shows."""
+    path = paths.log_file
+    if not path.exists():
+        return []
+    entries = []
+    with path.open() as log:
+        for lineno, line in enumerate(log, start=1):
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError as e:
+                raise StateError(f"{path}:{lineno} is not JSON ({e}); repair or remove "
+                                 f"that line") from e
+            if not isinstance(entry, dict) or not _ENTRY_KEYS <= entry.keys():
+                raise StateError(f"{path}:{lineno} is not an operational log entry: "
+                                 f"{line.strip()[:200]}")
+            entries.append(entry)
     return entries
 
 

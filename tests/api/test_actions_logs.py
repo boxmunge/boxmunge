@@ -94,3 +94,13 @@ def test_oplog_line_that_is_not_an_entry_fails_naming_the_log(fixture_paths) -> 
     error = _error(fixture_paths, "oplog.query", {})
     assert error.code is ErrorCode.FAILED
     assert str(fixture_paths.log_file) in error.message
+
+
+def test_oplog_line_that_is_not_json_fails_naming_the_line(fixture_paths) -> None:
+    """A torn line must not vanish from the query result unremarked."""
+    lines = len(fixture_paths.log_file.read_text().splitlines())
+    with fixture_paths.log_file.open("a") as log:
+        log.write('{"ts": "2026-10-16T00:00:00Z", "lev\n')
+    error = _error(fixture_paths, "oplog.query", {})
+    assert error.code is ErrorCode.FAILED
+    assert f"{fixture_paths.log_file}:{lines + 1}" in error.message
