@@ -119,3 +119,11 @@ class TestCompleteRemoval:
         assert _delete(box, MagicMock(), reload_) == 1
         assert not box.project_dir(NAME).exists()
         assert "caddy validate failed" in capsys.readouterr().err
+
+
+def test_bad_registry_line_neither_blocks_the_delete_nor_is_dropped(box):
+    registry = box.state / "projects.txt"
+    registry.write_text(f"{NAME}\nold-staging\n")
+    assert _delete(box, MagicMock()) == 0
+    assert not box.project_dir(NAME).exists()
+    assert registry.read_text() == "old-staging\n"

@@ -120,3 +120,22 @@ def test_clean_fleet_sends_no_failure_alert(tmp_path, monkeypatch, scanned):
     pushover = Pushover(monkeypatch, paths)
     assert cmd_security_scan([], paths) == 0
     assert _failure_alerts(pushover) == []
+
+
+def test_malformed_registry_line_is_alerted_and_every_valid_project_scanned(
+    tmp_path, monkeypatch, scanned, capsys,
+):
+    """One poisoned line in projects.txt must not abort the nightly scan, and
+    must not vanish: it is a fleet-level problem, the rest are still scanned."""
+    paths = make_box(tmp_path, projects=("aaa", "bbb"))
+    pushover = Pushover(monkeypatch, paths)
+    registry = paths.state / "projects.txt"
+    registry.write_text("aaa\n../etc\nbbb\n")
+    rc = cmd_security_scan([], paths)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert scanned == ["aaa-web:1", "bbb-web:1"]
+    assert f"{registry}:2" in err and "Correct or delete" in err
+    [(title, body, priority)] = _failure_alerts(pushover)
+    assert priority == 1
+    assert f"{registry}:2" in body and "'../etc'" in body

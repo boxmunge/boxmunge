@@ -138,14 +138,14 @@ def test_deployed_projects_skip_registered_but_never_deployed(paths: BoxPaths) -
     """The nightly scan and the cve-scan health check walk this list; a
     project registered ahead of its first deploy has nothing to scan and
     must not be reported as a failed scan every night."""
-    from boxmunge.project_registry import add_project, load_deployed_projects
+    from boxmunge.project_registry import add_project, deployed_among, read_registry
     for name in ("live", "pending"):
         add_project(name, paths)
     live = paths.project_dir("live")
     live.mkdir(parents=True)
     (live / "manifest.yml").write_text("project: live\n")
     paths.project_dir("pending").mkdir(parents=True)
-    assert load_deployed_projects(paths) == ["live"]
+    assert deployed_among(read_registry(paths).names, paths) == ["live"]
 
 
 def test_nightly_scan_targets_only_deployed_projects(paths: BoxPaths) -> None:
@@ -155,7 +155,80 @@ def test_nightly_scan_targets_only_deployed_projects(paths: BoxPaths) -> None:
     add_project("live", paths)
     (paths.project_dir("live")).mkdir(parents=True)
     (paths.project_dir("live") / "manifest.yml").write_text("project: live\n")
-    assert _parse_scan_targets([], paths) == ["live"]
+    assert _parse_scan_targets([], paths) == (["live"], ())
+
+
+class TestDamagedRegistry:
+    """projects.txt is deploy-writable: any line can hold anything, and a line
+    registered before its name was reserved (`x-staging`) is one too. A bad
+    line never stops a valid project, and is never silently dropped."""
+
+    @pytest.mark.parametrize("bad", ["../etc", "BAD NAME", "caddy", "foo-staging", "a/b"])
+    def test_listing_names_the_file_and_line(self, paths: BoxPaths, bad) -> None:
+        from boxmunge.project_registry import ProjectRegistryError, load_registered_projects
+        registry = paths.state / "projects.txt"
+        registry.write_text(f"alpha\n\n{bad}\nbeta\n")
+        with pytest.raises(ProjectRegistryError) as exc:
+            load_registered_projects(paths)
+        assert f"{registry}:3: " in str(exc.value) and repr(bad) in str(exc.value)
+        assert "Correct or delete each line" in str(exc.value)
+
+    def test_read_registry_keeps_every_valid_name(self, paths: BoxPaths) -> None:
+        from boxmunge.project_registry import read_registry
+        registry = paths.state / "projects.txt"
+        registry.write_text("alpha\n../x\nbeta\nBAD\n")
+        read = read_registry(paths)
+        assert read.names == {"alpha", "beta"} and read.unparsed == ("../x", "BAD")
+        assert [p.split(": ")[0] for p in read.problems] == [f"{registry}:2", f"{registry}:4"]
+
+    def test_membership_ignores_bad_lines(self, paths: BoxPaths) -> None:
+        from boxmunge.project_registry import is_registered
+        (paths.state / "projects.txt").write_text("alpha\nold-staging\n")
+        assert is_registered("alpha", paths)
+        assert not is_registered("beta", paths)
+
+    def test_add_and_remove_keep_bad_lines_verbatim(self, paths: BoxPaths) -> None:
+        from boxmunge.project_registry import add_project, read_registry, remove_project
+        registry = paths.state / "projects.txt"
+        registry.write_text("alpha\n  ../x \nold-staging\n")
+        add_project("gamma", paths)
+        remove_project("alpha", paths)
+        assert registry.read_text() == "gamma\n  ../x \nold-staging\n"
+        assert read_registry(paths).names == {"gamma"}
+
+    def test_deploy_of_a_valid_project_is_unaffected(self, paths: BoxPaths) -> None:
+        from unittest.mock import patch
+        from boxmunge.commands.deploy import run_deploy
+        from boxmunge.project_registry import add_project
+        from tests.bundle_helpers import place_bundle
+        add_project("myapp", paths)
+        registry = paths.state / "projects.txt"
+        registry.write_text(registry.read_text() + "old-staging\n")
+        place_bundle(paths)
+        with patch("boxmunge.commands.deploy.compose_up"), \
+                patch("boxmunge.commands.deploy.caddy_reload"):
+            assert run_deploy("myapp", paths) == 0
+        assert "old-staging\n" in registry.read_text()
+
+    def test_doctor_fails_naming_the_line(self, paths: BoxPaths) -> None:
+        import contextlib
+        import io
+        import json
+        from boxmunge.commands.doctor import run_doctor
+        registry = paths.state / "projects.txt"
+        registry.write_text("alpha\n../x\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            assert run_doctor(paths, as_json=True) == 1
+        [result] = [r for r in json.loads(out.getvalue()) if r["name"] == "Project registry"]
+        assert result["status"] == "FAIL" and f"{registry}:2: " in result["detail"]
+
+    def test_listings_report_rather_than_hide(self, paths: BoxPaths, monkeypatch) -> None:
+        from boxmunge import mcp_tools
+        (paths.state / "projects.txt").write_text("alpha\n../x\n")
+        monkeypatch.setattr(mcp_tools, "_get_paths", lambda: paths)
+        result = mcp_tools._tool_project_list_mcp()
+        assert result["success"] is False and ":2: " in result["messages"][0]
 
 
 class TestOverlappingNames:

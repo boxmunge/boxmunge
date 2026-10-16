@@ -392,7 +392,26 @@ def test_fleet_summary_reports_unreadable_host_suppressions(
     assert exc.value.code == 1
     captured = capsys.readouterr()
     assert "Projects: 1" in captured.out
-    assert "ERROR: security: host suppressions:" in captured.err
+    assert (f"ERROR: security: box-wide file: Cannot parse YAML in "
+            f"{paths.host_suppressions}") in captured.err
+
+
+def test_fleet_summary_reports_each_bad_registry_line(
+        monkeypatch, tmp_path, capsys) -> None:
+    """A bad projects.txt line is listed as unreadable; the valid projects
+    are still counted."""
+    paths = _fleet_box(monkeypatch, tmp_path, ["alpha", "beta"])
+    registry = paths.state / "projects.txt"
+    registry.write_text("alpha\n../x\nbeta\n")
+    with pytest.raises(SystemExit) as exc:
+        cmd_security(["--json"])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["projects_count"] == 2
+    [entry] = payload["unreadable"]
+    assert entry["project"] is None and entry["error"].startswith(f"{registry}:2: ")
+    assert f"ERROR: security: box-wide file: {registry}:2: " in captured.err
 
 
 def test_fleet_summary_quarantined_listed(monkeypatch, tmp_path) -> None:

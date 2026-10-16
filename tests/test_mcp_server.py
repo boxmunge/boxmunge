@@ -103,9 +103,10 @@ class TestToolRegistration:
         mock.assert_called_once()
 
     def test_log_tool_returns_entries_in_data(self) -> None:
+        from boxmunge.commands.log_cmd import LogRead
         from boxmunge.mcp_tools import _tool_log
         with patch("boxmunge.commands.log_cmd.query_log") as mock_query:
-            mock_query.return_value = [{"ts": "2026-04-15", "level": "info", "msg": "ok"}]
+            mock_query.return_value = LogRead([{"ts": "2026-04-15", "level": "info", "msg": "ok"}])
             result = _tool_log()
         assert result["success"] is True
         assert len(result["data"]["entries"]) == 1

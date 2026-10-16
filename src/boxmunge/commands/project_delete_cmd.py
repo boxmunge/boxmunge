@@ -13,7 +13,8 @@ import shutil
 import sys
 from pathlib import Path
 
-from boxmunge.docker import compose_down, caddy_reload, remove_built_images, DockerError
+from boxmunge.built_images import remove_built_images
+from boxmunge.docker import compose_down, caddy_reload, DockerError
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.paths import BoxPaths

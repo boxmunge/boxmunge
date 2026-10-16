@@ -3,6 +3,7 @@
 
 import json
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -11,21 +12,36 @@ from boxmunge.log_rotation import log_files
 from boxmunge.paths import BoxPaths
 
 
-def parse_log_file(path: Path) -> list[dict[str, Any]]:
-    """Parse a JSON-lines log file. Skips malformed lines."""
+@dataclass
+class LogRead:
+    """Entries read from the operational log, and one `<file>:<line>: ...`
+    for each line that is not an entry (torn by a crash, or hand-edited).
+    Torn lines are reported, never dropped: the log must not hide corruption."""
+
+    entries: list[dict[str, Any]] = field(default_factory=list)
+    torn: list[str] = field(default_factory=list)
+
+
+def parse_log_file(path: Path) -> LogRead:
+    """Parse a JSON-lines log file; a missing file has no entries."""
+    read = LogRead()
     if not path.exists():
-        return []
-    entries = []
+        return read
     with path.open() as f:
-        for line in f:
+        for lineno, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
             try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return entries
+                entry = json.loads(line)
+            except (ValueError, RecursionError):
+                entry = None
+            if isinstance(entry, dict):
+                read.entries.append(entry)
+            else:
+                read.torn.append(f"{path}:{lineno}: not a JSON log entry (repair or remove "
+                                 f"that line): {line[:200]}")
+    return read
 
 
 def _parse_since(since: str) -> datetime:
@@ -81,24 +97,29 @@ def query_log(
     level: str | None = None,
     since: str | None = None,
     tail: int | None = None,
-) -> list[dict[str, Any]]:
-    """Filtered entries across the active log and the archives the query needs.
+) -> LogRead:
+    """Filtered entries across the active log and the archives the query
+    needs, with every torn line in the files it read.
 
     A ``since`` window reads every archive it reaches back into. Without one,
     files are read newest first only until ``tail`` entries match.
     """
     cutoff = _parse_since(since) if since else None
     chunks: list[list[dict[str, Any]]] = []
+    torn: list[list[str]] = []
     matched = 0
     for path in reversed(log_files(paths.log_file, cutoff)):
-        chunk = filter_log_entries(parse_log_file(path), project=project,
+        read = parse_log_file(path)
+        chunk = filter_log_entries(read.entries, project=project,
                                    component=component, level=level, since=since)
         chunks.append(chunk)
+        torn.append(read.torn)
         matched += len(chunk)
         if tail is not None and matched >= tail:
             break
     entries = [e for chunk in reversed(chunks) for e in chunk]
-    return filter_log_entries(entries, tail=tail)
+    return LogRead(filter_log_entries(entries, tail=tail),
+                   [t for file_torn in reversed(torn) for t in file_torn])
 
 
 def _format_human(entry: dict[str, Any]) -> str:
@@ -123,9 +144,11 @@ def run_log(
     as_json: bool = False,
     containers: bool = False,
 ) -> int:
-    """Execute the log command. Returns 0 on success."""
-    filtered = query_log(paths, project=project, component=component,
-                         level=level, since=since, tail=tail)
+    """Execute the log command. Returns 0, or 1 when a log file it read has
+    torn lines: each is a WARNING on stderr, after the entries."""
+    read = query_log(paths, project=project, component=component,
+                     level=level, since=since, tail=tail)
+    filtered = read.entries
 
     if not filtered:
         if not as_json:
@@ -157,7 +180,9 @@ def run_log(
                 print(f"WARN: Could not fetch container logs: {e}",
                       file=sys.stderr)
 
-    return 0
+    for torn in read.torn:
+        print(f"WARNING: {torn}", file=sys.stderr)
+    return 1 if read.torn else 0
 
 
 def cmd_log(args: list[str]) -> None:

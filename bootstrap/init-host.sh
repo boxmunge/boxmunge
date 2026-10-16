@@ -369,6 +369,11 @@ install -d -m 750 -o root -g "${DEPLOY_USER}" \
 install -d -m 775 -o root -g "${DEPLOY_USER}" \
     "${BOXMUNGE_ROOT}/caddy/sites"
 
+# The Caddy site journal (boxmunge.caddy_journal) is written by deploy-run
+# deploys, which cannot create it inside the root-owned caddy/.
+install -d -m 700 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" \
+    "${BOXMUNGE_ROOT}/caddy/.site-journal"
+
 # caddy/logs holds Caddy's JSON access log (bind-mounted to /var/log/caddy in
 # the container). The Caddy container writes here as root; the host's CrowdSec
 # daemon (also root) reads it. Caddy writes the log file itself as 0600, so the

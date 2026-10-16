@@ -115,3 +115,33 @@ def test_remove_site_drops_file_and_entry(tmp_path) -> None:
     assert not site.exists()
     assert restore_sites(caddy) == []
     remove_site(caddy, site)  # idempotent
+
+
+def _plant_refused_entry(paths) -> None:
+    journal = paths.caddy / JOURNAL_DIRNAME
+    journal.mkdir(exist_ok=True)
+    (journal / "other.conf.json").write_text('{"path": "/etc/x", "previous": null, "written": ""}')
+
+
+def _logged(paths) -> str:
+    return paths.log_file.read_text() if paths.log_file.exists() else ""
+
+
+def test_refused_journal_entry_reaches_the_operator_on_deploy(paths, capsys) -> None:
+    _prod(paths)
+    _plant_refused_entry(paths)
+    with _containers(), _caddy_rejects():
+        assert run_deploy("myapp", paths) == 1
+    err = capsys.readouterr().err
+    assert "not restored" in err and "other.conf.json" in err and "/etc/x" in err
+    assert "other.conf.json" in _logged(paths)
+
+
+def test_refused_journal_entry_reaches_the_operator_on_stage(paths, capsys) -> None:
+    _prod(paths)
+    _plant_refused_entry(paths)
+    with _containers(), _caddy_rejects():
+        assert run_stage("myapp", paths) == 1
+    err = capsys.readouterr().err
+    assert "not restored" in err and "other.conf.json" in err
+    assert "other.conf.json" in _logged(paths)

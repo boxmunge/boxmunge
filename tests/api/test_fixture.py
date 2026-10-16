@@ -40,7 +40,7 @@ def test_fixture_reads_back_through_the_platform_readers(tmp_path) -> None:
         "predeploy", "nightly", "manual"]
     assert load_project_security("billing", paths).quarantined is True
     assert [b["project"] for b in collect_inbox(paths, None)] == ["shop", "wiki"]
-    assert {e["level"] for e in parse_log_file(paths.log_file)} == {"info", "warn", "error"}
+    assert {e["level"] for e in parse_log_file(paths.log_file).entries} == {"info", "warn", "error"}
     jobs = JobStore(paths, result_schemas=registry_results).recent().jobs
     assert [(j["action"], j["state"]) for j in jobs] == [
         ("project.deploy", "succeeded"), ("project.backup", "failed")]

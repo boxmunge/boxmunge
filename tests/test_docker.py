@@ -278,8 +278,8 @@ class TestCaddyLockContentionLogging:
 
 
 # Captured at import, before tests/conftest.py swaps in its no-Docker stub.
-import boxmunge.docker as _docker_module  # noqa: E402
-untag_old_built_names = _docker_module.untag_old_built_names
+import boxmunge.built_images as _built_images  # noqa: E402
+untag_old_built_names = _built_images.untag_old_built_names
 
 
 class TestUntagOldBuiltNames:
@@ -314,7 +314,7 @@ class TestUntagOldBuiltNames:
         return run, calls
 
     def _untag(self, run):
-        with patch("boxmunge.docker._run", side_effect=run):
+        with patch("boxmunge.built_images._run", side_effect=run):
             return untag_old_built_names("myapp", {"web": "myapp-custom:1"}, {"cache", "worker"})
 
     def test_untags_labelled_builds_and_keeps_images_others_use(self):

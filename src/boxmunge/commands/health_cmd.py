@@ -351,8 +351,16 @@ def check_recent_errors(paths: BoxPaths) -> HealthCheck:
     """Scan operational log for recent errors."""
     from boxmunge.commands.log_cmd import query_log
 
-    errors = query_log(paths, level="error", since="24h")
+    read = query_log(paths, level="error", since="24h")
+    errors = read.entries
 
+    if read.torn:
+        return HealthCheck(
+            "recent-errors", "warn",
+            f"{len(errors)} error(s) in last 24h, and {len(read.torn)} torn "
+            f"line(s) in the operational log that may have been errors (first: "
+            f"{read.torn[0]}); `log --since 24h` lists them",
+        )
     if len(errors) > 10:
         return HealthCheck(
             "recent-errors", "warn",

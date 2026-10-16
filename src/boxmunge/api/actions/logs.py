@@ -98,9 +98,9 @@ def _oplog_query(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
 
 
 def _entries(paths: BoxPaths) -> list[dict[str, Any]]:
-    """Every operational log entry. Unlike the CLI's `log`, a line that is
-    not an entry (torn by a crash, or hand-edited) fails the query, naming
-    the line, rather than vanishing from what a dashboard shows."""
+    """Every operational log entry. A line that is not an entry (torn by a
+    crash, or hand-edited) fails the query, naming the line, rather than
+    vanishing from what a dashboard shows; the CLI's `log` warns and exits 1."""
     path = paths.log_file
     if not path.exists():
         return []

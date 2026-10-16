@@ -44,7 +44,7 @@ from boxmunge.fleet import PROJECT_INPUT_ERRORS
 from boxmunge.log import log_error
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.paths import BoxPaths
-from boxmunge.project_registry import load_registered_projects
+from boxmunge.project_registry import read_registry
 from boxmunge.state import StateError
 
 
@@ -200,17 +200,19 @@ def fleet_summary(paths: BoxPaths) -> dict:
 
     A project whose files cannot be read is listed under "unreadable" (a
     key present only when something is) with the reason, never silently
-    left out of the counts. A registered project with no manifest yet, with
+    left out of the counts; so is each registry line that is not a project
+    name, with a null project like the other box-wide files. A registered project with no manifest yet, with
     or without a directory, is not deployed and has no security state.
     """
-    projects = sorted(load_registered_projects(paths))
+    registry = read_registry(paths)
+    projects = sorted(registry.names)
     posture_dist = {"relaxed": 0, "balanced": 0, "strict": 0, "paranoid": 0}
     quarantined_list: list[dict] = []
     at_risk: list[str] = []
     active_supps_count = 0
     projects_with_supps = 0
     last_scans: list[str] = []
-    unreadable: list[dict] = []
+    unreadable: list[dict] = [{"project": None, "error": p} for p in registry.problems]
 
     today = datetime.now(timezone.utc).date()
 
@@ -270,8 +272,8 @@ def fleet_summary(paths: BoxPaths) -> dict:
 
 def _report_unreadable(unreadable: list[dict], paths: BoxPaths) -> None:
     for entry in unreadable:
-        # A null project is the box-wide host suppressions file.
-        source = entry["project"] or "host suppressions"
+        # A null project is a box-wide file; its error names the file.
+        source = entry["project"] or "box-wide file"
         print(f"ERROR: security: {source}: {entry['error']}", file=sys.stderr)
         log_error("security", f"fleet summary could not read {source}: {entry['error']}",
                   paths, project=entry["project"])
@@ -357,8 +359,8 @@ def cmd_security(args: list[str]) -> None:
 
     if not positional:
         # Fleet summary.
-        registered = load_registered_projects(paths)
-        if not registered:
+        registry = read_registry(paths)
+        if not (registry.names or registry.problems):
             if as_json:
                 print(format_fleet_json({
                     "projects_count": 0,

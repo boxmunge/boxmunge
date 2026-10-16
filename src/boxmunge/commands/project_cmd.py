@@ -10,7 +10,9 @@ import sys
 from boxmunge.commands.argv import parse_args
 from boxmunge.log import log_operation
 from boxmunge.paths import BoxPaths
-from boxmunge.project_registry import add_project, load_registered_projects
+from boxmunge.project_registry import (
+    ProjectRegistryError, add_project, load_registered_projects,
+)
 
 
 def cmd_project_add(args: list[str]) -> None:
@@ -31,7 +33,11 @@ def cmd_project_list(args: list[str]) -> None:
     """List all registered project names."""
     as_json = parse_args("project-list", args, flags={"--json"}).has("--json")
     paths = BoxPaths()
-    projects = sorted(load_registered_projects(paths))
+    try:
+        projects = sorted(load_registered_projects(paths))
+    except ProjectRegistryError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
     if as_json:
         print(json.dumps({"projects": projects}))
         return

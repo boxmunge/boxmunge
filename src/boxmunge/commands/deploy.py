@@ -317,7 +317,11 @@ def _caddy_rejected(project_name: str, paths: BoxPaths,
           + (f", or run 'rollback {project_name}' to return to the previous "
              f"release." if _has_rollback_target(paths, project_name) else "."),
           file=sys.stderr)
-    log_error("deploy", f"Caddy rejected {site}; previous routing restored",
+    if error.refused:
+        print(f"ERROR: some site files were not restored: {error.refused}",
+              file=sys.stderr)
+    log_error("deploy", f"Caddy rejected {site}; previous routing restored for: "
+              f"{restored}" + (f"; refused: {error.refused}" if error.refused else ""),
               paths, project=project_name)
     return 1
 

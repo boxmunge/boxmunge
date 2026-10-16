@@ -164,7 +164,7 @@ def _no_built_image_removal(request, monkeypatch):
     tier neither touches the Docker daemon."""
     if request.node.get_closest_marker("integration"):
         return
-    monkeypatch.setattr("boxmunge.docker.untag_old_built_names", lambda project, build_services, image_services: [])
+    monkeypatch.setattr("boxmunge.built_images.untag_old_built_names", lambda project, build_services, image_services: [])
     monkeypatch.setattr("boxmunge.commands.project_delete_cmd.remove_built_images",
                         lambda compose_project: [])
 

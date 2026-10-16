@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 
-from boxmunge import compose_resolve, docker
+from boxmunge import built_images, compose_resolve
 from boxmunge.compose_images import built_image_name
 from boxmunge.compose_mounts import PROD_SMOKE_SOURCE, STAGING_SMOKE_SOURCE
 from boxmunge.fileutil import atomic_write_text
@@ -357,7 +357,7 @@ def prepare_compose_override(
     build_services = {name: svc.get("image") for name, svc in services.items()
                       if isinstance(svc, dict) and svc.get("build") is not None}
     for compose_project in (project_name, f"{project_name}-staging"):
-        docker.untag_old_built_names(
+        built_images.untag_old_built_names(
             compose_project, build_services, set(services) - set(build_services))
 
     # Deploy-time warning for any service resolving to profile: off.

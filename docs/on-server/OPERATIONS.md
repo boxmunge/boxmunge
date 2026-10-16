@@ -423,7 +423,7 @@ status --json
 Health checks also run automatically every 5 minutes via a systemd timer. Failures trigger Pushover alerts after the configured threshold.
 
 A project whose manifest or state files cannot be read does not stop the others being checked.
-`check-all`, `status` and `health` print an `ERROR:` line naming the project and the file, write
+`check-all`, `backup-all`, `status` and `health` print an `ERROR:` line naming the project and the file, write
 an error entry to the operational log, and carry on with the rest of the fleet. `status` shows the
 project as `ERROR` (`"raw_status": "error"` with an `error` field in `--json`) and exits 1.
 This includes a quarantine record (`state/deploy/<project>.quarantined.json`) that is not JSON or
@@ -435,6 +435,16 @@ holds, so repair the file or restore it from a backup.
 `check-all` exits at least 1, and records an unreadable manifest in the project's health state so
 the normal threshold alert fires with the cause. `check-all` also reports an unreadable host
 config (`boxmunge.yml`), since alerts cannot be sent without it, and still runs the checks.
+
+The project registry, `state/projects.txt`, holds one project name per line. Every line is checked
+as a project name when it is read. A line that is not one (`../etc`, a reserved name such as
+`caddy` or `<x>-staging`) is reported as `projects.txt:<line>` with the reason. The nightly
+`security scan` still scans every valid project, then alerts on the bad line and exits 1;
+`security`, `health` and `doctor` name it too. Every valid project keeps working: deploys, stages
+and the other per-project commands only ask whether their own name is registered, and
+`project-add`/`project-delete` keep the bad line as it is when they rewrite the file. Listings
+(`project-list`, `projects.list`) fail naming the line rather than list the registry with it left
+out. Correct or delete the line as root.
 
 An alert counts as sent only when Pushover accepts it. If it is not delivered, the health check logs why (an `error` entry when the config cannot be read or the Pushover request fails, a `warn` entry when Pushover is not configured) and tries again on the next 5-minute tick until it gets through. Without Pushover keys the `warn` entry is written at most once a day, because the retry would otherwise repeat it every tick; `health` reports the missing keys as the `alerts` warning for as long as they are missing. The same applies to the critical alert for a stopped project and to the RECOVERED notice. Find these entries with `log --component health`.
 
@@ -475,6 +485,8 @@ logs --boxmunge
 The operational log records every boxmunge action with timestamp, level, project, and message. It is the first place to check when something happened unexpectedly.
 
 It lives in `/opt/boxmunge/logs/boxmunge.log`. The first write of each UTC day moves the previous day's file to `boxmunge.log.YYYY-MM-DD`; 90 days of archives are kept. `logs --boxmunge`, `log` and the health check's 24-hour error count read the archives their window or `--tail` reaches into, so nothing drops out at midnight. Writers take `logs/.boxmunge.log.lock`; if it stays held for 5 seconds the entry is dropped with an error on stderr naming the lock, rather than hanging the command. `health` warns (`operational-log`) if the active file's first line is not a log entry, which stops all logging until the file is moved aside.
+
+A line in a log file that is not a JSON entry (torn by a crash, or hand-edited) is never skipped silently. `log` prints every entry it can read, then a `WARNING: <file>:<line>: ...` on stderr for each torn line, and exits 1, so `--json` output stays parseable and scripts still notice. The MCP `log` tool returns the same warnings and fails, the action API's `oplog.query` fails naming the line, and the health check's `recent-errors` warns, since a torn line may have been an error. Repair or delete the line named.
 
 ---
 
