@@ -651,6 +651,11 @@ Rollback refuses, with the reason, instead of doing half a rollback:
 
 A project with `backup.type: none` rolls back its code only.
 
+A rollback records each step, so a rerun after a crash carries on where it
+stopped. One window remains: if the machine crashes in the seconds after the
+snapshot was restored but before that is recorded, the rerun restores the
+snapshot again, and anything written to the data in those seconds is lost.
+
 ## An interrupted or failed install
 
 Every bundle production install (`prod-deploy`, `rollback`) is recorded in

@@ -85,3 +85,23 @@ def test_not_in_the_deploy_shell() -> None:
     """Dropping the record is the operator's call, after checking production."""
     from boxmunge.shell import ALLOWED_COMMANDS
     assert "install-txn" not in ALLOWED_COMMANDS
+
+
+@pytest.mark.parametrize("record", ["stale", "unreadable"])
+def test_drop_puts_the_superseded_previous_back_when_previous_is_gone(failed_v2, record) -> None:
+    """--drop never deletes the last rollback target."""
+    import shutil
+    rel = failed_v2.project_releases(P)
+    shutil.rmtree(rel / "previous")
+    (rel / "previous.json").rename(rel / "previous.superseded.json")
+    (rel / "previous.superseded").mkdir()
+    (rel / "previous.superseded" / "VERSION").write_text("v0\n")
+    if record == "stale":
+        mark_live(failed_v2, P, "myapp-from-an-older-boxmunge")
+    else:
+        txn_path(failed_v2, P).write_text("not json")
+    assert run_drop(P, failed_v2) == 0
+    assert (rel / "previous" / "VERSION").read_text() == "v0\n"
+    assert (rel / "previous.json").exists()
+    assert not (rel / "previous.superseded").exists()
+    assert not (rel / "previous.superseded.json").exists()

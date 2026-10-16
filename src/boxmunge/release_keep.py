@@ -87,6 +87,17 @@ def restore_superseded(paths: BoxPaths, project: str, txn: InstallTxn) -> None:
         fsync_dir(prev_meta.parent)
 
 
+def rescue_superseded(paths: BoxPaths, project: str) -> None:
+    """When previous/ (or previous.json) is gone but the superseded one is
+    still there, put the superseded one back: dropping a record must never
+    delete the last rollback target. Needs no transaction record."""
+    _building, prev, prev_meta, sup_dir, sup_meta = _names(paths, project)
+    if os.path.lexists(sup_dir) and not os.path.lexists(prev):
+        durable_rename_dir(sup_dir, prev)
+    if os.path.lexists(sup_meta) and not os.path.lexists(prev_meta):
+        durable_rename(sup_meta, prev_meta)
+
+
 def discard_superseded(paths: BoxPaths, project: str) -> None:
     sup_dir, sup_meta = superseded_paths(paths, project)
     discard_dir(sup_dir)

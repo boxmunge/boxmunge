@@ -5,7 +5,8 @@ A record is stale when the files no longer match it (an older boxmunge ran
 after a platform rollback, or a hand edit): nothing resumes, abandons or
 drops it automatically. After checking that production is what
 .releases/live.json says, the operator drops it; an unreadable record is
-dropped the same way. A record that still matches the files is refused:
+dropped the same way. A superseded previous release whose replacement is
+gone is put back as previous/, never discarded. A record that still matches the files is refused:
 it has a supported way out (rerun, --abandon, rollback or a fix).
 """
 from __future__ import annotations
@@ -17,7 +18,7 @@ from typing import TYPE_CHECKING
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.fileutil import LockError, fsync_dir, project_lock
 from boxmunge.log import log_operation
-from boxmunge.release_keep import discard_superseded
+from boxmunge.release_keep import discard_superseded, rescue_superseded
 from boxmunge.release_txn import close_txn, load_txn, options_text, stale_reason, txn_path
 
 if TYPE_CHECKING:
@@ -33,6 +34,7 @@ def drop_locked(project_name: str, paths: BoxPaths) -> int:
     try:
         txn = load_txn(paths, project_name)
     except ReleaseStateError as e:
+        rescue_superseded(paths, project_name)
         discard_superseded(paths, project_name)
         path.unlink()
         fsync_dir(path.parent)
@@ -47,6 +49,7 @@ def drop_locked(project_name: str, paths: BoxPaths) -> int:
               f"files are as it left them. {options_text(project_name, txn)}.",
               file=sys.stderr)
         return 1
+    rescue_superseded(paths, project_name)
     close_txn(paths, project_name, txn)
     print(f"{project_name}: dropped the stale record of the install of {txn.ref} "
           f"({stale}).")
