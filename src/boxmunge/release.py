@@ -23,7 +23,6 @@ from __future__ import annotations
 import json
 import shutil
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,8 +32,8 @@ from boxmunge.bundle import (
 from boxmunge.compose_mounts import PROD_SMOKE_SOURCE
 from boxmunge.data_dirs import (
     Announce, DataDirs, KeptData, ReleaseStateError, classify, entry_label,
-    has_record, holds_data, naming_set_aside, record_path, save_record,
-    set_aside_announcer, start_record, warn_retained,
+    has_record, holds_data, record_path, save_record,
+    start_record, warn_retained,
 )
 from boxmunge.fileutil import (
     atomic_write_text, chmod_nofollow, chown_tree_deploy, mkdir_p_deploy,
@@ -329,37 +328,6 @@ def mark_live(paths: BoxPaths, project_name: str, ref: str) -> None:
     meta = _live_meta(paths, project_name)
     meta.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(meta, live_meta_text(ref), mode=0o644)
-
-
-def keep_previous_release(
-    paths: BoxPaths, project_name: str, data_snapshot: str | None,
-    replaced_by: str, release_tree: Path | None = None,
-) -> None:
-    """Copy the live release code to ``.releases/previous/`` before an upgrade.
-
-    The copy is built beside the old one and swapped in only when complete,
-    so a failure here leaves the live tree and the old snapshot untouched.
-    """
-    project_dir = paths.project_dir(project_name)
-    releases = paths.project_releases(project_name)
-    building = releases / "previous.building"
-    _remove(building)
-    building.mkdir(parents=True)
-    for entry in live_code_entries(project_dir, release_tree):
-        _copy_entry(entry, building / entry.name)
-    # After the copy, so the kept release has any contents set aside too.
-    copies = _ensure_record(project_dir, release_tree,
-                            set_aside_announcer(paths, project_name, "deploy"))
-    with naming_set_aside(copies):
-        meta = previous_meta_text(live_ref(paths, project_name), data_snapshot,
-                                  datetime.now(timezone.utc).isoformat(), replaced_by)
-        # Drop the old metadata first: a crash mid-swap then leaves no previous
-        # release (rollback refuses) rather than old metadata on a new tree.
-        _remove(_previous_meta(paths, project_name))
-        target = previous_dir(paths, project_name)
-        _remove(target)
-        building.rename(target)
-        atomic_write_text(_previous_meta(paths, project_name), meta, mode=0o644)
 
 
 def load_previous_release(paths: BoxPaths, project_name: str) -> PreviousRelease | None:

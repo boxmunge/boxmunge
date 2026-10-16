@@ -350,7 +350,7 @@ class TestPreUpgradeProjects:
         pdir = _pre_upgrade_box(paths)
         place_bundle(paths, timestamp="2026-10-13T110000000000",
                      files={"compose.yml": NO_MOUNTS})
-        with _docker(), patch("boxmunge.commands.deploy.install_release",
+        with _docker(), patch("boxmunge.commands.deploy_tree.install_release",
                               side_effect=OSError("disk full")):
             assert run_deploy("myapp", paths) == 1
         prev = paths.project_releases("myapp") / "previous" / "compose.yml"
@@ -550,7 +550,7 @@ class TestEdgeCasesOfStartingTheRecord:
     def test_crash_between_the_move_and_the_install(self, paths) -> None:
         from boxmunge.commands.deploy import run_deploy
         pdir = self._code_once_mounted_rw(paths)
-        with _docker(), patch("boxmunge.commands.deploy.install_release",
+        with _docker(), patch("boxmunge.commands.deploy_tree.install_release",
                               side_effect=OSError("power cut")):
             assert run_deploy("myapp", paths) == 1
         assert json.loads(_record(pdir).read_text())["data_dirs"] == []

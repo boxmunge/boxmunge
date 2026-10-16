@@ -190,16 +190,16 @@ def compose_up_checked(
                force_recreate=force_recreate, services=services, start=start)
 
 
-def check_containers_start(paths: BoxPaths, project_name: str, *, component: str,
-                           txn: str | None = None) -> None:
+def check_containers_start(paths: BoxPaths, project_name: str, *, component: str) -> None:
     """Check what starting production's existing, stopped containers would
     mount. A `docker start` reads no compose file — it mounts what each
     container was created with, and during a stage the compose files on
     disk are the staged release's — so only the containers' own bind mounts
     are checked: the own-file and nesting rules, and each source walked
     without following links, of the kind recorded at deploy. Raises
-    ComposeRefused, also while an install other than `txn` is open."""
-    _refuse_if_install_open(paths, project_name, component, txn)
+    ComposeRefused, also while an install transaction is open (no install
+    resumes by restarting stopped containers)."""
+    _refuse_if_install_open(paths, project_name, component, None)
     project_dir = paths.project_dir(project_name)
     try:
         existing = docker_containers.container_bind_sources(project_name)
@@ -215,11 +215,10 @@ def check_containers_start(paths: BoxPaths, project_name: str, *, component: str
 
 def start_containers_checked(
     paths: BoxPaths, project_name: str, names: list[str], *, component: str,
-    txn: str | None = None,
 ) -> None:
     """check_containers_start, then `docker start` the named containers.
     Raises ComposeRefused or DockerError."""
-    check_containers_start(paths, project_name, component=component, txn=txn)
+    check_containers_start(paths, project_name, component=component)
     start_containers(names)
 
 
