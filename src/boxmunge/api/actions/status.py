@@ -10,11 +10,16 @@ from boxmunge.api.actions._common import NO_PARAMS
 from boxmunge.api.context import ActionContext
 from boxmunge.api.principal import Tier
 from boxmunge.api.registry import Action
-from boxmunge.api.schema import BOOLEAN, INTEGER, STRING, arr, enum, obj
+from boxmunge.api.schema import (
+    BOOLEAN, INTEGER, NULLABLE_STRING, STRING, arr, enum, nullable, obj,
+)
+from boxmunge.api.timefmt import NULLABLE_TIMESTAMP, TIMESTAMP, utc_timestamp
 from boxmunge.commands.handshake_cmd import run_handshake
-from boxmunge.commands.status import collect_status
+from boxmunge.commands.status import ROW_STATES, collect_status
 from boxmunge.config import load_config
+from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import load_registered_projects
+from boxmunge.state import StateError
 from boxmunge.version import get_build_version
 
 PLATFORM_INFO = obj({
@@ -27,11 +32,16 @@ PLATFORM_INFO = obj({
 })
 
 STATUS_ROW = obj({
-    "project": STRING, "status": STRING, "raw_status": STRING,
-    "last_check": STRING, "deployed_at": STRING,
-    "cve_id": STRING, "severity": STRING, "explanation": STRING,
-    "quarantined_at": STRING, "error": STRING,
-}, optional=("cve_id", "severity", "explanation", "quarantined_at", "error"))
+    "project": STRING,
+    "status": enum(*ROW_STATES),
+    "last_check": NULLABLE_TIMESTAMP,
+    "deployed_at": NULLABLE_TIMESTAMP,
+    "quarantine": nullable(obj({
+        "cve_id": STRING, "severity": STRING, "explanation": STRING,
+        "quarantined_at": TIMESTAMP,
+    })),
+    "error": NULLABLE_STRING,
+})
 
 HEALTH_REPORT = obj({
     "healthy": BOOLEAN,
@@ -57,7 +67,34 @@ def _platform_info(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]
 
 
 def _status_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
-    return {"projects": collect_status(ctx.paths).rows}
+    return {"projects": [_status_row(row, ctx.paths) for row in collect_status(ctx.paths).rows]}
+
+
+def _status_row(row: dict[str, Any], paths: BoxPaths) -> dict[str, Any]:
+    """A dashboard row with every timestamp in the API's format. A stored
+    timestamp that is not one costs only this row, like any unreadable
+    state file."""
+    name = row["project"]
+    try:
+        quarantine = row["quarantine"]
+        return {
+            "project": name,
+            "status": row["state"],
+            "last_check": utc_timestamp(
+                row["last_check"], f"{paths.project_health_state(name)} last_check"),
+            "deployed_at": utc_timestamp(
+                row["deployed_at"], f"{paths.project_deploy_state(name)} deployed_at"),
+            "quarantine": None if quarantine is None else {
+                **quarantine,
+                "quarantined_at": utc_timestamp(
+                    quarantine["quarantined_at"],
+                    f"{paths.project_quarantine_state(name)} quarantined_at"),
+            },
+            "error": row["error"],
+        }
+    except StateError as e:
+        return {"project": name, "status": "error", "last_check": None, "deployed_at": None,
+                "quarantine": None, "error": f"{name}: {e}"}
 
 
 def _projects_list(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:

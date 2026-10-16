@@ -123,6 +123,11 @@ Parameter and result schemas use a small JSON Schema subset: `type`, `properties
 - `pattern` must match the **whole** string, as if written `^...$`. Anchor it yourself if you
   reuse it in JavaScript.
 - `true` and `false` are never integers: `{"tail": true}` is refused.
+- Every timestamp in a result is ISO 8601 in UTC with a trailing `Z`
+  (`2026-10-14T02:30:00Z`, with microseconds when the platform recorded them). Calendar dates,
+  such as a suppression's `until`, are `YYYY-MM-DD`.
+- Enum values are lowercase machine values (`failing`, not `FAILING`); a value that does not
+  apply is `null`, never a placeholder such as `-`.
 - There is no `default` keyword. Where a parameter is optional, its `description` states the
   default the server applies.
 
@@ -152,7 +157,7 @@ The catalog is the authority on parameters and result fields; this table is the 
 | Action | Parameters | Returns |
 |---|---|---|
 | `platform.info` | none | `api_version`, `server_version`, `build`, `min_client_version`, `schema_version`, `hostname` |
-| `status.get` | none | `projects`: one dashboard row per project (`status`, `raw_status`, `last_check`, `deployed_at`, quarantine fields) |
+| `status.get` | none | `projects`: one row per project: `status` (ok, failing, critical_stopped, unknown, quarantined, paused, pre_registered, error), `last_check`, `deployed_at`, `quarantine` (`cve_id`, `severity`, `explanation`, `quarantined_at`) and `error`, null where they do not apply |
 | `projects.list` | none | `projects`: registered project names |
 | `health.get` | none | `healthy`, `exit_code`, `checks` (`name`, `status` ok/warn/error/skip, `detail`) |
 | `project.get` | `project` | `lifecycle` (running, paused, quarantined, monitor_stopped, pre_registered, registered), `health`, `deploy` with history, `staging`, `paused`, `quarantine` |
@@ -160,7 +165,7 @@ The catalog is the authority on parameters and result fields; this table is the 
 | `project.logs` | `project`, `service`?, `tail`? (1-1000, default 100) | `lines` of container log output |
 | `oplog.query` | `project`?, `component`?, `level`?, `since`? (`30m`, `6h`, `7d`), `tail`? (default 50) | `entries` of the operational log; `detail` is compact JSON text or null |
 | `security.summary` | none | Fleet CVE view: posture counts, quarantined and at-risk projects, suppressions, breaker holds |
-| `security.project` | `project` | `status`, `findings` with dispositions, `quarantine`, `active_suppressions`, `off_services` |
+| `security.project` | `project` | `status` (normal, quarantined, at_risk_running), `findings` with dispositions, `quarantine`, `active_suppressions`, `off_services` |
 | `backups.list` | `project` | `snapshots`, newest first: `name`, `kind`, `taken_at`, `size` |
 | `inbox.list` | `project`? | `bundles` uploaded and not yet deployed |
 | `jobs.list` | `project`?, `limit`? (1-200, default 50) | `jobs`, newest first |

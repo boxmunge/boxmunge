@@ -15,8 +15,10 @@ from boxmunge.api.result import ActionError, ErrorCode
 from boxmunge.api.schema import (
     BOOLEAN, INTEGER, NULLABLE_INTEGER, NULLABLE_STRING, STRING, arr, enum, nullable, obj,
 )
+from boxmunge.api.timefmt import NULLABLE_TIMESTAMP, TIMESTAMP, utc_timestamp
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.inbox_cmd import collect_inbox
+from boxmunge.commands.status import HEALTH_STATES
 from boxmunge.cve.quarantine import read_quarantine_state
 from boxmunge.pause import read_paused_state
 from boxmunge.project_registry import load_registered_projects
@@ -30,20 +32,20 @@ PROJECT_VIEW = obj({
     "project": STRING,
     "lifecycle": enum(*LIFECYCLES),
     "health": obj({
-        "status": STRING,
-        "last_check": NULLABLE_STRING,
+        "status": enum(*HEALTH_STATES),
+        "last_check": NULLABLE_TIMESTAMP,
         "consecutive_failures": NULLABLE_INTEGER,
         "failure_reason": NULLABLE_STRING,
     }),
     "deploy": obj({
         "current_ref": NULLABLE_STRING,
-        "deployed_at": NULLABLE_STRING,
+        "deployed_at": NULLABLE_TIMESTAMP,
         "history": arr(obj({
-            "ref": STRING, "deployed_at": NULLABLE_STRING, "snapshot": NULLABLE_STRING,
+            "ref": STRING, "deployed_at": NULLABLE_TIMESTAMP, "snapshot": NULLABLE_STRING,
         })),
     }),
     "staging": obj({"active": BOOLEAN, "ref": NULLABLE_STRING}),
-    "paused": nullable(obj({"paused_at": STRING, "reason": NULLABLE_STRING})),
+    "paused": nullable(obj({"paused_at": TIMESTAMP, "reason": NULLABLE_STRING})),
     "quarantine": nullable(QUARANTINE_SCHEMA),
 })
 
@@ -54,7 +56,7 @@ CHECK_RESULT = obj({
     "smoke": obj({"status": enum("ok", "warning", "critical"), "message": STRING}),
 }, optional=("smoke",))
 
-BUNDLE = obj({"name": STRING, "project": STRING, "size": INTEGER, "mtime": STRING})
+BUNDLE = obj({"name": STRING, "project": STRING, "size": INTEGER, "mtime": TIMESTAMP})
 
 
 def _project_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
@@ -74,29 +76,39 @@ def _project_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
                          f"timestamp; resume the project or rewrite the file.")
     quarantine = read_quarantine_state(name, paths)
     staged = bool(staging.get("active", False))
+    health_status = health.get("status", "unknown")
+    if health_status not in HEALTH_STATES:
+        raise StateError(f"Health state {paths.project_health_state(name)} has the status "
+                         f"{health_status!r}; boxmunge writes one of {', '.join(HEALTH_STATES)}")
+    deploy_file = paths.project_deploy_state(name)
     return {
         "project": name,
         "lifecycle": _lifecycle(name, paths, has_dir=has_dir, deployed=deployed,
                                 paused=paused is not None,
                                 quarantined=quarantine is not None),
         "health": {
-            "status": health.get("status", "unknown"),
-            "last_check": health.get("last_check"),
+            "status": health_status,
+            "last_check": utc_timestamp(health.get("last_check"),
+                                        f"{paths.project_health_state(name)} last_check"),
             "consecutive_failures": health.get("consecutive_failures"),
             "failure_reason": health.get("failure_reason") or None,
         },
         "deploy": {
             "current_ref": deploy.get("current_ref"),
-            "deployed_at": deploy.get("deployed_at"),
+            "deployed_at": utc_timestamp(deploy.get("deployed_at"), f"{deploy_file} deployed_at"),
             "history": [
-                {"ref": entry["ref"], "deployed_at": entry.get("deployed_at") or None,
+                {"ref": entry["ref"],
+                 "deployed_at": utc_timestamp(entry.get("deployed_at") or None,
+                                              f"{deploy_file} history deployed_at"),
                  "snapshot": entry.get("snapshot") or None}
                 for entry in deploy.get("history", [])
             ],
         },
         "staging": {"active": staged, "ref": staging.get("ref") if staged else None},
         "paused": None if paused is None else {
-            "paused_at": paused["paused_at"], "reason": paused.get("reason")},
+            "paused_at": utc_timestamp(paused["paused_at"],
+                                       f"{paths.project_paused_state(name)} paused_at"),
+            "reason": paused.get("reason")},
         "quarantine": None if quarantine is None else quarantine_view(
             quarantine, paths.project_quarantine_state(name)),
     }

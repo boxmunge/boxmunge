@@ -20,9 +20,9 @@ def _record(n: int, **fields) -> dict:
     record = {
         "id": _id(n), "action": "project.deploy", "principal": "plugin:webui",
         "project": "shop", "state": "succeeded",
-        "created_at": f"2026-10-14T0{n}:00:00+00:00",
-        "started_at": f"2026-10-14T0{n}:00:05+00:00",
-        "finished_at": f"2026-10-14T0{n}:01:30+00:00", "error": None, "result": None,
+        "created_at": f"2026-10-14T0{n}:00:00Z",
+        "started_at": f"2026-10-14T0{n}:00:05Z",
+        "finished_at": f"2026-10-14T0{n}:01:30Z", "error": None, "result": None,
     }
     record.update(fields)
     return record
@@ -125,9 +125,9 @@ def test_record_under_the_wrong_name_is_corrupt(paths) -> None:
 def test_events_after_a_sequence_number(paths) -> None:
     paths.jobs_dir.mkdir(parents=True)
     lines = [
-        {"seq": 1, "ts": "t1", "type": "state", "state": "running"},
-        {"seq": 2, "ts": "t2", "type": "step", "step": "build", "status": "started"},
-        {"seq": 3, "ts": "t3", "type": "log", "message": "Pulling images"},
+        {"seq": 1, "ts": "2026-10-14T00:00:01Z", "type": "state", "state": "running"},
+        {"seq": 2, "ts": "2026-10-14T00:00:02Z", "type": "step", "step": "build", "status": "started"},
+        {"seq": 3, "ts": "2026-10-14T00:00:03Z", "type": "log", "message": "Pulling images"},
     ]
     (paths.jobs_dir / f"{_id(1)}.events.jsonl").write_text(
         "".join(json.dumps(line) + "\n" for line in lines))
@@ -139,8 +139,8 @@ def test_events_after_a_sequence_number(paths) -> None:
 
 @pytest.mark.parametrize("line,message", [
     ("{not json", "not JSON"),
-    ('{"seq": 0, "ts": "t", "type": "log"}', "below minimum 1"),
-    ('{"seq": 1, "ts": "t", "type": "shout"}', "must be one of"),
+    ('{"seq": 0, "ts": "2026-10-14T00:00:00Z", "type": "log"}', "below minimum 1"),
+    ('{"seq": 1, "ts": "2026-10-14T00:00:00Z", "type": "shout"}', "must be one of"),
 ])
 def test_corrupt_event_lines_are_reported(paths, line, message) -> None:
     paths.jobs_dir.mkdir(parents=True)

@@ -7,6 +7,7 @@ from typing import Any
 
 from boxmunge.api.result import ActionError, ErrorCode
 from boxmunge.api.schema import BOOLEAN, STRING, obj
+from boxmunge.api.timefmt import TIMESTAMP, utc_timestamp
 from boxmunge.cve.quarantine import QUARANTINE_TEXT_FIELDS, checked_quarantine_record
 from boxmunge.paths import BoxPaths, InvalidProjectName
 
@@ -19,7 +20,7 @@ NO_PARAMS = obj({})
 TAIL_MAX = 1000
 
 QUARANTINE_SCHEMA = obj({
-    "quarantined_at": STRING,
+    "quarantined_at": TIMESTAMP,
     "cve_id": STRING,
     "severity": STRING,
     "effective_severity": STRING,
@@ -69,5 +70,6 @@ def quarantine_view(state: dict[str, Any] | None, path: Path) -> dict[str, Any]:
     record = checked_quarantine_record(state, path)
     return {
         **{key: record[key] for key in QUARANTINE_TEXT_FIELDS},
+        "quarantined_at": utc_timestamp(record["quarantined_at"], f"{path} quarantined_at"),
         "action_complete": record.get("action_complete", False),
     }

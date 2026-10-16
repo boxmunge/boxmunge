@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -115,3 +116,31 @@ def test_every_action_runs_silently_against_the_fixture(fixture_paths, capfd) ->
     for name, params in calls:
         invoker.invoke(name, params, Principal.plugin("webui", Tier.OBSERVE))
     assert capfd.readouterr() == ("", "")
+
+
+_TIMESTAMPISH = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T")
+_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?Z")
+
+
+def _strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+
+
+def test_every_timestamp_any_action_returns_is_utc_with_a_z(fixture_paths) -> None:
+    """One format for every action: ISO 8601, UTC, trailing Z."""
+    invoker = make_invoker(fixture_paths, host=FixtureHost(fixture_paths))
+    bad = []
+    for name, params in _sweep_calls(fixture_paths):
+        data = invoker.invoke(name, params, Principal.plugin("webui", Tier.OBSERVE)).data
+        if name == "project.logs":
+            continue  # container log lines are text, timestamps inside them are not fields
+        bad += [(name, s) for s in _strings(data)
+                if _TIMESTAMPISH.match(s) and not _TIMESTAMP.fullmatch(s)]
+    assert bad == []

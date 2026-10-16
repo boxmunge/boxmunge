@@ -31,9 +31,9 @@ def test_fixture_reads_back_through_the_platform_readers(tmp_path) -> None:
         "billing", "blog", "newapp", "shop", "wiki"]
     snapshot = collect_status(paths)
     assert snapshot.failures == []
-    assert {row["project"]: row["raw_status"] for row in snapshot.rows} == {
+    assert {row["project"]: row["state"] for row in snapshot.rows} == {
         "shop": "ok", "blog": "paused", "billing": "quarantined",
-        "wiki": "failing", "newapp": "pre-registered",
+        "wiki": "failing", "newapp": "pre_registered",
     }
     assert [snapshot_kind(p, "shop").value for p in list_snapshots(paths, "shop")] == [
         "predeploy", "nightly", "manual"]

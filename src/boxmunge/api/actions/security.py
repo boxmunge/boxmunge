@@ -20,6 +20,7 @@ from boxmunge.commands.security_cmd import (
     SecurityViewError, fleet_summary, load_project_security,
 )
 from boxmunge.commands.security_views import project_cve_status
+from boxmunge.api.timefmt import NULLABLE_TIMESTAMP, utc_timestamp
 from boxmunge.cve.breaker import BreakerError, read_held
 from boxmunge.cve.policy import Disposition
 from boxmunge.cve.scan_state import stored_severities
@@ -33,7 +34,7 @@ SUMMARY = obj({
     "projects_count": INTEGER,
     "posture_distribution": obj({posture: INTEGER for posture in POSTURES}),
     "quarantined": arr(obj({
-        "project": STRING, "cve_id": STRING, "severity": STRING, "since": NULLABLE_STRING,
+        "project": STRING, "cve_id": STRING, "severity": STRING, "since": NULLABLE_TIMESTAMP,
     })),
     "at_risk_running": arr(STRING),
     "active_suppressions_count": INTEGER,
@@ -77,8 +78,8 @@ PROJECT_SECURITY = obj({
     "project": STRING,
     "posture": STRING,
     "dangerously_disable_quarantine": BOOLEAN,
-    "status": enum("NORMAL", "QUARANTINED", "AT_RISK_RUNNING"),
-    "last_scan": NULLABLE_STRING,
+    "status": enum("normal", "quarantined", "at_risk_running"),
+    "last_scan": NULLABLE_TIMESTAMP,
     "unscanned": arr(STRING),
     "findings": arr(FINDING),
     "quarantine": nullable(QUARANTINE_SCHEMA),
@@ -94,6 +95,15 @@ def _security_summary(params: dict[str, Any], ctx: ActionContext) -> dict[str, A
     summary = fleet_summary(ctx.paths)
     summary.setdefault("unreadable", [])  # the CLI omits it when empty; the API always has it
     summary["held_by_breaker"] = _held(ctx.paths)
+    for entry in summary["quarantined"]:
+        entry["since"] = utc_timestamp(
+            entry["since"], f"{ctx.paths.project_quarantine_state(entry['project'])} "
+                            f"quarantined_at")
+    summary["last_fleet_scan"] = utc_timestamp(summary["last_fleet_scan"], "the latest scan state")
+    grace = summary["grace"]
+    if grace is not None:
+        for key in ("installed_at", "expires_at"):
+            grace[key] = utc_timestamp(grace[key], f"the migration grace state {key}")
     return summary
 
 
@@ -126,8 +136,9 @@ def _security_project(params: dict[str, Any], ctx: ActionContext) -> dict[str, A
         "status": project_cve_status(
             quarantined=view.quarantined, quarantine_state=view.quarantine_state,
             scan_state=view.scan_state,
-            dangerously_disable=view.dangerously_disable_quarantine),
-        "last_scan": scan.get("scanned_at"),
+            dangerously_disable=view.dangerously_disable_quarantine).lower(),
+        "last_scan": utc_timestamp(scan.get("scanned_at"),
+                                   f"{ctx.paths.project_scan_state(name)} scanned_at"),
         "unscanned": list(scan.get("unscanned", [])),
         "findings": [
             _finding_view(finding, decision.get("image_ref"))

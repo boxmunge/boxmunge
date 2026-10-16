@@ -12,6 +12,7 @@ from boxmunge.api.principal import Tier
 from boxmunge.api.registry import Action
 from boxmunge.api.result import ActionError, ErrorCode
 from boxmunge.api.schema import INTEGER, NULLABLE_STRING, STRING, arr, enum, obj
+from boxmunge.api.timefmt import TIMESTAMP, utc_timestamp
 from boxmunge.commands.log_cmd import filter_log_entries
 from boxmunge.docker import DockerError
 from boxmunge.manifest import load_manifest
@@ -55,7 +56,7 @@ OPLOG_PARAMS = obj({
 }, optional=("project", "component", "level", "since", "tail"))
 
 OPLOG_ENTRY = obj({
-    "ts": STRING, "level": STRING, "component": STRING, "project": NULLABLE_STRING,
+    "ts": TIMESTAMP, "level": STRING, "component": STRING, "project": NULLABLE_STRING,
     "msg": STRING,
     "detail": {"type": ["string", "null"],
                "description": "The entry's detail object as compact JSON, or null."},
@@ -123,7 +124,8 @@ def _entries(paths: BoxPaths) -> list[dict[str, Any]]:
 def _entry_view(entry: dict[str, Any]) -> dict[str, Any]:
     detail = entry.get("detail")
     return {
-        "ts": entry["ts"], "level": entry["level"], "component": entry["component"],
+        "ts": utc_timestamp(entry["ts"], f"an operational log entry's ts ({entry['msg'][:80]!r})"),
+        "level": entry["level"], "component": entry["component"],
         "project": entry.get("project"), "msg": entry["msg"],
         "detail": None if detail is None else json.dumps(detail, sort_keys=True, default=str),
     }

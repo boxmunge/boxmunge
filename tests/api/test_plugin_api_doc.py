@@ -60,3 +60,8 @@ def test_the_closed_schema_claim_is_internal_only() -> None:
 def test_job_invocation_contract_is_documented() -> None:
     assert "HTTP 202" in DOC and "`data` is the job record" in DOC
     assert "`result`" in DOC.split("### Jobs", 1)[1]
+
+
+def test_value_conventions_are_documented() -> None:
+    assert "ISO 8601 in UTC with a trailing `Z`" in DOC
+    assert "Enum values are lowercase machine values" in DOC

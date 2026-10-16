@@ -9,14 +9,15 @@ from boxmunge.api.actions._common import PROJECT_PARAM, existing_project
 from boxmunge.api.context import ActionContext
 from boxmunge.api.principal import Tier
 from boxmunge.api.registry import Action
-from boxmunge.api.schema import INTEGER, NULLABLE_STRING, STRING, arr, enum, nullable, obj
+from boxmunge.api.timefmt import NULLABLE_TIMESTAMP
+from boxmunge.api.schema import INTEGER, STRING, arr, enum, nullable, obj
 from boxmunge.backup import BackupKind, parse_snapshot
 from boxmunge.commands.backup_cmd import list_snapshots
 
 SNAPSHOT = obj({
     "name": STRING,
     "kind": nullable(enum(*(kind.value for kind in BackupKind))),
-    "taken_at": NULLABLE_STRING,
+    "taken_at": NULLABLE_TIMESTAMP,
     "size": INTEGER,
 })
 

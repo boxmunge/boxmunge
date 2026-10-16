@@ -59,7 +59,7 @@ def test_corrupt_breaker_state_is_reported_not_hidden(fixture_paths) -> None:
 
 def test_quarantined_project(fixture_paths) -> None:
     billing = _call(fixture_paths, "security.project", {"project": "billing"})
-    assert billing["status"] == "QUARANTINED"
+    assert billing["status"] == "quarantined"
     assert billing["quarantine"]["cve_id"] == "CVE-2026-32003"
     assert [(f["cve_id"], f["disposition"]) for f in billing["findings"]] == [
         ("CVE-2026-32003", "quarantine")]
@@ -68,7 +68,7 @@ def test_quarantined_project(fixture_paths) -> None:
 
 def test_clean_project_lists_every_finding(fixture_paths) -> None:
     shop = _call(fixture_paths, "security.project", {"project": "shop"})
-    assert shop["status"] == "NORMAL" and shop["quarantine"] is None
+    assert shop["status"] == "normal" and shop["quarantine"] is None
     assert [f["disposition"] for f in shop["findings"]] == ["informational", "ignored_fixed"]
     assert shop["posture"] == "balanced" and shop["off_services"] == []
 

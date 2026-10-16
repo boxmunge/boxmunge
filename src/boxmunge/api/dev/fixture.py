@@ -19,8 +19,9 @@ from pathlib import Path
 import yaml
 
 from boxmunge.api.dev.fixture_projects import (
-    DEV_DIR, PROJECTS, QUARANTINE_CVE, iso, write_json, write_project,
+    DEV_DIR, PROJECTS, QUARANTINE_CVE, write_json, write_project,
 )
+from boxmunge.api.timefmt import format_utc
 from boxmunge.paths import BoxPaths
 from boxmunge.ulid import generate_ulid
 
@@ -151,13 +152,13 @@ def _write_jobs(paths: BoxPaths, now: datetime) -> None:
         created = now - timedelta(hours=hours)
         write_json(paths.jobs_dir / f"{job_id}.json", {
             "id": job_id, "action": action, "principal": principal, "project": project,
-            "state": state, "created_at": iso(created),
-            "started_at": iso(created + timedelta(seconds=5)),
-            "finished_at": iso(created + timedelta(seconds=90)), "error": error,
+            "state": state, "created_at": format_utc(created),
+            "started_at": format_utc(created + timedelta(seconds=5)),
+            "finished_at": format_utc(created + timedelta(seconds=90)), "error": error,
             "result": None,
         })
         lines = [
-            json.dumps({"seq": seq, "ts": iso(created + timedelta(seconds=5 + 10 * seq)),
+            json.dumps({"seq": seq, "ts": format_utc(created + timedelta(seconds=5 + 10 * seq)),
                         **event})
             for seq, event in enumerate(events, start=1)
         ]

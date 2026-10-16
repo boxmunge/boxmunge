@@ -16,7 +16,7 @@ from boxmunge.commands.security_cmd import (
     SecurityViewError, fleet_summary, load_project_security,
 )
 from boxmunge.commands.security_views import project_cve_status
-from boxmunge.commands.status import collect_status, run_status
+from boxmunge.commands.status import collect_status, display_rows, run_status
 
 
 def _deploy(paths, name: str, **manifest) -> None:
@@ -35,16 +35,17 @@ def test_collect_status_reports_failures_without_printing(paths, capsys) -> None
     snapshot = collect_status(paths)
     assert capsys.readouterr() == ("", "")
     rows = {row["project"]: row for row in snapshot.rows}
-    assert rows["bad"]["raw_status"] == "error"
-    assert rows["good"]["raw_status"] == "unknown"
-    assert rows["early"]["raw_status"] == "pre-registered"
+    assert rows["bad"]["state"] == "error"
+    assert rows["good"]["state"] == "unknown"
+    assert rows["early"]["state"] == "pre_registered"
     assert [name for name, _ in snapshot.failures] == ["bad"]
 
 
 def test_run_status_json_prints_the_collected_rows(paths, capsys) -> None:
     _deploy(paths, "good")
     assert run_status(paths, as_json=True) == 0
-    assert capsys.readouterr().out == json.dumps(collect_status(paths).rows, indent=2) + "\n"
+    assert capsys.readouterr().out == json.dumps(
+        display_rows(collect_status(paths).rows), indent=2) + "\n"
 
 
 def test_collect_status_without_projects_dir(tmp_path) -> None:

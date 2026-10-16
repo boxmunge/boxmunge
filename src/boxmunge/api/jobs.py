@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from boxmunge.api.schema import NULLABLE_STRING, STRING, enum, nullable, obj, validate
+from boxmunge.api.timefmt import NULLABLE_TIMESTAMP, TIMESTAMP
 from boxmunge.paths import BoxPaths
 from boxmunge.state import StateError
 
@@ -34,9 +35,9 @@ JOB_SCHEMA = obj({
     "principal": STRING,
     "project": NULLABLE_STRING,
     "state": enum(*JOB_STATES),
-    "created_at": STRING,
-    "started_at": NULLABLE_STRING,
-    "finished_at": NULLABLE_STRING,
+    "created_at": TIMESTAMP,
+    "started_at": NULLABLE_TIMESTAMP,
+    "finished_at": NULLABLE_TIMESTAMP,
     "error": nullable(obj({"code": STRING, "message": STRING})),
     # The action's result once the job has succeeded, in the shape of that
     # action's catalog result schema. No action runs as a job in this
@@ -47,7 +48,7 @@ JOB_SCHEMA = obj({
 
 EVENT_SCHEMA = obj({
     "seq": {"type": "integer", "minimum": 1},
-    "ts": STRING,
+    "ts": TIMESTAMP,
     "type": enum(*EVENT_TYPES),
     "message": STRING,
     "step": STRING,
