@@ -12,6 +12,7 @@ from boxmunge.commands.deploy_steps import (
     snapshot_live_release, take_pre_deploy_snapshot, update_repo,
 )
 from boxmunge.compose import prepare_compose_override
+from boxmunge.data_dirs import log_retained
 from boxmunge.docker import CaddyConfigRejected, compose_up, caddy_reload, DockerError
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.identity import register_project_identity
@@ -107,8 +108,9 @@ def _deploy_bundle(
                     return _install_failed(project_name, paths, e, changed=False,
                                            first_deploy=is_new)
             try:
-                install_release(tree, paths.project_dir(project_name))
+                retained = install_release(tree, paths.project_dir(project_name))
                 mark_live(paths, project_name, new_ref)
+                log_retained(paths, project_name, retained, "deploy")
             except (OSError, ValueError) as e:
                 return _install_failed(project_name, paths, e, changed=True,
                                        first_deploy=is_new)

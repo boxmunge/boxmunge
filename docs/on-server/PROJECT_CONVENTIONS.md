@@ -34,9 +34,9 @@ A bundle carries the project's code and configuration: `manifest.yml`, `compose.
 Each bundle deploy makes the project's code exactly the bundle: a file or directory the previous
 release had but the new bundle does not is removed (it stays in the previous-release copy that
 `rollback` restores). So anything the project needs on the server, including `project.env`, must
-ship in every bundle. Server-owned entries (below), read-write
-bind-mounted data directories, and `-staging` copies of bind-mounted directories are never touched
-by a deploy.
+ship in every bundle. Server-owned entries (below), data directories (any directory a release has
+bind-mounted read-write, see below), and `-staging` copies of bind-mounted directories are never
+touched by a deploy.
 
 Some entries belong to the server, and a bundle that carries any of them is refused before anything
 on the server changes (`ERROR:` naming each entry, exit 1):
@@ -69,6 +69,16 @@ most an empty placeholder for it. A directory bind-mounted **read-only** (`:ro`,
 `read_only: true`) is code or config: it ships in the bundle and is updated on every deploy like any
 other file. If boxmunge cannot read the live `compose.yml` well enough to tell which directories
 hold data, the deploy is refused before anything changes.
+
+Once a directory has been a data directory it stays one, even after a later release drops the
+mount (the same holds for a bind-mounted file): boxmunge records it in
+`.releases/data-dirs.json`, and no deploy, stage or rollback removes, overwrites or copies it. A
+deploy whose release no longer mounts it prints a `WARNING` naming it and logs one. A bundle that
+ships content under that name is refused while the server's copy holds data. Deleting retired data
+is a deliberate step: when no release in use or kept for rollback needs it, an operator removes it
+on the server (`rm -rf /opt/boxmunge/projects/<project>/uploads`), and the next deploy forgets it.
+An empty data directory nothing mounts is forgotten too. If `data-dirs.json` is unreadable or has an
+unknown `version`, deploys are refused until it is restored.
 
 ---
 

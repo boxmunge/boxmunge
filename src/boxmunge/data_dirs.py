@@ -1,0 +1,201 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Which top-level project entries hold data the app writes.
+
+A compose file only says what its own release bind-mounts read-write. Once a
+release drops a mount, no later compose file mentions the directory, so
+classifying from compose files alone turns yesterday's uploads/ into stale
+release code, which the next install deletes. The project therefore keeps
+``.releases/data-dirs.json``, a record of every entry that a compose file
+the box has held (live, incoming, or a kept release) bind-mounted
+read-write. A recorded entry is box state: installs never remove, overwrite
+or copy it into a kept release.
+
+An entry leaves the record only while neither it nor its ``-staging`` copy
+holds anything: when no compose file mounts it any more, or when a release
+ships it as code without mounting it read-write. Deleting a retired data
+directory is an operator's deliberate act, never a side effect of a deploy.
+"""
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import TYPE_CHECKING, Iterable
+
+from boxmunge.bind_mounts import BindMountError, bind_mounted_dirs
+from boxmunge.bundle import BOX_OWNED_ENTRIES, BOXMUNGE_ENTRIES
+from boxmunge.fileutil import atomic_write_text
+from boxmunge.log import log_warning
+
+if TYPE_CHECKING:
+    from boxmunge.paths import BoxPaths
+
+RECORD_VERSION = 1
+
+
+class ReleaseStateError(ValueError):
+    """Release state is unreadable: a .releases/ bookkeeping file, or a
+    compose.yml that says which directories hold data."""
+
+
+def record_path(project_dir: Path) -> Path:
+    return project_dir / ".releases" / "data-dirs.json"
+
+
+def bind_dirs(compose_path: Path, project_dir: Path) -> dict[str, bool]:
+    """Bind-mounted top-level dirs of a compose file -> read-write?"""
+    try:
+        return bind_mounted_dirs(compose_path, project_dir)
+    except BindMountError as e:
+        raise ReleaseStateError(
+            f"Cannot tell which project directories hold data: {e}. Nothing "
+            f"was changed; fix the file by hand before deploying."
+        ) from e
+
+
+def _read_write(compose_path: Path, project_dir: Path) -> set[str]:
+    return {d for d, rw in bind_dirs(compose_path, project_dir).items() if rw}
+
+
+def holds_data(path: Path) -> bool:
+    """Anything but a missing entry or an empty real directory."""
+    if path.is_dir() and not path.is_symlink():
+        return any(path.iterdir())
+    return os.path.lexists(path)
+
+
+def _valid_name(name: object) -> bool:
+    return (isinstance(name, str) and name not in ("", ".", "..")
+            and "/" not in name and "\0" not in name)
+
+
+def _load_record(project_dir: Path) -> set[str]:
+    """The recorded data entries; none for a project that has no record yet."""
+    path = record_path(project_dir)
+    if not os.path.lexists(path):
+        return set()
+    fix = (f"Nothing was changed. It lists the project directories that hold "
+           f"data, so deploys never delete them: restore it, or rewrite it as "
+           f'{{"version": {RECORD_VERSION}, "data_dirs": ["<dir>", ...]}}.')
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise ReleaseStateError(f"Cannot read {path}: {e}. {fix}") from e
+    if not isinstance(doc, dict):
+        raise ReleaseStateError(f"{path} is not a JSON object. {fix}")
+    version = doc.get("version")
+    if version != RECORD_VERSION or isinstance(version, bool):
+        raise ReleaseStateError(
+            f"{path} has version {version!r}; this boxmunge reads only "
+            f"version {RECORD_VERSION}. {fix}")
+    names = doc.get("data_dirs")
+    if not isinstance(names, list) or not all(_valid_name(n) for n in names):
+        raise ReleaseStateError(
+            f"{path}: data_dirs must be a list of top-level entry names. {fix}")
+    return set(names)
+
+
+def _staging_copy(name: str) -> str:
+    return f"{name}-staging"
+
+
+@dataclass(frozen=True)
+class DataDirs:
+    """How one install sees the project's entries."""
+    project_dir: Path
+    release: frozenset[str]   # read-write bind mounts of the incoming release
+    recorded: frozenset[str]  # entries that are data, mounted or not
+    mounted: frozenset[str]   # every bind-mounted entry of live + incoming
+
+    def box_state(self) -> set[str]:
+        """Entries that are never release code."""
+        tops = self.mounted | self.recorded
+        return (set(BOX_OWNED_ENTRIES) | set(BOXMUNGE_ENTRIES) | set(self.recorded)
+                | {_staging_copy(t) for t in tops})
+
+    def occupied(self, name: str) -> list[Path]:
+        """The server paths holding ``name``'s data: it and its staging copy."""
+        return [path for path in (self.project_dir / name,
+                                  self.project_dir / _staging_copy(name))
+                if holds_data(path)]
+
+    def after_install(self, shipped: set[str]) -> DataDirs:
+        """The record once the release is installed.
+
+        An entry the release ships that holds nothing on the server and that
+        the release does not mount read-write becomes release code (e.g. an
+        empty dir a release now mounts read-only and fills).
+        """
+        taken = {n for n in shipped & self.recorded
+                 if n not in self.release and not self.occupied(n)}
+        return replace(self, recorded=self.recorded - taken)
+
+    def retained(self) -> list[str]:
+        """Recorded entries holding data that the incoming release does not mount."""
+        return sorted(n for n in self.recorded - self.release if self.occupied(n))
+
+
+def classify(project_dir: Path, release_tree: Path | None,
+             kept_trees: Iterable[Path]) -> DataDirs:
+    """Classify the project's entries for installing ``release_tree``.
+
+    Kept releases (the rollback target, the production release during a
+    stage) count as compose files the box holds, so the record of a project
+    that predates it starts from every mount those still describe. Raises
+    ReleaseStateError for an unreadable compose file or record.
+    """
+    live_binds = bind_dirs(project_dir / "compose.yml", project_dir)
+    release_binds: dict[str, bool] = {}
+    if release_tree is not None:
+        release_binds = bind_dirs(release_tree / "compose.yml", project_dir)
+    release = {d for d, rw in release_binds.items() if rw}
+    candidates = _load_record(project_dir) | {d for d, rw in live_binds.items() if rw}
+    for tree in kept_trees:
+        candidates |= _read_write(tree / "compose.yml", project_dir)
+    dirs = DataDirs(
+        project_dir=project_dir,
+        release=frozenset(release),
+        recorded=frozenset(),
+        mounted=frozenset(live_binds) | frozenset(release_binds),
+    )
+    recorded = release | (set(dirs.mounted) & candidates) | {
+        n for n in candidates if dirs.occupied(n)}
+    recorded -= set(BOX_OWNED_ENTRIES) | set(BOXMUNGE_ENTRIES)
+    return replace(dirs, recorded=frozenset(recorded))
+
+
+def save_record(dirs: DataDirs) -> None:
+    """Persist ``dirs.recorded``; done before an install changes anything."""
+    path = record_path(dirs.project_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = {"version": RECORD_VERSION, "data_dirs": sorted(dirs.recorded)}
+    atomic_write_text(path, json.dumps(doc) + "\n", mode=0o644)
+
+
+def entry_label(path: Path) -> str:
+    return f"{path.name}/" if path.is_dir() and not path.is_symlink() else path.name
+
+
+def warn_retained(dirs: DataDirs, names: list[str]) -> None:
+    """Tell the operator which data entries the release no longer mounts."""
+    for name in names:
+        occupied = dirs.occupied(name)
+        print(f"  WARNING: {entry_label(occupied[0])} holds data but this "
+              f"release's compose.yml does not mount it read-write. It is "
+              f"kept: deploys never delete data. When no release in use or "
+              f"kept for rollback needs it, an operator deletes it on the "
+              f"server with: rm -rf {' '.join(str(p) for p in occupied)}")
+
+
+def log_retained(paths: BoxPaths, project_name: str, names: list[str],
+                 component: str) -> None:
+    """Log the entries install_release kept although the release dropped them."""
+    if not names:
+        return
+    project_dir = paths.project_dir(project_name)
+    labels = ", ".join(entry_label(project_dir / n) for n in names)
+    log_warning(component,
+                f"Kept data the installed release no longer mounts: {labels}. "
+                f"An operator deletes it on the server once nothing needs it.",
+                paths, project=project_name, detail={"retained": names})

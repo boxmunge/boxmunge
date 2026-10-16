@@ -14,6 +14,7 @@ from pathlib import Path
 from boxmunge.commands.deploy import redeploy_installed, run_deploy
 from boxmunge.commands.restore import run_restore
 from boxmunge.compose import prepare_compose_override
+from boxmunge.data_dirs import log_retained
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.intake import (
     IntakeError, check_installable, report_refusal, validate_release_tree,
@@ -204,8 +205,9 @@ def _roll_back_release(project_name: str, paths: BoxPaths,
 
     print("--- Restoring code ---")
     try:
-        install_release(tree, paths.project_dir(project_name))
+        retained = install_release(tree, paths.project_dir(project_name))
         mark_live(paths, project_name, target.ref)
+        log_retained(paths, project_name, retained, "rollback")
     except (OSError, ValueError) as e:
         print(f"ERROR: Restoring the previous release failed part-way: {e}",
               file=sys.stderr)

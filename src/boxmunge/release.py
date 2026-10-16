@@ -6,9 +6,10 @@ A project directory holds two kinds of entries:
 
 - **release code**: everything a bundle ships (manifest, compose, scripts,
   build contexts, project.env, ...);
-- **box state**: secrets.env, security/, data/, backups/, user bind-mount
-  dirs that hold data, their ``-staging`` copies, generated compose files,
-  repo/ and ``.releases/``.
+- **box state**: secrets.env, security/, data/, backups/, every entry that
+  a release has bind-mounted read-write and that still holds data (see
+  data_dirs), ``-staging`` copies, generated compose files, repo/ and
+  ``.releases/``.
 
 Installing a release replaces all release code (entries the new release no
 longer ships are removed) and never touches box state. Before an upgrade the
@@ -25,20 +26,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from boxmunge.bind_mounts import BindMountError, bind_mounted_dirs
 from boxmunge.bundle import (
     BOX_OWNED_ENTRIES, BOXMUNGE_ENTRIES, BundleError, is_placeholder,
 )
 from boxmunge.compose_mounts import PROD_SMOKE_SOURCE
+from boxmunge.data_dirs import (
+    DataDirs, ReleaseStateError, classify, entry_label, holds_data, log_retained,
+    save_record, warn_retained,
+)
 from boxmunge.fileutil import atomic_write_text, chown_tree_deploy, mkdir_p_deploy
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
-
-
-class ReleaseStateError(ValueError):
-    """Release state is unreadable: a .releases/ bookkeeping file, or the
-    live compose.yml that says which directories hold data."""
 
 
 def _read_meta(path: Path) -> dict:
@@ -60,8 +59,12 @@ class PreviousRelease:
     replaced_by: str
 
 
+_PREVIOUS = "previous"
+_PRESTAGE = "prestage"
+
+
 def previous_dir(paths: BoxPaths, project_name: str) -> Path:
-    return paths.project_releases(project_name) / "previous"
+    return paths.project_releases(project_name) / _PREVIOUS
 
 
 def _previous_meta(paths: BoxPaths, project_name: str) -> Path:
@@ -72,53 +75,31 @@ def _live_meta(paths: BoxPaths, project_name: str) -> Path:
     return paths.project_releases(project_name) / "live.json"
 
 
-def _bind_dirs(compose_path: Path, project_dir: Path) -> dict[str, bool]:
-    """Bind-mounted top-level dirs of a compose file -> read-write?"""
-    try:
-        return bind_mounted_dirs(compose_path, project_dir)
-    except BindMountError as e:
-        raise ReleaseStateError(
-            f"Cannot tell which project directories hold data: {e}. Nothing "
-            f"was changed; fix the file by hand before deploying."
-        ) from e
+def _kept_trees(project_dir: Path) -> list[Path]:
+    """Kept releases' code: the rollback target and, during a stage, production."""
+    releases = project_dir / ".releases"
+    return [releases / _PREVIOUS, releases / _PRESTAGE / "release"]
 
 
-def _data_dirs(project_dir: Path, release_tree: Path | None) -> tuple[set[str], set[str]]:
-    """(live, release) top-level dirs bind-mounted read-write: data dirs.
-
-    Read-only bind mounts are code or config the release ships.
-    """
-    live = {d for d, rw in _bind_dirs(project_dir / "compose.yml", project_dir).items() if rw}
-    release: set[str] = set()
-    if release_tree is not None:
-        release = {d for d, rw in
-                   _bind_dirs(release_tree / "compose.yml", project_dir).items() if rw}
-    return live, release
-
-
-def _box_state_names(project_dir: Path, release_tree: Path | None) -> set[str]:
-    """Names of live entries that are box state, never release code."""
-    tops = set(_bind_dirs(project_dir / "compose.yml", project_dir))
-    if release_tree is not None:
-        tops |= set(_bind_dirs(release_tree / "compose.yml", project_dir))
-    live_data, release_data = _data_dirs(project_dir, release_tree)
-    staging_copies = {f"{t}-staging" for t in tops}
-    return (set(BOX_OWNED_ENTRIES) | set(BOXMUNGE_ENTRIES) | live_data
-            | release_data | staging_copies)
-
-
-def _has_content(path: Path) -> bool:
-    return path.is_dir() and not path.is_symlink() and any(path.iterdir())
+def _classify(project_dir: Path, release_tree: Path | None) -> DataDirs:
+    return classify(project_dir, release_tree, _kept_trees(project_dir))
 
 
 def check_install(tree: Path, project_dir: Path) -> None:
     """Refuse a release that would overwrite or seed a data directory.
 
-    A directory bind-mounted read-write holds what the app writes. Content
-    the release ships for it is ambiguous (seed data? code mounted without
-    :ro?), so it is refused rather than silently skipped or installed. An
-    empty placeholder is fine. Changes nothing; raises BundleError, or
-    ReleaseStateError if a compose file cannot be classified.
+    Changes nothing; raises BundleError, or ReleaseStateError if a compose
+    file or the data-dir record cannot be read.
+    """
+    _check(tree, _classify(project_dir, tree))
+
+
+def _check(tree: Path, dirs: DataDirs) -> None:
+    """An entry the release bind-mounts read-write holds what the app writes,
+    so content shipped for it is ambiguous (seed data? code mounted without
+    :ro?) and is refused rather than silently skipped or installed. So is
+    content for any entry that holds data on the server, mounted or not: a
+    deploy never overwrites data. An empty placeholder is fine.
     """
     forbidden = sorted(
         e.name for e in tree.iterdir()
@@ -126,20 +107,27 @@ def check_install(tree: Path, project_dir: Path) -> None:
     )
     if forbidden:
         raise BundleError(f"Release tree carries box-owned entries: {forbidden}")
-    live_data, release_data = _data_dirs(project_dir, tree)
-    ambiguous = sorted(
-        item.name for item in tree.iterdir()
-        if not is_placeholder(item) and (
-            item.name in release_data
-            or (item.name in live_data and _has_content(project_dir / item.name)))
-    )
-    if ambiguous:
-        names = ", ".join(f"{n}/" for n in ambiguous)
+    shipped = sorted((e for e in tree.iterdir() if not is_placeholder(e)),
+                     key=lambda e: e.name)
+    mounted = [entry_label(e) for e in shipped if e.name in dirs.release]
+    if mounted:
         raise BundleError(
-            f"The release ships content for {names}, which compose.yml "
-            f"bind-mounts read-write, so it holds data the app writes. If it "
-            f"is code or config, mount it read-only (':ro', or read_only: "
-            f"true); if it is data, remove it from the bundle."
+            f"The release ships content for {', '.join(mounted)}, which "
+            f"compose.yml bind-mounts read-write, so it holds data the app "
+            f"writes. If it is code or config, mount it read-only (':ro', or "
+            f"read_only: true); if it is data, remove it from the bundle."
+        )
+    occupied = [e for e in shipped if e.name in dirs.recorded and dirs.occupied(e.name)]
+    if occupied:
+        server = " ".join(str(p) for e in occupied for p in dirs.occupied(e.name))
+        raise BundleError(
+            f"The release ships content for {', '.join(entry_label(e) for e in occupied)}, "
+            f"which holds data on the server (a release bind-mounted it "
+            f"read-write), and a deploy never overwrites data. Remove it from "
+            f"the bundle or ship the content under another name. If the data "
+            f"is no longer needed, an operator deletes it on the server first "
+            f"(rm -rf {server}); the next deploy then installs the bundle's "
+            f"content."
         )
 
 
@@ -210,34 +198,39 @@ def live_code_entries(project_dir: Path, release_tree: Path | None = None) -> li
     """The live project entries that are release code (see module docstring)."""
     if not project_dir.exists():
         return []
-    state = _box_state_names(project_dir, release_tree)
+    state = _classify(project_dir, release_tree).box_state()
     return sorted(e for e in project_dir.iterdir() if e.name not in state)
 
 
-def install_release(tree: Path, project_dir: Path) -> None:
+def install_release(tree: Path, project_dir: Path) -> list[str]:
     """Make the project's release code exactly ``tree``; keep box state.
 
-    check_install runs first, so a refused release changes nothing. A data
-    directory (read-write bind mount) that holds live data is kept when the
-    release ships only an empty placeholder for it.
+    Nothing changes if the release is refused. The data-dir record is
+    written before anything else, so every entry that holds data stays box
+    state from now on. A data entry the release ships only an empty
+    placeholder for is kept. Returns the entries holding data that the
+    release no longer mounts (kept, with a warning), for the caller to log.
     """
-    check_install(tree, project_dir)
+    dirs = _classify(project_dir, tree)
+    _check(tree, dirs)
+    project_dir.mkdir(parents=True, exist_ok=True)
 
     # Classify everything before changing anything.
     shipped = {e.name for e in tree.iterdir()}
-    live_data, _ = _data_dirs(project_dir, tree)
-    stale_entries = [e for e in live_code_entries(project_dir, tree)
-                     if e.name not in shipped]
+    dirs = dirs.after_install(shipped)
+    state = dirs.box_state()
+    stale_entries = sorted(e for e in project_dir.iterdir()
+                           if e.name not in state and e.name not in shipped)
 
-    project_dir.mkdir(parents=True, exist_ok=True)
+    save_record(dirs)
     for stale in stale_entries:
         _remove(stale)
 
     installed: list[Path] = []
     for item in tree.iterdir():
         dest_item = project_dir / item.name
-        if item.name in live_data and _has_content(dest_item):
-            # check_install allowed this only for an empty placeholder.
+        if item.name in dirs.recorded and holds_data(dest_item):
+            # _check allowed this only for an empty placeholder.
             print(f"  NOTE: kept the server's {item.name}/ (it holds live "
                   f"data); the release ships only an empty placeholder")
             continue
@@ -247,6 +240,9 @@ def install_release(tree: Path, project_dir: Path) -> None:
     (project_dir / "backups").mkdir(exist_ok=True)
     (project_dir / "data").mkdir(exist_ok=True)
     _make_scripts_executable(installed)
+    retained = dirs.retained()
+    warn_retained(dirs, retained)
+    return retained
 
 
 def live_ref(paths: BoxPaths, project_name: str) -> str:
@@ -340,7 +336,7 @@ def discard_previous_release(paths: BoxPaths, project_name: str) -> None:
 # complete, so a kept release always has its metadata.
 
 def _prestage(paths: BoxPaths, project_name: str) -> Path:
-    return paths.project_releases(project_name) / "prestage"
+    return paths.project_releases(project_name) / _PRESTAGE
 
 
 def prestage_tree(paths: BoxPaths, project_name: str) -> Path:
@@ -448,7 +444,9 @@ def sync_live_scripts(paths: BoxPaths, project_name: str, release_root: Path) ->
 def restore_prestage(paths: BoxPaths, project_name: str) -> None:
     """Put the kept production release back (unstage, or a failed stage)."""
     ref = prestage_ref(paths, project_name)
-    install_release(prestage_tree(paths, project_name), paths.project_dir(project_name))
+    retained = install_release(prestage_tree(paths, project_name),
+                               paths.project_dir(project_name))
+    log_retained(paths, project_name, retained, "unstage")
     if ref is None:
         _remove(_live_meta(paths, project_name))
     else:
