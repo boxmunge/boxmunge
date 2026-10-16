@@ -18,6 +18,7 @@ import socket
 import socketserver
 import stat
 import sys
+import tempfile
 import traceback
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -215,8 +216,26 @@ class UnixHTTPServer(socketserver.ThreadingUnixStreamServer):
                  access_log: bool = False) -> None:
         self.app = app
         self.access_log = access_log
+        self._socket_mode = socket_mode
         super().__init__(str(socket_path), _RequestHandler)
-        os.chmod(socket_path, socket_mode)
+
+    def server_bind(self) -> None:
+        """Bind inside a fresh 0700 directory, set the socket's mode there,
+        then link it to the published path. Binding at the path directly
+        would expose the socket with the process umask until a chmod. The
+        link fails, leaving the path alone, if anything already holds it."""
+        target = str(self.server_address)
+        private = tempfile.mkdtemp(prefix=".apid-", dir=os.path.dirname(target) or ".")
+        staged = os.path.join(private, "s")
+        try:
+            self.socket.bind(staged)
+            os.chmod(staged, self._socket_mode)
+            os.link(staged, target)
+        finally:
+            if os.path.lexists(staged):
+                os.unlink(staged)
+            os.rmdir(private)
+        self.server_address = target
 
 
 def prepare_socket_path(path: Path) -> None:

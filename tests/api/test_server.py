@@ -2,6 +2,7 @@
 """apid's HTTP transport, over real unix sockets."""
 from __future__ import annotations
 
+import os
 import socket
 import stat
 import threading
@@ -14,7 +15,7 @@ from boxmunge.api.jobs import JobStore
 from boxmunge.api.principal import Principal, Tier
 from boxmunge.api.registry import Action, Registry
 from boxmunge.api.schema import BOOLEAN, obj
-from boxmunge.api.server import ApiApp, ServerError, prepare_socket_path
+from boxmunge.api.server import ApiApp, ServerError, UnixHTTPServer, prepare_socket_path
 from tests.api.fakes import make_invoker
 from tests.api.unix_http import call, raw_exchange, serving
 
@@ -159,6 +160,41 @@ def test_a_stalled_client_is_dropped_and_the_server_carries_on(
                      b"Content-Length: 100\r\n\r\n{}")
         assert sock.recv(65536) == b""  # closed by the server, not by our timeout
     assert call(served, "GET", "/v1/actions")[0] == 200
+
+
+def test_socket_never_appears_with_the_process_umask(
+        fixture_app, sock_path, monkeypatch) -> None:
+    """The socket is bound in a private directory and gets its mode there,
+    so at no moment can anyone else connect to it at the published path."""
+    real_link = os.link
+    seen = []
+
+    def spy_link(src, dst, *args, **kwargs):
+        seen.append((stat.S_IMODE(os.stat(src).st_mode),
+                     stat.S_IMODE(os.stat(os.path.dirname(src)).st_mode),
+                     os.path.exists(dst)))
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", spy_link)
+    previous = os.umask(0)
+    try:
+        server = UnixHTTPServer(sock_path, fixture_app, socket_mode=0o600)
+    finally:
+        os.umask(previous)
+    try:
+        assert seen == [(0o600, 0o700, False)]
+        assert stat.S_IMODE(sock_path.stat().st_mode) == 0o600
+        assert sorted(p.name for p in sock_path.parent.iterdir()) == [sock_path.name]
+    finally:
+        server.server_close()
+
+
+def test_binding_over_an_existing_path_is_refused(fixture_app, sock_path) -> None:
+    sock_path.write_text("not a socket")
+    with pytest.raises(FileExistsError):
+        UnixHTTPServer(sock_path, fixture_app, socket_mode=0o600)
+    assert sock_path.read_text() == "not a socket"
+    assert sorted(p.name for p in sock_path.parent.iterdir()) == [sock_path.name]
 
 
 def test_socket_is_private_to_its_owner(served) -> None:
