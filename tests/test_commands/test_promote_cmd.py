@@ -2,6 +2,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 from boxmunge.commands.promote_cmd import run_promote
+from boxmunge.commands.promote_release import Promotion
 from boxmunge.state import write_state
 from boxmunge.project_registry import add_project
 
@@ -32,12 +33,12 @@ class TestRunPromote:
             "staging.testapp.example.com {}\n")
         write_state(paths.project_staging_state("testapp"), {"active": True})
 
-    @patch("boxmunge.commands.promote_cmd.run_deploy")
-    @patch("boxmunge.commands.promote_cmd.run_unstage")
+    @patch("boxmunge.commands.promote_cmd.deploy_staged_locked")
+    @patch("boxmunge.commands.promote_cmd.unstage_locked")
     def test_unstages_then_deploys(self, mock_unstage, mock_deploy, paths):
         self._setup_staged(paths)
         mock_unstage.return_value = 0
-        mock_deploy.return_value = 0
+        mock_deploy.return_value = Promotion(0, switched=True)
         result = run_promote("testapp", paths)
         assert result == 0
         mock_unstage.assert_called_once()
@@ -50,12 +51,12 @@ class TestRunPromote:
         result = run_promote("testapp", paths)
         assert result == 1
 
-    @patch("boxmunge.commands.promote_cmd.run_deploy")
-    @patch("boxmunge.commands.promote_cmd.run_unstage")
+    @patch("boxmunge.commands.promote_cmd.deploy_staged_locked")
+    @patch("boxmunge.commands.promote_cmd.unstage_locked")
     def test_deploys_to_production(self, mock_unstage, mock_deploy, paths):
         self._setup_staged(paths)
         mock_unstage.return_value = 0
-        mock_deploy.return_value = 0
+        mock_deploy.return_value = Promotion(0, switched=True)
         run_promote("testapp", paths)
         deploy_call = mock_deploy.call_args
         assert deploy_call[0][0] == "testapp"
@@ -78,8 +79,8 @@ class TestRefusesPaused:
 class TestRefusesQuarantined:
     """Wave 1: promote must refuse a CVE-quarantined project."""
 
-    @patch("boxmunge.commands.promote_cmd.run_deploy")
-    @patch("boxmunge.commands.promote_cmd.run_unstage")
+    @patch("boxmunge.commands.promote_cmd.deploy_staged_locked")
+    @patch("boxmunge.commands.promote_cmd.unstage_locked")
     def test_refuses_quarantined_project(
         self, mock_unstage, mock_deploy, paths, capsys,
     ):
@@ -104,32 +105,30 @@ class TestRefusesQuarantined:
 class TestPromoteComponentTagging:
     """Audit G-1: promote must tag SECURITY OFF logs with component="promote".
 
-    The promote -> run_deploy -> prepare_compose_override -> warn_off_services
+    The promote -> deploy_locked -> prepare_compose_override -> warn_off_services
     chain receives the component explicitly. Without the fix, warn_off_services
     sees component="deploy" and the SECURITY OFF entry is mis-attributed.
     """
 
-    def test_promote_passes_component_to_run_deploy(self, paths) -> None:
-        pdir = paths.project_dir("testapp")
-        pdir.mkdir(parents=True, exist_ok=True)
-        (pdir / "manifest.yml").write_text(VALID_MANIFEST)
-        write_state(paths.project_staging_state("testapp"), {"active": True})
+    def test_promote_passes_component_to_deploy(self, paths) -> None:
+        from boxmunge.commands import deploy as deploy_mod
+        from tests.test_commands.test_stage_promote_release import _docker, _prod_v1_staged_v2
+        _prod_v1_staged_v2(paths)
+        observed: list[str] = []
+        real = deploy_mod.prepare_compose_override
 
-        with patch(
-            "boxmunge.commands.promote_cmd.run_deploy",
-        ) as mock_deploy, patch(
-            "boxmunge.commands.promote_cmd.run_unstage",
-        ) as mock_unstage:
-            mock_deploy.return_value = 0
-            mock_unstage.return_value = 0
-            run_promote("testapp", paths)
+        def recording(paths_, manifest, component="deploy", release_root=None):
+            observed.append(component)
+            return real(paths_, manifest, component=component, release_root=release_root)
+        with _docker(), patch.object(deploy_mod, "prepare_compose_override", recording):
+            assert run_promote("myapp", paths) == 0
         # The whole point of the audit fix: component="promote" is forwarded.
-        assert mock_deploy.call_args.kwargs["component"] == "promote"
+        assert observed == ["promote"]
 
-    def test_run_deploy_threads_component_to_compose_override(
+    def test_deploy_threads_component_to_compose_override(
         self, paths, monkeypatch,
     ) -> None:
-        """Audit G-1 chain test: run_deploy(component='promote') flows the
+        """Audit G-1 chain test: deploy_locked(component='promote') flows the
         label through to prepare_compose_override (which passes it on to
         warn_off_services). We stub everything past the call to capture
         the component arg observed at the boundary.
@@ -163,11 +162,8 @@ class TestPromoteComponentTagging:
             return_value=MagicMock(returncode=0, stdout="abc", stderr=""),
         ))
 
-        from boxmunge.commands.deploy import run_deploy
-        run_deploy(
-            "testapp", paths, no_snapshot=True, _lock_held=True,
-            component="promote",
-        )
+        from boxmunge.commands.deploy import deploy_locked
+        deploy_locked("testapp", paths, no_snapshot=True, component="promote")
         assert observed == ["promote"]
 
 
@@ -187,8 +183,8 @@ class TestPromoteUnknownArg:
 class TestPromoteComposeRejectionExit3:
     """Audit H-N2: hardening rejection from underlying deploy returns 3."""
 
-    @patch("boxmunge.commands.promote_cmd.run_deploy")
-    @patch("boxmunge.commands.promote_cmd.run_unstage")
+    @patch("boxmunge.commands.promote_cmd.deploy_staged_locked")
+    @patch("boxmunge.commands.promote_cmd.unstage_locked")
     def test_hardening_rejection_propagates_3(
         self, mock_unstage, mock_deploy, paths,
     ):
@@ -204,7 +200,7 @@ class TestPromoteComposeRejectionExit3:
         write_state(paths.project_staging_state("testapp"), {"active": True})
 
         # Underlying deploy hits compose validation and returns 3.
-        mock_deploy.return_value = 3
+        mock_deploy.return_value = Promotion(3, switched=False)
         result = run_promote("testapp", paths)
         assert result == 3
         # Unstage must NOT run — production is hostile, staging stays live.

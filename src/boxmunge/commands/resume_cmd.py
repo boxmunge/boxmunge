@@ -117,7 +117,7 @@ def run_resume(
 
     try:
         with project_lock(project_name, paths):
-            rc, smoke_failure = _resume_locked(
+            rc, smoke_failure = resume_locked(
                 project_name, paths, skip_security_checks,
             )
     except LockError as e:
@@ -129,7 +129,7 @@ def run_resume(
     return rc
 
 
-def _resume_locked(
+def resume_locked(
     project_name: str, paths: BoxPaths, skip_security_checks: bool,
 ) -> tuple[int, str | None]:
     """Bring the project back online. Caller holds the project lock.

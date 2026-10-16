@@ -25,9 +25,14 @@ def is_paused(project_name: str, paths: BoxPaths) -> bool:
 def write_paused_state(
     project_name: str, paths: BoxPaths, reason: str | None = None,
 ) -> None:
-    """Mark the project as paused. Records UTC timestamp; reason optional."""
+    """Mark the project as paused. Records UTC timestamp; reason optional.
+
+    The record says ``action_complete: false`` until mark_pause_complete:
+    the maintenance page, the stop and the restart-policy hold all landed.
+    """
     data: dict[str, Any] = {
         "paused_at": datetime.now(timezone.utc).isoformat(),
+        "action_complete": False,
     }
     if reason is not None:
         data["reason"] = reason
@@ -50,6 +55,24 @@ def _update_paused_state(project_name: str, paths: BoxPaths, **fields: Any) -> N
     )
 
 
+def pause_action_complete(project_name: str, paths: BoxPaths) -> bool:
+    """True if the project is paused and its pause record does not say a
+    step is still missing. A record from before the field existed counts as
+    complete: the pause that wrote it had reported success."""
+    state = read_paused_state(project_name, paths)
+    return state is not None and state.get("action_complete", True) is True
+
+
+def pause_incomplete(project_name: str, paths: BoxPaths) -> bool:
+    """True if the project is marked paused but the pause did not finish:
+    it may still be serving, or running."""
+    return is_paused(project_name, paths) and not pause_action_complete(project_name, paths)
+
+
+def mark_pause_complete(project_name: str, paths: BoxPaths) -> None:
+    _update_paused_state(project_name, paths, action_complete=True)
+
+
 def hold_restart_policies(project_name: str, paths: BoxPaths) -> None:
     """Keep a paused project's containers stopped across a Docker restart.
 
@@ -57,8 +80,10 @@ def hold_restart_policies(project_name: str, paths: BoxPaths) -> None:
     the pause record (see boxmunge.restart_hold). Raises DockerError.
     """
     state = read_paused_state(project_name, paths) or {}
-    saved = restart_hold.hold(project_name, state.get("restart_policies") or {})
-    _update_paused_state(project_name, paths, restart_policies=saved)
+    restart_hold.hold(
+        project_name, state.get("restart_policies") or {},
+        lambda saved: _update_paused_state(project_name, paths, restart_policies=saved),
+    )
 
 
 def release_restart_policies(project_name: str, paths: BoxPaths) -> None:

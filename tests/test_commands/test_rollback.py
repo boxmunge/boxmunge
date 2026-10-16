@@ -113,18 +113,18 @@ class TestRollbackRestoresData:
     def _fake_backup(paths):
         counter = iter(range(100))
 
-        def run_backup(project_name, paths_, _lock_held=False, kind=None, manifest=None):
+        def backup_locked(project_name, paths_, kind=None, manifest=None):
             assert kind is BackupKind.PREDEPLOY
             n = next(counter)
             snap = paths_.project_backups(project_name) / f"{project_name}-snap{n}.tar.gz.age"
             snap.parent.mkdir(parents=True, exist_ok=True)
             snap.write_text(f"snapshot {n}")
             return 0
-        return run_backup
+        return backup_locked
 
     def test_code_and_matching_snapshot_restored(self, paths) -> None:
         add_project("myapp", paths)
-        with patch("boxmunge.commands.backup_cmd.run_backup", self._fake_backup(paths)):
+        with patch("boxmunge.commands.backup_cmd.backup_locked", self._fake_backup(paths)):
             _deploy(paths, V1, {"VERSION": "v1\n"}, backup="postgres")
             _deploy(paths, V2, {"VERSION": "v2\n"}, backup="postgres")
         pdir = paths.project_dir("myapp")
@@ -134,12 +134,12 @@ class TestRollbackRestoresData:
 
         restored = {}
 
-        def fake_restore(project_name, paths_, snapshot=None, yes=False, _lock_held=False):
+        def fake_restore(project_name, paths_, snapshot=None):
             restored["snapshot"] = snapshot
             restored["code"] = (pdir / "VERSION").read_text()
             return 0
 
-        with patch("boxmunge.commands.rollback.run_restore", fake_restore), _docker():
+        with patch("boxmunge.commands.rollback.restore_locked", fake_restore), _docker():
             assert run_rollback("myapp", paths, yes=True) == 0
         # Data is restored with the previous release's code already in place.
         assert restored == {"snapshot": "myapp-snap0.tar.gz.age", "code": "v1\n"}
@@ -149,7 +149,7 @@ class TestRollbackRestoresData:
         self, paths, capsys,
     ) -> None:
         add_project("myapp", paths)
-        with patch("boxmunge.commands.backup_cmd.run_backup", return_value=1):
+        with patch("boxmunge.commands.backup_cmd.backup_locked", return_value=1):
             _deploy(paths, V1, {"VERSION": "v1\n"}, backup="postgres")
             _deploy(paths, V2, {"VERSION": "v2\n"}, backup="postgres")
         pdir = paths.project_dir("myapp")

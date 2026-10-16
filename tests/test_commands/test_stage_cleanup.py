@@ -130,9 +130,10 @@ class TestPrestageIsAtomic:
     def test_failure_writing_metadata_leaves_no_half_kept_release(self, paths, prod) -> None:
         """A kept production release only appears once its metadata exists,
         so unstage/promote never find a release they cannot label."""
-        from boxmunge import release
+        from boxmunge import release_staging as release
         place_bundle(paths, timestamp=V2)
-        with patch("boxmunge.release.atomic_write_text", side_effect=OSError("disk full")), \
+        with patch("boxmunge.release_staging.atomic_write_text",
+                   side_effect=OSError("disk full")), \
                 _docker():
             assert run_stage("myapp", paths) == 1
         assert not release.has_prestage(paths, "myapp")

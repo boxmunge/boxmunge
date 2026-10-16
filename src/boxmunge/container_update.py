@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from contextlib import ExitStack
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -27,9 +26,8 @@ from boxmunge.deployed_inventory import DeployedService, InventoryError, load_de
 from boxmunge.docker import DockerError, compose_pull, compose_up, tag_image
 from boxmunge.docker_containers import ProjectContainer
 from boxmunge.backup import BackupKind
-from boxmunge.commands.backup_cmd import run_backup
+from boxmunge.commands.backup_cmd import backup_locked
 from boxmunge.commands.health_state import is_monitor_stopped
-from boxmunge.fileutil import LockError, project_lock
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_warning, log_error
 
@@ -238,15 +236,8 @@ def _maybe_rollback(
         log_operation("container-update", f"Rollback succeeded for {target.name}", paths, project=target.name)
 
 
-def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
-    """Update a single target. Returns a result dict suitable for logging.
-
-    A user project's whole update (lifecycle check, pre-update backup,
-    pull, recreate, health wait, rollback) runs under its project lock, so
-    it cannot interleave with a deploy, stage, restore, CVE quarantine, or
-    health tick. Caddy is not a project and has no project lock.
-    """
-    result: dict[str, Any] = {
+def _new_result(target: UpdateTarget) -> dict[str, Any]:
+    return {
         "name": target.name,
         "ts": _now(),
         "status": "succeeded",
@@ -256,24 +247,38 @@ def update_target(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
         "current_digests": {},
         "reason": None,
     }
-    with ExitStack() as stack:
-        if not target.is_caddy:
-            try:
-                stack.enter_context(project_lock(target.name, paths))
-            except LockError:
-                # Contention with a deploy, scan, or health tick is routine
-                # on a busy box, not a failure: skip (the caller retries
-                # once) and record nothing, so a project skipped day after
-                # day goes stale in the container-updates health check.
-                result["status"] = SKIPPED_LOCKED
-                result["reason"] = "project lock held by another operation"
-                log_warning(
-                    "container-update",
-                    f"Skipped {target.name}: project lock held by another operation",
-                    paths, project=target.name,
-                )
-                return result
-        return _update_locked(paths, target, result)
+
+
+def lock_skipped(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
+    """The result for a user project whose project lock is held.
+
+    Contention with a deploy, scan, or health tick is routine on a busy
+    box, not a failure: skip (the caller retries once) and record nothing,
+    so a project skipped day after day goes stale in the container-updates
+    health check.
+    """
+    result = _new_result(target)
+    result["status"] = SKIPPED_LOCKED
+    result["reason"] = "project lock held by another operation"
+    log_warning(
+        "container-update",
+        f"Skipped {target.name}: project lock held by another operation",
+        paths, project=target.name,
+    )
+    return result
+
+
+def update_target_locked(paths: "BoxPaths", target: UpdateTarget) -> dict[str, Any]:
+    """Update a single target. Returns a result dict suitable for logging.
+
+    The update core: for a user project the caller holds its project lock
+    for the whole update (lifecycle check, pre-update backup, pull,
+    recreate, health wait, rollback), so it cannot interleave with a
+    deploy, stage, restore, CVE quarantine, or health tick
+    (container_update_cmd.update_project). Caddy is not a project and has
+    no project lock.
+    """
+    return _update_locked(paths, target, _new_result(target))
 
 
 def _update_locked(
@@ -356,9 +361,7 @@ def _update_locked(
     # leaves running containers untouched, so this still captures the data
     # as the current images left it; a no-change run takes no backup.
     if target.has_backup:
-        rc = run_backup(
-            target.name, paths, kind=BackupKind.PREUPDATE, _lock_held=True,
-        )
+        rc = backup_locked(target.name, paths, kind=BackupKind.PREUPDATE)
         if rc != 0:
             return _fail(paths, target, result, "backup_failed", before=before,
                          message=f"Backup failed for {target.name}, aborting update")

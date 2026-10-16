@@ -12,12 +12,18 @@ Order of work, all under the project lock (audit C-09):
 4. Start every service again, recreating the backup service so its
    process starts over on the restored data. This runs on every path out
    of step 3, success or failure, including timeouts and permission errors.
+
+A project the health monitor stopped stays stopped: only the backup
+service runs, for the safety snapshot and the restore, and every service
+is stopped again afterwards. ``recover`` then starts it on the restored
+data and runs the smoke test that clears the stop.
 """
 
 import os
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from boxmunge.backup import (
@@ -25,10 +31,11 @@ from boxmunge.backup import (
     resolve_backup_service,
 )
 from boxmunge.commands.backup_cmd import list_snapshots, sweep_stale_dumps
+from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.docker import compose_command, compose_down, compose_up, DockerError
 from boxmunge.docker_run import docker_env
 from boxmunge.fileutil import LockError, open_regular_nofollow, project_lock
-from boxmunge.lifecycle import is_blocked
+from boxmunge.lifecycle import refuse_if_blocked
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
@@ -43,25 +50,28 @@ _READY_INTERVAL = 1.0
 _NO_HEALTHCHECK_GRACE = 2.0
 
 
-def run_restore(
-    project_name: str,
-    paths: BoxPaths,
-    snapshot: str | None = None,
-    yes: bool = False,
-    _lock_held: bool = False,
-    safety_snapshot: bool = True,
-) -> int:
-    """Restore a project from a backup snapshot. Returns 0 on success, 1 on failure."""
+@dataclass(frozen=True)
+class _RestorePlan:
+    snapshot_path: Path
+    service: str
+    restore_command: str
+    dump_command: str
+
+
+def _restore_plan(project_name: str, paths: BoxPaths,
+                  snapshot: str | None) -> _RestorePlan | None:
+    """What a restore would do, from the manifest on disk. None (after
+    printing why) if it cannot."""
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists():
         print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
-        return 1
+        return None
 
     try:
         manifest = load_manifest(paths.project_manifest(project_name))
     except ManifestError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        return 1
+        return None
 
     backup_conf = manifest.get("backup", {})
     if not backup_conf:
@@ -71,12 +81,12 @@ def run_restore(
             f"`backup.restore_command`.",
             file=sys.stderr,
         )
-        return 1
+        return None
     try:
         service = resolve_backup_service(manifest)
     except BackupError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        return 1
+        return None
     restore_command = backup_conf.get("restore_command", "")
     if not restore_command:
         print(
@@ -84,48 +94,74 @@ def run_restore(
             f"{project_name}.",
             file=sys.stderr,
         )
-        return 1
+        return None
 
     snapshot_path = _choose_snapshot(paths, project_name, snapshot)
     if snapshot_path is None:
+        return None
+    if not paths.backup_key.exists():
+        print(f"ERROR: Backup key not found: {paths.backup_key}", file=sys.stderr)
+        return None
+    return _RestorePlan(snapshot_path, service, restore_command,
+                        backup_conf.get("dump_command", ""))
+
+
+def run_restore(
+    project_name: str,
+    paths: BoxPaths,
+    snapshot: str | None = None,
+    yes: bool = False,
+    safety_snapshot: bool = True,
+) -> int:
+    """restore: confirm, take the project lock and restore. Returns 0 on
+    success, 1 on failure."""
+    plan = _restore_plan(project_name, paths, snapshot)
+    if plan is None:
         return 1
 
     if not yes:
-        print(f"\nWill restore {project_name} from {snapshot_path.name}")
+        print(f"\nWill restore {project_name} from {plan.snapshot_path.name}")
         print("This will STOP the project and overwrite current data.")
         response = input("Proceed? [y/N] ")
         if response.lower() != "y":
             print("Aborted.")
             return 1
 
-    key_path = paths.backup_key
-    if not key_path.exists():
-        print(f"ERROR: Backup key not found: {key_path}", file=sys.stderr)
-        return 1
-
-    def inner() -> int:
-        sweep_stale_dumps(paths, project_name)
-        # Checked under the lock: restore is operator-initiated and mutates
-        # compose state. REFUSE if the project is paused or CVE-quarantined
-        # — the operator must explicitly resume / security-resume first.
-        block = is_blocked(project_name, paths)
-        if block:
-            print(f"ERROR: {block.refuse_message}", file=sys.stderr)
-            return 1
-        clear_probation_if_active(paths, "restore")
-        return _run_restore_inner(
-            project_name, paths, snapshot_path, service, restore_command,
-            backup_conf.get("dump_command", "") if safety_snapshot else None,
-        )
-
-    if _lock_held:
-        return inner()
     try:
         with project_lock(project_name, paths):
-            return inner()
+            # The snapshot the operator confirmed, not whatever is newest now.
+            return restore_locked(project_name, paths, plan.snapshot_path.name,
+                                  safety_snapshot)
     except LockError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
+
+
+def restore_locked(project_name: str, paths: BoxPaths, snapshot: str | None,
+                   safety_snapshot: bool = True) -> int:
+    """The restore core. Caller holds the project lock; never takes it.
+
+    Refuses a paused or CVE-quarantined project — the operator must resume
+    or security-resume first — and reads the backup config, checked under
+    the lock immediately before production is touched. A project the health
+    monitor stopped gets its data back but is left stopped, for `recover`.
+    """
+    sweep_stale_dumps(paths, project_name)
+    if refuse_if_blocked(project_name, paths):
+        return 1
+    plan = _restore_plan(project_name, paths, snapshot)
+    if plan is None:
+        return 1
+    clear_probation_if_active(paths, "restore")
+    leave_stopped = is_monitor_stopped(project_name, paths)
+    if leave_stopped:
+        print(f"  '{project_name}' was stopped by the health monitor: only "
+              f"{plan.service} is started for the restore, and it stays stopped.")
+    return _run_restore_inner(
+        project_name, paths, plan.snapshot_path, plan.service,
+        plan.restore_command, plan.dump_command if safety_snapshot else None,
+        leave_stopped,
+    )
 
 
 def _choose_snapshot(paths: BoxPaths, project_name: str, snapshot: str | None) -> Path | None:
@@ -159,6 +195,7 @@ def _run_restore_inner(
     service: str,
     restore_command: str,
     dump_command: str | None,
+    leave_stopped: bool,
 ) -> int:
     """Verify, save, replace. Caller holds the project lock.
 
@@ -173,11 +210,12 @@ def _run_restore_inner(
             safety: Path | None = None
             if dump_command is not None:
                 print("  Taking pre-restore safety snapshot...")
-                safety = take_safety_snapshot(project_name, paths, dump_command, service)
+                safety = _safety_snapshot(project_name, paths, dump_command, service,
+                                          leave_stopped)
                 print(f"  Safety snapshot: {safety.name}")
             phase = "replace"
             rc = _replace_data(project_name, paths, service, restore_command,
-                               plaintext, snapshot_path, safety)
+                               plaintext, snapshot_path, safety, leave_stopped)
             phase = "cleanup"
     except (BackupError, RestoreError, OSError, subprocess.TimeoutExpired) as e:
         if phase == "verify":
@@ -196,6 +234,28 @@ def _run_restore_inner(
     return rc
 
 
+def _safety_snapshot(project_name: str, paths: BoxPaths, dump_command: str,
+                     service: str, stopped: bool) -> Path:
+    """Dump the current data. The monitor removed a stopped project's
+    containers, so the backup service is started for the dump, and stopped
+    again if the dump does not happen."""
+    if not stopped:
+        return take_safety_snapshot(project_name, paths, dump_command, service)
+    project_dir = paths.project_dir(project_name)
+    compose_files = _compose_files(paths, project_name)
+    try:
+        _start_service(project_dir, compose_files, project_name, service)
+        _wait_ready(project_name, service)
+        return take_safety_snapshot(project_name, paths, dump_command, service)
+    except subprocess.CalledProcessError as e:
+        _stop_all(project_dir, compose_files, project_name)
+        raise RestoreError(f"could not start {service} for the safety snapshot: "
+                           f"{e.stderr or e}") from e
+    except BaseException:
+        _stop_all(project_dir, compose_files, project_name)
+        raise
+
+
 def _compose_files(paths: BoxPaths, project_name: str) -> list[str]:
     compose_files = ["compose.yml"]
     if paths.project_compose_override(project_name).exists():
@@ -211,8 +271,10 @@ def _replace_data(
     plaintext: Path,
     snapshot_path: Path,
     safety: Path | None,
+    leave_stopped: bool,
 ) -> int:
-    """Stop, restore, and always start the project again."""
+    """Stop, restore, and always start the project again (or, if the health
+    monitor stopped it, always stop it again)."""
     project_dir = paths.project_dir(project_name)
     compose_files = _compose_files(paths, project_name)
     restored = False
@@ -234,9 +296,13 @@ def _replace_data(
         print(f"  ERROR: {e}", file=sys.stderr)
         log_error("restore", f"Restore failed: {e}", paths, project=project_name)
     finally:
-        print("  Starting all services..." if restored
-              else "  Restarting all services...")
-        started = _start_all(project_dir, compose_files, project_name)
+        if leave_stopped:
+            print("  Stopping every service again...")
+            started = _stop_all(project_dir, compose_files, project_name)
+        else:
+            print("  Starting all services..." if restored
+                  else "  Restarting all services...")
+            started = _start_all(project_dir, compose_files, project_name)
 
     if not restored:
         if safety is not None:
@@ -255,6 +321,9 @@ def _replace_data(
         BackupKind.PRERESTORE, SNAPSHOT_RETENTION[BackupKind.PRERESTORE],
     )
     print(f"{project_name}: restore complete")
+    if leave_stopped:
+        print(f"  It is still stopped by the health monitor: run 'recover "
+              f"{project_name}' to start it on the restored data.")
     return 0
 
 
@@ -320,6 +389,17 @@ def _start_all(project_dir: Path, compose_files: list[str], project_name: str) -
                    project_name=project_name, force_recreate=True)
     except DockerError as e:
         print(f"  ERROR: Start failed: {e}", file=sys.stderr)
+        return False
+    return True
+
+
+def _stop_all(project_dir: Path, compose_files: list[str], project_name: str) -> bool:
+    """Stop and remove every service, as the health monitor left them."""
+    try:
+        compose_down(project_dir, compose_files=compose_files,
+                     project_name=project_name)
+    except DockerError as e:
+        print(f"  ERROR: Stopping the services failed: {e}", file=sys.stderr)
         return False
     return True
 

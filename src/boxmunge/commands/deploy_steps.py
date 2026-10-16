@@ -18,12 +18,21 @@ def record_deploy_state(
     ref: str,
     snapshot: str | None,
 ) -> None:
-    """Record a deploy in the state file, pushing previous to history."""
+    """Record a deploy in the state file, pushing previous to history.
+
+    ``pre_deploy_snapshot`` is the data as the release in ``history[0]``
+    left it, which is what rollback restores with that release. Deploying
+    the release that is already current again (a retry after a failed
+    deploy, or a redeploy) keeps both: the newer snapshot holds data this
+    release may already have changed.
+    """
     state_path = paths.project_deploy_state(project_name)
     current = read_state(state_path)
 
     history = current.get("history", [])
-    if "current_ref" in current:
+    if current.get("current_ref") == ref:
+        snapshot = current.get("pre_deploy_snapshot", "")
+    elif "current_ref" in current:
         history.insert(0, {
             "ref": current["current_ref"],
             "deployed_at": current.get("deployed_at", ""),
@@ -61,9 +70,9 @@ def take_pre_deploy_snapshot(
         return None
     print("  Taking pre-deploy snapshot...")
     from boxmunge.backup import BackupKind
-    from boxmunge.commands.backup_cmd import list_snapshots, run_backup
-    if run_backup(project_name, paths, _lock_held=True,
-                  kind=BackupKind.PREDEPLOY, manifest=manifest) != 0:
+    from boxmunge.commands.backup_cmd import backup_locked, list_snapshots
+    if backup_locked(project_name, paths, kind=BackupKind.PREDEPLOY,
+                     manifest=manifest) != 0:
         print("  WARN: Pre-deploy backup failed — continuing deploy. "
               "A rollback of this deploy will not be able to restore data.")
         return None

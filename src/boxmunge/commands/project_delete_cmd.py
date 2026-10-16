@@ -62,7 +62,7 @@ def run_project_delete(
 
     try:
         with project_lock(project_name, paths):
-            return _delete_locked(project_name, paths, force)
+            return delete_locked(project_name, paths, force)
     except LockError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
@@ -92,7 +92,7 @@ def _teardown(project_name: str, paths: BoxPaths) -> list[str]:
     return failures
 
 
-def _delete_locked(project_name: str, paths: BoxPaths, force: bool) -> int:
+def delete_locked(project_name: str, paths: BoxPaths, force: bool) -> int:
     """Tear down and remove the project. Caller holds the project lock."""
     failures = _teardown(project_name, paths)
     if failures:

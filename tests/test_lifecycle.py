@@ -101,7 +101,7 @@ class TestComposeUpCallersUseIsBlocked:
     """Static lint test catching future drift.
 
     Every site calling compose_up / compose_pull should consult
-    is_blocked() (or have a documented exemption). Catches the
+    is_blocked() or refuse_if_blocked() (or have a documented exemption). Catches the
     'forgot to check state file' bug that motivated v0.7.0 wave 1.
     """
 
@@ -134,7 +134,7 @@ class TestComposeUpCallersUseIsBlocked:
             if normalized in EXEMPT:
                 continue
             text = caller.read_text()
-            if "is_blocked" not in text:
+            if not re.search(r"\b(is_blocked|refuse_if_blocked)\(", text):
                 missing.append(rel)
 
         assert not missing, (

@@ -98,9 +98,9 @@ def test_failure_keeping_previous_after_promote_never_lets_unstage_revert(
     release must not linger: unstage would put old files under the running
     new release."""
     from boxmunge.commands.unstage_cmd import run_unstage
-    from boxmunge.release import has_prestage
+    from boxmunge.release_staging import has_prestage
     pdir = _prod_v1_staged_v2(paths)
-    with _docker(), patch("boxmunge.commands.deploy.prestage_to_previous",
+    with _docker(), patch("boxmunge.commands.promote_release.prestage_to_previous",
                           side_effect=OSError("disk full")):
         assert run_promote("myapp", paths) == 1
     assert not has_prestage(paths, "myapp")
@@ -118,7 +118,7 @@ def test_promote_snapshots_production_data_with_the_production_manifest(paths) -
 
     taken: list[dict] = []
 
-    def fake_backup(project_name, paths_, _lock_held=False, kind=None, manifest=None):
+    def fake_backup(project_name, paths_, kind=None, manifest=None):
         assert kind is BackupKind.PREDEPLOY
         taken.append(manifest)
         snap = paths_.project_backups(project_name) / f"{project_name}-p{len(taken)}.tar.gz.age"
@@ -129,7 +129,7 @@ def test_promote_snapshots_production_data_with_the_production_manifest(paths) -
     add_project("myapp", paths)
     place_bundle(paths, timestamp=V1, files={"manifest.yml": manifest_text(backup="postgres")})
     place_bundle(paths, timestamp=V2, files={"manifest.yml": manifest_text(backup="none")})
-    with _docker(), patch("boxmunge.commands.backup_cmd.run_backup", fake_backup):
+    with _docker(), patch("boxmunge.commands.backup_cmd.backup_locked", fake_backup):
         assert run_deploy("myapp", paths, ref=V1) == 0
         assert run_stage("myapp", paths, ref=V2) == 0
         taken.clear()

@@ -23,13 +23,13 @@ def paths(tmp_path):
 class TestProbationGate:
     def test_skips_when_probation_active(self, paths):
         paths.probation.write_text('{"version":"0.2.1"}')
-        with patch("boxmunge.commands.container_update_cmd.update_target") as mock_update:
+        with patch("boxmunge.commands.container_update_cmd.update_target_locked") as mock_update:
             rc = run_container_update(paths)
         assert rc == 0
         mock_update.assert_not_called()
 
     def test_runs_when_no_probation(self, paths):
-        with patch("boxmunge.commands.container_update_cmd.update_target") as mock_update:
+        with patch("boxmunge.commands.container_update_cmd.update_target_locked") as mock_update:
             mock_update.return_value = {"name": "caddy", "status": "succeeded"}
             rc = run_container_update(paths)
         assert rc == 0
@@ -38,7 +38,7 @@ class TestProbationGate:
 
     def test_force_skips_probation(self, paths):
         paths.probation.write_text('{"version":"0.2.1"}')
-        with patch("boxmunge.commands.container_update_cmd.update_target") as mock_update:
+        with patch("boxmunge.commands.container_update_cmd.update_target_locked") as mock_update:
             mock_update.return_value = {"name": "caddy", "status": "succeeded"}
             run_container_update(paths, force=False)
             run_container_update(paths, force=True)
@@ -51,7 +51,7 @@ class TestDisabledMaster:
             "hostname: t\nadmin_email: t@t\n"
             "container_updates:\n  enabled: false\n"
         )
-        with patch("boxmunge.commands.container_update_cmd.update_target") as mock_update:
+        with patch("boxmunge.commands.container_update_cmd.update_target_locked") as mock_update:
             rc = run_container_update(paths)
         assert rc == 0
         mock_update.assert_not_called()
@@ -78,7 +78,7 @@ class TestCaddyAbortCascade:
                 return {"name": "caddy", "status": "failed", "reason": "test"}
             return {"name": target.name, "status": "succeeded"}
 
-        with patch("boxmunge.commands.container_update_cmd.update_target", side_effect=fake_update):
+        with patch("boxmunge.commands.container_update_cmd.update_target_locked", side_effect=fake_update):
             rc = run_container_update(paths)
 
         assert call_log == ["caddy"]  # myapp NOT called
@@ -106,7 +106,7 @@ class TestProjectIsolation:
                 return {"name": target.name, "status": "failed", "reason": "test"}
             return {"name": target.name, "status": "succeeded"}
 
-        with patch("boxmunge.commands.container_update_cmd.update_target", side_effect=fake_update):
+        with patch("boxmunge.commands.container_update_cmd.update_target_locked", side_effect=fake_update):
             rc = run_container_update(paths)
 
         assert "app-a" in call_log
@@ -116,7 +116,7 @@ class TestProjectIsolation:
 
 
 class TestDryRun:
-    @patch("boxmunge.commands.container_update_cmd.update_target")
+    @patch("boxmunge.commands.container_update_cmd.update_target_locked")
     @patch("boxmunge.commands.container_update_cmd._dry_run_target")
     def test_dry_run_does_not_call_update_target(
         self, mock_dry, mock_update, paths
@@ -129,8 +129,8 @@ class TestDryRun:
 
 
 def _make_paused_project(paths, name="paused-app"):
-    """Helper: write a project file tree and mark it paused."""
-    from boxmunge.pause import write_paused_state
+    """Helper: write a project file tree and mark it (completely) paused."""
+    from boxmunge.pause import mark_pause_complete, write_paused_state
     pdir = paths.project_dir(name)
     pdir.mkdir(parents=True)
     (pdir / "manifest.yml").write_text(yaml.dump({
@@ -142,6 +142,7 @@ def _make_paused_project(paths, name="paused-app"):
         f"services:\n  web:\n    image: nginx:1.25\n    container_name: {name}_web\n"
     )
     write_paused_state(name, paths)
+    mark_pause_complete(name, paths)
 
 
 class TestSkipsPausedProjects:
@@ -171,7 +172,7 @@ class TestSkipsPausedProjects:
             return {"name": target.name, "status": "no_change",
                     "previous_digests": {}, "current_digests": {}}
 
-        with patch("boxmunge.commands.container_update_cmd.update_target", side_effect=fake_update), \
+        with patch("boxmunge.commands.container_update_cmd.update_target_locked", side_effect=fake_update), \
              patch("boxmunge.commands.container_update_cmd._dry_run_target", side_effect=fake_dry):
             rc = run_container_update(paths)
 
@@ -204,7 +205,7 @@ class TestSkipsPausedProjects:
             return {"name": target.name, "status": "succeeded"}
 
         with patch("boxmunge.commands.container_update_cmd._dry_run_target", side_effect=fake_dry), \
-             patch("boxmunge.commands.container_update_cmd.update_target", side_effect=fake_update):
+             patch("boxmunge.commands.container_update_cmd.update_target_locked", side_effect=fake_update):
             rc = run_container_update(paths)
 
         assert "paused-app" in dry_call_log
@@ -228,7 +229,7 @@ class TestSkipsPausedProjects:
                 captured_results.append((message, kwargs))
 
         with patch("boxmunge.commands.container_update_cmd._dry_run_target", side_effect=fake_dry), \
-             patch("boxmunge.commands.container_update_cmd.update_target", return_value={"name": "caddy", "status": "succeeded"}), \
+             patch("boxmunge.commands.container_update_cmd.update_target_locked", return_value={"name": "caddy", "status": "succeeded"}), \
              patch("boxmunge.commands.container_update_cmd.log_operation", side_effect=fake_log_op):
             rc = run_container_update(paths)
 
@@ -249,7 +250,7 @@ class TestSkipsPausedProjects:
                     "previous_digests": {}, "current_digests": {}}
 
         with patch("boxmunge.commands.container_update_cmd._dry_run_target", side_effect=failing_dry), \
-             patch("boxmunge.commands.container_update_cmd.update_target", return_value={"name": "caddy", "status": "succeeded"}):
+             patch("boxmunge.commands.container_update_cmd.update_target_locked", return_value={"name": "caddy", "status": "succeeded"}):
             rc = run_container_update(paths)
 
         assert rc == 0  # paused-project pre-fetch failure is non-fatal
@@ -269,7 +270,7 @@ class TestSkipsPausedProjects:
                 captured_logs.append((message, kwargs))
 
         with patch("boxmunge.commands.container_update_cmd._dry_run_target", side_effect=fake_dry), \
-             patch("boxmunge.commands.container_update_cmd.update_target", return_value={"name": "caddy", "status": "succeeded"}), \
+             patch("boxmunge.commands.container_update_cmd.update_target_locked", return_value={"name": "caddy", "status": "succeeded"}), \
              patch("boxmunge.commands.container_update_cmd.log_operation", side_effect=fake_log_op):
             rc = run_container_update(paths)
 
@@ -291,7 +292,7 @@ class TestSkipsPausedProjects:
                     "previous_digests": {}, "current_digests": {}}
 
         with patch("boxmunge.commands.container_update_cmd._dry_run_target", side_effect=fake_dry), \
-             patch("boxmunge.commands.container_update_cmd.update_target", side_effect=fake_update):
+             patch("boxmunge.commands.container_update_cmd.update_target_locked", side_effect=fake_update):
             rc = run_container_update(paths, dry_run=True)
 
         assert update_calls == []  # update_target never called in dry-run
@@ -333,7 +334,7 @@ class TestSkipsQuarantinedProjects:
             return {"name": target.name, "status": "no_change",
                     "previous_digests": {}, "current_digests": {}}
 
-        with patch("boxmunge.commands.container_update_cmd.update_target", side_effect=fake_update), \
+        with patch("boxmunge.commands.container_update_cmd.update_target_locked", side_effect=fake_update), \
              patch("boxmunge.commands.container_update_cmd._dry_run_target", side_effect=fake_dry):
             rc = run_container_update(paths)
 
@@ -356,7 +357,7 @@ class TestSkipsQuarantinedProjects:
             return {"name": target.name, "status": "succeeded"}
 
         with patch("boxmunge.commands.container_update_cmd.log_operation", side_effect=fake_log_op), \
-             patch("boxmunge.commands.container_update_cmd.update_target", side_effect=fake_update):
+             patch("boxmunge.commands.container_update_cmd.update_target_locked", side_effect=fake_update):
             run_container_update(paths)
 
         assert captured, "expected a log_operation call for the quarantined project"
@@ -374,7 +375,7 @@ class TestLock:
         f = open(paths.container_update_lock, "w")
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
-            with patch("boxmunge.commands.container_update_cmd.update_target") as mock_update:
+            with patch("boxmunge.commands.container_update_cmd.update_target_locked") as mock_update:
                 rc = run_container_update(paths)
             assert rc == 0
             mock_update.assert_not_called()
@@ -393,7 +394,7 @@ class TestDeliberatelyStoppedProjects:
         _make_paused_project(paths, "paused-app")
         fake_containers.remove("paused-app")
         warnings: list = []
-        with patch("boxmunge.commands.container_update_cmd.update_target",
+        with patch("boxmunge.commands.container_update_cmd.update_target_locked",
                    return_value={"name": "caddy", "status": "succeeded"}), \
              patch("boxmunge.commands.container_update_cmd.log_warning",
                    side_effect=lambda c, m, *a, **k: warnings.append(m)):
@@ -411,7 +412,7 @@ class TestDeliberatelyStoppedProjects:
             "status": "critical_stopped", "stopped_at": "2026-10-01T03:00:00+00:00",
         })
         updated: list[str] = []
-        with patch("boxmunge.commands.container_update_cmd.update_target",
+        with patch("boxmunge.commands.container_update_cmd.update_target_locked",
                    side_effect=lambda p, t: updated.append(t.name) or
                    {"name": t.name, "status": "succeeded"}), \
              patch("boxmunge.commands.container_update_cmd._dry_run_target") as dry:
@@ -419,3 +420,18 @@ class TestDeliberatelyStoppedProjects:
         assert rc == 0
         assert updated == ["caddy"]
         dry.assert_not_called()
+
+
+def test_incomplete_pause_is_reported_as_possibly_serving(paths, fake_containers) -> None:
+    from boxmunge.commands.container_update_cmd import run_container_update
+    from boxmunge.pause import write_paused_state
+    _make_paused_project(paths, "paused-app")
+    write_paused_state("paused-app", paths)  # a pause whose stop failed
+    with patch("boxmunge.commands.container_update_cmd.update_target_locked",
+               return_value={"name": "caddy", "status": "succeeded"}), \
+            patch("boxmunge.commands.container_update_cmd._dry_run_target",
+                  return_value={"name": "paused-app", "status": "no_change",
+                                "previous_digests": {}, "current_digests": {}}), \
+            patch("boxmunge.commands.container_update_cmd.log_warning") as warn:
+        run_container_update(paths)
+    assert any("Pause incomplete" in c.args[1] for c in warn.call_args_list)

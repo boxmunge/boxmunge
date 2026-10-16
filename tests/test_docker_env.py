@@ -40,7 +40,7 @@ _SPAWN_MODULES = set(_SPAWNERS) | {"asyncio.subprocess"}
 NOT_DOCKER = {
     ("commands/add_git_project_cmd.py", "run_add_git_project", "git"): "clones the project repo",
     ("commands/auto_update_cmd.py", "run_auto_update", "?"): "execs the upgrade shim, whose boxmunge-server scrubs its own docker calls",
-    ("commands/deploy.py", "_start_release", "?"): "manifest pre_deploy host command (tracked separately)",
+    ("commands/deploy.py", "run_pre_deploy_hook", "?"): "manifest pre_deploy host command (tracked separately)",
     ("commands/deploy_steps.py", "update_repo", "git"): "fetches and checks out the project repo",
     ("commands/doctor.py", "run_doctor", "systemctl"): "reads timer state",
     ("commands/logs.py", "_show_host_logs", "journalctl"): "reads the journal",

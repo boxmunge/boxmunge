@@ -20,16 +20,16 @@ from boxmunge.intake import (
     IntakeError, check_installable, extract_candidate, incoming_workspace,
     report_refusal, validate_release_tree,
 )
-from boxmunge.lifecycle import is_blocked
+from boxmunge.lifecycle import refuse_if_blocked
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
 from boxmunge.release import (
-    ReleaseStateError, has_prestage, install_release, keep_previous_release,
-    discard_prestage, discard_previous_release, live_ref, mark_live, prestage_ref,
-    prestage_to_previous, prestage_tree, previous_dir, sync_live_scripts,
+    ReleaseStateError, install_release, keep_previous_release, live_ref, mark_live,
+    previous_dir,
 )
+from boxmunge.release_staging import has_prestage
 from boxmunge.source import (
     SourceError, bundle_ref, consume_bundle, resolve_bundle_source,
 )
@@ -43,7 +43,6 @@ def _run_deploy_inner(
     no_snapshot: bool = False,
     dry_run: bool = False,
     component: str = "deploy",
-    staged: bool = False,
 ) -> int:
     """Inner deploy logic — caller must hold the project lock."""
     project_dir = paths.project_dir(project_name)
@@ -54,8 +53,6 @@ def _run_deploy_inner(
     if not is_new and (project_dir / "repo").exists():
         return _deploy_repo(project_name, paths, ref, no_snapshot, dry_run, component)
 
-    if staged:
-        return _promote_staged(project_name, paths, no_snapshot, dry_run, component)
     if has_prestage(paths, project_name):
         print(f"ERROR: '{project_name}' has a staged release installed. Run "
               f"'promote {project_name}' to deploy it, or 'unstage "
@@ -143,67 +140,6 @@ def _install_failed(project_name: str, paths: BoxPaths, error: Exception,
     return 1
 
 
-def _promote_staged(
-    project_name: str, paths: BoxPaths, no_snapshot: bool, dry_run: bool,
-    component: str,
-) -> int:
-    """Deploy the release `stage` installed; the production release it
-    displaced becomes the previous release once the deploy succeeds."""
-    if not has_prestage(paths, project_name):
-        print(f"ERROR: No staged release is installed for '{project_name}'.",
-              file=sys.stderr)
-        return 1
-    try:
-        manifest = validate_release_tree(paths.project_dir(project_name),
-                                         project_name, paths, component)
-        staged_ref = live_ref(paths, project_name)
-    except IntakeError as e:
-        return report_refusal(e)
-    except ReleaseStateError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
-    if dry_run:
-        print(f"[DRY RUN] Would deploy the staged release {staged_ref}")
-        return 0
-    # Production data is snapshotted with the production release's own
-    # backup config: that snapshot is what rollback pairs with it.
-    snapshot_name = None
-    try:
-        if prestage_ref(paths, project_name) is not None:
-            production = load_manifest(prestage_tree(paths, project_name) / "manifest.yml")
-            snapshot_name = take_pre_deploy_snapshot(project_name, paths, production,
-                                                     no_snapshot)
-    except (ManifestError, ReleaseStateError) as e:
-        print(f"ERROR: Cannot read the kept production release: {e}", file=sys.stderr)
-        return 1
-    rc = _start_release(project_name, paths, manifest, staged_ref,
-                        snapshot_name, component)
-    if rc != 0:
-        # Production still runs the kept release: check it with its own scripts.
-        sync_live_scripts(paths, project_name, prestage_tree(paths, project_name))
-        return rc
-    try:
-        prestage_to_previous(paths, project_name, snapshot_name, staged_ref)
-    except (OSError, ReleaseStateError) as e:
-        print(f"ERROR: {staged_ref} is live, but keeping the release it "
-              f"replaced failed: {e}. 'rollback {project_name}' is not "
-              f"available for this deploy.", file=sys.stderr)
-        log_error("deploy", f"Keeping the previous release failed: {e}",
-                  paths, project=project_name)
-        # Production now runs the staged release. A kept production release
-        # left behind would let unstage put old files under it, and an older
-        # previous release would pair the wrong code with the data: drop both.
-        try:
-            discard_prestage(paths, project_name)
-            discard_previous_release(paths, project_name)
-        except (OSError, ReleaseStateError) as cleanup_error:
-            print(f"ERROR: Could not remove .releases/prestage/: {cleanup_error}. "
-                  f"Remove it by hand before running 'unstage {project_name}'.",
-                  file=sys.stderr)
-        return 1
-    return 0
-
-
 def redeploy_installed(
     project_name: str,
     paths: BoxPaths,
@@ -278,28 +214,72 @@ def _start_release(
     The release on disk has already passed validate_release_tree and its
     pre-deploy snapshot (if any) has been taken.
     """
-    project_dir = paths.project_dir(project_name)
     print(f"Deploying {project_name} (ref: {actual_ref})...")
+    rc = run_pre_deploy_hook(project_name, paths, manifest)
+    if rc != 0:
+        return rc
+    generate_release_config(project_name, paths, manifest, component)
+    return replace_release(project_name, paths, manifest, actual_ref, snapshot_name)
 
+
+def run_pre_deploy_hook(project_name: str, paths: BoxPaths, manifest: dict) -> int:
+    """The manifest's pre-deploy command. Production is not touched yet."""
     pre_deploy = manifest.get("deploy", {}).get("pre_deploy", "")
-    if pre_deploy:
-        print(f"  Running pre-deploy: {pre_deploy}")
-        try:
-            subprocess.run(
-                shlex.split(pre_deploy), shell=False, cwd=project_dir, check=True,
-                capture_output=True, text=True,
-            )
-        except subprocess.CalledProcessError as e:
-            print(f"  ERROR: Pre-deploy failed: {e.stderr}", file=sys.stderr)
-            return 1
+    if not pre_deploy:
+        return 0
+    print(f"  Running pre-deploy: {pre_deploy}")
+    try:
+        subprocess.run(
+            shlex.split(pre_deploy), shell=False, cwd=paths.project_dir(project_name),
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"  ERROR: Pre-deploy failed: {e.stderr}", file=sys.stderr)
+        return 1
+    return 0
 
+
+def generate_release_config(project_name: str, paths: BoxPaths, manifest: dict,
+                            component: str) -> None:
+    """Write the release's Caddy site and compose overlay (not yet live)."""
     print("  Generating Caddy config...")
     prepare_caddy_config(paths, manifest)
-
     print("  Generating compose overlay...")
     prepare_compose_override(paths, manifest, component=component,
-                             release_root=project_dir)
+                             release_root=paths.project_dir(project_name))
 
+
+def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
+                    actual_ref: str, snapshot_name: str | None) -> int:
+    """Start the release in production, route it, smoke-test, record.
+
+    From the container start on, production runs (or partly runs) this
+    release whatever fails afterwards, so the deploy state records it
+    either way: the release it replaced becomes the rollback target, paired
+    with the snapshot taken before this deploy. Only a first deploy that
+    fails records nothing, so a retry is still treated as a first deploy.
+    """
+    first_deploy = "current_ref" not in read_state(paths.project_deploy_state(project_name))
+    rc = 1
+    try:
+        rc = _start_and_verify(project_name, paths, manifest)
+    finally:
+        if rc == 0 or not first_deploy:
+            record_deploy_state(paths, project_name, actual_ref, snapshot_name)
+    if rc != 0:
+        return rc
+
+    log_operation("deploy", f"Deploy completed ref={actual_ref}", paths,
+                  project=project_name, detail={"ref": actual_ref})
+    print(f"{project_name}: deployed successfully (ref: {actual_ref})")
+
+    from boxmunge.webhooks import webhook_safe
+    webhook_safe("deploy", project_name, paths, details={"ref": actual_ref})
+    return 0
+
+
+def _start_and_verify(project_name: str, paths: BoxPaths, manifest: dict) -> int:
+    project_dir = paths.project_dir(project_name)
     print("  Starting containers...")
     compose_files = ["compose.yml", "compose.boxmunge.yml"]
     try:
@@ -322,16 +302,6 @@ def _start_release(
 
     if not smoke_ok(project_name, paths, project_dir, manifest, compose_files):
         return 1
-
-    record_deploy_state(paths, project_name, actual_ref, snapshot_name)
-
-    log_operation("deploy", f"Deploy completed ref={actual_ref}", paths,
-                  project=project_name, detail={"ref": actual_ref})
-    print(f"{project_name}: deployed successfully (ref: {actual_ref})")
-
-    from boxmunge.webhooks import webhook_safe
-    webhook_safe("deploy", project_name, paths, details={"ref": actual_ref})
-
     return 0
 
 
@@ -358,49 +328,55 @@ def _has_rollback_target(paths: BoxPaths, project_name: str) -> bool:
     return previous_dir(paths, project_name).is_dir()
 
 
+def deploy_eligible(project_name: str, paths: BoxPaths) -> bool:
+    """Checked by every deploy core under the project lock, immediately
+    before anything changes. Prints why and returns False if not."""
+    if refuse_if_blocked(project_name, paths):
+        return False
+    from boxmunge.project_registry import is_registered
+    if not is_registered(project_name, paths):
+        print(f"ERROR: Project '{project_name}' is not registered on this server. "
+              f"Run: project-add {project_name}", file=sys.stderr)
+        return False
+    return True
+
+
+def deploy_locked(
+    project_name: str,
+    paths: BoxPaths,
+    ref: str | None = None,
+    no_snapshot: bool = False,
+    dry_run: bool = False,
+    component: str = "deploy",
+) -> int:
+    """The deploy core. Caller holds the project lock; never takes it.
+
+    `component` labels log entries for the CLI verb that asked (promote,
+    rollback).
+    """
+    if not deploy_eligible(project_name, paths):
+        return 1
+    clear_probation_if_active(paths, "deploy")
+    return _run_deploy_inner(
+        project_name, paths, ref, no_snapshot, dry_run, component=component,
+    )
+
+
 def run_deploy(
     project_name: str,
     paths: BoxPaths,
     ref: str | None = None,
     no_snapshot: bool = False,
     dry_run: bool = False,
-    _lock_held: bool = False,
-    component: str = "deploy",
-    staged: bool = False,
 ) -> int:
-    """Execute the full deploy flow. Returns 0 on success, 1 on failure,
-    3 for a compose hardening rejection.
-
-    `component` labels the SECURITY OFF log entry so promote/rollback callers
-    can attribute the warning to the correct CLI verb (default: "deploy").
-    `staged=True` (promote) deploys the release `stage` installed instead of
-    taking one from the inbox.
-    """
-    block = is_blocked(project_name, paths)
-    if block:
-        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
+    """prod-deploy: take the project lock and deploy. Returns 0 on success,
+    1 on failure, 3 for a compose hardening rejection."""
+    try:
+        with project_lock(project_name, paths):
+            return deploy_locked(project_name, paths, ref, no_snapshot, dry_run)
+    except LockError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
-    clear_probation_if_active(paths, "deploy")
-    from boxmunge.project_registry import is_registered
-    if not is_registered(project_name, paths):
-        print(f"ERROR: Project '{project_name}' is not registered on this server. "
-              f"Run: project-add {project_name}", file=sys.stderr)
-        return 1
-
-    if not _lock_held:
-        try:
-            with project_lock(project_name, paths):
-                return _run_deploy_inner(
-                    project_name, paths, ref, no_snapshot, dry_run,
-                    component=component, staged=staged,
-                )
-        except LockError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
-            return 1
-    return _run_deploy_inner(
-        project_name, paths, ref, no_snapshot, dry_run, component=component,
-        staged=staged,
-    )
 
 
 def cmd_deploy(args: list[str]) -> None:

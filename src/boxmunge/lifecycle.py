@@ -13,6 +13,7 @@ extending BlockReason here; callers don't change.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -77,3 +78,16 @@ def is_blocked(project_name: str, paths: BoxPaths) -> Block | None:
             skip_message=f"Skipped paused project '{project_name}'",
         )
     return None
+
+
+def refuse_if_blocked(project_name: str, paths: BoxPaths) -> bool:
+    """Print the refusal and return True if the project is blocked.
+
+    Operate cores call this under the project lock, immediately before
+    they mutate: a pause or quarantine that completed while the caller
+    waited for the lock must win (see boxmunge.fileutil, "Lock order").
+    """
+    block = is_blocked(project_name, paths)
+    if block:
+        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
+    return block is not None

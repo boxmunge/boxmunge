@@ -224,3 +224,46 @@ class TestRestoredDataIsLoaded:
         _restore(box)
         assert box.events[-1] == "up-all"
         assert box.up_kwargs[-1].get("force_recreate") is True
+
+
+class TestMonitorStoppedStaysStopped:
+    """A project the health monitor stopped comes back only through `recover`
+    (or a deploy, rollback or resume), which re-checks it: restore puts the
+    data back and leaves the project stopped."""
+
+    @staticmethod
+    def _monitor_stop(box: Box) -> None:
+        from boxmunge.state import write_state
+        write_state(box.paths.project_health_state(PROJECT), {
+            "status": "critical_stopped", "failure_reason": "db corrupt",
+            "stopped_at": "2026-10-16T10:00:00+00:00",
+        })
+
+    def test_data_is_restored_and_the_project_left_stopped(self, box, capsys):
+        from boxmunge.commands.health_state import is_monitor_stopped
+        self._monitor_stop(box)
+        assert _restore(box) == 0
+        assert box.events == ["decrypt", "start-db", "dump", "encrypt", "down",
+                              "start-db", "restore-cmd", "down"]
+        assert "up-all" not in box.events
+        assert is_monitor_stopped(PROJECT, box.paths)
+        assert f"recover {PROJECT}" in capsys.readouterr().out
+
+    def test_without_a_safety_snapshot_nothing_is_started_first(self, box):
+        self._monitor_stop(box)
+        assert _restore(box, safety_snapshot=False) == 0
+        assert box.events == ["decrypt", "down", "start-db", "restore-cmd", "down"]
+
+    def test_failed_safety_snapshot_stops_the_backup_service_again(self, box, capsys):
+        self._monitor_stop(box)
+        box.dump_rc = 1
+        assert _restore(box) == 1
+        assert box.events[-1] == "down"
+        assert "up-all" not in box.events and "restore-cmd" not in box.events
+
+    def test_failed_restore_leaves_it_stopped(self, box):
+        self._monitor_stop(box)
+        box.restore_rc = 1
+        assert _restore(box) == 1
+        assert box.events[-1] == "down"
+        assert "up-all" not in box.events

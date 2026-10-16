@@ -14,7 +14,7 @@ import uuid
 import pytest
 
 import boxmunge.container_update as cu
-from boxmunge.container_update import update_target
+from boxmunge.commands.container_update_cmd import update_project
 from boxmunge.container_update_targets import UpdateTarget
 from boxmunge.paths import BoxPaths
 from tests.integration.conftest import skip_no_docker
@@ -65,7 +65,7 @@ def test_interpolated_image_is_updated(project, monkeypatch):
     compose(project_dir, name, "up", "-d")
     _pull_moves(monkeypatch, tag, newer)
 
-    result = update_target(paths, _target(name, project_dir))
+    result = update_project(paths, _target(name, project_dir), dry_run=False)
 
     assert result["status"] == "succeeded", result
     assert container_image_ids(name, "web") == {new_id}
@@ -83,7 +83,7 @@ def test_included_image_service_is_updated(project, monkeypatch):
     compose(project_dir, name, "up", "-d")
     _pull_moves(monkeypatch, tag, newer)
 
-    result = update_target(paths, _target(name, project_dir))
+    result = update_project(paths, _target(name, project_dir), dry_run=False)
 
     assert result["status"] == "succeeded", result
     assert container_image_ids(name, "db") == {new_id}
@@ -98,7 +98,7 @@ def test_expected_service_without_container_is_a_failure_not_no_change(project, 
         f"services:\n  web:\n    image: {tag}\n    command: [sleep, '3600']\n    network_mode: none\n")
     monkeypatch.setattr(cu, "compose_pull", lambda *a, **k: None)
 
-    result = update_target(paths, _target(name, project_dir))
+    result = update_project(paths, _target(name, project_dir), dry_run=False)
 
     assert result["status"] == "failed"
     assert "web" in result["reason"]
@@ -123,7 +123,7 @@ def test_rollback_restores_the_previous_image(project, monkeypatch):
     compose(project_dir, name, "up", "-d", "--wait")
     _pull_moves(monkeypatch, tag, broken)
 
-    result = update_target(paths, _target(name, project_dir, "rollback_to_previous"))
+    result = update_project(paths, _target(name, project_dir, "rollback_to_previous"), dry_run=False)
 
     assert result["status"] == "failed"
     assert result["rollback_attempted"] is True
@@ -150,7 +150,7 @@ def test_scaled_to_zero_and_finished_one_shot_services_do_not_fail_the_update(
     compose(project_dir, name, "up", "-d")
     _pull_moves(monkeypatch, tag, newer)
 
-    result = update_target(paths, _target(name, project_dir, "rollback_to_previous"))
+    result = update_project(paths, _target(name, project_dir, "rollback_to_previous"), dry_run=False)
 
     assert result["status"] == "succeeded", result
     assert result["rollback_attempted"] is False
@@ -170,7 +170,7 @@ def test_long_running_service_updated_to_exit_zero_is_rolled_back(project, monke
     compose(project_dir, name, "up", "-d")
     _pull_moves(monkeypatch, tag, broken)
 
-    result = update_target(paths, _target(name, project_dir, "rollback_to_previous"))
+    result = update_project(paths, _target(name, project_dir, "rollback_to_previous"), dry_run=False)
 
     assert result["status"] == "failed" and result["reason"] == "unhealthy: web", result
     assert result["rollback_succeeded"] is True
@@ -190,7 +190,7 @@ def test_genuine_one_shot_stays_healthy_across_an_update(project, monkeypatch):
     docker("wait", f"{name}-migrate-1")  # it ran to completion before the update
     _pull_moves(monkeypatch, tag, newer)
 
-    result = update_target(paths, _target(name, project_dir, "rollback_to_previous"))
+    result = update_project(paths, _target(name, project_dir, "rollback_to_previous"), dry_run=False)
 
     assert result["status"] == "succeeded", result
     assert container_image_ids(name, "migrate") == {new_id}

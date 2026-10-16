@@ -304,54 +304,9 @@ def restart_projects(paths: BoxPaths, *, refused: Collection[str]) -> Restart:
             continue
 
         project_name = project_dir.name
-
-        # Never restart a project that is intentionally not running.
-        # Quarantined: bringing containers back would silently undo a
-        # security action. Paused: same — operator deliberately offlined
-        # the project. Quarantine specifically gets a structured log
-        # entry so the operator sees the skip in the daily report;
-        # paused historically did not log here, so preserve that.
-        block = is_blocked(project_name, paths)
-        if block:
-            if block.reason is BlockReason.QUARANTINED:
-                log_operation(
-                    "upgrade", block.skip_message,
-                    paths, project=project_name,
-                )
-            continue
-        # The health monitor stopped it after a critical result. Starting
-        # it would leave the stop marker standing over a running project
-        # (nothing bumps last_started_at here); `recover`, or a deploy,
-        # brings it back deliberately.
-        if is_monitor_stopped(project_name, paths):
-            result.monitor_stopped.append(project_name)
-            log_operation("upgrade", f"Not restarting {project_name}: the health "
-                          f"monitor stopped it; run `recover {project_name}` once "
-                          f"it is fixed", paths, project=project_name)
-            continue
-        if project_name in refused:
-            log_operation("upgrade", f"Not restarting {project_name}: its compose.yml "
-                          f"was refused; its containers are left as they are",
-                          paths, project=project_name)
-            continue
-
-        compose_files = ["compose.yml"]
-        override = paths.project_compose_override(project_name)
-        if override.exists():
-            compose_files.append("compose.boxmunge.yml")
-
         try:
             with project_lock(project_name, paths):
-                try:
-                    compose_up(project_dir, compose_files=compose_files,
-                               project_name=project_name)
-                    result.succeeded.append(project_name)
-                except DockerError as e:
-                    result.failed.append(project_name)
-                    log_error(
-                        "upgrade", f"Failed to restart {project_name}: {e}",
-                        paths, project=project_name,
-                    )
+                _restart_locked(paths, project_dir, project_name, refused, result)
         except LockError:
             result.skipped_locked.append(project_name)
             log_warning(
@@ -362,3 +317,54 @@ def restart_projects(paths: BoxPaths, *, refused: Collection[str]) -> Restart:
             )
 
     return result
+
+
+def _restart_locked(
+    paths: BoxPaths, project_dir: Path, project_name: str,
+    refused: Collection[str], result: Restart,
+) -> None:
+    """Restart one project, recording the outcome in `result`. Caller holds
+    its project lock.
+
+    Every reason to leave the project alone is checked here, under the
+    lock: a pause or quarantine that completed while the upgrade waited for
+    the lock must not be undone.
+    """
+    # Never restart a project that is intentionally not running.
+    # Quarantined: bringing containers back would silently undo a
+    # security action. Paused: same — operator deliberately offlined
+    # the project. Quarantine specifically gets a structured log
+    # entry so the operator sees the skip in the daily report;
+    # paused historically did not log here, so preserve that.
+    block = is_blocked(project_name, paths)
+    if block:
+        if block.reason is BlockReason.QUARANTINED:
+            log_operation("upgrade", block.skip_message, paths, project=project_name)
+        return
+    # The health monitor stopped it after a critical result. Starting
+    # it would leave the stop marker standing over a running project
+    # (nothing bumps last_started_at here); `recover`, or a deploy,
+    # brings it back deliberately.
+    if is_monitor_stopped(project_name, paths):
+        result.monitor_stopped.append(project_name)
+        log_operation("upgrade", f"Not restarting {project_name}: the health "
+                      f"monitor stopped it; run `recover {project_name}` once "
+                      f"it is fixed", paths, project=project_name)
+        return
+    if project_name in refused:
+        log_operation("upgrade", f"Not restarting {project_name}: its compose.yml "
+                      f"was refused; its containers are left as they are",
+                      paths, project=project_name)
+        return
+
+    compose_files = ["compose.yml"]
+    if paths.project_compose_override(project_name).exists():
+        compose_files.append("compose.boxmunge.yml")
+    try:
+        compose_up(project_dir, compose_files=compose_files,
+                   project_name=project_name)
+        result.succeeded.append(project_name)
+    except DockerError as e:
+        result.failed.append(project_name)
+        log_error("upgrade", f"Failed to restart {project_name}: {e}",
+                  paths, project=project_name)

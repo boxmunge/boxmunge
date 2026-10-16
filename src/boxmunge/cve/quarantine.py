@@ -285,7 +285,7 @@ def _complete_action(
         ) from e
 
     # 5. Hold the stop across a Docker daemon restart or reboot (B-19).
-    state = _pin_restart_policies(project_name, state)
+    state = _pin_restart_policies(project_name, paths, state)
 
     if state.get("action_complete") is not True:
         state = {**state, "action_complete": True}
@@ -297,11 +297,16 @@ def _complete_action(
     )
 
 
-def _pin_restart_policies(project_name: str, state: dict[str, Any]) -> dict[str, Any]:
+def _pin_restart_policies(
+    project_name: str, paths: BoxPaths, state: dict[str, Any],
+) -> dict[str, Any]:
     """Hold the project's containers at restart policy "no" (B-19); return
-    the record with each container's original policy saved for the lift."""
+    the record with each container's original policy saved for the lift.
+    The originals are written to the record before any policy changes."""
+    def persist(saved: dict[str, str]) -> None:
+        _write_record(project_name, paths, {**state, "restart_policies": saved})
     try:
-        saved = restart_hold.hold(project_name, state.get("restart_policies") or {})
+        saved = restart_hold.hold(project_name, state.get("restart_policies") or {}, persist)
     except DockerError as e:
         raise QuarantineError(
             f"Failed to disable restart policies for {project_name!r}: {e}",

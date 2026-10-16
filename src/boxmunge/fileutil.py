@@ -24,6 +24,13 @@ To rule out deadlock, a process only ever acquires them in this order
 Gating checks (paused, quarantined, monitor-stopped) that decide whether a
 project may be mutated are made *after* taking the project lock, so a
 concurrent quarantine cannot land between the check and the action.
+
+One lock owner: every operate command is split into an entry point
+(``run_*``) that prompts, takes the project lock and does nothing else, and
+a core (``*_locked``) that assumes the lock is held, never acquires it, and
+rechecks eligibility (lifecycle blocks, staging state) itself immediately
+before mutating. Cores call other cores, never another entry point, so a
+composed operation (promote = deploy + unstage) holds one lock throughout.
 Network calls that do not need the lock (webhooks, Pushover) run after it
 is released.
 """

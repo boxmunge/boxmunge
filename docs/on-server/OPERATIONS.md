@@ -130,6 +130,22 @@ keeps the displaced production release as the `rollback` target. `unstage` puts 
 release's files back. While a release is staged, `prod-deploy` and `rollback` refuse: promote or
 unstage first.
 
+A `promote` that fails before any production container is touched (a failing `pre_deploy` hook)
+leaves the stage as it was. Once it has started the staged release's containers, production runs
+that release even if a later step fails (`compose up` errors part-way, Caddy rejects the site, smoke
+fails): the error says `production now runs <ref>` and what `rollback` would do, and the displaced
+production release becomes the previous release, exactly as after a failed `prod-deploy`. `rollback`
+returns to it with the data snapshot taken before the promotion (it refuses, and says so, if the
+project keeps backups but that snapshot could not be taken). Staging is left up: `unstage` removes
+it, and never puts the old release's files back under the new containers. If staging cannot be
+torn down after a successful promotion, `promote` exits 1 and asks you to run `unstage`.
+
+If a promote is killed after it started production, `unstage`, `stage` and `prod-deploy` refuse
+until `promote` is run again. That rerun finishes the switch: it does not run the `pre_deploy` hook
+again or take a new snapshot (production data may already have changed), and however it ends, even
+if it fails, the displaced release becomes the previous release with the snapshot taken before the
+first attempt. After that, `unstage`, `rollback` and `prod-deploy` work as after any failed deploy.
+
 Production's smoke checks keep running the production release's own `boxmunge-scripts/` while a
 release is staged (production mounts a copy kept in `.releases/live-scripts/`), so a smoke check
 that only the staged release passes does not fail production. Production switches to the new
@@ -145,7 +161,9 @@ A stage that fails after installing its release (staging containers fail to star
 copy fails, Caddy rejects the staging site) cleans up after itself: staging containers, the staging Caddy site and compose files are
 removed and the production release's files are put back. `unstage` removes whatever a stage left
 behind even if that stage never got as far as recording itself active, so it can always be used to
-clean up; with nothing staged it reports `No staging found` and exits 1.
+clean up; with nothing staged it reports `No staging found` and exits 1. If the staging containers
+cannot be removed (Docker errors), nothing else is removed: the staging compose files and site stay,
+the staging state records `cleanup_incomplete`, and running `unstage` again retries.
 
 Staging is useful for:
 - Verifying a new bundle before it goes live
@@ -467,6 +485,12 @@ stops with an error. To restore anyway, without a safety snapshot:
 restore myapp myapp-2026-03-30T020000.tar.gz.age --no-safety-snapshot
 ```
 
+`restore` refuses a paused or CVE-quarantined project (`resume` or `security resume` it first). A
+project the health monitor stopped gets its data back but stays stopped: only the backup service is
+started, for the safety snapshot and the restore, and every service is stopped again afterwards,
+whether or not the restore succeeded. Then run `recover myapp`, which starts it on the restored data
+and runs the smoke test that clears the stop.
+
 Safety snapshots sit alongside the nightly backups and are pruned by the same retention.
 
 Verify that a backup restores successfully (non-destructive):
@@ -496,6 +520,11 @@ hardening), installs it, restores the snapshot, and starts it. Secrets, suppress
 `backups/` are never part of a release, so they are not rolled back. For a promoted staging
 release, the previous release is the production release that `stage` displaced. A git project
 restores the snapshot and checks out the previous ref.
+
+A deploy that fails after it started the new release's containers still counts as having replaced
+the old one, since production may be running the new code: rollback returns to the release it
+replaced, with the snapshot taken just before. Deploying the same release again (a retry) keeps that
+pairing, rather than pairing the old release with data the new one may already have changed.
 
 Rollback refuses, with the reason, instead of doing half a rollback:
 
@@ -550,7 +579,10 @@ ERROR: Another operation is in progress for 'myapp'. Try again shortly.
 
 Confirmation prompts are answered before the lock is taken, and the checks that decide whether the
 command may act (paused, CVE-quarantined, monitor-stopped) are repeated once the lock is held. A
-quarantine that lands while you are answering the prompt therefore still wins.
+pause or quarantine that lands while you are answering the prompt, or that finishes just before a
+waiting command gets the lock, therefore still wins: `prod-deploy`, `stage`, `promote`, `rollback`,
+`restore` and `backup` refuse, and the upgrade restart and health check leave the project alone.
+A `promote` holds the one lock across its deploy and the staging teardown that follows it.
 
 Timers treat a held lock as routine, not as a failure. The 5-minute health check skips the project
 for that tick. `container-update` logs a warning (`Skipped myapp: project lock held by another
@@ -582,6 +614,15 @@ Containers are stopped via `docker compose stop`, so state is preserved on disk 
 - `backup-sync` continues (it only copies; existing off-box snapshots are never removed)
 - Platform upgrades keep it paused: the maintenance page stays in place and the containers stay stopped
 - A Docker restart or reboot keeps it stopped: pause sets each container's restart policy to `no` (saving the original), and `resume` restores the originals before starting the containers
+
+The pause is recorded first, so automation leaves the project alone from the start, but it is only
+marked complete once the maintenance page is live, the containers are stopped and their restart
+policies are held. If a step fails (Caddy cannot reload, `docker compose stop` errors), `pause`
+exits 1 with `ERROR: Pausing 'myapp' is incomplete: ...`: the project counts as paused, but may
+still be serving or running. Fix the cause and run `pause myapp` again to finish it (an incomplete
+pause is the one case where pausing a paused project is accepted), or `resume myapp`. Until then
+`status` shows it as `PAUSED (incomplete)`, `health` warns about it under `lifecycle`, and
+`container-update` logs that it may still be serving on images it does not update while paused.
 
 To bring it back:
 
@@ -828,7 +869,7 @@ Check logs from just before the containers were stopped:
 logs myapp --tail 200
 ```
 
-Once you have identified and fixed the underlying issue, restart the same build with `recover` (no image pull, no rebuild; it restores routing and runs the smoke test):
+Once you have identified and fixed the underlying issue, restart the same build with `recover` (no image pull, no rebuild; it restores routing and runs the smoke test). If the fix is restoring data, run `restore` first: it leaves the project stopped for `recover`.
 
 ```
 recover myapp

@@ -2,10 +2,13 @@
 from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING
-from boxmunge.commands.deploy import run_deploy
-from boxmunge.commands.unstage_cmd import run_unstage
+from boxmunge.commands.deploy import deploy_locked
+from boxmunge.commands.promote_release import (
+    Promotion, deploy_staged_locked, report_failed_after_switch,
+)
+from boxmunge.commands.unstage_cmd import unstage_locked
 from boxmunge.fileutil import project_lock, LockError
-from boxmunge.lifecycle import is_blocked
+from boxmunge.lifecycle import refuse_if_blocked
 from boxmunge.log import log_operation
 from boxmunge.state import read_state
 
@@ -14,30 +17,31 @@ if TYPE_CHECKING:
 
 
 def run_promote(project_name: str, paths: BoxPaths, dry_run: bool = False) -> int:
-    block = is_blocked(project_name, paths)
-    if block:
-        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
+    """promote: take the project lock and promote staging to production."""
+    try:
+        with project_lock(project_name, paths):
+            return promote_locked(project_name, paths, dry_run)
+    except LockError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+
+def promote_locked(project_name: str, paths: BoxPaths, dry_run: bool = False) -> int:
+    """The promote core. Caller holds the project lock; never takes it.
+
+    Deploy and unstage run as cores under the same lock, so nothing can
+    land between production going live and staging being torn down.
+    """
+    if refuse_if_blocked(project_name, paths):
         return 1
     staging_state = read_state(paths.project_staging_state(project_name))
     if not staging_state.get("active"):
         print(f"ERROR: No active staging for '{project_name}'.", file=sys.stderr)
         return 1
-
     if dry_run:
         print(f"[DRY RUN] Would promote '{project_name}' from staging to production")
         return 0
-
-    try:
-        with project_lock(project_name, paths):
-            # Re-read state inside the lock to avoid TOCTOU
-            staging_state = read_state(paths.project_staging_state(project_name))
-            if not staging_state.get("active"):
-                print(f"ERROR: Staging was torn down before lock was acquired.", file=sys.stderr)
-                return 1
-            return _run_promote_inner(project_name, paths, staging_state)
-    except LockError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
+    return _run_promote_inner(project_name, paths, staging_state)
 
 
 def _run_promote_inner(
@@ -45,28 +49,30 @@ def _run_promote_inner(
 ) -> int:
     print(f"Promoting {project_name} from staging to production...")
 
-    staged_ref = staging_state.get("ref")
-    ref_arg = staged_ref if staged_ref and staged_ref != "latest" else None
-
     # Deploy to production FIRST — staging stays live as fallback
     print("  Deploying to production...")
-    # staged=True: deploy the release `stage` installed, never a newer
-    # inbox bundle. The ref only matters for git-sourced projects.
-    deploy_result = run_deploy(
-        project_name, paths, ref=ref_arg, _lock_held=True,
-        component="promote", staged=True,
-    )
-    if deploy_result != 0:
-        print("ERROR: Production deploy failed. Staging is still live.", file=sys.stderr)
+    deployed = _deploy_to_production(project_name, paths, staging_state)
+    if deployed.rc != 0:
+        if deployed.switched:
+            print(f"ERROR: Production deploy failed after the switch (see above). "
+                  f"Staging is still up; run 'unstage {project_name}' to remove "
+                  f"it.", file=sys.stderr)
+        else:
+            print("ERROR: Production deploy failed. Staging is still live.",
+                  file=sys.stderr)
         # Preserve hardening-rejection exit code (3) so operators can
         # distinguish security policy failures from generic deploy errors.
-        return deploy_result if deploy_result == 3 else 1
+        return deployed.rc if deployed.rc == 3 else 1
 
     # Only tear down staging after successful production deploy
     print("  Tearing down staging...")
-    unstage_result = run_unstage(project_name, paths, _lock_held=True)
-    if unstage_result != 0:
-        print("  WARN: Unstage had issues (production is live)")
+    if unstage_locked(project_name, paths) != 0:
+        print(f"ERROR: {project_name} is live in production, but tearing down "
+              f"staging failed (see above). Run 'unstage {project_name}' to "
+              f"finish.", file=sys.stderr)
+        log_operation("promote", "Promoted; staging teardown incomplete", paths,
+                      project=project_name)
+        return 1
 
     log_operation("promote", "Promoted from staging to production", paths, project=project_name)
     print(f"{project_name}: promoted to production successfully.")
@@ -75,6 +81,27 @@ def _run_promote_inner(
     webhook_safe("promote", project_name, paths)
 
     return 0
+
+
+def _deploy_to_production(project_name: str, paths: BoxPaths,
+                          staging_state: dict) -> Promotion:
+    """A bundle project deploys the release `stage` installed, never a newer
+    inbox bundle; a git project deploys the staged ref."""
+    if (paths.project_dir(project_name) / "repo").exists():
+        staged_ref = staging_state.get("ref")
+        ref_arg = staged_ref if staged_ref and staged_ref != "latest" else None
+        state_path = paths.project_deploy_state(project_name)
+        started_before = read_state(state_path).get("last_started_at")
+        rc = deploy_locked(project_name, paths, ref=ref_arg, component="promote")
+        # The deploy records a start once its containers may have started
+        # (deploy.replace_release), so a failure after that point is one
+        # past the switch.
+        switched = read_state(state_path).get("last_started_at") != started_before
+        if rc != 0 and switched:
+            current = read_state(state_path).get("current_ref", "the staged ref")
+            report_failed_after_switch(project_name, paths, current, certain=True)
+        return Promotion(rc, switched=switched)
+    return deploy_staged_locked(project_name, paths)
 
 
 def cmd_promote(args: list[str]) -> None:
