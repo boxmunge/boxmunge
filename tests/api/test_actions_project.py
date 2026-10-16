@@ -2,6 +2,8 @@
 """project.get, project.health and inbox.list."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from boxmunge.api.dev.fixture_host import FixtureHost
@@ -114,3 +116,20 @@ def test_inbox_list(fixture_paths) -> None:
     assert all(b["size"] == 2048 for b in bundles)
     only_wiki = _call(fixture_paths, "inbox.list", {"project": "wiki"})["bundles"]
     assert [b["project"] for b in only_wiki] == ["wiki"]
+
+
+def _rewrite_json(path, **changes):
+    record = json.loads(path.read_text())
+    for key, value in changes.items():
+        if value is ...:
+            del record[key]
+        else:
+            record[key] = value
+    path.write_text(json.dumps(record))
+
+
+def test_a_quarantine_record_with_a_null_field_fails_naming_the_file(fixture_paths) -> None:
+    path = fixture_paths.project_quarantine_state("billing")
+    _rewrite_json(path, explanation=None)
+    error = _code(fixture_paths, "project.get", {"project": "billing"})
+    assert error.code is ErrorCode.FAILED and str(path) in error.message

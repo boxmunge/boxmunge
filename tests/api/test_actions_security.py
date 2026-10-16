@@ -110,3 +110,22 @@ def test_summary_lists_an_unreadable_project_and_keeps_serving(fixture_paths) ->
     assert [u["project"] for u in summary["unreadable"]] == ["shop"]
     assert str(path) in summary["unreadable"][0]["error"]
     assert sum(summary["posture_distribution"].values()) == 3  # newapp has no manifest
+
+
+def _rewrite_json(path, **changes):
+    record = json.loads(path.read_text())
+    for key, value in changes.items():
+        if value is ...:
+            del record[key]
+        else:
+            record[key] = value
+    path.write_text(json.dumps(record))
+
+
+def test_a_quarantine_record_with_a_null_severity_fails_naming_the_file(fixture_paths) -> None:
+    path = fixture_paths.project_quarantine_state("billing")
+    _rewrite_json(path, severity=None)
+    error = _error(fixture_paths, "security.project", {"project": "billing"})
+    assert error.code is ErrorCode.FAILED and str(path) in error.message
+    summary = _call(fixture_paths, "security.summary")
+    assert [u["project"] for u in summary["unreadable"]] == ["billing"]

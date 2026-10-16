@@ -90,7 +90,8 @@ def _project_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
         "staging": {"active": staged, "ref": staging.get("ref") if staged else None},
         "paused": None if paused is None else {
             "paused_at": paused["paused_at"], "reason": paused.get("reason")},
-        "quarantine": None if quarantine is None else quarantine_view(quarantine),
+        "quarantine": None if quarantine is None else quarantine_view(
+            quarantine, paths.project_quarantine_state(name)),
     }
 
 

@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from boxmunge.api.result import ActionError, ErrorCode
-from boxmunge.api.schema import BOOLEAN, NULLABLE_STRING, STRING, obj
+from boxmunge.api.schema import BOOLEAN, STRING, obj
+from boxmunge.cve.quarantine import QUARANTINE_TEXT_FIELDS, checked_quarantine_record
 from boxmunge.paths import BoxPaths, InvalidProjectName
 
 PROJECT_NAME_PATTERN = "[a-z0-9][a-z0-9-]{0,62}"
@@ -20,10 +21,10 @@ TAIL_MAX = 1000
 QUARANTINE_SCHEMA = obj({
     "quarantined_at": STRING,
     "cve_id": STRING,
-    "severity": NULLABLE_STRING,
-    "effective_severity": NULLABLE_STRING,
-    "explanation": NULLABLE_STRING,
-    "image_ref": NULLABLE_STRING,
+    "severity": STRING,
+    "effective_severity": STRING,
+    "explanation": STRING,
+    "image_ref": STRING,
     "action_complete": BOOLEAN,
 })
 
@@ -51,15 +52,12 @@ def deployed_project(paths: BoxPaths, name: str) -> Path:
     return project_dir
 
 
-def quarantine_view(state: dict[str, Any]) -> dict[str, Any]:
-    """A quarantine state file as QUARANTINE_SCHEMA describes it. A record
-    without action_complete predates it and counts as incomplete."""
+def quarantine_view(state: dict[str, Any] | None, path: Path) -> dict[str, Any]:
+    """The quarantine state file at *path* as QUARANTINE_SCHEMA describes it.
+    A record without action_complete predates it and counts as incomplete;
+    any other departure from what boxmunge writes is QuarantineError."""
+    record = checked_quarantine_record(state, path)
     return {
-        "quarantined_at": state["quarantined_at"],
-        "cve_id": state["cve_id"],
-        "severity": state.get("severity"),
-        "effective_severity": state.get("effective_severity"),
-        "explanation": state.get("explanation"),
-        "image_ref": state.get("image_ref"),
-        "action_complete": bool(state.get("action_complete", False)),
+        **{key: record[key] for key in QUARANTINE_TEXT_FIELDS},
+        "action_complete": record.get("action_complete", False),
     }

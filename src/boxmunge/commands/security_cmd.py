@@ -31,7 +31,9 @@ from boxmunge.cve.breaker import BreakerError, read_held
 from boxmunge.cve.policy import Disposition
 from boxmunge.cve.grace import GraceError, read_grace_state
 from boxmunge.cve.scan_state import read_scan_state
-from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
+from boxmunge.cve.quarantine import (
+    checked_quarantine_record, is_quarantined, read_quarantine_state,
+)
 from boxmunge.cve.suppressions import (
     SCOPE_HOST,
     SuppressionsError,
@@ -160,12 +162,13 @@ def _fleet_facts(name: str, paths: BoxPaths, today) -> _FleetFacts:
     sec_block = manifest.get("security") or {}
     quarantine = None
     if is_quarantined(name, paths):
-        qstate = read_quarantine_state(name, paths) or {}
+        qstate = checked_quarantine_record(
+            read_quarantine_state(name, paths), paths.project_quarantine_state(name))
         quarantine = {
             "project": name,
-            "cve_id": qstate.get("cve_id", ""),
-            "severity": qstate.get("effective_severity") or qstate.get("severity", ""),
-            "since": qstate.get("quarantined_at"),
+            "cve_id": qstate["cve_id"],
+            "severity": qstate["effective_severity"] or qstate["severity"],
+            "since": qstate["quarantined_at"],
         }
     scan_state = read_scan_state(paths.project_scan_state(name))
     # At risk = opted out of quarantine AND carrying findings that would

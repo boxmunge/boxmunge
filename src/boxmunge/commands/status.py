@@ -6,11 +6,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from boxmunge.commands.argv import parse_args
-from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
+from boxmunge.cve.quarantine import (
+    checked_quarantine_record, is_quarantined, read_quarantine_state,
+)
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.paths import BoxPaths
 from boxmunge.pause import is_paused
-from boxmunge.state import read_state
+from boxmunge.state import StateError, read_state
 
 
 def _short_ts(raw: str) -> str:
@@ -115,7 +117,8 @@ def _project_row(name: str, paths: BoxPaths) -> dict[str, str]:
     # (mirrors lifecycle.is_blocked ordering — the security action is
     # the more specific one).
     if is_quarantined(name, paths):
-        qstate = read_quarantine_state(name, paths) or {}
+        qstate = checked_quarantine_record(
+            read_quarantine_state(name, paths), paths.project_quarantine_state(name))
         deploy = read_state(paths.project_deploy_state(name))
         return {
             "project": name,
@@ -123,13 +126,10 @@ def _project_row(name: str, paths: BoxPaths) -> dict[str, str]:
             "last_check": "-",
             "deployed_at": deploy.get("deployed_at", "-"),
             "raw_status": "quarantined",
-            "cve_id": qstate.get("cve_id", "-"),
-            "severity": (
-                qstate.get("effective_severity")
-                or qstate.get("severity", "-")
-            ),
-            "explanation": qstate.get("explanation", ""),
-            "quarantined_at": qstate.get("quarantined_at", "-"),
+            "cve_id": qstate["cve_id"],
+            "severity": qstate["effective_severity"] or qstate["severity"],
+            "explanation": qstate["explanation"],
+            "quarantined_at": qstate["quarantined_at"],
         }
     if is_paused(name, paths):
         deploy = read_state(paths.project_deploy_state(name))
@@ -144,6 +144,9 @@ def _project_row(name: str, paths: BoxPaths) -> dict[str, str]:
     deploy = read_state(paths.project_deploy_state(name))
 
     status = health.get("status", "unknown")
+    if not isinstance(status, str):
+        raise StateError(f"Health state {paths.project_health_state(name)} has a status "
+                         f"that is not text: {status!r}")
     if status == "ok":
         display_status = "OK"
     elif status == "critical_stopped":

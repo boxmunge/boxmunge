@@ -2,6 +2,8 @@
 """platform.info, status.get, projects.list, health.get and LiveHost."""
 from __future__ import annotations
 
+import json
+
 import pytest
 import yaml
 
@@ -106,3 +108,37 @@ def test_live_host_logs_raise_docker_errors(paths, monkeypatch) -> None:
     (paths.projects / "shop").mkdir()
     with pytest.raises(DockerError):
         LiveHost(paths).container_logs("shop", None, 10)
+
+
+def _rewrite_json(path, **changes):
+    record = json.loads(path.read_text())
+    for key, value in changes.items():
+        if value is ...:
+            del record[key]
+        else:
+            record[key] = value
+    path.write_text(json.dumps(record))
+
+
+@pytest.mark.parametrize("changes", [
+    {"explanation": None}, {"severity": None}, {"effective_severity": 3},
+    {"explanation": ...},
+])
+def test_a_quarantine_record_unlike_what_boxmunge_writes_is_an_error_row(
+        fixture_paths, changes) -> None:
+    """Writers always store these fields as text; a record that does not is
+    corrupt, and must cost only its own row, not the whole dashboard."""
+    path = fixture_paths.project_quarantine_state("billing")
+    _rewrite_json(path, **changes)
+    rows = {r["project"]: r for r in _call(fixture_paths, "status.get")["projects"]}
+    assert rows["billing"]["raw_status"] == "error"
+    assert str(path) in rows["billing"]["error"]
+    assert rows["shop"]["raw_status"] == "ok"
+
+
+def test_a_health_status_that_is_not_text_is_an_error_row(fixture_paths) -> None:
+    path = fixture_paths.project_health_state("shop")
+    _rewrite_json(path, status=None)
+    rows = {r["project"]: r for r in _call(fixture_paths, "status.get")["projects"]}
+    assert rows["shop"]["raw_status"] == "error"
+    assert str(path) in rows["shop"]["error"]

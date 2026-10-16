@@ -131,7 +131,9 @@ def _security_project(params: dict[str, Any], ctx: ActionContext) -> dict[str, A
             for decision in scan.get("decisions", [])
             for finding in decision.get("findings") or []
         ],
-        "quarantine": quarantine_view(view.quarantine_state) if view.quarantined else None,
+        "quarantine": quarantine_view(
+            view.quarantine_state, ctx.paths.project_quarantine_state(name),
+        ) if view.quarantined else None,
         "active_suppressions": [
             {"cve_id": s.cve_id, "until": s.until.isoformat(), "reason": s.reason,
              "reviewed_by": s.reviewed_by, "added": s.added.isoformat(), "scope": s.scope}

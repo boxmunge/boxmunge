@@ -54,6 +54,28 @@ class QuarantineError(Exception):
     """Quarantine action could not complete."""
 
 
+# Every field write_quarantine_state stores as text.
+QUARANTINE_TEXT_FIELDS = (
+    "quarantined_at", "cve_id", "severity", "effective_severity", "explanation", "image_ref",
+)
+
+
+def checked_quarantine_record(state: dict[str, Any] | None, path: Path) -> dict[str, Any]:
+    """*state* if it holds what write_quarantine_state writes; otherwise
+    QuarantineError naming the file. action_complete may be absent: records
+    from before it existed lack it, and count as incomplete."""
+    if not isinstance(state, dict):
+        raise QuarantineError(f"Quarantine state {path} is not a JSON object")
+    bad = [key for key in QUARANTINE_TEXT_FIELDS if not isinstance(state.get(key), str)]
+    if "action_complete" in state and not isinstance(state["action_complete"], bool):
+        bad.append("action_complete")
+    if bad:
+        raise QuarantineError(
+            f"Quarantine state {path} is corrupt ({', '.join(bad)} missing or of the wrong "
+            f"type). Run `boxmunge security scan` to rewrite it.")
+    return state
+
+
 # ---------- state primitives ----------
 
 
