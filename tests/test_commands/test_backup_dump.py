@@ -115,7 +115,7 @@ def test_backup_sweeps_dumps_a_killed_backup_left(project: BoxPaths) -> None:
     (backups / ".dump-killed.tar.gz").write_bytes(b"SECRET-ROW")
     seen: list[list[str]] = []
 
-    def dump(paths, name, command, service):
+    def dump(paths, name, command, service, compose_file=None):
         seen.append(sorted(p.name for p in _dumps_left(paths)))
         raise BackupError("stop here")
     with patch.object(backup_cmd, "execute_dump", side_effect=dump):

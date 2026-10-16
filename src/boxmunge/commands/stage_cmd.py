@@ -29,6 +29,7 @@ from boxmunge.release import (
     ReleaseStateError, install_release, live_ref, mark_live, project_data_dirs,
 )
 from boxmunge.release_staging import keep_prestage_release
+from boxmunge.release_txn import refuse_if_install_open
 from boxmunge.security_warn import warn_off_services, warn_writable_state
 from boxmunge.source import SourceError, bundle_ref, consume_bundle, resolve_bundle_source
 from boxmunge.staging_compose import STAGING_BASE, STAGING_FILES, STAGING_OVERLAY
@@ -141,6 +142,10 @@ def stage_locked(project_name: str, paths: BoxPaths, ref: str | None = None,
     anything changes.
     """
     if refuse_if_blocked(project_name, paths):
+        return 1
+    # A stage would install over the half-installed release and take it as
+    # production's own, losing the open install's rollback target.
+    if refuse_if_install_open(paths, project_name, component="stage"):
         return 1
     if not is_registered(project_name, paths):
         print(f"ERROR: Project '{project_name}' is not registered on this server. "

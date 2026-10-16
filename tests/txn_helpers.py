@@ -54,11 +54,14 @@ def crash_at(point: str, fn: Callable[[], object]) -> int:
 
 
 @contextmanager
-def fake_backups(taken: list[dict]):
-    """backup_locked records the manifest it was given and writes a snapshot."""
+def fake_backups(taken: list[dict], prefix: str = "p"):
+    """backup_locked records the manifest it was given and writes a snapshot
+    named <project>-<prefix><n>; give each context its own prefix when a test
+    must tell their snapshots apart."""
     def fake(project_name, paths_, kind=None, manifest=None):
         taken.append(manifest)
-        snap = paths_.project_backups(project_name) / f"{project_name}-p{len(taken)}.tar.gz.age"
+        snap = (paths_.project_backups(project_name)
+                / f"{project_name}-{prefix}{len(taken)}.tar.gz.age")
         snap.parent.mkdir(parents=True, exist_ok=True)
         snap.write_text("snapshot")
         return 0

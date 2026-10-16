@@ -76,8 +76,8 @@ def restore_superseded(paths: BoxPaths, project: str, txn: InstallTxn) -> None:
     if os.path.lexists(sup_dir):
         discard_dir(prev)
         durable_rename_dir(sup_dir, prev)
-    elif txn.previous_before is None:
-        discard_dir(prev)  # there was no previous release: only the keep made this one
+    elif not txn.had_previous:
+        discard_dir(prev)  # there was no previous/ before: only the keep made this one
     if os.path.lexists(sup_meta):
         if os.path.lexists(prev_meta):
             prev_meta.unlink()
@@ -93,3 +93,21 @@ def discard_superseded(paths: BoxPaths, project: str) -> None:
     if os.path.lexists(sup_meta):
         sup_meta.unlink()
         fsync_dir(sup_meta.parent)
+
+
+def ensure_kept_pairing(paths: BoxPaths, project: str, txn: InstallTxn) -> None:
+    """previous.json pairs the kept release with ``txn``'s snapshot.
+
+    The keep writes it so; a fix-forward that takes over a kept (or a
+    rollback's) previous release rewrites it after recording itself, and
+    a crash between the two is repaired here, by the next core that reads
+    the open install, before anything uses the rollback target.
+    """
+    if (txn.source == "rollback" or txn.replaced_ref is None or txn.abandoning
+            or not txn.reached("previous_kept")):
+        return
+    _building, prev, prev_meta, _sup_dir, _sup_meta = _names(paths, project)
+    text = kept_previous_text(txn)
+    if not prev.is_dir() or (prev_meta.is_file() and prev_meta.read_text() == text):
+        return
+    atomic_write_text(prev_meta, text, mode=0o644)

@@ -67,8 +67,13 @@ def _run_deploy_inner(
             print(f"ERROR: {err}", file=sys.stderr)
             return 1
         if txn is not None and dry_run:
+            from boxmunge.commands.deploy_tree import bundle_resume_problem
+            problem = bundle_resume_problem(project_name, paths, txn, ref)
+            if problem:
+                print(f"ERROR: {problem}.", file=sys.stderr)
+                return 1
             print(f"[DRY RUN] Would resume the open install of {txn.ref} "
-                  f"(phase {txn.phase})")
+                  f"(phase {txn.phase}) from the project dir")
             return 0
         if txn is not None:
             return resume_without_bundle(project_name, paths, txn, ref, component)

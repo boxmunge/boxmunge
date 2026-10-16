@@ -314,6 +314,17 @@ def atomic_write_bytes(
 DISCARDED = ".discarded"
 
 
+def _fsync_file(full: str) -> None:
+    try:
+        fd = os.open(full, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as e:
+        raise OSError(e.errno, f"cannot sync {full}: {e.strerror}") from e
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def sync_tree(path: Path) -> None:
     """fsync every regular file and directory under ``path`` (itself
     included) without following links, so a directory renamed into place
@@ -323,17 +334,21 @@ def sync_tree(path: Path) -> None:
     for root, _dirs, files in os.walk(path, followlinks=False):
         for name in files:
             full = os.path.join(root, name)
-            if not stat.S_ISREG(os.lstat(full).st_mode):
-                continue
-            try:
-                fd = os.open(full, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-            except OSError as e:
-                raise OSError(e.errno, f"cannot sync {full}: {e.strerror}") from e
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+            if stat.S_ISREG(os.lstat(full).st_mode):
+                _fsync_file(full)
         fsync_dir(Path(root))
+
+
+def sync_entries(entries: list[Path], parent: Path) -> None:
+    """fsync the given entries of ``parent`` (trees whole, links not
+    followed) and then ``parent`` itself, which holds their names."""
+    for entry in entries:
+        mode = os.lstat(entry).st_mode
+        if stat.S_ISDIR(mode):
+            sync_tree(entry)
+        elif stat.S_ISREG(mode):
+            _fsync_file(str(entry))
+    fsync_dir(parent)
 
 
 def durable_rename_dir(src: Path, dest: Path) -> None:
@@ -372,6 +387,15 @@ def discard_dir(path: Path) -> None:
     fsync_dir(path.parent)
     _rmtree_real_dir(doomed)
     fsync_dir(path.parent)
+
+
+def sweep_discarded(directory: Path) -> None:
+    """Remove the ``*.discarded`` debris a crash inside discard_dir left in
+    ``directory``. Run by the cores that own it, under the project lock."""
+    if not directory.is_dir():
+        return
+    for doomed in sorted(directory.glob(f"*{DISCARDED}")):
+        discard_dir(doomed)
 
 
 class LockError(Exception):

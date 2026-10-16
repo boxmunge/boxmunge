@@ -22,10 +22,11 @@ from boxmunge.commands.upgrade_steps import (
     UpgradeGateError,
     check_upgrade,
     migrate_project_manifests,
-    notify_locked_skips,
-    notify_refused,
     regenerate_configs,
     restart_projects,
+)
+from boxmunge.commands.upgrade_notify import (
+    notify_install_open, notify_locked_skips, notify_refused,
 )
 from boxmunge.docker import caddy_reload, DockerError
 from boxmunge.log import log_operation, log_error
@@ -76,6 +77,9 @@ def _migrate_regenerate_reload(
     if migrated.skipped_locked:
         print(f"  Not migrated on disk (locked; migrated in memory): "
               f"{', '.join(migrated.skipped_locked)}")
+    if migrated.install_open:
+        print(f"  Not migrated on disk (an install is open; migrated in memory): "
+              f"{', '.join(migrated.install_open)}")
     for advice in migrated.unlinked.values():
         print(f"  WARNING: {advice}", file=sys.stderr)
     if not (migrated.written or migrated.in_memory or migrated.skipped_locked):
@@ -89,6 +93,9 @@ def _migrate_regenerate_reload(
     if regen.refused:
         print("  Refused projects keep their previous configs and running "
               "containers and are not restarted. Fix compose.yml and redeploy.")
+    for name, why in sorted(regen.install_open.items()):
+        print(f"  INSTALL OPEN: {name}: not regenerated or restarted: {why}")
+    notify_install_open(paths, regen.install_open)
 
     print(f"[{step + 2}/{total}] Reloading Caddy...")
     try:
@@ -113,6 +120,8 @@ def _restart(paths: BoxPaths, step: int, total: int, refused: dict[str, str]) ->
         print(f"  Not restarted (compose refused): {', '.join(sorted(refused))}")
     if restart.start_refused:
         print(f"  Not restarted (start checks refused): {', '.join(restart.start_refused)}")
+    if restart.install_open:
+        print(f"  Not restarted (an install is open): {', '.join(restart.install_open)}")
     notify_locked_skips(paths, restart.skipped_locked)
     notify_refused(paths, refused)
     if restart.failed:

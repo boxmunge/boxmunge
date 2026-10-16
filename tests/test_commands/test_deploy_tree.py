@@ -89,11 +89,10 @@ def test_other_production_starts_refused_mid_install(paths) -> None:
     place_bundle(paths, timestamp=V2, files={"manifest.yml": hook_manifest("false")})
     with docker_off():
         run_deploy("myapp", paths, ref=V2)
-    with docker_off() as up, patch("boxmunge.compose_guard.log_error") as logged:
+    with docker_off() as up:
         result = restart_projects(paths, refused=())
     up.assert_not_called()
-    assert result.start_refused == ["myapp"]
-    assert "is open at phase hook_started" in logged.call_args.args[1]
+    assert result.install_open == ["myapp"] and result.start_refused == []
 
 
 def test_first_deploy_has_no_keep_and_no_snapshot(paths) -> None:

@@ -75,6 +75,14 @@ Usage: boxmunge prod-deploy <project> [--ref REF] [--no-snapshot] [--dry-run]
 Deploy directly to production (skips staging). --abandon undoes an install
 that stopped before its pre-deploy hook ran: the replaced release's files
 go back; containers and data are not touched.""",
+    "install-txn": """\
+Usage: boxmunge install-txn <project> --drop
+
+Remove a stale install record (.releases/install.json): one the files no
+longer match, after a platform rollback or a hand edit, or one that cannot
+be read. Check first that production is what .releases/live.json says. A
+record that still matches is refused: rerun, --abandon, rollback or deploy
+a fix instead.""",
     "rollback": """\
 Usage: boxmunge rollback <project> [--yes]
 

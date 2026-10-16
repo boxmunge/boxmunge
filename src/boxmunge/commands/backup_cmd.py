@@ -124,6 +124,7 @@ def backup_locked(
               f"not yet deployed. Deploy first with: boxmunge deploy {project_name}", file=sys.stderr)
         return 1
 
+    compose_file = None
     if manifest is None:
         try:
             source = backup_source(paths, project_name)
@@ -138,7 +139,7 @@ def backup_locked(
                 notify(paths, f"{project_name}: backup skipped", source.skip,
                        component="backup", project=project_name, priority=1)
             return 0
-        manifest = source.manifest
+        manifest, compose_file = source.manifest, source.compose_file
 
     backup_conf = manifest.get("backup", {})
     backup_type = backup_conf.get("type", "none")
@@ -170,7 +171,7 @@ def backup_locked(
         return 1
 
     return _run_backup_inner(
-        project_name, paths, dump_command, service, kind, retention,
+        project_name, paths, dump_command, service, kind, retention, compose_file,
     )
 
 
@@ -181,12 +182,13 @@ def _run_backup_inner(
     service: str,
     kind: BackupKind,
     retention: int,
+    compose_file: Path | None = None,
 ) -> int:
     print(f"{project_name}: starting {kind.value} backup (service: {service})...")
     sweep_stale_dumps(paths, project_name)
 
     try:
-        raw_path = execute_dump(paths, project_name, dump_command, service)
+        raw_path = execute_dump(paths, project_name, dump_command, service, compose_file)
     except BackupError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         log_error("backup", f"Backup dump failed: {e}", paths, project=project_name)

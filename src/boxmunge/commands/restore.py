@@ -122,6 +122,8 @@ def run_restore(
 
     `canary` is for `self-test` alone: its canary is boxmunge's own fixture,
     started without the project checks (see compose_guard.compose_up_canary)."""
+    if refuse_if_install_open(paths, project_name, component="restore"):
+        return 1   # before the prompt; restore_locked checks again under the lock
     plan = _restore_plan(project_name, paths, snapshot)
     if plan is None:
         return 1

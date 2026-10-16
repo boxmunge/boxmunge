@@ -7,8 +7,9 @@ previous ref. Whenever either half is missing, rollback refuses and says
 why; it never reports success for a half-done rollback (audit C-02).
 """
 
+import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from boxmunge.commands.deploy import (
@@ -30,9 +31,10 @@ from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
 from boxmunge.release import (
     ReleaseStateError, discard_previous_release, install_release, live_ref,
-    load_previous_release, mark_live,
+    load_previous_release, mark_live, sync_release_code,
 )
 from boxmunge.release_staging import has_prestage
+from boxmunge.release_keep import ensure_kept_pairing
 from boxmunge.release_txn import (
     InstallTxn, advance, close_txn, load_txn, open_txn, stale_reason, start_refusal,
     supersede_txn,
@@ -49,7 +51,9 @@ class RollbackTarget:
     ref: str
     snapshot: str            # data snapshot to restore; "" when there is no data
     tree: Path | None        # previous release tree (bundle projects)
-    note: str = ""           # when/what replaced it, for the plan
+    # When/what replaced it, for the plan. Not compared: repairing an open
+    # install's pairing rewrites it under the lock (ensure_kept_pairing).
+    note: str = field(default="", compare=False)
 
 
 def _backup_type(manifest_path: Path) -> str:
@@ -80,8 +84,13 @@ def _required_snapshot(snapshot: str, backup_type: str, paths: BoxPaths,
     return snapshot
 
 
-def find_rollback_target(paths: BoxPaths, project_name: str) -> RollbackTarget:
-    """What rollback would restore. Raises RollbackUnavailable with the reason."""
+def find_rollback_target(paths: BoxPaths, project_name: str,
+                         txn: InstallTxn | None = None) -> RollbackTarget:
+    """What rollback would restore. Raises RollbackUnavailable with the reason.
+
+    With an open install ``txn`` that kept (or took over) the previous
+    release, its snapshot is the one that pairs with it: previous.json may
+    not say so yet after a crash (ensure_kept_pairing)."""
     project_dir = paths.project_dir(project_name)
     if not (project_dir / "manifest.yml").exists():
         raise RollbackUnavailable("the project has not been deployed")
@@ -110,9 +119,12 @@ def find_rollback_target(paths: BoxPaths, project_name: str) -> RollbackTarget:
             "last bundle deploy replaced; there is none after a first deploy, "
             "or once a rollback has used it. Deploy a known-good bundle instead."
         )
+    paired = previous.data_snapshot
+    if (txn is not None and txn.source != "rollback" and txn.replaced_ref is not None
+            and not txn.abandoning and txn.reached("previous_kept")):
+        paired = txn.snapshot
     snapshot = _required_snapshot(
-        previous.data_snapshot, _backup_type(previous.tree / "manifest.yml"),
-        paths, project_name)
+        paired, _backup_type(previous.tree / "manifest.yml"), paths, project_name)
     return RollbackTarget(
         ref=previous.ref, snapshot=snapshot, tree=previous.tree,
         note=f"replaced {previous.replaced_at} by {previous.replaced_by}",
@@ -123,8 +135,15 @@ def run_rollback(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
     """rollback: show the plan, confirm, take the project lock and roll back."""
     if refuse_if_blocked(project_name, paths):
         return 1
+    # Checked before the prompt too (and again under the lock): an open
+    # install may make a rollback meaningless, or already finished.
+    ok, txn = _open_install(project_name, paths)
+    if not ok:
+        return 1
+    if _rollback_finished(paths, project_name, txn):
+        return _locked(project_name, paths, None)
     try:
-        target = find_rollback_target(paths, project_name)
+        target = find_rollback_target(paths, project_name, txn)
     except RollbackUnavailable as e:
         print(f"ERROR: Cannot roll back {project_name}: {e}", file=sys.stderr)
         return 1
@@ -142,9 +161,13 @@ def run_rollback(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
             print("Aborted.")
             return 1
 
+    return _locked(project_name, paths, target)
+
+
+def _locked(project_name: str, paths: BoxPaths, expected: RollbackTarget | None) -> int:
     try:
         with project_lock(project_name, paths):
-            return rollback_locked(project_name, paths, expected=target)
+            return rollback_locked(project_name, paths, expected=expected)
     except LockError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
@@ -163,9 +186,13 @@ def rollback_locked(project_name: str, paths: BoxPaths,
     ok, txn = _open_install(project_name, paths)
     if not ok:
         return 1
+    if _rollback_finished(paths, project_name, txn):
+        return _finish_rollback(project_name, paths, txn)
     try:
-        target = find_rollback_target(paths, project_name)
-    except RollbackUnavailable as e:
+        if txn is not None:
+            ensure_kept_pairing(paths, project_name, txn)
+        target = find_rollback_target(paths, project_name, txn)
+    except (OSError, RollbackUnavailable) as e:
         print(f"ERROR: Cannot roll back {project_name}: {e}", file=sys.stderr)
         return 1
     if expected is not None and target != expected:
@@ -189,12 +216,40 @@ def _open_install(project_name: str, paths: BoxPaths) -> tuple[bool, InstallTxn 
     if stale:
         print(f"ERROR: {start_refusal(project_name, txn, stale)}.", file=sys.stderr)
         return False, None
-    if txn.source != "rollback" and not txn.reached("hook_started"):
+    if txn.abandoning:
+        print(f"ERROR: Cannot roll back {project_name}: {start_refusal(project_name, txn, None)}.",
+              file=sys.stderr)
+        return False, None
+    if not txn.data_may_have_changed():
+        what = (f"`prod-deploy {project_name} --abandon` puts `{txn.replaced_ref}`'s files back"
+                if txn.replaced_ref else
+                f"`prod-deploy {project_name} --abandon` removes this first deploy's code")
         print(f"ERROR: Cannot roll back {project_name}: nothing to roll back: production's "
-              f"containers and data are untouched; `prod-deploy {project_name} --abandon` "
-              f"puts `{txn.replaced_ref or 'the empty project'}`'s files back.", file=sys.stderr)
+              f"containers and data are untouched; {what}.", file=sys.stderr)
         return False, None
     return True, txn
+
+
+def _rollback_finished(paths: BoxPaths, project_name: str, txn: InstallTxn | None) -> bool:
+    """A rollback that reached switching drops its target's metadata only
+    once production runs the target: a crash after that left it open."""
+    return (txn is not None and txn.source == "rollback" and txn.reached("switching")
+            and not os.path.lexists(paths.project_releases(project_name) / "previous.json"))
+
+
+def _finish_rollback(project_name: str, paths: BoxPaths, txn: InstallTxn) -> int:
+    print(f"The rollback of {project_name} to {txn.ref} had already succeeded; "
+          f"finishing it.")
+    try:
+        discard_previous_release(paths, project_name)
+    except (OSError, ReleaseStateError) as e:
+        print(f"ERROR: Removing the used rollback target failed: {e}", file=sys.stderr)
+        return 1
+    close_txn(paths, project_name, txn)
+    log_operation("rollback", f"Finished the rollback to {txn.ref} after an interruption",
+                  paths, project=project_name)
+    print(f"\n{project_name}: rollback complete")
+    return 0
 
 
 def _restore_data(project_name: str, paths: BoxPaths, snapshot: str, txn: str | None) -> bool:
@@ -249,8 +304,13 @@ def _roll_back_release(project_name: str, paths: BoxPaths, target: RollbackTarge
         return report_refusal(e)
     txn = current
     if txn is None or txn.source != "rollback":
+        try:
+            replaced = live_ref(paths, project_name)
+        except ReleaseStateError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
         fields = {"source": "rollback", "ref": target.ref, "staged_id": None,
-                  "replaced_ref": live_ref(paths, project_name), "snapshot": target.snapshot}
+                  "replaced_ref": replaced, "snapshot": target.snapshot}
         txn = (supersede_txn(paths, project_name, txn, phase="committed", **fields)
                if txn is not None else open_txn(paths, project_name, **fields))
     crash_point("rollback.committed")
@@ -261,6 +321,7 @@ def _roll_back_release(project_name: str, paths: BoxPaths, target: RollbackTarge
                                    set_aside_announcer(paths, project_name, "rollback"))
             mark_live(paths, project_name, target.ref)
             log_kept(paths, project_name, kept, "rollback")
+            sync_release_code(paths.project_dir(project_name))
         except (OSError, ValueError) as e:
             print(f"ERROR: Restoring the previous release failed part-way: {e}. Rerun "
                   f"'rollback {project_name}' to finish it.", file=sys.stderr)
@@ -284,13 +345,14 @@ def _restore_rolled_back_data(project_name: str, paths: BoxPaths, manifest: dict
     # validated above), before restore checks and starts the backup
     # service. Otherwise that check compares the old release with the
     # record of the release it just replaced, and refuses.
-    prepare_compose_override(paths, manifest, component="rollback")
     try:
+        prepare_compose_override(paths, manifest, component="rollback")
         check_start(paths, project_name, component="rollback",
                     compose_files=["compose.yml", "compose.boxmunge.yml"],
                     record=True, deploying=True, txn=txn.id)
-    except ComposeRefused as e:
-        print(f"ERROR: {e}", file=sys.stderr)
+    except (ComposeRefused, OSError, ValueError) as e:
+        print(f"ERROR: {e}. Rerun 'rollback {project_name}' once the cause is fixed.",
+              file=sys.stderr)
         return False
     return _restore_data(project_name, paths, snapshot, txn.id)
 
@@ -307,7 +369,13 @@ def _start_rolled_back(project_name: str, paths: BoxPaths, manifest: dict,
             print(f"ERROR: The pre-deploy hook failed; rerun 'rollback {project_name}' "
                   f"once it is fixed.", file=sys.stderr)
             return rc
-    generate_release_config(project_name, paths, manifest, "rollback")
+    try:
+        generate_release_config(project_name, paths, manifest, "rollback")
+    except (OSError, ValueError) as e:
+        print(f"ERROR: Generating the previous release's configs failed: {e}. Rerun "
+              f"'rollback {project_name}' once the cause is fixed.", file=sys.stderr)
+        log_error("rollback", f"Config generation failed: {e}", paths, project=project_name)
+        return 1
     if not txn.reached("switching"):
         txn = advance(paths, project_name, txn, "switching")
     crash_point("rollback.switching")

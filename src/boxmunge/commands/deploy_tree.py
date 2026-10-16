@@ -24,12 +24,14 @@ from boxmunge.commands.deploy import (
 from boxmunge.commands.deploy_steps import snapshot_live_release
 from boxmunge.crashpoint import crash_point
 from boxmunge.data_dirs import ReleaseStateError, SetAsideError, log_kept, set_aside_announcer
-from boxmunge.fileutil import atomic_write_text
+from boxmunge.fileutil import sweep_discarded
 from boxmunge.intake import IntakeError, report_refusal, validate_release_tree
 from boxmunge.log import log_error
-from boxmunge.release import install_release, live_ref, load_previous_release, mark_live
+from boxmunge.release import (
+    install_release, live_ref, load_previous_release, mark_live, sync_release_code,
+)
 from boxmunge.release_keep import (
-    keep_previous_release_txn, kept_previous_text, restore_superseded,
+    ensure_kept_pairing, keep_previous_release_txn, restore_superseded,
 )
 from boxmunge.release_txn import (
     InstallTxn, advance, close_txn, load_txn, open_txn, options_text, stale_reason,
@@ -56,13 +58,16 @@ class TreeDeploy:
 def deploy_tree_locked(project_name: str, paths: BoxPaths, req: TreeDeploy) -> int:
     """The tree-deploy core. Caller holds the project lock; never takes it."""
     try:
+        sweep_discarded(paths.project_releases(project_name))
         txn = load_txn(paths, project_name)
-    except ReleaseStateError as e:
+        if txn is not None and not stale_reason(paths, project_name, txn):
+            ensure_kept_pairing(paths, project_name, txn)
+    except (OSError, ReleaseStateError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
     if txn is not None:
         stale = stale_reason(paths, project_name, txn)
-        if stale:
+        if stale or txn.abandoning:
             print(f"ERROR: {start_refusal(project_name, txn, stale)}.", file=sys.stderr)
             return 1
         if (txn.source, txn.ref, txn.staged_id) == (req.source, req.ref, req.staged_id):
@@ -73,7 +78,11 @@ def deploy_tree_locked(project_name: str, paths: BoxPaths, req: TreeDeploy) -> i
 
 def _fresh(project_name: str, paths: BoxPaths, req: TreeDeploy) -> int:
     deployed = (paths.project_dir(project_name) / "manifest.yml").exists()
-    replaced = live_ref(paths, project_name) if deployed else None
+    try:
+        replaced = live_ref(paths, project_name) if deployed else None
+    except ReleaseStateError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
     snapshot = snapshot_live_release(project_name, paths, req.no_snapshot) if deployed else None
     crash_point("txn.before_open")
     txn = open_txn(paths, project_name, source=req.source, ref=req.ref,
@@ -110,6 +119,7 @@ def _install(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTx
                                    set_aside_announcer(paths, project_name, req.component))
             mark_live(paths, project_name, req.ref)
             log_kept(paths, project_name, kept, req.component)
+            sync_release_code(paths.project_dir(project_name))
         except (OSError, ValueError) as e:
             return _left_open(project_name, paths, txn, req, f"installing the release failed: {e}")
     elif not txn.reached("installed"):
@@ -156,10 +166,10 @@ def _switch(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTxn
 
 def _left_open(project_name: str, paths: BoxPaths, txn: InstallTxn, req: TreeDeploy,
                why: str, rc: int = 1) -> int:
-    print(f"ERROR: The install of {req.ref} stopped at {txn.phase}: {why}. Production's "
-          f"containers were not started or changed, and other starts of {project_name} "
-          f"are refused until this install is finished: {options_text(project_name, txn)}.",
-          file=sys.stderr)
+    print(f"ERROR: The install of {req.ref} stopped at {txn.phase}: {why}. This attempt "
+          f"did not start or change production's containers, and other starts of "
+          f"{project_name} are refused until this install is finished: "
+          f"{options_text(project_name, txn)}.", file=sys.stderr)
     log_error(req.component, f"Install of {req.ref} left open at {txn.phase}: {why}",
               paths, project=project_name)
     return rc
@@ -188,10 +198,11 @@ def _fix_forward(project_name: str, paths: BoxPaths, req: TreeDeploy,
         return _fresh(project_name, paths, req)
     print(f"Deploying {req.ref} over the unfinished install of {old.ref}. The rollback "
           f"target stays {old.replaced_ref or 'none (first deploy)'}, paired with "
-          f"{old.snapshot or 'no snapshot'}; no new snapshot is taken.")
+          f"{old.snapshot or 'no data snapshot'}; no new snapshot is taken.")
     txn = supersede_txn(paths, project_name, old, source=req.source, ref=req.ref,
                         replaced_ref=old.replaced_ref, staged_id=req.staged_id,
                         snapshot=old.snapshot, phase="previous_kept")
+    ensure_kept_pairing(paths, project_name, txn)
     return _install(project_name, paths, req, txn)
 
 
@@ -209,11 +220,12 @@ def _over_rollback(project_name: str, paths: BoxPaths, req: TreeDeploy,
         return 1
     snapshot = (snapshot_live_release(project_name, paths, req.no_snapshot) or ""
                 if old.reached("data_restored") else old.snapshot)
+    # Recorded first, then paired: a crash between the two is repaired by
+    # ensure_kept_pairing before anything reads the rollback target.
     txn = supersede_txn(paths, project_name, old, source=req.source, ref=req.ref,
                         replaced_ref=target.ref, staged_id=req.staged_id,
                         snapshot=snapshot, phase="previous_kept")
-    atomic_write_text(paths.project_releases(project_name) / "previous.json",
-                      kept_previous_text(txn), mode=0o644)
+    ensure_kept_pairing(paths, project_name, txn)
     return _install(project_name, paths, req, txn)
 
 
@@ -224,17 +236,38 @@ def _names(project_name: str, ref: str | None, txn_ref: str) -> bool:
     return wanted == txn_ref or txn_ref.removeprefix(f"{project_name}-").startswith(wanted)
 
 
+def bundle_resume_problem(project_name: str, paths: BoxPaths, txn: InstallTxn,
+                          ref: str | None) -> str | None:
+    """Why `prod-deploy` without a bundle cannot resume ``txn``, or None.
+    Only a bundle install whose code is in place (live.json names it) can
+    resume from the project dir."""
+    stale = stale_reason(paths, project_name, txn)
+    if stale or txn.abandoning or txn.source != "bundle" \
+            or not _names(project_name, ref, txn.ref):
+        return start_refusal(project_name, txn, stale)
+    if not txn.reached("installed"):
+        return (f"The install of {txn.ref} cannot be resumed: its bundle is no longer in "
+                f"the inbox and the install had not finished (phase {txn.phase}). Upload "
+                f"{txn.ref}.tar.gz again and rerun "
+                f"'prod-deploy {project_name} --ref {txn.ref}'; or "
+                f"{options_text(project_name, txn, rerun=False)}")
+    try:
+        installed = live_ref(paths, project_name)
+    except ReleaseStateError as e:
+        return str(e)
+    if installed != txn.ref:
+        return (f"The install of {txn.ref} cannot be resumed from the project dir: "
+                f"live.json names {installed}. {options_text(project_name, txn, rerun=False)}")
+    return None
+
+
 def resume_without_bundle(project_name: str, paths: BoxPaths, txn: InstallTxn,
                           ref: str | None, component: str) -> int:
     """`prod-deploy` found no bundle while an install is open: a bundle
     install that reached `installed` resumes from the project dir."""
-    if txn.source != "bundle" or not _names(project_name, ref, txn.ref):
-        print(f"ERROR: {start_refusal(project_name, txn, None)}.", file=sys.stderr)
-        return 1
-    if not txn.reached("installed"):
-        print(f"ERROR: The install of {txn.ref} cannot be resumed: its bundle is no longer "
-              f"in the inbox and the install had not finished (phase {txn.phase}). Upload "
-              f"the bundle again, or {options_text(project_name, txn)}.", file=sys.stderr)
+    problem = bundle_resume_problem(project_name, paths, txn, ref)
+    if problem:
+        print(f"ERROR: {problem}.", file=sys.stderr)
         return 1
     try:
         manifest = validate_release_tree(paths.project_dir(project_name), project_name,

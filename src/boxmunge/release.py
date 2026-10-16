@@ -21,6 +21,7 @@ aside while another one is staged is in boxmunge.release_staging.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,7 +37,8 @@ from boxmunge.data_dirs import (
     start_record, warn_retained,
 )
 from boxmunge.fileutil import (
-    atomic_write_text, chmod_nofollow, chown_tree_deploy, mkdir_p_deploy,
+    atomic_write_text, chmod_nofollow, chown_tree_deploy, discard_dir, fsync_dir,
+    mkdir_p_deploy, sync_entries,
 )
 
 if TYPE_CHECKING:
@@ -347,10 +349,23 @@ def load_previous_release(paths: BoxPaths, project_name: str) -> PreviousRelease
 
 
 def discard_previous_release(paths: BoxPaths, project_name: str) -> None:
-    """Drop the kept previous release (after a rollback has used it)."""
+    """Drop the kept previous release (after a rollback has used it).
+
+    The metadata goes first and durably: from then on there is no rollback
+    target, and a crash part-way through removing the tree leaves only
+    debris, never a half-removed release that still looks usable."""
     _ensure_record(paths.project_dir(project_name))
-    _remove(previous_dir(paths, project_name))
-    _remove(_previous_meta(paths, project_name))
+    meta = _previous_meta(paths, project_name)
+    if os.path.lexists(meta):
+        meta.unlink()
+        fsync_dir(meta.parent)
+    discard_dir(previous_dir(paths, project_name))
+
+
+def sync_release_code(project_dir: Path) -> None:
+    """Make the release code install_release wrote durable, before an
+    install records that it is in place."""
+    sync_entries(live_code_entries(project_dir), project_dir)
 
 
 # --- production smoke scripts ---------------------------------------------

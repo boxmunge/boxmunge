@@ -89,10 +89,11 @@ def test_fix_forward_over_a_rollback_after_data_restored_takes_a_new_snapshot(pa
     _failed_v2(paths)
     place_bundle(paths, timestamp=V3, files={"manifest.yml": manifest_text(backup="postgres")})
     taken: list[dict] = []
-    with docker_off(), fake_backups(taken), \
+    with docker_off(), fake_backups(taken, prefix="new"), \
             patch("boxmunge.commands.rollback.restore_locked", lambda *a, **k: 0):
         assert crash_at("rollback.data_restored",
                         lambda: run_rollback("myapp", paths, yes=True)) == 137
         assert run_deploy("myapp", paths, ref=V3) == 0
     assert len(taken) == 1
-    assert "myapp-p1.tar.gz.age" in (paths.project_releases("myapp") / "previous.json").read_text()
+    meta = (paths.project_releases("myapp") / "previous.json").read_text()
+    assert "myapp-new1.tar.gz.age" in meta and "myapp-p1.tar.gz.age" not in meta

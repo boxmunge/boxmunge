@@ -29,6 +29,7 @@ from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
 from boxmunge.state import read_state
 from boxmunge.release import ReleaseStateError, discard_previous_release, live_ref
+from boxmunge.release_txn import refuse_if_install_open
 from boxmunge.release_staging import (
     discard_prestage, has_prestage, mark_prestage_replaced, prestage_ref,
     prestage_replaced, prestage_snapshot, prestage_to_previous, prestage_tree,
@@ -46,6 +47,8 @@ class Promotion:
 def deploy_staged_locked(project_name: str, paths: BoxPaths) -> Promotion:
     """The staged-deploy core. Caller holds the project lock; never takes it."""
     if not deploy_eligible(project_name, paths):
+        return Promotion(1, switched=False)
+    if refuse_if_install_open(paths, project_name, component=COMPONENT):
         return Promotion(1, switched=False)
     clear_probation_if_active(paths, "deploy")
     if not has_prestage(paths, project_name):
