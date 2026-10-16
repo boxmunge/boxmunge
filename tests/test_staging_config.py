@@ -113,7 +113,7 @@ class TestStagingComposeBase:
 class TestStagingEmitsOffWarning:
     """Lock the wiring: stage path emits SECURITY OFF when manifest opts out.
 
-    Exercising the full _run_stage_inner pipeline requires bundles, git
+    Exercising the full stage_locked pipeline requires bundles, git
     repos, and Docker. The helper is the seam — proving stage calls it
     correctly is enough to lock the wiring without all that scaffolding.
     """

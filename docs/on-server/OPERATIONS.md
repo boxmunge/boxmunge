@@ -478,6 +478,12 @@ stops with an error. To restore anyway, without a safety snapshot:
 restore myapp myapp-2026-03-30T020000.tar.gz.age --no-safety-snapshot
 ```
 
+`restore` refuses a paused or CVE-quarantined project (`resume` or `security resume` it first). A
+project the health monitor stopped gets its data back but stays stopped: only the backup service is
+started, for the safety snapshot and the restore, and every service is stopped again afterwards,
+whether or not the restore succeeded. Then run `recover myapp`, which starts it on the restored data
+and runs the smoke test that clears the stop.
+
 Safety snapshots sit alongside the nightly backups and are pruned by the same retention.
 
 Verify that a backup restores successfully (non-destructive):
@@ -849,7 +855,7 @@ Check logs from just before the containers were stopped:
 logs myapp --tail 200
 ```
 
-Once you have identified and fixed the underlying issue, restart the same build with `recover` (no image pull, no rebuild; it restores routing and runs the smoke test):
+Once you have identified and fixed the underlying issue, restart the same build with `recover` (no image pull, no rebuild; it restores routing and runs the smoke test). If the fix is restoring data, run `restore` first: it leaves the project stopped for `recover`.
 
 ```
 recover myapp
