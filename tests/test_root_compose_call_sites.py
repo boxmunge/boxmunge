@@ -109,7 +109,8 @@ def test_the_scan_finds_the_checked_call_sites() -> None:
                     for _ in _calls(tree, names)})
     assert sites == [
         "commands/deploy.py", "commands/recover_cmd.py", "commands/restore.py",
-        "commands/resume_cmd.py", "commands/security_resume.py", "commands/stage_cmd.py",
+        "commands/resume_cmd.py", "commands/rollback.py", "commands/security_resume.py",
+        "commands/stage_cmd.py",
         "commands/upgrade_steps.py", "container_update.py", "cve/quarantine.py",
         "staging_data.py",
     ]

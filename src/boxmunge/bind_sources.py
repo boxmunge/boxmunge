@@ -44,9 +44,10 @@ RECORD_VERSION = 2
 # bind-mount rules, not by content hashing. secrets.env is not hashed either:
 # `secrets set` rewrites it between deploys, and its values reach only the
 # containers' environments; the bind-mount rules keep containers off it.
+_UNHASHED = frozenset({"secrets.env"})
 _CONTROL_FILES = tuple(
     e for e in CONTROL_ENTRIES
-    if e not in ("security", ".releases", "boxmunge-scripts", "repo/.git", "secrets.env")
+    if e not in ("security", ".releases", "boxmunge-scripts", "repo/.git") and e not in _UNHASHED
 )
 OVERLAY = "compose.boxmunge.yml"
 
@@ -147,9 +148,11 @@ def control_hashes(project_dir: Path, read_files: Iterable[Path]) -> dict[str, s
     candidates: dict[str, Path] = {e: project_dir / e for e in _CONTROL_FILES}
     for path in read_files:
         try:
-            candidates[project_rel(str(path), project_dir)] = Path(path)
+            rel = project_rel(str(path), project_dir)
         except BindSourceError:
             continue  # outside the project; the reference walk already refused it
+        if rel not in _UNHASHED:
+            candidates[rel] = Path(path)
     for rel in sorted(candidates):
         hashes[rel] = _hash_file(project_dir, candidates[rel], rel)
     return hashes

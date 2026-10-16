@@ -407,3 +407,17 @@ def test_refusal_state_is_outside_every_project(box) -> None:
     assert not str(state).startswith(str(paths.projects) + os.sep)
     assert denied_host_path(str(paths.state), project_dir, paths) == str(paths.root)
     assert denied_host_path("../../state/start-refused", project_dir, paths) == str(paths.root)
+
+
+def test_secrets_env_named_as_an_env_file_is_not_hashed_either(box) -> None:
+    """compose.yml may name ./secrets.env as an env_file itself; `secrets set`
+    still must not make the next start refuse."""
+    paths, project_dir, up, _, sent = box
+    (project_dir / "secrets.env").write_text("A=1\n")
+    doc = yaml.safe_load((project_dir / "compose.yml").read_text())
+    doc["services"]["web"]["env_file"] = ["./secrets.env"]
+    (project_dir / "compose.yml").write_text(yaml.safe_dump(doc))
+    _deploy(paths)
+    (project_dir / "secrets.env").write_text("A=2\n")
+    _restart(paths)
+    assert up.call_count == 2 and sent == []
