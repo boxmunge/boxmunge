@@ -22,7 +22,7 @@ from boxmunge.compose_images import image_warnings
 from boxmunge.compose_isolation import isolation_problems
 from boxmunge.compose_mounts import has_named_volume
 from boxmunge.compose_own_files import own_file_problems
-from boxmunge.compose_service_rules import service_findings
+from boxmunge.compose_service_rules import namespace_refusals, service_findings
 from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
 from boxmunge.published_ports import declared_ports
@@ -31,6 +31,7 @@ from boxmunge.security_overlay import (
     PROFILE_OFF,
     overlay_security_opt_for_profile,
 )
+from boxmunge.userns import offset as userns_offset
 
 
 class ComposeSecurityError(Exception):
@@ -242,6 +243,14 @@ def _enforce_cve_rule(
 
 
 
+def _remapped(paths: BoxPaths) -> bool:
+    try:
+        return userns_offset.remap_offset(paths) != 0
+    except userns_offset.RemapError as e:
+        raise ComposeSecurityError(
+            f"cannot tell whether this box remaps user namespaces: {e}") from e
+
+
 def _profile_note(services: dict[str, Any], message: str) -> str:
     """Explain a refusal of a service that only runs under a profile."""
     for name, svc in services.items():
@@ -376,9 +385,16 @@ def validate_user_compose(
     if isinstance(manifest_services, dict) and (cve_policy or {}).get("profile") == PROFILE_OFF:
         off = off | {name for name in services if name not in manifest_services}
 
+    remapped = _remapped(paths)
     for svc_name, svc in services.items():
         if not isinstance(svc, dict):
             continue
+
+        refused = namespace_refusals(svc, remapped=remapped)
+        if refused:
+            first = refused[0]
+            message = f"service {svc_name}: {first.key} = {first.value} {first.advice}"
+            raise ComposeSecurityError(message + _profile_note(services, message))
 
         findings = service_findings(svc, base_dir, paths, roots)
         if not findings:

@@ -39,10 +39,9 @@ _STRICT_BOOL_KEYS: tuple[str, ...] = ("privileged", "read_only", "init")
 
 # Namespace keys: the value `host` shares the host's namespace. Joining
 # another container's namespace (`container:<name>`, a network by name) is
-# an isolation question, answered in compose_isolation.
-_NAMESPACE_KEYS: tuple[str, ...] = (
-    "pid", "ipc", "network_mode", "uts", "userns_mode", "cgroup",
-)
+# an isolation question, answered in compose_isolation. userns_mode is not
+# here: namespace_refusals refuses it outright.
+_NAMESPACE_KEYS: tuple[str, ...] = ("pid", "ipc", "network_mode", "uts", "cgroup")
 
 _SECCOMP_DEFAULTS: frozenset[str] = frozenset({"runtime/default", "builtin"})
 
@@ -77,6 +76,40 @@ def _check_namespaces(svc: dict[str, Any]) -> list[Finding]:
             continue
         if raw.strip().lower() == "host":
             hits.append(Finding(key, raw))
+    return hits
+
+
+# A remapped daemon refuses these outright (privileged, host pid and host
+# network fail at create; host ipc fails at runc's mqueue mount), so on a
+# remapped box profile: off cannot relax them.
+_HOST_ONLY_UNDER_REMAP: dict[str, str] = {
+    "pid": "process", "network_mode": "network", "ipc": "IPC"}
+
+_USERNS_ADVICE = (
+    "is not allowed: every project runs in the daemon's user namespace, and "
+    "leaving it (userns_mode: host) runs the service's root as real host root on "
+    "a remapped box. Remove it (not relaxed by profile: off)")
+_REMAP_ADVICE = (
+    "cannot run on this box: its Docker daemon remaps user namespaces, which "
+    "refuses {what}. Remove it (not relaxed by profile: off); a service that "
+    "needs it cannot run on a remapped box")
+
+
+def namespace_refusals(svc: dict[str, Any], *, remapped: bool) -> list[Finding]:
+    """Findings profile: off does not relax: userns_mode with any value, and,
+    on a remapped box, privileged and host pid, network_mode and ipc."""
+    hits: list[Finding] = []
+    if "userns_mode" in svc:
+        hits.append(Finding("userns_mode", repr(svc["userns_mode"]), _USERNS_ADVICE))
+    if not remapped:
+        return hits
+    if svc.get("privileged") is True:
+        hits.append(Finding("privileged", "true", _REMAP_ADVICE.format(what="privileged mode")))
+    for key, what in _HOST_ONLY_UNDER_REMAP.items():
+        raw = svc.get(key)
+        if isinstance(raw, str) and raw.strip().lower() == "host":
+            hits.append(Finding(key, raw, _REMAP_ADVICE.format(
+                what=f"sharing the host's {what} namespace")))
     return hits
 
 
