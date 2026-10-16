@@ -43,6 +43,7 @@ from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
+from boxmunge.release_txn import refuse_if_install_open
 from boxmunge.restore_safety import RestoreError, take_safety_snapshot, verify_plaintext
 from boxmunge.service_exec import ServiceCommandTimeout, run_in_service
 
@@ -144,16 +145,22 @@ def run_restore(
 
 
 def restore_locked(project_name: str, paths: BoxPaths, snapshot: str | None,
-                   safety_snapshot: bool = True, canary: bool = False) -> int:
+                   safety_snapshot: bool = True, canary: bool = False,
+                   txn: str | None = None) -> int:
     """The restore core. Caller holds the project lock; never takes it.
 
     Refuses a paused or CVE-quarantined project — the operator must resume
-    or security-resume first — and reads the backup config, checked under
-    the lock immediately before production is touched. A project the health
-    monitor stopped gets its data back but is left stopped, for `recover`.
+    or security-resume first — and, before anything is stopped, a project
+    with an open install transaction other than `txn` (the rollback that
+    restores as part of its own transaction). Reads the backup config,
+    checked under the lock immediately before production is touched. A
+    project the health monitor stopped gets its data back but is left
+    stopped, for `recover`.
     """
     sweep_stale_dumps(paths, project_name)
     if refuse_if_blocked(project_name, paths):
+        return 1
+    if refuse_if_install_open(paths, project_name, component="restore", txn=txn):
         return 1
     plan = _restore_plan(project_name, paths, snapshot)
     if plan is None:
@@ -166,7 +173,7 @@ def restore_locked(project_name: str, paths: BoxPaths, snapshot: str | None,
     return _run_restore_inner(
         project_name, paths, plan.snapshot_path, plan.service,
         plan.restore_command, plan.dump_command if safety_snapshot else None,
-        leave_stopped, canary,
+        leave_stopped, canary, txn,
     )
 
 
@@ -203,6 +210,7 @@ def _run_restore_inner(
     dump_command: str | None,
     leave_stopped: bool,
     canary: bool = False,
+    txn: str | None = None,
 ) -> int:
     """Verify, save, replace. Caller holds the project lock.
 
@@ -218,11 +226,11 @@ def _run_restore_inner(
             if dump_command is not None:
                 print("  Taking pre-restore safety snapshot...")
                 safety = _safety_snapshot(project_name, paths, dump_command, service,
-                                          leave_stopped, canary)
+                                          leave_stopped, canary, txn)
                 print(f"  Safety snapshot: {safety.name}")
             phase = "replace"
             rc = _replace_data(project_name, paths, service, restore_command,
-                               plaintext, snapshot_path, safety, leave_stopped, canary)
+                               plaintext, snapshot_path, safety, leave_stopped, canary, txn)
             phase = "cleanup"
     except (BackupError, RestoreError, OSError, subprocess.TimeoutExpired) as e:
         if phase == "verify":
@@ -242,7 +250,8 @@ def _run_restore_inner(
 
 
 def _safety_snapshot(project_name: str, paths: BoxPaths, dump_command: str,
-                     service: str, stopped: bool, canary: bool = False) -> Path:
+                     service: str, stopped: bool, canary: bool = False,
+                     txn: str | None = None) -> Path:
     """Dump the current data. The monitor removed a stopped project's
     containers, so the backup service is started for the dump, and stopped
     again if the dump does not happen."""
@@ -251,7 +260,7 @@ def _safety_snapshot(project_name: str, paths: BoxPaths, dump_command: str,
     project_dir = paths.project_dir(project_name)
     compose_files = _compose_files(paths, project_name)
     try:
-        _start_service(paths, project_name, compose_files, service, canary)
+        _start_service(paths, project_name, compose_files, service, canary, txn)
         _wait_ready(project_name, service)
         return take_safety_snapshot(project_name, paths, dump_command, service)
     except subprocess.CalledProcessError as e:
@@ -280,6 +289,7 @@ def _replace_data(
     safety: Path | None,
     leave_stopped: bool,
     canary: bool = False,
+    txn: str | None = None,
 ) -> int:
     """Stop, restore, and always start the project again (or, if the health
     monitor stopped it, always stop it again)."""
@@ -290,7 +300,7 @@ def _replace_data(
     if not canary:
         try:
             check_start(paths, project_name, component="restore",
-                        compose_files=compose_files)
+                        compose_files=compose_files, txn=txn)
         except ComposeRefused as e:
             print(f"  ERROR: {e}", file=sys.stderr)
             print("  Production was not touched.", file=sys.stderr)
@@ -304,7 +314,7 @@ def _replace_data(
         except DockerError as e:
             print(f"  WARN: Stop failed (may not be running): {e}")
         print(f"  Starting {service} for restore...")
-        _start_service(paths, project_name, compose_files, service, canary)
+        _start_service(paths, project_name, compose_files, service, canary, txn)
         _wait_ready(project_name, service)
         print("  Restoring data...")
         _run_restore_command(project_dir, project_name, service, restore_command, plaintext)
@@ -320,7 +330,7 @@ def _replace_data(
         else:
             print("  Starting all services..." if restored
                   else "  Restarting all services...")
-            started = _start_all(paths, project_name, compose_files, canary)
+            started = _start_all(paths, project_name, compose_files, canary, txn)
 
     if not restored:
         if safety is not None:
@@ -347,11 +357,11 @@ def _replace_data(
 
 def _start_service(
     paths: BoxPaths, project_name: str, compose_files: list[str], service: str,
-    canary: bool,
+    canary: bool, txn: str | None = None,
 ) -> None:
     """Start one service for the restore, through the start checks (no
     rebuild, so the exact deployed image comes back)."""
-    _up(paths, project_name, compose_files, canary, build=False, services=[service])
+    _up(paths, project_name, compose_files, canary, txn, build=False, services=[service])
 
 
 def _wait_ready(project_name: str, service: str) -> None:
@@ -399,21 +409,21 @@ def _run_restore_command(
 
 
 def _up(paths: BoxPaths, project_name: str, compose_files: list[str], canary: bool,
-        **kwargs) -> None:
+        txn: str | None = None, **kwargs) -> None:
     if canary:
         compose_up_canary(paths, project_name, compose_files=compose_files, **kwargs)
     else:
         compose_up_checked(paths, project_name, component="restore",
-                           compose_files=compose_files, **kwargs)
+                           compose_files=compose_files, txn=txn, **kwargs)
 
 
 def _start_all(paths: BoxPaths, project_name: str, compose_files: list[str],
-               canary: bool) -> bool:
+               canary: bool, txn: str | None = None) -> bool:
     """Start every service. The backup service is still running from the
     restore and may hold the pre-restore data open or in memory, so it is
     recreated rather than left as it is."""
     try:
-        _up(paths, project_name, compose_files, canary, force_recreate=True)
+        _up(paths, project_name, compose_files, canary, txn, force_recreate=True)
     except DockerError as e:
         print(f"  ERROR: Start failed: {e}", file=sys.stderr)
         return False

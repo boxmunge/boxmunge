@@ -134,7 +134,7 @@ class TestRollbackRestoresData:
 
         restored = {}
 
-        def fake_restore(project_name, paths_, snapshot=None):
+        def fake_restore(project_name, paths_, snapshot=None, txn=None):
             restored["snapshot"] = snapshot
             restored["code"] = (pdir / "VERSION").read_text()
             return 0
