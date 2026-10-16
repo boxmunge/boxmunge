@@ -296,3 +296,153 @@ def test_stage_unstage_and_promote_keep_retired_data(paths, capsys) -> None:
         assert run_deploy("myapp", paths, ref=without_mount(13)) == 0
     assert (pdir / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
     assert "uploads/ holds data" in capsys.readouterr().out
+    log = [json.loads(line) for line in paths.log_file.read_text().splitlines()]
+    assert any(e["component"] == "stage" and e["level"] == "warn"
+               and "uploads/" in e["msg"] for e in log)
+
+
+# --- projects deployed before the record existed ------------------------------
+
+def _deployer(paths):
+    from boxmunge.commands.deploy import run_deploy
+    from boxmunge.project_registry import add_project
+    from tests.bundle_helpers import place_bundle
+    add_project("myapp", paths)
+
+    def deploy(hour: int, compose: str) -> int:
+        place_bundle(paths, timestamp=f"2026-10-13T{hour:02d}0000000000",
+                     files={"compose.yml": compose})
+        with _docker():
+            return run_deploy("myapp", paths)
+    return deploy
+
+
+def _pre_upgrade_box(paths) -> Path:
+    """Live on B (no mount); A, kept for rollback, mounted ./uploads; no record."""
+    deploy = _deployer(paths)
+    pdir = paths.project_dir("myapp")
+    assert deploy(9, MOUNTS_UPLOADS) == 0
+    (pdir / "uploads").mkdir()
+    (pdir / "uploads" / "photo.jpg").write_text("USER UPLOAD")
+    assert deploy(10, NO_MOUNTS) == 0
+    _record(pdir).unlink()
+    return pdir
+
+
+class TestPreUpgradeProjects:
+    def test_first_deploy_after_upgrade_keeps_a_dir_retired_before_it(self, paths) -> None:
+        from boxmunge.commands.deploy import run_deploy
+        pdir = _pre_upgrade_box(paths)
+        from tests.bundle_helpers import place_bundle
+        for hour in (11, 12):
+            place_bundle(paths, timestamp=f"2026-10-13T{hour}0000000000",
+                         files={"compose.yml": NO_MOUNTS})
+            with _docker():
+                assert run_deploy("myapp", paths) == 0
+            assert (pdir / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
+        assert json.loads(_record(pdir).read_text())["data_dirs"] == ["uploads"]
+
+    def test_crash_after_the_previous_release_swap_loses_nothing(self, paths) -> None:
+        """previous/ already holds B when install_release fails: only the
+        record still knows uploads/ is data."""
+        from boxmunge.commands.deploy import run_deploy
+        from tests.bundle_helpers import place_bundle
+        pdir = _pre_upgrade_box(paths)
+        place_bundle(paths, timestamp="2026-10-13T110000000000",
+                     files={"compose.yml": NO_MOUNTS})
+        with _docker(), patch("boxmunge.commands.deploy.install_release",
+                              side_effect=OSError("disk full")):
+            assert run_deploy("myapp", paths) == 1
+        prev = paths.project_releases("myapp") / "previous" / "compose.yml"
+        assert prev.read_text() == NO_MOUNTS
+        place_bundle(paths, timestamp="2026-10-13T120000000000",
+                     files={"compose.yml": NO_MOUNTS})
+        with _docker():
+            assert run_deploy("myapp", paths) == 0
+        assert (pdir / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
+
+    def test_promote_after_upgrade_keeps_a_dir_only_production_mounted(self, paths) -> None:
+        from boxmunge.commands.deploy import run_deploy
+        from boxmunge.commands.promote_cmd import run_promote
+        from boxmunge.commands.stage_cmd import run_stage
+        from tests.bundle_helpers import place_bundle
+        from tests.test_commands.test_stage_promote_release import _docker as _stage_docker
+        deploy = _deployer(paths)
+        pdir = paths.project_dir("myapp")
+        assert deploy(9, MOUNTS_UPLOADS) == 0
+        (pdir / "uploads").mkdir()
+        (pdir / "uploads" / "photo.jpg").write_text("USER UPLOAD")
+        for hour in (10, 11):
+            place_bundle(paths, timestamp=f"2026-10-13T{hour}0000000000",
+                         files={"compose.yml": NO_MOUNTS})
+        with _stage_docker():
+            assert run_stage("myapp", paths, ref="2026-10-13T100000000000") == 0
+            _record(pdir).unlink()
+            assert run_promote("myapp", paths) == 0
+            assert run_deploy("myapp", paths, ref="2026-10-13T110000000000") == 0
+        assert (pdir / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
+
+
+CONF_RW = ("services:\n  web:\n    image: nginx\n"
+           "    volumes: [\"./conf:/etc/conf\"]\n")
+CONF_RO = ("services:\n  web:\n    image: nginx\n"
+           "    volumes: [\"./conf:/etc/conf:ro\"]\n")
+
+
+def _live_with_old_rollback_target(tmp_path: Path, live_compose: str) -> Path:
+    """Live release ships conf/ as code; the kept release mounted it rw."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "compose.yml").write_text(live_compose)
+    (project / "conf").mkdir()
+    (project / "conf" / "app.conf").write_text("old conf")
+    previous = project / ".releases" / "previous"
+    previous.mkdir(parents=True)
+    (previous / "compose.yml").write_text(CONF_RW)
+    return project
+
+
+class TestKeptReleasesOnlySeedTheRecord:
+    def test_code_the_live_release_mounts_read_only_stays_code(self, tmp_path: Path) -> None:
+        project = _live_with_old_rollback_target(tmp_path, CONF_RO)
+        for n in range(2):
+            tree = _release(tmp_path, f"c{n}", CONF_RO, {"conf/app.conf": f"conf {n}"})
+            assert install_release(tree, project) == []
+            assert (project / "conf" / "app.conf").read_text() == f"conf {n}"
+        assert json.loads(_record(project).read_text())["data_dirs"] == []
+
+    def test_refusal_names_the_kept_release_and_never_advises_deleting(
+        self, tmp_path: Path,
+    ) -> None:
+        project = _live_with_old_rollback_target(tmp_path, NO_MOUNTS)
+        tree = _release(tmp_path, "c", NO_MOUNTS, {"conf/app.conf": "new conf"})
+        with pytest.raises(BundleError) as refused:
+            install_release(tree, project)
+        message = str(refused.value)
+        assert "kept for rollback" in message and str(_record(project)) in message
+        assert "rm -rf" not in message
+        assert not _record(project).exists()
+        _record(project).write_text('{"version": 1, "data_dirs": []}')
+        install_release(tree, project)
+        assert (project / "conf" / "app.conf").read_text() == "new conf"
+
+    def test_record_wins_over_kept_releases_once_it_exists(self, tmp_path: Path) -> None:
+        project = _live_with_old_rollback_target(tmp_path, NO_MOUNTS)
+        _record(project).write_text('{"version": 1, "data_dirs": []}')
+        tree = _release(tmp_path, "c", NO_MOUNTS)
+        install_release(tree, project)
+        assert not (project / "conf").exists()
+
+
+def test_staging_copy_alone_is_kept_without_a_warning_each_deploy(
+    tmp_path: Path, project: Path, capsys,
+) -> None:
+    (project / "uploads-staging").mkdir()
+    (project / "uploads-staging" / "photo.jpg").write_text("STAGING COPY")
+    shutil.rmtree(project / "uploads")
+    b = _release(tmp_path, "b", NO_MOUNTS)
+    assert install_release(b, project) == []
+    assert install_release(b, project) == []
+    assert "WARNING" not in capsys.readouterr().out
+    assert (project / "uploads-staging" / "photo.jpg").exists()
+    assert json.loads(_record(project).read_text())["data_dirs"] == ["uploads"]

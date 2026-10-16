@@ -31,8 +31,8 @@ from boxmunge.bundle import (
 )
 from boxmunge.compose_mounts import PROD_SMOKE_SOURCE
 from boxmunge.data_dirs import (
-    DataDirs, ReleaseStateError, classify, entry_label, holds_data, log_retained,
-    save_record, warn_retained,
+    DataDirs, ReleaseStateError, classify, entry_label, has_record, holds_data,
+    log_retained, record_path, save_record, warn_retained,
 )
 from boxmunge.fileutil import atomic_write_text, chown_tree_deploy, mkdir_p_deploy
 
@@ -85,6 +85,17 @@ def _classify(project_dir: Path, release_tree: Path | None) -> DataDirs:
     return classify(project_dir, release_tree, _kept_trees(project_dir))
 
 
+def _ensure_record(project_dir: Path) -> None:
+    """Start the data-dir record before anything can change a kept release.
+
+    A project deployed before the record existed may know a retired data
+    directory only from a kept release's compose.yml; every function that
+    replaces or drops a kept release, and install_release, calls this first.
+    """
+    if not has_record(project_dir):
+        save_record(_classify(project_dir, None))
+
+
 def check_install(tree: Path, project_dir: Path) -> None:
     """Refuse a release that would overwrite or seed a data directory.
 
@@ -118,6 +129,19 @@ def _check(tree: Path, dirs: DataDirs) -> None:
             f"read_only: true); if it is data, remove it from the bundle."
         )
     occupied = [e for e in shipped if e.name in dirs.recorded and dirs.occupied(e.name)]
+    seeded = [e for e in occupied if e.name in dirs.seeded]
+    if seeded:
+        labels = ", ".join(entry_label(e) for e in seeded)
+        raise BundleError(
+            f"The release ships content for {labels}, which the release kept "
+            f"for rollback (or production's, during a stage) bind-mounts "
+            f"read-write, so boxmunge treats it as data: this project has no "
+            f"record of its data directories yet ({record_path(dirs.project_dir)}). "
+            f"If it is data, remove it from the bundle. If it is code, write "
+            f"that file yourself listing only the directories that really hold "
+            f'data, as {{"version": 1, "data_dirs": ["<dir>", ...]}} (an empty '
+            f"list if none), and deploy again."
+        )
     if occupied:
         server = " ".join(str(p) for e in occupied for p in dirs.occupied(e.name))
         raise BundleError(
@@ -282,6 +306,7 @@ def keep_previous_release(
     so a failure here leaves the live tree and the old snapshot untouched.
     """
     project_dir = paths.project_dir(project_name)
+    _ensure_record(project_dir)
     releases = paths.project_releases(project_name)
     building = releases / "previous.building"
     _remove(building)
@@ -323,6 +348,7 @@ def load_previous_release(paths: BoxPaths, project_name: str) -> PreviousRelease
 
 def discard_previous_release(paths: BoxPaths, project_name: str) -> None:
     """Drop the kept previous release (after a rollback has used it)."""
+    _ensure_record(paths.project_dir(project_name))
     _remove(previous_dir(paths, project_name))
     _remove(_previous_meta(paths, project_name))
 
@@ -359,6 +385,7 @@ def keep_prestage_release(paths: BoxPaths, project_name: str,
     if has_prestage(paths, project_name):
         return
     project_dir = paths.project_dir(project_name)
+    _ensure_record(project_dir)
     deployed = (project_dir / "manifest.yml").exists()
     building = paths.project_releases(project_name) / "prestage.building"
     _remove(building)
@@ -381,12 +408,14 @@ def prestage_ref(paths: BoxPaths, project_name: str) -> str | None:
 
 
 def discard_prestage(paths: BoxPaths, project_name: str) -> None:
+    _ensure_record(paths.project_dir(project_name))
     _remove(_prestage(paths, project_name))
 
 
 def prestage_to_previous(paths: BoxPaths, project_name: str,
                          data_snapshot: str | None, replaced_by: str) -> None:
     """On promote: the kept production release becomes the previous release."""
+    _ensure_record(paths.project_dir(project_name))
     ref = prestage_ref(paths, project_name)
     if ref is None:
         # First promote of a never-deployed project: nothing to roll back to.

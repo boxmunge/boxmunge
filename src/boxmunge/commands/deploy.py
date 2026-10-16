@@ -191,7 +191,7 @@ def _promote_staged(
         try:
             discard_prestage(paths, project_name)
             discard_previous_release(paths, project_name)
-        except OSError as cleanup_error:
+        except (OSError, ReleaseStateError) as cleanup_error:
             print(f"ERROR: Could not remove .releases/prestage/: {cleanup_error}. "
                   f"Remove it by hand before running 'unstage {project_name}'.",
                   file=sys.stderr)

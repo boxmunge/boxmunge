@@ -80,6 +80,13 @@ on the server (`rm -rf /opt/boxmunge/projects/<project>/uploads`), and the next 
 An empty data directory nothing mounts is forgotten too. If `data-dirs.json` is unreadable or has an
 unknown `version`, deploys are refused until it is restored.
 
+A project deployed before boxmunge kept this record starts it on its next deploy, stage, promote or
+rollback, also from the compose files of the releases kept in `.releases/` (a mount the live release
+already dropped may survive only there). Directories the live `compose.yml` mounts read-only are code
+and are never taken from them. If a deploy is refused because a kept release once mounted a
+directory read-write that is code now, write `data-dirs.json` yourself listing only the directories
+that really hold data (`{"version": 1, "data_dirs": ["uploads"]}`, or an empty list) and deploy again.
+
 ---
 
 ## Manifest Format

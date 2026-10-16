@@ -6,9 +6,13 @@ release drops a mount, no later compose file mentions the directory, so
 classifying from compose files alone turns yesterday's uploads/ into stale
 release code, which the next install deletes. The project therefore keeps
 ``.releases/data-dirs.json``, a record of every entry that a compose file
-the box has held (live, incoming, or a kept release) bind-mounted
-read-write. A recorded entry is box state: installs never remove, overwrite
-or copy it into a kept release.
+the box has installed bind-mounted read-write. A recorded entry is box
+state: installs never remove, overwrite or copy it into a kept release.
+
+A project that has no record yet (it was deployed before the record
+existed) starts one from its kept releases' compose files too, before any
+kept release is replaced: a mount the live release dropped may survive only
+there.
 
 An entry leaves the record only while neither it nor its ``-staging`` copy
 holds anything: when no compose file mounts it any more, or when a release
@@ -70,11 +74,15 @@ def _valid_name(name: object) -> bool:
             and "/" not in name and "\0" not in name)
 
 
-def _load_record(project_dir: Path) -> set[str]:
-    """The recorded data entries; none for a project that has no record yet."""
+def has_record(project_dir: Path) -> bool:
+    return os.path.lexists(record_path(project_dir))
+
+
+def _load_record(project_dir: Path) -> set[str] | None:
+    """The recorded data entries; None for a project that has no record yet."""
     path = record_path(project_dir)
-    if not os.path.lexists(path):
-        return set()
+    if not has_record(project_dir):
+        return None
     fix = (f"Nothing was changed. It lists the project directories that hold "
            f"data, so deploys never delete them: restore it, or rewrite it as "
            f'{{"version": {RECORD_VERSION}, "data_dirs": ["<dir>", ...]}}.')
@@ -107,6 +115,7 @@ class DataDirs:
     release: frozenset[str]   # read-write bind mounts of the incoming release
     recorded: frozenset[str]  # entries that are data, mounted or not
     mounted: frozenset[str]   # every bind-mounted entry of live + incoming
+    seeded: frozenset[str] = frozenset()  # recorded only because a kept release mounts it
 
     def box_state(self) -> set[str]:
         """Entries that are never release code."""
@@ -132,27 +141,39 @@ class DataDirs:
         return replace(self, recorded=self.recorded - taken)
 
     def retained(self) -> list[str]:
-        """Recorded entries holding data that the incoming release does not mount."""
-        return sorted(n for n in self.recorded - self.release if self.occupied(n))
+        """Recorded entries holding data that the incoming release does not mount.
+
+        Only the entry itself counts: a ``-staging`` copy alone keeps the
+        entry recorded but is staging's data, not something to warn about on
+        every deploy.
+        """
+        return sorted(n for n in self.recorded - self.release
+                      if holds_data(self.project_dir / n))
 
 
 def classify(project_dir: Path, release_tree: Path | None,
              kept_trees: Iterable[Path]) -> DataDirs:
     """Classify the project's entries for installing ``release_tree``.
 
-    Kept releases (the rollback target, the production release during a
-    stage) count as compose files the box holds, so the record of a project
-    that predates it starts from every mount those still describe. Raises
-    ReleaseStateError for an unreadable compose file or record.
+    ``kept_trees`` (the rollback target, production's release during a
+    stage) are read only while the project has no record. An entry the live
+    compose.yml mounts read-only is the live release's code, whatever an
+    older release once mounted. Raises ReleaseStateError for an unreadable
+    compose file or record.
     """
     live_binds = bind_dirs(project_dir / "compose.yml", project_dir)
     release_binds: dict[str, bool] = {}
     if release_tree is not None:
         release_binds = bind_dirs(release_tree / "compose.yml", project_dir)
     release = {d for d, rw in release_binds.items() if rw}
-    candidates = _load_record(project_dir) | {d for d, rw in live_binds.items() if rw}
-    for tree in kept_trees:
-        candidates |= _read_write(tree / "compose.yml", project_dir)
+    live_rw = {d for d, rw in live_binds.items() if rw}
+    stored = _load_record(project_dir)
+    kept: set[str] = set()
+    if stored is None:
+        for tree in kept_trees:
+            kept |= _read_write(tree / "compose.yml", project_dir)
+        kept -= set(live_binds) - live_rw
+    candidates = (stored or set()) | live_rw | kept
     dirs = DataDirs(
         project_dir=project_dir,
         release=frozenset(release),
@@ -162,11 +183,12 @@ def classify(project_dir: Path, release_tree: Path | None,
     recorded = release | (set(dirs.mounted) & candidates) | {
         n for n in candidates if dirs.occupied(n)}
     recorded -= set(BOX_OWNED_ENTRIES) | set(BOXMUNGE_ENTRIES)
-    return replace(dirs, recorded=frozenset(recorded))
+    seeded = recorded - release - live_rw - (stored or set())
+    return replace(dirs, recorded=frozenset(recorded), seeded=frozenset(seeded))
 
 
 def save_record(dirs: DataDirs) -> None:
-    """Persist ``dirs.recorded``; done before an install changes anything."""
+    """Persist ``dirs.recorded``, before anything it protects can change."""
     path = record_path(dirs.project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     doc = {"version": RECORD_VERSION, "data_dirs": sorted(dirs.recorded)}
