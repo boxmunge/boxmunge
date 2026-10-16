@@ -83,12 +83,23 @@ def _cmd_stage(args: argparse.Namespace) -> int:
 
 
 def _cmd_prod_deploy(args: argparse.Namespace) -> int:
+    if args.abandon:
+        return _abandon_install(args)
     flags = []
     if args.dry_run:
         flags.append("--dry-run")
     if args.no_snapshot:
         flags.append("--no-snapshot")
     return _bundle_upload_and_run("prod-deploy", flags)
+
+
+def _abandon_install(args: argparse.Namespace) -> int:
+    """Undo the open install on the server; nothing is bundled or uploaded."""
+    from boxmunge_cli.ssh import run_ssh
+    if args.dry_run or args.no_snapshot:
+        raise CliExit(USAGE, "--abandon takes no other options.")
+    config = connect()
+    return run_ssh(config, "prod-deploy", config["project"], "--abandon")
 
 
 def _cmd_promote(args: argparse.Namespace) -> int:
@@ -167,6 +178,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                    help="Upload and validate on the server without deploying")
     p.add_argument("--no-snapshot", action="store_true",
                    help="Skip the pre-deploy backup snapshot")
+    p.add_argument("--abandon", action="store_true",
+                   help="Undo an interrupted install whose pre-deploy hook has not "
+                        "run: the previous release's files go back (a first "
+                        "deploy's code is removed); containers and data were never "
+                        "touched. Uploads nothing; rerun it if it is interrupted")
     p.set_defaults(func=_cmd_prod_deploy)
 
     p = subparsers.add_parser("promote", help="Promote staging to production",

@@ -24,7 +24,9 @@ from boxmunge_cli.version import parse_version
 
 # Oldest boxmunge-server this client works with: the release whose command
 # surface (stage/prod-deploy/promote flags, status --json, logs options,
-# handshake schema_version) the client was built and tested against.
+# handshake schema_version) the client was built and tested against. The one
+# exception is prod-deploy --abandon, which is newer: older servers reject it
+# with "unknown argument", and it is not worth refusing every command for.
 MIN_SERVER_VERSION = "0.10.0"
 
 
