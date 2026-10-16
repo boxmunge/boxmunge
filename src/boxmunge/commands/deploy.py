@@ -59,6 +59,19 @@ def _run_deploy_inner(
     try:
         bundle_path = resolve_bundle_source(project_name, paths, ref=ref)
     except SourceError as e:
+        from boxmunge.commands.deploy_tree import resume_without_bundle
+        from boxmunge.release_txn import load_txn
+        try:
+            txn = load_txn(paths, project_name)
+        except ReleaseStateError as err:
+            print(f"ERROR: {err}", file=sys.stderr)
+            return 1
+        if txn is not None and dry_run:
+            print(f"[DRY RUN] Would resume the open install of {txn.ref} "
+                  f"(phase {txn.phase})")
+            return 0
+        if txn is not None:
+            return resume_without_bundle(project_name, paths, txn, ref, component)
         if is_new or ref:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1

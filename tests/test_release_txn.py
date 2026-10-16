@@ -118,3 +118,12 @@ def test_options_text_by_phase(paths, releases) -> None:
     txn = advance(paths, P, advance(paths, P, txn, "installed"), "hook_started")
     text = options_text(P, txn)
     assert "--abandon" not in text and "rollback myapp" in text and "snap-1" in text
+
+
+def test_a_first_deploy_offers_no_rollback(paths, releases) -> None:
+    """A first deploy has no rollback target: a fix is the way out."""
+    txn = _open(paths, replaced_ref=None, snapshot="")
+    for phase in ("previous_kept", "installed", "hook_started"):
+        txn = advance(paths, P, txn, phase)
+    text = options_text(P, txn)
+    assert "rollback" not in text and "deploy a fix" in text

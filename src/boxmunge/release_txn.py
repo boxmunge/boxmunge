@@ -214,7 +214,7 @@ def options_text(project: str, txn: InstallTxn) -> str:
     if txn.source != "rollback" and not txn.reached("hook_started"):
         lines.append(f"'prod-deploy {project} --abandon' puts {replaced}'s files back "
                      f"(containers and data are untouched)")
-    if txn.source != "rollback" and txn.reached("hook_started"):
+    if txn.source != "rollback" and txn.reached("hook_started") and txn.replaced_ref:
         lines.append(f"'rollback {project}' restores {txn.snapshot or 'no snapshot'} "
                      f"with {replaced}")
     lines.append("or deploy a fix (a different bundle, SHA or staged release)")

@@ -24,12 +24,16 @@ from boxmunge.commands.deploy import (
 from boxmunge.commands.deploy_steps import snapshot_live_release
 from boxmunge.crashpoint import crash_point
 from boxmunge.data_dirs import ReleaseStateError, SetAsideError, log_kept, set_aside_announcer
+from boxmunge.fileutil import atomic_write_text
+from boxmunge.intake import IntakeError, report_refusal, validate_release_tree
 from boxmunge.log import log_error
-from boxmunge.release import install_release, live_ref, mark_live
-from boxmunge.release_keep import keep_previous_release_txn, restore_superseded
+from boxmunge.release import install_release, live_ref, load_previous_release, mark_live
+from boxmunge.release_keep import (
+    keep_previous_release_txn, kept_previous_text, restore_superseded,
+)
 from boxmunge.release_txn import (
     InstallTxn, advance, close_txn, load_txn, open_txn, options_text, stale_reason,
-    start_refusal,
+    start_refusal, supersede_txn,
 )
 
 if TYPE_CHECKING:
@@ -173,7 +177,69 @@ def _resume(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTxn
 
 def _fix_forward(project_name: str, paths: BoxPaths, req: TreeDeploy,
                  old: InstallTxn) -> int:
-    """A different deploy over an open install. Until Task 6 makes it a
-    fix-forward, it is refused with the open install's options."""
-    print(f"ERROR: {start_refusal(project_name, old, None)}.", file=sys.stderr)
-    return 1
+    """A different deploy over an open install (spec: fix-forward)."""
+    if old.source == "rollback":
+        return _over_rollback(project_name, paths, req, old)
+    if not old.reached("previous_kept"):
+        print(f"Closing the unfinished install of {old.ref} (nothing was installed); "
+              f"deploying {req.ref} instead.")
+        restore_superseded(paths, project_name, old)
+        close_txn(paths, project_name, old)
+        return _fresh(project_name, paths, req)
+    print(f"Deploying {req.ref} over the unfinished install of {old.ref}. The rollback "
+          f"target stays {old.replaced_ref or 'none (first deploy)'}, paired with "
+          f"{old.snapshot or 'no snapshot'}; no new snapshot is taken.")
+    txn = supersede_txn(paths, project_name, old, source=req.source, ref=req.ref,
+                        replaced_ref=old.replaced_ref, staged_id=req.staged_id,
+                        snapshot=old.snapshot, phase="previous_kept")
+    return _install(project_name, paths, req, txn)
+
+
+def _over_rollback(project_name: str, paths: BoxPaths, req: TreeDeploy,
+                   old: InstallTxn) -> int:
+    """Superseding a rollback: its target (still in previous/) becomes this
+    deploy's replaced release. Before data_restored the data is still the
+    failed release's, so the target's own snapshot pairs with it; from
+    data_restored on a new snapshot is taken."""
+    target = load_previous_release(paths, project_name)
+    if target is None:
+        print(f"ERROR: The interrupted rollback of {project_name} has no target left in "
+              f".releases/previous/; rerun 'rollback {project_name}' or inspect it.",
+              file=sys.stderr)
+        return 1
+    snapshot = (snapshot_live_release(project_name, paths, req.no_snapshot) or ""
+                if old.reached("data_restored") else old.snapshot)
+    txn = supersede_txn(paths, project_name, old, source=req.source, ref=req.ref,
+                        replaced_ref=target.ref, staged_id=req.staged_id,
+                        snapshot=snapshot, phase="previous_kept")
+    atomic_write_text(paths.project_releases(project_name) / "previous.json",
+                      kept_previous_text(txn), mode=0o644)
+    return _install(project_name, paths, req, txn)
+
+
+def _names(project_name: str, ref: str | None, txn_ref: str) -> bool:
+    if ref is None:
+        return True
+    wanted = ref.removesuffix(".tar.gz")
+    return wanted == txn_ref or txn_ref.removeprefix(f"{project_name}-").startswith(wanted)
+
+
+def resume_without_bundle(project_name: str, paths: BoxPaths, txn: InstallTxn,
+                          ref: str | None, component: str) -> int:
+    """`prod-deploy` found no bundle while an install is open: a bundle
+    install that reached `installed` resumes from the project dir."""
+    if txn.source != "bundle" or not _names(project_name, ref, txn.ref):
+        print(f"ERROR: {start_refusal(project_name, txn, None)}.", file=sys.stderr)
+        return 1
+    if not txn.reached("installed"):
+        print(f"ERROR: The install of {txn.ref} cannot be resumed: its bundle is no longer "
+              f"in the inbox and the install had not finished (phase {txn.phase}). Upload "
+              f"the bundle again, or {options_text(project_name, txn)}.", file=sys.stderr)
+        return 1
+    try:
+        manifest = validate_release_tree(paths.project_dir(project_name), project_name,
+                                         paths, component)
+    except IntakeError as e:
+        return report_refusal(e)
+    return deploy_tree_locked(project_name, paths, TreeDeploy(
+        tree=None, ref=txn.ref, source="bundle", manifest=manifest, component=component))
