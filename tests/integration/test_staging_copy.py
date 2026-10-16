@@ -220,3 +220,44 @@ def test_a_config_file_in_a_data_directory(paths, project, capsys, copy_data) ->
     expected = "production key" if copy_data else "staging key"
     assert docker("exec", f"{project}-staging-db-1", "cat", "/key") == expected
     assert (pdir / "data" / "key.pem").read_text() == "production key"
+
+
+def _with_file_store(release: dict[str, str], source: str) -> dict[str, str]:
+    compose = yaml.safe_load(release["compose.yml"])
+    compose["services"]["db"]["volumes"].append(f"{source}:/files/app.db")
+    return {**release, "compose.yml": yaml.safe_dump(compose)}
+
+
+@pytest.mark.parametrize("source,staged", [
+    ("./app.db", "app.db-staging"), ("./store/app.db", "store-staging/app.db"),
+], ids=["top-level", "nested"])
+def test_a_single_file_data_store_is_copied_as_a_file(paths, project, capsys,
+                                                      source, staged) -> None:
+    """Review of PR #65: the placeholder for a top-level file store was made
+    as a directory, and that leftover broke every later stage."""
+    pdir = paths.project_dir(project)
+    (pdir / source).parent.mkdir(parents=True, exist_ok=True)
+    (pdir / source).write_text("production rows")
+    release = _with_file_store(_release(project, "pgdata"), source)
+    for ts in ("2026-10-13T090000000000", "2026-10-13T100000000000",
+               "2026-10-13T110000000000"):
+        place_bundle(paths, project, ts, release)
+    with _no_caddy():
+        assert run_deploy(project, paths, ref="2026-10-13T090000000000") == 0
+        assert run_stage(project, paths, ref="2026-10-13T100000000000") == 0
+        assert (pdir / staged).is_file()
+        assert docker("exec", f"{project}-staging-db-1", "cat", "/files/app.db") == \
+            "production rows"
+        # A wrong-type leftover (as the bug left) is replaced, and said so.
+        assert run_unstage(project, paths) == 0
+        if (pdir / staged).exists():
+            _sh_rm = ["run", "--rm", "--network", "none", "-v", f"{pdir}:/p", BUSYBOX,
+                      "rm", "-rf", f"/p/{staged}"]
+            docker(*_sh_rm)
+        (pdir / staged).mkdir(parents=True)
+        capsys.readouterr()
+        assert run_stage(project, paths, ref="2026-10-13T110000000000") == 0
+    assert "is a directory, but production's" in capsys.readouterr().out
+    assert (pdir / staged).is_file()
+    assert docker("exec", f"{project}-staging-db-1", "cat", "/files/app.db") == \
+        "production rows"

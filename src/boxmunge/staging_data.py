@@ -140,18 +140,57 @@ def _copy(project: str, src: Store, dest: Store, is_file: bool) -> None:
     run_throwaway(project, [*source, *dst], f"{_EMPTY_DST} && cp -a /src/. /dst/")
 
 
+def _remove_wrong_type(project: str, project_dir: Path, dest: Store, top: str,
+                       rest: str, want: str) -> None:
+    """Remove a staging destination of the wrong type: it is staging's own
+    copy, about to be replaced, and could only have been left by an earlier
+    failed copy (or by hand)."""
+    have = "a directory" if os.path.isdir(dest.ref) else "a file"
+    print(f"  NOTE: staging's {dest.ref} is {have}, but production's {dest.key} is "
+          f"{want}; removing staging's copy before the copy replaces it.")
+    if rest:
+        run_throwaway(project, ["-v", f"{project_dir / top}:/x"], f"rm -rf /x/{shlex.quote(rest)}")
+    elif os.path.isdir(dest.ref) and not os.path.islink(dest.ref):
+        run_throwaway(project, ["-v", f"{dest.ref}:/x"], _EMPTY_DST.replace("/dst", "/x"))
+        os.rmdir(dest.ref)
+    else:
+        os.unlink(dest.ref)
+
+
 def prepare_destinations(project: str, project_dir: Path, plan: CopyPlan) -> None:
-    """Make each bind destination exist before Compose creates staging's
-    containers, which refuses a missing config or secret file. The copy
-    replaces these placeholders; they are made as root, like the copy."""
+    """Make each bind destination exist, as the type production's source is,
+    before Compose creates staging's containers (it refuses a missing config
+    or secret file, and would create any other missing source as a
+    directory). The copy replaces these placeholders."""
     for src, dest in plan.pairs:
-        if dest.kind != "bind" or os.path.lexists(dest.ref):
+        if dest.kind != "bind":
             continue
         is_file = _is_file(src, "production")
         top, _, rest = os.path.relpath(dest.ref, project_dir).partition(os.sep)
-        parent, name = os.path.split(rest)
-        script = (f"mkdir -p /x/{shlex.quote(parent)} && touch /x/{shlex.quote(rest)}"
-                  if is_file and name else f"mkdir -p /x/{shlex.quote(rest)}")
+        holder = project_dir / top
+        if rest and os.path.lexists(holder) and (holder.is_symlink() or not holder.is_dir()):
+            raise StagingDataError(
+                f"{holder} must be staging's directory of copies but is not a "
+                f"directory. Remove it (rm -rf {holder}) and stage again.")
+        if os.path.lexists(dest.ref):
+            right = os.path.isfile(dest.ref) if is_file else os.path.isdir(dest.ref)
+            if right and not os.path.islink(dest.ref):
+                continue
+            _remove_wrong_type(project, project_dir, dest, top, rest,
+                               "a file" if is_file else "a directory")
+        if not rest:
+            # The entry itself, directly in the project dir, which the
+            # deploy user owns: made here, never auto-created by Docker.
+            if is_file:
+                os.close(os.open(dest.ref, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                 | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600))
+            else:
+                os.mkdir(dest.ref)
+            continue
+        # Inside the entry's -staging directory, which may belong to root.
+        parent = os.path.dirname(rest)
+        script = (f"mkdir -p /x/{shlex.quote(parent or '.')} && touch /x/{shlex.quote(rest)}"
+                  if is_file else f"mkdir -p /x/{shlex.quote(rest)}")
         run_throwaway(project, ["-v", f"{project_dir / top}:/x"], script)
 
 

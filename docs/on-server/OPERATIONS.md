@@ -206,7 +206,8 @@ Staging keeps its own data between stages. To start it from a copy of production
 3. checks every production source exists (a missing volume is never created empty) and refuses if
    any staging container is running;
 4. stops production's running containers, empties each staging destination completely (hidden
-   files included), copies production's data in, and starts production again whatever happened,
+   files included; a staging copy of the wrong type, such as a directory where production has a
+   file, is removed with a `NOTE`), copies production's data in, and starts production again whatever happened,
    even if it was interrupted. If production cannot be started again, `stage` fails with
    `PRODUCTION IS DOWN` and the `docker start` command to run;
 5. starts staging only after every copy succeeded.
