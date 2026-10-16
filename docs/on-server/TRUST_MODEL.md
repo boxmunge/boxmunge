@@ -207,7 +207,9 @@ Break-fix releases are applied the same way unless the box sets
 applied automatically. Each release is also marked `breaking` or not.
 Automatic updates may move a box to a newer minor line, but only when no
 release between the box's version and the candidate (the candidate
-included) is breaking, and never into a new major version. The
+included) is breaking, and never into a new major version. A box that
+cannot reach a security or break-fix release for that reason alerts its
+operator and reports a `platform-updates` health warning instead. The
 version-check circuit breaker can hold a broken security or break-fix
 release fleet-wide.
 

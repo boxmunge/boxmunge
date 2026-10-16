@@ -127,6 +127,9 @@ class BoxPaths:
         # before each scan; consumed by the CVE policy engine as the
         # active-exploitation signal.
         self.kev_catalog = self.state / "kev" / "catalog.json"
+        # Last auto-update discovery that installed nothing: any security or
+        # break-fix release it could not install, and the alert sent for it.
+        self.platform_update_state = self.state / "platform-updates.json"
 
     def container_update_target_state(self, name: str) -> Path:
         return self.container_update_state / f"{name}.json"

@@ -871,7 +871,28 @@ command line or upload method fail; it always bumps the minor version, and
 its release notes say what to change. Automatic updates may cross minor
 lines, but never a breaking release: a 0.10.3 box takes security release
 0.11.2 automatically only if neither 0.11.0, 0.11.1 nor 0.11.2 is breaking.
-They never cross a major version. To take security releases only, set this in
+They never cross a major version.
+
+When a security or break-fix release exists that auto-update cannot install
+for that reason, the box does not fall behind quietly:
+
+- auto-update logs it as a warning on every run (`log --component auto-update`)
+  and sends a priority-1 Pushover alert, for example: "Security release 0.11.2
+  cannot be installed automatically: 0.11.0 between this box (0.10.3) and it is
+  a breaking release. Read the release notes, then run `upgrade`." The alert
+  repeats at most once a day while the same release stays blocked, and
+  straight away when a newer one is blocked. An alert Pushover did not accept
+  is retried on the next run.
+- `health` reports `platform-updates` as `WARN`, naming the release and the
+  breaking release (or major version) in the way, until it is installed. It
+  is a warning, never an error, so it cannot roll back an upgrade on
+  probation.
+
+Read the notes of the breaking release, make the changes they describe, then
+run `upgrade`. The state behind both lives in
+`/opt/boxmunge/state/platform-updates.json`.
+
+To take security releases only, set this in
 `/opt/boxmunge/config/boxmunge.yml`:
 
 ```yaml

@@ -48,5 +48,7 @@ attack surface are offered as explicit opt-in choices or plugins instead. See th
 Only the latest release is supported with security fixes. We don't backport to older versions — upgrade to get the fix.
 
 When a breaking release stands between a box and a security or break-fix release, auto-update
-cannot install the fix, because doing so could break the box's projects. The operator reads the
-breaking release's notes, makes any changes it asks for, and runs `upgrade`.
+cannot install the fix, because doing so could break the box's projects. The box does not stay
+behind silently: it sends its operator a priority alert naming the release it cannot install and
+the breaking release in the way, repeated daily while it stays blocked, and `boxmunge health`
+reports a warning until the operator has read the release notes and run `upgrade`.
