@@ -20,7 +20,8 @@ def _as_root(deploy_uid: int, deploy_gid: int):
     return (
         patch("boxmunge.stash.os.geteuid", return_value=0),
         patch("boxmunge.stash.pwd.getpwnam", return_value=deploy),
-        patch("boxmunge.stash.os.chown"),
+        # Ownership is set on the temp file's descriptor (fileutil).
+        patch("boxmunge.fileutil.os.fchown"),
         patch("boxmunge.fileutil.os.getuid", return_value=1000),
     )
 
@@ -69,7 +70,7 @@ class TestOwners:
         euid, pw, chown, getuid = _as_root(1000, 1000)
         with euid, pw, chown as mock_chown, getuid:
             restore_stash(paths, archive)
-        mock_chown.assert_any_call(str(paths.backup_key), 0, 1000)
+        assert [c.args[1:] for c in mock_chown.call_args_list] == [(0, 1000)]
 
     def test_unexpected_owner_is_refused_when_root(self, tmp_path: Path) -> None:
         paths = _make_paths(tmp_path)

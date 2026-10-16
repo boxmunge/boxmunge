@@ -1,7 +1,7 @@
 """Tests for structured JSON-lines logging."""
 
 import json
-import logging.handlers
+import logging
 from pathlib import Path
 
 from boxmunge.log import (
@@ -11,6 +11,7 @@ from boxmunge.log import (
     log_error,
     _reset_logger,
 )
+from boxmunge.log_rotation import SharedLogFileHandler
 from boxmunge.paths import BoxPaths
 
 
@@ -69,42 +70,26 @@ class TestStructuredLog:
 
 
 class TestLogRotation:
+    """Rotation behaviour itself is covered with real processes in
+    test_log_rotation.py; these pin how get_logger wires the handler."""
+
     def setup_method(self):
         _reset_logger()
 
-    def test_file_handler_is_timed_rotating(self, tmp_path: Path) -> None:
-        """File handler must rotate daily; the plain FileHandler grew unbounded."""
+    def test_file_handler_is_the_shared_rotating_handler(self, tmp_path: Path) -> None:
         paths = BoxPaths(root=tmp_path / "bm")
         paths.logs.mkdir(parents=True)
         logger = get_logger(paths)
-        file_handlers = [
-            h for h in logger.handlers
-            if isinstance(h, logging.FileHandler)
-        ]
+        file_handlers = [h for h in logger.handlers if isinstance(h, logging.FileHandler)]
         assert len(file_handlers) == 1
-        fh = file_handlers[0]
-        assert isinstance(fh, logging.handlers.TimedRotatingFileHandler)
+        assert isinstance(file_handlers[0], SharedLogFileHandler)
 
     def test_rotation_keeps_90_days(self, tmp_path: Path) -> None:
         paths = BoxPaths(root=tmp_path / "bm")
         paths.logs.mkdir(parents=True)
         logger = get_logger(paths)
-        fh = next(
-            h for h in logger.handlers
-            if isinstance(h, logging.handlers.TimedRotatingFileHandler)
-        )
-        assert fh.backupCount == 90
-
-    def test_rotation_at_midnight(self, tmp_path: Path) -> None:
-        paths = BoxPaths(root=tmp_path / "bm")
-        paths.logs.mkdir(parents=True)
-        logger = get_logger(paths)
-        fh = next(
-            h for h in logger.handlers
-            if isinstance(h, logging.handlers.TimedRotatingFileHandler)
-        )
-        # `when="midnight"` is normalised to "MIDNIGHT" internally.
-        assert fh.when.upper() == "MIDNIGHT"
+        fh = next(h for h in logger.handlers if isinstance(h, SharedLogFileHandler))
+        assert fh.keep == 90
 
     def test_log_file_chmod_0o664_on_open(self, tmp_path: Path) -> None:
         """Regression: when the upgrade shim (root) opens the rotated log first,
@@ -124,16 +109,3 @@ class TestLogRotation:
             f"log file {log_file} mode {oct(mode)} is not group-writable; "
             f"deploy user will be locked out after root-context rotation"
         )
-
-    def test_handler_class_is_shared_subclass(self, tmp_path: Path) -> None:
-        """The handler must be the boxmunge subclass that handles perms,
-        not a plain TimedRotatingFileHandler."""
-        from boxmunge.log import _SharedTimedRotatingFileHandler
-        paths = BoxPaths(root=tmp_path / "bm")
-        paths.logs.mkdir(parents=True)
-        logger = get_logger(paths)
-        fh = next(
-            h for h in logger.handlers
-            if isinstance(h, logging.handlers.TimedRotatingFileHandler)
-        )
-        assert isinstance(fh, _SharedTimedRotatingFileHandler)

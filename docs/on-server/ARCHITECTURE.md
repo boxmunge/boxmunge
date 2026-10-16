@@ -64,7 +64,9 @@ Key features:
     staging/                  # per-project staging state
   docs/                       # on-server documentation (root:root 755)
   logs/                       # boxmunge operational logs (deploy:deploy 755)
-    boxmunge.log
+    boxmunge.log              # today's entries (UTC); writers rotate it under a lock
+    boxmunge.log.YYYY-MM-DD   # one archive per earlier day, 90 kept
+    .boxmunge.log.lock        # rotation lock (0660, deploy group only)
 ```
 
 For project-level conventions (manifest format, script contracts, env file conventions), run `agent-help conventions`.
@@ -251,12 +253,11 @@ If `type` is anything other than `none`, both `dump_command` and `restore_comman
 
 Backup flow:
 
-1. Run the dump command from the manifest
-2. Tar and compress the output
-3. Encrypt with age using the backup key
-4. Write atomically to `<project>/backups/<project>-<ISO8601>-<kind>.tar.gz.age`, where kind is `nightly`, `predeploy`, `preupdate` or `manual`
-5. Prune local archives of the same kind beyond that kind's retention count (see OPERATIONS.md)
-6. Log the backup
+1. Run the dump command from the manifest, with a 10-minute limit (on overrun or interruption its processes are killed inside the container). Its output goes to a private (0600) `.dump-*` file in the project's `backups/` directory: the plaintext touches disk until step 2 finishes
+2. Encrypt with age using the backup key, then remove the plaintext dump (also on any failure or timeout)
+3. Write atomically to `<project>/backups/<project>-<ISO8601>-<kind>.tar.gz.age`, where kind is `nightly`, `predeploy`, `preupdate` or `manual`
+4. Prune local archives of the same kind beyond that kind's retention count (see OPERATIONS.md)
+5. Log the backup
 
 Off-box sync uses `rclone copy` to push encrypted archives to the configured remote. It never deletes off-site copies, so the remote is an archive rather than a mirror of local retention. Since archives are encrypted before leaving the box, the remote is untrusted storage.
 

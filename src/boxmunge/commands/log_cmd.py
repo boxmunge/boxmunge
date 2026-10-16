@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from boxmunge.log_rotation import log_files
 from boxmunge.paths import BoxPaths
 
 
@@ -68,9 +69,36 @@ def filter_log_entries(
         cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%S")
         result = [e for e in result if e.get("ts", "") >= cutoff_str]
     if tail is not None:
-        result = result[-tail:]
+        result = result[len(result) - tail:] if tail else []
 
     return result
+
+
+def query_log(
+    paths: BoxPaths,
+    project: str | None = None,
+    component: str | None = None,
+    level: str | None = None,
+    since: str | None = None,
+    tail: int | None = None,
+) -> list[dict[str, Any]]:
+    """Filtered entries across the active log and the archives the query needs.
+
+    A ``since`` window reads every archive it reaches back into. Without one,
+    files are read newest first only until ``tail`` entries match.
+    """
+    cutoff = _parse_since(since) if since else None
+    chunks: list[list[dict[str, Any]]] = []
+    matched = 0
+    for path in reversed(log_files(paths.log_file, cutoff)):
+        chunk = filter_log_entries(parse_log_file(path), project=project,
+                                   component=component, level=level, since=since)
+        chunks.append(chunk)
+        matched += len(chunk)
+        if tail is not None and matched >= tail:
+            break
+    entries = [e for chunk in reversed(chunks) for e in chunk]
+    return filter_log_entries(entries, tail=tail)
 
 
 def _format_human(entry: dict[str, Any]) -> str:
@@ -96,9 +124,8 @@ def run_log(
     containers: bool = False,
 ) -> int:
     """Execute the log command. Returns 0 on success."""
-    entries = parse_log_file(paths.log_file)
-    filtered = filter_log_entries(entries, project=project, component=component,
-                                  level=level, since=since, tail=tail)
+    filtered = query_log(paths, project=project, component=component,
+                         level=level, since=since, tail=tail)
 
     if not filtered:
         if not as_json:

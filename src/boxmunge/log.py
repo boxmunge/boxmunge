@@ -1,65 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 """Structured JSON-lines logging for boxmunge.
 
-Logs to /opt/boxmunge/logs/boxmunge.log in JSON-lines format:
+Logs to /opt/boxmunge/logs/boxmunge.log in JSON-lines format, rotated daily
+(see boxmunge.log_rotation):
     {"ts": "...", "level": "info", "component": "deploy", "project": "myapp", "msg": "...", "detail": {...}}
 
 Also logs to stderr for interactive use (human-readable format).
 """
 
-import grp
 import json
 import logging
-import logging.handlers
-import os
 import sys
 from datetime import datetime, timezone
 from typing import Any
 
+from boxmunge.log_rotation import SharedLogFileHandler
 from boxmunge.paths import BoxPaths
 
 _logger: logging.Logger | None = None
-
-
-class _SharedTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
-    """TimedRotatingFileHandler that ensures the log file is shared between root
-    and the deploy group.
-
-    boxmunge runs commands as both root (upgrade shim, systemd timers) and as
-    the deploy user (restricted shell, project ops). Without explicit perms,
-    whichever process opens the file first owns it, locking the other out
-    after midnight rotation. We chgrp to 'deploy' and chmod 0o664 on every
-    open so writers in either context can append.
-    """
-
-    def _open(self):  # type: ignore[override]
-        # umask 0o002 → new file mode 0o664 if defaults applied
-        old_umask = os.umask(0o002)
-        try:
-            stream = super()._open()
-        finally:
-            os.umask(old_umask)
-        # Best-effort: align the file to deploy group + 0o664. Failures here
-        # (caller is not file owner and not root) are silent because the file
-        # is already open and writeable by the current process.
-        try:
-            deploy_gid = grp.getgrnam("deploy").gr_gid
-            os.chown(self.baseFilename, -1, deploy_gid)
-        except (KeyError, OSError):
-            pass
-        try:
-            os.chmod(self.baseFilename, 0o664)
-        except OSError:
-            pass
-        return stream
 
 
 class _JsonFormatter(logging.Formatter):
     """Format log records as JSON-lines."""
 
     def format(self, record: logging.LogRecord) -> str:
+        # The record's creation time, not the time of formatting: rotation
+        # files each entry by the day of this same instant.
+        created = datetime.fromtimestamp(record.created, timezone.utc)
         entry: dict[str, Any] = {
-            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "ts": created.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             "level": record.levelname.lower().replace("warning", "warn"),
             "component": getattr(record, "component", ""),
             "project": getattr(record, "project", None),
@@ -130,11 +99,7 @@ def get_logger(paths: BoxPaths) -> logging.Logger:
     # (only if log dir exists; tests sometimes use a freshly-made BoxPaths
     # whose logs/ subdir hasn't been created yet — fine, just skip)
     if paths.logs.exists():
-        fh = _SharedTimedRotatingFileHandler(
-            paths.log_file,
-            when="midnight",
-            backupCount=90,
-        )
+        fh = SharedLogFileHandler(paths.log_file)
         fh.setFormatter(_JsonFormatter())
         fh.setLevel(logging.DEBUG)
         logger.addHandler(fh)

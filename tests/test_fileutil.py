@@ -24,7 +24,7 @@ class TestOpenSharedLockfile:
             os.close(fd)
 
     def test_file_mode_is_group_writable(self, tmp_path: Path) -> None:
-        """Mode 0o664 so root and deploy group can both take the flock.
+        """Mode 0o660 so root and deploy group can both take the flock.
 
         Regression: when root creates the lock first (e.g. upgrade shim),
         deploy was getting EACCES on subsequent flock attempts.
@@ -33,22 +33,21 @@ class TestOpenSharedLockfile:
         fd = open_shared_lockfile(lock)
         try:
             mode = lock.stat().st_mode & 0o777
-            # Group write bit must be set; we accept 0o664 specifically
-            # but tolerate umask narrowing if the caller's environment
-            # is unusual. Hard requirement: group can write.
             assert mode & 0o060 == 0o060, f"mode {oct(mode)} is not group-writable"
+            assert mode & 0o007 == 0, f"mode {oct(mode)} lets other users take the lock"
         finally:
             os.close(fd)
 
-    def test_existing_file_chmodded_back_to_0o664(self, tmp_path: Path) -> None:
+    def test_existing_file_chmodded_to_0o660(self, tmp_path: Path) -> None:
         """If a file exists at narrower perms (e.g. created by older code),
         the helper must widen it on next open so locks remain shareable."""
         lock = tmp_path / ".old.lock"
         lock.touch(mode=0o600)
+        lock.chmod(0o644)  # world-readable, as earlier versions left them
         fd = open_shared_lockfile(lock)
         try:
             mode = lock.stat().st_mode & 0o777
-            assert mode == 0o664, f"mode should have been widened to 0o664, got {oct(mode)}"
+            assert mode == 0o660, f"mode should have been set to 0o660, got {oct(mode)}"
         finally:
             os.close(fd)
 
@@ -399,7 +398,56 @@ class TestDurability:
             real_rename(src, dst)
 
         with patch("boxmunge.fileutil.os.rename", rename), \
-             patch("boxmunge.fileutil._chown_deploy",
-                   side_effect=lambda p: seen.append(("chown", 0))):
+             patch("boxmunge.fileutil._fchown_deploy",
+                   side_effect=lambda fd, what: seen.append(("chown", 0))):
             atomic_write_text(target, "k: v", mode=0o600)
         assert seen == [("chown", 0), ("rename", 0o600)]
+
+
+class TestOpenRegularNofollow:
+    """Root opening names in deploy-writable dirs must not be redirected."""
+
+    @pytest.mark.parametrize("make", ["symlink", "hardlink", "fifo", "dir"])
+    def test_refuses_anything_but_a_plain_file(self, tmp_path: Path, make: str) -> None:
+        from boxmunge.fileutil import open_regular_nofollow
+        victim = tmp_path / "victim"
+        victim.write_text("keep")
+        name = tmp_path / "name"
+        {"symlink": lambda: name.symlink_to(victim),
+         "hardlink": lambda: os.link(victim, name),
+         "fifo": lambda: os.mkfifo(name),
+         "dir": lambda: name.mkdir()}[make]()
+        with pytest.raises(OSError):
+            os.close(open_regular_nofollow(name, os.O_RDONLY | os.O_NONBLOCK))
+        assert victim.read_text() == "keep"
+
+    def test_lock_file_planted_as_symlink_is_refused(self, tmp_path: Path) -> None:
+        victim = tmp_path / "victim"
+        victim.write_text("keep")
+        victim.chmod(0o600)
+        lock = tmp_path / ".x.lock"
+        lock.symlink_to(victim)
+        with pytest.raises(OSError):
+            open_shared_lockfile(lock)
+        assert victim.stat().st_mode & 0o777 == 0o600
+
+    def test_chmod_nofollow_refuses_a_symlink(self, tmp_path: Path) -> None:
+        from boxmunge.fileutil import chmod_nofollow
+        victim = tmp_path / "victim"
+        victim.write_text("x")
+        victim.chmod(0o600)
+        link = tmp_path / "link.sh"
+        link.symlink_to(victim)
+        with pytest.raises(OSError):
+            chmod_nofollow(link, add=0o755)
+        assert victim.stat().st_mode & 0o777 == 0o600
+
+    @pytest.mark.parametrize("start", [0o000, 0o200])
+    def test_chmod_nofollow_works_on_an_unreadable_file_of_ones_own(
+            self, tmp_path: Path, start: int) -> None:
+        from boxmunge.fileutil import chmod_nofollow
+        script = tmp_path / "smoke.sh"
+        script.write_text("#!/bin/sh\n")
+        script.chmod(start)
+        chmod_nofollow(script, add=0o755)
+        assert script.stat().st_mode & 0o777 == start | 0o755

@@ -35,7 +35,9 @@ from boxmunge.data_dirs import (
     has_record, holds_data, log_kept, naming_set_aside, record_path, save_record,
     set_aside_announcer, start_record, warn_retained,
 )
-from boxmunge.fileutil import atomic_write_text, chown_tree_deploy, mkdir_p_deploy
+from boxmunge.fileutil import (
+    atomic_write_text, chmod_nofollow, chown_tree_deploy, mkdir_p_deploy,
+)
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -220,7 +222,9 @@ def _make_scripts_executable(entries: list[Path]) -> None:
         scripts = entry.rglob("*.sh") if entry.is_dir() else [entry]
         for sh_file in scripts:
             if sh_file.suffix == ".sh" and sh_file.is_file() and not sh_file.is_symlink():
-                sh_file.chmod(sh_file.stat().st_mode | 0o755)
+                # Through a no-follow descriptor: the checks above race with a
+                # deploy-side swap, and Path.chmod would follow the link.
+                chmod_nofollow(sh_file, add=0o755)
 
 
 def live_code_entries(project_dir: Path, release_tree: Path | None = None) -> list[Path]:
@@ -473,7 +477,7 @@ def sync_live_scripts(paths: BoxPaths, project_name: str, release_root: Path) ->
     if dest.is_symlink() or (dest.exists() and not dest.is_dir()):
         raise ReleaseStateError(f"{dest} is not a directory")
     mkdir_p_deploy(dest)
-    dest.chmod(0o755)
+    chmod_nofollow(dest, 0o755)
     if src.is_dir() and not src.is_symlink():
         _refresh_dir_in_place(src, dest)
     else:

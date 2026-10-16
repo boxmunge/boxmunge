@@ -355,11 +355,23 @@ logs --boxmunge
 
 The operational log records every boxmunge action with timestamp, level, project, and message. It is the first place to check when something happened unexpectedly.
 
+It lives in `/opt/boxmunge/logs/boxmunge.log`. The first write of each UTC day moves the previous day's file to `boxmunge.log.YYYY-MM-DD`; 90 days of archives are kept. `logs --boxmunge`, `log` and the health check's 24-hour error count read the archives their window or `--tail` reaches into, so nothing drops out at midnight. Writers take `logs/.boxmunge.log.lock`; if it stays held for 5 seconds the entry is dropped with an error on stderr naming the lock, rather than hanging the command. `health` warns (`operational-log`) if the active file's first line is not a log entry, which stops all logging until the file is moved aside.
+
 ---
 
 ## Backups
 
-Back up a single project (dump, compress, encrypt, store locally):
+Back up a single project (dump, encrypt, store locally). The dump command has 10 minutes
+(as does a restore's `restore_command`). Past that the backup fails, the command's process
+group is killed inside the container (the error names the group, or says the kill could not be
+verified and the command may still be running), and the project lock is released. A dump command
+that starts its own session (`setsid`) leaves that group and escapes the kill: keep dump commands
+in the foreground. Killing the client side
+narrows but does not eliminate server-side lock collisions: a database such as Postgres
+notices the dead client only on its next socket I/O, so its locks can outlive the kill briefly. A backup stopped by SIGTERM
+(`systemctl stop`, shutdown) cleans up the same way. A plaintext dump left by a process that
+could not clean up (SIGKILL, power loss) is removed, and logged, by the project's next backup
+or restore:
 
 ```
 backup myapp
@@ -1167,12 +1179,15 @@ The agent will discover all available tools automatically. Available tools inclu
 (optionally with `version` for `upgrade --target`). Each result's `messages` carries the
 command's stdout and stderr.
 
-Requires the `mcp` package on the server. It is not installed by default — add it
-to the server's environment with:
+Requires the `mcp` package on the server. It is not installed by default — as root,
+add it to the server's active environment with:
 
 ```
 /opt/boxmunge/env-active/bin/pip install 'mcp>=1.0'
 ```
+
+Every platform upgrade (manual or auto-update) builds a fresh environment without it, so
+repeat the install after each upgrade. Until then `mcp-serve` exits 1 with this instruction.
 
 Note: `boxmunge` on PyPI is the *client* CLI. The server package is
 `boxmunge-server` and is installed from GitHub releases, not PyPI.

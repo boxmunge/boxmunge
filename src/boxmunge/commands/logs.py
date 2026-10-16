@@ -108,13 +108,16 @@ def _show_host_logs() -> None:
 
 
 def _show_boxmunge_logs(paths: BoxPaths, tail: int = 100) -> None:
-    """Show the boxmunge operational log (last N lines)."""
-    log_file = paths.log_file
-    if not log_file.exists():
+    """Show the boxmunge operational log (last N lines, across rotation)."""
+    from boxmunge.log_rotation import log_files
+    files = log_files(paths.log_file)
+    if not files:
         print("No operational log found yet.")
         return
-    from collections import deque
-    with log_file.open() as f:
-        lines = deque(f, maxlen=tail)
-    for line in lines:
+    lines: list[str] = []
+    for path in reversed(files):
+        lines = path.read_text().splitlines(keepends=True) + lines
+        if len(lines) >= tail:
+            break
+    for line in lines[len(lines) - tail:]:
         print(line, end="")

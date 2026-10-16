@@ -46,7 +46,7 @@ def _fake_dump(paths, project_name, dump_command, service):
 
 @pytest.fixture
 def no_dump():
-    with patch.object(backup_cmd, "_execute_dump", side_effect=_fake_dump):
+    with patch.object(backup_cmd, "execute_dump", side_effect=_fake_dump):
         yield
 
 
@@ -90,7 +90,7 @@ class TestKindedBackup:
         self, paths, system_container, retention, capsys,
     ) -> None:
         _project(paths, retention=retention)
-        with patch.object(backup_cmd, "_execute_dump") as dump:
+        with patch.object(backup_cmd, "execute_dump") as dump:
             assert run_backup("myapp", paths, kind=BackupKind.NIGHTLY) == 1
         dump.assert_not_called()
         assert "backup.retention" in capsys.readouterr().err

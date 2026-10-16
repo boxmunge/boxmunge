@@ -9,8 +9,17 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from boxmunge.paths import BoxPaths
 
 # Every command the deploy shell accepts. This is the complete allowlist.
 ALLOWED_COMMANDS: set[str] = {
@@ -132,43 +141,85 @@ def handle_scp_upload(args: list[str]) -> None:
     """Handle an scp upload by receiving to a temp dir, then filing to inbox.
 
     Delegates to the real scp binary for protocol handling, with the
-    destination rewritten to the inbox temp directory. After scp completes,
-    the received file is processed by the reception handler.
+    destination rewritten to a private directory for this session under the
+    inbox temp area. Concurrent uploads share that area, so this session
+    files and removes only what it received itself. The client's own target
+    path is ignored.
     """
     from boxmunge.paths import BoxPaths
     from boxmunge.reception import receive_bundle
 
     paths = BoxPaths()
-    paths.inbox_tmp.mkdir(parents=True, exist_ok=True)
-
-    scp_args = ["/usr/bin/scp", "-t", str(paths.inbox_tmp)]
-    result = subprocess.run(scp_args, check=False)
-
-    if result.returncode != 0:
-        # Clean temp before exiting
-        for leftover in paths.inbox_tmp.iterdir():
-            leftover.unlink(missing_ok=True)
-        print("ERROR: scp upload failed.", file=sys.stderr)
-        sys.exit(1)
-
-    received_files = list(paths.inbox_tmp.iterdir())
-    if not received_files:
-        print("ERROR: No file received.", file=sys.stderr)
-        sys.exit(1)
-
+    # A hangup or kill mid-transfer would otherwise skip the cleanup below and
+    # strand this session's partial upload. Installed before the directory
+    # exists, so no window leaves one behind.
+    for signum in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(signum, _exit_on_signal)
+    session_dir: Path | None = None
     try:
+        paths.inbox_tmp.mkdir(parents=True, exist_ok=True)
+        _sweep_abandoned_uploads(paths)
+        session_dir = Path(tempfile.mkdtemp(dir=paths.inbox_tmp, prefix="scp-"))
+        result = subprocess.run(["/usr/bin/scp", "-t", str(session_dir)], check=False)
+        if result.returncode != 0:
+            print("ERROR: scp upload failed.", file=sys.stderr)
+            sys.exit(1)
+
+        received_files = sorted(session_dir.iterdir())
+        if not received_files:
+            print("ERROR: No file received.", file=sys.stderr)
+            sys.exit(1)
+
         for received in received_files:
             try:
                 dest = receive_bundle(received, paths)
                 print(f"Received: {dest.name}")
             except ValueError as e:
                 print(f"ERROR: {e}", file=sys.stderr)
-                received.unlink(missing_ok=True)
                 sys.exit(1)
     finally:
-        # Clean any remaining temp files
-        for leftover in paths.inbox_tmp.iterdir():
-            leftover.unlink(missing_ok=True)
+        if session_dir is not None:
+            shutil.rmtree(session_dir)
+
+
+# Uploads untouched for this long were abandoned by a session that could not
+# clean up (SIGKILL, power loss). A live transfer writes continuously, so its
+# newest mtime is always recent.
+_ABANDONED_UPLOAD_SECONDS = 24 * 3600
+
+
+def _newest_mtime(path: Path) -> float:
+    newest = path.lstat().st_mtime
+    if path.is_dir() and not path.is_symlink():
+        for child in path.rglob("*"):
+            newest = max(newest, child.lstat().st_mtime)
+    return newest
+
+
+def _sweep_abandoned_uploads(paths: BoxPaths) -> None:
+    """Remove session dirs, and flat files from the old shared layout, idle for a day.
+
+    An entry that cannot be removed is logged and left; it must not stop
+    this upload.
+    """
+    from boxmunge.log import log_warning
+    cutoff = time.time() - _ABANDONED_UPLOAD_SECONDS
+    for entry in paths.inbox_tmp.iterdir():
+        try:
+            if _newest_mtime(entry) >= cutoff:
+                continue
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        except FileNotFoundError:
+            continue  # its own session finished and cleaned up meanwhile
+        except OSError as e:
+            log_warning("upload", f"cannot remove abandoned upload {entry}: {e}", paths)
+
+
+def _exit_on_signal(signum: int, _frame: object) -> None:
+    sys.exit(128 + signum)
 
 
 def run_command(command: str, args: list[str]) -> int:

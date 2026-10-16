@@ -62,7 +62,7 @@ def _setup_project(paths: BoxPaths, manifest: str) -> None:
 
 
 class TestRunBackup:
-    @patch("boxmunge.commands.backup_cmd._execute_dump")
+    @patch("boxmunge.commands.backup_cmd.execute_dump")
     @patch("boxmunge.backup.encrypt_file")
     def test_backup_succeeds_with_dump_type(
         self, mock_encrypt: MagicMock, mock_dump: MagicMock, paths: BoxPaths
@@ -138,7 +138,7 @@ class TestBackupSkipsQuarantined:
     """Wave 1: backups of stopped (CVE-quarantined) services are pointless
     and may surface confusing volume-empty warnings — skip cleanly."""
 
-    @patch("boxmunge.commands.backup_cmd._execute_dump")
+    @patch("boxmunge.commands.backup_cmd.execute_dump")
     @patch("boxmunge.backup.encrypt_file")
     def test_run_backup_skips_quarantined(
         self, mock_encrypt, mock_dump, paths: BoxPaths, capsys,

@@ -87,6 +87,21 @@ Any violation stops the shim with a non-zero exit and an error naming the
 file, before the value reaches a path, a URL, or an `rm -rf`. Repair or remove
 the file as `supervisor` and re-run.
 
+### Files root writes in deploy-writable directories
+
+`logs/`, `state/`, `stashes/`, `inbox/` and project trees are writable by deploy, and root
+writes there too (timers, upgrades). Root opens those files without following a final-component
+symlink and refuses anything but a plain file with one link (the operational log, lock files,
+the container-update lock, stash archives, decrypted restore snapshots). It sets owner and mode
+on the open descriptor, never by name after the fact (atomic state writes, backup dumps and
+temps). A planted link makes the operation fail with an error naming the path, instead of
+redirecting root to another file. Remove the link and re-run.
+
+This protects the last path component only. Deploy can still swap an intermediate directory it
+owns (`projects/<p>/backups`, a `state/` subdirectory, `inbox/.tmp`) for a symlink, so a root
+write below it can land elsewhere. Deploy is root-equivalent through the docker group anyway;
+these checks are defence in depth, not a boundary.
+
 ### What deploy may ask root to do
 
 `/etc/sudoers.d/boxmunge-deploy` grants deploy exactly two shim invocations:
