@@ -192,7 +192,7 @@ boxmunge supports two project sources, declared in `manifest.yml` via the `sourc
 6. Install -- only a release that passed every check replaces the live project files
 7. Pre-deploy command -- run `deploy.pre_deploy` from manifest if defined (e.g., migrations)
 8. Generate configs -- write Caddy site config and compose overlay (networking, env_files, resource limits)
-9. Start containers -- `docker compose up -d` with overlay
+9. Start containers -- re-validate the installed files, check every bind source without following symlinks and record its kind (creating missing ones as directories), then `docker compose up -d` with overlay. Every later start (upgrade, container update, `recover`, `resume`, `restore`) repeats the check against that record first; see TRUST_MODEL.md, "Container Escape and Root Restarts"
 10. Reload Caddy -- graceful, zero-downtime
 11. Smoke test -- run `boxmunge-scripts/smoke.sh`, interpret exit code
 12. Record state -- write deploy state JSON atomically

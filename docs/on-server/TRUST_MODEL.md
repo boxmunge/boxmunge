@@ -12,7 +12,7 @@ boxmunge's defences are calibrated against a specific set of attackers. Future e
 
 - **Network-level third-party attackers** — scanning, brute-force SSH, DDoS, malicious traffic targeting the public surface. Mitigations: UFW, CrowdSec, fail2ban, kernel hardening, key-only SSH on a non-default port.
 - **Supply-chain compromise of platform releases** — a tampered boxmunge release reaching the box. Mitigations: every release's `SHA256SUMS` is keyless-signed by the GitHub Actions release workflow (Sigstore Fulcio + Rekor), and the upgrade shim verifies the signature against a pinned workflow identity and OIDC issuer before installing. cosign is hard-required — an unsigned release is refused, not silently installed. This closes the prior circularity (where SHA256SUMS and the bundle came from the same release URL and could be replaced in lockstep).
-- **Container-escape blast radius** — a compromised user container should not trivially own the host. Mitigations: per-service capability drops, `no-new-privileges`, `pids_limit`, Tini, the host-level platform-container hardening.
+- **Container-escape blast radius** — a compromised user container should not trivially own the host. Mitigations: per-service capability drops, `no-new-privileges`, `pids_limit`, Tini, the host-level platform-container hardening, and re-checking a project's files and mounts before every start (see "Container Escape and Root Restarts").
 
 ### Out of scope (current product)
 
@@ -61,6 +61,79 @@ the shell and the `boxmunge-sftp` subsystem wrapper refuse it. Clients upload wi
 - **Docker group** — the deploy user is in the `docker` group, which is effectively equivalent to root on the host (a user can mount the host filesystem via `docker run -v /:/host`). This is an intentional trade-off: the deploy user needs to run `docker compose` for deployments, and Docker's permission model requires group membership. The restricted shell limits what the deploy user does *directly*, but it is not a privilege boundary against a determined attacker who already has SSH access as deploy. Key-only authentication is the real perimeter.
 - **Backup encryption key** — the deploy user can read the age identity key at `/opt/boxmunge/config/backup.key` (mode 640, group deploy). This is required for backup and restore operations to work without sudo. An authenticated deploy user can decrypt any backup snapshot.
 - **Backups** — the deploy user can trigger backup/restore for any project.
+
+## Container Escape and Root Restarts
+
+Docker on the box runs without user-namespace remapping, and the overlay
+does not force a non-root user, so uid 0 in a container is root for every
+host file the container can reach through a bind mount. A compromised
+container is therefore contained by what it can mount and by what root
+later does with the files it can write.
+
+Root does a lot with a project's files after deploy: upgrades restart every
+project, container updates and `security resume` recreate them, and
+`recover`, `resume`, `restore` and `stage` start them. Each of those runs
+`docker compose up` (or `start`) on the files in the project directory, and
+Docker resolves every bind source again, following symlinks, each time it
+starts a container. Two escalations followed:
+
+- **A container rewrites the files root starts it from.** A project could
+  bind-mount its own directory read-write (`.:/app`), or compose.yml, the
+  manifest, `.env`, the overlay or the kept releases. The container could
+  then rewrite compose.yml to `privileged: true` with `/:/host`, and the
+  next root restart ran it unvalidated.
+- **A container redirects a bind mount.** A container that can write the
+  directory holding another bind source can replace that source with a
+  symlink to `/`; the next start mounts the host root.
+
+What closes them:
+
+- Compose validation refuses a read-write bind mount of the project
+  directory or of anything boxmunge reads from it, and any bind source
+  inside a read-write one (SECURITY.md, "Project isolation"). These are
+  not relaxed by `profile: "off"`.
+- Every start goes through one check (`boxmunge.compose_guard`), enforced
+  by a test that no other code calls `compose up`/`start`. It re-runs
+  deploy's own validation on the files on disk, then walks every bind
+  source of the model it is about to run from the project directory
+  without following symlinks: no path component may be a symlink, the
+  source must exist inside the project, and it must still be the kind
+  (directory or file) recorded when the project was deployed. Deploy and
+  stage write that record (`state/deploy/<project>.binds.json`, outside
+  the project) and create missing sources as plain directories, rather
+  than leaving Docker to create them as root through whatever a symlink
+  points at. An upgrade re-records each project from the configs it
+  regenerates. The check also confirms every file boxmunge reads (the
+  compose files, the manifest, `.env`, the generated overlay, and whatever
+  `compose.yml` includes, extends or names in `env_file`/`label_file`)
+  still hashes to what deploy recorded, so a container that rewrote a
+  control file boxmunge's validator would still accept — a manifest set to
+  `security.profile: off`, say — is refused until a redeploy re-blesses it.
+  A project deployed before these rules, whose running container already
+  mounts the project directory read-write, is caught by inspecting the
+  live containers' own mounts and refused with "redeploy required". The
+  validator also refuses a `provider:` service (Compose runs its type on
+  the host) and validates every profile, not just the active ones. While a
+  release is staged the project directory holds the staged release's
+  files, so every production start except the `promote` that deploys it is
+  refused. A start that fails the check does not happen: it is
+  logged, alerted at high priority, and the running containers are left
+  as they are.
+
+What remains:
+
+- Docker itself restarts containers (restart policies, a daemon restart,
+  a reboot) without any boxmunge check. With no bind source inside a
+  read-write one, a container cannot redirect its own mounts, but the
+  check cannot cover those starts.
+- The check and Docker's mount are separate steps, so there is a short
+  window between them.
+- Anything a container can do as root inside its own read-write mounts
+  stays possible, and so does a kernel or runtime escape.
+
+Recommended follow-ups, not implemented: enable `userns-remap` in the
+Docker daemon so container root maps to an unprivileged host uid, and give
+the overlay a default non-root user.
 
 ## The Upgrade Shim and the Root Boundary
 

@@ -166,9 +166,11 @@ Two invariants:
 ## What `compose.yml` may not do
 
 Your `compose.yml` is merged with the generated overlay, and Compose lets some
-user keys win over it. So every deploy, stage, resume, and upgrade checks
-`compose.yml` first and refuses to proceed (exit code 3) when it finds a key
-that would undo the hardening. Values are normalised before they are compared:
+user keys win over it. So every deploy and stage, and every later start of
+the containers (upgrade restarts, container updates, `recover`, `resume`,
+`security resume`, `restore`), checks `compose.yml` first and refuses to
+proceed (exit code 3 for deploy, stage and resume) when it finds a key that
+would undo the hardening. Values are normalised before they are compared:
 letter case, surrounding spaces, a `CAP_` prefix, and `=` versus `:` in
 `security_opt` make no difference.
 
@@ -214,8 +216,8 @@ of a rejection.
 
 ### Project isolation
 
-These rules keep one project's `compose.yml` from reaching another project.
-They apply to every service and are **not** relaxed by `profile: "off"`.
+These rules keep one project's `compose.yml` from reaching another project,
+or the files boxmunge itself reads from the project directory. They apply to every service and are **not** relaxed by `profile: "off"`.
 
 | Rejected | What to do instead |
 |---|---|
@@ -234,6 +236,8 @@ They apply to every service and are **not** relaxed by `profile: "off"`.
 | A reference to another project's built image (`boxmunge.invalid/<other>/...`) or an image by ID (`sha256:...`, or a bare hex string, which Docker resolves as an ID prefix) in an `image:`, a `type: image` mount, a `docker-image://` additional context, `build.dockerfile_inline`, `build.args`, or the Dockerfile | Compose runs a local image without pulling, so this would run or build from another project's image, with its code. Use a published image from a registry, or this project's own `boxmunge.invalid/<project>/<service>`. |
 | `provider:` on a service, `models:` on a service, or a top-level `models:` in `compose.yml` | These hand the service to something outside its containers; a provider is an executable run on the host as whoever deploys. Run the service from an image. |
 | `ports:` on any service | Remove it: routed traffic reaches the service through Caddy. A port that must be published goes in the manifest, below. |
+| A read-write bind mount of the project directory, or of anything boxmunge reads from it: `compose.yml`, `manifest.yml`, `.env`, `project.env`, `secrets.env`, the generated `compose.boxmunge*.yml` and `compose.staging-base.yml`, `caddy.override.conf`, `security/`, `.releases/`, `boxmunge-scripts/`, `repo/.git`, and any file `compose.yml` includes, extends or names in `env_file` or `label_file` (or a directory holding one of them, or a path inside one) | Mount it read-only (`.:/app:ro`) and mount a data subdirectory such as `./data` read-write. boxmunge re-runs `docker compose up` on these files as root (upgrades, container updates, `recover`), so a container able to rewrite them could run any compose file it liked. |
+| A bind source (or `secrets`/`configs` file) inside another service's read-write bind source, such as `./data` read-write and `./data/uploads`, checked over production's mounts and the `-staging` copies `stage` makes of them | Mount sibling directories (`./data`, `./uploads`). A container that can write `./data` could replace `./data/uploads` with a symlink, and Docker follows it the next time the container starts. |
 | An `include:`, `extends: file:`, `env_file:`, or `label_file:` path outside the project directory (followed through nested includes), remote, or written with `${VAR}` | Keep every compose, extends, include, env and label file inside the project, and write the path literally. |
 
 ### Built image names
