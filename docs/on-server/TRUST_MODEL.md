@@ -97,6 +97,11 @@ on the open descriptor, never by name after the fact (atomic state writes, backu
 temps). A planted link makes the operation fail with an error naming the path, instead of
 redirecting root to another file. Remove the link and re-run.
 
+This protects the last path component only. Deploy can still swap an intermediate directory it
+owns (`projects/<p>/backups`, a `state/` subdirectory, `inbox/.tmp`) for a symlink, so a root
+write below it can land elsewhere. Deploy is root-equivalent through the docker group anyway;
+these checks are defence in depth, not a boundary.
+
 ### What deploy may ask root to do
 
 `/etc/sudoers.d/boxmunge-deploy` grants deploy exactly two shim invocations:

@@ -112,17 +112,29 @@ def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
 
 
 def chmod_nofollow(path: Path, mode: int | None = None, add: int = 0) -> None:
-    """chmod through a no-follow descriptor (Linux has no lchmod).
+    """chmod that refuses a symlink rather than following it.
 
-    Sets ``mode``, or adds ``add`` to the current bits. Raises on a symlink.
+    Sets ``mode``, or adds ``add`` to the current bits. Linux has no lchmod,
+    so the file is pinned with an O_PATH descriptor (which needs no read
+    permission, so a 0000 file of the caller's own still works) and chmod'd
+    through its /proc/self/fd entry. Elsewhere lchmod does the same job.
     """
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
-    fd = os.open(path, flags)
-    try:
-        current = stat.S_IMODE(os.fstat(fd).st_mode)
-        os.fchmod(fd, mode if mode is not None else current | add)
-    finally:
-        os.close(fd)
+    if hasattr(os, "O_PATH"):
+        fd = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            st = os.fstat(fd)
+            if stat.S_ISLNK(st.st_mode):
+                raise OSError(f"{path} is a symlink; refusing to chmod through it")
+            new = mode if mode is not None else stat.S_IMODE(st.st_mode) | add
+            os.chmod(f"/proc/self/fd/{fd}", new)
+        finally:
+            os.close(fd)
+        return
+    st = os.lstat(path)
+    if stat.S_ISLNK(st.st_mode):
+        raise OSError(f"{path} is a symlink; refusing to chmod through it")
+    new = mode if mode is not None else stat.S_IMODE(st.st_mode) | add
+    os.chmod(path, new, follow_symlinks=False)
 
 
 def mkdir_p_deploy(path: Path) -> None:

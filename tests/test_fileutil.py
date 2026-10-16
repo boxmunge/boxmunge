@@ -441,3 +441,13 @@ class TestOpenRegularNofollow:
         with pytest.raises(OSError):
             chmod_nofollow(link, add=0o755)
         assert victim.stat().st_mode & 0o777 == 0o600
+
+    @pytest.mark.parametrize("start", [0o000, 0o200])
+    def test_chmod_nofollow_works_on_an_unreadable_file_of_ones_own(
+            self, tmp_path: Path, start: int) -> None:
+        from boxmunge.fileutil import chmod_nofollow
+        script = tmp_path / "smoke.sh"
+        script.write_text("#!/bin/sh\n")
+        script.chmod(start)
+        chmod_nofollow(script, add=0o755)
+        assert script.stat().st_mode & 0o777 == start | 0o755
