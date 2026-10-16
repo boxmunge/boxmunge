@@ -1,4 +1,4 @@
-"""Docker Compose >= 2.24 is required: older releases mis-read \\' in
+"""Docker Compose >= 2.35 is required: older releases mis-read \\' in
 single-quoted env-file values, which is how secrets are stored.
 
 install.sh and compose_version.py each check it; one table drives both, so
@@ -21,30 +21,31 @@ INSTALL_SH = REPO / "install.sh"
 
 # (exact stdout of `docker compose version --short`, verdict)
 CASES = [
-    ("2.24.0\n", "ok"),
-    ("v2.24.0\n", "ok"),
+    ("2.35.0\n", "ok"),
+    ("v2.35.0\n", "ok"),
     ("5.1.3\n", "ok"),
-    ("2.26.1-4\n", "ok"),
-    ("2.29.2-desktop.1\n", "ok"),
+    ("2.26.1-4\n", "old"),         # Debian 13's own docker-compose package
+    ("2.38.2-desktop.1\n", "ok"),
     ("2.40.3+ds1-0ubuntu1~24.04.1\n", "ok"),
-    ("2.24.0\r\n", "ok"),            # whitespace is trimmed
-    ("  2.25.0  \n", "ok"),
+    ("2.35.0\r\n", "ok"),            # whitespace is trimmed
+    ("  2.36.0  \n", "ok"),
     ("3.0.0\n", "ok"),
     ("2.100.0\n", "ok"),
+    ("2.34.0\n", "old"),           # no `config --no-env-resolution`
     ("2.23.3\n", "old"),
     ("v2.20.2\n", "old"),
     ("2.9.0\n", "old"),
     ("1.29.2\n", "old"),
-    ("2.24.0-rc.1\n", "ok"),         # suffix ignored: 2.24.0 itself is supported
+    ("2.35.0-rc.1\n", "ok"),         # suffix ignored: 2.35.0 itself is supported
     ("", "unreadable"),
     ("\n", "unreadable"),
     ("garbage\n", "unreadable"),
-    ("2.24\n", "unreadable"),
-    ("2.24.0.1\n", "unreadable"),
-    ("WARNING: something\n2.24.0\n", "unreadable"),
-    ("2.24.0\nWARNING: something\n", "unreadable"),
-    ("2.24.0-x y\n", "unreadable"),
-    ("Docker Compose version v2.24.0\n", "unreadable"),
+    ("2.35\n", "unreadable"),
+    ("2.35.0.1\n", "unreadable"),
+    ("WARNING: something\n2.35.0\n", "unreadable"),
+    ("2.35.0\nWARNING: something\n", "unreadable"),
+    ("2.35.0-x y\n", "unreadable"),
+    ("Docker Compose version v2.35.0\n", "unreadable"),
 ]
 
 
@@ -91,7 +92,7 @@ def test_python_and_install_sh_agree(tmp_path: Path, monkeypatch, out: str, verd
         assert "apt-get install --only-upgrade docker-compose-plugin" in sh_msg
 
 
-@pytest.mark.parametrize("out", ["garbage\n", "2.24\n", "WARNING: x\n2.24.0\n"])
+@pytest.mark.parametrize("out", ["garbage\n", "2.35\n", "WARNING: x\n2.35.0\n"])
 def test_unreadable_output_is_shown(tmp_path: Path, monkeypatch, out: str) -> None:
     first_word = out.split()[0]
     assert first_word in _python_verdict(monkeypatch, out)[1]

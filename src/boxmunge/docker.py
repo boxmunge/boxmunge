@@ -316,7 +316,7 @@ def compose_pull(
     ``--ignore-buildable`` skips services that also declare build:, whose
     image: is the local name compose tags the build with; pulling it asks a
     registry for a name that only exists on this box ("pull access denied").
-    The flag exists in Compose v2 (2.24 and later checked) and v5.
+    The flag exists in every Compose boxmunge supports (see compose_version).
     """
     cmd = compose_command(project_name, compose_files)
     cmd.extend(["pull", "--ignore-buildable"])

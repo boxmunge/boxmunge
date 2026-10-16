@@ -49,14 +49,15 @@ fi
 # ---------------------------------------------------------------------------
 # Docker Compose version.
 #
-# Secrets reach containers as single-quoted env-file values with \' for a
-# quote, which Compose reads literally only from 2.24 on (2.20-2.23 keep the
-# backslash; older releases fail to parse). Keep in step with
+# boxmunge resolves user compose with `config --no-env-resolution`, which
+# Compose accepts from 2.35.0 (2.34 and older: "unknown flag"). That also
+# covers secrets' single-quoted env-file values with \' for a quote, which
+# Compose reads literally from 2.24 on. Keep in step with
 # MIN_COMPOSE_VERSION in src/boxmunge/compose_version.py. An upgrade checks
 # before anything is changed; a fresh install right after the bootstrap has
 # installed Docker.
 # ---------------------------------------------------------------------------
-MIN_COMPOSE_VERSION="2.24.0"
+MIN_COMPOSE_VERSION="2.35.0"
 # Same rule as compose_version.py: trim ASCII whitespace, then the whole
 # output must be one version with an optional packaging suffix; anything
 # else is reported as unreadable, never guessed at.

@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """The minimum Docker Compose version boxmunge supports, and its check.
 
-Secrets reach containers as single-quoted values in Compose env files, with
-``\\'`` for a quote. Compose reads that literally from 2.24 on; 2.20-2.23
-pass the backslash through and older releases fail to parse the file.
+boxmunge resolves user compose with ``config --no-env-resolution``, which
+Compose accepts from 2.35.0 (2.34 and older reject the flag, so validation
+could not run). That also covers secrets' single-quoted env-file values with
+``\\'`` for a quote, which Compose reads literally from 2.24 on.
 install.sh refuses to install or upgrade below this version (keep its
 MIN_COMPOSE_VERSION in step), and `doctor` reports it.
 """
@@ -14,7 +15,7 @@ import subprocess
 
 from boxmunge.docker_run import docker_env
 
-MIN_COMPOSE_VERSION = (2, 24, 0)
+MIN_COMPOSE_VERSION = (2, 35, 0)
 # Same rule as install.sh's require_compose_version: trim ASCII whitespace,
 # then the whole output must be one version, optionally with a packaging
 # suffix (-desktop.1, +ds1-0ubuntu1~24.04.1). Anything else is unreadable,
