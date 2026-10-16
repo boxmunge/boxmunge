@@ -56,6 +56,46 @@ def _images(prefix: str) -> list[str]:
     return out.stdout.split()
 
 
+def _docker_lines(*args: str) -> list[str]:
+    out = subprocess.run(["docker", *args], capture_output=True, text=True, check=True)
+    return [line for line in out.stdout.splitlines() if line.strip()]
+
+
+def _leftovers(prefix: str) -> dict[str, list[str]]:
+    """Every container, network, volume and image named for this run. The
+    prefix is unique per run, so nothing else on the daemon matches it."""
+    def ours(name: str) -> bool:
+        return name.startswith(prefix) or f"/{prefix}" in name
+    return {
+        "container": [n for n in _docker_lines("ps", "-a", "--format", "{{.Names}}") if ours(n)],
+        "network": [n for n in _docker_lines("network", "ls", "--format", "{{.Name}}") if ours(n)],
+        "volume": [n for n in _docker_lines("volume", "ls", "--format", "{{.Name}}") if ours(n)],
+        "image": [n for n in _docker_lines("image", "ls", "--format", "{{.Repository}}:{{.Tag}}")
+                  if ours(n)],
+    }
+
+
+def _remove_everything(prefix: str, project_dirs: list[Path]) -> None:
+    """Take down every compose project the test brought up (orphans, such as
+    a service the test removed from compose.yml, included), then whatever
+    else it created by name; fail if anything is still there."""
+    for project_dir in project_dirs:
+        for compose_project in (project_dir.name, f"{project_dir.name}-staging"):
+            subprocess.run(
+                ["docker", "compose", "-p", compose_project, "--profile", "*", "down",
+                 "-v", "--rmi", "local", "--remove-orphans", "-t", "0"],
+                cwd=project_dir, capture_output=True, timeout=120, check=False)
+    found = _leftovers(prefix)
+    removals = (("container", ["rm", "-f", "-v"]), ("network", ["network", "rm"]),
+                ("volume", ["volume", "rm", "-f"]), ("image", ["image", "rm", "-f"]))
+    for kind, cmd in removals:
+        if found[kind]:
+            subprocess.run(["docker", *cmd, *found[kind]], capture_output=True, check=False)
+    remaining = {kind: names for kind, names in _leftovers(prefix).items() if names}
+    if remaining:
+        pytest.fail(f"the test left Docker objects behind: {remaining}")
+
+
 @pytest.fixture
 def project(tmp_path: Path):
     name = f"bmimg-{uuid.uuid4().hex[:8]}"
@@ -74,8 +114,7 @@ def project(tmp_path: Path):
                 "services": {"web": {"port": 8080}}}
     yield paths, name, project_dir, manifest
     _teardown(name, paths)
-    subprocess.run(["docker", "image", "rm", "-f", f"{name}-web", f"{name}-custom"],
-                   capture_output=True, check=False)
+    _remove_everything(name, [project_dir])
 
 
 def test_deploy_stage_update_and_delete_use_platform_names(project) -> None:
@@ -177,8 +216,7 @@ def test_untagging_leaves_a_prefix_sharing_projects_image_alone(tmp_path: Path) 
         prepare_compose_override(paths, manifest, release_root=paths.project_dir(foo))
         assert local_image_id(shared) is not None
     finally:
-        subprocess.run(["docker", "image", "rm", "-f", f"{foo_bar}-web"],
-                       capture_output=True, check=False)
+        _remove_everything(foo, [paths.project_dir(foo), paths.project_dir(foo_bar)])
 
 
 def test_profiled_service_is_hardened_in_the_overlay(project) -> None:
@@ -248,7 +286,8 @@ def local_registry():
     subprocess.run(["docker", "run", "-d", "--name", cname, "-p", f"127.0.0.1:{port}:5000",
                     "registry:2"], check=True, capture_output=True)
     yield f"localhost:{port}"
-    subprocess.run(["docker", "rm", "-f", cname], capture_output=True, check=False)
+    # -v: the registry image declares a volume for its storage.
+    subprocess.run(["docker", "rm", "-f", "-v", cname], capture_output=True, check=False)
 
 
 def test_untag_does_not_depend_on_repo_digests(project, local_registry) -> None:
