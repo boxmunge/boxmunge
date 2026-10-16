@@ -1082,6 +1082,14 @@ How an upgrade is applied and undone:
    site and compose overlay, reloads Caddy and restarts projects. A failure in any of these
    (a project whose configs cannot be regenerated, a Caddy reload, a project that does not
    restart) fails the upgrade and triggers a rollback.
+   A project whose `compose.yml` the new release's compose validator refuses (a file that
+   predates a validator fix) does not fail the upgrade. Rolling back would only bring back
+   the validator that let the file in. The project gets no new overlay or Caddy site, and it
+   is **not restarted**: its running containers are left exactly as they were, never rebuilt
+   or re-run from the refused file. The upgrade output prints `REFUSED: <project>: <reason>`,
+   the refusal is logged as an error (`log <project>`), and one priority-1 Pushover alert
+   lists every refused project. Fix the compose file and redeploy; until then the project
+   keeps running its old containers.
 4. A health check runs, then a 6-hour probation. A critical health result during probation
    rolls back.
 
@@ -1101,8 +1109,12 @@ release's on every upgrade, and put back to the previous release's on a rollback
 always describe the code that is running.
 
 `upgrade --dry-run` renders every project's migrated manifest and configs in memory and
-reports what the upgrade would do. It writes nothing; the upgrade shim runs it as a
-pre-flight check against the new release before touching anything.
+reports what the upgrade would do. That includes each project the new release's compose
+validator would refuse, as `<project>: would be refused by this release's compose validator
+... : <reason>`. A refusal does not fail the dry run, because it does not fail the upgrade.
+The dry run writes nothing and sends no alert. The upgrade shim runs it as a pre-flight check
+against the new release before touching anything, so `upgrade --dry-run` run by hand
+reports against the installed release.
 
 ## Querying Logs
 

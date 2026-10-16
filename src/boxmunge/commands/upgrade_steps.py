@@ -6,6 +6,8 @@ upgrade_cmd sequences these for --apply and the full flow; check_upgrade is
 the write-nothing rendering behind --dry-run.
 """
 
+from collections.abc import Collection
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -101,11 +103,10 @@ def migrate_project_manifests(paths: BoxPaths) -> list[str]:
     return migrated_names
 
 
-def _compose_accepted(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> bool:
-    """Validate the user compose.yml against silent-floor-defeating keys.
+def _compose_refusal(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> str | None:
+    """Why this release's compose validator refuses the project, or None.
 
-    A hostile compose.yml that slipped in before validation must not get a
-    fresh overlay from an upgrade; the project keeps its existing configs.
+    Pure: the dry run calls it too, and must log nothing.
     """
     off_services = {svc for svc, _ in services_with_off_profile(manifest)}
     try:
@@ -117,10 +118,8 @@ def _compose_accepted(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> b
             manifest_services=manifest.get("services"),
         )
     except ComposeSecurityError as e:
-        log_error("upgrade", f"Compose validation rejected during regen: {e}",
-                  paths, project=name)
-        return False
-    return True
+        return str(e)
+    return None
 
 
 def _write_maintenance_site(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> None:
@@ -135,9 +134,18 @@ def _write_maintenance_site(paths: BoxPaths, name: str, manifest: dict[str, Any]
             f"Failed to re-render the maintenance page for {name}: {e}") from e
 
 
-def _regenerate_project(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> bool:
-    """Write one project's Caddy site config and compose overlay. Returns
-    True if live configs were regenerated."""
+@dataclass
+class Regeneration:
+    """What regenerate_configs did: projects whose live configs were
+    rewritten, and projects refused by the compose validator (name -> why)."""
+    processed: list[str] = field(default_factory=list)
+    refused: dict[str, str] = field(default_factory=dict)
+
+
+def _regenerate_project(
+    paths: BoxPaths, name: str, manifest: dict[str, Any], regen: Regeneration,
+) -> None:
+    """Write one project's Caddy site config and compose overlay."""
     # A paused or CVE-quarantined project is deliberately offline. Its Caddy
     # fragment must stay the maintenance page: regenerating live routing
     # would send visitors to stopped upstreams (502) instead of the page the
@@ -148,9 +156,20 @@ def _regenerate_project(paths: BoxPaths, name: str, manifest: dict[str, Any]) ->
     if block:
         _write_maintenance_site(paths, name, manifest)
         log_operation("upgrade", block.skip_message, paths, project=name)
-        return False
-    if not _compose_accepted(paths, name, manifest):
-        return False
+        return
+    # A compose.yml that predates a validator fix must not get a fresh
+    # overlay, nor be rebuilt and re-run as root by restart_projects. Its
+    # old configs and running containers are left untouched; the upgrade
+    # itself goes on, since rolling back would only restore the validator
+    # that let the file in.
+    refusal = _compose_refusal(paths, name, manifest)
+    if refusal is not None:
+        regen.refused[name] = refusal
+        log_error("upgrade", f"Compose validation refused {name}: {refusal}. Its "
+                  f"configs and running containers are left as they were and it "
+                  f"is not restarted; fix compose.yml and redeploy.",
+                  paths, project=name)
+        return
     try:
         prepare_caddy_config(paths, manifest)
         prepare_compose_override(paths, manifest, component="upgrade")
@@ -158,23 +177,20 @@ def _regenerate_project(paths: BoxPaths, name: str, manifest: dict[str, Any]) ->
         # The project would restart on its old overlay; fail so the shim
         # rolls back instead of reporting a half-applied upgrade (D-07).
         raise UpgradeGateError(f"Failed to regenerate configs for {name}: {e}") from e
-    return True
+    regen.processed.append(name)
 
 
-def regenerate_configs(paths: BoxPaths) -> list[str]:
+def regenerate_configs(paths: BoxPaths) -> Regeneration:
     """Re-generate Caddy and compose overlay configs for all projects, each
     under its project lock. A project whose lock is held is left alone: the
     operation holding it (a deploy, say) writes its own configs.
-
-    Returns list of project names whose live configs were regenerated.
     """
-    processed = []
+    regen = Regeneration()
     for project_dir, manifest in _project_manifests(paths):
         name = manifest.get("project", project_dir.name)
         try:
             with project_lock(name, paths):
-                if _regenerate_project(paths, name, manifest):
-                    processed.append(name)
+                _regenerate_project(paths, name, manifest, regen)
         except LockError:
             log_warning(
                 "upgrade",
@@ -182,7 +198,7 @@ def regenerate_configs(paths: BoxPaths) -> list[str]:
                 f"operation, which writes its own configs",
                 paths, project=name,
             )
-    return processed
+    return regen
 
 
 def check_upgrade(paths: BoxPaths) -> list[str]:
@@ -202,6 +218,12 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
             if manifest.get("hosts"):
                 render_maintenance_caddy_config(manifest["hosts"])
             report.append(f"{name}: {block.reason.value}; keeps its maintenance page")
+            continue
+        refusal = _compose_refusal(paths, name, manifest)
+        if refusal is not None:
+            report.append(f"{name}: would be refused by this release's compose "
+                          f"validator and left on its current configs and "
+                          f"containers, not restarted: {refusal}")
             continue
         if not paths.project_caddy_override(name).exists():
             generate_caddy_config(manifest)
@@ -230,10 +252,31 @@ def notify_locked_skips(paths: BoxPaths, skipped_locked: list[str]) -> None:
            f"deploy.", component="upgrade")
 
 
+def notify_refused(paths: BoxPaths, refused: dict[str, str]) -> None:
+    """One priority-1 alert per upgrade naming every refused project.
+
+    One summary rather than one alert per project; the dry run never
+    alerts, so an upgrade alerts once, and again on a later upgrade only
+    while the compose.yml is still refused.
+    """
+    if not refused:
+        return
+    from boxmunge.notify import notify
+    lines = "\n".join(f"- {name}: {why}" for name, why in sorted(refused.items()))
+    notify(paths, "upgrade — compose refused",
+           f"The upgrade's compose validator refused {len(refused)} project(s). "
+           f"They keep their previous configs and running containers and were "
+           f"not restarted. Fix compose.yml and redeploy:\n{lines}",
+           component="upgrade", priority=1)
+
+
 def restart_projects(
-    paths: BoxPaths,
+    paths: BoxPaths, *, refused: Collection[str],
 ) -> tuple[list[str], list[str], list[str]]:
     """Restart all deployed projects under per-project locks.
+
+    Projects in `refused` (see regenerate_configs) are skipped: their old
+    containers keep running untouched, never rebuilt from the refused file.
 
     Returns (succeeded, failed, skipped_locked) lists. A project whose
     project_lock is held by another operation is skipped (logged as a
@@ -269,6 +312,11 @@ def restart_projects(
                     "upgrade", block.skip_message,
                     paths, project=project_name,
                 )
+            continue
+        if project_name in refused:
+            log_operation("upgrade", f"Not restarting {project_name}: its compose.yml "
+                          f"was refused; its containers are left as they are",
+                          paths, project=project_name)
             continue
 
         compose_files = ["compose.yml"]

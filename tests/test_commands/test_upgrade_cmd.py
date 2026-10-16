@@ -110,7 +110,7 @@ class TestRestartRespectsLock:
         fd = os.open(str(alpha_lock), os.O_CREAT | os.O_RDWR)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
-            succeeded, failed, skipped = restart_projects(paths)
+            succeeded, failed, skipped = restart_projects(paths, refused=())
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
@@ -131,7 +131,7 @@ class TestRestartRespectsLock:
         self._make_project(paths, "alpha")
         self._make_project(paths, "beta")
 
-        succeeded, failed, skipped = restart_projects(paths)
+        succeeded, failed, skipped = restart_projects(paths, refused=())
 
         assert sorted(succeeded) == ["alpha", "beta"]
         assert failed == []
@@ -156,6 +156,7 @@ class TestLockSkipPushoverNotification:
             "source": "bundle", "hosts": [f"{name}.test"],
             "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
         }))
+        (pdir / "compose.yml").write_text("services:\n  web:\n    image: nginx:1.25\n")
 
     @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
     @patch("boxmunge.commands.upgrade_steps.compose_up")
@@ -247,7 +248,7 @@ class TestSkipsQuarantined:
         self._make_project(paths, "beta")
         self._quarantine(paths, "alpha")
 
-        succeeded, failed, skipped = restart_projects(paths)
+        succeeded, failed, skipped = restart_projects(paths, refused=())
 
         # alpha was quarantined, so compose_up MUST NOT have been called
         # for it — only beta should have been started.
@@ -268,7 +269,7 @@ class TestSkipsQuarantined:
         self._quarantine(paths, "alpha")
 
         with patch("boxmunge.commands.upgrade_steps.log_operation") as mock_log:
-            restart_projects(paths)
+            restart_projects(paths, refused=())
 
         # The skip MUST be logged with the upgrade component and project.
         skip_logs = [
@@ -292,7 +293,7 @@ class TestSkipsQuarantined:
         site_conf.parent.mkdir(parents=True, exist_ok=True)
         site_conf.write_text("# pre-existing normal config\n")
 
-        processed = regenerate_configs(paths)
+        processed = regenerate_configs(paths).processed
 
         # alpha was quarantined, so the normal-regen path must have been
         # skipped (alpha not in processed).

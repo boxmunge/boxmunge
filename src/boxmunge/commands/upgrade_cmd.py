@@ -16,10 +16,12 @@ import sys
 from boxmunge.commands.health_cmd import run_health
 from boxmunge.commands.self_test_cmd import run_self_test
 from boxmunge.commands.upgrade_steps import (
+    Regeneration,
     UpgradeGateError,
     check_upgrade,
     migrate_project_manifests,
     notify_locked_skips,
+    notify_refused,
     regenerate_configs,
     restart_projects,
 )
@@ -56,7 +58,9 @@ def _gate_failed(paths: BoxPaths, error: Exception) -> int:
     return 1
 
 
-def _migrate_regenerate_reload(paths: BoxPaths, step: int, total: int) -> list[str]:
+def _migrate_regenerate_reload(
+    paths: BoxPaths, step: int, total: int,
+) -> tuple[list[str], Regeneration]:
     """Steps shared by --apply and the full flow. Any failure raises: a
     project left on stale configs, or a Caddy that did not take the new
     ones, is not an upgrade that should report success."""
@@ -65,8 +69,13 @@ def _migrate_regenerate_reload(paths: BoxPaths, step: int, total: int) -> list[s
     print(f"  Migrated: {', '.join(migrated)}" if migrated else "  No migrations needed.")
 
     print(f"[{step + 1}/{total}] Regenerating configs...")
-    processed = regenerate_configs(paths)
-    print(f"  Processed: {len(processed)} project(s)")
+    regen = regenerate_configs(paths)
+    print(f"  Processed: {len(regen.processed)} project(s)")
+    for name, why in sorted(regen.refused.items()):
+        print(f"  REFUSED: {name}: {why}")
+    if regen.refused:
+        print("  Refused projects keep their previous configs and running "
+              "containers and are not restarted. Fix compose.yml and redeploy.")
 
     print(f"[{step + 2}/{total}] Reloading Caddy...")
     try:
@@ -74,23 +83,28 @@ def _migrate_regenerate_reload(paths: BoxPaths, step: int, total: int) -> list[s
     except DockerError as e:
         raise UpgradeGateError(f"Caddy reload failed: {e}") from e
     print("  Caddy reloaded.")
-    return migrated
+    return migrated, regen
 
 
-def _restart(paths: BoxPaths, step: int, total: int) -> tuple[list[str], list[str], list[str]]:
+def _restart(
+    paths: BoxPaths, step: int, total: int, refused: dict[str, str],
+) -> tuple[list[str], list[str], list[str]]:
     print(f"[{step}/{total}] Restarting projects...")
-    succeeded, failed_projects, skipped_locked = restart_projects(paths)
+    succeeded, failed_projects, skipped_locked = restart_projects(paths, refused=refused)
     if succeeded:
         print(f"  Restarted: {', '.join(succeeded)}")
     if skipped_locked:
         print(f"  Skipped (locked): {', '.join(skipped_locked)}")
+    if refused:
+        print(f"  Not restarted (compose refused): {', '.join(sorted(refused))}")
     notify_locked_skips(paths, skipped_locked)
+    notify_refused(paths, refused)
     if failed_projects:
         print(f"  FAILED: {', '.join(failed_projects)}", file=sys.stderr)
     return succeeded, failed_projects, skipped_locked
 
 
-def _finish(paths: BoxPaths, label: str, migrated: list[str],
+def _finish(paths: BoxPaths, label: str, migrated: list[str], regen: Regeneration,
             restart: tuple[list[str], list[str], list[str]], new_version: str) -> int:
     """Record the new version, but only when every project restarted."""
     succeeded, failed_projects, skipped_locked = restart
@@ -100,6 +114,7 @@ def _finish(paths: BoxPaths, label: str, migrated: list[str],
             "migrated": migrated,
             "restarted": succeeded,
             "skipped_locked": skipped_locked,
+            "refused": sorted(regen.refused),
             "failed": failed_projects,
         },
     )
@@ -123,12 +138,12 @@ def _run_apply(paths: BoxPaths, current_version: str, new_version: str) -> int:
     print(f"  Current: {current_version}")
     print(f"  New:     {new_version}\n")
     try:
-        migrated = _migrate_regenerate_reload(paths, 1, 4)
+        migrated, regen = _migrate_regenerate_reload(paths, 1, 4)
     except (ManifestError, MigrationError, UpgradeGateError) as e:
         return _gate_failed(paths, e)
-    restart = _restart(paths, 4, 4)
+    restart = _restart(paths, 4, 4, regen.refused)
     return _finish(paths, f"Apply {current_version} -> {new_version}",
-                   migrated, restart, new_version)
+                   migrated, regen, restart, new_version)
 
 
 def _run_full(
@@ -148,10 +163,10 @@ def _run_full(
         return 1
 
     try:
-        migrated = _migrate_regenerate_reload(paths, 2, 6)
+        migrated, regen = _migrate_regenerate_reload(paths, 2, 6)
     except (ManifestError, MigrationError, UpgradeGateError) as e:
         return _gate_failed(paths, e)
-    restart = _restart(paths, 5, 6)
+    restart = _restart(paths, 5, 6, regen.refused)
     prune_stashes(paths, keep=5)
 
     print("\n[6/6] Post-upgrade validation")
@@ -167,7 +182,7 @@ def _run_full(
         return _gate_failed(paths, UpgradeGateError("health check found critical issues"))
 
     rc = _finish(paths, f"Upgrade {current_version} -> {new_version}",
-                 migrated, restart, new_version)
+                 migrated, regen, restart, new_version)
     if rc == 0:
         print(f"\nUpgrade complete: {current_version} -> {new_version}")
     return rc
