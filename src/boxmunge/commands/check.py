@@ -272,13 +272,15 @@ def run_check(project_name: str, paths: BoxPaths, verbose: bool = True) -> int:
 _STATUS_FROM_EXIT = {0: "ok", 1: "warning", 2: "critical"}
 
 
-def _run_check_json(project_name: str, paths: BoxPaths) -> int:
-    """Run health check and emit a single JSON object on stdout.
+def collect_check(project_name: str, paths: BoxPaths) -> dict[str, Any]:
+    """Run the project's smoke checks and return the `check --json` payload.
 
     Schema:
-      {"project": "X", "exit_code": 0, "smoke": {"status": "...", "message": "..."}}
+      {"project": "X", "exit_code": 0, "status": "ok", "smoke": {"status": "...", "message": "..."}}
 
     The smoke object is omitted when no service in the manifest declares one.
+    A project that cannot be checked gets exit_code 1 and an "error" message
+    instead of status and smoke.
     """
     project_dir = paths.project_dir(project_name)
     manifest_path = paths.project_manifest(project_name)
@@ -287,8 +289,7 @@ def _run_check_json(project_name: str, paths: BoxPaths) -> int:
     if not project_dir.exists():
         payload["exit_code"] = 1
         payload["error"] = f"Project not found: {project_name}"
-        print(json.dumps(payload))
-        return 1
+        return payload
 
     if paths.is_project_pre_registered(project_name):
         payload["exit_code"] = 1
@@ -296,16 +297,14 @@ def _run_check_json(project_name: str, paths: BoxPaths) -> int:
             f"Project '{project_name}' is pre-registered (secrets set) but "
             f"not yet deployed."
         )
-        print(json.dumps(payload))
-        return 1
+        return payload
 
     try:
         manifest = load_manifest(manifest_path)
     except ManifestError as e:
         payload["exit_code"] = 1
         payload["error"] = str(e)
-        print(json.dumps(payload))
-        return 1
+        return payload
 
     has_smoke = any(svc.get("smoke") for svc in manifest.get("services", {}).values())
     smoke_obj: dict[str, str] | None = None
@@ -323,8 +322,14 @@ def _run_check_json(project_name: str, paths: BoxPaths) -> int:
     payload["status"] = _STATUS_FROM_EXIT.get(worst, "unknown")
     if smoke_obj is not None:
         payload["smoke"] = smoke_obj
+    return payload
+
+
+def _run_check_json(project_name: str, paths: BoxPaths) -> int:
+    """Emit the check payload as a single JSON object on stdout."""
+    payload = collect_check(project_name, paths)
     print(json.dumps(payload))
-    return worst
+    return payload["exit_code"]
 
 
 def cmd_check(args: list[str]) -> None:

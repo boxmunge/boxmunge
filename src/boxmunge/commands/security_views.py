@@ -44,7 +44,7 @@ def _format_iso_compact(iso: str | None) -> str:
     return dt.strftime("%Y-%m-%d %H:%M UTC")
 
 
-def _project_status(
+def project_cve_status(
     *,
     quarantined: bool,
     quarantine_state: dict[str, Any] | None,
@@ -160,7 +160,7 @@ def format_project_text(
         f"{'true' if dangerously_disable_quarantine else 'false'}"
     )
 
-    status = _project_status(
+    status = project_cve_status(
         quarantined=quarantined,
         quarantine_state=quarantine_state,
         scan_state=scan_state,
@@ -249,7 +249,7 @@ def format_project_json(
         for decision in scan_state.get("decisions", []):
             findings_payload.extend(decision.get("findings") or [])
 
-    status = _project_status(
+    status = project_cve_status(
         quarantined=quarantined,
         quarantine_state=quarantine_state,
         scan_state=scan_state,

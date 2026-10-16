@@ -3095,7 +3095,7 @@ def _host_suppression_paths(tmp_path, monkeypatch, entries):
 def test_fleet_summary_counts_host_scope_suppressions(monkeypatch, tmp_path) -> None:
     """A host-scope suppression must appear in the fleet count.
 
-    Regression: _fleet_summary only ever read per-project suppression files,
+    Regression: fleet_summary only ever read per-project suppression files,
     so a host suppression covering every project reported as 0 — hiding it
     from the review workflow it is supposed to surface before expiry.
     """

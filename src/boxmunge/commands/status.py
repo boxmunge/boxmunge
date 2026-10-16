@@ -2,6 +2,7 @@
 
 import json
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from boxmunge.commands.argv import parse_args
@@ -27,17 +28,24 @@ def _short_ts(raw: str) -> str:
     return ts.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def run_status(paths: BoxPaths, as_json: bool = False) -> int:
-    """Show status dashboard for all projects.
+@dataclass
+class StatusSnapshot:
+    """Every project's dashboard row, and the projects that could not be read."""
 
-    A project whose state files cannot be read gets an ERROR row (and an
-    ERROR line on stderr); the rest of the dashboard still renders. Returns
-    1 if any project failed, else 0.
+    projects_dir_exists: bool
+    rows: list[dict[str, str]] = field(default_factory=list)
+    failures: list[tuple[str, Exception]] = field(default_factory=list)
+
+
+def collect_status(paths: BoxPaths) -> StatusSnapshot:
+    """Build the dashboard rows without printing anything.
+
+    A project whose state files cannot be read gets an ERROR row and an
+    entry in ``failures``; the other rows are still built.
     """
     projects_dir = paths.projects
     if not projects_dir.exists():
-        print("No projects directory found.")
-        return 0
+        return StatusSnapshot(projects_dir_exists=False)
 
     deployed = sorted(
         p.name for p in projects_dir.iterdir()
@@ -48,19 +56,13 @@ def run_status(paths: BoxPaths, as_json: bool = False) -> int:
         if p.is_dir() and not (p / "manifest.yml").exists()
     )
 
-    if not deployed and not pre_registered:
-        print("No projects registered.")
-        return 0
-
-    rows = []
-    failed = False
+    snapshot = StatusSnapshot(projects_dir_exists=True)
     for name in deployed:
         try:
-            rows.append(_project_row(name, paths))
+            snapshot.rows.append(_project_row(name, paths))
         except PROJECT_INPUT_ERRORS as e:
-            report_project_failure("status", name, e, paths)
-            failed = True
-            rows.append({
+            snapshot.failures.append((name, e))
+            snapshot.rows.append({
                 "project": name,
                 "status": "ERROR",
                 "last_check": "-",
@@ -70,21 +72,41 @@ def run_status(paths: BoxPaths, as_json: bool = False) -> int:
             })
 
     for name in pre_registered:
-        rows.append({
+        snapshot.rows.append({
             "project": name,
             "status": "PRE-REGISTERED",
             "last_check": "-",
             "deployed_at": "-",
             "raw_status": "pre-registered",
         })
+    return snapshot
+
+
+def run_status(paths: BoxPaths, as_json: bool = False) -> int:
+    """Show status dashboard for all projects.
+
+    A project whose state files cannot be read gets an ERROR row (and an
+    ERROR line on stderr); the rest of the dashboard still renders. Returns
+    1 if any project failed, else 0.
+    """
+    snapshot = collect_status(paths)
+    if not snapshot.projects_dir_exists:
+        print("No projects directory found.")
+        return 0
+    if not snapshot.rows:
+        print("No projects registered.")
+        return 0
+
+    for name, error in snapshot.failures:
+        report_project_failure("status", name, error, paths)
 
     if as_json:
         # JSON output keeps full-precision timestamps for machine consumption.
-        print(json.dumps(rows, indent=2))
+        print(json.dumps(snapshot.rows, indent=2))
     else:
-        _print_table(rows)
+        _print_table(snapshot.rows)
 
-    return 1 if failed else 0
+    return 1 if snapshot.failures else 0
 
 
 def _project_row(name: str, paths: BoxPaths) -> dict[str, str]:

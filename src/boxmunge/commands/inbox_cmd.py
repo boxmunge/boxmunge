@@ -75,8 +75,8 @@ def run_inbox_list(paths: BoxPaths, project_filter: str | None) -> int:
     return 0
 
 
-def _run_inbox_list_json(paths: BoxPaths, project_filter: str | None) -> int:
-    """Emit the inbox listing as JSON on stdout. Returns 0."""
+def collect_inbox(paths: BoxPaths, project_filter: str | None) -> list[dict[str, object]]:
+    """The inbox's bundles, newest first, as `inbox --json` lists them."""
     items: list[dict[str, object]] = []
     if paths.inbox.exists():
         for entry in paths.inbox.iterdir():
@@ -97,7 +97,12 @@ def _run_inbox_list_json(paths: BoxPaths, project_filter: str | None) -> int:
                 "mtime": mtime.isoformat().replace("+00:00", "Z"),
             })
     items.sort(key=lambda b: b["mtime"], reverse=True)
-    print(json.dumps({"bundles": items}))
+    return items
+
+
+def _run_inbox_list_json(paths: BoxPaths, project_filter: str | None) -> int:
+    """Emit the inbox listing as JSON on stdout. Returns 0."""
+    print(json.dumps({"bundles": collect_inbox(paths, project_filter)}))
     return 0
 
 

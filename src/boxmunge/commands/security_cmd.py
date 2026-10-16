@@ -14,6 +14,7 @@ Dispatches:
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from boxmunge.commands.security_actions import cmd_security_scan
@@ -68,64 +69,78 @@ def _suppressions_path(paths: BoxPaths, project: str):
     return paths.project_dir(project) / "security" / "suppressions.yml"
 
 
-def _per_project_view(project: str, as_json: bool, paths: BoxPaths) -> int:
-    manifest_path = paths.project_manifest(project)
-    try:
-        manifest = load_manifest(manifest_path)
-    except ManifestError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
+class SecurityViewError(Exception):
+    """A project's security view cannot be built from its files."""
 
+
+@dataclass(frozen=True)
+class ProjectSecurity:
+    """Everything the per-project security views render."""
+
+    manifest: dict
+    posture: str
+    dangerously_disable_quarantine: bool
+    quarantined: bool
+    quarantine_state: dict | None
+    scan_state: dict | None
+    active_suppressions: tuple
+
+
+def load_project_security(project: str, paths: BoxPaths) -> ProjectSecurity:
+    """Read a project's security state. Raises SecurityViewError, with the
+    message the CLI prints, when the manifest or suppressions are unusable."""
+    try:
+        manifest = load_manifest(paths.project_manifest(project))
+    except ManifestError as e:
+        raise SecurityViewError(str(e)) from e
     if "schema_version" not in manifest:
-        print(
-            f"ERROR: manifest for project '{project}' is missing schema_version",
-            file=sys.stderr,
-        )
-        return 1
+        raise SecurityViewError(
+            f"manifest for project '{project}' is missing schema_version")
 
     sec_block = manifest.get("security") or {}
-    posture = sec_block.get("posture") or "balanced"
-    dangerously = bool(sec_block.get("dangerously_disable_quarantine", False))
-
     quarantined = is_quarantined(project, paths)
     qstate = read_quarantine_state(project, paths) if quarantined else None
     scan_state = read_scan_state(paths.project_scan_state(project))
-
     try:
         supps = load_suppressions(_suppressions_path(paths, project))
     except SuppressionsError as e:
-        print(f"ERROR: failed to load suppressions: {e}", file=sys.stderr)
-        return 1
+        raise SecurityViewError(f"failed to load suppressions: {e}") from e
     today = datetime.now(timezone.utc).date()
-    active = active_suppressions(supps, today=today)
+    return ProjectSecurity(
+        manifest=manifest,
+        posture=sec_block.get("posture") or "balanced",
+        dangerously_disable_quarantine=bool(
+            sec_block.get("dangerously_disable_quarantine", False)),
+        quarantined=quarantined,
+        quarantine_state=qstate,
+        scan_state=scan_state,
+        active_suppressions=active_suppressions(supps, today=today),
+    )
 
-    if as_json:
-        print(format_project_json(
-            manifest,
-            posture=posture,
-            dangerously_disable_quarantine=dangerously,
-            quarantined=quarantined,
-            quarantine_state=qstate,
-            scan_state=scan_state,
-            active_suppressions=active,
-        ))
-    else:
-        print(format_project_text(
-            manifest,
-            posture=posture,
-            dangerously_disable_quarantine=dangerously,
-            quarantined=quarantined,
-            quarantine_state=qstate,
-            scan_state=scan_state,
-            active_suppressions=active,
-        ))
+
+def _per_project_view(project: str, as_json: bool, paths: BoxPaths) -> int:
+    try:
+        view = load_project_security(project, paths)
+    except SecurityViewError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    render = format_project_json if as_json else format_project_text
+    print(render(
+        view.manifest,
+        posture=view.posture,
+        dangerously_disable_quarantine=view.dangerously_disable_quarantine,
+        quarantined=view.quarantined,
+        quarantine_state=view.quarantine_state,
+        scan_state=view.scan_state,
+        active_suppressions=view.active_suppressions,
+    ))
     return 0
 
 
 # ---------- fleet summary ----------
 
 
-def _fleet_summary(paths: BoxPaths) -> dict:
+def fleet_summary(paths: BoxPaths) -> dict:
     """Aggregate state across all registered projects."""
     projects = sorted(load_registered_projects(paths))
     posture_dist = {"relaxed": 0, "balanced": 0, "strict": 0, "paranoid": 0}
@@ -308,7 +323,7 @@ def cmd_security(args: list[str]) -> None:
             else:
                 print("No projects registered.")
             return
-        summary = _fleet_summary(paths)
+        summary = fleet_summary(paths)
         if as_json:
             print(format_fleet_json(summary))
         else:
