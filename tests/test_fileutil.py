@@ -341,3 +341,65 @@ class TestChownDeployErrorClass:
         finally:
             _l.getLogger("boxmunge").removeHandler(h)
         assert records == []
+
+
+class TestDurability:
+    """A rename is atomic but not durable until its directory is synced: after
+    a power cut the old file, or an empty new one, could come back."""
+
+    def _record(self, events: list[str]):
+        import stat
+        real_fsync, real_rename = os.fsync, os.rename
+
+        def fsync(fd: int) -> None:
+            kind = "dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+            events.append(f"fsync-{kind}")
+            real_fsync(fd)
+
+        def rename(src, dst) -> None:
+            events.append("rename")
+            real_rename(src, dst)
+
+        return (patch("boxmunge.fileutil.os.fsync", fsync),
+                patch("boxmunge.fileutil.os.rename", rename))
+
+    @pytest.mark.parametrize("write", [
+        lambda p: atomic_write_text(p, "new"),
+        lambda p: atomic_write_bytes(p, b"new"),
+    ])
+    def test_syncs_file_then_renames_then_syncs_directory(self, tmp_path: Path, write) -> None:
+        target = tmp_path / "state.json"
+        target.write_text("old")
+        events: list[str] = []
+        fsync_patch, rename_patch = self._record(events)
+        with fsync_patch, rename_patch:
+            write(target)
+        assert events == ["fsync-file", "rename", "fsync-dir"]
+        assert target.read_text() == "new"
+
+    def test_durable_rename_syncs_a_file_written_elsewhere(self, tmp_path: Path) -> None:
+        """The backup writer's temp is written by age in another container."""
+        from boxmunge.fileutil import durable_rename
+        tmp, target = tmp_path / ".enc.tmp", tmp_path / "backup.age"
+        tmp.write_bytes(b"ciphertext")
+        events: list[str] = []
+        fsync_patch, rename_patch = self._record(events)
+        with fsync_patch, rename_patch:
+            durable_rename(tmp, target)
+        assert events == ["fsync-file", "rename", "fsync-dir"]
+        assert target.read_bytes() == b"ciphertext" and not tmp.exists()
+
+    def test_mode_and_owner_are_set_before_the_file_is_visible(self, tmp_path: Path) -> None:
+        target = tmp_path / "secret.yml"
+        seen: list[tuple[str, int]] = []
+        real_rename = os.rename
+
+        def rename(src, dst) -> None:
+            seen.append(("rename", os.stat(src).st_mode & 0o777))
+            real_rename(src, dst)
+
+        with patch("boxmunge.fileutil.os.rename", rename), \
+             patch("boxmunge.fileutil._chown_deploy",
+                   side_effect=lambda p: seen.append(("chown", 0))):
+            atomic_write_text(target, "k: v", mode=0o600)
+        assert seen == [("chown", 0), ("rename", 0o600)]

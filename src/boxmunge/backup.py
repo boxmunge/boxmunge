@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from boxmunge.fileutil import durable_rename
 from boxmunge.paths import BoxPaths
 from boxmunge.system_container import (
     SystemContainerError, SystemTools, connect, platform_owner,
@@ -186,7 +187,9 @@ def encrypt_file(input_path: Path, output_path: Path, paths: BoxPaths) -> None:
                 "-o", tools.path(tmp_path),
                 tools.path(input_path),
             ], timeout=_BACKUP_CMD_TIMEOUT)
-            os.rename(tmp_path, output_path)
+            # age wrote the temp from another container; sync it before it
+            # replaces anything, or a power cut could leave an empty backup.
+            durable_rename(tmp_path, output_path)
         except BaseException:
             tmp_path.unlink(missing_ok=True)
             raise
