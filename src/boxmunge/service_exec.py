@@ -4,11 +4,16 @@
 Killing the `docker compose exec` client (on a timeout, or when boxmunge is
 itself interrupted) does not stop what it started inside the container. A
 hung pg_dump left running keeps its database locks and blocks the next
-restore, and nightly runs would pile up more of them. So every command run
-here carries a unique environment variable, inherited by all of its
-processes, and on timeout or interruption those processes are found by it
-and killed. That needs only sh, grep and /proc in the image, which a
-command run with `sh -c` already implies.
+restore, and nightly runs would pile up more of them.
+
+So the command runs under a small sh wrapper that leads its own process
+group (`docker exec` makes it a session leader; elsewhere it re-executes
+itself under setsid) and records that group's id in a pid file in /dev/shm
+or /tmp. To stop it, a second exec kills the whole group and then checks
+/proc until no live member is left. Anything that cannot be verified (no
+pid file, unreadable /proc, a member that will not die, e.g. one running as
+another uid) is reported as possibly still running, never as stopped.
+A process that leaves the group itself (its own setsid) escapes both.
 """
 
 from __future__ import annotations
@@ -18,19 +23,47 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-_ID_VAR = "BOXMUNGE_EXEC_ID"
-_STOP_SCRIPT = f"""
-left() {{
-  for d in /proc/[0-9]*; do
-    grep -q "{_ID_VAR}=$1" "$d/environ" 2>/dev/null && return 0
+# $0 is this script, $1 the pid file name, $2 the command. No output on
+# stdout, which carries the dump.
+_WRAPPER = r"""
+read -r stat < /proc/$$/stat 2>/dev/null || stat=""
+set -- "$0" "$1" "$2" ${stat##*) }
+if [ "$6" != "$$" ] && command -v setsid >/dev/null 2>&1 && [ -z "$BOXMUNGE_SETSID" ]; then
+  BOXMUNGE_SETSID=1 exec setsid sh -c "$1" "$1" "$2" "$3"
+fi
+pf=""
+if [ "$6" = "$$" ]; then
+  for d in /dev/shm /tmp; do
+    if (umask 077; echo $$ > "$d/$2") 2>/dev/null; then pf="$d/$2"; break; fi
+  done
+fi
+sh -c "$3"
+rc=$?
+[ -n "$pf" ] && rm -f "$pf"
+exit $rc
+"""
+# $1 is the pid file name.
+_STOP_SCRIPT = r"""
+pid=""
+for d in /dev/shm /tmp; do
+  if [ -r "$d/$1" ]; then read -r pid < "$d/$1"; pf="$d/$1"; break; fi
+done
+[ -n "$pid" ] || { echo "no record of the command's process group" >&2; exit 1; }
+[ -r /proc/$$/stat ] || { echo "/proc is not readable" >&2; exit 1; }
+alive() {
+  for f in /proc/[0-9]*/stat; do
+    read -r line < "$f" 2>/dev/null || continue
+    set -- ${line##*) }
+    [ "$3" = "$pid" ] && [ "$1" != Z ] && return 0
   done
   return 1
-}}
-for d in /proc/[0-9]*; do
-  grep -q "{_ID_VAR}=$1" "$d/environ" 2>/dev/null && kill -KILL "${{d#/proc/}}" 2>/dev/null
+}
+kill -s KILL "-$pid" 2>/dev/null
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  alive || { rm -f "$pf"; exit 0; }
+  sleep 1 2>/dev/null
 done
-for i in 1 2 3 4 5; do left "$1" || exit 0; sleep 1; done
-echo "processes still running after SIGKILL" >&2
+echo "process group $pid is still running after SIGKILL" >&2
 exit 1
 """
 _STOP_TIMEOUT = 60
@@ -50,16 +83,14 @@ class ServiceCommandTimeout(Exception):
         super().__init__(f"timed out after {timeout}s; {outcome}")
 
 
-def _exec(project_name: str, service: str, argv: list[str], env: str | None = None) -> list[str]:
-    cmd = ["docker", "compose", "-f", "compose.yml", "-p", project_name, "exec", "-T"]
-    if env is not None:
-        cmd += ["-e", env]
-    return cmd + [service, *argv]
+def _exec(project_name: str, service: str, argv: list[str]) -> list[str]:
+    return ["docker", "compose", "-f", "compose.yml", "-p", project_name,
+            "exec", "-T", service, *argv]
 
 
-def _stop(project_dir: Path, project_name: str, service: str, exec_id: str) -> str | None:
-    """Kill the command's processes in the container; None, or why it failed."""
-    cmd = _exec(project_name, service, ["sh", "-c", _STOP_SCRIPT, "boxmunge-stop", exec_id])
+def _stop(project_dir: Path, project_name: str, service: str, pid_name: str) -> str | None:
+    """Kill the command's process group in the container; None, or why that failed."""
+    cmd = _exec(project_name, service, ["sh", "-c", _STOP_SCRIPT, "boxmunge-stop", pid_name])
     try:
         result = subprocess.run(cmd, cwd=project_dir, capture_output=True,
                                 text=True, timeout=_STOP_TIMEOUT)
@@ -76,19 +107,19 @@ def run_in_service(
 ) -> subprocess.CompletedProcess:
     """``sh -c command`` in the service, bounded by ``timeout``.
 
-    Raises ServiceCommandTimeout when it overruns, after killing it in the
-    container. If boxmunge is interrupted meanwhile, the command is killed
-    there too before the interruption propagates.
+    Raises ServiceCommandTimeout when it overruns, after trying to kill it in
+    the container. If boxmunge is interrupted meanwhile, the command is
+    killed there too before the interruption propagates.
     """
-    exec_id = secrets.token_hex(16)
-    cmd = _exec(project_name, service, ["sh", "-c", command], env=f"{_ID_VAR}={exec_id}")
+    pid_name = f"boxmunge-exec-{secrets.token_hex(16)}.pid"
+    cmd = _exec(project_name, service, ["sh", "-c", _WRAPPER, _WRAPPER, pid_name, command])
     try:
         return subprocess.run(cmd, cwd=project_dir, timeout=timeout, **run_kwargs)
     except subprocess.TimeoutExpired as e:
         raise ServiceCommandTimeout(
-            timeout, _stop(project_dir, project_name, service, exec_id)) from e
+            timeout, _stop(project_dir, project_name, service, pid_name)) from e
     except OSError:
         raise  # nothing started
     except BaseException:
-        _stop(project_dir, project_name, service, exec_id)
+        _stop(project_dir, project_name, service, pid_name)
         raise

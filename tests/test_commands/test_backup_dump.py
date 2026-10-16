@@ -37,7 +37,7 @@ class _Docker:
         if "boxmunge-stop" in cmd:
             self.stops.append(cmd)
             return subprocess.CompletedProcess(cmd, 0, "", "")
-        assert any(a.startswith("BOXMUNGE_EXEC_ID=") for a in cmd), cmd
+        assert any(a.startswith("boxmunge-exec-") for a in cmd), cmd
         return _real_run(self.dump_argv, **{k: v for k, v in kwargs.items() if k != "cwd"})
 
 

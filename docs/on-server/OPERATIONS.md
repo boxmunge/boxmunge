@@ -362,9 +362,11 @@ It lives in `/opt/boxmunge/logs/boxmunge.log`. The first write of each UTC day m
 ## Backups
 
 Back up a single project (dump, encrypt, store locally). The dump command has 10 minutes
-(as does a restore's `restore_command`). Past that the backup fails, the command's processes
-are killed inside the container (the error says so if that failed, and the command may then
-still be running), and the project lock is released. A backup stopped by SIGTERM
+(as does a restore's `restore_command`). Past that the backup fails, the command's process
+group is killed inside the container (the error says so if that could not be verified, and the
+command may then still be running), and the project lock is released. Killing the client side
+narrows but does not eliminate server-side lock collisions: a database such as Postgres
+notices the dead client only on its next socket I/O, so its locks can outlive the kill briefly. A backup stopped by SIGTERM
 (`systemctl stop`, shutdown) cleans up the same way. A plaintext dump left by a process that
 could not clean up (SIGKILL, power loss) is removed, and logged, by the project's next backup
 or restore:
