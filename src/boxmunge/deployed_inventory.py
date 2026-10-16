@@ -38,7 +38,8 @@ class DeployedService:
     # whose service is no longer in the model).
     image: str | None
     buildable: bool
-    # `up` starts it: in the model and not behind an inactive profile.
+    # `up` starts it: in the model, not behind an inactive profile, and not
+    # scaled to zero replicas.
     expected: bool
     containers: tuple[ProjectContainer, ...]
 
@@ -64,6 +65,21 @@ def _services(model: dict[str, Any], what: str) -> dict[str, dict[str, Any]]:
     return services
 
 
+def _scaled_to_zero(svc: dict[str, Any]) -> bool:
+    """`deploy.replicas: 0` or `scale: 0`: `up` creates no container."""
+    deploy = svc.get("deploy")
+    replicas = deploy.get("replicas") if isinstance(deploy, dict) else None
+    if replicas is None:
+        replicas = svc.get("scale")
+    return replicas == 0
+
+
+def startup_image_ref(project: str, svc: DeployedService) -> str:
+    """The image reference `compose up` starts ``svc`` from: its `image:`,
+    or for a build-only service the image Compose built for it."""
+    return svc.image or f"{project}-{svc.name}"
+
+
 def load_deployed_inventory(
     project_dir: Path, compose_files: list[str], project_name: str,
 ) -> DeployedInventory:
@@ -87,7 +103,8 @@ def load_deployed_inventory(
     services = {
         name: DeployedService(
             name=name, image=svc.get("image"), buildable="build" in svc,
-            expected=name in active, containers=tuple(by_service.pop(name, ())),
+            expected=name in active and not _scaled_to_zero(svc),
+            containers=tuple(by_service.pop(name, ())),
         )
         for name, svc in every.items()
     }

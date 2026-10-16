@@ -262,6 +262,7 @@ def format_project_json(
         "status": status,
         "last_scan": (scan_state or {}).get("scanned_at"),
         "scan_basis": (scan_state or {}).get("basis"),
+        "stopped_reason": (scan_state or {}).get("stopped_reason"),
         "findings": findings_payload,
         "quarantine": quarantine_state if quarantined else None,
         "active_suppressions": [

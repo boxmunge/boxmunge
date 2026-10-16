@@ -303,8 +303,8 @@ def _scan_one_project_locked(
     targets, unidentified = inventory.targets, inventory.unidentified
     basis = {"basis": inventory.basis, "stopped_reason": inventory.stopped_reason}
     warnings = _unscanned(unidentified=unidentified) + [
-        f"service {svc!r}: behind an inactive compose profile and has no "
-        f"container — nothing to scan"
+        f"service {svc!r}: not started by `compose up` (inactive profile or "
+        f"zero replicas) and has no container — nothing to scan"
         for svc in inventory.not_started
     ]
     if not targets:

@@ -654,16 +654,22 @@ that is not active: nothing of it is deployed, so it is not scanned and not
 counted as a failure. If such a service has a container (it was started
 with `--profile`), that container is scanned.
 
+A service that `compose up` does not start (behind an inactive profile, or
+scaled to zero with `deploy.replicas: 0` or `scale: 0`) and that has no
+container is not scanned and not counted as a failure.
+
 A project the platform stopped on purpose (paused, CVE-quarantined, or
 stopped by the health monitor, as boxmunge's own state records) is scanned
-differently. Its containers may be gone (a monitor stop removes them, a
+more widely. Its containers may be gone (a monitor stop removes them, a
 prune removes stopped ones) and a pull may have moved its tags, so the scan
-checks the images `compose up` would start when it comes back: whatever
-each service's `image:` names in the local image store now, or for a
-`build:` service the `<project>-<service>` image Compose built. `security
-resume` therefore re-scans exactly what the lift will start. An image that
-is not in the local store makes the scan incomplete. `security status
-<project>` shows which of the two the last scan checked.
+also checks the images `compose up` would start when it comes back:
+whatever each service's `image:` names in the local image store now, or
+for a `build:` service the image Compose built for it. `security resume`
+therefore re-scans exactly what the lift will start. Every container the
+project still has is scanned too, so the scan never covers less than what
+is running. An image `up` would start that is not in the local store makes
+the scan incomplete. `security status <project>` shows which of the two the
+last scan checked.
 
 ## Scan cadence
 

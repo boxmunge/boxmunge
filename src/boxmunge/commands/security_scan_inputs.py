@@ -22,7 +22,7 @@ from boxmunge.cve.policy import PolicyError, Posture, parse_posture
 from boxmunge.cve.scan_state import BASIS_CONTAINERS, BASIS_STARTUP_IMAGES
 from boxmunge.cve.suppressions import Suppression, SuppressionsError, load_suppressions
 from boxmunge.deployed_inventory import (
-    DeployedInventory, InventoryError, load_deployed_inventory,
+    DeployedInventory, InventoryError, load_deployed_inventory, startup_image_ref,
 )
 from boxmunge.docker_run import DockerError
 from boxmunge.lifecycle import is_blocked
@@ -148,7 +148,8 @@ class ImageInventory:
     targets: list[ScanTarget] = field(default_factory=list)
     # service → why its image cannot be identified.
     unidentified: dict[str, str] = field(default_factory=dict)
-    # Services behind an inactive Compose profile with no container.
+    # Services `up` does not start (inactive profile, zero replicas) that
+    # have no container.
     not_started: list[str] = field(default_factory=list)
 
 
@@ -179,8 +180,9 @@ def identify_images(manifest: dict[str, Any], deployed: DeployedInventory) -> Im
     defines them. Each container is scanned by the image it was created
     from, never by the image its tag names now, since a pull moves the tag
     without touching running containers. A service with no container is
-    inactive only behind an inactive profile; otherwise it is unidentified,
-    so the scan is incomplete rather than silently smaller.
+    inactive only when `up` does not start it (an inactive profile, zero
+    replicas); otherwise it is unidentified, so the scan is incomplete
+    rather than silently smaller.
     """
     inventory = ImageInventory(BASIS_CONTAINERS, None)
     for service in _manifest_first(manifest, deployed):
@@ -203,14 +205,18 @@ def identify_images(manifest: dict[str, Any], deployed: DeployedInventory) -> Im
 def identify_startup_images(
     manifest: dict[str, Any], deployed: DeployedInventory, reason: str,
 ) -> ImageInventory:
-    """The images `compose up` would start, for a project the platform
-    stopped on purpose (paused, quarantined, stopped by the health monitor).
+    """For a project the platform stopped on purpose (paused, quarantined,
+    stopped by the health monitor): the image of every container it still
+    has, plus the images `compose up` would start.
 
     Such a project's containers may be gone (a monitor stop removes them; a
     prune removes stopped ones), and a pull may have moved its tags since
     they were created. Bringing it back (resume, recover) starts what each
-    service's image reference or build tag names now, so that is scanned:
-    a resume re-scan then checks exactly what the resume will run.
+    service's image reference names now, so that is scanned, and a resume
+    re-scan checks exactly what the resume will run. A stop marker does not
+    prove nothing runs (a stop can fail after the marker is written; `stop`
+    leaves one-off containers), so every existing container is scanned too:
+    the scan never covers less than what is running.
     """
     inventory = ImageInventory(BASIS_STARTUP_IMAGES, reason)
     for service in _manifest_first(manifest, deployed):
@@ -221,22 +227,20 @@ def identify_startup_images(
                 "no image would be started for it"
             )
             continue
-        if not deployed_svc.expected:
-            # Behind an inactive profile `up` does not start it; a container
-            # left from a removed service is removed by `up --remove-orphans`.
-            if deployed_svc.image or deployed_svc.buildable:
-                inventory.not_started.append(service)
-            continue
-        # Compose tags a built image <project>-<service> unless image: names it.
-        ref = deployed_svc.image or f"{deployed.project}-{service}"
-        image = docker_containers.local_image(ref)
-        if image is None:
-            inventory.unidentified[service] = (
-                f"the image `compose up` would start ({ref}) is not in the "
-                f"local image store; pull or build it, then scan again"
-            )
-            continue
-        inventory.targets.append(ScanTarget(service, image.image_ref))
+        refs = dict.fromkeys(c.image_ref for c in deployed_svc.containers)
+        if deployed_svc.expected:
+            ref = startup_image_ref(deployed.project, deployed_svc)
+            image = docker_containers.local_image(ref)
+            if image is None:
+                inventory.unidentified[service] = (
+                    f"the image `compose up` would start ({ref}) is not in the "
+                    f"local image store; pull or build it, then scan again"
+                )
+            else:
+                refs[image.image_ref] = None
+        elif not refs:
+            inventory.not_started.append(service)
+        inventory.targets.extend(ScanTarget(service, r) for r in refs)
     return inventory
 
 

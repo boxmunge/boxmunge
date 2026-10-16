@@ -311,6 +311,18 @@ class TestUpdateTarget:
         fake_containers.run("caddy", "caddy", _OLD, name="boxmunge-caddy", running=False)
         assert _wait_healthy(_caddy_target(paths), ["caddy"]) == (False, ["caddy"])
 
+    def test_one_shot_that_finished_is_healthy(self, paths, caddy, fake_containers):
+        from boxmunge.container_update import _wait_healthy
+        fake_containers.run("caddy", "migrate", _OLD, running=False, exit_code=0,
+                            restart_policy="no")
+        assert _wait_healthy(_caddy_target(paths), ["caddy", "migrate"]) == (True, [])
+
+    def test_one_shot_that_failed_is_unhealthy(self, paths, caddy, fake_containers):
+        from boxmunge.container_update import _wait_healthy
+        fake_containers.run("caddy", "migrate", _OLD, running=False, exit_code=3,
+                            restart_policy="no")
+        assert _wait_healthy(_caddy_target(paths), ["caddy", "migrate"]) == (False, ["migrate"])
+
     @staticmethod
     def _stateful(paths, monkeypatch, fake_containers):
         _write_project(paths, "stateful", with_backup=True)
@@ -382,7 +394,7 @@ class TestDryRun:
 
 
 class TestImageServices:
-    def test_build_services_and_inactive_profiles_are_not_updated(self, paths):
+    def test_build_inactive_and_scaled_to_zero_services_are_not_updated(self, paths):
         from boxmunge.container_update import image_services
         pdir = paths.project_dir("myapp")
         pdir.mkdir(parents=True)
@@ -391,6 +403,7 @@ class TestImageServices:
             "  web:\n    image: nginx:1.25\n    container_name: custom\n"
             "  app:\n    build: .\n    image: myapp-app\n"
             "  dev:\n    image: dev:1\n    profiles: [dev]\n"
+            "  off:\n    image: off:1\n    deploy:\n      replicas: 0\n"
         )
         target = UpdateTarget(
             name="myapp", project_dir=pdir,

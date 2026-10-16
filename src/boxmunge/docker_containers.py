@@ -40,6 +40,17 @@ class ProjectContainer:
     health: str | None
     # Started by `docker compose run`, not managed by `up`.
     oneoff: bool
+    # Exit code of a container that is not running (None while it runs).
+    exit_code: int | None
+    # Restart policy name: "no", "always", "unless-stopped", "on-failure".
+    restart_policy: str
+
+    @property
+    def finished_cleanly(self) -> bool:
+        """A one-shot container that ran to completion: it exited 0 and its
+        restart policy leaves it exited. Not a failure."""
+        return (not self.running and self.exit_code == 0
+                and self.restart_policy in ("no", "on-failure"))
 
     @property
     def image_ref(self) -> str:
@@ -91,14 +102,21 @@ def _container(doc: dict[str, Any], images: dict[str, dict[str, Any]]) -> Projec
         raise DockerError(f"container {name}: docker reports image {image_id!r}, not an image ID")
     state = doc.get("State") or {}
     health = (state.get("Health") or {}).get("Status")
+    running = state.get("Running") is True
+    exit_code = state.get("ExitCode")
+    if not running and not isinstance(exit_code, int):
+        raise DockerError(f"container {name}: docker reports exit code {exit_code!r}")
+    policy = ((doc.get("HostConfig") or {}).get("RestartPolicy") or {}).get("Name") or "no"
     return ProjectContainer(
         name=name,
         service=service,
         image_id=image_id,
         repo_digests=tuple(images[image_id].get("RepoDigests") or ()),
-        running=state.get("Running") is True,
+        running=running,
         health=health if isinstance(health, str) and health else None,
         oneoff=str(labels.get(_ONEOFF_LABEL, "")).lower() == "true",
+        exit_code=None if running else exit_code,
+        restart_policy=policy,
     )
 
 

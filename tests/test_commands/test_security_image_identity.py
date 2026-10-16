@@ -94,6 +94,13 @@ def test_profile_service_without_container_is_inactive(tmp_path, running):
     assert inv.targets == [] and inv.unidentified == {} and inv.not_started == ["migrate"]
 
 
+def test_service_scaled_to_zero_is_inactive(tmp_path, running):
+    compose = {"services": {"a": {"image": "a:1", "deploy": {"replicas": 0}},
+                            "b": {"image": "b:1", "scale": 0}}}
+    inv = _identify(tmp_path, compose)
+    assert inv.unidentified == {} and inv.not_started == ["a", "b"]
+
+
 def test_profile_service_with_a_container_is_scanned(tmp_path, running):
     running("migrate", _WEB_ID)
     compose = {"services": {"migrate": {"image": "tools:1", "profiles": ["tools"]}}}

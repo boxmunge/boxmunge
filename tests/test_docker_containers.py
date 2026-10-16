@@ -17,14 +17,16 @@ local_image = docker_containers.local_image
 _IMG = "sha256:" + "a" * 64
 
 
-def _container(name, service, *, image=_IMG, running=True, health=None, oneoff=False):
+def _container(name, service, *, image=_IMG, running=True, health=None, oneoff=False,
+               restart="unless-stopped"):
     labels = {"com.docker.compose.project": "demo", "com.docker.compose.service": service}
     if oneoff:
         labels["com.docker.compose.oneoff"] = "True"
-    state = {"Running": running}
+    state = {"Running": running, "ExitCode": 0}
     if health:
         state["Health"] = {"Status": health}
-    return {"Name": f"/{name}", "Image": image, "Config": {"Labels": labels}, "State": state}
+    return {"Name": f"/{name}", "Image": image, "Config": {"Labels": labels}, "State": state,
+            "HostConfig": {"RestartPolicy": {"Name": restart}}}
 
 
 @pytest.fixture
@@ -70,6 +72,15 @@ def test_a_locally_built_image_is_named_by_its_id(daemon):
     daemon["containers"] = [_container("demo-web-1", "web")]
     (web,) = project_containers("demo")
     assert web.image_ref == _IMG
+
+
+def test_a_one_shot_that_exited_zero_finished_cleanly(daemon):
+    daemon["containers"] = [_container("demo-migrate-1", "migrate", running=False, restart="no"),
+                            _container("demo-web-1", "web", running=False)]
+    migrate, web = project_containers("demo")
+    assert (migrate.exit_code, migrate.finished_cleanly) == (0, True)
+    # Exited 0 but its policy would restart it: not a finished one-shot.
+    assert not web.finished_cleanly
 
 
 def test_one_off_containers_are_marked(daemon):

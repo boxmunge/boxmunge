@@ -132,8 +132,9 @@ def _health_round(
     """One look at the services' containers: (still settling, unhealthy).
 
     A service without a container, or with one that is not running or
-    reports unhealthy, is unhealthy. One without a healthcheck settles once
-    the no-healthcheck grace period is over.
+    reports unhealthy, is unhealthy, except a one-shot container that ran to
+    completion (exited 0, not restarted by its policy). One without a
+    healthcheck settles once the no-healthcheck grace period is over.
     """
     by_service: dict[str, list[ProjectContainer]] = defaultdict(list)
     for container in _managed(docker_containers.project_containers(target.name)):
@@ -141,10 +142,10 @@ def _health_round(
     settling: list[str] = []
     unhealthy: list[str] = []
     for name in services:
-        containers = by_service.get(name, [])
-        if not containers or any(
-            not c.running or c.health == "unhealthy" for c in containers
-        ):
+        containers = [c for c in by_service.get(name, []) if not c.finished_cleanly]
+        if not by_service.get(name):
+            unhealthy.append(name)
+        elif any(not c.running or c.health == "unhealthy" for c in containers):
             unhealthy.append(name)
         elif any(c.health == "starting" or (c.health is None and in_grace)
                  for c in containers):

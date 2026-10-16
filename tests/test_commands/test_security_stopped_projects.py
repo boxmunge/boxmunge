@@ -61,11 +61,13 @@ def test_running_project_is_scanned_by_its_containers(box, fake_containers):
 
 
 def test_paused_project_scans_what_resume_would_start(box, fake_containers):
-    """The paused pre-pull moved the tag; resume would start the pulled image."""
+    """The paused pre-pull moved the tag; resume would start the pulled image.
+    The container the marker did not stop (a failed `compose stop`, say)
+    still runs the old one, so that is scanned too."""
     write_paused_state("demo", box)
     fake_containers.images["demo-web:1"] = LocalImage(_PULLED, ())
     scan = _scan(box)
-    assert box.scanned == [_PULLED, _BUILT] and scan.complete
+    assert box.scanned == [_RUNNING, _PULLED, _BUILT] and scan.complete
     state = read_scan_state(box.project_scan_state("demo"))
     assert (state["basis"], state["stopped_reason"]) == (BASIS_STARTUP_IMAGES, "paused")
 
@@ -76,6 +78,15 @@ def test_quarantined_project_without_containers_is_still_complete(box, fake_cont
     scan = _scan(box)
     assert box.scanned == [_RUNNING, _BUILT] and scan.complete
     assert (scan.basis, scan.stopped_reason) == (BASIS_STARTUP_IMAGES, "quarantined")
+
+
+def test_stopped_basis_never_covers_less_than_the_containers(box, fake_containers):
+    """One-off and orphan containers survive `compose stop`; they are scanned."""
+    seed_quarantine(box)
+    fake_containers.run("demo", "web", _PULLED, oneoff=True)
+    fake_containers.run("demo", "retired", _BUILT)
+    _scan(box)
+    assert box.scanned == [_RUNNING, _PULLED, _BUILT, _BUILT]
 
 
 def test_monitor_stopped_project_scans_what_recover_would_start(box, fake_containers):
@@ -133,3 +144,17 @@ def test_resume_refuses_when_what_it_would_start_is_missing(
     assert cmd_security_resume(["demo"], box) == 1
     assert resume == [] and is_quarantined("demo", box)
     assert "(demo-web:1) is not in the local image store" in capsys.readouterr().err
+
+
+def test_status_json_names_the_scan_basis(box):
+    from boxmunge.commands.security_views import format_project_json
+    from boxmunge.manifest import load_manifest
+    write_paused_state("demo", box)
+    _scan(box)
+    payload = json.loads(format_project_json(
+        load_manifest(box.project_manifest("demo")), posture="balanced",
+        dangerously_disable_quarantine=False, quarantined=False, quarantine_state=None,
+        scan_state=read_scan_state(box.project_scan_state("demo")), active_suppressions=(),
+    ))
+    assert (payload["cve"]["scan_basis"], payload["cve"]["stopped_reason"]) == (
+        BASIS_STARTUP_IMAGES, "paused")

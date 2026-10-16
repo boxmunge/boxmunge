@@ -41,32 +41,32 @@ def deployed(tmp_path_factory):
     tags = {svc: f"{name}-img-{svc}:1" for svc in _SERVICES}
     ids = {svc: build_image(tags[svc], f"{name}-{svc}") for svc in _SERVICES}
     (project_dir / "db.yml").write_text(
-        f"services:\n  db:\n    image: {tags['db']}\n    command: [sleep, '3600']\n")
+        f"services:\n  db:\n    image: {tags['db']}\n    command: [sleep, '3600']\n    network_mode: none\n")
     (project_dir / "base.yml").write_text(
-        f"services:\n  base:\n    image: {tags['ext']}\n    command: [sleep, '3600']\n")
+        f"services:\n  base:\n    image: {tags['ext']}\n    command: [sleep, '3600']\n    network_mode: none\n")
     (project_dir / "compose.yml").write_text(
         "include:\n  - db.yml\n"
         "services:\n"
         "  web:\n"
         f"    image: ${{WEB_IMAGE:-{tags['web']}}}\n"
         f"    container_name: {name}-custom-web\n"
-        "    command: [sleep, '3600']\n"
+        "    command: [sleep, '3600']\n    network_mode: none\n"
         "  worker:\n"
         f"    image: {tags['worker']}\n"
-        "    command: [sleep, '3600']\n"
+        "    command: [sleep, '3600']\n    network_mode: none\n"
         "    deploy:\n      replicas: 2\n"
         "  ext:\n"
         "    extends:\n      file: base.yml\n      service: base\n"
         "  dev:\n"
         f"    image: {tags['dev']}\n"
-        "    profiles: [dev]\n"
+        "    profiles: [dev]\n    network_mode: none\n"
         "  tools:\n"
         f"    image: {tags['tools']}\n"
         "    profiles: [tools]\n"
-        "    command: [sleep, '3600']\n"
+        "    command: [sleep, '3600']\n    network_mode: none\n"
         "  gone:\n"
         f"    image: {tags['gone']}\n"
-        "    command: [sleep, '3600']\n")
+        "    command: [sleep, '3600']\n    network_mode: none\n")
     extra_tags = [f"{name}-moved:1", f"{name}-worker-new:1"]
     try:
         compose(project_dir, name, "up", "-d")
@@ -176,26 +176,74 @@ def test_quarantined_project_without_containers_scans_what_resume_starts(tmp_pat
     (project_dir / "Dockerfile").write_text(f"FROM busybox:1.36\nLABEL bm.test={name}-app\n")
     (project_dir / "compose.yml").write_text(
         "services:\n"
-        f"  web:\n    image: {web}\n    command: [sleep, '3600']\n"
-        "  app:\n    build: .\n    command: [sleep, '3600']\n")
+        f"  web:\n    image: {web}\n    command: [sleep, '3600']\n    network_mode: none\n"
+        "  app:\n    build: .\n    command: [sleep, '3600']\n    network_mode: none\n")
     try:
         compose(project_dir, name, "up", "-d", "--build")
         compose(project_dir, name, "down")
         new_id = build_image(newer, f"{name}-web-new")
         docker("tag", newer, web)
         seed_quarantine(paths, name)
-        scanned: list[str] = []
-        mp = pytest.MonkeyPatch()
-        mp.setattr(security_scan_core, "scan_image",
-                   lambda ref, timeout: scanned.append(ref) or scan_result(ref))
-        try:
-            result = scan_one_project(
-                paths, name, audit_only=True,
-                kev=KevCatalog(cve_ids=frozenset(), fetched_at=datetime.now(timezone.utc)),
-            )
-        finally:
-            mp.undo()
+        result, scanned = _audit_scan(paths, name)
         assert result.complete and result.stopped_reason == "quarantined"
-        assert {_identity(ref) for ref in scanned} == {new_id, image_id(f"{name}-app")}
+        assert scanned == {new_id, image_id(f"{name}-app")}
     finally:
         tear_down(project_dir, name, [web, newer, f"{name}-app"])
+
+
+def _audit_scan(paths, name):
+    scanned: list[str] = []
+    mp = pytest.MonkeyPatch()
+    mp.setattr(security_scan_core, "scan_image",
+               lambda ref, timeout: scanned.append(ref) or scan_result(ref))
+    try:
+        result = scan_one_project(
+            paths, name, audit_only=True,
+            kev=KevCatalog(cve_ids=frozenset(), fetched_at=datetime.now(timezone.utc)),
+        )
+    finally:
+        mp.undo()
+    return result, {_identity(ref) for ref in scanned}
+
+
+def test_a_stop_marker_never_hides_a_running_container(tmp_path):
+    """The pause marker is written first; if the stop then fails the old
+    container keeps running. After a tag move, both it and what resume would
+    start are scanned."""
+    from boxmunge.pause import write_paused_state
+    name = f"bminv-{uuid.uuid4().hex[:8]}"
+    paths = make_box(tmp_path, projects=(name,))
+    project_dir = paths.project_dir(name)
+    web, newer = f"{name}-img-web:1", f"{name}-img-web-new:1"
+    old_id = build_image(web, f"{name}-web")
+    (project_dir / "compose.yml").write_text(
+        f"services:\n  web:\n    image: {web}\n    command: [sleep, '3600']\n    network_mode: none\n")
+    try:
+        compose(project_dir, name, "up", "-d")
+        write_paused_state(name, paths)
+        new_id = build_image(newer, f"{name}-web-new")
+        docker("tag", newer, web)
+        result, scanned = _audit_scan(paths, name)
+        assert result.stopped_reason == "paused" and result.complete
+        assert scanned == {old_id, new_id}
+    finally:
+        tear_down(project_dir, name, [web, newer])
+
+
+def test_services_scaled_to_zero_are_not_expected(tmp_path):
+    name = f"bminv-{uuid.uuid4().hex[:8]}"
+    paths = make_box(tmp_path, projects=(name,))
+    project_dir = paths.project_dir(name)
+    web = f"{name}-img-web:1"
+    web_id = build_image(web, f"{name}-web")
+    (project_dir / "compose.yml").write_text(
+        "services:\n"
+        f"  web:\n    image: {web}\n    command: [sleep, '3600']\n    network_mode: none\n"
+        f"  spare:\n    image: {web}\n    deploy:\n      replicas: 0\n    network_mode: none\n"
+        f"  idle:\n    image: {web}\n    scale: 0\n    network_mode: none\n")
+    try:
+        compose(project_dir, name, "up", "-d")
+        result, scanned = _audit_scan(paths, name)
+        assert result.complete and scanned == {web_id}
+    finally:
+        tear_down(project_dir, name, [web])

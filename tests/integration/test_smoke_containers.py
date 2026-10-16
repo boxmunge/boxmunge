@@ -21,7 +21,7 @@ def project(tmp_path):
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "smoke.sh").write_text(
         "test ! -e /tmp/broken || { echo \"$(hostname) broken\" >&2; exit 1; }\n")
-    common = ("    command: [sleep, '3600']\n"
+    common = ("    command: [sleep, '3600']\n    network_mode: none\n"
               "    volumes: ['./scripts:/boxmunge-scripts:ro']\n")
     (tmp_path / "compose.yml").write_text(
         "services:\n"

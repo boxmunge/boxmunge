@@ -80,7 +80,8 @@ class FakeContainers:
 
     def run(self, project: str, service: str, image_id: str, *,
             repo_digests: tuple[str, ...] = (), name: str | None = None,
-            running: bool = True, health: str | None = None, oneoff: bool = False):
+            running: bool = True, health: str | None = None, oneoff: bool = False,
+            exit_code: int | None = None, restart_policy: str = "unless-stopped"):
         from boxmunge.docker_containers import ProjectContainer
 
         existing = self.by_project.setdefault(project, [])
@@ -89,6 +90,9 @@ class FakeContainers:
             name=name or f"{project}-{service}-{replica}",
             service=service, image_id=image_id, repo_digests=tuple(repo_digests),
             running=running, health=health, oneoff=oneoff,
+            # A stopped container failed unless the test says otherwise.
+            exit_code=None if running else (1 if exit_code is None else exit_code),
+            restart_policy=restart_policy,
         )
         existing.append(container)
         return container
@@ -111,6 +115,7 @@ class FakeContainers:
                 name=f"{project}-{svc}-1", service=svc,
                 image_id=self._declared_id(spec["image"]),
                 repo_digests=(spec["image"],), running=True, health=None, oneoff=False,
+                exit_code=None, restart_policy="unless-stopped",
             )
             for svc, spec in services.items()
             if isinstance(spec, dict) and isinstance(spec.get("image"), str)
