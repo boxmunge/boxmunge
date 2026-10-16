@@ -32,7 +32,7 @@ from boxmunge.paths import BoxPaths
 COMPONENT = "auto-update"
 REMIND_AFTER = timedelta(hours=24)
 _STATE_KEYS = {"checked_at", "problems", "alerted"}
-TITLE = "[boxmunge] OS updates are not being installed"
+TITLE = "OS updates are not being installed"
 
 
 class OsUpdateStateError(ValueError):

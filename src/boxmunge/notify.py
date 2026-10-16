@@ -16,6 +16,9 @@ True only when Pushover accepted the message, and logs why otherwise:
 
 Callers that track "alert sent" state record it only on True, so an
 undelivered alert is retried on their next run.
+
+Every title starts with ``[<hostname>]`` so an operator with several boxes
+knows which one is talking. Callers pass the title without it.
 """
 from __future__ import annotations
 
@@ -94,7 +97,8 @@ def notify(
 ) -> bool:
     """Send a Pushover notification. True only if it was delivered."""
     try:
-        user_key, app_token = pushover_credentials(load_config(paths))
+        config = load_config(paths)
+        user_key, app_token = pushover_credentials(config)
     except ConfigError as e:
         log_error(component, f"Alert not sent ({title}): cannot load config: {e}",
                   paths, project=project)
@@ -102,7 +106,8 @@ def notify(
     if not user_key or not app_token:
         _log_unconfigured(paths, component, title, project)
         return False
-    if not send_notification(user_key, app_token, title, body, priority=priority):
+    if not send_notification(user_key, app_token, f"[{config['hostname']}] {title}",
+                             body, priority=priority):
         log_error(component, f"Alert not sent ({title}): Pushover request failed",
                   paths, project=project)
         return False

@@ -716,7 +716,7 @@ suppressions file, or a quarantine action that could not complete.
   carries on. A corrupt prior scan state (`state/scans/<project>.json`) is
   logged and treated as "no prior scan"; this scan overwrites it.
 - Every run with an incomplete or failed project sends **one** priority-1
-  alert, `[boxmunge] CVE scan incomplete — N projects not fully scanned`,
+  alert, `[<hostname>] CVE scan incomplete — N projects not fully scanned`,
   listing each project and image. Single-project scans alert too.
 - `boxmunge health` has a `cve-scan` check that warns when any deployed
   project has not been scanned in 36 hours, has never been scanned, or
@@ -744,7 +744,7 @@ projects scanned, the breaker **trips** when either
 
 When it trips, every new non-KEV quarantine in the run is **held**: the
 projects keep running, their scan state still records the `QUARANTINE`
-dispositions, and **one** priority-1 alert (`[boxmunge] Circuit breaker
+dispositions, and **one** priority-1 alert (`[<hostname>] Circuit breaker
 held <N> quarantines`) lists the held projects by CVE. The held set is
 kept in `state/cve-breaker.json`, shown by `boxmunge security` (and
 `held_by_breaker` in `--json`), and makes `security scan` exit 2. Later
@@ -811,11 +811,11 @@ several findings are involved the title names the worst and adds
 | `[boxmunge:<project>] <N> fixable CVE findings over the quarantine gate — rebuild to apply the fix` | normal |
 | `[boxmunge:<project>] <N> new CVE findings (informational)` (digest, top 5 listed) | normal |
 | `[boxmunge:<project>] Suppression expired — <CVE>` | priority-1 |
-| `[boxmunge] Host suppression expired — <CVE>` (once per fleet scan) | priority-1 |
-| `[boxmunge] CVE policy enforcement begins in <N>h` (one-time) | priority-1 |
-| `[boxmunge] CISA KEV feed stale — exploitation defense degraded` | priority-1 |
-| `[boxmunge] CISA KEV refresh rejected — previous catalog kept` | priority-1 |
-| `[boxmunge] CVE scan incomplete — <N> projects not fully scanned` | priority-1 |
+| `[<hostname>] Host suppression expired — <CVE>` (once per fleet scan) | priority-1 |
+| `[<hostname>] CVE policy enforcement begins in <N>h` (one-time) | priority-1 |
+| `[<hostname>] CISA KEV feed stale — exploitation defense degraded` | priority-1 |
+| `[<hostname>] CISA KEV refresh rejected — previous catalog kept` | priority-1 |
+| `[<hostname>] CVE scan incomplete — <N> projects not fully scanned` | priority-1 |
 
 Alerting is best-effort. The durable record is the on-disk scan state
 under `state/scans/<project>.json`. If Pushover isn't configured, or

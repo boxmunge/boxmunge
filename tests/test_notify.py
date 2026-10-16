@@ -80,3 +80,12 @@ def test_malformed_pushover_block_is_an_error(paths):
     assert notify(paths, "t", "b", component="health") is False
     entries = [json.loads(line) for line in paths.log_file.read_text().splitlines()]
     assert any(e["level"] == "error" and "must be a mapping" in e["msg"] for e in entries)
+
+
+def test_every_title_names_the_box(paths):
+    """An operator with several boxes must know which one is talking."""
+    paths.config_file.parent.mkdir(parents=True, exist_ok=True)
+    paths.config_file.write_text(BASE + "pushover:\n  user_key: u\n  app_token: a\n")
+    with patch("boxmunge.notify.send_notification", return_value=True) as send:
+        assert notify(paths, "OS updates are not being installed", "b", component="x")
+    assert send.call_args.args[2] == "[box.example.com] OS updates are not being installed"

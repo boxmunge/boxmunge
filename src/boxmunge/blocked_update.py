@@ -82,7 +82,7 @@ def alert_text(blocked: dict[str, Any], current: str) -> tuple[str, str]:
     """(title, body) of the blocked-update alert."""
     word = CLASS_WORD[blocked["class"]]
     version = blocked["version"]
-    title = f"[boxmunge] {word} release {version} needs a manual upgrade"
+    title = f"{word} release {version} needs a manual upgrade"
     body = (f"{word} release {version} cannot be installed automatically: "
             f"{describe_reason(blocked, current)}. Read the release notes, then run "
             f"`upgrade`.\n{blocked['url']}")
