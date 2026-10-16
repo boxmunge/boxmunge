@@ -1,0 +1,10 @@
+// Managed by boxmunge (bootstrap/50unattended-upgrades-debian).
+// Debian security updates only. Origins-Pattern takes "key=value" matches;
+// the legacy Allowed-Origins list takes "origin:archive" and crashes
+// unattended-upgrade on anything else.
+Unattended-Upgrade::Origins-Pattern {
+    "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+};
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
