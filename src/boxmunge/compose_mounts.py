@@ -34,6 +34,10 @@ _SYSTEM_DENIED_PATHS: tuple[str, ...] = (
 
 _ENV_SUBSTITUTION_RE = re.compile(r"\$\w|\$\{")
 
+# Long-syntax mount types whose source is checked (bind) or is not a host
+# path. `npipe` and `cluster` name host or cluster resources by other means.
+_MOUNT_TYPES: frozenset[str] = frozenset({"bind", "volume", "tmpfs", "image"})
+
 # Smoke-test mount sources injected by the overlay generator: production
 # mounts its own copy of its release's scripts (see release.sync_live_scripts),
 # staging the staged release's scripts in the project dir. Must be ignored
@@ -163,6 +167,14 @@ def check_volumes(
         return []
     hits: list[tuple[str, str]] = []
     for entry in volumes:
+        if isinstance(entry, dict) and entry.get("type") not in _MOUNT_TYPES:
+            hits.append((
+                str(entry),
+                f"uses mount type {entry.get('type')!r}, whose source boxmunge "
+                f"cannot check; use bind (inside the project), volume, tmpfs "
+                f"or image",
+            ))
+            continue
         src = volume_source(entry)
         if src is None:
             continue

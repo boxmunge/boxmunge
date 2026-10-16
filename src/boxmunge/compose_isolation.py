@@ -6,11 +6,13 @@ keep one project's compose file from reaching another project: it may
 declare and join only its own networks (any alias is fine there: a
 project-local network cannot collide with another project's), use only
 its own named volumes, and
-read host files (secrets, configs, build contexts) only from inside its
-own directory. It may not publish ports on the host either; a port that
-must be published is declared in the manifest (see `published_ports`). The shared `boxmunge-proxy` network is attached by
-boxmunge's overlay for routed services; a compose file may not join it
-itself.
+read host files (secrets, configs, build inputs; see compose_build) only
+from inside its own directory. It may not publish ports on the host
+either; a port that must be published is declared in the manifest (see
+`published_ports`). Nor may it hand a service to anything outside its
+containers (`provider`, `models`). The shared `boxmunge-proxy` network is
+attached by boxmunge's overlay for routed services; a compose file may
+not join it itself, by `networks:` or by `network_mode`.
 
 Unlike the hardening rules, these are not relaxed by `security.profile:
 off`: opting a service out of container hardening does not entitle it to
@@ -21,6 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from boxmunge.compose_build import build_problems
 from boxmunge.compose_mounts import host_path_forms, outside_roots
 
 PROXY_NETWORK = "boxmunge-proxy"
@@ -121,6 +124,30 @@ def _check_file_refs(doc: dict[str, Any], base_dir: Path, roots: tuple[Path, ...
     return problems
 
 
+_MODELS_PROBLEM = (
+    "{where} models: runs AI models through Docker Model Runner, outside the "
+    "project's containers, which boxmunge does not manage. Remove it and run "
+    "the model server as an ordinary service from an image."
+)
+
+
+def _check_network_mode(svc_name: str, svc: dict[str, Any]) -> list[str]:
+    """network_mode accepts any Docker network name, so only `none`,
+    `service:<name>` and `host` (a hardening question) stay in the project.
+    Matched exactly, as Docker matches them: `Host` would name a network."""
+    mode = svc.get("network_mode")
+    if mode is None:
+        return []
+    if isinstance(mode, str) and (mode in ("none", "host") or mode.startswith("service:")):
+        return []
+    return [
+        f"service {svc_name}: network_mode {mode!r} joins a network or "
+        f"container outside this compose file, which may be another "
+        f"project's. Remove it and use the project's own networks, or use "
+        f"service:<name> for a service in this file, or none."
+    ]
+
+
 def _service_networks(svc: dict[str, Any]) -> dict[str, Any]:
     nets = svc.get("networks") or {}
     if isinstance(nets, list):
@@ -165,14 +192,16 @@ def _check_service(
                 f"container's volumes, which may be another project's. Name a "
                 f"service in this compose file instead."
             )
-    build = svc.get("build")
-    context = build.get("context") if isinstance(build, dict) else build
-    if isinstance(context, str) and "://" not in context and not context.startswith("git@"):
-        if outside_roots(context, base_dir, roots):
-            problems.append(
-                f"service {svc_name}: build context {context!r} is outside the "
-                f"project directory. Keep the build context inside the project."
-            )
+    problems += _check_network_mode(svc_name, svc)
+    if "provider" in svc:
+        problems.append(
+            f"service {svc_name}: provider: hands the service to an executable "
+            f"on the host, which runs outside any container as whoever runs the "
+            f"deploy. Remove it and run the service from an image."
+        )
+    if "models" in svc:
+        problems.append(_MODELS_PROBLEM.format(where=f"service {svc_name}:"))
+    problems += build_problems(svc_name, svc.get("build"), base_dir, roots)
     return problems
 
 
@@ -182,6 +211,8 @@ def isolation_problems(
     """Return every cross-project isolation violation in a compose document."""
     problems = _check_networks(doc, project) + _check_volumes(doc, project)
     problems += _check_file_refs(doc, base_dir, roots)
+    if doc.get("models"):
+        problems.append(_MODELS_PROBLEM.format(where="top-level"))
     networks = doc.get("networks")
     declared = set(networks) if isinstance(networks, dict) else set()
     services = doc.get("services") or {}

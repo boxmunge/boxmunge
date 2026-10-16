@@ -182,16 +182,19 @@ like any other.
 |---|---|
 | `privileged: true` | Full host access. |
 | `privileged`, `read_only`, or `init` given as anything but an unquoted `true`/`false` | A quoted `"true"` is not checked as a boolean. Write the bare value. |
-| `pid`, `ipc`, `network_mode`, `uts`, `userns_mode`, `cgroupns_mode` set to `host` | Shares a host namespace. |
-| `pid`, `ipc`, `network_mode` set to `container:<name>` | Joins another container's namespace, which may be another project's. Use `service:<name>` for a service in the same file. |
+| `pid`, `ipc`, `network_mode`, `uts`, `userns_mode`, `cgroup` set to `host` | Shares a host namespace. |
+| `pid`, `ipc` set to `container:<name>` | Joins another container's namespace, which may be another project's. Use `service:<name>` for a service in the same file. |
+| `use_api_socket: true` | Hands the container the Docker daemon's API, which can start privileged containers with any host path mounted. Remove it. |
+| `privileged` on a `post_start` or `pre_stop` hook, or on a `develop.watch` `exec` hook | The hook regains every capability the hardening drops. Remove `privileged:`; hooks run with the service's own privileges. |
 | `cap_add` of a denied capability | See the denylist below. |
 | `security_opt` with `unconfined`, `label:disable`, `no-new-privileges:false`, or a custom `seccomp` profile file | Disables a kernel confinement layer. `seccomp=runtime/default` is fine. |
-| `devices`, `device_cgroup_rules` | Exposes host devices. |
+| `devices`, `device_cgroup_rules`, `gpus`, `deploy.resources.reservations.devices` | Exposes host devices. |
 | `cgroup_parent` that is absolute or contains `..` | Escapes the container cgroup. |
 | A bind mount of a protected host path, anything inside one, or any parent of one | Protected: the Docker and containerd sockets and state, `/proc`, `/sys`, `/dev`, `/etc`, `/boot`, `/root`, `/home`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, and the boxmunge root outside `projects/`. Paths are compared after `~` expansion, joining relative paths to the project directory, collapsing `..` and `//`, and resolving symlinks, so `/run` (the parent of `/run/docker.sock`), `/tmp/../etc`, and `../../config` are all refused. |
 | `${VAR}` or `$VAR` inside a bind-mount source | The path cannot be verified. Write it literally. |
 | A bind mount outside the project directory | One project must not read or write another's files. Use paths such as `./data`; an absolute path is fine if it is inside `/opt/boxmunge/projects/<project>/`. Symlinks are resolved before the check. |
-| `build.network: host`, `build.privileged` | Build steps run in a container too; keep them off the host network and unprivileged. |
+| `build.network: host`, `build.privileged`, `build.entitlements` | Build steps run in a container too; keep them off the host network and unprivileged. |
+| A long-syntax mount of `type: npipe` or `type: cluster` | Its source cannot be checked. Use `bind` (inside the project), `volume`, `tmpfs` or `image`. |
 
 ### Capability denylist
 
@@ -222,9 +225,13 @@ They apply to every service and are **not** relaxed by `profile: "off"`.
 | A service joining a network the file does not declare | Declare it, or use `default`. Any alias is fine on the project's own networks; they cannot collide with another project's. |
 | An `external: true` volume, or a volume with `driver`/`driver_opts` | Use a plain named volume (`data: {}`) or a bind mount inside the project. |
 | `external_links`, or `volumes_from: [container:<name>]` | Reach services in the same file by service name; name a service in `volumes_from`. |
-| A `secrets`/`configs` `file:` or a `build` context outside the project directory | Keep the file or context inside the project. Secret values belong in `secrets set`. |
+| A `secrets`/`configs` `file:` outside the project directory | Keep the file inside the project. Secret values belong in `secrets set`. |
+| A build input outside the project: the `build` context, any `build.additional_contexts` path, or the `build.dockerfile` (resolved against the context, symlinks followed) | Keep every build input inside the project. Remote git or HTTP(S) contexts, and `docker-image://<image>` or `service:<name>` additional contexts, are fine. |
+| Any other build context form (`oci-layout://`, `file://`, ...), `build.ssh`, a `type=local` (or other non-registry, non-inline) `build.cache_from`/`cache_to`, a `build.network` naming a Docker network, or a build key boxmunge does not know | These read host files or credentials, or reach another project's network. Vendor private dependencies into the project, use `type=registry` or `type=inline` caches, and leave `build.network` unset or `none`. |
+| `network_mode` other than `none`, `host` (a hardening rule above) or `service:<name>` | Any other value, `bridge` included, joins a Docker network or container by name, which may be another project's. Use the project's own networks. |
+| `provider:` on a service, or `models:` (top-level or on a service) | These hand the service to something outside its containers; a provider is an executable run on the host as whoever deploys. Run the service from an image. |
 | `ports:` on any service | Remove it: routed traffic reaches the service through Caddy. A port that must be published goes in the manifest, below. |
-| An `include:`, `extends: file:`, or `env_file:` path outside the project directory (followed through nested includes), remote, or written with `${VAR}` | Keep every compose, extends, include, and env file inside the project, and write the path literally. |
+| An `include:`, `extends: file:`, `env_file:`, or `label_file:` path outside the project directory (followed through nested includes), remote, or written with `${VAR}` | Keep every compose, extends, include, env and label file inside the project, and write the path literally. |
 
 ### Published ports (opt-in)
 

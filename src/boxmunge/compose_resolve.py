@@ -10,9 +10,9 @@ So the validator and the overlay generator work on the output of
 will start.
 
 What `config` output cannot show is where it read things from: `env_file`
-contents are inlined and `extends`/`include` are merged away. Those file
-references are checked on the literal files instead, following every
-include and extends file they lead to.
+and `label_file` contents are inlined and `extends`/`include` are merged
+away. Those file references are checked on the literal files instead,
+following every include and extends file they lead to.
 """
 from __future__ import annotations
 
@@ -183,8 +183,8 @@ class _ReferenceWalk:
             norm, _ = host_path_forms(ref, base)
             self.problems.append(
                 f"{what} {ref!r} resolves to {norm}, outside the project "
-                f"directory. Keep every compose, extends, include and env_file "
-                f"path inside the project."
+                f"directory. Keep every compose, extends, include, env_file and "
+                f"label_file path inside the project."
             )
             return False
         return True
@@ -224,10 +224,13 @@ class _ReferenceWalk:
                 self.visit(Path(host_path_forms(ext_file, base)[0]))
             for ref in _env_file_paths(svc.get("env_file")):
                 self._confined(f"{path.name}: service {svc_name}: env_file", ref, base)
+            for ref in _as_list(svc.get("label_file")):
+                self._confined(f"{path.name}: service {svc_name}: label_file", ref, base)
 
 
 def reference_problems(compose_path: Path, roots: tuple[Path, ...]) -> list[str]:
-    """Return every include/extends/env_file reference that leaves the project."""
+    """Return every include/extends/env_file/label_file reference that leaves
+    the project."""
     walk = _ReferenceWalk(roots)
     walk.visit(compose_path)
     return walk.problems
