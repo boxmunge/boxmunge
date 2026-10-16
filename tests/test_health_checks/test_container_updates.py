@@ -52,3 +52,17 @@ class TestContainerUpdatesCheck:
         _write_state(paths, "caddy", "no_change")
         c = check_container_updates(paths)
         assert c.status == "ok"
+
+    @pytest.mark.parametrize("content", ["{not json", '{"last_check": "yesterday"}',
+                                         '{"last_check": "2026-10-16T03:00:00"}', "[]"])
+    def test_unreadable_state_is_reported_not_skipped(self, paths, content):
+        _write_state(paths, "caddy", "succeeded")
+        paths.container_update_target_state("myapp").write_text(content)
+        c = check_container_updates(paths)
+        assert c.status == "warn"
+        assert "unreadable state" in c.detail and "myapp" in c.detail
+
+    def test_z_suffix_timestamps_are_read(self, paths):
+        _write_state(paths, "caddy", "succeeded",
+                     last_check_iso=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        assert check_container_updates(paths).status == "ok"

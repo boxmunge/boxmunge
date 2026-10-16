@@ -32,42 +32,37 @@ def check_container_updates(paths: BoxPaths) -> HealthCheck:
 
     failed: list[str] = []
     stale: list[str] = []
-    now = datetime.now(timezone.utc)
-    threshold = now - timedelta(hours=_STALE_THRESHOLD_HOURS)
-
-    import logging
-    logger = logging.getLogger("boxmunge")
+    unreadable: list[str] = []
+    threshold = datetime.now(timezone.utc) - timedelta(hours=_STALE_THRESHOLD_HOURS)
 
     for state_file in sorted(state_dir.glob("*.json")):
+        target = state_file.stem
         try:
             data = json.loads(state_file.read_text())
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("Skipping unreadable state file %s: %s", state_file, e)
+            last_check = data.get("last_check")
+            # Python 3.10's fromisoformat does not accept a trailing Z.
+            ts = (datetime.fromisoformat(last_check.removesuffix("Z") + "+00:00"
+                                         if last_check.endswith("Z") else last_check)
+                  if last_check else None)
+            if ts is not None and ts.tzinfo is None:
+                raise ValueError(f"last_check {last_check!r} has no timezone")
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError,
+                AttributeError, TypeError, ValueError) as e:
+            # A state file nobody can read hides whether updates are working.
+            unreadable.append(f"{target} ({type(e).__name__}: {e})")
             continue
-        target = state_file.stem
         if data.get("last_status") == "failed":
             failed.append(target)
-        last_check = data.get("last_check")
-        if last_check:
-            # Normalize trailing Z to +00:00 (Python <3.11 doesn't accept Z)
-            normalized = last_check.replace("Z", "+00:00") if last_check.endswith("Z") else last_check
-            try:
-                ts = datetime.fromisoformat(normalized)
-                if ts < threshold:
-                    stale.append(target)
-            except ValueError as e:
-                logger.warning("Unparseable last_check in %s: %s (%s)", state_file, last_check, e)
+        if ts is not None and ts < threshold:
+            stale.append(target)
 
+    problems = []
     if failed:
-        return HealthCheck(
-            name="container-updates",
-            status="warn",
-            detail=f"failed targets: {', '.join(failed)}",
-        )
+        problems.append(f"failed targets: {', '.join(failed)}")
     if stale:
-        return HealthCheck(
-            name="container-updates",
-            status="warn",
-            detail=f"stale (>48h since check): {', '.join(stale)}",
-        )
+        problems.append(f"stale (>48h since check): {', '.join(stale)}")
+    if unreadable:
+        problems.append(f"unreadable state in {state_dir}: {'; '.join(unreadable)}")
+    if problems:
+        return HealthCheck(name="container-updates", status="warn", detail="; ".join(problems))
     return HealthCheck(name="container-updates", status="ok", detail="all targets recent")
