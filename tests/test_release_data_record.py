@@ -564,3 +564,30 @@ class TestEdgeCasesOfStartingTheRecord:
         assert (pdir / "conf" / "app.conf").read_text() == "newer conf"
         assert [p.name for p in self._retained(pdir)] == [copy.name]
         assert (copy / "app.conf").read_text() == "old conf"
+
+    def test_failure_after_the_move_reports_what_was_set_aside(self, paths, capsys) -> None:
+        from boxmunge.commands.deploy import run_deploy
+        pdir = self._code_once_mounted_rw(paths)
+        with _docker(), patch("boxmunge.release.atomic_write_text",
+                              side_effect=OSError("disk full")):
+            assert run_deploy("myapp", paths) == 1
+        [copy] = self._retained(pdir)
+        err = capsys.readouterr().err
+        assert str(copy) in err
+        assert "Nothing in the project was changed" not in err
+        assert (copy / "app.conf").read_text() == "old conf"
+
+    def test_destination_is_announced_before_anything_moves(self, paths, capsys) -> None:
+        from boxmunge.commands.deploy import run_deploy
+        pdir = self._code_once_mounted_rw(paths)
+        with _docker(), patch("boxmunge.data_dirs._move_contents",
+                              side_effect=OSError("power cut")):
+            assert run_deploy("myapp", paths) == 1
+        out, err = capsys.readouterr()
+        [line] = [ln for ln in out.splitlines() if ".releases/retained/" in ln]
+        dest = line.rsplit("rm -rf ", 1)[1]
+        assert dest in err
+        log = [json.loads(ln) for ln in paths.log_file.read_text().splitlines()]
+        assert any(e["level"] == "warn" and dest in e["msg"] for e in log)
+        assert not _record(pdir).exists()
+        assert (pdir / "conf" / "app.conf").read_text() == "old conf"

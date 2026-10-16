@@ -14,7 +14,7 @@ from pathlib import Path
 from boxmunge.commands.deploy import redeploy_installed, run_deploy
 from boxmunge.commands.restore import run_restore
 from boxmunge.compose import prepare_compose_override
-from boxmunge.data_dirs import log_kept
+from boxmunge.data_dirs import log_kept, set_aside_announcer
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.intake import (
     IntakeError, check_installable, report_refusal, validate_release_tree,
@@ -205,7 +205,8 @@ def _roll_back_release(project_name: str, paths: BoxPaths,
 
     print("--- Restoring code ---")
     try:
-        kept = install_release(tree, paths.project_dir(project_name))
+        kept = install_release(tree, paths.project_dir(project_name),
+                               set_aside_announcer(paths, project_name, "rollback"))
         mark_live(paths, project_name, target.ref)
         log_kept(paths, project_name, kept, "rollback")
     except (OSError, ValueError) as e:

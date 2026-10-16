@@ -31,8 +31,9 @@ from boxmunge.bundle import (
 )
 from boxmunge.compose_mounts import PROD_SMOKE_SOURCE
 from boxmunge.data_dirs import (
-    DataDirs, KeptData, ReleaseStateError, classify, entry_label, has_record,
-    holds_data, log_kept, record_path, save_record, start_record, warn_retained,
+    Announce, DataDirs, KeptData, ReleaseStateError, classify, entry_label,
+    has_record, holds_data, log_kept, naming_set_aside, record_path, save_record,
+    set_aside_announcer, start_record, warn_retained,
 )
 from boxmunge.fileutil import atomic_write_text, chown_tree_deploy, mkdir_p_deploy
 
@@ -85,7 +86,8 @@ def _classify(project_dir: Path, release_tree: Path | None) -> DataDirs:
     return classify(project_dir, release_tree, _kept_trees(project_dir))
 
 
-def _ensure_record(project_dir: Path, release_tree: Path | None = None) -> list[Path]:
+def _ensure_record(project_dir: Path, release_tree: Path | None = None,
+                   announce: Announce | None = None) -> list[Path]:
     """Start the data-dir record before anything can change a kept release.
 
     A project deployed before the record existed may know a retired data
@@ -96,7 +98,7 @@ def _ensure_record(project_dir: Path, release_tree: Path | None = None) -> list[
     """
     if has_record(project_dir):
         return []
-    return start_record(_classify(project_dir, release_tree))
+    return start_record(_classify(project_dir, release_tree), announce)
 
 
 def check_install(tree: Path, project_dir: Path) -> None:
@@ -229,19 +231,21 @@ def live_code_entries(project_dir: Path, release_tree: Path | None = None) -> li
     return sorted(e for e in project_dir.iterdir() if e.name not in state)
 
 
-def install_release(tree: Path, project_dir: Path) -> KeptData:
+def install_release(tree: Path, project_dir: Path,
+                    announce: Announce | None = None) -> KeptData:
     """Make the project's release code exactly ``tree``; keep box state.
 
     Nothing changes if the release is refused. The data-dir record is
     written before anything else, so every entry that holds data stays box
     state from now on. A data entry the release ships only an empty
     placeholder for is kept. Returns what was kept with a warning (data the
-    release no longer mounts, contents set aside), for the caller to log.
+    release no longer mounts, contents set aside), for the caller to log;
+    ``announce`` hears of each set-aside destination before it is used.
     """
     dirs = _classify(project_dir, tree)
     _check(tree, dirs)
     project_dir.mkdir(parents=True, exist_ok=True)
-    copies = [] if has_record(project_dir) else start_record(dirs)
+    copies = [] if has_record(project_dir) else start_record(dirs, announce)
 
     # Classify everything before changing anything.
     shipped = {e.name for e in tree.iterdir()}
@@ -317,23 +321,23 @@ def keep_previous_release(
     for entry in live_code_entries(project_dir, release_tree):
         _copy_entry(entry, building / entry.name)
     # After the copy, so the kept release has any contents set aside too.
-    copies = _ensure_record(project_dir, release_tree)
-    log_kept(paths, project_name, KeptData(copies=copies), "deploy")
-
-    meta = {
-        "ref": live_ref(paths, project_name),
-        "data_snapshot": data_snapshot or "",
-        "replaced_at": datetime.now(timezone.utc).isoformat(),
-        "replaced_by": replaced_by,
-    }
-    # Drop the old metadata first: a crash mid-swap then leaves no previous
-    # release (rollback refuses) rather than old metadata on a new tree.
-    _remove(_previous_meta(paths, project_name))
-    target = previous_dir(paths, project_name)
-    _remove(target)
-    building.rename(target)
-    atomic_write_text(_previous_meta(paths, project_name),
-                      json.dumps(meta, indent=2) + "\n", mode=0o644)
+    copies = _ensure_record(project_dir, release_tree,
+                            set_aside_announcer(paths, project_name, "deploy"))
+    with naming_set_aside(copies):
+        meta = {
+            "ref": live_ref(paths, project_name),
+            "data_snapshot": data_snapshot or "",
+            "replaced_at": datetime.now(timezone.utc).isoformat(),
+            "replaced_by": replaced_by,
+        }
+        # Drop the old metadata first: a crash mid-swap then leaves no previous
+        # release (rollback refuses) rather than old metadata on a new tree.
+        _remove(_previous_meta(paths, project_name))
+        target = previous_dir(paths, project_name)
+        _remove(target)
+        building.rename(target)
+        atomic_write_text(_previous_meta(paths, project_name),
+                          json.dumps(meta, indent=2) + "\n", mode=0o644)
 
 
 def load_previous_release(paths: BoxPaths, project_name: str) -> PreviousRelease | None:
@@ -398,11 +402,12 @@ def keep_prestage_release(paths: BoxPaths, project_name: str,
     if deployed:
         for entry in live_code_entries(project_dir, release_tree):
             _copy_entry(entry, building / "release" / entry.name)
-    copies = _ensure_record(project_dir, release_tree)
-    log_kept(paths, project_name, KeptData(copies=copies), "stage")
-    meta = {"ref": live_ref(paths, project_name) if deployed else None}
-    atomic_write_text(building / "meta.json", json.dumps(meta) + "\n", mode=0o644)
-    building.rename(_prestage(paths, project_name))
+    copies = _ensure_record(project_dir, release_tree,
+                            set_aside_announcer(paths, project_name, "stage"))
+    with naming_set_aside(copies):
+        meta = {"ref": live_ref(paths, project_name) if deployed else None}
+        atomic_write_text(building / "meta.json", json.dumps(meta) + "\n", mode=0o644)
+        building.rename(_prestage(paths, project_name))
 
 
 def prestage_ref(paths: BoxPaths, project_name: str) -> str | None:
@@ -481,7 +486,8 @@ def restore_prestage(paths: BoxPaths, project_name: str) -> None:
     """Put the kept production release back (unstage, or a failed stage)."""
     ref = prestage_ref(paths, project_name)
     kept = install_release(prestage_tree(paths, project_name),
-                           paths.project_dir(project_name))
+                           paths.project_dir(project_name),
+                           set_aside_announcer(paths, project_name, "unstage"))
     log_kept(paths, project_name, kept, "unstage")
     if ref is None:
         _remove(_live_meta(paths, project_name))

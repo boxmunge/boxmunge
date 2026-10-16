@@ -26,10 +26,11 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable, Iterator
 
 from boxmunge.bind_mounts import BindMountError, bind_mounted_dirs
 from boxmunge.bundle import BOX_OWNED_ENTRIES, BOXMUNGE_ENTRIES, is_placeholder
@@ -208,11 +209,41 @@ def save_record(dirs: DataDirs) -> None:
     atomic_write_text(path, json.dumps(doc) + "\n", mode=0o644)
 
 
-def _set_aside(project_dir: Path, name: str) -> Path:
-    """Move ``name``'s contents into a new ``.releases/retained/`` dir."""
-    entry = project_dir / name
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    dest = project_dir / ".releases" / "retained" / f"{name}-{stamp}"
+class SetAsideError(OSError):
+    """A step failed after contents were moved to ``.releases/retained/``."""
+
+    def __init__(self, cause: Exception, copies: list[Path]) -> None:
+        super().__init__(f"{cause}. Before it failed, old contents were moved "
+                         f"to: {', '.join(str(c) for c in copies)}")
+        self.copies = copies
+
+
+@contextmanager
+def naming_set_aside(copies: list[Path]) -> Iterator[None]:
+    """Turn a failure after contents were set aside into a SetAsideError."""
+    try:
+        yield
+    except (OSError, ReleaseStateError) as e:
+        if copies and not isinstance(e, SetAsideError):
+            raise SetAsideError(e, copies) from e
+        raise
+
+
+# Called with each .releases/retained/ destination before anything moves into it.
+Announce = Callable[[Path], None]
+
+
+def set_aside_announcer(paths: BoxPaths, project_name: str, component: str) -> Announce:
+    def announce(dest: Path) -> None:
+        log_warning(component,
+                    f"Setting aside the old contents of an entry an older release "
+                    f"mounted read-write, now release code, in {dest}. An operator "
+                    f"deletes it on the server once nothing needs it.",
+                    paths, project=project_name, detail={"set_aside": str(dest)})
+    return announce
+
+
+def _move_contents(entry: Path, dest: Path) -> None:
     dest.mkdir(parents=True)
     if entry.is_dir() and not entry.is_symlink():
         # Move the contents, not the directory: a running container's
@@ -220,24 +251,36 @@ def _set_aside(project_dir: Path, name: str) -> Path:
         for child in sorted(entry.iterdir()):
             child.rename(dest / child.name)
     else:
-        entry.rename(dest / name)
-    print(f"  WARNING: {name} was bind-mounted read-write by an older release "
-          f"(kept in .releases/), so it may hold data, and this release ships "
-          f"it as code. Its previous contents are kept in {dest}. When nothing "
-          f"needs them, an operator deletes them on the server with: rm -rf {dest}")
-    return dest
+        entry.rename(dest / entry.name)
 
 
-def start_record(dirs: DataDirs) -> list[Path]:
+def start_record(dirs: DataDirs, announce: Announce | None = None) -> list[Path]:
     """Start the record of a project that has none; returns the copies set aside.
 
-    The record is written after the moves: a crash part-way leaves no
-    record, so the next deploy moves what is left instead of installing
-    code over it.
+    Each destination is announced (printed, and passed to ``announce``)
+    before anything moves into it. The record is written after the moves: a
+    crash part-way leaves no record, so the next deploy moves what is left
+    instead of installing code over it. Raises SetAsideError, naming what was
+    moved, if a move or the record write fails after a move began.
     """
-    copies = [_set_aside(dirs.project_dir, n) for n in sorted(dirs.adopted)
-              if holds_data(dirs.project_dir / n)]
-    save_record(dirs)
+    copies: list[Path] = []
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    with naming_set_aside(copies):
+        for name in sorted(dirs.adopted):
+            entry = dirs.project_dir / name
+            if not holds_data(entry):
+                continue
+            dest = dirs.project_dir / ".releases" / "retained" / f"{name}-{stamp}"
+            print(f"  WARNING: {name} was bind-mounted read-write by an older "
+                  f"release (kept in .releases/), so it may hold data, and this "
+                  f"release ships it as code. Its previous contents are kept in "
+                  f"{dest}. When nothing needs them, an operator deletes them on "
+                  f"the server with: rm -rf {dest}")
+            if announce is not None:
+                announce(dest)
+            copies.append(dest)
+            _move_contents(entry, dest)
+        save_record(dirs)
     return copies
 
 
@@ -265,17 +308,13 @@ def warn_retained(dirs: DataDirs, names: list[str]) -> None:
 
 def log_kept(paths: BoxPaths, project_name: str, kept: KeptData,
              component: str) -> None:
-    """Log what an install kept: retired data, and contents set aside."""
+    """Log the retired data an install kept (set-aside copies are logged as
+    they are announced, before they move)."""
+    if not kept.retained:
+        return
     project_dir = paths.project_dir(project_name)
-    if kept.retained:
-        labels = ", ".join(entry_label(project_dir / n) for n in kept.retained)
-        log_warning(component,
-                    f"Kept data the installed release no longer mounts: {labels}. "
-                    f"An operator deletes it on the server once nothing needs it.",
-                    paths, project=project_name, detail={"retained": kept.retained})
-    for copy in kept.copies:
-        log_warning(component,
-                    f"Set aside the old contents of an entry an older release "
-                    f"mounted read-write, now release code: {copy}. An operator "
-                    f"deletes it on the server once nothing needs it.",
-                    paths, project=project_name, detail={"set_aside": str(copy)})
+    labels = ", ".join(entry_label(project_dir / n) for n in kept.retained)
+    log_warning(component,
+                f"Kept data the installed release no longer mounts: {labels}. "
+                f"An operator deletes it on the server once nothing needs it.",
+                paths, project=project_name, detail={"retained": kept.retained})
