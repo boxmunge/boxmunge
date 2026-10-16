@@ -109,7 +109,7 @@ def test_fleet_summary_has_its_full_shape_on_an_empty_box(paths) -> None:
         "projects_count", "posture_distribution", "quarantined", "at_risk_running",
         "active_suppressions_count", "active_suppressions_projects",
         "active_suppressions_host", "host_suppressions", "last_fleet_scan",
-        "grace", "held_by_breaker",
+        "grace", "held_by_breaker", "unreadable",
     }
 
 

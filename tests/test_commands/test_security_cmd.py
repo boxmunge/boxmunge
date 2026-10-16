@@ -326,6 +326,55 @@ def test_fleet_summary_json_aggregates(monkeypatch, tmp_path) -> None:
     assert payload["posture_distribution"]["balanced"] == 2
 
 
+def _fleet_box(monkeypatch, tmp_path, names):
+    paths = _make_paths(tmp_path)
+    for name in names:
+        proj = paths.projects / name
+        proj.mkdir(parents=True)
+        (proj / "manifest.yml").write_text(yaml.safe_dump({
+            "schema_version": 2, "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ", "source": "bundle",
+            "project": name, "hosts": [f"{name}.example.com"],
+            "services": {"web": {"port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh"}},
+        }))
+    (paths.state / "projects.txt").write_text("".join(f"{n}\n" for n in names))
+    monkeypatch.setattr("boxmunge.commands.security_cmd._paths", lambda: paths)
+    return paths
+
+
+def test_fleet_summary_reports_unreadable_projects_instead_of_skipping(
+        monkeypatch, tmp_path, capsys) -> None:
+    """A corrupt manifest or suppressions file used to drop the project from
+    the counts, or read as "no suppressions", with nothing said."""
+    paths = _fleet_box(monkeypatch, tmp_path, ["alpha", "beta", "gamma"])
+    paths.project_manifest("beta").write_text("services: [unclosed\n")
+    supps = paths.project_dir("gamma") / "security" / "suppressions.yml"
+    supps.parent.mkdir(parents=True)
+    supps.write_text("suppressions: [unclosed\n")
+    with pytest.raises(SystemExit) as exc:
+        cmd_security(["--json"])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["projects_count"] == 3
+    assert sum(payload["posture_distribution"].values()) == 1
+    assert [u["project"] for u in payload["unreadable"]] == ["beta", "gamma"]
+    assert "ERROR: security: beta:" in captured.err
+    assert "ERROR: security: gamma:" in captured.err
+
+
+def test_fleet_summary_reports_unreadable_host_suppressions(
+        monkeypatch, tmp_path, capsys) -> None:
+    paths = _fleet_box(monkeypatch, tmp_path, ["alpha"])
+    paths.host_suppressions.parent.mkdir(parents=True, exist_ok=True)
+    paths.host_suppressions.write_text("suppressions: [unclosed\n")
+    with pytest.raises(SystemExit) as exc:
+        cmd_security([])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "Projects: 1" in captured.out
+    assert "ERROR: security: host suppressions:" in captured.err
+
+
 def test_fleet_summary_quarantined_listed(monkeypatch, tmp_path) -> None:
     paths = _make_paths(tmp_path)
     proj = paths.projects / "demo"

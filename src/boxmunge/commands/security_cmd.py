@@ -38,6 +38,8 @@ from boxmunge.cve.suppressions import (
     active_suppressions,
     load_suppressions,
 )
+from boxmunge.fleet import PROJECT_INPUT_ERRORS
+from boxmunge.log import log_error
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import load_registered_projects
@@ -140,8 +142,56 @@ def _per_project_view(project: str, as_json: bool, paths: BoxPaths) -> int:
 # ---------- fleet summary ----------
 
 
+@dataclass(frozen=True)
+class _FleetFacts:
+    """One project's contribution to the fleet summary."""
+
+    posture: str
+    quarantine: dict | None
+    at_risk: bool
+    scanned_at: str | None
+    active_suppressions: int
+
+
+def _fleet_facts(name: str, paths: BoxPaths, today) -> _FleetFacts:
+    """Read everything the fleet summary needs from one project. Raises
+    PROJECT_INPUT_ERRORS or SuppressionsError when a file is unreadable."""
+    manifest = load_manifest(paths.project_manifest(name))
+    sec_block = manifest.get("security") or {}
+    quarantine = None
+    if is_quarantined(name, paths):
+        qstate = read_quarantine_state(name, paths) or {}
+        quarantine = {
+            "project": name,
+            "cve_id": qstate.get("cve_id", ""),
+            "severity": qstate.get("effective_severity") or qstate.get("severity", ""),
+            "since": qstate.get("quarantined_at"),
+        }
+    scan_state = read_scan_state(paths.project_scan_state(name))
+    # At risk = opted out of quarantine AND carrying findings that would
+    # otherwise quarantine, not merely opted out.
+    at_risk = bool(sec_block.get("dangerously_disable_quarantine", False)) and any(
+        f.get("disposition") == Disposition.STILL_RUNNING_AT_RISK.value
+        for d in (scan_state or {}).get("decisions", [])
+        for f in d.get("findings", [])
+    )
+    supps = load_suppressions(_suppressions_path(paths, name))
+    return _FleetFacts(
+        posture=(sec_block.get("posture") or "balanced").lower(),
+        quarantine=quarantine,
+        at_risk=at_risk,
+        scanned_at=(scan_state or {}).get("scanned_at") or None,
+        active_suppressions=len(active_suppressions(supps, today=today)),
+    )
+
+
 def fleet_summary(paths: BoxPaths) -> dict:
-    """Aggregate state across all registered projects."""
+    """Aggregate state across all registered projects.
+
+    A project whose files cannot be read is listed under "unreadable" with
+    the reason, never silently left out of the counts. A pre-registered
+    project (no manifest yet) has no security state to count.
+    """
     projects = sorted(load_registered_projects(paths))
     posture_dist = {"relaxed": 0, "balanced": 0, "strict": 0, "paranoid": 0}
     quarantined_list: list[dict] = []
@@ -149,49 +199,29 @@ def fleet_summary(paths: BoxPaths) -> dict:
     active_supps_count = 0
     projects_with_supps = 0
     last_scans: list[str] = []
+    unreadable: list[dict] = []
 
     today = datetime.now(timezone.utc).date()
 
     for name in projects:
         try:
-            manifest = load_manifest(paths.project_manifest(name))
-        except ManifestError:
+            if paths.is_project_pre_registered(name):
+                continue
+            facts = _fleet_facts(name, paths, today)
+        except (*PROJECT_INPUT_ERRORS, SuppressionsError) as e:
+            unreadable.append({"project": name, "error": str(e)})
             continue
-        sec_block = manifest.get("security") or {}
-        posture = (sec_block.get("posture") or "balanced").lower()
-        if posture in posture_dist:
-            posture_dist[posture] += 1
-
-        if is_quarantined(name, paths):
-            qstate = read_quarantine_state(name, paths) or {}
-            quarantined_list.append({
-                "project": name,
-                "cve_id": qstate.get("cve_id", ""),
-                "severity": qstate.get("effective_severity") or qstate.get("severity", ""),
-                "since": qstate.get("quarantined_at"),
-            })
-
-        scan_state = read_scan_state(paths.project_scan_state(name))
-        # At risk = opted out of quarantine AND carrying findings that would
-        # otherwise quarantine, not merely opted out.
-        if bool(sec_block.get("dangerously_disable_quarantine", False)) and any(
-            f.get("disposition") == Disposition.STILL_RUNNING_AT_RISK.value
-            for d in (scan_state or {}).get("decisions", [])
-            for f in d.get("findings", [])
-        ):
+        if facts.posture in posture_dist:
+            posture_dist[facts.posture] += 1
+        if facts.quarantine is not None:
+            quarantined_list.append(facts.quarantine)
+        if facts.at_risk:
             at_risk.append(name)
-
-        if scan_state and scan_state.get("scanned_at"):
-            last_scans.append(scan_state["scanned_at"])
-
-        try:
-            supps = load_suppressions(_suppressions_path(paths, name))
-        except SuppressionsError:
-            supps = ()
-        active = active_suppressions(supps, today=today)
-        if active:
+        if facts.scanned_at:
+            last_scans.append(facts.scanned_at)
+        if facts.active_suppressions:
             projects_with_supps += 1
-            active_supps_count += len(active)
+            active_supps_count += facts.active_suppressions
 
     grace_payload = _grace_payload(paths, now=datetime.now(timezone.utc))
 
@@ -201,8 +231,9 @@ def fleet_summary(paths: BoxPaths) -> dict:
     # from the review workflow that is meant to catch it before it lapses.
     try:
         host_supps = load_suppressions(paths.host_suppressions, scope=SCOPE_HOST)
-    except SuppressionsError:
+    except SuppressionsError as e:
         host_supps = ()
+        unreadable.append({"project": None, "error": str(e)})
     active_host = active_suppressions(host_supps, today=today)
 
     return {
@@ -220,7 +251,17 @@ def fleet_summary(paths: BoxPaths) -> dict:
         "last_fleet_scan": max(last_scans) if last_scans else None,
         "grace": grace_payload,
         "held_by_breaker": _held_payload(paths),
+        "unreadable": unreadable,
     }
+
+
+def _report_unreadable(unreadable: list[dict], paths: BoxPaths) -> None:
+    for entry in unreadable:
+        # A null project is the box-wide host suppressions file.
+        source = entry["project"] or "host suppressions"
+        print(f"ERROR: security: {source}: {entry['error']}", file=sys.stderr)
+        log_error("security", f"fleet summary could not read {source}: {entry['error']}",
+                  paths, project=entry["project"])
 
 
 def _held_payload(paths: BoxPaths) -> dict:
@@ -328,6 +369,9 @@ def cmd_security(args: list[str]) -> None:
             print(format_fleet_json(summary))
         else:
             print(format_fleet_text(summary))
+        if summary["unreadable"]:
+            _report_unreadable(summary["unreadable"], paths)
+            sys.exit(1)
         return
 
     if len(positional) > 1:

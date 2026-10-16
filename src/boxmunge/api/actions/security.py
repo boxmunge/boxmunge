@@ -47,6 +47,9 @@ SUMMARY = obj({
         "projects": arr(obj({"project": STRING, "cves": arr(STRING)})),
         "error": NULLABLE_STRING,
     }),
+    # Projects left out of the counts because a file could not be read; a
+    # null project is the box-wide host suppressions file.
+    "unreadable": arr(obj({"project": NULLABLE_STRING, "error": STRING})),
 })
 
 # Keys older scan-state files may lack; they read back as null.

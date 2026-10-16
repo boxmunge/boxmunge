@@ -100,3 +100,13 @@ def test_corrupt_scan_state_fails_naming_the_file(fixture_paths) -> None:
     path.write_text("{not json")
     error = _error(fixture_paths, "security.project", {"project": "shop"})
     assert error.code is ErrorCode.FAILED and str(path) in error.message
+
+
+def test_summary_lists_an_unreadable_project_and_keeps_serving(fixture_paths) -> None:
+    path = fixture_paths.project_scan_state("shop")
+    path.write_text("{not json")
+    summary = _call(fixture_paths, "security.summary")
+    assert summary["projects_count"] == 5
+    assert [u["project"] for u in summary["unreadable"]] == ["shop"]
+    assert str(path) in summary["unreadable"][0]["error"]
+    assert sum(summary["posture_distribution"].values()) == 3  # newapp has no manifest
