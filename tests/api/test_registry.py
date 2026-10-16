@@ -97,3 +97,14 @@ def test_result_of_action_is_refused_outside_a_job_records_result() -> None:
                     result=obj({}), handler=lambda params, ctx: {})
     with pytest.raises(RegistryError, match="x-result-of-action is allowed only"):
         registry.register(action)
+
+
+def test_result_of_action_is_refused_in_params() -> None:
+    """Callers never send job records; only results may carry the keyword."""
+    registry = Registry()
+    action = Action(name="thing.get", tier=Tier.OBSERVE, summary="Test.",
+                    params=obj({"action": STRING, "result": RESULT_OF_ACTION},
+                               optional=("action", "result")),
+                    result=obj({}), handler=lambda params, ctx: {})
+    with pytest.raises(RegistryError, match="params schema may not use x-result-of-action"):
+        registry.register(action)

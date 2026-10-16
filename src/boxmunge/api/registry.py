@@ -18,7 +18,7 @@ from typing import Any, Callable
 from boxmunge.api.context import ActionContext
 from boxmunge.api.principal import Principal, Tier, refusal
 from boxmunge.api.result import ActionError, ErrorCode
-from boxmunge.api.schema import SchemaDefinitionError, check_schema
+from boxmunge.api.schema import SchemaDefinitionError, check_schema, uses_result_of_action
 
 ACTION_NAME_RE = re.compile(r"[a-z][a-z_]*\.[a-z][a-z_]*")
 LOCK_NAMES = frozenset({"project"})
@@ -77,6 +77,9 @@ class Registry:
                 raise RegistryError(f"{name}: {label} schema: {e}") from e
             if schema["type"] != "object":
                 raise RegistryError(f"{name}: {label} schema must be an object")
+        if uses_result_of_action(action.params):
+            raise RegistryError(f"{name}: a params schema may not use x-result-of-action; "
+                                f"only job records in results carry it")
         unknown = sorted(set(action.locks) - LOCK_NAMES)
         if unknown:
             raise RegistryError(f"{name}: unknown lock(s): {', '.join(unknown)}")

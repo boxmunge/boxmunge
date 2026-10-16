@@ -116,6 +116,14 @@ def _check_object(schema: dict[str, Any], path: str) -> None:
             f"{path}: required names undeclared properties: {', '.join(missing)}")
 
 
+def uses_result_of_action(schema: dict[str, Any]) -> bool:
+    """True if x-result-of-action appears anywhere in *schema*."""
+    if _RESULT_OF_ACTION in schema:
+        return True
+    return (any(uses_result_of_action(sub) for sub in schema.get("properties", {}).values())
+            or ("items" in schema and uses_result_of_action(schema["items"])))
+
+
 def _check_result_of_action(schema: dict[str, Any], path: str, in_slot: bool) -> None:
     if not in_slot:
         raise SchemaDefinitionError(
