@@ -167,3 +167,43 @@ def test_caddy_reload_reports_refused_entries(caddy, victim) -> None:
         caddy_reload(caddy, caddy)
     assert exc.value.restored == ["good.conf"]
     assert "bad.conf.json" in str(exc.value) and victim.exists()
+
+
+def test_fifo_entry_is_refused_without_blocking(caddy) -> None:
+    import os
+    (caddy / JOURNAL_DIRNAME).mkdir()
+    os.mkfifo(caddy / JOURNAL_DIRNAME / "app.conf.json")
+    with pytest.raises(JournalError, match="not a regular file"):
+        restore_sites(caddy)
+
+
+def test_oversized_entry_is_refused(caddy) -> None:
+    site = caddy / "sites" / "app.conf"
+    _plant(caddy, "app.conf.json", {"path": str(site), "previous": None,
+                                    "written": "x" * (5 * 1024 * 1024)})
+    with pytest.raises(JournalError, match="larger than"):
+        restore_sites(caddy)
+
+
+@pytest.mark.parametrize("make", ["fifo", "dev_zero_link", "huge"])
+def test_reads_never_follow_block_or_exhaust(tmp_path, make) -> None:
+    """The reader itself, for a file swapped after the directory checks."""
+    import os
+    from boxmunge.caddy_journal import MAX_SITE_BYTES, _read
+    path = tmp_path / "app.conf"
+    if make == "fifo":
+        os.mkfifo(path)
+    elif make == "dev_zero_link":
+        path.symlink_to("/dev/zero")
+    else:
+        path.write_bytes(b"x" * (MAX_SITE_BYTES + 1))
+    with pytest.raises(JournalError):
+        _read(path)
+
+
+def test_write_site_refuses_oversized_content(caddy) -> None:
+    from boxmunge.caddy_journal import MAX_SITE_BYTES
+    site = caddy / "sites" / "app.conf"
+    with pytest.raises(JournalError, match="larger than"):
+        write_site(caddy, site, "x" * (MAX_SITE_BYTES + 1))
+    assert not site.exists()

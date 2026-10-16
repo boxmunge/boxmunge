@@ -23,8 +23,11 @@ writes. Anything else is refused with JournalError and never acted on.
 """
 from __future__ import annotations
 
+import errno
 import json
+import os
 import re
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +40,9 @@ _ENTRY_SUFFIX = ".json"
 # What paths.project_caddy_site and project_staging_caddy_site name.
 _SITE_NAME = re.compile(r"[a-z0-9][a-z0-9-]*\.conf")
 _RECORD_KEYS = frozenset({"path", "previous", "written"})
+# Far above any real site block. An entry holds two of them, JSON-escaped.
+MAX_SITE_BYTES = 1024 * 1024
+_MAX_ENTRY_BYTES = 4 * MAX_SITE_BYTES
 
 # Site files are read by the Caddy container through a bind mount whose
 # uid may not map to the deploy user, so they stay world-readable. They
@@ -104,16 +110,17 @@ def _read_entry(caddy_dir: Path, entry: Path) -> tuple[Path, dict[str, Any]]:
             f"will not restore from it. Delete it (as root) and check the site "
             f"files in {caddy_dir / SITES_DIRNAME}."
         )
-    if entry.is_symlink() or not entry.is_file():
-        raise refuse("is a symlink or not a regular file")
     try:
         site = _checked_site(caddy_dir, entry.name[:-len(_ENTRY_SUFFIX)], str(entry))
+        text = _read(entry, _MAX_ENTRY_BYTES)
     except JournalError as e:
         raise refuse(str(e).removeprefix(f"{entry}: ")) from e
+    if text is None:
+        raise refuse("vanished while being read")
     try:
-        record = json.loads(entry.read_text())
-    except (OSError, ValueError, RecursionError) as e:
-        raise refuse(f"is unreadable or not JSON ({e})") from e
+        record = json.loads(text)
+    except (ValueError, RecursionError) as e:
+        raise refuse(f"is not JSON ({e})") from e
     if not isinstance(record, dict) or record.keys() != _RECORD_KEYS:
         raise refuse(f"is not an object with exactly {sorted(_RECORD_KEYS)}")
     if record["path"] != str(site):
@@ -124,13 +131,42 @@ def _read_entry(caddy_dir: Path, entry: Path) -> tuple[Path, dict[str, Any]]:
     return site, record
 
 
-def _read(path: Path) -> str | None:
-    return path.read_text() if path.exists() else None
+def _read(path: Path, limit: int = MAX_SITE_BYTES) -> str | None:
+    """The text of the regular file at `path`, or None if there is none.
+
+    Root reads these from deploy-writable directories, so the file is opened
+    without following a symlink or blocking on a FIFO, must be a regular
+    file once open, and may be at most `limit` bytes: a file swapped for a
+    FIFO or a link to /dev/zero can neither hang nor exhaust the reader.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise JournalError(f"{path} is a symlink; boxmunge does not follow it.") from e
+        raise JournalError(f"{path} cannot be opened: {e}") from e
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            raise JournalError(f"{path} is not a regular file.")
+        data = f.read(limit + 1)
+    if len(data) > limit:
+        raise JournalError(f"{path} is larger than {limit} bytes.")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise JournalError(f"{path} is not UTF-8 text: {e}") from e
 
 
 def write_site(caddy_dir: Path, site_path: Path, content: str) -> None:
     """Write a site file, journaling what it replaces if not yet journaled."""
     site, entry = _entry_site(caddy_dir, site_path)
+    if len(content.encode("utf-8")) > MAX_SITE_BYTES:
+        raise JournalError(
+            f"{site}: the new site config is larger than {MAX_SITE_BYTES} "
+            f"bytes; shorten it (a custom Caddy override, most likely)."
+        )
     if entry.exists() or entry.is_symlink():
         previous = _read_entry(caddy_dir, entry)[1]["previous"]
     else:
@@ -171,10 +207,11 @@ def restore_sites(caddy_dir: Path) -> list[str]:
     for entry in sorted(journal.glob(f"*{_ENTRY_SUFFIX}")):
         try:
             site, record = _read_entry(caddy_dir, entry)
+            current = _read(site)
         except JournalError as e:
             refused.append(str(e))
             continue
-        if _read(site) == record["written"]:
+        if current == record["written"]:
             if record["previous"] is None:
                 site.unlink(missing_ok=True)
             else:

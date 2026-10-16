@@ -342,6 +342,11 @@ if [[ -d "${BOXMUNGE_ROOT}/caddy/sites" ]]; then
     chmod 775 "${BOXMUNGE_ROOT}/caddy/sites"
 fi
 
+# The Caddy site journal (boxmunge.caddy_journal) is written by deploy-run
+# deploys, but caddy/ is root:deploy 750, so deploy cannot create it: the
+# first site write on a box without it would fail. Idempotent.
+install -d -m 700 -o deploy -g deploy "${BOXMUNGE_ROOT}/caddy/.site-journal"
+
 # Ensure maintenance dir exists and is mounted into Caddy. Used by the
 # pause/resume feature (v0.4) — Caddy serves a static 503 page from here
 # while a project is paused. Idempotent.

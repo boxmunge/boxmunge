@@ -280,7 +280,11 @@ def _bring_up_staging(project_name: str, paths: BoxPaths,
         restored = ", ".join(e.restored) or "(nothing journaled)"
         print(f"ERROR: Caddy rejected the staging site config ({site}); the "
               f"previous routing was restored for: {restored}.", file=sys.stderr)
-        log_error("stage", f"Caddy rejected {site}; previous routing restored",
+        if e.refused:
+            print(f"ERROR: some site files were not restored: {e.refused}",
+                  file=sys.stderr)
+        log_error("stage", f"Caddy rejected {site}; previous routing restored for: "
+                  f"{restored}" + (f"; refused: {e.refused}" if e.refused else ""),
                   paths, project=project_name)
         return 1
     except DockerError as e:
