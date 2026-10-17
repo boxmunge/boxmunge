@@ -190,7 +190,7 @@ boxmunge supports two project sources, declared in `manifest.yml` via the `sourc
 4. Pre-deploy snapshot -- encrypted backup of the current data, taken with the outgoing release's own backup configuration (unless `--no-snapshot`)
 5. Keep the outgoing release -- its code is copied to `.releases/previous/` and paired with that snapshot, for `rollback`
 6. Install -- only a release that passed every check replaces the live project files
-7. Pre-deploy command -- run `deploy.pre_deploy` from manifest if defined, on the host in the project directory, without a shell (PROJECT_CONVENTIONS.md)
+7. Pre-deploy command -- run `deploy.pre_deploy` from manifest if defined, on the host in the project directory, without a shell, as deploy (PROJECT_CONVENTIONS.md, TRUST_MODEL.md)
 8. Generate configs -- write Caddy site config and compose overlay (networking, env_files, resource limits)
 9. Start containers -- re-validate the installed files, check every bind source without following symlinks and record its kind (creating missing ones as directories), then `docker compose up -d` with overlay. Every later start (upgrade, container update, `recover`, `resume`, `restore`) repeats the check against that record first; see TRUST_MODEL.md, "Container Escape and Root Restarts"
 10. Reload Caddy -- graceful, zero-downtime

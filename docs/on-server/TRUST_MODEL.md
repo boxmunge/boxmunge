@@ -222,6 +222,12 @@ against a parent swapped by deploy. That is acceptable because deploy is root-eq
 becomes a boundary if deploy ever loses docker access, or if agent trust is split from operator
 trust. Those operations then need dir-fd traversal.
 
+Project code never runs on the host as root. An operator who runs `prod-deploy`, `rollback` or
+`promote` with sudo makes boxmunge root, and the `pre_deploy` hook still runs as deploy: root
+switches to deploy's uid, gid and groups for it, with the deploy shell's environment, no stdin,
+its own session (no terminal of root's to push input into) and no other inherited descriptor.
+On a host with no deploy user the hook is not run and the deploy fails, saying so.
+
 ### What deploy may ask root to do
 
 `/etc/sudoers.d/boxmunge-deploy` grants deploy exactly two shim invocations:

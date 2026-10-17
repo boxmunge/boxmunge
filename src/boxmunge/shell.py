@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, MutableMapping
 
+from boxmunge.as_deploy import shell_environment
+
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
@@ -364,30 +366,11 @@ def _dispatch_string(command_string: str) -> None:
     dispatch_command(command, args)
 
 
-# Variables the shell passes on to the commands it runs. Anything else an SSH
-# client got through (BASH_ENV, ENV, PYTHONPATH...) could run code in one of
-# those commands before it does its job, so it is dropped here. This cannot
-# undo what already acted when /bin/sh and python started this shell: the
-# dynamic loader's LD_PRELOAD, LD_LIBRARY_PATH or GCONV_PATH. Against those
-# the boundary is sshd, which accepts only LANG, LC_*, COLORTERM and NO_COLOR
-# from deploy (src/boxmunge/sshd/00-boxmunge.conf, checked by install.sh and
-# `health`). The proxy and TZ variables are machine-wide settings (pam_env)
-# that deploy's outbound calls (image pulls, version checks) rely on.
-_KEPT_ENV = frozenset({"TERM", "LANG", "COLORTERM", "NO_COLOR",
-                       "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_ORIGINAL_COMMAND",
-                       "http_proxy", "https_proxy", "no_proxy",
-                       "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "TZ"})
-SHELL_PATH = "/usr/local/bin:/usr/bin:/bin"
-
-
 def restrict_environment(env: MutableMapping[str, str]) -> None:
-    """Keep only _KEPT_ENV and LC_*; set PATH and the account's own variables."""
-    for name in list(env):
-        if name not in _KEPT_ENV and not name.startswith("LC_"):
-            del env[name]
-    account = pwd.getpwuid(os.getuid())
-    env.update(PATH=SHELL_PATH, HOME=account.pw_dir, USER=account.pw_name,
-               LOGNAME=account.pw_name, SHELL=account.pw_shell)
+    """Keep only as_deploy.KEPT_ENV and LC_*; set PATH and the account's own variables."""
+    kept = shell_environment(env, pwd.getpwuid(os.getuid()))
+    env.clear()
+    env.update(kept)
 
 
 def main() -> None:
