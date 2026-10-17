@@ -18,7 +18,9 @@ files it reads and where its compose commands run.
 """
 from __future__ import annotations
 
+import os
 import shutil
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -113,6 +115,39 @@ def test_a_build_context_resolves_in_the_slot(paths) -> None:
         live = production_model(paths, project)["services"]["app"]
     assert staged["build"]["context"] == str(release_dir(slot_dir(paths, project)) / "img")
     assert live["build"]["context"] == str(paths.project_dir(project) / "img")
+
+
+def test_absolute_build_inputs_in_the_project_build_the_staged_tree(paths) -> None:
+    """An absolute build path naming release code in the project dir is the
+    staged copy for staging, never production's: context, dockerfile
+    (Compose resolves it against the context) and additional contexts.
+    Resolved, not built: no image is made."""
+    def where(build: dict) -> tuple[str, str, str]:
+        dockerfile = os.path.normpath(os.path.join(build["context"], build["dockerfile"]))
+        return build["context"], dockerfile, build["additional_contexts"]["vendor"]
+
+    with slot_project(paths) as project:
+        pdir = paths.project_dir(project)
+        for ref, version in ((V1, "v1"), (V2, "v2")):
+            compose = {"services": {"app": {"build": {
+                "context": f"{pdir}/img", "dockerfile": f"{pdir}/docker/Dockerfile",
+                "additional_contexts": {"vendor": f"{pdir}/vendor"}},
+                "network_mode": "none", "environment": {"VERSION": version}}}}
+            place_bundle(paths, project, ref, {
+                **release(project, version), "compose.yml": yaml.safe_dump(compose),
+                "img/marker": version, "vendor/lib": version,
+                "docker/Dockerfile": f"FROM scratch\nLABEL version={version}\n"})
+        with no_caddy(), patch("boxmunge.compose_guard.compose_up"):
+            assert run_deploy(project, paths, ref=V1) == 0
+            assert run_stage(project, paths, ref=V2) == 0
+        staged = where(staging_model(staging_target(paths, project))["services"]["app"]["build"])
+        live = where(production_model(paths, project)["services"]["app"]["build"])
+        slot_release = release_dir(slot_dir(paths, project))
+        assert staged == (f"{slot_release}/img", f"{slot_release}/docker/Dockerfile",
+                          f"{slot_release}/vendor")
+        assert live == (f"{pdir}/img", f"{pdir}/docker/Dockerfile", f"{pdir}/vendor")
+        assert "version=v2" in Path(staged[1]).read_text()
+        assert "version=v1" in Path(live[1]).read_text()
 
 
 def test_stage_and_unstage_leave_production_untouched(paths, project) -> None:

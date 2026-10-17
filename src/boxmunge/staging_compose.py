@@ -10,9 +10,11 @@ is pointed at by absolute path: bind mounts and config/secret files at
 the entry's ``-staging`` copy in the project dir, env files at the file
 itself (Compose reads them; nothing is mounted). A path that leaves the
 project is made absolute against the project dir, so it means what it
-means for production (a bind gets the ``-staging`` suffix). A build
-context in box state is refused: staging would build from other files
-than production. Explicit volume and network names and published ports
+means for production (a bind gets the ``-staging`` suffix). Staging
+builds from the staged tree: an absolute build input naming release code
+in the project dir becomes the same path relative to the release, and one
+in box state, or one with no staged counterpart, is refused. Explicit
+volume and network names and published ports
 are dropped (container_name never gets here: validation refuses it);
 staging_isolation then proves the result disjoint.
 """
@@ -25,6 +27,7 @@ from typing import Any
 import yaml
 
 from boxmunge.bind_mounts import project_relative
+from boxmunge.bundle import BOXMUNGE_ENTRIES
 from boxmunge.compose import ComposeError
 from boxmunge.compose_mounts import is_bind_entry, volume_source
 from boxmunge.staged_release import STAGING_BASE, STAGING_OVERLAY
@@ -69,29 +72,86 @@ def _staging_read_file(entry: Any, project_dir: Path, box_state: set[str]) -> An
     return entry
 
 
-def _build_input(path: str, project_dir: Path, box_state: set[str], what: str) -> str:
-    """A local build input stays relative unless it leaves the project.
-    One in box state is refused: staging would build from release/'s copy
-    of the name while production builds from the data itself."""
-    if "://" in path:
-        return path
-    rel = project_relative(path, project_dir)
+def _outside(path: str, project_dir: Path) -> str:
+    """A path leaving the project, absolute so it means what it means for
+    production."""
+    return path if os.path.isabs(path) or path.startswith("~") \
+        else os.path.normpath(os.path.join(project_dir, path))
+
+
+def _release_code(path: str, base: str, project_dir: Path, box_state: set[str],
+                  what: str) -> str | None:
+    """Where in the project a local build input lies (``path`` resolved
+    against ``base`` as Compose resolves it), or None outside it. Box state
+    is refused: staging would build from release/'s copy of the name while
+    production builds from the data itself. boxmunge's own entries are no
+    release code at all, so nothing in the staged release stands for them."""
+    if path.startswith("~"):
+        return None
+    rel = project_relative(os.path.join(base, path), project_dir)
     if rel is None:
-        return path if os.path.isabs(path) or path.startswith("~") \
-            else os.path.normpath(os.path.join(project_dir, path))
+        return None
     top = rel.partition(os.sep)[0]
+    if top in BOXMUNGE_ENTRIES:
+        raise _unmappable(path, what, f"is in {top}, which boxmunge keeps, not the release")
     if top in box_state:
         raise ComposeError(
             f"build {what} {path!r} is in {top}, which the project dir keeps as "
             f"server-owned state, not release code, so staging and production "
             f"would build from different files. Build from release code: move "
             f"the build inputs into a directory the release carries.")
-    return path
+    return rel
+
+
+def _unmappable(path: str, what: str, why: str) -> ComposeError:
+    return ComposeError(
+        f"build {what} {path!r} {why}, so staging cannot build the staged "
+        f"release's copy of it. Use a path relative to the release (for a "
+        f"dockerfile, relative to a build context in the release).")
+
+
+def _local_input(path: str, project_dir: Path, box_state: set[str], what: str) -> str:
+    """A build context or additional context. Compose resolves a relative
+    one against the project directory, which for staging is the staged
+    release; an absolute one naming release code in the project dir would
+    build production's copy, so it becomes the same path relative to the
+    release."""
+    if "://" in path:
+        return path
+    rel = _release_code(path, str(project_dir), project_dir, box_state, what)
+    if rel is None:
+        return _outside(path, project_dir)
+    if not os.path.isabs(path):
+        return path
+    return "." if rel == "." else os.path.join(".", rel)
+
+
+def _dockerfile(dockerfile: str, context: str, project_dir: Path, box_state: set[str]) -> str:
+    """Compose resolves a relative dockerfile against the build context, so
+    release code is named relative to staging's context; only an in-project
+    context resolves in the staged release."""
+    remote = "://" in context
+    if remote and not os.path.isabs(dockerfile):
+        return dockerfile  # a file of the remote context
+    prod_context = os.path.normpath(os.path.join(project_dir, os.path.expanduser(context)))
+    context_rel = None if remote else _release_code(
+        context, str(project_dir), project_dir, box_state, "context")
+    rel = _release_code(dockerfile, prod_context, project_dir, box_state, "dockerfile")
+    if rel is None:
+        if os.path.isabs(dockerfile) or dockerfile.startswith("~") or context_rel is None:
+            return dockerfile
+        return os.path.normpath(os.path.join(prod_context, dockerfile))
+    if context_rel is None:
+        raise _unmappable(dockerfile, "dockerfile", f"is release code in the project dir "
+                          f"but the build context {context!r} is not in the release")
+    if not os.path.isabs(dockerfile):
+        return dockerfile
+    return os.path.relpath(rel, context_rel)
 
 
 def _staging_contexts(contexts: Any, project_dir: Path, box_state: set[str]) -> Any:
     def one(name: str, ref: str) -> str:
-        return _build_input(ref, project_dir, box_state, f"additional_contexts.{name}")
+        return _local_input(ref, project_dir, box_state, f"additional_contexts.{name}")
     if isinstance(contexts, dict):
         return {k: one(k, v) if isinstance(v, str) else v for k, v in contexts.items()}
     if not isinstance(contexts, list):
@@ -105,12 +165,15 @@ def _staging_contexts(contexts: Any, project_dir: Path, box_state: set[str]) -> 
 
 def _staging_build(build: Any, project_dir: Path, box_state: set[str]) -> Any:
     if isinstance(build, str):
-        return _build_input(build, project_dir, box_state, "context")
+        return _local_input(build, project_dir, box_state, "context")
     if not isinstance(build, dict):
         return build
     build = dict(build)
+    context = build.get("context", ".")  # Compose's default: the project directory
     if isinstance(build.get("context"), str):
-        build["context"] = _build_input(build["context"], project_dir, box_state, "context")
+        build["context"] = _local_input(context, project_dir, box_state, "context")
+    if isinstance(build.get("dockerfile"), str) and isinstance(context, str):
+        build["dockerfile"] = _dockerfile(build["dockerfile"], context, project_dir, box_state)
     if "additional_contexts" in build:
         build["additional_contexts"] = _staging_contexts(
             build["additional_contexts"], project_dir, box_state)

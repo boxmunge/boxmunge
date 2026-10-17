@@ -205,6 +205,12 @@ of the release mounts read-write: a container could replace it with a symlink to
 which Docker would mount on the container's next start, so validation refuses it (SECURITY.md,
 "Project isolation").
 
+Staging builds from the staged release. A `build` context, `dockerfile` or additional context
+that names release code by absolute path in the project dir (`<project>/src`) is staging's
+staged copy of it; one in a data directory or another server-owned entry, or one in `.releases/`
+or `repo/`, is refused. So is an absolute `dockerfile` in the project when the context is not:
+use paths relative to the release.
+
 Two behaviour changes in this release:
 
 - staging's copy of a nested data mount moved: `./data/db` used to become `./data/db-staging`

@@ -145,3 +145,67 @@ def test_additional_contexts_that_leave_the_project_are_made_absolute(tmp_path) 
 def test_box_state_build_contexts_are_refused(tmp_path, build) -> None:
     with pytest.raises(ComposeError, match="Build from release code"):
         _web(tmp_path, build=build)
+
+
+@pytest.mark.parametrize("build,want", [
+    (f"{P}/src", "./src"),
+    ({"context": f"{P}"}, {"context": "."}),
+    ({"context": f"{P}/src/"}, {"context": "./src"}),
+    ({"context": ".", "dockerfile": f"{P}/docker/Dockerfile"},
+     {"context": ".", "dockerfile": "docker/Dockerfile"}),
+    ({"context": f"{P}/src", "dockerfile": f"{P}/docker/Dockerfile"},   # relative to the context
+     {"context": "./src", "dockerfile": "../docker/Dockerfile"}),
+    ({"dockerfile": f"{P}/Dockerfile"}, {"dockerfile": "Dockerfile"}),  # context defaults to "."
+    ({"context": "./src", "dockerfile": "Dockerfile.prod"},
+     {"context": "./src", "dockerfile": "Dockerfile.prod"}),
+    ({"context": "./src", "additional_contexts": {"v": f"{P}/vendor", "r": f"{P}"}},
+     {"context": "./src", "additional_contexts": {"v": "./vendor", "r": "."}}),
+    ({"context": ".", "additional_contexts": [f"v={P}/vendor"]},
+     {"context": ".", "additional_contexts": ["v=./vendor"]}),
+])
+def test_absolute_release_code_build_inputs_resolve_in_the_staged_release(tmp_path, build,
+                                                                          want) -> None:
+    """Production's own copy of release code is never what staging builds."""
+    assert _web(tmp_path, build=build)["build"] == want
+
+
+@pytest.mark.parametrize("build,want", [
+    ({"context": ".", "dockerfile": "../shared/Dockerfile"},       # leaves the project
+     {"context": ".", "dockerfile": f"{P.parent}/shared/Dockerfile"}),
+    ({"context": "../lib", "dockerfile": "Dockerfile"},
+     {"context": f"{P.parent}/lib", "dockerfile": "Dockerfile"}),
+    ({"context": ".", "dockerfile": "/srv/Dockerfile"}, {"context": ".", "dockerfile": "/srv/Dockerfile"}),
+    ({"context": "https://example.com/r.git", "dockerfile": "Dockerfile"},
+     {"context": "https://example.com/r.git", "dockerfile": "Dockerfile"}),
+])
+def test_dockerfiles_outside_the_project_keep_their_production_meaning(tmp_path, build,
+                                                                       want) -> None:
+    assert _web(tmp_path, build=build)["build"] == want
+
+
+@pytest.mark.parametrize("build", [
+    {"context": ".", "dockerfile": "data/Dockerfile"},
+    {"context": "./src", "dockerfile": "../uploads/Dockerfile"},
+    {"context": ".", "dockerfile": f"{P}/data/Dockerfile"},
+    {"context": "./data/x", "dockerfile": "../../src/Dockerfile"},
+])
+def test_box_state_dockerfiles_are_refused(tmp_path, build) -> None:
+    with pytest.raises(ComposeError, match="Build from release code"):
+        _web(tmp_path, build=build)
+
+
+@pytest.mark.parametrize("build,named", [
+    ({"context": f"{P}/.releases/previous/src"}, f"{P}/.releases/previous/src"),
+    ({"context": "./.releases/previous"}, "./.releases/previous"),
+    ({"context": ".", "additional_contexts": {"a": f"{P}/repo/lib"}}, f"{P}/repo/lib"),
+    ({"context": ".", "dockerfile": f"{P}/.releases/staged/release/Dockerfile"},
+     f"{P}/.releases/staged/release/Dockerfile"),
+    # Release code, but no path relative to staging's context reaches it.
+    ({"context": "../lib", "dockerfile": f"{P}/Dockerfile"}, f"{P}/Dockerfile"),
+    ({"context": "https://example.com/r.git", "dockerfile": f"{P}/Dockerfile"}, f"{P}/Dockerfile"),
+])
+def test_unmappable_build_inputs_in_the_project_are_refused(tmp_path, build, named) -> None:
+    with pytest.raises(ComposeError, match="relative to the release") as e:
+        _web(tmp_path, build=build)
+    assert named in str(e.value)
+
