@@ -1609,8 +1609,8 @@ reports against the installed release.
 Unstage before upgrading. If a project still has a release staged by 0.10.1,
 the upgrade leaves it exactly as it is: the dry run says "<p>: a release
 staged by boxmunge 0.10.1 (<kind>) will be left as is; after the upgrade,
-resolve it with boxmunge-server legacy-stage <p>", and the apply alerts once
-a day until it is resolved. The project keeps running its current containers
+resolve it with boxmunge-server legacy-stage <p>", the apply alerts once,
+and the health check alerts again at most once a day until it is resolved. The project keeps running its current containers
 and is backed up; starts, deploys and pause are refused, quarantine is held,
 and health smoke checks are suspended.
 
