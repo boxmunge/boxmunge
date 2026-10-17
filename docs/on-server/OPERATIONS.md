@@ -1239,6 +1239,11 @@ even under `profile: "off"`: the remapped daemon cannot start such a container. 
 above 65535 is refused there too; before the migration it is a logged warning, and the migration's
 check refuses the project until the id is in range.
 
+The boxmunge-system container (age and rclone) runs in the host user namespace
+(`userns_mode: host` in `system/compose.yml`) as the deploy user, so it can read the backup key and
+write as deploy. On a remapped box, backups, restores and backup-sync refuse a system container that
+runs remapped and print the command that recreates it.
+
 ### Alerts not configured
 
 `alerts` warns when `pushover.user_key` or `pushover.app_token` is missing from

@@ -24,6 +24,7 @@ def healthy_inspect(paths: BoxPaths, *, user: str | None = None) -> dict[str, An
     return {
         "State": {"Status": "running"},
         "Config": {"User": user or f"{owner.st_uid}:{owner.st_gid}"},
+        "HostConfig": {"UsernsMode": "host"},
         "Mounts": [
             {"Source": str(m.host), "Destination": m.container}
             for m in sc.system_mounts(paths)

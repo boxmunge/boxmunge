@@ -34,7 +34,7 @@ def test_only_the_system_compose_file_sets_userns_mode() -> None:
             for doc in yaml.safe_load_all(path.read_text()):
                 if _has_userns_mode(doc):
                     found.add(str(path.relative_to(REPO)))
-    assert found <= {"system/compose.yml"}, found
+    assert found == {"system/compose.yml"}, found
 
 
 def test_no_shipped_code_passes_userns_to_docker() -> None:

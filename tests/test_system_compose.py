@@ -40,3 +40,8 @@ def test_runs_as_the_deploy_uid_from_install() -> None:
 def test_the_system_image_is_named_for_the_data_helper() -> None:
     from boxmunge.data_helper import HELPER_IMAGE
     assert _service()["image"] == HELPER_IMAGE
+
+
+def test_the_system_container_uses_the_host_user_namespace() -> None:
+    """It must read backup.key (root:deploy 0640) and write as deploy."""
+    assert _service()["userns_mode"] == "host"

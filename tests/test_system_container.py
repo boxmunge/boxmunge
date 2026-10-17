@@ -124,6 +124,65 @@ class TestConnect:
         assert run.call_args[0][0][:3] == ["docker", "exec", CONTAINER_NAME]
 
 
+class TestNamespace:
+    """A remapped container cannot read backup.key (root:deploy 0640) or
+    write as deploy, so only the host user namespace will do there."""
+
+    @staticmethod
+    def _remapped_container(paths):
+        info = healthy_inspect(paths)
+        info["HostConfig"]["UsernsMode"] = ""
+        return info
+
+    def test_remapped_daemon_requires_the_host_namespace(self, paths, monkeypatch) -> None:
+        from tests.userns_helpers import remap_box
+        remap_box(paths, monkeypatch)
+        info = self._remapped_container(paths)
+        monkeypatch.setattr(sc, "_inspect", lambda name: info)
+        with pytest.raises(SystemContainerError, match="userns_mode: host"):
+            connect(paths)
+
+    def test_a_remap_boxmunge_did_not_configure_counts_too(self, paths, monkeypatch) -> None:
+        from boxmunge.userns import offset
+        from tests.userns_helpers import remapped_info
+        monkeypatch.setattr(offset, "docker_info", remapped_info)
+        info = self._remapped_container(paths)
+        monkeypatch.setattr(sc, "_inspect", lambda name: info)
+        with pytest.raises(SystemContainerError, match="remapped user namespace"):
+            connect(paths)
+
+    def test_unknown_remap_state_refuses_a_remappable_container(self, paths, monkeypatch) -> None:
+        from boxmunge.userns import offset
+
+        def down():
+            raise offset.RemapError("cannot ask the Docker daemon whether it is remapped: down")
+        monkeypatch.setattr(offset, "docker_info", down)
+        info = self._remapped_container(paths)
+        monkeypatch.setattr(sc, "_inspect", lambda name: info)
+        with pytest.raises(SystemContainerError, match="cannot tell whether .* remapped"):
+            connect(paths)
+
+    def test_host_namespace_never_needs_the_remap_state(self, paths, monkeypatch) -> None:
+        from boxmunge.userns import offset
+
+        def down():
+            raise AssertionError("the host namespace is right on any daemon")
+        monkeypatch.setattr(offset, "docker_info", down)
+        monkeypatch.setattr(sc, "_inspect", lambda name: healthy_inspect(paths))
+        connect(paths)
+
+    def test_unremapped_daemon_accepts_either(self, paths, monkeypatch) -> None:
+        info = self._remapped_container(paths)
+        monkeypatch.setattr(sc, "_inspect", lambda name: info)
+        connect(paths)
+
+    def test_remapped_and_host_namespace_connects(self, paths, monkeypatch) -> None:
+        from tests.userns_helpers import remap_box
+        remap_box(paths, monkeypatch)
+        monkeypatch.setattr(sc, "_inspect", lambda name: healthy_inspect(paths))
+        connect(paths)
+
+
 class TestContainerPath:
     """Host-to-container translation is a prefix match on the real mounts.
 

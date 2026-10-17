@@ -22,6 +22,13 @@ services:
     # .env beside this file from `id -u deploy` / `id -g deploy`; boxmunge
     # refuses to use a container running as any other uid.
     user: "${BOXMUNGE_UID:?set by install.sh in .env}:${BOXMUNGE_GID:?set by install.sh in .env}"
+    # The host user namespace, with the deploy uid: under a remapped daemon a
+    # remapped container could not read the root:deploy 0640 backup key or
+    # write age temp files as deploy. It stays non-root, cap_drop ALL,
+    # read-only and no-new-privileges, so it has exactly deploy's rights.
+    # The only userns_mode in the release (tests/test_userns_static.py); the
+    # data helper runs this image remapped, through docker run.
+    userns_mode: host
     volumes:
       # Backup key (read-only)
       - type: bind
