@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Individual deploy steps: snapshot, repo update, diagnostics, smoke, state."""
+"""Individual deploy steps: snapshot, diagnostics, smoke, state."""
 
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -99,37 +98,6 @@ def snapshot_live_release(
               f"restore data.")
         return None
     return take_pre_deploy_snapshot(project_name, paths, live_manifest, no_snapshot)
-
-
-def update_repo(repo_dir: Path, deploy_ref: str, manifest: dict) -> str | None:
-    """Fetch and check out deploy_ref; return the short HEAD sha, None on error."""
-    if manifest.get("repo", ""):
-        print(f"  Pulling {deploy_ref}...")
-        try:
-            subprocess.run(
-                ["git", "fetch", "origin"], cwd=repo_dir, check=True,
-                capture_output=True, text=True,
-            )
-            subprocess.run(
-                ["git", "checkout", deploy_ref], cwd=repo_dir, check=True,
-                capture_output=True, text=True,
-            )
-            subprocess.run(
-                ["git", "pull", "--ff-only", "origin", deploy_ref],
-                cwd=repo_dir, check=False, capture_output=True, text=True,
-            )
-        except subprocess.CalledProcessError as e:
-            print(f"  ERROR: Git pull failed: {e.stderr}", file=sys.stderr)
-            return None
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=repo_dir, capture_output=True, text=True, check=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        print(f"  ERROR: Cannot read the deployed git ref: {e}", file=sys.stderr)
-        return None
-    return result.stdout.strip()
 
 
 def post_deploy_diagnostics(

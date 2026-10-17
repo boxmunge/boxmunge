@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 from boxmunge.commands.add_git_project_cmd import run_add_git_project
-from boxmunge.commands.deploy_steps import update_repo
+from boxmunge.git_slot import checkout_detached, fetch, resolve_ref
 from boxmunge.commands.upgrade_cmd import run_upgrade
 from boxmunge.manifest import CURRENT_SCHEMA_VERSION, load_manifest
 from boxmunge.paths import BoxPaths
@@ -93,7 +93,8 @@ def test_apply_keeps_symlink_and_uses_migrated_manifest(
     # The link still follows the repository: a later commit is what the
     # next git deploy reads, migrated in memory.
     _commit_manifest(origin, "two.example.com", "move host")
-    assert update_repo(repo, "main", load_manifest(link)) is not None
+    fetch(repo)
+    checkout_detached(repo, resolve_ref(repo, "main"))
     manifest = load_manifest(link)
     assert manifest["hosts"] == ["two.example.com"]
     assert manifest["schema_version"] == CURRENT_SCHEMA_VERSION

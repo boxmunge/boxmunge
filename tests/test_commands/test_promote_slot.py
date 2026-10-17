@@ -399,45 +399,6 @@ def test_an_install_without_a_tree_is_refused_while_staged(paths, capsys) -> Non
     assert load_txn(paths, "myapp") is None
 
 
-def _git_project_with_a_slot(paths):
-    import yaml
-    from boxmunge.project_registry import add_project
-    from boxmunge.staged_release import new_meta, write_meta
-    from boxmunge.state import write_state
-    add_project("myapp", paths)
-    pdir = paths.project_dir("myapp")
-    (pdir / "repo").mkdir(parents=True)
-    (pdir / "manifest.yml").write_text(yaml.safe_dump({
-        "project": "myapp", "hosts": ["myapp.example.com"],
-        "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
-        "backup": {"type": "none"}}))
-    write_state(paths.project_deploy_state("myapp"), {
-        "current_ref": "abc", "history": [{"ref": "def", "snapshot": ""}]})
-    slot = slot_dir(paths, "myapp")
-    (slot / "release").mkdir(parents=True)
-    write_meta(slot, new_meta("bundle", "myapp-v2", None))
-
-
-def test_a_git_deploy_is_refused_while_a_release_is_staged(paths, capsys) -> None:
-    from unittest.mock import patch
-    _git_project_with_a_slot(paths)
-    with patch("boxmunge.commands.deploy.update_repo") as update:
-        assert run_deploy("myapp", paths) == 1
-    update.assert_not_called()
-    assert ("unstage myapp first: git installs cannot yet prove isolation from a staged "
-            "release") in capsys.readouterr().err
-
-
-def test_a_git_rollback_is_refused_while_a_release_is_staged(paths, capsys) -> None:
-    from unittest.mock import patch
-    _git_project_with_a_slot(paths)
-    with patch("boxmunge.commands.deploy.update_repo") as update:
-        assert run_rollback("myapp", paths, yes=True) == 1
-    update.assert_not_called()
-    assert ("unstage myapp first: git installs cannot yet prove isolation from a staged "
-            "release") in capsys.readouterr().err
-
-
 def test_a_rerun_says_which_release_is_live(paths, capsys) -> None:
     """Killed after the switch, then another bundle deployed over the open
     install: the rerun tears staging down and says what is live now."""

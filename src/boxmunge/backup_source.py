@@ -20,13 +20,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import yaml
-
-from boxmunge.git_slot import GitRefError, resolve_recorded_ref, show_manifest
+from boxmunge.git_slot import GitRefError, manifest_at, resolve_recorded_ref
 from boxmunge.legacy_stage import (
     EvidenceError, LegacyStage, cannot_tell, evidence, legacy_stage, real_dir_problem,
 )
-from boxmunge.manifest import ManifestError, at_current_schema, load_manifest
+from boxmunge.manifest import load_manifest
 from boxmunge.release import previous_dir
 from boxmunge.release_txn import CODE_RESTORED, load_txn, options_text
 
@@ -99,7 +97,7 @@ def _legacy(paths: BoxPaths, project: str, stage: LegacyStage) -> BackupSource:
         # follows repo/'s staged checkout: if the staged release renamed the
         # backup service, the dump fails (noisily) rather than reaching the
         # wrong container. Resolving the stage is the fix, not a rewrite here.
-        return BackupSource(_from_git(pdir / "repo", running))
+        return BackupSource(manifest_at(pdir / "repo", running))
     return BackupSource(load_manifest(kept / "manifest.yml"), compose_file=kept / "compose.yml")
 
 
@@ -108,18 +106,3 @@ def _running_commit(repo: Path, current_ref: str | None) -> str:
         return resolve_recorded_ref(repo, current_ref or "")
     except GitRefError as e:
         raise EvidenceError(f"cannot resolve the deployed commit: {e}") from e
-
-
-def _from_git(repo: Path, sha: str) -> dict[str, Any]:
-    """manifest.yml as committed at `sha`, loaded in memory at the current
-    schema. Raises ManifestError when it cannot be read."""
-    where = Path(f"{repo}@{sha}:manifest.yml")
-    try:
-        doc = yaml.safe_load(show_manifest(repo, sha))
-    except GitRefError as e:
-        raise ManifestError(f"Cannot read manifest {where}: {e}") from e
-    except yaml.YAMLError as e:
-        raise ManifestError(f"Manifest is not valid YAML: {where}: {e}") from e
-    if not isinstance(doc, dict):
-        raise ManifestError(f"Manifest is not a YAML mapping: {where}")
-    return at_current_schema(doc, where)

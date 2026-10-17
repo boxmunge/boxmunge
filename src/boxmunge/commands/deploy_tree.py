@@ -3,7 +3,8 @@
 install transaction (release_txn).
 
 The same core runs a bundle deploy and a promote (whose tree is the
-staged slot). The phases and what happens at each failure point are the
+staged slot); a git deploy (commands/git_deploy.py) shares its switch and
+its left-open report. The phases and what happens at each failure point are the
 spec's closing table: a failed keep closes the transaction with nothing
 changed; a failed install, hook or config generation leaves it open (rerun,
 --abandon before hook_started, rollback from hook_started on, or a
@@ -156,20 +157,24 @@ def _install(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTx
             log_kept(paths, project_name, kept, req.component)
             sync_release_code(paths.project_dir(project_name))
         except (OSError, ValueError) as e:
-            return _left_open(project_name, paths, txn, req, f"installing the release failed: {e}")
+            return report_left_open(project_name, paths, txn, req,
+                                    f"installing the release failed: {e}")
     elif not txn.reached("installed"):
-        return _left_open(project_name, paths, txn, req,
-                          f"the release {req.ref} is no longer available to install, and "
-                          f"its install had not finished")
+        return report_left_open(project_name, paths, txn, req,
+                                f"the release {req.ref} is no longer available to install, "
+                                f"and its install had not finished")
     if not txn.reached("installed"):
         txn = advance(paths, project_name, txn, "installed")
     crash_point("txn.installed")
     if req.on_installed is not None:
         req.on_installed()
-    return _switch(project_name, paths, req, txn)
+    return switch_and_close(project_name, paths, req, txn)
 
 
-def _switch(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTxn) -> int:
+def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy,
+                     txn: InstallTxn) -> int:
+    """From installed: the hook (unless resuming at switching), configs,
+    replace_release, then close."""
     resumed_switch = txn.reached("switching")
     if not resumed_switch:
         if not txn.reached("hook_started"):
@@ -178,11 +183,13 @@ def _switch(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTxn
         print(f"Deploying {project_name} (ref: {req.ref})...")
         rc = run_pre_deploy_hook(project_name, paths, req.manifest)
         if rc != 0:
-            return _left_open(project_name, paths, txn, req, "the pre-deploy hook failed", rc)
+            return report_left_open(project_name, paths, txn, req, "the pre-deploy hook failed",
+                                    rc)
     try:
         generate_release_config(project_name, paths, req.manifest, req.component)
     except (OSError, ValueError) as e:
-        return _left_open(project_name, paths, txn, req, f"generating its configs failed: {e}")
+        return report_left_open(project_name, paths, txn, req,
+                                f"generating its configs failed: {e}")
     if not resumed_switch:
         txn = advance(paths, project_name, txn, "switching")
     else:
@@ -203,8 +210,8 @@ def _switch(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTxn
     return rc
 
 
-def _left_open(project_name: str, paths: BoxPaths, txn: InstallTxn, req: TreeDeploy,
-               why: str, rc: int = 1) -> int:
+def report_left_open(project_name: str, paths: BoxPaths, txn: InstallTxn, req: TreeDeploy,
+                     why: str, rc: int = 1) -> int:
     print(f"ERROR: The install of {req.ref} stopped at {txn.phase}: {why}. This attempt "
           f"did not start or change production's containers, and other starts of "
           f"{project_name} are refused until this install is finished: "
@@ -220,7 +227,7 @@ def _resume(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTxn
     if txn.phase == "committed":
         return _keep(project_name, paths, req, txn)
     if txn.phase == "switching":
-        return _switch(project_name, paths, req, txn)
+        return switch_and_close(project_name, paths, req, txn)
     return _install(project_name, paths, req, txn)
 
 

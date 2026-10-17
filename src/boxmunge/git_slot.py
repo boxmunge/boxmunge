@@ -21,6 +21,7 @@ import pwd
 import re
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from boxmunge.fs_nofollow import chown_tree_deploy, running_as_root
 
@@ -181,6 +182,11 @@ def checkout_detached(repo: Path, sha: str) -> None:
         raise GitRefError(f"git checkout {sha} in {repo} failed: {result.stderr.strip()}")
 
 
+def is_full_sha(ref: str) -> bool:
+    """A git install's ref: deploys and stages record full commit SHAs."""
+    return bool(_FULL_SHA.fullmatch(ref or ""))
+
+
 def show_manifest(repo: Path, sha: str) -> str:
     """manifest.yml as committed at `sha` (not the work tree's)."""
     _require_full_sha(sha, "read manifest.yml at")
@@ -188,6 +194,24 @@ def show_manifest(repo: Path, sha: str) -> str:
     if result.returncode != 0:
         raise GitRefError(f"cannot read manifest.yml at {sha}: {result.stderr.strip()}")
     return result.stdout
+
+
+def manifest_at(repo: Path, sha: str) -> dict[str, Any]:
+    """manifest.yml as committed at ``sha``, loaded in memory at the current
+    schema. Raises ManifestError, naming it, when it cannot be read."""
+    import yaml
+
+    from boxmunge.manifest import ManifestError, at_current_schema
+    where = Path(f"{repo}@{sha}:manifest.yml")
+    try:
+        doc = yaml.safe_load(show_manifest(repo, sha))
+    except GitRefError as e:
+        raise ManifestError(f"Cannot read manifest {where}: {e}") from e
+    except yaml.YAMLError as e:
+        raise ManifestError(f"Manifest is not valid YAML: {where}: {e}") from e
+    if not isinstance(doc, dict):
+        raise ManifestError(f"Manifest is not a YAML mapping: {where}")
+    return at_current_schema(doc, where)
 
 
 SUBMODULE_WARN = ("submodules are not checked out; neither production nor staging "
@@ -246,10 +270,11 @@ def _refuse_filters(clone: Path, sha: str) -> None:
             raise GitRefError(f"cannot read {name} at {sha}: {blob.stderr.strip()}")
         if _assigns_filter(blob.stdout):
             raise GitRefError(
-                f"{name} assigns a git filter (Git LFS, say) at {sha}. The staged checkout "
-                f"runs no filter drivers, so staging would not run the files production's "
-                f"checkout has. Stage a commit without filter attributes, or deploy this "
-                f"one with prod-deploy")
+                f"{name} assigns a git filter (Git LFS, say) at {sha}. boxmunge's own "
+                f"checkouts of a commit (the staged release, and the isolation check of a "
+                f"deploy while a release is staged) run no filter drivers, so they would "
+                f"not have the files production's checkout has. Use a commit without "
+                f"filter attributes, or unstage and deploy it with prod-deploy")
 
 
 def copy_project_entries(project_dir: Path, release: Path) -> None:
