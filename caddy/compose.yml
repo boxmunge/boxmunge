@@ -30,7 +30,8 @@ services:
     # Site configs of releases before Caddy logged to stdout write
     # /var/log/caddy/access.log; a rollback to one regenerates them. Container
     # memory only, never a host path, read by nothing: it keeps a rolled-back
-    # Caddy starting. Remove once no rollback target predates the stdout log.
+    # Caddy starting (CrowdSec sees no HTTP traffic until the next upgrade).
+    # Remove once no rollback target predates the stdout log.
     tmpfs:
       - /var/log/caddy:size=64m,mode=0700
     cap_drop:

@@ -73,11 +73,17 @@ fix_ssh_filter() {
     fi
 }
 
-# An install whose collection step failed (crowdsec.sh hid that) never got the
-# Caddy parser; the hub index must be current for the install to succeed.
+# An install whose collection step failed (crowdsec.sh used to hide that) never
+# got the Caddy parser. Only then is the hub contacted: an outage must not fail
+# every upgrade, nor --force overwrite a parser the operator adjusted. The hub
+# index must be current for the install to succeed.
 install_parser() {
-    cscli hub update
-    cscli collections install crowdsecurity/caddy --force
+    local installed
+    installed="$(cscli collections list -o raw)"
+    if ! grep -q '^crowdsecurity/caddy,' <<<"${installed}"; then
+        cscli hub update
+        cscli collections install crowdsecurity/caddy
+    fi
 }
 
 # MemoryMax bounds what a flood of lines can make CrowdSec hold; GOMEMLIMIT
