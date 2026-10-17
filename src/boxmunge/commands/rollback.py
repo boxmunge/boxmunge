@@ -33,12 +33,13 @@ from boxmunge.release import (
     ReleaseStateError, discard_previous_release, install_release, live_ref,
     load_previous_release, mark_live, sync_release_code,
 )
-from boxmunge.release_staging import has_prestage
 from boxmunge.release_keep import ensure_kept_pairing
 from boxmunge.release_txn import (
     InstallTxn, advance, close_txn, load_txn, open_txn, stale_reason, start_refusal,
     supersede_txn,
 )
+from boxmunge.staged_release import sweep_debris
+from boxmunge.staging_isolation import StagingIsolationError, check_install_isolation
 from boxmunge.state import read_state
 
 
@@ -105,10 +106,6 @@ def find_rollback_target(paths: BoxPaths, project_name: str,
             _backup_type(project_dir / "manifest.yml"), paths, project_name)
         return RollbackTarget(ref=history[0]["ref"], snapshot=snapshot, tree=None)
 
-    if has_prestage(paths, project_name):
-        raise RollbackUnavailable(
-            f"a staged release is installed; run 'promote {project_name}' or "
-            f"'unstage {project_name}' first")
     try:
         previous = load_previous_release(paths, project_name)
     except ReleaseStateError as e:
@@ -302,6 +299,12 @@ def _roll_back_release(project_name: str, paths: BoxPaths, target: RollbackTarge
         check_installable(tree, paths.project_dir(project_name))
     except IntakeError as e:
         return report_refusal(e)
+    try:  # D8, before the transaction opens
+        sweep_debris(paths, project_name)
+        check_install_isolation(paths, project_name, tree, manifest)
+    except (StagingIsolationError, OSError) as e:
+        print(f"ERROR: {e}\n  Nothing was changed.", file=sys.stderr)
+        return 1
     txn = current
     if txn is None or txn.source != "rollback":
         try:

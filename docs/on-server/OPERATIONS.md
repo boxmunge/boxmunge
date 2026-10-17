@@ -148,21 +148,26 @@ is torn down completely. `promote` deploys the staged release (never a newer bun
 the inbox meanwhile). `unstage` takes staging down and drops the slot; if it cannot remove the
 staging containers it keeps the slot, records why, and prints the commands to finish by hand.
 
-A `promote` that fails before any production container is touched (a failing `pre_deploy` hook)
-leaves the stage as it was. Once it has started the staged release's containers, production runs
-that release even if a later step fails (`compose up` errors part-way, Caddy rejects the site, smoke
-fails): the error says `production now runs <ref>` and what `rollback` would do, and the displaced
-production release becomes the previous release, exactly as after a failed `prod-deploy`. `rollback`
-returns to it with the data snapshot taken before the promotion (it refuses, and says so, if the
-project keeps backups but that snapshot could not be taken). Staging is left up: `unstage` removes
-it, and never puts the old release's files back under the new containers. If staging cannot be
-torn down after a successful promotion, `promote` exits 1 and asks you to run `unstage`.
+`promote` is an ordinary production deploy whose release is the staged one, in the same install
+transaction as `prod-deploy`. A `promote` that fails before any production container is touched (a
+failing `pre_deploy` hook) leaves the install open, as a failed `prod-deploy` does, and the stage as
+it was: rerun `promote`, or deploy a fix. Once it has started the staged release's containers,
+production runs that release even if a later step fails (`compose up` errors part-way, Caddy
+rejects the site, smoke fails): the error says `production now runs <ref>` and what `rollback`
+would do, and the displaced production release becomes the previous release, exactly as after a
+failed `prod-deploy`. `rollback` returns to it with the data snapshot taken (with production's own
+manifest) before the promotion. The stage is then marked retired, so it is never promoted twice;
+staging is left up and `unstage` removes it. If staging cannot be torn down after a successful
+promotion, `promote` exits 1 and asks you to run `unstage`. A promote that is killed is finished by
+running `promote` again, which resumes the install from where it stopped (after the switch it
+does not run the `pre_deploy` hook again or take a new snapshot).
 
-If a promote is killed after it started production, `unstage`, `stage` and `prod-deploy` refuse
-until `promote` is run again. That rerun finishes the switch: it does not run the `pre_deploy` hook
-again or take a new snapshot (production data may already have changed), and however it ends, even
-if it fails, the displaced release becomes the previous release with the snapshot taken before the
-first attempt. After that, `unstage`, `rollback` and `prod-deploy` work as after any failed deploy.
+`prod-deploy` and `rollback` work while a release is staged; staging is left as it is, and the
+next `promote` keeps whatever production then runs as its previous release. Before anything
+changes, each proves production's next release shares nothing with staging (as `stage` does,
+below) and refuses with "Nothing was changed" if it would. Such a release whose `compose.yml` uses
+`include:` or `extends: file:` cannot be checked this way and is refused: unstage first, or move
+those services into `compose.yml`.
 
 Staging and production share no Docker resource. Before installing anything, `stage` resolves
 staging from the staged release, and production both as it runs and as it would run once the

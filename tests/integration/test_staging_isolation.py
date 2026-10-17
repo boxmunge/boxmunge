@@ -166,3 +166,32 @@ def test_a_whole_project_mount_is_refused_before_install(paths, capsys) -> None:
     pdir = paths.project_dir(project)
     assert (pdir / "appconfig" / "settings").read_text() == "prod-config"
     assert not (pdir / ".releases" / "staged").exists()
+
+
+def test_promote_proves_and_installs_the_staged_release(paths, staged) -> None:
+    """D8 resolves the staged release as production would run it, for real,
+    then promote installs it and drops the slot."""
+    from boxmunge.commands.promote_cmd import run_promote
+    with _no_containers():
+        assert run_promote(staged, paths) == 0
+    project_dir = paths.project_dir(staged)
+    assert (project_dir / "appconfig" / "settings").read_text() == "staged-config"
+    assert not slot_dir(paths, staged).exists()
+    assert not list(paths.project_releases(staged).glob(".isolation-*"))
+
+
+def test_a_deploy_during_a_stage_sharing_staging_data_is_refused(paths, staged, capsys) -> None:
+    release = _release(staged, "hotfix")
+    doc = yaml.safe_load(release["compose.yml"])
+    doc["services"]["web"]["volumes"].append("./uploads-staging:/u2")
+    release["compose.yml"] = yaml.safe_dump(doc)
+    place_bundle(paths, staged, "2026-10-13T110000000000", release)
+    with _no_containers():
+        assert run_deploy(staged, paths, ref="2026-10-13T110000000000") == 1
+    err = capsys.readouterr().err
+    assert "share these with production after this install" in err
+    assert "Nothing was changed" in err
+    project_dir = paths.project_dir(staged)
+    assert (project_dir / "appconfig" / "settings").read_text() == "prod-config"
+    assert not (project_dir / ".releases" / "install.json").exists()
+    assert not list(paths.project_releases(staged).glob(".isolation-*"))

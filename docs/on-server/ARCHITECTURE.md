@@ -215,7 +215,7 @@ Steps 5 to 9 of a bundle deploy, and every bundle rollback, run inside an instal
 
 The staged release lives in its own tree, the slot `.releases/staged/`: `release/` is the staged
 release, staging's compose files sit beside it, and `meta.json` records the stage (its ref, an id,
-and whether it is `starting` or `ready`). Staging containers run from `release/`
+and whether it is `starting`, `ready`, or `retired` once promoted). Staging containers run from `release/`
 (`--project-directory`); production's project directory is never written by a stage. A stage that
 fails after the slot is in place is torn down the same way unstage does it, and a re-stage that
 fails tears everything down too.

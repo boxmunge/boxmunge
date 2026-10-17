@@ -134,3 +134,22 @@ def test_an_install_sharing_with_the_slots_staging_is_refused(paths, tmp_path) -
     with pytest.raises(StagingIsolationError, match="share these with production after this"):
         check_install_isolation(paths, "myapp", tree, {"project": "myapp", "services": {}})
     assert not list(paths.project_releases("myapp").glob(".isolation-*"))
+
+
+@pytest.mark.parametrize("compose", [
+    {"include": ["extra.yml"], "services": {"web": {"image": "nginx"}}},
+    {"services": {"web": {"image": "nginx", "extends": {"file": "base.yml", "service": "b"}}}},
+])
+def test_candidate_model_refuses_include_and_extends_files(paths, tmp_path, compose) -> None:
+    """Resolved with production's project dir, they would be read from
+    production's files, not the candidate's: a fail-open for D8."""
+    from boxmunge.staging_isolation import candidate_model
+    paths.project_dir("myapp").mkdir(parents=True)
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "compose.yml").write_text(yaml.safe_dump(compose))
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    with pytest.raises(StagingIsolationError, match="Unstage first, or remove include/extends"):
+        candidate_model(paths, "myapp", tree, {"project": "myapp", "services": {}}, scratch)
+

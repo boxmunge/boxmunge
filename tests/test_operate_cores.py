@@ -90,7 +90,6 @@ def test_stage_core(paths, lock_attempts) -> None:
     assert load_slot(paths, NAME).state == "ready"
 
 
-@pytest.mark.xfail(strict=True, reason="Task 20: promote deploys the slot")
 def test_promote_core(paths, lock_attempts) -> None:
     _staged_v2(paths)
     with _docker():

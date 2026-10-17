@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Prove that staging and production share no Docker resource.
 
 Both environments run on one daemon beside one project directory. Staging
@@ -210,9 +211,8 @@ def _without_read_files(compose: Path, dest: Path) -> Path:
     """``compose`` without its services' env and label files. They are
     release code the project dir lacks until the install, which Compose
     2.35 refuses to resolve even with --no-env-resolution, and they name no
-    resource the comparison looks at. Every relative path, include and
-    extends file in it resolves against --project-directory, wherever the
-    copy lies."""
+    resource the comparison looks at. Every relative path in it resolves
+    against --project-directory, wherever the copy lies."""
     doc = yaml.safe_load(compose.read_text())
     for svc in _mapping(_mapping(doc).get("services")).values():
         if isinstance(svc, dict):
@@ -222,10 +222,26 @@ def _without_read_files(compose: Path, dest: Path) -> Path:
     return dest
 
 
+def _refuse_other_files(compose: Path) -> None:
+    """The candidate is resolved with production's project dir as its
+    --project-directory, so an include: or extends: file: would be read
+    from production's current files, not the candidate's: the proof would
+    compare the wrong model. Refused rather than proved wrongly."""
+    doc = _mapping(yaml.safe_load(compose.read_text()))
+    services = _mapping(doc.get("services")).values()
+    if "include" in doc or any(isinstance(svc, dict) and isinstance(svc.get("extends"), dict)
+                               and "file" in svc["extends"] for svc in services):
+        raise StagingIsolationError(
+            "a release whose compose.yml uses include: or extends: file: cannot be "
+            "checked against staging while a release is staged. Unstage first, or "
+            "remove include/extends (move those services into compose.yml)")
+
+
 def candidate_model(paths: BoxPaths, project: str, tree: Path, manifest: dict[str, Any],
                     scratch: Path) -> dict[str, Any]:
     """What production would run once ``tree`` is installed in the project
     dir: its compose.yml and the overlay it would get, resolved there."""
+    _refuse_other_files(tree / "compose.yml")
     overlay = scratch / "compose.boxmunge.candidate.yml"
     overlay.write_text(generate_compose_override(
         manifest, env_files=production_env_files(paths, project) or None,
@@ -260,7 +276,9 @@ def check_isolation(paths: BoxPaths, project: str, staging: dict[str, Any],
 def check_install_isolation(paths: BoxPaths, project: str, tree: Path,
                             manifest: dict[str, Any]) -> None:
     """D8: a production install while a release is staged must share nothing
-    with the slot's staging. Raises StagingIsolationError."""
+    with the slot's staging. Raises StagingIsolationError. The scratch lies
+    in .releases/ as ``.isolation-*``: a kill leaves it for
+    staged_release.sweep_debris, which deploy and rollback run under the lock."""
     if not has_slot(paths, project):
         return
     releases = paths.project_releases(project)

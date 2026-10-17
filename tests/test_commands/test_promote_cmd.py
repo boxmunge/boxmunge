@@ -2,9 +2,9 @@
 import pytest
 from unittest.mock import patch, MagicMock
 from boxmunge.commands.promote_cmd import run_promote
-from boxmunge.commands.promote_release import Promotion
 from boxmunge.state import write_state
 from boxmunge.project_registry import add_project
+from tests.stage_helpers import prod_and_stage
 
 VALID_MANIFEST = """\
 id: 01TESTULID0000000000000000
@@ -22,55 +22,22 @@ backup:
 """
 
 class TestRunPromote:
-    def _setup_staged(self, paths):
-        pdir = paths.project_dir("testapp")
-        pdir.mkdir(parents=True, exist_ok=True)
-        (pdir / "manifest.yml").write_text(VALID_MANIFEST)
-        (pdir / "compose.yml").write_text("services:\n  web:\n    image: nginx\n")
-        paths.project_staging_compose_override("testapp").write_text(
-            "networks:\n  boxmunge-proxy:\n    external: true\n")
-        paths.project_staging_caddy_site("testapp").write_text(
-            "staging.testapp.example.com {}\n")
-        write_state(paths.project_staging_state("testapp"), {"active": True})
-
-    @patch("boxmunge.commands.promote_cmd.deploy_staged_locked")
-    @patch("boxmunge.commands.promote_cmd.unstage_locked")
-    def test_unstages_then_deploys(self, mock_unstage, mock_deploy, paths):
-        self._setup_staged(paths)
-        mock_unstage.return_value = 0
-        mock_deploy.return_value = Promotion(0, switched=True)
-        result = run_promote("testapp", paths)
-        assert result == 0
-        mock_unstage.assert_called_once()
-        mock_deploy.assert_called_once()
-
-    def test_fails_no_active_staging(self, paths):
+    def test_fails_no_active_staging(self, paths, capsys):
+        add_project("testapp", paths)
         pdir = paths.project_dir("testapp")
         pdir.mkdir(parents=True, exist_ok=True)
         (pdir / "manifest.yml").write_text(VALID_MANIFEST)
         result = run_promote("testapp", paths)
         assert result == 1
-
-    @patch("boxmunge.commands.promote_cmd.deploy_staged_locked")
-    @patch("boxmunge.commands.promote_cmd.unstage_locked")
-    def test_deploys_to_production(self, mock_unstage, mock_deploy, paths):
-        self._setup_staged(paths)
-        mock_unstage.return_value = 0
-        mock_deploy.return_value = Promotion(0, switched=True)
-        run_promote("testapp", paths)
-        deploy_call = mock_deploy.call_args
-        assert deploy_call[0][0] == "testapp"
+        assert "No staged release for 'testapp'" in capsys.readouterr().err
 
 
 class TestRefusesPaused:
     def test_refuses_paused_project(self, paths, capsys):
         from boxmunge.pause import write_paused_state
-        pdir = paths.project_dir("testapp")
-        pdir.mkdir(parents=True, exist_ok=True)
-        (pdir / "manifest.yml").write_text(VALID_MANIFEST)
-        write_state(paths.project_staging_state("testapp"), {"active": True})
-        write_paused_state("testapp", paths)
-        rc = run_promote("testapp", paths)
+        prod_and_stage(paths)
+        write_paused_state("myapp", paths)
+        rc = run_promote("myapp", paths)
         assert rc == 1
         err = capsys.readouterr().err
         assert "paused" in err.lower()
@@ -79,27 +46,24 @@ class TestRefusesPaused:
 class TestRefusesQuarantined:
     """Wave 1: promote must refuse a CVE-quarantined project."""
 
-    @patch("boxmunge.commands.promote_cmd.deploy_staged_locked")
-    @patch("boxmunge.commands.promote_cmd.unstage_locked")
+    @patch("boxmunge.commands.promote_cmd.deploy_tree_locked")
+    @patch("boxmunge.commands.promote_cmd.teardown_staging_locked")
     def test_refuses_quarantined_project(
-        self, mock_unstage, mock_deploy, paths, capsys,
+        self, mock_teardown, mock_deploy, paths, capsys,
     ):
-        pdir = paths.project_dir("testapp")
-        pdir.mkdir(parents=True, exist_ok=True)
-        (pdir / "manifest.yml").write_text(VALID_MANIFEST)
-        write_state(paths.project_staging_state("testapp"), {"active": True})
-        paths.project_quarantine_state("testapp").parent.mkdir(
+        prod_and_stage(paths)
+        paths.project_quarantine_state("myapp").parent.mkdir(
             parents=True, exist_ok=True,
         )
-        paths.project_quarantine_state("testapp").write_text("{}")
-        rc = run_promote("testapp", paths)
+        paths.project_quarantine_state("myapp").write_text("{}")
+        rc = run_promote("myapp", paths)
         assert rc == 1
         err = capsys.readouterr().err
         assert "quarantine" in err.lower()
         assert "security resume" in err
         # Underlying mutating helpers MUST NOT have run.
         mock_deploy.assert_not_called()
-        mock_unstage.assert_not_called()
+        mock_teardown.assert_not_called()
 
 
 class TestPromoteComponentTagging:
@@ -110,10 +74,9 @@ class TestPromoteComponentTagging:
     sees component="deploy" and the SECURITY OFF entry is mis-attributed.
     """
 
-    @pytest.mark.xfail(strict=True, reason="Task 20: promote deploys the slot")
     def test_promote_passes_component_to_deploy(self, paths) -> None:
         from boxmunge.commands import deploy as deploy_mod
-        from tests.stage_helpers import prod_and_stage, staging_docker_off as _docker
+        from tests.stage_helpers import staging_docker_off as _docker
         prod_and_stage(paths)
         observed: list[str] = []
         real = deploy_mod.prepare_compose_override
@@ -184,25 +147,13 @@ class TestPromoteUnknownArg:
 class TestPromoteComposeRejectionExit3:
     """Audit H-N2: hardening rejection from underlying deploy returns 3."""
 
-    @patch("boxmunge.commands.promote_cmd.deploy_staged_locked")
-    @patch("boxmunge.commands.promote_cmd.unstage_locked")
+    @patch("boxmunge.commands.promote_cmd.deploy_tree_locked", return_value=3)
+    @patch("boxmunge.commands.promote_cmd.teardown_staging_locked")
     def test_hardening_rejection_propagates_3(
-        self, mock_unstage, mock_deploy, paths,
+        self, mock_teardown, mock_deploy, paths,
     ):
-        # Reuse setup fixture from TestRunPromote.
-        pdir = paths.project_dir("testapp")
-        pdir.mkdir(parents=True, exist_ok=True)
-        (pdir / "manifest.yml").write_text(VALID_MANIFEST)
-        (pdir / "compose.yml").write_text("services:\n  web:\n    image: nginx\n")
-        paths.project_staging_compose_override("testapp").write_text(
-            "networks:\n  boxmunge-proxy:\n    external: true\n")
-        paths.project_staging_caddy_site("testapp").write_text(
-            "staging.testapp.example.com {}\n")
-        write_state(paths.project_staging_state("testapp"), {"active": True})
-
-        # Underlying deploy hits compose validation and returns 3.
-        mock_deploy.return_value = Promotion(3, switched=False)
-        result = run_promote("testapp", paths)
-        assert result == 3
-        # Unstage must NOT run — production is hostile, staging stays live.
-        mock_unstage.assert_not_called()
+        prod_and_stage(paths)
+        assert run_promote("myapp", paths) == 3
+        mock_deploy.assert_called_once()
+        # Teardown must NOT run — production is hostile, staging stays live.
+        mock_teardown.assert_not_called()

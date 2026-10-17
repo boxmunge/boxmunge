@@ -290,7 +290,6 @@ def test_stage_and_unstage_leave_production_data(paths, capsys) -> None:
     assert "uploads/ holds data" not in capsys.readouterr().out
 
 
-@pytest.mark.xfail(strict=True, reason="Task 20: promote deploys the slot")
 def test_stage_unstage_and_promote_keep_retired_data(paths, capsys) -> None:
     """A promoted release that drops the mount keeps production's data."""
     from boxmunge.commands.deploy import run_deploy
@@ -387,7 +386,6 @@ class TestPreUpgradeProjects:
             assert run_deploy("myapp", paths) == 0
         assert (pdir / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
 
-    @pytest.mark.xfail(strict=True, reason="Task 20: promote deploys the slot")
     def test_promote_after_upgrade_keeps_a_dir_only_production_mounted(self, paths) -> None:
         from boxmunge.commands.deploy import run_deploy
         from boxmunge.commands.promote_cmd import run_promote
