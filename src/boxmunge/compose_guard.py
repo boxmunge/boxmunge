@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -44,6 +45,7 @@ from boxmunge.notify import notify
 from boxmunge.paths import RESERVED_PROJECT_NAMES
 from boxmunge.release_staging import has_prestage
 from boxmunge.release_txn import load_txn, stale_reason, start_refusal
+from boxmunge.staged_release import SlotError, clear_production_stopped
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -188,6 +190,23 @@ def compose_up_checked(
     compose_up(paths.project_dir(project_name), compose_files=compose_files, build=build,
                project_name=staging_compose_project(project_name) if staging else project_name,
                force_recreate=force_recreate, services=services, start=start)
+    if not staging and start:
+        _clear_production_stopped(paths, project_name, component)
+
+
+def _clear_production_stopped(paths: BoxPaths, project_name: str, component: str) -> None:
+    """Production runs again, so a staging copy's stop no longer stands
+    (boxmunge.production_stopped). Production is up by now: an unreadable
+    slot must not turn that into a failed start, so it is said loudly and
+    left for the slot's own cores, which refuse it."""
+    try:
+        clear_production_stopped(paths, project_name)
+    except (SlotError, OSError) as e:
+        message = (f"{project_name}: production is running, but its staged slot cannot be "
+                   f"read to clear the production_stopped marker: {e}. Inspect the slot and "
+                   f"unstage {project_name}.")
+        print(f"ERROR: {message}", file=sys.stderr)
+        log_error(component, message, paths, project=project_name)
 
 
 def check_containers_start(paths: BoxPaths, project_name: str, *, component: str) -> None:
