@@ -7,13 +7,14 @@ import sys
 from boxmunge.docker import compose_stop, caddy_reload, DockerError
 from boxmunge.fileutil import LockError, atomic_write_text, project_lock
 from boxmunge.legacy_stage import refuse_if_legacy_stage
-from boxmunge.log import log_operation, log_error
+from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import (
     hold_restart_policies, is_paused, mark_pause_complete, pause_action_complete,
     render_maintenance_caddy_config, write_paused_state,
 )
 from boxmunge.paths import BoxPaths
+from boxmunge.staged_release import SlotError, clear_production_stopped
 
 
 def run_pause(
@@ -130,6 +131,7 @@ def pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int:
     except DockerError as e:
         return _pause_incomplete(
             project_name, paths, f"stopping the containers failed: {e}")
+    _take_over_copy_stop(project_name, paths)
     # Keep it stopped across a Docker restart or reboot (B-19 for pause).
     try:
         hold_restart_policies(project_name, paths)
@@ -146,6 +148,20 @@ def pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int:
     print(f"  Visitors to {', '.join(hosts)} see the maintenance page.")
     print(f"  Run 'resume {project_name}' to bring back online.")
     return 0
+
+
+def _take_over_copy_stop(project_name: str, paths: BoxPaths) -> None:
+    """The stop is pause's now: a staging copy's production_stopped marker
+    no longer stands (resume starts production). A slot that cannot be
+    read or written is said, not raised: the pause itself succeeded."""
+    try:
+        clear_production_stopped(paths, project_name)
+    except (SlotError, OSError) as e:
+        message = (f"{project_name}'s staged slot could not be read or written to clear "
+                   f"staging's production_stopped marker: {e}. Inspect the slot and "
+                   f"unstage {project_name}")
+        print(f"  WARN: {message}.", file=sys.stderr)
+        log_warning("pause", message, paths, project=project_name)
 
 
 def _pause_incomplete(project_name: str, paths: BoxPaths, what: str) -> int:

@@ -187,10 +187,12 @@ staged release's own in `.releases/staged/release/`.
 The staged release lives in `.releases/staged/`, so the project directory stays production's and
 production starts as usual during a stage (upgrade restarts, container updates, `recover`,
 `resume`, `security resume`, `restore`). A release staged by boxmunge 0.10.1 is different: it put
-the staged release's files in the project directory. For such a project every production start is
-refused with a "start refused" alert (see Troubleshooting), and `stage`, `unstage`, `promote`,
-`prod-deploy`, `rollback`, `restore`, `resume`, `recover`, `pause` and `data adopt` refuse, naming
-`boxmunge-server legacy-stage <project>`. Its running containers are left as they are.
+the staged release's files in the project directory. For such a project `stage`, `unstage`,
+`promote`, `prod-deploy`, `rollback`, `restore`, `resume`, `recover`, `pause` and `data adopt`
+refuse directly, naming `boxmunge-server legacy-stage <project>`; background starts (upgrade
+restarts, container updates) and `security resume` are refused with a "start refused" alert (see
+Troubleshooting). If boxmunge cannot tell whether such a stage is on disk (for example `state/`
+cannot be read), it refuses the same way and says so. Its running containers are left as they are.
 
 A bind mount, config or secret file in a data directory (any directory a release has mounted
 read-write) or another server-owned entry (`data/`, `secrets.env`) points staging at the entry's
@@ -234,7 +236,13 @@ Staging keeps its own data between stages. To start it from a copy of production
    files included; a staging copy of the wrong type, such as a directory where production has a
    file, is removed with a `NOTE`), copies production's data in, and starts production again whatever happened,
    even if it was interrupted. If production cannot be started again, `stage` fails with
-   `PRODUCTION IS DOWN` and the `docker start` command to run;
+   `PRODUCTION IS DOWN` and the `docker start` command to run. If `stage` itself was killed during
+   the copy, the slot's `production_stopped` marker names the containers it stopped: the next health
+   check (or `stage`, `unstage` or `recover`) starts them again and alerts, and the health check
+   never applies its critical stop while the marker stands. If the slot's `meta.json` cannot be
+   read, the health check cannot tell, so it reports the project `CRITICAL`, alerts once and leaves
+   production alone: run `recover <project>` (it starts production with its compose files), then
+   `unstage <project>`. `pause` takes the stop over (`resume` starts production);
 5. starts staging only after every copy succeeded.
 
 The copies run in the data helper, a short-lived container from the box's own `boxmunge-system`
@@ -718,6 +726,10 @@ wait too. The alert names your options:
   snapshot, and it can no longer be abandoned once an earlier attempt's hook
   ran. This is also the way out of a first deploy whose hook keeps failing.
 
+While an install is open the health check runs no smoke and takes no critical
+action (the install may already have replaced the smoke scripts): `check-all`
+reports the project as `WARNING (install open: ...)`, naming these options.
+
 A failure once the containers were started (compose, Caddy or the smoke test)
 closes the install as before: production may run the new release, and
 `rollback` returns to the old one.
@@ -978,9 +990,9 @@ does not page every run); the refusal is logged every time:
 
 - **"has a release staged by boxmunge 0.10.1"** — the project directory
   may hold that stage's files, so production is not recreated from them
-  (upgrade restarts, container updates, `recover`, `resume`, `security
-  resume`, `restore` and `data adopt` all wait). Running containers keep
-  running. Resolve it with `boxmunge-server legacy-stage <project>`; the
+  (upgrade restarts, container updates and `security resume` wait with
+  this alert; `recover`, `resume`, `restore` and `data adopt` refuse on
+  the terminal without one). Running containers keep running. Resolve it with `boxmunge-server legacy-stage <project>`; the
   next run picks it up. This alert does not mean tampering.
 - **"an install of <ref> ... is open at phase <phase>"** — a deploy or
   rollback stopped part-way, so the project directory may hold a

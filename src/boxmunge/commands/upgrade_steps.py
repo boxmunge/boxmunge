@@ -19,7 +19,7 @@ from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_check
 from boxmunge.release_txn import open_install_reason
 from boxmunge.docker import DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
-from boxmunge.legacy_stage import legacy_stage
+from boxmunge.legacy_stage import legacy_stage_refusal
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import (
@@ -206,7 +206,7 @@ def _record_bind_sources(paths: BoxPaths, name: str) -> str | None:
     files in its project directory, so there is nothing of production's to
     record; restart_projects refuses the project.
     """
-    if legacy_stage(paths, name) is not None:
+    if legacy_stage_refusal(paths, name) is not None:
         return None
     try:
         check_start(paths, name, component="upgrade",

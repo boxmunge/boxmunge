@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import patch
 
 import pytest
@@ -155,3 +156,62 @@ def test_unstage_refuses_a_legacy_stage_without_a_slot(paths, capsys) -> None:
     _state(paths)
     assert unstage_locked(P, paths) == 1
     assert "legacy-stage" in capsys.readouterr().err
+
+
+def test_a_symlinked_prestage_is_a_bundle_stage(paths, tmp_path) -> None:
+    pdir = paths.project_dir(P)
+    (pdir / ".releases").mkdir(parents=True)
+    (pdir / ".releases" / "prestage").symlink_to(tmp_path / "elsewhere")
+    assert legacy_stage(paths, P).kind == "bundle"
+
+
+@pytest.mark.parametrize("make", ["dangling-link", "directory"])
+def test_a_state_file_that_is_not_a_file_counts_as_a_stage(paths, tmp_path, make) -> None:
+    paths.project_dir(P).mkdir(parents=True)
+    path = legacy_staging_state(paths, P)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if make == "dangling-link":
+        path.symlink_to(tmp_path / "gone.json")
+    else:
+        path.mkdir()
+    assert legacy_stage(paths, P).kind == "leftover"
+
+
+def _unreadable_state_dir(paths):
+    """state/staging cannot be searched (EACCES): whether a 0.10.1 stage is
+    recorded there cannot be told."""
+    paths.project_dir(P).mkdir(parents=True, exist_ok=True)
+    state_dir = legacy_staging_state(paths, P).parent
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_dir.chmod(0)
+    return state_dir
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads through a mode-0 directory")
+def test_undetectable_stage_refuses_cores(paths, capsys) -> None:
+    state_dir = _unreadable_state_dir(paths)
+    try:
+        with pytest.raises(OSError):
+            legacy_stage(paths, P)
+        assert refuse_if_legacy_stage(paths, P) is True
+    finally:
+        state_dir.chmod(0o755)
+    assert "cannot tell whether a 0.10.1 stage is on disk" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads through a mode-0 directory")
+def test_undetectable_stage_refuses_production_starts(paths) -> None:
+    """A detection error is a refusal of this project's start, not an
+    exception that aborts restart_projects for every project after it."""
+    prod_and_stage(paths)
+    state_dir = _unreadable_state_dir(paths)
+    try:
+        with patch("boxmunge.compose_guard.compose_up") as up, \
+                patch("boxmunge.compose_guard.notify"), \
+                pytest.raises(ComposeRefused,
+                              match="cannot tell whether a 0.10.1 stage is on disk"):
+            compose_up_checked(paths, P, component="upgrade",
+                               compose_files=["compose.yml", "compose.boxmunge.yml"])
+    finally:
+        state_dir.chmod(0o755)
+    up.assert_not_called()

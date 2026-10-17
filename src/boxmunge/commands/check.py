@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from boxmunge.commands.argv import parse_args, require_project_name
+from boxmunge.commands.check_holds import tick_hold
 from boxmunge.commands.health_state import (
     is_monitor_stopped, record_still_stopped, update_health_state,
 )
@@ -400,6 +401,9 @@ def _check_one(name: str, paths: BoxPaths, read_only: bool) -> int:
                 paths, project=name,
             )
         return 0
+    held = tick_hold(name, paths, read_only)
+    if held is not None:
+        return held
     # The monitor removed this project's containers after a critical
     # result. Running smoke now would only report "No such container" and
     # overwrite the real stop reason; the stop stands until recover or a

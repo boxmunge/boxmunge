@@ -49,7 +49,7 @@ from boxmunge.docker import compose_up, start_containers
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import discard_dir
 from boxmunge.intake import IntakeError, validate_release_tree
-from boxmunge.legacy_stage import legacy_refusal, legacy_stage
+from boxmunge.legacy_stage import legacy_stage_refusal
 from boxmunge.log import log_error, log_warning
 from boxmunge.notify import notify
 from boxmunge.paths import RESERVED_PROJECT_NAMES
@@ -132,10 +132,9 @@ def _refuse_if_install_open(paths: BoxPaths, project_name: str, component: str,
 
 
 def _refuse_if_legacy_stage(paths: BoxPaths, project_name: str, component: str) -> None:
-    stage = legacy_stage(paths, project_name)
-    if stage is not None:
-        raise _refused(paths, project_name, component, legacy_refusal(project_name, stage),
-                       tampering=False)
+    refusal = legacy_stage_refusal(paths, project_name)
+    if refusal is not None:
+        raise _refused(paths, project_name, component, refusal, tampering=False)
 
 
 def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
