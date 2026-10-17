@@ -29,7 +29,7 @@ ssh-keygen -A >/dev/null
 mkdir -p /run/sshd /opt/boxmunge/bin /opt/boxmunge/env-active/bin /root/.ssh
 
 # The venv as install.sh leaves it, with the package from /src: its python
-# and the boxmunge-shell entry point. The login shell is install.sh's own
+# and the boxmunge-shell entry point. The login shell is install-ssh.sh's own
 # wrapper (WRAPPER_NOW); WRAPPER_BEFORE is the one earlier releases wrote.
 ln -s /usr/bin/python3 /opt/boxmunge/env-active/bin/python
 cat > /opt/boxmunge/env-active/bin/boxmunge-shell <<'ENTRY'
@@ -41,7 +41,7 @@ sys.exit(main())
 ENTRY
 chmod 755 /opt/boxmunge/env-active/bin/boxmunge-shell
 WRAPPER_NOW="$(sed -n "/^cat > \"\${BOXMUNGE_ROOT}\/bin\/boxmunge-shell\" <<'WRAPPER'$/,/^WRAPPER$/p" \
-    /install.sh | sed '1d;$d')"
+    /bootstrap/install-ssh.sh | sed '1d;$d')"
 [[ "${WRAPPER_NOW}" == "#!/bin/sh"* ]] || { echo "WRAPPER_NOT_FOUND"; exit 1; }
 WRAPPER_BEFORE='#!/usr/bin/env bash
 exec /opt/boxmunge/env-active/bin/boxmunge-shell "$@"'

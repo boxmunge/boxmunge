@@ -40,7 +40,6 @@ def _docker_run(mounts: dict[str, str], script: str) -> subprocess.CompletedProc
 def probe() -> dict[str, str]:
     result = _docker_run(
         {str(REPO / "bootstrap"): "/bootstrap", str(REPO / "src"): "/src",
-         str(REPO / "install.sh"): "/install.sh",
          str(REPO / "tests/integration/sshd_hardening_probe.sh"): "/probe.sh"},
         "bash /probe.sh",
     )

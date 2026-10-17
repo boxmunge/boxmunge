@@ -20,10 +20,10 @@
 # included file ends with that file, so it cannot capture the main file's
 # settings. PermitTTY keeps its default: the interactive deploy shell needs
 # a terminal. Port, AllowUsers and the session limits stay in sshd.sh, the
-# SFTP Subsystem in install.sh.
+# SFTP Subsystem in install-ssh.sh.
 #
-# Run by sshd.sh on a fresh box and by install.sh on every install and
-# upgrade. Idempotent. The result is checked with `sshd -t` and against the
+# Run by sshd.sh on a fresh box and by install.sh (install-ssh.sh) on every
+# install and every upgrade that changes the installer. Idempotent. The result is checked with `sshd -t` and against the
 # settings sshd would actually give deploy and supervisor (`sshd -T -C`); on
 # any failure the previous drop-in is put back and the script exits non-zero.
 set -euo pipefail

@@ -71,8 +71,17 @@ def test_a_fresh_bootstrap_applies_it_before_sshd_restarts() -> None:
 
 def test_every_install_and_upgrade_applies_it_before_recording_the_installer() -> None:
     text = (REPO / "install.sh").read_text()
-    call = 'bash "${SCRIPT_DIR}/bootstrap/sshd-hardening.sh"'
-    assert call in text
+    source = 'source "${SCRIPT_DIR}/bootstrap/install-ssh.sh"'
+    assert source in text
     # A failed run leaves the old fingerprint, so the next upgrade re-runs install.sh.
-    assert text.index(call) < text.index('INSTALLER_HASH_FILE="${BOXMUNGE_ROOT}/state/installer.sha256"')
-    assert text.index(call) > text.index("init-host.sh")
+    assert text.index(source) < text.index('INSTALLER_HASH_FILE="${BOXMUNGE_ROOT}/state/installer.sha256"')
+    assert text.index(source) > text.index("init-host.sh")
+    helper = (REPO / "bootstrap" / "install-ssh.sh").read_text()
+    call = 'bash "${SCRIPT_DIR}/bootstrap/sshd-hardening.sh"'
+    assert call in helper
+    # After the Subsystem line is wired: sshd -t then sees the whole config.
+    assert helper.index("SFTP_SUBSYSTEM_LINE=") < helper.index(call)
+
+
+def test_install_sh_stays_within_its_budget() -> None:
+    assert len((REPO / "install.sh").read_text().splitlines()) <= 600
