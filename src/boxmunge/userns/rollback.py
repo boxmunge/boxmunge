@@ -173,11 +173,11 @@ def _reverse(paths: BoxPaths, j: Journal, daemon: DaemonControl, rb_images: Path
     rinv, finv = Inventory.from_json(j.rollback_inventory), Inventory.from_json(j.inventory)
     old_root = Path(finv.root)
     new_root = old_root / f"{j.offset}.{j.offset}"
-    if not j.reached("rb-saved"):
+    if not j.reached("rb-quiesced"):
+        # Again on a resume: the fresh inventory may hold an image made since.
         save_all(rinv.images, j, rb_images, save, prefix="rb-image")
         j.phase = "rb-saved"
         save()
-    if not j.reached("rb-quiesced"):
         quiesce(rinv)
         daemon.stop()
         j.phase = "rb-quiesced"

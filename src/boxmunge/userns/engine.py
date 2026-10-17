@@ -116,6 +116,8 @@ def _switch(paths: BoxPaths, j: Journal, inv: Inventory, daemon: DaemonControl,
             raise MigrationError("the daemon came up with another offset")
     except Exception as e:
         back_to_prior(paths, j.daemon_json, j.offset, daemon)
+        for key in [k for k in j.items if k.startswith("restart:")]:
+            del j.items[key]  # an earlier failed switch's restart says nothing about this one
         bring_up(paths, inv, j, save, component=COMPONENT, prefix="restart")
         j.phase, j.failed = "prepared", f"the remapped daemon did not start: {e}"
         save()

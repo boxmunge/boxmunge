@@ -219,3 +219,15 @@ def test_rebuild_resumes_a_volume_part_way(paths, monkeypatch, tmp_path) -> None
     assert j.items == {"volume:v": "shifted", "network": "created", "caddyfile": "0644",
                        f"bind:{tmp_path / 'uploads'}": "shifted"}
     assert j.phase == "rebuilt"
+
+
+def test_a_second_failed_switch_restarts_every_project_again(paths, monkeypatch, tmp_path) -> None:
+    _etc, _original, j = _real_switch_box(paths, monkeypatch, tmp_path)
+    j.items["restart:shop"] = "up"  # from an earlier failed switch
+    monkeypatch.setattr(en.uo, "remap_offset", lambda paths: 0)
+    seen = []
+    monkeypatch.setattr(en, "bring_up", lambda paths, inv, j, save, **kw: seen.append(dict(j.items)))
+    with pytest.raises(en.MigrationError):
+        en._switch(paths, j, Inventory("overlay2", "", str(tmp_path), "29.9.0"), _Daemon(),
+                   lambda: save_journal(paths, j))
+    assert seen == [{}]
