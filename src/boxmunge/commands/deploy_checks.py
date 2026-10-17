@@ -34,6 +34,7 @@ from boxmunge.release_target import ReleaseTarget
 from boxmunge.run_as import ServiceUser, describe, identity, read_users
 
 _SHOWN = 10  # unreadable paths listed per mount
+_OVERFLOW_UID = 65534
 
 
 @dataclass(frozen=True)
@@ -167,7 +168,10 @@ def _owner_uid(target: ReleaseTarget, model: dict[str, Any], m: Mount,
             uid = os.lstat(str(m.source)).st_uid
         except FileNotFoundError:
             return None
-        return uid - offset if offset and offset <= uid < offset + RANGE else uid
+        if not offset:
+            return uid
+        # A host owner outside the remap range is the overflow uid inside.
+        return uid - offset if offset <= uid < offset + RANGE else _OVERFLOW_UID
     name = volume_name(model, target.compose_project, str(m.source))
     if volume_labels(name) is None:
         return None
@@ -178,9 +182,31 @@ def _owner_uid(target: ReleaseTarget, model: dict[str, Any], m: Mount,
     return int(out)
 
 
+def _change_problem(target: ReleaseTarget, name: str, new: ServiceUser, before: str | None,
+                    after: str, data: list[Mount]) -> str:
+    where = ", ".join(str(m.source or m.target) for m in data)
+    was = f"ran as {before} and now resolves" if before else "resolves"
+    head = (f"service {name} {was} to {after} ({describe(new)}), and keeps data in "
+            f"{where} that {'the old user' if before else 'another user'} owns. Its files "
+            f"would be unwritable.")
+    ids = new.nonroot_ids()
+    if ids:
+        return (f"{head} Either keep the old user (declare `security.user` with it, or "
+                f"`security.user: image` with a reason when the image runs as it), or run "
+                f"`boxmunge data chown {target.project} {name} {ids[0]}:{ids[1]}` before "
+                f"deploying again")
+    return (f"{head} {after} is a name, so boxmunge cannot compare it with the data's "
+            f"owner: declare `security.user: \"<uid>:<gid>\"` with {after}'s ids and run "
+            f"`boxmunge data chown {target.project} {name} <uid>:<gid>` before deploying "
+            f"again")
+
+
 def user_change_problems(paths: BoxPaths, target: ReleaseTarget, model: dict[str, Any],
                          services: dict[str, dict], users: dict[str, ServiceUser],
                          offset: int) -> list[str]:
+    """A service whose user changes over data the old user owns; with no
+    earlier user to compare (a first deploy, or containers removed), a
+    numeric user over data someone else owns."""
     recorded = read_users(paths, target.project, staging=target.staging)
     running = docker_containers.container_users(target.compose_project)
     problems = []
@@ -191,21 +217,14 @@ def user_change_problems(paths: BoxPaths, target: ReleaseTarget, model: dict[str
         before = (recorded[name].runs_as() if name in recorded
                   else identity(running[name]) if name in running else None)
         after = new.runs_as()
-        if before is None or before == after or after == "root":
+        numeric = after.isascii() and after.isdigit()
+        if before == after or after == "root" or (before is None and not numeric):
             continue
-        if after.isascii() and after.isdigit():
+        if numeric:
             owners = [_owner_uid(target, model, m, offset) for m in data]
             if all(uid in (None, int(after)) for uid in owners):
                 continue
-        ids = new.nonroot_ids()
-        chown = (f"boxmunge data chown {target.project} {name} {ids[0]}:{ids[1]}"
-                 if ids else f"boxmunge data chown {target.project} {name} <uid>:<gid>")
-        where = ", ".join(str(m.source or m.target) for m in data)
-        problems.append(
-            f"service {name} ran as {before} and now resolves to {after} ({describe(new)}), "
-            f"and keeps data in {where}. Its files would be unwritable. Either declare "
-            f"`security.user: image` with a reason, or add USER to the Dockerfile (or "
-            f"`security.user: \"<uid>:<gid>\"`) and run `{chown}` before deploying again")
+        problems.append(_change_problem(target, name, new, before, after, data))
     return problems
 
 
@@ -220,7 +239,10 @@ def unreadable_entries(source: str) -> list[str]:
     for dirpath, dirnames, filenames in os.walk(source):
         for entry, need in [*((d, 0o005) for d in dirnames), *((f, 0o004) for f in filenames)]:
             path = os.path.join(dirpath, entry)
-            mode = os.lstat(path).st_mode
+            try:
+                mode = os.lstat(path).st_mode
+            except FileNotFoundError:
+                continue  # gone since the directory was listed
             if not os.path.islink(path) and mode & need != need:
                 closed.append(path)
     return closed

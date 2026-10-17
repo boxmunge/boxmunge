@@ -376,10 +376,18 @@ def _update_locked(
         except (DockerError, RunAsError) as e:
             return _fail(paths, target, result, f"inventory_failed: {e}", before=before)
         if drift:
+            # The pull moved the tags; point them back, or the next restart of
+            # any kind would recreate the services from the new images.
+            try:
+                for svc_name in changed:
+                    tag_image(running[svc_name].image_id, str(services[svc_name].image))
+            except DockerError as e:
+                return _fail(paths, target, result, f"user_changed, and pointing the "
+                             f"tags back failed: {e}", before=before)
             body = (f"Not updating {target.name}: {'; '.join(drift)}. These services run as "
                     f"their image's own user, so the new image would change who owns and "
-                    f"writes their data. Review it, declare security.user if needed, and "
-                    f"deploy {target.name}.")
+                    f"writes their data; its tags point at the running images again. Review "
+                    f"it, declare security.user if needed, and deploy {target.name}.")
             notify(paths, f"{target.name}: image user changed", body,
                    component="container-update", project=target.name, priority=1)
             return _fail(paths, target, result, "user_changed: " + "; ".join(drift),

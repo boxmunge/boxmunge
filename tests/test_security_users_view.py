@@ -80,3 +80,9 @@ def test_default_user_hint_only_for_the_default(paths, user, hinted) -> None:
     hint = default_user_hint(paths, "shop", "web")
     assert (hint is not None and "passwd entry" in hint) is hinted
     assert default_user_hint(paths, "shop", "web", staging=True) is None
+
+
+def test_a_record_only_data_chown_wrote_is_still_undecided(paths) -> None:
+    _deployed(paths, "old")
+    write_users(paths, "old", {"app": ServiceUser("10001:10001", "data-chown")})
+    assert check_service_users(paths).status == "warn"

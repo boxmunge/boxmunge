@@ -319,20 +319,28 @@ def recorded_users(paths: BoxPaths, project_name: str, *,
         raise ComposeError(str(e)) from e
 
 
+def render_compose_override(paths: BoxPaths, manifest: dict[str, Any],
+                            user_compose: dict[str, Any]) -> str:
+    """compose.boxmunge.yml's content for the release in the project dir
+    (`user_compose`: its resolved compose.yml), with the users the record
+    holds; nothing is written."""
+    project_name = manifest["project"]
+    return generate_compose_override(
+        manifest, env_files=production_env_files(paths, project_name) or None,
+        user_compose=user_compose, users=recorded_users(paths, project_name),
+    )
+
+
 def prepare_compose_override(
     paths: BoxPaths,
     manifest: dict[str, Any],
     component: str = "deploy",
-    *,
-    warn: bool = True,
 ) -> None:
     """Generate compose.boxmunge.yml for the release in the project dir,
     with the users the record holds.
 
     `component` labels the SECURITY OFF log entry so callers from upgrade /
-    resume don't misattribute the warning as "deploy". `warn=False` skips
-    the deploy-time warnings (the first of deploy's two passes, which only
-    names the built images the users are decided from). Lives here, not in
+    resume don't misattribute the warning as "deploy". Lives here, not in
     commands/, to avoid `commands/`-to-`commands/` imports (audit A-2).
     """
     project_name = manifest["project"]
@@ -340,13 +348,8 @@ def prepare_compose_override(
     override_path = paths.project_compose_override(project_name)
     override_path.parent.mkdir(parents=True, exist_ok=True)
 
-    env_files = production_env_files(paths, project_name)
-
     user_compose = load_user_compose(project_dir / "compose.yml", project_name)
-    content = generate_compose_override(
-        manifest, env_files=env_files or None, user_compose=user_compose,
-        users=recorded_users(paths, project_name),
-    )
+    content = render_compose_override(paths, manifest, user_compose)
     atomic_write_text(override_path, content)
     refresh_overlay_hash(project_dir, paths.project_bind_record(project_name))
     # Before the overlay named built images under boxmunge.invalid/, Compose
@@ -361,8 +364,6 @@ def prepare_compose_override(
         built_images.untag_old_built_names(
             compose_project, build_services, set(services) - set(build_services))
 
-    if not warn:
-        return
     # Deploy-time warning for any service resolving to profile: off.
     # Repeated by design — see spec §"Deploy-time warning".
     warn_off_services(paths, manifest, component=component)

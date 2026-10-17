@@ -28,6 +28,7 @@ import sys
 
 from boxmunge.bind_sources import BindSourceError, project_rel, source_kind
 from boxmunge.commands.deploy_checks import persistent, service_mounts, volume_name
+from boxmunge.compose_resolve import ComposeResolveError
 from boxmunge.compose_guard import check_containers_start, start_containers_checked
 from boxmunge.data_helper import (
     COMPOSE_VOLUME_LABEL, compose_volume_labels, copy_into_volume, is_anonymous, run_helper,
@@ -228,7 +229,8 @@ def run_data_chown(paths: BoxPaths, project: str, service: str, spec: str) -> in
     try:
         with project_lock(project, paths):
             chown_locked(paths, project, service, ids)
-    except (DataError, DockerError, LockError, BindSourceError, RunAsError) as e:
+    except (DataError, DockerError, LockError, BindSourceError, RunAsError,
+            ComposeResolveError, OSError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
     return 0

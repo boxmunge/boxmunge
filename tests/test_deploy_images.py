@@ -88,5 +88,5 @@ def test_every_service_needing_a_declaration_is_listed() -> None:
                 "web": {"build": ".", "image": "boxmunge.invalid/shop/web"}}
     with pytest.raises(DeployRefused) as e:
         di.decide_users(services, facts, {"project": "shop", "services": {"web": {}}})
-    assert len(e.value.problems) == 2
+    assert len(e.value.problems) == 3 and "merge" in e.value.problems[2]
     assert "redis:7" in e.value.problems[0] and "postgres:16" in e.value.problems[1]

@@ -303,8 +303,9 @@ def refuse_container_owned(dirs: DataDirs) -> None:
         owned = [n for n in sorted(dirs.adopted) if holds_data(dirs.project_dir / n)
                  and not _owned_by_me(dirs.project_dir / n)]
         if owned:
-            moves = "; ".join(f"sudo mv {dirs.project_dir / n}/* <somewhere outside the "
-                              f"project>" for n in owned)
+            moves = "; ".join(f"sudo find {dirs.project_dir / n} -mindepth 1 -maxdepth 1 "
+                              f"-exec mv -t <a directory outside the project> {{}} +"
+                              for n in owned)
             raise ContainerOwnedEntryError(
                 f"an older release bind-mounted {', '.join(owned)} read-write, so they hold "
                 f"container-owned data, and this release ships them as code. boxmunge will "

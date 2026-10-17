@@ -70,7 +70,7 @@ def prepare_storage(paths: BoxPaths, target: ReleaseTarget) -> None:
     model, services = resolved_services(target)
     offset = remap_offset(paths)
     for name, svc in sorted(services.items()):
-        ids = users[name].nonroot_ids() if name in users else None
+        ids = users[name].owner_ids() if name in users else None
         for m in service_mounts(svc):
             if m.kind == "bind" and not m.read_only and m.source and (offset or ids):
                 _bind_source(target, paths, m.source, ids)

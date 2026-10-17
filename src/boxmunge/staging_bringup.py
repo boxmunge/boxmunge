@@ -26,6 +26,7 @@ from boxmunge.docker import (
 from boxmunge.log import log_error
 from boxmunge.release_target import DeployRefused, staging_release_target
 from boxmunge.run_as import RunAsError, default_user_hint
+from boxmunge.userns.offset import RemapError
 from boxmunge.security_warn import warn_off_services, warn_writable_state
 from boxmunge.staged_release import SlotError, release_dir, slot_dir, staging_target
 from boxmunge.staging_copy_plan import StagingDataError
@@ -40,7 +41,8 @@ if TYPE_CHECKING:
 STORAGE_ERRORS = (BindSourceError, ComposeError, ComposeSecurityError, OSError,
                   ReleaseStateError, StagingDataError, StagingIsolationError, SlotError)
 # ... and the release's own refusal to start, found once its images are built.
-BRING_UP_ERRORS = (*STORAGE_ERRORS, DeployRefused, DockerError, RunAsError)
+BRING_UP_ERRORS = (*STORAGE_ERRORS, DeployRefused, DockerError, RunAsError,
+                   ComposeResolveError, RemapError)
 
 
 def _staging_auth(project_name: str, paths: BoxPaths) -> tuple[str, str] | None:

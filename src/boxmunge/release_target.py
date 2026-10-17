@@ -6,6 +6,7 @@ dir, or staging from its slot."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from boxmunge import compose_resolve
@@ -41,10 +42,14 @@ class ReleaseTarget:
                 "--profile", "*"]
 
 
-def production_target(paths: BoxPaths, project: str) -> ReleaseTarget:
+def production_target(paths: BoxPaths, project: str,
+                      overlay: Path | None = None) -> ReleaseTarget:
+    """Production as it runs, or (`overlay`) with a scratch overlay in place
+    of the live one; Compose resolves its relative paths in the project dir
+    all the same."""
     return ReleaseTarget(project, ComposeTarget(
         cwd=paths.project_dir(project), project_name=project,
-        files=["compose.yml", "compose.boxmunge.yml"]))
+        files=["compose.yml", str(overlay) if overlay else "compose.boxmunge.yml"]))
 
 
 def staging_release_target(paths: BoxPaths, project: str) -> ReleaseTarget:

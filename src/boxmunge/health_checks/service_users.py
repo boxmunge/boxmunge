@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from boxmunge.commands.health_cmd import HealthCheck
 from boxmunge.project_registry import deployed_among, read_registry
-from boxmunge.run_as import RunAsError, effective_user, read_users
+from boxmunge.run_as import SOURCE_CHOWN, RunAsError, effective_user, read_users
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -27,10 +27,13 @@ def _undecided(paths: BoxPaths) -> tuple[list[str], list[str]]:
     undecided, problems = [], []
     for project in deployed_among(read_registry(paths).names, paths):
         try:
-            if not read_users(paths, project):
-                undecided.append(project)
+            users = read_users(paths, project)
         except RunAsError as e:
             problems.append(str(e))
+            continue
+        # data chown records only its service: no deploy decided the rest.
+        if all(u.source == SOURCE_CHOWN for u in users.values()):
+            undecided.append(project)
     return undecided, problems
 
 
@@ -82,6 +85,6 @@ def pending_declarations(paths: BoxPaths) -> tuple[list[str], list[str]]:
     for project in undecided:
         try:
             pending += _project_pending(paths, project)
-        except (ComposeResolveError, DockerError, ManifestError, OSError) as e:
+        except (ComposeResolveError, DockerError, ManifestError, OSError, ValueError) as e:
             problems.append(f"{project}: {e}")
     return pending, problems

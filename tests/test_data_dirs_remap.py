@@ -28,7 +28,7 @@ def test_container_owned_entry_is_refused_when_remapped(paths, monkeypatch) -> N
     monkeypatch.setattr(data_dirs, "_owned_by_me", lambda path: False)
     with pytest.raises(ContainerOwnedEntryError) as e:
         start_record(_dirs(project_dir))
-    assert f"sudo mv {project_dir / 'uploads'}/*" in str(e.value)
+    assert f"sudo find {project_dir / 'uploads'} -mindepth 1" in str(e.value)
     assert (project_dir / "uploads" / "a.jpg").exists()
     assert not data_dirs.has_record(project_dir)
 

@@ -46,7 +46,8 @@ def test_every_root_registry_service_is_listed_and_nothing_recorded(
     with pytest.raises(DeployRefused) as e:
         di.prepare_release_users(paths, production_target(paths, "shop"), MANIFEST,
                                  component="deploy")
-    assert len(e.value.problems) == 2  # cache and db, both named
+    assert len(e.value.problems) == 3  # cache and db, both named, and how to merge them
+    assert "merge their blocks" in e.value.problems[-1]
     assert read_users(paths, "shop") == {}
 
 
@@ -104,6 +105,8 @@ def test_a_refused_bundle_deploy_leaves_its_install_open_and_says_what_to_add(
     with docker_off() as up:
         assert run_deploy("myapp", paths, ref=V1) == 1
     assert not up.called
+    assert not paths.project_compose_override("myapp").exists()  # decided from a scratch overlay
+    assert not paths.project_caddy_site("myapp").exists()
     err = capsys.readouterr().err
     assert "registry image postgres:16" in err and "user: image" in err
     assert "schema_version: 2" in err
@@ -156,3 +159,17 @@ def test_a_refused_stage_starts_nothing_and_a_good_one_records_staging_users(
         assert run_promote("myapp", paths) == 0
     assert read_users(paths, "myapp")["web"].emitted() == "10001:10001"
     assert read_users(paths, "myapp", staging=True) == {}
+
+
+def test_a_refusal_points_built_image_names_back(paths, images, monkeypatch) -> None:
+    from boxmunge.docker_containers import LocalImage
+    _resolved(monkeypatch, {**SERVICES, "new": {"build": ".", "image": "boxmunge.invalid/shop/new"}})
+    present = {"boxmunge.invalid/shop/web": LocalImage("sha256:" + "1" * 64, ()),
+               "boxmunge.invalid/shop/new": None}
+    monkeypatch.setattr("boxmunge.docker_containers.local_image", lambda ref: present[ref])
+    calls = []
+    monkeypatch.setattr(di, "_run", lambda cmd, **kw: calls.append(cmd))
+    with pytest.raises(DeployRefused):
+        di.prepare_release_users(paths, production_target(paths, "shop"), MANIFEST,
+                                 component="deploy")
+    assert calls == [["docker", "tag", "sha256:" + "1" * 64, "boxmunge.invalid/shop/web"]]

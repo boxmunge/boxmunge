@@ -172,6 +172,14 @@ class ServiceUser:
     def runs_as(self) -> str:
         return identity(self.user if self.user is not None else self.image_user)
 
+    def owner_ids(self) -> tuple[int, int] | None:
+        """The numeric uid:gid the service writes its data as, where it is
+        known: nonroot_ids, or the image's own numeric non-root USER."""
+        ids = self.nonroot_ids()
+        if ids is None and self.user is None:
+            ids = numeric_ids(self.image_user)
+        return ids if ids and ids[0] != 0 else None
+
     def nonroot_ids(self) -> tuple[int, int] | None:
         """The numeric uid:gid of a non-root user boxmunge or compose.yml
         set; None for root, names, a bare uid and the image's own user."""
@@ -279,7 +287,13 @@ def read_users(paths: BoxPaths, project: str, *, staging: bool = False) -> dict[
                 or not isinstance(entry.get("image_user"), str)):
             raise RunAsError(f"{path}: entry {svc!r} is not {{user, source, image_user}}: "
                              f"{entry!r}. {_REDECIDE}")
-        out[svc] = ServiceUser(entry["user"], entry["source"], entry["image_user"])
+        user = ServiceUser(entry["user"], entry["source"], entry["image_user"])
+        if user.source in _EMITTED and user.user is not None and (
+                numeric_ids(user.user) is None or not all(
+                    i <= MAX_ID for i in numeric_ids(user.user))):
+            raise RunAsError(f"{path}: entry {svc!r} would emit user {user.user!r}, which is "
+                             f"not <uid>:<gid> with ids up to {MAX_ID}. {_REDECIDE}")
+        out[svc] = user
     return out
 
 

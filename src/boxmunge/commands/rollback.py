@@ -13,7 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from boxmunge.commands.deploy import (
-    GIT_WHILE_STAGED, deploy_locked, generate_release_config, replace_release, run_pre_deploy_hook,
+    GIT_WHILE_STAGED, decide_release_users, deploy_locked, generate_release_config,
+    replace_release, run_pre_deploy_hook,
 )
 from boxmunge.commands.restore import restore_locked
 from boxmunge.compose import prepare_compose_override
@@ -354,11 +355,13 @@ def _restore_rolled_back_data(project_name: str, paths: BoxPaths, manifest: dict
     # service. Otherwise that check compares the old release with the
     # record of the release it just replaced, and refuses.
     try:
+        # The backup service restores as the user the restored release runs as.
+        decide_release_users(project_name, paths, manifest, "rollback")
         prepare_compose_override(paths, manifest, component="rollback")
         check_start(paths, project_name, component="rollback",
                     compose_files=["compose.yml", "compose.boxmunge.yml"],
                     record=True, deploying=True, txn=txn.id)
-    except (ComposeRefused, OSError, ValueError) as e:
+    except (ComposeRefused, DeployRefused, DockerError, OSError, ValueError) as e:
         print(f"ERROR: {e}. Rerun 'rollback {project_name}' once the cause is fixed.",
               file=sys.stderr)
         return False

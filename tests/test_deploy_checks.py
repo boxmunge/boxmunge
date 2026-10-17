@@ -154,6 +154,38 @@ def test_read_only_sources_must_be_world_readable_when_remapped(paths, monkeypat
     (conf / "sub").chmod(0o755)
 
 
-def test_first_deploy_has_nothing_to_compare(paths) -> None:
+def test_a_first_deploy_with_no_data_yet_passes(paths, monkeypatch) -> None:
+    monkeypatch.setattr(dc, "volume_labels", lambda name: None)
     assert dc.user_change_problems(paths, production_target(paths, "new"), {},
                                    {"app": _svc("data:/data")}, {"app": DEFAULT}, 0) == []
+
+
+def test_with_no_earlier_user_data_someone_else_owns_is_refused(paths) -> None:
+    uploads = paths.project_dir("new") / "uploads"
+    uploads.mkdir(parents=True)
+    problems = dc.user_change_problems(
+        paths, production_target(paths, "new"), {},
+        {"app": _svc({"type": "bind", "source": str(uploads), "target": "/u"})},
+        {"app": DEFAULT}, 0)
+    assert len(problems) == 1 and "resolves to 10001" in problems[0]
+    assert "another user owns" in problems[0] and "data chown new app 10001:10001" in problems[0]
+
+
+def test_a_name_user_is_told_the_uid_route(paths, monkeypatch) -> None:
+    uploads = paths.project_dir("shop") / "uploads"
+    uploads.mkdir(parents=True)
+    monkeypatch.setattr("boxmunge.docker_containers.container_users", lambda p: {"app": ""})
+    problems = dc.user_change_problems(
+        paths, production_target(paths, "shop"), {},
+        {"app": _svc({"type": "bind", "source": str(uploads), "target": "/u"})},
+        {"app": ServiceUser(None, "image", "node")}, 0)
+    assert "node is a name" in problems[0] and "security.user: image" not in problems[0]
+
+
+def test_a_host_owner_outside_the_remap_range_is_the_overflow_uid(paths) -> None:
+    import os
+    uploads = paths.project_dir("shop") / "uploads"
+    uploads.mkdir(parents=True)
+    mount = dc.Mount("bind", "/u", str(uploads), False)
+    assert os.lstat(uploads).st_uid < S
+    assert dc._owner_uid(production_target(paths, "shop"), {}, mount, S) == 65534

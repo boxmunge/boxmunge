@@ -139,3 +139,18 @@ def test_project_delete_removes_both_records(paths) -> None:
     files = project_state_files(paths, "app")
     assert paths.project_users_record("app") in files
     assert paths.project_users_record("app", staging=True) in files
+
+
+@pytest.mark.parametrize("user", ["root", "1000", "0:70000", "a:b"])
+def test_a_record_that_would_emit_an_unmappable_or_odd_user_is_refused(paths, user) -> None:
+    import json
+    paths.project_users_record("app").write_text(json.dumps(
+        {"web": {"user": user, "source": "manifest", "image_user": ""}}))
+    with pytest.raises(RunAsError, match="would emit user"):
+        read_users(paths, "app")
+
+
+def test_owner_ids_take_a_numeric_image_user() -> None:
+    assert ServiceUser(None, "image", "1000:1000").owner_ids() == (1000, 1000)
+    assert ServiceUser(None, "image", "node").owner_ids() is None
+    assert ServiceUser("10001:10001", "default").owner_ids() == (10001, 10001)

@@ -11,12 +11,14 @@ are included: `up <service>` (restore) starts them from the same record.
 """
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 from boxmunge.commands import deploy_checks
 from boxmunge.compose_images import is_platform_image
+from boxmunge import docker_containers
 from boxmunge.docker_containers import ImageFacts, image_facts
-from boxmunge.docker_run import run as _run
+from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.log import log_operation, log_warning
 from boxmunge.paths import BoxPaths
 from boxmunge.release_target import (
@@ -66,6 +68,9 @@ def decide_users(services: dict[str, dict], facts: dict[str, ImageFacts],
                                 f"{describe(carried[name])}")
             else:
                 refusals.append(str(e))
+    if len(refusals) > 1:
+        refusals.append("Several services need a declaration: merge their blocks under the "
+                        "one services: key of manifest.yml")
     if refusals:
         raise DeployRefused(refusals)
     return users, warnings
@@ -90,6 +95,45 @@ def prepare_release_users(paths: BoxPaths, target: ReleaseTarget, manifest: dict
     record cannot be read)."""
     carried = read_users(paths, target.project, staging=target.staging) if rollback else None
     model, services = resolved_services(target)
+    tags = _built_tags(services)
+    try:
+        return _decide_and_record(paths, target, manifest, model, services, carried,
+                                  component)
+    except BaseException:
+        _restore_tags(tags)
+        raise
+
+
+def _built_tags(services: dict[str, dict]) -> dict[str, str | None]:
+    """{built image name: the image it names now, or None}."""
+    names = {str(s["image"]) for s in services.values()
+             if s.get("build") is not None and isinstance(s.get("image"), str)}
+    tags = {}
+    for name in sorted(names):
+        image = docker_containers.local_image(name)
+        tags[name] = image.image_id if image is not None else None
+    return tags
+
+
+def _restore_tags(tags: dict[str, str | None]) -> None:
+    """A release refused before it started leaves its built images' names
+    where they were: otherwise any later start would run the refused
+    release's images."""
+    try:
+        for name, image_id in tags.items():
+            if image_id is not None:
+                _run(["docker", "tag", image_id, name], capture=True)
+            elif docker_containers.local_image(name) is not None:
+                _run(["docker", "image", "rm", name], capture=True)
+    except DockerError as e:
+        print(f"  ERROR: pointing the built images' names back failed: {e}. Until the "
+              f"next deploy, a restart may run the images just built", file=sys.stderr)
+
+
+def _decide_and_record(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, Any],
+                       model: dict[str, Any], services: dict[str, dict],
+                       carried: dict[str, ServiceUser] | None,
+                       component: str) -> dict[str, ServiceUser]:
     build_and_pull(target, services)
     facts = {name: image_facts(str(svc.get("image"))) for name, svc in services.items()}
     users, warnings = decide_users(as_written(services, compose_users(target)), facts,

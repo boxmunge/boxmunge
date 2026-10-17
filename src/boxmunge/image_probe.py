@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import subprocess
 import tarfile
+import threading
 import uuid
 from dataclasses import dataclass
 from typing import IO
@@ -73,10 +74,14 @@ def probe_dir(image_id: str, path: str, offset: int) -> DirOwner | None:
         proc = subprocess.Popen(["docker", "container", "cp", f"{name}:{path}", "-"],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 env=docker_env())
+        # A daemon that never answers must not hang the deploy.
+        watchdog = threading.Timer(_PROBE_TIMEOUT, proc.kill)
+        watchdog.start()
         try:
             assert proc.stdout is not None
             owner = first_header_owner(proc.stdout, offset)
         finally:
+            watchdog.cancel()
             proc.kill()
             _out, err = proc.communicate(timeout=_PROBE_TIMEOUT)
         if owner is None and _NOT_FOUND not in err:

@@ -43,3 +43,4 @@ def test_container_update_refuses_and_alerts(paths, fake_containers, monkeypatch
     assert result["status"] == "failed" and result["reason"].startswith("user_changed: web")
     assert docker.ups == 0
     assert sent == ["myapp: image user changed"]
+    assert docker.tags["nginx:1.25"] != _NEW  # the next restart runs the old image

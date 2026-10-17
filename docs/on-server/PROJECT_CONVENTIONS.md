@@ -293,8 +293,9 @@ next deploy (`boxmunge security <project>` shows it). In order:
 1. compose.yml `user:` wins (the overlay adds nothing);
 2. else `security.user` (the service's own block, else the project's);
 3. else the image's own non-root `USER`;
-4. else, for a `build:` service, **10001:10001** (its tmpfs mounts are given to that uid);
-5. else the deploy is **refused**, printing the manifest.yml lines to add.
+4. else, under `profile: off`, the image's own user, whatever it is;
+5. else, for a `build:` service, **10001:10001** (its tmpfs mounts are given to that uid);
+6. else the deploy is **refused**, printing the manifest.yml lines to add.
 
 A registry image whose `USER` is empty or root (postgres, mysql, mariadb, redis, nginx, node,
 python, caddy all are) needs a declaration. A service only compose.yml defines is declared under
@@ -320,7 +321,9 @@ once); a service whose user changes while it keeps data the old user owns (run
 `boxmunge data chown <project> <service> <uid>:<gid>` first: it stops the service, gives its
 read-write binds and volumes to that user, and leaves it stopped for the deploy); a release that
 would replace a non-empty anonymous volume with an empty named one (`data adopt` first, see
-OPERATIONS.md). Data in an anonymous volume warns at every deploy until it is adopted. A
+OPERATIONS.md). Data in an anonymous volume warns at every deploy until it is adopted, and is refused on a
+box whose Docker daemon remaps user namespaces. A user change is checked even with no earlier
+user to compare: a numeric user over existing data another user owns is refused the same way. A
 `build:` service that fails smoke on the 10001 default gets a hint: it may need a passwd entry
 (add `USER` to the Dockerfile) or a `security.user`. container-update does not recreate a
 service that runs as its image's user when a new image changes that `USER`; it alerts, and the
