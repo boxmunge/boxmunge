@@ -61,8 +61,8 @@ def _state_active(paths: BoxPaths, project: str) -> bool:
     if not _present(path):
         return False
     try:
-        doc = json.loads(path.read_text())
-    except (OSError, ValueError):
+        doc = json.loads(read_text_nofollow(path))
+    except (OSError, ValueError):  # a link, a FIFO or garbage: still a stage
         doc = None
     if not isinstance(doc, dict):
         return True  # unreadable: treat as a stage; legacy-stage shows the evidence
@@ -196,7 +196,7 @@ def stage_time(paths: BoxPaths, project: str, stage: LegacyStage) -> datetime:
         return datetime.fromtimestamp(st.st_mtime, timezone.utc)
     reflog = pdir / "repo" / ".git" / "logs" / "HEAD"
     try:
-        lines = reflog.read_text().splitlines()
+        lines = read_text_nofollow(reflog).splitlines()
         times = [int(line.split("\t", 1)[0].split()[-2]) for line in lines
                  if "\tcheckout:" in line]
     except (OSError, UnicodeDecodeError, ValueError, IndexError) as e:
@@ -319,10 +319,10 @@ def _read_records(paths: BoxPaths) -> dict[str, Any]:
     """The whole record. A corrupt one raises StateError naming the file
     (a per-project input error: check-all reports it and carries on)."""
     path = records_path(paths)
-    if not path.exists():
+    if not os.path.lexists(path):
         return {}
     try:
-        doc = json.loads(path.read_text())
+        doc = json.loads(read_text_nofollow(path))
     except (OSError, UnicodeDecodeError, ValueError) as e:
         raise StateError(f"cannot read {path}: {e}; fix or remove it") from e
     if not isinstance(doc, dict) or not all(isinstance(r, dict) for r in doc.values()):

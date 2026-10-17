@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from boxmunge.data_dirs import ReleaseStateError
-from boxmunge.fileutil import atomic_write_text, fsync_dir
+from boxmunge.fileutil import atomic_write_text, fsync_dir, read_text_nofollow
 from boxmunge.release import live_meta_text
 from boxmunge.release_keep import discard_superseded, kept_previous_text, superseded_paths
 from boxmunge.ulid import generate_ulid
@@ -127,7 +127,7 @@ def load_txn(paths: BoxPaths, project: str) -> InstallTxn | None:
         return None
     fix = f"Inspect it; `boxmunge-server install-txn {project} --drop` removes it."
     try:
-        doc = json.loads(path.read_text())
+        doc = json.loads(read_text_nofollow(path))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise ReleaseStateError(f"Cannot read {path}: {e}. {fix}") from e
     if not isinstance(doc, dict) or doc.get("version") != TXN_VERSION:
