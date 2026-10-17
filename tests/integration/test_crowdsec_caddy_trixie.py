@@ -58,7 +58,7 @@ OLD_LOG = (
 )
 NEW_LOG = "\n".join(_access_log_lines()) + "\n"
 # What compose sets on the container caddy/compose.yml makes (crowdsec-acquis.sh checks it).
-SYSTEM_CADDY = ["--label", "com.docker.compose.project.config_files=/opt/boxmunge/caddy/compose.yml"]
+SYSTEM_CADDY = ["--label", "com.docker.compose.project=caddy"]
 # An upstream answering with a header far longer than CrowdSec's 64 KiB line limit.
 HUGE_RESPONSE = 'header X-Huge "{}"\n        respond "ok"'.format("a" * 70000)
 
@@ -199,14 +199,16 @@ def test_caddy_access_lines_reach_crowdsec_through_docker(caddy, crowdsec, tmp_p
 
 def test_crowdsec_acquis_refuses_a_boxmunge_caddy_compose_did_not_make(crowdsec, tmp_path) -> None:
     name = f"bmtest-cs-squat-{uuid.uuid4().hex[:10]}"
-    _run(["docker", "create", "--name", name, "--network", "none", CADDY])
+    # What a project's compose would make: its own project label, set by Compose.
+    _run(["docker", "create", "--name", name, "--network", "none",
+          "--label", "com.docker.compose.project=myapp", CADDY])
     try:
         _script_for(crowdsec, name, tmp_path)
         result = _sh(crowdsec, "bash /crowdsec-acquis.sh", check=False)
     finally:
         _run(["docker", "rm", "-f", name], check=False)
     assert result.returncode != 0
-    assert f"{name} was not made from /opt/boxmunge/caddy/compose.yml" in result.stderr
+    assert f"{name} belongs to compose project 'myapp', not the" in result.stderr
 
 
 def test_crowdsec_acquis_fails_loudly_when_caddy_is_not_tailed(crowdsec, tmp_path) -> None:

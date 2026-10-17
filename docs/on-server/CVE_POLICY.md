@@ -643,8 +643,8 @@ are read from the model Compose resolves from every file the project is
 deployed with, so services that come from `include:`, settings inherited
 through `extends:`, and `${VAR:-default}` images all count.
 
-Containers are found by their Compose labels, so a custom `container_name`
-and every replica are found. Each container is scanned by the image it was
+Containers are found by their Compose labels, so every replica is found
+(and a `container_name` left from before boxmunge refused it). Each container is scanned by the image it was
 created from: its registry digest (`repo@sha256:…`) when the image was
 pulled, otherwise its local image ID (`sha256:…`), the only identity a
 locally built (`build:`) image has. The `image:` tag is never scanned in

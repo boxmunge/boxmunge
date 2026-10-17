@@ -94,19 +94,20 @@ YAML
     mv -f "${PARSER}.tmp" "${PARSER}"
 }
 
-# The docker source follows a container by name. A container of that name that
-# is not the one caddy/compose.yml made (a project cannot name one so, see
-# compose_isolation) would feed CrowdSec lines of its choosing.
+# The docker source follows a container by name. One of that name from any
+# compose project but the platform's own `caddy` (caddy/compose.yml, a
+# reserved project name) would feed CrowdSec lines of its choosing. Compose
+# sets the project label itself; a service's labels cannot override it.
 require_system_caddy() {
-    local config
-    config="$(docker inspect --format \
-        '{{index .Config.Labels "com.docker.compose.project.config_files"}}' \
-        "${CADDY_CONTAINER}")" \
+    local project
+    project="$(docker inspect --format \
+        '{{index .Config.Labels "com.docker.compose.project"}}' "${CADDY_CONTAINER}")" \
         || fail "there is no ${CADDY_CONTAINER} container; start it with
        docker compose -f ${CADDY_COMPOSE} up -d"
-    [[ "${config}" == "${CADDY_COMPOSE}" ]] \
-        || fail "${CADDY_CONTAINER} was not made from ${CADDY_COMPOSE} (its compose
-       file is '${config}'). Remove it and run: docker compose -f ${CADDY_COMPOSE} up -d"
+    [[ "${project}" == caddy ]] \
+        || fail "${CADDY_CONTAINER} belongs to compose project '${project}', not the
+       platform's caddy (${CADDY_COMPOSE}). Remove it and run:
+       docker compose -f ${CADDY_COMPOSE} up -d"
 }
 
 # crowdsec.sh used to append exactly this block; nothing else of ours is there.
