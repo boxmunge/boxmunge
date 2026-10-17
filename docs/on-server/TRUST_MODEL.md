@@ -64,9 +64,12 @@ the shell and the `boxmunge-sftp` subsystem wrapper refuse it. Clients upload wi
 
 ## Container Escape and Root Restarts
 
-Docker on the box runs without user-namespace remapping, and the overlay
-does not force a non-root user, so uid 0 in a container is root for every
-host file the container can reach through a bind mount. A compromised
+A box installed from this release on is remapped from the first boot:
+container uid N is host uid S+N, so container root is an unprivileged host
+user (OPERATIONS.md, "User-namespace remapping"). A box installed earlier
+runs without user-namespace remapping until it migrates, and the overlay
+does not force a non-root user, so there uid 0 in a container is root for
+every host file the container can reach through a bind mount. A compromised
 container is therefore contained by what it can mount and by what root
 later does with the files it can write.
 
@@ -131,9 +134,9 @@ What remains:
 - Anything a container can do as root inside its own read-write mounts
   stays possible, and so does a kernel or runtime escape.
 
-Recommended follow-ups, not implemented: enable `userns-remap` in the
-Docker daemon so container root maps to an unprivileged host uid, and give
-the overlay a default non-root user.
+Recommended follow-ups, not implemented: migrate boxes installed before
+`userns-remap` was the default, so container root maps to an unprivileged
+host uid there too, and give the overlay a default non-root user.
 
 ## The Upgrade Shim and the Root Boundary
 

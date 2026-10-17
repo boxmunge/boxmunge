@@ -1191,7 +1191,7 @@ the exit code. The MCP `health` tool runs the same checks.
 | `alerts` | Pushover is not configured, so nothing on this box can alert you | see [Alerts not configured](#alerts-not-configured) |
 | `container-updates` | the daily container update failed for a target (also when a service it updates has no container, so its running image is unknown), or has not run for 48 hours | `log --component container-update`; the entry ends with the command's own error output |
 | `platform-updates` | a security or break-fix release cannot be installed automatically | see [Upgrading the Platform](#upgrading-the-platform) |
-| `docker-userns` | Docker does not remap user namespaces yet, remaps them with another identity, or a source cannot be read on a box boxmunge has not remapped (warning; deploys go on); or the record or `daemon.json` claims boxmunge's remap and a source disagrees, or a remapped box's `caddy/logs` is missing, not a directory or not S:S (error, alerted once a day) | see [User-namespace remapping](#user-namespace-remapping) |
+| `docker-userns` | Docker does not remap user namespaces yet, remaps them with another identity, or a source cannot be read on a box boxmunge has not remapped (warning; deploys go on); or the record or `daemon.json` claims boxmunge's remap and a source disagrees, or a remapped box's `caddy/logs` is missing, not a directory, not S:S or not writable by its owner, or its `caddy/Caddyfile` is not a world-readable regular file (error, alerted once a day) | see [User-namespace remapping](#user-namespace-remapping) |
 | `security-profiles` | a service runs with `profile: off` | review the reason in its manifest |
 | `cve-scan` | a deployed project has not been scanned for 36 hours, was never scanned, or its last scan was incomplete | `security scan <project>`; see `agent-help cve` |
 | `ufw`, `crowdsec`, `aide`, `auditd`, `sysctl` | a host hardening component is off or misconfigured | `doctor`, then the supervisor user |
@@ -1218,6 +1218,10 @@ other source on each run: `/etc/subuid` and `/etc/subgid` (exactly one range of 
 `userns-remap` in `/etc/docker/daemon.json` (`boxmunge-remap:boxmunge-remap`), and the running
 daemon (remapped, `overlay2` storage, data root ending in `/S.S`).
 
+- **Freshly installed:** remapped from the first boot. `init-host.sh` creates `boxmunge-remap`
+  and its ranges, writes `daemon.json` before Docker first starts, records S, and journals the
+  migration as committed, so there is nothing to migrate. Before it changes anything, it refuses a
+  host whose Docker already has containers or volumes, and a `daemon.json` it did not write.
 - **Not migrated:** a warning. Deploys go on as before.
 - **A source cannot be read** (for example a `daemon.json` only root can read) on a box where neither
   the record nor `daemon.json` names `boxmunge-remap`: a warning naming the file. Deploys go on under
@@ -1247,7 +1251,9 @@ runs remapped and print the command that recreates it.
 
 Caddy runs remapped as container root, so on a remapped box `/opt/boxmunge/caddy/logs` belongs to
 S:S (the host's CrowdSec reads it as root). `docker-userns` reports an error when it is missing, is
-not a directory, or has another owner, and prints the fix.
+not a directory, has another owner or lacks the owner's write and search bits, and prints the fix. Caddy reads `caddy/Caddyfile` through
+the "other" permission bits, so the file is 0644 (`caddy/` itself stays 0750); `docker-userns`
+reports an error, with the `chmod`, when it is not.
 
 ### Alerts not configured
 

@@ -439,6 +439,11 @@ def phase_1_server_setup(hostname: str):
     bundle_path = build_server_bundle()
     step_pass(f"Built server bundle: {bundle_path.name}")
 
+    # server-setup confirms the host key non-interactively only against a
+    # fingerprint given up front; the VM's own key file is the out-of-band source.
+    fingerprint = ssh_run("test", PORTS["ssh_initial"],
+                          "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub").stdout.split()[1]
+
     # server-setup auto-detects the SSH key (same key cloud-init installed)
     cmd = [
         "boxmunge",
@@ -454,6 +459,7 @@ def phase_1_server_setup(hostname: str):
         "--no-crowdsec",
         "--no-auto-updates",
         "--local-bundle", str(bundle_path),
+        "--host-key-fingerprint", fingerprint,
     ]
 
     setup_log = CACHE_DIR / "server-setup.log"
@@ -478,6 +484,12 @@ def phase_1_server_setup(hostname: str):
 
     ssh_run("supervisor", PORTS["ssh_boxmunge"], "docker info > /dev/null 2>&1")
     step_pass("Docker is running")
+
+    result = ssh_run("supervisor", PORTS["ssh_boxmunge"],
+                     "docker info --format '{{json .SecurityOptions}} {{.Driver}}'")
+    if "name=userns" not in result.stdout or not result.stdout.strip().endswith(" overlay2"):
+        step_fail("Docker is not remapped on overlay2 from the first boot", result.stdout)
+    step_pass("Docker remaps user namespaces (overlay2)")
 
     result = ssh_run("supervisor", PORTS["ssh_boxmunge"],
                      "docker ps --format '{{.Names}}'")

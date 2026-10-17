@@ -34,6 +34,11 @@ ${BOXMUNGE_ROOT}/config Full
 /etc/shadow Full
 /etc/group Full
 
+# Docker's user-namespace remap (bootstrap/userns.sh)
+/etc/docker/daemon.json Full
+/etc/subuid Full
+/etc/subgid Full
+
 # systemd units
 /etc/systemd/system Full
 EOF

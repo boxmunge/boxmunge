@@ -97,6 +97,11 @@ if [[ -z "${SSH_KEY}" ]]; then
     exit 1
 fi
 
+# User-namespace remapping refuses a host that is not fresh before anything
+# changes; sets USERNS_OFFSET.
+source "$(dirname "$0")/userns.sh"
+userns_preflight
+
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
@@ -143,6 +148,8 @@ apt-get install -y -qq \
 # Step 3: Install Docker (official repo)
 # ---------------------------------------------------------------------------
 echo "##BOXMUNGE:STEP:3:15:Installing Docker"
+# User-namespace remapping, configured before Docker's first start (userns.sh).
+userns_before_docker
 banner "Step 3/14: Installing Docker"
 if command -v docker &>/dev/null; then
     echo "Docker already installed — skipping."
@@ -179,7 +186,8 @@ if id "${DEPLOY_USER}" &>/dev/null; then
         echo "Changed deploy shell from bash to boxmunge-shell"
     fi
 else
-    useradd -m -s /opt/boxmunge/bin/boxmunge-shell "${DEPLOY_USER}"
+    # No subordinate ids (Debian gives each new user 65536): only boxmunge-remap needs them.
+    useradd -m -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 -s /opt/boxmunge/bin/boxmunge-shell "${DEPLOY_USER}"
 fi
 usermod -aG docker "${DEPLOY_USER}"
 
@@ -187,7 +195,7 @@ banner "Step 4b/14: Creating supervisor user (full shell access)..."
 if id supervisor &>/dev/null; then
     echo "User 'supervisor' already exists — skipping useradd."
 else
-    useradd -m -s /bin/bash supervisor
+    useradd -m -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 -s /bin/bash supervisor
 fi
 usermod -aG docker,deploy supervisor
 
@@ -223,44 +231,7 @@ echo "Supervisor user 'supervisor' ready with full shell and SSH key installed."
 # ---------------------------------------------------------------------------
 echo "##BOXMUNGE:STEP:5:15:Configuring SSH"
 banner "Step 5/14: Configuring SSH (port ${SSH_PORT})"
-SSHD_CONFIG="/etc/ssh/sshd_config"
-
-# Apply settings — add if missing, replace if present
-_set_sshd() {
-    local key="$1" val="$2"
-    if grep -qE "^#?${key}" "${SSHD_CONFIG}"; then
-        sed -i "s|^#\?${key}.*|${key} ${val}|" "${SSHD_CONFIG}"
-    else
-        echo "${key} ${val}" >> "${SSHD_CONFIG}"
-    fi
-}
-
-_set_sshd Port            "${SSH_PORT}"
-_set_sshd PermitRootLogin no
-_set_sshd PasswordAuthentication no
-_set_sshd ChallengeResponseAuthentication no
-_set_sshd UsePAM yes
-
-# Session and access limits
-_set_sshd MaxAuthTries 3
-_set_sshd LoginGraceTime 30
-_set_sshd ClientAliveInterval 300
-_set_sshd ClientAliveCountMax 2
-
-# Restrict SSH features — deploy user must not tunnel or forward
-_set_sshd AllowTcpForwarding no
-_set_sshd GatewayPorts no
-_set_sshd PermitTunnel no
-_set_sshd X11Forwarding no
-
-# Only named accounts may log in
-_set_sshd AllowUsers "${DEPLOY_USER} supervisor"
-
-# Note: the sshd Subsystem directive for SFTP is wired in install.sh, after
-# the wrapper binary exists at /opt/boxmunge/bin/boxmunge-sftp. Doing it here
-# would create a window where sshd points at a non-existent wrapper.
-
-systemctl restart sshd
+source "$(dirname "$0")/sshd.sh"
 
 # ---------------------------------------------------------------------------
 # Step 6: Configure firewall (ufw)
@@ -319,31 +290,7 @@ source "$(dirname "$0")/apparmor.sh"
 echo "##BOXMUNGE:STEP:9:15:Configuring automatic updates"
 if [[ "${INSTALL_AUTO_UPDATES}" == "true" ]]; then
     banner "Step 8/14: Configuring unattended-upgrades"
-    if [[ "${ID}" == "ubuntu" ]]; then
-        cat > /etc/apt/apt.conf.d/50unattended-upgrades <<'EOF'
-Unattended-Upgrade::Allowed-Origins {
-    "${distro_id}:${distro_codename}-security";
-    "${distro_id}ESMApps:${distro_codename}-apps-security";
-    "${distro_id}ESM:${distro_codename}-infra-security";
-};
-Unattended-Upgrade::AutoFixInterruptedDpkg "true";
-Unattended-Upgrade::MinimalSteps "true";
-Unattended-Upgrade::Remove-Unused-Dependencies "true";
-EOF
-    else
-        install -m 0644 "$(dirname "$0")/50unattended-upgrades-debian" \
-            /etc/apt/apt.conf.d/50unattended-upgrades
-    fi
-
-    cat > /etc/apt/apt.conf.d/20auto-upgrades <<EOF
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
-Unattended-Upgrade::Automatic-Reboot "true";
-Unattended-Upgrade::Automatic-Reboot-Time "${REBOOT_WINDOW}";
-EOF
-
-    systemctl enable unattended-upgrades
-    systemctl restart unattended-upgrades
+    source "$(dirname "$0")/unattended.sh"
 else
     echo "Skipping unattended-upgrades (--no-auto-updates)"
 fi
@@ -374,12 +321,13 @@ install -d -m 775 -o root -g "${DEPLOY_USER}" \
 install -d -m 700 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" \
     "${BOXMUNGE_ROOT}/caddy/.site-journal"
 
-# caddy/logs holds Caddy's JSON access log (bind-mounted to /var/log/caddy in
-# the container). The Caddy container writes here as root; the host's CrowdSec
-# daemon (also root) reads it. Caddy writes the log file itself as 0600, so the
-# dir need not be world-readable.
-install -d -m 750 -o root -g root \
-    "${BOXMUNGE_ROOT}/caddy/logs"
+# caddy/logs holds Caddy's JSON access log (bind-mounted to /var/log/caddy).
+# Caddy writes here as its remapped root (host uid S); the host's CrowdSec
+# (root) reads it. Caddy makes the log 0600, so the dir is not world-readable.
+userns_caddy_logs "${USERNS_OFFSET}"
+# Created here, before Caddy first starts: dockerd would create a missing bind
+# source owned by the remapped root.
+install -d -m 755 -o root -g "${DEPLOY_USER}" "${BOXMUNGE_ROOT}/caddy/maintenance"
 
 install -d -m 755 -o root -g root \
     "${BOXMUNGE_ROOT}/templates" \
@@ -398,21 +346,12 @@ install -d -m 755 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" "${BOXMUNGE_ROOT}/inbo
 install -d -m 755 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" "${BOXMUNGE_ROOT}/inbox/.consumed"
 
 # ---------------------------------------------------------------------------
-# Step 10: Configure Docker logging
+# Step 10: Start Docker remapped
 # ---------------------------------------------------------------------------
-echo "##BOXMUNGE:STEP:11:15:Configuring Docker logging"
-banner "Step 10/14: Configuring Docker logging defaults"
-install -d -m 755 /etc/docker
-cat > /etc/docker/daemon.json <<'EOF'
-{
-    "log-driver": "json-file",
-    "log-opts": {
-        "max-size": "50m",
-        "max-file": "5"
-    }
-}
-EOF
+echo "##BOXMUNGE:STEP:11:15:Starting Docker remapped"
+banner "Step 10/14: Starting Docker remapped (daemon.json from userns.sh)"
 systemctl restart docker
+userns_verify "${USERNS_OFFSET}"
 
 # ---------------------------------------------------------------------------
 # Step 11: Create Docker network and backup key; write boxmunge.yml
@@ -429,6 +368,7 @@ fi
 
 # Backup encryption key (age identity)
 age-keygen -o "${BOXMUNGE_ROOT}/config/backup.key" 2>/dev/null
+# shellcheck disable=SC2034  # read by summary.sh
 BACKUP_PUBKEY="$(age-keygen -y "${BOXMUNGE_ROOT}/config/backup.key")"
 chmod 640 "${BOXMUNGE_ROOT}/config/backup.key"
 chown root:"${DEPLOY_USER}" "${BOXMUNGE_ROOT}/config/backup.key"
@@ -463,8 +403,10 @@ EOF
 if [ "$SELF_SIGNED_TLS" = "true" ]; then
     echo "tls_mode: internal" >> "${BOXMUNGE_ROOT}/config/boxmunge.yml"
 fi
+userns_record "${USERNS_OFFSET}"
 chmod 640 "${BOXMUNGE_ROOT}/config/boxmunge.yml"
 chown root:"${DEPLOY_USER}" "${BOXMUNGE_ROOT}/config/boxmunge.yml"
+userns_journal_committed "${USERNS_OFFSET}"
 
 # ---------------------------------------------------------------------------
 # Step 12: Install boxmunge CLI
@@ -507,57 +449,17 @@ cat > "${BOXMUNGE_ROOT}/caddy/Caddyfile" <<EOF
 import /etc/caddy/sites/*.conf
 EOF
 fi
-chmod 640 "${BOXMUNGE_ROOT}/caddy/Caddyfile"
+# Remapped Caddy reads it as an "other" user; caddy/ (0750) still hides it from the host's.
+chmod 644 "${BOXMUNGE_ROOT}/caddy/Caddyfile"
 chown root:"${DEPLOY_USER}" "${BOXMUNGE_ROOT}/caddy/Caddyfile"
 
-cat > "${BOXMUNGE_ROOT}/caddy/compose.yml" <<'EOF'
-# Caddy reverse proxy — managed by boxmunge
-# Do not edit directly. Changes are made via boxmunge commands.
-
-services:
-  caddy:
-    image: caddy:2-alpine
-    container_name: boxmunge-caddy
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./sites:/etc/caddy/sites:ro
-      - ./maintenance:/etc/caddy/maintenance:ro
-      # Writable bind mount (not a named volume) so the host's CrowdSec
-      # daemon can read access.log directly. read_only above locks only the
-      # container rootfs, not mounted volumes.
-      - ./logs:/var/log/caddy
-      - caddy_data:/data
-      - caddy_config:/config
-    networks:
-      - boxmunge-proxy
-    read_only: true
-    cap_drop:
-      - ALL
-    cap_add:
-      - NET_BIND_SERVICE
-    healthcheck:
-      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
-volumes:
-  caddy_data:
-  caddy_config:
-
-networks:
-  boxmunge-proxy:
-    external: true
-EOF
-chmod 640 "${BOXMUNGE_ROOT}/caddy/compose.yml"
-chown root:"${DEPLOY_USER}" "${BOXMUNGE_ROOT}/caddy/compose.yml"
+# The bundle's caddy/compose.yml, which install.sh keeps current on upgrades.
+install -m 640 -o root -g "${DEPLOY_USER}" "$(dirname "$0")/../caddy/compose.yml" \
+    "${BOXMUNGE_ROOT}/caddy/compose.yml"
 
 # Start Caddy
 docker compose -f "${BOXMUNGE_ROOT}/caddy/compose.yml" up -d
+# shellcheck disable=SC2034  # read by summary.sh
 CADDY_STATUS="$(docker inspect --format='{{.State.Status}}' boxmunge-caddy 2>/dev/null || echo 'unknown')"
 
 # ---------------------------------------------------------------------------
@@ -571,37 +473,4 @@ bash "${SCRIPT_DIR}/harden.sh"
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
-echo ""
-echo "###################################################################"
-echo "#                  boxmunge init complete                         #"
-echo "###################################################################"
-echo ""
-echo "  Hostname   : ${HOSTNAME_ARG}"
-echo "  SSH port   : ${SSH_PORT}"
-echo "  Deploy user: ${DEPLOY_USER}"
-echo "  Root dir   : ${BOXMUNGE_ROOT}"
-echo "  Caddy      : ${CADDY_STATUS}"
-echo ""
-echo "  *** BACKUP KEY — SAVE THIS FILE TO A SECURE LOCATION ***"
-echo "  ${BOXMUNGE_ROOT}/config/backup.key"
-echo ""
-echo "  Public key: ${BACKUP_PUBKEY}"
-echo ""
-echo "-------------------------------------------------------------------"
-echo "  Next steps:"
-echo ""
-echo "  1. Copy your backup key to a secure password manager NOW."
-echo ""
-echo "  2. Reconnect as supervisor for administration:"
-echo "       ssh -p ${SSH_PORT} supervisor@${HOSTNAME_ARG}"
-echo ""
-echo "  3. Deploy via restricted shell:"
-echo "       ssh -p ${SSH_PORT} ${DEPLOY_USER}@${HOSTNAME_ARG} \"help\""
-echo ""
-echo "  4. Upload bundles:"
-echo "       scp -O -P ${SSH_PORT} bundle.tar.gz ${DEPLOY_USER}@${HOSTNAME_ARG}:"
-echo ""
-echo "  5. Configure backup remote in ${BOXMUNGE_ROOT}/config/boxmunge.yml"
-echo "     then test with: boxmunge backup <project-name>"
-echo "###################################################################"
-echo ""
+source "$(dirname "$0")/summary.sh"

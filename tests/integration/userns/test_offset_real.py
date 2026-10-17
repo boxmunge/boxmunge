@@ -49,10 +49,41 @@ def test_container_root_is_host_s(remapped_daemon, tmp_path) -> None:
     assert (tmp_path / "f").stat().st_uid == remapped_daemon
 
 
+DEPLOY_GID = 4242  # init-host's deploy group; Caddy's root is not in it
+
+
+def _caddyfile(paths, mode: int):
+    caddyfile = paths.caddy / "Caddyfile"
+    caddyfile.write_text("import /etc/caddy/sites/*.conf\n")
+    os.chown(caddyfile, 0, DEPLOY_GID)
+    caddyfile.chmod(mode)
+    return caddyfile
+
+
+def test_docker_userns_agrees_with_what_caddy_can_read(dind_record) -> None:
+    """docker-userns errors exactly when Caddy's root could not read its config."""
+    from boxmunge.health_checks.userns import check_docker_userns
+    s = offset.remap_offset(dind_record)
+    os.chown(dind_record.caddy / "logs", s, s)
+    caddyfile = _caddyfile(dind_record, 0o640)
+
+    def caddy_reads() -> bool:
+        # Caddy's capabilities (caddy/compose.yml): no DAC override.
+        return subprocess.run(["docker", "run", "--rm", "--network", "none", "--cap-drop", "ALL",
+                               "--cap-add", "NET_BIND_SERVICE",
+                               "-v", f"{caddyfile}:/etc/caddy/Caddyfile:ro",
+                               BUSYBOX, "cat", "/etc/caddy/Caddyfile"],
+                              capture_output=True).returncode == 0
+    assert check_docker_userns(dind_record).status == "error" and not caddy_reads()
+    caddyfile.chmod(0o644)
+    assert check_docker_userns(dind_record).status == "ok" and caddy_reads()
+
+
 def test_docker_userns_agrees_with_what_remapped_root_can_write(dind_record) -> None:
     """docker-userns errors exactly when Caddy's root could not append to its log."""
     from boxmunge.health_checks.userns import check_docker_userns
     s = offset.remap_offset(dind_record)
+    _caddyfile(dind_record, 0o644)
     logs = dind_record.caddy / "logs"
     logs.chmod(0o750)
 
@@ -64,4 +95,7 @@ def test_docker_userns_agrees_with_what_remapped_root_can_write(dind_record) -> 
                               capture_output=True).returncode == 0
     assert check_docker_userns(dind_record).status == "error" and not caddy_writes()
     os.chown(logs, s, s)
+    logs.chmod(0o550)  # the owner's, but not writable by it
+    assert check_docker_userns(dind_record).status == "error" and not caddy_writes()
+    logs.chmod(0o750)
     assert check_docker_userns(dind_record).status == "ok" and caddy_writes()
