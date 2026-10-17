@@ -21,15 +21,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from boxmunge.fileutil import durable_rename, open_regular_nofollow
+from boxmunge.fileutil import fsync_dir, open_regular_nofollow
 from boxmunge.log import log_operation, log_warning
 from boxmunge.notify import notify
-from boxmunge.stash import META_FILENAME, STASH_FORMAT_VERSION, list_stashes
+from boxmunge.stash import META_FILENAME, list_stashes
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 REWRITE_PREFIX = ".rewrite-"
+# The layout this rewrite knows is 0.10.1's (format 1), not whatever format
+# `stash create` writes now: a later create-format bump must not widen it.
+_REWRITABLE_FORMAT = 1
 
 
 class StashRewriteError(Exception):
@@ -58,8 +61,8 @@ def _check_format(tar: tarfile.TarFile, members: list[tarfile.TarInfo]) -> None:
     if meta_file is None:
         raise StashRewriteError("its meta is not a regular file")
     got = json.loads(meta_file.read()).get("format_version")
-    if got != STASH_FORMAT_VERSION:
-        raise StashRewriteError(f"format {got!r} is not {STASH_FORMAT_VERSION}, "
+    if got != _REWRITABLE_FORMAT:
+        raise StashRewriteError(f"format {got!r} is not {_REWRITABLE_FORMAT}, "
                                 f"the one this release can rewrite")
 
 
@@ -89,9 +92,21 @@ def _verify(copy: Path, want: list[tuple]) -> None:
         raise StashRewriteError("the rewritten stash does not read back member for member")
 
 
-def _rewrite(original: Path, tmp: Path) -> list[str]:
+def _sweep_stale(paths: BoxPaths) -> None:
+    """Remove temps left by a rewrite that crashed before its rename, so a
+    later run with the same pid is not refused. unlink never follows a link."""
+    for entry in sorted(paths.stashes.glob(f"{REWRITE_PREFIX}*")):
+        if entry.is_dir() and not entry.is_symlink():
+            continue  # only blocks a run whose temp has this name, which then fails noisily
+        entry.unlink()
+        log_warning("upgrade", f"Removed {entry.name} from {paths.stashes}, left by a stash "
+                    f"rewrite that did not finish", paths)
+
+
+def _rewrite(paths: BoxPaths, original: Path, tmp: Path) -> list[str]:
     """The dropped members' names; [] when there was nothing to drop.
-    Removes its copy and raises on any failure."""
+    Removes its copy and raises on any failure before the rename; the
+    caller makes the rename durable."""
     created = False
     try:
         # stashes/ is deploy-writable: never read through a planted link.
@@ -105,13 +120,14 @@ def _rewrite(original: Path, tmp: Path) -> list[str]:
                 return []
             keep = [m for m in members if not m.issym()]
             want = [_record(tar, m) for m in keep]
+            _sweep_stale(paths)
             # O_EXCL | O_NOFOLLOW: a name planted at the temp path is refused, never used.
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
                          | os.O_CLOEXEC, 0o600)
             created = True
             _write_copy(fd, (st.st_uid, st.st_gid), tar, keep)
-        _verify(tmp, want)
-        durable_rename(tmp, original)
+        _verify(tmp, want)   # also refuses a temp that is no longer a plain file
+        os.rename(tmp, original)   # the copy's data was fsynced in _write_copy
         return dropped
     except BaseException:
         if created:
@@ -129,7 +145,7 @@ def sanitize_latest_stash(paths: BoxPaths) -> SanitizeResult:
     original = stashes[0]
     tmp = paths.stashes / f"{REWRITE_PREFIX}{os.getpid()}.tmp"
     try:
-        dropped = _rewrite(original, tmp)
+        dropped = _rewrite(paths, original, tmp)
     except Exception as e:  # noqa: BLE001 - never raises; the failure is alerted
         error = f"{type(e).__name__}: {e}"
         message = (f"The latest stash {original.name} could not be rewritten without its "
@@ -142,4 +158,18 @@ def sanitize_latest_stash(paths: BoxPaths) -> SanitizeResult:
         return SanitizeResult(False, error=error)
     for name in dropped:
         log_operation("upgrade", f"Dropped link member {name} from stash {original.name}", paths)
-    return SanitizeResult(bool(dropped), dropped)
+    if not dropped:
+        return SanitizeResult(False)
+    try:
+        fsync_dir(paths.stashes)
+    except OSError as e:
+        error = f"{type(e).__name__}: {e}"
+        message = (f"The latest stash {original.name} was rewritten without its link members, "
+                   f"but syncing {paths.stashes} failed ({error}). Until it is synced, a crash "
+                   f"may bring back the original, and then a rollback's stash restore may abort "
+                   f"on git links. Run `sync` on the host now.")
+        log_warning("upgrade", message, paths)
+        notify(paths, "upgrade: stash rewrite not durable", message, component="upgrade",
+               priority=1)
+        return SanitizeResult(True, dropped, error)
+    return SanitizeResult(True, dropped)

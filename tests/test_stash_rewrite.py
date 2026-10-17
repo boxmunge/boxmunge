@@ -11,11 +11,11 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge import stash_rewrite
-from boxmunge.stash import META_FILENAME, STASH_FORMAT_VERSION, create_stash, list_stashes
+from boxmunge.stash import META_FILENAME, create_stash, list_stashes
 from boxmunge.stash_rewrite import REWRITE_PREFIX, sanitize_latest_stash
 
 
-def _stash(paths, tmp_path, fmt: int = STASH_FORMAT_VERSION,
+def _stash(paths, tmp_path, fmt: int = 1,
            name: str = "boxmunge-stash-2026-10-16T120000.tar.gz", meta_last: bool = True):
     """A stash as 0.10.1 writes it for a git project: compose.yml a link."""
     src = tmp_path / "src"
@@ -155,14 +155,16 @@ def test_verify_compares_member_for_member(paths, tmp_path) -> None:
 
 
 def test_planted_temp_file_leaves_original_and_alerts(paths, tmp_path) -> None:
-    """Review Focus 5: a planted temp name is refused (O_EXCL | O_NOFOLLOW)."""
+    """Review Focus 5: a name planted at the temp path after the sweep is
+    refused (O_EXCL | O_NOFOLLOW), never written through."""
     archive = _stash(paths, tmp_path)
     before = archive.read_bytes()
     victim = tmp_path / "victim"
     victim.write_text("keep")
     planted = paths.stashes / f"{REWRITE_PREFIX}{os.getpid()}.tmp"
     os.symlink(victim, planted)
-    with patch.object(stash_rewrite, "notify") as alert:
+    with patch.object(stash_rewrite, "notify") as alert, \
+            patch.object(stash_rewrite, "_sweep_stale"):
         result = sanitize_latest_stash(paths)
     assert result.error and not result.changed
     assert archive.read_bytes() == before and victim.read_text() == "keep"
@@ -182,7 +184,7 @@ def test_a_symlinked_stash_is_refused(paths, tmp_path) -> None:
 
 
 def test_other_format_is_left_alone(paths, tmp_path) -> None:
-    archive = _stash(paths, tmp_path, fmt=STASH_FORMAT_VERSION + 1)
+    archive = _stash(paths, tmp_path, fmt=2)
     before = archive.read_bytes()
     with patch.object(stash_rewrite, "notify") as alert:
         assert sanitize_latest_stash(paths).error
@@ -210,3 +212,43 @@ def test_create_stash_writes_no_symlink_members(paths) -> None:
     os.symlink(pdir / "repo" / "manifest.yml", pdir / "manifest.yml")
     with tarfile.open(create_stash(paths)) as tar:
         assert not any(m.issym() for m in tar.getmembers())
+
+
+def test_the_rewritable_format_is_0_10_1s_not_the_create_format(paths, tmp_path) -> None:
+    """A later create-format bump must not change which layout is rewritten."""
+    archive = _stash(paths, tmp_path, fmt=1)
+    with patch.object(stash_rewrite, "STASH_FORMAT_VERSION", 2, create=True):
+        assert sanitize_latest_stash(paths).changed
+    assert "projects/g/compose.yml" not in [n for n, _t, _c in _members(archive)]
+
+
+def test_a_failed_directory_sync_reports_the_rewrite_truthfully(paths, tmp_path) -> None:
+    archive = _stash(paths, tmp_path)
+    with patch.object(stash_rewrite, "fsync_dir", side_effect=OSError("EIO")), \
+            patch.object(stash_rewrite, "notify") as alert:
+        result = sanitize_latest_stash(paths)
+    assert result.changed and result.dropped == ["projects/g/compose.yml"]
+    assert "EIO" in (result.error or "")
+    assert "projects/g/compose.yml" not in [n for n, _t, _c in _members(archive)]
+    body = alert.call_args.args[2]
+    assert "was rewritten" in body and "left as it is" not in body
+    assert alert.call_args.kwargs["priority"] == 1
+    assert [p.name for p in paths.stashes.iterdir()] == [archive.name]
+
+
+def test_stale_rewrite_temps_are_swept_first(paths, tmp_path) -> None:
+    """A crash between the copy and the rename leaves a temp; a later run
+    (same pid or not) removes it, never following a link."""
+    archive = _stash(paths, tmp_path)
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    os.symlink(victim, paths.stashes / f"{REWRITE_PREFIX}{os.getpid()}.tmp")
+    (paths.stashes / f"{REWRITE_PREFIX}1.tmp").write_bytes(b"stale copy")
+    with patch.object(stash_rewrite, "log_warning") as warned, \
+            patch.object(stash_rewrite, "notify") as alert:
+        result = sanitize_latest_stash(paths)
+    assert result.changed and not result.error and not alert.called
+    assert victim.read_text() == "keep"
+    assert [p.name for p in paths.stashes.iterdir()] == [archive.name]
+    swept = " ".join(c.args[1] for c in warned.call_args_list)
+    assert f"{REWRITE_PREFIX}1.tmp" in swept and f"{REWRITE_PREFIX}{os.getpid()}.tmp" in swept
