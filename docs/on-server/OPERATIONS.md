@@ -196,7 +196,9 @@ restarts, container updates) and `security resume` are refused with a "start ref
 Troubleshooting). If boxmunge cannot tell whether such a stage is on disk (for example `state/`
 cannot be read), it refuses the same way and says so; the health check then runs no smoke test
 and reports a warning, a backup is skipped with an alert, a due CVE quarantine is not taken (the
-scan reports why), and an upgrade leaves the project as it is with a high-priority alert. Its
+scan reports why), and an upgrade leaves the project as it is with a high-priority alert. Fix the
+cause (usually permissions) and retry; a project the upgrade left this way keeps its previous
+configs until you deploy, resume or recover it. Its
 running containers are left as they are. How to resolve it: "Upgrading from 0.10.1 with a
 release staged".
 Until it is resolved:
@@ -1612,16 +1614,19 @@ a day until it is resolved. The project keeps running its current containers
 and is backed up; starts, deploys and pause are refused, quarantine is held,
 and health smoke checks are suspended.
 
-Once probation has ended, run `boxmunge-server legacy-stage <p>` to see what
-production runs, then `--discard` (put production's release back; with
+Run `boxmunge-server legacy-stage <p>` to see what production runs (this works
+during probation too). Once probation has ended, run `--discard` (put production's release back; with
 `--confirm-recreated` if production was already started from the staged files)
 or `--keep-staged` (treat the staged release as promoted). If it is
 interrupted, run the same command again.
 
 `legacy-stage` is operator-only: run it as root (`sudo boxmunge-server legacy-stage <p>`); the
 deploy shell and MCP do not offer it. It takes the project's lock (if the project is busy, try
-again) and refuses while a platform rollback is still possible: during probation (it says when
-probation ends) or while an interrupted upgrade or rollback is pending.
+again). `--discard` and `--keep-staged` refuse while a platform rollback is still possible:
+during probation (it says when probation ends) or while an interrupted upgrade or rollback is
+pending. With no flag it works then too and adds "Not available yet: <why>".
+For a git project it runs git as the deploy user, so `repo/` must be deploy's: one cloned with
+`sudo` is refused with the fix (`chown -R deploy:deploy <p>/repo`, then retry).
 
 - With no flag it prints the evidence and the choices it allows, and changes nothing. The
   evidence is when the stage was made, the deploy state's ref, the staged ref, production's
@@ -1636,8 +1641,8 @@ probation ends) or while an interrupted upgrade or rollback is pending.
   snapshot for a manual `restore`).
 - `--keep-staged` treats the staged release as promoted. For `untouched` it first takes a
   pre-deploy snapshot with production's manifest; for `recreated`, `rollback` uses the newest
-  pre-deploy snapshot taken after the stage, and reports "unavailable: no data snapshot" if there
-  is none.
+  pre-deploy snapshot taken after the stage; with none, `rollback` refuses ("no pre-deploy data
+  snapshot was taken when that release was replaced ...").
 
 The choice is recorded first, and a rerun must name the same one. The command then stops staging,
 removes the staging site, puts the code in place, cleans up the staging files, drops the stage
