@@ -1,0 +1,106 @@
+"""The slot: <p>/.releases/staged/ (meta, swap, debris, compose target)."""
+from __future__ import annotations
+
+import json
+import os
+
+import pytest
+
+from boxmunge.staged_release import (
+    SlotError, building_dir, drop_slot, load_slot, manual_teardown, new_meta,
+    release_dir, slot_dir, staging_target, swap_in, sweep_debris, update_meta, write_meta,
+)
+
+P = "myapp"
+
+
+def _build(paths, ref="myapp-v2"):
+    building = building_dir(paths, P)
+    (release_dir(building)).mkdir(parents=True)
+    (release_dir(building) / "VERSION").write_text(ref)
+    meta = new_meta("bundle", ref, "ab" * 32)
+    write_meta(building, meta)
+    return meta
+
+
+def test_meta_round_trip_and_swap(paths) -> None:
+    meta = _build(paths)
+    swap_in(paths, P)
+    assert load_slot(paths, P) == meta and meta.state == "starting"
+    assert not building_dir(paths, P).exists()
+    doc = json.loads((slot_dir(paths, P) / "meta.json").read_text())
+    assert doc["version"] == 1 and doc["production_stopped"] is None
+
+
+def test_restage_swap_replaces_the_old_slot(paths) -> None:
+    _build(paths, "myapp-v2")
+    swap_in(paths, P)
+    new = _build(paths, "myapp-v3")
+    swap_in(paths, P)
+    assert load_slot(paths, P).id == new.id
+    assert (release_dir(slot_dir(paths, P)) / "VERSION").read_text() == "myapp-v3"
+    assert sorted(os.listdir(paths.project_releases(P))) == ["staged"]
+
+
+@pytest.mark.parametrize("bad", ["", "{}", '{"version": 2}', "[1]",
+                                 json.dumps({"version": 1, "id": "x", "kind": "zip", "ref": "r",
+                                             "bundle_sha256": None, "staged_at": "t",
+                                             "state": "ready"})])
+def test_unreadable_meta_is_a_slot_error(paths, bad) -> None:
+    _build(paths)
+    swap_in(paths, P)
+    (slot_dir(paths, P) / "meta.json").write_text(bad)
+    with pytest.raises(SlotError, match="meta.json"):
+        load_slot(paths, P)
+
+
+def test_symlinked_slot_is_a_slot_error(paths, tmp_path) -> None:
+    paths.project_releases(P).mkdir(parents=True)
+    os.symlink(tmp_path, slot_dir(paths, P))
+    with pytest.raises(SlotError, match="not a directory"):
+        load_slot(paths, P)
+
+
+def test_update_meta_and_clear_marker(paths) -> None:
+    from boxmunge.staged_release import clear_production_stopped
+    meta = _build(paths)
+    swap_in(paths, P)
+    update_meta(paths, P, meta, production_stopped={"at": "t", "containers": ["c1"]})
+    clear_production_stopped(paths, P)
+    assert load_slot(paths, P).production_stopped is None
+
+
+def test_sweep_removes_building_and_discarded_debris(paths) -> None:
+    rel = paths.project_releases(P)
+    (rel / "staged.building" / "release").mkdir(parents=True)
+    (rel / "staged.discarded").mkdir()
+    (rel / ".isolation-abc").mkdir()
+    (rel / "live.json").write_text("{}")
+    sweep_debris(paths, P)
+    assert sorted(os.listdir(rel)) == ["live.json"]
+
+
+def test_staging_target(paths) -> None:
+    _build(paths)
+    swap_in(paths, P)
+    t = staging_target(paths, P)
+    slot = slot_dir(paths, P)
+    assert t.cwd == t.project_directory == slot / "release"
+    assert t.project_name == "myapp-staging" and t.env_file is None
+    assert t.files == [str(slot / "compose.staging-base.yml"),
+                       str(slot / "compose.boxmunge-staging.yml")]
+    (slot / "release" / ".env").write_text("X=1\n")
+    assert staging_target(paths, P).env_file == slot / "release" / ".env"
+
+
+def test_manual_teardown_names_the_project_directory(paths) -> None:
+    text = manual_teardown(paths, P)
+    assert f"--project-directory {slot_dir(paths, P)}/release" in text
+    assert f"rm -rf {slot_dir(paths, P)}" in text and "myapp-staging.conf" in text
+
+
+def test_drop_slot(paths) -> None:
+    _build(paths)
+    swap_in(paths, P)
+    drop_slot(paths, P)
+    assert load_slot(paths, P) is None
