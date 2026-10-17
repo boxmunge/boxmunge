@@ -223,9 +223,11 @@ def copy_entry_nofollow(src_dir: int, name: str, dest_dir: int) -> None:
     copied as a link; a regular file through descriptors that refuse a link
     and never block on a FIFO, its destination created exclusively (a name
     planted there is refused, not written through); a directory
-    recursively, through directory descriptors. Anything else raises OSError."""
+    recursively, through directory descriptors. Modes are kept without the
+    setuid and setgid bits. Anything else raises OSError."""
     st = os.stat(name, dir_fd=src_dir, follow_symlinks=False)
-    mode = stat.S_IMODE(st.st_mode)
+    # Never setuid or setgid: root makes these files, in a tree deploy owns.
+    mode = stat.S_IMODE(st.st_mode) & 0o1777
     if stat.S_ISLNK(st.st_mode):
         os.symlink(os.readlink(name, dir_fd=src_dir), name, dir_fd=dest_dir)
     elif stat.S_ISREG(st.st_mode):

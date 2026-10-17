@@ -51,3 +51,16 @@ def test_a_fifo_is_refused_without_blocking(dirs) -> None:
     os.mkfifo(src / "pipe")
     with pytest.raises(OSError, match="not a file, directory or link"):
         copy_entry_nofollow(sfd, "pipe", dfd)
+
+
+def test_setuid_and_setgid_bits_are_never_copied(dirs) -> None:
+    src, dest, sfd, dfd = dirs
+    (src / "tool").write_text("x")
+    (src / "tool").chmod(0o4755)
+    (src / "shared").mkdir()
+    (src / "shared").chmod(0o3775)   # setgid and sticky
+    for name in ("tool", "shared"):
+        copy_entry_nofollow(sfd, name, dfd)
+    assert (src / "tool").stat().st_mode & 0o7777 == 0o4755    # the source as it was
+    assert (dest / "tool").stat().st_mode & 0o7777 == 0o755
+    assert (dest / "shared").stat().st_mode & 0o7777 == 0o1775
