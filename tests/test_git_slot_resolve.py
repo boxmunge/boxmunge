@@ -246,8 +246,9 @@ def test_run_as_root_git_runs_as_the_deploy_user(repos, monkeypatch) -> None:
     assert (seen["user"], seen["group"], seen["extra_groups"]) == (owner, 5678, [])
     # Nothing of root's session reaches a process deploy controls.
     assert seen["stdin"] is subprocess.DEVNULL and seen["start_new_session"] is True
-    assert seen["env"]["HOME"] == "/home/deploy" and seen["env"]["GIT_CONFIG_NOSYSTEM"] == "1"
-    assert set(seen["env"]) <= {"PATH", "HOME", "LANG", "GIT_CONFIG_NOSYSTEM"}
+    # The config deploy-run git reads: deploy's (HOME) and the system's.
+    assert seen["env"]["HOME"] == "/home/deploy"
+    assert set(seen["env"]) <= {"PATH", "HOME", "LANG"}
     assert argvs[0][1:3] == ["-c", "core.hooksPath=/dev/null"]
 
 

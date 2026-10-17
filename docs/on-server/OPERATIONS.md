@@ -113,6 +113,11 @@ staged release. Deploy such a commit with `prod-deploy`. As a bundle may not shi
 `*-staging` entry, a git stage is refused while the project directory holds one that is neither
 production's data nor staging's copy: rename it.
 
+boxmunge always runs git as the deploy user, also when a command runs as root (with `sudo`):
+`repo/` must be deploy's, origin must accept deploy's SSH key or credentials, and git reads
+deploy's own config and the system's (`/etc/gitconfig`), the same in the deploy shell and under
+`sudo`.
+
 A git project's `manifest.yml` and `compose.yml` are symlinks into `repo/`, so every deploy
 reads the repository's files. boxmunge never writes them. When an upgrade raises the manifest
 schema, a git project's manifest is migrated in memory each time it is read, and the upgrade

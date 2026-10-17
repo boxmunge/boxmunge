@@ -61,7 +61,10 @@ def _as_deploy(repo: Path) -> dict:
     The repository and its config are deploy's, so whatever git runs from
     them (filters, fsmonitor) is deploy's code: it runs as deploy, with no
     stdin, in its own session (no controlling terminal to inject into) and
-    a minimal environment (git refuses another user's repository anyway)."""
+    a minimal environment (git refuses another user's repository anyway).
+    It reads the config git run by deploy itself reads: deploy's own and
+    the root-owned system config (/etc/gitconfig), so a command run with
+    sudo sees the filters, proxy and safe.directory the deploy shell does."""
     if not running_as_root():
         return {}
     try:
@@ -71,7 +74,7 @@ def _as_deploy(repo: Path) -> dict:
                           "deploy user") from e
     _require_deploy_owned(repo, pw.pw_uid)
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": pw.pw_dir,
-           "LANG": os.environ.get("LANG", "C.UTF-8"), "GIT_CONFIG_NOSYSTEM": "1"}
+           "LANG": os.environ.get("LANG", "C.UTF-8")}
     return {"user": pw.pw_uid, "group": pw.pw_gid, "extra_groups": [], "env": env,
             "stdin": subprocess.DEVNULL, "start_new_session": True}
 
