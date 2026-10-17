@@ -104,29 +104,59 @@ active_venv() { echo "$BOXMUNGE_ROOT/env-$ACTIVE_SLOT"; }
 # acquire_lock [skip]: take upgrade.lock once per run. With "skip", a busy
 # lock exits 0 (the health timer retries on its next fire); otherwise it dies.
 #
-# Deploy can plant anything at upgrade.lock. A link or non-regular file is
-# refused before the open. The open is read-write, which (unlike >>) never
-# blocks on a FIFO swapped in after that check, and the descriptor must then
-# be the regular file now at the name, so a swapped-in FIFO or link is
-# refused too. A bash redirection that can write always passes O_CREAT and
-# never O_NOFOLLOW, so a link swapped in within that instant could still make
-# root create an empty file at its target (never truncate or write one).
+# Deploy can plant anything at upgrade.lock, and swap it between any check
+# and the open. Every bash redirection follows a link, and the writing ones
+# create a missing target, so bash never opens it: open_lock_and_reexec has
+# Python open it without following a link or blocking on a FIFO, refuse
+# anything but a plain regular file, put it on fd 9 and run this shim again
+# with the same arguments. That run finds BM_UPGRADE_LOCK_FD=9 and checks fd
+# 9 is upgrade.lock itself before it takes the flock.
 acquire_lock() {
     [[ "$LOCK_HELD" -eq 1 ]] && return 0
-    mkdir -p "$STATE_DIR"
-    refuse_symlink "$LOCK_FILE"
-    [[ ! -e "$LOCK_FILE" || -f "$LOCK_FILE" ]] \
-        || die "$LOCK_FILE is not a regular file; refusing to use it as root. Remove it and re-run."
-    exec 9<>"$LOCK_FILE"
+    if [[ "${BM_UPGRADE_LOCK_FD:-}" != 9 ]]; then
+        mkdir -p "$STATE_DIR"
+        refuse_symlink "$LOCK_FILE"
+        open_lock_and_reexec
+    fi
+    unset BM_UPGRADE_LOCK_FD  # children inherit fd 9, never the claim that it is checked
     python3 -c 'import os, stat, sys
 fd, name = os.fstat(9), os.lstat(sys.argv[1])
-sys.exit(not (stat.S_ISREG(fd.st_mode) and (fd.st_dev, fd.st_ino) == (name.st_dev, name.st_ino)))' "$LOCK_FILE" \
-        || die "$LOCK_FILE was replaced while it was opened; refusing to use it as root. Remove it and re-run."
+sys.exit(not (stat.S_ISREG(fd.st_mode) and (fd.st_dev, fd.st_ino) == (name.st_dev, name.st_ino)))' \
+        "$LOCK_FILE" 2>/dev/null \
+        || die "fd 9 is not $LOCK_FILE (it was replaced, or the descriptor came from elsewhere); refusing to lock it. Remove it and re-run."
     if ! flock -n 9; then
         [[ "${1:-}" == "skip" ]] && { log "Another upgrade is in progress; skipping"; exit 0; }
         die "Another upgrade is in progress"
     fi
     LOCK_HELD=1
+}
+
+# open_lock_and_reexec: see acquire_lock. Replaces this process; prints a
+# FATAL line like die() when upgrade.lock cannot be used.
+open_lock_and_reexec() {
+    exec python3 -c '
+import errno, os, stat, sys, time
+path, shell, shim, args = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+
+def fatal(what):
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    sys.exit(f"{now} boxmunge-upgrade: FATAL: {path} {what}; refusing to use it as root. Remove it and re-run.")
+
+try:
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+except OSError as e:
+    fatal("is a symlink" if e.errno == errno.ELOOP else f"cannot be opened ({e.strerror})")
+st = os.fstat(fd)
+if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+    fatal("is not a plain regular file")
+os.set_blocking(fd, True)
+if fd != 9:
+    os.dup2(fd, 9)
+    os.close(fd)
+os.set_inheritable(9, True)
+os.environ["BM_UPGRADE_LOCK_FD"] = "9"
+os.execv(shell, [shell, shim, *args])
+' "$LOCK_FILE" "$BASH" "$SHIM_PATH" "${SHIM_ARGS[@]+"${SHIM_ARGS[@]}"}"
 }
 
 # is_blocklisted <version>: 0 if listed, 1 if not. A blocklist that is not a
@@ -155,12 +185,30 @@ PYBL
     esac
 }
 
+# write_active_slot_file <slot>: the temp file is written, chmod'd and synced
+# through the descriptor that created it. upgrade-state/ is deploy-writable,
+# so reopening the temp by name could follow a link deploy renamed over it.
 write_active_slot_file() {
-    local tmp
-    tmp="$(mktemp "$STATE_DIR/.active-slot.XXXXXX")"
-    echo "$1" > "$tmp"
-    chmod 0644 "$tmp"
-    replace_file "$tmp" "$ACTIVE_SLOT_FILE"
+    BM_SLOT="$1" BM_FILE="$ACTIVE_SLOT_FILE" python3 - <<'PYAS'
+import os, tempfile
+path = os.environ["BM_FILE"]
+directory = os.path.dirname(path)
+fd, tmp = tempfile.mkstemp(dir=directory, prefix=".active-slot.")
+try:
+    with os.fdopen(fd, "w") as f:
+        f.write(os.environ["BM_SLOT"] + "\n")
+        f.flush()
+        os.fchmod(f.fileno(), 0o644)
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    if os.path.lexists(tmp):
+        os.unlink(tmp)
+    raise
+dir_fd = os.open(directory, os.O_RDONLY)
+os.fsync(dir_fd)
+os.close(dir_fd)
+PYAS
 }
 
 add_blocklist() {

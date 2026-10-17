@@ -28,6 +28,15 @@
 
 set -euo pipefail
 
+# Root starts in the caller's directory (sudo keeps it), which deploy may
+# control, and `python3 -c` / `python3 -` put the working directory first on
+# sys.path, so a planted json.py there would run as root. Leave it, and keep
+# every Python this shim runs from importing from it.
+SHIM_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+SHIM_ARGS=("$@")
+cd /
+export PYTHONSAFEPATH=1
+
 BOXMUNGE_ROOT="${BOXMUNGE_ROOT:-/opt/boxmunge}"
 STATE_DIR="$BOXMUNGE_ROOT/upgrade-state"
 LOCK_FILE="$STATE_DIR/upgrade.lock"
@@ -48,6 +57,8 @@ SUDOERS_FILE="${BOXMUNGE_SUDOERS_FILE:-/etc/sudoers.d/boxmunge-deploy}"
 
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) boxmunge-upgrade: $*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
+
+[[ "$BOXMUNGE_ROOT" == /* ]] || die "BOXMUNGE_ROOT must be an absolute path, not '$BOXMUNGE_ROOT'"
 
 # bm_log <level> <component> <msg> [<detail-json>]
 #
@@ -77,7 +88,7 @@ PYBM
 
 # >>> boxmunge-upgrade.d: the source loader; scripts/build-shim.py replaces
 # this block with the libraries themselves.
-SHIM_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/boxmunge-upgrade.d"
+SHIM_LIB_DIR="$(dirname "$SHIM_PATH")/boxmunge-upgrade.d"
 [[ -d "$SHIM_LIB_DIR" ]] \
     || die "This is the unbuilt source shim and $SHIM_LIB_DIR is missing; install a release bundle, whose shim is built"
 for lib in state slots probation system; do

@@ -69,4 +69,94 @@ expect 0 "" "an existing regular upgrade.lock is used"
     && pass "upgrade.lock stays a regular file" || fail "upgrade.lock was replaced"
 drop_root
 
+# --- writes and opens by name in upgrade-state ----------------------------
+
+# HOSTILE: prepend to PATH. Its mktemp, python3 and timeout stand in for
+# deploy winning a race: each swaps a name in upgrade-state for a link to
+# $VICTIM just after root created or checked it, then runs the real tool.
+HOSTILE="$(mktemp -d)"
+REAL_MKTEMP="$(command -v mktemp)"
+REAL_PYTHON="$(command -v python3)"
+cat > "$HOSTILE/mktemp" <<EOS
+#!/usr/bin/env bash
+out="\$("$REAL_MKTEMP" "\$@")"
+if [[ "\$*" == *upgrade-state/.active-slot.* ]]; then rm -f "\$out"; ln -s "\$VICTIM" "\$out"; fi
+echo "\$out"
+EOS
+cat > "$HOSTILE/python3" <<EOS
+#!/usr/bin/env bash
+for a in "\$@"; do
+    if [[ "\$a" == */upgrade-state/upgrade.lock && -n "\${SWAP_LOCK:-}" ]]; then
+        rm -f "\$a"; ln -s "\$VICTIM" "\$a"
+    fi
+done
+exec "$REAL_PYTHON" "\$@"
+EOS
+chmod +x "$HOSTILE"/*
+
+# The active-slot rewrite after an interrupted swap (env-active is the truth)
+# never writes through a temp file deploy swapped for a link.
+new_root a
+echo "b" > "$BOXMUNGE_ROOT/$STATE/active-slot"
+echo "1.2.3" > "$BOXMUNGE_ROOT/env-b/upgrade-inflight"
+VICTIM="$(mktemp)"
+echo "precious" > "$VICTIM"
+export VICTIM
+PATH="$HOSTILE:$PATH" run_shim check-probation
+[[ "$(cat "$VICTIM")" == "precious" ]] && pass "active-slot rewrite did not write through a swapped temp" \
+    || fail "root wrote the active slot through a swapped temp: $(cat "$VICTIM")"
+[[ "$(cat "$BOXMUNGE_ROOT/$STATE/active-slot")" == "a" && ! -L "$BOXMUNGE_ROOT/$STATE/active-slot" ]] \
+    && pass "active-slot rewritten to the live slot" || fail "active-slot not rewritten: $OUT"
+rm -f "$VICTIM"
+drop_root
+
+# upgrade.lock swapped for a link after the shim's checks, right before it
+# is opened: neither an existing target nor a missing one is opened or made.
+for victim_kind in existing missing; do
+    new_root a
+    VICTIM="$(mktemp -d)/victim"
+    [[ "$victim_kind" == missing ]] || echo "precious" > "$VICTIM"
+    export VICTIM
+    SWAP_LOCK=1 PATH="$HOSTILE:$PATH" run_shim check-probation
+    expect 1 "is a symlink" "upgrade.lock swapped for a link to a $victim_kind file is refused"
+    if [[ "$victim_kind" == missing ]]; then
+        [[ ! -e "$VICTIM" ]] && pass "root did not create the swapped link's target" \
+            || fail "root created $VICTIM through a swapped upgrade.lock"
+    else
+        [[ "$(cat "$VICTIM")" == "precious" ]] && pass "swapped link's existing target untouched" \
+            || fail "swapped link's target changed"
+    fi
+    rm -rf "$(dirname "$VICTIM")"
+    drop_root
+done
+unset VICTIM
+
+# A lock descriptor handed in by the environment must be upgrade.lock itself.
+new_root a
+other="$(mktemp)"
+RC=0
+OUT="$(BM_UPGRADE_LOCK_FD=9 bash "$SHIM" check-probation 9<>"$other" 2>&1)" || RC=$?
+expect 1 "is not $BOXMUNGE_ROOT/$STATE/upgrade.lock" "a lock descriptor for another file is refused"
+rm -f "$other"
+drop_root
+
+# --- root's Python never imports from the caller's directory ---------------
+
+new_root a
+write_probation "1.2.3" "b" "$SOON"
+evil="$(mktemp -d)"
+printf 'import os\nopen(os.environ["BOXMUNGE_ROOT"] + "/pwned", "w").close()\nfrom importlib import import_module\n' > "$evil/json.py"
+mkdir "$evil/boxmunge"
+printf 'import os\nopen(os.environ["BOXMUNGE_ROOT"] + "/pwned", "w").close()\n' > "$evil/boxmunge/__init__.py"
+pushd "$evil" >/dev/null
+run_shim check-probation
+popd >/dev/null
+expect 0 "" "check-probation runs from a deploy-controlled directory"
+[[ ! -e "$BOXMUNGE_ROOT/pwned" ]] && pass "no module was imported from the caller's directory" \
+    || fail "root imported a planted module from its working directory"
+rm -rf "$evil"
+drop_root
+
+rm -rf "$HOSTILE"
+
 finish

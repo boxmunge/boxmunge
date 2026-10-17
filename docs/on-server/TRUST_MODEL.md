@@ -169,8 +169,14 @@ reads from that directory is checked before use:
   minutes for clock steps) counts as expired, so a forged far-future value
   cannot hold off upgrades.
 - `blocklist.json` must be a JSON object keyed by semver versions.
-- None of these files, nor `upgrade.lock`, may be a symlink. The shim writes
-  `active-slot` by rename, so a planted link is replaced rather than followed.
+- None of these files, nor `upgrade.lock`, may be a symlink, a FIFO or
+  anything but a plain file. Root opens them without following a link or
+  blocking (bash never opens `upgrade.lock` by name: Python opens it and hands
+  the shim the descriptor), and writes them by rename from a temp file it
+  wrote through its own descriptor, so a planted link is replaced, not
+  followed.
+- The shim runs from `/` with `PYTHONSAFEPATH=1`, so a module planted in the
+  caller's working directory is never imported as root.
 
 Any violation stops the shim with a non-zero exit and an error naming the
 file, before the value reaches a path, a URL, or an `rm -rf`. Repair or remove
