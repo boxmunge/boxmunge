@@ -197,3 +197,56 @@ def test_future_alert_time_is_unusable_and_not_logged(paths, monkeypatch) -> Non
     hc.alert_docker_userns(paths, now=T0)
     assert len(sent) == 1
     assert "2999" not in paths.log_file.read_text()
+
+
+def _as_root(monkeypatch) -> None:
+    monkeypatch.setattr(hc, "_is_root", lambda: True)
+
+
+def test_an_interrupted_migration_is_an_error(paths, monkeypatch) -> None:
+    from boxmunge.userns.journal import FORWARD, Journal, save_journal
+    save_journal(paths, Journal(FORWARD, "rebuilt", S, failed="volume shop_data: no space"))
+    _as_root(monkeypatch)
+    check = hc.check_docker_userns(paths)
+    assert check.status == "error" and "interrupted at rebuilt" in check.detail
+    assert "no space" in check.detail and "userns-migrate" in check.detail
+
+
+def test_an_interrupted_rollback_names_the_rollback(paths, monkeypatch) -> None:
+    from boxmunge.userns.journal import ROLLBACK, Journal, save_journal
+    save_journal(paths, Journal(ROLLBACK, "rb-restored", S))
+    _as_root(monkeypatch)
+    detail = hc.check_docker_userns(paths).detail
+    assert "rollback migration was interrupted at rb-restored" in detail
+    assert "Resume: sudo /opt/boxmunge/bin/boxmunge-upgrade userns-rollback" in detail
+
+
+def test_the_journal_is_not_read_as_deploy(paths, monkeypatch) -> None:
+    from boxmunge.userns.journal import FORWARD, Journal, save_journal
+    save_journal(paths, Journal(FORWARD, "rebuilt", S))
+    monkeypatch.setattr(hc, "_is_root", lambda: False)
+    assert hc.check_docker_userns(paths).status == "warn"  # the unmigrated warning
+
+
+def test_a_fresh_installs_committed_journal_is_ok(paths, monkeypatch) -> None:
+    from boxmunge.userns.journal import FORWARD, Journal, save_journal
+    remap_box(paths, monkeypatch)
+    _caddyfile(paths)
+    save_journal(paths, Journal(FORWARD, "committed", S, fresh_install=True))
+    _as_root(monkeypatch)
+    assert hc.check_docker_userns(paths).status == "ok"
+
+
+def test_uncommitted_after_seven_days_warns_and_reminds(paths, monkeypatch) -> None:
+    from boxmunge.userns.journal import FORWARD, Journal, save_journal
+    remap_box(paths, monkeypatch)
+    _caddyfile(paths)
+    save_journal(paths, Journal(FORWARD, "applied", S, applied_at=T0.isoformat()))
+    _as_root(monkeypatch)
+    sent = []
+    monkeypatch.setattr(hc, "notify", lambda p, title, body, **kw: sent.append(kw["priority"]) or True)
+    assert hc.check_docker_userns(paths, now=T0 + timedelta(days=6)).status == "ok"
+    check = hc.alert_docker_userns(paths, now=T0 + timedelta(days=8))
+    assert check.status == "warn" and "userns-commit" in check.detail and sent == [0]
+    hc.alert_docker_userns(paths, now=T0 + timedelta(days=8, hours=3))
+    assert sent == [0]  # once a day
