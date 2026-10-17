@@ -301,7 +301,7 @@ def _bring_up_staging(project_name: str, paths: BoxPaths,
             prepare_destinations(paths, project_name, plan)
             print("  Creating staging containers for the data copy...")
             compose_up_checked(paths, project_name, component="stage",
-                               compose_files=STAGING_FILES, staging=True, record=True,
+                               compose_files=STAGING_FILES, staging=True, prestage=True, record=True,
                                deploying=True, start=False)
             copy_production_data(paths, project_name, plan)
             print("  Data copy complete.")
@@ -316,7 +316,7 @@ def _bring_up_staging(project_name: str, paths: BoxPaths,
     print("  Starting staging containers...")
     try:
         compose_up_checked(paths, project_name, component="stage",
-                           compose_files=STAGING_FILES, staging=True, record=True,
+                           compose_files=STAGING_FILES, staging=True, prestage=True, record=True,
                            deploying=True)
     except DockerError as e:
         print(f"  ERROR: {e}", file=sys.stderr)

@@ -19,6 +19,11 @@ While an install transaction is open (.releases/install.json), a
 production start is refused unless it is the core resuming that install:
 the project directory may hold a half-installed release.
 
+Staging runs from the slot (.releases/staged): its starts validate the
+staged release there, resolve its model from it, and prove that model
+mounts nothing of production's (I3, staging_isolation) before Compose
+runs.
+
 A start that fails a check does not happen: the refusal is logged, the
 operator is alerted, and the running containers are left as they are.
 ComposeRefused is a DockerError, so every caller already treats it as a
@@ -45,7 +50,8 @@ from boxmunge.notify import notify
 from boxmunge.paths import RESERVED_PROJECT_NAMES
 from boxmunge.release_staging import has_prestage
 from boxmunge.release_txn import load_txn, stale_reason, start_refusal
-from boxmunge.staged_release import SlotError, clear_production_stopped
+from boxmunge.staged_release import SlotError, clear_production_stopped, staging_target
+from boxmunge.staging_isolation import separation_problems
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -119,12 +125,48 @@ def _refuse_if_install_open(paths: BoxPaths, project_name: str, component: str,
     raise _refused(paths, project_name, component, reason, tampering=False)
 
 
+def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
+                   record: bool) -> None:
+    """Staging runs from the slot: validate the staged release there,
+    resolve the model from it, prove I3 on that model, and check (or record)
+    its bind sources against the project dir as staging's own record."""
+    project_dir = paths.project_dir(project_name)
+    target = staging_target(paths, project_name)
+    release = target.cwd
+    try:
+        validate_release_tree(release, project_name, paths, component)
+        _, read_files = compose_resolve.walk_references(release / "compose.yml", (release,))
+        read_files = [*read_files, *(Path(f) for f in target.files)]
+        model = compose_resolve.resolve_deployed_config(
+            target.cwd, target.files, target.project_name, all_profiles=True,
+            project_directory=target.project_directory, env_file=target.env_file)
+        problems = separation_problems(model, project_dir, release)
+        if problems:
+            raise BindSourceError(problems[0])
+        sources = bind_sources.model_sources(model, project_dir)
+        record_path = paths.project_bind_record(project_name, staging=True)
+        if record:
+            bind_sources.record(project_dir, sources, read_files, record_path)
+        else:
+            rec = bind_sources.read_record(record_path)
+            bind_sources.check_sources(project_dir, sources, rec["sources"])
+            bind_sources.check_control(project_dir, read_files, rec["control"])
+    except (IntakeError, compose_resolve.ComposeResolveError, BindSourceError, OSError) as e:
+        raise _refused(paths, project_name, component, str(e)) from e
+
+
 def check_start(
-    paths: BoxPaths, project_name: str, *, component: str, compose_files: list[str],
-    staging: bool = False, record: bool = False, promoting: bool = False,
-    deploying: bool = False, txn: str | None = None,
+    paths: BoxPaths, project_name: str, *, component: str,
+    compose_files: list[str] | None = None, staging: bool = False, record: bool = False,
+    promoting: bool = False, deploying: bool = False, txn: str | None = None,
+    prestage: bool = False,
 ) -> None:
     """Re-validate the project and check every bind source it would mount.
+
+    A `staging` start is checked against the slot (_check_staging), with
+    staging's compose files; a production start needs `compose_files`.
+    `prestage` is the interim stage layout, whose staging runs from the
+    project dir with `compose_files`; it goes when stage builds the slot.
 
     A production start while an install transaction is open is refused
     unless `txn` is that transaction's id (the core resuming it). A
@@ -144,6 +186,13 @@ def check_start(
 
     Raises ComposeRefused.
     """
+    if prestage and not staging:
+        raise ValueError("prestage is staging's interim layout; pass staging=True")
+    if staging and not prestage:
+        _check_staging(paths, project_name, component=component, record=record)
+        return
+    if compose_files is None:
+        raise ValueError("a production start check needs compose_files")
     project_dir = paths.project_dir(project_name)
     compose_project = staging_compose_project(project_name) if staging else project_name
     record_path = paths.project_bind_record(project_name, staging=staging)
@@ -176,18 +225,25 @@ def check_start(
 
 
 def compose_up_checked(
-    paths: BoxPaths, project_name: str, *, component: str, compose_files: list[str],
-    staging: bool = False, record: bool = False, promoting: bool = False,
-    deploying: bool = False, build: bool = True, force_recreate: bool = False,
-    services: list[str] | None = None, start: bool = True, txn: str | None = None,
+    paths: BoxPaths, project_name: str, *, component: str,
+    compose_files: list[str] | None = None, staging: bool = False, record: bool = False,
+    promoting: bool = False, deploying: bool = False, build: bool = True,
+    force_recreate: bool = False, services: list[str] | None = None, start: bool = True,
+    txn: str | None = None, prestage: bool = False,
 ) -> None:
     """check_start, then `docker compose up` (`start=False`: create without
     starting, which still mounts nothing yet but fixes every bind source in
-    the containers it creates). A production up of every service clears the
-    slot's production_stopped marker. Raises ComposeRefused or DockerError."""
+    the containers it creates). Staging runs from the slot, with its own
+    files. A production up of every service clears the slot's
+    production_stopped marker. Raises ComposeRefused or DockerError."""
     check_start(paths, project_name, component=component, compose_files=compose_files,
                 staging=staging, record=record, promoting=promoting, deploying=deploying,
-                txn=txn)
+                txn=txn, prestage=prestage)
+    if staging and not prestage:
+        target = staging_target(paths, project_name)
+        compose_up(target.cwd, build=build, force_recreate=force_recreate,
+                   services=services, start=start, **target.kwargs())
+        return
     compose_up(paths.project_dir(project_name), compose_files=compose_files, build=build,
                project_name=staging_compose_project(project_name) if staging else project_name,
                force_recreate=force_recreate, services=services, start=start)

@@ -284,10 +284,12 @@ def test_container_mount_outside_the_project_is_refused(box) -> None:
             check_containers_start(paths, NAME, component="stage")
 
 
-def test_staging_keeps_its_own_record(box) -> None:
+def test_prestage_staging_keeps_its_own_record(box) -> None:
+    """The interim stage layout (staging from the project dir) until stage
+    builds the slot; the slot's own start is tests/test_compose_guard_slot.py."""
     paths, *_ = box
     compose_up_checked(paths, NAME, component="stage", compose_files=["compose.yml"],
-                       staging=True, record=True)
+                       staging=True, prestage=True, record=True)
     assert paths.project_bind_record(NAME, staging=True).exists()
     assert not paths.project_bind_record(NAME).exists()
 

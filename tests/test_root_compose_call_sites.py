@@ -363,7 +363,7 @@ def test_promote_and_staging_starts_are_allowed_while_staged(staged) -> None:
     compose_up_checked(paths, NAME, component="promote", compose_files=["compose.yml"],
                        record=True, promoting=True)
     compose_up_checked(paths, NAME, component="stage", compose_files=["compose.yml"],
-                       staging=True, record=True)
+                       staging=True, prestage=True, record=True)
     with patch("boxmunge.docker_containers.container_bind_sources", return_value=[]):
         start_containers_checked(paths, NAME, [f"{NAME}-web-1"], component="stage")
     assert up.call_count == 2

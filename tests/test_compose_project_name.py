@@ -136,6 +136,17 @@ _PROJECT_SCOPED = {
 }
 
 
+def _names_project(call: ast.Call) -> bool:
+    """`project_name=`, or `**<target>.kwargs()`: a ComposeTarget's
+    keywords always carry it (test_compose_target_kwargs_name_the_project)."""
+    return any(
+        k.arg == "project_name"
+        or (k.arg is None and isinstance(k.value, ast.Call)
+            and getattr(k.value.func, "attr", None) == "kwargs")
+        for k in call.keywords
+    )
+
+
 def test_project_scoped_helpers_always_get_project_name() -> None:
     offenders = []
     for path in sorted(SRC.rglob("*.py")):
@@ -144,11 +155,15 @@ def test_project_scoped_helpers_always_get_project_name() -> None:
                 continue
             func = node.func
             name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-            if name in _PROJECT_SCOPED and not any(
-                k.arg == "project_name" for k in node.keywords
-            ):
+            if name in _PROJECT_SCOPED and not _names_project(node):
                 offenders.append(f"{path.relative_to(SRC)}:{node.lineno} {name}")
     assert offenders == [], "calls without project_name=: " + ", ".join(offenders)
+
+
+def test_compose_target_kwargs_name_the_project(tmp_path: Path) -> None:
+    from boxmunge.staged_release import staging_target_for
+    kwargs = staging_target_for(tmp_path, tmp_path, "myapp").kwargs()
+    assert kwargs["project_name"] == "myapp-staging"
 
 
 def test_compose_project_label_only_built_in_docker_module() -> None:
