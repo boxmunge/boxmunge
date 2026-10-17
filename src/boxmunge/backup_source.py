@@ -4,9 +4,9 @@
 Without an open install that is the project dir's. During one (see
 release_txn), the project dir may already hold the new release's files
 while the old containers still run: from previous_kept to hook_started the
-running release is the kept one; at switching (only after a crash) it is
-ambiguous, and while a rollback is open the data is being restored, so
-both skip. A manifest or install record that cannot be read is an error
+running release is the kept one (a git project's: the replaced commit);
+at switching (only after a crash) it is ambiguous, and while a rollback
+is open the data is being restored, so both skip. A manifest or install record that cannot be read is an error
 (ManifestError, ReleaseStateError), never a skip.
 
 A stage left by boxmunge 0.10.1 comes first: its evidence says which
@@ -24,7 +24,7 @@ from boxmunge.git_slot import GitRefError, manifest_at, resolve_recorded_ref
 from boxmunge.legacy_stage import (
     EvidenceError, LegacyStage, cannot_tell, evidence, legacy_stage, real_dir_problem,
 )
-from boxmunge.manifest import load_manifest
+from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.release import previous_dir
 from boxmunge.release_txn import CODE_RESTORED, load_txn, options_text
 
@@ -61,6 +61,18 @@ def backup_source(paths: BoxPaths, project: str) -> BackupSource:
             f"first: {options_text(project, txn)}"))
     if txn.replaced_ref is None:
         return BackupSource(None, skip=f"the first deploy ({txn.ref}) is not running yet")
+    repo = paths.project_dir(project) / "repo"
+    if repo.is_dir():
+        # Git keeps no previous tree: the replaced commit's manifest, from the
+        # repository. The dump execs through the project dir's compose.yml,
+        # which follows the new checkout from installed on; a renamed backup
+        # service fails the dump (noisily), it never reaches another container.
+        try:
+            running = resolve_recorded_ref(repo, txn.replaced_ref)
+        except GitRefError as e:
+            raise ManifestError(f"cannot resolve the replaced commit {txn.replaced_ref}: "
+                                f"{e}") from e
+        return BackupSource(manifest_at(repo, running))
     kept = previous_dir(paths, project)
     return BackupSource(load_manifest(kept / "manifest.yml"),
                         compose_file=kept / "compose.yml")

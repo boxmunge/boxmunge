@@ -181,16 +181,6 @@ def test_isolation_scratch_left_by_a_kill_is_swept_by_deploy_and_rollback(paths)
     assert not list(releases.glob(".isolation-*"))
 
 
-def test_a_git_slot_is_refused_by_this_build(paths, capsys) -> None:
-    prod_and_stage(paths)
-    update_meta(paths, "myapp", load_slot(paths, "myapp"), kind="git")
-    with staging_docker_off() as docker:
-        assert run_promote("myapp", paths) == 1
-        docker["up"].assert_not_called()
-    assert "it is a git stage" in capsys.readouterr().err
-    assert load_txn(paths, "myapp") is None
-
-
 def test_a_candidate_using_include_is_refused_while_staged(paths, capsys) -> None:
     """Its include would be read from production's files, not its own."""
     prod_and_stage(paths)
