@@ -70,6 +70,29 @@ def test_update_meta_and_clear_marker(paths) -> None:
     assert load_slot(paths, P).production_stopped is None
 
 
+@pytest.mark.parametrize("marker", [{}, [], "c1", {"at": "t"}, {"containers": ["c1"]},
+                                    {"at": 1, "containers": ["c1"]},
+                                    {"at": "t", "containers": "c1"},
+                                    {"at": "t", "containers": [1]},
+                                    {"at": "t", "containers": []}])
+def test_a_malformed_marker_is_a_slot_error(paths, marker) -> None:
+    _build(paths)
+    swap_in(paths, P)
+    path = slot_dir(paths, P) / "meta.json"
+    doc = json.loads(path.read_text())
+    path.write_text(json.dumps({**doc, "production_stopped": marker}))
+    with pytest.raises(SlotError, match="meta.json.*production_stopped"):
+        load_slot(paths, P)
+
+
+def test_a_marker_records_some_container(paths) -> None:
+    from boxmunge.production_stopped import mark_stopped
+    meta = _build(paths)
+    swap_in(paths, P)
+    with pytest.raises(ValueError, match="no container"):
+        mark_stopped(paths, P, meta, [])
+
+
 def test_sweep_removes_building_and_discarded_debris(paths) -> None:
     rel = paths.project_releases(P)
     (rel / "staged.building" / "release").mkdir(parents=True)

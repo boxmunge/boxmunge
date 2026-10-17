@@ -104,7 +104,21 @@ def load_slot(paths: BoxPaths, project: str) -> StagedRelease | None:
         raise SlotError(f"{path} is missing {e}") from e
     if meta.kind not in KINDS or meta.state not in STATES:
         raise SlotError(f"{path} has kind {meta.kind!r} and state {meta.state!r}")
+    if not _valid_marker(meta.production_stopped):
+        raise SlotError(f"{path} has a malformed production_stopped marker "
+                        f"{meta.production_stopped!r}: expected null or "
+                        f"{{\"at\": <time>, \"containers\": [<name>, ...]}}")
     return meta
+
+
+def _valid_marker(marker: Any) -> bool:
+    if marker is None:
+        return True
+    if not isinstance(marker, dict) or set(marker) != {"at", "containers"}:
+        return False
+    names = marker["containers"]
+    return (isinstance(marker["at"], str) and isinstance(names, list) and bool(names)
+            and all(isinstance(n, str) and n for n in names))
 
 
 def update_meta(paths: BoxPaths, project: str, meta: StagedRelease,

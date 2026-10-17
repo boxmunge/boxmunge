@@ -183,14 +183,16 @@ def compose_up_checked(
 ) -> None:
     """check_start, then `docker compose up` (`start=False`: create without
     starting, which still mounts nothing yet but fixes every bind source in
-    the containers it creates). Raises ComposeRefused or DockerError."""
+    the containers it creates). A production up of every service clears the
+    slot's production_stopped marker. Raises ComposeRefused or DockerError."""
     check_start(paths, project_name, component=component, compose_files=compose_files,
                 staging=staging, record=record, promoting=promoting, deploying=deploying,
                 txn=txn)
     compose_up(paths.project_dir(project_name), compose_files=compose_files, build=build,
                project_name=staging_compose_project(project_name) if staging else project_name,
                force_recreate=force_recreate, services=services, start=start)
-    if not staging and start:
+    # A partial up (restore's one service) may leave the rest stopped.
+    if not staging and start and not services:
         _clear_production_stopped(paths, project_name, component)
 
 
@@ -203,10 +205,12 @@ def _clear_production_stopped(paths: BoxPaths, project_name: str, component: str
         clear_production_stopped(paths, project_name)
     except (SlotError, OSError) as e:
         message = (f"{project_name}: production is running, but its staged slot cannot be "
-                   f"read to clear the production_stopped marker: {e}. Inspect the slot and "
-                   f"unstage {project_name}.")
+                   f"read or written to clear the production_stopped marker: {e}. Inspect "
+                   f"the slot and unstage {project_name}.")
         print(f"ERROR: {message}", file=sys.stderr)
         log_error(component, message, paths, project=project_name)
+        notify(paths, f"{project_name}: staged slot unreadable", message,
+               component=component, project=project_name, priority=1)
 
 
 def check_containers_start(paths: BoxPaths, project_name: str, *, component: str) -> None:

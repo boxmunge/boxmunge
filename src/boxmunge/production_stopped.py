@@ -16,12 +16,16 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from boxmunge import docker_containers
-from boxmunge.compose_guard import compose_up_checked, start_containers_checked
+from boxmunge.compose_guard import (
+    ComposeRefused, compose_up_checked, start_containers_checked,
+)
 from boxmunge.docker_run import DockerError
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_error, log_operation
 from boxmunge.notify import notify
-from boxmunge.staged_release import StagedRelease, load_slot, update_meta
+from boxmunge.staged_release import (
+    StagedRelease, clear_production_stopped, load_slot, update_meta,
+)
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -35,18 +39,28 @@ class ProductionDownError(DockerError):
 
 def mark_stopped(paths: BoxPaths, project: str, meta: StagedRelease,
                  containers: list[str]) -> StagedRelease:
+    if not containers:
+        raise ValueError(f"{project}: a production_stopped marker records the containers "
+                         f"stopped; no container was named")
     return update_meta(paths, project, meta, production_stopped={
         "at": datetime.now(timezone.utc).isoformat(), "containers": list(containers)})
 
 
-def _start(paths: BoxPaths, project: str, names: list[str], component: str) -> None:
+def _all_present(project: str, names: list[str]) -> bool:
     # `docker start` brings back exactly what was stopped; a container gone
     # since (removed by hand, a crashed recreate) needs production's up.
     present = {c.name for c in docker_containers.project_containers(project)}
-    if names and set(names) <= present:
-        start_containers_checked(paths, project, names, component=component)
-    else:
-        compose_up_checked(paths, project, component=component, compose_files=PROD_FILES)
+    return set(names) <= present
+
+
+def _remedy(project: str, names: list[str], error: DockerError, docker_start: bool) -> str:
+    recover = f"`boxmunge recover {project}`"
+    if isinstance(error, ComposeRefused):
+        # Never advise bypassing the check: the refusal's alert says what failed.
+        return f"Its start was refused: fix what the refusal names, then run {recover}."
+    if docker_start:
+        return f"Start them with `docker start {' '.join(names)}` or run {recover}."
+    return f"Fix the cause, then run {recover}."
 
 
 def start_again(paths: BoxPaths, project: str, *, component: str, alert: bool) -> bool:
@@ -55,7 +69,7 @@ def start_again(paths: BoxPaths, project: str, *, component: str, alert: bool) -
     raises ProductionDownError (the marker kept) when it could not be
     started."""
     meta = load_slot(paths, project)
-    if meta is None or not meta.production_stopped:
+    if meta is None or meta.production_stopped is None:
         return False
     block = is_blocked(project, paths)
     if block is not None:
@@ -63,19 +77,25 @@ def start_again(paths: BoxPaths, project: str, *, component: str, alert: bool) -
         print(f"  Production stays stopped: {why}.")
         log_operation(component, f"production_stopped kept: {why}", paths, project=project)
         return False
-    names = list(meta.production_stopped.get("containers") or [])
+    names = list(meta.production_stopped["containers"])
+    docker_start = False
     try:
-        _start(paths, project, names, component)
+        docker_start = _all_present(project, names)
+        if docker_start:
+            start_containers_checked(paths, project, names, component=component)
+        else:
+            compose_up_checked(paths, project, component=component, compose_files=PROD_FILES)
     except DockerError as e:
         message = (f"PRODUCTION IS DOWN: {project}'s containers were stopped for "
-                   f"staging's data copy and starting them again failed: {e}. Start them "
-                   f"with: docker start {' '.join(names)}")
+                   f"staging's data copy and starting them again failed: {e}. "
+                   f"{_remedy(project, names, e, docker_start)}")
         print(f"ERROR: {message}", file=sys.stderr)
         log_error(component, message, paths, project=project)
         notify(paths, f"{project}: production is down", message, component=component,
                project=project, priority=1)
         raise ProductionDownError(message) from e
-    update_meta(paths, project, meta, production_stopped=None)
+    # The up path has cleared it already; this reloads, so it writes at most once.
+    clear_production_stopped(paths, project)
     print("  Production started again.")
     if alert:
         notify(paths, f"{project}: production started again",
