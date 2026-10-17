@@ -245,7 +245,9 @@ Staging keeps its own data between stages. To start it from a copy of production
    alerted once per error. If the slot's `meta.json` cannot be
    read, the health check cannot tell, so it reports the project `CRITICAL`, alerts once and leaves
    production alone: run `recover <project>` (it starts production with its compose files), then
-   `unstage <project>`. `pause` takes the stop over (`resume` starts production);
+   `unstage <project>`. `unstage` and a new `stage` replace such a slot, and with it any marker;
+   each logs a warning and sends a priority-1 alert naming `recover <project>`. `pause` takes the
+   stop over (`resume` starts production);
 5. starts staging only after every copy succeeded.
 
 The copies run in the data helper, a short-lived container from the box's own `boxmunge-system`
@@ -681,7 +683,7 @@ How it works for a bundle project: every deploy that replaces a release keeps th
 pre-deploy data snapshot. Rollback validates that release again (manifest, identity, compose
 hardening), installs it, restores the snapshot, and starts it. Secrets, suppressions, `data/` and
 `backups/` are never part of a release, so they are not rolled back. For a promoted staging
-release, the previous release is the production release that `stage` displaced. A git project
+release, the previous release is the production release that `promote` replaced. A git project
 restores the snapshot and checks out the previous ref.
 
 A deploy that fails after it started the new release's containers still counts as having replaced
@@ -695,7 +697,8 @@ Rollback refuses, with the reason, instead of doing half a rollback:
   to go back to; deploy a known-good bundle instead);
 - when the project has backups configured but no snapshot was taken before the last deploy (the
   backup failed or `--no-snapshot` was used), or that snapshot is no longer in `backups/`;
-- while a staged release is installed (`promote` or `unstage` first);
+- for a git project, while a release is staged (`unstage` first; a bundle project's rollback works
+  during a stage, as above);
 - while an install is open whose pre-deploy hook has not run yet: nothing reached production's
   containers or data, so `prod-deploy <project> --abandon` puts the old files back instead (see
   "An interrupted or failed install").
@@ -709,23 +712,26 @@ snapshot again, and anything written to the data in those seconds is lost.
 
 ## An interrupted or failed install
 
-Every bundle production install (`prod-deploy`, `rollback`) is recorded in
-`<project>/.releases/install.json` until it finishes. While it is open, nothing
-else starts the project's containers: upgrades, `resume`, `recover`,
-container updates and `restore` refuse and say why, and `stage` and `promote`
-wait too. The alert names your options:
+Every bundle production install (`prod-deploy`, `rollback`, `promote`) is
+recorded in `<project>/.releases/install.json` until it finishes. While it is
+open, nothing else starts the project's containers: upgrades, `resume`,
+`recover`, container updates, `restore` and `stage` refuse and say why. A
+`promote` does not wait: it resumes its own open install, and over another
+command's it deploys the staged release as a fix (the last option below).
+The alert names your options:
 
-- run the same command again (`prod-deploy <project> --ref <bundle>`, or
-  `rollback <project>`): it carries on from where it stopped, with the data
-  snapshot it took before it started (once the new release's containers may
-  have started, the pre-deploy hook is not run again);
+- run the same command again (`prod-deploy <project> --ref <bundle>`,
+  `rollback <project>` or `promote <project>`): it carries on from where it
+  stopped, with the data snapshot it took before it started (once the new
+  release's containers may have started, the pre-deploy hook is not run again);
 - `prod-deploy <project> --abandon`, while nothing has reached production's
   data: the old release's files go back (a first deploy's code is removed);
-  containers and data were never touched. If it is interrupted, run it again;
+  containers and data were never touched, and a staged release stays staged
+  and promotable. If it is interrupted, run it again;
 - `rollback <project>`, once a pre-deploy hook may have run (this install's,
   or an earlier attempt's it replaced): the old release with the snapshot taken
   before the first attempt;
-- or deploy a fix (another bundle): it keeps the same rollback target and
+- or deploy a fix (another bundle, or `promote`): it keeps the same rollback target and
   snapshot, and it can no longer be abandoned once an earlier attempt's hook
   ran. This is also the way out of a first deploy whose hook keeps failing.
 
@@ -741,9 +747,7 @@ While an install is open, backups use the manifest and compose file of the
 release the containers still run, and are skipped with an alert when that is
 ambiguous (an attempt may have started its containers). A platform upgrade
 leaves the project alone: its configs are not regenerated and it is not
-restarted, and the upgrade alerts about it. The health check still reads the
-project directory's manifest, which may be the half-installed release's;
-finish the install promptly.
+restarted, and the upgrade alerts about it.
 
 If the record no longer matches the files (after a platform rollback, or a hand
 edit), it is reported as stale and nothing is resumed automatically: check that
