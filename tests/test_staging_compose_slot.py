@@ -8,11 +8,15 @@ from pathlib import Path
 import pytest
 import yaml
 
+from boxmunge.bundle import BOXMUNGE_ENTRIES
 from boxmunge.compose import ComposeError
 from boxmunge.staging_compose import generate_staging_compose_base
 
 P = Path("/opt/boxmunge/projects/myapp")
-BOX = {"uploads", "data", "secrets.env", "backups", ".releases"}
+# As data_dirs classifies a project: boxmunge's own entries are always box state.
+BOX = {"uploads", "data", "secrets.env", "backups", *BOXMUNGE_ENTRIES}
+# A git slot's: its repo/ is the staged clone, release code (release.staged_box_state).
+GIT_BOX = BOX - {"repo"}
 
 
 def _base(tmp_path, doc) -> dict:
@@ -269,3 +273,46 @@ def test_project_relative_is_deterministic_and_literal_on_request(tmp_path) -> N
                            capture_output=True, env={**os.environ, "PYTHONHASHSEED": str(seed)}
                            ).stdout.strip() for seed in range(6)}
     assert seen == {"link/x link/x"}
+
+
+def test_a_git_slots_clone_is_release_code(tmp_path) -> None:
+    path = tmp_path / "compose.yml"
+    path.write_text(yaml.safe_dump({"services": {"web": {
+        "build": {"context": "./repo", "additional_contexts": {"lib": f"{P}/repo/lib"}},
+        "volumes": ["./repo/conf:/etc/app:ro", "./data:/data"]}}}))
+    web = yaml.safe_load(generate_staging_compose_base(path, GIT_BOX, P))["services"]["web"]
+    assert web["build"] == {"context": "./repo", "additional_contexts": {"lib": "./repo/lib"}}
+    assert web["volumes"] == ["./repo/conf:/etc/app:ro", f"{P}/data-staging:/data"]
+
+
+def test_staged_box_state_of_a_git_release_leaves_repo_out(tmp_path) -> None:
+    from boxmunge.release import staged_box_state
+    project, bundle, git = tmp_path / "myapp", tmp_path / "bundle", tmp_path / "git"
+    for tree in (project, bundle, git):
+        tree.mkdir()
+        (tree / "compose.yml").write_text("services: {web: {image: x}}\n")
+    (project / "repo").mkdir()
+    (git / "repo").mkdir()
+    assert "repo" in staged_box_state(project, bundle)
+    assert "repo" not in staged_box_state(project, git)
+
+
+def test_a_git_slots_compose_is_read_through_its_own_link_only(tmp_path) -> None:
+    """Production's classification reads the slot's compose.yml without
+    following a link; a git slot's is the link into its own clone."""
+    import os
+
+    from boxmunge.data_dirs import ReleaseStateError
+    from boxmunge.release import project_data_dirs
+    project = tmp_path / "myapp"
+    release = project / ".releases" / "staged" / "release"
+    (release / "repo").mkdir(parents=True)
+    (project / "compose.yml").write_text("services: {web: {image: x}}\n")
+    (release / "repo" / "compose.yml").write_text(
+        "services: {web: {image: x, volumes: ['./cache:/c']}}\n")
+    os.symlink("repo/compose.yml", release / "compose.yml")
+    assert "cache" in project_data_dirs(project).staged
+    os.remove(release / "compose.yml")
+    os.symlink(str(release / "repo" / "compose.yml"), release / "compose.yml")
+    with pytest.raises(ReleaseStateError, match="symlink"):
+        project_data_dirs(project)

@@ -9,7 +9,6 @@ from pathlib import Path
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.commands.deploy_steps import (
     post_deploy_diagnostics, record_deploy_state, smoke_ok, take_pre_deploy_snapshot,
-    update_repo,
 )
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_guard import compose_up_checked
@@ -30,13 +29,7 @@ from boxmunge.release import ReleaseStateError, live_ref, previous_dir
 from boxmunge.source import (
     SourceError, bundle_ref, consume_bundle, resolve_bundle_source,
 )
-from boxmunge.staged_release import has_slot
 from boxmunge.state import read_state
-
-# Until git installs are tree-based, a git deploy or rollback has no
-# candidate tree to prove apart from staging (D8): refused, not skipped.
-GIT_WHILE_STAGED = ("unstage {p} first: git installs cannot yet prove isolation from a "
-                    "staged release")
 
 
 def _run_deploy_inner(
@@ -51,12 +44,9 @@ def _run_deploy_inner(
     project_dir = paths.project_dir(project_name)
     is_new = not (project_dir / "manifest.yml").exists()
 
-    # Git projects have a repo/ dir and pull their code in place. Bundle
+    # Git projects have a repo/ dir and check a commit out in place. Bundle
     # projects take a release from the inbox.
     if not is_new and (project_dir / "repo").exists():
-        if has_slot(paths, project_name):
-            print(f"ERROR: {GIT_WHILE_STAGED.format(p=project_name)}.", file=sys.stderr)
-            return 1
         return _deploy_repo(project_name, paths, ref, no_snapshot, dry_run, component)
 
     try:
@@ -159,28 +149,27 @@ def _deploy_repo(
     project_name: str, paths: BoxPaths, ref: str | None,
     no_snapshot: bool, dry_run: bool, component: str,
 ) -> int:
-    """Check out the requested ref of a git-sourced project and start it."""
+    """Fetch origin, resolve the ref (--ref, else the live manifest's) to a
+    full SHA, and deploy exactly that commit (commands/git_deploy.py)."""
+    from boxmunge.commands.git_deploy import GitDeploy, deploy_git_locked
+    from boxmunge.git_slot import (
+        GitRefError, fetch, require_regular_control_files, resolve_ref,
+    )
     repo_dir = paths.project_dir(project_name) / "repo"
     try:
-        manifest = load_manifest(paths.project_manifest(project_name))
-    except ManifestError as e:
+        wanted = ref or load_manifest(paths.project_manifest(project_name)).get("ref", "main")
+        print(f"  Fetching {wanted}...")
+        fetch(repo_dir)
+        sha = resolve_ref(repo_dir, wanted)
+        require_regular_control_files(repo_dir, sha)
+    except (ManifestError, GitRefError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
-    deploy_ref = ref or manifest.get("ref", "main")
     if dry_run:
-        print(f"[DRY RUN] Would deploy {project_name} at ref {deploy_ref}")
+        print(f"[DRY RUN] Would deploy {project_name} at {wanted} ({sha})")
         return 0
-    actual_ref = update_repo(repo_dir, deploy_ref, manifest)
-    if actual_ref is None:
-        return 1
-    try:
-        manifest = validate_release_tree(paths.project_dir(project_name),
-                                         project_name, paths, component)
-    except IntakeError as e:
-        return report_refusal(e)
-    snapshot_name = take_pre_deploy_snapshot(project_name, paths, manifest, no_snapshot)
-    return _start_release(project_name, paths, manifest, actual_ref,
-                          snapshot_name, component)
+    return deploy_git_locked(project_name, paths, GitDeploy(
+        sha=sha, source="git", component=component, no_snapshot=no_snapshot))
 
 
 def _start_release(
@@ -256,7 +245,8 @@ def generate_release_config(project_name: str, paths: BoxPaths, manifest: dict,
 
 def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
                     actual_ref: str, snapshot_name: str | None,
-                    component: str = "deploy", txn: str | None = None) -> int:
+                    component: str = "deploy", txn: str | None = None,
+                    replaced_ref: str | None = None) -> int:
     """Start the release in production, route it, smoke-test, record.
 
     From the container start on, production runs (or partly runs) this
@@ -266,7 +256,8 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
     fails records nothing, so a retry is still treated as a first deploy.
 
     `txn` is the id of the install transaction this start finishes
-    (release_txn).
+    (release_txn), and `replaced_ref` the release it replaced (the
+    rollback target; see record_deploy_state).
     """
     first_deploy = "current_ref" not in read_state(paths.project_deploy_state(project_name))
     rc = 1
@@ -274,7 +265,7 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
         rc = _start_and_verify(project_name, paths, manifest, component, txn)
     finally:
         if rc == 0 or not first_deploy:
-            record_deploy_state(paths, project_name, actual_ref, snapshot_name)
+            record_deploy_state(paths, project_name, actual_ref, snapshot_name, replaced_ref)
     if rc != 0:
         return rc
 

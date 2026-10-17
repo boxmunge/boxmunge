@@ -111,7 +111,9 @@ source: bundle
 # Git repo URL. Required if source: git. Ignored for source: bundle.
 repo: https://github.com/example/myapp.git
 
-# Branch, tag, or commit SHA to deploy. Only relevant for source: git.
+# Branch, tag, or full 40-character commit SHA to deploy. Only relevant for
+# source: git. An abbreviated SHA, or a name that is both a branch and a tag,
+# is refused.
 ref: main
 
 # REQUIRED. One or more hostnames this project serves.

@@ -180,16 +180,21 @@ class TestRefusals:
         with pytest.raises(RollbackUnavailable, match="no previous deploy"):
             find_rollback_target(paths, "myapp")
 
-    def test_repo_project_target(self, paths) -> None:
+    def test_repo_project_target(self, paths, tmp_path) -> None:
+        from tests.git_helpers import commit, git, origin_with
+        origin, work = origin_with(tmp_path, {"manifest.yml": manifest_text()})
+        previous = git("rev-parse", "HEAD", cwd=work)
+        current = commit(work, {"f": "x"}, "current")
         pdir = paths.project_dir("myapp")
-        (pdir / "repo").mkdir(parents=True)
-        (pdir / "manifest.yml").write_text(manifest_text())
+        pdir.mkdir(parents=True)
+        git("clone", "-q", str(origin), str(pdir / "repo"), cwd=tmp_path)
+        (pdir / "manifest.yml").symlink_to(pdir / "repo" / "manifest.yml")
         write_state(paths.project_deploy_state("myapp"), {
-            "current_ref": "abc123", "pre_deploy_snapshot": "",
-            "history": [{"ref": "def456"}],
+            "current_ref": current, "pre_deploy_snapshot": "",
+            "history": [{"ref": previous[:7]}],   # 0.10.1 recorded short SHAs
         })
         target = find_rollback_target(paths, "myapp")
-        assert target.ref == "def456"
+        assert target.ref == previous
         assert target.tree is None
 
 

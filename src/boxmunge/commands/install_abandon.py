@@ -2,7 +2,7 @@
 """prod-deploy <project> --abandon: undo an install before its hook ran.
 
 Allowed before hook_started: the replaced release's code goes back into the
-project dir, the superseded previous release goes back to previous/, and
+project dir (a git project's replaced commit is checked out again), the superseded previous release goes back to previous/, and
 the transaction closes. Containers and data are untouched, and a staged
 slot stays as it was. From hook_started on the hook may have changed data,
 so rollback is the way back.
@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from boxmunge.data_dirs import ReleaseStateError, log_kept, set_aside_announcer
 from boxmunge.fileutil import LockError, discard_dir, fsync_dir, project_lock, sweep_discarded
+from boxmunge.git_slot import checkout_detached
 from boxmunge.log import log_error, log_operation
 from boxmunge.release import (
     _remove, install_release, live_code_entries, mark_live, previous_dir, sync_release_code,
@@ -31,9 +32,15 @@ if TYPE_CHECKING:
 
 def _put_code_back(project_name: str, paths: BoxPaths, txn: InstallTxn) -> None:
     """Install the replaced release from previous/ (the keep's copy of it),
-    or remove a first deploy's code. Safe to run again: previous/ is not
-    touched until CODE_RESTORED is recorded."""
+    or remove a first deploy's code; a git project checks the replaced
+    commit out again. Safe to run again: previous/ is not touched until
+    CODE_RESTORED is recorded."""
     project_dir = paths.project_dir(project_name)
+    if (project_dir / "repo").is_dir():
+        # A first deploy replaced nothing that ran: its checkout stays.
+        if txn.replaced_ref is not None:
+            checkout_detached(project_dir / "repo", txn.replaced_ref)
+        return
     if txn.replaced_ref is None:
         for entry in live_code_entries(project_dir):
             _remove(entry)
@@ -109,7 +116,9 @@ def abandon_locked(project_name: str, paths: BoxPaths) -> int:
         log_error("deploy", f"Abandon of {txn.ref} failed: {e}", paths, project=project_name)
         return 1
     close_txn(paths, project_name, txn)
+    git = (paths.project_dir(project_name) / "repo").is_dir()
     back = (f"{txn.replaced_ref}'s files are back" if txn.replaced_ref else
+            f"repo/ stays checked out at {txn.ref}, which nothing runs" if git else
             "the first deploy's code was removed")
     print(f"{project_name}: abandoned the install of {txn.ref}; {back}. Containers and "
           f"data were not touched.")

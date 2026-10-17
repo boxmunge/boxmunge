@@ -92,6 +92,33 @@ Deploy a specific git ref:
 prod-deploy myapp --ref v1.2.3
 ```
 
+`prod-deploy` and `stage` fetch `origin`, then resolve the ref (`--ref`, else the manifest's `ref`)
+once, to a full commit SHA: a branch is origin's branch as just fetched (never a stale local
+one), a tag is a tag, and a commit is named by all 40 characters. An abbreviated SHA, and a name
+that is both a branch and a tag of origin, are refused (give the full SHA). The deploy then checks
+that commit out detached in `repo/`; there is no `git pull`. Deploy state records the full SHA. A
+deploy runs in the same install transaction as a bundle deploy (see "An interrupted or failed
+install"), and its pre-deploy snapshot is taken with the running release's manifest before
+anything is checked out.
+
+`stage` of a git project checks the resolved commit out in a clone of its own in the slot
+(`.releases/staged/release/repo/`), beside copies of the project directory's other release files
+(`.env`, `project.env`, `boxmunge-scripts/`, ...); production's `repo/` and its `HEAD` never
+move. `promote` then deploys exactly that SHA, even if the branch has moved since, and `unstage`
+leaves production on its own commit. A `.gitmodules` is staged with a warning: submodules are
+checked out in neither production nor staging. A commit whose `.gitattributes` assigns a `filter`
+(Git LFS, for example) cannot be staged, because the staged checkout runs no filter drivers and
+would not have production's files; nor can one with a symbolic link that resolves outside the
+staged release. Deploy such a commit with `prod-deploy`. As a bundle may not ship a top-level
+`*-staging` entry, a git stage is refused while the project directory holds one that is neither
+production's data nor staging's copy: rename it.
+
+boxmunge always runs git as the deploy user, also when a command runs as root (with `sudo`):
+`repo/` must be deploy's, origin must accept deploy's SSH key or credentials, and git reads
+deploy's own config and the system's (`/etc/gitconfig`), the same in the deploy shell and under
+`sudo`. An upgrade's dry run and apply warn about each git project whose `repo/` deploy does not
+own (one cloned, or fetched into, as root), naming the fix: `chown -R deploy:deploy <p>/repo`.
+
 A git project's `manifest.yml` and `compose.yml` are symlinks into `repo/`, so every deploy
 reads the repository's files. boxmunge never writes them. When an upgrade raises the manifest
 schema, a git project's manifest is migrated in memory each time it is read, and the upgrade
@@ -170,8 +197,9 @@ next `promote` keeps whatever production then runs as its previous release. Befo
 changes, each proves production's next release shares nothing with staging (as `stage` does,
 below) and refuses with "Nothing was changed" if it would. Such a release whose `compose.yml` uses
 `include:` or `extends: file:` cannot be checked this way and is refused: unstage first, or move
-those services into `compose.yml`. A git project's `prod-deploy` and `rollback` cannot be checked
-yet and are refused while a release is staged: unstage first.
+those services into `compose.yml`. A git project's `prod-deploy` and `rollback` check the commit
+from a scratch clone of it, so they are refused for a commit `stage` would refuse (a filter
+attribute, a link out of the tree).
 
 Staging and production share no Docker resource. Before installing anything, `stage` resolves
 staging from the staged release, and production both as it runs and as it would run once the
@@ -339,7 +367,8 @@ stage myapp
 promote myapp
 ```
 
-For git-based projects, deploy pulls the latest code:
+For git-based projects, deploy fetches origin and checks out the commit the manifest's `ref`
+names now:
 
 ```
 prod-deploy myapp
@@ -716,7 +745,8 @@ pre-deploy data snapshot. Rollback validates that release again (manifest, ident
 hardening), installs it, restores the snapshot, and starts it. Secrets, suppressions, `data/` and
 `backups/` are never part of a release, so they are not rolled back. For a promoted staging
 release, the previous release is the production release that `promote` replaced. A git project
-restores the snapshot and checks out the previous ref.
+checks out the commit the last deploy replaced (or the one an open install replaced) and restores
+the snapshot taken before that deploy, in the same recorded steps.
 
 A deploy that fails after it started the new release's containers still counts as having replaced
 the old one, since production may be running the new code: rollback returns to the release it
@@ -729,8 +759,6 @@ Rollback refuses, with the reason, instead of doing half a rollback:
   to go back to; deploy a known-good bundle instead);
 - when the project has backups configured but no snapshot was taken before the last deploy (the
   backup failed or `--no-snapshot` was used), or that snapshot is no longer in `backups/`;
-- for a git project, while a release is staged (`unstage` first; a bundle project's rollback works
-  during a stage, as above);
 - while an install is open whose pre-deploy hook has not run yet: nothing reached production's
   containers or data, so `prod-deploy <project> --abandon` puts the old files back instead (see
   "An interrupted or failed install").
@@ -744,7 +772,7 @@ snapshot again, and anything written to the data in those seconds is lost.
 
 ## An interrupted or failed install
 
-Every bundle production install (`prod-deploy`, `rollback`, `promote`) is
+Every production install (`prod-deploy`, `rollback`, `promote`, bundle or git) is
 recorded in `<project>/.releases/install.json` until it finishes. While it is
 open, nothing else starts the project's containers: upgrades, `resume`,
 `recover`, container updates, `restore` and `stage` refuse and say why. A
@@ -752,18 +780,20 @@ open, nothing else starts the project's containers: upgrades, `resume`,
 command's it deploys the staged release as a fix (the last option below).
 The alert names your options:
 
-- run the same command again (`prod-deploy <project> --ref <bundle>`,
+- run the same command again (`prod-deploy <project> --ref <bundle or full SHA>`,
   `rollback <project>` or `promote <project>`): it carries on from where it
   stopped, with the data snapshot it took before it started (once the new
   release's containers may have started, the pre-deploy hook is not run again);
 - `prod-deploy <project> --abandon`, while nothing has reached production's
-  data: the old release's files go back (a first deploy's code is removed);
+  data: the old release's files go back (a first deploy's code is removed; a
+  git project checks the replaced commit out again, and a first git deploy's
+  checkout stays, with nothing running it);
   containers and data were never touched, and a staged release stays staged
   and promotable. If it is interrupted, run it again;
 - `rollback <project>`, once a pre-deploy hook may have run (this install's,
   or an earlier attempt's it replaced): the old release with the snapshot taken
   before the first attempt;
-- or deploy a fix (another bundle, or `promote`): it keeps the same rollback target and
+- or deploy a fix (another bundle or commit, or `promote`): it keeps the same rollback target and
   snapshot, and it can no longer be abandoned once an earlier attempt's hook
   ran. This is also the way out of a first deploy whose hook keeps failing.
 
@@ -783,7 +813,7 @@ restarted, and the upgrade alerts about it.
 
 If the record no longer matches the files (after a platform rollback, or a hand
 edit), it is reported as stale and nothing is resumed automatically: check that
-production is what `.releases/live.json` says, then, as root, run
+production is what `.releases/live.json` says (for a git project, what `repo/` has checked out), then, as root, run
 `boxmunge-server install-txn <project> --drop`. It refuses a record that still
 matches the files; use one of the options above for that.
 
