@@ -26,6 +26,8 @@ import urllib.request
 from pathlib import Path
 
 from vm_guest_access import (
+    KNOWN_HOSTS,
+    check_cloud_init,
     check_guest_egress,
     cloud_init_host_key_block,
     forget_host_keys,
@@ -50,7 +52,6 @@ DEBIAN_IMAGE = CACHE_DIR / "debian-13-generic-amd64.qcow2"
 OVERLAY_DISK = CACHE_DIR / "test-disk.qcow2"
 CLOUD_INIT_ISO = CACHE_DIR / "cloud-init.iso"
 PID_FILE = CACHE_DIR / "qemu.pid"
-HOST_KEY = CACHE_DIR / "host_ed25519"  # the VM's ssh host key, made per run
 
 # Port forwards: host_port -> VM port
 PORTS = {
@@ -69,6 +70,7 @@ VM_CPUS = "2"
 # before boot (see vm_guest_access), so it is checked strictly.
 SSH_OPTS = [
     "-o", "StrictHostKeyChecking=yes",
+    "-o", f"UserKnownHostsFile={KNOWN_HOSTS}",
     "-o", "LogLevel=ERROR",
     "-o", "ConnectTimeout=5",
 ]
@@ -131,14 +133,6 @@ def clean_known_hosts():
     forget_host_keys(_RECORDED_PORTS)
 
 
-def prepare_vm_host_key() -> str:
-    """Make this run's VM host key, trust it in known_hosts; return its cloud-config."""
-    public_key = generate_host_key(HOST_KEY)
-    clean_known_hosts()
-    trust_host_key(public_key, _TRUSTED_PORTS)
-    return cloud_init_host_key_block(HOST_KEY)
-
-
 def ensure_cache_dir():
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -153,41 +147,52 @@ def download_image():
     print(f"  Saved to {DEBIAN_IMAGE}")
 
 
-def build_cloud_init_iso(ssh_pubkey: str, host_key_config: str):
-    """Build cloud-init ISO with the developer's key and the VM's host key."""
+def _write_private(path: Path, text: str):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+
+
+def build_cloud_init_iso(ssh_pubkey: str):
+    """Build the cloud-init ISO and trust the VM's new host key in known_hosts.
+
+    The VM's host key is generated for this run in a private (0700) temporary
+    directory, which is deleted with the private key as soon as the ISO is
+    built: known_hosts needs only the public key. The ISO carries the private
+    key too, so it is written 0600 and removed by cleanup_vm.
+    """
     user_data_template = (CLOUD_INIT_DIR / "user-data").read_text()
     for placeholder in ("__SSH_PUBLIC_KEY__", "__HOST_KEY_CONFIG__"):
         if placeholder not in user_data_template:
             raise RuntimeError(f"cloud-init user-data lacks {placeholder}")
-    user_data = (user_data_template
-                 .replace("__SSH_PUBLIC_KEY__", ssh_pubkey)
-                 .replace("__HOST_KEY_CONFIG__", host_key_config))
-
     meta_data = (CLOUD_INIT_DIR / "meta-data").read_text()
 
-    # Write to temp files for ISO generation
-    staging = CACHE_DIR / "cloud-init-staging"
-    staging.mkdir(parents=True, exist_ok=True)
-    (staging / "user-data").write_text(user_data)
-    (staging / "meta-data").write_text(meta_data)
-
-    # Cloud-init requires volume label "cidata" on the ISO
     CLOUD_INIT_ISO.unlink(missing_ok=True)
-    subprocess.run(
-        [
-            "mkisofs",
-            "-o", str(CLOUD_INIT_ISO),
-            "-V", "cidata",
-            "-J", "-R",
-            str(staging),
-        ],
-        check=True, capture_output=True,
-    )
+    # Same filesystem as CLOUD_INIT_ISO, so the final rename is atomic.
+    with tempfile.TemporaryDirectory(prefix="cloud-init-", dir=CACHE_DIR) as tmp:
+        tmp_dir = Path(tmp)
+        host_key = tmp_dir / "host_ed25519"
+        host_public_key = generate_host_key(host_key)
+        user_data = (user_data_template
+                     .replace("__SSH_PUBLIC_KEY__", ssh_pubkey)
+                     .replace("__HOST_KEY_CONFIG__", cloud_init_host_key_block(host_key)))
 
-    # Cleanup staging
-    for f in staging.iterdir():
-        f.unlink()
-    staging.rmdir()
+        staging = tmp_dir / "cidata"
+        staging.mkdir(mode=0o700)
+        _write_private(staging / "user-data", user_data)
+        _write_private(staging / "meta-data", meta_data)
+
+        # Cloud-init requires volume label "cidata" on the ISO
+        iso = tmp_dir / "cloud-init.iso"
+        subprocess.run(
+            ["mkisofs", "-o", str(iso), "-V", "cidata", "-J", "-R", str(staging)],
+            check=True, capture_output=True,
+        )
+        iso.chmod(0o600)
+        os.replace(iso, CLOUD_INIT_ISO)
+
+    clean_known_hosts()
+    trust_host_key(host_public_key, _TRUSTED_PORTS)
 
 
 def create_overlay_disk():
@@ -251,28 +256,35 @@ def launch_qemu():
         time.sleep(1)
         if proc.poll() is not None:
             log_content = log_path.read_text().strip()
-            print(f"ERROR: QEMU exited (code={proc.returncode}). Log:", file=sys.stderr)
-            print(log_content, file=sys.stderr)
-            sys.exit(2)
+            raise RuntimeError(f"QEMU exited (code={proc.returncode}). Log:\n{log_content}")
     print(f"  QEMU started (pid={proc.pid}, accel={accel})")
     return proc
 
 
-def wait_for_ssh(port: int, timeout: int = 180) -> bool:
-    """Poll SSH until it responds or timeout."""
+def wait_for_ssh(port: int, timeout: int = 180):
+    """Poll SSH until it responds; raise with ssh's last error on timeout."""
     deadline = time.time() + timeout
     attempt = 0
+    last_error = ""
     while time.time() < deadline:
         attempt += 1
-        result = subprocess.run(
-            ["ssh", *SSH_OPTS, "-p", str(port), "test@localhost", "true"],
-            capture_output=True, check=False, timeout=10,
-        )
-        if result.returncode == 0:
-            print(f"  SSH ready after {attempt} attempts")
-            return True
+        try:
+            result = subprocess.run(
+                ["ssh", *SSH_OPTS, "-p", str(port), "test@localhost", "true"],
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            last_error = "ssh did not finish within 10s"
+        else:
+            if result.returncode == 0:
+                print(f"  SSH ready after {attempt} attempts")
+                return
+            last_error = result.stderr.strip() or f"ssh exited {result.returncode}"
         time.sleep(3)
-    return False
+    raise RuntimeError(
+        f"SSH on port {port} did not become available within {timeout}s. "
+        f"Last ssh error: {last_error}"
+    )
 
 
 def ssh_run(user: str, port: int, command: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -308,11 +320,12 @@ def kill_qemu():
 
 
 def cleanup_vm():
-    """Full cleanup: kill QEMU, remove overlay disk, clean known_hosts."""
+    """Full cleanup: kill QEMU, remove overlay disk and ISO, clean known_hosts."""
     kill_qemu()
     OVERLAY_DISK.unlink(missing_ok=True)
+    CLOUD_INIT_ISO.unlink(missing_ok=True)  # carries the VM's private host key
     clean_known_hosts()
-    # Keep the base image and cloud-init ISO cached
+    # Keep the base image cached
 
 
 def verify_target_is_debian(port: int):
@@ -338,23 +351,26 @@ def cmd_boot():
     ensure_cache_dir()
     download_image()
     ssh_pubkey = detect_ssh_pubkey()
-    build_cloud_init_iso(ssh_pubkey, prepare_vm_host_key())
-    create_overlay_disk()
+    try:
+        build_cloud_init_iso(ssh_pubkey)
+        create_overlay_disk()
 
-    print("Launching VM...")
-    launch_qemu()
+        print("Launching VM...")
+        launch_qemu()
 
-    print("Waiting for SSH...")
-    if not wait_for_ssh(PORTS["ssh_initial"]):
-        print("ERROR: SSH did not become available within timeout.", file=sys.stderr)
-        kill_qemu()
+        print("Waiting for SSH...")
+        wait_for_ssh(PORTS["ssh_initial"])
+        verify_target_is_debian(PORTS["ssh_initial"])
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        cleanup_vm()
         sys.exit(2)
 
-    verify_target_is_debian(PORTS["ssh_initial"])
-    try:
-        check_guest_egress(ssh_run, PORTS["ssh_initial"])
-    except RuntimeError as e:
-        print(f"WARNING: {e}", file=sys.stderr)
+    for check in (check_cloud_init, check_guest_egress):
+        try:
+            check(ssh_run, PORTS["ssh_initial"])
+        except RuntimeError as e:
+            print(f"WARNING: {e}", file=sys.stderr)
     print(f"\nVM is running. Connect with:")
     print(f"  ssh {' '.join(SSH_OPTS)} -p {PORTS['ssh_initial']} test@localhost")
     print(f"\nTo tear down:")
@@ -365,10 +381,10 @@ def cmd_teardown():
     """Kill a VM left from a previous run."""
     if PID_FILE.exists():
         print("Killing QEMU...")
-        cleanup_vm()
-        print("Done.")
     else:
-        print("No VM found (no PID file).")
+        print("No VM found (no PID file); removing leftovers.")
+    cleanup_vm()
+    print("Done.")
 
 
 # ---------------------------------------------------------------------------
@@ -790,19 +806,19 @@ def cmd_run():
         download_image()
         ssh_pubkey = detect_ssh_pubkey()
         step_pass(f"Using SSH key: {ssh_pubkey[:30]}...")
-        build_cloud_init_iso(ssh_pubkey, prepare_vm_host_key())
+        build_cloud_init_iso(ssh_pubkey)
         create_overlay_disk()
 
         print("Launching QEMU...")
         launch_qemu()
 
         print("Waiting for SSH...")
-        if not wait_for_ssh(PORTS["ssh_initial"]):
-            print("ERROR: SSH did not become available.", file=sys.stderr)
-            sys.exit(2)
+        wait_for_ssh(PORTS["ssh_initial"])
 
         verify_target_is_debian(PORTS["ssh_initial"])
         step_pass("VM booted and verified as Debian")
+        check_cloud_init(ssh_run, PORTS["ssh_initial"])
+        step_pass("cloud-init finished cleanly")
         check_guest_egress(ssh_run, PORTS["ssh_initial"])
         step_pass("VM resolves and reaches the internet")
 

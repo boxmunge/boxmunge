@@ -23,10 +23,12 @@ and restore with data integrity verification.
 The harness generates the VM's ed25519 host key for each run, installs it
 through cloud-init, and records it in `~/.ssh/known_hosts` for
 `[localhost]:12222` and `[localhost]:19220` before the VM boots. server-setup
-finds the key there, so it never runs `ssh-keyscan` (macOS's ssh-keyscan
-returns nothing from Debian 13's sshd when scanning several key types at
-once), and the harness's own SSH checks the key strictly. Teardown removes
-the entries.
+finds the key there, so it never runs `ssh-keyscan` (Debian 13's sshd
+penalises keyscan's unauthenticated connections under PerSourcePenalties, so
+repeated runs get empty scans), and the harness's own SSH checks the key
+strictly. The private key is deleted once the cloud-init ISO is built; the
+ISO (0600) and the known_hosts entries are removed by teardown. After boot
+the test also requires `cloud-init status` to be clean, not degraded.
 
 ## Usage
 
