@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# tests/integration/sshd_deploy_probe.sh — run as root in a throwaway Debian 13
+# container by test_sshd_deploy_forwarding.py, with bootstrap/ at /bootstrap
+# and src/ at /src.
+#
+# Builds a box the way init-host.sh does (deploy with the real restricted
+# shell as its login shell and in the docker group, supervisor with bash,
+# sshd.sh), then tries every SSH channel that could bypass the shell, as
+# deploy, under four sshd configurations. Prints one line per attempt:
+#   RESULT <phase> <user> <channel> <allowed|refused>
+# plus the effective sshd settings for deploy in each phase.
+set -uo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq >/dev/null
+apt-get install -y -qq openssh-server openssh-client python3 python3-yaml >/dev/null || exit 1
+set -e
+
+printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/systemctl
+chmod +x /usr/local/bin/systemctl
+# The shell hands allowed commands to boxmunge-server; a stand-in echoes them.
+printf '#!/bin/sh\necho "boxmunge-server ran: $*"\n' > /usr/local/bin/boxmunge-server
+chmod +x /usr/local/bin/boxmunge-server
+ssh-keygen -A >/dev/null
+mkdir -p /run/sshd /opt/boxmunge/bin /root/.ssh
+
+cat > /opt/boxmunge/bin/boxmunge-shell <<'SHELL'
+#!/bin/sh
+PYTHONPATH=/src exec python3 -c 'from boxmunge.shell import main; main()' "$@"
+SHELL
+chmod 755 /opt/boxmunge/bin/boxmunge-shell
+groupadd -f docker
+useradd -m -s /opt/boxmunge/bin/boxmunge-shell deploy
+useradd -m -s /bin/bash supervisor
+usermod -aG docker deploy
+install -d -o deploy -g deploy /opt/boxmunge/inbox /opt/boxmunge/inbox/.tmp
+ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/id_ed25519
+for user in deploy supervisor; do
+    home="$(getent passwd "${user}" | cut -d: -f6)"
+    install -d -m 700 -o "${user}" -g "${user}" "${home}/.ssh"
+    install -m 600 -o "${user}" -g "${user}" /root/.ssh/id_ed25519.pub "${home}/.ssh/authorized_keys"
+done
+
+export SSH_PORT=922 DEPLOY_USER=deploy
+# shellcheck source=/dev/null  # mounted into the container
+. /bootstrap/sshd.sh
+DROPIN=/etc/ssh/sshd_config.d/00-boxmunge-deploy.conf
+cp "${DROPIN}" /root/dropin.conf
+cp /etc/ssh/sshd_config /root/sshd_config.shipped
+
+# What a forward would reach: a stand-in for /var/run/docker.sock
+# (root:docker 0660) and a local TCP service. Both answer PONG.
+python3 - <<'PY' &
+import grp, os, socket, threading
+def serve(s):
+    s.listen()
+    while True:
+        c, _ = s.accept(); c.sendall(b"PONG\n"); c.close()
+u = socket.socket(socket.AF_UNIX); u.bind("/run/docker.sock")
+os.chown("/run/docker.sock", 0, grp.getgrnam("docker").gr_gid); os.chmod("/run/docker.sock", 0o660)
+t = socket.socket(); t.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); t.bind(("127.0.0.1", 7777))
+threading.Thread(target=serve, args=(t,), daemon=True).start()
+serve(u)
+PY
+set +e
+
+SSH=(ssh -p 922 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+     -o LogLevel=ERROR -o ExitOnForwardFailure=yes)
+
+# Prints PONG if something answers at the address (unix path or tcp port).
+pong() {
+    python3 - "$1" <<'PY' 2>/dev/null
+import socket, sys, time
+target = sys.argv[1]
+for _ in range(30):
+    try:
+        if target.startswith("/"):
+            s = socket.socket(socket.AF_UNIX); s.connect(target)
+        else:
+            s = socket.create_connection(("127.0.0.1", int(target)), timeout=2)
+        s.settimeout(2)
+        data = s.recv(16)
+        if data:
+            print(data.decode().strip()); sys.exit(0)
+    except OSError:
+        pass
+    time.sleep(0.2)
+PY
+}
+
+report() { echo "RESULT ${PHASE} $1 $2 $3"; }
+
+# forward <user> <channel> <ssh forward option> <address to probe>
+forward() {
+    local user="$1" channel="$2" opt="$3" addr="$4" pid verdict=refused
+    rm -f /tmp/fwd.sock /tmp/rfwd.sock
+    "${SSH[@]}" -N "${opt}" "${user}@127.0.0.1" 2>/dev/null & pid=$!
+    [[ "$(pong "${addr}")" == PONG ]] && verdict=allowed
+    kill "${pid}" 2>/dev/null; wait "${pid}" 2>/dev/null
+    report "${user}" "${channel}" "${verdict}"
+}
+
+probe_deploy() {
+    forward deploy docker-sock-L "-L/tmp/fwd.sock:/run/docker.sock" /tmp/fwd.sock
+    forward deploy tcp-L "-L7701:127.0.0.1:7777" 7701
+    forward deploy tcp-R "-R7702:127.0.0.1:7777" 7702
+    forward deploy streamlocal-R "-R/tmp/rfwd.sock:127.0.0.1:7777" /tmp/rfwd.sock
+    local out verdict=refused
+    out="$(timeout 10 "${SSH[@]}" -W 127.0.0.1:7777 deploy@127.0.0.1 </dev/null 2>/dev/null)"
+    [[ "${out}" == PONG ]] && verdict=allowed
+    report deploy stdio-W "${verdict}"
+    # A forwarded agent appears as a deploy-owned socket while the session runs.
+    eval "$(ssh-agent -s)" >/dev/null; ssh-add -q /root/.ssh/id_ed25519
+    sleep 3 | "${SSH[@]}" -A deploy@127.0.0.1 >/dev/null 2>&1 & pid=$!
+    verdict=refused
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.2
+        [[ -n "$(find /tmp -path '/tmp/ssh-*' -name 'agent.*' -user deploy 2>/dev/null)" ]] \
+            && { verdict=allowed; break; }
+    done
+    wait "${pid}"; ssh-agent -k >/dev/null
+    report deploy agent "${verdict}"
+    echo "SETTINGS ${PHASE} $(sshd -T -C user=deploy,host=localhost,addr=127.0.0.1 \
+        | grep -E '^(disableforwarding|allowtcpforwarding|allowstreamlocalforwarding|allowagentforwarding|x11forwarding|permittunnel|permituserrc|permittty) ' \
+        | sort | tr '\n' ',')"
+}
+
+restart_sshd() {
+    [[ -f /run/sshd.pid ]] && kill "$(cat /run/sshd.pid)" && sleep 0.5
+    sshd -t || { echo "SSHD_INVALID ${PHASE}"; exit 1; }
+    /usr/sbin/sshd
+    for _ in $(seq 50); do
+        "${SSH[@]}" supervisor@127.0.0.1 true 2>/dev/null && return 0
+        sleep 0.1
+    done
+    echo "SSHD_DOWN ${PHASE}"; exit 1
+}
+
+# 1. As released: sshd.sh's globals, no Match block for deploy.
+PHASE=shipped-before; rm -f "${DROPIN}"; restart_sshd; probe_deploy
+# 2. The same box once TCP forwarding is turned on globally (for supervisor, say).
+PHASE=opened-before
+sed -i 's/^AllowTcpForwarding no$/AllowTcpForwarding yes/' /etc/ssh/sshd_config
+restart_sshd; probe_deploy
+# 3. That box with the fix applied: deploy is closed, supervisor keeps forwarding.
+PHASE=opened-after; DEPLOY_USER=deploy bash /bootstrap/sshd-deploy.sh >/dev/null || exit 1
+restart_sshd; probe_deploy
+forward supervisor tcp-L "-L7703:127.0.0.1:7777" 7703
+# 4. As this release ships it.
+PHASE=shipped-after; cp /root/sshd_config.shipped /etc/ssh/sshd_config
+cmp -s "${DROPIN}" /root/dropin.conf || { echo "DROPIN_DIFFERS"; exit 1; }
+restart_sshd; probe_deploy
+
+# The session itself still works: allowlisted commands and scp uploads.
+echo "COMMAND $("${SSH[@]}" deploy@127.0.0.1 status --json 2>&1)"
+echo "TTY $(echo exit | "${SSH[@]}" -tt deploy@127.0.0.1 2>&1 | tr -d '\r' | grep -c 'boxmunge>')"
+echo "REFUSED $("${SSH[@]}" deploy@127.0.0.1 cat /etc/passwd 2>&1)"
+mkdir -p /tmp/bundle/demo && echo 'project: demo' > /tmp/bundle/demo/manifest.yml
+tar -czf /tmp/demo.tar.gz -C /tmp/bundle demo
+echo "SCP $(scp -O -P 922 -o BatchMode=yes -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR /tmp/demo.tar.gz deploy@127.0.0.1: 2>&1)"
+echo "INBOX $(ls /opt/boxmunge/inbox)"

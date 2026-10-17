@@ -28,7 +28,8 @@ _set_sshd LoginGraceTime 30
 _set_sshd ClientAliveInterval 300
 _set_sshd ClientAliveCountMax 2
 
-# Restrict SSH features — deploy user must not tunnel or forward
+# No tunnels or TCP forwarding for anyone. deploy gets no forwarding of any
+# kind (stream-local, agent, X11, user rc) from its own Match block below.
 _set_sshd AllowTcpForwarding no
 _set_sshd GatewayPorts no
 _set_sshd PermitTunnel no
@@ -40,5 +41,8 @@ _set_sshd AllowUsers "${DEPLOY_USER} supervisor"
 # Note: the sshd Subsystem directive for SFTP is wired in install.sh, after
 # the wrapper binary exists at /opt/boxmunge/bin/boxmunge-sftp. Doing it here
 # would create a window where sshd points at a non-existent wrapper.
+
+# Before the restart, so sshd never serves deploy without it.
+DEPLOY_USER="${DEPLOY_USER}" bash "$(dirname "${BASH_SOURCE[0]}")/sshd-deploy.sh"
 
 systemctl restart sshd
