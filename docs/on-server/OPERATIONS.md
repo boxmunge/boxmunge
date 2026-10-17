@@ -190,7 +190,8 @@ recreate while a release is staged: upgrade restarts, container updates, `recove
 
 A bind mount, config or secret file in a data directory (any directory a release has mounted
 read-write) or another server-owned entry (`data/`, `secrets.env`) points staging at the entry's
-`-staging` copy: `./uploads/img` becomes `./uploads-staging/img`. Staging never reads
+`-staging` copy in the project dir: `./uploads/img` becomes `<project>/uploads-staging/img`,
+an absolute path. Staging never reads
 production's copy, so a config or secret `file:` in a data directory (`./data/key.pem`) must exist
 in staging's copy (`./data-staging/key.pem`): `stage` copies it with `copy_data`, and without
 `copy_data` refuses, naming the file to put there. Such a file may not sit in a directory a service

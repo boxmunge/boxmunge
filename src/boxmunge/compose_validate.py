@@ -13,6 +13,7 @@ the full picture.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -279,6 +280,7 @@ def validate_user_compose(
     off_services: set[str] | None = None,
     cve_policy: dict | None = None,
     manifest_services: dict | None = None,
+    project_directory: Path | None = None,
 ) -> None:
     """Parse compose.yml and reject hostile keys.
 
@@ -307,11 +309,15 @@ def validate_user_compose(
     (interpolation, `.env`, extends and include applied), so nothing the
     literal file hides reaches the containers unchecked.
 
+    `project_directory` is where Compose resolves the file's relative
+    paths when that is not the file's own directory (staging's base sits
+    in the slot beside the release it runs from).
+
     Raises ComposeSecurityError on the first hostile key in a non-off
     service, or if the file cannot be read, parsed, or resolved.
     """
     off = off_services or set()
-    base_dir = compose_path.parent
+    base_dir = project_directory or compose_path.parent
     roots = (base_dir, paths.project_dir(project_name))
 
     try:
@@ -359,11 +365,12 @@ def validate_user_compose(
 
     # include/extends/env_file references only exist in the literal files;
     # everything else is checked on the model Compose will actually run.
-    references, read_files = compose_resolve.walk_references(compose_path, roots)
+    references, read_files = compose_resolve.walk_references(compose_path, roots, base=base_dir)
     if references:
         raise ComposeSecurityError(references[0])
     try:
-        doc = compose_resolve.resolve_compose_config(compose_path, project_name)
+        doc = compose_resolve.resolve_compose_config(
+            compose_path, project_name, project_directory=project_directory)
     except compose_resolve.ComposeResolveError as e:
         raise ComposeSecurityError(f"could not resolve compose.yml: {e}") from e
     services = doc.get("services") or {}
