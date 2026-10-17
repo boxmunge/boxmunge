@@ -12,19 +12,16 @@ from boxmunge.paths import BoxPaths
 def _access_log_lines() -> list[str]:
     """Caddy access-log directive lines for a site block.
 
-    Emits JSON to a shared host-mounted file (`/var/log/caddy/access.log`,
-    bind-mounted from `/opt/boxmunge/caddy/logs`) that the host's CrowdSec
-    `crowdsecurity/caddy` parser ingests for HTTP-layer detection. Every site
-    block writes to the same path; Caddy dedupes file writers by filename, so
-    this is safe. Caddy self-rotates the file (lumberjack), keeping rotation
-    out of logrotate — consistent with the rest of the box.
+    JSON on the container's stdout (Caddy's own runtime log stays on
+    stderr). The host's CrowdSec reads it through the Docker API
+    (`source: docker`, stdout only) for the `crowdsecurity/caddy` parser.
+    Never a file: one would sit in a directory the remapped Caddy owns, and
+    root CrowdSec would open whatever Caddy left there (a FIFO, a link to a
+    root-only file). Docker's json-file driver rotates it (daemon.json).
     """
     return [
         "    log {",
-        "        output file /var/log/caddy/access.log {",
-        "            roll_size 50MiB",
-        "            roll_keep 5",
-        "        }",
+        "        output stdout",
         "        format json",
         "    }",
     ]

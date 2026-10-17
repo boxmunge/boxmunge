@@ -359,6 +359,10 @@ if [[ -f "${SCRIPT_DIR}/caddy/maintenance/index.html" ]]; then
     chmod 644 "${BOXMUNGE_ROOT}/caddy/maintenance/index.html"
 fi
 
+# Caddy logs access to stdout, not to the caddy/logs mount the compose file
+# below no longer has: fix site configs before Caddy is recreated on it.
+bash "${SCRIPT_DIR}/bootstrap/caddy-access-log.sh" sites
+
 # Refresh system Caddy compose so existing installs pick up new mounts
 # (e.g., the v0.4 maintenance bind-mount). If the compose file actually
 # changed, restart Caddy so the new mount takes effect.
@@ -373,6 +377,14 @@ if [[ -f "${SCRIPT_DIR}/caddy/compose.yml" ]]; then
     if [[ "${CADDY_COMPOSE_CHANGED}" -eq 1 ]] && docker inspect boxmunge-caddy >/dev/null 2>&1; then
         docker compose -f "${BOXMUNGE_ROOT}/caddy/compose.yml" up -d
     fi
+fi
+bash "${SCRIPT_DIR}/bootstrap/caddy-access-log.sh" retire
+
+# CrowdSec reads Caddy's stdout through Docker; verified after the restart.
+if command -v cscli >/dev/null 2>&1; then
+    BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/crowdsec-caddy.sh"
+else
+    echo "  CrowdSec is not installed (--no-crowdsec): nothing watches Caddy's access log"
 fi
 
 # rclone config for off-site backup-sync. Mounted read-only into the

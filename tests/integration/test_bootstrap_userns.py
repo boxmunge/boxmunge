@@ -28,7 +28,6 @@ userns_daemon_json
 export BOXMUNGE_ROOT=/tmp/bm
 install -d -m 750 /tmp/bm/config /tmp/bm/caddy
 printf 'hostname: h\\nadmin_email: a@b.c\\n' > /tmp/bm/config/boxmunge.yml
-userns_caddy_logs "$S"; userns_caddy_logs "$S"
 userns_record "$S"; userns_journal_committed "$S"
 echo "again=$(userns_allocate)"
 echo "subuid=$(grep '^boxmunge-remap:' /etc/subuid | tr '\\n' ' ')"
@@ -36,7 +35,6 @@ echo "subgid=$(grep '^boxmunge-remap:' /etc/subgid | tr '\\n' ' ')"
 echo "group=$(getent group boxmunge-remap | cut -d: -f1)"
 echo "daemon=$(tr -d '\\n' < /etc/docker/daemon.json)"
 echo "daemon_mode=$(stat -c '%a' /etc/docker/daemon.json)"
-echo "logs=$(stat -c '%a %u:%g' /tmp/bm/caddy/logs)"
 echo "dir=$(stat -c '%a %u' /tmp/bm/upgrade-root)"
 echo "journal=$(cat /tmp/bm/upgrade-root/userns-migration.json)"
 echo "mode=$(stat -c '%a' /tmp/bm/upgrade-root/userns-migration.json)"
@@ -66,7 +64,6 @@ def test_userns_bootstrap_on_trixie(tmp_path: Path) -> None:
         "userns-remap": "boxmunge-remap:boxmunge-remap", "storage-driver": "overlay2",
         "features": {"containerd-snapshotter": False}}
     assert out["daemon_mode"] == "644"
-    assert out["logs"] == f"750 {s}:{s}"
     assert out["dir"] == "700 0" and out["mode"] == "600"
     assert out["tmp"] == "userns-migration.json "
     assert json.loads(out["journal"]) == {"version": 1, "direction": "forward",
@@ -93,8 +90,6 @@ no_group() {  # identity refused: daemon.json must not name it
     echo "daemon_json=$(test -e /etc/docker/daemon.json && echo written || echo absent)" >&2
     userdel boxmunge-remap; return $rc
 }
-link_logs() { mkdir -p /tmp/bm/caddy /victim; ln -sfn /victim /tmp/bm/caddy/logs; userns_caddy_logs 1048576; }
-file_logs() { mkdir -p /tmp/bm2/caddy; : > /tmp/bm2/caddy/logs; BOXMUNGE_ROOT=/tmp/bm2 userns_caddy_logs 1048576; }
 malformed() { printf 'alice:x:65536\n' > /etc/subuid; userns_allocate; }
 misaligned() { printf 'boxmunge-remap:1048577:65536\n' | tee /etc/subuid > /etc/subgid; userns_allocate; }
 by_uid() {
@@ -126,8 +121,6 @@ docker_empty() { fake_docker 'exit 0'; userns_refuse_existing_docker; }
 info() { fake_docker "echo '$1'"; userns_verify 1048576; }
 foreign_json() { mkdir -p /etc/docker; echo '{"data-root": "/srv/docker"}' > /etc/docker/daemon.json; userns_daemon_json; }
 try no_group no_group
-try link_logs link_logs; echo "victim=$(stat -c '%u:%g' /victim)"
-try file_logs file_logs
 try malformed malformed
 try misaligned misaligned
 try by_uid by_uid
@@ -159,9 +152,6 @@ def test_userns_bootstrap_refusals_on_trixie(tmp_path: Path) -> None:
     out = _outputs(result.stdout)
     assert out["no_group"].startswith("refused:") and "without a group" in out["no_group"]
     assert "daemon_json=absent" in out["no_group"]
-    assert out["link_logs"].startswith("refused:") and "link" in out["link_logs"]
-    assert out["victim"] == "0:0"
-    assert out["file_logs"].startswith("refused:") and "not a directory" in out["file_logs"]
     assert out["malformed"].startswith("refused:") and "/etc/subuid:1" in out["malformed"]
     assert out["misaligned"].startswith("refused:") and "by hand" in out["misaligned"]
     assert out["by_uid"] == "ok:1245184 1 "

@@ -321,10 +321,6 @@ install -d -m 775 -o root -g "${DEPLOY_USER}" \
 install -d -m 700 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" \
     "${BOXMUNGE_ROOT}/caddy/.site-journal"
 
-# caddy/logs holds Caddy's JSON access log (bind-mounted to /var/log/caddy).
-# Caddy writes here as its remapped root (host uid S); the host's CrowdSec
-# (root) reads it. Caddy makes the log 0600, so the dir is not world-readable.
-userns_caddy_logs "${USERNS_OFFSET}"
 # Created here, before Caddy first starts: dockerd would create a missing bind
 # source owned by the remapped root.
 install -d -m 755 -o root -g "${DEPLOY_USER}" "${BOXMUNGE_ROOT}/caddy/maintenance"

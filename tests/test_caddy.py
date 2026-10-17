@@ -70,14 +70,17 @@ class TestGenerateCaddyConfig:
         config = generate_caddy_config(FULL_MANIFEST)
         assert "myapp-backend:8000" in config
 
-    def test_access_log_block_present(self) -> None:
-        # CrowdSec's caddy parser ingests these JSON access logs from the
-        # host-mounted file; without the directive there is no HTTP-layer
-        # detection on the proxy.
+    def test_access_log_goes_to_stdout_as_json(self) -> None:
+        # CrowdSec reads Caddy's stdout through the Docker API; without the
+        # directive there is no HTTP-layer detection on the proxy.
         config = generate_caddy_config(SIMPLE_MANIFEST)
-        assert "log {" in config
-        assert "output file /var/log/caddy/access.log" in config
-        assert "format json" in config
+        assert "    log {\n        output stdout\n        format json\n    }\n" in config
+
+    def test_access_log_is_never_a_file(self) -> None:
+        # A file would live in a directory the remapped Caddy controls, and
+        # root CrowdSec would open whatever Caddy put there.
+        assert "output file" not in generate_caddy_config(SIMPLE_MANIFEST)
+        assert "/var/log/caddy" not in generate_caddy_config(SIMPLE_MANIFEST)
 
 
 class TestStagingCaddyConfig:
@@ -86,10 +89,10 @@ class TestStagingCaddyConfig:
         assert "basicauth" not in config
         assert "staging.myapp.example.com" in config
 
-    def test_access_log_block_present(self) -> None:
+    def test_access_log_goes_to_stdout_as_json(self) -> None:
         config = generate_staging_caddy_config(SIMPLE_MANIFEST)
-        assert "output file /var/log/caddy/access.log" in config
-        assert "format json" in config
+        assert "    log {\n        output stdout\n        format json\n    }\n" in config
+        assert "output file" not in config
 
     def test_auth_injected_when_provided(self) -> None:
         config = generate_staging_caddy_config(

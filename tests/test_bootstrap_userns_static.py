@@ -32,23 +32,11 @@ def test_daemon_json_is_written_after_the_identity() -> None:
 
 
 
-def test_caddy_logs_is_created_for_caddys_remapped_root() -> None:
-    """Never root-owned first and chowned later: docker-userns errors on that,
-    and a chown that follows a link would hand its target to container root."""
-    text = _init_host()
-    assert 'userns_caddy_logs "${USERNS_OFFSET}"' in text
-    assert '"${BOXMUNGE_ROOT}/caddy/logs"' not in text
-    code = [line for line in (BOOT / "userns.sh").read_text().splitlines()
-            if not line.lstrip().startswith("#")]
-    assert not [line for line in code if "chown" in line]
-
-
 def test_caddy_bind_sources_exist_before_caddy_first_starts() -> None:
     """dockerd would create a missing one owned by the remapped root."""
     text = _init_host()
     up = text.index('docker compose -f "${BOXMUNGE_ROOT}/caddy/compose.yml" up -d')
     assert text.index('"${BOXMUNGE_ROOT}/caddy/maintenance"') < up
-    assert text.index('userns_caddy_logs "${USERNS_OFFSET}"') < up
 
 
 def test_caddyfile_is_readable_by_caddys_remapped_root() -> None:

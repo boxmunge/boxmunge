@@ -23,7 +23,7 @@ USERNS_DIND = [pytest.mark.integration, pytest.mark.userns_dind, DIND]
 def dind_paths(tmp_path: Path) -> BoxPaths:
     root = tmp_path / "boxmunge"
     for sub in ("config", "projects", "state/deploy", "state/health", "logs",
-                "caddy/sites", "caddy/logs", "system", "upgrade-state"):
+                "caddy/sites", "system", "upgrade-state"):
         (root / sub).mkdir(parents=True)
     (root / "config" / "boxmunge.yml").write_text(
         "hostname: dind.localhost\nadmin_email: ops@example.com\n")
