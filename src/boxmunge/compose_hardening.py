@@ -6,9 +6,12 @@ the rule that a user's own `read_only` or `/tmp` declaration wins.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from boxmunge.security_overlay import render_compose_security_fragment, resolve_security
+
+if TYPE_CHECKING:
+    from boxmunge.run_as import ServiceUser
 
 
 # ---------------------------------------------------------------------------
@@ -105,4 +108,28 @@ def hardening_fragment(
             fragment.pop("read_only")
         if "tmpfs" in fragment and _user_claims_tmp(user_svc):
             fragment.pop("tmpfs")
+    return fragment
+
+
+def tmpfs_for(entry: str, ids: tuple[int, int]) -> str:
+    """A tmpfs entry a numeric non-root user can write. A tmpfs over an image
+    path inherits that directory's mode, so the mode is set explicitly."""
+    if ":" in entry:
+        return entry  # options the operator chose
+    if entry == "/tmp":
+        return "/tmp:mode=1777"
+    return f"{entry}:uid={ids[0]},gid={ids[1]},mode=0700"
+
+
+def apply_run_user(fragment: dict[str, Any], user: ServiceUser | None) -> dict[str, Any]:
+    """Add the recorded user to a service fragment and give its tmpfs mounts
+    to a numeric non-root user. No record (a project deployed before users
+    were decided) leaves the fragment as it was."""
+    value = user.emitted() if user is not None else None
+    if value is None:
+        return fragment
+    fragment["user"] = value
+    ids = user.nonroot_ids()
+    if ids and isinstance(fragment.get("tmpfs"), list):
+        fragment["tmpfs"] = [tmpfs_for(e, ids) for e in fragment["tmpfs"]]
     return fragment

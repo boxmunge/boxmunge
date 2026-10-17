@@ -33,6 +33,8 @@ from boxmunge.commands.backup_cmd import backup_locked
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_warning, log_error
+from boxmunge.run_as import RunAsError
+from boxmunge.user_drift import guard_pull
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -365,6 +367,24 @@ def _update_locked(
         log_operation("container-update", f"No updates available for {target.name}", paths, project=target.name)
         persist_result(paths, target, result, before=before)
         return result
+
+    # Step 3b: a service that runs as its image's own user would change who
+    # writes its data with the new image; only a deploy decides that
+    # (user_drift). The project is not updated at all: every changed tag
+    # goes back, or the next restart of any kind would run the new images.
+    if not target.is_caddy:
+        refs = {svc: str(services[svc].image) for svc in changed}
+        old = {svc: running[svc].image_id for svc in changed}
+        try:
+            drift = guard_pull(paths, target.name, refs, old, component="container-update")
+            if drift:
+                for svc in changed.keys() - drift.keys():
+                    tag_image(old[svc], refs[svc])
+        except (DockerError, RunAsError) as e:
+            return _fail(paths, target, result, f"inventory_failed: {e}", before=before)
+        if drift:
+            return _fail(paths, target, result, "user_changed: " + "; ".join(
+                f"{svc}: {why}" for svc, why in drift.items()), before=before)
 
     # Step 4: Pre-update backup, only now that a recreate will happen. Pulling
     # leaves running containers untouched, so this still captures the data

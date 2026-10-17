@@ -5,13 +5,9 @@ from unittest.mock import patch
 
 import pytest
 
-from boxmunge.commands.deploy import (
-    cmd_deploy,
-    record_deploy_state,
-    prepare_caddy_config,
-    prepare_compose_override,
-    run_deploy,
-)
+from boxmunge.caddy import prepare_caddy_config
+from boxmunge.commands.deploy import cmd_deploy, record_deploy_state, run_deploy
+from boxmunge.compose import prepare_compose_override
 from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import add_project
 from boxmunge.state import read_state

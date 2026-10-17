@@ -333,3 +333,15 @@ def enrich_failure_with_writable_hint(
     if not hint:
         return failure_message
     return f"{failure_message}\n{hint}"
+
+
+def smoke_failure_message(failure_message: str, project_dir: Path, manifest: dict[str, Any],
+                          service: str, log_fetcher: Callable[[str], str] | None) -> str:
+    """A smoke failure's message with the writable hint when the service's
+    logs show a read-only-fs error. Non-fatal: if the enrichment fails, the
+    original message is returned unchanged."""
+    try:
+        return enrich_failure_with_writable_hint(failure_message, project_dir, manifest,
+                                                 service, log_fetcher=log_fetcher)
+    except Exception:  # noqa: BLE001 — the smoke result stands without its hint
+        return failure_message

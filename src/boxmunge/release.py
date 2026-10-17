@@ -33,7 +33,7 @@ from boxmunge.bundle import (
 from boxmunge.data_dirs import (
     Announce, DataDirs, KeptData, ReleaseStateError, classify, entry_label,
     has_record, holds_data, record_path, save_record,
-    start_record, warn_retained,
+    refuse_container_owned, start_record, warn_retained,
 )
 from boxmunge.fileutil import atomic_write_text, discard_dir, fsync_dir, sync_entries
 from boxmunge.fs_nofollow import chmod_nofollow, chown_tree_deploy, mkdir_p_deploy
@@ -135,7 +135,10 @@ def check_install(tree: Path, project_dir: Path) -> None:
     Changes nothing; raises BundleError, or ReleaseStateError if a compose
     file or the data-dir record cannot be read.
     """
-    _check(tree, _classify(project_dir, tree))
+    dirs = _classify(project_dir, tree)
+    _check(tree, dirs)
+    if not has_record(project_dir):
+        refuse_container_owned(dirs)
 
 
 def _check(tree: Path, dirs: DataDirs) -> None:

@@ -72,9 +72,14 @@ def _read_write(compose_path: Path, project_dir: Path) -> set[str]:
 
 
 def holds_data(path: Path) -> bool:
-    """Anything but a missing entry or an empty real directory."""
+    """Anything but a missing entry or an empty real directory. A directory
+    this user cannot list (a container's, often 0700) is presumed to hold
+    data, so it is never reclassified as code or pruned."""
     if path.is_dir() and not path.is_symlink():
-        return any(path.iterdir())
+        try:
+            return any(path.iterdir())
+        except PermissionError:
+            return True
     return os.path.lexists(path)
 
 
@@ -269,6 +274,50 @@ def _move_contents(entry: Path, dest: Path) -> None:
         entry.rename(dest / entry.name)
 
 
+class ContainerOwnedEntryError(ReleaseStateError):
+    """On a remapped box, a container-owned data entry a release ships as code."""
+
+
+def _remapped(project_dir: Path) -> bool:
+    from boxmunge.paths import BoxPaths
+    from boxmunge.userns.offset import RemapError, remap_offset
+    try:
+        return remap_offset(BoxPaths(root=project_dir.parent.parent)) != 0
+    except RemapError as e:
+        raise ReleaseStateError(str(e)) from e
+
+
+def _owned_by_me(path: Path) -> bool:
+    """Deploy can move this entry's contents: it owns it and can list it."""
+    try:
+        if os.lstat(path).st_uid != os.geteuid():
+            return False
+        if path.is_dir() and not path.is_symlink():
+            next(iter(path.iterdir()), None)
+        return True
+    except PermissionError:
+        return False
+
+
+def refuse_container_owned(dirs: DataDirs) -> None:
+    """D18: start_record would move container-owned data aside as deploy,
+    which a remapped box does not let deploy do. Refused before any move.
+    Raises ContainerOwnedEntryError naming every such entry."""
+    if dirs.adopted and _remapped(dirs.project_dir):
+        owned = [n for n in sorted(dirs.adopted) if holds_data(dirs.project_dir / n)
+                 and not _owned_by_me(dirs.project_dir / n)]
+        if owned:
+            moves = "; ".join(f"sudo find {dirs.project_dir / n} -mindepth 1 -maxdepth 1 "
+                              f"-exec mv -t <a directory outside the project> {{}} +"
+                              for n in owned)
+            raise ContainerOwnedEntryError(
+                f"an older release bind-mounted {', '.join(owned)} read-write, so they hold "
+                f"container-owned data, and this release ships them as code. boxmunge will "
+                f"not move container-owned data as deploy. Either keep mounting them "
+                f"read-write in this release, or, as supervisor, move their contents aside "
+                f"({moves}) and deploy again.")
+
+
 def start_record(dirs: DataDirs, announce: Announce | None = None) -> list[Path]:
     """Start the record of a project that has none; returns the copies set aside.
 
@@ -278,6 +327,7 @@ def start_record(dirs: DataDirs, announce: Announce | None = None) -> list[Path]
     instead of installing code over it. Raises SetAsideError, naming what was
     moved, if a move or the record write fails after a move began.
     """
+    refuse_container_owned(dirs)
     copies: list[Path] = []
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     with naming_set_aside(copies):

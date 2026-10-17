@@ -71,7 +71,7 @@ def _no_containers():
 
 
 def _manifest(project: str) -> str:
-    manifest = yaml.safe_load(manifest_text(project))
+    manifest = yaml.safe_load(manifest_text(project, image_users=True))
     manifest["schema_version"] = 3
     manifest["services"]["web"]["writable"] = {"external": True}
     return yaml.safe_dump(manifest)

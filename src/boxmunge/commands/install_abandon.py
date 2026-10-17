@@ -13,7 +13,9 @@ import os
 import sys
 from typing import TYPE_CHECKING
 
+from boxmunge.commands import release_config
 from boxmunge.data_dirs import ReleaseStateError, log_kept, set_aside_announcer
+from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import LockError, discard_dir, fsync_dir, project_lock, sweep_discarded
 from boxmunge.git_slot import checkout_detached
 from boxmunge.log import log_error, log_operation
@@ -109,7 +111,8 @@ def abandon_locked(project_name: str, paths: BoxPaths) -> int:
         releases = paths.project_releases(project_name)
         discard_dir(releases / "incoming")
         sweep_discarded(releases)
-    except (OSError, ValueError) as e:
+        release_config.remove_candidates(project_name)  # the images its users were decided from
+    except (OSError, ValueError, DockerError) as e:
         print(f"ERROR: Abandoning the install of {txn.ref} failed: {e}. The install stays "
               f"open; run 'prod-deploy {project_name} --abandon' again once the cause is "
               f"fixed.", file=sys.stderr)

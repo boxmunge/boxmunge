@@ -345,7 +345,7 @@ def validate_security_block(
     validate_user_field(block, context)
 
 
-def _effective_profile(
+def effective_profile(
     project_security: dict[str, Any] | None,
     service_security: dict[str, Any] | None,
 ) -> str:
@@ -371,7 +371,7 @@ def services_with_off_profile(manifest: dict[str, Any]) -> list[tuple[str, str]]
     result: list[tuple[str, str]] = []
     for svc_name, svc in services.items():
         svc_sec = svc.get("security") if isinstance(svc, dict) else None
-        if _effective_profile(project_sec, svc_sec) != PROFILE_OFF:
+        if effective_profile(project_sec, svc_sec) != PROFILE_OFF:
             continue
         # Reason precedence: service-level reason wins if service set off.
         if isinstance(svc_sec, dict) and svc_sec.get("profile") == PROFILE_OFF:
@@ -406,7 +406,7 @@ def services_with_overrides(manifest: dict[str, Any]) -> list[tuple[str, list[st
         if not isinstance(svc, dict):
             continue
         svc_sec = svc.get("security")
-        if _effective_profile(project_sec, svc_sec) == PROFILE_OFF:
+        if effective_profile(project_sec, svc_sec) == PROFILE_OFF:
             continue
         resolved = resolve_security(project_sec, svc_sec)
         if resolved == default_baseline:

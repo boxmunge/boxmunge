@@ -145,7 +145,10 @@ def smoke_ok(
         return True
     print("  Running smoke tests in containers...")
     from boxmunge.commands.check import run_smoke_in_container, should_downgrade_smoke_failure
-    smoke_result = run_smoke_in_container(project_dir, manifest, compose_files)
+    from boxmunge.run_as import default_user_hint
+    smoke_result = run_smoke_in_container(
+        project_dir, manifest, compose_files,
+        hint=lambda svc: default_user_hint(paths, project_name, svc))
     if smoke_result.status == "ok":
         print("  Smoke tests passed.")
         return True

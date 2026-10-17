@@ -254,6 +254,7 @@ the `default` profile silently — most projects need nothing here.
 | `cap_drop` | list[str] | dangerous-cap list | If specified, REPLACES the default list. |
 | `published_ports` | list | — | Project level only. Opt-in host-published ports, each `{service, port, reason}` plus optional `host_port`, `protocol`, `host_ip` (default `127.0.0.1`). See SECURITY.md, "Published ports". |
 | `cap_add` | list[str] | `[]` | Capabilities to keep; subtracted from `cap_drop`. Canonical names only (`NET_RAW`). The denylist in SECURITY.md (`SYS_ADMIN`, `SYS_MODULE`, `ALL`, ...) is rejected. |
+| `user` | string | — | Per service only, or project-wide as a default. Who the service runs as: `root`, `image` (the image's own user), or a quoted `"<uid>:<gid>"` (each 1..65535). `root` and `image` **require `reason`**. See "Who a service runs as". |
 
 ### Per-service `security:`
 
@@ -286,6 +287,52 @@ services:
       profile: off
       reason: "intentional honeypot, see issue #42"
 ```
+
+### Who a service runs as
+
+Deploy, stage and promote build the release's images, pull the missing ones, and decide each
+service's user from them; restarts, upgrades and container-update reuse that decision until the
+next deploy (`boxmunge security <project>` shows it). In order:
+
+1. compose.yml `user:` wins (the overlay adds nothing);
+2. else `security.user` (the service's own block, else the project's);
+3. else the image's own non-root `USER`;
+4. else, under `profile: off`, the image's own user, whatever it is;
+5. else, for a `build:` service, **10001:10001** (its tmpfs mounts are given to that uid);
+6. else the deploy is **refused**, printing the manifest.yml lines to add.
+
+A registry image whose `USER` is empty or root (postgres, mysql, mariadb, redis, nginx, node,
+python, caddy all are) needs a declaration. For a service only compose.yml defines, add an entry
+that holds nothing but its `security` block (`user`, and `reason` when it is root or image), with no
+`port`, `routes` or `internal: true`: it declares who the service runs as and changes nothing else
+(no read-only root filesystem, env files or proxy network). A `security` block needs
+`schema_version: 2` or later.
+
+| Image family | Add under `services.<svc>` |
+|---|---|
+| postgres | `security: {user: image, reason: "postgres entrypoint drops to postgres"}` |
+| mysql, mariadb | `security: {user: image, reason: "entrypoint initialises as root, drops to mysql"}` |
+| redis | `security: {user: "999:1000"}` for `redis:*-alpine`, `"999:999"` for the Debian tags |
+| nginx | `security: {user: image, reason: "master runs as root, workers as nginx"}` |
+| node (official) | `security: {user: "1000:1000"}` |
+| python (run directly) | a small Dockerfile with `USER`, or `security: {user: image, reason: "..."}` |
+| caddy (as a project) | `security: {user: image, reason: "binds and writes /data as root"}` |
+
+The table is guidance only; boxmunge never uses it to decide. `boxmunge doctor` lists every
+deployed service whose next deploy will be refused this way. Further refusals, each saying what
+to change: a numeric non-root service whose image owns a volume's mount path as another uid (fix
+it in the Dockerfile: `RUN chown <uid>:<gid> <path>`; a path the image lacks is given to the user
+once); a service whose user changes while it keeps data the old user owns (run
+`boxmunge data chown <project> <service> <uid>:<gid>` first: it stops the service, gives its
+read-write binds and volumes to that user, and leaves it stopped for the deploy); a release that
+would replace a non-empty anonymous volume with an empty named one (`data adopt` first, see
+OPERATIONS.md). Data in an anonymous volume warns at every deploy until it is adopted, and is refused on a
+box whose Docker daemon remaps user namespaces. A user change is checked even with no earlier
+user to compare: a numeric user over existing data another user owns is refused the same way. A
+`build:` service that fails smoke on the 10001 default gets a hint: it may need a passwd entry
+(add `USER` to the Dockerfile) or a `security.user`. container-update does not recreate a
+service that runs as its image's user when a new image changes that `USER`; it alerts, and the
+next deploy decides.
 
 ---
 

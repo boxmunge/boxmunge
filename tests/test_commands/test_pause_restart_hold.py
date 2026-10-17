@@ -84,3 +84,29 @@ def test_originals_prefer_a_real_policy_over_a_held_no():
     assert originals({"a": "no", "b": "always"}, {"a": "always", "b": "no", "c": "no"}) == {
         "a": "always", "b": "always", "c": "no",
     }
+
+
+def test_resume_holds_back_a_pulled_image_whose_user_changed(box, monkeypatch, capsys):
+    """Resume pulls: a service running as its image's user resumes on the
+    image it ran before when the new one's USER moved, and the next deploy
+    pulls it again (user_drift)."""
+    from boxmunge import user_drift
+    from boxmunge.docker_containers import ImageFacts, LocalImage
+    from boxmunge.run_as import ServiceUser, write_users
+    paths, fake = box
+    run_pause("demo", paths, yes=True)
+    services = resume_cmd._services_to_pull("demo", paths)
+    svc, ref = next(iter(services.items()))
+    write_users(paths, "demo", {svc: ServiceUser(None, "manifest", "")})
+    tags = {ref: "sha256:" + "0" * 64}
+    monkeypatch.setattr("boxmunge.docker_containers.local_image",
+                        lambda r: LocalImage(tags[r], ()) if r in tags else None)
+    monkeypatch.setattr(resume_cmd, "compose_pull",
+                        lambda *a, **k: tags.__setitem__(ref, "sha256:" + "1" * 64))
+    monkeypatch.setattr(user_drift, "tag_image", lambda src, r: tags.__setitem__(r, src))
+    monkeypatch.setattr(user_drift, "notify", lambda *a, **k: True)
+    monkeypatch.setattr("boxmunge.docker_containers.image_facts",
+                        lambda r: ImageFacts(tags[r], "nobody", ()))
+    assert run_resume("demo", paths, yes=True) == 0
+    assert tags[ref] == "sha256:" + "0" * 64 and user_drift.held_back(paths, "demo") == {svc}
+    assert "resumes on its previous image" in capsys.readouterr().out

@@ -39,7 +39,7 @@ _DB = ["sh", "-c", "trap 'exit 0' TERM; while :; do sleep 1; done"]
 
 
 def _release(project: str, volume: str, sources: dict | None = None) -> dict[str, str]:
-    manifest = yaml.safe_load(manifest_text(project))
+    manifest = yaml.safe_load(manifest_text(project, image_users=True))
     manifest["schema_version"] = 3
     manifest["services"] = {"db": {"internal": True, "writable": {"external": True}}}
     manifest["staging"] = {"copy_data": {"sources": sources} if sources else True}

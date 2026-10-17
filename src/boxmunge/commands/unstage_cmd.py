@@ -101,9 +101,10 @@ def _take_down(project: str, paths: BoxPaths, component: str) -> bool:
         caddy_reload(paths.caddy, paths.state)
     except DockerError as e:
         print(f"  WARN: Caddy reload failed: {e}")
-    record = paths.project_bind_record(project, staging=True)
-    if os.path.lexists(record):
-        record.unlink()
+    for record in (paths.project_bind_record(project, staging=True),
+                   paths.project_users_record(project, staging=True)):
+        if os.path.lexists(record):
+            record.unlink()
     # Which copies are retired depends on what production's compose.yml
     # mounts; that file is always production's now.
     try:

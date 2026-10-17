@@ -24,6 +24,7 @@ from boxmunge.manifest import (
     ManifestError, at_current_schema, load_manifest_as_written, validate_manifest,
 )
 from boxmunge.security_overlay import services_with_off_profile
+from boxmunge.user_entries import USER_ENTRIES
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -130,6 +131,7 @@ def validate_release_tree(
             project_name=project_name,
             cve_policy=manifest.get("security"),
             manifest_services=manifest.get("services"),
+            user_entries=manifest.get(USER_ENTRIES),
         )
     except ComposeSecurityError as e:
         log_error(component, f"Compose validation rejected: {e}",

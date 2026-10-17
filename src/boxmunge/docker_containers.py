@@ -254,3 +254,49 @@ def _host_path(source: str) -> str:
     if source.startswith(_DESKTOP_HOST_PREFIX):
         return source[len(_DESKTOP_HOST_PREFIX) - 1:]
     return source
+
+
+@dataclass(frozen=True)
+class ImageFacts:
+    """What deciding a service's user needs from its image. `user` is
+    Config.User, '' when unset (the containerd store omits the key)."""
+    image_id: str
+    user: str
+    volumes: tuple[str, ...]
+
+
+def image_facts(ref: str) -> ImageFacts:
+    """Inspect a local image. Raises DockerError when it is not present."""
+    docs = _inspect(["docker", "image", "inspect", ref])
+    if len(docs) != 1:
+        raise DockerError(f"docker image inspect {ref} described {len(docs)} images")
+    doc = docs[0]
+    image_id = doc.get("Id")
+    if not isinstance(image_id, str) or not image_id.startswith("sha256:"):
+        raise DockerError(f"docker image inspect {ref} reports image ID {image_id!r}")
+    config = doc.get("Config") or {}
+    user = config.get("User") or ""
+    volumes = config.get("Volumes") or {}
+    if not isinstance(user, str) or not isinstance(volumes, dict):
+        raise DockerError(f"docker image inspect {ref}: unreadable Config.User {user!r} "
+                          f"or Config.Volumes {volumes!r}")
+    return ImageFacts(image_id=image_id, user=user, volumes=tuple(sorted(volumes)))
+
+
+def container_users(project_name: str) -> dict[str, str]:
+    """{service: Config.User} of the compose project's containers, `run`
+    one-offs excluded ('' is the image's default user). Replicas share
+    their service's config, so the first one found speaks for it."""
+    listed = _run(["docker", "ps", "-a", "--no-trunc", *compose_project_filter(project_name),
+                   "--format", "{{.ID}}"], capture=True)
+    ids = listed.stdout.split()
+    users: dict[str, str] = {}
+    for doc in _inspect(["docker", "container", "inspect", *ids]) if ids else []:
+        config = doc.get("Config") or {}
+        labels = config.get("Labels") or {}
+        if str(labels.get(_ONEOFF_LABEL, "")).lower() == "true":
+            continue
+        service = labels.get(_SERVICE_LABEL)
+        if isinstance(service, str) and service:
+            users.setdefault(service, str(config.get("User") or ""))
+    return users

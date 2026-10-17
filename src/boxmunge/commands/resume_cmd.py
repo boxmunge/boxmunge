@@ -15,6 +15,8 @@ import sys
 
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.compose import prepare_compose_override
+from boxmunge.run_as import RunAsError
+from boxmunge.user_drift import guard_pull, image_ids
 from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
 from boxmunge.deployed_inventory import (
     InventoryError, load_deployed_inventory, pulled_services,
@@ -32,13 +34,13 @@ from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state, write_state
 
 
-def _services_to_pull(project_name: str, paths: BoxPaths) -> list[str]:
-    """The services a resume pulls: those `up` starts from a registry image
-    (deployed_inventory.pulled_services). Raises InventoryError."""
+def _services_to_pull(project_name: str, paths: BoxPaths) -> dict[str, str]:
+    """{service: image} a resume pulls: the services `up` starts from a
+    registry image (deployed_inventory.pulled_services). Raises InventoryError."""
     inventory = load_deployed_inventory(
         paths.project_dir(project_name), _compose_files(project_name, paths), project_name,
     )
-    return sorted(pulled_services(inventory))
+    return {name: str(svc.image) for name, svc in sorted(pulled_services(inventory).items())}
 
 
 def _refuse_unless_resumable(project_name: str, paths: BoxPaths) -> bool:
@@ -155,7 +157,7 @@ def resume_locked(
 
     # Pull images (unless overridden or no image: services).
     try:
-        pull_image_services = [] if skip_security_checks else _services_to_pull(
+        pull_image_services = {} if skip_security_checks else _services_to_pull(
             project_name, paths)
     except InventoryError as e:
         print(f"ERROR: cannot read the project's services: {e}", file=sys.stderr)
@@ -164,8 +166,18 @@ def resume_locked(
     if pull_image_services:
         print("  Pulling latest images...")
         try:
+            before = image_ids(pull_image_services)
             compose_pull(project_dir, compose_files=compose_files,
-                         project_name=project_name, services=pull_image_services)
+                         project_name=project_name, services=sorted(pull_image_services))
+            held = guard_pull(paths, project_name, pull_image_services, before,
+                              component="resume")
+            for svc, why in held.items():
+                print(f"  WARNING: {svc} resumes on its previous image: the new one's "
+                      f"{why}; deploy {project_name} to decide from it.")
+        except RunAsError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            log_error("resume", str(e), paths, project=project_name)
+            return 1, None
         except DockerError as e:
             print(f"ERROR: Image pull failed: {e}", file=sys.stderr)
             print("       Use --skip-security-checks to resume without "

@@ -20,11 +20,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from boxmunge.commands.deploy import (
-    generate_release_config, replace_release, run_pre_deploy_hook,
-)
+from boxmunge.commands.deploy import replace_release, run_pre_deploy_hook
 from boxmunge.commands.deploy_steps import snapshot_live_release
+from boxmunge.commands.release_config import decide_release_users, generate_release_config
 from boxmunge.crashpoint import crash_point
+from boxmunge.docker_run import DockerError
 from boxmunge.data_dirs import ReleaseStateError, SetAsideError, log_kept, set_aside_announcer
 from boxmunge.intake import IntakeError, report_refusal, validate_release_tree
 from boxmunge.log import log_error
@@ -34,6 +34,7 @@ from boxmunge.release import (
 from boxmunge.release_keep import (
     ensure_kept_pairing, keep_previous_release_txn, restore_superseded,
 )
+from boxmunge.release_target import DeployRefused
 from boxmunge.release_txn import (
     InstallTxn, advance, close_txn, load_txn, open_txn, options_text, stale_reason,
     start_refusal, supersede_txn,
@@ -43,6 +44,7 @@ from boxmunge.staging_isolation import StagingIsolationError, check_install_isol
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
+    from boxmunge.run_as import ServiceUser
 
 
 @dataclass(frozen=True)
@@ -168,13 +170,40 @@ def _install(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTx
     crash_point("txn.installed")
     if req.on_installed is not None:
         req.on_installed()
-    return switch_and_close(project_name, paths, req, txn)
+    # Before the hook: a refusal leaves the install abandonable.
+    users = _decide(project_name, paths, req, txn)
+    if isinstance(users, int):
+        return users
+    return switch_and_close(project_name, paths, req, txn, users)
 
 
-def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy,
-                     txn: InstallTxn) -> int:
-    """From installed: the hook (unless resuming at switching), configs,
+def _decide(project_name: str, paths: BoxPaths, req: TreeDeploy,
+            txn: InstallTxn) -> dict[str, ServiceUser] | int:
+    """The release's users, or the exit code of a refusal (reported)."""
+    try:
+        return decide_release_users(project_name, paths, req.manifest, req.component)
+    except DeployRefused as e:
+        print(f"ERROR: {req.ref} cannot start as it is:\n{e}", file=sys.stderr)
+        log_error(req.component, f"{req.ref} cannot start as it is: {e}", paths,
+                  project=project_name)
+        return report_left_open(project_name, paths, txn, req, "it cannot start as it is (the "
+                                "problems above say what to change); nothing has run",
+                                rerun=False)
+    except DockerError as e:
+        return report_left_open(project_name, paths, txn, req,
+                                f"building its images failed: {e}")
+
+
+def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTxn,
+                     users: dict[str, ServiceUser] | None = None) -> int:
+    """From installed: the users (`users`, decided before the hook, or
+    decided here first), the hook (unless resuming at switching), configs,
     replace_release, then close."""
+    if users is None:
+        decided = _decide(project_name, paths, req, txn)
+        if isinstance(decided, int):
+            return decided
+        users = decided
     resumed_switch = txn.reached("switching")
     if not resumed_switch:
         if not txn.reached("hook_started"):
@@ -186,7 +215,7 @@ def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy,
             return report_left_open(project_name, paths, txn, req, "the pre-deploy hook failed",
                                     rc)
     try:
-        generate_release_config(project_name, paths, req.manifest, req.component)
+        generate_release_config(project_name, paths, req.manifest, req.component, users)
     except (OSError, ValueError) as e:
         return report_left_open(project_name, paths, txn, req,
                                 f"generating its configs failed: {e}")
@@ -211,11 +240,11 @@ def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy,
 
 
 def report_left_open(project_name: str, paths: BoxPaths, txn: InstallTxn, req: TreeDeploy,
-                     why: str, rc: int = 1) -> int:
+                     why: str, rc: int = 1, *, rerun: bool = True) -> int:
     print(f"ERROR: The install of {req.ref} stopped at {txn.phase}: {why}. This attempt "
           f"did not start or change production's containers, and other starts of "
           f"{project_name} are refused until this install is finished: "
-          f"{options_text(project_name, txn)}.", file=sys.stderr)
+          f"{options_text(project_name, txn, rerun=rerun)}.", file=sys.stderr)
     log_error(req.component, f"Install of {req.ref} left open at {txn.phase}: {why}",
               paths, project=project_name)
     return rc

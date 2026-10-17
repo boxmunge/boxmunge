@@ -28,6 +28,7 @@ from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
 from boxmunge.published_ports import declared_ports
 from boxmunge.run_as import compose_user_problems, unmappable_users
+from boxmunge.user_entries import entries_missing_from
 from boxmunge.security_overlay import (
     PROFILE_DEFAULT,
     PROFILE_OFF,
@@ -280,6 +281,7 @@ def validate_user_compose(
     off_services: set[str] | None = None,
     cve_policy: dict | None = None,
     manifest_services: dict | None = None,
+    user_entries: dict | None = None,
     project_directory: Path | None = None,
 ) -> None:
     """Parse compose.yml and reject hostile keys.
@@ -382,7 +384,10 @@ def validate_user_compose(
     if isolation:
         raise ComposeSecurityError(isolation[0] + _profile_note(services, isolation[0]))
     remapped = _remapped(paths)
-    user_problems = compose_user_problems(services, manifest_services)
+    # `user_entries`: the manifest's user-only entries (user_entries.py).
+    user_problems = entries_missing_from(user_entries, services)
+    user_problems += compose_user_problems(services, {**(user_entries or {}),
+                                                      **(manifest_services or {})})
     if remapped:
         user_problems += unmappable_users(services)
     else:

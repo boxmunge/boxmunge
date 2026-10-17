@@ -424,6 +424,8 @@ def collect_health(paths: BoxPaths) -> HealthReport:
     )
     report.checks.append(check_security_profiles(paths))
     report.checks.append(check_cve_scan_freshness(paths))
+    from boxmunge.health_checks.service_users import check_service_users
+    report.checks.append(check_service_users(paths))
 
     # Host hardening checks
     from boxmunge.health_checks.hardening import (

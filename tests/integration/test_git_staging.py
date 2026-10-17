@@ -39,7 +39,7 @@ _LOOP = ["sh", "-c", "trap 'exit 0' TERM; while :; do sleep 1; done"]
 
 
 def _files(name: str, origin, version: str, *, build: bool = False) -> dict[str, str]:
-    manifest = yaml.safe_load(manifest_text(name))
+    manifest = yaml.safe_load(manifest_text(name, image_users=True))
     manifest.update(schema_version=3, source="git", repo=str(origin), ref="main")
     manifest["services"] = {"app": {"internal": True, "writable": {"external": True}}}
     app = {"command": _LOOP, "network_mode": "none", "environment": {"VERSION": version},

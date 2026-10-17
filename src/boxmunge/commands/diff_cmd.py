@@ -95,7 +95,9 @@ def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
 
         if manifest:
             from boxmunge.caddy import generate_caddy_config
-            from boxmunge.compose import generate_compose_override, load_user_compose
+            from boxmunge.compose import (
+                generate_compose_override, load_user_compose, recorded_users,
+            )
 
             new_caddy = generate_caddy_config(manifest)
             current_caddy_path = paths.project_caddy_site(project_name)
@@ -109,10 +111,12 @@ def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
 
             # v0.8: pass the candidate compose.yml from the new bundle so
             # the overlay omits read_only/tmpfs defaults consistently with
-            # what a real deploy of this bundle would produce.
+            # what a real deploy of this bundle would produce. The users are
+            # those decided last: the deploy decides them again from its images.
             candidate_user_compose = load_user_compose(extracted / "compose.yml", project_name)
             new_compose = generate_compose_override(
                 manifest, user_compose=candidate_user_compose,
+                users=recorded_users(paths, project_name),
             )
             current_compose_path = paths.project_compose_override(project_name)
             if current_compose_path.exists():

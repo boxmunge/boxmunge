@@ -15,12 +15,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from boxmunge.commands.deploy import (
-    generate_release_config, replace_release, run_pre_deploy_hook,
+    replace_release, run_pre_deploy_hook,
+)
+from boxmunge.commands.release_config import (
+    decide_release_users, generate_release_config, promote_candidates,
 )
 from boxmunge.commands.restore import restore_locked
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_guard import ComposeRefused, check_start
 from boxmunge.crashpoint import crash_point
+from boxmunge.docker_run import DockerError
 from boxmunge.data_dirs import log_kept, set_aside_announcer
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.intake import (
@@ -37,6 +41,7 @@ from boxmunge.release import (
     load_previous_release, mark_live, sync_release_code,
 )
 from boxmunge.release_keep import ensure_kept_pairing
+from boxmunge.release_target import DeployRefused
 from boxmunge.release_txn import (
     InstallTxn, advance, close_txn, load_txn, open_txn, stale_reason, start_refusal,
     supersede_txn,
@@ -344,11 +349,16 @@ def restore_rolled_back_data(project_name: str, paths: BoxPaths, manifest: dict,
     # service. Otherwise that check compares the old release with the
     # record of the release it just replaced, and refuses.
     try:
-        prepare_compose_override(paths, manifest, component="rollback")
+        # The backup service restores as the user the restored release runs as.
+        users = decide_release_users(project_name, paths, manifest, "rollback")
+        # The backup service is the restored release's: its images get
+        # their names now, not at the switch.
+        promote_candidates(paths, project_name)
+        prepare_compose_override(paths, manifest, component="rollback", users=users or None)
         check_start(paths, project_name, component="rollback",
                     compose_files=["compose.yml", "compose.boxmunge.yml"],
                     record=True, deploying=True, txn=txn.id)
-    except (ComposeRefused, OSError, ValueError) as e:
+    except (ComposeRefused, DeployRefused, DockerError, OSError, ValueError) as e:
         print(f"ERROR: {e}. Rerun 'rollback {project_name}' once the cause is fixed.",
               file=sys.stderr)
         return False
@@ -368,8 +378,9 @@ def start_rolled_back(project_name: str, paths: BoxPaths, manifest: dict,
                   f"once it is fixed.", file=sys.stderr)
             return rc
     try:
-        generate_release_config(project_name, paths, manifest, "rollback")
-    except (OSError, ValueError) as e:
+        users = decide_release_users(project_name, paths, manifest, "rollback")
+        generate_release_config(project_name, paths, manifest, "rollback", users)
+    except (DeployRefused, DockerError, OSError, ValueError) as e:
         print(f"ERROR: Generating the previous release's configs failed: {e}. Rerun "
               f"'rollback {project_name}' once the cause is fixed.", file=sys.stderr)
         log_error("rollback", f"Config generation failed: {e}", paths, project=project_name)

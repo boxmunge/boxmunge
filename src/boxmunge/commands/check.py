@@ -66,6 +66,7 @@ def run_smoke_in_container(
     project_name: str | None = None,
     *,
     logs_target: "ComposeTarget | None" = None,
+    hint: "Callable[[str], str | None] | None" = None,
 ) -> SmokeResult:
     """Execute per-service smoke tests inside their running containers.
 
@@ -81,7 +82,8 @@ def run_smoke_in_container(
 
     A failure's writable hint reads the service's logs through
     ``logs_target`` (staging passes its slot target); without one, through
-    production's compose files in ``project_dir``.
+    production's compose files in ``project_dir``. ``hint(service)`` may add
+    a line about the failing service (deploy's default-user hint).
 
     Returns the first failing result, or ok if all pass.
     """
@@ -114,22 +116,12 @@ def run_smoke_in_container(
                     break
 
         if sr.status != "ok":
-            # v0.9: enrich the failure message with a writable hint when
-            # container logs show a read-only-fs error. Non-fatal — if
-            # enrichment fails, return the original message unchanged.
-            try:
-                from boxmunge.writable_diagnostics import (
-                    enrich_failure_with_writable_hint,
-                )
-                enriched = enrich_failure_with_writable_hint(
-                    sr.message, project_dir, manifest, svc_name,
-                    log_fetcher=_logs_through(logs_target),
-                )
-                if enriched != sr.message:
-                    sr = SmokeResult(status=sr.status, message=enriched)
-            except Exception:
-                pass
-            return sr
+            from boxmunge.writable_diagnostics import smoke_failure_message
+            message = smoke_failure_message(sr.message, project_dir, manifest, svc_name,
+                                            _logs_through(logs_target))
+            extra = hint(svc_name) if hint is not None else None
+            return SmokeResult(status=sr.status,
+                               message=f"{message}\n{extra}" if extra else message)
 
     return SmokeResult(status="ok", message="")
 

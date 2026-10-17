@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -13,11 +13,15 @@ from boxmunge.compose_mounts import SMOKE_SOURCE
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
 from boxmunge.published_ports import overlay_ports
-from boxmunge.compose_hardening import hardening_fragment
+from boxmunge.compose_hardening import apply_run_user, hardening_fragment
+from boxmunge.run_as import RunAsError, read_users
 from boxmunge.security_warn import (
     warn_off_services, warn_published_ports, warn_writable_state,
 )
 from boxmunge.writable import WritableState, classify_state
+
+if TYPE_CHECKING:
+    from boxmunge.run_as import ServiceUser
 
 
 class ComposeError(ValueError):
@@ -56,6 +60,7 @@ def _build_service_override(
     *,
     user_compose: dict[str, Any],
     alias_prefix: str | None = None,
+    users: dict[str, ServiceUser] | None = None,
 ) -> dict[str, Any]:
     """Build per-service overrides for every service.
 
@@ -68,8 +73,11 @@ def _build_service_override(
     resource limits, the smoke-script mount, and the writable: translation.
 
     `user_compose` (the resolved compose model) supplies the compose-only
-    services and the user's own read_only / tmpfs declarations.
+    services and the user's own read_only / tmpfs declarations. `users`
+    (the users record) gives each service its decided user, and a numeric
+    non-root one its tmpfs mounts.
     """
+    users = users or {}
     project = manifest["project"]
     prefix = alias_prefix or project
     project_security = manifest.get("security")
@@ -164,7 +172,7 @@ def _build_service_override(
             pids_value = sec_fragment.pop("pids_limit")
             svc_override["deploy"]["resources"]["limits"]["pids"] = pids_value
 
-        svc_override.update(sec_fragment)
+        svc_override.update(apply_run_user(sec_fragment, users.get(svc_name)))
 
         if svc_override:
             services[svc_name] = svc_override
@@ -183,6 +191,7 @@ def _build_service_override(
         fragment = hardening_fragment(project_security, None, user_svc)
         fragment.pop("read_only", None)
         fragment.pop("tmpfs", None)
+        fragment = apply_run_user(fragment, users.get(svc_name))
         if fragment:
             services[svc_name] = {**services.get(svc_name, {}), **fragment}
 
@@ -233,6 +242,7 @@ def generate_compose_override(
     env_files: dict[str, str] | None = None,
     *,
     user_compose: dict[str, Any],
+    users: dict[str, ServiceUser] | None = None,
 ) -> str:
     """Generate compose.boxmunge.yml content.
 
@@ -244,7 +254,8 @@ def generate_compose_override(
     `validate_user_compose` checked. Required: without it the overlay
     could not see compose-only services, and they would run unhardened.
     """
-    return _render_override(manifest, env_files, user_compose, alias_prefix=None)
+    return _render_override(manifest, env_files, user_compose, alias_prefix=None,
+                            users=users)
 
 
 def _render_override(
@@ -252,10 +263,12 @@ def _render_override(
     env_files: dict[str, str] | None,
     user_compose: dict[str, Any],
     alias_prefix: str | None,
+    users: dict[str, ServiceUser] | None,
 ) -> str:
     env_file_list = _build_env_file_list(env_files)
     services = _build_service_override(
         manifest, env_file_list, user_compose=user_compose, alias_prefix=alias_prefix,
+        users=users,
     )
     override: dict[str, Any] = {"networks": {"boxmunge-proxy": {"external": True}}}
     if services:
@@ -296,12 +309,39 @@ def production_env_files(paths: BoxPaths, project_name: str) -> dict[str, str]:
     return env_files
 
 
+def recorded_users(paths: BoxPaths, project_name: str, *,
+                   staging: bool = False) -> dict[str, ServiceUser]:
+    """The users record the overlay replays. Raises ComposeError for one
+    that cannot be read: guessing would change who a service runs as."""
+    try:
+        return read_users(paths, project_name, staging=staging)
+    except RunAsError as e:
+        raise ComposeError(str(e)) from e
+
+
+def render_compose_override(paths: BoxPaths, manifest: dict[str, Any],
+                            user_compose: dict[str, Any],
+                            users: dict[str, ServiceUser] | None = None) -> str:
+    """compose.boxmunge.yml's content for the release in the project dir
+    (`user_compose`: its resolved compose.yml), with the users the record
+    holds; nothing is written."""
+    project_name = manifest["project"]
+    return generate_compose_override(
+        manifest, env_files=production_env_files(paths, project_name) or None,
+        user_compose=user_compose,
+        users=users if users is not None else recorded_users(paths, project_name),
+    )
+
+
 def prepare_compose_override(
     paths: BoxPaths,
     manifest: dict[str, Any],
     component: str = "deploy",
+    *,
+    users: dict[str, ServiceUser] | None = None,
 ) -> None:
-    """Generate compose.boxmunge.yml for the release in the project dir.
+    """Generate compose.boxmunge.yml for the release in the project dir,
+    with `users`, or (None) the users the record holds.
 
     `component` labels the SECURITY OFF log entry so callers from upgrade /
     resume don't misattribute the warning as "deploy". Lives here, not in
@@ -312,12 +352,8 @@ def prepare_compose_override(
     override_path = paths.project_compose_override(project_name)
     override_path.parent.mkdir(parents=True, exist_ok=True)
 
-    env_files = production_env_files(paths, project_name)
-
     user_compose = load_user_compose(project_dir / "compose.yml", project_name)
-    content = generate_compose_override(
-        manifest, env_files=env_files or None, user_compose=user_compose,
-    )
+    content = render_compose_override(paths, manifest, user_compose, users)
     atomic_write_text(override_path, content)
     refresh_overlay_hash(project_dir, paths.project_bind_record(project_name))
     # Before the overlay named built images under boxmunge.invalid/, Compose
@@ -347,6 +383,7 @@ def generate_staging_compose_override(
     env_files: dict[str, str] | None = None,
     *,
     user_compose: dict[str, Any],
+    users: dict[str, ServiceUser] | None = None,
 ) -> str:
     """Generate compose.boxmunge-staging.yml content.
 
@@ -358,5 +395,5 @@ def generate_staging_compose_override(
     """
     return _render_override(
         manifest, env_files, user_compose,
-        alias_prefix=f"{manifest['project']}-staging",
+        alias_prefix=f"{manifest['project']}-staging", users=users,
     )

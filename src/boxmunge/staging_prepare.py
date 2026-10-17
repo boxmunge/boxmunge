@@ -29,6 +29,7 @@ from boxmunge.staging_compose import generate_staging_compose_base
 from boxmunge.staging_copies import claim_new_copies, foreign_copies, slot_made
 from boxmunge.staging_copy_plan import CopyPlan, StagingDataError, copy_sources
 from boxmunge.staging_data import plan_staging_copy
+from boxmunge.user_entries import USER_ENTRIES
 from boxmunge.staging_isolation import (
     StagingIsolationError, candidate_model, check_isolation, production_model, resolving,
     separation_problems, staging_copy_tops, staging_model,
@@ -36,6 +37,7 @@ from boxmunge.staging_isolation import (
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
+    from boxmunge.run_as import ServiceUser
 
 
 def env_files_for_staging(paths: BoxPaths, project: str, release: Path) -> dict[str, str]:
@@ -51,16 +53,26 @@ def env_files_for_staging(paths: BoxPaths, project: str, release: Path) -> dict[
     return env
 
 
-def write_staging_files(paths: BoxPaths, project: str, manifest: dict[str, Any],
-                        release: Path, dest_dir: Path) -> dict:
-    """Write staging's base and overlay for the release in ``release`` into
-    ``dest_dir``; returns the resolved user compose model."""
-    box_state = staged_box_state(paths.project_dir(project), release)
+def write_staging_overlay(paths: BoxPaths, project: str, manifest: dict[str, Any],
+                          release: Path, dest_dir: Path,
+                          users: dict[str, ServiceUser] | None) -> dict:
+    """Write staging's overlay; returns the resolved user compose model."""
     user_compose = load_user_compose(release / "compose.yml", project)
     # mode=0o644: read by `docker compose` in deploy and root contexts.
     atomic_write_text(dest_dir / STAGING_OVERLAY, generate_staging_compose_override(
         manifest, env_files=env_files_for_staging(paths, project, release) or None,
-        user_compose=user_compose), mode=0o644)
+        user_compose=user_compose, users=users), mode=0o644)
+    return user_compose
+
+
+def write_staging_files(paths: BoxPaths, project: str, manifest: dict[str, Any],
+                        release: Path, dest_dir: Path,
+                        users: dict[str, ServiceUser] | None = None) -> dict:
+    """Write staging's base and overlay for the release in ``release`` into
+    ``dest_dir``; returns the resolved user compose model. The overlay
+    names no service users until stage has decided them (`users`)."""
+    box_state = staged_box_state(paths.project_dir(project), release)
+    user_compose = write_staging_overlay(paths, project, manifest, release, dest_dir, users)
     atomic_write_text(dest_dir / STAGING_BASE, generate_staging_compose_base(
         release / "compose.yml", box_state, paths.project_dir(project)), mode=0o644)
     return user_compose
@@ -112,7 +124,7 @@ def validate_staging_base(paths: BoxPaths, project: str, manifest: dict[str, Any
         files_dir / STAGING_BASE, paths, project_name=project,
         off_services={svc for svc, _ in services_with_off_profile(manifest)},
         cve_policy=manifest.get("security"), manifest_services=manifest.get("services"),
-        project_directory=release)
+        user_entries=manifest.get(USER_ENTRIES), project_directory=release)
 
 
 def _refuse_shared(paths: BoxPaths, project: str, staging: dict[str, Any], release: Path,

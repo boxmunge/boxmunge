@@ -172,6 +172,9 @@ def fake_containers(request, monkeypatch) -> FakeContainers:
                             lambda project_name: [])
         monkeypatch.setattr("boxmunge.docker_containers.container_mounts",
                             lambda project_name: [])
+        # Who a project's containers run as (deploy's user-change check).
+        monkeypatch.setattr("boxmunge.docker_containers.container_users",
+                            lambda project_name: {})
         # The legacy-stage evidence asks when production's containers were made.
         monkeypatch.setattr("boxmunge.docker_containers.created_times",
                             lambda project_name: {})
@@ -306,3 +309,21 @@ def _unremapped_daemon(request, monkeypatch, tmp_path_factory):
 
     monkeypatch.setattr("boxmunge.userns.offset.ETC", tmp_path_factory.mktemp("etc"))
     monkeypatch.setattr("boxmunge.userns.offset.docker_info", lambda: dict(UNREMAPPED_INFO))
+
+
+@pytest.fixture(autouse=True)
+def _users_decided_without_images(request, monkeypatch):
+    """Off the integration tier, deploy, stage and promote build no images:
+    the step that builds them and decides users records nothing, so the
+    overlay emits no user, as for a project deployed before users were
+    decided; and there are no candidate images to remove. Tests of that
+    step are marked `decides_users`."""
+    if request.node.get_closest_marker("integration"):
+        return
+    monkeypatch.setattr("boxmunge.commands.release_config.remove_candidates",
+                        lambda project_name: None)
+    if request.node.get_closest_marker("decides_users"):
+        return
+    monkeypatch.setattr("boxmunge.commands.deploy_images.prepare_release_users",
+                        lambda paths, target, manifest, *, component, rollback=False,
+                        refetch=frozenset(): {})

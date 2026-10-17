@@ -57,6 +57,21 @@ def _dry_run_target(paths: BoxPaths, target: UpdateTarget) -> dict[str, Any]:
         return {"name": target.name, "status": "failed",
                 "reason": f"inventory_failed: {e}",
                 "previous_digests": before, "current_digests": before}
+    if changed and not target.is_caddy:
+        from boxmunge.run_as import RunAsError
+        from boxmunge.user_drift import guard_pull
+        try:
+            held = guard_pull(paths, target.name, {s: str(services[s].image) for s in changed},
+                              {s: running[s].image_id for s in changed},
+                              component="container-update")
+        except (DockerError, RunAsError) as e:
+            return {"name": target.name, "status": "failed",
+                    "reason": f"inventory_failed: {e}",
+                    "previous_digests": before, "current_digests": before}
+        if held:
+            return {"name": target.name, "status": "failed", "reason": "user_changed: " +
+                    "; ".join(f"{s}: {why}" for s, why in held.items()),
+                    "previous_digests": before, "current_digests": changed}
     if changed:
         return {"name": target.name, "status": "would_change",
                 "previous_digests": before, "current_digests": changed}

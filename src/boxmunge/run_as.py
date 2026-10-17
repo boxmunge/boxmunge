@@ -5,13 +5,26 @@
 or "<uid>:<gid>" with both ids in 1..65535; `root` and `image` need the
 block's `reason`, as other opt-outs do. A compose `user:` is the operator's
 explicit choice and wins; its numeric parts must be mappable (0..65535).
+
+Deploy, stage and promote decide who each service runs as from its images
+(`effective_user`) and record it in `state/deploy/<p>[-staging].users.json`;
+every later start replays the record, so an upgrade or a restart never
+changes a service's user.
 """
 from __future__ import annotations
 
+import json
 import re
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
-from boxmunge.security_overlay import SecurityValidationError
+from boxmunge.fileutil import atomic_write_text
+from boxmunge.fs_nofollow import read_text_nofollow
+from boxmunge.user_entries import service_entry
+from boxmunge.security_overlay import PROFILE_OFF, SecurityValidationError, effective_profile
+
+if TYPE_CHECKING:
+    from boxmunge.paths import BoxPaths
 
 USER_ROOT = "root"
 USER_IMAGE = "image"
@@ -108,3 +121,197 @@ def unmappable_users(services: dict[str, Any]) -> list[str]:
                                 f"{MAX_ID}, which a remapped daemon cannot map. Use an id "
                                 f"between 0 and {MAX_ID}")
     return problems
+
+
+DEFAULT_USER = "10001:10001"
+SOURCE_COMPOSE = "compose"
+SOURCE_MANIFEST = "manifest"
+SOURCE_IMAGE = "image"
+SOURCE_DEFAULT = "default"
+SOURCE_OFF = "profile-off"
+SOURCE_CHOWN = "data-chown"
+SOURCES = frozenset({SOURCE_COMPOSE, SOURCE_MANIFEST, SOURCE_IMAGE, SOURCE_DEFAULT,
+                     SOURCE_OFF, SOURCE_CHOWN})
+# The sources whose user the overlay emits; the others run what the image
+# or compose.yml says.
+_EMITTED = frozenset({SOURCE_MANIFEST, SOURCE_DEFAULT, SOURCE_CHOWN})
+_REDECIDE = ("boxmunge cannot replay it: remove it and deploy the project again, "
+             "which decides every service's user afresh")
+IMAGE_REASON = "runs as the image's own default user, root; its entrypoint drops privileges"
+
+
+class RunAsError(Exception):
+    """A service cannot be given a user, or the users record is unreadable;
+    the message says what to do."""
+
+
+def identity(value: str | None) -> str:
+    """The user part of a user spec; 'root' for every spelling of root
+    (Docker runs '', '0', 'root', '0:<gid>' and 'root:<group>' as uid 0)."""
+    part = (value or "").strip().split(":", 1)[0]
+    return "root" if part in ("", "0", "root") else part
+
+
+def numeric_ids(value: str | None) -> tuple[int, int] | None:
+    match = _NUMERIC.fullmatch((value or "").strip())
+    return (int(match[1]), int(match[2])) if match else None
+
+
+@dataclass(frozen=True)
+class ServiceUser:
+    """Who one service runs as, and why. `user` is the value the decision
+    produced (None: the image's own user); `image_user` is the image's
+    Config.User when it was decided ('' when the image sets none)."""
+    user: str | None
+    source: str
+    image_user: str = ""
+
+    def emitted(self) -> str | None:
+        """The overlay's `user:` (None: emit nothing)."""
+        return self.user if self.source in _EMITTED else None
+
+    def runs_as(self) -> str:
+        return identity(self.user if self.user is not None else self.image_user)
+
+    def owner_ids(self) -> tuple[int, int] | None:
+        """The numeric uid:gid the service writes its data as, where it is
+        known: nonroot_ids, or the image's own numeric non-root USER."""
+        ids = self.nonroot_ids()
+        if ids is None and self.user is None:
+            ids = numeric_ids(self.image_user)
+        return ids if ids and ids[0] != 0 else None
+
+    def nonroot_ids(self) -> tuple[int, int] | None:
+        """The numeric uid:gid of a non-root user boxmunge or compose.yml
+        set; None for root, names, a bare uid and the image's own user."""
+        ids = numeric_ids(self.user) if self.source in _EMITTED | {SOURCE_COMPOSE} else None
+        return ids if ids and ids[0] != 0 else None
+
+
+def _profile_off(manifest: dict[str, Any], service: str) -> bool:
+    svc = service_entry(manifest, service)
+    svc_sec = svc.get("security") if isinstance(svc, dict) else None
+    return effective_profile(manifest.get("security"), svc_sec) == PROFILE_OFF
+
+
+def declaration_text(service: str, manifest: dict[str, Any]) -> str:
+    """Where to put, and the manifest.yml lines that declare, `service`
+    running as its image's own user, for the manifest as it stands."""
+    own = service_entry(manifest, service)
+    sec = own.get("security") if isinstance(own, dict) else None
+    lines = ["services:", f"  {service}:"]
+    if not isinstance(own, dict):
+        where = (f"add to manifest.yml's services (compose.yml alone defines {service}; "
+                 f"an entry holding only security says who it runs as and changes "
+                 f"nothing else about it)")
+    elif isinstance(sec, dict):
+        where = f"merge into services.{service}.security in manifest.yml"
+    else:
+        where = f"merge into services.{service} in manifest.yml"
+    lines += ["    security:", "      user: image"]
+    if not (isinstance(sec, dict) and sec.get("reason")):
+        lines.append(f'      reason: "{IMAGE_REASON}"')
+    return where + ":\n\n" + "\n".join(lines) + "\n\n"
+
+
+def root_refusal(service: str, image: Any, manifest: dict[str, Any]) -> str:
+    return (
+        f"service {service} runs the registry image {image}, which sets no non-root "
+        f"USER, so it would run as root; say so in the manifest. If its entrypoint "
+        f"starts as root and drops privileges (postgres, mysql, mariadb, nginx), "
+        f"{declaration_text(service, manifest)}"
+        f"(A security block needs `schema_version: 2` or later in manifest.yml.) "
+        f"If instead it runs as a fixed non-root user from the start (redis:*-alpine "
+        f"is 999:1000), write `user: \"<uid>:<gid>\"` in place of the user and reason "
+        f"lines. See PROJECT_CONVENTIONS.md, \"Who a service runs as\".")
+
+
+def effective_user(service: str, svc: dict[str, Any], manifest: dict[str, Any],
+                   image_user: str) -> ServiceUser:
+    """The spec's rules 1-5, in order: compose `user:`, `security.user`, the
+    image's non-root USER, profile off, the build: default. Raises
+    RunAsError (rule 5) with the lines to add."""
+    compose_user = compose_user_text(svc.get("user"))
+    if compose_user is not None:
+        return ServiceUser(compose_user, SOURCE_COMPOSE, image_user)
+    declared, _reason = declared_user(manifest.get("security"),
+                                      service_entry(manifest, service))
+    if declared is not None:
+        value = {USER_ROOT: "0:0", USER_IMAGE: None}.get(declared, declared)
+        return ServiceUser(value, SOURCE_MANIFEST, image_user)
+    if identity(image_user) != "root":
+        return ServiceUser(None, SOURCE_IMAGE, image_user)
+    if _profile_off(manifest, service):
+        return ServiceUser(None, SOURCE_OFF, image_user)
+    if svc.get("build") is not None:
+        return ServiceUser(DEFAULT_USER, SOURCE_DEFAULT, image_user)
+    raise RunAsError(root_refusal(service, svc.get("image"), manifest))
+
+
+def describe(user: ServiceUser) -> str:
+    image = user.image_user or "root"
+    if user.source == SOURCE_COMPOSE:
+        return f"{user.user} (compose.yml user:)"
+    if user.source == SOURCE_MANIFEST:
+        if user.user is None:
+            return f"the image's user, {image} (security.user: image)"
+        return "root (security.user: root)" if user.user == "0:0" else f"{user.user} (security.user)"
+    if user.source == SOURCE_IMAGE:
+        return f"{user.image_user} (the image's USER)"
+    if user.source == SOURCE_DEFAULT:
+        return f"{DEFAULT_USER} (the default for a build: service with no USER)"
+    if user.source == SOURCE_CHOWN:
+        return f"{user.user} (set by data chown)"
+    return f"the image's user, {image} (profile: off)"
+
+
+def read_users(paths: BoxPaths, project: str, *, staging: bool = False) -> dict[str, ServiceUser]:
+    """The users record; {} when the project has none (deployed before users
+    were decided). Raises RunAsError for a record that cannot be read."""
+    path = paths.project_users_record(project, staging=staging)
+    try:
+        doc = json.loads(read_text_nofollow(path))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        raise RunAsError(f"cannot read the users record {path}: {e}. {_REDECIDE}") from e
+    if not isinstance(doc, dict):
+        raise RunAsError(f"{path} is not a users record. {_REDECIDE}")
+    out = {}
+    for svc, entry in doc.items():
+        if (not isinstance(entry, dict) or entry.get("source") not in SOURCES
+                or not (entry.get("user") is None or isinstance(entry.get("user"), str))
+                or not isinstance(entry.get("image_user"), str)):
+            raise RunAsError(f"{path}: entry {svc!r} is not {{user, source, image_user}}: "
+                             f"{entry!r}. {_REDECIDE}")
+        user = ServiceUser(entry["user"], entry["source"], entry["image_user"])
+        if user.source in _EMITTED and user.user is not None and (
+                numeric_ids(user.user) is None or not all(
+                    i <= MAX_ID for i in numeric_ids(user.user))):
+            raise RunAsError(f"{path}: entry {svc!r} would emit user {user.user!r}, which is "
+                             f"not <uid>:<gid> with ids up to {MAX_ID}. {_REDECIDE}")
+        out[svc] = user
+    return out
+
+
+def write_users(paths: BoxPaths, project: str, users: dict[str, ServiceUser], *,
+                staging: bool = False) -> None:
+    doc = {svc: {"user": u.user, "source": u.source, "image_user": u.image_user}
+           for svc, u in sorted(users.items())}
+    atomic_write_text(paths.project_users_record(project, staging=staging),
+                      json.dumps(doc, indent=2) + "\n")
+
+
+def default_user_hint(paths: BoxPaths, project: str, service: str, *,
+                      staging: bool = False) -> str | None:
+    """A line for a failing service that took the 10001:10001 default."""
+    try:
+        user = read_users(paths, project, staging=staging).get(service)
+    except RunAsError as e:
+        return f"  HINT: {e}"
+    if user is None or user.source != SOURCE_DEFAULT:
+        return None
+    return (f"  HINT: {service} runs as {DEFAULT_USER}, the default for a build: service "
+            f"whose image sets no USER, and that uid has no passwd entry in the image. If "
+            f"the app needs one, or must write where 10001 cannot, add USER to its "
+            f"Dockerfile or declare security.user in manifest.yml.")
