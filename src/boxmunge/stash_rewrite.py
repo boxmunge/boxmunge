@@ -21,7 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from boxmunge.fileutil import RenamedNotSyncedError, durable_rename, open_regular_nofollow
+from boxmunge.fileutil import RenamedNotSyncedError, durable_rename
+from boxmunge.fs_nofollow import open_regular_nofollow
 from boxmunge.log import log_operation, log_warning
 from boxmunge.notify import notify
 from boxmunge.stash import META_FILENAME, list_stashes

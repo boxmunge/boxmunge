@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from boxmunge.data_dirs import ReleaseStateError
-from boxmunge.fileutil import atomic_write_text, fsync_dir, read_text_nofollow
+from boxmunge.fileutil import atomic_write_text, fsync_dir
+from boxmunge.fs_nofollow import read_text_nofollow
 from boxmunge.release import live_meta_text
 from boxmunge.release_keep import discard_superseded, kept_previous_text, superseded_paths
 from boxmunge.ulid import generate_ulid

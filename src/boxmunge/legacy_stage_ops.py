@@ -33,9 +33,9 @@ from boxmunge.docker import (
     staging_compose_project,
 )
 from boxmunge.fileutil import (
-    DISCARDED, atomic_write_text, chown_tree_deploy, discard_dir, durable_rename_dir, fsync_dir,
-    read_text_nofollow,
+    DISCARDED, atomic_write_text, discard_dir, durable_rename_dir, fsync_dir,
 )
+from boxmunge.fs_nofollow import chown_tree_deploy, read_text_nofollow
 from boxmunge.git_layout import alert_unlinked, relink_advice
 from boxmunge.legacy_stage import (
     LEGACY_STAGING_FILES, Evidence, LegacyStage, drop_record, get_record,

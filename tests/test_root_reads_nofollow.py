@@ -15,7 +15,7 @@ from typing import Callable
 import pytest
 
 from boxmunge.data_dirs import ReleaseStateError
-from boxmunge.fileutil import open_regular_nofollow, read_text_nofollow
+from boxmunge.fs_nofollow import open_regular_nofollow, read_text_nofollow
 from boxmunge.legacy_stage import (
     EvidenceError, LegacyStage, get_record, legacy_stage, legacy_staging_state, records_path,
     stage_time,

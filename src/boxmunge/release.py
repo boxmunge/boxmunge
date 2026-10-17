@@ -35,9 +35,8 @@ from boxmunge.data_dirs import (
     has_record, holds_data, record_path, save_record,
     start_record, warn_retained,
 )
-from boxmunge.fileutil import (
-    atomic_write_text, chmod_nofollow, discard_dir, fsync_dir, sync_entries,
-)
+from boxmunge.fileutil import atomic_write_text, discard_dir, fsync_dir, sync_entries
+from boxmunge.fs_nofollow import chmod_nofollow
 from boxmunge.staged_release import SLOT, release_dir
 
 if TYPE_CHECKING:

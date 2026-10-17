@@ -25,7 +25,8 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 from boxmunge import docker_containers
 from boxmunge.docker_run import DockerError
-from boxmunge.fileutil import atomic_write_text, exclusive_lock, read_text_nofollow
+from boxmunge.fileutil import atomic_write_text, exclusive_lock
+from boxmunge.fs_nofollow import read_text_nofollow
 from boxmunge.git_slot import GitRefError, head_sha, rev_parse
 from boxmunge.notify import notify
 from boxmunge.state import StateError, read_state

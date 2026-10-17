@@ -12,7 +12,8 @@ from boxmunge.container_update import (
     SKIPPED_LOCKED, SKIPPED_MONITOR_STOPPED, lock_skipped, update_target_locked,
 )
 from boxmunge.container_update_targets import UpdateTarget, build_targets
-from boxmunge.fileutil import LockError, open_regular_nofollow, project_lock
+from boxmunge.fileutil import LockError, project_lock
+from boxmunge.fs_nofollow import open_regular_nofollow
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.notify import notify

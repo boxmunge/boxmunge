@@ -153,7 +153,7 @@ class TestWriteGuards:
             path.unlink()
             path.symlink_to(target)
 
-        with patch("boxmunge.fileutil._fchown_deploy", side_effect=swap):
+        with patch("boxmunge.fileutil.fchown_deploy", side_effect=swap):
             with pytest.raises(ManifestError, match="is a symlink"):
                 write_manifest(path, MANIFEST)
         assert path.is_symlink() and target.read_text() == "# the repository's\n"

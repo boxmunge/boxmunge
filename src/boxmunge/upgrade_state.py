@@ -14,7 +14,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, TYPE_CHECKING
 
-from boxmunge.fileutil import atomic_write_text, open_regular_nofollow, read_text_nofollow
+from boxmunge.fileutil import atomic_write_text
+from boxmunge.fs_nofollow import open_regular_nofollow, read_text_nofollow
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths

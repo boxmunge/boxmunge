@@ -18,7 +18,8 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from boxmunge.commands.health_cmd import HealthCheck
-from boxmunge.fileutil import atomic_write_text, open_regular_nofollow
+from boxmunge.fileutil import atomic_write_text
+from boxmunge.fs_nofollow import open_regular_nofollow
 from boxmunge.log import log_error
 from boxmunge.notify import notify
 from boxmunge.userns import offset

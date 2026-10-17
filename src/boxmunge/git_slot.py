@@ -19,7 +19,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from boxmunge.fileutil import running_as_root
+from boxmunge.fs_nofollow import running_as_root
 
 GIT_TIMEOUT = 300
 _FULL_SHA = re.compile(r"[0-9a-f]{40}")

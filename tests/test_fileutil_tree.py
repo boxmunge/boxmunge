@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from boxmunge import fileutil
+from boxmunge import fileutil, fs_nofollow
 from boxmunge.fileutil import discard_dir, durable_rename_dir, sync_tree
 
 
@@ -107,8 +107,8 @@ class _Swap:
     def __init__(self, monkeypatch) -> None:
         self.inodes: set[int] = set()
         real_stat, real_fstat = os.stat, os.fstat
-        monkeypatch.setattr(fileutil, "running_as_root", lambda: True)
-        monkeypatch.setattr(fileutil, "_deploy_owner", lambda: (os.getuid(), os.getgid()))
+        monkeypatch.setattr(fs_nofollow, "running_as_root", lambda: True)
+        monkeypatch.setattr(fs_nofollow, "_deploy_owner", lambda: (os.getuid(), os.getgid()))
 
         def chown(path, uid, gid, *, dir_fd=None, follow_symlinks=True):
             st = real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
@@ -116,8 +116,8 @@ class _Swap:
 
         def fchown(fd, uid, gid):
             self.inodes.add(real_fstat(fd).st_ino)
-        monkeypatch.setattr(fileutil.os, "chown", chown)
-        monkeypatch.setattr(fileutil.os, "fchown", fchown)
+        monkeypatch.setattr(fs_nofollow.os, "chown", chown)
+        monkeypatch.setattr(fs_nofollow.os, "fchown", fchown)
         self.monkeypatch = monkeypatch
 
     def before_listing(self, directory: Path, swap) -> None:
@@ -131,7 +131,7 @@ class _Swap:
                 done.append(True)
                 swap()
             return real_scandir(target)
-        self.monkeypatch.setattr(fileutil.os, "scandir", scandir)
+        self.monkeypatch.setattr(fs_nofollow.os, "scandir", scandir)
 
 
 def _inodes(root: Path) -> set[int]:
@@ -159,7 +159,7 @@ def test_chown_tree_deploy_of_a_link_reowns_only_the_link(tmp_path, monkeypatch)
     outside = _outside(tmp_path)
     os.symlink(outside, tmp_path / "x")
     rec = _Swap(monkeypatch)
-    fileutil.chown_tree_deploy(tmp_path / "x")
+    fs_nofollow.chown_tree_deploy(tmp_path / "x")
     assert rec.inodes == {os.lstat(tmp_path / "x").st_ino}
 
 
@@ -170,7 +170,7 @@ def test_chown_tree_deploy_never_descends_a_nested_link(tmp_path, monkeypatch) -
     (tree / "f").write_text("f")
     os.symlink(outside, tree / "d" / "link")
     rec = _Swap(monkeypatch)
-    fileutil.chown_tree_deploy(tree)
+    fs_nofollow.chown_tree_deploy(tree)
     assert rec.inodes == _inodes(tree)
     assert not rec.inodes & _inodes(outside)
 
@@ -181,7 +181,7 @@ def test_chown_tree_deploy_survives_the_top_swapped_for_a_link(tmp_path, monkeyp
     (tree / "f").mkdir(parents=True)
     rec = _Swap(monkeypatch)
     rec.before_listing(tree, lambda: _link_in(tree, outside, tmp_path / "aside"))
-    fileutil.chown_tree_deploy(tree)
+    fs_nofollow.chown_tree_deploy(tree)
     assert not rec.inodes & _inodes(outside)
 
 
@@ -193,20 +193,20 @@ def test_chown_tree_deploy_survives_a_subdirectory_swapped_for_a_link(tmp_path,
     rec = _Swap(monkeypatch)
     rec.before_listing(tree / "sub",
                        lambda: _link_in(tree / "sub", outside, tmp_path / "aside"))
-    fileutil.chown_tree_deploy(tree)
+    fs_nofollow.chown_tree_deploy(tree)
     assert not rec.inodes & _inodes(outside)
 
 
 def test_chown_tree_deploy_of_a_file_reowns_it(tmp_path, monkeypatch) -> None:
     (tmp_path / "f").write_text("x")
     rec = _Swap(monkeypatch)
-    fileutil.chown_tree_deploy(tmp_path / "f")
+    fs_nofollow.chown_tree_deploy(tmp_path / "f")
     assert rec.inodes == {os.lstat(tmp_path / "f").st_ino}
 
 
 def test_chown_tree_deploy_is_silent_when_not_root(tmp_path, monkeypatch) -> None:
     (tmp_path / "d").mkdir()
     rec = _Swap(monkeypatch)
-    monkeypatch.setattr(fileutil, "running_as_root", lambda: False)
-    fileutil.chown_tree_deploy(tmp_path / "d")
+    monkeypatch.setattr(fs_nofollow, "running_as_root", lambda: False)
+    fs_nofollow.chown_tree_deploy(tmp_path / "d")
     assert rec.inodes == set()
