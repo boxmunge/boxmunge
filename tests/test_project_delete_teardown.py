@@ -207,6 +207,7 @@ def test_a_forced_delete_is_refused_while_containers_exist(box, monkeypatch, cap
     from boxmunge.commands import project_delete_cmd as pd
     _no_helper(monkeypatch)
     monkeypatch.setattr(pd, "_teardown", lambda name, paths: ["production: boom"])
+    monkeypatch.setattr(pd, "caddy_reload", lambda *a, **k: None)
     fake_containers.run(NAME, "db", "sha256:x")
     _refused(box, capsys, pd.delete_locked(NAME, box, force=True), "myapp-db-1")
 

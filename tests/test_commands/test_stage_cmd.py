@@ -127,9 +127,10 @@ class TestRunStage:
         assert os.stat(staging_base).st_mode & 0o777 == 0o644, \
             f"Staging compose base must be 0o644; got {oct(os.stat(staging_base).st_mode & 0o777)}"
 
+    @patch("boxmunge.docker.compose_logs_capture", return_value="")  # the smoke's hint
     @patch("boxmunge.staging_bringup.caddy_reload")
     @patch("boxmunge.compose_guard.compose_up")
-    def test_copies_smoke_scripts(self, mock_up, mock_reload, paths):
+    def test_copies_smoke_scripts(self, mock_up, mock_reload, mock_logs, paths):
         add_project("testapp", paths)
         manifest_with_smoke = VALID_MANIFEST.replace(
             "    routes:\n      - path: /\n",

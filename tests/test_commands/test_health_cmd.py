@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from boxmunge.commands.health_cmd import (
@@ -38,6 +39,7 @@ class TestHealthReport:
         ])
         assert report.exit_code == 2
 
+    @pytest.mark.usefixtures("docker_down")  # health probes Docker and Caddy
     def test_health_does_not_crash_when_a_hardening_check_raises(
         self, tmp_path: Path, monkeypatch, capsys,
     ) -> None:

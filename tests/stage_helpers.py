@@ -21,7 +21,10 @@ def staging_docker_off():
             patch("boxmunge.staging_bringup.caddy_reload"), \
             patch("boxmunge.stage_slot.compose_down") as down_retire, \
             patch("boxmunge.commands.unstage_cmd.compose_down") as down, \
-            patch("boxmunge.commands.unstage_cmd.caddy_reload"):
+            patch("boxmunge.commands.unstage_cmd.caddy_reload"), \
+            patch("boxmunge.docker.compose_logs_capture", return_value=""):
+        # compose_logs_capture: the post-deploy writable diagnostics and a
+        # failed smoke's hint fetch logs, production's and staging's.
         yield {"up": up, "down": down, "down_retire": down_retire}
 
 
