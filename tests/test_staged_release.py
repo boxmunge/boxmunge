@@ -95,6 +95,31 @@ def test_made_round_trips(paths) -> None:
     assert load_slot(paths, P).made == ("media-staging",)
 
 
+def test_a_linked_meta_is_a_slot_error(paths, tmp_path) -> None:
+    """Root reads the record in a directory deploy can write: a link to a
+    valid record elsewhere is refused, not followed."""
+    _build(paths)
+    swap_in(paths, P)
+    meta = slot_dir(paths, P) / "meta.json"
+    elsewhere = tmp_path / "meta.json"
+    elsewhere.write_text(meta.read_text())
+    meta.unlink()
+    meta.symlink_to(elsewhere)
+    with pytest.raises(SlotError, match=str(meta)):
+        load_slot(paths, P)
+
+
+def test_a_fifo_meta_is_a_slot_error_without_blocking(paths) -> None:
+    from tests.fifo_guard import raised_without_blocking
+    _build(paths)
+    swap_in(paths, P)
+    meta = slot_dir(paths, P) / "meta.json"
+    meta.unlink()
+    os.mkfifo(meta)
+    err = raised_without_blocking(lambda: load_slot(paths, P), meta)
+    assert isinstance(err, SlotError) and str(meta) in str(err)
+
+
 def test_symlinked_slot_is_a_slot_error(paths, tmp_path) -> None:
     paths.project_releases(P).mkdir(parents=True)
     os.symlink(tmp_path, slot_dir(paths, P))

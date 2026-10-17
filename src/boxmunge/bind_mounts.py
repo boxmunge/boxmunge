@@ -15,6 +15,7 @@ from typing import Any
 import yaml
 
 from boxmunge.compose_mounts import volume_source
+from boxmunge.fileutil import read_text_nofollow
 
 
 class BindMountError(ValueError):
@@ -60,10 +61,11 @@ def _top_dir(source: str, project_dir: Path) -> str | None:
     return rel.split(os.sep, 1)[0]
 
 
-def _entries(compose_path: Path) -> list[Any]:
+def _entries(compose_path: Path, nofollow: bool = False) -> list[Any]:
     try:
-        doc = yaml.safe_load(compose_path.read_text())
-    except (OSError, yaml.YAMLError) as e:
+        text = read_text_nofollow(compose_path) if nofollow else compose_path.read_text()
+        doc = yaml.safe_load(text)
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
         raise BindMountError(f"cannot read {compose_path}: {e}") from e
     if not isinstance(doc, dict):
         raise BindMountError(f"{compose_path} is not a YAML mapping")
@@ -85,17 +87,20 @@ def _entries(compose_path: Path) -> list[Any]:
     return entries
 
 
-def bind_mounted_dirs(compose_path: Path, project_dir: Path) -> dict[str, bool]:
+def bind_mounted_dirs(compose_path: Path, project_dir: Path, *,
+                      nofollow: bool = False) -> dict[str, bool]:
     """Map each bind-mounted top-level project dir to True if any mount of it
-    is read-write. A missing compose file mounts nothing.
+    is read-write. A missing compose file mounts nothing. ``nofollow``
+    reads the file without following a link or blocking on a FIFO
+    (fileutil.read_text_nofollow), refusing anything but a regular file.
 
     Raises BindMountError if the file exists but cannot be classified: a
     guess here decides whether live data is deleted.
     """
-    if not compose_path.exists():
+    if not (os.path.lexists(compose_path) if nofollow else compose_path.exists()):
         return {}
     dirs: dict[str, bool] = {}
-    for entry in _entries(compose_path):
+    for entry in _entries(compose_path, nofollow):
         source = volume_source(entry)
         if source is None:
             continue

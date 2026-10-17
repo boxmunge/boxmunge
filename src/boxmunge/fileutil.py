@@ -35,6 +35,7 @@ Network calls that do not need the lock (webhooks, Pushover) run after it
 is released.
 """
 
+import errno
 import fcntl
 import logging
 import os
@@ -106,9 +107,20 @@ def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
 
     For root opening a name in a directory the deploy user can write: a
     planted symlink (or a hard link to another file) would otherwise make
-    root read, write, chmod or chown a file outside it.
+    root read, write, chmod or chown a file outside it. It opens O_NONBLOCK,
+    so a planted FIFO is refused at once instead of blocking the open; the
+    flag is cleared once the file is known to be regular, so callers get an
+    ordinary blocking descriptor.
     """
-    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
+    try:
+        fd = os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, mode)
+    except OSError as e:
+        # ENXIO: a write-only open of a FIFO (or socket) nobody reads.
+        what = {errno.ELOOP: "a symlink", errno.ENXIO: "a FIFO or socket"}.get(e.errno)
+        if what is None:
+            raise
+        raise OSError(e.errno, f"{path} is {what}, not a plain regular file; refusing "
+                      "to use it. Remove it so it can be recreated.") from e
     st = os.fstat(fd)
     if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
         os.close(fd)
@@ -116,7 +128,15 @@ def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
             f"{path} is not a plain regular file (mode {oct(st.st_mode)}, "
             f"{st.st_nlink} links); refusing to use it. Remove it so it can be recreated."
         )
+    fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
     return fd
+
+
+def read_text_nofollow(path: Path) -> str:
+    """A UTF-8 file's text, read without following a link (see
+    open_regular_nofollow). Raises OSError (or UnicodeDecodeError)."""
+    with os.fdopen(open_regular_nofollow(path, os.O_RDONLY), encoding="utf-8") as f:
+        return f.read()
 
 
 def chmod_nofollow(path: Path, mode: int | None = None, add: int = 0) -> None:

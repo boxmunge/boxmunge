@@ -421,6 +421,42 @@ class TestOpenRegularNofollow:
             os.close(open_regular_nofollow(name, os.O_RDONLY | os.O_NONBLOCK))
         assert victim.read_text() == "keep"
 
+    def test_a_fifo_is_refused_without_blocking(self, tmp_path: Path) -> None:
+        """No O_NONBLOCK from the caller: the open itself must not wait for
+        a writer on a planted FIFO."""
+        from boxmunge.fileutil import open_regular_nofollow
+        from tests.fifo_guard import raised_without_blocking
+        fifo = tmp_path / "meta.json"
+        os.mkfifo(fifo)
+        err = raised_without_blocking(lambda: open_regular_nofollow(fifo, os.O_RDONLY), fifo)
+        assert isinstance(err, OSError) and str(fifo) in str(err)
+
+    def test_the_descriptor_it_returns_blocks(self, tmp_path: Path) -> None:
+        import fcntl
+        from boxmunge.fileutil import open_regular_nofollow
+        path = tmp_path / "f"
+        path.write_text("x")
+        fd = open_regular_nofollow(path, os.O_RDONLY)
+        try:
+            assert not fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_NONBLOCK
+        finally:
+            os.close(fd)
+
+    def test_read_text_nofollow(self, tmp_path: Path) -> None:
+        from boxmunge.fileutil import read_text_nofollow
+        from tests.fifo_guard import raised_without_blocking
+        path = tmp_path / "f"
+        path.write_text("text ✓\n")
+        assert read_text_nofollow(path) == "text ✓\n"
+        link = tmp_path / "link"
+        link.symlink_to(path)
+        with pytest.raises(OSError, match=str(link)):
+            read_text_nofollow(link)
+        fifo = tmp_path / "fifo"
+        os.mkfifo(fifo)
+        assert isinstance(raised_without_blocking(lambda: read_text_nofollow(fifo), fifo),
+                          OSError)
+
     def test_lock_file_planted_as_symlink_is_refused(self, tmp_path: Path) -> None:
         victim = tmp_path / "victim"
         victim.write_text("keep")

@@ -23,7 +23,8 @@ from typing import TYPE_CHECKING, Any
 from boxmunge.crashpoint import crash_point
 from boxmunge.docker import staging_compose_project
 from boxmunge.fileutil import (
-    DISCARDED, atomic_write_text, discard_dir, durable_rename_dir, sweep_discarded,
+    DISCARDED, atomic_write_text, discard_dir, durable_rename_dir, read_text_nofollow,
+    sweep_discarded,
 )
 from boxmunge.ulid import generate_ulid
 
@@ -105,7 +106,7 @@ def load_slot(paths: BoxPaths, project: str) -> StagedRelease | None:
         raise SlotError(f"{slot} is not a directory")
     path = slot / "meta.json"
     try:
-        doc = json.loads(path.read_text())
+        doc = json.loads(read_text_nofollow(path))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise SlotError(f"cannot read {path}: {e}") from e
     if not isinstance(doc, dict) or doc.get("version") != META_VERSION:

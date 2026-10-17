@@ -52,10 +52,12 @@ def record_path(project_dir: Path) -> Path:
     return project_dir / ".releases" / "data-dirs.json"
 
 
-def bind_dirs(compose_path: Path, project_dir: Path) -> dict[str, bool]:
-    """Bind-mounted top-level dirs of a compose file -> read-write?"""
+def bind_dirs(compose_path: Path, project_dir: Path, *,
+              nofollow: bool = False) -> dict[str, bool]:
+    """Bind-mounted top-level dirs of a compose file -> read-write?
+    ``nofollow`` for a file root must not reach through a link or FIFO."""
     try:
-        return bind_mounted_dirs(compose_path, project_dir)
+        return bind_mounted_dirs(compose_path, project_dir, nofollow=nofollow)
     except BindMountError as e:
         raise ReleaseStateError(
             f"Cannot tell which project directories hold data: {e}. Nothing "
@@ -203,7 +205,8 @@ def classify(project_dir: Path, release_tree: Path | None,
         n for n in candidates if dirs.occupied(n)}
     recorded -= set(BOX_OWNED_ENTRIES) | set(BOXMUNGE_ENTRIES)
     seeded = recorded - release - live_rw - (stored or set())
-    staged_binds = bind_dirs(staged_compose, project_dir) if staged_compose else {}
+    staged_binds = (bind_dirs(staged_compose, project_dir, nofollow=True)
+                    if staged_compose else {})
     return replace(dirs, recorded=frozenset(recorded), seeded=frozenset(seeded),
                    adopted=frozenset(adopted - recorded), staged=frozenset(staged_binds),
                    staged_rw=frozenset(d for d, rw in staged_binds.items() if rw))

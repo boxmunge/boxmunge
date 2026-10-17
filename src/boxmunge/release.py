@@ -85,10 +85,18 @@ def _kept_trees(project_dir: Path) -> list[Path]:
 
 def _staged_compose(project_dir: Path) -> Path | None:
     """The staged release's compose.yml, while a release is staged. A linked
-    slot is refused by its own cores; nothing is read through it."""
+    slot is refused by its own cores; nothing is read through it. Whatever
+    lies at the name is passed on: data_dirs reads it without following a
+    link or blocking on a FIFO, and refuses anything but a regular file."""
     slot = project_dir / ".releases" / SLOT
+    if not slot.is_dir() or slot.is_symlink():
+        return None
+    if os.path.islink(release_dir(slot)):
+        raise ReleaseStateError(f"{release_dir(slot)} is a symbolic link, where the staged "
+                                f"release's own tree belongs; nothing is read through it. "
+                                f"Unstage, or remove it by hand and stage again")
     compose = release_dir(slot) / "compose.yml"
-    return compose if slot.is_dir() and not slot.is_symlink() and compose.is_file() else None
+    return compose if os.path.lexists(compose) else None
 
 
 def _classify(project_dir: Path, release_tree: Path | None, *,
