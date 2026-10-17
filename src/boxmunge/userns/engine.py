@@ -1,0 +1,268 @@
+# SPDX-License-Identifier: Apache-2.0
+"""The forward migration (spec section 5): journalled, every step resumable.
+
+Phase 0 (inventory and preflight) runs again under the locks on every
+resume before the daemon switch, after making sure the old daemon runs on
+its original config. Phase 1 prepares with no downtime (identity, one tar
+per image, PREMIGRATE backups synced off-site). Phase 2 stops everything
+and switches the daemon; a remapped daemon that will not start puts the
+original daemon.json back and restarts everything on the untouched old
+root. Phase 3 rebuilds the daemon's state (network, images, the Caddyfile's
+mode, volumes moved and shifted, bind data shifted). Phase 4 brings the box
+up project by project, then the timers come back and the journal says
+`applied`. Each step is journalled (durably) before the next starts, so a
+kill at any point leaves a box that still runs unremapped or that a rerun
+completes, or userns-rollback reverses. Any failure is journalled, alerted
+and left for the operator.
+"""
+from __future__ import annotations
+
+import os
+from contextlib import ExitStack, contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, Iterator
+
+from boxmunge.backup import BackupKind
+from boxmunge.docker_run import run as _run
+from boxmunge.fileutil import project_lock
+from boxmunge.notify import notify
+from boxmunge.paths import BoxPaths
+from boxmunge.pause import is_paused
+from boxmunge.project_registry import load_registered_projects
+from boxmunge.userns import offset as uo
+from boxmunge.userns.bringup import bring_up, quiesce
+from boxmunge.userns.daemon_ctl import DaemonControl, TimerControl, daemon_answers
+from boxmunge.userns.images import IMAGES_DIR, load_all, save_all
+from boxmunge.userns.inventory import PROXY_NETWORK, Inventory, take_inventory
+from boxmunge.userns.journal import FORWARD, ROLLBACK, Journal, load_journal, save_journal
+from boxmunge.userns.preflight import PreflightRefused, preflight
+from boxmunge.userns.shift import Direction, scan_tree, shift_tree
+from boxmunge.userns.switch import (
+    CADDYFILE_MODE, MigrationError, back_to_prior, caddyfile_mode, create_identity,
+    ensure_prior, host_ids, prior_store, read_daemon_json, set_caddyfile_mode, to_remapped,
+)
+from boxmunge.userns.volumes import data_dir, move, recreate
+
+COMPONENT = "userns-migrate"
+Save = Callable[[], None]
+
+
+@contextmanager
+def project_locks(paths: BoxPaths, projects: list[str]) -> Iterator[None]:
+    """Every project lock, in name order. The migration is the only holder of
+    more than one (it runs under upgrade.lock); see fileutil's lock order."""
+    with ExitStack() as stack:
+        for p in sorted(projects):
+            stack.enter_context(project_lock(p, paths))
+        yield
+
+
+def shift_journalled(j: Journal, tree: Path, direction: Direction, save: Save,
+                     key: str) -> None:
+    """Journal the tree's setuid list, then shift it (shift.py's docstring)."""
+    setid = {**scan_tree(tree, j.offset, direction).setid, **j.setid.get(key, {})}
+    if setid != j.setid.get(key, {}):
+        j.setid[key] = setid
+        save()
+    shift_tree(tree, j.offset, direction, setid)
+
+
+def _phase0(paths: BoxPaths, j: Journal | None, timers: TimerControl,
+            images_dir: Path) -> Journal:
+    s = j.offset if j is not None else uo.allocate_offset(uo.ETC, host_ids())
+    inv = take_inventory(paths)
+    if j is not None and j.inventory:
+        inv = inv.with_running_from(Inventory.from_json(j.inventory))
+    report = preflight(paths, inv, direction=FORWARD, offset=s, images_dir=images_dir)
+    print(report.text())
+    if not report.ok:
+        raise PreflightRefused(report)
+    if j is None:
+        return Journal(FORWARD, "started", s, daemon_json=read_daemon_json(),
+                       prior_store=prior_store(inv), inventory=inv.to_json(),
+                       timers=timers.state(), caddyfile_mode=caddyfile_mode(paths))
+    j.inventory = inv.to_json()
+    return j
+
+
+def _backups(paths: BoxPaths, inv: Inventory) -> None:
+    from boxmunge.commands.backup_cmd import backup_locked, run_backup_sync
+    for p in inv.projects:
+        if not paths.project_manifest(p).exists():
+            continue
+        if is_paused(p, paths):
+            print(f"  {p} is paused: no pre-migration backup (its containers are stopped); "
+                  f"its data is carried like any other")
+            continue
+        if backup_locked(p, paths, kind=BackupKind.PREMIGRATE) != 0:
+            raise MigrationError(f"the pre-migration backup of {p} failed; nothing was stopped")
+    if run_backup_sync(paths) != 0:
+        raise MigrationError("backup-sync failed; nothing was stopped")
+
+
+def _prepare(paths: BoxPaths, j: Journal, inv: Inventory, save: Save) -> None:
+    create_identity(j.offset)
+    _backups(paths, inv)
+    j.phase = "prepared"
+    save()
+
+
+def _switch(paths: BoxPaths, j: Journal, inv: Inventory, daemon: DaemonControl,
+            save: Save) -> None:
+    try:
+        to_remapped(paths, j.daemon_json, j.offset, daemon)
+        if uo.remap_offset(paths) != j.offset:
+            raise MigrationError("the daemon came up with another offset")
+    except Exception as e:
+        back_to_prior(paths, j.daemon_json, j.offset, daemon)
+        bring_up(paths, inv, j, save, component=COMPONENT, prefix="restart")
+        j.phase, j.failed = "prepared", f"the remapped daemon did not start: {e}"
+        save()
+        raise MigrationError(f"the remapped daemon did not start ({e}). daemon.json was "
+                             f"restored and the box restarted on its old root; the boxmunge "
+                             f"timers stay stopped until you run userns-migrate again or "
+                             f"userns-rollback") from e
+    j.phase = "switched"
+    save()
+
+
+def _network(inv: Inventory) -> None:
+    found = _run(["docker", "network", "ls", "-q", "--filter", f"name=^{PROXY_NETWORK}$"],
+                 capture=True).stdout.split()
+    if found:
+        return  # created before a crash
+    net = inv.network
+    args = ["docker", "network", "create", "--driver", str(net.get("driver") or "bridge")]
+    for cfg in (net.get("ipam") or {}).get("Config") or []:
+        for key, flag in (("Subnet", "--subnet"), ("Gateway", "--gateway"),
+                          ("IPRange", "--ip-range")):
+            if cfg.get(key):
+                args += [flag, cfg[key]]
+    for k, v in sorted((net.get("options") or {}).items()):
+        args += ["--opt", f"{k}={v}"]
+    for k, v in sorted((net.get("labels") or {}).items()):
+        args += ["--label", f"{k}={v}"]
+    _run([*args, PROXY_NETWORK], capture=True)
+
+
+def _rebuild(paths: BoxPaths, j: Journal, inv: Inventory, images_dir: Path, save: Save) -> None:
+    old_root = Path(inv.root)
+    new_root = old_root / f"{j.offset}.{j.offset}"
+    if j.items.get("network") != "created":
+        _network(inv)
+        j.items["network"] = "created"
+        save()
+    load_all(inv.images, j, images_dir, save)
+    if j.caddyfile_mode is not None and j.items.get("caddyfile") != "0644":
+        set_caddyfile_mode(paths, CADDYFILE_MODE)
+        j.items["caddyfile"] = "0644"
+        save()
+    for v in inv.volumes:
+        if v.anonymous:
+            continue  # empty ones are recreated empty; ones with data were refused
+        key = f"volume:{v.name}"
+        if j.items.get(key) not in ("moved", "shifted"):
+            recreate(v)  # again on a resume: a restarted daemon may have dropped it
+            j.items[key] = "created"
+            save()
+            move(old_root, new_root, v.name)
+            j.items[key] = "moved"
+            save()
+        if j.items[key] == "moved":
+            tree = data_dir(new_root, v.name)
+            shift_journalled(j, tree, Direction.FORWARD, save, str(tree))
+            j.items[key] = "shifted"
+            save()
+    for source in inv.data_binds():
+        key = f"bind:{source}"
+        if j.items.get(key) != "shifted" and os.path.lexists(source):
+            shift_journalled(j, Path(source), Direction.FORWARD, save, source)
+            j.items[key] = "shifted"
+            save()
+    j.phase = "rebuilt"
+    save()
+
+
+def _final(paths: BoxPaths, j: Journal, results: dict[str, str]) -> None:
+    from boxmunge.commands.check import run_check_all
+    from boxmunge.commands.security_actions import cmd_security_scan
+    from boxmunge.commands.self_test_cmd import run_self_test
+    checks = {"cve-scan": cmd_security_scan([], paths),
+              "check-all": run_check_all(paths, read_only=False),
+              "self-test": run_self_test(paths)}
+    lines = [f"{p}: {status}" for p, status in sorted(results.items())]
+    lines += [f"{name}: exit {rc}" for name, rc in checks.items()]
+    notify(paths, "userns migration applied",
+           "\n".join(lines) + "\nSoak for 48 hours, then: sudo /opt/boxmunge/bin/boxmunge-upgrade "
+           "userns-commit. To undo: sudo /opt/boxmunge/bin/boxmunge-upgrade userns-rollback",
+           component=COMPONENT, priority=1)
+
+
+def _ensure_remapped(paths: BoxPaths, j: Journal, daemon: DaemonControl) -> None:
+    """After the switch: the remapped daemon runs, exactly as journalled."""
+    if not daemon_answers():
+        daemon.start()
+    if uo.remap_offset(paths) != j.offset:
+        raise MigrationError(f"the daemon is not remapped at offset {j.offset} as the journal "
+                             f"says; see docker-userns in health")
+
+
+def _refuse_rerun(j: Journal | None) -> Journal | None:
+    if j is not None and j.direction == FORWARD and j.phase in ("applied", "committed"):
+        raise MigrationError(f"the migration is already {j.phase}; "
+                             + ("nothing to do" if j.phase == "committed"
+                                else "soak, then userns-commit, or userns-rollback"))
+    if j is not None and j.direction == ROLLBACK and j.phase != "rolled-back":
+        raise MigrationError(f"a rollback stopped at {j.phase}; finish it with userns-rollback")
+    if j is not None and j.direction == ROLLBACK:
+        return None  # a rolled-back box starts over from phase 0
+    return j
+
+
+def migrate(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,
+            images_dir: Path = IMAGES_DIR) -> Journal:
+    """Run or resume the migration. Caller: root, holding upgrade.lock."""
+    j = _refuse_rerun(load_journal(paths))
+    with project_locks(paths, sorted(load_registered_projects(paths))):
+        if j is not None and not j.reached("switched"):
+            ensure_prior(paths, j.daemon_json, j.offset, daemon)
+        elif j is not None:
+            _ensure_remapped(paths, j, daemon)
+        if j is None or not j.reached("switched"):
+            j = _phase0(paths, j, timers, images_dir)
+            save_journal(paths, j)
+        journal = j
+
+        def save() -> None:
+            save_journal(paths, journal)
+
+        inv = Inventory.from_json(j.inventory)
+        try:
+            j.failed = None
+            timers.stop_all()
+            if not j.reached("switched"):
+                save_all(inv.images, j, images_dir, save)
+                if not j.reached("prepared"):
+                    _prepare(paths, j, inv, save)
+                quiesce(inv)  # again on a resume: the old daemon may have restarted some
+                j.phase = "quiesced"
+                save()
+                _switch(paths, j, inv, daemon, save)
+            if not j.reached("rebuilt"):
+                _rebuild(paths, j, inv, images_dir, save)
+            results = bring_up(paths, inv, j, save, component=COMPONENT)
+            timers.restore(j.timers)
+            j.phase, j.failed = "applied", None
+            j.applied_at = datetime.now(timezone.utc).isoformat()
+            save()
+        except BaseException as e:
+            j.failed = j.failed or f"{j.phase}: {e}"
+            save()
+            notify(paths, "userns migration stopped", f"Stopped after phase {j.phase}: {e}. "
+                   f"The boxmunge timers are stopped. Re-run userns-migrate to resume, or "
+                   f"userns-rollback.", component=COMPONENT, priority=1)
+            raise
+    _final(paths, j, results)  # outside the locks: the scan and check-all take them
+    return j
+

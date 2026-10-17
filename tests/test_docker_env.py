@@ -52,6 +52,8 @@ NOT_DOCKER = {
     ("shell.py", "run_command", "boxmunge-server"): "boxmunge-server scrubs its own docker calls",
     ("shell.py", "_run_upgrade", "?"): "runs the upgrade shim or boxmunge-server upgrade",
     ("userns/daemon_ctl.py", "_systemctl", "systemctl"): "stops and starts docker.service and the boxmunge timers",
+    ("userns/switch.py", "_checked", "?"): "useradd/usermod: creates the remap identity",
+    ("userns/switch.py", "create_identity", "id"): "asks whether the remap identity exists",
     ("version.py", "get_build_version", "git"): "reads the source commit",
 }
 
