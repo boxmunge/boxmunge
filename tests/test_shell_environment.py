@@ -14,13 +14,18 @@ CLIENT = {
     "USER": "root", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TERM": "xterm",
     "SSH_CONNECTION": "192.0.2.1 5 192.0.2.2 922", "SSH_ORIGINAL_COMMAND": "status",
 }
+# Machine-wide settings pam_env gives every session; outbound calls need them.
+MACHINE = {"http_proxy": "http://proxy.example.com:3128", "https_proxy": "http://proxy.example.com:3128",
+           "no_proxy": "localhost", "HTTP_PROXY": "http://proxy.example.com:3128",
+           "HTTPS_PROXY": "http://proxy.example.com:3128", "NO_PROXY": "localhost",
+           "TZ": "Europe/London"}
 
 
-def test_only_locale_terminal_and_ssh_variables_survive() -> None:
-    env = dict(CLIENT)
+def test_only_locale_terminal_ssh_proxy_and_tz_variables_survive() -> None:
+    env = {**CLIENT, **MACHINE}
     restrict_environment(env)
     account = pwd.getpwuid(os.getuid())
-    assert env == {
+    assert env == {**MACHINE,
         "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TERM": "xterm",
         "SSH_CONNECTION": "192.0.2.1 5 192.0.2.2 922", "SSH_ORIGINAL_COMMAND": "status",
         "PATH": SHELL_PATH, "HOME": account.pw_dir, "USER": account.pw_name,

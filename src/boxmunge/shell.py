@@ -365,12 +365,18 @@ def _dispatch_string(command_string: str) -> None:
 
 
 # Variables the shell passes on to the commands it runs. Anything else an SSH
-# client got through (BASH_ENV, LD_PRELOAD, PYTHONPATH...) could run code before
-# an allowlisted command does. sshd accepts only LANG, LC_*, COLORTERM and
-# NO_COLOR from deploy (src/boxmunge/sshd/00-boxmunge.conf); this holds if a
-# later sshd setting widens that.
+# client got through (BASH_ENV, ENV, PYTHONPATH...) could run code in one of
+# those commands before it does its job, so it is dropped here. This cannot
+# undo what already acted when /bin/sh and python started this shell: the
+# dynamic loader's LD_PRELOAD, LD_LIBRARY_PATH or GCONV_PATH. Against those
+# the boundary is sshd, which accepts only LANG, LC_*, COLORTERM and NO_COLOR
+# from deploy (src/boxmunge/sshd/00-boxmunge.conf, checked by install.sh and
+# `health`). The proxy and TZ variables are machine-wide settings (pam_env)
+# that deploy's outbound calls (image pulls, version checks) rely on.
 _KEPT_ENV = frozenset({"TERM", "LANG", "COLORTERM", "NO_COLOR",
-                       "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_ORIGINAL_COMMAND"})
+                       "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_ORIGINAL_COMMAND",
+                       "http_proxy", "https_proxy", "no_proxy",
+                       "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "TZ"})
 SHELL_PATH = "/usr/local/bin:/usr/bin:/bin"
 
 
