@@ -136,17 +136,63 @@ def _refuse_top_level_files(paths: BoxPaths, project: str, plan: CopyPlan,
             f"(e.g. ./db/app.db rather than ./app.db).")
 
 
-def _copy(project: str, src: Store, dest: Store, is_file: bool) -> None:
-    source = _mount(src, "/src", True)
+def _top_entry(project_dir: Path, ref: str) -> tuple[Path, list[str]]:
+    """The project directory's entry holding `ref`, and the parts below it.
+
+    Docker resolves a -v source's links on the host as root, and data
+    directories are written by containers, so only a top entry is mounted
+    (no container can write the project directory itself); the rest is
+    resolved inside the helper (_resolved)."""
+    rel = Path(os.path.relpath(ref, project_dir))
+    if not rel.parts or rel.parts[0] in (".", "..") or ".." in rel.parts:
+        raise StagingDataError(f"{ref} is not inside {project_dir}; refusing to copy it")
+    top = project_dir / rel.parts[0]
+    if top.is_symlink():
+        raise StagingDataError(f"{top} is a symlink; refusing to copy through it. "
+                               f"Remove it (rm {top}) and stage again.")
+    return top, list(rel.parts[1:])
+
+
+def _resolved(var: str, path: str) -> str:
+    """Shell that sets `var` to `path` and refuses it unless it exists and
+    is reached without a link (resolved in the helper's own namespace)."""
+    return (f'{var}={shlex.quote(path)} && [ -e "${var}" ] && '
+            f'[ "$(readlink -f "${var}")" = "${var}" ] || {{ echo "{path} is missing or '
+            f'reached through a symlink; nothing copied" >&2; exit 3; }}; ')
+
+
+def _source(project_dir: Path, src: Store) -> tuple[list[str], str]:
+    """Production's store, mounted read-only, and the shell that finds it as $s."""
+    if src.kind == "volume":
+        return _mount(src, "/src", True), "s=/src; "
+    top, rest = _top_entry(project_dir, src.ref)
+    return ["-v", f"{top}:/srcroot:ro"], _resolved("s", "/".join(["/srcroot", *rest]))
+
+
+def _copy_job(project_dir: Path, src: Store, dest: Store,
+              is_file: bool) -> tuple[list[str], str]:
+    """The helper's mounts and script for one pair, planned (and every link
+    on the host side refused) before production is stopped."""
+    mounts, script = _source(project_dir, src)
+    if dest.kind == "volume":  # exists (verified)
+        return ([*mounts, *_mount(dest, "/dst", False)],
+                f'{script}{_EMPTY_DST} && cp -a "$s"/. /dst/')
+    rel = Path(os.path.relpath(dest.ref, project_dir))
+    if is_file and len(rel.parts) == 1:
+        # A file directly in the project directory: mount that directory,
+        # which no container can write, and replace the file whole.
+        name = shlex.quote(rel.parts[0])
+        return ([*mounts, "-v", f"{project_dir}:/dst"],
+                f'{script}rm -rf /dst/{name} && cp -a "$s" /dst/{name}')
+    top, rest = _top_entry(project_dir, dest.ref)
+    mounts += ["-v", f"{top}:/dst"]
     if is_file:
-        # Mount the destination's directory; the file is replaced whole.
-        name = shlex.quote(Path(dest.ref).name)
-        run_helper(copy_label(project), [*source, "-v", f"{Path(dest.ref).parent}:/dst"],
-                   f"rm -rf /dst/{name} && cp -a /src /dst/{name}")
-        return
-    # A staging volume exists (verified); -v creates a missing directory.
-    dst = _mount(dest, "/dst", False) if dest.kind == "volume" else ["-v", f"{dest.ref}:/dst"]
-    run_helper(copy_label(project), [*source, *dst], f"{_EMPTY_DST} && cp -a /src/. /dst/")
+        name = shlex.quote(rest[-1])
+        return mounts, (f'{script}{_resolved("d", "/".join(["/dst", *rest[:-1]]))}'
+                        f'rm -rf "$d"/{name} && cp -a "$s" "$d"/{name}')
+    return mounts, (f'{script}{_resolved("d", "/".join(["/dst", *rest]))}'
+                    f'rm -rf "$d"/* "$d"/.[!.]* "$d"/..?* && [ -z "$(ls -A "$d")" ] '
+                    f'&& cp -a "$s"/. "$d"/')
 
 
 def _remove_wrong_type(project: str, project_dir: Path, dest: Store, top: str,
@@ -235,6 +281,9 @@ def copy_production_data(paths: BoxPaths, project: str, plan: CopyPlan) -> None:
             f"refusing to replace their data underneath them.")
     kinds = verify_plan(plan)
     _refuse_top_level_files(paths, project, plan, kinds)
+    project_dir = paths.project_dir(project)
+    jobs = [_copy_job(project_dir, src, dest, is_file)
+            for (src, dest), is_file in zip(plan.pairs, kinds)]
     stopped = _running(project)
     if stopped:
         check_containers_start(paths, project, component="stage")
@@ -243,9 +292,9 @@ def copy_production_data(paths: BoxPaths, project: str, plan: CopyPlan) -> None:
         if stopped:
             print(f"  Stopping production for the copy: {', '.join(stopped)}")
             _run(["docker", "stop", "-t", str(_STOP_TIMEOUT), *stopped], capture=True)
-        for (src, dest), is_file in zip(plan.pairs, kinds):
+        for (src, dest), (mounts, script) in zip(plan.pairs, jobs):
             print(f"  Copying production {src.label} to staging {dest.label}...")
-            _copy(project, src, dest, is_file)
+            run_helper(copy_label(project), mounts, script)
     except BaseException as e:  # noqa: BLE001 - re-raised; kept as the cause
         cause = e
         raise

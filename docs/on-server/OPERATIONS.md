@@ -238,7 +238,9 @@ Staging keeps its own data between stages. To start it from a copy of production
 The copies run in the data helper, a short-lived container from the box's own `boxmunge-system`
 image (`boxmunge.invalid/system/system`, never pulled) running as root with no network, a read-only
 root filesystem and only the capabilities a copy needs, so owners and 0600 files carry over;
-production's stores are mounted read-only. If that image is missing, `stage` says to build it with
+production's stores are mounted read-only. A symlink on the way to a store or a copy (for
+example `data-staging/a` pointing elsewhere) makes `stage` refuse the copy before anything is
+written; remove the link and stage again. If that image is missing, `stage` says to build it with
 `docker compose -f /opt/boxmunge/system/compose.yml build`. On a box with user-namespace remapping, a
 single-file store directly in the project directory (`./app.db`) is refused before anything stops:
 mount a directory holding the file instead (`./db/app.db`).
