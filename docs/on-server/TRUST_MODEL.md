@@ -228,7 +228,13 @@ on its next upgrade, and a hand-edited rule is put back.
 boxmunge hardens the VPS as part of installation:
 
 - **UFW firewall** — deny all inbound except SSH, HTTP, HTTPS
-- **CrowdSec** — community threat intelligence IPS
+- **CrowdSec** — community threat intelligence IPS. It reads Caddy's access log from the
+  container's stdout through the Docker API, never from a file: a file would sit in a
+  directory Caddy (remapped, so it owns that directory) controls, and root CrowdSec would
+  open whatever Caddy put there (a FIFO, `/dev/zero`, a link to a root-only file). Its
+  unit runs with `MemoryMax=512M`, `TasksMax=256` and `Restart=on-failure`
+  (`crowdsec.service.d/boxmunge-limits.conf`), so a flood can neither exhaust the host's
+  memory nor switch detection off for good
 - **fail2ban** — brute-force protection
 - **Kernel hardening** — sysctl overrides (SYN cookies, ASLR, restricted BPF, etc.)
 - **AIDE** — file integrity monitoring on the control plane

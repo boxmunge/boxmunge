@@ -503,6 +503,22 @@ It lives in `/opt/boxmunge/logs/boxmunge.log`. The first write of each UTC day m
 
 A line in a log file that is not a JSON entry (torn by a crash, or hand-edited) is never skipped silently. `log` prints every entry it can read, then a `WARNING: <file>:<line>: ...` on stderr for each torn line, and exits 1, so `--json` output stays parseable and scripts still notice. The MCP `log` tool returns the same warnings and fails, the action API's `oplog.query` fails naming the line, and the health check's `recent-errors` warns, since a torn line may have been an error. Repair or delete the line named.
 
+### Caddy access log
+
+Every site's access log is JSON on the Caddy container's stdout; Caddy's own messages go to its
+stderr. Read it as the supervisor user with `docker logs boxmunge-caddy 2>/dev/null` (stdout only).
+Docker keeps 5 files of 50 MB (`caddy/compose.yml`). The host's CrowdSec reads the same stream
+through the Docker API (`/etc/crowdsec/acquis.d/boxmunge-caddy.yaml`, stdout only) and never opens a
+log file Caddy could replace. Every install and upgrade rewrites that file and CrowdSec's limits
+drop-in, restarts CrowdSec, and fails unless CrowdSec tails `boxmunge-caddy` and parses a Caddy line.
+Check it with `cscli metrics` (source `docker:boxmunge-caddy`).
+
+Earlier releases wrote `/opt/boxmunge/caddy/logs/access.log`. The upgrade rewrites the
+generated log block in `caddy/sites/`, removes `caddy/logs` and CrowdSec's old file entry, and stops
+if a `caddy.override.conf` still writes to `/var/log/caddy`: Caddy no longer mounts it, so that
+config would stop Caddy from starting. Change the override's log block to `output stdout`, clear the
+version from the blocklist (`boxmunge-upgrade clear-blocklist <version>`) and upgrade again.
+
 ---
 
 ## Backups
@@ -1191,7 +1207,7 @@ the exit code. The MCP `health` tool runs the same checks.
 | `alerts` | Pushover is not configured, so nothing on this box can alert you | see [Alerts not configured](#alerts-not-configured) |
 | `container-updates` | the daily container update failed for a target (also when a service it updates has no container, so its running image is unknown), or has not run for 48 hours | `log --component container-update`; the entry ends with the command's own error output |
 | `platform-updates` | a security or break-fix release cannot be installed automatically | see [Upgrading the Platform](#upgrading-the-platform) |
-| `docker-userns` | Docker does not remap user namespaces yet, remaps them with another identity, or a source cannot be read on a box boxmunge has not remapped (warning; deploys go on); or the record or `daemon.json` claims boxmunge's remap and a source disagrees, or a remapped box's `caddy/logs` is missing, not a directory, not S:S or not writable by its owner, or its `caddy/Caddyfile` is not a world-readable regular file (error, alerted once a day) | see [User-namespace remapping](#user-namespace-remapping) |
+| `docker-userns` | Docker does not remap user namespaces yet, remaps them with another identity, or a source cannot be read on a box boxmunge has not remapped (warning; deploys go on); or the record or `daemon.json` claims boxmunge's remap and a source disagrees, or a remapped box's `caddy/Caddyfile` is not a world-readable regular file (error, alerted once a day) | see [User-namespace remapping](#user-namespace-remapping) |
 | `security-profiles` | a service runs with `profile: off` | review the reason in its manifest |
 | `cve-scan` | a deployed project has not been scanned for 36 hours, was never scanned, or its last scan was incomplete | `security scan <project>`; see `agent-help cve` |
 | `ufw`, `crowdsec`, `aide`, `auditd`, `sysctl` | a host hardening component is off or misconfigured | `doctor`, then the supervisor user |
@@ -1249,11 +1265,10 @@ write as deploy. On a remapped box (or when the remap state cannot be read), bac
 backup-sync and the `system-container` check in `health` and `doctor` refuse a system container that
 runs remapped and print the command that recreates it.
 
-Caddy runs remapped as container root, so on a remapped box `/opt/boxmunge/caddy/logs` belongs to
-S:S (the host's CrowdSec reads it as root). `docker-userns` reports an error when it is missing, is
-not a directory, has another owner or lacks the owner's write and search bits, and prints the fix. Caddy reads `caddy/Caddyfile` through
-the "other" permission bits, so the file is 0644 (`caddy/` itself stays 0750); `docker-userns`
-reports an error, with the `chmod`, when it is not.
+Caddy runs remapped as container root. Its access log goes to its stdout, so no writable bind mount
+is needed (see [Caddy access log](#caddy-access-log)). Caddy reads `caddy/Caddyfile` through the
+"other" permission bits, so the file is 0644 (`caddy/` itself stays 0750); `docker-userns` reports
+an error, with the `chmod`, when it is not.
 
 ### Alerts not configured
 
