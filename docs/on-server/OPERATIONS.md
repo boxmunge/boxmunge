@@ -194,7 +194,10 @@ the staged release's files in the project directory. For such a project `stage`,
 refuse directly, naming `boxmunge-server legacy-stage <project>`; background starts (upgrade
 restarts, container updates) and `security resume` are refused with a "start refused" alert (see
 Troubleshooting). If boxmunge cannot tell whether such a stage is on disk (for example `state/`
-cannot be read), it refuses the same way and says so. Its running containers are left as they are.
+cannot be read), it refuses the same way and says so; the health check then runs no smoke test
+and reports a warning, a backup is skipped with an alert, a due CVE quarantine is not taken (the
+scan reports why), and an upgrade leaves the project as it is with a high-priority alert. Its
+running containers are left as they are.
 Until it is resolved:
 
 - the health check runs no smoke test and takes no critical action for it, reports it as

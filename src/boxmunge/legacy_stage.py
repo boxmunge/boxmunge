@@ -110,13 +110,18 @@ def legacy_refusal(project: str, stage: LegacyStage) -> str:
             f"boxmunge-server legacy-stage {project}")
 
 
+def cannot_tell(project: str, error: OSError) -> str:
+    """Why a detection that raised (legacy_stage) cannot tell."""
+    return f"cannot tell whether a 0.10.1 stage is on disk for '{project}': {error}"
+
+
 def legacy_stage_refusal(paths: BoxPaths, project: str) -> str | None:
     """Why ``project`` is refused for a 0.10.1 stage, or None. A detection
     that cannot tell refuses too."""
     try:
         stage = legacy_stage(paths, project)
     except OSError as e:
-        return f"cannot tell whether a 0.10.1 stage is on disk for '{project}': {e}"
+        return cannot_tell(project, e)
     return None if stage is None else legacy_refusal(project, stage)
 
 

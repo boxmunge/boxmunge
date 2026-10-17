@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.legacy_stage import (
-    Evidence, EvidenceError, LegacyStage, evidence, get_record, legacy_stage, update_record,
+    Evidence, EvidenceError, LegacyStage, cannot_tell, evidence, get_record, legacy_stage,
+    update_record,
 )
 from boxmunge.legacy_stage_ops import (
     LegacyStageError, allowed_choices, drop_stage_record, finish_apply,
@@ -120,7 +121,11 @@ def legacy_stage_locked(paths: BoxPaths, project: str, choice: str | None,
     except StateError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
-    stage = legacy_stage(paths, project)
+    try:
+        stage = legacy_stage(paths, project)
+    except OSError as e:
+        print(f"ERROR: {cannot_tell(project, e)}", file=sys.stderr)
+        return 1
     if stage is None:
         return _finish_resolved(paths, project, choice, recorded)
     why = platform_rollback_possible(paths)

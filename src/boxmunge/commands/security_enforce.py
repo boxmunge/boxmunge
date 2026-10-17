@@ -23,7 +23,7 @@ from boxmunge.cve.quarantine import (
     read_quarantine_state,
     reassert_quarantine,
 )
-from boxmunge.legacy_stage import legacy_stage
+from boxmunge.legacy_stage import cannot_tell, legacy_stage
 from boxmunge.log import log_warning
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
@@ -53,11 +53,19 @@ def enforce(
     An existing record is re-asserted whatever this scan found, so a
     partially failed action converges (audit B-03). During grace no NEW
     quarantine fires; the heads-up alert summarises what would. For a
-    project with a 0.10.1 stage both are held (Enforcement.held).
+    project with a 0.10.1 stage both are held (Enforcement.held); when it
+    cannot be told whether one is on disk, a due action is not taken and
+    is reported as the error.
     """
     project_dir = paths.project_dir(project)
     try:
-        legacy = legacy_stage(paths, project) is not None
+        try:
+            legacy = legacy_stage(paths, project) is not None
+        except OSError as e:
+            # A 0.10.1 stage may be on disk: acting could stop production.
+            due = is_quarantined(project, paths) or (headline is not None and not in_grace)
+            return Enforcement(error=(f"quarantine action not taken: {cannot_tell(project, e)}"
+                                      if due else None))
         if is_quarantined(project, paths):
             if legacy:
                 # Re-asserting stops the containers again: production's.

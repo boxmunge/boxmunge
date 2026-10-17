@@ -91,7 +91,7 @@ def _migrate_regenerate_reload(
     for name, kind in sorted(excluded.legacy.items()):
         print(f"  LEFT AS IS: {name}: a release staged by boxmunge 0.10.1 ({kind}); "
               f"resolve it with boxmunge-server legacy-stage {name}")
-    for name, why in sorted(excluded.install.items()):
+    for name, why in sorted({**excluded.install, **excluded.undetermined}.items()):
         print(f"  LEFT AS IS: {name}: {why}")
     if excluded.busy:
         print(f"  Skipped (busy; keeps its previous configs until its next deploy, resume "

@@ -23,7 +23,7 @@ import yaml
 
 from boxmunge.git_slot import GitRefError, resolve_recorded_ref, show_manifest
 from boxmunge.legacy_stage import (
-    EvidenceError, LegacyStage, evidence, legacy_stage, real_dir_problem,
+    EvidenceError, LegacyStage, cannot_tell, evidence, legacy_stage, real_dir_problem,
 )
 from boxmunge.manifest import ManifestError, at_current_schema, load_manifest
 from boxmunge.release import previous_dir
@@ -44,7 +44,10 @@ class BackupSource:
 
 def backup_source(paths: BoxPaths, project: str) -> BackupSource:
     """Raises ManifestError or ReleaseStateError when it cannot tell."""
-    stage = legacy_stage(paths, project)
+    try:
+        stage = legacy_stage(paths, project)
+    except OSError as e:
+        return BackupSource(None, alert=True, skip=cannot_tell(project, e))
     if stage is not None:
         return _legacy(paths, project, stage)
     txn = load_txn(paths, project)

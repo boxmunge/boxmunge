@@ -22,7 +22,7 @@ from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.release_txn import InstallTxn, load_txn, stale_reason, start_refusal
 from boxmunge.docker import DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
-from boxmunge.legacy_stage import LegacyStage, legacy_stage
+from boxmunge.legacy_stage import LegacyStage, cannot_tell, legacy_stage
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import (
@@ -69,11 +69,15 @@ def require_manifest(project_dir: Path) -> Path:
     return path
 
 
-def exclusion(paths: BoxPaths, name: str) -> LegacyStage | InstallTxn | ReleaseStateError | None:
+def exclusion(paths: BoxPaths, name: str) -> LegacyStage | InstallTxn | ReleaseStateError | OSError | None:
     """Why the upgrade leaves `name` exactly as it is, or None: a stage left by
-    0.10.1, an open install, or an install record this release cannot read.
-    Read-only; the one decision behind the dry run and the apply."""
-    stage = legacy_stage(paths, name)
+    0.10.1, an OSError when it cannot be told whether one is on disk, an
+    open install, or an install record this release cannot read. Read-only;
+    the one decision behind the dry run and the apply."""
+    try:
+        stage = legacy_stage(paths, name)
+    except OSError as e:
+        return e
     if stage is not None:
         return stage
     try:
@@ -285,6 +289,8 @@ def _left_as_is_line(paths: BoxPaths, name: str) -> str | None:
         line = f"{name}: an install ({why.ref}, {why.phase}) is open; the project will be left as is"
         unreadable = _unreadable_release_files(paths, name, why)[1]
         return line if unreadable is None else f"{line} ({unreadable})"
+    if isinstance(why, OSError):
+        return f"{name}: {cannot_tell(name, why)}; the project will be left as is"
     return f"{name}: {why}; the project will be left as is"
 
 

@@ -16,7 +16,7 @@ from boxmunge.config import ConfigError, load_config
 from boxmunge.docker_run import docker_env
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
-from boxmunge.legacy_stage import alert_legacy, legacy_stage
+from boxmunge.legacy_stage import alert_legacy, cannot_tell, legacy_stage
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_error, log_operation
 from boxmunge.manifest import load_manifest, ManifestError
@@ -407,7 +407,16 @@ def _check_one(name: str, paths: BoxPaths, read_only: bool) -> int:
     instead of the project silently dropping out of monitoring), then
     re-raised for the fleet loop to report.
     """
-    stage = legacy_stage(paths, name)
+    try:
+        stage = legacy_stage(paths, name)
+    except OSError as e:
+        # The project directory may hold a 0.10.1 stage's files: no smoke, no
+        # critical action; the warning reaches the health alerts.
+        message = cannot_tell(name, e)
+        print(f"{name}: WARNING ({message})")
+        if not read_only:
+            update_health_state(name, 1, message, paths)
+        return 1
     if stage is not None:
         # Its smoke definitions may be the staged ones: no smoke, no critical action.
         print(f"{name}: legacy-stage ({stage.kind}); run 'boxmunge-server legacy-stage {name}'")
