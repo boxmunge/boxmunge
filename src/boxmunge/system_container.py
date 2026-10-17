@@ -159,7 +159,9 @@ def _check_namespace(info: dict[str, Any], paths: BoxPaths, name: str) -> None:
     except RemapError as e:
         raise SystemContainerError(
             f"{name} is not in the host user namespace, and boxmunge cannot tell "
-            f"whether the Docker daemon is remapped: {e}") from e
+            f"whether the Docker daemon is remapped: {e}. Recreating it from "
+            f"{paths.system_compose} (userns_mode: host) is right on any daemon: "
+            f"docker compose -f {paths.system_compose} up -d --force-recreate") from e
     if remapped:
         raise SystemContainerError(
             f"{name} runs in the daemon's remapped user namespace, where it cannot read "

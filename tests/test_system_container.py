@@ -159,7 +159,8 @@ class TestNamespace:
         monkeypatch.setattr(offset, "docker_info", down)
         info = self._remapped_container(paths)
         monkeypatch.setattr(sc, "_inspect", lambda name: info)
-        with pytest.raises(SystemContainerError, match="cannot tell whether .* remapped"):
+        with pytest.raises(SystemContainerError,
+                           match="cannot tell whether .* remapped.*--force-recreate"):
             connect(paths)
 
     def test_host_namespace_never_needs_the_remap_state(self, paths, monkeypatch) -> None:

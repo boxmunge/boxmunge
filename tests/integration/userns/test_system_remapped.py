@@ -49,11 +49,14 @@ def _system(paths, tmp_path: Path, extra: str):
     env = {**docker_env(), "BOXMUNGE_UID": str(DEPLOY), "BOXMUNGE_GID": str(DEPLOY),
            "BOXMUNGE_CONFIG": str(paths.config), "BOXMUNGE_PROJECTS": str(paths.projects)}
     try:
-        subprocess.run([*cmd, "up", "-d", "--no-build", "--pull", "never", "--wait"],
-                       env=env, check=True, capture_output=True, text=True)
+        up = subprocess.run([*cmd, "up", "-d", "--no-build", "--pull", "never", "--wait"],
+                            env=env, capture_output=True, text=True)
+        assert up.returncode == 0, up.stderr
         yield
     finally:
-        subprocess.run([*cmd, "down"], env=env, check=True, capture_output=True)
+        down = subprocess.run([*cmd, "down"], env=env, capture_output=True, text=True)
+        if down.returncode != 0:
+            print(f"compose down failed: {down.stderr}")
 
 
 def test_host_namespace_reads_the_key_and_writes_as_deploy(
@@ -70,6 +73,7 @@ def test_a_remapped_system_container_is_refused(system_image, dind_record, tmp_p
     with _system(dind_record, tmp_path, "    userns_mode: !reset null\n"):
         with pytest.raises(sc.SystemContainerError, match="remapped user namespace"):
             sc.connect(dind_record)
-        cat = subprocess.run(["docker", "exec", sc.CONTAINER_NAME, "cat", "/config/backup.key"],
-                             capture_output=True, text=True, env=docker_env())
-        assert cat.returncode != 0 and "Permission denied" in cat.stderr
+        for probe in ("cat /config/backup.key", "echo x > /projects/written"):
+            run = subprocess.run(["docker", "exec", sc.CONTAINER_NAME, "sh", "-c", probe],
+                                 capture_output=True, text=True, env=docker_env())
+            assert run.returncode != 0 and "Permission denied" in run.stderr, probe

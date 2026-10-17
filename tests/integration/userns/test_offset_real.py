@@ -57,8 +57,10 @@ def test_docker_userns_agrees_with_what_remapped_root_can_write(dind_record) -> 
     logs.chmod(0o750)
 
     def caddy_writes() -> bool:
-        return subprocess.run(["docker", "run", "--rm", "-v", f"{logs}:/var/log/caddy", BUSYBOX,
-                               "sh", "-c", "echo {} >> /var/log/caddy/access.log"],
+        # Caddy's capabilities (caddy/compose.yml): no DAC override.
+        return subprocess.run(["docker", "run", "--rm", "--cap-drop", "ALL",
+                               "--cap-add", "NET_BIND_SERVICE", "-v", f"{logs}:/var/log/caddy",
+                               BUSYBOX, "sh", "-c", "echo {} >> /var/log/caddy/access.log"],
                               capture_output=True).returncode == 0
     assert check_docker_userns(dind_record).status == "error" and not caddy_writes()
     os.chown(logs, s, s)
