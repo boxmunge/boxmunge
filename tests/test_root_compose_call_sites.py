@@ -24,7 +24,9 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "boxmunge"
 GUARD = "compose_guard.py"
 # The primitives themselves, and the self-test canary: boxmunge's own fixed
 # compose file under canary/, outside every project.
-RAW_ALLOWED = {"docker.py", "commands/self_test_cmd.py"}
+# The image probe creates (never starts) a container with nothing of a
+# project's mounted, to read one path's owner out of an image.
+RAW_ALLOWED = {"docker.py", "commands/self_test_cmd.py", "image_probe.py"}
 _PRIMITIVES = {"compose_up", "start_containers"}
 _START_VERBS = {"up", "start", "restart", "create"}
 

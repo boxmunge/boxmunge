@@ -20,6 +20,7 @@ import os
 import re
 import shlex
 import stat
+import subprocess
 import uuid
 from pathlib import Path
 
@@ -53,10 +54,20 @@ def helper_argv(name: str, mounts: list[str], script: str) -> list[str]:
 def run_helper(label: str, mounts: list[str], script: str, *, check: bool = True,
                timeout: int = _TIMEOUT) -> int:
     """Run `script` in the helper with `mounts`; return its exit code."""
+    return _helper(label, mounts, script, check=check, timeout=timeout).returncode
+
+
+def helper_output(label: str, mounts: list[str], script: str) -> str:
+    """Run `script` in the helper with `mounts`; return what it printed."""
+    return _helper(label, mounts, script, check=True, timeout=_TIMEOUT).stdout
+
+
+def _helper(label: str, mounts: list[str], script: str, *, check: bool,
+            timeout: int) -> subprocess.CompletedProcess[str]:
     name = f"boxmunge-{label}-{uuid.uuid4().hex[:8]}"
     try:
         return _run(helper_argv(name, mounts, script), capture=True, check=check,
-                    timeout=timeout).returncode
+                    timeout=timeout)
     except DockerError as e:
         if "no such image" in str(e).lower():
             raise HelperError(f"the helper image {HELPER_IMAGE} is missing; it is the "
