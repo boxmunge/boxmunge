@@ -13,8 +13,10 @@ from boxmunge import git_slot
 from boxmunge.git_slot import (
     GitRefError,
     checkout_detached,
+    fetch,
     head_sha,
     resolve_recorded_ref,
+    resolve_ref,
     rev_parse,
     show_manifest,
 )
@@ -292,3 +294,67 @@ def _owned_by(st, uid):
     fields = list(st)
     fields[4] = uid
     return os.stat_result(fields)
+
+
+# Operator refs (plan Task 27): resolved once, to a full SHA, from origin's refs.
+
+def test_fetch_then_a_branch_resolves_to_the_remote_tip_not_the_stale_local_one(repos) -> None:
+    _origin, work, prod = repos
+    stale = git("rev-parse", "HEAD", cwd=prod)
+    moved = commit(work, {"f": "b"}, "B")
+    fetch(prod)
+    assert git("rev-parse", "HEAD", cwd=prod) == stale       # fetch never moves HEAD
+    assert resolve_ref(prod, "main") == moved != stale
+
+
+def test_tags_and_full_shas_resolve(repos) -> None:
+    _origin, work, prod = repos
+    sha = git("rev-parse", "HEAD", cwd=work)
+    git("tag", "v1", cwd=work)
+    git("push", "-q", "origin", "v1", cwd=work)
+    fetch(prod)
+    assert resolve_ref(prod, "v1") == sha and resolve_ref(prod, sha) == sha
+
+
+def test_a_local_only_branch_is_not_origins(repos) -> None:
+    *_, prod = repos
+    git("branch", "mine", cwd=prod)
+    with pytest.raises(GitRefError, match="neither a branch nor a tag of origin"):
+        resolve_ref(prod, "mine")
+
+
+def test_branch_and_tag_of_one_name_is_refused(repos) -> None:
+    _origin, work, prod = repos
+    git("branch", "dual", cwd=work)
+    git("tag", "dual", cwd=work)
+    git("push", "-q", "origin", "refs/heads/dual:refs/heads/dual",
+        "refs/tags/dual:refs/tags/dual", cwd=work)
+    fetch(prod)
+    with pytest.raises(GitRefError, match="both a branch and a tag"):
+        resolve_ref(prod, "dual")
+
+
+def test_abbreviated_sha_is_refused(repos) -> None:
+    _origin, work, prod = repos
+    sha = git("rev-parse", "HEAD", cwd=work)
+    with pytest.raises(GitRefError, match="40 characters"):
+        resolve_ref(prod, sha[:8])
+
+
+def test_unknown_full_sha_is_refused(repos) -> None:
+    with pytest.raises(GitRefError, match="not in the repository"):
+        resolve_ref(repos[2], "0" * 40)
+
+
+def test_a_failed_fetch_is_an_error(tmp_path) -> None:
+    git("init", "-q", str(tmp_path / "lonely"), cwd=tmp_path)
+    with pytest.raises(GitRefError, match="git fetch"):
+        fetch(tmp_path / "lonely")
+
+
+@pytest.mark.parametrize("ref", [*HOSTILE, "HEAD", "refs/heads/main"])
+def test_hostile_operator_refs_refused_before_git_runs(tmp_path, ref) -> None:
+    """Review Focus 3, and no name that is not a plain branch or tag name."""
+    with patch.object(git_slot, "_git") as run, pytest.raises(GitRefError):
+        resolve_ref(tmp_path, ref)
+    run.assert_not_called()

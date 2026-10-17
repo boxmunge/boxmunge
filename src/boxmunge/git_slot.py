@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Git for git-sourced projects: commits boxmunge recorded, HEAD, detached
-checkouts and manifest reads.
+"""Git for git-sourced projects: fetching, ref resolution, HEAD, detached
+checkouts, manifest reads, and the staged clone (materialise).
 
-The legacy-stage evidence and discard read production's repository with
-these. PR C (git staging on the slot) extends this module with fetching,
-operator-ref resolution and the staged clone.
+An operator's ref is resolved once, to a full SHA, from origin's refs after
+a fetch: 40 hex characters name that commit; otherwise exactly one of
+refs/remotes/origin/<ref> and refs/tags/<ref> must exist. A plain
+`git rev-parse <ref>` would pick up a stale local branch, so it is never
+used for an operator's ref; refs boxmunge recorded itself (deploy history)
+go through resolve_recorded_ref.
 
 Every name is checked in Python before git runs, and every call that takes
 one passes --end-of-options, so no ref is ever read as an option, a range
-or a path. Run as root (legacy-stage is operator-only), git runs as the
-deploy user, who owns the repository.
+or a path. Run as root, git runs as the deploy user, who owns the
+repository; the repository's hooks and fsmonitor never run.
 """
 from __future__ import annotations
 
@@ -72,7 +75,8 @@ def _git(args: list[str], cwd: Path, *, timeout: int = 60) -> subprocess.Complet
     """git's result; a hang or output that is not UTF-8 raises GitRefError,
     so callers handle one error type. The repository's hooks never run."""
     try:
-        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args], cwd=cwd,
+        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null",
+                               "-c", "core.fsmonitor=false", *args], cwd=cwd,
                               capture_output=True, text=True, timeout=timeout, check=False,
                               **_as_deploy(cwd))
     except subprocess.TimeoutExpired as e:
@@ -106,6 +110,38 @@ def rev_parse(repo: Path, name: str) -> str | None:
     return _commit(repo, name)
 
 
+def fetch(repo: Path) -> None:
+    """Add origin's objects and refs; never changes HEAD or the work tree."""
+    result = _git(["fetch", "-q", "--prune", "--tags", "--no-recurse-submodules", "origin"],
+                  repo, timeout=GIT_TIMEOUT)
+    if result.returncode != 0:
+        raise GitRefError(f"git fetch in {repo} failed: {result.stderr.strip()}")
+
+
+def resolve_ref(repo: Path, ref: str) -> str:
+    """An operator's ref (--ref, or the manifest's) as a full SHA, from
+    origin's refs as the last fetch left them (module docstring)."""
+    if _FULL_SHA.fullmatch(ref or ""):
+        sha = _commit(repo, ref)
+        if sha != ref:
+            raise GitRefError(f"commit {ref} is not in the repository (after fetching origin)")
+        return sha
+    _check_name(ref)
+    if ref == "HEAD" or ref.startswith("refs/"):
+        raise GitRefError(f"{ref!r} is not a branch or tag name: give a branch or tag of "
+                          f"origin, or a full 40-character commit SHA")
+    branch = _commit(repo, f"refs/remotes/origin/{ref}")
+    tag = _commit(repo, f"refs/tags/{ref}")
+    if branch and tag:
+        raise GitRefError(f"{ref!r} is both a branch and a tag of origin; give the full "
+                          f"40-character commit SHA instead")
+    if branch or tag:
+        return branch or tag  # type: ignore[return-value]
+    hint = (" (an abbreviated commit SHA is not accepted: give all 40 characters)"
+            if _SHORT_SHA.fullmatch(ref) else "")
+    raise GitRefError(f"{ref!r} is neither a branch nor a tag of origin{hint}")
+
+
 def resolve_recorded_ref(repo: Path, ref: str) -> str:
     """A ref boxmunge recorded itself (deploy history): a full SHA, or a
     short one written by 0.10.1 that git resolves to exactly one commit."""
@@ -136,7 +172,8 @@ def _require_full_sha(sha: str, what: str) -> None:
 def checkout_detached(repo: Path, sha: str) -> None:
     """Check out `sha` with HEAD detached; the repository's hooks never run."""
     _require_full_sha(sha, "check out")
-    result = _git(["checkout", "-q", "--detach", "--end-of-options", sha], repo,
+    result = _git(["checkout", "-q", "--detach", "--no-recurse-submodules",
+                   "--end-of-options", sha], repo,
                   timeout=GIT_TIMEOUT)
     if result.returncode != 0:
         raise GitRefError(f"git checkout {sha} in {repo} failed: {result.stderr.strip()}")
