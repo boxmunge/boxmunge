@@ -55,6 +55,7 @@ def _init_host_caddy(root: Path, s: int) -> None:
     (caddy / "sites").mkdir(mode=0o775)
     os.chown(caddy / "sites", 0, DEPLOY_GID)
     (caddy / "maintenance").mkdir(mode=0o755)
+    os.chown(caddy / "maintenance", 0, DEPLOY_GID)
     assert userns(f'userns_caddy_logs {s}', root).returncode == 0
     caddyfile = caddy / "Caddyfile"
     caddyfile.write_text("{\n    email ops@example.com\n}\n\nimport /etc/caddy/sites/*.conf\n")

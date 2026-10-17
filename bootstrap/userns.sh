@@ -28,11 +28,14 @@ _userns_subids() {
 }
 
 # _userns_own <entries>: start:count of each entry that is boxmunge-remap's,
-# by name or by its numeric uid (as Docker reads the files).
+# by name or by its numeric uid (as Docker reads the files), in plain base 10
+# as Python's int() reads them (01048576 is 1048576, not octal).
 _userns_own() {
     local uid
     uid="$(awk -F: -v n="$USERNS_NAME" '$1 == n && $3 ~ /^[0-9]+$/ {print $3; exit}' /etc/passwd)"
-    awk -F: -v n="$USERNS_NAME" -v u="$uid" '$1 == n || (u != "" && $1 == u) {print $2 ":" $3}' <<<"$1"
+    # ("" ...) forces a string compare: Docker does not read 0999 as uid 999.
+    awk -F: -v n="$USERNS_NAME" -v u="$uid" \
+        '$1 == n || (u != "" && ($1 "") == (u "")) {printf "%.0f:%.0f\n", $2, $3}' <<<"$1"
 }
 
 # userns_allocate: print S. boxmunge-remap's own range when it has exactly one
@@ -47,8 +50,8 @@ userns_allocate() {
     own_u="$(_userns_own "$subuid")"
     own_g="$(_userns_own "$subgid")"
     if [[ -n "$own_u$own_g" ]]; then
-        if [[ "$own_u" == "$own_g" && "$own_u" != *$'\n'* && "${own_u#*:}" == "$USERNS_RANGE" \
-              && $(( ${own_u%%:*} % USERNS_RANGE )) -eq 0 ]]; then
+        if [[ "$own_u" == "$own_g" && "$own_u" != *$'\n'* && "${own_u#*:}" == "$USERNS_RANGE" ]] \
+              && (( ${own_u%%:*} % USERNS_RANGE == 0 )); then
             echo "${own_u%%:*}"
             return 0
         fi
@@ -82,14 +85,24 @@ userns_identity() {
     getent group "$USERNS_NAME" >/dev/null \
         || _userns_error "user $USERNS_NAME exists without a group of that name; Docker needs both" \
         || return 1
-    local subuid subgid now
+    local subuid subgid now f
     subuid="$(_userns_subids /etc/subuid)" && subgid="$(_userns_subids /etc/subgid)" || return 1
     if [[ -z "$(_userns_own "$subuid")$(_userns_own "$subgid")" ]]; then
+        # Debian 13's passwd package creates neither file, and usermod
+        # refuses --add-subuids/--add-subgids without them.
+        for f in /etc/subuid /etc/subgid; do
+            [[ -e "$f" || -L "$f" ]] || install -m 644 -o root -g root /dev/null "$f" || return 1
+        done
         usermod --add-subuids "$1-$(( $1 + USERNS_RANGE - 1 ))" \
             --add-subgids "$1-$(( $1 + USERNS_RANGE - 1 ))" "$USERNS_NAME" || return 1
     fi
-    now="$(userns_allocate)" || return 1
-    [[ "$now" == "$1" ]] || _userns_error "$USERNS_NAME's subordinate ids start at $now, not $1"
+    # The range must now be in both files: allocate would also print S for
+    # files usermod left empty, so read the entries themselves.
+    subuid="$(_userns_subids /etc/subuid)" && subgid="$(_userns_subids /etc/subgid)" || return 1
+    now="$(_userns_own "$subuid") / $(_userns_own "$subgid")"
+    [[ "$now" == "$1:$USERNS_RANGE / $1:$USERNS_RANGE" ]] \
+        || _userns_error "$USERNS_NAME's subordinate ids are '$now', not $1:$USERNS_RANGE in both" \
+            "/etc/subuid and /etc/subgid"
 }
 
 # A host already running containers or volumes is not a fresh install: its
@@ -97,8 +110,9 @@ userns_identity() {
 userns_refuse_existing_docker() {
     command -v docker >/dev/null 2>&1 || return 0
     docker info >/dev/null 2>&1 \
-        || _userns_error "Docker is installed but not answering; start it (systemctl start docker)" \
-            "so init-host.sh can check that it holds no containers or volumes" || return 1
+        || _userns_error "Docker is installed but not answering. Start it (systemctl start docker;" \
+            "if it will not start, see journalctl -u docker and /etc/docker/daemon.json) so" \
+            "init-host.sh can check that it holds no containers or volumes" || return 1
     local containers volumes
     containers="$(docker ps -aq)" && volumes="$(docker volume ls -q)" || return 1
     [[ -z "$containers$volumes" ]] \
@@ -129,14 +143,16 @@ userns_daemon_json() {
             "settings back afterwards."
         return 1
     fi
-    install -d -m 755 /etc/docker && _userns_daemon_json_text > "$path"
+    # 0644 whatever root's umask: deploy reads it (offset.daemon_json_userns).
+    install -d -m 755 /etc/docker && _userns_daemon_json_text > "$path" && chmod 644 "$path"
 }
 
-# userns_before_docker: everything before Docker's first start; sets USERNS_OFFSET.
+# userns_before_docker: everything before Docker's first start; sets
+# USERNS_OFFSET. Every refusal comes before the identity is created.
 userns_before_docker() {
     userns_refuse_existing_docker || return 1
     USERNS_OFFSET="$(userns_allocate)" || return 1
-    userns_identity "$USERNS_OFFSET" && userns_daemon_json
+    userns_daemon_json && userns_identity "$USERNS_OFFSET"
 }
 
 # userns_verify <S>: the running daemon is remapped as daemon.json says.
@@ -177,7 +193,8 @@ userns_record() {
 }
 
 # userns_journal_committed <S>: a fresh install is born committed, so the
-# migration finds nothing to do (boxmunge.userns.journal reads this record).
+# migration finds nothing to do. The format is the migration journal's
+# (version 1; direction, phase, offset, fresh_install).
 userns_journal_committed() {
     local dir="${BOXMUNGE_ROOT}/upgrade-root"
     if [[ -L "$dir" ]]; then

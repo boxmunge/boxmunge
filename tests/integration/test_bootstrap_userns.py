@@ -19,6 +19,7 @@ set -e
 printf '{SUBUID}' > /etc/subuid
 printf '{SUBGID}' > /etc/subgid
 . /bootstrap/userns.sh
+umask 077  # root's umask must not decide what deploy can read
 userns_before_docker
 S="$USERNS_OFFSET"; echo "S=$S"
 userns_identity "$S"
@@ -33,6 +34,7 @@ echo "subuid=$(grep '^boxmunge-remap:' /etc/subuid | tr '\\n' ' ')"
 echo "subgid=$(grep '^boxmunge-remap:' /etc/subgid | tr '\\n' ' ')"
 echo "group=$(getent group boxmunge-remap | cut -d: -f1)"
 echo "daemon=$(tr -d '\\n' < /etc/docker/daemon.json)"
+echo "daemon_mode=$(stat -c '%a' /etc/docker/daemon.json)"
 echo "logs=$(stat -c '%a %u:%g' /tmp/bm/caddy/logs)"
 echo "dir=$(stat -c '%a %u' /tmp/bm/upgrade-root)"
 echo "journal=$(cat /tmp/bm/upgrade-root/userns-migration.json)"
@@ -62,6 +64,7 @@ def test_userns_bootstrap_on_trixie(tmp_path: Path) -> None:
         "log-driver": "json-file", "log-opts": {"max-size": "50m", "max-file": "5"},
         "userns-remap": "boxmunge-remap:boxmunge-remap", "storage-driver": "overlay2",
         "features": {"containerd-snapshotter": False}}
+    assert out["daemon_mode"] == "644"
     assert out["logs"] == f"750 {s}:{s}"
     assert out["dir"] == "700 0" and out["mode"] == "600"
     assert out["tmp"] == "userns-migration.json "
@@ -94,6 +97,20 @@ by_uid() {
     S="$(userns_allocate)"; userns_identity "$S"; echo "$S $(wc -l < /etc/subuid)"
 }
 host_gid() { groupadd -g 1048600 big; userns_allocate; }
+no_files() {  # trixie's passwd package creates neither file; usermod needs both
+    rm -f /etc/subuid /etc/subgid
+    S="$(userns_allocate)"; userns_identity "$S"
+    echo "$S $(stat -c '%a %U' /etc/subuid) $(stat -c '%a %U' /etc/subgid)"
+}
+zeros() {
+    printf 'boxmunge-remap:01048576:065536\n' | tee /etc/subuid > /etc/subgid
+    S="$(userns_allocate)"; userns_identity "$S"; echo "$S"
+}
+foreign_first() {
+    mkdir -p /etc/docker; echo '{"debug": true}' > /etc/docker/daemon.json
+    userns_before_docker; local rc=$?
+    echo "ranges=$(grep -c . /etc/subuid)" >&2; return $rc
+}
 fake_docker() { printf '#!/bin/sh\n%s\n' "$1" > /usr/local/bin/docker; chmod +x /usr/local/bin/docker; }
 docker_used() { fake_docker 'case "$1" in ps) echo c0ffee;; esac'; userns_refuse_existing_docker; }
 docker_volume() { fake_docker 'case "$1" in volume) echo data;; esac'; userns_refuse_existing_docker; }
@@ -107,6 +124,10 @@ try malformed malformed
 try misaligned misaligned
 try by_uid by_uid
 try host_gid host_gid
+try no_files no_files
+try zeros zeros
+try foreign_first foreign_first
+rm -f /etc/docker/daemon.json
 try docker_used docker_used
 try docker_volume docker_volume
 try docker_down docker_down
@@ -119,7 +140,12 @@ try foreign_json foreign_json; echo "kept=$(cat /etc/docker/daemon.json)"
 """
 
 
-def test_userns_bootstrap_refusals_on_trixie() -> None:
+def test_userns_bootstrap_refusals_on_trixie(tmp_path: Path) -> None:
+    # The Python side of the host_gid and zeros cases.
+    assert allocate_offset(tmp_path, host_ids={1048600}) == 1114112
+    (tmp_path / "subuid").write_text("boxmunge-remap:01048576:065536\n")
+    (tmp_path / "subgid").write_text("boxmunge-remap:01048576:065536\n")
+    assert allocate_offset(tmp_path, host_ids=set()) == 1048576
     result = _run_on_trixie(REFUSALS)
     assert result.returncode == 0, result.stdout + result.stderr
     out = _outputs(result.stdout)
@@ -130,6 +156,10 @@ def test_userns_bootstrap_refusals_on_trixie() -> None:
     assert out["misaligned"].startswith("refused:") and "by hand" in out["misaligned"]
     assert out["by_uid"] == "ok:1245184 1 "
     assert out["host_gid"] == "ok:1114112 "
+    assert out["no_files"] == "ok:1114112 644 root 644 root "
+    assert out["zeros"] == "ok:1048576 "
+    # Refused before the identity is touched: no range was added.
+    assert out["foreign_first"].startswith("refused:") and "ranges=0" in out["foreign_first"]
     for case in ("docker_used", "docker_volume"):
         assert out[case].startswith("refused:") and "userns-migrate" in out[case], out[case]
     assert out["docker_down"].startswith("refused:") and "not answering" in out["docker_down"]

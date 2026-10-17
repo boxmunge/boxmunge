@@ -30,6 +30,14 @@ def test_caddy_logs_is_created_for_caddys_remapped_root() -> None:
     assert not [line for line in code if "chown" in line]
 
 
+def test_caddy_bind_sources_exist_before_caddy_first_starts() -> None:
+    """dockerd would create a missing one owned by the remapped root."""
+    text = _init_host()
+    up = text.index('docker compose -f "${BOXMUNGE_ROOT}/caddy/compose.yml" up -d')
+    assert text.index('"${BOXMUNGE_ROOT}/caddy/maintenance"') < up
+    assert text.index('userns_caddy_logs "${USERNS_OFFSET}"') < up
+
+
 def test_caddyfile_is_readable_by_caddys_remapped_root() -> None:
     """Remapped, Caddy's root is an "other" user to a root:deploy file."""
     text = _init_host()
