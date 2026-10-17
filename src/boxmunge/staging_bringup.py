@@ -15,19 +15,23 @@ from boxmunge.bind_sources import BindSourceError
 from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.caddy_journal import write_site
 from boxmunge.compose import ComposeError, load_user_compose
+from boxmunge.commands import deploy_images
 from boxmunge.compose_guard import compose_up_checked
+from boxmunge.compose_resolve import ComposeResolveError
 from boxmunge.compose_validate import ComposeSecurityError
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import (
     CaddyConfigRejected, DockerError, caddy_config_lock, caddy_reload,
 )
 from boxmunge.log import log_error
+from boxmunge.release_target import DeployRefused, staging_release_target
+from boxmunge.run_as import RunAsError
 from boxmunge.security_warn import warn_off_services, warn_writable_state
 from boxmunge.staged_release import SlotError, release_dir, slot_dir, staging_target
 from boxmunge.staging_copy_plan import StagingDataError
 from boxmunge.staging_data import copy_production_data, prepare_destinations
 from boxmunge.staging_isolation import StagingIsolationError
-from boxmunge.staging_prepare import check_staging_storage
+from boxmunge.staging_prepare import check_staging_storage, write_staging_overlay
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -35,6 +39,8 @@ if TYPE_CHECKING:
 # Failures generating, checking or preparing staging's files and storage.
 STORAGE_ERRORS = (BindSourceError, ComposeError, ComposeSecurityError, OSError,
                   ReleaseStateError, StagingDataError, StagingIsolationError, SlotError)
+# ... and the release's own refusal to start, found once its images are built.
+BRING_UP_ERRORS = (*STORAGE_ERRORS, DeployRefused, DockerError)
 
 
 def _staging_auth(project_name: str, paths: BoxPaths) -> tuple[str, str] | None:
@@ -52,9 +58,24 @@ def _staging_auth(project_name: str, paths: BoxPaths) -> tuple[str, str] | None:
     return auth_user, hashed
 
 
+def _decide_users(paths: BoxPaths, project: str, manifest: dict[str, Any]) -> None:
+    """Build staging's images, decide and record who each service runs as
+    (deploy_images), and write the slot's overlay with those users."""
+    slot = slot_dir(paths, project)
+    print("  Building images and deciding who each service runs as...")
+    try:
+        users = deploy_images.prepare_release_users(
+            paths, staging_release_target(paths, project), manifest, component="stage")
+    except (RunAsError, ComposeResolveError) as e:
+        raise DeployRefused([str(e)]) from e
+    write_staging_overlay(paths, project, manifest, release_dir(slot), slot, users)
+
+
 def _prepare_storage(paths: BoxPaths, project: str, manifest: dict[str, Any]) -> None:
-    """Check staging's files from the slot and, with copy_data, copy
-    production's data into staging's created, never started containers."""
+    """Decide staging's users, check staging's files from the slot and,
+    with copy_data, copy production's data into staging's created, never
+    started containers."""
+    _decide_users(paths, project, manifest)
     release = release_dir(slot_dir(paths, project))
     user_compose = load_user_compose(release / "compose.yml", project)
     # Deploy-time warnings, repeated by design (spec "Deploy-time warning").
@@ -68,7 +89,7 @@ def _prepare_storage(paths: BoxPaths, project: str, manifest: dict[str, Any]) ->
     prepare_destinations(paths, project, plan)
     print("  Creating staging containers for the data copy...")
     compose_up_checked(paths, project, component="stage", staging=True,
-                       record=True, deploying=True, start=False)
+                       record=True, deploying=True, build=False, start=False)
     copy_production_data(paths, project, plan)
     print("  Data copy complete.")
 
@@ -113,7 +134,12 @@ def bring_up_staging(paths: BoxPaths, project: str, manifest: dict[str, Any]) ->
             write_site(paths.caddy, staging_conf,
                        generate_staging_caddy_config(manifest, auth=staging_auth))
         _prepare_storage(paths, project, manifest)
-    except (*STORAGE_ERRORS, DockerError) as e:
+    except DeployRefused as e:
+        print(f"  ERROR: Staging cannot start as it is:\n{e}", file=sys.stderr)
+        print("  Staging was not started.", file=sys.stderr)
+        log_error("stage", f"Stage refused: {e}", paths, project=project)
+        return 1
+    except BRING_UP_ERRORS as e:
         print(f"  ERROR: Preparing staging's storage failed: {e}", file=sys.stderr)
         print("  Staging was not started.", file=sys.stderr)
         log_error("stage", f"Preparing staging storage failed: {e}", paths, project=project)
@@ -121,7 +147,7 @@ def bring_up_staging(paths: BoxPaths, project: str, manifest: dict[str, Any]) ->
     print("  Starting staging containers...")
     try:
         compose_up_checked(paths, project, component="stage", staging=True, record=True,
-                           deploying=True)
+                           deploying=True, build=False)
     except DockerError as e:
         print(f"  ERROR: {e}", file=sys.stderr)
         log_error("stage", f"Stage failed: {e}", paths, project=project)

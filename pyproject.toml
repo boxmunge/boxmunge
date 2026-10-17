@@ -32,6 +32,7 @@ boxmunge = ["tui/*.tcss", "sshd/*.conf"]
 markers = [
     "integration: integration tests requiring Docker",
     "userns_dind: needs a daemon the test can remap and restart (the privileged dind CI job)",
+    "decides_users: runs deploy's image build, user decision and storage steps (unit tier stubs them otherwise)",
 ]
 testpaths = ["tests"]
 pythonpath = ["src"]

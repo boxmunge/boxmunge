@@ -19,6 +19,7 @@ from boxmunge.commands.restore import restore_locked
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_guard import ComposeRefused, check_start
 from boxmunge.crashpoint import crash_point
+from boxmunge.docker_run import DockerError
 from boxmunge.data_dirs import log_kept, set_aside_announcer
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.intake import (
@@ -35,6 +36,7 @@ from boxmunge.release import (
     load_previous_release, mark_live, sync_release_code,
 )
 from boxmunge.release_keep import ensure_kept_pairing
+from boxmunge.release_target import DeployRefused
 from boxmunge.release_txn import (
     InstallTxn, advance, close_txn, load_txn, open_txn, stale_reason, start_refusal,
     supersede_txn,
@@ -377,7 +379,7 @@ def _start_rolled_back(project_name: str, paths: BoxPaths, manifest: dict,
             return rc
     try:
         generate_release_config(project_name, paths, manifest, "rollback")
-    except (OSError, ValueError) as e:
+    except (DeployRefused, DockerError, OSError, ValueError) as e:
         print(f"ERROR: Generating the previous release's configs failed: {e}. Rerun "
               f"'rollback {project_name}' once the cause is fixed.", file=sys.stderr)
         log_error("rollback", f"Config generation failed: {e}", paths, project=project_name)

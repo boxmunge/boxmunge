@@ -52,6 +52,18 @@ def env_files_for_staging(paths: BoxPaths, project: str, release: Path) -> dict[
     return env
 
 
+def write_staging_overlay(paths: BoxPaths, project: str, manifest: dict[str, Any],
+                          release: Path, dest_dir: Path,
+                          users: dict[str, ServiceUser] | None) -> dict:
+    """Write staging's overlay; returns the resolved user compose model."""
+    user_compose = load_user_compose(release / "compose.yml", project)
+    # mode=0o644: read by `docker compose` in deploy and root contexts.
+    atomic_write_text(dest_dir / STAGING_OVERLAY, generate_staging_compose_override(
+        manifest, env_files=env_files_for_staging(paths, project, release) or None,
+        user_compose=user_compose, users=users), mode=0o644)
+    return user_compose
+
+
 def write_staging_files(paths: BoxPaths, project: str, manifest: dict[str, Any],
                         release: Path, dest_dir: Path,
                         users: dict[str, ServiceUser] | None = None) -> dict:
@@ -59,11 +71,7 @@ def write_staging_files(paths: BoxPaths, project: str, manifest: dict[str, Any],
     ``dest_dir``; returns the resolved user compose model. The overlay
     names no service users until stage has decided them (`users`)."""
     box_state = staged_box_state(paths.project_dir(project), release)
-    user_compose = load_user_compose(release / "compose.yml", project)
-    # mode=0o644: read by `docker compose` in deploy and root contexts.
-    atomic_write_text(dest_dir / STAGING_OVERLAY, generate_staging_compose_override(
-        manifest, env_files=env_files_for_staging(paths, project, release) or None,
-        user_compose=user_compose, users=users), mode=0o644)
+    user_compose = write_staging_overlay(paths, project, manifest, release, dest_dir, users)
     atomic_write_text(dest_dir / STAGING_BASE, generate_staging_compose_base(
         release / "compose.yml", box_state, paths.project_dir(project)), mode=0o644)
     return user_compose

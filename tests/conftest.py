@@ -309,3 +309,17 @@ def _unremapped_daemon(request, monkeypatch, tmp_path_factory):
 
     monkeypatch.setattr("boxmunge.userns.offset.ETC", tmp_path_factory.mktemp("etc"))
     monkeypatch.setattr("boxmunge.userns.offset.docker_info", lambda: dict(UNREMAPPED_INFO))
+
+
+@pytest.fixture(autouse=True)
+def _users_decided_without_images(request, monkeypatch):
+    """Off the integration tier, deploy, stage and promote build no images:
+    the step that builds them and decides users records nothing, and the
+    pre-start storage step does nothing, so the overlay emits no user, as
+    for a project deployed before users were decided. Tests of those steps
+    are marked `decides_users`."""
+    if request.node.get_closest_marker("integration") or \
+            request.node.get_closest_marker("decides_users"):
+        return
+    monkeypatch.setattr("boxmunge.commands.deploy_images.prepare_release_users",
+                        lambda paths, target, manifest, *, component, rollback=False: {})

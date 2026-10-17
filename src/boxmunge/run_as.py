@@ -134,6 +134,8 @@ SOURCES = frozenset({SOURCE_COMPOSE, SOURCE_MANIFEST, SOURCE_IMAGE, SOURCE_DEFAU
 # The sources whose user the overlay emits; the others run what the image
 # or compose.yml says.
 _EMITTED = frozenset({SOURCE_MANIFEST, SOURCE_DEFAULT, SOURCE_CHOWN})
+_REDECIDE = ("boxmunge cannot replay it: remove it and deploy the project again, "
+             "which decides every service's user afresh")
 IMAGE_REASON = "runs as the image's own default user, root; its entrypoint drops privileges"
 
 
@@ -213,6 +215,7 @@ def root_refusal(service: str, image: Any, manifest: dict[str, Any]) -> str:
         f"USER, so it would run as root; say so in the manifest. If its entrypoint "
         f"starts as root and drops privileges (postgres, mysql, mariadb, nginx), "
         f"{declaration_text(service, manifest)}"
+        f"(A security block needs `schema_version: 2` or later in manifest.yml.) "
         f"If instead it runs as a fixed non-root user from the start (redis:*-alpine "
         f"is 999:1000), write `user: \"<uid>:<gid>\"` in place of the user and reason "
         f"lines. See PROJECT_CONVENTIONS.md, \"Who a service runs as\".")
@@ -266,17 +269,16 @@ def read_users(paths: BoxPaths, project: str, *, staging: bool = False) -> dict[
     except FileNotFoundError:
         return {}
     except (OSError, ValueError) as e:
-        raise RunAsError(f"cannot read the users record {path}: {e}. Deploy "
-                         f"{project} again to decide its users afresh") from e
+        raise RunAsError(f"cannot read the users record {path}: {e}. {_REDECIDE}") from e
     if not isinstance(doc, dict):
-        raise RunAsError(f"{path} is not a users record")
+        raise RunAsError(f"{path} is not a users record. {_REDECIDE}")
     out = {}
     for svc, entry in doc.items():
         if (not isinstance(entry, dict) or entry.get("source") not in SOURCES
                 or not (entry.get("user") is None or isinstance(entry.get("user"), str))
                 or not isinstance(entry.get("image_user"), str)):
             raise RunAsError(f"{path}: entry {svc!r} is not {{user, source, image_user}}: "
-                             f"{entry!r}")
+                             f"{entry!r}. {_REDECIDE}")
         out[svc] = ServiceUser(entry["user"], entry["source"], entry["image_user"])
     return out
 

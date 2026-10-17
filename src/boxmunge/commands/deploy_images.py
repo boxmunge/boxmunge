@@ -19,11 +19,11 @@ from boxmunge.docker_containers import ImageFacts, image_facts
 from boxmunge.docker_run import run as _run
 from boxmunge.log import log_operation, log_warning
 from boxmunge.paths import BoxPaths
+from boxmunge.release_target import DeployRefused, ReleaseTarget, resolved_services
 from boxmunge.run_as import (
     SOURCE_MANIFEST, RunAsError, ServiceUser, declared_user, describe, effective_user,
-    write_users,
+    read_users, write_users,
 )
-from boxmunge.release_target import DeployRefused, ReleaseTarget, resolved_services
 from boxmunge.userns.offset import RemapError, remap_offset
 
 _BUILD_TIMEOUT = 1800
@@ -43,19 +43,30 @@ def build_and_pull(target: ReleaseTarget, services: dict[str, dict]) -> None:
 
 
 def decide_users(services: dict[str, dict], facts: dict[str, ImageFacts],
-                 manifest: dict[str, Any]) -> dict[str, ServiceUser]:
-    """Every service's user; DeployRefused lists every service that needs a
-    declaration, so the operator adds them in one pass."""
+                 manifest: dict[str, Any], carried: dict[str, ServiceUser] | None = None,
+                 ) -> tuple[dict[str, ServiceUser], list[str]]:
+    """(every service's user, warnings). DeployRefused lists every service
+    that needs a declaration, so the operator adds them in one pass. A
+    rollback passes the record as `carried`: the release it restores may
+    predate its services' declarations, and a recorded decision about a
+    service's data stands until a deploy makes another."""
     users: dict[str, ServiceUser] = {}
     refusals: list[str] = []
+    warnings: list[str] = []
     for name, svc in sorted(services.items()):
         try:
             users[name] = effective_user(name, svc, manifest, facts[name].user)
         except RunAsError as e:
-            refusals.append(str(e))
+            if carried and name in carried:
+                users[name] = carried[name]
+                warnings.append(f"service {name}: the restored release does not say who it "
+                                f"runs as, so it keeps its recorded user, "
+                                f"{describe(carried[name])}")
+            else:
+                refusals.append(str(e))
     if refusals:
         raise DeployRefused(refusals)
-    return users
+    return users, warnings
 
 
 def _log_opt_outs(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, Any],
@@ -71,20 +82,22 @@ def _log_opt_outs(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
 
 
 def prepare_release_users(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, Any], *,
-                          component: str) -> dict[str, ServiceUser]:
+                          component: str, rollback: bool = False) -> dict[str, ServiceUser]:
     """Build/pull, inspect, decide every service's user, check, record.
-    Raises DeployRefused (nothing recorded) or DockerError."""
+    Raises DeployRefused (nothing recorded), DockerError or RunAsError (the
+    record cannot be read)."""
+    carried = read_users(paths, target.project, staging=target.staging) if rollback else None
     model, services = resolved_services(target)
     build_and_pull(target, services)
     facts = {name: image_facts(str(svc.get("image"))) for name, svc in services.items()}
-    users = decide_users(services, facts, manifest)
+    users, warnings = decide_users(services, facts, manifest, carried)
     try:
         offset = remap_offset(paths)
     except RemapError as e:
         raise DeployRefused([str(e)]) from e
-    refusals, warnings = deploy_checks.release_problems(
+    refusals, data_warnings = deploy_checks.release_problems(
         paths, target, model, services, facts, users, offset)
-    for warning in warnings:
+    for warning in warnings + data_warnings:
         print(f"  WARNING: {warning}")
         log_warning(component, warning, paths, project=target.project)
     if refusals:

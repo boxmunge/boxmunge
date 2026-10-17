@@ -24,6 +24,7 @@ from boxmunge.commands.deploy import (
 )
 from boxmunge.commands.deploy_steps import snapshot_live_release
 from boxmunge.crashpoint import crash_point
+from boxmunge.docker_run import DockerError
 from boxmunge.data_dirs import ReleaseStateError, SetAsideError, log_kept, set_aside_announcer
 from boxmunge.intake import IntakeError, report_refusal, validate_release_tree
 from boxmunge.log import log_error
@@ -33,6 +34,7 @@ from boxmunge.release import (
 from boxmunge.release_keep import (
     ensure_kept_pairing, keep_previous_release_txn, restore_superseded,
 )
+from boxmunge.release_target import DeployRefused
 from boxmunge.release_txn import (
     InstallTxn, advance, close_txn, load_txn, open_txn, options_text, stale_reason,
     start_refusal, supersede_txn,
@@ -181,7 +183,13 @@ def _switch(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTxn
             return _left_open(project_name, paths, txn, req, "the pre-deploy hook failed", rc)
     try:
         generate_release_config(project_name, paths, req.manifest, req.component)
-    except (OSError, ValueError) as e:
+    except DeployRefused as e:
+        print(f"ERROR: {req.ref} cannot start as it is:\n{e}", file=sys.stderr)
+        log_error(req.component, f"{req.ref} cannot start as it is: {e}", paths,
+                  project=project_name)
+        return _left_open(project_name, paths, txn, req,
+                          "it cannot start as it is (the problems above say what to change)")
+    except (DockerError, OSError, ValueError) as e:
         return _left_open(project_name, paths, txn, req, f"generating its configs failed: {e}")
     if not resumed_switch:
         txn = advance(paths, project_name, txn, "switching")

@@ -64,6 +64,7 @@ class TestComposeOverrideEmitsOffWarning:
         paths.project_releases = lambda name: proj / ".releases"
         paths.project_secrets = lambda name: proj / "secrets.env"
         paths.project_bind_record = lambda name, staging=False: tmp_path / "no-record.json"
+        paths.project_users_record = lambda name, staging=False: tmp_path / "no-users.json"
         # get_logger reads paths.logs; the deploy warning path logs, and
         # a pristine logger (no warm cache) triggers a cold build.
         paths.logs = tmp_path / "logs"
@@ -97,6 +98,7 @@ class TestComposeOverrideEmitsOffWarning:
         paths.project_releases = lambda name: proj / ".releases"
         paths.project_secrets = lambda name: proj / "secrets.env"
         paths.project_bind_record = lambda name, staging=False: tmp_path / "no-record.json"
+        paths.project_users_record = lambda name, staging=False: tmp_path / "no-users.json"
         # get_logger reads paths.logs; the deploy warning path logs, and
         # a pristine logger (no warm cache) triggers a cold build.
         paths.logs = tmp_path / "logs"
@@ -126,6 +128,7 @@ class TestComposeOverrideEmitsOffWarning:
         paths.project_releases = lambda name: proj / ".releases"
         paths.project_secrets = lambda name: proj / "secrets.env"
         paths.project_bind_record = lambda name, staging=False: tmp_path / "no-record.json"
+        paths.project_users_record = lambda name, staging=False: tmp_path / "no-users.json"
         # get_logger reads paths.logs; the deploy warning path logs, and
         # a pristine logger (no warm cache) triggers a cold build.
         paths.logs = tmp_path / "logs"

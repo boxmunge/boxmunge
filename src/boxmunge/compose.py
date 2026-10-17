@@ -323,11 +323,16 @@ def prepare_compose_override(
     paths: BoxPaths,
     manifest: dict[str, Any],
     component: str = "deploy",
+    *,
+    warn: bool = True,
 ) -> None:
-    """Generate compose.boxmunge.yml for the release in the project dir.
+    """Generate compose.boxmunge.yml for the release in the project dir,
+    with the users the record holds.
 
     `component` labels the SECURITY OFF log entry so callers from upgrade /
-    resume don't misattribute the warning as "deploy". Lives here, not in
+    resume don't misattribute the warning as "deploy". `warn=False` skips
+    the deploy-time warnings (the first of deploy's two passes, which only
+    names the built images the users are decided from). Lives here, not in
     commands/, to avoid `commands/`-to-`commands/` imports (audit A-2).
     """
     project_name = manifest["project"]
@@ -356,6 +361,8 @@ def prepare_compose_override(
         built_images.untag_old_built_names(
             compose_project, build_services, set(services) - set(build_services))
 
+    if not warn:
+        return
     # Deploy-time warning for any service resolving to profile: off.
     # Repeated by design — see spec §"Deploy-time warning".
     warn_off_services(paths, manifest, component=component)
