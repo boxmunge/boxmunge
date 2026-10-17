@@ -11,17 +11,24 @@
 # a bind mount of caddy/logs that the host's CrowdSec read as root. Under user-
 # ID remapping Caddy owns that directory, so it decides what root opens there (a
 # FIFO, /dev/zero, a link to a root-only file). Caddy now logs to stdout and
-# CrowdSec reads it through Docker (crowdsec-caddy.sh). caddy/compose.yml no
+# CrowdSec reads it through Docker (crowdsec-acquis.sh). caddy/compose.yml no
 # longer mounts /var/log/caddy and Caddy's root filesystem is read-only, so a
 # site config still naming it would stop Caddy from starting.
 set -euo pipefail
+# install.sh runs from the installer's root-only (0700) extraction dir; find,
+# run as deploy, cannot start from a directory it cannot read.
+cd /
 
 BOXMUNGE_ROOT="${BOXMUNGE_ROOT:-/opt/boxmunge}"
 DEPLOY_USER="${DEPLOY_USER:-deploy}"
 SITES="${BOXMUNGE_ROOT}/caddy/sites"
+JOURNAL="${BOXMUNGE_ROOT}/caddy/.site-journal"
 
-# The block caddy.py generated before, as it appears in a site file.
+# The block caddy.py generated before, as it appears in a site file, and as a
+# pending caddy_journal entry holds it (JSON-escaped): a failed validation
+# would otherwise restore the old block.
 OLD_BLOCK='output file \/var\/log\/caddy\/access\.log \{\n {12}roll_size 50MiB\n {12}roll_keep 5\n {8}\}\n'
+OLD_BLOCK_JSON='output file \/var\/log\/caddy\/access\.log \{\\n {12}roll_size 50MiB\\n {12}roll_keep 5\\n {8}\}\\n'
 
 # As the deploy user, who writes these files on every deploy anyway: a link
 # deploy planted in caddy/sites is skipped by find, never followed by root.
@@ -31,12 +38,18 @@ sites() {
     [[ -d "${SITES}" ]] || return 0
     as_deploy find "${SITES}" -maxdepth 1 -type f -name '*.conf' \
         -exec perl -0777 -i -pe "s/${OLD_BLOCK}/output stdout\\n/g" {} +
-    local overrides=() left status=0
+    if [[ -d "${JOURNAL}" ]]; then
+        as_deploy find "${JOURNAL}" -maxdepth 1 -type f -name '*.json' \
+            -exec perl -0777 -i -pe "s/${OLD_BLOCK_JSON}/output stdout\\\\n/g" {} +
+    fi
+    local targets=("${SITES}") left status=0
+    if [[ -d "${JOURNAL}" ]]; then
+        targets+=("${JOURNAL}")
+    fi
     shopt -s nullglob
-    overrides=("${BOXMUNGE_ROOT}"/projects/*/caddy.override.conf)
+    targets+=("${BOXMUNGE_ROOT}"/projects/*/caddy.override.conf)
     shopt -u nullglob
-    left="$(as_deploy grep -rlF --devices=skip /var/log/caddy "${SITES}" "${overrides[@]}")" \
-        || status=$?
+    left="$(as_deploy grep -rlF --devices=skip /var/log/caddy "${targets[@]}")" || status=$?
     if [[ ${status} -eq 1 ]]; then
         return 0
     fi
@@ -49,7 +62,7 @@ sites() {
         echo "       the install or upgrade again (after 'boxmunge-upgrade clear-blocklist" >&2
         echo "       <version>' if an upgrade stopped here)." >&2
     else
-        echo "ERROR: could not check ${SITES} and the caddy.override.conf files for" >&2
+        echo "ERROR: could not check ${targets[*]} for" >&2
         echo "       /var/log/caddy (grep exit ${status}); fix what grep reported above." >&2
     fi
     exit 1

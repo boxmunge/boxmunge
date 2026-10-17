@@ -19,7 +19,7 @@ from boxmunge.docker import _CADDY_CONTAINER
 
 REPO = Path(__file__).resolve().parents[1]
 BOOTSTRAP = REPO / "bootstrap"
-CROWDSEC_CADDY = (BOOTSTRAP / "crowdsec-caddy.sh").read_text()
+CROWDSEC_CADDY = (BOOTSTRAP / "crowdsec-acquis.sh").read_text()
 
 
 def _heredoc(text: str, start: str, end: str) -> str:
@@ -34,6 +34,10 @@ def _caddy_service() -> dict:
 def test_caddy_mounts_no_log_directory() -> None:
     for volume in _caddy_service()["volumes"]:
         assert "/var/log" not in volume and "logs" not in volume.split(":")[0]
+
+
+def test_old_log_path_is_only_a_small_container_private_tmpfs() -> None:
+    assert _caddy_service()["tmpfs"] == ["/var/log/caddy:size=64m,mode=0700"]
 
 
 def test_caddy_logs_to_a_driver_the_docker_api_reads_back_rotated() -> None:
@@ -85,7 +89,7 @@ def test_install_moves_sites_before_recreating_caddy_then_switches_crowdsec() ->
     copy = text.index('cp "${SCRIPT_DIR}/caddy/compose.yml"')
     up = text.index('docker compose -f "${BOXMUNGE_ROOT}/caddy/compose.yml" up -d')
     retire = text.index('caddy-access-log.sh" retire')
-    crowdsec = text.index('bootstrap/crowdsec-caddy.sh"')
+    crowdsec = text.index('bootstrap/crowdsec-acquis.sh"')
     assert sites < copy < up < retire < crowdsec
 
 
@@ -119,3 +123,22 @@ def test_legacy_removal_drops_exactly_the_block_crowdsec_sh_appended() -> None:
         env={"LEGACY_LOG": "/opt/boxmunge/caddy/logs/access.log", "PATH": "/usr/bin:/bin"},
         capture_output=True, text=True, check=True).stdout
     assert out == debian
+
+
+@pytest.mark.skipif(shutil.which("perl") is None, reason="needs perl")
+def test_sites_rewrite_also_fixes_a_pending_journal_entry() -> None:
+    import json
+    script = (BOOTSTRAP / "caddy-access-log.sh").read_text()
+    expr = re.search(r"^OLD_BLOCK_JSON='(.*)'$", script, re.M).group(1)
+    new = generate_caddy_config({
+        "project": "myapp", "hosts": ["myapp.example.com"],
+        "services": {"web": {"type": "frontend", "port": 3000, "routes": [{"path": "/"}]}},
+    })
+    old = new.replace(
+        "        output stdout\n",
+        "        output file /var/log/caddy/access.log {\n"
+        "            roll_size 50MiB\n            roll_keep 5\n        }\n")
+    rewritten = subprocess.run(
+        ["perl", "-0777", "-pe", f"s/{expr}/output stdout\\\\n/g"],
+        input=json.dumps({"previous": old}), capture_output=True, text=True, check=True).stdout
+    assert json.loads(rewritten) == {"previous": new}

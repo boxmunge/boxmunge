@@ -18,7 +18,7 @@ services:
     networks:
       - boxmunge-proxy
     # Site access logs go to stdout as JSON; the host's CrowdSec reads them
-    # through the Docker API (bootstrap/crowdsec-caddy.sh), so no host file
+    # through the Docker API (bootstrap/crowdsec-acquis.sh), so no host file
     # this container could replace is ever opened by root. Pinned to a
     # driver the Docker API can read back, rotated.
     logging:
@@ -27,6 +27,12 @@ services:
         max-size: "50m"
         max-file: "5"
     read_only: true
+    # Site configs of releases before Caddy logged to stdout write
+    # /var/log/caddy/access.log; a rollback to one regenerates them. Container
+    # memory only, never a host path, read by nothing: it keeps a rolled-back
+    # Caddy starting. Remove once no rollback target predates the stdout log.
+    tmpfs:
+      - /var/log/caddy:size=64m,mode=0700
     cap_drop:
       - ALL
     cap_add:

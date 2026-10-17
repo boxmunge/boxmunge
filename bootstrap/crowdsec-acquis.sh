@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# bootstrap/crowdsec-caddy.sh — CrowdSec reads Caddy's access log from Docker.
+# bootstrap/crowdsec-acquis.sh — the CrowdSec acquisition boxmunge manages.
 # Run by install.sh on every install and upgrade, once Caddy is up; idempotent.
 #
-# Writes boxmunge's acquisition and the crowdsec unit's limits, removes the file
-# acquisition earlier releases appended to acquis.yaml, restarts CrowdSec and
-# checks that it tails boxmunge-caddy and parses a Caddy access line. Anything
-# short of that exits non-zero: a CrowdSec that silently reads nothing is worse
-# than a failed install.
+# Writes the Caddy acquisition and the crowdsec unit's limits, removes the file
+# acquisition earlier releases appended to acquis.yaml, corrects the SSH filter
+# they appended, installs the Caddy parser, restarts CrowdSec and checks that it
+# tails boxmunge-caddy and parses a Caddy access line. Anything short of that
+# exits non-zero: a CrowdSec that silently reads nothing is worse than a failed
+# install.
 #
 # Why the Docker API and not a file: Caddy runs remapped and owns any directory
 # it logs into, so it decides what such a file is (a FIFO, /dev/zero, a link to
@@ -35,7 +36,7 @@ write_acquisition() {
     install -d -m 755 "$(dirname "${ACQUIS}")"
     # stdout only: Caddy's own runtime log (stderr) is not an access log.
     cat > "${ACQUIS}.tmp" <<YAML
-# Managed by boxmunge (bootstrap/crowdsec-caddy.sh); rewritten on upgrade.
+# Managed by boxmunge (bootstrap/crowdsec-acquis.sh); rewritten on upgrade.
 source: docker
 container_name:
   - ${CADDY_CONTAINER}
@@ -61,13 +62,31 @@ remove_legacy_acquisition() {
     fi
 }
 
+# Earlier bootstraps appended this filter where acquis.yaml had no journal
+# source; Debian's unit is ssh.service, so it matched nothing.
+fix_ssh_filter() {
+    [[ -f "${LEGACY_ACQUIS}" ]] || return 0
+    sed -i 's/^  - "_SYSTEMD_UNIT=sshd\.service"$/  - "_SYSTEMD_UNIT=ssh.service"/' "${LEGACY_ACQUIS}"
+    if grep -qF "_SYSTEMD_UNIT=sshd.service" "${LEGACY_ACQUIS}"; then
+        fail "${LEGACY_ACQUIS} filters the journal on sshd.service, which Debian does not
+       have (its unit is ssh.service). Correct that entry by hand and run this again."
+    fi
+}
+
+# An install whose collection step failed (crowdsec.sh hid that) never got the
+# Caddy parser; the hub index must be current for the install to succeed.
+install_parser() {
+    cscli hub update
+    cscli collections install crowdsecurity/caddy --force
+}
+
 # MemoryMax bounds what a flood of lines can make CrowdSec hold; GOMEMLIMIT
 # makes Go collect before reaching it; Restart brings it back if it is killed,
 # so hitting the bound never switches detection off for good.
 write_limits() {
     install -d -m 755 "$(dirname "${DROPIN}")"
     cat > "${DROPIN}.tmp" <<'UNIT'
-# Managed by boxmunge (bootstrap/crowdsec-caddy.sh); rewritten on upgrade.
+# Managed by boxmunge (bootstrap/crowdsec-acquis.sh); rewritten on upgrade.
 [Service]
 MemoryMax=512M
 TasksMax=256
@@ -80,13 +99,21 @@ UNIT
     systemctl daemon-reload
 }
 
+# Whether CrowdSec logged, after byte offset $1 of its log, that it tails Caddy.
+# Process substitution, not a pipe: grep -q exiting early would SIGPIPE tail
+# and, under pipefail, read as no match. Until CrowdSec first starts the log
+# may not exist; the caller's timeout reports that.
+tails_caddy() {
+    grep -qF "start tail for container ${CADDY_CONTAINER}\"" \
+        < <(tail -c "+$(($1 + 1))" "${CROWDSEC_LOG}" 2>/dev/null)
+}
+
 restart_and_verify() {
-    local offset
+    local offset size
     offset="$(stat -c %s "${CROWDSEC_LOG}" 2>/dev/null || echo 0)"
     systemctl restart crowdsec
     local deadline=$((SECONDS + VERIFY_SECONDS))
-    until tail -c "+$((offset + 1))" "${CROWDSEC_LOG}" 2>/dev/null \
-            | grep -qF "start tail for container ${CADDY_CONTAINER}\""; do
+    until tails_caddy "${offset}"; do
         if (( SECONDS >= deadline )); then
             fail "CrowdSec is not reading ${CADDY_CONTAINER}'s access log: ${CROWDSEC_LOG}
        shows no 'start tail for container ${CADDY_CONTAINER}' within ${VERIFY_SECONDS}s
@@ -94,15 +121,17 @@ restart_and_verify() {
        ${CROWDSEC_LOG} for the docker datasource's errors."
         fi
         sleep 1
+        # CrowdSec rotated its log: the new file holds only lines since then.
+        size="$(stat -c %s "${CROWDSEC_LOG}" 2>/dev/null || echo 0)"
+        (( size >= offset )) || offset=0
     done
     local out
     out="$(cscli explain --log "${SAMPLE}" --type caddy --color no 2>&1)" \
         || fail "cscli explain failed: ${out}"
     if ! grep -qF "🟢 crowdsecurity/caddy-logs" <<<"${out}" \
             || ! grep -qF "parser success" <<<"${out}"; then
-        fail "CrowdSec does not parse Caddy's access log. Install the parser with
-       'cscli collections install crowdsecurity/caddy' and run this again.
-       cscli explain said:
+        fail "CrowdSec does not parse Caddy's access log (crowdsecurity/caddy is
+       installed). cscli explain said:
 ${out}"
     fi
     echo "  CrowdSec tails ${CADDY_CONTAINER} and parses its access log"
@@ -110,5 +139,7 @@ ${out}"
 
 write_acquisition
 remove_legacy_acquisition
+fix_ssh_filter
+install_parser
 write_limits
 restart_and_verify

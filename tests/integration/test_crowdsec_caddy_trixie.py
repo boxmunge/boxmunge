@@ -2,7 +2,7 @@
 
 A real caddy:2-alpine runs a site block from generate_caddy_config; a
 debian:trixie container installs CrowdSec with bootstrap/crowdsec.sh, talks to
-the same Docker daemon through its socket, and runs bootstrap/crowdsec-caddy.sh
+the same Docker daemon through its socket, and runs bootstrap/crowdsec-acquis.sh
 exactly as install.sh does. The only change to the script is the container
 name (a shared daemon cannot host a second boxmunge-caddy) and, for the
 failure test, the wait. Also covers bootstrap/caddy-access-log.sh, which moves
@@ -37,6 +37,11 @@ MANIFEST = {
 LEGACY_ACQUIS = (
     "\n---\nsource: file\nfilenames:\n  - /opt/boxmunge/caddy/logs/access.log\n"
     "labels:\n  type: caddy\n"
+)
+# What crowdsec.sh appended where acquis.yaml had no journal source.
+LEGACY_SSH = (
+    '\n---\nsource: journalctl\njournalctl_filter:\n  - "_SYSTEMD_UNIT=sshd.service"\n'
+    "labels:\n  type: syslog\n"
 )
 # Each site block's access log as caddy.py generated it before this release.
 OLD_LOG = (
@@ -105,19 +110,21 @@ def crowdsec(tmp_path: Path):
                   "apt-get update -qq >/dev/null\n"
                   "apt-get install -y -qq ca-certificates curl >/dev/null\n"
                   "bash /bootstrap/crowdsec.sh > /tmp/cs.log 2>&1 || { tail -20 /tmp/cs.log; exit 1; }\n"
-                  f"printf '%s' '{LEGACY_ACQUIS}' >> /etc/crowdsec/acquis.yaml\n")
+                  f"printf '%s' '{LEGACY_ACQUIS}{LEGACY_SSH}' >> /etc/crowdsec/acquis.yaml\n"
+                  # A box whose collection step failed: crowdsec-acquis.sh installs it.
+                  "cscli collections remove crowdsecurity/caddy >/dev/null\n")
         yield name
     finally:
         _run(["docker", "rm", "-f", name], check=False)
 
 
 def _script_for(container: str, caddy_name: str, tmp_path: Path, wait: int = 60) -> None:
-    text = (REPO / "bootstrap" / "crowdsec-caddy.sh").read_text()
+    text = (REPO / "bootstrap" / "crowdsec-acquis.sh").read_text()
     assert "CADDY_CONTAINER=boxmunge-caddy\n" in text and "VERIFY_SECONDS=60\n" in text
     text = text.replace("CADDY_CONTAINER=boxmunge-caddy\n", f"CADDY_CONTAINER={caddy_name}\n")
     text = text.replace("VERIFY_SECONDS=60\n", f"VERIFY_SECONDS={wait}\n")
-    (tmp_path / "crowdsec-caddy.sh").write_text(text)
-    _run(["docker", "cp", str(tmp_path / "crowdsec-caddy.sh"), f"{container}:/crowdsec-caddy.sh"])
+    (tmp_path / "crowdsec-acquis.sh").write_text(text)
+    _run(["docker", "cp", str(tmp_path / "crowdsec-acquis.sh"), f"{container}:/crowdsec-acquis.sh"])
 
 
 def _acquisition(container: str) -> dict:
@@ -128,13 +135,14 @@ def _acquisition(container: str) -> dict:
 
 def test_caddy_access_lines_reach_crowdsec_through_docker(caddy, crowdsec, tmp_path) -> None:
     _script_for(crowdsec, caddy, tmp_path)
-    result = _sh(crowdsec, "bash /crowdsec-caddy.sh", check=False)
+    result = _sh(crowdsec, "bash /crowdsec-acquis.sh", check=False)
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"CrowdSec tails {caddy}" in result.stdout
 
     state = _sh(crowdsec, "cat /etc/crowdsec/acquis.yaml; echo ===; "
                           "cat /etc/systemd/system/crowdsec.service.d/boxmunge-limits.conf").stdout
     assert "caddy/logs" not in state
+    assert "sshd.service" not in state and "_SYSTEMD_UNIT=ssh.service" in state
     assert "MemoryMax=512M" in state
 
     for _ in range(3):
@@ -151,7 +159,7 @@ def test_caddy_access_lines_reach_crowdsec_through_docker(caddy, crowdsec, tmp_p
 
 def test_crowdsec_caddy_fails_loudly_when_caddy_is_not_tailed(crowdsec, tmp_path) -> None:
     _script_for(crowdsec, "bmtest-cs-no-such-caddy", tmp_path, wait=10)
-    result = _sh(crowdsec, "bash /crowdsec-caddy.sh", check=False)
+    result = _sh(crowdsec, "bash /crowdsec-acquis.sh", check=False)
     assert result.returncode != 0
     assert "CrowdSec is not reading bmtest-cs-no-such-caddy's access log" in result.stderr
 
@@ -172,19 +180,29 @@ def _trixie(script: str) -> subprocess.CompletedProcess:
                  "bash", "-c", _BOX + script], timeout=300, check=False)
 
 
-def test_sites_moves_generated_configs_to_stdout() -> None:
-    old = generate_caddy_config(MANIFEST).replace(NEW_LOG, OLD_LOG)
+def test_sites_moves_generated_configs_and_pending_journal_to_stdout(tmp_path) -> None:
+    new = generate_caddy_config(MANIFEST)
+    old = new.replace(NEW_LOG, OLD_LOG)
     assert OLD_LOG in old
+    site = "/opt/boxmunge/caddy/sites/myapp.conf"
+    entry = json.dumps({"path": site, "previous": old, "written": old})
     result = _trixie(
-        f"printf '%s' '{old}' > /opt/boxmunge/caddy/sites/myapp.conf\n"
+        f"printf '%s' '{old}' > {site}\n"
         "ln -s /victim/keep /opt/boxmunge/caddy/sites/planted.conf\n"
+        "install -d -m 700 -o deploy -g deploy /opt/boxmunge/caddy/.site-journal\n"
+        f"printf '%s' '{entry}' > /opt/boxmunge/caddy/.site-journal/myapp.conf.json\n"
+        "chown deploy /opt/boxmunge/caddy/.site-journal/myapp.conf.json\n"
+        # install.sh runs from the installer's root-only extraction directory.
+        "cd /root\n"
         "bash /bootstrap/caddy-access-log.sh sites\n"
         "bash /bootstrap/caddy-access-log.sh sites\n"  # idempotent
-        "cat /opt/boxmunge/caddy/sites/myapp.conf; echo ===\n"
+        f"cat {site}; echo ===\n"
+        "cat /opt/boxmunge/caddy/.site-journal/myapp.conf.json; echo ===\n"
         "test -L /opt/boxmunge/caddy/sites/planted.conf && cat /victim/keep\n")
     assert result.returncode == 0, result.stdout + result.stderr
-    conf, rest = result.stdout.split("===\n")
-    assert conf == generate_caddy_config(MANIFEST)
+    conf, journal, rest = result.stdout.split("===\n")
+    assert conf == new
+    assert json.loads(journal) == {"path": site, "previous": new, "written": new}
     assert rest == "secret\n"
 
 
@@ -207,3 +225,32 @@ def test_retire_removes_caddy_logs_without_following_links() -> None:
         "test ! -e /opt/boxmunge/caddy/logs && cat /victim/keep\n")
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.endswith("secret\n")
+
+
+def _compose_tmpfs() -> list[str]:
+    import yaml
+    service = yaml.safe_load((REPO / "caddy" / "compose.yml").read_text())["services"]["caddy"]
+    assert service["read_only"] is True
+    return service["tmpfs"]
+
+
+@pytest.mark.parametrize("with_tmpfs", [True, False])
+def test_rolled_back_site_configs_still_load_on_the_new_compose(tmp_path, with_tmpfs) -> None:
+    """A rollback's `upgrade --apply` regenerates every site with the old file
+    block; on a read-only rootfs only the compose tmpfs lets Caddy load it."""
+    caddyfile = tmp_path / "Caddyfile"
+    caddyfile.write_text("{\n    admin off\n}\n"
+                         + generate_caddy_config(MANIFEST).replace(NEW_LOG, OLD_LOG))
+    caddyfile.chmod(0o644)
+    name = f"bmtest-cs-rollback-{uuid.uuid4().hex[:10]}"
+    tmpfs = [arg for t in _compose_tmpfs() for arg in ("--tmpfs", t)] if with_tmpfs else []
+    try:
+        _run(["docker", "run", "-d", "--name", name, "--network", "none", "--read-only",
+              "--cap-drop", "ALL", "--cap-add", "NET_BIND_SERVICE", *tmpfs,
+              "-v", f"{caddyfile}:/etc/caddy/Caddyfile:ro", CADDY])
+        time.sleep(2)
+        validate = _run(["docker", "exec", name, "caddy", "validate",
+                         "--config", "/etc/caddy/Caddyfile"], check=False)
+        assert (validate.returncode == 0) is with_tmpfs, validate.stdout + validate.stderr
+    finally:
+        _run(["docker", "rm", "-f", name], check=False)

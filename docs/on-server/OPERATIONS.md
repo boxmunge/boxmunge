@@ -512,12 +512,16 @@ through the Docker API (`/etc/crowdsec/acquis.d/boxmunge-caddy.yaml`, stdout onl
 log file Caddy could replace. Every install and upgrade rewrites that file and CrowdSec's limits
 drop-in, restarts CrowdSec, and fails unless CrowdSec tails `boxmunge-caddy` and parses a Caddy line.
 Check it with `cscli metrics` (source `docker:boxmunge-caddy`).
+A 64 MB tmpfs at `/var/log/caddy`, inside the container only, lets a rollback to an earlier
+release (whose site configs write there) still start Caddy; nothing reads it, so CrowdSec sees no
+HTTP traffic until the box is upgraded again.
 
 Earlier releases wrote `/opt/boxmunge/caddy/logs/access.log`. The upgrade rewrites the
 generated log block in `caddy/sites/`, removes `caddy/logs` and CrowdSec's old file entry, and stops
-if a `caddy.override.conf` still writes to `/var/log/caddy`: Caddy no longer mounts it, so that
-config would stop Caddy from starting. Change the override's log block to `output stdout`, clear the
-version from the blocklist (`boxmunge-upgrade clear-blocklist <version>`) and upgrade again.
+if a `caddy.override.conf` or a hand-placed file in `caddy/sites/` still mentions `/var/log/caddy`:
+Caddy no longer mounts it, so that config would stop Caddy from starting. Change its log block to
+`output stdout`, clear the version from the blocklist (`boxmunge-upgrade clear-blocklist <version>`)
+and upgrade again.
 
 ---
 
@@ -857,7 +861,7 @@ This brings containers up on whatever images are already cached locally. Do not 
 
 ### Caddy maintenance-dir mount
 
-The styled 503 page is served by Caddy from `/etc/caddy/maintenance` (mounted from `/opt/boxmunge/caddy/maintenance/` on the host). The mount is fixed in `caddy/compose.yml`. If you ever hand-edit the Caddy compose file without changing the bundled version, `install.sh`'s file-equality check (`cmp -s`) will not detect the drift and `docker compose up -d` will not recreate the container -- the running Caddy will keep its stale mounts.
+The styled 503 page is served by Caddy from `/etc/caddy/maintenance` (mounted from `/opt/boxmunge/caddy/maintenance/` on the host). The mount is fixed in `caddy/compose.yml`. Do not hand-edit the Caddy compose file: every `install.sh` run (fresh install or upgrade) replaces it with the bundled one and runs `docker compose up -d`, which recreates Caddy whenever its definition differs from the running container.
 
 If the maintenance page does not render after an upgrade, force a Caddy recreate explicitly:
 

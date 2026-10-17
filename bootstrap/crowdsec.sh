@@ -33,13 +33,13 @@ fi
 # update, `cscli collections install` fails with "Downloaded version doesn't
 # match index". --force re-enables collections the package already symlinked
 # (otherwise install aborts on "tainted, won't enable unless --force").
-cscli hub update 2>/dev/null || true
-cscli collections install crowdsecurity/linux --force 2>/dev/null || true
-cscli collections install crowdsecurity/sshd --force 2>/dev/null || true
+cscli hub update
+cscli collections install crowdsecurity/linux --force
+cscli collections install crowdsecurity/sshd --force
 # Parses boxmunge-caddy's JSON access log, which CrowdSec reads from the
 # container's stdout through Docker. install.sh writes that acquisition once
-# Caddy runs (bootstrap/crowdsec-caddy.sh) and fails if the parser is missing.
-cscli collections install crowdsecurity/caddy --force 2>/dev/null || true
+# Caddy runs (bootstrap/crowdsec-acquis.sh).
+cscli collections install crowdsecurity/caddy --force
 
 if [[ -f /etc/crowdsec/acquis.yaml ]]; then
     if ! grep -q "journalctl" /etc/crowdsec/acquis.yaml; then

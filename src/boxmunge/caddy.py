@@ -17,7 +17,7 @@ def _access_log_lines() -> list[str]:
     (`source: docker`, stdout only) for the `crowdsecurity/caddy` parser.
     Never a file: one would sit in a directory the remapped Caddy owns, and
     root CrowdSec would open whatever Caddy left there (a FIFO, a link to a
-    root-only file). Docker's json-file driver rotates it (daemon.json).
+    root-only file). caddy/compose.yml's json-file logging rotates it.
     """
     return [
         "    log {",
