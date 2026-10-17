@@ -100,34 +100,113 @@ def test_crash_point_exits_only_when_named(monkeypatch) -> None:
     assert exited == [137]
 
 
-def _root_chowns(monkeypatch) -> list[str]:
-    chowned: list[str] = []
-    monkeypatch.setattr(fileutil.os, "getuid", lambda: 0)
-    monkeypatch.setattr(fileutil, "_chown_deploy", chowned.append)
-    return chowned
+class _Swap:
+    """Root's chowns, recorded by inode instead of made, and a hook that
+    lets a test swap a directory for a link at a chosen moment."""
+
+    def __init__(self, monkeypatch) -> None:
+        self.inodes: set[int] = set()
+        real_stat, real_fstat = os.stat, os.fstat
+        monkeypatch.setattr(fileutil, "running_as_root", lambda: True)
+        monkeypatch.setattr(fileutil, "_deploy_owner", lambda: (os.getuid(), os.getgid()))
+
+        def chown(path, uid, gid, *, dir_fd=None, follow_symlinks=True):
+            st = real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+            self.inodes.add(st.st_ino)
+
+        def fchown(fd, uid, gid):
+            self.inodes.add(real_fstat(fd).st_ino)
+        monkeypatch.setattr(fileutil.os, "chown", chown)
+        monkeypatch.setattr(fileutil.os, "fchown", fchown)
+        self.monkeypatch = monkeypatch
+
+    def before_listing(self, directory: Path, swap) -> None:
+        """Call swap() when the walk is about to list `directory`."""
+        ino, real_scandir = os.lstat(directory).st_ino, os.scandir
+        done = []
+
+        def scandir(target="."):
+            st = os.fstat(target) if isinstance(target, int) else os.lstat(target)
+            if st.st_ino == ino and not done:
+                done.append(True)
+                swap()
+            return real_scandir(target)
+        self.monkeypatch.setattr(fileutil.os, "scandir", scandir)
+
+
+def _inodes(root: Path) -> set[int]:
+    found = {os.lstat(root).st_ino}
+    for dirpath, dirs, files in os.walk(root):
+        found |= {os.lstat(os.path.join(dirpath, n)).st_ino for n in dirs + files}
+    return found
+
+
+def _outside(tmp_path: Path) -> Path:
+    outside = tmp_path / "etc"
+    (outside / "sub").mkdir(parents=True)
+    (outside / "passwd").write_text("root")
+    return outside
+
+
+def _link_in(place: Path, target: Path, aside: Path) -> None:
+    place.rename(aside)
+    os.symlink(target, place)
 
 
 def test_chown_tree_deploy_of_a_link_reowns_only_the_link(tmp_path, monkeypatch) -> None:
     """A planted top-level link (pdir/x -> /etc) must never hand its target
-    to deploy: os.walk would follow it."""
-    target = tmp_path / "etc"
-    (target / "sub").mkdir(parents=True)
-    (target / "passwd").write_text("root")
-    os.symlink(target, tmp_path / "x")
-    chowned = _root_chowns(monkeypatch)
+    to deploy."""
+    outside = _outside(tmp_path)
+    os.symlink(outside, tmp_path / "x")
+    rec = _Swap(monkeypatch)
     fileutil.chown_tree_deploy(tmp_path / "x")
-    assert chowned == [str(tmp_path / "x")]
+    assert rec.inodes == {os.lstat(tmp_path / "x").st_ino}
 
 
 def test_chown_tree_deploy_never_descends_a_nested_link(tmp_path, monkeypatch) -> None:
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "secret").write_text("s")
+    outside = _outside(tmp_path)
     tree = tmp_path / "tree"
     (tree / "d").mkdir(parents=True)
     (tree / "f").write_text("f")
     os.symlink(outside, tree / "d" / "link")
-    chowned = _root_chowns(monkeypatch)
+    rec = _Swap(monkeypatch)
     fileutil.chown_tree_deploy(tree)
-    assert sorted(chowned) == sorted([str(tree), str(tree / "d"), str(tree / "f")])
-    assert not any(c.startswith(str(outside)) for c in chowned)
+    assert rec.inodes == _inodes(tree)
+    assert not rec.inodes & _inodes(outside)
+
+
+def test_chown_tree_deploy_survives_the_top_swapped_for_a_link(tmp_path, monkeypatch) -> None:
+    outside = _outside(tmp_path)
+    tree = tmp_path / "tree"
+    (tree / "f").mkdir(parents=True)
+    rec = _Swap(monkeypatch)
+    rec.before_listing(tree, lambda: _link_in(tree, outside, tmp_path / "aside"))
+    fileutil.chown_tree_deploy(tree)
+    assert not rec.inodes & _inodes(outside)
+
+
+def test_chown_tree_deploy_survives_a_subdirectory_swapped_for_a_link(tmp_path,
+                                                                     monkeypatch) -> None:
+    outside = _outside(tmp_path)
+    tree = tmp_path / "tree"
+    (tree / "sub" / "deeper").mkdir(parents=True)
+    rec = _Swap(monkeypatch)
+    rec.before_listing(tree / "sub",
+                       lambda: _link_in(tree / "sub", outside, tmp_path / "aside"))
+    fileutil.chown_tree_deploy(tree)
+    assert not rec.inodes & _inodes(outside)
+
+
+def test_chown_tree_deploy_of_a_file_reowns_it(tmp_path, monkeypatch) -> None:
+    (tmp_path / "f").write_text("x")
+    rec = _Swap(monkeypatch)
+    fileutil.chown_tree_deploy(tmp_path / "f")
+    assert rec.inodes == {os.lstat(tmp_path / "f").st_ino}
+
+
+def test_chown_tree_deploy_is_silent_when_not_root(tmp_path, monkeypatch) -> None:
+    (tmp_path / "d").mkdir()
+    rec = _Swap(monkeypatch)
+    monkeypatch.setattr(fileutil, "running_as_root", lambda: False)
+    fileutil.chown_tree_deploy(tmp_path / "d")
+    assert rec.inodes == set()

@@ -211,21 +211,40 @@ def chown_tree_deploy(path: Path) -> None:
     """Best-effort chown of ``path`` and everything under it to deploy.
 
     For trees a root-run path (upgrade) copies that the deploy shell must
-    later replace. Links are re-owned, never followed: a ``path`` that is
-    itself a link has only the link re-owned (os.walk would follow it).
-    Same best-effort rules as ``_chown_deploy``.
+    later replace. Deploy can swap any entry for a link while this runs, so
+    nothing is reached by name: the top is opened without following a link
+    (a link or a file there is re-owned itself, which grants nothing), the
+    walk goes through directory descriptors (os.fwalk refuses a directory
+    swapped for a link), and each entry is re-owned relative to its
+    directory without following a link. Same best-effort rules as
+    ``_chown_deploy``.
     """
     if not running_as_root():
         return
-    _chown_deploy(str(path))
-    if os.path.islink(path):
+    owner = _deploy_owner()
+    if owner is None:
         return
-    for root, dirs, files in os.walk(path):
-        for name in dirs + files:
-            target = os.path.join(root, name)
-            if os.path.islink(target):
-                continue
-            _chown_deploy(target)
+    try:
+        top = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOTDIR):
+            _chown_deploy(str(path))  # a link or a file: re-own just that
+        else:
+            _warn_chown(str(path), e)
+        return
+    try:
+        try:
+            os.fchown(top, *owner)
+        except OSError as e:
+            _warn_chown(str(path), e)
+        for root, dirs, files, dirfd in os.fwalk(".", dir_fd=top, follow_symlinks=False):
+            for name in dirs + files:
+                try:
+                    os.chown(name, *owner, dir_fd=dirfd, follow_symlinks=False)
+                except OSError as e:
+                    _warn_chown(os.path.join(str(path), root, name), e)
+    finally:
+        os.close(top)
 
 
 def open_shared_lockfile(path: Path) -> int:

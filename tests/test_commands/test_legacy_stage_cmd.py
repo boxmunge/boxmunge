@@ -326,26 +326,18 @@ def test_after_the_last_step_only_the_recorded_choice_finishes(paths, legacy, ca
 
 # -- fix round 1 ------------------------------------------------------------
 
-def _as_root(monkeypatch) -> list[str]:
-    """Root's chowns, recorded instead of made."""
-    from boxmunge import fileutil
-    chowned: list[str] = []
-    monkeypatch.setattr(fileutil, "running_as_root", lambda: True)
-    monkeypatch.setattr(fileutil, "_chown_deploy", chowned.append)
-    return chowned
-
-
 def test_root_discard_never_chowns_through_an_installed_link(paths, legacy, tmp_path,
                                                              monkeypatch) -> None:
+    from tests.test_fileutil_tree import _inodes, _Swap
     outside = tmp_path / "etc"
     outside.mkdir()
     (outside / "passwd").write_text("root")
     os.symlink(outside, legacy / ".releases" / "prestage" / "release" / "x")
-    chowned = _as_root(monkeypatch)
+    rec = _Swap(monkeypatch)
     assert _run(paths, "discard") == 0
     assert os.path.islink(legacy / "x")
-    assert str(legacy / "x") in chowned
-    assert not any(c.startswith(str(outside)) for c in chowned)
+    assert os.lstat(legacy / "x").st_ino in rec.inodes
+    assert not rec.inodes & _inodes(outside)
 
 
 @pytest.mark.parametrize("linked", ["prestage", "prestage/release"])
