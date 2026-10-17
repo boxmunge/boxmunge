@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# tests/integration/sshd_deploy_probe.sh — run as root in a throwaway Debian 13
-# container by test_sshd_deploy_forwarding.py, with bootstrap/ at /bootstrap
+# tests/integration/sshd_hardening_probe.sh — run as root in a throwaway Debian 13
+# container by test_sshd_hardening.py, with bootstrap/ at /bootstrap
 # and src/ at /src.
 #
 # Builds a box the way init-host.sh does (deploy with the real restricted
 # shell as its login shell and in the docker group, supervisor with bash,
-# sshd.sh), then tries every SSH channel that could bypass the shell, as
-# deploy, under four sshd configurations. Prints one line per attempt:
+# sshd.sh) on a cloud image whose 50-cloud-init.conf turns passwords on, then
+# tries every SSH channel that could bypass the shell, as deploy, under three
+# sshd configurations. Prints one line per attempt:
 #   RESULT <phase> <user> <channel> <allowed|refused>
-# plus the effective sshd settings for deploy in each phase.
+# plus the effective sshd settings for deploy and supervisor in each phase.
 set -uo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
@@ -44,9 +45,8 @@ done
 export SSH_PORT=922 DEPLOY_USER=deploy
 # shellcheck source=/dev/null  # mounted into the container
 . /bootstrap/sshd.sh
-DROPIN=/etc/ssh/sshd_config.d/00-boxmunge-deploy.conf
-cp "${DROPIN}" /root/dropin.conf
-cp /etc/ssh/sshd_config /root/sshd_config.shipped
+DROPIN=/etc/ssh/sshd_config.d/00-boxmunge.conf
+echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/50-cloud-init.conf
 
 # What a forward would reach: a stand-in for /var/run/docker.sock
 # (root:docker 0660) and a local TCP service. Both answer PONG.
@@ -120,8 +120,15 @@ probe_deploy() {
     done
     wait "${pid}"; ssh-agent -k >/dev/null
     report deploy agent "${verdict}"
-    echo "SETTINGS ${PHASE} $(sshd -T -C user=deploy,host=localhost,addr=127.0.0.1 \
-        | grep -E '^(disableforwarding|allowtcpforwarding|allowstreamlocalforwarding|allowagentforwarding|x11forwarding|permittunnel|permituserrc|permittty) ' \
+    settings deploy
+    settings supervisor
+}
+
+# Settings that show logins, forwarding and the Match block's scope (port and
+# maxauthtries come from the main file, which sshd reads after the drop-ins).
+settings() {
+    echo "SETTINGS ${PHASE} $1 $(sshd -T -C "user=$1,host=localhost,addr=127.0.0.1" \
+        | grep -E '^(passwordauthentication|kbdinteractiveauthentication|permitrootlogin|disableforwarding|allowtcpforwarding|allowstreamlocalforwarding|allowagentforwarding|x11forwarding|permittunnel|gatewayports|permituserrc|permittty|port|maxauthtries) ' \
         | sort | tr '\n' ',')"
 }
 
@@ -136,20 +143,21 @@ restart_sshd() {
     echo "SSHD_DOWN ${PHASE}"; exit 1
 }
 
-# 1. As released: sshd.sh's globals, no Match block for deploy.
-PHASE=shipped-before; rm -f "${DROPIN}"; restart_sshd; probe_deploy
-# 2. The same box once TCP forwarding is turned on globally (for supervisor, say).
-PHASE=opened-before
-sed -i 's/^AllowTcpForwarding no$/AllowTcpForwarding yes/' /etc/ssh/sshd_config
-restart_sshd; probe_deploy
-# 3. That box with the fix applied: deploy is closed, supervisor keeps forwarding.
-PHASE=opened-after; DEPLOY_USER=deploy bash /bootstrap/sshd-deploy.sh >/dev/null || exit 1
+# 1. A box bootstrapped before the drop-in: Debian's main-file defaults for
+#    forwarding, and cloud-init's drop-in turning passwords back on.
+PHASE=fleet-before; rm -f "${DROPIN}"; restart_sshd; probe_deploy
+forward supervisor tcp-L "-L7703:127.0.0.1:7777" 7703
+# 2. That box once install.sh has run the hardening.
+PHASE=fleet-after; DEPLOY_USER=deploy bash /bootstrap/sshd-hardening.sh >/dev/null || exit 1
 restart_sshd; probe_deploy
 forward supervisor tcp-L "-L7703:127.0.0.1:7777" 7703
-# 4. As this release ships it.
-PHASE=shipped-after; cp /root/sshd_config.shipped /etc/ssh/sshd_config
-cmp -s "${DROPIN}" /root/dropin.conf || { echo "DROPIN_DIFFERS"; exit 1; }
+# 3. An operator opens TCP forwarding for supervisor in its own Match block:
+#    the next install accepts it, and deploy stays closed.
+PHASE=relaxed-after
+printf 'Match User supervisor\n    AllowTcpForwarding yes\n' > /etc/ssh/sshd_config.d/10-ops.conf
+DEPLOY_USER=deploy bash /bootstrap/sshd-hardening.sh >/dev/null || exit 1
 restart_sshd; probe_deploy
+forward supervisor tcp-L "-L7703:127.0.0.1:7777" 7703
 
 # The session itself still works: allowlisted commands and scp uploads.
 echo "COMMAND $("${SSH[@]}" deploy@127.0.0.1 status --json 2>&1)"

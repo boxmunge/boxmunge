@@ -518,10 +518,11 @@ else
     echo "  sshd Subsystem rewired to boxmunge-sftp + reload sent"
 fi
 
-# deploy's key gets a session and no forwarding of any kind (the script says
-# why). Every install and upgrade re-applies it, so boxes bootstrapped before
-# it get it too; it fails the install if sshd would not enforce it.
-DEPLOY_USER=deploy bash "${SCRIPT_DIR}/bootstrap/sshd-deploy.sh"
+# Key-only logins and no forwarding, as a drop-in that wins over cloud-init's
+# (the script says why). Every install and upgrade re-applies it, so boxes
+# bootstrapped before it get it too; it fails the install if sshd would not
+# enforce it.
+DEPLOY_USER=deploy bash "${SCRIPT_DIR}/bootstrap/sshd-hardening.sh"
 
 # ---------------------------------------------------------------------------
 # Install the boxmunge-upgrade shim (orchestrates auto-updates)
