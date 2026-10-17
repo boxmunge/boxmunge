@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
 
 import pytest
 
@@ -36,14 +35,8 @@ def test_running_project(fixture_paths) -> None:
     assert shop["paused"] is None and shop["quarantine"] is None
 
 
-def _no_containers():
-    """blog's 0.10.1 stage asks Docker which containers production runs."""
-    return patch("boxmunge.legacy_stage.docker_containers.created_times", return_value={})
-
-
 def test_paused_quarantined_staged_and_pre_registered(fixture_paths) -> None:
-    with _no_containers():
-        blog = _call(fixture_paths, "project.get", {"project": "blog"})
+    blog = _call(fixture_paths, "project.get", {"project": "blog"})
     assert blog["lifecycle"] == "paused"
     assert blog["paused"]["reason"] == "Content freeze until the redesign ships"
     billing = _call(fixture_paths, "project.get", {"project": "billing"})
@@ -64,8 +57,7 @@ def test_an_open_install_and_a_0_10_1_stage(fixture_paths) -> None:
     assert shop["install"]["source"] == "bundle" and shop["install"]["phase"] == "installed"
     assert shop["install"]["ref"].startswith("shop-") and shop["install"]["id"]
     assert shop["legacy_stage"] is None
-    with _no_containers():
-        blog = _call(fixture_paths, "project.get", {"project": "blog"})
+    blog = _call(fixture_paths, "project.get", {"project": "blog"})
     assert blog["legacy_stage"] == {"kind": "bundle", "evidence": "untouched"}
     assert blog["install"] is None
     wiki = _call(fixture_paths, "project.get", {"project": "wiki"})
