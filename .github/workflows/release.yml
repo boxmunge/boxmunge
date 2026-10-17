@@ -35,7 +35,7 @@ jobs:
       breaking: ${{ steps.release_class.outputs.breaking }}
       title: ${{ steps.release_class.outputs.title }}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
         with:
           persist-credentials: false
 
@@ -106,7 +106,7 @@ jobs:
     steps:
       # Checked out only for scripts/release-lint.py (stdlib only). Nothing
       # from PyPI is installed or run in this job.
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
         with:
           persist-credentials: false
 
