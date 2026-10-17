@@ -100,6 +100,10 @@ jobs:
           pip install --require-hashes -r requirements.txt -r requirements-mcp.txt
           pip install --require-hashes -r requirements-dev.txt
           pip install -e . --no-deps
+      - name: Fetch the v0.10.1 tag
+        # test_legacy_upgrade.py installs boxmunge 0.10.1 from `git archive
+        # v0.10.1`; the checkout above is depth 1 with no tags.
+        run: git fetch --no-tags --depth=1 origin refs/tags/v0.10.1:refs/tags/v0.10.1
       - name: Integration tests (real Docker)
         env:
           # Turn "prerequisite missing" into a failure instead of a silent skip.

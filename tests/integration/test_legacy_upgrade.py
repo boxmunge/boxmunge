@@ -50,13 +50,25 @@ def _docker(*args: str, timeout: int = 600) -> subprocess.CompletedProcess:
                           timeout=timeout, check=False)
 
 
+def _v0101_archive() -> bytes:
+    """0.10.1's source. CI's checkout is shallow, without tags: its
+    integration job fetches this one tag in the step "Fetch the v0.10.1 tag"."""
+    tag = subprocess.run(["git", "-C", str(REPO), "rev-parse", "-q", "--verify",
+                          "refs/tags/v0.10.1^{commit}"], capture_output=True, check=False)
+    if tag.returncode != 0:
+        pytest.fail("tag v0.10.1 is not in this checkout: fetch it with `git fetch --no-tags "
+                    "--depth=1 origin refs/tags/v0.10.1:refs/tags/v0.10.1` (CI: the "
+                    "integration job's step \"Fetch the v0.10.1 tag\")")
+    return subprocess.run(["git", "-C", str(REPO), "archive", "v0.10.1"], check=True,
+                          capture_output=True).stdout
+
+
 @pytest.fixture(scope="module")
 def image(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     out = tmp_path_factory.mktemp("legacy")
     v0101 = out / "v0101"
     v0101.mkdir()
-    archive = subprocess.run(["git", "-C", str(REPO), "archive", "v0.10.1"], check=True,
-                             capture_output=True).stdout
+    archive = _v0101_archive()
     subprocess.run(["tar", "-x", "-C", str(v0101)], input=archive, check=True)
     tarball = out / "boxmunge.tar.gz"
     subprocess.run(["make", "-C", str(REPO), "bundle", f"BUNDLE={tarball}"],
