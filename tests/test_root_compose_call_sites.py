@@ -142,7 +142,7 @@ def test_the_scan_finds_the_checked_call_sites() -> None:
         "commands/data_cmd.py", "commands/deploy.py", "commands/recover_cmd.py", "commands/restore.py",
         "commands/resume_cmd.py", "commands/rollback.py", "commands/security_resume.py",
         "commands/upgrade_steps.py", "container_update.py", "cve/quarantine.py",
-        "production_stopped.py", "staging_bringup.py", "staging_data.py",
+        "legacy_stage_ops.py", "production_stopped.py", "staging_bringup.py", "staging_data.py",
     ]
 
 

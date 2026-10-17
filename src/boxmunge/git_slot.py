@@ -8,10 +8,13 @@ operator-ref resolution and the staged clone.
 
 Every name is checked in Python before git runs, and every call that takes
 one passes --end-of-options, so no ref is ever read as an option, a range
-or a path.
+or a path. Run as root (legacy-stage is operator-only), git runs as the
+deploy user, who owns the repository.
 """
 from __future__ import annotations
 
+import os
+import pwd
 import re
 import subprocess
 from pathlib import Path
@@ -27,12 +30,28 @@ class GitRefError(ValueError):
     """A ref that cannot be resolved to exactly one commit, or a git failure."""
 
 
+def _as_deploy() -> dict:
+    """subprocess arguments that run git as the deploy user when we are root.
+    The repository and its config are deploy's: a filter or fsmonitor
+    command there must never run as root (and git refuses a repository
+    another user owns)."""
+    if os.geteuid() != 0:
+        return {}
+    try:
+        pw = pwd.getpwnam("deploy")
+    except KeyError as e:
+        raise GitRefError("running as root, git runs as the deploy user, and there is no "
+                          "deploy user") from e
+    return {"user": pw.pw_uid, "group": pw.pw_gid, "extra_groups": [],
+            "env": {**os.environ, "HOME": pw.pw_dir}}
+
+
 def _git(args: list[str], cwd: Path, *, timeout: int = 60) -> subprocess.CompletedProcess:
     """git's result; a hang or output that is not UTF-8 raises GitRefError,
     so callers handle one error type."""
     try:
         return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
-                              timeout=timeout, check=False)
+                              timeout=timeout, check=False, **_as_deploy())
     except subprocess.TimeoutExpired as e:
         raise GitRefError(f"git {args[0]} in {cwd} timed out after {timeout}s") from e
     except UnicodeDecodeError as e:

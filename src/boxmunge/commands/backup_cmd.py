@@ -78,6 +78,7 @@ def backup_locked(
     project_name: str, paths: BoxPaths,
     kind: BackupKind = BackupKind.MANUAL,
     manifest: dict | None = None,
+    compose_file: Path | None = None,
 ) -> int:
     """The backup core. Caller holds the project lock; never takes it.
 
@@ -89,7 +90,8 @@ def backup_locked(
     the project dir's). ``manifest`` overrides the choice: the pre-deploy
     snapshot passes production's own, read before any install starts, and
     promote passes the production release's while the staged release's
-    files are on disk.
+    files are on disk. ``compose_file`` goes with it when the running
+    release's compose file is not the project dir's (legacy-stage).
 
     Paused projects refuse with rc=1 (operator-driven backup against a
     paused project is almost certainly wrong). Quarantined projects skip
@@ -124,7 +126,6 @@ def backup_locked(
               f"not yet deployed. Deploy first with: boxmunge deploy {project_name}", file=sys.stderr)
         return 1
 
-    compose_file = None
     if manifest is None:
         try:
             source = backup_source(paths, project_name)

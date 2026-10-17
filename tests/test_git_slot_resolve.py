@@ -213,3 +213,35 @@ def test_a_manifest_that_is_not_utf8_is_a_git_ref_error(repos) -> None:
     sha = commit(work, {}, "binary manifest")
     with pytest.raises(GitRefError, match="UTF-8"):
         show_manifest(work, sha)
+
+
+def test_run_as_root_git_runs_as_the_deploy_user(repos, monkeypatch) -> None:
+    """The repository is deploy's: its config (filters, fsmonitor) must never
+    run as root, and git refuses a repository another user owns."""
+    import pwd
+    *_, prod = repos
+    seen = {}
+    real = subprocess.run
+
+    def run(argv, **kw):
+        seen.update(kw)
+        return real(argv, **{k: v for k, v in kw.items()
+                             if k not in ("user", "group", "extra_groups")})
+    monkeypatch.setattr(git_slot.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(git_slot.pwd, "getpwnam", lambda name: pwd.struct_passwd(
+        (name, "x", 1234, 5678, "", "/home/deploy", "/bin/sh")))
+    monkeypatch.setattr(git_slot.subprocess, "run", run)
+    assert head_sha(prod)
+    assert (seen["user"], seen["group"], seen["extra_groups"]) == (1234, 5678, [])
+    assert seen["env"]["HOME"] == "/home/deploy"
+
+
+def test_run_as_root_without_a_deploy_user_git_is_refused(repos, monkeypatch) -> None:
+    *_, prod = repos
+
+    def missing(name):
+        raise KeyError(name)
+    monkeypatch.setattr(git_slot.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(git_slot.pwd, "getpwnam", missing)
+    with pytest.raises(GitRefError, match="deploy user"):
+        head_sha(prod)
