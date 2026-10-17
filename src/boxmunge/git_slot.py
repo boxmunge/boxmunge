@@ -32,7 +32,23 @@ class GitRefError(ValueError):
     """A ref that cannot be resolved to exactly one commit, or a git failure."""
 
 
-def _as_deploy() -> dict:
+def _require_deploy_owned(repo: Path, uid: int) -> None:
+    """git as deploy refuses a repository deploy does not own (one cloned with
+    sudo), and its advice to add safe.directory is wrong here: say to chown."""
+    for path in (repo, repo / ".git"):
+        try:
+            owner = os.lstat(path).st_uid
+        except FileNotFoundError:
+            continue  # not a repository: git says so
+        except OSError as e:
+            raise GitRefError(f"cannot inspect {path}: {e}") from e
+        if owner != uid:
+            raise GitRefError(f"{repo} must be owned by the deploy user (chown -R "
+                              f"deploy:deploy {repo}), then retry; {path} is owned by "
+                              f"uid {owner}")
+
+
+def _as_deploy(repo: Path) -> dict:
     """subprocess arguments that run git as the deploy user when we are root.
     The repository and its config are deploy's, so whatever git runs from
     them (filters, fsmonitor) is deploy's code: it runs as deploy, with no
@@ -45,6 +61,7 @@ def _as_deploy() -> dict:
     except KeyError as e:
         raise GitRefError("running as root, git runs as the deploy user, and there is no "
                           "deploy user") from e
+    _require_deploy_owned(repo, pw.pw_uid)
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": pw.pw_dir,
            "LANG": os.environ.get("LANG", "C.UTF-8"), "GIT_CONFIG_NOSYSTEM": "1"}
     return {"user": pw.pw_uid, "group": pw.pw_gid, "extra_groups": [], "env": env,
@@ -57,7 +74,7 @@ def _git(args: list[str], cwd: Path, *, timeout: int = 60) -> subprocess.Complet
     try:
         return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args], cwd=cwd,
                               capture_output=True, text=True, timeout=timeout, check=False,
-                              **_as_deploy())
+                              **_as_deploy(cwd))
     except subprocess.TimeoutExpired as e:
         raise GitRefError(f"git {args[0]} in {cwd} timed out after {timeout}s") from e
     except UnicodeDecodeError as e:

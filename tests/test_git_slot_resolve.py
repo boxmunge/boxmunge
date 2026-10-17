@@ -228,8 +228,9 @@ def test_run_as_root_git_runs_as_the_deploy_user(repos, monkeypatch) -> None:
         return real(argv, **{k: v for k, v in kw.items()
                              if k not in ("user", "group", "extra_groups")})
     monkeypatch.setattr(git_slot, "running_as_root", lambda: True)
+    owner = prod.stat().st_uid  # deploy owns the repository
     monkeypatch.setattr(git_slot.pwd, "getpwnam", lambda name: pwd.struct_passwd(
-        (name, "x", 1234, 5678, "", "/home/deploy", "/bin/sh")))
+        (name, "x", owner, 5678, "", "/home/deploy", "/bin/sh")))
     monkeypatch.setenv("SUDO_USER", "operator")
     monkeypatch.setattr(git_slot.subprocess, "run", run)
     argvs = []
@@ -240,7 +241,7 @@ def test_run_as_root_git_runs_as_the_deploy_user(repos, monkeypatch) -> None:
         return real_run(argv, **kw)
     monkeypatch.setattr(git_slot.subprocess, "run", recording)
     assert head_sha(prod)
-    assert (seen["user"], seen["group"], seen["extra_groups"]) == (1234, 5678, [])
+    assert (seen["user"], seen["group"], seen["extra_groups"]) == (owner, 5678, [])
     # Nothing of root's session reaches a process deploy controls.
     assert seen["stdin"] is subprocess.DEVNULL and seen["start_new_session"] is True
     assert seen["env"]["HOME"] == "/home/deploy" and seen["env"]["GIT_CONFIG_NOSYSTEM"] == "1"
@@ -257,3 +258,37 @@ def test_run_as_root_without_a_deploy_user_git_is_refused(repos, monkeypatch) ->
     monkeypatch.setattr(git_slot.pwd, "getpwnam", missing)
     with pytest.raises(GitRefError, match="deploy user"):
         head_sha(prod)
+
+
+@pytest.mark.parametrize("where", ["repo", ".git"])
+def test_run_as_root_a_repository_deploy_does_not_own_is_refused(repos, monkeypatch,
+                                                                  where) -> None:
+    """A repo/ an operator cloned with sudo is root's: git as deploy would fail
+    with advice to add safe.directory, which is wrong here. Say to chown it."""
+    import pwd
+    *_, prod = repos
+    other = prod.stat().st_uid + 1
+    monkeypatch.setattr(git_slot, "running_as_root", lambda: True)
+    monkeypatch.setattr(git_slot.pwd, "getpwnam", lambda name: pwd.struct_passwd(
+        (name, "x", other, 5678, "", "/home/deploy", "/bin/sh")))
+    if where == ".git":  # only the .git directory is someone else's
+        real_lstat = git_slot.os.lstat
+
+        def lstat(path, *a, **kw):
+            st = real_lstat(path, *a, **kw)
+            return _owned_by(st, other) if Path(path) == prod else st
+        monkeypatch.setattr(git_slot.os, "lstat", lstat)
+    run = patch.object(git_slot.subprocess, "run")
+    with run as spawned, pytest.raises(GitRefError) as excinfo:
+        head_sha(prod)
+    spawned.assert_not_called()
+    assert (f"{prod} must be owned by the deploy user (chown -R deploy:deploy {prod}), "
+            f"then retry") in str(excinfo.value)
+    assert "safe.directory" not in str(excinfo.value)
+
+
+def _owned_by(st, uid):
+    import os
+    fields = list(st)
+    fields[4] = uid
+    return os.stat_result(fields)
