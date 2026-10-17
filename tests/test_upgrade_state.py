@@ -3,7 +3,7 @@ import json
 import pytest
 from boxmunge.paths import BoxPaths
 from boxmunge.upgrade_state import (
-    is_blocklisted, add_to_blocklist, remove_from_blocklist,
+    UpgradeStateError, is_blocklisted, add_to_blocklist, remove_from_blocklist,
     read_probation, write_probation, clear_probation,
 )
 
@@ -16,6 +16,19 @@ def paths(tmp_path):
 
 
 class TestBlocklist:
+    @pytest.mark.parametrize("content,problem", [
+        ("{not json", "is not valid JSON"),
+        ('["0.2.1"]', "is not a JSON object"),
+    ])
+    def test_unreadable_blocklist_names_the_file(self, paths, content, problem):
+        paths.blocklist.write_text(content)
+        for call in (lambda: is_blocklisted(paths, "0.2.1"),
+                     lambda: add_to_blocklist(paths, "0.2.1", "x")):
+            with pytest.raises(UpgradeStateError) as e:
+                call()
+            assert str(paths.blocklist) in str(e.value) and problem in str(e.value)
+        assert paths.blocklist.read_text() == content
+
     def test_empty_blocklist_returns_false(self, paths):
         assert is_blocklisted(paths, "0.2.1") is False
 

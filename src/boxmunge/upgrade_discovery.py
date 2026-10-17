@@ -32,7 +32,7 @@ from boxmunge.release_selection import (
     AUTO_CLASSES, GITHUB_REPO, MODE_CLASSES, MODES, VERSION_RE, find_blocked, newer,
     parse_github_releases, select,
 )
-from boxmunge.upgrade_state import is_blocklisted
+from boxmunge.upgrade_state import UpgradeStateError, is_blocklisted
 from boxmunge.version import read_installed_version, parse_version_string
 
 
@@ -164,7 +164,11 @@ def discover_update(paths: BoxPaths, mode: str) -> dict[str, Any]:
     if candidate is None or not newer(candidate["version"], current):
         return {"action": "up_to_date", **meta}
 
-    if is_blocklisted(paths, candidate["version"]):
+    try:
+        blocklisted = is_blocklisted(paths, candidate["version"])
+    except UpgradeStateError as e:
+        return {"action": "error", "message": f"Cannot read the upgrade blocklist: {e}"}
+    if blocklisted:
         return {"action": "blocklisted", "version": candidate["version"],
                 "class": candidate["class"], **meta}
 
