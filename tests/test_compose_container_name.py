@@ -15,7 +15,6 @@ import yaml
 
 from boxmunge.compose_validate import ComposeSecurityError, validate_user_compose
 from boxmunge.paths import BoxPaths
-from boxmunge.staging_compose import generate_staging_compose_base
 
 
 def _validate(paths: BoxPaths, svc: dict[str, Any], *, project: str = "myapp",
@@ -44,14 +43,3 @@ def test_any_container_name_is_refused(paths, project, name, off) -> None:
 
 def test_no_container_name_is_accepted(paths) -> None:
     _validate(paths, {})
-
-
-def test_staging_drops_container_name(paths) -> None:
-    """A staging copy runs beside production, so it takes Compose's own names."""
-    project_dir = paths.project_dir("myapp")
-    project_dir.mkdir(parents=True, exist_ok=True)
-    compose = yaml.safe_dump({"services": {"web": {"image": "alpine",
-                                                   "container_name": "myapp-web"}}})
-    (project_dir / "compose.yml").write_text(compose)
-    staged = yaml.safe_load(generate_staging_compose_base(project_dir / "compose.yml", set()))
-    assert "container_name" not in staged["services"]["web"]

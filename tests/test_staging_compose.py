@@ -52,9 +52,9 @@ def test_long_syntax_and_volumes(tmp_path: Path) -> None:
     assert vols[2:] == ["dbdata:/var/lib/db", "/anon"]
 
 
-def test_explicit_names_ports_and_container_names_are_dropped(tmp_path: Path) -> None:
+def test_explicit_names_and_ports_are_dropped(tmp_path: Path) -> None:
     base = _base(tmp_path, {
-        "services": {"web": {"image": "nginx", "container_name": "myapp-web",
+        "services": {"web": {"image": "nginx",
                              "ports": ["8080:80"], "networks": ["internal"]}},
         "volumes": {"data": {"name": "myapp_data"}},
         "networks": {"internal": {"name": "myapp_internal"}},

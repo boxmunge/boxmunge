@@ -55,12 +55,11 @@ def test_build_contexts(tmp_path) -> None:
     assert _web(tmp_path, build={"context": "../lib"})["build"]["context"] == f"{P.parent}/lib"
 
 
-def test_names_ports_and_container_names_dropped(tmp_path) -> None:
-    doc = _base(tmp_path, {"services": {"web": {"image": "x", "ports": ["80:80"],
-                                                "container_name": "w"}},
+def test_names_and_ports_dropped(tmp_path) -> None:
+    doc = _base(tmp_path, {"services": {"web": {"image": "x", "ports": ["80:80"]}},
                            "volumes": {"d": {"name": "myapp_d"}},
                            "networks": {"n": {"name": "myapp_n"}}})
-    assert "ports" not in doc["services"]["web"] and "container_name" not in doc["services"]["web"]
+    assert "ports" not in doc["services"]["web"]
     assert "name" not in doc["volumes"]["d"] and "name" not in doc["networks"]["n"]
 
 

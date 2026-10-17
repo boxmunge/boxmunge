@@ -12,9 +12,9 @@ itself (Compose reads them; nothing is mounted). A path that leaves the
 project is made absolute against the project dir, so it means what it
 means for production (a bind gets the ``-staging`` suffix). A build
 context in box state is refused: staging would build from other files
-than production. Explicit
-names and published ports are dropped; staging_isolation then proves the
-result disjoint.
+than production. Explicit volume and network names and published ports
+are dropped (container_name never gets here: validation refuses it);
+staging_isolation then proves the result disjoint.
 """
 from __future__ import annotations
 
@@ -174,7 +174,6 @@ def generate_staging_compose_base(compose_path: Path, box_state: set[str],
         if not isinstance(svc, dict):
             continue  # malformed entry: leave it for Compose to reject
         svc.pop("ports", None)
-        svc.pop("container_name", None)
         volumes = svc.get("volumes")
         if isinstance(volumes, list):
             svc["volumes"] = [_staging_volume(v, project_dir, box_state) for v in volumes]

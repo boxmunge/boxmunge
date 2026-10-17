@@ -179,7 +179,7 @@ either, or build an image tag production runs, and if a service needs an `env_fi
 exist (staging could not start: create the file, for `secrets.env` with `secrets set`, or mark it
 `required: false`). It checks again before starting anything. The staging copy of
 `compose.yml` drops explicit volume and network `name:` lines (validation only allows the project's
-own name, which Compose would choose anyway), `container_name:` and `ports:`. Bind mounts of release
+own name, which Compose would choose anyway) and `ports:`. Bind mounts of release
 code and configuration (`./appconfig:/etc/app:ro`, config and secret `file:` entries) work in both
 environments without copying any data: production mounts its project directory's, staging the
 staged release's own in `.releases/staged/release/`.
