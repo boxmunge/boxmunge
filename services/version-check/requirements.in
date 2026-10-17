@@ -1,4 +1,4 @@
 # Runtime dependencies of the version-check service.
 # Regenerate with: make lock
 flask==3.1.*
-gunicorn==23.*
+gunicorn==26.*
