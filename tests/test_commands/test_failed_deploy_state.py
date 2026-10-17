@@ -38,6 +38,7 @@ def _repo_project(paths, state: dict | None) -> dict:
 
 def _start(paths, manifest, ref, snapshot, smoke=True) -> int:
     with patch.object(deploy, "compose_up_checked"), patch.object(deploy, "caddy_reload"), \
+            patch.object(deploy.deploy_storage, "prepare_storage"), \
             patch.object(deploy, "post_deploy_diagnostics"), \
             patch.object(deploy, "smoke_ok", return_value=smoke):
         return deploy.replace_release(NAME, paths, manifest, ref, snapshot)

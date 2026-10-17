@@ -86,9 +86,8 @@ class TestPromoteComponentTagging:
             return real(paths_, manifest, component=component, **kw)
         with _docker(), patch.object(deploy_mod, "prepare_compose_override", recording):
             assert run_promote("myapp", paths) == 0
-        # The whole point of the audit fix: component="promote" is forwarded
-        # (to both overlay passes: before and after the users are decided).
-        assert observed == ["promote", "promote"]
+        # The whole point of the audit fix: component="promote" is forwarded.
+        assert observed == ["promote"]
 
     def test_deploy_threads_component_to_compose_override(
         self, paths, monkeypatch,
@@ -129,7 +128,7 @@ class TestPromoteComponentTagging:
 
         from boxmunge.commands.deploy import deploy_locked
         deploy_locked("testapp", paths, no_snapshot=True, component="promote")
-        assert observed == ["promote", "promote"]
+        assert observed == ["promote"]
 
 
 class TestPromoteUnknownArg:
