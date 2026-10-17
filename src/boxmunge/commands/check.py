@@ -16,6 +16,7 @@ from boxmunge.config import ConfigError, load_config
 from boxmunge.docker_run import docker_env
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
+from boxmunge.legacy_stage import alert_legacy, legacy_stage
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_error, log_operation
 from boxmunge.manifest import load_manifest, ManifestError
@@ -406,6 +407,13 @@ def _check_one(name: str, paths: BoxPaths, read_only: bool) -> int:
     instead of the project silently dropping out of monitoring), then
     re-raised for the fleet loop to report.
     """
+    stage = legacy_stage(paths, name)
+    if stage is not None:
+        # Its smoke definitions may be the staged ones: no smoke, no critical action.
+        print(f"{name}: legacy-stage ({stage.kind}); run 'boxmunge-server legacy-stage {name}'")
+        if not read_only:
+            alert_legacy(paths, name, stage)
+        return 1
     # A blocked (paused or CVE-quarantined) project is intentionally
     # stopped. Running smoke (which depends on a live container)
     # would fail, escalate to alerts via update_health_state, and

@@ -22,7 +22,9 @@ from boxmunge.cve.quarantine import (
     quarantine_project,
     reassert_quarantine,
 )
+from boxmunge.legacy_stage import legacy_stage
 from boxmunge.log import log_warning
+from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 
 
@@ -34,6 +36,9 @@ class Enforcement:
     # The quarantine landed on this attempt: a new one, or an earlier
     # partial one completed. The QUARANTINED alert is due.
     landed: bool = False
+    # The CVE that would have quarantined the project, held because a
+    # 0.10.1 stage is in place (spec "On the beta, until it is resolved").
+    held: str | None = None
 
 
 def enforce(
@@ -58,6 +63,8 @@ def enforce(
             )
             return Enforcement(landed=not was_complete)
         if headline is not None and not in_grace:
+            if legacy_stage(paths, project) is not None:
+                return _hold(paths, project, headline[1].finding.cve_id)
             quarantine_project(
                 project, paths, project_dir=project_dir,
                 hosts=hosts, compose_files=compose_files,
@@ -67,6 +74,20 @@ def enforce(
     except QuarantineError as e:
         return Enforcement(error=f"quarantine action failed for {project!r}: {e}")
     return Enforcement()
+
+
+def _hold(paths: BoxPaths, project: str, cve: str) -> Enforcement:
+    """Hold, not take, the quarantine of a project with a 0.10.1 stage: it
+    would stop production, and security resume and legacy-stage stay
+    refused until probation ends."""
+    message = (f"{project} would be quarantined for {cve}, but it has a release staged by "
+               f"boxmunge 0.10.1: a quarantine would stop production, and security resume "
+               f"and legacy-stage stay refused until probation ends. Resolve it with "
+               f"`boxmunge-server legacy-stage {project}`.")
+    log_warning("cve-scan", message, paths, project=project, detail={"cve": cve})
+    notify(paths, f"{project}: quarantine held", message,
+           component="cve-scan", project=project, priority=1)
+    return Enforcement(held=cve)
 
 
 def announce_quarantine(

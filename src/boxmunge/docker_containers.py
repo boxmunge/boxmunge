@@ -15,7 +15,9 @@ Docker is looked up as an image ID and not found.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from boxmunge.docker import compose_project_filter
@@ -141,6 +143,30 @@ def project_containers(project_name: str) -> list[ProjectContainer]:
     if missing:
         raise DockerError(f"docker image inspect did not describe {', '.join(missing)}")
     return sorted((_container(d, images) for d in docs), key=lambda c: c.name)
+
+
+def _docker_time(value: str) -> datetime:
+    """Docker's RFC 3339 times carry nanoseconds; Python reads microseconds."""
+    m = re.fullmatch(r"(.+T\d\d:\d\d:\d\d)(\.\d+)?(Z|[+-]\d\d:\d\d)", value)
+    if m is None:
+        raise DockerError(f"unreadable container time {value!r}")
+    base, frac, tz = m.groups()
+    try:
+        return datetime.fromisoformat(base + (frac or ".0")[:7] + ("+00:00" if tz == "Z" else tz))
+    except ValueError as e:
+        raise DockerError(f"unreadable container time {value!r}: {e}") from e
+
+
+def created_times(project_name: str) -> dict[str, datetime]:
+    """Each container of the compose project (running or not) -> its
+    creation time. Raises DockerError when Docker cannot be asked."""
+    listed = _run(["docker", "ps", "-a", "--no-trunc", *compose_project_filter(project_name),
+                   "--format", "{{.ID}}"], capture=True)
+    ids = listed.stdout.split()
+    if not ids:
+        return {}
+    return {str(doc.get("Name", "")).lstrip("/"): _docker_time(str(doc.get("Created", "")))
+            for doc in _inspect(["docker", "container", "inspect", *ids])}
 
 
 def running_by_service(project_name: str) -> dict[str, list[str]]:

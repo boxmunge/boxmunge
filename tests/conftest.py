@@ -172,6 +172,9 @@ def fake_containers(request, monkeypatch) -> FakeContainers:
                             lambda project_name: [])
         monkeypatch.setattr("boxmunge.docker_containers.container_mounts",
                             lambda project_name: [])
+        # The legacy-stage evidence asks when production's containers were made.
+        monkeypatch.setattr("boxmunge.docker_containers.created_times",
+                            lambda project_name: {})
     return fake
 
 

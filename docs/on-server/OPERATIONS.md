@@ -195,6 +195,16 @@ refuse directly, naming `boxmunge-server legacy-stage <project>`; background sta
 restarts, container updates) and `security resume` are refused with a "start refused" alert (see
 Troubleshooting). If boxmunge cannot tell whether such a stage is on disk (for example `state/`
 cannot be read), it refuses the same way and says so. Its running containers are left as they are.
+Until it is resolved:
+
+- the health check runs no smoke test and takes no critical action for it, reports it as
+  `legacy-stage`, and alerts (high priority) at most once a day;
+- backups continue with the manifest of the release the containers run, told from the evidence
+  `legacy-stage` prints; if that evidence cannot be read (Docker unavailable, an unreadable
+  reflog or `.releases/prestage/`, a commit that does not resolve), the backup is skipped with
+  an alert naming the cause;
+- a CVE quarantine is held, not taken (it would stop production), with a high-priority alert
+  naming the finding. Scans and their reports run as usual.
 
 A bind mount, config or secret file in a data directory (any directory a release has mounted
 read-write) or another server-owned entry (`data/`, `secrets.env`) points staging at the entry's
