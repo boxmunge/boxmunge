@@ -1,10 +1,11 @@
-"""The image probe on a remapped daemon: host S+N comes back as container N."""
+"""The image probe on a remapped daemon: the helper sees container ids."""
 from __future__ import annotations
 
 import subprocess
 
 import pytest
 
+from boxmunge import data_helper
 from boxmunge.image_probe import probe_dir
 from tests.integration.userns.conftest import USERNS_DIND
 from tests.integration.userns.dockerd import BUSYBOX
@@ -22,6 +23,7 @@ def probe_image(remapped_daemon):
                    check=True, capture_output=True)
     image_id = subprocess.run(["docker", "image", "inspect", "-f", "{{.Id}}", tag], check=True,
                               capture_output=True, text=True).stdout.strip()
+    subprocess.run(["docker", "tag", BUSYBOX, data_helper.HELPER_IMAGE], check=True)
     yield image_id, remapped_daemon
     subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
 
@@ -32,10 +34,10 @@ def _volumes() -> set[str]:
 
 
 def test_remapped_probe_translates_and_leaves_no_volume(probe_image) -> None:
-    image_id, s = probe_image
+    image_id, _s = probe_image
     before = _volumes()
-    data = probe_dir(image_id, "/data", s)
+    data = probe_dir(image_id, "/data")
     assert (data.uid, data.gid, data.mode) == (1000, 1001, 0o750)
-    assert probe_dir(image_id, "/vol", s).uid == 70
-    assert probe_dir(image_id, "/absent", s) is None
+    assert probe_dir(image_id, "/vol").uid == 70
+    assert probe_dir(image_id, "/absent") is None
     assert _volumes() == before

@@ -34,7 +34,8 @@ def test_mounts_from_long_and_short_syntax() -> None:
 def test_image_owning_the_target_as_another_uid_is_refused() -> None:
     problems = dc.ownership_problems(
         {"app": _svc({"type": "volume", "source": "data", "target": "/data"})},
-        FACTS, {"app": DEFAULT}, 0, probe=lambda image, path, offset: DirOwner(0, 0, 0o755, True))
+        FACTS, {"app": DEFAULT}, lambda key: True,
+        probe=lambda image, path: DirOwner(0, 0, 0o755, True))
     assert len(problems) == 1
     assert "owns as 0:0" in problems[0] and "RUN chown 10001:10001 /data" in problems[0]
 
@@ -43,7 +44,15 @@ def test_image_owning_the_target_as_another_uid_is_refused() -> None:
 def test_matching_owner_or_imageless_target_passes(owner) -> None:
     assert dc.ownership_problems(
         {"app": _svc({"type": "volume", "source": "data", "target": "/data"})},
-        FACTS, {"app": DEFAULT}, 0, probe=lambda *a: owner) == []
+        FACTS, {"app": DEFAULT}, lambda key: True, probe=lambda *a: owner) == []
+
+
+def test_an_existing_volume_with_data_keeps_its_own_owners() -> None:
+    """Docker copies the image's directory only into an empty volume."""
+    assert dc.ownership_problems(
+        {"app": _svc({"type": "volume", "source": "data", "target": "/data"})},
+        FACTS, {"app": DEFAULT}, lambda key: False,
+        probe=lambda image, path: DirOwner(0, 0, 0o755, True)) == []
 
 
 def test_root_and_image_users_are_not_probed() -> None:
@@ -52,7 +61,7 @@ def test_root_and_image_users_are_not_probed() -> None:
     for user in (ServiceUser("0:0", "manifest"), ServiceUser(None, "manifest")):
         assert dc.ownership_problems(
             {"app": _svc({"type": "volume", "source": "d", "target": "/d"})},
-            FACTS, {"app": user}, 0, probe=probe) == []
+            FACTS, {"app": user}, lambda key: True, probe=probe) == []
 
 
 def test_anonymous_data_from_compose_and_image_volume() -> None:

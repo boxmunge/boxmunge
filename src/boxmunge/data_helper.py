@@ -62,6 +62,11 @@ def helper_output(label: str, mounts: list[str], script: str) -> str:
     return _helper(label, mounts, script, check=True, timeout=_TIMEOUT).stdout
 
 
+def helper_result(label: str, mounts: list[str], script: str) -> subprocess.CompletedProcess[str]:
+    """Run `script` in the helper with `mounts`; its exit code is the caller's to read."""
+    return _helper(label, mounts, script, check=False, timeout=_TIMEOUT)
+
+
 def _helper(label: str, mounts: list[str], script: str, *, check: bool,
             timeout: int) -> subprocess.CompletedProcess[str]:
     name = f"boxmunge-{label}-{uuid.uuid4().hex[:8]}"

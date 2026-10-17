@@ -70,14 +70,14 @@ def _bind_source(target: ReleaseTarget, paths: BoxPaths, source: str,
 
 
 def _fresh_volume(target: ReleaseTarget, model: dict, key: str, image: str, path: str,
-                  ids: tuple[int, int], offset: int) -> None:
+                  ids: tuple[int, int]) -> None:
     decl = (model.get("volumes") or {}).get(key)
     if isinstance(decl, dict) and decl.get("external"):
         return  # the operator's own volume: never created or chowned here
     name = volume_name(model, target.compose_project, key)
     if volume_labels(name) is not None:
         return  # not created by this deploy: never re-chowned
-    if probe_dir(image_facts(image).image_id, path, offset) is not None:
+    if probe_dir(image_facts(image).image_id, path) is not None:
         return  # the image owns it; deploy_checks proved the owner matches
     _run(["docker", "volume", "create",
           *compose_volume_labels(target.compose_project, key), name], capture=True)
@@ -97,4 +97,4 @@ def prepare_storage(paths: BoxPaths, target: ReleaseTarget) -> None:
                 _bind_source(target, paths, m.source, ids, offset)
             elif m.kind == "volume" and m.source and ids:
                 _fresh_volume(target, model, m.source, str(svc.get("image")), m.target,
-                              ids, offset)
+                              ids)

@@ -2,8 +2,9 @@
 """What a release's user decisions mean for its data; refusals with guidance.
 
 - D16: Docker copies an image's directory, owner included, into an empty
-  volume at every create, so a numeric non-root service must find its
-  volume targets owned by its own uid in the image (or absent from it).
+  volume whenever a container is created on it, so a numeric non-root
+  service must find a new or empty volume's target owned by its own uid in
+  the image (or absent from it).
 - D17: data in an anonymous volume survives only while Compose hands it
   from a container to its replacement. Refused on a remapped box, warned
   about before the migration; a release that would swap a non-empty one
@@ -28,13 +29,14 @@ from boxmunge.data_helper import (
     helper_output, is_anonymous, volume, volume_is_empty, volume_labels,
 )
 from boxmunge.docker_containers import ImageFacts
-from boxmunge.image_probe import RANGE, DirOwner, probe_dir
+from boxmunge.image_probe import DirOwner, probe_dir
 from boxmunge.paths import BoxPaths
 from boxmunge.release_target import ReleaseTarget
 from boxmunge.run_as import ServiceUser, describe, identity, read_users
 
 _SHOWN = 10  # unreadable paths listed per mount
 _OVERFLOW_UID = 65534
+RANGE = 65536
 
 
 @dataclass(frozen=True)
@@ -88,9 +90,12 @@ def volume_name(model: dict[str, Any], compose_project: str, key: str) -> str:
 
 
 def ownership_problems(services: dict[str, dict], facts: dict[str, ImageFacts],
-                       users: dict[str, ServiceUser], offset: int,
-                       probe: Callable[[str, str, int], DirOwner | None] = probe_dir) -> list[str]:
-    """D16, for numeric non-root services' named volumes."""
+                       users: dict[str, ServiceUser], fresh: Callable[[str], bool],
+                       probe: Callable[[str, str], DirOwner | None] = probe_dir) -> list[str]:
+    """D16, for numeric non-root services' named volumes that are new or
+    empty (`fresh`, by volume key): Docker copies the image's directory only
+    into an empty volume. One that holds data keeps its own owners, which
+    the user-change check looks at."""
     problems = []
     for name, svc in sorted(services.items()):
         ids = users[name].nonroot_ids() if name in users else None
@@ -99,14 +104,14 @@ def ownership_problems(services: dict[str, dict], facts: dict[str, ImageFacts],
         for m in service_mounts(svc):
             if m.kind != "volume":
                 continue
-            owner = probe(facts[name].image_id, m.target, offset)
-            if owner is not None and owner.uid != ids[0]:
+            owner = probe(facts[name].image_id, m.target)
+            if owner is not None and owner.uid != ids[0] and fresh(str(m.source)):
                 problems.append(
                     f"service {name} mounts volume {m.source} at {m.target}, which the image "
                     f"owns as {owner.uid}:{owner.gid}, but the service runs as "
                     f"{ids[0]}:{ids[1]} ({describe(users[name])}). Docker copies that "
-                    f"directory into the volume, owner included, at every create, so a "
-                    f"one-time chown would not hold. Set its ownership in the Dockerfile "
+                    f"directory into the volume, owner included, whenever a container is "
+                    f"created on it while it is empty, so a one-time chown would not hold. Set its ownership in the Dockerfile "
                     f"(`RUN chown {ids[0]}:{ids[1]} {m.target}`) or declare security.user")
     return problems
 
@@ -270,7 +275,13 @@ def release_problems(paths: BoxPaths, target: ReleaseTarget, model: dict[str, An
                      services: dict[str, dict], facts: dict[str, ImageFacts],
                      users: dict[str, ServiceUser], offset: int) -> tuple[list[str], list[str]]:
     """(refusals, warnings) for a release about to start."""
-    refusals = ownership_problems(services, facts, users, offset)
+    label = f"{target.compose_project}-check"
+
+    def fresh(key: str) -> bool:
+        name = volume_name(model, target.compose_project, key)
+        return volume_labels(name) is None or volume_is_empty(label, name)
+
+    refusals = ownership_problems(services, facts, users, fresh)
     if offset:
         refusals += readability_problems(services)
     anonymous = anonymous_findings(target.project, services, facts)

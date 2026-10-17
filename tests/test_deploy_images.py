@@ -1,49 +1,16 @@
 """Build/pull, inspect and the image-directory probe (no Docker)."""
 from __future__ import annotations
 
-import io
-import tarfile
-
 import pytest
 
 from boxmunge.commands import deploy_images as di
 from boxmunge.docker_containers import ImageFacts
-from boxmunge.image_probe import ProbeError, first_header_owner
 from boxmunge.release_target import (
     DeployRefused, ReleaseTarget, production_target, staging_release_target,
 )
 from boxmunge.staged_release import ComposeTarget
 
 S = 1048576
-
-
-def _tar(uid: int, gid: int, mode: int = 0o750) -> io.BytesIO:
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w") as tar:
-        info = tarfile.TarInfo("data")
-        info.type, info.uid, info.gid, info.mode = tarfile.DIRTYPE, uid, gid, mode
-        tar.addfile(info)
-    buf.seek(0)
-    return buf
-
-
-def test_header_ids_are_translated_to_the_container_view() -> None:
-    owner = first_header_owner(_tar(S + 1000, S + 1001), S)
-    assert (owner.uid, owner.gid, owner.mode, owner.is_dir) == (1000, 1001, 0o750, True)
-
-
-def test_unremapped_box_uses_ids_as_they_are() -> None:
-    assert first_header_owner(_tar(70, 70), 0).uid == 70
-
-
-def test_an_empty_stream_means_the_path_is_absent() -> None:
-    assert first_header_owner(io.BytesIO(b""), S) is None
-
-
-@pytest.mark.parametrize("uid", [5, S + 65536, 2 * S])
-def test_an_id_outside_the_remap_range_is_refused(uid) -> None:
-    with pytest.raises(ProbeError, match="outside the remap range"):
-        first_header_owner(_tar(uid, S), S)
 
 
 def _calls(monkeypatch) -> list:

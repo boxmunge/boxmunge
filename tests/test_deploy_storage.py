@@ -29,7 +29,7 @@ def _setup(paths, monkeypatch, *, offset=0, existing=frozenset(), probe=None, mo
                         calls.append(("mkdir", root, str(rel), ids)))
     monkeypatch.setattr(ds, "volume_labels", lambda name: {} if name in existing else None)
     monkeypatch.setattr(ds, "image_facts", lambda ref: ImageFacts("sha256:" + "a" * 64, "", ()))
-    monkeypatch.setattr(ds, "probe_dir", lambda image, path, off: probe)
+    monkeypatch.setattr(ds, "probe_dir", lambda image, path: probe)
     monkeypatch.setattr(ds, "_run", lambda cmd, capture=False: calls.append(cmd))
     monkeypatch.setattr(ds, "compose_volume_labels", lambda cp, key: ["--label", f"k={key}"])
     write_users(paths, "shop", {"app": ServiceUser("10001:10001", "default")})
