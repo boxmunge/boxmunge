@@ -1520,8 +1520,17 @@ How an upgrade is applied and undone:
    with the file it points to, or remove it, and retry. A stash that fails, for this or any
    reason, is logged as an error and sends a local alert; the standby venv is dropped and the
    release is not blocklisted, so auto-update retries it once the box is fixed.
-3. The venvs swap and `upgrade --apply` migrates manifests, regenerates every project's Caddy
-   site and compose overlay, reloads Caddy and restarts projects. A bundle project's manifest
+3. The venvs swap and `upgrade --apply` first rewrites the latest stash without the symlink
+   members an older release wrote, so a rollback's `stash restore` cannot abort on them (a
+   failure leaves the stash as it is, sends a high-priority alert and does not stop the
+   upgrade). It then migrates manifests and regenerates every project's Caddy site and compose
+   overlay, project by project under that project's lock, reloads Caddy and restarts projects.
+   Three kinds of project are left exactly as they are (not migrated, regenerated or
+   restarted), reported as `LEFT AS IS` or `Skipped (busy)`, alerted, and do not fail the
+   upgrade: one with a release staged by boxmunge 0.10.1 (one high-priority alert per project;
+   resolve it with `boxmunge-server legacy-stage <project>`; the dry run names it too), one
+   with an open install, and one busy with another operation (it keeps its previous configs
+   until its next deploy, resume or recover). A bundle project's manifest
    is rewritten at the new schema. A git project's is not: its `manifest.yml` links into
    `repo/`, so it is migrated in memory and you are alerted once to update it in the
    repository (see "Deploying a New Project (Git)"). A failure in any of these

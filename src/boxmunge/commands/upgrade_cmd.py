@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """boxmunge upgrade -- single command for platform updates.
 
-Flow: stash -> migrate manifests -> regenerate configs -> reload Caddy ->
-restart projects -> self-test -> health -> report.
+Flow: stash -> migrate manifests and regenerate configs (per project) ->
+reload Caddy -> restart projects -> self-test -> health -> report.
 
 Dispatch modes:
   --dry-run   render migrated manifests + configs in memory; writes nothing
-  --apply     migrate/regen/reload/restart/version-write only (shim handles
-              stash, health, rollback externally)
-  (default)   full six-step flow with stash, self-test, and health check
+  --apply     stash rewrite (D18) then migrate/regen/reload/restart/
+              version-write only (shim handles stash, health, rollback)
+  (default)   full five-step flow with stash, self-test, and health check
 """
 
 import sys
@@ -21,19 +21,17 @@ from boxmunge.commands.upgrade_steps import (
     Restart,
     UpgradeGateError,
     check_upgrade,
-    migrate_project_manifests,
-    regenerate_configs,
     restart_projects,
 )
-from boxmunge.commands.upgrade_notify import (
-    notify_install_open, notify_locked_skips, notify_refused,
-)
+from boxmunge.commands.upgrade_notify import notify_locked_skips, notify_refused
 from boxmunge.docker import caddy_reload, DockerError
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import ManifestError
 from boxmunge.migration import MigrationError
 from boxmunge.paths import BoxPaths
 from boxmunge.stash import create_stash, prune_stashes
+from boxmunge.stash_rewrite import sanitize_latest_stash
+from boxmunge.upgrade_exclusions import Exclusions, apply_projects, notify_exclusions
 from boxmunge.version import read_installed_version, write_installed_version, get_build_version, parse_version_string
 
 
@@ -63,52 +61,51 @@ def _gate_failed(paths: BoxPaths, error: Exception) -> int:
 
 def _migrate_regenerate_reload(
     paths: BoxPaths, step: int, total: int,
-) -> tuple[ManifestMigration, Regeneration]:
+) -> tuple[ManifestMigration, Regeneration, Exclusions]:
     """Steps shared by --apply and the full flow. Any failure raises: a
     project left on stale configs, or a Caddy that did not take the new
-    ones, is not an upgrade that should report success."""
-    print(f"[{step}/{total}] Migrating manifests...")
-    migrated = migrate_project_manifests(paths)
+    ones, is not an upgrade that should report success. Excluded projects
+    are reported and alerted, and do not fail it."""
+    print(f"[{step}/{total}] Migrating manifests and regenerating configs, project by project...")
+    migrated, regen, excluded = apply_projects(paths)
     if migrated.written:
         print(f"  Migrated: {', '.join(migrated.written)}")
     if migrated.in_memory:
         print(f"  Update schema_version in the repository's manifest.yml (git): "
               f"{', '.join(migrated.in_memory)}")
-    if migrated.skipped_locked:
-        print(f"  Not migrated on disk (locked; migrated in memory): "
-              f"{', '.join(migrated.skipped_locked)}")
-    if migrated.install_open:
-        print(f"  Not migrated on disk (an install is open; migrated in memory): "
-              f"{', '.join(migrated.install_open)}")
+    if not (migrated.written or migrated.in_memory):
+        print("  No migrations needed.")
     for advice in migrated.unlinked.values():
         print(f"  WARNING: {advice}", file=sys.stderr)
-    if not (migrated.written or migrated.in_memory or migrated.skipped_locked):
-        print("  No migrations needed.")
-
-    print(f"[{step + 1}/{total}] Regenerating configs...")
-    regen = regenerate_configs(paths)
-    print(f"  Processed: {len(regen.processed)} project(s)")
+    print(f"  Regenerated: {len(regen.processed)} project(s)")
     for name, why in sorted(regen.refused.items()):
         print(f"  REFUSED: {name}: {why}")
     if regen.refused:
         print("  Refused projects keep their previous configs and running "
               "containers and are not restarted. Fix compose.yml and redeploy.")
-    for name, why in sorted(regen.install_open.items()):
-        print(f"  INSTALL OPEN: {name}: not regenerated or restarted: {why}")
-    notify_install_open(paths, regen.install_open)
+    for name, kind in sorted(excluded.legacy.items()):
+        print(f"  LEFT AS IS: {name}: a release staged by boxmunge 0.10.1 ({kind}); "
+              f"resolve it with boxmunge-server legacy-stage {name}")
+    for name, why in sorted(excluded.install.items()):
+        print(f"  LEFT AS IS: {name}: {why}")
+    if excluded.busy:
+        print(f"  Skipped (busy; keeps its previous configs until its next deploy, resume "
+              f"or recover): {', '.join(excluded.busy)}")
+    notify_exclusions(paths, excluded)
 
-    print(f"[{step + 2}/{total}] Reloading Caddy...")
+    print(f"[{step + 1}/{total}] Reloading Caddy...")
     try:
         caddy_reload(paths.caddy, paths.state)
     except DockerError as e:
         raise UpgradeGateError(f"Caddy reload failed: {e}") from e
     print("  Caddy reloaded.")
-    return migrated, regen
+    return migrated, regen, excluded
 
 
-def _restart(paths: BoxPaths, step: int, total: int, refused: dict[str, str]) -> Restart:
+def _restart(paths: BoxPaths, step: int, total: int, refused: dict[str, str],
+             excluded: Exclusions) -> Restart:
     print(f"[{step}/{total}] Restarting projects...")
-    restart = restart_projects(paths, refused=refused)
+    restart = restart_projects(paths, refused=refused, excluded=excluded.names())
     if restart.succeeded:
         print(f"  Restarted: {', '.join(restart.succeeded)}")
     if restart.skipped_locked:
@@ -120,8 +117,8 @@ def _restart(paths: BoxPaths, step: int, total: int, refused: dict[str, str]) ->
         print(f"  Not restarted (compose refused): {', '.join(sorted(refused))}")
     if restart.start_refused:
         print(f"  Not restarted (start checks refused): {', '.join(restart.start_refused)}")
-    if restart.install_open:
-        print(f"  Not restarted (an install is open): {', '.join(restart.install_open)}")
+    if excluded.names():
+        print(f"  Not restarted (left as is): {', '.join(sorted(excluded.names()))}")
     notify_locked_skips(paths, restart.skipped_locked)
     notify_refused(paths, refused)
     if restart.failed:
@@ -130,15 +127,15 @@ def _restart(paths: BoxPaths, step: int, total: int, refused: dict[str, str]) ->
 
 
 def _finish(paths: BoxPaths, label: str, migrated: ManifestMigration, regen: Regeneration,
-            restart: Restart, new_version: str) -> int:
+            excluded: Exclusions, restart: Restart, new_version: str) -> int:
     """Record the new version, but only when every project restarted."""
     log_operation(
         "upgrade", label, paths,
         detail={
             "migrated": migrated.written,
             "migrated_in_memory": migrated.in_memory,
-            "migrate_skipped_locked": migrated.skipped_locked,
             "git_unlinked": sorted(migrated.unlinked),
+            "excluded": sorted(excluded.names()),
             "restarted": restart.succeeded,
             "skipped_locked": restart.skipped_locked,
             "monitor_stopped": restart.monitor_stopped,
@@ -155,8 +152,23 @@ def _finish(paths: BoxPaths, label: str, migrated: ManifestMigration, regen: Reg
     return 0
 
 
+def _rewrite_stash(paths: BoxPaths, step: int, total: int) -> None:
+    """D18, before anything else is written. Runs under the shim's
+    upgrade.lock (acquire_lock, held through the apply), which is what makes
+    the rewrite's sweep of stale .rewrite-* temps safe: no other rewrite can
+    be in flight. Never fails the upgrade; a failure was alerted."""
+    print(f"[{step}/{total}] Making the latest stash restorable by the previous release...")
+    result = sanitize_latest_stash(paths)
+    if result.changed:
+        print(f"  Dropped {len(result.dropped)} link member(s).")
+    elif result.error is None:
+        print("  Nothing to change.")
+    if result.error is not None:
+        print(f"  WARNING: stash not fully rewritten (alerted): {result.error}", file=sys.stderr)
+
+
 def _run_apply(paths: BoxPaths, current_version: str, new_version: str) -> int:
-    """Run migrate/regen/reload/restart/version-write only.
+    """Run stash rewrite/migrate/regen/reload/restart/version-write only.
 
     The upgrade shim handles stash creation, health checks, and rollback
     externally, so we skip those here. Returns 0 on success and 1 if any
@@ -166,13 +178,14 @@ def _run_apply(paths: BoxPaths, current_version: str, new_version: str) -> int:
     print("========================\n")
     print(f"  Current: {current_version}")
     print(f"  New:     {new_version}\n")
+    _rewrite_stash(paths, 1, 4)
     try:
-        migrated, regen = _migrate_regenerate_reload(paths, 1, 4)
+        migrated, regen, excluded = _migrate_regenerate_reload(paths, 2, 4)
     except (ManifestError, MigrationError, UpgradeGateError) as e:
         return _gate_failed(paths, e)
-    restart = _restart(paths, 4, 4, regen.refused)
+    restart = _restart(paths, 4, 4, regen.refused, excluded)
     return _finish(paths, f"Apply {current_version} -> {new_version}",
-                   migrated, regen, restart, new_version)
+                   migrated, regen, excluded, restart, new_version)
 
 
 def _run_full(
@@ -181,8 +194,8 @@ def _run_full(
     new_version: str,
     skip_self_test: bool,
 ) -> int:
-    """Run the complete six-step upgrade flow."""
-    print("[1/6] Creating stash...")
+    """Run the complete five-step upgrade flow."""
+    print("[1/5] Creating stash...")
     try:
         archive = create_stash(paths)
         print(f"  Stash: {archive.name}")
@@ -191,14 +204,15 @@ def _run_full(
         log_error("upgrade", f"Stash failed: {e}", paths)
         return 1
 
+    # Its own stash, made by this release, has no link members: no rewrite.
     try:
-        migrated, regen = _migrate_regenerate_reload(paths, 2, 6)
+        migrated, regen, excluded = _migrate_regenerate_reload(paths, 2, 5)
     except (ManifestError, MigrationError, UpgradeGateError) as e:
         return _gate_failed(paths, e)
-    restart = _restart(paths, 5, 6, regen.refused)
+    restart = _restart(paths, 4, 5, regen.refused, excluded)
     prune_stashes(paths, keep=5)
 
-    print("\n[6/6] Post-upgrade validation")
+    print("\n[5/5] Post-upgrade validation")
     if skip_self_test:
         print("  Self-test skipped.")
     else:
@@ -211,7 +225,7 @@ def _run_full(
         return _gate_failed(paths, UpgradeGateError("health check found critical issues"))
 
     rc = _finish(paths, f"Upgrade {current_version} -> {new_version}",
-                 migrated, regen, restart, new_version)
+                 migrated, regen, excluded, restart, new_version)
     if rc == 0:
         print(f"\nUpgrade complete: {current_version} -> {new_version}")
     return rc
@@ -252,7 +266,8 @@ probation. The flags below are for the shim and direct invocations only.
 Flags:
   --dry-run         Render manifest migrations and configs in memory and
                     report; writes nothing. The shim's pre-flight check.
-  --apply           Migrate/regen/reload/restart only. The shim calls this
+  --apply           Rewrite the latest stash for the previous release, then
+                    migrate/regen/reload/restart only. The shim calls this
                     after creating its own stash; do not use directly.
   --skip-self-test  Skip the post-upgrade self-test step.
   -h, --help        Show this message.

@@ -9,7 +9,8 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge.commands.upgrade_cmd import run_upgrade
-from boxmunge.commands.upgrade_steps import UpgradeGateError, regenerate_configs
+from boxmunge.commands.upgrade_steps import UpgradeGateError
+from boxmunge.upgrade_exclusions import apply_projects
 from boxmunge.docker import DockerError
 from boxmunge.version import read_installed_version
 from tests.test_commands.test_upgrade_dry_run_and_pause import _pause, _project, _setup
@@ -28,7 +29,7 @@ def test_regen_failure_raises(paths) -> None:
     with patch("boxmunge.commands.upgrade_steps.prepare_compose_override",
                side_effect=RuntimeError("generator bug")):
         with pytest.raises(UpgradeGateError, match="alpha"):
-            regenerate_configs(paths)
+            apply_projects(paths)[1]
 
 
 def test_maintenance_render_failure_raises(paths) -> None:
@@ -36,7 +37,7 @@ def test_maintenance_render_failure_raises(paths) -> None:
     with patch("boxmunge.commands.upgrade_steps.atomic_write_text",
                side_effect=OSError("disk full")):
         with pytest.raises(UpgradeGateError, match="maintenance"):
-            regenerate_configs(paths)
+            apply_projects(paths)[1]
 
 
 @patch("boxmunge.commands.upgrade_cmd.caddy_reload")

@@ -184,7 +184,8 @@ def test_over_a_rollback_a_crash_before_pairing_is_repaired(paths) -> None:
 
 
 def test_the_upgrade_leaves_an_open_install_alone(paths) -> None:
-    from boxmunge.commands.upgrade_steps import regenerate_configs, restart_projects
+    from boxmunge.commands.upgrade_steps import restart_projects
+    from boxmunge.upgrade_exclusions import apply_projects
     _v1_then(paths, {"manifest.yml": hook_manifest("false", "postgres")})
     with docker_off(), fake_backups([]):
         assert run_deploy(P, paths, ref=V2) == 1
@@ -192,9 +193,9 @@ def test_the_upgrade_leaves_an_open_install_alone(paths) -> None:
     before = overlay.read_text()
     with docker_off() as up, \
             patch("boxmunge.commands.upgrade_steps.prepare_compose_override") as regen_overlay:
-        regen = regenerate_configs(paths)
-        restart = restart_projects(paths, refused=regen.refused)
+        _migration, regen, excluded = apply_projects(paths)
+        restart = restart_projects(paths, refused=regen.refused, excluded=excluded.names())
     regen_overlay.assert_not_called()
     up.assert_not_called()
-    assert P in regen.install_open and restart.install_open == [P]
+    assert P in excluded.install and restart.succeeded == []
     assert restart.start_refused == [] and overlay.read_text() == before
