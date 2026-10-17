@@ -289,3 +289,21 @@ def write_users(paths: BoxPaths, project: str, users: dict[str, ServiceUser], *,
            for svc, u in sorted(users.items())}
     atomic_write_text(paths.project_users_record(project, staging=staging),
                       json.dumps(doc, indent=2) + "\n")
+
+
+def image_user_drift(paths: BoxPaths, project: str, changed: dict[str, str]) -> list[str]:
+    """"<svc>: image user <old> -> <new>" for each service that runs as its
+    image's own user and whose newly pulled image (`changed`: service ->
+    image ref) declares another USER. Other sources pin the user in the
+    overlay or compose.yml, so a new image cannot change it."""
+    from boxmunge.docker_containers import image_facts  # run_as stays free of Docker
+    record = read_users(paths, project)
+    drift = []
+    for svc, ref in sorted(changed.items()):
+        rec = record.get(svc)
+        if rec is None or rec.emitted() is not None or rec.source == SOURCE_COMPOSE:
+            continue
+        new = image_facts(ref).user
+        if identity(new) != identity(rec.image_user):
+            drift.append(f"{svc}: image user {rec.image_user or 'root'} -> {new or 'root'}")
+    return drift

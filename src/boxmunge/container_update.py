@@ -33,6 +33,8 @@ from boxmunge.commands.backup_cmd import backup_locked
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation, log_warning, log_error
+from boxmunge.notify import notify
+from boxmunge.run_as import RunAsError, image_user_drift
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -365,6 +367,23 @@ def _update_locked(
         log_operation("container-update", f"No updates available for {target.name}", paths, project=target.name)
         persist_result(paths, target, result, before=before)
         return result
+
+    # Step 3b: a service that runs as its image's own user would change who
+    # writes its data with the new image; only a deploy decides that.
+    if not target.is_caddy:
+        try:
+            drift = image_user_drift(paths, target.name, changed)
+        except (DockerError, RunAsError) as e:
+            return _fail(paths, target, result, f"inventory_failed: {e}", before=before)
+        if drift:
+            body = (f"Not updating {target.name}: {'; '.join(drift)}. These services run as "
+                    f"their image's own user, so the new image would change who owns and "
+                    f"writes their data. Review it, declare security.user if needed, and "
+                    f"deploy {target.name}.")
+            notify(paths, f"{target.name}: image user changed", body,
+                   component="container-update", project=target.name, priority=1)
+            return _fail(paths, target, result, "user_changed: " + "; ".join(drift),
+                         before=before, message=body)
 
     # Step 4: Pre-update backup, only now that a recreate will happen. Pulling
     # leaves running containers untouched, so this still captures the data
