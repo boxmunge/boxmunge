@@ -202,7 +202,9 @@ Until it is resolved:
 - backups continue with the manifest of the release the containers run, told from the evidence
   `legacy-stage` prints; if that evidence cannot be read (Docker unavailable, an unreadable
   reflog or `.releases/prestage/`, a commit that does not resolve), the backup is skipped with
-  an alert naming the cause;
+  an alert naming the cause. For a git project the dump still runs through the project's
+  `compose.yml`, which is the staged checkout's: if the staged release renamed the backup
+  service, the backup fails with an error until the stage is resolved;
 - a CVE quarantine is held, not taken (it would stop production), with a high-priority alert
   naming the finding. Scans and their reports run as usual.
 

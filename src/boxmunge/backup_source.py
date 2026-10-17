@@ -80,6 +80,10 @@ def _legacy(paths: BoxPaths, project: str, stage: LegacyStage) -> BackupSource:
         # Production was started from the staged files in the project dir.
         return BackupSource(load_manifest(pdir / "manifest.yml"))
     if running is not None:
+        # The dump still execs through the project dir's compose.yml, which
+        # follows repo/'s staged checkout: if the staged release renamed the
+        # backup service, the dump fails (noisily) rather than reaching the
+        # wrong container. Resolving the stage is the fix, not a rewrite here.
         return BackupSource(_from_git(pdir / "repo", running))
     kept = pdir / ".releases" / "prestage" / "release"
     return BackupSource(load_manifest(kept / "manifest.yml"), compose_file=kept / "compose.yml")

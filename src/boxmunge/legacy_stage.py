@@ -125,15 +125,22 @@ class Evidence:
     classification: str            # "untouched" | "recreated"
     t: datetime                    # when the stage changed the project dir
     current_ref: str | None        # the deploy state's
-    staged_ref: str | None
+    staged_ref: str | None         # as recorded
     production_ref: str | None     # bundle: the kept release's ref; git: current_ref's SHA
     head: str | None               # git: repo/ HEAD
     notes: tuple[str, ...] = ()
+    # git: the staged ref's full SHA; "?" when short, unresolvable or not
+    # recorded (see notes), None for a stage of the checked-out tree.
+    staged_sha: str | None = None
 
     def describe(self) -> list[str]:
+        staged = self.staged_ref
+        if self.staged_sha and self.staged_sha != self.staged_ref:
+            staged = f"{staged} ({self.staged_sha})"
         lines = [f"stage made at {self.t.isoformat()}",
                  f"deploy state current_ref: {self.current_ref}",
-                 f"staged ref: {self.staged_ref}"]
+                 f"staged ref: {staged}",
+                 f"production's release: {self.production_ref}"]
         if self.head:
             lines.append(f"repo/ HEAD: {self.head}")
         lines += list(self.notes)
@@ -184,14 +191,35 @@ def _git_full(repo: Path, ref: str | None, label: str, notes: list[str]) -> str 
     return sha
 
 
-def _json_ref(path: Path) -> str | None:
+def _json_doc(path: Path) -> dict[str, Any]:
     try:
         doc = json.loads(path.read_text())
     except (OSError, UnicodeDecodeError, ValueError) as e:
         raise EvidenceError(f"cannot read {path}: {e}") from e
     if not isinstance(doc, dict):
         raise EvidenceError(f"{path} is not a JSON object")
-    return doc.get("ref")
+    return doc
+
+
+def _ref_of(path: Path, doc: dict[str, Any]) -> str | None:
+    ref = doc.get("ref")
+    if ref is not None and not isinstance(ref, str):
+        raise EvidenceError(f"{path}: ref {ref!r} is not a string")
+    return ref
+
+
+def _staged_record(paths: BoxPaths, project: str, notes: list[str]) -> tuple[bool, str | None]:
+    """(recorded, ref) from state/staging. 0.10.1 checks out the staged ref
+    before it writes {"active": true, "ref": ref or "latest"}, so a stage
+    killed in between leaves no state, or an earlier unstage's
+    {"active": false}: the ref is then unknown, never "no change"."""
+    path = legacy_staging_state(paths, project)
+    if path.exists():
+        doc = _json_doc(path)
+        if doc.get("active") is True and "ref" in doc:
+            return True, _ref_of(path, doc)
+    notes.append("the staged ref is not recorded; it is not compared")
+    return False, None
 
 
 def evidence(paths: BoxPaths, project: str, stage: LegacyStage) -> Evidence:
@@ -202,25 +230,25 @@ def evidence(paths: BoxPaths, project: str, stage: LegacyStage) -> Evidence:
     except StateError as e:
         raise EvidenceError(str(e)) from e
     notes: list[str] = []
-    head = None
+    head = staged_sha = None
     if stage.kind == "bundle":
-        staged = _json_ref(pdir / ".releases" / "live.json")
-        production = _json_ref(pdir / ".releases" / "prestage" / "meta.json")
+        live, kept = pdir / ".releases" / "live.json", pdir / ".releases" / "prestage" / "meta.json"
+        staged = _ref_of(live, _json_doc(live))
+        production = _ref_of(kept, _json_doc(kept))
         shown = staged
     else:
         repo = pdir / "repo"
-        state = legacy_staging_state(paths, project)
-        shown = _json_ref(state) if state.exists() else None
+        recorded, shown = _staged_record(paths, project, notes)
         try:
             head = head_sha(repo)
         except GitRefError as e:
             raise EvidenceError(f"cannot read repo/'s HEAD: {e}") from e
         production = _git_full(repo, current, "current_ref", notes)
-        staged = _git_full(repo, shown, "staged ref", notes)
+        staged = staged_sha = _git_full(repo, shown, "staged ref", notes) if recorded else "?"
         if staged is None or (staged != "?" and staged == production):
             # The stage changed no code: whatever runs, runs production's.
             return Evidence("untouched", stage_time(paths, project, stage), current, shown,
-                            production, head, tuple(notes))
+                            production, head, tuple(notes), staged_sha)
     t = stage_time(paths, project, stage)
     try:
         created = docker_containers.created_times(project)
@@ -231,7 +259,7 @@ def evidence(paths: BoxPaths, project: str, stage: LegacyStage) -> Evidence:
     refs_differ = stage.kind == "git" or current != staged
     untouched = refs_differ and all(c < t for c in created.values())
     return Evidence("untouched" if untouched else "recreated", t, current, shown,
-                    production, head, tuple(notes))
+                    production, head, tuple(notes), staged_sha)
 
 
 # -- The dedupe record (state/legacy-stages.json) and the alert -------------
@@ -247,14 +275,33 @@ def _records_path(paths: BoxPaths) -> Path:
 
 
 def _read_records(paths: BoxPaths) -> dict[str, Any]:
-    """The whole record; a corrupt one raises (ValueError), never reads as empty."""
+    """The whole record. A corrupt one raises StateError naming the file
+    (a per-project input error: check-all reports it and carries on)."""
     path = _records_path(paths)
     if not path.exists():
         return {}
-    doc = json.loads(path.read_text())
-    if not isinstance(doc, dict):
-        raise ValueError(f"{path} is not a JSON object; fix or remove it")
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        raise StateError(f"cannot read {path}: {e}; fix or remove it") from e
+    if not isinstance(doc, dict) or not all(isinstance(r, dict) for r in doc.values()):
+        raise StateError(f"{path} is not a JSON object of per-project objects; "
+                         f"fix or remove it")
     return doc
+
+
+def _last_alert(paths: BoxPaths, rec: dict[str, Any]) -> datetime | None:
+    value = rec.get("last_alert")
+    if value is None:
+        return None
+    try:
+        when = datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        when = None
+    if when is None or when.tzinfo is None:
+        raise StateError(f"{_records_path(paths)}: last_alert {value!r} is not a time with a "
+                         f"timezone; fix or remove it")
+    return when
 
 
 @contextmanager
@@ -294,8 +341,8 @@ def alert_legacy(paths: BoxPaths, project: str, stage: LegacyStage, *,
         for key, value in (("kind", stage.kind), ("first_seen", now.isoformat()),
                            ("last_alert", None), ("choice", None)):
             rec.setdefault(key, value)
-        last = rec.get("last_alert")
-        if last and now - datetime.fromisoformat(last) < ALERT_EVERY:
+        last = _last_alert(paths, rec)
+        if last is not None and now - last < ALERT_EVERY:
             return False
         if not notify(paths, f"{project}: release staged by boxmunge 0.10.1",
                       LEGACY_ALERT.format(p=project), component="legacy-stage",

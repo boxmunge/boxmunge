@@ -15,6 +15,7 @@ from boxmunge.legacy_stage import (
     stage_time, update_record,
 )
 from boxmunge.manifest import ManifestError
+from boxmunge.state import StateError
 from tests.git_helpers import git
 from tests.legacy_helpers import (
     legacy_bundle_stage, legacy_git_stage, reflog_checkout_time, stamp,
@@ -150,6 +151,67 @@ def test_git_reflog_without_a_checkout_is_an_evidence_error(paths, legacy_git) -
         stage_time(paths, "myapp", LegacyStage("git"))
 
 
+def _write_staging_state(paths, doc) -> None:
+    from boxmunge.legacy_stage import legacy_staging_state
+    legacy_staging_state(paths, "myapp").write_text(json.dumps(doc))
+
+
+@pytest.mark.parametrize("doc", [None, {"active": False}, {"active": True}])
+def test_git_unrecorded_staged_ref_is_classified_by_the_containers(
+        paths, legacy_git, doc) -> None:
+    # 0.10.1 checks out the staged ref before it writes the staging state:
+    # a stage killed in between leaves no ref, or an earlier unstage's.
+    from boxmunge.legacy_stage import legacy_staging_state
+    *_, t = legacy_git
+    if doc is None:
+        legacy_staging_state(paths, "myapp").unlink()
+    else:
+        _write_staging_state(paths, doc)
+    assert legacy_stage(paths, "myapp") == LegacyStage("git")
+    with patch(CREATED, return_value=_created(1, at=t)):
+        ev = evidence(paths, "myapp", LegacyStage("git"))
+    assert ev.classification == "recreated"
+    assert any("the staged ref is not recorded" in n for n in ev.notes)
+
+
+@pytest.mark.parametrize("ref", ["latest", None])
+def test_git_stage_of_the_checked_out_tree_is_untouched(paths, legacy_git, ref) -> None:
+    _write_staging_state(paths, {"active": True, "ref": ref})
+    with patch(CREATED, side_effect=AssertionError("containers need not be asked")):
+        assert evidence(paths, "myapp", LegacyStage("git")).classification == "untouched"
+
+
+@pytest.mark.parametrize("ref", [7, ["a"], {"x": 1}])
+def test_a_ref_that_is_not_a_string_is_an_evidence_error(paths, legacy_git, ref) -> None:
+    _write_staging_state(paths, {"active": True, "ref": ref})
+    with pytest.raises(EvidenceError, match="not a string"):
+        evidence(paths, "myapp", LegacyStage("git"))
+
+
+def test_a_bundle_ref_that_is_not_a_string_is_an_evidence_error(paths, legacy) -> None:
+    (legacy / ".releases" / "live.json").write_text(json.dumps({"ref": 3}))
+    with patch(CREATED, return_value={}), pytest.raises(EvidenceError, match="not a string"):
+        evidence(paths, "myapp", LegacyStage("bundle"))
+
+
+def test_git_evidence_carries_and_describes_resolved_shas(paths, legacy_git) -> None:
+    a, b, _, t = legacy_git
+    paths.project_deploy_state("myapp").write_text(json.dumps({"current_ref": a}))
+    _write_staging_state(paths, {"active": True, "ref": "main"})
+    with patch(CREATED, return_value=_created(-1, at=t)):
+        ev = evidence(paths, "myapp", LegacyStage("git"))
+    assert ev.staged_ref == "main" and ev.staged_sha == b and ev.production_ref == a
+    text = "\n".join(ev.describe())
+    assert f"staged ref: main ({b})" in text and f"production's release: {a}" in text
+
+
+def test_bundle_evidence_describes_the_kept_release(paths, legacy) -> None:
+    with patch(CREATED, return_value=_created(-5)):
+        ev = evidence(paths, "myapp", LegacyStage("bundle"))
+    assert ev.staged_sha is None
+    assert f"production's release: {ev.production_ref}" in ev.describe()
+
+
 # -- backups ----------------------------------------------------------------
 
 def test_backup_of_an_untouched_stage_uses_the_kept_production_manifest(paths, legacy) -> None:
@@ -265,10 +327,14 @@ def test_record_fields_are_kept_and_dropped(paths) -> None:
     assert (paths.state / "legacy-stages.json").stat().st_mode & 0o777 == 0o644
 
 
-def test_a_corrupt_record_fails_loudly(paths, legacy) -> None:
+@pytest.mark.parametrize("text", ["{nope", "[1, 2]", '{"myapp": [1]}',
+                                  '{"myapp": {"last_alert": "yesterday"}}'])
+def test_a_corrupt_record_is_a_state_error_naming_the_file(paths, legacy, text) -> None:
+    # StateError is a per-project input error: check-all reports it and
+    # carries on with the other projects.
     paths.state.mkdir(parents=True, exist_ok=True)
-    (paths.state / "legacy-stages.json").write_text("{nope")
-    with pytest.raises(ValueError):
+    (paths.state / "legacy-stages.json").write_text(text)
+    with pytest.raises(StateError, match="legacy-stages.json"):
         alert_legacy(paths, "myapp", legacy_stage(paths, "myapp"), now=T)
 
 
@@ -307,6 +373,39 @@ def test_quarantine_held_for_a_legacy_project(paths, legacy) -> None:
     quarantine.assert_not_called()
     assert result.held == "CVE-1" and not result.landed
     assert alert.call_args.kwargs["priority"] == 1 and "CVE-1" in alert.call_args.args[2]
+
+
+def _quarantine_record(paths, *, complete: bool) -> None:
+    path = paths.project_quarantine_state("myapp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"cve_id": "CVE-9", "action_complete": complete}))
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_quarantine_reassertion_held_for_a_legacy_project(paths, legacy, complete) -> None:
+    # Re-asserting stops the containers again: production, for this project.
+    from boxmunge.commands import security_enforce
+    _quarantine_record(paths, complete=complete)
+    with patch.object(security_enforce, "reassert_quarantine") as reassert, \
+            patch("boxmunge.commands.security_enforce.notify") as alert:
+        result = security_enforce.enforce(paths, "myapp", hosts=[], compose_files=[],
+                                          headline=None, in_grace=False)
+    reassert.assert_not_called()
+    assert result.held == "CVE-9" and not result.landed and result.error is None
+    assert alert.call_args.kwargs["priority"] == 1 and "CVE-9" in alert.call_args.args[2]
+
+
+def test_reassertion_hold_of_a_record_without_a_cve_fails_loudly(paths, legacy) -> None:
+    from boxmunge.commands import security_enforce
+    path = paths.project_quarantine_state("myapp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"action_complete": False}))
+    with patch.object(security_enforce, "reassert_quarantine") as reassert, \
+            patch("boxmunge.commands.security_enforce.notify"):
+        result = security_enforce.enforce(paths, "myapp", hosts=[], compose_files=[],
+                                          headline=None, in_grace=False)
+    reassert.assert_not_called()
+    assert result.held is None and "names no cve_id" in result.error
 
 
 def test_quarantine_not_held_during_grace(paths, legacy) -> None:
