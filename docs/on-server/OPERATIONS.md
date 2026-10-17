@@ -1191,7 +1191,7 @@ the exit code. The MCP `health` tool runs the same checks.
 | `alerts` | Pushover is not configured, so nothing on this box can alert you | see [Alerts not configured](#alerts-not-configured) |
 | `container-updates` | the daily container update failed for a target (also when a service it updates has no container, so its running image is unknown), or has not run for 48 hours | `log --component container-update`; the entry ends with the command's own error output |
 | `platform-updates` | a security or break-fix release cannot be installed automatically | see [Upgrading the Platform](#upgrading-the-platform) |
-| `docker-userns` | Docker does not remap user namespaces yet, remaps them with another identity, or a source cannot be read on a box boxmunge has not remapped (warning; deploys go on); or the record or `daemon.json` claims boxmunge's remap and a source disagrees (error, alerted once a day) | see [User-namespace remapping](#user-namespace-remapping) |
+| `docker-userns` | Docker does not remap user namespaces yet, remaps them with another identity, or a source cannot be read on a box boxmunge has not remapped (warning; deploys go on); or the record or `daemon.json` claims boxmunge's remap and a source disagrees, or a remapped box's `caddy/logs` is not S:S (error, alerted once a day) | see [User-namespace remapping](#user-namespace-remapping) |
 | `security-profiles` | a service runs with `profile: off` | review the reason in its manifest |
 | `cve-scan` | a deployed project has not been scanned for 36 hours, was never scanned, or its last scan was incomplete | `security scan <project>`; see `agent-help cve` |
 | `ufw`, `crowdsec`, `aide`, `auditd`, `sysctl` | a host hardening component is off or misconfigured | `doctor`, then the supervisor user |
@@ -1243,6 +1243,10 @@ The boxmunge-system container (age and rclone) runs in the host user namespace
 (`userns_mode: host` in `system/compose.yml`) as the deploy user, so it can read the backup key and
 write as deploy. On a remapped box, backups, restores and backup-sync refuse a system container that
 runs remapped and print the command that recreates it.
+
+Caddy runs remapped as container root, so on a remapped box `/opt/boxmunge/caddy/logs` belongs to
+S:S (the host's CrowdSec reads it as root). `docker-userns` reports an error when it is missing, is
+not a directory, or has another owner, and prints the fix.
 
 ### Alerts not configured
 

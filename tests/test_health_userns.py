@@ -18,10 +18,55 @@ def test_unmigrated_box_warns_with_the_check_command(paths) -> None:
     assert "userns-migrate --check" in check.detail
 
 
+def _caddy_logs(paths, monkeypatch, uid: int, gid: int):
+    """caddy/logs as a directory owned uid:gid (a unit test cannot chown to S)."""
+    import os
+    logs = paths.caddy / "logs"
+    logs.mkdir(parents=True)
+    real = os.lstat
+
+    def lstat(p):
+        st = real(p)
+        return os.stat_result((*st[:4], uid, gid, *st[6:])) if str(p) == str(logs) else st
+    monkeypatch.setattr(hc.os, "lstat", lstat)
+    return logs
+
+
 def test_remapped_box_is_ok(paths, monkeypatch) -> None:
     remap_box(paths, monkeypatch)
+    _caddy_logs(paths, monkeypatch, S, S)
     check = hc.check_docker_userns(paths)
     assert check.status == "ok" and str(S) in check.detail
+
+
+def test_caddy_logs_must_belong_to_container_root(paths, monkeypatch) -> None:
+    """Caddy runs remapped as container root (host uid S) and appends to
+    caddy/logs/access.log; owned by host root, it cannot."""
+    remap_box(paths, monkeypatch)
+    _caddy_logs(paths, monkeypatch, 0, 0)
+    check = hc.check_docker_userns(paths)
+    assert check.status == "error" and "caddy/logs" in check.detail
+    assert f"chown -hR {S}:{S} {paths.caddy / 'logs'}" in check.detail
+
+
+def test_missing_caddy_logs_is_an_error_not_a_crash(paths, monkeypatch) -> None:
+    remap_box(paths, monkeypatch)
+    check = hc.check_docker_userns(paths)
+    assert check.status == "error" and "caddy/logs" in check.detail
+    assert "does not exist" in check.detail
+
+
+def test_symlinked_caddy_logs_is_an_error(paths, monkeypatch, tmp_path) -> None:
+    remap_box(paths, monkeypatch)
+    (tmp_path / "elsewhere").mkdir()
+    (paths.caddy / "logs").symlink_to(tmp_path / "elsewhere")
+    check = hc.check_docker_userns(paths)
+    assert check.status == "error" and "not a directory" in check.detail
+
+
+def test_unremapped_box_never_looks_at_caddy_logs(paths) -> None:
+    assert not (paths.caddy / "logs").exists()
+    assert hc.check_docker_userns(paths).status == "warn"
 
 
 def test_flipped_daemon_is_an_error(paths, monkeypatch) -> None:

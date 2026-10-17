@@ -47,3 +47,19 @@ def test_container_root_is_host_s(remapped_daemon, tmp_path) -> None:
         check=True, capture_output=True, text=True).stdout.split()
     assert out[:3] == ["0", str(remapped_daemon), "65536"]
     assert (tmp_path / "f").stat().st_uid == remapped_daemon
+
+
+def test_docker_userns_agrees_with_what_remapped_root_can_write(dind_record) -> None:
+    """docker-userns errors exactly when Caddy's root could not append to its log."""
+    from boxmunge.health_checks.userns import check_docker_userns
+    s = offset.remap_offset(dind_record)
+    logs = dind_record.caddy / "logs"
+    logs.chmod(0o750)
+
+    def caddy_writes() -> bool:
+        return subprocess.run(["docker", "run", "--rm", "-v", f"{logs}:/var/log/caddy", BUSYBOX,
+                               "sh", "-c", "echo {} >> /var/log/caddy/access.log"],
+                              capture_output=True).returncode == 0
+    assert check_docker_userns(dind_record).status == "error" and not caddy_writes()
+    os.chown(logs, s, s)
+    assert check_docker_userns(dind_record).status == "ok" and caddy_writes()
