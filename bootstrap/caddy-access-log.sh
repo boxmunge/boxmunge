@@ -3,7 +3,7 @@
 # bootstrap/caddy-access-log.sh — move an existing box's Caddy access log from
 # a file to stdout. Run by install.sh on every install and upgrade; idempotent.
 #
-#   sites    before Caddy is recreated: rewrite the generated file block in
+#   sites    before Caddy is recreated: rewrite the generated log block in
 #            caddy/sites, refuse any config that still names /var/log/caddy
 #   retire   once Caddy runs without the mount: remove caddy/logs
 #
@@ -15,8 +15,8 @@
 # longer mounts /var/log/caddy and Caddy's root filesystem is read-only, so a
 # site config still naming it would stop Caddy from starting.
 set -euo pipefail
-# install.sh runs from the installer's root-only (0700) extraction dir; find,
-# run as deploy, cannot start from a directory it cannot read.
+# install.sh runs from the installer's root-only (0700) extraction dir, which
+# a command run as deploy cannot start from.
 cd /
 
 BOXMUNGE_ROOT="${BOXMUNGE_ROOT:-/opt/boxmunge}"
@@ -24,24 +24,86 @@ DEPLOY_USER="${DEPLOY_USER:-deploy}"
 SITES="${BOXMUNGE_ROOT}/caddy/sites"
 JOURNAL="${BOXMUNGE_ROOT}/caddy/.site-journal"
 
-# The block caddy.py generated before, as it appears in a site file, and as a
-# pending caddy_journal entry holds it (JSON-escaped): a failed validation
-# would otherwise restore the old block.
-OLD_BLOCK='output file \/var\/log\/caddy\/access\.log \{\n {12}roll_size 50MiB\n {12}roll_keep 5\n {8}\}\n'
-OLD_BLOCK_JSON='output file \/var\/log\/caddy\/access\.log \{\\n {12}roll_size 50MiB\\n {12}roll_keep 5\\n {8}\}\\n'
+# Swaps the log block caddy.py generated before for the one it generates now,
+# in every regular *.conf in caddy/sites and in the texts of pending
+# caddy_journal entries (a failed validation would otherwise restore the old
+# block). Links, FIFOs and other non-regular files are skipped, never opened
+# for reading. NEW must equal caddy.py's _access_log_lines (a test checks).
+REWRITE="$(cat <<'PY'
+import json, os, stat, sys
 
-# As the deploy user, who writes these files on every deploy anyway: a link
-# deploy planted in caddy/sites is skipped by find, never followed by root.
+OLD = """    log {
+        output file /var/log/caddy/access.log {
+            roll_size 50MiB
+            roll_keep 5
+        }
+        format json
+    }
+"""
+NEW = """    log_append user_agent {http.request.header.User-Agent}
+    log {
+        output stdout
+        format filter {
+            wrap json
+            fields {
+                request>headers delete
+                resp_headers delete
+                request>uri regexp "^(.{0,1000}.{0,1000}.{0,48}).*$" "${1}"
+                request>host regexp "^(.{0,256}).*$" "${1}"
+                request>method regexp "^(.{0,32}).*$" "${1}"
+                user_agent regexp "^(.{0,512}).*$" "${1}"
+            }
+        }
+    }
+"""
+
+
+def rewrite(path, edit):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return  # a link (ELOOP) or gone: not a file boxmunge wrote
+    with os.fdopen(fd) as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            return
+        text = f.read()
+    changed = edit(text)
+    if changed == text:
+        return
+    tmp = f"{path}.boxmunge-rewrite"
+    with open(tmp, "x") as f:
+        f.write(changed)
+    os.chmod(tmp, stat.S_IMODE(st.st_mode))
+    os.replace(tmp, path)
+
+
+def entry(text):
+    record = json.loads(text)
+    for key in ("previous", "written"):
+        if isinstance(record.get(key), str):
+            record[key] = record[key].replace(OLD, NEW)
+    return json.dumps(record)
+
+
+sites, journal = sys.argv[1:]
+for name in sorted(os.listdir(sites)):
+    if name.endswith(".conf"):
+        rewrite(os.path.join(sites, name), lambda text: text.replace(OLD, NEW))
+if os.path.isdir(journal):
+    for name in sorted(os.listdir(journal)):
+        if name.endswith(".json"):
+            rewrite(os.path.join(journal, name), entry)
+PY
+)"
+
+# As the deploy user, who writes these files on every deploy anyway: nothing
+# deploy planted there is ever opened as root.
 as_deploy() { runuser -u "${DEPLOY_USER}" -- "$@"; }
 
 sites() {
     [[ -d "${SITES}" ]] || return 0
-    as_deploy find "${SITES}" -maxdepth 1 -type f -name '*.conf' \
-        -exec perl -0777 -i -pe "s/${OLD_BLOCK}/output stdout\\n/g" {} +
-    if [[ -d "${JOURNAL}" ]]; then
-        as_deploy find "${JOURNAL}" -maxdepth 1 -type f -name '*.json' \
-            -exec perl -0777 -i -pe "s/${OLD_BLOCK_JSON}/output stdout\\\\n/g" {} +
-    fi
+    as_deploy python3 -I -c "${REWRITE}" "${SITES}" "${JOURNAL}"
     local targets=("${SITES}") left status=0
     if [[ -d "${JOURNAL}" ]]; then
         targets+=("${JOURNAL}")
@@ -57,8 +119,8 @@ sites() {
         echo "ERROR: these Caddy configs still write an access log under /var/log/caddy," >&2
         echo "       which Caddy no longer mounts, so Caddy could not start:" >&2
         sed 's/^/         /' <<<"${left}" >&2
-        echo "       Change each log block's output to 'output stdout' (CrowdSec reads" >&2
-        echo "       Caddy's stdout; see OPERATIONS.md, 'Caddy access log'), then run" >&2
+        echo "       Replace each log block with the one boxmunge generates (CrowdSec" >&2
+        echo "       reads Caddy's stdout; see OPERATIONS.md, 'Caddy access log'), then run" >&2
         echo "       the install or upgrade again (after 'boxmunge-upgrade clear-blocklist" >&2
         echo "       <version>' if an upgrade stopped here)." >&2
     else

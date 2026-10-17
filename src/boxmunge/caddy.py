@@ -9,20 +9,52 @@ from boxmunge.manifest import get_all_routes
 from boxmunge.paths import BoxPaths
 
 
+# Access-log fields kept, each cut to this many characters. CrowdSec's docker
+# source drops a line over 64 KiB and loses the lines after it while it
+# restarts the tail, and Caddy JSON-escapes a byte into up to six. So no
+# request or response header is logged whole (a client or an upstream sets
+# them, at any length): only the User-Agent, appended as a field of its own.
+ACCESS_LOG_FIELD_LIMITS = {
+    "request>uri": 2048,
+    "request>host": 256,
+    "request>method": 32,
+    "user_agent": 512,
+}
+ACCESS_LOG_DROPPED = ("request>headers", "resp_headers")
+
+
+def _up_to(limit: int) -> str:
+    """A regexp matching up to `limit` characters. Go's regexp refuses a
+    repeat count above 1000, so a longer limit is a run of such groups."""
+    chunks = [1000] * (limit // 1000) + ([limit % 1000] if limit % 1000 else [])
+    return "".join(f".{{0,{n}}}" for n in chunks)
+
+
 def _access_log_lines() -> list[str]:
     """Caddy access-log directive lines for a site block.
 
     JSON on the container's stdout (Caddy's own runtime log stays on
     stderr). The host's CrowdSec reads it through the Docker API
-    (`source: docker`, stdout only) for the `crowdsecurity/caddy` parser.
-    Never a file: one would sit in a directory the remapped Caddy owns, and
-    root CrowdSec would open whatever Caddy left there (a FIFO, a link to a
-    root-only file). caddy/compose.yml's json-file logging rotates it.
+    (`source: docker`, stdout only) with boxmunge's own parser
+    (bootstrap/crowdsec-acquis.sh): the hub's caddy parser needs the request
+    headers logged. Never a file: one would sit in a directory the remapped
+    Caddy owns, and root CrowdSec would open whatever Caddy left there (a
+    FIFO, a link to a root-only file). caddy/compose.yml's json-file logging
+    rotates it.
     """
+    fields = [f"                {name} delete" for name in ACCESS_LOG_DROPPED]
+    fields += [f'                {name} regexp "^({_up_to(limit)}).*$" "${{1}}"'
+               for name, limit in ACCESS_LOG_FIELD_LIMITS.items()]
     return [
+        "    log_append user_agent {http.request.header.User-Agent}",
         "    log {",
         "        output stdout",
-        "        format json",
+        "        format filter {",
+        "            wrap json",
+        "            fields {",
+        *fields,
+        "            }",
+        "        }",
         "    }",
     ]
 

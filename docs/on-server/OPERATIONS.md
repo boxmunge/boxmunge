@@ -507,21 +507,29 @@ A line in a log file that is not a JSON entry (torn by a crash, or hand-edited) 
 
 Every site's access log is JSON on the Caddy container's stdout; Caddy's own messages go to its
 stderr. Read it as the supervisor user with `docker logs boxmunge-caddy 2>/dev/null` (stdout only).
-Docker keeps 5 files of 50 MB (`caddy/compose.yml`). The host's CrowdSec reads the same stream
-through the Docker API (`/etc/crowdsec/acquis.d/boxmunge-caddy.yaml`, stdout only) and never opens a
-log file Caddy could replace. Every install and upgrade rewrites that file and CrowdSec's limits
-drop-in, restarts CrowdSec, and fails unless CrowdSec tails `boxmunge-caddy` and parses a Caddy line.
-Check it with `cscli metrics` (source `docker:boxmunge-caddy`).
-A 64 MB tmpfs at `/var/log/caddy`, inside the container only, lets a rollback to an earlier
-release (whose site configs write there) still start Caddy; nothing reads it, so CrowdSec sees no
-HTTP traffic until the box is upgraded again.
+Docker keeps 5 files of 50 MB (`caddy/compose.yml`). The log has no request or response headers:
+it carries the User-Agent as a field of its own and cuts the URI, host, method and User-Agent to a
+fixed length, so no client or upstream can make a line long enough to stall CrowdSec. The host's
+CrowdSec reads the same stream through the Docker API (`/etc/crowdsec/acquis.d/boxmunge-caddy.yaml`,
+stdout only) with boxmunge's parser (`parsers/s01-parse/boxmunge-caddy-logs.yaml`) into the hub's
+HTTP scenarios, and never opens a log file Caddy could replace. Every install and upgrade rewrites
+those files and CrowdSec's limits drop-in, checks `boxmunge-caddy` was made from
+`caddy/compose.yml`, restarts CrowdSec, and fails unless CrowdSec tails `boxmunge-caddy` and a
+scanner's Caddy line reaches a scenario. Check it with `cscli metrics` (source
+`docker:boxmunge-caddy`). `health` (`caddy`) reports an error for a `boxmunge-caddy` from any other
+compose project.
+
+A tmpfs at `/var/log/caddy` (up to 320 MB, room for the old configs' own rotation), inside the
+container only, lets a rollback to an earlier release (whose site configs write there) still start
+Caddy. Nothing reads it, so CrowdSec sees no HTTP traffic until the box is upgraded again; the
+rollback's log and alert say so.
 
 Earlier releases wrote `/opt/boxmunge/caddy/logs/access.log`. The upgrade rewrites the
 generated log block in `caddy/sites/`, removes `caddy/logs` and CrowdSec's old file entry, and stops
 if a `caddy.override.conf` or a hand-placed file in `caddy/sites/` still mentions `/var/log/caddy`:
-Caddy no longer mounts it, so that config would stop Caddy from starting. Change its log block to
-`output stdout`, clear the version from the blocklist (`boxmunge-upgrade clear-blocklist <version>`)
-and upgrade again.
+Caddy no longer mounts it, so that config would stop Caddy from starting. Replace its log block
+with the one boxmunge generates, clear the version from the blocklist (`boxmunge-upgrade
+clear-blocklist <version>`) and upgrade again.
 
 ---
 

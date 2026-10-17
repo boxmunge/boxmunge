@@ -6,15 +6,19 @@ run on Debian 13's CrowdSec is tests/integration/test_crowdsec_caddy_trixie.py.
 from __future__ import annotations
 
 import configparser
+import json
+import os
 import re
 import shutil
+import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 import yaml
 
-from boxmunge.caddy import generate_caddy_config
+from boxmunge.caddy import ACCESS_LOG_FIELD_LIMITS, _access_log_lines, generate_caddy_config
 from boxmunge.docker import _CADDY_CONTAINER
 
 REPO = Path(__file__).resolve().parents[1]
@@ -37,7 +41,9 @@ def test_caddy_mounts_no_log_directory() -> None:
 
 
 def test_old_log_path_is_only_a_small_container_private_tmpfs() -> None:
-    assert _caddy_service()["tmpfs"] == ["/var/log/caddy:size=64m,mode=0700"]
+    """Room for the old configs' own rotation (roll_size 50MiB, roll_keep 5,
+    plus the file being written), so a rolled-back Caddy never fills it."""
+    assert _caddy_service()["tmpfs"] == ["/var/log/caddy:size=320m,mode=0700"]
 
 
 def test_caddy_logs_to_a_driver_the_docker_api_reads_back_rotated() -> None:
@@ -52,7 +58,7 @@ def test_acquisition_reads_caddys_stdout_through_docker() -> None:
     doc = yaml.safe_load(body.replace("${CADDY_CONTAINER}", name))
     assert doc == {
         "source": "docker", "container_name": [_CADDY_CONTAINER],
-        "follow_stdout": True, "follow_stderr": False, "labels": {"type": "caddy"},
+        "follow_stdout": True, "follow_stderr": False, "labels": {"type": "boxmunge-caddy"},
     }
     assert _caddy_service()["container_name"] == _CADDY_CONTAINER
 
@@ -94,25 +100,6 @@ def test_install_moves_sites_before_recreating_caddy_then_switches_crowdsec() ->
 
 
 @pytest.mark.skipif(shutil.which("perl") is None, reason="needs perl")
-def test_sites_rewrite_turns_the_old_block_into_exactly_the_new_one() -> None:
-    script = (BOOTSTRAP / "caddy-access-log.sh").read_text()
-    old_block = re.search(r"^OLD_BLOCK='(.*)'$", script, re.M).group(1)
-    new = generate_caddy_config({
-        "project": "myapp", "hosts": ["myapp.example.com"],
-        "services": {"web": {"type": "frontend", "port": 3000, "routes": [{"path": "/"}]}},
-    })
-    old = new.replace(
-        "        output stdout\n",
-        "        output file /var/log/caddy/access.log {\n"
-        "            roll_size 50MiB\n            roll_keep 5\n        }\n")
-    assert old != new
-    rewritten = subprocess.run(
-        ["perl", "-0777", "-pe", f"s/{old_block}/output stdout\\n/g"],
-        input=old, capture_output=True, text=True, check=True).stdout
-    assert rewritten == new
-
-
-@pytest.mark.skipif(shutil.which("perl") is None, reason="needs perl")
 def test_legacy_removal_drops_exactly_the_block_crowdsec_sh_appended() -> None:
     expr = re.search(r"-pe \\\n\s+'(.*)' \\\n", CROWDSEC_CADDY).group(1)
     ours = ("\n---\nsource: file\nfilenames:\n  - /opt/boxmunge/caddy/logs/access.log\n"
@@ -125,20 +112,90 @@ def test_legacy_removal_drops_exactly_the_block_crowdsec_sh_appended() -> None:
     assert out == debian
 
 
-@pytest.mark.skipif(shutil.which("perl") is None, reason="needs perl")
-def test_sites_rewrite_also_fixes_a_pending_journal_entry() -> None:
-    import json
+# Each site block's access log as caddy.py generated it before this release.
+OLD_LOG = (
+    "    log {\n"
+    "        output file /var/log/caddy/access.log {\n"
+    "            roll_size 50MiB\n"
+    "            roll_keep 5\n"
+    "        }\n"
+    "        format json\n"
+    "    }\n"
+)
+MANIFEST = {
+    "project": "myapp", "hosts": ["myapp.example.com"],
+    "services": {"web": {"type": "frontend", "port": 3000, "routes": [{"path": "/"}]}},
+}
+
+
+def _rewrite_program() -> str:
     script = (BOOTSTRAP / "caddy-access-log.sh").read_text()
-    expr = re.search(r"^OLD_BLOCK_JSON='(.*)'$", script, re.M).group(1)
-    new = generate_caddy_config({
-        "project": "myapp", "hosts": ["myapp.example.com"],
-        "services": {"web": {"type": "frontend", "port": 3000, "routes": [{"path": "/"}]}},
-    })
-    old = new.replace(
-        "        output stdout\n",
-        "        output file /var/log/caddy/access.log {\n"
-        "            roll_size 50MiB\n            roll_keep 5\n        }\n")
-    rewritten = subprocess.run(
-        ["perl", "-0777", "-pe", f"s/{expr}/output stdout\\\\n/g"],
-        input=json.dumps({"previous": old}), capture_output=True, text=True, check=True).stdout
-    assert json.loads(rewritten) == {"previous": new}
+    return script.split("REWRITE=\"$(cat <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+
+
+def _new_log() -> str:
+    return "\n".join(_access_log_lines()) + "\n"
+
+
+def test_sites_rewrite_knows_the_current_log_block() -> None:
+    namespace: dict = {}
+    program = _rewrite_program()
+    exec(program.split("\n\ndef rewrite", 1)[0], namespace)  # OLD and NEW only
+    assert namespace["NEW"] == _new_log()
+    assert namespace["OLD"] == OLD_LOG
+
+
+def test_sites_rewrite_moves_sites_and_journal_and_skips_what_it_must_not_open(tmp_path) -> None:
+    sites, journal = tmp_path / "sites", tmp_path / ".site-journal"
+    sites.mkdir()
+    journal.mkdir()
+    new = generate_caddy_config(MANIFEST)
+    old = new.replace(_new_log(), OLD_LOG)
+    assert old != new
+    (sites / "myapp.conf").write_text(old)
+    (sites / "myapp.conf").chmod(0o644)
+    victim = tmp_path / "victim"
+    victim.write_text(OLD_LOG)
+    (sites / "planted.conf").symlink_to(victim)
+    os.mkfifo(sites / "fifo.conf")
+    (journal / "myapp.conf.json").write_text(
+        json.dumps({"path": "x", "previous": old, "written": old}))
+    for _ in range(2):  # idempotent
+        subprocess.run([sys.executable, "-I", "-c", _rewrite_program(), str(sites), str(journal)],
+                       check=True, timeout=30)
+    assert (sites / "myapp.conf").read_text() == new
+    assert stat.S_IMODE((sites / "myapp.conf").stat().st_mode) == 0o644
+    assert json.loads((journal / "myapp.conf.json").read_text()) == {
+        "path": "x", "previous": new, "written": new}
+    assert victim.read_text() == OLD_LOG and (sites / "planted.conf").is_symlink()
+
+
+def test_every_access_line_stays_far_below_crowdsecs_64k_line_limit() -> None:
+    """CrowdSec 1.4.6's docker source drops a line over 64 KiB and loses the
+    lines after it. Caddy JSON-escapes a byte into at most six (\\ufffd), so
+    only fields cut to a fixed length may carry client or upstream text."""
+    lines = _access_log_lines()
+    for dropped in ("request>headers", "resp_headers"):
+        assert f"                {dropped} delete" in lines
+    for name, limit in ACCESS_LOG_FIELD_LIMITS.items():
+        caps = [line for line in lines if line.lstrip().startswith(f"{name} regexp ")]
+        assert len(caps) == 1
+        counts = [int(n) for n in re.findall(r"\.\{0,(\d+)\}", caps[0])]
+        assert sum(counts) == limit and all(n <= 1000 for n in counts)  # Go's repeat limit
+    fixed = 2048  # keys, addresses, numbers, Caddy's own strings
+    assert 6 * sum(ACCESS_LOG_FIELD_LIMITS.values()) + fixed < 32 * 1024
+
+
+def test_boxmunge_parser_feeds_the_hub_http_scenarios() -> None:
+    body = _heredoc(CROWDSEC_CADDY, "\"${PARSER}.tmp\" <<'YAML'", "YAML")
+    doc = yaml.safe_load(body)
+    assert doc["filter"] == "evt.Parsed.program == 'boxmunge-caddy'"
+    statics = {(s.get("meta") or s.get("parsed") or s.get("target"), s.get("expression"))
+               for s in doc["statics"]}
+    assert ("http_user_agent", 'JsonExtract(evt.Line.Raw, "user_agent")') in statics
+    assert ("source_ip", 'JsonExtract(evt.Line.Raw, "request.remote_ip")') in statics
+    assert ("evt.Parsed.request", 'JsonExtract(evt.Line.Raw, "request.uri")') in statics
+    keys = {s.get("meta") or s.get("parsed") for s in doc["statics"]}
+    # http-bad-user-agent reads evt.Parsed, the other scenarios evt.Meta.
+    assert {"log_type", "service", "http_status", "http_path", "verb", "http_verb",
+            "target_fqdn", "http_user_agent"} <= keys

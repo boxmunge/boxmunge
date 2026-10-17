@@ -74,7 +74,9 @@ class TestGenerateCaddyConfig:
         # CrowdSec reads Caddy's stdout through the Docker API; without the
         # directive there is no HTTP-layer detection on the proxy.
         config = generate_caddy_config(SIMPLE_MANIFEST)
-        assert "    log {\n        output stdout\n        format json\n    }\n" in config
+        assert "    log {\n        output stdout\n        format filter {\n" in config
+        assert "            wrap json\n" in config
+        assert "    log_append user_agent {http.request.header.User-Agent}\n" in config
 
     def test_access_log_is_never_a_file(self) -> None:
         # A file would live in a directory the remapped Caddy controls, and
@@ -91,7 +93,8 @@ class TestStagingCaddyConfig:
 
     def test_access_log_goes_to_stdout_as_json(self) -> None:
         config = generate_staging_caddy_config(SIMPLE_MANIFEST)
-        assert "    log {\n        output stdout\n        format json\n    }\n" in config
+        assert "    log {\n        output stdout\n        format filter {\n" in config
+        assert "request>headers delete" in config
         assert "output file" not in config
 
     def test_auth_injected_when_provided(self) -> None:

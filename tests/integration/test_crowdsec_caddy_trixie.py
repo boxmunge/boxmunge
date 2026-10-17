@@ -19,13 +19,16 @@ from pathlib import Path
 
 import pytest
 
-from boxmunge.caddy import generate_caddy_config
+from boxmunge.caddy import _access_log_lines, generate_caddy_config
 from tests.integration.conftest import skip_no_docker
 
 pytestmark = [pytest.mark.integration, skip_no_docker]
 
 REPO = Path(__file__).resolve().parents[2]
 TRIXIE = "debian:trixie"
+# Debian 13 with python3, which init-host.sh installs on every box (the
+# plain image has none) and caddy-access-log.sh runs as deploy.
+TRIXIE_PYTHON = "python:3.13-slim-trixie"
 CADDY = "caddy:2-alpine"
 HOST = "bmtest.example.com"
 MANIFEST = {
@@ -53,7 +56,11 @@ OLD_LOG = (
     "        format json\n"
     "    }\n"
 )
-NEW_LOG = "    log {\n        output stdout\n        format json\n    }\n"
+NEW_LOG = "\n".join(_access_log_lines()) + "\n"
+# What compose sets on the container caddy/compose.yml makes (crowdsec-acquis.sh checks it).
+SYSTEM_CADDY = ["--label", "com.docker.compose.project.config_files=/opt/boxmunge/caddy/compose.yml"]
+# An upstream answering with a header far longer than CrowdSec's 64 KiB line limit.
+HUGE_RESPONSE = 'header X-Huge "{}"\n        respond "ok"'.format("a" * 70000)
 
 # No systemd in a container. restart runs the daemon in the background the way
 # the unit does; real systemctl returns once CrowdSec is ready (Type=notify).
@@ -81,12 +88,15 @@ def _sh(container: str, script: str, **kw) -> subprocess.CompletedProcess:
 
 @pytest.fixture
 def caddy(tmp_path: Path):
-    """Real Caddy serving a generated site block on :80, no network."""
+    """Real Caddy serving a generated site block on :80, no network, as
+    caddy/compose.yml labels it; its route answers with a huge header."""
     name = f"bmtest-cs-caddy-{uuid.uuid4().hex[:10]}"
     caddyfile = tmp_path / "Caddyfile"
-    caddyfile.write_text("{\n    admin off\n}\n" + generate_caddy_config(MANIFEST))
+    site = generate_caddy_config(MANIFEST).replace("reverse_proxy myapp-frontend:3000", HUGE_RESPONSE)
+    assert HUGE_RESPONSE in site
+    caddyfile.write_text("{\n    admin off\n}\n" + site)
     caddyfile.chmod(0o644)
-    _run(["docker", "run", "-d", "--name", name, "--network", "none",
+    _run(["docker", "run", "-d", "--name", name, "--network", "none", *SYSTEM_CADDY,
           "-v", f"{caddyfile}:/etc/caddy/Caddyfile:ro", CADDY])
     try:
         yield name
@@ -108,7 +118,8 @@ def crowdsec(tmp_path: Path):
                   "chmod +x /usr/local/bin/systemctl\n"
                   "echo 'APT::Install-Recommends \"false\";' > /etc/apt/apt.conf.d/99norecommends\n"
                   "apt-get update -qq >/dev/null\n"
-                  "apt-get install -y -qq ca-certificates curl >/dev/null\n"
+                  # The box's docker CLI: crowdsec-acquis.sh inspects Caddy with it.
+                  "apt-get install -y -qq ca-certificates curl docker-cli >/dev/null\n"
                   "bash /bootstrap/crowdsec.sh > /tmp/cs.log 2>&1 || { tail -20 /tmp/cs.log; exit 1; }\n"
                   f"printf '%s' '{LEGACY_ACQUIS}{LEGACY_SSH}' >> /etc/crowdsec/acquis.yaml\n"
                   # A box whose collection step failed: crowdsec-acquis.sh installs it.
@@ -133,6 +144,33 @@ def _acquisition(container: str) -> dict:
     return json.JSONDecoder().raw_decode(out)[0]
 
 
+def _get(caddy: str, extra: str = "", path: str = "/wp-login.php") -> None:
+    """One request through Caddy; extra is shell that adds wget arguments."""
+    _run(["docker", "exec", caddy, "sh", "-c",
+          f'wget -q -O /dev/null --header "Host: {HOST}" {extra} "http://127.0.0.1{path}"'],
+         check=False)
+
+
+def _wait_reads(crowdsec: str, source: str, reads: int) -> dict:
+    deadline = time.monotonic() + 60
+    while _acquisition(crowdsec).get(source, {}).get("reads", 0) < reads:
+        assert time.monotonic() < deadline, _acquisition(crowdsec)
+        time.sleep(2)
+    time.sleep(3)
+    return _acquisition(crowdsec)[source]
+
+
+def _tail_starts(crowdsec: str, caddy: str) -> int:
+    log = _sh(crowdsec, "cat /var/log/crowdsec.log").stdout
+    return log.count(f'start tail for container {caddy}"')
+
+
+# 0xFF is valid in a header and escaped by Caddy into six bytes (\\ufffd):
+# a request near the server's header limit, everything in it as long as it goes.
+_FF = "$(head -c 3000 /dev/zero | tr '\\0' '\\377')"
+_HOSTILE = f'--header "User-Agent: Nikto {_FF}{_FF}" --header "X-A: {_FF}{_FF}"'
+
+
 def test_caddy_access_lines_reach_crowdsec_through_docker(caddy, crowdsec, tmp_path) -> None:
     _script_for(crowdsec, caddy, tmp_path)
     result = _sh(crowdsec, "bash /crowdsec-acquis.sh", check=False)
@@ -145,23 +183,42 @@ def test_caddy_access_lines_reach_crowdsec_through_docker(caddy, crowdsec, tmp_p
     assert "sshd.service" not in state and "_SYSTEMD_UNIT=ssh.service" in state
     assert "MemoryMax=512M" in state
 
-    for _ in range(3):
-        _run(["docker", "exec", caddy, "wget", "-q", "-O", "/dev/null",
-              "--header", f"Host: {HOST}", "http://127.0.0.1/wp-login.php"], check=False)
-    source, deadline = f"docker:{caddy}", time.monotonic() + 60
-    while _acquisition(crowdsec).get(source, {}).get("reads", 0) < 3:
-        assert time.monotonic() < deadline, _acquisition(crowdsec)
-        time.sleep(2)
-    time.sleep(3)
-    # Exactly the three access lines: Caddy's runtime log on stderr is not read.
-    assert _acquisition(crowdsec)[source] == {"reads": 3, "parsed": 3}
+    starts = _tail_starts(crowdsec, caddy)
+    _get(caddy, _HOSTILE, path=f"/{_FF}?q={_FF}")
+    for _ in range(5):
+        _get(caddy)
+    # Every line read and parsed, the hostile one included, and the tail never
+    # restarted (a line over 64 KiB would have killed it and lost those after).
+    # Caddy's runtime log on stderr is not read.
+    assert _wait_reads(crowdsec, f"docker:{caddy}", 6) == {"reads": 6, "parsed": 6}
+    assert _tail_starts(crowdsec, caddy) == starts
+    stdout = _run(["docker", "logs", caddy]).stdout.splitlines()
+    assert len(stdout) == 6 and max(map(len, stdout)) < 32 * 1024
+    assert "Nikto" in stdout[0] and "X-Huge" not in "".join(stdout)
 
 
-def test_crowdsec_caddy_fails_loudly_when_caddy_is_not_tailed(crowdsec, tmp_path) -> None:
-    _script_for(crowdsec, "bmtest-cs-no-such-caddy", tmp_path, wait=10)
-    result = _sh(crowdsec, "bash /crowdsec-acquis.sh", check=False)
+def test_crowdsec_acquis_refuses_a_boxmunge_caddy_compose_did_not_make(crowdsec, tmp_path) -> None:
+    name = f"bmtest-cs-squat-{uuid.uuid4().hex[:10]}"
+    _run(["docker", "create", "--name", name, "--network", "none", CADDY])
+    try:
+        _script_for(crowdsec, name, tmp_path)
+        result = _sh(crowdsec, "bash /crowdsec-acquis.sh", check=False)
+    finally:
+        _run(["docker", "rm", "-f", name], check=False)
     assert result.returncode != 0
-    assert "CrowdSec is not reading bmtest-cs-no-such-caddy's access log" in result.stderr
+    assert f"{name} was not made from /opt/boxmunge/caddy/compose.yml" in result.stderr
+
+
+def test_crowdsec_acquis_fails_loudly_when_caddy_is_not_tailed(crowdsec, tmp_path) -> None:
+    name = f"bmtest-cs-stopped-{uuid.uuid4().hex[:10]}"
+    _run(["docker", "create", "--name", name, "--network", "none", *SYSTEM_CADDY, CADDY])
+    try:
+        _script_for(crowdsec, name, tmp_path, wait=10)
+        result = _sh(crowdsec, "bash /crowdsec-acquis.sh", check=False)
+    finally:
+        _run(["docker", "rm", "-f", name], check=False)
+    assert result.returncode != 0
+    assert f"CrowdSec is not reading {name}'s access log" in result.stderr
 
 
 _BOX = """set -eu
@@ -176,7 +233,7 @@ echo secret > /victim/keep
 def _trixie(script: str) -> subprocess.CompletedProcess:
     return _run(["docker", "run", "--rm", "--network", "none",
                  "--name", f"bmtest-cs-sites-{uuid.uuid4().hex[:10]}",
-                 "-v", f"{REPO / 'bootstrap'}:/bootstrap:ro", TRIXIE,
+                 "-v", f"{REPO / 'bootstrap'}:/bootstrap:ro", TRIXIE_PYTHON,
                  "bash", "-c", _BOX + script], timeout=300, check=False)
 
 
@@ -213,7 +270,7 @@ def test_sites_refuses_an_override_that_still_names_the_file() -> None:
         "bash /bootstrap/caddy-access-log.sh sites\n")
     assert result.returncode == 1, result.stdout + result.stderr
     assert "/opt/boxmunge/projects/app/caddy.override.conf" in result.stderr
-    assert "output stdout" in result.stderr
+    assert "Replace each log block with the one boxmunge generates" in result.stderr
 
 
 def test_retire_removes_caddy_logs_without_following_links() -> None:

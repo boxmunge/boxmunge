@@ -231,7 +231,9 @@ boxmunge hardens the VPS as part of installation:
 - **CrowdSec** — community threat intelligence IPS. It reads Caddy's access log from the
   container's stdout through the Docker API, never from a file: a file would sit in a
   directory Caddy (remapped, so it owns that directory) controls, and root CrowdSec would
-  open whatever Caddy put there (a FIFO, `/dev/zero`, a link to a root-only file). Its
+  open whatever Caddy put there (a FIFO, `/dev/zero`, a link to a root-only file). Caddy
+  logs no request or response headers and cuts every client-set field to a fixed length, so no
+  request makes a line long enough to stop CrowdSec's tail. Its
   unit runs with `MemoryMax=512M`, `TasksMax=256` and `Restart=on-failure`
   (`crowdsec.service.d/boxmunge-limits.conf`), so a flood can neither exhaust the host's
   memory nor switch detection off for good
