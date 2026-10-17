@@ -206,6 +206,12 @@ class BoxPaths:
         name = _checked(name)
         return self.deploy_state / f"{name}{STAGING_SUFFIX if staging else ''}.binds.json"
 
+    def project_users_record(self, name: str, *, staging: bool = False) -> Path:
+        """Who each service of a project, or its staging copy, runs as,
+        decided at deploy, stage and promote (run_as)."""
+        name = _checked(name)
+        return self.deploy_state / f"{name}{STAGING_SUFFIX if staging else ''}.users.json"
+
     def project_paused_state(self, name: str) -> Path:
         name = _checked(name)
         return self.deploy_state / f"{name}.paused.json"
