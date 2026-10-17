@@ -32,9 +32,17 @@ def _caddy_logs(paths, monkeypatch, uid: int, gid: int):
     return logs
 
 
+def _caddyfile(paths, mode: int = 0o644):
+    caddyfile = paths.caddy / "Caddyfile"
+    caddyfile.write_text("import /etc/caddy/sites/*.conf\n")
+    caddyfile.chmod(mode)
+    return caddyfile
+
+
 def test_remapped_box_is_ok(paths, monkeypatch) -> None:
     remap_box(paths, monkeypatch)
     _caddy_logs(paths, monkeypatch, S, S)
+    _caddyfile(paths)
     check = hc.check_docker_userns(paths)
     assert check.status == "ok" and str(S) in check.detail
 
@@ -62,6 +70,30 @@ def test_caddy_logs_must_be_writable_by_its_owner(paths, monkeypatch, mode) -> N
         logs.chmod(0o750)
     assert check.status == "error" and f"mode {mode:04o}" in check.detail
     assert f"sudo chmod 750 {logs}" in check.detail
+
+
+@pytest.mark.parametrize("mode", [0o640, 0o600, 0o440])
+def test_caddyfile_must_be_readable_by_other(paths, monkeypatch, mode) -> None:
+    """Remapped, Caddy's root (host uid S) is neither the owner nor in the
+    group of a root:deploy Caddyfile: it reads through the "other" bits."""
+    remap_box(paths, monkeypatch)
+    _caddy_logs(paths, monkeypatch, S, S)
+    caddyfile = _caddyfile(paths, mode)
+    check = hc.check_docker_userns(paths)
+    assert check.status == "error" and f"mode {mode:04o}" in check.detail
+    assert f"sudo chmod 0644 {caddyfile}" in check.detail
+
+
+def test_missing_or_linked_caddyfile_is_an_error(paths, monkeypatch, tmp_path) -> None:
+    remap_box(paths, monkeypatch)
+    _caddy_logs(paths, monkeypatch, S, S)
+    check = hc.check_docker_userns(paths)
+    assert check.status == "error" and "Caddyfile does not exist" in check.detail
+    (tmp_path / "real").write_text("x")
+    (tmp_path / "real").chmod(0o644)
+    (paths.caddy / "Caddyfile").symlink_to(tmp_path / "real")
+    check = hc.check_docker_userns(paths)
+    assert check.status == "error" and "not a regular file" in check.detail
 
 
 def test_missing_caddy_logs_is_an_error_not_a_crash(paths, monkeypatch) -> None:

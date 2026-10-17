@@ -4,7 +4,7 @@
 ok when remapped as recorded; warn on a box that has not migrated yet; error
 when the record, the subid files, daemon.json and the running daemon
 disagree (a daemon that restarted on another store or without remapping),
-or when a remapped Caddy cannot write caddy/logs.
+or when a remapped Caddy cannot write caddy/logs or read caddy/Caddyfile.
 check-all, run by root's health timer, alerts on an error once a day.
 """
 from __future__ import annotations
@@ -61,7 +61,7 @@ def check_docker_userns(paths: BoxPaths) -> HealthCheck:
             NAME, "warn",
             "userns remapping is off: container root is host root for every file a "
             f"container can reach. Plan the migration: {_CHECK_COMMAND}")
-    problem = _caddy_logs_problem(paths, s)
+    problem = _caddy_logs_problem(paths, s) or _caddyfile_problem(paths)
     if problem:
         return HealthCheck(NAME, "error", problem)
     return HealthCheck(NAME, "ok", f"remapped: container uid N is host uid {s}+N (overlay2)")
@@ -90,6 +90,24 @@ def _caddy_logs_problem(paths: BoxPaths, s: int) -> str | None:
         return (f"{logs} is {s}:{s} but mode {stat.S_IMODE(st.st_mode):04o}, which its owner "
                 f"cannot create files in, so Caddy cannot write its access log. "
                 f"Fix: sudo chmod 750 {logs}")
+    return None
+
+
+def _caddyfile_problem(paths: BoxPaths) -> str | None:
+    """Remapped, Caddy's root is an "other" user to the root:deploy
+    Caddyfile, so without the other-read bit Caddy cannot load its config."""
+    caddyfile = paths.caddy / "Caddyfile"
+    fix = f"sudo chmod 0644 {caddyfile}"
+    try:
+        st = os.lstat(caddyfile)
+    except FileNotFoundError:
+        return f"{caddyfile} does not exist, so Caddy has no config to load"
+    if not stat.S_ISREG(st.st_mode):
+        return (f"{caddyfile} is not a regular file (a link or a directory); replace it with "
+                f"the file itself, then: {fix}")
+    if not st.st_mode & stat.S_IROTH:
+        return (f"{caddyfile} is mode {stat.S_IMODE(st.st_mode):04o}, which Caddy's remapped "
+                f"root cannot read, so Caddy cannot load its config. Fix: {fix}")
     return None
 
 
