@@ -82,6 +82,10 @@ def _kept_trees(project_dir: Path) -> list[Path]:
     return [project_dir / ".releases" / _PREVIOUS]
 
 
+# The relative link a git slot's release/compose.yml is (git_slot).
+GIT_SLOT_COMPOSE = "repo/compose.yml"
+
+
 def _staged_compose(project_dir: Path) -> Path | None:
     """The staged release's compose.yml, while a release is staged. A linked
     slot is refused by its own cores; nothing is read through it. Whatever
@@ -95,6 +99,12 @@ def _staged_compose(project_dir: Path) -> Path | None:
                                 f"release's own tree belongs; nothing is read through it. "
                                 f"Unstage, or remove it by hand and stage again")
     compose = release_dir(slot) / "compose.yml"
+    clone = release_dir(slot) / "repo"
+    if (os.path.islink(compose) and os.readlink(compose) == GIT_SLOT_COMPOSE
+            and clone.is_dir() and not clone.is_symlink()):
+        # A git slot's own link into its clone (git_slot.copy_project_entries):
+        # the clone's file is read, still without following a link.
+        compose = clone / "compose.yml"
     return compose if os.path.lexists(compose) else None
 
 

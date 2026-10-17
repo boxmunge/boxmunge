@@ -295,3 +295,24 @@ def test_staged_box_state_of_a_git_release_leaves_repo_out(tmp_path) -> None:
     (git / "repo").mkdir()
     assert "repo" in staged_box_state(project, bundle)
     assert "repo" not in staged_box_state(project, git)
+
+
+def test_a_git_slots_compose_is_read_through_its_own_link_only(tmp_path) -> None:
+    """Production's classification reads the slot's compose.yml without
+    following a link; a git slot's is the link into its own clone."""
+    import os
+
+    from boxmunge.data_dirs import ReleaseStateError
+    from boxmunge.release import project_data_dirs
+    project = tmp_path / "myapp"
+    release = project / ".releases" / "staged" / "release"
+    (release / "repo").mkdir(parents=True)
+    (project / "compose.yml").write_text("services: {web: {image: x}}\n")
+    (release / "repo" / "compose.yml").write_text(
+        "services: {web: {image: x, volumes: ['./cache:/c']}}\n")
+    os.symlink("repo/compose.yml", release / "compose.yml")
+    assert "cache" in project_data_dirs(project).staged
+    os.remove(release / "compose.yml")
+    os.symlink(str(release / "repo" / "compose.yml"), release / "compose.yml")
+    with pytest.raises(ReleaseStateError, match="symlink"):
+        project_data_dirs(project)
