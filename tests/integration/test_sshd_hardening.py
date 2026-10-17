@@ -115,13 +115,13 @@ _STUB_LOGGING_SYSTEMCTL = (
     "printf '#!/bin/sh\\necho \"$*\" >> /tmp/systemctl.log\\n' > /usr/local/bin/systemctl\n"
     "chmod +x /usr/local/bin/systemctl\n"
 )
-_RUN = "DEPLOY_USER=deploy bash /bootstrap/sshd-hardening.sh"
+_RUN = "bash /bootstrap/sshd-hardening.sh"
 _DROPIN = "/etc/ssh/sshd_config.d/00-boxmunge.conf"
 
 
 def test_sshd_hardening_sh_is_idempotent_and_fails_loudly_on_trixie() -> None:
     result = _docker_run(
-        {str(REPO / "bootstrap"): "/bootstrap"},
+        {str(REPO / "bootstrap"): "/bootstrap", str(REPO / "src"): "/src"},
         "export DEBIAN_FRONTEND=noninteractive\n"
         "apt-get update -qq >/dev/null && apt-get install -y -qq openssh-server >/dev/null\n"
         + _STUB_LOGGING_SYSTEMCTL +

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# bootstrap/sshd-hardening.sh — boxmunge's sshd settings, as a drop-in that wins.
+# bootstrap/sshd-hardening.sh — install boxmunge's sshd drop-in
+# (src/boxmunge/sshd/00-boxmunge.conf) and prove sshd enforces it.
 #
 # Debian's sshd_config starts with `Include /etc/ssh/sshd_config.d/*.conf`
 # and sshd keeps the first value it reads for a keyword, so any drop-in
 # beats the main file: a cloud image's 50-cloud-init.conf saying
 # `PasswordAuthentication yes` re-enables passwords whatever the main file
-# says. These settings live in 00-boxmunge.conf, which sorts first.
+# says. These settings live in 00-boxmunge.conf, which sorts first. The file
+# ships in the package too, so `health` can compare the installed copy.
 #
 # deploy's restricted shell is the boundary for its key, and deploy is in
 # the docker group, so any SSH channel that never reaches the shell is root:
@@ -24,10 +26,11 @@
 # settings sshd would actually give deploy and supervisor (`sshd -T -C`); on
 # any failure the previous drop-in is put back and the script exits non-zero.
 set -euo pipefail
-: "${DEPLOY_USER:?}"
 
+SOURCE="$(dirname "${BASH_SOURCE[0]}")/../src/boxmunge/sshd/00-boxmunge.conf"
 DROPIN="/etc/ssh/sshd_config.d/00-boxmunge.conf"
 
+# What sshd -T must then report (the policy, checked independently of the file).
 AUTH=(
     "PasswordAuthentication no"
     "KbdInteractiveAuthentication no"
@@ -46,17 +49,6 @@ DEPLOY_ONLY=(
     "PermitUserRC no"
 )
 
-render() {
-    local line
-    echo "# Managed by boxmunge (bootstrap/sshd-hardening.sh); rewritten on install and upgrade."
-    echo "# Sorts first so these values win over later drop-ins (sshd keeps the first)."
-    for line in "${AUTH[@]}" "${FORWARDING[@]}"; do echo "${line}"; done
-    echo ""
-    echo "# deploy's restricted shell is its boundary: no channel may bypass it."
-    echo "Match User ${DEPLOY_USER}"
-    for line in "${FORWARDING[@]}" "${DEPLOY_ONLY[@]}"; do echo "    ${line}"; done
-}
-
 # missing_for <user> <setting>...: prints the settings sshd would not give
 # <user>, one per line.
 missing_for() {
@@ -72,12 +64,12 @@ missing_for() {
 # Every account gets key-only logins. Forwarding is checked for deploy only:
 # an operator may open it for supervisor in a Match block of their own.
 ineffective_settings() {
-    missing_for "${DEPLOY_USER}" "${AUTH[@]}" "${FORWARDING[@]}" "${DEPLOY_ONLY[@]}"
+    missing_for deploy "${AUTH[@]}" "${FORWARDING[@]}" "${DEPLOY_ONLY[@]}"
     missing_for supervisor "${AUTH[@]}"
 }
 
-content="$(render)"
-if [[ -f "${DROPIN}" && "$(cat "${DROPIN}")" == "${content}" ]]; then
+[[ -f "${SOURCE}" ]] || { echo "ERROR: ${SOURCE} is missing from the release bundle." >&2; exit 1; }
+if cmp -s "${SOURCE}" "${DROPIN}"; then
     changed=0
 else
     changed=1
@@ -89,8 +81,7 @@ if [[ "${changed}" -eq 1 ]]; then
         backup="$(mktemp)"
         cp -p "${DROPIN}" "${backup}"
     fi
-    printf '%s\n' "${content}" > "${DROPIN}.tmp"
-    chmod 0644 "${DROPIN}.tmp"
+    install -m 0644 "${SOURCE}" "${DROPIN}.tmp"
     mv -f "${DROPIN}.tmp" "${DROPIN}"
 fi
 

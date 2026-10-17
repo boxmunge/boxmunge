@@ -6,6 +6,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = (REPO / "bootstrap" / "sshd-hardening.sh").read_text()
+DROPIN = (REPO / "src" / "boxmunge" / "sshd" / "00-boxmunge.conf").read_text()
 
 AUTH = {"PasswordAuthentication": "no", "KbdInteractiveAuthentication": "no",
         "PermitRootLogin": "no"}
@@ -25,19 +26,24 @@ def test_the_drop_in_sorts_before_cloud_inits() -> None:
     assert "00-boxmunge.conf" < "50-cloud-init.conf"
 
 
-def test_globals_and_deploys_match_block_close_logins_and_forwarding() -> None:
+def _settings(lines: list[str]) -> dict[str, str]:
+    return dict(line.split() for line in lines if line and not line.startswith("#"))
+
+
+def test_the_drop_in_says_what_the_effective_settings_are_checked_against() -> None:
     assert _array("AUTH") == AUTH
     assert _array("FORWARDING") == FORWARDING
     assert _array("DEPLOY_ONLY") == DEPLOY_ONLY
-    render = SCRIPT.split("render() {\n", 1)[1].split("\n}\n", 1)[0]
-    globals_, match = render.split('echo "Match User ${DEPLOY_USER}"')
-    assert '"${AUTH[@]}" "${FORWARDING[@]}"' in globals_
-    assert '"${FORWARDING[@]}" "${DEPLOY_ONLY[@]}"' in match
+    globals_, match = DROPIN.split("\nMatch User deploy\n")
+    assert _settings(globals_.splitlines()) == {**AUTH, **FORWARDING}
+    lines = match.splitlines()
+    assert all(line.startswith("    ") for line in lines)
+    assert _settings([line.strip() for line in lines]) == {**FORWARDING, **DEPLOY_ONLY}
+    assert "Match" not in match
 
 
 def test_the_effective_settings_are_checked_for_both_accounts() -> None:
-    assert 'missing_for "${DEPLOY_USER}" "${AUTH[@]}" "${FORWARDING[@]}" "${DEPLOY_ONLY[@]}"' \
-        in SCRIPT
+    assert 'missing_for deploy "${AUTH[@]}" "${FORWARDING[@]}" "${DEPLOY_ONLY[@]}"' in SCRIPT
     assert 'missing_for supervisor "${AUTH[@]}"' in SCRIPT
     assert '/usr/sbin/sshd -T -C "user=${user}' in SCRIPT
     assert SCRIPT.index("/usr/sbin/sshd -t") < SCRIPT.index("systemctl try-reload-or-restart ssh")
@@ -58,7 +64,7 @@ def test_a_fresh_bootstrap_applies_it_before_sshd_restarts() -> None:
 
 def test_every_install_and_upgrade_applies_it_before_recording_the_installer() -> None:
     text = (REPO / "install.sh").read_text()
-    call = 'DEPLOY_USER=deploy bash "${SCRIPT_DIR}/bootstrap/sshd-hardening.sh"'
+    call = 'bash "${SCRIPT_DIR}/bootstrap/sshd-hardening.sh"'
     assert call in text
     # A failed run leaves the old fingerprint, so the next upgrade re-runs install.sh.
     assert text.index(call) < text.index('INSTALLER_HASH_FILE="${BOXMUNGE_ROOT}/state/installer.sha256"')

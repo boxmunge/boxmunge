@@ -148,14 +148,14 @@ restart_sshd() {
 PHASE=fleet-before; rm -f "${DROPIN}"; restart_sshd; probe_deploy
 forward supervisor tcp-L "-L7703:127.0.0.1:7777" 7703
 # 2. That box once install.sh has run the hardening.
-PHASE=fleet-after; DEPLOY_USER=deploy bash /bootstrap/sshd-hardening.sh >/dev/null || exit 1
+PHASE=fleet-after; bash /bootstrap/sshd-hardening.sh >/dev/null || exit 1
 restart_sshd; probe_deploy
 forward supervisor tcp-L "-L7703:127.0.0.1:7777" 7703
 # 3. An operator opens TCP forwarding for supervisor in its own Match block:
 #    the next install accepts it, and deploy stays closed.
 PHASE=relaxed-after
 printf 'Match User supervisor\n    AllowTcpForwarding yes\n' > /etc/ssh/sshd_config.d/10-ops.conf
-DEPLOY_USER=deploy bash /bootstrap/sshd-hardening.sh >/dev/null || exit 1
+bash /bootstrap/sshd-hardening.sh >/dev/null || exit 1
 restart_sshd; probe_deploy
 forward supervisor tcp-L "-L7703:127.0.0.1:7777" 7703
 

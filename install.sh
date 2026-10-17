@@ -522,7 +522,7 @@ fi
 # (the script says why). Every install and upgrade re-applies it, so boxes
 # bootstrapped before it get it too; it fails the install if sshd would not
 # enforce it.
-DEPLOY_USER=deploy bash "${SCRIPT_DIR}/bootstrap/sshd-hardening.sh"
+bash "${SCRIPT_DIR}/bootstrap/sshd-hardening.sh"
 
 # ---------------------------------------------------------------------------
 # Install the boxmunge-upgrade shim (orchestrates auto-updates)
@@ -601,10 +601,10 @@ if [[ "${INSTALLED_VERSION}" != "unknown" && "${FROM_UPGRADE_SHIM}" -eq 0 ]]; th
 fi
 
 # ---------------------------------------------------------------------------
-# Record the installer fingerprint (sha256 of this script as it was applied)
-# so the upgrade shim can detect when a future release ships an install.sh
-# that differs from the one this host already ran — and re-invoke install.sh
-# automatically before flipping to the new venv. Without this, system-level
+# Record the installer fingerprint (install.sh and the files it installs
+# from, as applied) so the upgrade shim can detect when a future release
+# ships an installer that differs from the one this host already ran, and
+# re-invoke install.sh automatically before flipping to the new venv. Without this, system-level
 # changes (new apt packages, new systemd units, install.sh-only migrations)
 # silently require a manual `bash boxmunge-install.sh` after every upgrade.
 # Written last so a partial install (which exits earlier under `set -e`)
@@ -613,8 +613,10 @@ fi
 # ---------------------------------------------------------------------------
 INSTALLER_HASH_FILE="${BOXMUNGE_ROOT}/state/installer.sha256"
 mkdir -p "$(dirname "${INSTALLER_HASH_FILE}")"
-sha256sum "${SCRIPT_DIR}/install.sh" 2>/dev/null \
-    | awk '{print $1}' > "${INSTALLER_HASH_FILE}.tmp"
+# Covers install.sh and the files it installs from: a release that changes
+# only bootstrap/sshd-hardening.sh must re-run it too. The shim computes the
+# same fingerprint over a new bundle (tests/test_installer_fingerprint.py).
+(cd "${SCRIPT_DIR}" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}' > "${INSTALLER_HASH_FILE}.tmp"
 mv -f "${INSTALLER_HASH_FILE}.tmp" "${INSTALLER_HASH_FILE}"
 chown root:deploy "${INSTALLER_HASH_FILE}" 2>/dev/null || true
 chmod 0644 "${INSTALLER_HASH_FILE}"

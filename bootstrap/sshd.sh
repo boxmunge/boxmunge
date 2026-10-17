@@ -34,6 +34,6 @@ _set_sshd AllowUsers "${DEPLOY_USER} supervisor"
 # would create a window where sshd points at a non-existent wrapper.
 
 # Logins and forwarding. Before the restart, so sshd never serves without it.
-DEPLOY_USER="${DEPLOY_USER}" bash "$(dirname "${BASH_SOURCE[0]}")/sshd-hardening.sh"
+bash "$(dirname "${BASH_SOURCE[0]}")/sshd-hardening.sh"
 
 systemctl restart sshd
