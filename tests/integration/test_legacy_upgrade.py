@@ -93,24 +93,33 @@ def image(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
 
 def _run(image: str, kind: str, way: str) -> dict[str, str]:
     project = f"legacyt{uuid.uuid4().hex[:8]}"
+    runner = f"bmtest-legacy-{uuid.uuid4().hex[:10]}"
     try:
-        result = _docker("run", "--rm", "--name", f"bmtest-legacy-{uuid.uuid4().hex[:10]}",
+        result = _docker("run", "--rm", "--name", runner,
                          "-v", "/var/run/docker.sock:/var/run/docker.sock",
                          "-v", f"{HERE}:/t:ro", image,
                          "bash", "/t/legacy_upgrade.sh", kind, way, project, timeout=900)
     finally:
+        # A timeout kills only the docker client: the script's container runs
+        # on. Stop it first, so it cannot start more containers after the sweep.
+        _docker("rm", "-f", runner)
         # The script removes them itself; this covers a script that died.
         for p in (project, f"{project}-staging"):
             ids = _docker("ps", "-aq", "--filter", f"label=com.docker.compose.project={p}")
             if ids.stdout.split():
                 _docker("rm", "-f", *ids.stdout.split())
     assert result.returncode == 0, result.stdout + result.stderr
-    facts = dict(re.findall(r"^([A-Z_]+)=(\S*)$", result.stdout, re.M))
+    facts = dict(re.findall(r"^([A-Z][A-Z0-9_]*)=(\S*)$", result.stdout, re.M))
     facts["log"] = result.stdout + result.stderr
     return facts
 
 
-SETUP_STEPS = ("REGISTER", "ADD", "DEPLOY_V1", "STAGE", "PAUSE", "RECREATE", "PROMOTE", "STASH")
+# The 0.10.1 setup steps legacy_upgrade.sh runs for each kind: every one must
+# have run and passed.
+SETUP_STEPS = {"bundle": ("ADD", "DEPLOY_V1", "STAGE", "STASH"),
+               "bundle-recreated": ("ADD", "DEPLOY_V1", "STAGE", "PAUSE", "RECREATE", "STASH"),
+               "leftover": ("ADD", "DEPLOY_V1", "STAGE", "PROMOTE", "STASH"),
+               "git": ("REGISTER", "ADD", "DEPLOY_V1", "STAGE", "STASH")}
 # What production runs once 0.10.1 has staged: the stage recreated it from
 # the staged files (bundle-recreated), or promoted them (leftover).
 RUNNING = {"bundle": "v1", "bundle-recreated": "v2", "leftover": "v2", "git": "v1"}
@@ -119,8 +128,8 @@ RECORDED = {"bundle": "bundle", "bundle-recreated": "bundle", "leftover": "lefto
 
 def _left_as_is(kind: str, way: str, facts: dict[str, str]) -> None:
     log = facts["log"]
-    for step in SETUP_STEPS:
-        assert facts.get(f"{step}_RC", "0") == "0", f"0.10.1 setup step {step} failed\n{log}"
+    for step in SETUP_STEPS[kind]:
+        assert facts.get(f"{step}_RC") == "0", f"0.10.1 setup step {step} failed\n{log}"
     assert facts["PROD_VERSION_BEFORE"] == RUNNING[kind], log
     assert facts["CONTAINERS_BEFORE"] == ("1" if kind == "leftover" else "2"), log
     assert facts["DRY_RC"] == "0" and facts.get("DRY_LEFT") == "yes", log
@@ -155,9 +164,17 @@ def test_rollback_to_0101_finds_its_stage_as_it_was(image: str, kind: str, way: 
     assert facts["REAPPLY_RC"] == "0", log
     if kind != "leftover":
         assert facts["OLD_UNSTAGE_RC"] == "0" and facts["STAGING_LEFT"] == "0", log
+    # 0.10.1's own behaviour, pinned so a change is noticed: its re-apply
+    # restarts production from the project dir, which holds the staged files,
+    # and its unstage does not put production's release back.
+    assert facts["PROD_VERSION_REAPPLIED"] == "v2", log
+    if kind != "leftover":
+        assert facts["PROD_VERSION_AFTER"] == "v2", log
     if kind == "git":
-        # The control: without the rewrite, 0.10.1 refuses its own stash.
-        assert facts["UNREWRITTEN_RESTORE_RC"] != "0", log
+        # The control, run first from the same state: without the rewrite,
+        # 0.10.1 refuses its own stash, on the link member.
+        assert facts["UNREWRITTEN_RESTORE_RC"] == "1", log
+        assert facts.get("UNREWRITTEN_RESTORE_WHY") == "link-member", log
 
 
 # legacy-stage's choice per kind, and what production runs after it.

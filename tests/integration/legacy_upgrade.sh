@@ -162,19 +162,29 @@ fact IDS_AFTER_REFUSALS "$(ids)"
 
 case "$WAY" in
 rollback|failed-apply)
+    # The control, from the state the real restore starts from: 0.10.1 cannot
+    # restore the stash its shim made, unrewritten. It writes members in
+    # order, so what it wrote before it stopped the real restore writes again.
+    if [[ "$KIND" == git ]]; then
+        control=$R/stashes/boxmunge-stash-2099-01-01T000000.tar.gz
+        cp /tmp/unrewritten-stash.tar.gz "$control"
+        run UNREWRITTEN_RESTORE old stash restore --latest
+        # 0.10.1's data_filter refuses the git manifest.yml link (D19 kept it).
+        grep -qF "refusing to extract member 'projects/$P/manifest.yml'" /tmp/out.UNREWRITTEN_RESTORE \
+            && grep -qF "is a link to an absolute path" /tmp/out.UNREWRITTEN_RESTORE \
+            && fact UNREWRITTEN_RESTORE_WHY link-member
+        rm -f "$control"
+    fi
     run RESTORE old stash restore --latest
     fact RESTORED_FILES "$(snap)"
     run REAPPLY old upgrade --apply
+    fact PROD_VERSION_REAPPLIED "$(version "$P")"
     if [[ "$KIND" != leftover ]]; then
         run OLD_UNSTAGE old unstage "$P"
         fact STAGING_LEFT "$(docker ps -aq --filter "label=com.docker.compose.project=$P-staging" | wc -l)"
         fact PROD_VERSION_AFTER "$(version "$P")"
     fi
-    # The control: 0.10.1 cannot restore the stash its shim made, unrewritten.
-    if [[ "$KIND" == git ]]; then
-        cp /tmp/unrewritten-stash.tar.gz $R/stashes/boxmunge-stash-2099-01-01T000000.tar.gz
-        run UNREWRITTEN_RESTORE old stash restore --latest
-    fi ;;
+    ;;
 resolve)
     case "$KIND" in
         bundle-recreated)
