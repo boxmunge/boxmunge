@@ -22,6 +22,10 @@ _OS_CALLS = ("rename", "replace", "fchown", "chown", "lchown", "fchmod", "chmod"
 _DOCKER_CHANGES = {"up", "down", "stop", "start", "restart", "kill", "rm", "create", "load",
                    "pull", "run", "tag"}
 _READERS = {"id", "pgrep", "stat", "cat"}
+# An atomic write's temp file is invisible until its rename: a kill before
+# its create, its chmod or its rename leaves the same box, so only the
+# rename is counted.
+_INSIDE_ATOMIC_WRITE = {"_mkstemp_inner", "atomic_write_bytes"}
 
 
 def _label(kind: str) -> str:
@@ -43,7 +47,11 @@ def _changes_box(argv) -> str | None:
 
 
 @contextmanager
-def _patched(hit: Callable[[str], None]) -> Iterator[None]:
+def _patched(record: Callable[[str], None]) -> Iterator[None]:
+    def hit(label: str) -> None:
+        if label.split("@")[1] not in _INSIDE_ATOMIC_WRITE:
+            record(label)
+
     saved = {name: getattr(os, name) for name in _OS_CALLS}
     real_open, real_rmtree = os.open, shutil.rmtree
     real_run, real_popen = subprocess.run, subprocess.Popen

@@ -1378,6 +1378,50 @@ is needed (see [Caddy access log](#caddy-access-log)). Caddy reads `caddy/Caddyf
 "other" permission bits, so the file is 0644 (`caddy/` itself stays 0750); `docker-userns` reports
 an error, with the `chmod`, when it is not.
 
+#### Migrating an existing box
+
+The supervisor user runs the migration through the upgrade shim, at a time chosen for the downtime
+(none of these is open to the deploy user):
+
+```bash
+sudo /opt/boxmunge/bin/boxmunge-upgrade userns-migrate --check   # read-only report
+sudo /opt/boxmunge/bin/boxmunge-upgrade userns-migrate           # run, or resume, the migration
+sudo /opt/boxmunge/bin/boxmunge-upgrade userns-rollback          # undo it (uncommitted or stopped part-way)
+sudo /opt/boxmunge/bin/boxmunge-upgrade userns-commit            # after the 48-hour soak: delete the old root
+```
+
+`--check` changes nothing and always exits 0; its last line is the verdict. Each `REFUSED:` line names
+one offender and what to do. It refuses, among others: Docker older than 28.0; a `daemon.json` with
+another `data-root`, `storage-driver`, `userns-remap` or `containerd-snapshotter: true`; an open
+upgrade probation, install transaction, staged release (promote or unstage it), 0.10.1 stage, or
+half-applied pause or quarantine; no `backup_remote`; a container boxmunge does not run; privileged
+or host-namespace services; an anonymous volume holding data (adopt it with `data adopt`); an image
+or data file owned by an id above 65535; ACLs, file capabilities, immutable files, device nodes,
+mounts or outside hard links in data; a read-only bind that is not world-readable; a compose `user:`
+above 65535; and a service that runs as its image's root in a project whose users were never decided
+(add the `security: {user: ...}` line it prints, deploy, then migrate). `NOTE:` lines report the
+prior store, the estimated downtime, and the images run by digest: `docker load` keeps no digests, so
+these are pulled again by digest once their layers are loaded, and their registry must answer during
+the downtime.
+
+`userns-migrate` stops the boxmunge timers, takes every project lock, runs the checks again, saves
+every image to `/var/lib/boxmunge-userns/images/`, backs up every project (`premigrate`, the last two
+kept) and syncs the backups off-site. Downtime starts there: it stops every container, switches the
+daemon, loads the images, moves each volume into the remapped root, shifts the owners of volume and
+bind data by S, makes `caddy/Caddyfile` 0644, and brings each project back behind the maintenance
+page until its smoke tests pass. A project that does not come back stays on the maintenance page;
+the others carry on. If the remapped daemon does not start, the original `daemon.json` is put back
+and the box restarts on its untouched old root.
+
+Every step is journalled in the root-only `/opt/boxmunge/upgrade-root/userns-migration.json`. After
+any failure, kill or power cut, run the same command again to resume, or `userns-rollback` to put the
+box back; `docker-userns` reports a migration stopped part-way as an error naming both commands, the
+timers stay stopped, and no platform upgrade runs until it is finished. The rollback works from what
+the remapped daemon holds now, so projects, volumes and images created during the soak go back too.
+After 48 hours with every project healthy, `userns-commit` deletes the old root's images and data;
+there is no rollback after it. An applied migration not committed after seven days is a daily
+warning. While the box is remapped, `force-target` refuses releases before 0.11.0.
+
 ### Alerts not configured
 
 `alerts` warns when `pushover.user_key` or `pushover.app_token` is missing from

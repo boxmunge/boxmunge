@@ -26,7 +26,8 @@ VOLUME = f"{PROJECT}_data"
 COMPOSE = f"""services:
   app:
     image: {BUSYBOX}
-    command: ["sleep", "86400"]
+    # Exits on SIGTERM (a bare sleep as PID 1 ignores it), so stops are quick.
+    command: ["sh", "-c", "trap 'exit 0' TERM; sleep 86400 & wait"]
     network_mode: none
     restart: always
     volumes:
