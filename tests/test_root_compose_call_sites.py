@@ -274,8 +274,12 @@ def test_restore_refuses_before_stopping_the_project(tampered) -> None:
 
 def test_staging_copy_refuses_before_stopping_production(tampered) -> None:
     from boxmunge import staging_data
+    from boxmunge.staged_release import load_slot, new_meta, slot_dir, write_meta
     from boxmunge.staging_copy_plan import CopyPlan
     paths = tampered[0]
+    # The slot the copy would record production's stop in.
+    (slot_dir(paths, NAME) / "release").mkdir(parents=True)
+    write_meta(slot_dir(paths, NAME), new_meta("bundle", f"{NAME}-v2", None))
     uploads = str(paths.project_dir(NAME) / "data" / "uploads")
     with patch.object(staging_data, "_running",
                       side_effect=lambda p: [f"{NAME}-web-1"] if p == NAME else []), \
@@ -286,6 +290,7 @@ def test_staging_copy_refuses_before_stopping_production(tampered) -> None:
         with pytest.raises(ComposeRefused):
             staging_data.copy_production_data(paths, NAME, CopyPlan())
     assert not [c for c in run.call_args_list if c.args[0][:2] == ["docker", "stop"]]
+    assert load_slot(paths, NAME).production_stopped is None
     _assert_refused(tampered)
 
 

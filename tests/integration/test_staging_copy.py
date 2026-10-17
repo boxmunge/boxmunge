@@ -114,9 +114,9 @@ def test_restage_replaces_quiescent_staging_data_completely(paths, project) -> N
     seen_running: list[list[str]] = []
     real_copy = stage_cmd.copy_production_data
 
-    def copy(paths_, project_name, plan):
+    def copy(paths_, project_name, plan, **kwargs):
         seen_running.append(_running(stage))
-        real_copy(paths_, project_name, plan)
+        real_copy(paths_, project_name, plan, **kwargs)
 
     with _no_caddy(), patch("boxmunge.commands.stage_cmd.copy_production_data", copy):
         assert run_stage(project, paths, ref="2026-10-13T110000000000") == 0

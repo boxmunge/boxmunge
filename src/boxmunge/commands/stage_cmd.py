@@ -303,7 +303,7 @@ def _bring_up_staging(project_name: str, paths: BoxPaths,
             compose_up_checked(paths, project_name, component="stage",
                                compose_files=STAGING_FILES, staging=True, prestage=True, record=True,
                                deploying=True, start=False)
-            copy_production_data(paths, project_name, plan)
+            copy_production_data(paths, project_name, plan, prestage=True)
             print("  Data copy complete.")
     except (*_STORAGE_ERRORS, DockerError) as e:
         print(f"  ERROR: Preparing staging's storage failed: {e}", file=sys.stderr)

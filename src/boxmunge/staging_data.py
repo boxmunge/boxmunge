@@ -9,6 +9,11 @@ must exist: Docker would otherwise create an empty volume and the copy
 would "succeed" with no data. Each destination is emptied completely,
 hidden entries included, before the source is copied in.
 
+Before production is stopped, the slot's production_stopped marker
+records the containers durably (production_stopped), so a crash anywhere
+in the copy leaves a marker whoever finds it acts on; once production runs
+again the marker is cleared.
+
 Every copy and removal runs in the data helper (data_helper): the data
 belongs to container users, and on a remapped box to host ids deploy can
 neither read nor write. Production's stores are mounted read-only.
@@ -26,7 +31,9 @@ from boxmunge.compose_guard import check_containers_start, start_containers_chec
 from boxmunge.data_helper import EMPTY_X, run_helper
 from boxmunge.docker import staging_compose_project
 from boxmunge.docker_run import DockerError, run as _run
+from boxmunge.production_stopped import ProductionDownError, mark_stopped, start_again
 from boxmunge.release import project_data_dirs
+from boxmunge.staged_release import load_slot
 from boxmunge.staging_copy_plan import (
     CopyPlan, StagingDataError, Store, copy_sources, plan_copy, stores,
 )
@@ -246,33 +253,44 @@ def _running(compose_project: str) -> list[str]:
             if c.running]
 
 
-class ProductionDownError(DockerError):
-    """Production was stopped for the copy and could not be started again."""
+def _mark_stopped(paths: BoxPaths, project: str, stopped: list[str]) -> None:
+    """Record the stop in the slot, durably, before it happens: a failed
+    write stops nothing."""
+    meta = load_slot(paths, project)
+    if meta is None:
+        raise StagingDataError(
+            f"{project} has no staged slot to record production's stop in, so "
+            f"production was not stopped and nothing was copied. Stage again.")
+    mark_stopped(paths, project, meta, stopped)
 
 
-def _start_again(paths: BoxPaths, project: str, stopped: list[str],
-                 cause: BaseException | None) -> None:
+def _start_again_prestage(paths: BoxPaths, project: str, stopped: list[str]) -> None:
+    """The interim stage layout has no slot, so no marker: start the
+    stopped containers directly. It goes when stage builds the slot."""
     try:
         start_containers_checked(paths, project, stopped, component="stage")
     except DockerError as e:
-        names = " ".join(stopped)
         message = (f"PRODUCTION IS DOWN: its containers were stopped for the data "
                    f"copy and starting them again failed: {e}. Start them with: "
-                   f"docker start {names}")
+                   f"docker start {' '.join(stopped)}")
         print(f"ERROR: {message}", file=sys.stderr)
-        raise ProductionDownError(message) from (cause or e)
+        raise ProductionDownError(message) from e
     print("  Production started again.")
 
 
-def copy_production_data(paths: BoxPaths, project: str, plan: CopyPlan) -> None:
+def copy_production_data(paths: BoxPaths, project: str, plan: CopyPlan, *,
+                         prestage: bool = False) -> None:
     """Stop production, copy each pair, start production again.
 
-    Raises StagingDataError or DockerError naming what failed. Production
-    is started again whatever happens, including a failed or interrupted
-    stop; staging is left created but not started. Both the stop and the
-    start are guarded by the start checks (compose_guard): production is
-    not stopped if its containers' mounts would not be started again, and
-    is left down, loudly, if they changed during the copy.
+    Raises StagingDataError, DockerError or ProductionDownError naming what
+    failed. Every pair is planned, and its links refused, before
+    production stops. Production is not stopped if its containers' mounts
+    would not be started again (compose_guard), nor before the slot's
+    production_stopped marker is written. It is started again whatever
+    happens, including a failed or interrupted stop (start_again, which
+    clears the marker, or keeps it and says so loudly if the start fails);
+    staging is left created but not started. `prestage` is the interim
+    stage layout, which has no slot: no marker is written.
     """
     staging_running = _running(staging_compose_project(project))
     if staging_running:
@@ -287,7 +305,8 @@ def copy_production_data(paths: BoxPaths, project: str, plan: CopyPlan) -> None:
     stopped = _running(project)
     if stopped:
         check_containers_start(paths, project, component="stage")
-    cause: BaseException | None = None
+        if not prestage:
+            _mark_stopped(paths, project, stopped)
     try:
         if stopped:
             print(f"  Stopping production for the copy: {', '.join(stopped)}")
@@ -295,12 +314,11 @@ def copy_production_data(paths: BoxPaths, project: str, plan: CopyPlan) -> None:
         for (src, dest), (mounts, script) in zip(plan.pairs, jobs):
             print(f"  Copying production {src.label} to staging {dest.label}...")
             run_helper(copy_label(project), mounts, script)
-    except BaseException as e:  # noqa: BLE001 - re-raised; kept as the cause
-        cause = e
-        raise
     finally:
-        if stopped:
-            _start_again(paths, project, stopped, cause)
+        if stopped and prestage:
+            _start_again_prestage(paths, project, stopped)
+        elif stopped:
+            start_again(paths, project, component="stage", alert=False)
     for store in plan.fresh:
         print(f"  NOTE: staging {store.label} has no production source; it starts as it is.")
     for store in plan.unused:
