@@ -1,8 +1,6 @@
 """Phase 0: each refusal lists its offenders; the verdict line always prints."""
 from __future__ import annotations
 
-import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -189,11 +187,9 @@ def test_missing_backup_remote_is_refused(paths, quiet) -> None:
 
 def test_undeclared_root_services_are_refused_with_the_line_to_add(paths, quiet,
                                                                    monkeypatch) -> None:
-    monkeypatch.undo()  # the real _undeclared_root, over a stand-in for the users check
-    fake = types.ModuleType("service_users")
-    fake.GUIDE = "PROJECT_CONVENTIONS.md"
-    fake.pending_declarations = lambda paths: (["shop/db (postgres:16)"], ["blog: unreadable"])
-    monkeypatch.setitem(sys.modules, "boxmunge.health_checks.service_users", fake)
+    monkeypatch.undo()  # the real _undeclared_root, over the users check's answer
+    monkeypatch.setattr("boxmunge.health_checks.service_users.pending_declarations",
+                        lambda paths: (["shop/db (postgres:16)"], ["blog: unreadable"]))
     r = checks.Report()
     pf._undeclared_root(paths, r)
     assert any("shop/db (postgres:16) runs as its image's root" in x

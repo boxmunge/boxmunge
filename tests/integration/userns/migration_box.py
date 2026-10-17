@@ -78,8 +78,14 @@ def make_box(paths: BoxPaths) -> None:
     os.chown(uploads / "media", 33, 33)
     (uploads / "media" / "b.png").write_text("png")
     os.chown(uploads / "media" / "b.png", 33, 33)
-    (project / "manifest.yml").write_text(f"project: {PROJECT}\nhosts: [{PROJECT}.example.com]\n")
+    # The service runs as its image's root: declared, as the preflight requires.
+    (project / "manifest.yml").write_text(
+        f"project: {PROJECT}\nhosts: [{PROJECT}.example.com]\nservices:\n  app:\n"
+        f"    security:\n      user: image\n      reason: a test box's shell, as its image runs it\n")
     (project / "compose.yml").write_text(COMPOSE)
+    # A deployed project has its overlay; this box's adds nothing (the
+    # migration's bring-up of the overlay is stood in for).
+    (project / "compose.boxmunge.yml").write_text("services:\n  app: {}\n")
     add_project(PROJECT, paths)
     docker("pull", "-q", BUSYBOX)
     docker("tag", BUSYBOX, IMAGE)
@@ -117,11 +123,9 @@ def daemon_remapped() -> bool:
 
 def stand_ins(monkeypatch) -> None:
     """What this box does not run, stood in for (module docstring)."""
-    from boxmunge.userns import bringup, engine, preflight
+    from boxmunge.userns import bringup, engine
     monkeypatch.setattr(engine, "_backups", lambda paths, inv: None)
     monkeypatch.setattr(engine, "_final", lambda paths, j, results: None)
-    # The users decision lands with the non-root default (userns PR3).
-    monkeypatch.setattr(preflight, "_undeclared_root", lambda paths, r: None)
     monkeypatch.setattr(bringup, "compose_up_platform", lambda *a, **kw: None)
     monkeypatch.setattr(bringup, "connect", lambda paths: None)
     monkeypatch.setattr(bringup, "caddy_reload", lambda *a: None)
