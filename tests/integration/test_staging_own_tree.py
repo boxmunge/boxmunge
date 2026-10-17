@@ -8,24 +8,31 @@ production's own deploys and rollbacks during a stage never mix the two
 environments. Production's own commands during a stage (upgrade restart,
 pause/resume, check smoke, backup dump, critical down and recover) start,
 exec into or stop production as v1 from its own project dir while v2 is
-staged, and leave staging running as it was.
+staged, and leave staging running as it was. Backup and restore run
+through the session's real system container, so that test's box is the
+integration root (int_paths).
+
+container-update during a stage is not tested here: it needs a local
+registry. The read and project-directory censuses (unit tier) cover which
+files it reads and where its compose commands run.
 """
 from __future__ import annotations
 
 import shutil
-import time
 from unittest.mock import patch
 
 import pytest
 import yaml
 
 from boxmunge.backup_dump import execute_dump
+from boxmunge.commands.backup_cmd import run_backup
 from boxmunge.commands.check import run_check
 from boxmunge.commands.deploy import run_deploy
 from boxmunge.commands.health_state import update_health_state
 from boxmunge.commands.pause_cmd import run_pause
 from boxmunge.commands.promote_cmd import run_promote
 from boxmunge.commands.recover_cmd import run_recover
+from boxmunge.commands.restore import run_restore
 from boxmunge.commands.resume_cmd import run_resume
 from boxmunge.commands.rollback import run_rollback
 from boxmunge.commands.stage_cmd import run_stage
@@ -36,12 +43,10 @@ from boxmunge.staging_isolation import production_model, staging_model
 from tests.bundle_helpers import place_bundle, tree_snapshot
 from tests.integration.docker_images import docker
 from tests.integration.slot_release import (
-    V1, V2, V3, containers, no_caddy, production_files, project, release, runs,
-    slot_project, working_dir,
+    V1, V2, V3, containers, no_caddy, production_files, release, running, runs,
+    slot_project, smoke_runs, working_dir,
 )
 from tests.txn_helpers import crash_at
-
-__all__ = ["project"]  # the fixture, imported for pytest
 
 pytestmark = [
     pytest.mark.integration,
@@ -49,6 +54,12 @@ pytestmark = [
     # Data copies, placeholders and unstage's cleanup run in the data helper.
     pytest.mark.usefixtures("helper_image"),
 ]
+
+
+@pytest.fixture
+def project(paths):
+    with slot_project(paths) as name:
+        yield name
 
 
 def _staged(project: str) -> str:
@@ -119,8 +130,14 @@ def test_stage_and_unstage_leave_production_untouched(paths, project) -> None:
     assert not slot_dir(paths, project).exists()
 
 
-def _start_events(container_id: str, since: str) -> int:
-    out = docker("events", "--since", since, "--until", str(int(time.time()) + 1),
+def _start_events(container_id: str) -> int:
+    """Start events since the container was created. Both bounds are the
+    daemon's clock (creation precedes the first start; `until` is the
+    daemon's now, so the call returns at once, never waiting on a future
+    bound)."""
+    created = docker("inspect", "--format", "{{.Created}}", container_id)
+    now = docker("info", "--format", "{{.SystemTime}}")
+    out = docker("events", "--since", created, "--until", now,
                  "--filter", f"container={container_id}", "--filter", "event=start",
                  "--format", "{{.Action}}")
     return len(out.split())
@@ -137,7 +154,7 @@ def test_copy_data_restarts_production_once_with_the_same_containers(paths) -> N
         assert {k: v[0] for k, v in after.items()} == {k: v[0] for k, v in before.items()}
         for name, (cid, started) in before.items():
             assert after[name][1] != started          # restarted, not recreated ...
-            assert _start_events(cid, started) == 2   # ... once: deploy's start, the copy's
+            assert _start_events(cid) == 2   # ... once: deploy's start, then the copy's
         assert production_files(paths, project) == files
         assert runs(_live(project), "v1") and runs(_staged(project), "v2")
 
@@ -247,15 +264,19 @@ def test_upgrade_restart_uses_production_files(paths, staged) -> None:
 def test_pause_and_resume_use_production_files(paths, staged) -> None:
     project, staging = staged
     assert run_pause(project, paths, yes=True) == 0
+    assert running(project) == [] and len(running(f"{project}-staging")) == 1
     assert run_resume(project, paths, yes=True, skip_security_checks=True) == 0
     _production_is_v1(paths, project, staging)
 
 
 def test_check_smoke_and_backup_dump_use_production_files(paths, staged) -> None:
-    """v2's smoke script fails in a v1 container: check passing means
-    production ran its own script."""
     project, staging = staged
+    pdir = paths.project_dir(project)
+    prod_runs, staging_runs = smoke_runs(pdir / "data"), smoke_runs(pdir / "data-staging")
     assert run_check(project, paths, verbose=False) == 0
+    # The smoke ran once, in production's container, with production's script.
+    assert smoke_runs(pdir / "data") == [*prod_runs, "v1"]
+    assert smoke_runs(pdir / "data-staging") == staging_runs
     dump = execute_dump(paths, project, 'echo "$VERSION $TAG"; cat /etc/app/settings', "app")
     try:
         assert dump.read_text().split() == ["v1", "v1", "v1"]
@@ -271,3 +292,21 @@ def test_critical_down_stops_only_production_and_recover_uses_its_files(paths, s
     assert containers(f"{project}-staging") == staging
     assert run_recover(project, paths, yes=True) == 0
     _production_is_v1(paths, project, staging)
+
+
+def test_restore_during_a_stage_uses_production_files(int_paths, system_container) -> None:
+    paths = int_paths
+    with slot_project(paths, {V1: {"backup": True}, V2: {"backup": True}}) as project:
+        pdir = paths.project_dir(project)
+        with no_caddy():
+            assert run_deploy(project, paths, ref=V1) == 0
+            assert run_stage(project, paths, ref=V2) == 0
+            staging = containers(f"{project}-staging")
+            docker("exec", _live(project), "sh", "-c", "echo backed-up > /data/rows")
+            docker("exec", _staged(project), "sh", "-c", "echo staging-own > /data/rows")
+            assert run_backup(project, paths) == 0
+            (pdir / "data" / "rows").write_text("changed since\n")
+            assert run_restore(project, paths, yes=True) == 0
+        assert (pdir / "data" / "rows").read_text() == "backed-up\n"
+        assert (pdir / "data-staging" / "rows").read_text() == "staging-own\n"
+        _production_is_v1(paths, project, staging)

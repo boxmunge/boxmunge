@@ -4,8 +4,10 @@
 Every release runs one busybox service with no network. Each version is
 observable from outside: its env (compose `environment`, `env_file` and
 `.env` interpolation), its read-only config dir, and a smoke script that
-passes only in a container of the same version, so a production container
-running the staged release's files (or the reverse) shows up.
+passes only in a container of the same version and records each run in
+the container's ./data, so a production container running the staged
+release's files (or the reverse), or a smoke run in the wrong
+environment, shows up.
 """
 from __future__ import annotations
 
@@ -16,7 +18,6 @@ from contextlib import ExitStack, contextmanager
 from typing import Any
 from unittest.mock import patch
 
-import pytest
 import yaml
 
 from boxmunge.project_registry import add_project
@@ -31,14 +32,22 @@ _CADDY = ("boxmunge.commands.deploy", "boxmunge.staging_bringup", "boxmunge.comm
           "boxmunge.commands.recover_cmd")
 
 
-def release(project: str, version: str, *, copy_data: bool = False,
+SMOKE_RUNS = "smoke-runs"
+
+
+def release(project: str, version: str, *, copy_data: bool = False, backup: bool = False,
             volumes: list[str] | None = None) -> dict[str, str]:
+    """`backup`: the service's /data/rows is the backed-up data."""
     manifest = yaml.safe_load(manifest_text(project))
     manifest["schema_version"] = 3
     manifest["services"] = {"app": {"internal": True, "writable": {"external": True},
                                     "smoke": "boxmunge-scripts/smoke.sh"}}
     if copy_data:
         manifest["staging"] = {"copy_data": True}
+    if backup:
+        manifest["backup"] = {"type": "custom", "service": "app",
+                              "dump_command": "cat /data/rows",
+                              "restore_command": "cat > /data/rows"}
     compose = {"services": {"app": {
         "image": BUSYBOX, "command": _LOOP, "network_mode": "none",
         "env_file": ["./app.env"],
@@ -47,7 +56,8 @@ def release(project: str, version: str, *, copy_data: bool = False,
     return {"manifest.yml": yaml.safe_dump(manifest), "compose.yml": yaml.safe_dump(compose),
             ".env": f"TAG={version}\n", "app.env": f"FROM_ENV_FILE={version}\n",
             "appconfig/settings": version, "data/.keep": "",
-            "boxmunge-scripts/smoke.sh": f'[ "$VERSION" = {version} ] || exit 2\n'}
+            "boxmunge-scripts/smoke.sh":
+                f'echo {version} >> /data/{SMOKE_RUNS}; [ "$VERSION" = {version} ] || exit 2\n'}
 
 
 @contextmanager
@@ -85,12 +95,6 @@ def slot_project(paths, versions: dict[str, dict[str, Any]] | None = None):
         remove(name)
 
 
-@pytest.fixture
-def project(paths):
-    with slot_project(paths) as name:
-        yield name
-
-
 def containers(compose_project: str) -> dict[str, tuple[str, str]]:
     """Container name -> (ID, StartedAt) for one compose project."""
     ids = docker("ps", "-aq", "--filter",
@@ -103,6 +107,17 @@ def containers(compose_project: str) -> dict[str, tuple[str, str]]:
         name, cid, started = line.split()
         out[name.lstrip("/")] = (cid, started)
     return out
+
+
+def running(compose_project: str) -> list[str]:
+    return docker("ps", "-q", "--filter",
+                  f"label=com.docker.compose.project={compose_project}").split()
+
+
+def smoke_runs(data_dir) -> list[str]:
+    """The versions whose smoke script ran in the container mounting data_dir."""
+    runs_file = data_dir / SMOKE_RUNS
+    return runs_file.read_text().split() if runs_file.exists() else []
 
 
 def env(container: str) -> dict[str, str]:
