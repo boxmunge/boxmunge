@@ -61,7 +61,7 @@ _TOOL_DEFS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "project": {"type": "string", "description": "Project name"},
-                "ref": {"type": "string", "description": "Git ref or bundle to stage"},
+                "ref": {"type": "string", "description": "Bundle to stage"},
                 "dry_run": {"type": "boolean", "description": "Preview without applying"},
             },
             "required": ["project"],

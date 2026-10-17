@@ -107,13 +107,27 @@ def _build_slot(project: str, paths: BoxPaths, tree: Path, manifest: dict[str, A
         durable_rename_dir(tree, release_dir(building))
         build_slot(paths, project, manifest, meta)
     except STORAGE_ERRORS as e:
-        discard_dir(building)
-        print(f"ERROR: Building the staged release failed: {e}\nNothing was changed.",
-              file=sys.stderr)
+        print(f"ERROR: Building the staged release failed: {e}", file=sys.stderr)
         log_error("stage", f"Building the staged release failed: {e}", paths,
                   project=project)
+        _discard_building(project, paths, building)
         return False
     return True
+
+
+def _discard_building(project: str, paths: BoxPaths, building: Path) -> None:
+    """The failed build's half-made slot goes; if that fails too, both
+    errors are said and the next stage (or deploy) sweeps it."""
+    try:
+        discard_dir(building)
+    except OSError as e:
+        print(f"ERROR: Removing the half-built {building} failed too: {e}. Production and "
+              f"any staged release were not changed; the next 'stage {project}' removes "
+              f"it.", file=sys.stderr)
+        log_error("stage", f"Removing the half-built staged release failed: {e}", paths,
+                  project=project)
+        return
+    print("Nothing was changed.", file=sys.stderr)
 
 
 def _intake_bundle(project: str, paths: BoxPaths, ref: str | None,
@@ -166,8 +180,12 @@ def _retire_previous(project: str, paths: BoxPaths) -> bool:
 
 def stage_locked(project: str, paths: BoxPaths, ref: str | None = None,
                  dry_run: bool = False) -> int:
-    """The stage core. Caller holds the project lock; never takes it."""
-    if not _eligible(project, paths) or not _clear_leftovers(project, paths):
+    """The stage core. Caller holds the project lock; never takes it. A dry
+    run changes nothing, so it leaves crash debris and a stopped production
+    for the real stage (or the health tick) to clear."""
+    if not _eligible(project, paths):
+        return 1
+    if not dry_run and not _clear_leftovers(project, paths):
         return 1
     candidate = _intake_bundle(project, paths, ref, dry_run)
     if isinstance(candidate, int):
@@ -176,7 +194,7 @@ def stage_locked(project: str, paths: BoxPaths, ref: str | None = None,
     if not _retire_previous(project, paths):
         return 1
     # From the swap on, any failure tears the whole stage down (D16).
-    ready = False
+    ready: StagedRelease | None = None
     try:
         rc = bring_up_staging(paths, project, manifest) if _swap(project, paths) else 1
         if rc == 0:
@@ -191,7 +209,7 @@ def stage_locked(project: str, paths: BoxPaths, ref: str | None = None,
                 print(f"ERROR: Cleanup after the failed stage was incomplete; "
                       f"run 'unstage {project}'.", file=sys.stderr)
     if ready:
-        _announce(project, paths, manifest, bundle_path)
+        _announce(project, paths, ready, manifest, bundle_path)
     return rc
 
 
@@ -207,21 +225,23 @@ def _swap(project: str, paths: BoxPaths) -> bool:
     return True
 
 
-def _mark_ready(project: str, paths: BoxPaths) -> bool:
-    """Step 7: the stage completed; only now can promote deploy it."""
+def _mark_ready(project: str, paths: BoxPaths) -> StagedRelease | None:
+    """Step 7: the stage completed; only now can promote deploy it. Returns
+    the record as written, or None."""
     try:
-        update_meta(paths, project, load_slot(paths, project), state="ready")
+        meta = load_slot(paths, project)
+        if meta is None:
+            raise SlotError(f"the staged slot of '{project}' is gone")
+        return update_meta(paths, project, meta, state="ready")
     except (OSError, SlotError) as e:
         print(f"ERROR: Recording the stage as ready failed: {e}", file=sys.stderr)
         log_error("stage", f"Recording the stage as ready failed: {e}", paths,
                   project=project)
-        return False
-    return True
+        return None
 
 
-def _announce(project: str, paths: BoxPaths, manifest: dict[str, Any],
+def _announce(project: str, paths: BoxPaths, meta: StagedRelease, manifest: dict[str, Any],
               bundle_path: Path) -> None:
-    meta = load_slot(paths, project)
     register_project_identity(project, manifest.get("id", ""), paths)
     consume_bundle(bundle_path, project, paths)
     print("  Staged at:")

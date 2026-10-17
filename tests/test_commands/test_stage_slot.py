@@ -224,3 +224,65 @@ def test_restage_over_a_slot_whose_switch_failed(paths) -> None:
         assert run_stage("myapp", paths, ref=V3) == 1
     meta = load_slot(paths, "myapp")
     assert meta.state == "starting" and meta.switch_rc is None
+
+
+# -- final review fixes ------------------------------------------------------
+
+def test_restage_over_an_unreadable_record_logs_and_pages(paths) -> None:
+    """The record holds the only trace of a copy that stopped production."""
+    prod_and_stage(paths)
+    (slot_dir(paths, "myapp") / "meta.json").write_text("{broken")
+    place_bundle(paths, timestamp=V3, files={"VERSION": "v3\n"})
+    sent: list[tuple] = []
+    with staging_docker_off(), patch("boxmunge.production_stopped.notify",
+                                     lambda *a, **k: sent.append((a[2], k["priority"]))):
+        assert run_stage("myapp", paths, ref=V3) == 0
+    assert [p for _, p in sent] == [1]
+    assert "boxmunge recover myapp" in sent[0][0]
+    import json
+    entries = [json.loads(line) for line in paths.log_file.read_text().splitlines()]
+    assert any(e["level"] == "warn" and "boxmunge recover myapp" in e["msg"]
+               for e in entries)
+
+
+def test_dry_run_leaves_leftovers_and_production_alone(paths, capsys) -> None:
+    """A dry run changes nothing: no sweep, no start of production."""
+    prod_and_stage(paths)
+    releases = paths.project_releases("myapp")
+    (releases / ".isolation-killed").mkdir()
+    (releases / "staged.building").mkdir()
+    place_bundle(paths, timestamp=V3, files={"VERSION": "v3\n"})
+    with staging_docker_off(), \
+            patch("boxmunge.commands.stage_cmd.start_again") as start:
+        assert run_stage("myapp", paths, ref=V3, dry_run=True) == 0
+    start.assert_not_called()
+    assert (releases / ".isolation-killed").is_dir() and (releases / "staged.building").is_dir()
+    assert "[DRY RUN] Would stage 'myapp'" in capsys.readouterr().out
+
+
+def test_the_announcement_does_not_read_the_slot_again(paths, capsys) -> None:
+    """A stage that recorded itself ready is announced from what it wrote."""
+    from boxmunge.staged_release import SlotError
+
+    def load(paths_, project):
+        meta = load_slot(paths_, project)
+        if meta is not None and meta.state == "ready":
+            raise SlotError("unreadable after ready")
+        return meta
+    add_project("myapp", paths)
+    place_bundle(paths, timestamp=V2, files={"VERSION": "v2\n"})
+    with staging_docker_off(), patch("boxmunge.commands.stage_cmd.load_slot", load):
+        assert run_stage("myapp", paths, ref=V2) == 0
+    assert "Run 'promote myapp' to go live" in capsys.readouterr().out
+
+
+def test_a_failed_build_whose_cleanup_fails_reports_both(paths, capsys) -> None:
+    add_project("myapp", paths)
+    place_bundle(paths, timestamp=V2, files={"VERSION": "v2\n"})
+    with staging_docker_off(), \
+            patch("boxmunge.commands.stage_cmd.build_slot", side_effect=OSError("build boom")), \
+            patch("boxmunge.commands.stage_cmd.discard_dir", side_effect=OSError("rm boom")):
+        assert run_stage("myapp", paths, ref=V2) == 1
+    err = capsys.readouterr().err
+    assert "Building the staged release failed: build boom" in err
+    assert "failed too: rm boom" in err and "Nothing was changed" not in err

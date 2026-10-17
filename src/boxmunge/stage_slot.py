@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from boxmunge import bind_sources
 from boxmunge.docker import compose_down
 from boxmunge.fileutil import sync_tree
-from boxmunge.production_stopped import start_again
+from boxmunge.production_stopped import start_again, unreadable_slot_discarded
 from boxmunge.staged_release import (
     SlotError, StagedRelease, building_dir, has_slot, load_slot, refuse_planted, release_dir,
     staging_target, update_meta, write_meta,
@@ -64,9 +64,8 @@ def retire_previous_staging(paths: BoxPaths, project: str) -> None:
     try:
         old = load_slot(paths, project)
     except SlotError as e:
-        print(f"  WARN: the previous stage's record is unreadable ({e}); taking its "
-              f"staging down with the slot's compose files. If a data copy had "
-              f"stopped production, start it with `boxmunge recover {project}`.")
+        unreadable_slot_discarded(paths, project, "stage", e, "re-staging takes its "
+                                  "staging down with the slot's compose files and replaces it")
         old = None
     if old is not None:
         start_again(paths, project, component="stage", alert=True)

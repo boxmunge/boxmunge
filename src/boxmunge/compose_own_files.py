@@ -30,6 +30,8 @@ from boxmunge.compose_mounts import host_path_forms, is_bind_entry, volume_sourc
 
 # Project entries boxmunge reads or runs, relative to the project directory.
 # repo/.git, not repo/: git runs hooks from it on the next deploy's fetch.
+# compose.boxmunge-staging.yml and compose.staging-base.yml are a 0.10.1
+# stage's files (legacy_stage), reserved until the upgrade floor passes the beta.
 CONTROL_ENTRIES: tuple[str, ...] = (
     "compose.yml", "manifest.yml", ".env", "project.env", "secrets.env",
     "compose.boxmunge.yml", "compose.boxmunge-staging.yml", "compose.staging-base.yml",

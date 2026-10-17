@@ -128,3 +128,20 @@ def test_unstage_removes_copies_only_the_staged_release_used(paths) -> None:
     assert not (pdir / "media-staging").exists()
     assert (pdir / "uploads-staging" / "kept").exists()  # production mounts ./uploads
     assert not (pdir / "media").exists()
+
+
+def test_unstage_with_unreadable_meta_logs_and_pages(paths) -> None:
+    """The record holds the only trace of a copy that stopped production."""
+    from unittest.mock import patch
+    prod_and_stage(paths)
+    (slot_dir(paths, "myapp") / "meta.json").write_text("{broken")
+    sent: list[tuple] = []
+    with staging_docker_off(), patch("boxmunge.production_stopped.notify",
+                                     lambda *a, **k: sent.append((a[2], k["priority"]))):
+        assert run_unstage("myapp", paths) == 0
+    assert [p for _, p in sent] == [1]
+    assert "boxmunge recover myapp" in sent[0][0]
+    import json
+    entries = [json.loads(line) for line in paths.log_file.read_text().splitlines()]
+    assert any(e["level"] == "warn" and "boxmunge recover myapp" in e["msg"]
+               for e in entries)

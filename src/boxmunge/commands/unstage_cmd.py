@@ -18,7 +18,7 @@ from boxmunge.docker import DockerError, caddy_config_lock, caddy_reload, compos
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.log import log_error, log_operation
 from boxmunge.legacy_stage import refuse_if_legacy_stage
-from boxmunge.production_stopped import start_again
+from boxmunge.production_stopped import start_again, unreadable_slot_discarded
 from boxmunge.release_txn import load_txn, options_text
 from boxmunge.staged_release import (
     SlotError, StagedRelease, drop_slot, has_slot, load_slot, manual_teardown, staging_target,
@@ -34,13 +34,12 @@ def staging_exists(project: str, paths: BoxPaths) -> bool:
     return has_slot(paths, project) or paths.project_staging_caddy_site(project).exists()
 
 
-def _read_meta(project: str, paths: BoxPaths) -> StagedRelease | None:
+def _read_meta(project: str, paths: BoxPaths, component: str) -> StagedRelease | None:
     try:
         return load_slot(paths, project)
     except SlotError as e:
-        print(f"  WARN: the stage's record is unreadable ({e}); tearing staging down "
-              f"with the slot's compose files. If a data copy had stopped production, "
-              f"start it with `boxmunge recover {project}`.")
+        unreadable_slot_discarded(paths, project, component, e, "tearing staging down "
+                                  "with the slot's compose files")
         return None
 
 
@@ -77,13 +76,13 @@ def teardown_staging_locked(project: str, paths: BoxPaths, *, component: str = "
 
 def _teardown(project: str, paths: BoxPaths, component: str) -> bool:
     sweep_debris(paths, project)  # refuses a planted link before any compose call
-    meta = _read_meta(project, paths)
+    meta = _read_meta(project, paths, component)
     if meta is not None and meta.production_stopped:
         try:
             start_again(paths, project, component=component, alert=True)
         except DockerError:
             return False  # said loudly; the marker is kept for the next try
-        meta = _read_meta(project, paths)
+        meta = _read_meta(project, paths, component)
     if has_slot(paths, project) and not _stop_staging(project, paths, meta, component):
         return False
     with caddy_config_lock(paths.state):

@@ -21,7 +21,7 @@ from boxmunge.compose_guard import (
 )
 from boxmunge.docker_run import DockerError
 from boxmunge.lifecycle import is_blocked
-from boxmunge.log import log_error, log_operation
+from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
 from boxmunge.project_alerts import clear_alert
 from boxmunge.staged_release import (
@@ -99,6 +99,21 @@ def production_down(paths: BoxPaths, project: str, component: str,
         notify(paths, DOWN_TITLE.format(project=project), message, component=component,
                project=project, priority=1)
     return ProductionDownError(message)
+
+
+def unreadable_slot_discarded(paths: BoxPaths, project: str, component: str,
+                              error: SlotError, doing: str) -> None:
+    """A slot whose record cannot be read is being replaced or torn down,
+    and with it any production_stopped marker: the only record that a copy
+    stopped production. Said on stdout, in the log and in a priority-1
+    alert, which name the way to start production again."""
+    message = (f"{project}'s staged slot record is unreadable ({error}); {doing}. If a "
+               f"data copy had stopped production, start it with "
+               f"`boxmunge recover {project}`.")
+    print(f"  WARN: {message}")
+    log_warning(component, message, paths, project=project)
+    notify(paths, f"{project}: staged slot record unreadable", message,
+           component=component, project=project, priority=1)
 
 
 def _record_started(paths: BoxPaths, project: str) -> None:
