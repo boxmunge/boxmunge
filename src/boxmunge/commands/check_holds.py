@@ -11,15 +11,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from boxmunge.log import log_operation
-from boxmunge.production_stopped import ProductionDownError, start_again
+from boxmunge.production_stopped import DOWN_TITLE, ProductionDownError, start_again_from
 from boxmunge.project_alerts import alert_once, clear_alert
 from boxmunge.release_txn import open_install_reason
-from boxmunge.staged_release import SlotError, load_slot
+from boxmunge.staged_release import SlotError, StagedRelease, load_slot
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 SLOT_ALERT = "staged-slot"
+DOWN_ALERT = "production-down"
 
 
 def tick_hold(name: str, paths: BoxPaths, read_only: bool) -> int | None:
@@ -31,27 +32,45 @@ def tick_hold(name: str, paths: BoxPaths, read_only: bool) -> int | None:
         return _unreadable_slot(name, paths, e, read_only)
     if not read_only:
         clear_alert(paths, name, SLOT_ALERT)
+    # Every production start waits for an open install, so a marker found
+    # now is started again once the install is closed.
+    status = _install_open(name, paths)
+    if status is not None:
+        return status
     if meta is not None and meta.production_stopped is not None:
-        status = _stopped_for_copy(name, paths, read_only)
-        if status is not None:
-            return status
-    return _install_open(name, paths)
+        return _stopped_for_copy(name, paths, meta, read_only)
+    if not read_only:
+        clear_alert(paths, name, DOWN_ALERT)
+    return None
 
 
-def _stopped_for_copy(name: str, paths: BoxPaths, read_only: bool) -> int | None:
+def _stopped_for_copy(name: str, paths: BoxPaths, meta: StagedRelease,
+                      read_only: bool) -> int | None:
     # staging's data copy stopped production and did not start it again (it
     # crashed: this tick holds the lock, so no copy is running): start it
     # now. The stop was deliberate, so the critical action (compose down) is
-    # never applied while the marker stands.
+    # never applied while the marker stands. A start that keeps failing is
+    # said every tick but paged once per error.
     if read_only:
         print(f"{name}: CRITICAL (production stopped for staging's data copy)")
         return 2
     try:
-        start_again(paths, name, component="check-all", alert=True)
+        started = start_again_from(paths, name, meta, component="check-all", alert=True,
+                                   page=False)
     except ProductionDownError as e:
+        alert_once(paths, name, DOWN_ALERT, {"error": str(e)},
+                   title=DOWN_TITLE.format(project=name), message=str(e),
+                   component="check-all", priority=1)
         print(f"{name}: CRITICAL ({e})")
         return 2
-    return None
+    clear_alert(paths, name, DOWN_ALERT)
+    if not started:
+        return None
+    # The app may still be booting: smoke now could fail critically and take
+    # down what was just started. The next tick runs inside the grace window.
+    print(f"{name}: WARNING (production started again after staging's data copy; "
+          f"checked next tick)")
+    return 1
 
 
 def _unreadable_slot(name: str, paths: BoxPaths, error: SlotError, read_only: bool) -> int:

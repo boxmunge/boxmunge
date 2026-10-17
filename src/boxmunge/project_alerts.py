@@ -19,7 +19,7 @@ from boxmunge.log import log_error, log_warning
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 
-ALERT_KINDS = ("manifest-schema", "git-layout", "staged-slot")
+ALERT_KINDS = ("manifest-schema", "git-layout", "staged-slot", "production-down")
 
 
 def alert_state(paths: BoxPaths, project: str, kind: str) -> Path:

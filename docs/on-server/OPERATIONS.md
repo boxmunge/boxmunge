@@ -239,7 +239,10 @@ Staging keeps its own data between stages. To start it from a copy of production
    `PRODUCTION IS DOWN` and the `docker start` command to run. If `stage` itself was killed during
    the copy, the slot's `production_stopped` marker names the containers it stopped: the next health
    check (or `stage`, `unstage` or `recover`) starts them again and alerts, and the health check
-   never applies its critical stop while the marker stands. If the slot's `meta.json` cannot be
+   never applies its critical stop while the marker stands. After such a start the health check runs
+   smoke on its next run, inside the post-start grace window; while an install is open it reports the
+   install instead and starts nothing. A start that keeps failing is reported on every run and
+   alerted once per error. If the slot's `meta.json` cannot be
    read, the health check cannot tell, so it reports the project `CRITICAL`, alerts once and leaves
    production alone: run `recover <project>` (it starts production with its compose files), then
    `unstage <project>`. `pause` takes the stop over (`resume` starts production);

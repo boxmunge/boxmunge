@@ -26,11 +26,13 @@ from boxmunge.notify import notify
 from boxmunge.staged_release import (
     SlotError, StagedRelease, clear_production_stopped, load_slot, update_meta,
 )
+from boxmunge.state import read_state, write_state
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 PROD_FILES = ["compose.yml", "compose.boxmunge.yml"]
+DOWN_TITLE = "{project}: production is down"
 
 
 class ProductionDownError(DockerError):
@@ -64,10 +66,11 @@ def _remedy(project: str, names: list[str], error: DockerError, docker_start: bo
 
 
 def start_stopped(paths: BoxPaths, project: str, names: list[str], *,
-                  component: str) -> None:
+                  component: str, page: bool = True) -> None:
     """Start production's containers the copy stopped (`docker start`, or
     production's up when one is gone). Raises ProductionDownError, said
-    loudly, when they could not be started."""
+    loudly (``page`` False: stderr and log only), when they could not be
+    started."""
     docker_start = False
     try:
         docker_start = _all_present(project, names)
@@ -78,19 +81,31 @@ def start_stopped(paths: BoxPaths, project: str, names: list[str], *,
     except DockerError as e:
         raise production_down(paths, project, component, (
             f"{project}'s containers were stopped for staging's data copy and starting "
-            f"them again failed: {e}. {_remedy(project, names, e, docker_start)}")) from e
+            f"them again failed: {e}. {_remedy(project, names, e, docker_start)}"),
+            page=page) from e
 
 
 def production_down(paths: BoxPaths, project: str, component: str,
-                    why: str) -> ProductionDownError:
-    """Say loudly (stderr, log, priority-1 alert) that production is down;
-    returns the error to raise."""
+                    why: str, *, page: bool = True) -> ProductionDownError:
+    """Say loudly (stderr, log and, if ``page``, a priority-1 alert) that
+    production is down; returns the error to raise. A caller that repeats
+    (the health tick) pages itself, once per error."""
     message = f"PRODUCTION IS DOWN: {why}"
     print(f"ERROR: {message}", file=sys.stderr)
     log_error(component, message, paths, project=project)
-    notify(paths, f"{project}: production is down", message, component=component,
-           project=project, priority=1)
+    if page:
+        notify(paths, DOWN_TITLE.format(project=project), message, component=component,
+               project=project, priority=1)
     return ProductionDownError(message)
+
+
+def _record_started(paths: BoxPaths, project: str) -> None:
+    # The health tick's grace window starts here, as after a deploy, resume
+    # or recover: an app still booting does not fail its next smoke.
+    path = paths.project_deploy_state(project)
+    state = read_state(path)
+    state["last_started_at"] = datetime.now(timezone.utc).isoformat()
+    write_state(path, state)
 
 
 def start_again(paths: BoxPaths, project: str, *, component: str, alert: bool) -> bool:
@@ -106,6 +121,13 @@ def start_again(paths: BoxPaths, project: str, *, component: str, alert: bool) -
             f"staging's data copy stopped cannot be named or started again. Run "
             f"`boxmunge recover {project}` to start production, then `unstage "
             f"{project}`.")) from e
+    return start_again_from(paths, project, meta, component=component, alert=alert)
+
+
+def start_again_from(paths: BoxPaths, project: str, meta: StagedRelease | None, *,
+                     component: str, alert: bool, page: bool = True) -> bool:
+    """start_again with the slot already read (``meta``). ``page`` False
+    leaves a failure's alert to the caller (start_stopped)."""
     if meta is None or meta.production_stopped is None:
         return False
     block = is_blocked(project, paths)
@@ -115,9 +137,10 @@ def start_again(paths: BoxPaths, project: str, *, component: str, alert: bool) -
         log_operation(component, f"production_stopped kept: {why}", paths, project=project)
         return False
     start_stopped(paths, project, list(meta.production_stopped["containers"]),
-                  component=component)
+                  component=component, page=page)
     # The up path has cleared it already; this reloads, so it writes at most once.
     clear_production_stopped(paths, project)
+    _record_started(paths, project)
     print("  Production started again.")
     if alert:
         notify(paths, f"{project}: production started again",
