@@ -37,7 +37,8 @@ from boxmunge.compose_guard import (
 )
 from boxmunge.docker import compose_down, DockerError
 from boxmunge.docker_run import docker_env
-from boxmunge.fileutil import LockError, open_regular_nofollow, project_lock
+from boxmunge.fileutil import LockError, project_lock
+from boxmunge.fs_nofollow import open_regular_nofollow
 from boxmunge.lifecycle import refuse_if_blocked
 from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_operation, log_error

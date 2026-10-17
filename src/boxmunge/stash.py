@@ -15,7 +15,8 @@ from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
-from boxmunge.fileutil import atomic_write_bytes, open_regular_nofollow
+from boxmunge.fileutil import atomic_write_bytes
+from boxmunge.fs_nofollow import open_regular_nofollow
 from boxmunge.git_layout import LINKED_FILES, links_into_repo
 from boxmunge.log import log_operation, log_warning
 from boxmunge.paths import BoxPaths

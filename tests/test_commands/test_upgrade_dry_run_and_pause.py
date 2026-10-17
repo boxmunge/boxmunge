@@ -11,7 +11,7 @@ from unittest.mock import patch
 import yaml
 
 from boxmunge.commands.upgrade_cmd import run_upgrade
-from boxmunge.commands.upgrade_steps import regenerate_configs
+from boxmunge.upgrade_exclusions import apply_projects
 from boxmunge.manifest import CURRENT_SCHEMA_VERSION
 from boxmunge.pause import render_maintenance_caddy_config, write_paused_state
 from boxmunge.paths import BoxPaths
@@ -66,7 +66,7 @@ class TestPausedProjectsKeepMaintenancePage:
         paths = _setup(tmp_path)
         _project(paths, "alpha")
         _pause(paths, "alpha")
-        regenerate_configs(paths)
+        apply_projects(paths)[1]
         content = paths.project_caddy_site("alpha").read_text()
         assert "status 503" in content
         assert "reverse_proxy" not in content
@@ -77,7 +77,7 @@ class TestPausedProjectsKeepMaintenancePage:
         _pause(paths, "alpha")
         with patch("boxmunge.commands.upgrade_steps.prepare_caddy_config") as caddy, \
              patch("boxmunge.commands.upgrade_steps.prepare_compose_override") as overlay:
-            processed = regenerate_configs(paths).processed
+            processed = apply_projects(paths)[1].processed
         caddy.assert_not_called()
         overlay.assert_not_called()
         assert "alpha" not in processed
@@ -155,7 +155,7 @@ class TestRegenTakesProjectLock:
         fd = os.open(str(lock), os.O_CREAT | os.O_RDWR)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
-            processed = regenerate_configs(paths).processed
+            processed = apply_projects(paths)[1].processed
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)

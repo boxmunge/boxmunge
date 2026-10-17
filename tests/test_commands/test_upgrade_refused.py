@@ -16,7 +16,8 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge.commands.upgrade_cmd import run_upgrade
-from boxmunge.commands.upgrade_steps import Restart, regenerate_configs, restart_projects
+from boxmunge.commands.upgrade_steps import Restart, restart_projects
+from boxmunge.upgrade_exclusions import apply_projects
 from boxmunge.version import read_installed_version
 from tests.test_commands.test_upgrade_dry_run_and_pause import _project, _setup, _snapshot
 
@@ -45,7 +46,7 @@ def _log_entries(paths) -> list[dict]:
 def test_regenerate_leaves_refused_project_on_its_old_configs(paths) -> None:
     site_before = paths.project_caddy_site("bad").read_text()
     with patch("boxmunge.caddy.caddy_config_lock"):
-        regen = regenerate_configs(paths)
+        regen = apply_projects(paths)[1]
     assert regen.processed == ["good"]
     assert list(regen.refused) == ["bad"]
     assert "privileged" in regen.refused["bad"]

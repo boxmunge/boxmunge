@@ -14,7 +14,7 @@ import tarfile
 import zlib
 from pathlib import Path
 
-from boxmunge.fileutil import open_regular_nofollow
+from boxmunge.fs_nofollow import open_regular_nofollow
 from boxmunge.backup import BackupError, BackupKind, backup_filename, encrypt_file
 from boxmunge.backup_dump import execute_dump
 from boxmunge.paths import BoxPaths

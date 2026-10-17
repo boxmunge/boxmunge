@@ -88,12 +88,13 @@ def alerts(monkeypatch) -> list[str]:
 
 
 def _upgrade(paths: BoxPaths) -> None:
-    """The root half of `upgrade --apply`: regenerate configs, restart, and
-    alert for the projects regeneration refused."""
+    """The root half of `upgrade --apply`: migrate and regenerate configs,
+    restart, and alert for the projects regeneration refused."""
     from boxmunge.commands.upgrade_notify import notify_refused
-    from boxmunge.commands.upgrade_steps import regenerate_configs, restart_projects
-    regen = regenerate_configs(paths)
-    restart_projects(paths, refused=regen.refused)
+    from boxmunge.commands.upgrade_steps import restart_projects
+    from boxmunge.upgrade_exclusions import apply_projects
+    _migration, regen, excluded = apply_projects(paths)
+    restart_projects(paths, refused=regen.refused, excluded=excluded.names())
     notify_refused(paths, regen.refused)
 
 

@@ -24,6 +24,34 @@ run_shim() {
     OUT="$(bash "$SHIM" "$@" 2>&1)" || RC=$?
 }
 
+# run_shim_within <secs> <fifo> <args...>: run_shim, but a shim still running
+# after <secs> (blocked on the planted FIFO <fifo>) has the FIFO opened
+# read-write, which unblocks a blocked reader or writer, and gets RC=124.
+run_shim_within() {
+    local secs="$1" fifo="$2" out pid ticks=0
+    shift 2
+    out="$(mktemp)"
+    bash "$SHIM" "$@" >"$out" 2>&1 &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null && [[ "$ticks" -lt $((secs * 10)) ]]; do
+        sleep 0.1
+        ticks=$((ticks + 1))
+    done
+    RC=0
+    if kill -0 "$pid" 2>/dev/null; then
+        exec 8<>"$fifo"
+        sleep 0.5
+        exec 8>&-
+        kill -9 "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        RC=124
+    else
+        wait "$pid" || RC=$?
+    fi
+    OUT="$(cat "$out")"
+    rm -f "$out"
+}
+
 # expect <rc> <substring> <description>: check the last run_shim.
 expect() {
     if [[ "$RC" -eq "$1" && "$OUT" == *"$2"* ]]; then

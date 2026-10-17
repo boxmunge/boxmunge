@@ -115,29 +115,33 @@ def _take_down(project: str, paths: BoxPaths, component: str) -> bool:
     return True
 
 
-def _refuse_if_promoting(project: str, paths: BoxPaths) -> bool:
-    """An open promote of this slot needs it to resume. A slot whose record
-    cannot be read cannot be told apart from that one, so it is kept too."""
+def promote_needs_slot(project: str, paths: BoxPaths) -> str | None:
+    """Why an open promote needs this slot to resume, or None. A slot or
+    install record that cannot be read cannot be told apart from that one,
+    so it is kept too. Caller holds the lock."""
     try:
         txn = load_txn(paths, project)
     except ReleaseStateError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return True
+        return str(e)
     if txn is None or txn.source != "staged":
-        return False
+        return None
     try:
         meta = load_slot(paths, project)
     except SlotError as e:
-        print(f"ERROR: '{project}' has a promote open (phase {txn.phase}) and the staged "
-              f"slot's record cannot be read ({e}), so the install may need this slot. "
-              f"{options_text(project, txn)}.", file=sys.stderr)
-        return True
+        return (f"'{project}' has a promote open (phase {txn.phase}) and the staged "
+                f"slot's record cannot be read ({e}), so the install may need this slot. "
+                f"{options_text(project, txn)}.")
     if meta is None or txn.staged_id != meta.id:
-        return False
-    print(f"ERROR: '{project}' is being promoted from this staged release (phase "
-          f"{txn.phase}); its install needs the slot. {options_text(project, txn)}.",
-          file=sys.stderr)
-    return True
+        return None
+    return (f"'{project}' is being promoted from this staged release (phase "
+            f"{txn.phase}); its install needs the slot. {options_text(project, txn)}.")
+
+
+def _refuse_if_promoting(project: str, paths: BoxPaths) -> bool:
+    reason = promote_needs_slot(project, paths)
+    if reason is not None:
+        print(f"ERROR: {reason}", file=sys.stderr)
+    return reason is not None
 
 
 def unstage_locked(project: str, paths: BoxPaths, dry_run: bool = False) -> int:

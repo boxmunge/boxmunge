@@ -52,6 +52,18 @@ def test_paused_quarantined_staged_and_pre_registered(fixture_paths) -> None:
     assert newapp["deploy"] == {"current_ref": None, "deployed_at": None, "history": []}
 
 
+def test_an_open_install_and_a_0_10_1_stage(fixture_paths) -> None:
+    shop = _call(fixture_paths, "project.get", {"project": "shop"})
+    assert shop["install"]["source"] == "bundle" and shop["install"]["phase"] == "installed"
+    assert shop["install"]["ref"].startswith("shop-") and shop["install"]["id"]
+    assert shop["legacy_stage"] is None
+    blog = _call(fixture_paths, "project.get", {"project": "blog"})
+    assert blog["legacy_stage"] == {"kind": "bundle", "evidence": "untouched"}
+    assert blog["install"] is None
+    wiki = _call(fixture_paths, "project.get", {"project": "wiki"})
+    assert wiki["install"] is None and wiki["legacy_stage"] is None
+
+
 def test_monitor_stopped_project(fixture_paths) -> None:
     fixture_paths.project_health_state("shop").write_text(
         '{"status": "critical_stopped", "stopped_at": "2999-01-01T00:00:00+00:00"}')

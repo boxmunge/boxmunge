@@ -27,7 +27,8 @@ from typing import Any, Iterable
 
 from boxmunge.compose_mounts import host_path_forms, is_bind_entry, volume_source
 from boxmunge.compose_own_files import CONTROL_ENTRIES
-from boxmunge.fileutil import atomic_write_text, open_regular_nofollow
+from boxmunge.fileutil import atomic_write_text
+from boxmunge.fs_nofollow import open_regular_nofollow
 
 DIR = "dir"
 FILE = "file"

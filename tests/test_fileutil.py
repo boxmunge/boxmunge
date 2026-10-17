@@ -9,7 +9,7 @@ import pytest
 
 from boxmunge.fileutil import atomic_write_bytes, atomic_write_text
 from boxmunge.fileutil import open_shared_lockfile, project_lock, LockError
-from boxmunge.fileutil import mkdir_p_deploy
+from boxmunge.fs_nofollow import mkdir_p_deploy
 from boxmunge.paths import BoxPaths
 
 
@@ -84,7 +84,7 @@ class TestMkdirPDeploy:
         existing.mkdir()
         chowned: list[str] = []
         with patch(
-            "boxmunge.fileutil._chown_deploy",
+            "boxmunge.fs_nofollow._chown_deploy",
             side_effect=lambda p: chowned.append(p),
         ):
             mkdir_p_deploy(existing / "b" / "c")
@@ -99,7 +99,7 @@ class TestMkdirPDeploy:
         target.mkdir()
         chowned: list[str] = []
         with patch(
-            "boxmunge.fileutil._chown_deploy",
+            "boxmunge.fs_nofollow._chown_deploy",
             side_effect=lambda p: chowned.append(p),
         ):
             mkdir_p_deploy(target)
@@ -121,7 +121,7 @@ class TestMkdirPDeploy:
             return real_mkdir(self, *args, **kwargs)
 
         with patch.object(Path, "mkdir", racing_mkdir), patch(
-            "boxmunge.fileutil._chown_deploy",
+            "boxmunge.fs_nofollow._chown_deploy",
             side_effect=lambda p: chowned.append(p),
         ):
             mkdir_p_deploy(target)
@@ -287,14 +287,14 @@ class TestChownDeployErrorClass:
 
     def test_no_deploy_user_silent(self, tmp_path: Path) -> None:
         import logging as _l
-        from boxmunge.fileutil import _chown_deploy
+        from boxmunge.fs_nofollow import _chown_deploy
         target = tmp_path / "f"
         target.write_text("x")
         h, records = self._captured_records()
         _l.getLogger("boxmunge").addHandler(h)
         try:
-            with patch("boxmunge.fileutil.os.getuid", return_value=0), \
-                 patch("boxmunge.fileutil.pwd.getpwnam",
+            with patch("boxmunge.fs_nofollow.os.getuid", return_value=0), \
+                 patch("boxmunge.fs_nofollow.pwd.getpwnam",
                        side_effect=KeyError("deploy")):
                 _chown_deploy(str(target))
         finally:
@@ -303,7 +303,7 @@ class TestChownDeployErrorClass:
 
     def test_oserror_logs_warning(self, tmp_path: Path) -> None:
         import logging as _l
-        from boxmunge.fileutil import _chown_deploy
+        from boxmunge.fs_nofollow import _chown_deploy
         target = tmp_path / "f"
         target.write_text("x")
 
@@ -314,9 +314,9 @@ class TestChownDeployErrorClass:
         h, records = self._captured_records()
         _l.getLogger("boxmunge").addHandler(h)
         try:
-            with patch("boxmunge.fileutil.os.getuid", return_value=0), \
-                 patch("boxmunge.fileutil.pwd.getpwnam", return_value=_PW), \
-                 patch("boxmunge.fileutil.os.chown",
+            with patch("boxmunge.fs_nofollow.os.getuid", return_value=0), \
+                 patch("boxmunge.fs_nofollow.pwd.getpwnam", return_value=_PW), \
+                 patch("boxmunge.fs_nofollow.os.chown",
                        side_effect=OSError("EPERM")):
                 _chown_deploy(str(target))
         finally:
@@ -329,13 +329,13 @@ class TestChownDeployErrorClass:
 
     def test_non_root_silent_no_log(self, tmp_path: Path) -> None:
         import logging as _l
-        from boxmunge.fileutil import _chown_deploy
+        from boxmunge.fs_nofollow import _chown_deploy
         target = tmp_path / "f"
         target.write_text("x")
         h, records = self._captured_records()
         _l.getLogger("boxmunge").addHandler(h)
         try:
-            with patch("boxmunge.fileutil.os.getuid", return_value=1000):
+            with patch("boxmunge.fs_nofollow.os.getuid", return_value=1000):
                 _chown_deploy(str(target))
         finally:
             _l.getLogger("boxmunge").removeHandler(h)
@@ -388,6 +388,26 @@ class TestDurability:
         assert events == ["fsync-file", "rename", "fsync-dir"]
         assert target.read_bytes() == b"ciphertext" and not tmp.exists()
 
+    def test_durable_rename_says_when_only_the_directory_sync_failed(self, tmp_path: Path) -> None:
+        """The rename is done: callers must be able to tell that from a failed rename."""
+        from boxmunge.fileutil import RenamedNotSyncedError, durable_rename
+        tmp, target = tmp_path / ".new.tmp", tmp_path / "data"
+        tmp.write_bytes(b"new")
+        target.write_bytes(b"old")
+        with patch("boxmunge.fileutil.fsync_dir", side_effect=OSError(5, "EIO")), \
+                pytest.raises(RenamedNotSyncedError, match="renamed .* not synced") as caught:
+            durable_rename(tmp, target)
+        assert isinstance(caught.value, OSError)
+        assert target.read_bytes() == b"new" and not tmp.exists()
+
+    def test_durable_rename_failing_rename_is_a_plain_oserror(self, tmp_path: Path) -> None:
+        from boxmunge.fileutil import RenamedNotSyncedError, durable_rename
+        tmp = tmp_path / ".new.tmp"
+        tmp.write_bytes(b"new")
+        with pytest.raises(OSError) as caught:
+            durable_rename(tmp, tmp_path / "missing-dir" / "data")
+        assert not isinstance(caught.value, RenamedNotSyncedError)
+
     def test_mode_and_owner_are_set_before_the_file_is_visible(self, tmp_path: Path) -> None:
         target = tmp_path / "secret.yml"
         seen: list[tuple[str, int]] = []
@@ -398,7 +418,7 @@ class TestDurability:
             real_rename(src, dst)
 
         with patch("boxmunge.fileutil.os.rename", rename), \
-             patch("boxmunge.fileutil._fchown_deploy",
+             patch("boxmunge.fileutil.fchown_deploy",
                    side_effect=lambda fd, what: seen.append(("chown", 0))):
             atomic_write_text(target, "k: v", mode=0o600)
         assert seen == [("chown", 0), ("rename", 0o600)]
@@ -409,7 +429,7 @@ class TestOpenRegularNofollow:
 
     @pytest.mark.parametrize("make", ["symlink", "hardlink", "fifo", "dir"])
     def test_refuses_anything_but_a_plain_file(self, tmp_path: Path, make: str) -> None:
-        from boxmunge.fileutil import open_regular_nofollow
+        from boxmunge.fs_nofollow import open_regular_nofollow
         victim = tmp_path / "victim"
         victim.write_text("keep")
         name = tmp_path / "name"
@@ -424,7 +444,7 @@ class TestOpenRegularNofollow:
     def test_a_fifo_is_refused_without_blocking(self, tmp_path: Path) -> None:
         """No O_NONBLOCK from the caller: the open itself must not wait for
         a writer on a planted FIFO."""
-        from boxmunge.fileutil import open_regular_nofollow
+        from boxmunge.fs_nofollow import open_regular_nofollow
         from tests.fifo_guard import raised_without_blocking
         fifo = tmp_path / "meta.json"
         os.mkfifo(fifo)
@@ -433,7 +453,7 @@ class TestOpenRegularNofollow:
 
     def test_the_descriptor_it_returns_blocks(self, tmp_path: Path) -> None:
         import fcntl
-        from boxmunge.fileutil import open_regular_nofollow
+        from boxmunge.fs_nofollow import open_regular_nofollow
         path = tmp_path / "f"
         path.write_text("x")
         fd = open_regular_nofollow(path, os.O_RDONLY)
@@ -443,7 +463,7 @@ class TestOpenRegularNofollow:
             os.close(fd)
 
     def test_read_text_nofollow(self, tmp_path: Path) -> None:
-        from boxmunge.fileutil import read_text_nofollow
+        from boxmunge.fs_nofollow import read_text_nofollow
         from tests.fifo_guard import raised_without_blocking
         path = tmp_path / "f"
         path.write_text("text ✓\n")
@@ -468,7 +488,7 @@ class TestOpenRegularNofollow:
         assert victim.stat().st_mode & 0o777 == 0o600
 
     def test_chmod_nofollow_refuses_a_symlink(self, tmp_path: Path) -> None:
-        from boxmunge.fileutil import chmod_nofollow
+        from boxmunge.fs_nofollow import chmod_nofollow
         victim = tmp_path / "victim"
         victim.write_text("x")
         victim.chmod(0o600)
@@ -481,7 +501,7 @@ class TestOpenRegularNofollow:
     @pytest.mark.parametrize("start", [0o000, 0o200])
     def test_chmod_nofollow_works_on_an_unreadable_file_of_ones_own(
             self, tmp_path: Path, start: int) -> None:
-        from boxmunge.fileutil import chmod_nofollow
+        from boxmunge.fs_nofollow import chmod_nofollow
         script = tmp_path / "smoke.sh"
         script.write_text("#!/bin/sh\n")
         script.chmod(start)

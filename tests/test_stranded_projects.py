@@ -68,11 +68,11 @@ def test_upgrade_restart_skips_stranded_project(paths: BoxPaths, capsys) -> None
 
 
 def test_upgrade_regenerate_skips_stranded_project(paths: BoxPaths, capsys) -> None:
-    from boxmunge.commands.upgrade_steps import regenerate_configs
+    from boxmunge.upgrade_exclusions import apply_projects
 
     _project(paths, "shop")
     _project(paths, "shop-staging")
     with patch("boxmunge.caddy.caddy_config_lock"):
-        processed = regenerate_configs(paths).processed
+        processed = apply_projects(paths)[1].processed
     assert processed == ["shop"]
     assert "upgrade: shop-staging:" in capsys.readouterr().err

@@ -18,6 +18,7 @@ import sys
 from boxmunge.config import ConfigError, load_config
 from boxmunge.paths import BoxPaths
 from boxmunge.upgrade_discovery import auto_update_mode, discover_update
+from boxmunge.upgrade_state import UpgradeStateError
 
 
 _FLAGS = frozenset({"--json", "--auto"})
@@ -37,6 +38,9 @@ def cmd_discover_update(args: list[str]) -> None:
             print(json.dumps({"action": "error",
                               "message": f"Cannot read auto-update policy: {e}"}))
             sys.exit(0)
-    result = discover_update(paths, mode=mode)
+    try:
+        result = discover_update(paths, mode=mode)
+    except UpgradeStateError as e:  # a planted or unreadable blocklist.json, named
+        result = {"action": "error", "message": str(e)}
     print(json.dumps(result))
     sys.exit(0)

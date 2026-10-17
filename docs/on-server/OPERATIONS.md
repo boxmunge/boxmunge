@@ -194,7 +194,26 @@ the staged release's files in the project directory. For such a project `stage`,
 refuse directly, naming `boxmunge-server legacy-stage <project>`; background starts (upgrade
 restarts, container updates) and `security resume` are refused with a "start refused" alert (see
 Troubleshooting). If boxmunge cannot tell whether such a stage is on disk (for example `state/`
-cannot be read), it refuses the same way and says so. Its running containers are left as they are.
+cannot be read), it refuses the same way and says so; the health check then runs no smoke test
+and reports a warning, a backup is skipped with an alert, a due CVE quarantine is not taken (the
+scan reports why), and an upgrade leaves the project as it is with a high-priority alert. Fix the
+cause (usually permissions) and retry; a project the upgrade left this way keeps its previous
+configs until you deploy, resume or recover it. Its
+running containers are left as they are. How to resolve it: "Upgrading from 0.10.1 with a
+release staged".
+Until it is resolved:
+
+- the health check runs no smoke test and takes no critical action for it, reports it as
+  `legacy-stage`, and alerts (high priority) at most once a day;
+- backups continue with the manifest of the release the containers run, told from the evidence
+  `legacy-stage` prints; if that evidence cannot be read (Docker unavailable, an unreadable
+  reflog or `.releases/prestage/`, a commit that does not resolve), the backup is skipped with
+  an alert naming the cause (a never-deployed git project's is skipped without one: it has no
+  data). For a git project the dump still runs through the project's
+  `compose.yml`, which is the staged checkout's: if the staged release renamed the backup
+  service, the backup fails with an error until the stage is resolved;
+- a CVE quarantine is held, not taken (it would stop production), with a high-priority alert
+  naming the finding. Scans and their reports run as usual.
 
 A bind mount, config or secret file in a data directory (any directory a release has mounted
 read-write) or another server-owned entry (`data/`, `secrets.env`) points staging at the entry's
@@ -1508,8 +1527,17 @@ How an upgrade is applied and undone:
    with the file it points to, or remove it, and retry. A stash that fails, for this or any
    reason, is logged as an error and sends a local alert; the standby venv is dropped and the
    release is not blocklisted, so auto-update retries it once the box is fixed.
-3. The venvs swap and `upgrade --apply` migrates manifests, regenerates every project's Caddy
-   site and compose overlay, reloads Caddy and restarts projects. A bundle project's manifest
+3. The venvs swap and `upgrade --apply` first rewrites the latest stash without the symlink
+   members an older release wrote, so a rollback's `stash restore` cannot abort on them (a
+   failure leaves the stash as it is, sends a high-priority alert and does not stop the
+   upgrade). It then migrates manifests and regenerates every project's Caddy site and compose
+   overlay, project by project under that project's lock, reloads Caddy and restarts projects.
+   Three kinds of project are left exactly as they are (not migrated, regenerated or
+   restarted), reported as `LEFT AS IS` or `Skipped (busy)`, alerted, and do not fail the
+   upgrade: one with a release staged by boxmunge 0.10.1 (one high-priority alert per project;
+   resolve it with `boxmunge-server legacy-stage <project>`; the dry run names it too), one
+   with an open install, and one busy with another operation (it keeps its previous configs
+   until its next deploy, resume or recover). A bundle project's manifest
    is rewritten at the new schema. A git project's is not: its `manifest.yml` links into
    `repo/`, so it is migrated in memory and you are alerted once to update it in the
    repository (see "Deploying a New Project (Git)"). A failure in any of these
@@ -1535,6 +1563,16 @@ alert. An interruption is not reported as a release failure. The first one of a 
 blocklist it, so auto-update retries; a second one does. Promotion and `clear-blocklist` reset the
 count. Interrupted before the swap, the previous release simply stays live. A rollback that is
 itself interrupted is finished by the next health-timer run.
+
+Before a rollback swaps back, the release being rolled back from tears down every project's
+staged release (`boxmunge-server staging-teardown-all --reason platform-rollback`, run by the
+shim; an older release does not know `.releases/staged/`) and sends one high-priority alert
+per project: "staged release discarded by the platform rollback; re-stage it". A staged release
+that an interrupted `promote` still needs is kept, and so is one whose teardown fails or whose
+project is busy: the alert says why and names the commands that remove it by hand. If the
+teardown itself does not finish (it is stopped after 10 minutes), one high-priority alert names
+those commands for every project still holding `.releases/staged/`. It never blocks the
+rollback, and the older release ignores what is left.
 
 A rollback swaps the venvs back, restores the stash, and re-runs `upgrade --apply` with the
 previous release, so its overlays and Caddy sites are regenerated and projects restarted on
@@ -1566,6 +1604,63 @@ validator would refuse, as `<project>: would be refused by this release's compos
 The dry run writes nothing and sends no alert. The upgrade shim runs it as a pre-flight check
 against the new release before touching anything, so `upgrade --dry-run` run by hand
 reports against the installed release.
+
+## Upgrading from 0.10.1 with a release staged
+
+Unstage before upgrading. If a project still has a release staged by 0.10.1,
+the upgrade leaves it exactly as it is: the dry run says "<p>: a release
+staged by boxmunge 0.10.1 (<kind>) will be left as is; after the upgrade,
+resolve it with boxmunge-server legacy-stage <p>", the apply alerts once,
+and the health check alerts again at most once a day until it is resolved. The project keeps running its current containers
+and is backed up; starts, deploys and pause are refused, quarantine is held,
+and health smoke checks are suspended.
+
+Run `boxmunge-server legacy-stage <p>` to see what production runs (this works
+during probation too). Once probation has ended, run `--discard` (put production's release back; with
+`--confirm-recreated` if production was already started from the staged files)
+or `--keep-staged` (treat the staged release as promoted). If it is
+interrupted, run the same command again.
+
+`legacy-stage` is operator-only: run it as root (`sudo boxmunge-server legacy-stage <p>`); the
+deploy shell and MCP do not offer it. It takes the project's lock (if the project is busy, try
+again). `--discard` and `--keep-staged` refuse while a platform rollback is still possible:
+during probation (it says when probation ends) or while an interrupted upgrade or rollback is
+pending. They also refuse while a platform upgrade is running ("a platform upgrade is in
+progress; run it again after it finishes"): from its stash to its swap there is no probation yet,
+but a rollback would still restore that stash. A `probation.json` it cannot read refuses too,
+naming the file to fix or remove. With no flag it works in all of these cases; except during an
+upgrade it adds "Not available yet: <why>".
+For a git project it runs git as the deploy user, so `repo/` must be deploy's: one cloned with
+`sudo` is refused with the fix (`chown -R deploy:deploy <p>/repo`, then retry).
+
+- With no flag it prints the evidence and the choices it allows, and changes nothing. The
+  evidence is when the stage was made, the deploy state's ref, the staged ref, production's
+  release, and whether production's containers are `untouched` (all created before the stage)
+  or `recreated` (started from the staged files: a failed 0.10.1 promote, or a recreate during
+  the stage). A git stage that changed no code (no `--ref`, or the deployed commit) is
+  `untouched` without that time ("not needed: the stage changed no code"), so `repo/`'s reflog
+  is not read. A `leftover` (a 0.10.1 promote whose unstage did not finish) has no evidence and
+  allows only `--discard`.
+- `--discard` throws the staged release away, puts production's release back and recreates
+  production from it on this release's overlay. For `untouched` and `leftover`, production keeps
+  the release it runs. For `recreated` it also needs `--confirm-recreated`: discarding the staged
+  files changes what runs, and data the staged code wrote stays (it names the newest pre-deploy
+  snapshot for a manual `restore`).
+- `--keep-staged` treats the staged release as promoted. For `untouched` it first takes a
+  pre-deploy snapshot with production's manifest; for `recreated`, `rollback` uses the newest
+  pre-deploy snapshot taken after the stage; with none, `rollback` refuses ("no pre-deploy data
+  snapshot was taken when that release was replaced ...").
+
+The choice is recorded first, and a rerun must name the same one. The command then stops staging,
+removes the staging site, puts the code in place, cleans up the staging files, drops the stage
+record (last), and finishes what the upgrade skipped: manifest migration, config regeneration and
+a start of production. It alerts once the stage is resolved. It never touches the stash.
+
+An install left open by an interrupted deploy (see "An interrupted or failed install") is also
+left as is by the upgrade. A record that no longer matches the files, after a platform rollback to
+0.10.1 and a redeploy by it, is reported as stale; check production, then drop it as root with
+`boxmunge-server install-txn <project> --drop`.
+
 
 ## Querying Logs
 

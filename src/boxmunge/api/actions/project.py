@@ -20,14 +20,22 @@ from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.inbox_cmd import collect_inbox
 from boxmunge.commands.status import HEALTH_STATES
 from boxmunge.cve.quarantine import read_quarantine_state
+from boxmunge.data_dirs import ReleaseStateError
+from boxmunge.legacy_stage import EvidenceError, cannot_tell, evidence, legacy_stage
 from boxmunge.pause import read_paused_state
 from boxmunge.project_registry import is_registered
 from boxmunge.paths import BoxPaths
+from boxmunge.release_txn import ABANDON_PHASES, PHASES, SOURCES, load_txn
 from boxmunge.staged_release import STATES as STAGING_STATES, SlotError, load_slot
 from boxmunge.state import StateError, read_state
 
 LIFECYCLES = ("registered", "pre_registered", "quarantined", "paused", "monitor_stopped",
               "running")
+
+INSTALL_VIEW = nullable(obj({"id": STRING, "source": enum(*SOURCES), "ref": STRING,
+                             "phase": enum(*PHASES, *ABANDON_PHASES)}))
+LEGACY_VIEW = nullable(obj({"kind": enum("bundle", "git", "leftover"),
+                            "evidence": nullable(enum("untouched", "recreated", "unknown"))}))
 
 PROJECT_VIEW = obj({
     "project": STRING,
@@ -49,6 +57,8 @@ PROJECT_VIEW = obj({
                     "state": nullable(enum(*STAGING_STATES))}),
     "paused": nullable(obj({"paused_at": TIMESTAMP, "reason": NULLABLE_STRING})),
     "quarantine": nullable(QUARANTINE_SCHEMA),
+    "install": INSTALL_VIEW,
+    "legacy_stage": LEGACY_VIEW,
 })
 
 CHECK_RESULT = obj({
@@ -59,6 +69,34 @@ CHECK_RESULT = obj({
 }, optional=("smoke",))
 
 BUNDLE = obj({"name": STRING, "project": STRING, "size": INTEGER, "mtime": TIMESTAMP})
+
+
+def _install_view(paths: BoxPaths, name: str) -> dict[str, Any] | None:
+    try:
+        txn = load_txn(paths, name)
+    except ReleaseStateError as e:
+        raise StateError(f"The install record of {name} is unreadable: {e}") from e
+    return None if txn is None else {"id": txn.id, "source": txn.source, "ref": txn.ref,
+                                     "phase": txn.phase}
+
+
+def _legacy_view(paths: BoxPaths, name: str) -> dict[str, Any] | None:
+    """A stage left by 0.10.1. Its evidence asks Docker (and git) what
+    production runs; when that cannot be read the stage is still reported,
+    as "unknown". A detection that cannot tell is not a "no stage"."""
+    try:
+        stage = legacy_stage(paths, name)
+    except OSError as e:
+        raise StateError(cannot_tell(name, e)) from e
+    if stage is None:
+        return None
+    if stage.kind == "leftover":
+        return {"kind": stage.kind, "evidence": None}
+    try:
+        found = evidence(paths, name, stage).classification
+    except (EvidenceError, OSError):
+        found = "unknown"
+    return {"kind": stage.kind, "evidence": found}
 
 
 def _project_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
@@ -116,6 +154,8 @@ def _project_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
             "reason": paused.get("reason")},
         "quarantine": None if quarantine is None else quarantine_view(
             quarantine, paths.project_quarantine_state(name)),
+        "install": _install_view(paths, name),
+        "legacy_stage": _legacy_view(paths, name),
     }
 
 

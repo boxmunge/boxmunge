@@ -199,13 +199,13 @@ def _status_tui_api(box, seen):
 
 
 def _upgrade_migrate_restart(box, seen):
-    from boxmunge.commands.upgrade_steps import (
-        migrate_project_manifests, regenerate_configs, restart_projects,
-    )
+    from boxmunge.commands.upgrade_steps import restart_projects
+    from boxmunge.upgrade_exclusions import apply_projects
     with staging_docker_off():
-        migrate_project_manifests(box.paths)
-        regenerate_configs(box.paths)
-        assert restart_projects(box.paths, refused=()).succeeded == ["myapp"]
+        _, regen, excluded = apply_projects(box.paths)
+        assert not excluded.names() and not regen.refused
+        assert restart_projects(box.paths, refused=(),
+                                excluded=excluded.names()).succeeded == ["myapp"]
 
 
 def _stash(box, seen):

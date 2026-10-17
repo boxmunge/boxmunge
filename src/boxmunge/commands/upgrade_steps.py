@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-project steps of a platform upgrade.
 
-migrate manifests -> regenerate configs -> (Caddy reload) -> restart projects.
+migrate manifests and regenerate configs (upgrade_exclusions.apply_projects,
+per project under its lock) -> (Caddy reload) -> restart projects.
 upgrade_cmd sequences these for --apply and the full flow; check_upgrade is
 the write-nothing rendering behind --dry-run.
 """
 
-from collections.abc import Callable, Collection
+import os
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
@@ -16,17 +18,17 @@ from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.compose import generate_compose_override, load_user_compose, prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
-from boxmunge.release_txn import open_install_reason
+from boxmunge.data_dirs import ReleaseStateError
+from boxmunge.release_txn import InstallTxn, load_txn, stale_reason, start_refusal
 from boxmunge.docker import DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
-from boxmunge.legacy_stage import legacy_stage_refusal
+from boxmunge.legacy_stage import LegacyStage, cannot_tell_left_as_is, legacy_stage
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import (
-    CURRENT_SCHEMA_VERSION, load_manifest, load_manifest_as_written, validate_manifest,
-    write_manifest,
+    CURRENT_SCHEMA_VERSION, ManifestError, load_manifest_as_written, validate_manifest,
 )
-from boxmunge.git_layout import alert_old_schema, alert_unlinked, relink_advice, unlinked_files
+from boxmunge.git_layout import relink_advice, unlinked_files
 from boxmunge.migration import migrate_manifest, MigrationError
 from boxmunge.pause import render_maintenance_caddy_config
 from boxmunge.fleet import report_project_failure
@@ -38,22 +40,70 @@ class UpgradeGateError(Exception):
     """A step the upgrade cannot succeed without failed; the shim rolls back."""
 
 
-def _project_manifests(
-    paths: BoxPaths, load: Callable[[Path], dict[str, Any]],
-) -> Iterator[tuple[Path, dict[str, Any]]]:
-    """Yield (project_dir, load(manifest.yml)) for every project that has a
-    manifest: load_manifest_as_written to migrate it, load_manifest to use it.
+def _project_dirs(paths: BoxPaths) -> Iterator[Path]:
+    """Every addressable project directory with a manifest.yml (a dangling
+    link included: loading it raises ManifestError).
 
-    ManifestError propagates. A corrupted manifest means the project never
-    gets its schema bumped or overlay regenerated; skipping it would let the
-    upgrade report success over a stale project. The shim rolls back instead.
+    Callers let ManifestError propagate. A corrupted manifest means the
+    project never gets its schema bumped or overlay regenerated; skipping it
+    would let the upgrade report success over a stale project. The shim
+    rolls back instead.
     """
     if not paths.projects.exists():
         return
     for project_dir in sorted(paths.projects.iterdir()):
-        manifest_path = project_dir / "manifest.yml"
-        if project_dir.is_dir() and manifest_path.exists() and _addressable(project_dir, paths):
-            yield project_dir, load(manifest_path)
+        if (project_dir.is_dir() and os.path.lexists(project_dir / "manifest.yml")
+                and _addressable(project_dir, paths)):
+            yield project_dir
+
+
+def require_manifest(project_dir: Path) -> Path:
+    """The project's manifest.yml; ManifestError, with the fix, for a link
+    whose target is missing. Only called for a project that is not excluded
+    (exclusion() reads no manifest), so a legacy stage never fails here."""
+    path = project_dir / "manifest.yml"
+    if path.is_symlink() and not path.exists():
+        raise ManifestError(
+            f"{project_dir.name}: manifest.yml links to {os.readlink(path)}, which does not "
+            f"exist; restore it in repo/ or delete the project, then retry the upgrade")
+    return path
+
+
+def exclusion(paths: BoxPaths, name: str) -> LegacyStage | InstallTxn | ReleaseStateError | OSError | None:
+    """Why the upgrade leaves `name` exactly as it is, or None: a stage left by
+    0.10.1, an OSError when it cannot be told whether one is on disk, an
+    open install, or an install record this release cannot read. Read-only;
+    the one decision behind the dry run and the apply."""
+    try:
+        stage = legacy_stage(paths, name)
+    except OSError as e:
+        return e
+    if stage is not None:
+        return stage
+    try:
+        return load_txn(paths, name)
+    except ReleaseStateError as e:
+        return e
+
+
+def _unreadable_release_files(paths: BoxPaths, name: str, txn: InstallTxn) -> tuple[str | None, str | None]:
+    """(stale_reason, None), or (None, why the release files the stale check
+    reads cannot be read). The project is excluded either way, so an
+    unreadable live.json or previous.json is reported, never fatal."""
+    try:
+        return stale_reason(paths, name, txn), None
+    except (ReleaseStateError, OSError) as e:
+        return None, (f"its release files cannot be read ({type(e).__name__}: {e}); "
+                      f"inspect {paths.project_releases(name)}")
+
+
+def install_exclusion_text(paths: BoxPaths, name: str, txn: InstallTxn) -> str:
+    """Why the apply leaves a project with an open install as it is."""
+    stale, unreadable = _unreadable_release_files(paths, name, txn)
+    if unreadable is not None:
+        return (f"an install of {txn.ref} ({txn.source}) is open at phase {txn.phase}; "
+                f"{unreadable}")
+    return start_refusal(name, txn, stale)
 
 
 def _addressable(project_dir: Path, paths: BoxPaths) -> bool:
@@ -93,70 +143,20 @@ def _migrated(project_dir: Path, manifest: dict[str, Any]) -> dict[str, Any] | N
 class ManifestMigration:
     """Projects whose manifest is older than the current schema: `written`
     were migrated on disk; `in_memory` are git projects, whose manifest.yml
-    links into the repository and is migrated by every reader instead;
-    `skipped_locked` were held by another operation and are migrated in
-    memory until the next upgrade. `unlinked` maps each git project whose
-    manifest.yml or compose.yml is not a link into repo/ to the fix."""
+    links into the repository and is migrated by every reader instead.
+    `unlinked` maps each git project whose manifest.yml or compose.yml is
+    not a link into repo/ to the fix. Projects the apply left alone are in
+    upgrade_exclusions.Exclusions."""
     written: list[str] = field(default_factory=list)
     in_memory: list[str] = field(default_factory=list)
-    skipped_locked: list[str] = field(default_factory=list)
     unlinked: dict[str, str] = field(default_factory=dict)
-    install_open: list[str] = field(default_factory=list)
 
 
 def _links_into_repository(project_dir: Path) -> bool:
     return (project_dir / "manifest.yml").is_symlink()
 
 
-def migrate_project_manifests(paths: BoxPaths) -> ManifestMigration:
-    """Migrate all project manifests to the current schema version.
-
-    A git project's manifest.yml is never written: replacing its link with
-    a file would detach the project from its repository's manifest. Its
-    operator is alerted, once, to update the file in the repository, and
-    once about a git project whose links an older upgrade replaced.
-
-    Each write is under the project lock. A project whose lock is held is
-    left at its schema on disk: every reader migrates it in memory, and the
-    next upgrade writes it.
-    """
-    result = ManifestMigration()
-    for project_dir, manifest in _project_manifests(paths, load_manifest_as_written):
-        name = project_dir.name
-        unlinked = alert_unlinked(paths, project_dir, manifest)
-        if unlinked:
-            result.unlinked[name] = relink_advice(project_dir, unlinked)
-        try:
-            migrated = _migrated(project_dir, manifest)
-        except MigrationError as e:
-            log_error("upgrade", f"{e}. Original manifest left in place.",
-                      paths, project=name)
-            raise
-        if migrated is None:
-            continue
-        if _links_into_repository(project_dir):
-            alert_old_schema(paths, name, manifest.get("schema_version"))
-            result.in_memory.append(name)
-            continue
-        try:
-            with project_lock(name, paths):
-                # The project dir may hold a half-installed release; the core
-                # that finishes or abandons the install migrates what it keeps.
-                if open_install_reason(paths, name):
-                    result.install_open.append(name)
-                    continue
-                write_manifest(project_dir / "manifest.yml", migrated)
-        except LockError:
-            result.skipped_locked.append(name)
-            log_warning("upgrade", f"Manifest of {name} not migrated on disk: held "
-                        f"by another operation. It is migrated in memory until the "
-                        f"next upgrade", paths, project=name)
-            continue
-        result.written.append(name)
-    return result
-
-
-def _compose_refusal(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> str | None:
+def compose_refusal(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> str | None:
     """Why this release's compose validator refuses the project, or None.
 
     Pure: the dry run calls it too, and must log nothing.
@@ -175,7 +175,7 @@ def _compose_refusal(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> st
     return None
 
 
-def _write_maintenance_site(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> None:
+def write_maintenance_page(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> None:
     hosts = manifest.get("hosts", [])
     if not hosts:
         return
@@ -202,12 +202,7 @@ def _record_bind_sources(paths: BoxPaths, name: str) -> str | None:
     project was deployed with, and a project deployed before boxmunge
     recorded bind sources has no record; restart_projects and every later
     start check against this one. The check logs and alerts a refusal.
-    A project staged by boxmunge 0.10.1 may hold the staged release's
-    files in its project directory, so there is nothing of production's to
-    record; restart_projects refuses the project.
     """
-    if legacy_stage_refusal(paths, name) is not None:
-        return None
     try:
         check_start(paths, name, component="upgrade",
                     compose_files=_compose_files(paths, name), record=True)
@@ -218,25 +213,17 @@ def _record_bind_sources(paths: BoxPaths, name: str) -> str | None:
 
 @dataclass
 class Regeneration:
-    """What regenerate_configs did: projects whose live configs were
+    """What the apply's regeneration did: projects whose live configs were
     rewritten, and projects refused by the compose validator (name -> why)."""
     processed: list[str] = field(default_factory=list)
     refused: dict[str, str] = field(default_factory=dict)
-    install_open: dict[str, str] = field(default_factory=dict)
 
 
 def _regenerate_project(
     paths: BoxPaths, name: str, manifest: dict[str, Any], regen: Regeneration,
 ) -> None:
-    """Write one project's Caddy site config and compose overlay."""
-    # An open install: the project dir may hold a half-installed release, so
-    # its configs are left as they are, for the install to write.
-    why = open_install_reason(paths, name)
-    if why:
-        regen.install_open[name] = why
-        log_warning("upgrade", f"Configs of {name} not regenerated and it is not "
-                    f"restarted: {why}", paths, project=name)
-        return
+    """Write one project's Caddy site config and compose overlay. Caller
+    holds its project lock and has excluded it if it must be left alone."""
     # A paused or CVE-quarantined project is deliberately offline. Its Caddy
     # fragment must stay the maintenance page: regenerating live routing
     # would send visitors to stopped upstreams (502) instead of the page the
@@ -245,7 +232,7 @@ def _regenerate_project(
     # resume regenerate both when the project comes back.
     block = is_blocked(name, paths)
     if block:
-        _write_maintenance_site(paths, name, manifest)
+        write_maintenance_page(paths, name, manifest)
         log_operation("upgrade", block.skip_message, paths, project=name)
         if not paths.project_bind_record(name).exists():
             _record_bind_sources(paths, name)
@@ -255,7 +242,7 @@ def _regenerate_project(
     # old configs and running containers are left untouched; the upgrade
     # itself goes on, since rolling back would only restore the validator
     # that let the file in.
-    refusal = _compose_refusal(paths, name, manifest)
+    refusal = compose_refusal(paths, name, manifest)
     if refusal is not None:
         regen.refused[name] = refusal
         log_error("upgrade", f"Compose validation refused {name}: {refusal}. Its "
@@ -277,27 +264,6 @@ def _regenerate_project(
     regen.processed.append(name)
 
 
-def regenerate_configs(paths: BoxPaths) -> Regeneration:
-    """Re-generate Caddy and compose overlay configs for all projects, each
-    under its project lock. A project whose lock is held is left alone: the
-    operation holding it (a deploy, say) writes its own configs.
-    """
-    regen = Regeneration()
-    for project_dir, manifest in _project_manifests(paths, load_manifest):
-        name = manifest.get("project", project_dir.name)
-        try:
-            with project_lock(name, paths):
-                _regenerate_project(paths, name, manifest, regen)
-        except LockError:
-            log_warning(
-                "upgrade",
-                f"Skipped config regeneration for {name} — held by another "
-                f"operation, which writes its own configs",
-                paths, project=name,
-            )
-    return regen
-
-
 def _in_memory_line(name: str, written: object) -> str:
     if written is None:
         return (f"{name}: repository manifest.yml has no schema_version; the "
@@ -308,13 +274,38 @@ def _in_memory_line(name: str, written: object) -> str:
             f"it in the repository)")
 
 
+def _left_as_is_line(paths: BoxPaths, name: str) -> str | None:
+    """The dry run's line for a project the apply will exclude, or None. Its
+    files are neither rendered nor checked, so such a project can never fail
+    the dry run."""
+    why = exclusion(paths, name)
+    if why is None:
+        return None
+    if isinstance(why, LegacyStage):
+        return (f"{name}: a release staged by boxmunge 0.10.1 ({why.kind}) will be left "
+                f"as is; after the upgrade, resolve it with boxmunge-server legacy-stage "
+                f"{name}")
+    if isinstance(why, InstallTxn):
+        line = f"{name}: an install ({why.ref}, {why.phase}) is open; the project will be left as is"
+        unreadable = _unreadable_release_files(paths, name, why)[1]
+        return line if unreadable is None else f"{line} ({unreadable})"
+    if isinstance(why, OSError):
+        return f"{name}: the project will be left as is: {cannot_tell_left_as_is(name, why)}"
+    return f"{name}: {why}; the project will be left as is"
+
+
 def check_upgrade(paths: BoxPaths) -> list[str]:
     """Dry run of migrate + regenerate: everything is rendered in memory and
     nothing is written, locked or logged. Raises on anything that would make
     --apply fail. Returns one report line per project."""
     report = []
-    for project_dir, manifest in _project_manifests(paths, load_manifest_as_written):
-        name = manifest.get("project", project_dir.name)
+    for project_dir in _project_dirs(paths):
+        name = project_dir.name
+        left = _left_as_is_line(paths, name)
+        if left is not None:
+            report.append(left)
+            continue
+        manifest = load_manifest_as_written(require_manifest(project_dir))
         migrated = _migrated(project_dir, manifest)
         unlinked = unlinked_files(project_dir, manifest)
         if unlinked:
@@ -333,7 +324,7 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
                 render_maintenance_caddy_config(manifest["hosts"])
             report.append(f"{name}: {block.reason.value}; keeps its maintenance page")
             continue
-        refusal = _compose_refusal(paths, name, manifest)
+        refusal = compose_refusal(paths, name, manifest)
         if refusal is not None:
             report.append(f"{name}: would be refused by this release's compose "
                           f"validator and left on its current configs and "
@@ -358,14 +349,16 @@ class Restart:
     monitor_stopped: list[str] = field(default_factory=list)
     # Refused by the start checks (compose_guard), which alerted for each.
     start_refused: list[str] = field(default_factory=list)
-    install_open: list[str] = field(default_factory=list)
 
 
-def restart_projects(paths: BoxPaths, *, refused: Collection[str]) -> Restart:
+def restart_projects(paths: BoxPaths, *, refused: Collection[str],
+                     excluded: Collection[str] = ()) -> Restart:
     """Restart all deployed projects under per-project locks.
 
-    Projects in `refused` (see regenerate_configs) are skipped: their old
+    Projects in `refused` (see _regenerate_project) are skipped: their old
     containers keep running untouched, never rebuilt from the refused file.
+    So are those the apply left as they are (upgrade_exclusions); one whose
+    install opened since is refused by the start checks.
 
     A project whose project_lock is held by another operation is skipped
     (logged as a warning), not retried and not raised — the v0.4
@@ -373,17 +366,12 @@ def restart_projects(paths: BoxPaths, *, refused: Collection[str]) -> Restart:
     project_lock; an upgrade that races a deploy must defer to the deploy.
     """
     result = Restart()
-    if not paths.projects.exists():
-        return result
-
-    for project_dir in sorted(paths.projects.iterdir()):
-        if not project_dir.is_dir():
-            continue
-        manifest_path = project_dir / "manifest.yml"
-        if not manifest_path.exists() or not _addressable(project_dir, paths):
-            continue
-
+    for project_dir in _project_dirs(paths):
         project_name = project_dir.name
+        if project_name in excluded:
+            log_operation("upgrade", f"Not restarting {project_name}: the upgrade left it "
+                          f"as it is", paths, project=project_name)
+            continue
         try:
             with project_lock(project_name, paths):
                 _restart_locked(paths, project_dir, project_name, refused, result)
@@ -430,11 +418,6 @@ def _restart_locked(
         log_operation("upgrade", f"Not restarting {project_name}: the health "
                       f"monitor stopped it; run `recover {project_name}` once "
                       f"it is fixed", paths, project=project_name)
-        return
-    if open_install_reason(paths, project_name):
-        result.install_open.append(project_name)
-        log_operation("upgrade", f"Not restarting {project_name}: an install is open",
-                      paths, project=project_name)
         return
     if project_name in refused:
         log_operation("upgrade", f"Not restarting {project_name}: its compose.yml "

@@ -92,7 +92,7 @@ def test_other_production_starts_refused_mid_install(paths) -> None:
     with docker_off() as up:
         result = restart_projects(paths, refused=())
     up.assert_not_called()
-    assert result.install_open == ["myapp"] and result.start_refused == []
+    assert result.start_refused == ["myapp"] and result.succeeded == []
 
 
 def test_first_deploy_has_no_keep_and_no_snapshot(paths) -> None:

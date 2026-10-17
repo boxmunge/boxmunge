@@ -14,7 +14,8 @@ MODULES = ["staged_release.py", "release_txn.py", "release_keep.py", "stage_slot
            # The commands that build, swap and drop the slot and the transaction.
            "commands/stage_cmd.py", "commands/unstage_cmd.py", "commands/promote_cmd.py",
            "commands/deploy_tree.py", "commands/install_abandon.py",
-           "commands/install_txn_cmd.py", "commands/rollback.py"]
+           "commands/install_txn_cmd.py", "commands/rollback.py",
+           "commands/legacy_stage_cmd.py"]
 RAW = {"rename", "renames", "replace", "move"}
 
 
@@ -36,8 +37,7 @@ def test_no_raw_renames() -> None:
     offenders = []
     for name in MODULES:
         path = SRC / name
-        if not path.exists():
-            continue  # legacy_stage_ops and stash_rewrite arrive in PR D
+        assert path.exists(), f"the census names a module that is gone: {name}"
         offenders += [f"{name}:{node.lineno}" for node in ast.walk(ast.parse(path.read_text()))
                       if _raw_rename(node)]
     assert offenders == [], f"use fileutil.durable_rename_dir / durable_rename: {offenders}"

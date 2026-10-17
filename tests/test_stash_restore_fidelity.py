@@ -20,9 +20,9 @@ def _as_root(deploy_uid: int, deploy_gid: int):
     return (
         patch("boxmunge.stash.os.geteuid", return_value=0),
         patch("boxmunge.stash.pwd.getpwnam", return_value=deploy),
-        # Ownership is set on the temp file's descriptor (fileutil).
-        patch("boxmunge.fileutil.os.fchown"),
-        patch("boxmunge.fileutil.os.getuid", return_value=1000),
+        # Ownership is set on the temp file's descriptor (fs_nofollow).
+        patch("boxmunge.fs_nofollow.os.fchown"),
+        patch("boxmunge.fs_nofollow.os.getuid", return_value=1000),
     )
 
 

@@ -169,8 +169,14 @@ reads from that directory is checked before use:
   minutes for clock steps) counts as expired, so a forged far-future value
   cannot hold off upgrades.
 - `blocklist.json` must be a JSON object keyed by semver versions.
-- None of these files, nor `upgrade.lock`, may be a symlink. The shim writes
-  `active-slot` by rename, so a planted link is replaced rather than followed.
+- None of these files, nor `upgrade.lock`, may be a symlink, a FIFO or
+  anything but a plain file. Root opens them without following a link or
+  blocking (bash never opens `upgrade.lock` by name: Python opens it and hands
+  the shim the descriptor), and writes them by rename from a temp file it
+  wrote through its own descriptor, so a planted link is replaced, not
+  followed.
+- The shim runs from `/` with `PYTHONSAFEPATH=1`, so a module planted in the
+  caller's working directory is never imported as root.
 
 Any violation stops the shim with a non-zero exit and an error naming the
 file, before the value reaches a path, a URL, or an `rm -rf`. Repair or remove
@@ -194,6 +200,18 @@ This protects the last path component only. Deploy can still swap an intermediat
 owns (`projects/<p>/backups`, a `state/` subdirectory, `inbox/.tmp`) for a symlink, so a root
 write below it can land elsewhere. Deploy is root-equivalent through the docker group anyway;
 these checks are defence in depth, not a boundary.
+
+Only the deploy uid can write `projects/`, `projects/<p>/` and `<p>/.releases/` (all
+deploy:deploy 0755). That includes project code that runs on the host as deploy (the
+`pre_deploy` hook and what it launches) and the boxmunge-system container (deploy uid). No
+service, staging, build or data-helper container can, and no smoke script can. Read-write binds
+may not be the project directory, a control entry or `.releases`, and remapped container uids
+are "other" on those 0755 directories. So root operations that walk these paths by name
+(`legacy-stage` restore and chown, `install_release` when root runs it, slot teardown, stash
+restore, project-delete under sudo) are protected against a planted final component, but not
+against a parent swapped by deploy. That is acceptable because deploy is root-equivalent. It
+becomes a boundary if deploy ever loses docker access, or if agent trust is split from operator
+trust. Those operations then need dir-fd traversal.
 
 ### What deploy may ask root to do
 

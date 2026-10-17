@@ -221,7 +221,7 @@ class TestLockSkipPushoverNotification:
 class TestSkipsQuarantined:
     """Wave 1: upgrade must NOT silently un-quarantine projects.
 
-    `regenerate_configs` MUST re-render the maintenance Caddy fragment
+    the apply's regeneration MUST re-render the maintenance Caddy fragment
     (not the normal site config) for a quarantined project, and
     `restart_projects` MUST skip them entirely.
     """
@@ -288,19 +288,19 @@ class TestSkipsQuarantined:
         assert len(skip_logs) == 1, mock_log.call_args_list
 
     def test_regen_renders_maintenance_for_quarantined(self, tmp_path):
-        from boxmunge.commands.upgrade_steps import regenerate_configs
+        from boxmunge.upgrade_exclusions import apply_projects
         paths = _setup_paths(tmp_path)
         self._make_project(paths, "alpha")
         self._quarantine(paths, "alpha")
 
         # Pre-existing site config from a prior deploy (we want to be sure
-        # regenerate_configs OVERWRITES with the maintenance fragment, not
+        # the regeneration OVERWRITES with the maintenance fragment, not
         # the normal one).
         site_conf = paths.project_caddy_site("alpha")
         site_conf.parent.mkdir(parents=True, exist_ok=True)
         site_conf.write_text("# pre-existing normal config\n")
 
-        processed = regenerate_configs(paths).processed
+        processed = apply_projects(paths)[1].processed
 
         # alpha was quarantined, so the normal-regen path must have been
         # skipped (alpha not in processed).
@@ -311,13 +311,13 @@ class TestSkipsQuarantined:
         assert "alpha.test" in content
 
     def test_regen_logs_quarantine_skip(self, tmp_path):
-        from boxmunge.commands.upgrade_steps import regenerate_configs
+        from boxmunge.upgrade_exclusions import apply_projects
         paths = _setup_paths(tmp_path)
         self._make_project(paths, "alpha")
         self._quarantine(paths, "alpha")
 
         with patch("boxmunge.commands.upgrade_steps.log_operation") as mock_log:
-            regenerate_configs(paths)
+            apply_projects(paths)[1]
 
         skip_logs = [
             c for c in mock_log.call_args_list
@@ -331,7 +331,7 @@ class TestSkipsQuarantined:
         """Defensive: prepare_caddy_config / prepare_compose_override
         MUST NOT be invoked for a quarantined project — the maintenance
         fragment is hand-rendered."""
-        from boxmunge.commands.upgrade_steps import regenerate_configs
+        from boxmunge.upgrade_exclusions import apply_projects
         paths = _setup_paths(tmp_path)
         self._make_project(paths, "alpha")
         self._quarantine(paths, "alpha")
@@ -341,14 +341,14 @@ class TestSkipsQuarantined:
         ) as mock_caddy, patch(
             "boxmunge.commands.upgrade_steps.prepare_compose_override",
         ) as mock_overlay:
-            regenerate_configs(paths)
+            apply_projects(paths)[1]
 
         mock_caddy.assert_not_called()
         mock_overlay.assert_not_called()
 
 
 class TestCvePolicyValidatorWiring:
-    """C-1 regression: upgrade's `regenerate_configs` must pass the
+    """C-1 regression: upgrade's regeneration must pass the
     manifest's `security` block as `cve_policy` to validate_user_compose.
     Mirrors the deploy.py canonical test in
     test_deploy.py::TestCvePolicyValidatorWiring.
@@ -364,7 +364,7 @@ class TestCvePolicyValidatorWiring:
         pdir = paths.project_dir(name)
         pdir.mkdir(parents=True)
         (pdir / "manifest.yml").write_text(yaml.dump({
-            "schema_version": 2, "project": name,
+            "schema_version": 2, "project": name, "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
             "source": "bundle", "hosts": [f"{name}.test"],
             "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
             "security": {"posture": "strict"},
@@ -378,7 +378,7 @@ class TestCvePolicyValidatorWiring:
     def test_regen_passes_security_block_as_cve_policy(
         self, _caddy, _overlay, tmp_path,
     ) -> None:
-        from boxmunge.commands.upgrade_steps import regenerate_configs
+        from boxmunge.upgrade_exclusions import apply_projects
 
         paths = _setup_paths(tmp_path)
         self._make_project_with_security(paths, "alpha")
@@ -387,7 +387,7 @@ class TestCvePolicyValidatorWiring:
         with patch(
             "boxmunge.commands.upgrade_steps.validate_user_compose",
         ) as mock_validate:
-            regenerate_configs(paths)
+            apply_projects(paths)
 
         # validate_user_compose must have been called for alpha and the
         # manifest's `security` block must have been forwarded as cve_policy.
