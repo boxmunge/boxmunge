@@ -51,6 +51,7 @@ NOT_DOCKER = {
     ("shell.py", "handle_scp_upload", "/usr/bin/scp"): "receives an upload into the inbox",
     ("shell.py", "run_command", "boxmunge-server"): "boxmunge-server scrubs its own docker calls",
     ("shell.py", "_run_upgrade", "?"): "runs the upgrade shim or boxmunge-server upgrade",
+    ("userns/daemon_ctl.py", "_systemctl", "systemctl"): "stops and starts docker.service and the boxmunge timers",
     ("version.py", "get_build_version", "git"): "reads the source commit",
 }
 
