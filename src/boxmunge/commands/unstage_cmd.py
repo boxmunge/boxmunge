@@ -38,7 +38,8 @@ def _read_meta(project: str, paths: BoxPaths) -> StagedRelease | None:
         return load_slot(paths, project)
     except SlotError as e:
         print(f"  WARN: the stage's record is unreadable ({e}); tearing staging down "
-              f"with the slot's compose files.")
+              f"with the slot's compose files. If a data copy had stopped production, "
+              f"start it with `boxmunge recover {project}`.")
         return None
 
 
@@ -63,8 +64,18 @@ def _stop_staging(project: str, paths: BoxPaths, meta: StagedRelease | None,
 
 def teardown_staging_locked(project: str, paths: BoxPaths, *, component: str = "unstage") -> bool:
     """Take staging down and drop the slot. Caller holds the lock. Returns
-    False if a step failed (each failure is reported)."""
-    sweep_debris(paths, project)
+    False if a step failed (each failure is reported, never raised: stage
+    and promote call this in their own failure paths)."""
+    try:
+        return _teardown(project, paths, component)
+    except OSError as e:
+        print(f"ERROR: Tearing staging down failed: {e}", file=sys.stderr)
+        log_error(component, f"Tearing staging down failed: {e}", paths, project=project)
+        return False
+
+
+def _teardown(project: str, paths: BoxPaths, component: str) -> bool:
+    sweep_debris(paths, project)  # refuses a planted link before any compose call
     meta = _read_meta(project, paths)
     if meta is not None and meta.production_stopped:
         try:

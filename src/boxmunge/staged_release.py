@@ -136,10 +136,30 @@ def clear_production_stopped(paths: BoxPaths, project: str) -> None:
         update_meta(paths, project, meta, production_stopped=None)
 
 
-def sweep_debris(paths: BoxPaths, project: str) -> None:
+def refuse_planted(paths: BoxPaths, project: str) -> None:
+    """The slot, ``staged.building`` and the ``*.discarded`` and
+    ``.isolation-*`` debris are boxmunge's own directories in the
+    deploy-writable ``.releases/``. A link or anything but a directory there
+    was put there by someone else: boxmunge neither follows nor removes it.
+    Raises OSError naming it, before anything acts on the slot."""
     releases = paths.project_releases(project)
     if not releases.is_dir():
         return
+    for path in [releases / SLOT, releases / BUILDING,
+                 *sorted(releases.glob(f"*{DISCARDED}")), *sorted(releases.glob(".isolation-*"))]:
+        if os.path.islink(path) or (os.path.lexists(path) and not path.is_dir()):
+            what = "a symbolic link" if os.path.islink(path) else "not a directory"
+            raise OSError(f"{path} is {what}, where boxmunge keeps its own directory; "
+                          f"boxmunge neither follows nor removes it. Inspect it, remove it "
+                          f"by hand (rm {path}), then run the command again")
+
+
+def sweep_debris(paths: BoxPaths, project: str) -> None:
+    """Remove crash debris; raises OSError for a planted link (refuse_planted)."""
+    releases = paths.project_releases(project)
+    if not releases.is_dir():
+        return
+    refuse_planted(paths, project)
     discard_dir(releases / BUILDING)
     sweep_discarded(releases)
     for entry in sorted(releases.glob(".isolation-*")):

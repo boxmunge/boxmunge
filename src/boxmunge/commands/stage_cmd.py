@@ -8,7 +8,7 @@ whole stage down (D16).
 
 stage_locked runs the spec's steps as named functions, in order:
 _eligible, _clear_leftovers, _intake_bundle (which ends in _build_slot),
-_retire_previous, swap_in, bring_up_staging, _mark_ready, _announce.
+_retire_previous, _swap, bring_up_staging, _mark_ready, _announce.
 """
 from __future__ import annotations
 
@@ -174,11 +174,10 @@ def stage_locked(project: str, paths: BoxPaths, ref: str | None = None,
     manifest, bundle_path = candidate
     if not _retire_previous(project, paths):
         return 1
-    swap_in(paths, project)
     # From the swap on, any failure tears the whole stage down (D16).
     ready = False
     try:
-        rc = bring_up_staging(paths, project, manifest)
+        rc = bring_up_staging(paths, project, manifest) if _swap(project, paths) else 1
         if rc == 0:
             ready = _mark_ready(project, paths)
             rc = 0 if ready else 1
@@ -193,6 +192,18 @@ def stage_locked(project: str, paths: BoxPaths, ref: str | None = None,
     if ready:
         _announce(project, paths, manifest, bundle_path)
     return rc
+
+
+def _swap(project: str, paths: BoxPaths) -> bool:
+    """Step 5: staged.building becomes the slot."""
+    try:
+        swap_in(paths, project)
+    except OSError as e:
+        print(f"ERROR: Putting the staged release in place failed: {e}", file=sys.stderr)
+        log_error("stage", f"Swapping in the staged release failed: {e}", paths,
+                  project=project)
+        return False
+    return True
 
 
 def _mark_ready(project: str, paths: BoxPaths) -> bool:

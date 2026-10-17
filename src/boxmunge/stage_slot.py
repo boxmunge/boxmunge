@@ -18,8 +18,8 @@ from boxmunge.docker import compose_down
 from boxmunge.fileutil import sync_tree
 from boxmunge.production_stopped import start_again
 from boxmunge.staged_release import (
-    SlotError, StagedRelease, building_dir, has_slot, load_slot, release_dir, staging_target,
-    update_meta, write_meta,
+    SlotError, StagedRelease, building_dir, has_slot, load_slot, refuse_planted, release_dir,
+    staging_target, update_meta, write_meta,
 )
 from boxmunge.staging_isolation import resolving, staging_model
 from boxmunge.staging_prepare import write_staging_files
@@ -56,9 +56,11 @@ def build_slot(paths: BoxPaths, project: str, manifest: dict[str, Any],
 def retire_previous_staging(paths: BoxPaths, project: str) -> None:
     """A re-stage: production first runs again if a copy stopped it, the old
     slot is marked `starting` (so nothing can promote it) and its staging
-    containers are taken down. Raises DockerError or OSError."""
+    containers are taken down. Raises DockerError or OSError (a planted
+    link in place of the slot is refused before any compose call)."""
     if not has_slot(paths, project):
         return
+    refuse_planted(paths, project)
     try:
         old = load_slot(paths, project)
     except SlotError as e:
