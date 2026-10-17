@@ -320,14 +320,16 @@ def recorded_users(paths: BoxPaths, project_name: str, *,
 
 
 def render_compose_override(paths: BoxPaths, manifest: dict[str, Any],
-                            user_compose: dict[str, Any]) -> str:
+                            user_compose: dict[str, Any],
+                            users: dict[str, ServiceUser] | None = None) -> str:
     """compose.boxmunge.yml's content for the release in the project dir
     (`user_compose`: its resolved compose.yml), with the users the record
     holds; nothing is written."""
     project_name = manifest["project"]
     return generate_compose_override(
         manifest, env_files=production_env_files(paths, project_name) or None,
-        user_compose=user_compose, users=recorded_users(paths, project_name),
+        user_compose=user_compose,
+        users=users if users is not None else recorded_users(paths, project_name),
     )
 
 
@@ -335,9 +337,11 @@ def prepare_compose_override(
     paths: BoxPaths,
     manifest: dict[str, Any],
     component: str = "deploy",
+    *,
+    users: dict[str, ServiceUser] | None = None,
 ) -> None:
     """Generate compose.boxmunge.yml for the release in the project dir,
-    with the users the record holds.
+    with `users`, or (None) the users the record holds.
 
     `component` labels the SECURITY OFF log entry so callers from upgrade /
     resume don't misattribute the warning as "deploy". Lives here, not in
@@ -349,7 +353,7 @@ def prepare_compose_override(
     override_path.parent.mkdir(parents=True, exist_ok=True)
 
     user_compose = load_user_compose(project_dir / "compose.yml", project_name)
-    content = render_compose_override(paths, manifest, user_compose)
+    content = render_compose_override(paths, manifest, user_compose, users)
     atomic_write_text(override_path, content)
     refresh_overlay_hash(project_dir, paths.project_bind_record(project_name))
     # Before the overlay named built images under boxmunge.invalid/, Compose

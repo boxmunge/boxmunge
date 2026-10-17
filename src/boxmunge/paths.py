@@ -206,6 +206,11 @@ class BoxPaths:
         name = _checked(name)
         return self.deploy_state / f"{name}{STAGING_SUFFIX if staging else ''}.binds.json"
 
+    def project_user_drift(self, name: str) -> Path:
+        """Services whose pulled image changed USER and was held back (user_drift)."""
+        name = _checked(name)
+        return self.deploy_state / f"{name}.user-drift.json"
+
     def project_users_record(self, name: str, *, staging: bool = False) -> Path:
         """Who each service of a project, or its staging copy, runs as,
         decided at deploy, stage and promote (run_as)."""

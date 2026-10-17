@@ -71,6 +71,8 @@ def _decide_users(paths: BoxPaths, project: str, manifest: dict[str, Any]) -> No
     except (RunAsError, ComposeResolveError) as e:
         raise DeployRefused([str(e)]) from e
     write_staging_overlay(paths, project, manifest, release_dir(slot), slot, users)
+    deploy_images.record_release_users(paths, staging_release_target(paths, project),
+                                       manifest, users, component="stage")
 
 
 def _prepare_storage(paths: BoxPaths, project: str, manifest: dict[str, Any]) -> None:

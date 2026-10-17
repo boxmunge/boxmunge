@@ -75,7 +75,7 @@ class TestPromoteComponentTagging:
     """
 
     def test_promote_passes_component_to_deploy(self, paths) -> None:
-        from boxmunge.commands import deploy as deploy_mod
+        from boxmunge.commands import release_config as deploy_mod
         from tests.stage_helpers import staging_docker_off as _docker
         prod_and_stage(paths)
         observed: list[str] = []
@@ -97,7 +97,8 @@ class TestPromoteComponentTagging:
         warn_off_services). We stub everything past the call to capture
         the component arg observed at the boundary.
         """
-        from boxmunge.commands import deploy as deploy_mod
+        from boxmunge.commands import deploy as deploy_cmd
+        from boxmunge.commands import release_config as deploy_mod
 
         pdir = paths.project_dir("testapp")
         pdir.mkdir(parents=True, exist_ok=True)
@@ -120,9 +121,9 @@ class TestPromoteComponentTagging:
             deploy_mod, "prepare_compose_override", fake_prepare_compose_override,
         )
         monkeypatch.setattr("boxmunge.compose_guard.compose_up", lambda *a, **k: None)
-        monkeypatch.setattr(deploy_mod, "caddy_reload", lambda *a, **k: None)
+        monkeypatch.setattr(deploy_cmd, "caddy_reload", lambda *a, **k: None)
         # Avoid any git/snapshot work by passing no_snapshot=True and no ref.
-        monkeypatch.setattr(deploy_mod.subprocess, "run", MagicMock(
+        monkeypatch.setattr(deploy_cmd.subprocess, "run", MagicMock(
             return_value=MagicMock(returncode=0, stdout="abc", stderr=""),
         ))
 

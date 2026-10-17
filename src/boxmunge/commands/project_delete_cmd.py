@@ -41,6 +41,7 @@ def project_state_files(paths: BoxPaths, name: str) -> list[Path]:
         paths.project_bind_record(name, staging=True),
         paths.project_users_record(name),
         paths.project_users_record(name, staging=True),
+        paths.project_user_drift(name),
         paths.project_paused_state(name),
         paths.project_quarantine_state(name),
         paths.project_scan_state(name),

@@ -4,19 +4,18 @@
 import shlex
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
-from boxmunge.caddy import prepare_caddy_config
 from boxmunge.bind_sources import BindSourceError
-from boxmunge.commands import deploy_images, deploy_storage
+from boxmunge.commands import deploy_storage
+from boxmunge.commands.release_config import (
+    decide_release_users, generate_release_config, promote_candidates,
+)
 from boxmunge.commands.deploy_steps import (
     post_deploy_diagnostics, record_deploy_state, smoke_ok, take_pre_deploy_snapshot,
     update_repo,
 )
-from boxmunge.compose import (
-    ComposeError, load_user_compose, prepare_compose_override, render_compose_override,
-)
+from boxmunge.compose import ComposeError
 from boxmunge.compose_guard import compose_up_checked
 from boxmunge.compose_resolve import ComposeResolveError
 from boxmunge.docker import CaddyConfigRejected, caddy_reload, DockerError
@@ -206,12 +205,21 @@ def _start_release(
     pre-deploy snapshot (if any) has been taken.
     """
     print(f"Deploying {project_name} (ref: {actual_ref})...")
+    try:
+        users = decide_release_users(project_name, paths, manifest, component)
+    except (DeployRefused, DockerError) as e:
+        print(f"ERROR: {project_name} cannot start as it is; nothing was run or changed "
+              f"(production runs its previous containers). Fix the following and deploy "
+              f"again:\n{e}", file=sys.stderr)
+        log_error(component, f"Deploy refused before the start: {e}", paths,
+                  project=project_name)
+        return 1
     rc = run_pre_deploy_hook(project_name, paths, manifest)
     if rc != 0:
         return rc
     try:
-        generate_release_config(project_name, paths, manifest, component)
-    except (DeployRefused, DockerError, OSError, ValueError) as e:
+        generate_release_config(project_name, paths, manifest, component, users)
+    except (OSError, ValueError) as e:
         print(f"ERROR: {project_name} was not started: production still runs its "
               f"previous containers. Fix the following and deploy again:\n{e}",
               file=sys.stderr)
@@ -262,38 +270,6 @@ def run_pre_deploy_hook(project_name: str, paths: BoxPaths, manifest: dict) -> i
     return 0
 
 
-def decide_release_users(project_name: str, paths: BoxPaths, manifest: dict,
-                         component: str) -> None:
-    """Build the release installed in the project dir, decide and record who
-    each service runs as. The images are built from a scratch overlay, so a
-    refusal leaves production's files and image names as they were.
-    Raises DeployRefused or DockerError."""
-    print("  Building images and deciding who each service runs as...")
-    try:
-        user_compose = load_user_compose(paths.project_dir(project_name) / "compose.yml",
-                                         project_name)
-        with tempfile.TemporaryDirectory(prefix="boxmunge-users-") as scratch:
-            overlay = Path(scratch) / "compose.boxmunge.yml"
-            overlay.write_text(render_compose_override(paths, manifest, user_compose))
-            deploy_images.prepare_release_users(
-                paths, production_target(paths, project_name, overlay), manifest,
-                component=component, rollback=component == "rollback")
-    except (RunAsError, ComposeResolveError, ComposeError) as e:
-        raise DeployRefused([str(e)]) from e
-
-
-def generate_release_config(project_name: str, paths: BoxPaths, manifest: dict,
-                            component: str) -> None:
-    """Decide the release's users, then write its Caddy site and compose
-    overlay (not yet live). Raises DeployRefused, DockerError, OSError or
-    ValueError."""
-    decide_release_users(project_name, paths, manifest, component)
-    print("  Generating Caddy config...")
-    prepare_caddy_config(paths, manifest)
-    print("  Generating compose overlay...")
-    prepare_compose_override(paths, manifest, component=component)
-
-
 def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
                     actual_ref: str, snapshot_name: str | None,
                     component: str = "deploy", txn: str | None = None) -> int:
@@ -333,13 +309,14 @@ def _start_and_verify(project_name: str, paths: BoxPaths, manifest: dict,
     print("  Starting containers...")
     compose_files = ["compose.yml", "compose.boxmunge.yml"]
     try:
+        promote_candidates(paths, project_name)
         deploy_storage.prepare_storage(paths, production_target(paths, project_name))
         # generate_release_config built every image the users were decided from.
         compose_up_checked(paths, project_name, component=component,
                            compose_files=compose_files, record=True, deploying=True,
                            build=False, txn=txn)
     except (DockerError, BindSourceError, RunAsError, ComposeResolveError, RemapError,
-            OSError) as e:
+            ComposeError, OSError) as e:
         print(f"  ERROR: {e}", file=sys.stderr)
         log_error("deploy", f"Deploy failed: container start: {e}", paths, project=project_name)
         return 1

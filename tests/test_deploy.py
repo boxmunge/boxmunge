@@ -5,7 +5,8 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 
 
-from boxmunge.commands.deploy import run_deploy, prepare_compose_override
+from boxmunge.commands.deploy import run_deploy
+from boxmunge.compose import prepare_compose_override
 from boxmunge.paths import BoxPaths
 
 

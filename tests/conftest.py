@@ -322,4 +322,5 @@ def _users_decided_without_images(request, monkeypatch):
             request.node.get_closest_marker("decides_users"):
         return
     monkeypatch.setattr("boxmunge.commands.deploy_images.prepare_release_users",
-                        lambda paths, target, manifest, *, component, rollback=False: {})
+                        lambda paths, target, manifest, *, component, rollback=False,
+                        refetch=frozenset(): {})
