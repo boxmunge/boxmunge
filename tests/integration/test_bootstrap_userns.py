@@ -179,3 +179,25 @@ def test_userns_bootstrap_refusals_on_trixie(tmp_path: Path) -> None:
         assert out[case].startswith("refused:") and "remapped" in out[case], out[case]
     assert out["foreign_json"].startswith("refused:") and "/srv/docker" in out["foreign_json"]
     assert out["kept"] == '{"data-root": "/srv/docker"}'
+
+
+# init-host's own useradd lines, run as written; a plain useradd is the control.
+USERS = r"""
+: > /etc/subuid; : > /etc/subgid
+DEPLOY_USER=deploy
+grep -E '^\s*useradd -m ' /bootstrap/init-host.sh > /tmp/users.sh
+echo "lines=$(wc -l < /tmp/users.sh)"
+. /tmp/users.sh
+useradd -m control
+echo "owners=$(cut -d: -f1 /etc/subuid /etc/subgid | sort -u | tr '\n' ' ')"
+"""
+
+
+def test_init_host_users_get_no_subordinate_ids_on_trixie() -> None:
+    """Debian's useradd gives every new login user a 65536-id range; deploy
+    and supervisor have no use for one, and boxmunge-remap's must stay alone."""
+    result = _run_on_trixie(USERS)
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = _outputs(result.stdout)
+    assert out["lines"] == "2"
+    assert out["owners"] == "control "

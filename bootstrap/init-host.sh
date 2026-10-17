@@ -186,7 +186,8 @@ if id "${DEPLOY_USER}" &>/dev/null; then
         echo "Changed deploy shell from bash to boxmunge-shell"
     fi
 else
-    useradd -m -s /opt/boxmunge/bin/boxmunge-shell "${DEPLOY_USER}"
+    # No subordinate ids (Debian gives each new user 65536): only boxmunge-remap needs them.
+    useradd -m -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 -s /opt/boxmunge/bin/boxmunge-shell "${DEPLOY_USER}"
 fi
 usermod -aG docker "${DEPLOY_USER}"
 
@@ -194,7 +195,7 @@ banner "Step 4b/14: Creating supervisor user (full shell access)..."
 if id supervisor &>/dev/null; then
     echo "User 'supervisor' already exists — skipping useradd."
 else
-    useradd -m -s /bin/bash supervisor
+    useradd -m -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 -s /bin/bash supervisor
 fi
 usermod -aG docker,deploy supervisor
 
