@@ -6,9 +6,10 @@ stage (spec 'VM harness (Debian 13)').
 Each scenario boots a fresh VM with vm-test.py's helpers, installs the
 v0.10.1 release tarball with `boxmunge server-setup --local-bundle`, deploys
 v1 of a small busybox project, then runs its steps in order over ssh: each is
-(description, user, command, expected exit code). `deploy` steps go through
-the deploy shell; `root` steps run with sudo as supervisor (operator-only
-commands such as legacy-stage run as root via boxmunge-server).
+(description, user, command, expected exit code[, text a refusal must print]).
+`deploy` steps go through the deploy shell; `root` steps run with sudo as
+supervisor (operator-only commands such as legacy-stage run as root via
+boxmunge-server).
 
 The beta is this tree's `make bundle`, relabelled as release BETA_VERSION
 and reached by 0.10.1's own upgrade shim (`boxmunge-upgrade target`): on the
@@ -99,7 +100,7 @@ SCENARIOS: dict[str, dict] = {
         ("and recorded for its alert", "root",
          "grep -q '\"vmstage\"' /opt/boxmunge/state/legacy-stages.json", 0),
         ("legacy-stage refused during probation", "root",
-         "boxmunge-server legacy-stage vmstage --discard", 1),
+         "boxmunge-server legacy-stage vmstage --discard", 1, "is on probation until"),
         ("end probation", "root", END_PROBATION, 0),
         ("legacy-stage --discard", "root", "boxmunge-server legacy-stage vmstage --discard", 0),
         ("production runs v1, staging is gone", "root",
@@ -119,7 +120,8 @@ SCENARIOS: dict[str, dict] = {
         ("rollback", "deploy", "rollback vmstage --yes", 0),
         ("production runs v1", "root", f"{runs('vmstage', 'v1')} && {no_staging('vmstage')}", 0),
         ("--discard of a recreated stage needs confirming", "root",
-         "boxmunge-server legacy-stage vmstage2 --discard", 1),
+         "boxmunge-server legacy-stage vmstage2 --discard", 1,
+         "rerun with --discard --confirm-recreated"),
         ("legacy-stage --discard --confirm-recreated", "root",
          "boxmunge-server legacy-stage vmstage2 --discard --confirm-recreated", 0),
         ("the second runs v1", "root",
@@ -285,14 +287,18 @@ def ssh(user: str, command: str) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, check=False, timeout=SSH_TIMEOUT)
 
 
-def run_steps(steps: list[tuple[str, str, str, int]]) -> None:
-    for description, user, command, expect in steps:
+def run_steps(steps: list[tuple]) -> None:
+    """Each step's exit code, and for a refusal that says why, its reason."""
+    for description, user, command, expect, *why in steps:
         for key, ref in REFS.items():   # not str.format: shell braces stay as they are
             command = command.replace(f"{{{key}}}", ref)
         result = ssh(user, command)
         if result.returncode != expect:
             vm.step_fail(description, f"{user}: {command} exited {result.returncode}, expected "
                          f"{expect}\nstdout: {result.stdout[-3000:]}\nstderr: {result.stderr[-3000:]}")
+        if why and why[0] not in result.stdout + result.stderr:
+            vm.step_fail(description, f"{user}: {command} did not say {why[0]!r}\nstdout: "
+                         f"{result.stdout[-3000:]}\nstderr: {result.stderr[-3000:]}")
         vm.step_pass(description)
 
 
