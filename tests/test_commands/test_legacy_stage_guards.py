@@ -13,7 +13,7 @@ import pytest
 from boxmunge.commands.legacy_stage_cmd import run_legacy_stage
 from boxmunge.legacy_stage import get_record, legacy_stage
 from tests.bundle_helpers import tree_snapshot
-from tests.test_commands.test_legacy_stage_cmd import _run
+from tests.test_commands.legacy_cmd_helpers import legacy_run
 
 
 def _held_upgrade_lock(paths) -> int:
@@ -63,7 +63,7 @@ def test_the_upgrade_lock_is_released_after_a_resolution(paths, legacy) -> None:
 def test_an_unreadable_probation_refuses_with_its_fix(paths, legacy, capsys, probation) -> None:
     paths.probation.parent.mkdir(parents=True, exist_ok=True)
     paths.probation.write_text(probation)
-    assert _run(paths, "discard") == 1
+    assert legacy_run(paths, "discard") == 1
     err = capsys.readouterr().err
     assert "cannot tell whether a platform rollback is possible" in err
     assert f"fix or remove {paths.probation}" in err and "Traceback" not in err
@@ -74,7 +74,7 @@ def test_an_unwritable_maintenance_page_says_run_it_again(paths, legacy, capsys)
     from boxmunge.commands.upgrade_steps import UpgradeGateError
     with patch("boxmunge.legacy_stage_ops.finish_apply",
                side_effect=UpgradeGateError("cannot write the maintenance page")):
-        assert _run(paths, "discard") == 1
+        assert legacy_run(paths, "discard") == 1
     assert "cannot write the maintenance page. Run the same command again" in \
         capsys.readouterr().err
 
@@ -83,7 +83,7 @@ def test_a_refused_start_names_the_refusal_to_fix(paths, legacy, capsys) -> None
     from boxmunge.compose_guard import ComposeRefused
     with patch("boxmunge.legacy_stage_ops.finish_apply",
                side_effect=ComposeRefused("mounts production's data")):
-        assert _run(paths, "discard") == 1
+        assert legacy_run(paths, "discard") == 1
     err = capsys.readouterr().err
     assert "mounts production's data" in err and "Fix what it refuses, then run" in err
 
@@ -96,7 +96,7 @@ def test_staging_containers_without_their_compose_files_are_refused(
             (legacy / name).unlink()
     assert legacy_stage(paths, "myapp") is not None      # still a bundle stage
     fake_containers.run("myapp-staging", "app", "sha256:" + "a" * 64)
-    assert _run(paths, "discard") == 1
+    assert legacy_run(paths, "discard") == 1
     err = capsys.readouterr().err
     assert "label=com.docker.compose.project=myapp-staging" in err and "docker rm -f" in err
     assert legacy_stage(paths, "myapp") is not None
@@ -123,6 +123,6 @@ def test_a_linked_releases_is_refused_before_the_stage_record_goes(paths, tmp_pa
     releases = paths.project_releases("myapp")
     shutil.rmtree(releases)
     releases.symlink_to(elsewhere)
-    assert _run(paths, "discard") == 1
+    assert legacy_run(paths, "discard") == 1
     assert f"{releases} is not a directory" in capsys.readouterr().err
     assert (elsewhere / "prestage.discarded").is_dir()

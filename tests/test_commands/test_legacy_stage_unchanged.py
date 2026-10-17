@@ -18,7 +18,7 @@ from boxmunge.legacy_stage import (
 from boxmunge.state import read_state, write_state
 from tests.bundle_helpers import SAFE_COMPOSE, manifest_text
 from tests.git_helpers import git, origin_with
-from tests.test_commands.test_legacy_stage_cmd import _run
+from tests.test_commands.legacy_cmd_helpers import legacy_run
 
 CREATED = "boxmunge.docker_containers.created_times"
 NOT_ASKED = AssertionError("a stage that changed no code needs no container times")
@@ -70,14 +70,14 @@ def test_evidence_of_an_unchanged_stage_needs_no_stage_time(paths, cloned, deplo
 
 
 def test_show_of_an_unchanged_stage(paths, cloned, capsys) -> None:
-    assert _run(paths, None) == 0
+    assert legacy_run(paths, None) == 0
     out = capsys.readouterr().out
     assert "untouched" in out and "not needed" in out and "Cannot tell" not in out
 
 
 def test_discard_of_an_unchanged_never_deployed_stage(paths, cloned, capsys) -> None:
     head = git("rev-parse", "HEAD", cwd=cloned)
-    assert _run(paths, "discard") == 0
+    assert legacy_run(paths, "discard") == 0
     assert "never deployed" in capsys.readouterr().out
     assert git("rev-parse", "HEAD", cwd=cloned) == head
     assert legacy_stage(paths, "myapp") is None
@@ -85,7 +85,7 @@ def test_discard_of_an_unchanged_never_deployed_stage(paths, cloned, capsys) -> 
 
 def test_discard_of_an_unchanged_deployed_stage(paths, cloned) -> None:
     head = _deploy_head(paths, cloned)
-    assert _run(paths, "discard") == 0
+    assert legacy_run(paths, "discard") == 0
     assert git("rev-parse", "HEAD", cwd=cloned) == head
     assert legacy_stage(paths, "myapp") is None
 
@@ -94,7 +94,7 @@ def test_keep_staged_of_an_unchanged_never_deployed_stage(paths, cloned) -> None
     head = git("rev-parse", "HEAD", cwd=cloned)
     with patch("boxmunge.commands.backup_cmd.backup_locked",
                side_effect=AssertionError("nothing was deployed to snapshot")):
-        assert _run(paths, "keep-staged") == 0
+        assert legacy_run(paths, "keep-staged") == 0
     assert read_state(paths.project_deploy_state("myapp"))["current_ref"] == head
     assert legacy_stage(paths, "myapp") is None
 
@@ -104,7 +104,7 @@ def test_keep_staged_of_an_unchanged_deployed_stage(paths, cloned) -> None:
     head = _deploy_head(paths, cloned)
     taken: list[dict] = []
     with fake_backups(taken):
-        assert _run(paths, "keep-staged") == 0
+        assert legacy_run(paths, "keep-staged") == 0
     assert taken[0]["backup"]["type"] == "postgres"
     state = read_state(paths.project_deploy_state("myapp"))
     assert state["current_ref"] == head and state["pre_deploy_snapshot"] == "myapp-p1.tar.gz.age"
