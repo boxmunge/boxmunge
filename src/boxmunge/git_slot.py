@@ -121,7 +121,9 @@ def fetch(repo: Path) -> None:
 def resolve_ref(repo: Path, ref: str) -> str:
     """An operator's ref (--ref, or the manifest's) as a full SHA, from
     origin's refs as the last fetch left them (module docstring)."""
-    if _FULL_SHA.fullmatch(ref or ""):
+    if not isinstance(ref, str):
+        raise GitRefError(f"ref {ref!r} is not a string: quote it in manifest.yml")
+    if _FULL_SHA.fullmatch(ref):
         sha = _commit(repo, ref)
         if sha != ref:
             raise GitRefError(f"commit {ref} is not in the repository (after fetching origin)")

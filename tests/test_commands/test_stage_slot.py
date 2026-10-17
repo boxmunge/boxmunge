@@ -106,20 +106,6 @@ def test_debris_is_swept(paths) -> None:
     assert not (paths.project_releases("myapp") / "staged.building").exists()
 
 
-def test_git_refusal_names_prod_deploy_and_leaves_the_stage(paths, capsys) -> None:
-    prod_and_stage(paths)
-    before = tree_snapshot(paths.project_dir("myapp"))
-    (paths.project_dir("myapp") / "repo").mkdir()
-    place_bundle(paths, timestamp=V3)
-    with staging_docker_off() as docker:
-        assert run_stage("myapp", paths, ref=V3) == 1
-    assert ("Staging a git-sourced project is not available in this build of boxmunge; "
-            "deploy 'myapp' with prod-deploy.") in capsys.readouterr().err
-    docker["down_retire"].assert_not_called()
-    after = tree_snapshot(paths.project_dir("myapp"))
-    assert {k: v for k, v in after.items() if k != "repo"} == before
-
-
 def test_dry_run_builds_no_slot(paths, capsys) -> None:
     add_project("myapp", paths)
     place_bundle(paths, timestamp=V1)

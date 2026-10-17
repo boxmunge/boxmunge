@@ -267,8 +267,14 @@ def staged_box_state(project_dir: Path, staged_release: Path) -> set[str]:
     pairs. (Production's own classification during a stage only keeps those
     copies from being pruned: DataDirs.staged.) The current slot is not
     read: ``staged_release`` is the staged view, and during a re-stage an
-    old slot's unreadable compose.yml must not fail the new stage."""
-    return project_data_dirs(project_dir, staged_release, with_staged=False).box_state()
+    old slot's unreadable compose.yml must not fail the new stage. A git
+    slot's repo/ is its own clone of the staged commit (git_slot): release
+    code there, never production's repo/."""
+    state = project_data_dirs(project_dir, staged_release, with_staged=False).box_state()
+    clone = staged_release / "repo"
+    if clone.is_dir() and not clone.is_symlink():
+        state.discard("repo")
+    return state
 
 
 def install_release(tree: Path, project_dir: Path,

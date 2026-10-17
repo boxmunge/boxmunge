@@ -7,8 +7,11 @@ briefly stopped for a copy_data stage). A failure after the swap tears the
 whole stage down (D16).
 
 stage_locked runs the spec's steps as named functions, in order:
-_eligible, _clear_leftovers, _intake_bundle (which ends in _build_slot),
-_retire_previous, _swap, bring_up_staging, _mark_ready, _announce.
+_eligible, _clear_leftovers, _intake_bundle or _intake_git (each ends in
+_build_slot), _retire_previous, _swap, bring_up_staging, _mark_ready,
+_announce. A git project's ref is resolved to a full SHA now and that
+commit is checked out in the slot's own clone (git_slot); promote deploys
+exactly that SHA.
 """
 from __future__ import annotations
 
@@ -19,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 from boxmunge.commands.unstage_cmd import teardown_staging_locked
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import LockError, discard_dir, durable_rename_dir, project_lock
+from boxmunge.git_slot import GitRefError, fetch, materialise, resolve_ref
 from boxmunge.identity import register_project_identity
 from boxmunge.intake import (
     IntakeError, check_installable, extract_candidate, incoming_workspace,
@@ -27,6 +31,7 @@ from boxmunge.intake import (
 from boxmunge.lifecycle import refuse_if_blocked
 from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_error, log_operation
+from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.production_stopped import start_again
 from boxmunge.project_registry import is_registered
 from boxmunge.release_txn import refuse_if_install_open
@@ -55,8 +60,7 @@ def _sha256(path: Path) -> str:
 
 
 def _eligible(project: str, paths: BoxPaths) -> bool:
-    """Step 1, under the lock: not blocked, registered, no open install, and
-    a bundle project (git staging is rebuilt on the slot later)."""
+    """Step 1, under the lock: not blocked, registered, no open install."""
     if refuse_if_blocked(project, paths) or refuse_if_legacy_stage(paths, project):
         return False
     if not is_registered(project, paths):
@@ -66,13 +70,7 @@ def _eligible(project: str, paths: BoxPaths) -> bool:
     # An open install owns the project dir until it closes; a stage now
     # would retire a slot a staged install may need, or stage over a
     # release that is half installed.
-    if refuse_if_install_open(paths, project, component="stage"):
-        return False
-    if (paths.project_dir(project) / "repo").exists():
-        print(f"ERROR: Staging a git-sourced project is not available in this build of "
-              f"boxmunge; deploy '{project}' with prod-deploy.", file=sys.stderr)
-        return False
-    return True
+    return not refuse_if_install_open(paths, project, component="stage")
 
 
 def _clear_leftovers(project: str, paths: BoxPaths) -> bool:
@@ -147,11 +145,7 @@ def _intake_bundle(project: str, paths: BoxPaths, ref: str | None,
             tree = extract_candidate(bundle_path, workspace)
             manifest = validate_release_tree(tree, project, paths, "stage")
             check_installable(tree, project_dir)
-            try:
-                precheck_candidate(paths, project, manifest, tree, workspace)
-            except STORAGE_ERRORS as e:
-                print(f"ERROR: {e}\nNothing was changed.", file=sys.stderr)
-                log_error("stage", f"Stage refused: {e}", paths, project=project)
+            if not _precheck(project, paths, manifest, tree, workspace):
                 return 1
             if dry_run:
                 print(f"[DRY RUN] Would stage '{project}'")
@@ -164,6 +158,53 @@ def _intake_bundle(project: str, paths: BoxPaths, ref: str | None,
     except IntakeError as e:
         return report_refusal(e)
     return manifest, bundle_path
+
+
+def _intake_git(project: str, paths: BoxPaths, ref: str | None,
+                dry_run: bool) -> tuple[dict[str, Any], None] | int:
+    """Step 2 for a git project: fetch, resolve the ref (--ref, else the
+    production manifest's) to a full SHA now, and check that commit out in
+    a clone of its own in .releases/incoming/; then prove its staging apart
+    from production and build the slot from it. Production's checkout and
+    HEAD are never touched."""
+    project_dir = paths.project_dir(project)
+    try:
+        wanted = ref or load_manifest(paths.project_manifest(project)).get("ref", "main")
+        print(f"  Fetching {wanted}...")
+        fetch(project_dir / "repo")
+        sha = resolve_ref(project_dir / "repo", wanted)
+        with incoming_workspace(paths, project) as workspace:
+            tree = workspace / "release"
+            tree.mkdir()
+            warnings = materialise(project_dir, sha, tree)
+            manifest = validate_release_tree(tree, project, paths, "stage")
+            if not _precheck(project, paths, manifest, tree, workspace):
+                return 1
+            for warning in warnings:
+                print(f"  WARN: {warning}")
+            if dry_run:
+                print(f"[DRY RUN] Would stage '{project}' at {sha}")
+                return 0
+            if not _build_slot(project, paths, tree, manifest, new_meta("git", sha, None)):
+                return 1
+    except IntakeError as e:
+        return report_refusal(e)
+    except (GitRefError, ManifestError) as e:
+        print(f"ERROR: {e}\nNothing was changed.", file=sys.stderr)
+        log_error("stage", f"Stage refused: {e}", paths, project=project)
+        return 1
+    return manifest, None
+
+
+def _precheck(project: str, paths: BoxPaths, manifest: dict[str, Any], tree: Path,
+              workspace: Path) -> bool:
+    try:
+        precheck_candidate(paths, project, manifest, tree, workspace)
+    except STORAGE_ERRORS as e:
+        print(f"ERROR: {e}\nNothing was changed.", file=sys.stderr)
+        log_error("stage", f"Stage refused: {e}", paths, project=project)
+        return False
+    return True
 
 
 def _retire_previous(project: str, paths: BoxPaths) -> bool:
@@ -190,7 +231,8 @@ def stage_locked(project: str, paths: BoxPaths, ref: str | None = None,
         return 1
     if not dry_run and not _clear_leftovers(project, paths):
         return 1
-    candidate = _intake_bundle(project, paths, ref, dry_run)
+    git = (paths.project_dir(project) / "repo").exists()
+    candidate = (_intake_git if git else _intake_bundle)(project, paths, ref, dry_run)
     if isinstance(candidate, int):
         return candidate
     manifest, bundle_path = candidate
@@ -244,9 +286,10 @@ def _mark_ready(project: str, paths: BoxPaths) -> StagedRelease | None:
 
 
 def _announce(project: str, paths: BoxPaths, meta: StagedRelease, manifest: dict[str, Any],
-              bundle_path: Path) -> None:
+              bundle_path: Path | None) -> None:
     register_project_identity(project, manifest.get("id", ""), paths)
-    consume_bundle(bundle_path, project, paths)
+    if bundle_path is not None:
+        consume_bundle(bundle_path, project, paths)
     print("  Staged at:")
     for host in manifest.get("hosts", []):
         print(f"    https://staging.{host}")

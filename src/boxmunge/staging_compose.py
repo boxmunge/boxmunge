@@ -88,7 +88,8 @@ def _release_code(path: str, base: str, project_dir: Path, box_state: set[str],
     outside it. Box state
     is refused: staging would build from release/'s copy of the name while
     production builds from the data itself. boxmunge's own entries are no
-    release code at all, so nothing in the staged release stands for them."""
+    release code at all, so nothing in the staged release stands for them,
+    except a git slot's own clone (staged_box_state leaves repo/ out)."""
     if path.startswith("~"):
         return None
     rel = project_relative(os.path.join(base, path), project_dir,
@@ -96,7 +97,7 @@ def _release_code(path: str, base: str, project_dir: Path, box_state: set[str],
     if rel is None:
         return None
     top = rel.partition(os.sep)[0]
-    if top in BOXMUNGE_ENTRIES:
+    if top in BOXMUNGE_ENTRIES and top in box_state:
         raise _unmappable(path, what, f"is in {top}, which boxmunge keeps, not the release")
     if top in box_state:
         raise ComposeError(
