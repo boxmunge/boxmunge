@@ -159,7 +159,7 @@ def _notes(paths: BoxPaths, inv: Inventory, r: Report) -> None:
     if any(m.source == str(paths.caddyfile) for c in inv.containers for m in c.mounts):
         r.notes.append(f"{paths.caddyfile} is made 0644: Caddy's remapped root reads it "
                        f"through the other bits (userns-rollback puts its mode back)")
-    carried = sum(i.size for i in inv.images if i.tags)
+    carried = sum(i.size for i in inv.images if i.carried)
     estimate = carried / 100e6 + r.files / 20000 + 2 * 15 + 30 * len(inv.projects)
     r.notes.append(f"estimated downtime: about {int(estimate)} s ({carried // 10**6} MB of images, "
                    f"{r.files} files to shift, two daemon restarts, {len(inv.projects)} project "

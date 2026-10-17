@@ -59,6 +59,7 @@ class ContainerEntry:
     ipc: str
     userns: str
     mounts: list[MountEntry] = field(default_factory=list)
+    image_ref: str = ""  # Config.Image: what compose asked for, maybe name@digest
 
 
 @dataclass
@@ -79,6 +80,14 @@ class ImageEntry:
     tags: list[str]
     size: int
     in_use: bool
+    # Digest references containers run it by. docker load restores tags,
+    # never digests, so these are pulled again after the load.
+    refs: list[str] = field(default_factory=list)
+
+    @property
+    def carried(self) -> bool:
+        """Untagged and unreferenced: nothing would find it after a recreate."""
+        return bool(self.tags or self.refs)
 
 
 @dataclass
@@ -166,7 +175,8 @@ def _container(doc: dict[str, Any], paths: BoxPaths) -> ContainerEntry:
         image_id=str(doc.get("Image")), running=bool((doc.get("State") or {}).get("Running")),
         privileged=host.get("Privileged") is True, pid=str(host.get("PidMode") or ""),
         network=str(host.get("NetworkMode") or ""), ipc=str(host.get("IpcMode") or ""),
-        userns=str(host.get("UsernsMode") or ""), mounts=mounts)
+        userns=str(host.get("UsernsMode") or ""), mounts=mounts,
+        image_ref=str(config.get("Image") or ""))
 
 
 def _has_data(mountpoint: str) -> bool:
@@ -227,7 +237,9 @@ def take_inventory(paths: BoxPaths) -> Inventory:
     image_ids = sorted(set(_run(["docker", "image", "ls", "-q", "--no-trunc"],
                                 capture=True).stdout.split()))
     images = [ImageEntry(id=d["Id"], tags=sorted(d.get("RepoTags") or []),
-                         size=int(d.get("Size") or 0), in_use=d["Id"] in used)
+                         size=int(d.get("Size") or 0), in_use=d["Id"] in used,
+                         refs=sorted({c.image_ref for c in containers
+                                      if c.image_id == d["Id"] and "@sha256:" in c.image_ref}))
               for d in (_json(["docker", "image", "inspect", *image_ids]) if image_ids else [])]
     projects = sorted(load_registered_projects(paths))
     return Inventory(driver=str(info.get("Driver")), driver_type=driver_type,

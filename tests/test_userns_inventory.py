@@ -34,7 +34,8 @@ def _docker(paths, tmp_path):
     (loose / "f").write_text("x")
     containers = [
         {"Id": "c1", "Name": "/shop-db-1", "Image": "sha256:img", "State": {"Running": False},
-         "Config": {"Labels": {"com.docker.compose.project": "shop",
+         "Config": {"Image": "postgres:16@sha256:" + "f" * 64,
+                    "Labels": {"com.docker.compose.project": "shop",
                                "com.docker.compose.service": "db"}},
          "HostConfig": {}, "Mounts": [
              {"Type": "volume", "Name": "a" * 64, "Destination": "/var/lib/postgresql/data", "RW": True},
@@ -97,6 +98,8 @@ def test_inventory_from_docker(paths, tmp_path, monkeypatch) -> None:
     assert inv.containers[0].mounts[0].kind == "anonymous"
     assert inv.data_binds() == [f"{paths.projects}/shop/uploads"]  # normalised
     assert [i.in_use for i in inv.images] == [True, False]
+    assert inv.images[0].refs == ["postgres:16@sha256:" + "f" * 64] and inv.images[0].carried
+    assert not inv.images[1].carried
     assert inv.network["ipam"]["Config"] == [{"Subnet": "172.30.0.0/16"}]
     assert Inventory.from_json(json.loads(json.dumps(inv.to_json()))) == inv
 

@@ -119,17 +119,22 @@ def volumes(inv: Inventory, r: Report) -> None:
 
 def images(inv: Inventory, r: Report) -> None:
     for img in inv.images:
-        if not img.tags:
+        if not img.carried:
             r.notes.append(f"image {img.id[:19]} has no tag and is not carried across "
                            f"(nothing references it after a recreate)")
             continue
+        if img.refs:
+            r.notes.append(f"{', '.join(img.refs)}: pulled again by digest once its layers are "
+                           f"loaded (docker load keeps no digests); its registry must answer "
+                           f"during the downtime")
         try:
             high = image_high_ids(img.id)
         except LayerScanError as e:
-            r.refusals.append(f"image {', '.join(img.tags)}: {e}")
+            r.refusals.append(f"image {', '.join(img.tags or img.refs)}: {e}")
             continue
         if high:
-            r.refusals.append(f"image {', '.join(img.tags)} has files owned by ids above 65535 "
+            r.refusals.append(f"image {', '.join(img.tags or img.refs)} has files owned by ids "
+                              f"above 65535 "
                               f"({', '.join(high[:5])}), which a remapped daemon cannot load. "
                               f"Rebuild or replace it and redeploy")
 
@@ -187,7 +192,7 @@ def _existing(path: Path) -> Path:
 
 
 def disk(inv: Inventory, r: Report, images_dir: Path) -> None:
-    carried = sum(i.size for i in inv.images if i.tags)
+    carried = sum(i.size for i in inv.images if i.carried)
     need = int(1.1 * 2 * carried)  # the tarballs, then the same layers unpacked
     free = min(shutil.disk_usage(_existing(images_dir)).free,
                shutil.disk_usage(_existing(Path(inv.root))).free)
