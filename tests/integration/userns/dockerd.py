@@ -25,12 +25,27 @@ def _quiet(*cmd: str) -> int:
     return subprocess.run(list(cmd), capture_output=True, check=False).returncode
 
 
+def _dockerd_running() -> bool:
+    """A live dockerd. A crash test's dockerd outlives the forked process
+    that started it and is left a zombie (the container's PID 1 does not
+    reap), which pgrep would still count."""
+    for stat in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            fields = stat.read_text().rsplit(")", 1)
+            name = fields[0].split("(", 1)[1]
+        except (OSError, IndexError):
+            continue  # gone since the listing
+        if name == "dockerd" and fields[1].split()[0] != "Z":
+            return True
+    return False
+
+
 class ProcessDaemon:
     """dockerd as a child process; the same stop/start contract as systemd."""
 
     def stop(self) -> None:
         _quiet("pkill", "-TERM", "-x", "dockerd")
-        _wait(lambda: _quiet("pgrep", "-x", "dockerd") != 0, "dockerd to exit")
+        _wait(lambda: not _dockerd_running(), "dockerd to exit")
 
     def start(self) -> None:
         with LOG.open("ab") as log:

@@ -33,6 +33,14 @@ def _label(kind: str) -> str:
     return f"{kind}@{sys._getframe(2).f_code.co_name}"
 
 
+def _caller() -> str:
+    """The first function outside subprocess that started the process."""
+    frame = sys._getframe(2)
+    while frame.f_back is not None and frame.f_code.co_filename == subprocess.__file__:
+        frame = frame.f_back
+    return frame.f_code.co_name
+
+
 def _changes_box(argv) -> str | None:
     """The change label of a process, or None for one that only reads."""
     args = [str(a) for a in (argv if isinstance(argv, (list, tuple)) else [argv])]
@@ -55,7 +63,7 @@ def _patched(record: Callable[[str], None]) -> Iterator[None]:
 
     saved = {name: getattr(os, name) for name in _OS_CALLS}
     real_open, real_rmtree = os.open, shutil.rmtree
-    real_run, real_popen = subprocess.run, subprocess.Popen
+    real_popen = subprocess.Popen
 
     def wrap(name):
         def call(*args, **kwargs):
@@ -72,30 +80,24 @@ def _patched(record: Callable[[str], None]) -> Iterator[None]:
         hit(_label("rmtree"))
         return real_rmtree(*args, **kwargs)
 
-    def run(argv, *args, **kwargs):
-        what = _changes_box(argv)
-        if what:
-            hit(_label(what))
-        return real_run(argv, *args, **kwargs)
-
     class Popen(real_popen):  # type: ignore[misc, valid-type]
         def __init__(self, argv, *args, **kwargs):
             what = _changes_box(argv)
             if what:
-                hit(_label(what))
+                hit(f"{what}@{_caller()}")
             super().__init__(argv, *args, **kwargs)
 
     for name in _OS_CALLS:
         setattr(os, name, wrap(name))
     os.open, shutil.rmtree = opened, rmtree
-    subprocess.run, subprocess.Popen = run, Popen
+    subprocess.Popen = Popen  # subprocess.run starts its process through it
     try:
         yield
     finally:
         for name, fn in saved.items():
             setattr(os, name, fn)
         os.open, shutil.rmtree = real_open, real_rmtree
-        subprocess.run, subprocess.Popen = real_run, real_popen
+        subprocess.Popen = real_popen
 
 
 def count(fn: Callable[[], object]) -> list[str]:
