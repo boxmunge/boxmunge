@@ -206,7 +206,11 @@ def _start_release(
 
 
 def run_pre_deploy_hook(project_name: str, paths: BoxPaths, manifest: dict) -> int:
-    """The manifest's pre-deploy command. Production is not touched yet."""
+    """The manifest's pre-deploy command. Production is not touched yet.
+
+    It runs on the host in the project directory, split into words but with
+    no shell, so `&&`, pipes and `$VAR` reach the program as arguments.
+    """
     pre_deploy = manifest.get("deploy", {}).get("pre_deploy", "")
     if not pre_deploy:
         return 0
@@ -218,6 +222,14 @@ def run_pre_deploy_hook(project_name: str, paths: BoxPaths, manifest: dict) -> i
         )
     except subprocess.CalledProcessError as e:
         print(f"  ERROR: Pre-deploy failed: {e.stderr}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        reason = "not found" if isinstance(e, FileNotFoundError) else (
+            "not executable" if isinstance(e, PermissionError) else e.strerror)
+        print(f"  ERROR: Pre-deploy command cannot run: {e.filename}: {reason}. "
+              "deploy.pre_deploy runs without a shell, from the project directory: "
+              "name an executable on the host's PATH, or a script in the project "
+              "(mode 0755) for anything with more than one step.", file=sys.stderr)
         return 1
     return 0
 

@@ -203,8 +203,12 @@ backup:
 
 # Deploy behaviour.
 deploy:
-  # Shell command(s) run before containers are restarted.
-  pre_deploy: "npm ci --prefix frontend && npm run build --prefix frontend"
+  # Command run on the host, in the project directory, before containers are
+  # restarted; a non-zero exit stops the deploy. It is split into words but run
+  # without a shell: `&&`, pipes, redirects and `$VAR` are passed to the program
+  # as plain arguments, so put more than one step in a script (mode 0755).
+  # Builds (npm ci, asset compilation) belong in the image's Dockerfile.
+  pre_deploy: "boxmunge-scripts/pre-deploy.sh"
 
   # If true, boxmunge takes a backup before deploying.
   snapshot_before_deploy: true
