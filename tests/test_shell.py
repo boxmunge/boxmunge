@@ -130,6 +130,7 @@ class TestAllowedCommands:
             "bundle",            # Local-dev only — packages a project on the developer's machine.
             "install-txn",       # Operator-only: dropping a stale install record.
             "legacy-stage",      # Operator-only (root): resolves a stage left by 0.10.1.
+            "staging-teardown-all",  # Root-only: run by the upgrade shim before a rollback.
         }
 
         for cmd in COMMANDS:

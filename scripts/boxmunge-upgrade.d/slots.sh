@@ -155,6 +155,16 @@ complete_rollback() {
     log "ROLLBACK: $new_version failed at stage=$stage, reverting to slot $prev_slot"
     bm_log warn upgrade "rollback initiated" "{\"version\": \"$new_version\", \"from_version\": \"$from_version\", \"stage\": \"$stage\"}"
 
+    # D14: the release being rolled back from tears down its staged releases
+    # (an older release does not know .releases/staged/). Only before the
+    # swap: once swapped, the active venv is the older release. It alerts per
+    # project, and neither a failure nor a hang (killed by the timeout: one
+    # compose down per staged project) blocks the rollback.
+    if [[ "$ACTIVE_SLOT" != "$prev_slot" ]]; then
+        timeout --kill-after=10 600 "$(active_venv)/bin/boxmunge-server" staging-teardown-all \
+            --reason platform-rollback \
+            || log "WARN: staging teardown before the rollback failed (alerted per project)"
+    fi
     [[ "$ACTIVE_SLOT" == "$prev_slot" ]] || swap_to "$prev_slot"
     # Any probation ended with this rollback. Left behind, it would name the
     # now-live slot as previous_slot.

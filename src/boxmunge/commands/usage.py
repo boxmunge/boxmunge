@@ -93,6 +93,13 @@ flag, shows what production runs and the choices, and changes nothing.
 files); --keep-staged treats it as promoted. Refused while a platform
 rollback is still possible (probation). If interrupted, run the same
 command again. Operator-only: run it as root, as boxmunge-server.""",
+    "staging-teardown-all": """\
+Usage: boxmunge staging-teardown-all --reason platform-rollback
+
+Tear down every project's staged release and alert to re-stage it. Run by
+the upgrade shim before a platform rollback swaps back (an older release
+does not know the staged slot); a failure is alerted with that project's
+manual commands and never blocks the rollback. Operator-only: run as root.""",
     "rollback": """\
 Usage: boxmunge rollback <project> [--yes]
 
