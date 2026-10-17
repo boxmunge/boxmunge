@@ -58,9 +58,16 @@ def _lookup(target: Target, port: int) -> list[tuple[str, str]]:
     return keys
 
 
+# Only the types server-setup can record. Asking for the sk-* types too makes
+# ssh-keyscan open more unauthenticated connections, each of which sshd's
+# PerSourcePenalties (OpenSSH >= 9.8, on by default in Debian 13) counts
+# against this address.
+_SCAN_TYPES = "ed25519,ecdsa,rsa"
+
+
 def _scan(target: Target) -> list[tuple[str, str]]:
     result = subprocess.run(
-        ["ssh-keyscan", "-T", "15", "-p", str(target.port), target.host],
+        ["ssh-keyscan", "-T", "15", "-t", _SCAN_TYPES, "-p", str(target.port), target.host],
         capture_output=True, text=True, check=False,
     )
     keys = []
@@ -70,9 +77,19 @@ def _scan(target: Target) -> list[tuple[str, str]]:
             continue
         keys.append((parts[1], parts[2]))
     if not keys:
+        stderr = result.stderr.strip() or "(nothing)"
         raise HostKeyError(
-            f"Could not read the SSH host key of {target.host}:{target.port}. "
-            f"{result.stderr.strip()}"
+            f"Could not read the SSH host key of {target.host}:{target.port}: "
+            f"ssh-keyscan returned no keys (exit {result.returncode}).\n"
+            f"ssh-keyscan said: {stderr}\n"
+            "If sshd is reachable, it may be rate-limiting this address: OpenSSH "
+            "9.8 and later (PerSourcePenalties, on by default in Debian 13) "
+            "refuses an address for a while after unauthenticated connections "
+            "such as ssh-keyscan's. Wait a few minutes and retry (with "
+            "--host-key-fingerprint SHA256:... so the retry needs no prompt), or "
+            "skip the scan: add the server's /etc/ssh/ssh_host_ed25519_key.pub "
+            f"(from its console) to {target.known_hosts} as "
+            f"'{host_pattern(target.host, target.port)} ssh-ed25519 AAAA...'."
         )
     return keys
 

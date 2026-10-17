@@ -51,6 +51,25 @@ def test_fingerprint_matches_ssh_keygen(keys) -> None:
     assert fingerprint(b64) == fp
 
 
+def test_scan_asks_only_for_recordable_key_types(target, keys, fake_remote) -> None:
+    # Fewer unauthenticated connections for sshd's PerSourcePenalties to count.
+    _offer(fake_remote, keys["ed"])
+    ensure_trusted(target, keys["ed"][2], None)
+    [argv] = fake_remote.calls("ssh-keyscan")
+    assert argv[argv.index("-t") + 1] == "ed25519,ecdsa,rsa"
+
+
+def test_empty_scan_explains_rate_limiting(target, keys, fake_remote) -> None:
+    fake_remote.respond("ssh-keyscan", HOST, stderr="write (localhost): Broken pipe\n", rc=1)
+    with pytest.raises(HostKeyError) as exc:
+        ensure_trusted(target, keys["ed"][2], None)
+    message = str(exc.value)
+    assert "Broken pipe" in message
+    assert "PerSourcePenalties" in message and "few minutes" in message
+    assert "--host-key-fingerprint" in message and str(target.known_hosts) in message
+    assert not target.known_hosts.exists()
+
+
 def test_known_host_is_left_to_ssh(target: Target, keys, fake_remote) -> None:
     target.known_hosts.parent.mkdir(parents=True)
     t, b, _ = keys["ed"]
