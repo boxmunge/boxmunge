@@ -175,7 +175,7 @@ The catalog is the authority on parameters and result fields; this table is the 
 | `status.get` | none | `projects`: one row per project: `status` (ok, failing, critical_stopped, unknown, quarantined, paused, pre_registered, error), `last_check`, `deployed_at`, `quarantine` (`cve_id`, `severity`, `explanation`, `quarantined_at`) and `error`, null where they do not apply |
 | `projects.list` | none | `projects`: registered project names |
 | `health.get` | none | `healthy`, `exit_code`, `checks` (`name`, `status` ok/warn/error/skip, `detail`) |
-| `project.get` | `project` | `lifecycle` (running, paused, quarantined, monitor_stopped, pre_registered, registered), `health`, `deploy` with history, `staging`, `paused`, `quarantine` |
+| `project.get` | `project` | `lifecycle` (running, paused, quarantined, monitor_stopped, pre_registered, registered), `health`, `deploy` with history, `staging` (`active`, and the staged release's `id`, `ref` and `state`: starting, ready or retired; null when nothing is staged), `paused`, `quarantine` |
 | `project.health` | `project` | Runs the smoke checks now: `exit_code`, `status`, `smoke` |
 | `project.logs` | `project`, `service`?, `tail`? (1-1000, default 100) | `lines` of container log output |
 | `oplog.query` | `project`?, `component`?, `level`?, `since`? (`30m`, `6h`, `7d`), `tail`? (default 50) | `entries` of the operational log; `detail` is compact JSON text or null |

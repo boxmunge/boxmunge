@@ -222,10 +222,6 @@ class BoxPaths:
         name = _checked(name)
         return self.caddy_sites / f"{name}-staging.conf"
 
-    def project_staging_compose_override(self, name: str) -> Path:
-        name = _checked(name)
-        return self.projects / name / "compose.boxmunge-staging.yml"
-
     def project_alerts_dir(self, name: str) -> Path:
         """The once-only alerts last sent for a project (see project_alerts)."""
         name = _checked(name)

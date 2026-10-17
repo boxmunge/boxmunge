@@ -17,13 +17,14 @@ from pathlib import Path
 from boxmunge.built_images import remove_built_images
 from boxmunge import docker_containers
 from boxmunge.data_helper import container_owned_dirs, empty_under
-from boxmunge.docker import compose_down, caddy_reload, DockerError
+from boxmunge.docker import DockerError, caddy_reload, compose_down, staging_compose_project
 from boxmunge.fileutil import LockError, project_lock
-from boxmunge.legacy_stage import legacy_staging_state
+from boxmunge.legacy_stage import legacy_staging_compose, legacy_staging_state
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.paths import BoxPaths
 from boxmunge.project_alerts import ALERT_KINDS, alert_state
 from boxmunge.project_registry import is_registered, remove_project as registry_remove
+from boxmunge.staged_release import has_slot, refuse_planted, staging_target
 
 
 def project_state_files(paths: BoxPaths, name: str) -> list[Path]:
@@ -91,14 +92,10 @@ def _teardown(project_name: str, paths: BoxPaths) -> list[str]:
                          project_name=project_name, remove_orphans=True)
         except DockerError as e:
             failures.append(f"production: {e}")
-    if paths.project_staging_compose_override(project_name).exists():
-        base = ("compose.staging-base.yml"
-                if (project_dir / "compose.staging-base.yml").exists() else "compose.yml")
-        try:
-            compose_down(project_dir, compose_files=[base, "compose.boxmunge-staging.yml"],
-                         project_name=f"{project_name}-staging", remove_orphans=True)
-        except DockerError as e:
-            failures.append(f"staging: {e}")
+    try:
+        _staging_down(project_name, paths)
+    except (DockerError, OSError) as e:
+        failures.append(f"staging: {e}")
     # Only the images the platform built for this project: their names
     # (boxmunge.invalid/<compose-project>/...) belong to no one else.
     for compose_project in (project_name, f"{project_name}-staging"):
@@ -107,6 +104,22 @@ def _teardown(project_name: str, paths: BoxPaths) -> list[str]:
         except DockerError as e:
             failures.append(f"built images of {compose_project}: {e}")
     return failures
+
+
+def _staging_down(project_name: str, paths: BoxPaths) -> None:
+    """compose down staging, from the slot (a link planted in its place is
+    refused, never followed), or from the project dir for a stage left by
+    boxmunge 0.10.1. Raises DockerError or OSError."""
+    if has_slot(paths, project_name):
+        refuse_planted(paths, project_name)
+        target = staging_target(paths, project_name)
+        compose_down(target.cwd, remove_orphans=True, **target.kwargs())
+        return
+    project_dir = paths.project_dir(project_name)
+    legacy = legacy_staging_compose(project_dir)
+    if legacy is not None:
+        compose_down(project_dir, compose_files=legacy,
+                     project_name=staging_compose_project(project_name), remove_orphans=True)
 
 
 class ContainersLeft(Exception):

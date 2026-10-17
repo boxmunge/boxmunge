@@ -71,6 +71,16 @@ def legacy_stage(paths: BoxPaths, project: str) -> LegacyStage | None:
     return LegacyStage("git" if _present(project_dir / "repo") else "leftover")
 
 
+def legacy_staging_compose(project_dir: Path) -> list[str] | None:
+    """The compose files a 0.10.1 stage ran staging from, in the project
+    dir, or None when its overlay is not there."""
+    if not _present(project_dir / LEGACY_STAGING_FILES[1]):
+        return None
+    base = (LEGACY_STAGING_FILES[0] if _present(project_dir / LEGACY_STAGING_FILES[0])
+            else "compose.yml")
+    return [base, LEGACY_STAGING_FILES[1]]
+
+
 def legacy_refusal(project: str, stage: LegacyStage) -> str:
     return (f"'{project}' has a release staged by boxmunge 0.10.1 ({stage.kind}); the "
             f"project directory may hold the staged files. Resolve it first with: "

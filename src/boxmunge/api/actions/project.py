@@ -20,10 +20,10 @@ from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.inbox_cmd import collect_inbox
 from boxmunge.commands.status import HEALTH_STATES
 from boxmunge.cve.quarantine import read_quarantine_state
-from boxmunge.legacy_stage import legacy_staging_state
 from boxmunge.pause import read_paused_state
 from boxmunge.project_registry import is_registered
 from boxmunge.paths import BoxPaths
+from boxmunge.staged_release import STATES as STAGING_STATES, SlotError, load_slot
 from boxmunge.state import StateError, read_state
 
 LIFECYCLES = ("registered", "pre_registered", "quarantined", "paused", "monitor_stopped",
@@ -45,7 +45,8 @@ PROJECT_VIEW = obj({
             "ref": STRING, "deployed_at": NULLABLE_TIMESTAMP, "snapshot": NULLABLE_STRING,
         })),
     }),
-    "staging": obj({"active": BOOLEAN, "ref": NULLABLE_STRING}),
+    "staging": obj({"active": BOOLEAN, "id": NULLABLE_STRING, "ref": NULLABLE_STRING,
+                    "state": nullable(enum(*STAGING_STATES))}),
     "paused": nullable(obj({"paused_at": TIMESTAMP, "reason": NULLABLE_STRING})),
     "quarantine": nullable(QUARANTINE_SCHEMA),
 })
@@ -70,15 +71,15 @@ def _project_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
     deployed = has_dir and (project_dir / "manifest.yml").exists()
     deploy = read_state(paths.project_deploy_state(name))
     health = read_state(paths.project_health_state(name))
-    # The slot is not read here yet: this reports the state file boxmunge
-    # 0.10.1 wrote (boxmunge.legacy_stage).
-    staging = read_state(legacy_staging_state(paths, name))
+    try:
+        slot = load_slot(paths, name)
+    except SlotError as e:
+        raise StateError(f"The staged release of {name} is unreadable: {e}") from e
     paused = read_paused_state(name, paths)
     if paused is not None and not isinstance(paused.get("paused_at"), str):
         raise StateError(f"Paused state {paths.project_paused_state(name)} has no paused_at "
                          f"timestamp; resume the project or rewrite the file.")
     quarantine = read_quarantine_state(name, paths)
-    staged = bool(staging.get("active", False))
     health_status = health.get("status", "unknown")
     if health_status not in HEALTH_STATES:
         raise StateError(f"Health state {paths.project_health_state(name)} has the status "
@@ -107,7 +108,8 @@ def _project_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
                 for entry in deploy.get("history", [])
             ],
         },
-        "staging": {"active": staged, "ref": staging.get("ref") if staged else None},
+        "staging": {"active": slot is not None, "id": slot.id if slot else None,
+                    "ref": slot.ref if slot else None, "state": slot.state if slot else None},
         "paused": None if paused is None else {
             "paused_at": utc_timestamp(paused["paused_at"],
                                        f"{paths.project_paused_state(name)} paused_at"),

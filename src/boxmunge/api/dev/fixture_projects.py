@@ -15,8 +15,8 @@ from typing import Any
 
 import yaml
 
-from boxmunge.legacy_stage import legacy_staging_state
 from boxmunge.paths import BoxPaths
+from boxmunge.staged_release import StagedRelease, slot_dir, write_meta
 from boxmunge.ulid import generate_ulid
 
 DEV_DIR = "dev"
@@ -149,8 +149,12 @@ def _write_state(paths: BoxPaths, project: FixtureProject, project_id: str,
         "failure_reason": project.failure_reason,
     })
     if project.staged:
-        write_json(legacy_staging_state(paths, name),
-                   {"active": True, "ref": ref(name, now - timedelta(hours=1))})
+        slot = slot_dir(paths, name)
+        (slot / "release").mkdir(parents=True, exist_ok=True)
+        write_meta(slot, StagedRelease(
+            id="01JF1XTVREST0STAGED0000000", kind="bundle",
+            ref=ref(name, now - timedelta(hours=1)), bundle_sha256=None,
+            staged_at=iso(now - timedelta(hours=1)), state="ready"))
     if project.paused_reason is not None:
         write_json(paths.project_paused_state(name), {
             "paused_at": iso(now - timedelta(hours=26)), "reason": project.paused_reason})

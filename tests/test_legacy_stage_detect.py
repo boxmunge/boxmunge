@@ -215,3 +215,14 @@ def test_undetectable_stage_refuses_production_starts(paths) -> None:
     finally:
         state_dir.chmod(0o755)
     up.assert_not_called()
+
+
+def test_only_the_legacy_module_knows_state_staging() -> None:
+    """state/staging is retired (D11): boxmunge reads it only to detect a
+    0.10.1 stage, and project-delete removes a leftover one."""
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[1] / "src" / "boxmunge"
+    users = sorted(str(p.relative_to(src)) for p in src.rglob("*.py")
+                   if "legacy_staging_state" in p.read_text() or
+                   '"staging" /' in p.read_text())
+    assert users == ["commands/project_delete_cmd.py", "legacy_stage.py"]
