@@ -22,7 +22,9 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from boxmunge.git_slot import GitRefError, resolve_recorded_ref, show_manifest
-from boxmunge.legacy_stage import EvidenceError, LegacyStage, evidence, legacy_stage
+from boxmunge.legacy_stage import (
+    EvidenceError, LegacyStage, evidence, legacy_stage, real_dir_problem,
+)
 from boxmunge.manifest import ManifestError, at_current_schema, load_manifest
 from boxmunge.release import previous_dir
 from boxmunge.release_txn import CODE_RESTORED, load_txn, options_text
@@ -72,6 +74,11 @@ def _legacy(paths: BoxPaths, project: str, stage: LegacyStage) -> BackupSource:
         ev = evidence(paths, project, stage)
         running = (_running_commit(pdir / "repo", ev.current_ref)
                    if stage.kind == "git" and ev.classification == "untouched" else None)
+        kept = pdir / ".releases" / "prestage" / "release"
+        problem = (real_dir_problem(kept)
+                   if stage.kind == "bundle" and ev.classification == "untouched" else None)
+        if problem:
+            raise EvidenceError(problem)
     except EvidenceError as e:
         return BackupSource(None, alert=True, skip=(
             f"a release staged by boxmunge 0.10.1 is in place and which release production "
@@ -85,7 +92,6 @@ def _legacy(paths: BoxPaths, project: str, stage: LegacyStage) -> BackupSource:
         # backup service, the dump fails (noisily) rather than reaching the
         # wrong container. Resolving the stage is the fix, not a rewrite here.
         return BackupSource(_from_git(pdir / "repo", running))
-    kept = pdir / ".releases" / "prestage" / "release"
     return BackupSource(load_manifest(kept / "manifest.yml"), compose_file=kept / "compose.yml")
 
 

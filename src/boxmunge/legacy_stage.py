@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -24,7 +25,7 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 from boxmunge import docker_containers
 from boxmunge.docker_run import DockerError
-from boxmunge.fileutil import atomic_write_text, exclusive_lock
+from boxmunge.fileutil import atomic_write_text, exclusive_lock, read_text_nofollow
 from boxmunge.git_slot import GitRefError, head_sha, rev_parse
 from boxmunge.notify import notify
 from boxmunge.state import StateError, read_state
@@ -79,6 +80,18 @@ def legacy_stage(paths: BoxPaths, project: str) -> LegacyStage | None:
     if not staged:
         return None
     return LegacyStage("git" if _present(project_dir / "repo") else "leftover")
+
+
+def real_dir_problem(path: Path) -> str | None:
+    """Why `path` is not a real directory, or None. The kept trees are
+    deploy-writable, and root must never read or re-own through a link there."""
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return f"{path} does not exist"
+    if stat.S_ISDIR(mode):
+        return None
+    return f"{path} is not a directory (a link or a file); refusing to read through it"
 
 
 def legacy_staging_compose(project_dir: Path) -> list[str] | None:
@@ -156,10 +169,13 @@ def stage_time(paths: BoxPaths, project: str, stage: LegacyStage) -> datetime:
     repo/'s HEAD reflog (git)."""
     pdir = paths.project_dir(project)
     if stage.kind == "bundle":
+        _require_kept_dirs(pdir)
         try:
-            st = (pdir / ".releases" / "prestage" / "meta.json").stat()
+            st = os.lstat(pdir / ".releases" / "prestage" / "meta.json")
         except OSError as e:
             raise EvidenceError(f"cannot read the kept release's meta.json: {e}") from e
+        if not stat.S_ISREG(st.st_mode):
+            raise EvidenceError("the kept release's meta.json is not a regular file")
         return datetime.fromtimestamp(st.st_mtime, timezone.utc)
     reflog = pdir / "repo" / ".git" / "logs" / "HEAD"
     try:
@@ -191,9 +207,16 @@ def _git_full(repo: Path, ref: str | None, label: str, notes: list[str]) -> str 
     return sha
 
 
+def _require_kept_dirs(pdir: Path) -> None:
+    for path in (pdir / ".releases", pdir / ".releases" / "prestage"):
+        problem = real_dir_problem(path)
+        if problem:
+            raise EvidenceError(problem)
+
+
 def _json_doc(path: Path) -> dict[str, Any]:
     try:
-        doc = json.loads(path.read_text())
+        doc = json.loads(read_text_nofollow(path))
     except (OSError, UnicodeDecodeError, ValueError) as e:
         raise EvidenceError(f"cannot read {path}: {e}") from e
     if not isinstance(doc, dict):
@@ -232,6 +255,7 @@ def evidence(paths: BoxPaths, project: str, stage: LegacyStage) -> Evidence:
     notes: list[str] = []
     head = staged_sha = None
     if stage.kind == "bundle":
+        _require_kept_dirs(pdir)
         live, kept = pdir / ".releases" / "live.json", pdir / ".releases" / "prestage" / "meta.json"
         staged = _ref_of(live, _json_doc(live))
         production = _ref_of(kept, _json_doc(kept))

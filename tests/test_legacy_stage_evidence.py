@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -417,3 +418,31 @@ def test_quarantine_not_held_during_grace(paths, legacy) -> None:
     quarantine.assert_not_called()
     alert.assert_not_called()
     assert result.held is None
+
+
+# -- links where root reads the kept release (fix round 2) -------------------
+
+def _relink(path, tmp_path) -> None:
+    aside = tmp_path / f"aside-{path.name}"
+    path.rename(aside)
+    os.symlink(aside, path)
+
+
+@pytest.mark.parametrize("linked", ["prestage", "prestage/release"])
+def test_backup_of_a_linked_kept_release_is_skipped_with_an_alert(paths, legacy, tmp_path,
+                                                                  linked) -> None:
+    _relink(legacy / ".releases" / linked, tmp_path)
+    with patch(CREATED, return_value=_created(-5)):
+        src = backup_source(paths, "myapp")
+    assert src.manifest is None and src.alert and "not a directory" in src.skip
+
+
+@pytest.mark.parametrize("name", ["prestage/meta.json", "live.json"])
+def test_evidence_read_through_a_linked_file_is_an_evidence_error(paths, legacy, tmp_path,
+                                                                  name) -> None:
+    path = legacy / ".releases" / name
+    (tmp_path / "planted.json").write_text(path.read_text())
+    path.unlink()
+    os.symlink(tmp_path / "planted.json", path)
+    with patch(CREATED, return_value={}), pytest.raises(EvidenceError):
+        evidence(paths, "myapp", LegacyStage("bundle"))

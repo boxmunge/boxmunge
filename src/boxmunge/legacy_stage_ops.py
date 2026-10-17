@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -31,11 +30,12 @@ from boxmunge.data_dirs import log_kept, set_aside_announcer
 from boxmunge.docker import DockerError, caddy_config_lock, caddy_reload, compose_down
 from boxmunge.fileutil import (
     DISCARDED, atomic_write_text, chown_tree_deploy, discard_dir, durable_rename_dir, fsync_dir,
+    read_text_nofollow,
 )
 from boxmunge.git_layout import alert_unlinked, relink_advice
 from boxmunge.legacy_stage import (
     LEGACY_STAGING_FILES, Evidence, LegacyStage, drop_record, get_record,
-    legacy_staging_compose, legacy_staging_state, update_record,
+    legacy_staging_compose, legacy_staging_state, real_dir_problem, update_record,
 )
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation
@@ -96,15 +96,9 @@ def predeploy_snapshots(paths: BoxPaths, project: str,
 # -- 0.10.1's prestage operations, on this release's durable helpers --------
 
 def _require_real_dir(path) -> None:
-    """The kept trees are deploy-writable: a link there would have root copy
-    or re-own whatever it points at."""
-    try:
-        mode = os.lstat(path).st_mode
-    except FileNotFoundError:
-        raise LegacyStageError(f"{path} does not exist") from None
-    if not stat.S_ISDIR(mode):
-        raise LegacyStageError(f"{path} is not a directory (a link or a file); refusing "
-                               f"to read through it. Inspect it by hand")
+    problem = real_dir_problem(path)
+    if problem:
+        raise LegacyStageError(f"{problem}. Inspect it by hand")
 
 
 def _prestage_ref(paths: BoxPaths, project: str) -> str | None:
@@ -112,7 +106,10 @@ def _prestage_ref(paths: BoxPaths, project: str) -> str | None:
     _require_real_dir(paths.project_releases(project))
     _require_real_dir(prestage)
     meta = prestage / "meta.json"
-    ref = json.loads(meta.read_text()).get("ref")
+    try:
+        ref = json.loads(read_text_nofollow(meta)).get("ref")
+    except (OSError, UnicodeDecodeError, ValueError, AttributeError) as e:
+        raise LegacyStageError(f"cannot read {meta}: {e}") from e
     if ref is not None and not isinstance(ref, str):
         raise LegacyStageError(f"{meta}: ref {ref!r} is not a string")
     return ref
@@ -245,7 +242,11 @@ def _production_code(paths: BoxPaths, project: str, stage: LegacyStage,
             from boxmunge.git_slot import checkout_detached, resolve_recorded_ref
             repo = paths.project_dir(project) / "repo"
             current = read_state(paths.project_deploy_state(project)).get("current_ref")
-            checkout_detached(repo, resolve_recorded_ref(repo, current or ""))
+            if current is None:
+                # add-git-project, then a 0.10.1 stage: no deployed commit to go back to.
+                print(f"  {project} was never deployed: repo/ stays at the staged checkout.")
+                return
+            checkout_detached(repo, resolve_recorded_ref(repo, current))
         return
     if ev is None:
         raise LegacyStageError("--keep-staged needs the evidence of what production runs")
@@ -287,9 +288,10 @@ def finish_apply(paths: BoxPaths, project: str) -> None:
     configs), then production recreated on this release's overlay as a
     deploy does. A paused, quarantined or monitor-stopped project is left
     stopped, with its bind sources recorded for the command that starts it.
-    A never-deployed project (a discarded first stage) has nothing to do."""
+    A never-deployed project (a discarded first stage: no recorded deploy)
+    has nothing to do; any other missing manifest fails loudly."""
     pdir = paths.project_dir(project)
-    if not os.path.lexists(pdir / "manifest.yml"):
+    if read_state(paths.project_deploy_state(project)).get("current_ref") is None:
         print(f"  {project} was never deployed: nothing to start.")
         return
     manifest_path = require_manifest(pdir)

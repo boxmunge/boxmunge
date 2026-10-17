@@ -486,3 +486,65 @@ def test_a_busy_project_says_so_once(paths, capsys) -> None:
         assert run_legacy_stage(paths, "myapp", None, False) == 1
     err = capsys.readouterr().err.lower()
     assert err.count("try again") == 1
+
+
+# -- fix round 2 ------------------------------------------------------------
+
+def test_after_a_crashed_never_deployed_discard_every_call_points_to_it(paths, capsys) -> None:
+    _never_deployed_stage(paths)
+    with patch("boxmunge.legacy_stage_ops._clean_up", side_effect=OSError("crash")):
+        assert _run(paths, "discard") == 1
+    capsys.readouterr()
+    assert _run(paths, None) == 0
+    assert "--discard" in capsys.readouterr().out
+    assert _run(paths, "keep-staged") == 1
+    err = capsys.readouterr().err
+    assert "--discard" in err and "Cannot tell" not in err
+
+
+def test_a_deployed_project_whose_manifest_went_missing_fails_loudly(paths, capsys) -> None:
+    from boxmunge.commands.deploy import run_deploy
+    from boxmunge.project_registry import add_project
+    from tests.bundle_helpers import place_bundle
+    from tests.txn_helpers import docker_off
+    add_project("myapp", paths)
+    place_bundle(paths, timestamp=V1)
+    with docker_off():
+        run_deploy("myapp", paths, ref=V1)
+    pdir = paths.project_dir("myapp")
+    (pdir / "compose.boxmunge-staging.yml").write_text("services: {}\n")
+    (pdir / "manifest.yml").unlink()
+    assert _run(paths, "discard") == 1
+    assert "manifest" in capsys.readouterr().err.lower()
+    assert get_record(paths, "myapp")["choice"] == "discard"
+
+
+def test_meta_json_read_through_a_link_is_refused(paths, legacy, tmp_path) -> None:
+    from boxmunge.legacy_stage_ops import LegacyStageError, restore_prestage_0101
+    meta = legacy / ".releases" / "prestage" / "meta.json"
+    (tmp_path / "planted.json").write_text(meta.read_text())
+    meta.unlink()
+    os.symlink(tmp_path / "planted.json", meta)
+    with pytest.raises(LegacyStageError, match="meta.json"):
+        restore_prestage_0101(paths, "myapp")
+    assert (legacy / "VERSION").read_text() == "v2\n"
+
+
+def test_never_deployed_git_discard_leaves_the_checkout(paths, legacy_git, capsys) -> None:
+    _, b, repo, t = legacy_git
+    write_state(paths.project_deploy_state("myapp"), {})
+    assert _run(paths, "discard", at=t, created=(-1,)) == 0
+    assert git("rev-parse", "HEAD", cwd=repo) == b
+    assert "never deployed" in capsys.readouterr().out
+    assert legacy_stage(paths, "myapp") is None
+    _run.up.assert_not_called()
+
+
+def test_never_deployed_git_keep_staged_records_the_staged_commit(paths, legacy_git) -> None:
+    _, b, _, t = legacy_git
+    write_state(paths.project_deploy_state("myapp"), {})
+    with patch("boxmunge.commands.backup_cmd.backup_locked",
+               side_effect=AssertionError("nothing was deployed to snapshot")):
+        assert _run(paths, "keep-staged", at=t, created=(-1,)) == 0
+    assert read_state(paths.project_deploy_state("myapp"))["current_ref"] == b
+    _run.up.assert_called_once()

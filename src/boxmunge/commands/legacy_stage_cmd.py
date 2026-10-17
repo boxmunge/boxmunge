@@ -128,10 +128,10 @@ def legacy_stage_locked(paths: BoxPaths, project: str, choice: str | None,
         print(f"ERROR: Not yet: {why}. Run it again after that.", file=sys.stderr)
         return 1
     ev = None
-    resumed_discard = choice == "discard" and recorded == "discard"
-    # A resumed --discard needs no evidence, and step 4 may have made it
-    # unreadable (a never-deployed project's live.json is gone).
-    if stage.kind != "leftover" and not resumed_discard:
+    # A started --discard needs no evidence, and its step 4 may have made it
+    # unreadable (a never-deployed project's live.json is gone): whatever is
+    # typed now reaches the resume or the refusal naming --discard.
+    if stage.kind != "leftover" and recorded != "discard":
         try:
             ev = evidence(paths, project, stage)
         except EvidenceError as e:
