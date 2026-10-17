@@ -16,7 +16,7 @@ def test_init_host_sources_userns_before_installing_docker() -> None:
     assert "cat > /etc/docker/daemon.json" not in text
     assert text.index("userns_verify") > text.index("systemctl restart docker")
     assert text.index("userns_record") > text.index('cat > "${BOXMUNGE_ROOT}/config/boxmunge.yml"')
-    assert len(text.splitlines()) < 602
+    assert len(text.splitlines()) < 500
 
 
 def test_userns_refusals_come_before_init_host_changes_anything() -> None:
@@ -62,3 +62,15 @@ def test_aide_watches_the_remap_files() -> None:
     text = (BOOT / "aide.sh").read_text()
     for path in ("/etc/docker/daemon.json Full", "/etc/subuid Full", "/etc/subgid Full"):
         assert path in text
+
+
+def test_init_host_sources_its_split_steps() -> None:
+    """The bundle ships bootstrap/ whole (Makefile BUNDLE_DIRS), so a sourced
+    step only has to exist beside init-host.sh."""
+    text = _init_host()
+    for name in ("userns.sh", "sshd.sh", "unattended.sh", "summary.sh"):
+        assert f'source "$(dirname "$0")/{name}"' in text
+        assert (BOOT / name).is_file()
+    makefile = (BOOT.parent / "Makefile").read_text()
+    assert any(line.startswith("BUNDLE_DIRS") and " bootstrap " in line
+               for line in makefile.splitlines())

@@ -231,44 +231,7 @@ echo "Supervisor user 'supervisor' ready with full shell and SSH key installed."
 # ---------------------------------------------------------------------------
 echo "##BOXMUNGE:STEP:5:15:Configuring SSH"
 banner "Step 5/14: Configuring SSH (port ${SSH_PORT})"
-SSHD_CONFIG="/etc/ssh/sshd_config"
-
-# Apply settings — add if missing, replace if present
-_set_sshd() {
-    local key="$1" val="$2"
-    if grep -qE "^#?${key}" "${SSHD_CONFIG}"; then
-        sed -i "s|^#\?${key}.*|${key} ${val}|" "${SSHD_CONFIG}"
-    else
-        echo "${key} ${val}" >> "${SSHD_CONFIG}"
-    fi
-}
-
-_set_sshd Port            "${SSH_PORT}"
-_set_sshd PermitRootLogin no
-_set_sshd PasswordAuthentication no
-_set_sshd ChallengeResponseAuthentication no
-_set_sshd UsePAM yes
-
-# Session and access limits
-_set_sshd MaxAuthTries 3
-_set_sshd LoginGraceTime 30
-_set_sshd ClientAliveInterval 300
-_set_sshd ClientAliveCountMax 2
-
-# Restrict SSH features — deploy user must not tunnel or forward
-_set_sshd AllowTcpForwarding no
-_set_sshd GatewayPorts no
-_set_sshd PermitTunnel no
-_set_sshd X11Forwarding no
-
-# Only named accounts may log in
-_set_sshd AllowUsers "${DEPLOY_USER} supervisor"
-
-# Note: the sshd Subsystem directive for SFTP is wired in install.sh, after
-# the wrapper binary exists at /opt/boxmunge/bin/boxmunge-sftp. Doing it here
-# would create a window where sshd points at a non-existent wrapper.
-
-systemctl restart sshd
+source "$(dirname "$0")/sshd.sh"
 
 # ---------------------------------------------------------------------------
 # Step 6: Configure firewall (ufw)
@@ -327,31 +290,7 @@ source "$(dirname "$0")/apparmor.sh"
 echo "##BOXMUNGE:STEP:9:15:Configuring automatic updates"
 if [[ "${INSTALL_AUTO_UPDATES}" == "true" ]]; then
     banner "Step 8/14: Configuring unattended-upgrades"
-    if [[ "${ID}" == "ubuntu" ]]; then
-        cat > /etc/apt/apt.conf.d/50unattended-upgrades <<'EOF'
-Unattended-Upgrade::Allowed-Origins {
-    "${distro_id}:${distro_codename}-security";
-    "${distro_id}ESMApps:${distro_codename}-apps-security";
-    "${distro_id}ESM:${distro_codename}-infra-security";
-};
-Unattended-Upgrade::AutoFixInterruptedDpkg "true";
-Unattended-Upgrade::MinimalSteps "true";
-Unattended-Upgrade::Remove-Unused-Dependencies "true";
-EOF
-    else
-        install -m 0644 "$(dirname "$0")/50unattended-upgrades-debian" \
-            /etc/apt/apt.conf.d/50unattended-upgrades
-    fi
-
-    cat > /etc/apt/apt.conf.d/20auto-upgrades <<EOF
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
-Unattended-Upgrade::Automatic-Reboot "true";
-Unattended-Upgrade::Automatic-Reboot-Time "${REBOOT_WINDOW}";
-EOF
-
-    systemctl enable unattended-upgrades
-    systemctl restart unattended-upgrades
+    source "$(dirname "$0")/unattended.sh"
 else
     echo "Skipping unattended-upgrades (--no-auto-updates)"
 fi
@@ -429,6 +368,7 @@ fi
 
 # Backup encryption key (age identity)
 age-keygen -o "${BOXMUNGE_ROOT}/config/backup.key" 2>/dev/null
+# shellcheck disable=SC2034  # read by summary.sh
 BACKUP_PUBKEY="$(age-keygen -y "${BOXMUNGE_ROOT}/config/backup.key")"
 chmod 640 "${BOXMUNGE_ROOT}/config/backup.key"
 chown root:"${DEPLOY_USER}" "${BOXMUNGE_ROOT}/config/backup.key"
@@ -519,6 +459,7 @@ install -m 640 -o root -g "${DEPLOY_USER}" "$(dirname "$0")/../caddy/compose.yml
 
 # Start Caddy
 docker compose -f "${BOXMUNGE_ROOT}/caddy/compose.yml" up -d
+# shellcheck disable=SC2034  # read by summary.sh
 CADDY_STATUS="$(docker inspect --format='{{.State.Status}}' boxmunge-caddy 2>/dev/null || echo 'unknown')"
 
 # ---------------------------------------------------------------------------
@@ -532,37 +473,4 @@ bash "${SCRIPT_DIR}/harden.sh"
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
-echo ""
-echo "###################################################################"
-echo "#                  boxmunge init complete                         #"
-echo "###################################################################"
-echo ""
-echo "  Hostname   : ${HOSTNAME_ARG}"
-echo "  SSH port   : ${SSH_PORT}"
-echo "  Deploy user: ${DEPLOY_USER}"
-echo "  Root dir   : ${BOXMUNGE_ROOT}"
-echo "  Caddy      : ${CADDY_STATUS}"
-echo ""
-echo "  *** BACKUP KEY — SAVE THIS FILE TO A SECURE LOCATION ***"
-echo "  ${BOXMUNGE_ROOT}/config/backup.key"
-echo ""
-echo "  Public key: ${BACKUP_PUBKEY}"
-echo ""
-echo "-------------------------------------------------------------------"
-echo "  Next steps:"
-echo ""
-echo "  1. Copy your backup key to a secure password manager NOW."
-echo ""
-echo "  2. Reconnect as supervisor for administration:"
-echo "       ssh -p ${SSH_PORT} supervisor@${HOSTNAME_ARG}"
-echo ""
-echo "  3. Deploy via restricted shell:"
-echo "       ssh -p ${SSH_PORT} ${DEPLOY_USER}@${HOSTNAME_ARG} \"help\""
-echo ""
-echo "  4. Upload bundles:"
-echo "       scp -O -P ${SSH_PORT} bundle.tar.gz ${DEPLOY_USER}@${HOSTNAME_ARG}:"
-echo ""
-echo "  5. Configure backup remote in ${BOXMUNGE_ROOT}/config/boxmunge.yml"
-echo "     then test with: boxmunge backup <project-name>"
-echo "###################################################################"
-echo ""
+source "$(dirname "$0")/summary.sh"
