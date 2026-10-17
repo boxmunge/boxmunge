@@ -1,6 +1,6 @@
 """Staging basic auth comes from the project's STAGING_AUTH_* secrets."""
 import bcrypt
-from boxmunge.commands.stage_cmd import _staging_auth
+from boxmunge.staging_bringup import _staging_auth
 from boxmunge.paths import BoxPaths
 from boxmunge.secrets import SecretsFile, set_key
 

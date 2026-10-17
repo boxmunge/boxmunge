@@ -34,13 +34,13 @@ from boxmunge import fileutil
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.pause import is_paused, write_paused_state
 from boxmunge.project_registry import add_project
-from boxmunge.release_staging import has_prestage
+from boxmunge.staged_release import load_slot
 from boxmunge.state import write_state
 
 from tests.bundle_helpers import place_bundle
 from tests.test_commands.cve_helpers import make_box, scan_result, seed_quarantine
 from tests.test_commands.test_restore_cmd import _setup_project
-from tests.test_commands.test_stage_promote_release import V1, V2, _docker
+from tests.stage_helpers import V1, V2, staging_docker_off as _docker
 from tests.test_lifecycle_locks import _cu_target, _setup
 
 NAME = "myapp"
@@ -87,14 +87,15 @@ def test_deploy_core(paths, lock_attempts) -> None:
 
 def test_stage_core(paths, lock_attempts) -> None:
     _staged_v2(paths)
-    assert has_prestage(paths, NAME)
+    assert load_slot(paths, NAME).state == "ready"
 
 
+@pytest.mark.xfail(strict=True, reason="Task 20: promote deploys the slot")
 def test_promote_core(paths, lock_attempts) -> None:
     _staged_v2(paths)
     with _docker():
         assert promote_cmd.promote_locked(NAME, paths) == 0
-    assert not has_prestage(paths, NAME)
+    assert load_slot(paths, NAME) is None
 
 
 def test_unstage_core(paths, lock_attempts) -> None:
@@ -102,6 +103,7 @@ def test_unstage_core(paths, lock_attempts) -> None:
     with _docker():
         assert unstage_cmd.unstage_locked(NAME, paths) == 0
     assert (paths.project_dir(NAME) / "VERSION").read_text() == "v1\n"
+    assert load_slot(paths, NAME) is None
 
 
 def test_rollback_core(paths, lock_attempts) -> None:

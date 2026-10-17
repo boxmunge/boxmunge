@@ -122,13 +122,45 @@ def test_production_not_running_is_not_marked(paths, running, fake_containers) -
     assert load_slot(paths, P).production_stopped is None
 
 
-def test_prestage_copy_starts_production_without_a_slot(paths, running) -> None:
-    """The interim stage layout has no slot to record the stop in."""
-    drop_slot(paths, P)
-    with patch.object(staging_data, "check_containers_start"), \
-            patch.object(staging_data, "_run") as run, patch.object(staging_data, "run_helper"), \
-            patch.object(staging_data, "start_containers_checked") as start:
-        staging_data.copy_production_data(paths, P, running, prestage=True)
-    assert len(_stops(run)) == 1
-    start.assert_called_once()
-    assert start.call_args.args[2] == ["shop-web-1"]
+def test_a_record_unreadable_after_the_stop_says_production_is_down(
+        paths, running, capsys) -> None:
+    def corrupt(*_a, **_kw):
+        (slot_dir(paths, P) / "meta.json").write_text("{broken")
+
+    with patch.object(staging_data, "check_containers_start"), patch.object(staging_data, "_run"), \
+            patch.object(staging_data, "run_helper", side_effect=corrupt), \
+            patch("boxmunge.production_stopped.start_containers_checked") as start, \
+            patch("boxmunge.production_stopped.notify") as alert, \
+            pytest.raises(ProductionDownError, match="cannot be read"):
+        staging_data.copy_production_data(paths, P, running)
+    start.assert_not_called()
+    err = capsys.readouterr().err
+    assert "PRODUCTION IS DOWN" in err and f"boxmunge recover {P}" in err
+    assert alert.call_args.kwargs["priority"] == 1
+
+
+def test_a_marker_gone_after_the_stop_says_production_is_down(paths, running, capsys) -> None:
+    def clear(*_a, **_kw):
+        from boxmunge.staged_release import update_meta
+        update_meta(paths, P, load_slot(paths, P), production_stopped=None)
+
+    with patch.object(staging_data, "check_containers_start"), patch.object(staging_data, "_run"), \
+            patch.object(staging_data, "run_helper", side_effect=clear), \
+            patch("boxmunge.production_stopped.notify"), \
+            pytest.raises(ProductionDownError, match="docker start shop-web-1"):
+        staging_data.copy_production_data(paths, P, running)
+    assert "PRODUCTION IS DOWN" in capsys.readouterr().err
+
+
+def test_a_pause_during_the_copy_keeps_production_stopped_quietly(paths, running) -> None:
+    from boxmunge.pause import write_paused_state
+
+    def pause(*_a, **_kw):
+        write_paused_state(P, paths)
+
+    with patch.object(staging_data, "check_containers_start"), patch.object(staging_data, "_run"), \
+            patch.object(staging_data, "run_helper", side_effect=pause), \
+            patch("boxmunge.production_stopped.start_containers_checked") as start:
+        staging_data.copy_production_data(paths, P, running)
+    start.assert_not_called()
+    assert load_slot(paths, P).production_stopped is not None

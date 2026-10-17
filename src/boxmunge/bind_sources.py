@@ -134,18 +134,22 @@ def source_kind(project_dir: Path, rel: str, *, create: bool) -> str:
     raise AssertionError("unreachable")
 
 
-def control_hashes(project_dir: Path, read_files: Iterable[Path]) -> dict[str, str | None]:
+def control_hashes(project_dir: Path, read_files: Iterable[Path], *,
+                   control_root: Path | None = None) -> dict[str, str | None]:
     """sha256 of every file boxmunge reads for the project, keyed by its
     project-relative path: the control files (compose, manifest, env files,
-    the generated overlays) and the compose/include/extends/env/label files
-    `read_files` names. An absent tracked file is `None`, so one created
-    after deploy is a mismatch. A control file that is a symlink (a git
-    project's compose.yml and manifest.yml link into repo/) is hashed
+    the generated overlays) of `control_root` (the release the start runs:
+    the project dir, or staging's slot) and the compose/include/extends/
+    env/label files `read_files` names. An absent tracked file is `None`, so
+    one created after deploy is a mismatch. A control file that is a symlink
+    (a git project's compose.yml and manifest.yml link into repo/) is hashed
     through its target, together with the target's path, as long as the
     fully resolved target stays inside the project; a link out of it is
     refused."""
     hashes: dict[str, str | None] = {}
-    candidates: dict[str, Path] = {e: project_dir / e for e in _CONTROL_FILES}
+    root = control_root or project_dir
+    candidates: dict[str, Path] = {project_rel(str(root / e), project_dir): root / e
+                                   for e in _CONTROL_FILES}
     for path in read_files:
         try:
             rel = project_rel(str(path), project_dir)
@@ -266,13 +270,14 @@ def check_sources(project_dir: Path, sources: set[str], record: dict[str, str]) 
 
 
 def check_control(
-    project_dir: Path, read_files: Iterable[Path], record: dict[str, str | None],
+    project_dir: Path, read_files: Iterable[Path], record: dict[str, str | None], *,
+    control_root: Path | None = None,
 ) -> None:
     """Every file boxmunge reads hashes to what deploy recorded. A rewritten
     control file (a tampered manifest or compose), or one newly created or
     removed, is refused: a later root `up` must never run container-modified
     control files."""
-    now = control_hashes(project_dir, read_files)
+    now = control_hashes(project_dir, read_files, control_root=control_root)
     for rel in sorted(set(now) | set(record)):
         if now.get(rel) != record.get(rel):
             raise BindSourceError(
@@ -282,7 +287,8 @@ def check_control(
 
 
 def record(
-    project_dir: Path, sources: set[str], read_files: Iterable[Path], path: Path,
+    project_dir: Path, sources: set[str], read_files: Iterable[Path], path: Path, *,
+    control_root: Path | None = None,
 ) -> None:
     """Check every source, creating missing ones, record their kinds, and
     record the sha256 of every file boxmunge reads."""
@@ -290,5 +296,5 @@ def record(
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps({
         "version": RECORD_VERSION, "sources": kinds,
-        "control": control_hashes(project_dir, read_files),
+        "control": control_hashes(project_dir, read_files, control_root=control_root),
     }, indent=2) + "\n")

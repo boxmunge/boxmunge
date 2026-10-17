@@ -20,7 +20,7 @@ import pytest
 import yaml
 
 from boxmunge import docker_containers
-from boxmunge.commands import stage_cmd
+from boxmunge import staging_bringup
 from boxmunge.commands.deploy import run_deploy
 from boxmunge.commands.stage_cmd import run_stage
 from boxmunge.commands.unstage_cmd import run_unstage
@@ -75,7 +75,7 @@ def project(paths):
 @contextmanager
 def _no_caddy():
     with patch("boxmunge.commands.deploy.caddy_reload"), \
-            patch("boxmunge.commands.stage_cmd.caddy_reload"), \
+            patch("boxmunge.staging_bringup.caddy_reload"), \
             patch("boxmunge.commands.unstage_cmd.caddy_reload"):
         yield
 
@@ -112,13 +112,13 @@ def test_restage_replaces_quiescent_staging_data_completely(paths, project) -> N
     (pdir / "data" / "upload").write_text("v2")
 
     seen_running: list[list[str]] = []
-    real_copy = stage_cmd.copy_production_data
+    real_copy = staging_bringup.copy_production_data
 
     def copy(paths_, project_name, plan, **kwargs):
         seen_running.append(_running(stage))
         real_copy(paths_, project_name, plan, **kwargs)
 
-    with _no_caddy(), patch("boxmunge.commands.stage_cmd.copy_production_data", copy):
+    with _no_caddy(), patch("boxmunge.staging_bringup.copy_production_data", copy):
         assert run_stage(project, paths, ref="2026-10-13T110000000000") == 0
     assert seen_running == [[]]  # staging was down while its data was replaced
     assert _running(stage) == ["db"] and _running(project) == ["db"]

@@ -59,21 +59,22 @@ def test_rollback_with_a_snapshot_and_a_changed_compose_passes_restores_check(pa
     assert (paths.project_dir("myapp") / "VERSION").read_text() == "v1\n"
 
 
-def test_production_starts_again_after_an_unstage(paths) -> None:
-    """unstage puts production's own files back, so production's record
-    holds again; the next root start goes ahead."""
+def test_production_starts_during_a_stage_and_after_an_unstage(paths) -> None:
+    """The staged release lives in the slot, so production's files and its
+    record hold throughout: root starts go ahead while staged and after."""
     from boxmunge.commands.stage_cmd import run_stage
     from boxmunge.commands.unstage_cmd import run_unstage
     from boxmunge.commands.upgrade_steps import restart_projects
     from tests.bundle_helpers import place_bundle
-    from tests.test_commands.test_stage_promote_release import _docker as _stage_docker
+    from tests.stage_helpers import staging_docker_off
 
     add_project("myapp", paths)
     _deploy(paths, V1, {"compose.yml": _compose("1.27-alpine")})
     place_bundle(paths, timestamp=V2, files={"compose.yml": _compose("1.28-alpine")})
-    with _stage_docker():
+    with staging_docker_off():
         assert run_stage("myapp", paths, ref=V2) == 0
-        assert restart_projects(paths, refused=()).start_refused == ["myapp"]
+        during = restart_projects(paths, refused=())
         assert run_unstage("myapp", paths) == 0
         restart = restart_projects(paths, refused=())
+    assert during.succeeded == ["myapp"] and during.start_refused == []
     assert restart.succeeded == ["myapp"] and restart.start_refused == []

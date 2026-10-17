@@ -62,10 +62,10 @@ def test_stage_refused_while_an_install_is_open(paths, capsys) -> None:
     _failed_v2(paths)
     place_bundle(paths, timestamp=V3, files={"VERSION": "v3\n"})
     before = load_txn(paths, P)
-    with docker_off(), patch("boxmunge.commands.stage_cmd.caddy_reload"):
+    with docker_off(), patch("boxmunge.staging_bringup.caddy_reload"):
         assert run_stage(P, paths, ref=V3) == 1
     assert load_txn(paths, P) == before
-    assert not (_rel(paths) / "prestage").exists()
+    assert not (_rel(paths) / "staged").exists()
     assert "is open at phase hook_started" in capsys.readouterr().err
 
 

@@ -1,10 +1,9 @@
 """C-13: a failed stage cleans up after itself, and unstage cleans up
-whatever a stage left behind, recorded as active or not.
+whatever a stage left behind, completed or not.
 
-Before, stage wrote the staging Caddy site and compose files and could start
-containers before recording {"active": true}; any later failure returned 1
-with all of it left behind (and prod's files replaced), and unstage refused
-because no staging was "active".
+A stage builds its release in the slot (.releases/staged); a failure after
+the swap tears the whole stage down (D16), and production's tree is never
+written, so there is nothing of production's to put back.
 """
 from __future__ import annotations
 
@@ -18,7 +17,7 @@ from boxmunge.commands.stage_cmd import run_stage
 from boxmunge.commands.unstage_cmd import run_unstage
 from boxmunge.docker import DockerError
 from boxmunge.project_registry import add_project
-from boxmunge.state import read_state
+from boxmunge.staged_release import building_dir, slot_dir
 
 from tests.bundle_helpers import place_bundle, tree_snapshot
 
@@ -35,7 +34,8 @@ def _docker(stage_up=None):
 
     with patch("boxmunge.compose_guard.compose_up", side_effect=up), \
             patch("boxmunge.commands.deploy.caddy_reload"), \
-            patch("boxmunge.commands.stage_cmd.caddy_reload"), \
+            patch("boxmunge.staging_bringup.caddy_reload"), \
+            patch("boxmunge.stage_slot.compose_down"), \
             patch("boxmunge.commands.unstage_cmd.compose_down") as down, \
             patch("boxmunge.commands.unstage_cmd.caddy_reload"):
         yield down
@@ -51,19 +51,16 @@ def prod(paths):
 
 
 def _staging_artefacts(paths):
-    pdir = paths.project_dir("myapp")
     return [p for p in (
         paths.project_staging_caddy_site("myapp"),
-        paths.project_staging_compose_override("myapp"),
-        pdir / "compose.staging-base.yml",
-        pdir / ".releases" / "prestage",
+        paths.project_bind_record("myapp", staging=True),
+        slot_dir(paths, "myapp"),
+        building_dir(paths, "myapp"),
     ) if p.exists()]
 
 
 class TestFailedStageCleansUp:
-    def test_compose_failure_restores_prod_and_removes_artefacts(
-        self, paths, prod, capsys,
-    ) -> None:
+    def test_compose_failure_removes_every_artefact(self, paths, prod, capsys) -> None:
         before = tree_snapshot(prod)
         place_bundle(paths, timestamp=V2, files={"VERSION": "v2\n"})
         with _docker(stage_up=DockerError("boom")) as down:
@@ -72,16 +69,16 @@ class TestFailedStageCleansUp:
         assert down.call_args.kwargs["project_name"] == "myapp-staging"
         assert _staging_artefacts(paths) == []
         assert tree_snapshot(prod) == before
-        assert read_state(paths.project_staging_state("myapp")).get("active") is not True
         assert "cleaned up" in capsys.readouterr().out
 
-    def test_data_snapshot_failure_cleans_up(self, paths, prod) -> None:
+    def test_data_copy_failure_cleans_up(self, paths, prod) -> None:
         before = tree_snapshot(prod)
         manifest = (prod / "manifest.yml").read_text() + "staging:\n  copy_data: true\n"
         place_bundle(paths, timestamp=V2, files={"manifest.yml": manifest})
         with _docker() as down, \
-                patch("boxmunge.commands.stage_cmd._check_prestage_storage"), \
-                patch("boxmunge.commands.stage_cmd.copy_production_data",
+                patch("boxmunge.staging_bringup.check_staging_storage"), \
+                patch("boxmunge.staging_bringup.prepare_destinations"), \
+                patch("boxmunge.staging_bringup.copy_production_data",
                       side_effect=DockerError("disk full")) as copy:
             assert run_stage("myapp", paths) == 1
         copy.assert_called_once()
@@ -97,25 +94,39 @@ class TestFailedStageCleansUp:
         assert not (paths.project_dir("myapp") / "manifest.yml").exists()
         assert _staging_artefacts(paths) == []
 
+    def test_failure_writing_the_record_leaves_no_slot(self, paths, prod) -> None:
+        """A slot only appears complete, with its record: a failed write
+        before the swap leaves nothing for unstage or promote to find."""
+        before = tree_snapshot(prod)
+        place_bundle(paths, timestamp=V2)
+        with patch("boxmunge.staged_release.atomic_write_text",
+                   side_effect=OSError("disk full")), _docker():
+            assert run_stage("myapp", paths) == 1
+        assert _staging_artefacts(paths) == []
+        assert tree_snapshot(prod) == before
+
 
 class TestUnstage:
-    def test_unstage_restores_the_production_release(self, paths, prod) -> None:
+    def test_unstage_leaves_production_as_it_was(self, paths, prod) -> None:
         before = tree_snapshot(prod)
         place_bundle(paths, timestamp=V2, files={"VERSION": "v2\n"})
         with _docker():
             assert run_stage("myapp", paths) == 0
-            assert (prod / "VERSION").read_text() == "v2\n"
+            assert (prod / "VERSION").read_text() == "v1\n"
             assert run_unstage("myapp", paths) == 0
         assert tree_snapshot(prod) == before
         assert _staging_artefacts(paths) == []
 
-    def test_unstage_cleans_up_without_active_state(self, paths, prod) -> None:
-        """A stage that died before recording state still leaves artefacts
-        that unstage must be able to remove."""
-        site = paths.project_staging_caddy_site("myapp")
-        site.write_text("staging.myapp.example.com {}\n")
-        override = paths.project_staging_compose_override("myapp")
-        override.write_text("services: {}\n")
+    def test_unstage_cleans_up_a_stage_that_never_finished(self, paths, prod) -> None:
+        """A stage that died after the swap leaves a `starting` slot and a
+        site that unstage must be able to remove."""
+        place_bundle(paths, timestamp=V2)
+        with _docker(), patch("boxmunge.commands.stage_cmd.teardown_staging_locked",
+                              return_value=True), \
+                patch("boxmunge.staging_bringup.compose_up_checked",
+                      side_effect=DockerError("killed")):
+            assert run_stage("myapp", paths) == 1
+        assert slot_dir(paths, "myapp").is_dir()
         with _docker() as down:
             assert run_unstage("myapp", paths) == 0
         down.assert_called_once()
@@ -132,17 +143,3 @@ class TestUnstage:
             assert run_stage("myapp", paths) == 0
             assert run_unstage("myapp", paths) == 0
             assert run_unstage("myapp", paths) == 1
-
-
-class TestPrestageIsAtomic:
-    def test_failure_writing_metadata_leaves_no_half_kept_release(self, paths, prod) -> None:
-        """A kept production release only appears once its metadata exists,
-        so unstage/promote never find a release they cannot label."""
-        from boxmunge import release_staging as release
-        place_bundle(paths, timestamp=V2)
-        with patch("boxmunge.release_staging.atomic_write_text",
-                   side_effect=OSError("disk full")), \
-                _docker():
-            assert run_stage("myapp", paths) == 1
-        assert not release.has_prestage(paths, "myapp")
-        assert (prod / "VERSION").read_text() == "v1\n"

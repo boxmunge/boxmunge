@@ -175,7 +175,7 @@ def test_a_create_without_start_keeps_the_marker(paths, stopped) -> None:
 def test_a_staging_up_keeps_the_marker(paths, stopped) -> None:
     with patch("boxmunge.compose_guard.check_start"), \
             patch("boxmunge.compose_guard.compose_up") as up:
-        compose_up_checked(paths, P, component="stage", compose_files=PROD_FILES, staging=True)
+        compose_up_checked(paths, P, component="stage", staging=True)
     up.assert_called_once()
     assert load_slot(paths, P).production_stopped is not None
 
@@ -209,3 +209,15 @@ def test_an_unreadable_slot_on_clear_is_alerted(paths, stopped) -> None:
                   lambda *a, **k: sent.append((a[1], a[2], k["priority"]))):
         compose_up_checked(paths, P, component="check-all", compose_files=PROD_FILES)
     assert len(sent) == 1 and "meta.json" in sent[0][1] and sent[0][2] == 1
+
+
+def test_an_unreadable_slot_says_production_is_down(paths, stopped, capsys) -> None:
+    (slot_dir(paths, P) / "meta.json").write_text("{broken")
+    with patch("boxmunge.production_stopped.start_containers_checked") as start, \
+            patch("boxmunge.production_stopped.notify") as alert, \
+            pytest.raises(ProductionDownError, match="cannot be read"):
+        start_again(paths, P, component="health", alert=True)
+    start.assert_not_called()
+    err = capsys.readouterr().err
+    assert "PRODUCTION IS DOWN" in err and f"boxmunge recover {P}" in err
+    assert alert.call_args.kwargs["priority"] == 1

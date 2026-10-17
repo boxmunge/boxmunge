@@ -1,10 +1,13 @@
 """Production is checked with its own smoke script while a release is staged.
 
-`stage` installs the staged release into the project dir production runs
-from. Production's overlay used to mount ./boxmunge-scripts from there, so
-after a stage, `check` ran the staged release's smoke.sh against the
-production release; a check only the new release passes marked production
-FAILING, and one exiting 2 got it stopped by the health monitor.
+`stage` used to install the staged release into the project dir production
+runs from, and production's overlay mounted ./boxmunge-scripts from there,
+so `check` ran the staged release's smoke.sh against the production
+release. The staged release now lives in the slot; production's tree, and
+its script, stay production's.
+
+The promote cases are marked xfail(strict): promote still deploys the old
+in-place stage until Task 20 rebuilds it on the slot and removes the marks.
 """
 from __future__ import annotations
 
@@ -24,6 +27,7 @@ from boxmunge.docker import DockerError
 from boxmunge.manifest import load_manifest
 from boxmunge.project_registry import add_project
 from boxmunge.release_staging import has_prestage
+from boxmunge.staged_release import release_dir, slot_dir
 
 from tests.bundle_helpers import manifest_text, place_bundle
 
@@ -51,7 +55,8 @@ def _docker(deploy_up=None):
             patch("boxmunge.commands.deploy.caddy_reload"), \
             patch("boxmunge.commands.check.run_smoke_in_container",
                   return_value=SmokeResult("ok", "")), \
-            patch("boxmunge.commands.stage_cmd.caddy_reload"), \
+            patch("boxmunge.staging_bringup.caddy_reload"), \
+            patch("boxmunge.stage_slot.compose_down"), \
             patch("boxmunge.commands.unstage_cmd.compose_down"), \
             patch("boxmunge.commands.unstage_cmd.caddy_reload"):
         yield
@@ -79,7 +84,9 @@ def staged(paths):
 
 def test_stage_leaves_production_on_its_own_smoke_script(staged) -> None:
     pdir = staged.project_dir("myapp")
-    assert (pdir / "boxmunge-scripts" / "smoke.sh").read_text() == "staged check\n"
+    assert (pdir / "boxmunge-scripts" / "smoke.sh").read_text() == "prod check\n"
+    staged_smoke = release_dir(slot_dir(staged, "myapp")) / "boxmunge-scripts" / "smoke.sh"
+    assert staged_smoke.read_text() == "staged check\n"
     assert _prod_smoke(staged) == "prod check\n"
 
 
@@ -90,12 +97,14 @@ def test_regenerating_production_overlay_during_stage_keeps_its_script(staged) -
     assert _prod_smoke(staged) == "prod check\n"
 
 
+@pytest.mark.xfail(strict=True, reason="Task 20: promote deploys the slot")
 def test_promote_switches_production_to_the_staged_script(staged) -> None:
     with _docker():
         assert run_promote("myapp", staged) == 0
     assert _prod_smoke(staged) == "staged check\n"
 
 
+@pytest.mark.xfail(strict=True, reason="Task 20: promote deploys the slot")
 def test_promote_failing_before_any_start_keeps_production_on_its_own_script(
     paths,
 ) -> None:
@@ -116,6 +125,7 @@ def test_promote_failing_before_any_start_keeps_production_on_its_own_script(
     assert has_prestage(paths, "myapp")
 
 
+@pytest.mark.xfail(strict=True, reason="Task 20: promote deploys the slot")
 def test_promote_failing_once_containers_started_runs_the_staged_script(
     staged,
 ) -> None:

@@ -57,7 +57,7 @@ Key features:
         previous.json         # its bundle name and pre-deploy data snapshot
         install.json          # the open install transaction (only while an install runs)
         previous.superseded/  # the rollback target an open install replaced, until it closes
-        prestage/             # production code displaced by `stage`, until promote/unstage
+        staged/               # the slot: the staged release (release/), its compose files, meta.json
         live-mounts/          # production's copies of the release code it bind-mounts
         live-scripts/         # production's copy of boxmunge-scripts/ (smoke checks)
         live.json             # bundle name of the installed release
@@ -200,7 +200,7 @@ boxmunge supports two project sources, declared in `manifest.yml` via the `sourc
 12. Record state -- write deploy state JSON atomically
 13. Log the deployment -- append to boxmunge operational log
 
-A bundle that fails validation stays in the inbox (it is not moved to `.consumed/`) and the command exits non-zero: 3 for a compose hardening rejection, 1 otherwise. `stage` uses the same unpack-validate-install path, but keeps the production release in `.releases/prestage/` instead of step 5 and takes no snapshot.
+A bundle that fails validation stays in the inbox (it is not moved to `.consumed/`) and the command exits non-zero: 3 for a compose hardening rejection, 1 otherwise. `stage` uses the same unpack and validate steps, then moves the release into its own tree, `.releases/staged/`, instead of installing it; it takes no snapshot.
 
 If any step fails, the deploy stops and reports the failure. No automatic rollback -- the operator or agent decides what to do next.
 
@@ -211,12 +211,14 @@ Steps 5 to 9 of a bundle deploy, and every bundle rollback, run inside an instal
 `stage <project>` follows the same steps but deploys to the staging environment at `staging.<hostname>`. After verification:
 
 - `promote <project>` -- deploys the staged release to production, then tears down staging
-- `unstage <project>` -- tears down staging and puts the production release's files back
+- `unstage <project>` -- tears down staging and drops the staged release; production is not touched
 
-The staged release is installed in the project directory (staging containers run from it); the
-production release it displaces is kept in `.releases/prestage/` until promote or unstage. A stage
-that fails after installing cleans up the same way unstage does. Staging state is tracked under
-`state/staging/`.
+The staged release lives in its own tree, the slot `.releases/staged/`: `release/` is the staged
+release, staging's compose files sit beside it, and `meta.json` records the stage (its ref, an id,
+and whether it is `starting` or `ready`). Staging containers run from `release/`
+(`--project-directory`); production's project directory is never written by a stage. A stage that
+fails after the slot is in place is torn down the same way unstage does it, and a re-stage that
+fails tears everything down too.
 
 ---
 

@@ -22,18 +22,20 @@ from __future__ import annotations
 
 import os
 import shlex
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from boxmunge import docker_containers
-from boxmunge.compose_guard import check_containers_start, start_containers_checked
+from boxmunge.compose_guard import check_containers_start
 from boxmunge.data_helper import EMPTY_X, run_helper
 from boxmunge.docker import staging_compose_project
 from boxmunge.docker_run import DockerError, run as _run
-from boxmunge.production_stopped import ProductionDownError, mark_stopped, start_again
+from boxmunge.lifecycle import is_blocked
+from boxmunge.production_stopped import (
+    ProductionDownError, mark_stopped, production_down, start_again,
+)
 from boxmunge.release import project_data_dirs
-from boxmunge.staged_release import load_slot
+from boxmunge.staged_release import load_slot, release_dir, slot_dir
 from boxmunge.staging_copy_plan import (
     CopyPlan, StagingDataError, Store, copy_sources, plan_copy, stores,
 )
@@ -52,12 +54,15 @@ _EMPTY_DST = EMPTY_X.replace("/x", "/dst")
 
 def plan_staging_copy(paths: BoxPaths, project: str, manifest: dict[str, Any],
                       prod_model: dict[str, Any], staging_model: dict[str, Any]) -> CopyPlan:
-    """Plan the copy from the two environments' resolved models."""
+    """Plan the copy from the two environments' resolved models. Each side's
+    data dirs are its own release's: production's from the project dir,
+    staging's from the slot's release."""
     project_dir = paths.project_dir(project)
-    data = project_data_dirs(project_dir).box_state()
+    staged = project_data_dirs(project_dir, release_dir(slot_dir(paths, project))).box_state()
     plan = plan_copy(
-        stores(prod_model, project, project_dir, data, staging=False),
-        stores(staging_model, staging_compose_project(project), project_dir, data,
+        stores(prod_model, project, project_dir, project_data_dirs(project_dir).box_state(),
+               staging=False),
+        stores(staging_model, staging_compose_project(project), project_dir, staged,
                staging=True),
         copy_sources(manifest) or {}, project)
     if not plan.pairs:
@@ -264,22 +269,22 @@ def _mark_stopped(paths: BoxPaths, project: str, stopped: list[str]) -> None:
     mark_stopped(paths, project, meta, stopped)
 
 
-def _start_again_prestage(paths: BoxPaths, project: str, stopped: list[str]) -> None:
-    """The interim stage layout has no slot, so no marker: start the
-    stopped containers directly. It goes when stage builds the slot."""
-    try:
-        start_containers_checked(paths, project, stopped, component="stage")
-    except DockerError as e:
-        message = (f"PRODUCTION IS DOWN: its containers were stopped for the data "
-                   f"copy and starting them again failed: {e}. Start them with: "
-                   f"docker start {' '.join(stopped)}")
-        print(f"ERROR: {message}", file=sys.stderr)
-        raise ProductionDownError(message) from e
-    print("  Production started again.")
+def _start_production_again(paths: BoxPaths, project: str, stopped: list[str]) -> None:
+    """start_again from the marker this copy wrote. It says loudly when the
+    slot cannot be read; a marker gone without a pause or quarantine holding
+    production down leaves production stopped, which is said loudly here."""
+    if start_again(paths, project, component="stage", alert=False):
+        return
+    if is_blocked(project, paths) is not None:
+        return  # start_again said production stays stopped, and why
+    raise production_down(paths, project, "stage", (
+        f"{project}'s containers were stopped for staging's data copy, and the slot's "
+        f"production_stopped marker was gone when the copy ended, so they were not "
+        f"started again. Start them with `docker start {' '.join(stopped)}` or run "
+        f"`boxmunge recover {project}`."))
 
 
-def copy_production_data(paths: BoxPaths, project: str, plan: CopyPlan, *,
-                         prestage: bool = False) -> None:
+def copy_production_data(paths: BoxPaths, project: str, plan: CopyPlan) -> None:
     """Stop production, copy each pair, start production again.
 
     Raises StagingDataError, DockerError or ProductionDownError naming what
@@ -289,8 +294,7 @@ def copy_production_data(paths: BoxPaths, project: str, plan: CopyPlan, *,
     production_stopped marker is written. It is started again whatever
     happens, including a failed or interrupted stop (start_again, which
     clears the marker, or keeps it and says so loudly if the start fails);
-    staging is left created but not started. `prestage` is the interim
-    stage layout, which has no slot: no marker is written.
+    staging is left created but not started.
     """
     staging_running = _running(staging_compose_project(project))
     if staging_running:
@@ -305,8 +309,7 @@ def copy_production_data(paths: BoxPaths, project: str, plan: CopyPlan, *,
     stopped = _running(project)
     if stopped:
         check_containers_start(paths, project, component="stage")
-        if not prestage:
-            _mark_stopped(paths, project, stopped)
+        _mark_stopped(paths, project, stopped)
     try:
         if stopped:
             print(f"  Stopping production for the copy: {', '.join(stopped)}")
@@ -315,10 +318,8 @@ def copy_production_data(paths: BoxPaths, project: str, plan: CopyPlan, *,
             print(f"  Copying production {src.label} to staging {dest.label}...")
             run_helper(copy_label(project), mounts, script)
     finally:
-        if stopped and prestage:
-            _start_again_prestage(paths, project, stopped)
-        elif stopped:
-            start_again(paths, project, component="stage", alert=False)
+        if stopped:
+            _start_production_again(paths, project, stopped)
     for store in plan.fresh:
         print(f"  NOTE: staging {store.label} has no production source; it starts as it is.")
     for store in plan.unused:

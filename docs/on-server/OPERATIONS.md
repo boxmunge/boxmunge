@@ -141,12 +141,12 @@ After verifying the staging environment:
   unstage myapp
   ```
 
-Staging runs from the project directory, so `stage` installs the staged release there and keeps the
-production release aside in `.releases/prestage/`. Production's running containers are not touched.
-`promote` deploys the staged release (never a newer bundle that arrived in the inbox meanwhile) and
-keeps the displaced production release as the `rollback` target. `unstage` puts the production
-release's files back. While a release is staged, `prod-deploy` and `rollback` refuse: promote or
-unstage first.
+The staged release lives in its own tree, `.releases/staged/` (the slot), and staging runs from
+there: `stage` never writes production's files, and production's running containers are only
+stopped for a `staging.copy_data` copy, then started again. A stage that fails, first or re-stage,
+is torn down completely. `promote` deploys the staged release (never a newer bundle that arrived in
+the inbox meanwhile). `unstage` takes staging down and drops the slot; if it cannot remove the
+staging containers it keeps the slot, records why, and prints the commands to finish by hand.
 
 A `promote` that fails before any production container is touched (a failing `pre_deploy` hook)
 leaves the stage as it was. Once it has started the staged release's containers, production runs

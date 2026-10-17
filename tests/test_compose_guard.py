@@ -284,16 +284,6 @@ def test_container_mount_outside_the_project_is_refused(box) -> None:
             check_containers_start(paths, NAME, component="stage")
 
 
-def test_prestage_staging_keeps_its_own_record(box) -> None:
-    """The interim stage layout (staging from the project dir) until stage
-    builds the slot; the slot's own start is tests/test_compose_guard_slot.py."""
-    paths, *_ = box
-    compose_up_checked(paths, NAME, component="stage", compose_files=["compose.yml"],
-                       staging=True, prestage=True, record=True)
-    assert paths.project_bind_record(NAME, staging=True).exists()
-    assert not paths.project_bind_record(NAME).exists()
-
-
 def test_platform_start_is_only_for_platform_stacks(box) -> None:
     paths, project_dir, up, *_ = box
     with pytest.raises(ValueError, match="not a platform stack"):

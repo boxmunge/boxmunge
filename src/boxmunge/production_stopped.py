@@ -24,7 +24,7 @@ from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_error, log_operation
 from boxmunge.notify import notify
 from boxmunge.staged_release import (
-    StagedRelease, clear_production_stopped, load_slot, update_meta,
+    SlotError, StagedRelease, clear_production_stopped, load_slot, update_meta,
 )
 
 if TYPE_CHECKING:
@@ -63,21 +63,11 @@ def _remedy(project: str, names: list[str], error: DockerError, docker_start: bo
     return f"Fix the cause, then run {recover}."
 
 
-def start_again(paths: BoxPaths, project: str, *, component: str, alert: bool) -> bool:
-    """Start production again if the slot says the copy stopped it and no
-    pause or quarantine holds it down. True when production runs again;
-    raises ProductionDownError (the marker kept) when it could not be
-    started."""
-    meta = load_slot(paths, project)
-    if meta is None or meta.production_stopped is None:
-        return False
-    block = is_blocked(project, paths)
-    if block is not None:
-        why = f"{project} is {block.reason.value}; its lift starts production"
-        print(f"  Production stays stopped: {why}.")
-        log_operation(component, f"production_stopped kept: {why}", paths, project=project)
-        return False
-    names = list(meta.production_stopped["containers"])
+def start_stopped(paths: BoxPaths, project: str, names: list[str], *,
+                  component: str) -> None:
+    """Start production's containers the copy stopped (`docker start`, or
+    production's up when one is gone). Raises ProductionDownError, said
+    loudly, when they could not be started."""
     docker_start = False
     try:
         docker_start = _all_present(project, names)
@@ -86,14 +76,46 @@ def start_again(paths: BoxPaths, project: str, *, component: str, alert: bool) -
         else:
             compose_up_checked(paths, project, component=component, compose_files=PROD_FILES)
     except DockerError as e:
-        message = (f"PRODUCTION IS DOWN: {project}'s containers were stopped for "
-                   f"staging's data copy and starting them again failed: {e}. "
-                   f"{_remedy(project, names, e, docker_start)}")
-        print(f"ERROR: {message}", file=sys.stderr)
-        log_error(component, message, paths, project=project)
-        notify(paths, f"{project}: production is down", message, component=component,
-               project=project, priority=1)
-        raise ProductionDownError(message) from e
+        raise production_down(paths, project, component, (
+            f"{project}'s containers were stopped for staging's data copy and starting "
+            f"them again failed: {e}. {_remedy(project, names, e, docker_start)}")) from e
+
+
+def production_down(paths: BoxPaths, project: str, component: str,
+                    why: str) -> ProductionDownError:
+    """Say loudly (stderr, log, priority-1 alert) that production is down;
+    returns the error to raise."""
+    message = f"PRODUCTION IS DOWN: {why}"
+    print(f"ERROR: {message}", file=sys.stderr)
+    log_error(component, message, paths, project=project)
+    notify(paths, f"{project}: production is down", message, component=component,
+           project=project, priority=1)
+    return ProductionDownError(message)
+
+
+def start_again(paths: BoxPaths, project: str, *, component: str, alert: bool) -> bool:
+    """Start production again if the slot says the copy stopped it and no
+    pause or quarantine holds it down. True when production runs again;
+    raises ProductionDownError (the marker kept) when it could not be
+    started, or when the slot cannot be read to name what was stopped."""
+    try:
+        meta = load_slot(paths, project)
+    except SlotError as e:
+        raise production_down(paths, project, component, (
+            f"{project}'s staged slot cannot be read ({e}), so the production containers "
+            f"staging's data copy stopped cannot be named or started again. Run "
+            f"`boxmunge recover {project}` to start production, then `unstage "
+            f"{project}`.")) from e
+    if meta is None or meta.production_stopped is None:
+        return False
+    block = is_blocked(project, paths)
+    if block is not None:
+        why = f"{project} is {block.reason.value}; its lift starts production"
+        print(f"  Production stays stopped: {why}.")
+        log_operation(component, f"production_stopped kept: {why}", paths, project=project)
+        return False
+    start_stopped(paths, project, list(meta.production_stopped["containers"]),
+                  component=component)
     # The up path has cleared it already; this reloads, so it writes at most once.
     clear_production_stopped(paths, project)
     print("  Production started again.")

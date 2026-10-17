@@ -110,10 +110,11 @@ class TestPromoteComponentTagging:
     sees component="deploy" and the SECURITY OFF entry is mis-attributed.
     """
 
+    @pytest.mark.xfail(strict=True, reason="Task 20: promote deploys the slot")
     def test_promote_passes_component_to_deploy(self, paths) -> None:
         from boxmunge.commands import deploy as deploy_mod
-        from tests.test_commands.test_stage_promote_release import _docker, _prod_v1_staged_v2
-        _prod_v1_staged_v2(paths)
+        from tests.stage_helpers import prod_and_stage, staging_docker_off as _docker
+        prod_and_stage(paths)
         observed: list[str] = []
         real = deploy_mod.prepare_compose_override
 

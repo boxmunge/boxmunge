@@ -141,9 +141,8 @@ def test_the_scan_finds_the_checked_call_sites() -> None:
     assert sites == [
         "commands/data_cmd.py", "commands/deploy.py", "commands/recover_cmd.py", "commands/restore.py",
         "commands/resume_cmd.py", "commands/rollback.py", "commands/security_resume.py",
-        "commands/stage_cmd.py",
         "commands/upgrade_steps.py", "container_update.py", "cve/quarantine.py",
-        "production_stopped.py", "staging_data.py",
+        "production_stopped.py", "staging_bringup.py", "staging_data.py",
     ]
 
 
@@ -364,11 +363,23 @@ def test_staged_project_starts_once_unstaged(staged) -> None:
 
 def test_promote_and_staging_starts_are_allowed_while_staged(staged) -> None:
     from boxmunge.compose_guard import compose_up_checked, start_containers_checked
+    from boxmunge.staged_release import new_meta, release_dir, slot_dir, write_meta
     paths, _, up, start = staged
     compose_up_checked(paths, NAME, component="promote", compose_files=["compose.yml"],
                        record=True, promoting=True)
-    compose_up_checked(paths, NAME, component="stage", compose_files=["compose.yml"],
-                       staging=True, prestage=True, record=True)
+    # Staging runs from the slot, with its own files, whatever production's hold.
+    slot = slot_dir(paths, NAME)
+    release = release_dir(slot)
+    release.mkdir(parents=True)
+    pdir = paths.project_dir(NAME)
+    (release / "manifest.yml").write_text((pdir / "manifest.yml").read_text())
+    (release / "compose.yml").write_text(yaml.safe_dump({"services": {"web": {
+        "image": "nginx:1.28"}}}))
+    (slot / "compose.staging-base.yml").write_text((release / "compose.yml").read_text())
+    (slot / "compose.boxmunge-staging.yml").write_text("services: {}\n")
+    write_meta(slot, new_meta("bundle", f"{NAME}-v2", None))
+    compose_up_checked(paths, NAME, component="stage", staging=True, record=True)
+    assert up.call_args.kwargs["project_directory"] == release
     with patch("boxmunge.docker_containers.container_bind_sources", return_value=[]):
         start_containers_checked(paths, NAME, [f"{NAME}-web-1"], component="stage")
     assert up.call_count == 2
