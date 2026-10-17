@@ -54,11 +54,13 @@ def compose(paths, project: str, *args: str) -> str:
 
 
 def teardown(paths, project: str) -> None:
+    from boxmunge.built_images import remove_built_images
     project_dir = paths.project_dir(project)
     if (project_dir / "compose.boxmunge.yml").exists():
         subprocess.run(["docker", "compose", "-p", project, "-f", "compose.yml", "-f",
                         "compose.boxmunge.yml", "down", "-v", "--rmi", "local", "-t", "0"],
                        cwd=project_dir, capture_output=True, timeout=120)
+    remove_built_images(project)  # a refused deploy's candidates too
 
 
 def _health(test: str) -> dict:
