@@ -25,7 +25,7 @@ from boxmunge.legacy_stage_ops import (
 from boxmunge.manifest import ManifestError
 from boxmunge.migration import MigrationError
 from boxmunge.state import StateError
-from boxmunge.upgrade_state import UpgradeInProgress, upgrade_lock
+from boxmunge.upgrade_state import UpgradeInProgress, UpgradeStateError, upgrade_lock
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -193,6 +193,9 @@ def run_legacy_stage(paths: BoxPaths, project: str, choice: str | None,
     except UpgradeInProgress:
         print("ERROR: a platform upgrade is in progress; run it again after it finishes.",
               file=sys.stderr)
+        return 1
+    except UpgradeStateError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
     except LockError as e:
         print(f"ERROR: {e}", file=sys.stderr)

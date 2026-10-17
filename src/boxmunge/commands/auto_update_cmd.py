@@ -37,7 +37,7 @@ def run_auto_update(paths: BoxPaths) -> int:
     from boxmunge.os_update_alert import record_os_updates
     from boxmunge.os_updates import inspect_os_updates
     from boxmunge.upgrade_discovery import auto_update_mode, discover_update
-    from boxmunge.upgrade_state import UpgradeInProgress, upgrade_lock
+    from boxmunge.upgrade_state import UpgradeInProgress, UpgradeStateError, upgrade_lock
     # `health` is not scheduled, so this timer is where a box notices that
     # its OS updates stopped arriving. Checked first: an upgrade below execs
     # the shim and never returns.
@@ -60,6 +60,10 @@ def run_auto_update(paths: BoxPaths) -> int:
         print("An upgrade is in progress; skipping this check.")
         log_operation("auto-update", "Skipped: upgrade in progress", paths)
         return 0
+    except UpgradeStateError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        log_error("auto-update", str(e), paths)
+        return 1
     action = result.get("action")
 
     if result.get("endpoint_error"):

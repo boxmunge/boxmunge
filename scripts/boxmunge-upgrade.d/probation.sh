@@ -11,13 +11,13 @@
 # probation's length (plus slack for clock steps) is forged or corrupt: it
 # counts as expired, or a far-future value would defer upgrades for good.
 read_probation() {
-    local out
+    local out content
     refuse_symlink "$PROBATION_FILE"
-    out="$(BM_PROBATION_FILE="$PROBATION_FILE" BM_HOURS="$PROBATION_HOURS" python3 - <<'PYPROB'
+    content="$(read_untrusted "$PROBATION_FILE")" || exit 1
+    out="$(BM_PROBATION="$content" BM_HOURS="$PROBATION_HOURS" python3 - <<'PYPROB'
 import json, os, sys
 from datetime import datetime, timedelta, timezone
-with open(os.environ["BM_PROBATION_FILE"]) as f:
-    d = json.load(f)
+d = json.loads(os.environ["BM_PROBATION"])
 keys = ("version", "previous_slot", "expires_at")
 if not isinstance(d, dict) or not all(isinstance(d.get(k), str) and "\n" not in d[k] for k in keys):
     sys.exit("probation.json must hold string version, previous_slot and expires_at")

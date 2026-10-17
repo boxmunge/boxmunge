@@ -28,7 +28,8 @@ P = "myapp"
 
 def _within(fn: Callable[[], object], fifo: Path, seconds: float = 5.0) -> object:
     """fn's result or exception; a call still blocked on `fifo` after
-    `seconds` is released (a writer opens it) and fails the test."""
+    `seconds` is released (opening it read-write unblocks a blocked reader
+    or writer) and fails the test."""
     out: dict[str, object] = {}
 
     def run() -> None:
@@ -40,8 +41,9 @@ def _within(fn: Callable[[], object], fifo: Path, seconds: float = 5.0) -> objec
     worker.start()
     worker.join(seconds)
     if worker.is_alive():
-        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        release = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
         worker.join(seconds)
+        os.close(release)
         pytest.fail(f"blocked on the FIFO at {fifo}")
     if "error" in out:
         raise out["error"]  # type: ignore[misc]
