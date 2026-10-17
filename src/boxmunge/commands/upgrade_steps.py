@@ -16,10 +16,10 @@ from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.compose import generate_compose_override, load_user_compose, prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
-from boxmunge.release_staging import has_prestage
 from boxmunge.release_txn import open_install_reason
 from boxmunge.docker import DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
+from boxmunge.legacy_stage import legacy_stage
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import (
@@ -202,11 +202,11 @@ def _record_bind_sources(paths: BoxPaths, name: str) -> str | None:
     project was deployed with, and a project deployed before boxmunge
     recorded bind sources has no record; restart_projects and every later
     start check against this one. The check logs and alerts a refusal.
-    While a release is staged the project directory holds the staged
-    release's files, so there is nothing of production's to record;
-    restart_projects refuses the project.
+    A project staged by boxmunge 0.10.1 may hold the staged release's
+    files in its project directory, so there is nothing of production's to
+    record; restart_projects refuses the project.
     """
-    if has_prestage(paths, name):
+    if legacy_stage(paths, name) is not None:
         return None
     try:
         check_start(paths, name, component="upgrade",

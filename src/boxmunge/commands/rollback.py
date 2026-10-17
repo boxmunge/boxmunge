@@ -25,6 +25,7 @@ from boxmunge.intake import (
     IntakeError, check_installable, report_refusal, validate_release_tree,
 )
 from boxmunge.lifecycle import refuse_if_blocked
+from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_error, log_operation
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.paths import BoxPaths
@@ -132,7 +133,7 @@ def find_rollback_target(paths: BoxPaths, project_name: str,
 
 def run_rollback(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
     """rollback: show the plan, confirm, take the project lock and roll back."""
-    if refuse_if_blocked(project_name, paths):
+    if refuse_if_blocked(project_name, paths) or refuse_if_legacy_stage(paths, project_name):
         return 1
     # Checked before the prompt too (and again under the lock): an open
     # install may make a rollback meaningless, or already finished.
@@ -180,7 +181,7 @@ def rollback_locked(project_name: str, paths: BoxPaths,
     ``expected`` is the plan the operator confirmed: if the deploy state
     changed since, nothing is done.
     """
-    if refuse_if_blocked(project_name, paths):
+    if refuse_if_blocked(project_name, paths) or refuse_if_legacy_stage(paths, project_name):
         return 1
     ok, txn = _open_install(project_name, paths)
     if not ok:

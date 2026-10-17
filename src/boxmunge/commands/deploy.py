@@ -21,6 +21,7 @@ from boxmunge.intake import (
     report_refusal, validate_release_tree,
 )
 from boxmunge.lifecycle import refuse_if_blocked
+from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
@@ -323,7 +324,7 @@ def _has_rollback_target(paths: BoxPaths, project_name: str) -> bool:
 def deploy_eligible(project_name: str, paths: BoxPaths) -> bool:
     """Checked by every deploy core under the project lock, immediately
     before anything changes. Prints why and returns False if not."""
-    if refuse_if_blocked(project_name, paths):
+    if refuse_if_blocked(project_name, paths) or refuse_if_legacy_stage(paths, project_name):
         return False
     from boxmunge.project_registry import is_registered
     if not is_registered(project_name, paths):

@@ -6,6 +6,7 @@ import sys
 
 from boxmunge.docker import compose_stop, caddy_reload, DockerError
 from boxmunge.fileutil import LockError, atomic_write_text, project_lock
+from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import (
@@ -93,6 +94,8 @@ def pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int:
     held. If a step fails the record stays incomplete and says so, and
     running pause again finishes it.
     """
+    if refuse_if_legacy_stage(paths, project_name):
+        return 1
     # Re-check under the lock: a pause may have landed while the operator
     # was answering the prompt.
     if _refuse_if_already_paused(project_name, paths):

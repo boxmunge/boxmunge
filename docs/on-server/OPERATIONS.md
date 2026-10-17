@@ -190,13 +190,13 @@ environments without copying any data:
   release does not touch these copies;
 - staging mounts the staged release itself.
 
-Production's running containers keep their configuration, but the staged release's `compose.yml`
-and `.env` are in the project directory while it is staged. A production `compose up` there (the
-restart after an upgrade, `recover`) resolves the staged `compose.yml`, not production's, and so
-recreates production from the staged release. boxmunge therefore refuses every production
-recreate while a release is staged: upgrade restarts, container updates, `recover`, `resume`,
-`security resume` and `restore` leave production's running containers as they are and raise a
-"start refused" alert (see Troubleshooting). Promote or unstage first; the next run picks it up.
+The staged release lives in `.releases/staged/`, so the project directory stays production's and
+production starts as usual during a stage (upgrade restarts, container updates, `recover`,
+`resume`, `security resume`, `restore`). A release staged by boxmunge 0.10.1 is different: it put
+the staged release's files in the project directory. For such a project every production start is
+refused with a "start refused" alert (see Troubleshooting), and `stage`, `unstage`, `promote`,
+`prod-deploy`, `rollback`, `restore`, `resume`, `recover`, `pause` and `data adopt` refuse, naming
+`boxmunge-server legacy-stage <project>`. Its running containers are left as they are.
 
 A bind mount, config or secret file in a data directory (any directory a release has mounted
 read-write) or another server-owned entry (`data/`, `secrets.env`) points staging at the entry's
@@ -981,11 +981,12 @@ containers are left alone, and a high-priority alert names the reason. The
 alert for one project and reason repeats at most once a day (so a timer
 does not page every run); the refusal is logged every time:
 
-- **"a release is staged"** — while a release is staged the project
-  directory holds the staged release's files, so production is not
-  recreated from them (upgrade restarts, container updates, `recover`,
-  `resume`, `security resume` and `restore` all wait). Running containers
-  keep running. `promote` or `unstage`, and the next run picks it up.
+- **"has a release staged by boxmunge 0.10.1"** — the project directory
+  may hold that stage's files, so production is not recreated from them
+  (upgrade restarts, container updates, `recover`, `resume`, `security
+  resume`, `restore` and `data adopt` all wait). Running containers keep
+  running. Resolve it with `boxmunge-server legacy-stage <project>`; the
+  next run picks it up. This alert does not mean tampering.
 - **"an install of <ref> ... is open at phase <phase>"** — a deploy or
   rollback stopped part-way, so the project directory may hold a
   half-installed release. The alert names the options for that phase; see

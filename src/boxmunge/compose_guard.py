@@ -10,10 +10,12 @@ first re-runs deploy's own validation (`validate_release_tree`) on the
 files on disk and checks every bind source of the compose model it is
 about to run (see boxmunge.bind_sources).
 
-While a release is staged, the project directory holds the staged
-release's files, not production's, so a production start other than the
-promote that deploys it is refused too: it would recreate production from
-the staged release (and run its migrations on production data).
+A stage left by boxmunge 0.10.1 (boxmunge.legacy_stage) put the staged
+release's files in the project directory, so every production start of
+such a project is refused: it could recreate production from the staged
+release (and run its migrations on production data). A stage in the slot
+leaves the project directory as production's, so production starts as
+usual.
 
 While an install transaction is open (.releases/install.json), a
 production start is refused unless it is the core resuming that install:
@@ -45,10 +47,10 @@ from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import compose_up, start_containers
 from boxmunge.docker_run import DockerError
 from boxmunge.intake import IntakeError, validate_release_tree
+from boxmunge.legacy_stage import legacy_refusal, legacy_stage
 from boxmunge.log import log_error
 from boxmunge.notify import notify
 from boxmunge.paths import RESERVED_PROJECT_NAMES
-from boxmunge.release_staging import has_prestage
 from boxmunge.release_txn import load_txn, stale_reason, start_refusal
 from boxmunge.staged_release import (
     SlotError, clear_production_stopped, load_slot, staging_target,
@@ -127,6 +129,13 @@ def _refuse_if_install_open(paths: BoxPaths, project_name: str, component: str,
     raise _refused(paths, project_name, component, reason, tampering=False)
 
 
+def _refuse_if_legacy_stage(paths: BoxPaths, project_name: str, component: str) -> None:
+    stage = legacy_stage(paths, project_name)
+    if stage is not None:
+        raise _refused(paths, project_name, component, legacy_refusal(project_name, stage),
+                       tampering=False)
+
+
 def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
                    record: bool) -> None:
     """Staging runs from the slot: validate the staged release there,
@@ -172,7 +181,7 @@ def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
 def check_start(
     paths: BoxPaths, project_name: str, *, component: str,
     compose_files: list[str] | None = None, staging: bool = False, record: bool = False,
-    promoting: bool = False, deploying: bool = False, txn: str | None = None,
+    deploying: bool = False, txn: str | None = None,
 ) -> None:
     """Re-validate the project and check every bind source it would mount.
 
@@ -182,8 +191,7 @@ def check_start(
 
     A production start while an install transaction is open is refused
     unless `txn` is that transaction's id (the core resuming it). A
-    production start while a release is staged is refused unless it is
-    `promoting` that release.
+    production start of a project staged by boxmunge 0.10.1 is refused.
 
     `record` (deploy, stage, upgrade) records the sources' kinds and the
     sha256 of every file boxmunge reads, instead of comparing them with the
@@ -209,10 +217,7 @@ def check_start(
     project_dir = paths.project_dir(project_name)
     record_path = paths.project_bind_record(project_name)
     _refuse_if_install_open(paths, project_name, component, txn)
-    if not promoting and has_prestage(paths, project_name):
-        raise _refused(paths, project_name, component,
-                       "a release is staged, so the project directory holds the staged "
-                       "release, not production's; promote or unstage first")
+    _refuse_if_legacy_stage(paths, project_name, component)
     try:
         validate_release_tree(project_dir, project_name, paths, component)
         _, read_files = compose_resolve.walk_references(
@@ -238,7 +243,7 @@ def check_start(
 def compose_up_checked(
     paths: BoxPaths, project_name: str, *, component: str,
     compose_files: list[str] | None = None, staging: bool = False, record: bool = False,
-    promoting: bool = False, deploying: bool = False, build: bool = True,
+    deploying: bool = False, build: bool = True,
     force_recreate: bool = False, services: list[str] | None = None, start: bool = True,
     txn: str | None = None,
 ) -> None:
@@ -248,8 +253,7 @@ def compose_up_checked(
     files. A production up of every service clears the slot's
     production_stopped marker. Raises ComposeRefused or DockerError."""
     check_start(paths, project_name, component=component, compose_files=compose_files,
-                staging=staging, record=record, promoting=promoting, deploying=deploying,
-                txn=txn)
+                staging=staging, record=record, deploying=deploying, txn=txn)
     if staging:
         target = staging_target(paths, project_name)
         compose_up(target.cwd, build=build, force_recreate=force_recreate,
@@ -283,13 +287,14 @@ def _clear_production_stopped(paths: BoxPaths, project_name: str, component: str
 def check_containers_start(paths: BoxPaths, project_name: str, *, component: str) -> None:
     """Check what starting production's existing, stopped containers would
     mount. A `docker start` reads no compose file — it mounts what each
-    container was created with, and during a stage the compose files on
-    disk are the staged release's — so only the containers' own bind mounts
+    container was created with — so only the containers' own bind mounts
     are checked: the own-file and nesting rules, and each source walked
     without following links, of the kind recorded at deploy. Raises
     ComposeRefused, also while an install transaction is open (no install
-    resumes by restarting stopped containers)."""
+    resumes by restarting stopped containers) and for a project staged by
+    boxmunge 0.10.1, as check_start does."""
     _refuse_if_install_open(paths, project_name, component, None)
+    _refuse_if_legacy_stage(paths, project_name, component)
     project_dir = paths.project_dir(project_name)
     try:
         existing = docker_containers.container_bind_sources(project_name)

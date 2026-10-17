@@ -17,6 +17,7 @@ from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import DockerError, caddy_config_lock, caddy_reload, compose_down
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.log import log_error, log_operation
+from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.production_stopped import start_again
 from boxmunge.release_txn import load_txn, options_text
 from boxmunge.staged_release import (
@@ -133,6 +134,8 @@ def _refuse_if_promoting(project: str, paths: BoxPaths) -> bool:
 
 def unstage_locked(project: str, paths: BoxPaths, dry_run: bool = False) -> int:
     """The unstage core. Caller holds the project lock; never takes it."""
+    if refuse_if_legacy_stage(paths, project):
+        return 1
     if not staging_exists(project, paths):
         print(f"ERROR: No staging found for '{project}'.", file=sys.stderr)
         return 1

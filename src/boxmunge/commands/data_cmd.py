@@ -28,6 +28,7 @@ from boxmunge.docker import COMPOSE_PROJECT_LABEL
 from boxmunge.docker_containers import container_mounts, project_containers
 from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.fileutil import LockError, project_lock
+from boxmunge.legacy_stage import legacy_refusal, legacy_stage
 from boxmunge.log import log_operation
 from boxmunge.paths import BoxPaths
 
@@ -105,6 +106,9 @@ def _remove_partial(target: str) -> None:
 def adopt_locked(paths: BoxPaths, project: str, service: str, path: str, name: str) -> None:
     """The adopt core. Caller holds the project lock. Raises DataError,
     DockerError or ComposeRefused (a DockerError) naming what failed."""
+    stage = legacy_stage(paths, project)
+    if stage is not None:
+        raise DataError(legacy_refusal(project, stage))
     if not _VOLUME_NAME.fullmatch(name):
         raise DataError(f"volume name {name!r} must be lower-case letters, digits, '_', "
                         f"'.' or '-', starting with a letter or digit, at most 63 characters")

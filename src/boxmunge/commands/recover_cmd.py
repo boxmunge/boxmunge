@@ -25,6 +25,7 @@ from boxmunge.docker import caddy_reload, DockerError
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.lifecycle import BlockReason, is_blocked
+from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import is_paused
@@ -99,6 +100,8 @@ def run_recover(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
 
 def recover_locked(project_name: str, paths: BoxPaths) -> int:
     """Restart the stopped build. Caller holds the project lock."""
+    if refuse_if_legacy_stage(paths, project_name):
+        return 1
     health = _monitor_stopped_health(project_name, paths)
     if health is None:
         return 1
