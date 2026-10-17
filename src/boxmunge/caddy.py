@@ -9,25 +9,32 @@ from boxmunge.manifest import get_all_routes
 from boxmunge.paths import BoxPaths
 
 
-# Access-log fields kept, each cut to this many characters. CrowdSec's docker
+# Access-log fields that carry text from a client or an upstream, each cut to
+# this many characters; every other such field is dropped. CrowdSec's docker
 # source drops a line over 64 KiB and loses the lines after it while it
 # restarts the tail, and Caddy JSON-escapes a byte into up to six. So no
-# request or response header is logged whole (a client or an upstream sets
-# them, at any length): only the User-Agent, appended as a field of its own.
+# request or response header is logged (any number, at any length), nor the
+# TLS details (a client's SNI runs to 64 KiB): only the User-Agent, appended
+# as a field of its own. A test walks every field a real Caddy emits and
+# fails on one that is neither here nor bounded by Caddy itself.
 ACCESS_LOG_FIELD_LIMITS = {
     "request>uri": 2048,
     "request>host": 256,
     "request>method": 32,
     "user_agent": 512,
+    "user_id": 256,
 }
-ACCESS_LOG_DROPPED = ("request>headers", "resp_headers")
+ACCESS_LOG_DROPPED = ("request>headers", "request>tls", "resp_headers")
 
 
-def _up_to(limit: int) -> str:
-    """A regexp matching up to `limit` characters. Go's regexp refuses a
-    repeat count above 1000, so a longer limit is a run of such groups."""
+def _longer_than(limit: int) -> str:
+    """A regexp capturing the first `limit` characters of a longer value and
+    matching nothing shorter, which the filter then leaves untouched. Fixed
+    widths, not `.{0,n}`: a bounded range costs Go's regexp engine far more
+    per request. Go refuses a repeat count above 1000, so a longer limit is
+    a run of such groups."""
     chunks = [1000] * (limit // 1000) + ([limit % 1000] if limit % 1000 else [])
-    return "".join(f".{{0,{n}}}" for n in chunks)
+    return "^(" + "".join(f".{{{n}}}" for n in chunks) + ").+$"
 
 
 def _access_log_lines() -> list[str]:
@@ -43,7 +50,7 @@ def _access_log_lines() -> list[str]:
     rotates it.
     """
     fields = [f"                {name} delete" for name in ACCESS_LOG_DROPPED]
-    fields += [f'                {name} regexp "^({_up_to(limit)}).*$" "${{1}}"'
+    fields += [f'                {name} regexp "{_longer_than(limit)}" "${{1}}"'
                for name, limit in ACCESS_LOG_FIELD_LIMITS.items()]
     return [
         "    log_append user_agent {http.request.header.User-Agent}",

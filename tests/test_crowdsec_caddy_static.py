@@ -158,6 +158,9 @@ def test_sites_rewrite_moves_sites_and_journal_and_skips_what_it_must_not_open(t
     victim.write_text(OLD_LOG)
     (sites / "planted.conf").symlink_to(victim)
     os.mkfifo(sites / "fifo.conf")
+    # What the first version's fixed temporary name left (a crash, or planted):
+    # a rerun must not trip over it.
+    (sites / "myapp.conf.boxmunge-rewrite").write_text("stale")
     (journal / "myapp.conf.json").write_text(
         json.dumps({"path": "x", "previous": old, "written": old}))
     for _ in range(2):  # idempotent
@@ -168,6 +171,8 @@ def test_sites_rewrite_moves_sites_and_journal_and_skips_what_it_must_not_open(t
     assert json.loads((journal / "myapp.conf.json").read_text()) == {
         "path": "x", "previous": new, "written": new}
     assert victim.read_text() == OLD_LOG and (sites / "planted.conf").is_symlink()
+    assert sorted(p.name for p in sites.iterdir()) == [
+        "fifo.conf", "myapp.conf", "myapp.conf.boxmunge-rewrite", "planted.conf"]
 
 
 def test_every_access_line_stays_far_below_crowdsecs_64k_line_limit() -> None:
@@ -175,12 +180,14 @@ def test_every_access_line_stays_far_below_crowdsecs_64k_line_limit() -> None:
     lines after it. Caddy JSON-escapes a byte into at most six (\\ufffd), so
     only fields cut to a fixed length may carry client or upstream text."""
     lines = _access_log_lines()
-    for dropped in ("request>headers", "resp_headers"):
+    for dropped in ("request>headers", "request>tls", "resp_headers"):
         assert f"                {dropped} delete" in lines
     for name, limit in ACCESS_LOG_FIELD_LIMITS.items():
         caps = [line for line in lines if line.lstrip().startswith(f"{name} regexp ")]
         assert len(caps) == 1
-        counts = [int(n) for n in re.findall(r"\.\{0,(\d+)\}", caps[0])]
+        # Fixed widths: a value no longer than the limit does not match at all.
+        assert re.search(r'regexp "\^\((\.\{\d+\})+\)\.\+\$" "\$\{1\}"$', caps[0]), caps[0]
+        counts = [int(n) for n in re.findall(r"\.\{(\d+)\}", caps[0])]
         assert sum(counts) == limit and all(n <= 1000 for n in counts)  # Go's repeat limit
     fixed = 2048  # keys, addresses, numbers, Caddy's own strings
     assert 6 * sum(ACCESS_LOG_FIELD_LIMITS.values()) + fixed < 32 * 1024

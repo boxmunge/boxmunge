@@ -30,7 +30,7 @@ JOURNAL="${BOXMUNGE_ROOT}/caddy/.site-journal"
 # block). Links, FIFOs and other non-regular files are skipped, never opened
 # for reading. NEW must equal caddy.py's _access_log_lines (a test checks).
 REWRITE="$(cat <<'PY'
-import json, os, stat, sys
+import json, os, stat, sys, tempfile
 
 OLD = """    log {
         output file /var/log/caddy/access.log {
@@ -47,11 +47,13 @@ NEW = """    log_append user_agent {http.request.header.User-Agent}
             wrap json
             fields {
                 request>headers delete
+                request>tls delete
                 resp_headers delete
-                request>uri regexp "^(.{0,1000}.{0,1000}.{0,48}).*$" "${1}"
-                request>host regexp "^(.{0,256}).*$" "${1}"
-                request>method regexp "^(.{0,32}).*$" "${1}"
-                user_agent regexp "^(.{0,512}).*$" "${1}"
+                request>uri regexp "^(.{1000}.{1000}.{48}).+$" "${1}"
+                request>host regexp "^(.{256}).+$" "${1}"
+                request>method regexp "^(.{32}).+$" "${1}"
+                user_agent regexp "^(.{512}).+$" "${1}"
+                user_id regexp "^(.{256}).+$" "${1}"
             }
         }
     }
@@ -71,11 +73,15 @@ def rewrite(path, edit):
     changed = edit(text)
     if changed == text:
         return
-    tmp = f"{path}.boxmunge-rewrite"
-    with open(tmp, "x") as f:
-        f.write(changed)
-    os.chmod(tmp, stat.S_IMODE(st.st_mode))
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".boxmunge-rewrite-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(changed)
+        os.chmod(tmp, stat.S_IMODE(st.st_mode))
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
 
 
 def entry(text):

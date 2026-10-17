@@ -507,14 +507,14 @@ A line in a log file that is not a JSON entry (torn by a crash, or hand-edited) 
 
 Every site's access log is JSON on the Caddy container's stdout; Caddy's own messages go to its
 stderr. Read it as the supervisor user with `docker logs boxmunge-caddy 2>/dev/null` (stdout only).
-Docker keeps 5 files of 50 MB (`caddy/compose.yml`). The log has no request or response headers:
-it carries the User-Agent as a field of its own and cuts the URI, host, method and User-Agent to a
-fixed length, so no client or upstream can make a line long enough to stall CrowdSec. The host's
+Docker keeps 5 files of 50 MB (`caddy/compose.yml`). The log has no request or response headers
+and no TLS details: it carries the User-Agent as a field of its own and cuts the URI, host, method,
+User-Agent and user id to a fixed length, so no client or upstream can make a line long enough to stall CrowdSec. The host's
 CrowdSec reads the same stream through the Docker API (`/etc/crowdsec/acquis.d/boxmunge-caddy.yaml`,
 stdout only) with boxmunge's parser (`parsers/s01-parse/boxmunge-caddy-logs.yaml`) into the hub's
 HTTP scenarios, and never opens a log file Caddy could replace. Every install and upgrade rewrites
-those files and CrowdSec's limits drop-in, checks `boxmunge-caddy` was made from
-`caddy/compose.yml`, restarts CrowdSec, and fails unless CrowdSec tails `boxmunge-caddy` and a
+those files and CrowdSec's limits drop-in, checks `boxmunge-caddy` belongs to the platform's
+`caddy` compose project, restarts CrowdSec, and fails unless CrowdSec tails `boxmunge-caddy` and a
 scanner's Caddy line reaches a scenario. Check it with `cscli metrics` (source
 `docker:boxmunge-caddy`). `health` (`caddy`) reports an error for a `boxmunge-caddy` from any other
 compose project.
