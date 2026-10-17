@@ -302,8 +302,8 @@ def run_check_all(paths: BoxPaths, *, read_only: bool) -> int:
     rest. An unusable host config is reported the same way.
 
     Returns the worst per-project status (0 ok, 1 warning, 2 critical),
-    at least 1 if any project could not be checked, and 2 if the Docker
-    daemon's user-namespace remapping is broken (docker-userns).
+    at least 1 if any project could not be checked, and 2 if docker-userns
+    reports an error (broken remapping, or a remapped box's caddy/logs).
     """
     worst = 0
     failed: list[str] = []

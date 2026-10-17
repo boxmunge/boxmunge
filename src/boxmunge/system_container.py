@@ -15,6 +15,7 @@ from typing import Any
 
 from boxmunge.docker_run import docker_env
 from boxmunge.paths import BoxPaths
+from boxmunge.userns.offset import RemapError, daemon_remapped
 
 CONTAINER_NAME = "boxmunge-system"
 # Where the container sees the operator's rclone config (system/compose.yml).
@@ -147,6 +148,28 @@ def _check_user(info: dict[str, Any], paths: BoxPaths, name: str) -> None:
         )
 
 
+def _check_namespace(info: dict[str, Any], paths: BoxPaths, name: str) -> None:
+    """Under a remapped daemon the container must be in the host user
+    namespace. A container already there is right on any daemon, so the
+    remap state is asked for only when it is not."""
+    if info["HostConfig"]["UsernsMode"] == "host":
+        return
+    try:
+        remapped = daemon_remapped(paths)
+    except RemapError as e:
+        raise SystemContainerError(
+            f"{name} is not in the host user namespace, and boxmunge cannot tell "
+            f"whether the Docker daemon is remapped: {e}. Recreating it from "
+            f"{paths.system_compose} (userns_mode: host) is right on any daemon: "
+            f"docker compose -f {paths.system_compose} up -d --force-recreate") from e
+    if remapped:
+        raise SystemContainerError(
+            f"{name} runs in the daemon's remapped user namespace, where it cannot read "
+            f"{paths.backup_key} (root:deploy 0640) or write as deploy. Recreate it from "
+            f"{paths.system_compose}, which sets userns_mode: host: docker compose -f "
+            f"{paths.system_compose} up -d --force-recreate")
+
+
 @dataclass(frozen=True)
 class SystemTools:
     """A handle on a verified, running system container.
@@ -166,12 +189,12 @@ class SystemTools:
 
 
 def connect(paths: BoxPaths) -> SystemTools:
-    """Verify the system container is running, as the deploy user, with this
-    root's mounts.
+    """Verify the system container is running, as the deploy user, in a user
+    namespace where that uid is deploy, with this root's mounts.
 
     Raises SystemContainerError, saying how to fix it, when the container is
-    missing, not running, running as another uid, or mounted for a different
-    boxmunge root.
+    missing, not running, running as another uid, remapped on a remapped
+    daemon, or mounted for a different boxmunge root.
     """
     name = CONTAINER_NAME
     info = _inspect(name)
@@ -183,6 +206,7 @@ def connect(paths: BoxPaths) -> SystemTools:
             f"The {name} container is {status}, not running. {start_hint(paths)}"
         )
     _check_user(info, paths, name)
+    _check_namespace(info, paths, name)
     _check_mounts(info, paths, name)
     return SystemTools(paths=paths, name=name)
 

@@ -3,7 +3,8 @@
 
 ok when remapped as recorded; warn on a box that has not migrated yet; error
 when the record, the subid files, daemon.json and the running daemon
-disagree (a daemon that restarted on another store or without remapping).
+disagree (a daemon that restarted on another store or without remapping),
+or when a remapped Caddy cannot write caddy/logs.
 check-all, run by root's health timer, alerts on an error once a day.
 """
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
@@ -59,7 +61,30 @@ def check_docker_userns(paths: BoxPaths) -> HealthCheck:
             NAME, "warn",
             "userns remapping is off: container root is host root for every file a "
             f"container can reach. Plan the migration: {_CHECK_COMMAND}")
+    problem = _caddy_logs_problem(paths, s)
+    if problem:
+        return HealthCheck(NAME, "error", problem)
     return HealthCheck(NAME, "ok", f"remapped: container uid N is host uid {s}+N (overlay2)")
+
+
+def _caddy_logs_problem(paths: BoxPaths, s: int) -> str | None:
+    """Caddy runs remapped as container root, host uid S, and appends to
+    caddy/logs/access.log; the host's CrowdSec reads it as host root. Only
+    the directory is checked: as deploy, health cannot look inside it."""
+    logs = paths.caddy / "logs"
+    fix = f"sudo install -d -m 750 -o {s} -g {s} {logs}"
+    try:
+        st = os.lstat(logs)
+    except FileNotFoundError:
+        return f"{logs} does not exist, so Caddy cannot write its access log. Fix: {fix}"
+    if not stat.S_ISDIR(st.st_mode):
+        return (f"{logs} is not a directory (a link or a file), so Caddy's access log "
+                f"would not land where CrowdSec reads it. Remove it, then: {fix}")
+    if (st.st_uid, st.st_gid) != (s, s):
+        return (f"{logs} is owned by {st.st_uid}:{st.st_gid}, not {s}:{s} (Caddy's root in "
+                f"the remapped namespace), so Caddy cannot write its access log. Fix "
+                f"(-h: never through a link Caddy made): sudo chown -hR {s}:{s} {logs}")
+    return None
 
 
 def _alert_state(paths: BoxPaths, now: datetime) -> dict[str, str]:
