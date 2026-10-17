@@ -23,9 +23,12 @@ from tests.integration.userns.dockerd import BUSYBOX
 
 PROJECT = "bmsweep"
 VOLUME = f"{PROJECT}_data"
+# A local tag: carried by docker save/load alone, so the many migrations of
+# the crash sweeps never ask a registry (test_images_real covers digests).
+IMAGE = "boxmunge.invalid/dind/sweep:1"
 COMPOSE = f"""services:
   app:
-    image: {BUSYBOX}
+    image: {IMAGE}
     # Exits on SIGTERM (a bare sleep as PID 1 ignores it), so stops are quick.
     command: ["sh", "-c", "trap 'exit 0' TERM; sleep 86400 & wait"]
     network_mode: none
@@ -78,6 +81,7 @@ def make_box(paths: BoxPaths) -> None:
     (project / "compose.yml").write_text(COMPOSE)
     add_project(PROJECT, paths)
     docker("pull", "-q", BUSYBOX)
+    docker("tag", BUSYBOX, IMAGE)
     compose_up(paths)
     docker("exec", container(), "sh", "-c", SEED)
 

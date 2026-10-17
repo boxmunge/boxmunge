@@ -53,6 +53,11 @@ def write_daemon_json(text: str | None) -> None:
             os.unlink(path)
             fsync_dir(path.parent)
         return
+    if not os.path.lexists(path.parent):
+        # Made here, root's 0755: atomic_write_bytes would hand a directory
+        # it creates to deploy, who could then rewrite the daemon's config.
+        os.mkdir(path.parent, 0o755)
+        fsync_dir(path.parent.parent)
     # 0644: deploy reads userns-remap from it (offset.daemon_json_userns).
     atomic_write_bytes(path, text.encode(), mode=0o644, owner=(os.geteuid(), os.getegid()))
 
@@ -133,18 +138,30 @@ def back_to_prior(paths: BoxPaths, daemon_json: str | None, s: int,
 
 
 def ensure_prior(paths: BoxPaths, daemon_json: str | None, s: int,
-                 daemon: DaemonControl) -> bool:
-    """Before the switch completed: the old daemon runs on its original
-    config. A crash inside the switch left the merged daemon.json or the
-    record, or a stopped daemon. Returns True when the daemon was restarted
-    (restart-policy containers may have started again)."""
-    if read_daemon_json() != daemon_json or uo.recorded_offset(paths) is not None:
+                 daemon: DaemonControl) -> str | None:
+    """Before the switch completed: the old daemon runs on its prior config.
+
+    A crash inside the switch left the merged daemon.json (this migration's
+    own write: put back) or the record, or a stopped daemon. A daemon.json
+    the operator changed since (to fix why the remapped daemon would not
+    start) becomes the prior config, unless it still names a userns remap.
+    Returns the prior config to journal."""
+    from boxmunge.userns.daemon_config import merged_daemon_json, parse_daemon_json
+    now = read_daemon_json()
+    ours = merged_daemon_json(daemon_json.encode() if daemon_json is not None else None).decode()
+    if now not in (daemon_json, ours):
+        if parse_daemon_json(now.encode() if now is not None else None).get("userns-remap"):
+            raise MigrationError(f"{daemon_json_path()} changed since the migration began and "
+                                 f"names a userns-remap; put back the original (the journal "
+                                 f"holds it) or remove the remap from it, then run this again")
+        print(f"  {daemon_json_path()} changed since the migration began; using it as the "
+              f"prior config")
+        daemon_json = now
+    if now == ours or uo.recorded_offset(paths) is not None:
         back_to_prior(paths, daemon_json, s, daemon)
-        return True
-    if not daemon_answers():
+    elif not daemon_answers():
         daemon.start()
-        return True
-    return False
+    return daemon_json
 
 
 def _caddyfile_fd(paths: BoxPaths) -> int:

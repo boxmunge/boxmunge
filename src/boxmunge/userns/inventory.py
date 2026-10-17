@@ -124,10 +124,15 @@ class Inventory:
         return sorted(mounted | set(self.record_data))
 
     def with_running_from(self, earlier: Inventory) -> Inventory:
-        """A fresh inventory taken after a partial quiesce keeps who was running."""
+        """A fresh inventory taken after a partial quiesce keeps who was
+        running, and the containers removed since (a rollback removes the
+        remapped daemon's once they are stopped): the bring-up starts their
+        services from compose."""
         was = {c.id for c in earlier.containers if c.running}
         for c in self.containers:
             c.running = c.running or c.id in was
+        present = {c.id for c in self.containers}
+        self.containers += [c for c in earlier.containers if c.id not in present]
         return self
 
 

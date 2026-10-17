@@ -133,3 +133,13 @@ def test_running_state_survives_a_reinventory_after_quiesce(paths, tmp_path, mon
     earlier.containers[0].running = True
     later = take_inventory(paths).with_running_from(earlier)
     assert later.containers[0].running and later.driver_type == ""
+
+
+def test_containers_removed_since_are_kept_for_the_bring_up(paths, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(inv_mod, "_run", _docker(paths, tmp_path))
+    _info(monkeypatch, Driver="overlay2", DriverStatus=[])
+    monkeypatch.setattr(inv_mod, "load_registered_projects", lambda p: {"shop"})
+    earlier = take_inventory(paths)
+    earlier.containers[0].running = True
+    later = Inventory("overlay2", "", "/v", "29.9.0").with_running_from(earlier)
+    assert [(c.id, c.running) for c in later.containers] == [("c1", True)]

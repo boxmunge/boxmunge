@@ -24,6 +24,11 @@ def test_id_rules(value, direction, expected) -> None:
     assert shift._new_id(value, S, direction) == expected
 
 
+def test_ids_in_range_pass_a_forward_shift_only_once_one_began() -> None:
+    assert shift._new_id(S + 70, S, Direction.FORWARD, resumed=False) is None
+    assert shift._new_id(70, S, Direction.FORWARD, resumed=False) == S + 70
+
+
 @pytest.mark.parametrize("bad", [0, -S, S + 1])
 def test_offset_must_be_a_positive_multiple_of_the_range(tmp_path, bad) -> None:
     with pytest.raises(ValueError):

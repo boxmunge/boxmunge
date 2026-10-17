@@ -167,7 +167,10 @@ def _notes(paths: BoxPaths, inv: Inventory, r: Report) -> None:
 
 
 def preflight(paths: BoxPaths, inv: Inventory, *, direction: str, offset: int,
-              images_dir: Path, scan_images: bool = True) -> Report:
+              images_dir: Path, scan_images: bool = True,
+              extra_binds: list[str] | None = None) -> Report:
+    """`extra_binds`: bind data a rollback also unshifts (the forward
+    inventory's, which the remapped daemon may no longer mount)."""
     r = Report()
     forward = direction == FORWARD
     checks.docker_version(inv, r)
@@ -176,8 +179,9 @@ def preflight(paths: BoxPaths, inv: Inventory, *, direction: str, offset: int,
         r.refusals.append(problem)
     _lifecycle(paths, inv, r, forward=forward)
     checks.containers(inv, r)
-    checks.volumes(inv, r)
-    checks.data(inv, offset, Direction.FORWARD if forward else Direction.INVERSE, r)
+    checks.volumes(inv, r, forward=forward)
+    checks.data(inv, offset, Direction.FORWARD if forward else Direction.INVERSE, r,
+                extra_binds or [])
     if forward:
         checks.prior_store(inv, r)
         _daemon_json(r)

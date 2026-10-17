@@ -56,7 +56,9 @@ def test_round_trip_keeps_the_container_view(tree) -> None:
     assert all(after[k][:2] == (before[k][0] + S, before[k][1] + S) for k in before)
     assert all(after[k][2] == before[k][2] for k in before)  # setuid/setgid restored
     assert os.stat("/etc/passwd").st_uid == 0  # the link target was not touched
-    assert shift_tree(tree, S, F).changed == 0  # idempotent
+    assert shift_tree(tree, S, F, resumed=True).changed == 0  # idempotent
+    with pytest.raises(ShiftRefused, match="never shifted"):
+        shift_tree(tree, S, F)  # in range, though no shift of it began
     shift_tree(tree, S, I)
     assert _owners(tree) == before
 
@@ -75,7 +77,7 @@ def test_resume_after_a_crash_part_way(tree, monkeypatch) -> None:
     with pytest.raises(KeyboardInterrupt):
         shift_tree(tree, S, F)
     monkeypatch.setattr(os, "fchown", real)
-    shift_tree(tree, S, F)
+    shift_tree(tree, S, F, resumed=True)
     assert all(os.lstat(tree / f"f{i}").st_uid == S + i for i in range(50))
 
 
@@ -93,8 +95,8 @@ def test_a_crash_between_chown_and_chmod_keeps_the_setuid_bit(tree, monkeypatch)
         shift_tree(tree, S, F, setid)
     monkeypatch.undo()
     assert os.lstat(tree / "suid").st_mode & 0o7777 == 0o755  # the kernel cleared it
-    assert scan_tree(tree, S, F).setid == {}  # a fresh scan no longer knows
-    shift_tree(tree, S, F, setid)
+    assert scan_tree(tree, S, F, resumed=True).setid == {}  # a fresh scan no longer knows
+    shift_tree(tree, S, F, setid, resumed=True)
     st = os.lstat(tree / "suid")
     assert (st.st_uid, st.st_mode & 0o7777) == (S + 999, 0o4755)
 
@@ -170,3 +172,19 @@ def test_a_link_planted_above_the_tree_shifts_nothing(tree) -> None:
     with pytest.raises(ShiftRefused, match="without following a link"):
         shift_tree(tree / "project" / "etc", S, F)
     assert os.stat("/etc").st_uid == 0 and os.stat("/etc/passwd").st_uid == 0
+
+
+def test_a_hard_link_made_between_scan_and_shift_is_refused(tree, monkeypatch) -> None:
+    """Deploy can link one of its own files into a data tree while the shift runs."""
+    from boxmunge.userns import shift as sh
+    (tree / "a").write_text("x")
+    (tree / "outside").write_text("y")
+    real = sh.scan_tree
+
+    def scan_then_link(*a, **kw):
+        scan = real(*a, **kw)
+        os.link(tree / "outside", tree / "b")
+        return scan
+    monkeypatch.setattr(sh, "scan_tree", scan_then_link)
+    with pytest.raises(ShiftRefused, match="became a hard link since the scan"):
+        shift_tree(tree, S, F)

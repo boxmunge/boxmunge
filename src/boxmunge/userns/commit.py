@@ -34,6 +34,8 @@ from boxmunge.userns.preflight_checks import dir_size
 from boxmunge.userns.switch import MigrationError
 
 SOAK = timedelta(hours=48)
+# Journalled before the first deletion: from then on there is no rollback.
+COMMIT_STARTED = "commit-before"
 _GC_WAIT = 120
 _OLD_ROOT_DIRS = ("containers", "volumes", "image")
 
@@ -111,10 +113,10 @@ def commit(paths: BoxPaths, *, now: datetime | None = None,
     j = _checked(paths, load_journal(paths), now or datetime.now(timezone.utc))
     prior = j.prior_store
     old_root = Path(Inventory.from_json(j.inventory).root)
-    if "commit-before" not in j.items:
-        j.items["commit-before"] = str(_old_store_size(prior, old_root))
+    if COMMIT_STARTED not in j.items:
+        j.items[COMMIT_STARTED] = str(_old_store_size(prior, old_root))
         save_journal(paths, j)
-    before = int(j.items["commit-before"])
+    before = int(j.items[COMMIT_STARTED])
     remove_tars(images_dir)
     for sub in _OLD_ROOT_DIRS:
         if (old_root / sub).is_dir() and not (old_root / sub).is_symlink():

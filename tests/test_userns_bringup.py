@@ -23,9 +23,14 @@ def _inv():
 
 def test_quiesce_stops_projects_system_then_caddy(monkeypatch) -> None:
     calls = []
-    monkeypatch.setattr(bu, "_run", lambda cmd, capture=False, timeout=None: calls.append(cmd[4:]))
-    assert bu.quiesce(_inv()) == ["good-app-1", "bad-app-1", "boxmunge-system", "boxmunge-caddy"]
-    assert calls == [["good-app-1", "bad-app-1"], ["boxmunge-system"], ["boxmunge-caddy"]]
+
+    def run(cmd, capture=False, timeout=None):
+        if cmd[:2] == ["docker", "ps"]:  # idle is stopped; bad-app-1 is gone already
+            return type("R", (), {"stdout": "boxmunge-caddy\nboxmunge-system\ngood-app-1\n"})()
+        calls.append(cmd[4:])
+    monkeypatch.setattr(bu, "_run", run)
+    assert bu.quiesce(_inv()) == ["good-app-1", "boxmunge-system", "boxmunge-caddy"]
+    assert calls == [["good-app-1"], ["boxmunge-system"], ["boxmunge-caddy"]]
 
 
 @pytest.fixture

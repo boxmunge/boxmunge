@@ -250,3 +250,12 @@ def test_uncommitted_after_seven_days_warns_and_reminds(paths, monkeypatch) -> N
     assert check.status == "warn" and "userns-commit" in check.detail and sent == [0]
     hc.alert_docker_userns(paths, now=T0 + timedelta(days=8, hours=3))
     assert sent == [0]  # once a day
+
+
+def test_a_commit_stopped_part_way_is_an_error(paths, monkeypatch) -> None:
+    from boxmunge.userns.journal import FORWARD, Journal, save_journal
+    save_journal(paths, Journal(FORWARD, "applied", S, applied_at=T0.isoformat(),
+                                items={"commit-before": "100"}))
+    _as_root(monkeypatch)
+    check = hc.check_docker_userns(paths)
+    assert check.status == "error" and "finish it: sudo" in check.detail

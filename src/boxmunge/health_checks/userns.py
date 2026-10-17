@@ -54,6 +54,9 @@ def _journal_check(paths: BoxPaths, now: datetime) -> HealthCheck | None:
         return HealthCheck(NAME, "error", str(e))
     if j is None or j.phase in ("committed", "rolled-back"):
         return None
+    if j.direction == FORWARD and j.phase == "applied" and "commit-before" in j.items:
+        return HealthCheck(NAME, "error", f"a userns-commit stopped part-way, after it began "
+                           f"deleting the old root; finish it: {_SHIM} userns-commit")
     if j.direction == FORWARD and j.phase == "applied":
         applied = datetime.fromisoformat(str(j.applied_at))
         if now - applied > _REMINDER_AFTER:

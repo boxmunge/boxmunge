@@ -18,6 +18,7 @@ and left for the operator.
 from __future__ import annotations
 
 import os
+import sys
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,13 +60,18 @@ def project_locks(paths: BoxPaths, projects: list[str]) -> Iterator[None]:
 
 
 def shift_journalled(j: Journal, tree: Path, direction: Direction, save: Save,
-                     key: str) -> None:
-    """Journal the tree's setuid list, then shift it (shift.py's docstring)."""
-    setid = {**scan_tree(tree, j.offset, direction).setid, **j.setid.get(key, {})}
-    if setid != j.setid.get(key, {}):
-        j.setid[key] = setid
+                     key: str, seed: str | None = None) -> None:
+    """Journal the tree's setuid list, then shift it (shift.py's docstring).
+    `seed` is the key of the same tree's earlier shift the other way, whose
+    list holds a mode a kill inside it may have cleared. Ids already in the
+    target range are accepted only once a shift of this tree has begun."""
+    resumed = key in j.setid
+    setid = {**j.setid.get(seed or "", {}), **scan_tree(tree, j.offset, direction).setid,
+             **j.setid.get(key, {})}
+    if not resumed or setid != j.setid[key]:
+        j.setid[key] = setid  # also the mark that this tree's shift has begun
         save()
-    shift_tree(tree, j.offset, direction, setid)
+    shift_tree(tree, j.offset, direction, setid, resumed=resumed)
 
 
 def _phase0(paths: BoxPaths, j: Journal | None, timers: TimerControl,
@@ -109,7 +115,7 @@ def _prepare(paths: BoxPaths, j: Journal, inv: Inventory, save: Save) -> None:
 
 
 def _switch(paths: BoxPaths, j: Journal, inv: Inventory, daemon: DaemonControl,
-            save: Save) -> None:
+            timers: TimerControl, save: Save) -> None:
     try:
         to_remapped(paths, j.daemon_json, j.offset, daemon)
         if uo.remap_offset(paths) != j.offset:
@@ -119,12 +125,12 @@ def _switch(paths: BoxPaths, j: Journal, inv: Inventory, daemon: DaemonControl,
         for key in [k for k in j.items if k.startswith("restart:")]:
             del j.items[key]  # an earlier failed switch's restart says nothing about this one
         bring_up(paths, inv, j, save, component=COMPONENT, prefix="restart")
+        timers.restore(j.timers)
         j.phase, j.failed = "prepared", f"the remapped daemon did not start: {e}"
         save()
         raise MigrationError(f"the remapped daemon did not start ({e}). daemon.json was "
-                             f"restored and the box restarted on its old root; the boxmunge "
-                             f"timers stay stopped until you run userns-migrate again or "
-                             f"userns-rollback") from e
+                             f"restored and the box restarted on its old root; fix the cause, "
+                             f"then run userns-migrate again, or userns-rollback") from e
     j.phase = "switched"
     save()
 
@@ -228,7 +234,8 @@ def migrate(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,
     j = _refuse_rerun(load_journal(paths))
     with project_locks(paths, sorted(load_registered_projects(paths))):
         if j is not None and not j.reached("switched"):
-            ensure_prior(paths, j.daemon_json, j.offset, daemon)
+            j.daemon_json = ensure_prior(paths, j.daemon_json, j.offset, daemon)
+            save_journal(paths, j)
         elif j is not None:
             _ensure_remapped(paths, j, daemon)
         if j is None or not j.reached("switched"):
@@ -240,17 +247,21 @@ def migrate(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,
             save_journal(paths, journal)
 
         inv = Inventory.from_json(j.inventory)
+        stopped = False
         try:
             j.failed = None
-            timers.stop_all()
             if not j.reached("switched"):
                 save_all(inv.images, j, images_dir, save)
                 if not j.reached("prepared"):
                     _prepare(paths, j, inv, save)
+                timers.stop_all()  # from here until the box runs again
+                stopped = True
                 quiesce(inv)  # again on a resume: the old daemon may have restarted some
                 j.phase = "quiesced"
                 save()
-                _switch(paths, j, inv, daemon, save)
+                _switch(paths, j, inv, daemon, timers, save)
+            timers.stop_all()
+            stopped = True
             if not j.reached("rebuilt"):
                 _rebuild(paths, j, inv, images_dir, save)
             results = bring_up(paths, inv, j, save, component=COMPONENT)
@@ -261,10 +272,18 @@ def migrate(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,
         except BaseException as e:
             j.failed = j.failed or f"{j.phase}: {e}"
             save()
+            held = ("The boxmunge timers are stopped. " if stopped and j.phase != "prepared"
+                    else "")
             notify(paths, "userns migration stopped", f"Stopped after phase {j.phase}: {e}. "
-                   f"The boxmunge timers are stopped. Re-run userns-migrate to resume, or "
-                   f"userns-rollback.", component=COMPONENT, priority=1)
+                   f"{held}Re-run userns-migrate to resume, or userns-rollback.",
+                   component=COMPONENT, priority=1)
             raise
-    _final(paths, j, results)  # outside the locks: the scan and check-all take them
+    try:
+        _final(paths, j, results)  # outside the locks: the scan and check-all take them
+    except Exception as e:  # the migration is applied; only its report is missing
+        print(f"ERROR: the migration is applied, but its final checks failed: {e}. Run "
+              f"check-all, security scan and self-test yourself.", file=sys.stderr)
+        notify(paths, "userns migration applied; its final checks failed", str(e),
+               component=COMPONENT, priority=1)
     return j
 

@@ -21,6 +21,13 @@ case "${BOXMUNGE_DIND_PRIOR_STORE:?set by the CI matrix}" in
     overlay2) echo '{"storage-driver": "overlay2", "features": {"containerd-snapshotter": false}}' > /etc/docker/daemon.json ;;
     *) echo "unknown prior store $BOXMUNGE_DIND_PRIOR_STORE" >&2; exit 2 ;;
 esac
+# An operator key the migration must keep, and a way past Docker Hub's pull
+# rate limit on a shared address (BOXMUNGE_DIND_REGISTRY_MIRROR, e.g.
+# https://mirror.gcr.io).
+if [ -n "${BOXMUNGE_DIND_REGISTRY_MIRROR:-}" ]; then
+    python3 -c 'import json, sys; p = "/etc/docker/daemon.json"; d = json.load(open(p))
+d["registry-mirrors"] = [sys.argv[1]]; json.dump(d, open(p, "w"))' "$BOXMUNGE_DIND_REGISTRY_MIRROR"
+fi
 cp /etc/docker/daemon.json /etc/docker/daemon.json.prior
 dind dockerd >> /var/log/dockerd.log 2>&1 &
 i=0

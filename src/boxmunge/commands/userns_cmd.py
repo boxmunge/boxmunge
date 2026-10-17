@@ -93,8 +93,11 @@ def _run(paths: BoxPaths, sub: str) -> None:
         print("Migration applied." + (f" Not healthy, on the maintenance page: {failed}"
                                       if failed else ""))
     elif sub == "rollback":
-        rollback(paths, daemon=SystemdDaemon(), timers=SystemdTimers())
-        print("Rolled back to the prior store.")
+        j = rollback(paths, daemon=SystemdDaemon(), timers=SystemdTimers())
+        failed = sorted(k for k, v in j.items.items()
+                        if k.startswith(("rb-project:", "abort:")) and v.startswith("failed"))
+        print("Rolled back to the prior store." + (f" Not healthy, on the maintenance page: "
+                                                   f"{failed}" if failed else ""))
     else:
         commit(paths)
         print("Committed: the old root is deleted; rollback is no longer offered.")

@@ -55,8 +55,10 @@ def remapped(paths, monkeypatch, tmp_path):
     monkeypatch.setattr(rb, "preflight", lambda *a, **kw: Report())
     monkeypatch.setattr(rb, "save_all", lambda *a, **kw: events.append("save-images"))
     monkeypatch.setattr(rb, "quiesce", lambda inv: events.append("quiesce"))
+    monkeypatch.setattr(rb, "_remove_remapped_containers", lambda: events.append("rm containers"))
+    monkeypatch.setattr(rb.uo, "remap_offset", lambda paths: S)
     monkeypatch.setattr(rb, "move", lambda src, dst, name: events.append(f"move {name}"))
-    monkeypatch.setattr(rb, "shift_journalled", lambda j, tree, d, save, key: events.append(
+    monkeypatch.setattr(rb, "shift_journalled", lambda j, tree, d, save, key, seed=None: events.append(
         f"unshift {tree.name if tree.name != '_data' else tree.parent.name}"))
     monkeypatch.setattr(rb, "set_caddyfile_mode", lambda p, mode: events.append(f"caddyfile {mode:o}"))
     monkeypatch.setattr(rb, "back_to_prior", lambda paths, text, s, daemon: (
@@ -76,6 +78,7 @@ def test_the_order_that_keeps_old_containers_safe(paths, remapped) -> None:
     timers = FakeTimers()
     rb.rollback(paths, daemon=_Daemon(events), timers=timers)
     start = events.index("daemon start")
+    assert events.index("quiesce") < events.index("rm containers") < events.index("daemon stop")
     for before in ("quiesce", "daemon stop", "move old_v", "unshift old_v", "unshift uploads",
                    "caddyfile 640", 'daemon.json {"x": 1}'):
         assert events.index(before) < start, before
@@ -93,7 +96,7 @@ def test_resume_after_a_crash_mid_restore(paths, remapped, monkeypatch) -> None:
     events, _ = remapped
     calls = {"n": 0}
 
-    def crash_once(j, tree, d, save, key):
+    def crash_once(j, tree, d, save, key, seed=None):
         calls["n"] += 1
         if calls["n"] == 2:
             raise RuntimeError("power cut")
@@ -115,7 +118,7 @@ def test_a_migration_stopped_before_the_switch_is_aborted(paths, monkeypatch, tm
     save_journal(paths, Journal(FORWARD, "quiesced", S, daemon_json=None, timers={"t": True},
                                 inventory=Inventory("overlay2", "", str(tmp_path), "29").to_json()))
     monkeypatch.setattr(rb, "load_registered_projects", lambda p: set())
-    monkeypatch.setattr(rb, "ensure_prior", lambda *a: calls.append("ensure-prior"))
+    monkeypatch.setattr(rb, "ensure_prior", lambda *a: calls.append("ensure-prior"))  # -> None
     monkeypatch.setattr(rb, "bring_up", lambda *a, **kw: calls.append(kw["prefix"]))
     monkeypatch.setattr(rb, "remove_tars", lambda d: calls.append("tars"))
     timers = FakeTimers()
@@ -137,6 +140,7 @@ def test_an_abort_before_any_stop_starts_nothing(paths, monkeypatch, tmp_path) -
 @pytest.mark.parametrize("journal, match", [
     (None, "no userns migration"),
     (Journal(FORWARD, "committed", S), "committed"),
+    (Journal(FORWARD, "applied", S, items={"commit-before": "10"}), "finish it with userns-commit"),
     (Journal(ROLLBACK, "rolled-back", S), "already rolled back"),
 ])
 def test_refusals(paths, journal, match) -> None:
@@ -150,3 +154,19 @@ def test_where_each_volume_goes_back(tmp_path) -> None:
     (tmp_path / "volumes" / "moved").mkdir(parents=True)
     (tmp_path / "volumes" / "kept" / "_data").mkdir(parents=True)
     assert [rb._where(tmp_path, n) for n in ("moved", "kept", "new")] == ["old", "stayed", "soak"]
+
+
+def test_a_rollback_on_another_daemon_than_the_journalled_one_is_refused(paths, remapped,
+                                                                       monkeypatch) -> None:
+    events, _ = remapped
+    monkeypatch.setattr(rb.uo, "remap_offset", lambda paths: 0)
+    with pytest.raises(rb.MigrationError, match="not remapped at offset"):
+        rb.rollback(paths, daemon=_Daemon(events), timers=FakeTimers())
+    assert "quiesce" not in events
+
+
+def test_the_rollback_scans_the_forward_binds_too(paths, remapped, monkeypatch) -> None:
+    seen = {}
+    monkeypatch.setattr(rb, "preflight", lambda *a, **kw: seen.update(kw) or Report())
+    rb.rollback(paths, daemon=_Daemon(remapped[0]), timers=FakeTimers())
+    assert seen["extra_binds"] and seen["extra_binds"][0].endswith("uploads")

@@ -97,7 +97,7 @@ def namespaces(inv: Inventory, r: Report) -> None:
                               f"daemon; remove it from the project and redeploy")
 
 
-def volumes(inv: Inventory, r: Report) -> None:
+def volumes(inv: Inventory, r: Report, *, forward: bool) -> None:
     by_volume = {m.name: (c, m) for c in inv.containers for m in c.mounts if m.type == "volume"}
     for v in inv.volumes:
         if v.driver != "local" or v.options:
@@ -113,8 +113,10 @@ def volumes(inv: Inventory, r: Report) -> None:
                 f"Adopt it: boxmunge data adopt {c.compose_project} {c.service}:{m.destination} "
                 f"<name>, add <name>:{m.destination} to the service, and redeploy")
         else:
-            r.notes.append(f"dangling anonymous volume {v.name[:12]} ({dir_size(Path(v.mountpoint))} "
-                           f"bytes) is left in the old root; userns-commit deletes it")
+            fate = ("is left in the old root; userns-commit deletes it" if forward
+                    else "is deleted with the remapped root")
+            r.notes.append(f"dangling anonymous volume {v.name[:12]} "
+                           f"({dir_size(Path(v.mountpoint))} bytes) {fate}")
 
 
 def images(inv: Inventory, r: Report) -> None:
@@ -142,14 +144,15 @@ def images(inv: Inventory, r: Report) -> None:
                               f"Rebuild or replace it and redeploy")
 
 
-def shifted_trees(inv: Inventory) -> list[Path]:
+def shifted_trees(inv: Inventory, extra_binds: list[str]) -> list[Path]:
     """Every tree the migration shifts: bind data and named volumes' data."""
-    trees = [Path(p) for p in inv.data_binds()]
+    trees = [Path(p) for p in sorted(set(inv.data_binds()) | set(extra_binds))]
     return trees + [Path(v.mountpoint) for v in inv.volumes if not v.anonymous]
 
 
-def data(inv: Inventory, s: int, direction: Direction, r: Report) -> None:
-    for tree in shifted_trees(inv):
+def data(inv: Inventory, s: int, direction: Direction, r: Report,
+         extra_binds: list[str]) -> None:
+    for tree in shifted_trees(inv, extra_binds):
         if not os.path.lexists(tree):
             r.notes.append(f"{tree} is mounted but does not exist; nothing to shift")
             continue
@@ -196,7 +199,10 @@ def _existing(path: Path) -> Path:
 
 def disk(inv: Inventory, r: Report, images_dir: Path) -> None:
     carried = sum(i.size for i in inv.images if i.carried)
-    need = int(1.1 * 2 * carried)  # the tarballs, then the same layers unpacked
+    # The tarballs, then the same layers unpacked; tarballs an interrupted
+    # run already wrote need no new space.
+    written = sum(t.stat().st_size for t in images_dir.glob("*.tar")) if images_dir.is_dir() else 0
+    need = max(0, int(1.1 * 2 * carried) - written)
     free = min(shutil.disk_usage(_existing(images_dir)).free,
                shutil.disk_usage(_existing(Path(inv.root))).free)
     if free < need:

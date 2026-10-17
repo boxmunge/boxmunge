@@ -24,6 +24,7 @@ from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import load_registered_projects
 from boxmunge.userns import offset as uo
 from boxmunge.userns.bringup import bring_up, quiesce
+from boxmunge.userns.commit import COMMIT_STARTED
 from boxmunge.userns.daemon_ctl import DaemonControl, TimerControl, daemon_answers
 from boxmunge.userns.engine import Save, project_locks, shift_journalled
 from boxmunge.userns.images import IMAGES_DIR, load_all, remove_tars, save_all
@@ -43,7 +44,7 @@ _PLATFORM = frozenset({"caddy", "system"})
 def _abort(paths: BoxPaths, j: Journal, daemon: DaemonControl, timers: TimerControl,
            images_dir: Path, save: Save) -> Journal:
     """Before the switch nothing was carried: restart what was stopped."""
-    ensure_prior(paths, j.daemon_json, j.offset, daemon)
+    j.daemon_json = ensure_prior(paths, j.daemon_json, j.offset, daemon)
     if j.phase != "started":  # a quiesce may have begun
         bring_up(paths, Inventory.from_json(j.inventory), j, save, component=COMPONENT,
                  prefix="abort")
@@ -87,13 +88,15 @@ def _restore_data(paths: BoxPaths, j: Journal, rinv: Inventory, finv: Inventory,
             save()
         if j.items[key] == "moved":
             tree = data_dir(old_root, v.name)
-            shift_journalled(j, tree, Direction.INVERSE, save, f"rb:{tree}")
+            shift_journalled(j, tree, Direction.INVERSE, save, f"rb:{tree}",
+                             seed=str(data_dir(new_root, v.name)))
             j.items[key] = "restored"
             save()
     for source in sorted(set(rinv.data_binds()) | set(finv.data_binds())):
         key = f"rb-bind:{source}"
         if j.items.get(key) != "restored" and os.path.lexists(source):
-            shift_journalled(j, Path(source), Direction.INVERSE, save, f"rb:{source}")
+            shift_journalled(j, Path(source), Direction.INVERSE, save, f"rb:{source}",
+                             seed=source)
             j.items[key] = "restored"
             save()
     if j.items.get("caddyfile") == "0644" and j.caddyfile_mode is not None \
@@ -121,6 +124,16 @@ def _soak_volumes(j: Journal, rinv: Inventory, old_root: Path, new_root: Path,
             save()
 
 
+def _remove_remapped_containers() -> None:
+    """Nothing needs the remapped daemon's containers again (the bring-up
+    recreates from compose on the old daemon, and the remapped root goes).
+    Removed, a reboot during the restore cannot have their restart policies
+    start them on data that is only partly unshifted."""
+    ids = _run(["docker", "ps", "-aq", "--no-trunc"], capture=True).stdout.split()
+    if ids:
+        _run(["docker", "rm", "-f", *ids], capture=True, timeout=900)
+
+
 def _leftovers(paths: BoxPaths, j: Journal, save: Save) -> None:
     """Old-root containers of projects deleted during the soak were started
     by their restart policies; remove them (and their soak-only volumes)."""
@@ -143,11 +156,15 @@ def _start(paths: BoxPaths, j: Journal, daemon: DaemonControl, images_dir: Path)
     on every resume before the quiesce: the soak goes on until then)."""
     if not daemon_answers():
         daemon.start()
+    if uo.remap_offset(paths) != j.offset:
+        raise MigrationError(f"the daemon is not remapped at offset {j.offset} as the journal "
+                             f"says; see docker-userns in health")
     inv = take_inventory(paths)
     if j.rollback_inventory:
         inv = inv.with_running_from(Inventory.from_json(j.rollback_inventory))
     report = preflight(paths, inv, direction=ROLLBACK, offset=j.offset,
-                       images_dir=images_dir, scan_images=False)
+                       images_dir=images_dir, scan_images=False,
+                       extra_binds=Inventory.from_json(j.inventory).data_binds())
     print(report.text())
     if not report.ok:
         raise PreflightRefused(report)
@@ -160,9 +177,11 @@ def _start(paths: BoxPaths, j: Journal, daemon: DaemonControl, images_dir: Path)
 def _refuse(j: Journal | None) -> Journal:
     if j is None:
         raise MigrationError("there is no userns migration to roll back")
-    if j.direction == FORWARD and j.phase == "committed":
-        raise MigrationError("the migration is committed: the old root is gone, so it cannot "
-                             "be rolled back")
+    if j.direction == FORWARD and (j.phase == "committed" or COMMIT_STARTED in j.items):
+        raise MigrationError("the migration is committed (or its commit began): the old root "
+                             "is gone, so it cannot be rolled back"
+                             + ("; finish it with userns-commit" if j.phase != "committed"
+                                else ""))
     if j.direction == ROLLBACK and j.phase == "rolled-back":
         raise MigrationError("the migration was already rolled back")
     return j
@@ -179,6 +198,7 @@ def _reverse(paths: BoxPaths, j: Journal, daemon: DaemonControl, rb_images: Path
         j.phase = "rb-saved"
         save()
         quiesce(rinv)
+        _remove_remapped_containers()
         daemon.stop()
         j.phase = "rb-quiesced"
         save()

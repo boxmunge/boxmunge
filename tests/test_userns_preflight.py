@@ -215,3 +215,15 @@ def test_compose_user_ids_a_remapped_daemon_cannot_map_are_refused(paths) -> Non
     _COMPOSE_USERS(paths, Inventory("overlay2", "", "/v", "29.9.0", projects=["shop"]), r)
     assert r.refusals and all("shop: service app: user = '70000:70000': id 70000 is above "
                               "65535" in x for x in r.refusals)
+
+
+def test_tarballs_a_stopped_run_wrote_need_no_new_space(paths, quiet, monkeypatch) -> None:
+    images_dir = Path(_inv(quiet).root) / "img"
+    images_dir.mkdir()
+    (images_dir / "a.tar").write_bytes(b"x" * 1000)
+    free = type("U", (), {"free": 1500})()
+    monkeypatch.setattr(checks.shutil, "disk_usage", lambda p: free)
+    inv = _inv(quiet, images=[ImageEntry("sha256:i", ["x:1"], 1000, True)])
+    assert _run(paths, inv).ok  # 2200 needed, 1000 of it written already
+    (images_dir / "a.tar").unlink()
+    assert "1500 bytes free, 2200 needed" in _run(paths, inv).text()

@@ -64,6 +64,9 @@ class SystemdDaemon:
             raise ControlError(f"systemctl stop docker failed: {result.stderr.strip()}")
 
     def start(self) -> None:
+        # A remapped config that would not start can use up docker.service's
+        # start limit; then even the original config would be refused.
+        _systemctl("reset-failed", "docker.service", "docker.socket")
         result = _systemctl("start", "docker.service")
         if result.returncode != 0:
             raise ControlError(f"systemctl start docker failed: {result.stderr.strip()}. "

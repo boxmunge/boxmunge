@@ -39,16 +39,19 @@ class BringUpError(Exception):
 
 
 def quiesce(inv: Inventory) -> list[str]:
-    """Stop every running container in order; returns their names."""
+    """Stop every container still running, in order; returns their names.
+    Asked of Docker, not the inventory: a resumed quiesce finds some stopped,
+    or removed, already (and a restarted daemon may have started more)."""
     groups = [
         [c for c in inv.containers if c.compose_project in inv.projects],
         [c for c in inv.containers if c.name == CONTAINER_NAME],
         [c for c in inv.containers if c.compose_project not in inv.projects
          and c.name != CONTAINER_NAME],
     ]
+    running = set(_run(["docker", "ps", "--format", "{{.Names}}"], capture=True).stdout.split())
     stopped = []
     for group in groups:
-        names = [c.name for c in group if c.running]
+        names = [c.name for c in group if c.name in running]
         if names:
             _run(["docker", "stop", "-t", str(_STOP_TIMEOUT), *names], capture=True, timeout=900)
             stopped += names

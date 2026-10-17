@@ -72,7 +72,8 @@ def test_a_clean_run_goes_through_every_phase(paths, box) -> None:
     j = _migrate(paths, timers)
     assert calls == [*STEPS, "final"] and j.phase == "applied" and j.applied_at
     assert load_journal(paths).timers == FakeTimers().state()
-    assert [c[0] for c in timers.calls] == ["stop", "restore"]
+    assert [c[0] for c in timers.calls] == ["stop", "stop", "restore"]
+    assert calls.index("_prepare") < calls.index("quiesce")
 
 
 @pytest.mark.parametrize("step", STEPS)
@@ -144,11 +145,13 @@ def test_a_remapped_daemon_that_will_not_start_puts_everything_back(paths, monke
     brought = []
     monkeypatch.setattr(en, "bring_up", lambda *a, **kw: brought.append(kw["prefix"]))
     inv = Inventory("overlay2", "", str(tmp_path), "29.9.0")
+    timers = FakeTimers()
     with pytest.raises(en.MigrationError, match="restarted on its old root"):
-        en._switch(paths, j, inv, daemon, lambda: save_journal(paths, j))
+        en._switch(paths, j, inv, daemon, timers, lambda: save_journal(paths, j))
     assert (etc / "docker" / "daemon.json").read_text() == original
     assert sw.uo.recorded_offset(paths) is None
     assert daemon.calls == ["stop", "start", "stop", "start"] and brought == ["restart"]
+    assert timers.calls[-1][0] == "restore"  # the box runs again, so do its timers
     assert load_journal(paths).phase == "prepared"
 
 
@@ -158,7 +161,7 @@ def test_the_switch_writes_the_merged_config_and_the_record(paths, monkeypatch,
     monkeypatch.setattr(en.uo, "remap_offset", lambda paths: S)
     daemon = _Daemon()
     en._switch(paths, j, Inventory("overlay2", "", str(tmp_path), "29.9.0"), daemon,
-               lambda: save_journal(paths, j))
+               FakeTimers(), lambda: save_journal(paths, j))
     doc = json.loads((etc / "docker" / "daemon.json").read_text())
     assert doc["userns-remap"] == "boxmunge-remap:boxmunge-remap" and doc["log-driver"]
     assert sw.uo.recorded_offset(paths) == S and load_journal(paths).phase == "switched"
@@ -168,14 +171,41 @@ def test_the_switch_writes_the_merged_config_and_the_record(paths, monkeypatch,
 def test_a_crash_inside_the_switch_is_undone_before_phase_0_runs_again(paths, monkeypatch,
                                                                       tmp_path) -> None:
     etc, original, j = _real_switch_box(paths, monkeypatch, tmp_path)
-    (etc / "docker" / "daemon.json").write_text('{"userns-remap": "boxmunge-remap:boxmunge-remap"}')
+    from boxmunge.userns.daemon_config import merged_daemon_json
+    (etc / "docker" / "daemon.json").write_bytes(merged_daemon_json(original.encode()))
     sw.uo.write_offset_record(paths, S)
     daemon = _Daemon()
-    assert sw.ensure_prior(paths, original, S, daemon)
+    assert sw.ensure_prior(paths, original, S, daemon) == original
     assert (etc / "docker" / "daemon.json").read_text() == original
     assert sw.uo.recorded_offset(paths) is None and daemon.calls == ["stop", "start"]
     monkeypatch.setattr(sw, "daemon_answers", lambda: True)
-    assert not sw.ensure_prior(paths, original, S, daemon)  # nothing left to undo
+    assert sw.ensure_prior(paths, original, S, daemon) == original
+    assert daemon.calls == ["stop", "start"]  # nothing left to undo
+
+
+def test_the_operators_fix_to_daemon_json_becomes_the_prior_config(paths, monkeypatch,
+                                                                   tmp_path) -> None:
+    """After a remapped daemon would not start, the operator edits daemon.json
+    and runs the migration again: their edit is kept, not undone."""
+    etc, original, _j = _real_switch_box(paths, monkeypatch, tmp_path)
+    fixed = '{"log-driver": "json-file", "iptables": true}'
+    (etc / "docker" / "daemon.json").write_text(fixed)
+    monkeypatch.setattr(sw, "daemon_answers", lambda: True)
+    daemon = _Daemon()
+    assert sw.ensure_prior(paths, original, S, daemon) == fixed
+    assert (etc / "docker" / "daemon.json").read_text() == fixed and daemon.calls == []
+    (etc / "docker" / "daemon.json").write_text('{"userns-remap": "default"}')
+    with pytest.raises(en.MigrationError, match="names a userns-remap"):
+        sw.ensure_prior(paths, original, S, daemon)
+
+
+def test_writing_daemon_json_makes_its_directory_roots(paths, monkeypatch) -> None:
+    made = []
+    monkeypatch.setattr(sw, "atomic_write_bytes", lambda path, data, **kw: made.append(path))
+    assert not (sw.uo.ETC / "docker").exists()
+    sw.write_daemon_json("{}")
+    assert oct((sw.uo.ETC / "docker").stat().st_mode & 0o777) == "0o755"
+    assert made == [sw.uo.ETC / "docker" / "daemon.json"]
 
 
 def test_a_failed_backup_stops_before_any_downtime(paths, monkeypatch, tmp_path) -> None:
@@ -199,7 +229,7 @@ def test_rebuild_resumes_a_volume_part_way(paths, monkeypatch, tmp_path) -> None
                                                    new.mkdir(parents=True, exist_ok=True)))
     monkeypatch.setattr(en, "scan_tree", lambda *a: type("S", (), {"setid": {"x": 0o4755}})())
     shifted = []
-    monkeypatch.setattr(en, "shift_tree", lambda tree, s, d, setid: shifted.append((tree, setid)))
+    monkeypatch.setattr(en, "shift_tree", lambda tree, s, d, setid, resumed: shifted.append((tree, setid)))
     monkeypatch.setattr(en, "set_caddyfile_mode", lambda paths, mode: events.append(oct(mode)))
     inv = Inventory("overlay2", "", str(root), "29.9.0", images=[ImageEntry("sha256:a", ["a:1"], 1, True)],
                     volumes=[VolumeEntry("v", "local", {}, {}, "", True, False, True),
@@ -229,5 +259,14 @@ def test_a_second_failed_switch_restarts_every_project_again(paths, monkeypatch,
     monkeypatch.setattr(en, "bring_up", lambda paths, inv, j, save, **kw: seen.append(dict(j.items)))
     with pytest.raises(en.MigrationError):
         en._switch(paths, j, Inventory("overlay2", "", str(tmp_path), "29.9.0"), _Daemon(),
-                   lambda: save_journal(paths, j))
+                   FakeTimers(), lambda: save_journal(paths, j))
     assert seen == [{}]
+
+
+def test_a_failure_before_the_downtime_leaves_the_timers_running(paths, box) -> None:
+    calls, crash = box
+    crash["_prepare"] = True
+    timers = FakeTimers()
+    with pytest.raises(RuntimeError, match="power cut"):
+        _migrate(paths, timers)
+    assert timers.calls == []
