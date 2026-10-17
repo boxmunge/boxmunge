@@ -17,7 +17,9 @@ from pathlib import Path
 from boxmunge.commands.deploy import (
     replace_release, run_pre_deploy_hook,
 )
-from boxmunge.commands.release_config import decide_release_users, generate_release_config
+from boxmunge.commands.release_config import (
+    decide_release_users, generate_release_config, promote_candidates,
+)
 from boxmunge.commands.restore import restore_locked
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_guard import ComposeRefused, check_start
@@ -349,6 +351,9 @@ def restore_rolled_back_data(project_name: str, paths: BoxPaths, manifest: dict,
     try:
         # The backup service restores as the user the restored release runs as.
         users = decide_release_users(project_name, paths, manifest, "rollback")
+        # The backup service is the restored release's: its images get
+        # their names now, not at the switch.
+        promote_candidates(paths, project_name)
         prepare_compose_override(paths, manifest, component="rollback", users=users or None)
         check_start(paths, project_name, component="rollback",
                     compose_files=["compose.yml", "compose.boxmunge.yml"],

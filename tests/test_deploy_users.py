@@ -27,7 +27,7 @@ def images(monkeypatch):
     """No builds or pulls; every image sets no USER."""
     built: list[list[str]] = []
     monkeypatch.setattr(di, "build_and_pull",
-                        lambda target, s, refetch=frozenset(): built.append(sorted(s)))
+                        lambda target, s, refetch=frozenset(): built.append(sorted(s)) or {})
     monkeypatch.setattr(di, "image_facts", lambda ref: ImageFacts("sha256:" + "a" * 64, "", ()))
     return built
 
@@ -217,3 +217,20 @@ def test_a_rollback_of_an_undecided_project_stays_undecided(paths, images, monke
                                     component="rollback", rollback=True) == {}
     assert images == [["db", "web"]]  # still built: the start does not build
     assert read_users(paths, "shop") == {}
+
+
+def test_a_rollbacks_restore_runs_the_restored_releases_images(paths, monkeypatch) -> None:
+    """The backup service the restore starts is the restored release's: its
+    candidates are named before the restore, not at the switch."""
+    from boxmunge.commands import rollback
+    order: list[str] = []
+    monkeypatch.setattr(rollback, "decide_release_users", lambda *a: order.append("decide") or {})
+    monkeypatch.setattr(rollback, "promote_candidates", lambda *a: order.append("promote"))
+    monkeypatch.setattr(rollback, "prepare_compose_override", lambda *a, **k: None)
+    monkeypatch.setattr(rollback, "check_start", lambda *a, **k: None)
+    monkeypatch.setattr(rollback, "_restore_data", lambda *a: order.append("restore") or True)
+
+    class Txn:
+        id = "t1"
+    assert rollback.restore_rolled_back_data("shop", paths, MANIFEST, "snap", Txn())
+    assert order == ["decide", "promote", "restore"]
