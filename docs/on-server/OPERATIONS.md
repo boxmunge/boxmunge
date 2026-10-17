@@ -819,6 +819,17 @@ is fixed. The helper is not used while any container of the project or its stagi
 (including `compose run` containers and ones a forced delete left behind): the delete then fails,
 naming them, until you remove them with `docker rm -f`.
 
+## Service Users After an Upgrade
+
+Projects deployed before boxmunge decided who each service runs as keep running as their images
+say; health warns `service-users` for them until each one's next deploy decides (see
+PROJECT_CONVENTIONS.md, "Who a service runs as"). That deploy refuses every registry service whose
+image runs as root until its manifest declares `security.user`, printing the lines to add. Run
+`boxmunge doctor` first: it lists every such service on the box, so you can add them all before
+deploying. A `build:` service with no `USER` moves to 10001:10001 at that deploy; if it keeps data
+the old user owns, the deploy is refused until `data chown <project> <service> 10001:10001` (or a
+`security.user` that keeps the old user).
+
 ## Naming an Anonymous Volume
 
 A service that mounts a path with no volume name (`- /var/lib/postgresql/data`, or an image

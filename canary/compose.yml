@@ -11,6 +11,11 @@ services:
 
   db:
     image: postgres:16-alpine
+    # postgres's own user: the image owns /var/lib/postgresql/data as 70,
+    # and Docker copies it into the empty volume, owner included.
+    user: "70:70"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
     environment:
       POSTGRES_USER: canary
       POSTGRES_PASSWORD: canary
@@ -20,3 +25,6 @@ services:
       interval: 2s
       timeout: 5s
       retries: 10
+
+volumes:
+  pgdata: {}
