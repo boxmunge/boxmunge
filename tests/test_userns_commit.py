@@ -83,7 +83,7 @@ def test_a_store_that_did_not_shrink_is_loud(paths, tmp_path, monkeypatch, remap
     monkeypatch.setattr(cm, "_GC_WAIT", 0)
     _journal(paths, tmp_path, {"driver_type": cm.CONTAINERD_STORE, "store_root": str(tmp_path),
                                "containerd_address": "/run/x.sock", "namespace": "moby",
-                               "size": 10**9})
+                               "managed": False, "size": 10**9})
     monkeypatch.setattr(cm, "_clean_containerd", lambda prior: None)
     with pytest.raises(cm.MigrationError, match="only 0 bytes were freed"):
         cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
@@ -110,3 +110,27 @@ def test_containerd_cleanup_order(monkeypatch) -> None:
     cm._clean_containerd({"containerd_address": "/run/containerd/containerd.sock", "namespace": "moby"})
     kinds = [c[0] for c in calls]
     assert kinds.index("leases") < kinds.index("snapshots") < kinds.index("images")
+
+
+def test_dockerds_own_old_containerd_root_is_removed(paths, tmp_path, remapped) -> None:
+    store = tmp_path / "containerd" / "daemon"
+    (store / "io.containerd.content.v1.content").mkdir(parents=True)
+    (store / "io.containerd.content.v1.content" / "blob").write_bytes(b"x" * 100000)
+    (tmp_path / f"{S}.{S}" / "containerd" / "daemon").mkdir(parents=True)
+    prior = {"driver_type": cm.CONTAINERD_STORE, "store_root": str(store), "managed": True,
+             "containerd_address": "/var/run/docker/containerd/containerd.sock",
+             "namespace": "moby", "size": cm._old_store_size(
+                 {"driver_type": cm.CONTAINERD_STORE, "store_root": str(store)}, tmp_path)}
+    _journal(paths, tmp_path, prior)
+    assert cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img").phase == "committed"
+    assert not store.exists() and (tmp_path / f"{S}.{S}" / "containerd" / "daemon").is_dir()
+
+
+def test_an_old_containerd_root_still_in_use_is_left(paths, tmp_path, remapped) -> None:
+    store = tmp_path / "containerd" / "daemon"
+    store.mkdir(parents=True)
+    _journal(paths, tmp_path, {"driver_type": cm.CONTAINERD_STORE, "store_root": str(store),
+                               "managed": True, "size": 0})
+    with pytest.raises(cm.MigrationError, match="may still be in use"):
+        cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
+    assert store.is_dir()

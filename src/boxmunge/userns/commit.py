@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """userns-commit: after the soak, delete the old root and the old images.
 
-On the containerd store, removing the images alone frees nothing: the old
-containers' leases and their active `<id>-init`/rootfs snapshots still pin
-content. So leases go first, then snapshots (children before parents), then
-images, and the store's size must have fallen by at least the old store's
-inventoried size, less 10%. On a graph driver, overlay2/ and image/ go.
+On the containerd store kept by dockerd's own containerd, the remapped
+daemon runs its own containerd from the remapped root, so the old one's
+root is a directory nothing uses any more, and it goes. With the system
+containerd, shared by both daemons, removing the images alone frees
+nothing: the old containers' leases and their `<id>-init`/rootfs snapshots
+still pin content. So leases go first, then snapshots (children before
+parents), then images (the remapped daemon, on overlay2, keeps none of
+them in containerd). Either way the store's size must have fallen by at
+least the old store's inventoried size, less 10%. On a graph driver,
+overlay2/ and image/ go.
 The size before is journalled when the commit starts, so a resumed commit
 measures against the same figure. Once committed, rollback is no longer
 offered.
@@ -74,6 +79,16 @@ def _clean_containerd(prior: dict) -> None:
         _ctr(prior, "images", "rm", *images)
 
 
+def _drop_managed_root(old_root: Path, s: int, store_root: Path) -> None:
+    """dockerd's own old containerd root, once its remapped one is in use."""
+    if not (old_root / f"{s}.{s}" / "containerd" / "daemon").is_dir():
+        raise MigrationError(f"the remapped daemon's containerd root is not under "
+                             f"{old_root}/{s}.{s}; {store_root} may still be in use, so it "
+                             f"is left as it is")
+    if store_root.is_dir() and not store_root.is_symlink():
+        shutil.rmtree(store_root)
+
+
 def _checked(paths: BoxPaths, j: Journal | None, now: datetime) -> Journal:
     if j is None or j.direction != FORWARD or j.phase != "applied":
         raise MigrationError(f"nothing to commit (journal: "
@@ -104,7 +119,9 @@ def commit(paths: BoxPaths, *, now: datetime | None = None,
     for sub in _OLD_ROOT_DIRS:
         if (old_root / sub).is_dir() and not (old_root / sub).is_symlink():
             shutil.rmtree(old_root / sub)
-    if prior["driver_type"] == CONTAINERD_STORE:
+    if prior["driver_type"] == CONTAINERD_STORE and prior["managed"]:
+        _drop_managed_root(old_root, j.offset, Path(prior["store_root"]))
+    elif prior["driver_type"] == CONTAINERD_STORE:
         _clean_containerd(prior)
     elif Path(prior["store_root"]).is_dir():
         shutil.rmtree(prior["store_root"])

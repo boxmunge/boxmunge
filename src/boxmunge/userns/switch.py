@@ -97,12 +97,16 @@ def prior_store(inv: Inventory) -> dict:
     """The store the old daemon used, and its size, for commit and rollback."""
     root = Path(inv.root)
     if inv.driver_type == CONTAINERD_STORE:
-        managed = root / "containerd" / "daemon"
-        croot = managed if managed.is_dir() else Path("/var/lib/containerd")
-        address = ("/var/run/docker/containerd/containerd.sock" if managed.is_dir()
+        # dockerd's own containerd keeps its root in the daemon's root (and a
+        # remapped daemon's in the remapped root); the system containerd is
+        # shared by both daemons.
+        managed = (root / "containerd" / "daemon").is_dir()
+        croot = root / "containerd" / "daemon" if managed else Path("/var/lib/containerd")
+        address = ("/var/run/docker/containerd/containerd.sock" if managed
                    else "/run/containerd/containerd.sock")
         return {"driver": inv.driver, "driver_type": inv.driver_type, "store_root": str(croot),
-                "containerd_address": address, "namespace": "moby", "size": dir_size(croot)}
+                "containerd_address": address, "namespace": "moby", "managed": managed,
+                "size": dir_size(croot)}
     return {"driver": inv.driver, "driver_type": inv.driver_type,
             "store_root": str(root / "overlay2"),
             "size": dir_size(root / "overlay2") + dir_size(root / "image")}
