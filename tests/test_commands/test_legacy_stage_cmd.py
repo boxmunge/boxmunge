@@ -15,25 +15,9 @@ from boxmunge.state import read_state, write_state
 from boxmunge.upgrade_state import write_probation
 from tests.bundle_helpers import SAFE_COMPOSE
 from tests.git_helpers import git
-from tests.legacy_helpers import legacy_bundle_stage, legacy_git_stage, reflog_checkout_time, stamp
+from tests.legacy_helpers import stamp
 from tests.stage_helpers import V1, V2, staging_docker_off
 from tests.test_legacy_stage_evidence import T, _created
-
-
-@pytest.fixture
-def legacy(paths):
-    pdir = legacy_bundle_stage(paths)
-    stamp(pdir / ".releases" / "prestage" / "meta.json", T)
-    return pdir
-
-
-@pytest.fixture
-def legacy_git(paths, tmp_path):
-    (tmp_path / "src").mkdir()
-    a, b = legacy_git_stage(paths, tmp_path / "src")
-    (paths.project_dir("myapp") / "compose.yml").write_text(SAFE_COMPOSE)
-    repo = paths.project_dir("myapp") / "repo"
-    return a, b, repo, reflog_checkout_time(repo)
 
 
 def _run(paths, choice, confirm=False, created=(-5,), at=T):
