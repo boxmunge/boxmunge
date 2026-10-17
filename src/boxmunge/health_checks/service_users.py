@@ -51,9 +51,13 @@ def check_service_users(paths: BoxPaths) -> HealthCheck:
 def _project_pending(paths: BoxPaths, project: str) -> list[str]:
     from boxmunge.docker_containers import image_facts
     from boxmunge.manifest import load_manifest
-    from boxmunge.release_target import production_target, resolved_services
+    from boxmunge.release_target import (
+        as_written, compose_users, production_target, resolved_services,
+    )
     manifest = load_manifest(paths.project_manifest(project))
-    _model, services = resolved_services(production_target(paths, project))
+    target = production_target(paths, project)
+    _model, services = resolved_services(target)
+    services = as_written(services, compose_users(target))
     pending = []
     for name, svc in sorted(services.items()):
         if svc.get("build") is not None:

@@ -59,3 +59,24 @@ def resolved_services(target: ReleaseTarget) -> tuple[dict[str, Any], dict[str, 
         project_directory=c.project_directory, env_file=c.env_file)
     services = model.get("services") or {}
     return model, {n: s for n, s in services.items() if isinstance(s, dict)}
+
+
+def compose_users(target: ReleaseTarget) -> dict[str, Any]:
+    """{service: its `user:`} from the release's compose.yml alone. The
+    resolved model also carries the overlay's `user:`, which is boxmunge's
+    own earlier decision; only compose.yml's is the operator's choice."""
+    from boxmunge.compose import load_user_compose  # compose imports run_as, which this feeds
+    release = target.compose.project_directory or target.compose.cwd
+    services = load_user_compose(release / "compose.yml", target.project).get("services") or {}
+    return {n: s["user"] for n, s in services.items() if isinstance(s, dict) and "user" in s}
+
+
+def as_written(services: dict[str, dict], users: dict[str, Any]) -> dict[str, dict]:
+    """The resolved services with only compose.yml's own `user:`."""
+    out = {}
+    for name, svc in services.items():
+        svc = {k: v for k, v in svc.items() if k != "user"}
+        if name in users:
+            svc["user"] = users[name]
+        out[name] = svc
+    return out

@@ -31,8 +31,9 @@ def images(monkeypatch):
     return built
 
 
-def _resolved(monkeypatch, services):
+def _resolved(monkeypatch, services, compose_users=None):
     monkeypatch.setattr(di, "resolved_services", lambda target: ({}, services))
+    monkeypatch.setattr(di, "compose_users", lambda target: compose_users or {})
 
 
 SERVICES = {"web": {"build": ".", "image": "boxmunge.invalid/shop/web"},
@@ -57,6 +58,17 @@ def test_decisions_are_recorded_and_opt_outs_logged(paths, images, monkeypatch) 
     assert users["web"].emitted() == "10001:10001" and users["db"].emitted() is None
     assert read_users(paths, "shop") == users
     assert "drops to postgres" in paths.log_file.read_text()
+
+
+def test_the_overlays_own_user_is_not_taken_for_compose_ymls(paths, images, monkeypatch) -> None:
+    """The resolved model carries the last decision through the overlay; a
+    change of decision must not be read back as compose.yml's choice."""
+    services = {"web": {**SERVICES["web"], "user": "0:0"}, "worker": {
+        **SERVICES["web"], "user": "1000"}}
+    _resolved(monkeypatch, services, compose_users={"worker": 1000})
+    users = di.prepare_release_users(paths, production_target(paths, "shop"), MANIFEST,
+                                     component="deploy")
+    assert users["web"].source == "default" and users["worker"].source == "compose"
 
 
 def test_check_refusals_stop_before_recording(paths, images, monkeypatch) -> None:

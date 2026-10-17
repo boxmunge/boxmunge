@@ -19,7 +19,9 @@ from boxmunge.docker_containers import ImageFacts, image_facts
 from boxmunge.docker_run import run as _run
 from boxmunge.log import log_operation, log_warning
 from boxmunge.paths import BoxPaths
-from boxmunge.release_target import DeployRefused, ReleaseTarget, resolved_services
+from boxmunge.release_target import (
+    DeployRefused, ReleaseTarget, as_written, compose_users, resolved_services,
+)
 from boxmunge.run_as import (
     SOURCE_MANIFEST, RunAsError, ServiceUser, declared_user, describe, effective_user,
     read_users, write_users,
@@ -90,7 +92,8 @@ def prepare_release_users(paths: BoxPaths, target: ReleaseTarget, manifest: dict
     model, services = resolved_services(target)
     build_and_pull(target, services)
     facts = {name: image_facts(str(svc.get("image"))) for name, svc in services.items()}
-    users, warnings = decide_users(services, facts, manifest, carried)
+    users, warnings = decide_users(as_written(services, compose_users(target)), facts,
+                                   manifest, carried)
     try:
         offset = remap_offset(paths)
     except RemapError as e:
