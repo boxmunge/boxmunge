@@ -19,11 +19,11 @@ from boxmunge.compose_guard import compose_up_checked
 from boxmunge.compose_validate import ComposeSecurityError
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import (
-    CaddyConfigRejected, DockerError, caddy_config_lock, caddy_reload, staging_compose_project,
+    CaddyConfigRejected, DockerError, caddy_config_lock, caddy_reload,
 )
 from boxmunge.log import log_error
 from boxmunge.security_warn import warn_off_services, warn_writable_state
-from boxmunge.staged_release import SlotError, release_dir, slot_dir
+from boxmunge.staged_release import SlotError, release_dir, slot_dir, staging_target
 from boxmunge.staging_copy_plan import StagingDataError
 from boxmunge.staging_data import copy_production_data, prepare_destinations
 from boxmunge.staging_isolation import StagingIsolationError
@@ -131,8 +131,9 @@ def bring_up_staging(paths: BoxPaths, project: str, manifest: dict[str, Any]) ->
     if any(svc.get("smoke") for svc in manifest.get("services", {}).values()):
         print("  Running smoke tests in containers...")
         from boxmunge.commands.check import run_smoke_in_container
+        target = staging_target(paths, project)
         result = run_smoke_in_container(release, manifest, [],
-                                        project_name=staging_compose_project(project))
+                                        project_name=target.project_name, logs_target=target)
         if result.status == "ok":
             print("  Smoke tests passed.")
         else:
