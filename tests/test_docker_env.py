@@ -46,6 +46,7 @@ NOT_DOCKER = {
     ("commands/logs.py", "_show_host_logs", "journalctl"): "reads the journal",
     ("cve/scanner.py", "refresh_db", "trivy"): "trivy DB download; never reads project compose files, needs HOME for its cache",
     ("cve/scanner.py", "scan_image", "trivy"): "trivy scans an image from the daemon; never reads project compose files",
+    ("git_slot.py", "_git", "git"): "runs git in the project's repo or the slot's clone",
     ("health_checks/hardening.py", "_run", "?"): "host hardening probes (ufw, systemctl, sshd) with an sbin PATH",
     ("mcp_tools.py", "run_subprocess_tool", "?"): "runs the upgrade shim argv",
     ("os_updates.py", "_systemctl", "systemctl"): "reads apt timer and unit state",
