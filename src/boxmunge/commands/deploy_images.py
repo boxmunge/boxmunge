@@ -14,9 +14,10 @@ from __future__ import annotations
 from typing import Any
 
 from boxmunge.commands import deploy_checks
-from boxmunge.compose_images import is_platform_image
+from boxmunge import docker_containers
+from boxmunge.compose_images import built_image_name, is_platform_image
 from boxmunge.docker_containers import ImageFacts, image_facts
-from boxmunge.docker_run import run as _run
+from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.log import log_operation, log_warning
 from boxmunge.paths import BoxPaths
 from boxmunge.release_target import (
@@ -30,10 +31,41 @@ from boxmunge.user_entries import service_entry
 from boxmunge.userns.offset import RemapError, remap_offset
 
 _BUILD_TIMEOUT = 1800
+CANDIDATE = "boxmunge-candidate"
+
+
+def candidate_name(compose_project: str, service: str) -> str:
+    """Where a service's not yet approved image waits for the switch: a
+    build, or a held-back registry image pulled again."""
+    return f"{built_image_name(compose_project, service)}:{CANDIDATE}"
+
+
+def _pull_again(target: ReleaseTarget, services: dict[str, dict],
+                again: list[str]) -> dict[str, str]:
+    """Pull the held-back images again under their candidate names; their
+    real tags keep naming the images that run, until the switch. Returns
+    {service: the ref its user is decided from}."""
+    refs = {n: str(services[n]["image"]) for n in again}
+    before = {n: docker_containers.local_image(r) for n, r in refs.items()}
+    print(f"  Pulling {', '.join(again)} again: its image's USER changed...")
+    _run([*target.command(), "pull", "--ignore-buildable", "--policy", "always", *again],
+         cwd=target.compose.cwd, timeout=_BUILD_TIMEOUT)
+    decided = {}
+    for name, ref in refs.items():
+        pulled = docker_containers.local_image(ref)
+        if pulled is None:
+            raise DockerError(f"{ref} is not in the local image store after the pull")
+        decided[name] = candidate_name(target.compose_project, name)
+        _run(["docker", "tag", pulled.image_id, decided[name]], capture=True)
+        if before[name] is not None:
+            _run(["docker", "tag", before[name].image_id, ref], capture=True)
+    return decided
 
 
 def build_and_pull(target: ReleaseTarget, services: dict[str, dict],
-                   refetch: frozenset[str] = frozenset()) -> None:
+                   refetch: frozenset[str] = frozenset()) -> dict[str, str]:
+    """Build, pull what is missing, and pull `refetch` again under candidate
+    names (returned: {service: ref to decide from})."""
     builds = sorted(n for n, s in services.items() if s.get("build") is not None)
     pulls = sorted(n for n, s in services.items() if s.get("build") is None
                    and isinstance(s.get("image"), str) and not is_platform_image(s["image"]))
@@ -42,14 +74,12 @@ def build_and_pull(target: ReleaseTarget, services: dict[str, dict],
         print(f"  Building {', '.join(builds)}...")
         _run([*target.command(), "build", *builds], cwd=target.compose.cwd,
              timeout=_BUILD_TIMEOUT)
-    if again:
-        print(f"  Pulling {', '.join(again)} again: its image's USER changed...")
-        _run([*target.command(), "pull", "--ignore-buildable", "--policy", "always", *again],
-             cwd=target.compose.cwd, timeout=_BUILD_TIMEOUT)
+    decided = _pull_again(target, services, again) if again else {}
     rest = [n for n in pulls if n not in refetch]
     if rest:
         _run([*target.command(), "pull", "--ignore-buildable", "--policy", "missing", *rest],
              cwd=target.compose.cwd, timeout=_BUILD_TIMEOUT)
+    return decided
 
 
 def decide_users(services: dict[str, dict], facts: dict[str, ImageFacts],
@@ -105,7 +135,7 @@ def prepare_release_users(paths: BoxPaths, target: ReleaseTarget, manifest: dict
     DeployRefused, DockerError or RunAsError (the record cannot be read)."""
     carried = read_users(paths, target.project, staging=target.staging) if rollback else None
     model, services = resolved_services(target)
-    build_and_pull(target, services, refetch)
+    decide_from = build_and_pull(target, services, refetch)
     if carried == {}:
         # A rollback of a project whose users no deploy has decided: it
         # goes back to running as its images say, as it did; its next
@@ -113,7 +143,8 @@ def prepare_release_users(paths: BoxPaths, target: ReleaseTarget, manifest: dict
         print("  No deploy has decided this project's users yet; the restored release "
               "runs its services as their images say until the next deploy.")
         return {}
-    facts = {name: image_facts(str(svc.get("image"))) for name, svc in services.items()}
+    facts = {name: image_facts(decide_from.get(name, str(svc.get("image"))))
+             for name, svc in services.items()}
     users, warnings = decide_users(as_written(services, compose_users(target)), facts,
                                    manifest, carried)
     try:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from boxmunge import user_drift
+from boxmunge.commands.release_config import remove_candidates as REAL_REMOVE
 from boxmunge.docker_containers import ImageFacts, LocalImage
 from boxmunge.run_as import ServiceUser, write_users
 
@@ -77,27 +78,101 @@ def test_container_update_refuses_and_points_every_changed_tag_back(
     assert user_drift.held_back(paths, "myapp") == {"web"}
 
 
-@pytest.mark.decides_users
-def test_the_deploy_pulls_a_held_back_image_again_and_clears_the_record(
-        paths, monkeypatch) -> None:
-    """No loop: the alert's deploy decides from the new image, records its
-    USER, and the next container-update finds nothing to hold back."""
+OLD, NEW = "sha256:" + "0" * 64, "sha256:" + "1" * 64
+CANDIDATE = "boxmunge.invalid/shop/db:boxmunge-candidate"
+
+
+@pytest.fixture
+def registry(paths, monkeypatch):
+    """A box whose postgres:16 runs OLD; pulling it again fetches NEW, whose
+    USER is nginx. Tags and docker tag/rm/pull act on one dict."""
     from boxmunge.commands import deploy_images as di
-    from boxmunge.commands.release_config import decide_release_users, generate_release_config
+    from boxmunge.commands import release_config as rc
+    tags = {"postgres:16": OLD}
+
+    def run(cmd, **kw):
+        import subprocess
+        if cmd[:3] == ["docker", "image", "ls"]:
+            found = "\n".join(r for r in tags if r.endswith(":boxmunge-candidate"))
+            return subprocess.CompletedProcess(cmd, 0, found, "")
+        if "pull" in cmd:
+            tags["postgres:16"] = NEW
+        elif cmd[:2] == ["docker", "tag"]:
+            tags[cmd[3]] = tags.get(cmd[2], cmd[2])
+        elif cmd[:3] == ["docker", "image", "rm"]:
+            for ref in cmd[3:]:
+                tags.pop(ref, None)
+    for mod in (di, rc):
+        monkeypatch.setattr(mod, "_run", run)
+    monkeypatch.setattr("boxmunge.docker_containers.local_image",
+                        lambda ref: LocalImage(tags[ref], ()) if ref in tags else None)
+    def facts(ref):
+        return ImageFacts(tags[ref], "nginx" if tags[ref] == NEW else "", ())
+    monkeypatch.setattr(di, "image_facts", facts)
+    monkeypatch.setattr("boxmunge.docker_containers.image_facts", facts)
     paths.project_dir("shop").mkdir(parents=True)
     (paths.project_dir("shop") / "compose.yml").write_text(
         "services:\n  db:\n    image: postgres:16\n")
     paths.project_user_drift("shop").write_text('{"services": ["db"]}\n')
-    pulls = []
-    monkeypatch.setattr(di, "_run", lambda cmd, **kw: pulls.append(cmd))
-    _facts(monkeypatch, "nginx")
-    monkeypatch.setattr(di, "image_facts", lambda ref: ImageFacts("sha256:x", "nginx", ()))
-    manifest = {"project": "shop", "hosts": ["shop.example.com"], "schema_version": 3,
-                "services": {"web": {"port": 80, "routes": [{"path": "/"}]}},
-                "user_entries": {"db": {"security": {"user": "image", "reason": "r"}}}}
-    users = decide_release_users("shop", paths, manifest, "deploy")
-    assert any("always" in c and c[-1] == "db" for c in pulls)
+    return tags
+
+
+def _manifest(declared: bool) -> dict:
+    entries = {"db": {"security": {"user": "image", "reason": "r"}}} if declared else {}
+    return {"project": "shop", "hosts": ["shop.example.com"], "schema_version": 3,
+            "services": {"web": {"port": 80, "routes": [{"path": "/"}]}},
+            "user_entries": entries}
+
+
+@pytest.mark.decides_users
+def test_the_deploy_decides_from_the_held_back_image_and_names_it_only_at_the_switch(
+        paths, registry) -> None:
+    """No loop: the alert's deploy decides from the new image; the real tag
+    moves only when the release switches, and nothing is held back then."""
+    from boxmunge.commands.release_config import (
+        decide_release_users, generate_release_config, promote_candidates,
+    )
+    users = decide_release_users("shop", paths, _manifest(True), "deploy")
     assert users["db"].image_user == "nginx"
-    generate_release_config("shop", paths, manifest, "deploy", users)
+    assert registry["postgres:16"] == OLD and registry[CANDIDATE] == NEW
+    generate_release_config("shop", paths, _manifest(True), "deploy", users)
+    assert user_drift.held_back(paths, "shop") == {"db"}  # until the switch
+    promote_candidates(paths, "shop")
+    assert registry["postgres:16"] == NEW and CANDIDATE not in registry
     assert user_drift.held_back(paths, "shop") == frozenset()
     assert user_drift.drift(paths, "shop", {"db": "postgres:16"}) == {}
+
+
+@pytest.mark.decides_users
+def test_a_refused_deploy_leaves_the_running_image_named(paths, registry, monkeypatch) -> None:
+    """Refused (the new image runs as root, undeclared), then abandoned: a
+    later restart still finds the tag naming the image that ran."""
+    from boxmunge.commands import deploy_images as di
+    from boxmunge.commands import release_config as rc
+    from boxmunge.release_target import DeployRefused
+    monkeypatch.setattr(di, "image_facts", lambda ref: ImageFacts(registry[ref], "", ()))
+    with pytest.raises(DeployRefused):
+        rc.decide_release_users("shop", paths, _manifest(False), "deploy")
+    assert registry["postgres:16"] == OLD
+    REAL_REMOVE("shop")  # what abandon and the next deploy do
+    assert CANDIDATE not in registry
+
+
+def test_abandon_removes_the_candidates(paths, monkeypatch) -> None:
+    from boxmunge.commands import install_abandon, release_config
+    removed = []
+    monkeypatch.setattr(release_config, "remove_candidates", removed.append)
+    monkeypatch.setattr(install_abandon, "restore_superseded", lambda *a: None)
+    from tests.bundle_helpers import place_bundle
+    from boxmunge.project_registry import add_project
+    from boxmunge.commands.deploy import run_deploy
+    from tests.txn_helpers import docker_off
+    from unittest.mock import patch
+    add_project("myapp", paths)
+    place_bundle(paths, timestamp="2026-10-16T090000000000")
+    with docker_off(), patch("boxmunge.commands.deploy_tree.decide_release_users",
+                             side_effect=__import__("boxmunge.release_target", fromlist=["x"])
+                             .DeployRefused(["no"])):
+        assert run_deploy("myapp", paths, ref="2026-10-16T090000000000") == 1
+    assert install_abandon.run_abandon("myapp", paths) == 0
+    assert removed == ["myapp"]
