@@ -163,7 +163,7 @@ def test_deploy_stage_update_and_delete_use_platform_names(project) -> None:
     assert _container_image(f"{name}-web-1") == built
 
     # Staging builds under its own name and leaves production's alone.
-    write_staging_files(paths, name, manifest, project_dir, project_dir, box_state=set())
+    write_staging_files(paths, name, manifest, project_dir, project_dir)
     compose_up(project_dir, compose_files=STAGING_FILES, project_name=f"{name}-staging")
     assert _container_image(f"{name}-staging-web-1") == f"boxmunge.invalid/{name}-staging/web"
     assert local_image_id(built) is not None

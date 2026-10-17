@@ -298,6 +298,19 @@ def load_user_compose(compose_path: Path, project_name: str) -> dict[str, Any]:
         raise ComposeError(f"cannot resolve {compose_path}: {e}") from e
 
 
+def production_env_files(paths: BoxPaths, project_name: str) -> dict[str, str]:
+    """The env files production's overlay names: those that exist, the
+    project's relative to the project dir it runs from."""
+    env_files: dict[str, str] = {}
+    if paths.host_secrets.exists():
+        env_files["host_secrets"] = str(paths.host_secrets)
+    if (paths.project_dir(project_name) / "project.env").exists():
+        env_files["project_env"] = "./project.env"
+    if paths.project_secrets(project_name).exists():
+        env_files["project_secrets"] = "./secrets.env"
+    return env_files
+
+
 def prepare_compose_override(
     paths: BoxPaths,
     manifest: dict[str, Any],
@@ -329,16 +342,7 @@ def prepare_compose_override(
     override_path = paths.project_compose_override(project_name)
     override_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Build env_files based on which files exist
-    env_files: dict[str, str] = {}
-    if paths.host_secrets.exists():
-        env_files["host_secrets"] = str(paths.host_secrets)
-    project_env = paths.project_dir(project_name) / "project.env"
-    if project_env.exists():
-        env_files["project_env"] = "./project.env"
-    project_secrets = paths.project_secrets(project_name)
-    if project_secrets.exists():
-        env_files["project_secrets"] = "./secrets.env"
+    env_files = production_env_files(paths, project_name)
 
     user_compose = load_user_compose(release_root / "compose.yml", project_name)
     live_mounts = plan_live_mounts(user_compose, release_root, project_data_dirs(project_dir).box_state())

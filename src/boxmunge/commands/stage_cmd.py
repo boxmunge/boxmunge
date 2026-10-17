@@ -1,8 +1,10 @@
 """boxmunge stage <project> — stage from latest source alongside production."""
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from boxmunge.caddy import generate_staging_caddy_config
@@ -10,6 +12,7 @@ from boxmunge.caddy_journal import write_site
 from boxmunge.commands.unstage_cmd import refuse_if_promotion_interrupted, teardown_staging
 from boxmunge.compose import ComposeError
 from boxmunge.compose_guard import compose_up_checked
+from boxmunge.compose_resolve import resolve_deployed_config
 from boxmunge.compose_validate import ComposeSecurityError
 from boxmunge.data_dirs import SetAsideError, log_kept, set_aside_announcer
 from boxmunge.docker import (
@@ -26,18 +29,23 @@ from boxmunge.lifecycle import refuse_if_blocked
 from boxmunge.log import log_operation, log_error
 from boxmunge.project_registry import is_registered
 from boxmunge.release import (
-    ReleaseStateError, install_release, live_ref, mark_live, project_data_dirs,
+    ReleaseStateError, install_release, live_ref, mark_live,
 )
-from boxmunge.release_staging import keep_prestage_release
+from boxmunge.release_staging import (
+    has_prestage, keep_prestage_release, prestage_ref, production_release_root,
+)
 from boxmunge.release_txn import refuse_if_install_open
 from boxmunge.security_warn import warn_off_services, warn_writable_state
 from boxmunge.source import SourceError, bundle_ref, consume_bundle, resolve_bundle_source
 from boxmunge.staging_compose import STAGING_BASE, STAGING_FILES, STAGING_OVERLAY
-from boxmunge.staging_copy_plan import StagingDataError
-from boxmunge.staging_data import copy_production_data, prepare_destinations
-from boxmunge.staging_isolation import StagingIsolationError
+from boxmunge.staged_release import staging_target_for
+from boxmunge.staging_copy_plan import CopyPlan, StagingDataError, copy_sources
+from boxmunge.staging_data import copy_production_data, plan_staging_copy, prepare_destinations
+from boxmunge.staging_isolation import (
+    StagingIsolationError, check_isolation, production_model, resolving, staging_model,
+)
 from boxmunge.staging_prepare import (
-    check_staging_storage, precheck_candidate, write_staging_files,
+    precheck_candidate, require_staging_files, validate_staging_base, write_staging_files,
 )
 from boxmunge.state import write_state
 
@@ -207,6 +215,42 @@ def _retire_previous_staging(project_name: str, paths: BoxPaths) -> None:
                  project_name=staging_compose_project(project_name))
 
 
+def _prestage_production(paths: BoxPaths, project_name: str) -> dict[str, Any] | None:
+    """Production's model while the staged release is installed in the
+    project dir: from the kept release, or None if it never deployed."""
+    if has_prestage(paths, project_name) and prestage_ref(paths, project_name) is None:
+        return None
+    root = production_release_root(paths, project_name)
+    if root == paths.project_dir(project_name):
+        return production_model(paths, project_name)
+    env = root / ".env"
+    return resolve_deployed_config(
+        paths.project_dir(project_name),
+        [str(root / "compose.yml"), paths.project_compose_override(project_name).name],
+        project_name, all_profiles=True, project_directory=paths.project_dir(project_name),
+        env_file=env if env.exists() else Path(os.devnull))
+
+
+def _check_prestage_storage(paths: BoxPaths, project_name: str,
+                            manifest: dict[str, Any]) -> CopyPlan | None:
+    """staging_prepare.check_staging_storage for this interim layout, where
+    staging runs from the project dir and production from its kept release;
+    it goes, with _prestage_production, when stage builds the slot."""
+    project_dir = paths.project_dir(project_name)
+    validate_staging_base(paths, project_name, manifest, project_dir, project_dir)
+    with resolving():
+        staging = staging_model(staging_target_for(project_dir, project_dir, project_name))
+        prod = _prestage_production(paths, project_name)
+    check_isolation(paths, project_name, staging, [("production", prod)] if prod else [])
+    plan = None
+    if copy_sources(manifest) is not None and prod is not None:
+        print("  Planning the copy of production data...")
+        plan = plan_staging_copy(paths, project_name, manifest, prod, staging)
+    copied = {dest.ref for _, dest in plan.pairs if dest.kind == "bind"} if plan else set()
+    require_staging_files(staging, project_dir, copied)
+    return plan
+
+
 def _bring_up_staging(project_name: str, paths: BoxPaths,
                       manifest: dict[str, Any], ref: str | None) -> int:
     """Write staging config, start staging containers, smoke-test, record."""
@@ -237,7 +281,7 @@ def _bring_up_staging(project_name: str, paths: BoxPaths,
     # with production (checked below, before anything starts).
     try:
         user_compose = write_staging_files(paths, project_name, manifest, project_dir,
-                                           project_dir, project_data_dirs(project_dir).box_state())
+                                           project_dir)
     except _STORAGE_ERRORS as e:
         print(f"  ERROR: Writing staging's compose files failed: {e}", file=sys.stderr)
         return 1
@@ -250,7 +294,7 @@ def _bring_up_staging(project_name: str, paths: BoxPaths,
 
     staging_project_name = staging_compose_project(project_name)
     try:
-        plan = check_staging_storage(paths, project_name, manifest)
+        plan = _check_prestage_storage(paths, project_name, manifest)
         if plan is not None:
             # Create staging (and so its volumes) without starting it, then
             # copy into it while neither side runs.

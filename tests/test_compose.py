@@ -819,3 +819,16 @@ class TestBuiltImageNames:
         services = yaml.safe_load(generate_staging_compose_override(
             self._MANIFEST, user_compose=self._USER))["services"]
         assert services["web"]["image"] == "boxmunge.invalid/myapp-staging/web"
+
+
+def test_production_env_files_names_only_files_that_exist(paths) -> None:
+    from boxmunge.compose import production_env_files
+    project_dir = paths.project_dir("myapp")
+    project_dir.mkdir(parents=True)
+    assert production_env_files(paths, "myapp") == {}
+    paths.host_secrets.write_text("")
+    (project_dir / "project.env").write_text("")
+    paths.project_secrets("myapp").write_text("")
+    assert production_env_files(paths, "myapp") == {
+        "host_secrets": str(paths.host_secrets), "project_env": "./project.env",
+        "project_secrets": "./secrets.env"}

@@ -1,14 +1,14 @@
-# SPDX-License-Identifier: Apache-2.0
 """Prove that staging and production share no Docker resource.
 
-Both environments run on one daemon from one project directory. Staging is
-safe only if nothing either one names reaches the other: no volume,
+Both environments run on one daemon beside one project directory. Staging
+is safe only if nothing either one names reaches the other: no volume,
 network, network alias, container name or built image tag, and no bind
-mount source (equal, or one inside the other). Both models are resolved by
-`docker compose config` from the files each environment really runs with:
-production from its own release (the kept one during a stage) and its
-generated overlay, staging from the generated staging files. Any overlap
-refuses the stage before staging touches anything.
+mount source (equal, or one inside the other). Every model is resolved by
+`docker compose config` from the files the environment really runs with:
+production from its project dir and overlay; staging from the slot
+(staged_release.staging_target); and, before a stage or a production
+install, production as it would run with the candidate. Any overlap
+refuses the stage, or the install, before anything changes.
 
 The shared ``boxmunge-proxy`` network itself is deliberately common to
 every project; the explicit aliases on it are not.
@@ -16,15 +16,21 @@ every project; the explicit aliases on it are not.
 from __future__ import annotations
 
 import os
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import yaml
+
+from boxmunge.bind_mounts import project_relative
+from boxmunge.compose import generate_compose_override, load_user_compose, production_env_files
 from boxmunge.compose_mounts import is_bind_entry, volume_source
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
 from boxmunge.docker import staging_compose_project
-from boxmunge.release_staging import has_prestage, prestage_ref, production_release_root
-from boxmunge.staging_compose import STAGING_FILES
+from boxmunge.staged_release import ComposeTarget, has_slot, staging_target
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -128,91 +134,138 @@ def overlaps(prod: Identities, staging: Identities) -> list[str]:
     return found
 
 
-def mount_problems(ids: Identities, project_dir: Path, box_state: set[str],
-                   environment: str) -> list[str]:
-    """Mounts `stage` cannot keep apart: the whole project directory, and
-    (for production) release code, which installing the staged release
-    replaces: every entry but ``box_state``.
-    """
+def whole_project_mounts(ids: Identities, project_dir: Path, environment: str) -> list[str]:
     whole = {os.path.normpath(project_dir), os.path.realpath(project_dir)}
+    return [f"{environment} {use} mounts the whole project directory ({path}), which "
+            f"staging and production cannot each have a copy of. Mount the "
+            f"subdirectories the service needs instead."
+            for path, use in sorted(ids.binds.items()) if path in whole]
+
+
+def _read_only(entry: Any) -> bool:
+    if isinstance(entry, dict):
+        return entry.get("read_only") is True
+    parts = entry.split(":")
+    return len(parts) > 2 and "ro" in parts[2].split(",")
+
+
+def separation_problems(model: dict[str, Any], project_dir: Path, release: Path) -> list[str]:
+    """I3: staging mounts nothing of production's except its -staging copies
+    (read-write) and the slot's release (read-only)."""
+    roots = {os.path.normpath(release), os.path.realpath(release)}
+
+    def check(src: str, ro: bool, what: str) -> list[str]:
+        path = os.path.normpath(os.path.join(release, os.path.expanduser(src)))
+        if any(path == r or path.startswith(r + os.sep) for r in roots):
+            return [] if ro else [f"staging {what} mounts the staged release ({path}) "
+                                  f"read-write; mount release code read-only"]
+        rel = project_relative(path, project_dir)
+        if rel is None or rel.split(os.sep, 1)[0].endswith("-staging"):
+            return []
+        return [f"staging {what} mounts {path}, which is production's"]
+
     problems: list[str] = []
-    for path, use in sorted(ids.binds.items()):
-        if path in whole:
-            problems.append(
-                f"{environment} {use} mounts the whole project directory ({path}), "
-                f"which staging and production cannot each have a copy of. Mount "
-                f"the subdirectories the service needs instead.")
-            continue
-        rel = next((os.path.relpath(path, base) for base in whole
-                    if path.startswith(base + os.sep)), None)
-        if environment == "production" and rel and rel.split(os.sep, 1)[0] not in box_state:
-            problems.append(
-                f"production {use} mounts {path} from the project directory, which "
-                f"`stage` replaces with the staged release: production's "
-                f"compose.boxmunge.yml was generated by an older boxmunge. An "
-                f"upgrade regenerates it, or redeploy production's current "
-                f"release; then stage again.")
-    return list(dict.fromkeys(problems))
+    for name, svc in _mapping(model.get("services")).items():
+        for entry in (svc.get("volumes") or []) if isinstance(svc, dict) else []:
+            if is_bind_entry(entry):
+                problems += check(volume_source(entry), _read_only(entry), f"service {name}")
+    for section in ("configs", "secrets"):
+        for key, decl in _mapping(model.get(section)).items():
+            if isinstance(_mapping(decl).get("file"), str):
+                problems += check(decl["file"], True, f"{section[:-1]} {key}")
+    return problems
+
+
+@contextmanager
+def resolving() -> Iterator[None]:
+    """A model that cannot be resolved cannot be proved apart: refuse."""
+    try:
+        yield
+    except ComposeResolveError as e:
+        raise StagingIsolationError(f"cannot resolve the environments to compare: {e}") from e
 
 
 def production_model(paths: BoxPaths, project: str) -> dict[str, Any] | None:
-    """The model production runs with; None when it was never deployed."""
-    if has_prestage(paths, project) and prestage_ref(paths, project) is None:
-        return None
+    """The model production runs with, from its project dir; None when it
+    was never deployed."""
     project_dir = paths.project_dir(project)
-    overlay = paths.project_compose_override(project)
-    if not (project_dir / "manifest.yml").exists() and not has_prestage(paths, project):
+    if not (project_dir / "manifest.yml").exists():
         return None
+    overlay = paths.project_compose_override(project)
     if not overlay.exists():
         raise StagingIsolationError(
-            f"production of '{project}' has no {overlay.name}, so what it runs "
-            f"cannot be checked against staging. Redeploy production first.")
-    release_root = production_release_root(paths, project)
-    return resolve_deployed_config(
-        project_dir, [str(release_root / "compose.yml"), overlay.name], project,
-        all_profiles=True, project_directory=project_dir, env_file=_env_file(release_root))
+            f"production of '{project}' has no {overlay.name}, so what it runs cannot be "
+            f"checked against staging. Redeploy production first.")
+    return resolve_deployed_config(project_dir, ["compose.yml", overlay.name], project,
+                                   all_profiles=True)
 
 
-def _env_file(release_root: Path) -> Path:
-    env = release_root / ".env"
-    return env if env.exists() else Path(os.devnull)
+def staging_model(target: ComposeTarget) -> dict[str, Any]:
+    return resolve_deployed_config(target.cwd, target.files, target.project_name,
+                                   all_profiles=True, project_directory=target.project_directory,
+                                   env_file=target.env_file)
 
 
-def staging_model(paths: BoxPaths, project: str, staging_dir: Path | None = None) -> dict:
-    """Staging's model from its generated files in ``staging_dir`` (default
-    the project dir; a candidate's are written beside it before install)."""
+def _without_read_files(compose: Path, dest: Path) -> Path:
+    """``compose`` without its services' env and label files. They are
+    release code the project dir lacks until the install, which Compose
+    2.35 refuses to resolve even with --no-env-resolution, and they name no
+    resource the comparison looks at. Every relative path, include and
+    extends file in it resolves against --project-directory, wherever the
+    copy lies."""
+    doc = yaml.safe_load(compose.read_text())
+    for svc in _mapping(_mapping(doc).get("services")).values():
+        if isinstance(svc, dict):
+            svc.pop("env_file", None)
+            svc.pop("label_file", None)
+    dest.write_text(yaml.safe_dump(doc, default_flow_style=False, sort_keys=False))
+    return dest
+
+
+def candidate_model(paths: BoxPaths, project: str, tree: Path, manifest: dict[str, Any],
+                    scratch: Path) -> dict[str, Any]:
+    """What production would run once ``tree`` is installed in the project
+    dir: its compose.yml and the overlay it would get, resolved there."""
+    overlay = scratch / "compose.boxmunge.candidate.yml"
+    overlay.write_text(generate_compose_override(
+        manifest, env_files=production_env_files(paths, project) or None,
+        user_compose=load_user_compose(tree / "compose.yml", project)))
+    compose = _without_read_files(tree / "compose.yml", scratch / "compose.candidate.yml")
+    env = tree / ".env"
     project_dir = paths.project_dir(project)
-    staging_dir = staging_dir or project_dir
     return resolve_deployed_config(
-        project_dir, [str(staging_dir / f) for f in STAGING_FILES],
-        staging_compose_project(project), all_profiles=True,
-        project_directory=project_dir, env_file=_env_file(staging_dir))
+        project_dir, [str(compose), str(overlay)], project, all_profiles=True,
+        project_directory=project_dir, env_file=env if env.is_file() else Path(os.devnull))
 
 
-def check_isolation(paths: BoxPaths, project: str, box_state: set[str],
-                    staging_dir: Path | None = None) -> tuple[dict | None, dict]:
-    """Resolve both environments and refuse anything `stage` cannot keep apart.
-
-    ``box_state`` names the project entries that stay as they are once the
-    staged release is installed. Returns (production model or None, staging model) for the
-    data copy. Raises StagingIsolationError naming each problem found.
-    """
-    try:
-        prod = production_model(paths, project)
-        staging = staging_model(paths, project, staging_dir)
-    except ComposeResolveError as e:
-        raise StagingIsolationError(f"cannot resolve the environments to compare: {e}") from e
+def check_isolation(paths: BoxPaths, project: str, staging: dict[str, Any],
+                    productions: list[tuple[str, dict[str, Any]]]) -> None:
+    """Refuse a staging model that shares anything with any of the labelled
+    production models. Raises StagingIsolationError naming each problem."""
     project_dir = paths.project_dir(project)
     staging_ids = identities(staging, staging_compose_project(project), project_dir)
-    problems = mount_problems(staging_ids, project_dir, box_state, "staging")
-    if prod is not None:
-        prod_ids = identities(prod, project, project_dir)
-        problems = mount_problems(prod_ids, project_dir, box_state, "production") + problems
+    problems = whole_project_mounts(staging_ids, project_dir, "staging")
+    for label, model in productions:
+        prod_ids = identities(model, project, project_dir)
+        problems += whole_project_mounts(prod_ids, project_dir, label)
         shared = overlaps(prod_ids, staging_ids)
         if shared:
-            problems.append("staging would share these with production:\n    - "
+            problems.append(f"staging would share these with {label}:\n    - "
                             + "\n    - ".join(shared))
     if problems:
         raise StagingIsolationError(
             "staging cannot be kept apart from production:\n  - " + "\n  - ".join(problems))
-    return prod, staging
+
+
+def check_install_isolation(paths: BoxPaths, project: str, tree: Path,
+                            manifest: dict[str, Any]) -> None:
+    """D8: a production install while a release is staged must share nothing
+    with the slot's staging. Raises StagingIsolationError."""
+    if not has_slot(paths, project):
+        return
+    releases = paths.project_releases(project)
+    with resolving():
+        with tempfile.TemporaryDirectory(dir=releases, prefix=".isolation-") as scratch:
+            candidate = candidate_model(paths, project, tree, manifest, Path(scratch))
+        staging = staging_model(staging_target(paths, project))
+    check_isolation(paths, project, staging, [("production after this install", candidate)])

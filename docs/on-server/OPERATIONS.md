@@ -165,9 +165,12 @@ if it fails, the displaced release becomes the previous release with the snapsho
 first attempt. After that, `unstage`, `rollback` and `prod-deploy` work as after any failed deploy.
 
 Staging and production share no Docker resource. Before installing anything, `stage` resolves
-both with `docker compose config` (`-p myapp` and `-p myapp-staging`) and refuses if they would
-share a volume, network, network alias, container name or bind-mount source, or if staging would
-build an image tag production runs. It checks again before starting anything. The staging copy of
+staging from the staged release, and production both as it runs and as it would run once the
+release is promoted, with `docker compose config` (`-p myapp` and `-p myapp-staging`). It refuses
+if staging would share a volume, network, network alias, container name or bind-mount source with
+either, or build an image tag production runs, and if a service needs an `env_file` that does not
+exist (staging could not start: create the file, for `secrets.env` with `secrets set`, or mark it
+`required: false`). It checks again before starting anything. The staging copy of
 `compose.yml` drops explicit volume and network `name:` lines (validation only allows the project's
 own name, which Compose would choose anyway), `container_name:` and `ports:`. Bind mounts of release
 code and configuration (`./appconfig:/etc/app:ro`, config and secret `file:` entries) work in both
@@ -209,10 +212,6 @@ Two behaviour changes in this release:
   cannot tell them from the app's own files, and a code copy may hold what an operator put there;
 - `stage` refuses a service that mounts the whole project directory (`.:/app`), which staging and
   production cannot each have a copy of. Mount the subdirectories the service needs instead.
-
-A production overlay written by an older boxmunge still mounts release code from the project
-directory. `stage` refuses to run beside it, before installing anything, and names the mount;
-an upgrade or a redeploy of production regenerates the overlay.
 
 Production's smoke checks keep running the production release's own `boxmunge-scripts/` while a
 release is staged (production mounts a copy kept in `.releases/live-scripts/`), so a smoke check
