@@ -38,7 +38,7 @@ SMOKE_RUNS = "smoke-runs"
 def release(project: str, version: str, *, copy_data: bool = False, backup: bool = False,
             volumes: list[str] | None = None) -> dict[str, str]:
     """`backup`: the service's /data/rows is the backed-up data."""
-    manifest = yaml.safe_load(manifest_text(project))
+    manifest = yaml.safe_load(manifest_text(project, image_users=True))
     manifest["schema_version"] = 3
     manifest["services"] = {"app": {"internal": True, "writable": {"external": True},
                                     "smoke": "boxmunge-scripts/smoke.sh"}}

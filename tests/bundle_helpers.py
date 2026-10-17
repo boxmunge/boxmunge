@@ -14,9 +14,18 @@ from boxmunge.paths import BoxPaths
 ULID = "01TESTULID0000000000000000"
 
 
-def manifest_text(project: str = "myapp", ulid: str = ULID, backup: str = "none") -> str:
+# Deploy refuses a registry image that sets no non-root USER until the
+# manifest says who it runs as; fixtures not about that run every service
+# as its image's own user, as boxmunge did before it decided users.
+IMAGE_USERS = ("schema_version: 2\n"
+               "security:\n  user: image\n  reason: test fixture, each image's own user\n")
+
+
+def manifest_text(project: str = "myapp", ulid: str = ULID, backup: str = "none", *,
+                  image_users: bool = False) -> str:
     return (
-        f"id: {ulid}\n"
+        (IMAGE_USERS if image_users else "")
+        + f"id: {ulid}\n"
         f"project: {project}\n"
         "source: bundle\n"
         "hosts:\n"

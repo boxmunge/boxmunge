@@ -43,7 +43,7 @@ def _compose(**web) -> str:
 
 
 def _files(project: str, **web) -> dict[str, str]:
-    return {"manifest.yml": manifest_text(project), "compose.yml": _compose(**web),
+    return {"manifest.yml": manifest_text(project, image_users=True), "compose.yml": _compose(**web),
             "appconfig/settings": "x", "uploads/.keep": ""}
 
 
