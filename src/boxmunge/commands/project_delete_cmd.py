@@ -9,6 +9,7 @@ quarantine markers, so a project later created with the same name starts
 clean.
 """
 
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -136,6 +137,9 @@ def _remove_project_dir(project_name: str, project_dir: Path) -> None:
                 f"{' '.join(left)})")
         for path in owned:
             empty_under(f"{project_name}-delete", project_dir, path.relative_to(project_dir))
+            # Still the container user's, and often 0700: deploy cannot list
+            # it, which rmtree would, but may remove it from its own parent.
+            os.rmdir(path)
     shutil.rmtree(project_dir)
 
 

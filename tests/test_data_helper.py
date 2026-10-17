@@ -136,3 +136,27 @@ def test_root_needs_no_helper_to_delete(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "a").mkdir()
     monkeypatch.setattr(data_helper.os, "geteuid", lambda: 0)
     assert data_helper.container_owned_dirs(tmp_path) == []
+
+
+def test_a_foreign_unreadable_dir_is_selected_without_being_listed(tmp_path: Path,
+                                                                   monkeypatch) -> None:
+    """pgdata (999, 0700) directly in the project directory is selected as
+    it is: deploy cannot list it, so the walk must not try."""
+    (tmp_path / "pgdata" / "base").mkdir(parents=True)
+    (tmp_path / "code").mkdir()
+    me = os.geteuid()
+    real_lstat = os.lstat
+
+    def lstat(path):
+        st = real_lstat(path)
+        if Path(path).name == "pgdata":
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, 999,
+                                   999, st.st_size, 0, 0, 0))
+        return st
+    monkeypatch.setattr(data_helper.os, "lstat", lstat)
+    (tmp_path / "pgdata").chmod(0)
+    try:
+        assert data_helper.container_owned_dirs(tmp_path) == [tmp_path / "pgdata"]
+    finally:
+        (tmp_path / "pgdata").chmod(0o755)
+    assert me != 999

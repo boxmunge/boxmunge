@@ -208,3 +208,24 @@ def test_a_forced_delete_is_refused_while_containers_exist(box, monkeypatch, cap
     monkeypatch.setattr(pd, "_teardown", lambda name, paths: ["production: boom"])
     fake_containers.run(NAME, "db", "sha256:x")
     _refused(box, capsys, pd.delete_locked(NAME, box, force=True), "myapp-db-1")
+
+
+def test_emptied_dirs_are_removed_even_when_unreadable(box, monkeypatch):
+    """CI on Linux: an emptied 0700 directory of uid 999 cannot be listed by
+    deploy, and rmtree lists every directory it removes; rmdir needs only
+    the parent's write permission."""
+    from boxmunge.commands import project_delete_cmd as pd
+    pdir = box.project_dir(NAME)
+    (pdir / "pgdata" / "base").mkdir(parents=True)
+    monkeypatch.setattr(pd, "container_owned_dirs", lambda root: [root / "pgdata"])
+
+    def empty(label, root, rel):
+        (root / rel / "base").rmdir()
+        (root / rel).chmod(0)  # as deploy sees 999's 0700 directory
+    monkeypatch.setattr(pd, "empty_under", empty)
+    try:
+        assert _delete(box, MagicMock()) == 0
+    finally:
+        if (pdir / "pgdata").exists():
+            (pdir / "pgdata").chmod(0o755)
+    assert not pdir.exists()
