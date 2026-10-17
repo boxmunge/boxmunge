@@ -187,3 +187,29 @@ def test_every_ref_taking_call_ends_options(repos) -> None:
     assert seen and all("--end-of-options" in args for args in seen)
     assert all(args[args.index("--end-of-options") + 1].startswith(("main", sha[:8], "HEAD", sha))
                for args in seen)
+
+
+def test_a_git_failure_is_an_error_not_no_commit(tmp_path) -> None:
+    """rev-parse exits 1 for a name that names no commit; anything else is git failing."""
+    (tmp_path / "not-a-repo").mkdir()
+    with pytest.raises(GitRefError, match="not a git repository"):
+        rev_parse(tmp_path / "not-a-repo", "main")
+    with pytest.raises(GitRefError, match="not a git repository"):
+        head_sha(tmp_path / "not-a-repo")
+    with pytest.raises(GitRefError, match="not a git repository"):
+        resolve_recorded_ref(tmp_path / "not-a-repo", "abcdef12")
+
+
+def test_a_git_timeout_is_a_git_ref_error(tmp_path) -> None:
+    hung = subprocess.TimeoutExpired(["git"], 60)
+    with patch.object(git_slot.subprocess, "run", side_effect=hung), \
+            pytest.raises(GitRefError, match="timed out"):
+        checkout_detached(tmp_path, "a" * 40)
+
+
+def test_a_manifest_that_is_not_utf8_is_a_git_ref_error(repos) -> None:
+    _origin, work, _prod = repos
+    (work / "manifest.yml").write_bytes(b"project: \xff\xfe\n")
+    sha = commit(work, {}, "binary manifest")
+    with pytest.raises(GitRefError, match="UTF-8"):
+        show_manifest(work, sha)

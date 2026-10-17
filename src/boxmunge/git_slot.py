@@ -28,8 +28,15 @@ class GitRefError(ValueError):
 
 
 def _git(args: list[str], cwd: Path, *, timeout: int = 60) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
-                          timeout=timeout, check=False)
+    """git's result; a hang or output that is not UTF-8 raises GitRefError,
+    so callers handle one error type."""
+    try:
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
+                              timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as e:
+        raise GitRefError(f"git {args[0]} in {cwd} timed out after {timeout}s") from e
+    except UnicodeDecodeError as e:
+        raise GitRefError(f"git {args[0]} in {cwd} wrote output that is not UTF-8: {e}") from e
 
 
 def _check_name(name: str) -> None:
@@ -40,12 +47,20 @@ def _check_name(name: str) -> None:
 def _commit(repo: Path, name: str) -> str | None:
     _check_name(name)
     result = _git(["rev-parse", "-q", "--verify", "--end-of-options", f"{name}^{{commit}}"], repo)
-    return result.stdout.strip() if result.returncode == 0 else None
+    if result.returncode == 0:
+        return result.stdout.strip()
+    # -q --verify exits 1, silently, for a name that names no single commit;
+    # any other exit is git failing (not a repository, dubious ownership, corruption).
+    if result.returncode == 1 and not result.stderr.strip():
+        return None
+    raise GitRefError(f"git rev-parse {name} in {repo} failed (exit {result.returncode}): "
+                      f"{result.stderr.strip()}")
 
 
 def rev_parse(repo: Path, name: str) -> str | None:
     """The full SHA of the commit `name` names, or None if it names none.
-    Raises GitRefError for a name that is not a valid ref or SHA."""
+    Raises GitRefError for a name that is not a valid ref or SHA, or when
+    git itself fails."""
     return _commit(repo, name)
 
 
