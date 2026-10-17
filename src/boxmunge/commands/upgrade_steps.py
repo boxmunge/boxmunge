@@ -19,13 +19,15 @@ from boxmunge.compose import generate_compose_override, load_user_compose, prepa
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
 from boxmunge.data_dirs import ReleaseStateError
-from boxmunge.release_txn import load_txn
+from boxmunge.release_txn import InstallTxn, load_txn
 from boxmunge.docker import DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
-from boxmunge.legacy_stage import legacy_stage
+from boxmunge.legacy_stage import LegacyStage, legacy_stage
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
-from boxmunge.manifest import CURRENT_SCHEMA_VERSION, load_manifest_as_written, validate_manifest
+from boxmunge.manifest import (
+    CURRENT_SCHEMA_VERSION, ManifestError, load_manifest_as_written, validate_manifest,
+)
 from boxmunge.git_layout import relink_advice, unlinked_files
 from boxmunge.migration import migrate_manifest, MigrationError
 from boxmunge.pause import render_maintenance_caddy_config
@@ -53,6 +55,31 @@ def _project_dirs(paths: BoxPaths) -> Iterator[Path]:
         if (project_dir.is_dir() and os.path.lexists(project_dir / "manifest.yml")
                 and _addressable(project_dir, paths)):
             yield project_dir
+
+
+def require_manifest(project_dir: Path) -> Path:
+    """The project's manifest.yml; ManifestError, with the fix, for a link
+    whose target is missing. Only called for a project that is not excluded
+    (exclusion() reads no manifest), so a legacy stage never fails here."""
+    path = project_dir / "manifest.yml"
+    if path.is_symlink() and not path.exists():
+        raise ManifestError(
+            f"{project_dir.name}: manifest.yml links to {os.readlink(path)}, which does not "
+            f"exist; restore it in repo/ or delete the project, then retry the upgrade")
+    return path
+
+
+def exclusion(paths: BoxPaths, name: str) -> LegacyStage | InstallTxn | ReleaseStateError | None:
+    """Why the upgrade leaves `name` exactly as it is, or None: a stage left by
+    0.10.1, an open install, or an install record this release cannot read.
+    Read-only; the one decision behind the dry run and the apply."""
+    stage = legacy_stage(paths, name)
+    if stage is not None:
+        return stage
+    try:
+        return load_txn(paths, name)
+    except ReleaseStateError as e:
+        return e
 
 
 def _addressable(project_dir: Path, paths: BoxPaths) -> bool:
@@ -224,21 +251,19 @@ def _in_memory_line(name: str, written: object) -> str:
 
 
 def _left_as_is_line(paths: BoxPaths, name: str) -> str | None:
-    """The dry run's line for a project the apply will exclude (see
-    upgrade_exclusions.exclusion), or None. Its files are neither rendered
-    nor checked, so such a project can never fail the dry run."""
-    stage = legacy_stage(paths, name)
-    if stage is not None:
-        return (f"{name}: a release staged by boxmunge 0.10.1 ({stage.kind}) will be left "
+    """The dry run's line for a project the apply will exclude, or None. Its
+    files are neither rendered nor checked, so such a project can never fail
+    the dry run."""
+    why = exclusion(paths, name)
+    if why is None:
+        return None
+    if isinstance(why, LegacyStage):
+        return (f"{name}: a release staged by boxmunge 0.10.1 ({why.kind}) will be left "
                 f"as is; after the upgrade, resolve it with boxmunge-server legacy-stage "
                 f"{name}")
-    try:
-        txn = load_txn(paths, name)
-    except ReleaseStateError as e:
-        return f"{name}: {e}; the project will be left as is"
-    if txn is not None:
-        return f"{name}: an install ({txn.ref}, {txn.phase}) is open; the project will be left as is"
-    return None
+    if isinstance(why, InstallTxn):
+        return f"{name}: an install ({why.ref}, {why.phase}) is open; the project will be left as is"
+    return f"{name}: {why}; the project will be left as is"
 
 
 def check_upgrade(paths: BoxPaths) -> list[str]:
@@ -252,7 +277,7 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
         if left is not None:
             report.append(left)
             continue
-        manifest = load_manifest_as_written(project_dir / "manifest.yml")
+        manifest = load_manifest_as_written(require_manifest(project_dir))
         migrated = _migrated(project_dir, manifest)
         unlinked = unlinked_files(project_dir, manifest)
         if unlinked:

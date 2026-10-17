@@ -270,14 +270,14 @@ LEGACY_ALERT = ("{p} has a release staged by boxmunge 0.10.1. It was left as is 
 ALERT_EVERY = timedelta(hours=24)
 
 
-def _records_path(paths: BoxPaths) -> Path:
+def records_path(paths: BoxPaths) -> Path:
     return paths.state / "legacy-stages.json"
 
 
 def _read_records(paths: BoxPaths) -> dict[str, Any]:
     """The whole record. A corrupt one raises StateError naming the file
     (a per-project input error: check-all reports it and carries on)."""
-    path = _records_path(paths)
+    path = records_path(paths)
     if not path.exists():
         return {}
     try:
@@ -299,7 +299,7 @@ def _last_alert(paths: BoxPaths, rec: dict[str, Any]) -> datetime | None:
     except ValueError:
         when = None
     if when is None or when.tzinfo is None:
-        raise StateError(f"{_records_path(paths)}: last_alert {value!r} is not a time with a "
+        raise StateError(f"{records_path(paths)}: last_alert {value!r} is not a time with a "
                          f"timezone; fix or remove it")
     return when
 
@@ -311,7 +311,7 @@ def _records(paths: BoxPaths) -> Iterator[dict[str, Any]]:
         before = json.dumps(doc, sort_keys=True)
         yield doc
         if json.dumps(doc, sort_keys=True) != before:
-            atomic_write_text(_records_path(paths), json.dumps(doc, indent=2) + "\n",
+            atomic_write_text(records_path(paths), json.dumps(doc, indent=2) + "\n",
                               mode=0o644, refuse_link=True)
 
 

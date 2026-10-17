@@ -15,18 +15,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import sys
+
 from boxmunge.commands.upgrade_steps import (
     ManifestMigration, Regeneration, _links_into_repository, _migrated, _project_dirs,
-    _regenerate_project,
+    _regenerate_project, exclusion, require_manifest,
 )
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.git_layout import alert_old_schema, alert_unlinked, relink_advice
-from boxmunge.legacy_stage import LegacyStage, alert_legacy, legacy_stage
+from boxmunge.legacy_stage import LegacyStage, alert_legacy, records_path
 from boxmunge.log import log_error, log_warning
 from boxmunge.manifest import load_manifest, load_manifest_as_written, write_manifest
 from boxmunge.migration import MigrationError
 from boxmunge.notify import notify
-from boxmunge.release_txn import open_install_reason
+from boxmunge.release_txn import InstallTxn, start_refusal, stale_reason
+from boxmunge.state import StateError
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -43,25 +46,13 @@ class Exclusions:
         return set(self.legacy) | set(self.install) | set(self.busy)
 
 
-def exclusion(paths: BoxPaths, name: str) -> tuple[str, str] | None:
-    """("legacy", kind) or ("install", why) for a project the apply must
-    leave alone, or None. Read-only."""
-    stage = legacy_stage(paths, name)
-    if stage is not None:
-        return "legacy", stage.kind
-    why = open_install_reason(paths, name)
-    if why is not None:
-        return "install", why
-    return None
-
-
 def migrate_one(paths: BoxPaths, project_dir: Path) -> str | None:
     """One project's manifest at the current schema on disk: "written", or
     "in_memory" for a git project, whose link into its repository is never
     written (D19; its operator is alerted to update the repository's file),
     or None if it is already current. Caller holds the project lock."""
     name = project_dir.name
-    manifest = load_manifest_as_written(project_dir / "manifest.yml")
+    manifest = load_manifest_as_written(require_manifest(project_dir))
     try:
         migrated = _migrated(project_dir, manifest)
     except MigrationError as e:
@@ -80,7 +71,7 @@ def _apply_locked(paths: BoxPaths, project_dir: Path, migration: ManifestMigrati
                   regen: Regeneration) -> None:
     name = project_dir.name
     unlinked = alert_unlinked(paths, project_dir,
-                              load_manifest_as_written(project_dir / "manifest.yml"))
+                              load_manifest_as_written(require_manifest(project_dir)))
     if unlinked:
         migration.unlinked[name] = relink_advice(project_dir, unlinked)
     done = migrate_one(paths, project_dir)
@@ -103,10 +94,13 @@ def apply_projects(paths: BoxPaths) -> tuple[ManifestMigration, Regeneration, Ex
                 why = exclusion(paths, name)
                 if why is None:
                     _apply_locked(paths, project_dir, migration, regen)
-                elif why[0] == "legacy":
-                    excluded.legacy[name] = why[1]
+                elif isinstance(why, LegacyStage):
+                    excluded.legacy[name] = why.kind
+                elif isinstance(why, InstallTxn):
+                    excluded.install[name] = start_refusal(
+                        name, why, stale_reason(paths, name, why))
                 else:
-                    excluded.install[name] = why[1]
+                    excluded.install[name] = str(why)
         except LockError:
             excluded.busy.append(name)
             log_warning("upgrade", f"Skipped {name}: held by another operation; it keeps its "
@@ -121,9 +115,19 @@ def apply_projects(paths: BoxPaths) -> tuple[ManifestMigration, Regeneration, Ex
 def notify_exclusions(paths: BoxPaths, excluded: Exclusions) -> None:
     """A priority-1 alert per legacy project (deduplicated by
     state/legacy-stages.json), and one summary each for open installs and
-    busy projects. Sent with no project lock held."""
+    busy projects. Sent with no project lock held. A legacy alert whose
+    dedupe record cannot be read or written is logged and printed instead:
+    the project was still left as is, so it must not fail the upgrade."""
     for name, kind in sorted(excluded.legacy.items()):
-        alert_legacy(paths, name, LegacyStage(kind))
+        try:
+            alert_legacy(paths, name, LegacyStage(kind))
+        except (StateError, OSError) as e:
+            message = (f"Could not alert that {name} has a release staged by boxmunge 0.10.1 "
+                       f"(the dedupe record {records_path(paths)}: {type(e).__name__}: {e}); "
+                       f"fix or remove that file. The project was left as is; resolve it with "
+                       f"boxmunge-server legacy-stage {name}")
+            log_error("upgrade", message, paths, project=name)
+            print(f"  WARNING: {message}", file=sys.stderr)
     if excluded.install:
         lines = "\n".join(f"- {n}: {why}" for n, why in sorted(excluded.install.items()))
         notify(paths, "upgrade: projects with an open install left as they are",

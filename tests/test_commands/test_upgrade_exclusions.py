@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from boxmunge.commands.upgrade_cmd import _run_apply, _run_dry
 from boxmunge.commands.upgrade_steps import check_upgrade, restart_projects
 from boxmunge.fileutil import project_lock
+from boxmunge.manifest import ManifestError
 from boxmunge.release_txn import open_txn
 from boxmunge.upgrade_exclusions import Exclusions, apply_projects, notify_exclusions
 from tests.bundle_helpers import tree_snapshot
@@ -147,3 +150,81 @@ def test_apply_passes_the_excluded_set_to_the_restart(paths) -> None:
 def _empty():
     from boxmunge.commands.upgrade_steps import ManifestMigration, Regeneration
     return ManifestMigration(), Regeneration(), Exclusions()
+
+
+# -- Fix round 1 ---------------------------------------------------------------
+
+def _apply(paths) -> int:
+    with patch("boxmunge.commands.upgrade_cmd.caddy_reload"), \
+            patch("boxmunge.commands.upgrade_cmd.write_installed_version"):
+        return _run_apply(paths, "0.10.1", "0.11.0")
+
+
+@pytest.mark.parametrize("damage", ["corrupt_record", "lock_is_a_directory"])
+def test_a_legacy_alert_that_cannot_be_recorded_does_not_fail_the_apply(
+        paths, capsys, damage) -> None:
+    legacy_bundle_stage(paths)
+    if damage == "corrupt_record":
+        (paths.state / "legacy-stages.json").write_text("{not json")
+    else:
+        (paths.state / ".legacy-stages.lock").mkdir()
+    with patch("boxmunge.legacy_stage.notify", return_value=True):
+        assert _apply(paths) == 0
+    assert "legacy-stages.json" in capsys.readouterr().err
+    errors = [line for line in paths.log_file.read_text().splitlines()
+              if '"error"' in line and "myapp" in line]
+    assert any("legacy-stages.json" in line for line in errors)
+
+
+def _dangle(pdir) -> None:
+    (pdir / "manifest.yml").unlink()
+    (pdir / "manifest.yml").symlink_to("repo/manifest.yml")
+
+
+def test_dry_run_fails_on_a_dangling_manifest_link_with_the_fix(paths, capsys) -> None:
+    _deployed(paths)
+    _dangle(paths.project_dir("myapp"))
+    with patch("boxmunge.commands.upgrade_cmd.get_build_version", return_value="0.11.0+abc"):
+        assert _run_dry(paths) == 1
+    err = capsys.readouterr().err
+    assert "myapp: manifest.yml links to repo/manifest.yml, which does not exist" in err
+    assert "restore it in repo/ or delete the project" in err
+    assert "boxmunge-upgrade clear-blocklist 0.11.0" in err
+
+
+def test_apply_fails_on_a_dangling_manifest_link_with_the_fix(paths) -> None:
+    _deployed(paths)
+    _dangle(paths.project_dir("myapp"))
+    with pytest.raises(ManifestError, match="links to repo/manifest.yml, which does not exist"):
+        apply_projects(paths)
+
+
+def test_dry_run_passes_a_legacy_project_with_a_dangling_manifest_link(paths, capsys) -> None:
+    _dangle(legacy_bundle_stage(paths))
+    assert _run_dry(paths) == 0
+    assert LEGACY_DRY_LINE in capsys.readouterr().out
+
+
+def test_one_decision_names_why_a_project_is_left(paths) -> None:
+    from boxmunge.commands.upgrade_steps import exclusion
+    from boxmunge.data_dirs import ReleaseStateError
+    from boxmunge.legacy_stage import LegacyStage
+    from boxmunge.release_txn import InstallTxn, txn_path
+    _deployed(paths)
+    assert exclusion(paths, "myapp") is None
+    _open_install(paths)
+    assert isinstance(exclusion(paths, "myapp"), InstallTxn)
+    txn_path(paths, "myapp").write_text("{not json")
+    assert isinstance(exclusion(paths, "myapp"), ReleaseStateError)
+    assert check_upgrade(paths)[0].endswith("; the project will be left as is")
+    assert "Cannot read" in apply_projects(paths)[2].install["myapp"]
+    (paths.project_dir("myapp") / ".releases" / "prestage").mkdir()
+    assert exclusion(paths, "myapp") == LegacyStage("bundle")
+
+
+def test_no_migrations_line_says_left_projects_are_not_migrated(paths, capsys) -> None:
+    legacy_bundle_stage(paths)
+    with patch("boxmunge.legacy_stage.notify", return_value=True):
+        assert _apply(paths) == 0
+    assert "No migrations needed (projects left as is are not migrated)." in \
+        capsys.readouterr().out

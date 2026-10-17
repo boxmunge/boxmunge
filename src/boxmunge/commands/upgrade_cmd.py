@@ -44,7 +44,11 @@ def _run_dry(paths: BoxPaths) -> int:
     try:
         report = check_upgrade(paths)
     except Exception as e:
+        semver, _ = parse_version_string(get_build_version())
         print(f"  ERROR: {e}", file=sys.stderr)
+        print(f"  The upgrade shim blocklists this version after a failed dry run: once it "
+              f"is fixed, run `sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist "
+              f"{semver}` and retry.", file=sys.stderr)
         return 1
     for line in report:
         print(f"  {line}")
@@ -74,7 +78,8 @@ def _migrate_regenerate_reload(
         print(f"  Update schema_version in the repository's manifest.yml (git): "
               f"{', '.join(migrated.in_memory)}")
     if not (migrated.written or migrated.in_memory):
-        print("  No migrations needed.")
+        print("  No migrations needed (projects left as is are not migrated)."
+              if excluded.names() else "  No migrations needed.")
     for advice in migrated.unlinked.values():
         print(f"  WARNING: {advice}", file=sys.stderr)
     print(f"  Regenerated: {len(regen.processed)} project(s)")
@@ -153,10 +158,14 @@ def _finish(paths: BoxPaths, label: str, migrated: ManifestMigration, regen: Reg
 
 
 def _rewrite_stash(paths: BoxPaths, step: int, total: int) -> None:
-    """D18, before anything else is written. Runs under the shim's
-    upgrade.lock (acquire_lock, held through the apply), which is what makes
-    the rewrite's sweep of stale .rewrite-* temps safe: no other rewrite can
-    be in flight. Never fails the upgrade; a failure was alerted."""
+    """D18, before anything else is written. Never fails the upgrade; a
+    failure was alerted.
+
+    The rewrite sweeps stale .rewrite-* temps, which is safe only because no
+    other rewrite can be in flight. That rests on the shim's upgrade.lock
+    (acquire_lock, held through the apply), not on any lock taken here: a
+    direct `boxmunge-server upgrade --apply` holds none, which is one reason
+    it is for the shim only."""
     print(f"[{step}/{total}] Making the latest stash restorable by the previous release...")
     result = sanitize_latest_stash(paths)
     if result.changed:
