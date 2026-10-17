@@ -385,6 +385,17 @@ See `agent-help writable` and `PROJECT_CONVENTIONS.md` for the schema reference.
   and writes nothing.
   A failed gate (config regeneration, Caddy reload, restart, self-test) fails the upgrade; it is never reported
   as a warning followed by "Upgrade complete".
+  The apply first rewrites the latest stash without the symlink members an older release wrote (a git
+  project's links into `repo/`), so a rollback's `stash restore` cannot abort on them: it writes a verified copy
+  beside the original and renames it over it, and on any failure leaves the original and alerts. Before a
+  rollback swaps back, the release being rolled back from tears down every staged release
+  (`staging-teardown-all`), since an older release does not know `.releases/staged/`.
+- Stages left by boxmunge 0.10.1 (`legacy_stage.py`, the only code that knows the old layout): 0.10.1 staged
+  into the project directory (`.releases/prestage/` held production's release, `state/staging/<project>.json`
+  recorded the stage). Such a project is detected read-only, left exactly as it is by the upgrade, refused for
+  every start and lifecycle command, backed up with the manifest of the release its containers run, and
+  resolved by `boxmunge-server legacy-stage <project>` (see OPERATIONS.md, "Upgrading from 0.10.1 with a
+  release staged"). `state/legacy-stages.json` dedupes its daily alert and records a started resolution.
 
 ## CVE Policy Module
 

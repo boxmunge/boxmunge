@@ -15,7 +15,10 @@ from typing import Any
 
 import yaml
 
+from boxmunge.legacy_stage import legacy_staging_state
 from boxmunge.paths import BoxPaths
+from boxmunge.release import mark_live
+from boxmunge.release_txn import advance, open_txn
 from boxmunge.staged_release import StagedRelease, slot_dir, write_meta
 from boxmunge.ulid import generate_ulid
 
@@ -49,6 +52,8 @@ class FixtureProject:
     paused_reason: str | None = None
     quarantine_cve: str | None = None
     staged: bool = False
+    install_phase: str | None = None   # an open install (.releases/install.json) at this phase
+    legacy_kind: str | None = None      # a stage left by boxmunge 0.10.1 ("bundle")
     findings: tuple[dict[str, Any], ...] = ()
     backups: tuple[tuple[str, float], ...] = ()  # (kind, hours ago)
     smoke: tuple[str, str] = ("ok", "")           # (status, message)
@@ -58,7 +63,7 @@ QUARANTINE_CVE = "CVE-2026-32003"
 
 PROJECTS: tuple[FixtureProject, ...] = (
     FixtureProject(
-        "shop", ("web", "worker"), deploys_hours_ago=(3, 75),
+        "shop", ("web", "worker"), deploys_hours_ago=(3, 75), install_phase="installed",
         findings=(
             finding("CVE-2026-31001", "Medium", "informational", "libxml2",
                     "Medium, below the balanced threshold. Reported only."),
@@ -69,7 +74,7 @@ PROJECTS: tuple[FixtureProject, ...] = (
     ),
     FixtureProject(
         "blog", ("web",), deploys_hours_ago=(200,), posture="strict",
-        paused_reason="Content freeze until the redesign ships",
+        paused_reason="Content freeze until the redesign ships", legacy_kind="bundle",
         backups=(("nightly", 30),),
         smoke=("warning", "smoke could not run (infrastructure, not app): "
                           "container blog-web-1 is not running"),
@@ -155,6 +160,10 @@ def _write_state(paths: BoxPaths, project: FixtureProject, project_id: str,
             id="01JF1XTVREST0STAGED0000000", kind="bundle",
             ref=ref(name, now - timedelta(hours=1)), bundle_sha256=None,
             staged_at=iso(now - timedelta(hours=1)), state="ready"))
+    if project.install_phase is not None:
+        _write_install(paths, name, ref(name, deploys[0]), project.install_phase, now)
+    if project.legacy_kind is not None:
+        _write_legacy_stage(paths, name, project.legacy_kind, ref(name, deploys[0]), now)
     if project.paused_reason is not None:
         write_json(paths.project_paused_state(name), {
             "paused_at": iso(now - timedelta(hours=26)), "reason": project.paused_reason})
@@ -165,6 +174,34 @@ def _write_state(paths: BoxPaths, project: FixtureProject, project_id: str,
             "explanation": project.findings[0]["explanation"],
             "image_ref": "sha256:" + "b" * 64, "action_complete": True,
         })
+
+
+def _write_install(paths: BoxPaths, name: str, live: str, phase: str,
+                   now: datetime) -> None:
+    """A prod-deploy of the inbox's bundle that stopped at `phase`."""
+    bundle = f"{name}-{now - timedelta(hours=1):%Y-%m-%dT%H%M%S%f}"
+    txn = open_txn(paths, name, source="bundle", ref=bundle, replaced_ref=live,
+                   staged_id=None, snapshot="")
+    if phase != txn.phase:
+        advance(paths, name, txn, phase)
+
+
+def _write_legacy_stage(paths: BoxPaths, name: str, kind: str, live: str,
+                        now: datetime) -> None:
+    """What 0.10.1 left after staging a bundle two days ago: production's
+    release kept in .releases/prestage/, the staged one in the project dir
+    and live.json."""
+    if kind != "bundle":
+        raise ValueError(f"the fixture writes only a bundle legacy stage, not {kind!r}")
+    staged_at = now - timedelta(days=2)
+    staged = ref(name, staged_at)
+    releases = paths.project_releases(name)
+    (releases / "prestage" / "release").mkdir(parents=True)
+    meta = releases / "prestage" / "meta.json"
+    write_json(meta, {"ref": live})
+    os.utime(meta, (staged_at.timestamp(), staged_at.timestamp()))
+    mark_live(paths, name, staged)
+    write_json(legacy_staging_state(paths, name), {"active": True, "ref": staged})
 
 
 def _write_scan(paths: BoxPaths, project: FixtureProject, now: datetime) -> None:

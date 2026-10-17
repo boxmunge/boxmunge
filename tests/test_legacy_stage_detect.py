@@ -219,10 +219,13 @@ def test_undetectable_stage_refuses_production_starts(paths) -> None:
 
 def test_only_the_legacy_module_knows_state_staging() -> None:
     """state/staging is retired (D11): boxmunge reads it only to detect a
-    0.10.1 stage, and project-delete and legacy-stage remove a leftover one."""
+    0.10.1 stage, and project-delete and legacy-stage remove a leftover one.
+    The API's dev fixture writes one, so plugin authors see project.get's
+    legacy_stage field."""
     from pathlib import Path
     src = Path(__file__).resolve().parents[1] / "src" / "boxmunge"
     users = sorted(str(p.relative_to(src)) for p in src.rglob("*.py")
                    if "legacy_staging_state" in p.read_text() or
                    '"staging" /' in p.read_text())
-    assert users == ["commands/project_delete_cmd.py", "legacy_stage.py", "legacy_stage_ops.py"]
+    assert users == ["api/dev/fixture_projects.py", "commands/project_delete_cmd.py",
+                     "legacy_stage.py", "legacy_stage_ops.py"]
