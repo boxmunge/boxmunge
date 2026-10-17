@@ -98,3 +98,36 @@ def test_crash_point_exits_only_when_named(monkeypatch) -> None:
     crashpoint.crash_point("txn.installed")
     crashpoint.crash_point("txn.committed")
     assert exited == [137]
+
+
+def _root_chowns(monkeypatch) -> list[str]:
+    chowned: list[str] = []
+    monkeypatch.setattr(fileutil.os, "getuid", lambda: 0)
+    monkeypatch.setattr(fileutil, "_chown_deploy", chowned.append)
+    return chowned
+
+
+def test_chown_tree_deploy_of_a_link_reowns_only_the_link(tmp_path, monkeypatch) -> None:
+    """A planted top-level link (pdir/x -> /etc) must never hand its target
+    to deploy: os.walk would follow it."""
+    target = tmp_path / "etc"
+    (target / "sub").mkdir(parents=True)
+    (target / "passwd").write_text("root")
+    os.symlink(target, tmp_path / "x")
+    chowned = _root_chowns(monkeypatch)
+    fileutil.chown_tree_deploy(tmp_path / "x")
+    assert chowned == [str(tmp_path / "x")]
+
+
+def test_chown_tree_deploy_never_descends_a_nested_link(tmp_path, monkeypatch) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret").write_text("s")
+    tree = tmp_path / "tree"
+    (tree / "d").mkdir(parents=True)
+    (tree / "f").write_text("f")
+    os.symlink(outside, tree / "d" / "link")
+    chowned = _root_chowns(monkeypatch)
+    fileutil.chown_tree_deploy(tree)
+    assert sorted(chowned) == sorted([str(tree), str(tree / "d"), str(tree / "f")])
+    assert not any(c.startswith(str(outside)) for c in chowned)

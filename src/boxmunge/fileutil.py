@@ -51,13 +51,20 @@ if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 
+def running_as_root() -> bool:
+    """Whether boxmunge runs as root. The real uid: boxmunge is never
+    installed setuid, so it equals the effective one (root by login or
+    sudo), and every root-only path in fileutil and git_slot asks this."""
+    return os.getuid() == 0
+
+
 def _deploy_owner() -> tuple[int, int] | None:
     """deploy's (uid, gid) when running as root and deploy exists, else None.
 
     KeyError means no deploy user (bootstrap not done yet, or a dev/test
     machine), where there is nothing to hand ownership to.
     """
-    if os.getuid() != 0:
+    if not running_as_root():
         return None
     try:
         pw = pwd.getpwnam("deploy")
@@ -204,12 +211,15 @@ def chown_tree_deploy(path: Path) -> None:
     """Best-effort chown of ``path`` and everything under it to deploy.
 
     For trees a root-run path (upgrade) copies that the deploy shell must
-    later replace. Links are re-owned, never followed. Same best-effort
-    rules as ``_chown_deploy``.
+    later replace. Links are re-owned, never followed: a ``path`` that is
+    itself a link has only the link re-owned (os.walk would follow it).
+    Same best-effort rules as ``_chown_deploy``.
     """
-    if os.getuid() != 0:
+    if not running_as_root():
         return
     _chown_deploy(str(path))
+    if os.path.islink(path):
+        return
     for root, dirs, files in os.walk(path):
         for name in dirs + files:
             target = os.path.join(root, name)
