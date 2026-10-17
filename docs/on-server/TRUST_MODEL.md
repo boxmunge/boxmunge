@@ -116,12 +116,16 @@ What closes them:
   mounts the project directory read-write, is caught by inspecting the
   live containers' own mounts and refused with "redeploy required". The
   validator also refuses a `provider:` service (Compose runs its type on
-  the host) and validates every profile, not just the active ones. While a
-  release is staged the project directory holds the staged release's
-  files, so every production start except the `promote` that deploys it is
-  refused. A start that fails the check does not happen: it is
-  logged, alerted at high priority, and the running containers are left
-  as they are.
+  the host) and validates every profile, not just the active ones. A
+  staged release lives in its own tree (`.releases/staged/`), so the
+  project directory stays production's; a staging start is checked against
+  that tree and must mount nothing of production's. A project staged by
+  boxmunge 0.10.1, which put the staged release's files in the project
+  directory, has every production start refused until `legacy-stage`
+  resolves it. While an install is open (`.releases/install.json`), only
+  the install itself starts production. A start that fails the check
+  does not happen: it is logged, alerted at high priority, and the
+  running containers are left as they are.
 
 What remains:
 

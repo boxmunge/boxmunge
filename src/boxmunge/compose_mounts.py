@@ -38,13 +38,11 @@ _ENV_SUBSTITUTION_RE = re.compile(r"\$\w|\$\{")
 # path. `npipe` and `cluster` name host or cluster resources by other means.
 _MOUNT_TYPES: frozenset[str] = frozenset({"bind", "volume", "tmpfs", "image"})
 
-# Smoke-test mount sources injected by the overlay generator: production
-# mounts its own copy of its release's scripts (see release.sync_live_scripts),
-# staging the staged release's scripts in the project dir. Must be ignored
-# when classifying user-compose volume entries.
-PROD_SMOKE_SOURCE = "./.releases/live-scripts"
-STAGING_SMOKE_SOURCE = "./boxmunge-scripts"
-_SMOKE_MOUNT_SOURCES: frozenset[str] = frozenset({PROD_SMOKE_SOURCE, STAGING_SMOKE_SOURCE})
+# Smoke-test mount source injected by the overlay generator: each environment
+# mounts its own release's scripts (production's project dir, staging's slot).
+# Must be ignored when classifying user-compose volume entries.
+SMOKE_SOURCE = "./boxmunge-scripts"
+_SMOKE_MOUNT_SOURCES: frozenset[str] = frozenset({SMOKE_SOURCE})
 
 
 def _is_path_like(src: str) -> bool:

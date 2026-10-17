@@ -17,6 +17,7 @@ from boxmunge.docker import DockerError
 from boxmunge.lifecycle import is_blocked
 from boxmunge.paths import BoxPaths
 from boxmunge.project_alerts import alert_state
+from boxmunge.legacy_stage import legacy_staging_state
 from boxmunge.project_registry import add_project, is_registered
 from boxmunge.state import write_state
 
@@ -30,7 +31,7 @@ def _state_files(paths: BoxPaths) -> list[Path]:
         paths.project_paused_state(NAME),
         paths.project_quarantine_state(NAME),
         paths.project_scan_state(NAME),
-        paths.project_staging_state(NAME),
+        legacy_staging_state(paths, NAME),
         paths.container_update_target_state(NAME),
         alert_state(paths, NAME, "manifest-schema"),
         alert_state(paths, NAME, "git-layout"),

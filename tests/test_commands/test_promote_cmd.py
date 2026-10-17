@@ -81,9 +81,9 @@ class TestPromoteComponentTagging:
         observed: list[str] = []
         real = deploy_mod.prepare_compose_override
 
-        def recording(paths_, manifest, component="deploy", release_root=None):
+        def recording(paths_, manifest, component="deploy"):
             observed.append(component)
-            return real(paths_, manifest, component=component, release_root=release_root)
+            return real(paths_, manifest, component=component)
         with _docker(), patch.object(deploy_mod, "prepare_compose_override", recording):
             assert run_promote("myapp", paths) == 0
         # The whole point of the audit fix: component="promote" is forwarded.
@@ -110,7 +110,7 @@ class TestPromoteComponentTagging:
         observed: list[str] = []
 
         def fake_prepare_compose_override(
-            paths, manifest, component: str = "deploy", release_root=None,
+            paths, manifest, component: str = "deploy",
         ) -> None:
             observed.append(component)
 

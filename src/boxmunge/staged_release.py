@@ -129,7 +129,12 @@ def _valid_marker(marker: Any) -> bool:
 
 def update_meta(paths: BoxPaths, project: str, meta: StagedRelease,
                 **changes: Any) -> StagedRelease:
+    """Write ``meta`` with ``changes``. Only a retired slot records the
+    switch's exit code, so any other state drops it (load_slot refuses a
+    slot that keeps one)."""
     new = replace(meta, **changes)
+    if new.state != "retired":
+        new = replace(new, switch_rc=None)
     write_meta(slot_dir(paths, project), new)
     return new
 

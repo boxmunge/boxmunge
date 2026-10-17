@@ -54,7 +54,7 @@ def test_shared_aliases_on_the_proxy_network_collide(tmp_path: Path) -> None:
 def test_bind_sources_collide_when_equal_or_nested(tmp_path: Path) -> None:
     def binds(*sources):
         return [{"type": "bind", "source": s, "target": f"/t{i}"} for i, s in enumerate(sources)]
-    prod = _ids(tmp_path, "myapp", volumes=binds("./data", "./.releases/live-mounts/conf"))
+    prod = _ids(tmp_path, "myapp", volumes=binds("./data", "./.releases/previous/conf"))
     staging = _ids(tmp_path, "myapp-staging",
                    volumes=binds("./data-staging", "./conf", f"{tmp_path}/data/sub"))
     found = overlaps(prod, staging)

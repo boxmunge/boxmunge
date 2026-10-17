@@ -19,6 +19,7 @@ from boxmunge import docker_containers
 from boxmunge.data_helper import container_owned_dirs, empty_under
 from boxmunge.docker import compose_down, caddy_reload, DockerError
 from boxmunge.fileutil import LockError, project_lock
+from boxmunge.legacy_stage import legacy_staging_state
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.paths import BoxPaths
 from boxmunge.project_alerts import ALERT_KINDS, alert_state
@@ -40,7 +41,7 @@ def project_state_files(paths: BoxPaths, name: str) -> list[Path]:
         paths.project_paused_state(name),
         paths.project_quarantine_state(name),
         paths.project_scan_state(name),
-        paths.project_staging_state(name),
+        legacy_staging_state(paths, name),
         paths.container_update_target_state(name),
         *(alert_state(paths, name, kind) for kind in ALERT_KINDS),
     ]

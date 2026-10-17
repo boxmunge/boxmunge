@@ -122,12 +122,13 @@ class DataDirs:
     mounted: frozenset[str]   # every bind-mounted entry of live + incoming
     seeded: frozenset[str] = frozenset()  # recorded only because a kept release mounts it
     adopted: frozenset[str] = frozenset()  # kept release mounted it rw; now shipped as code
+    staged: frozenset[str] = frozenset()  # top-level binds of the staged release (the slot)
 
     def box_state(self) -> set[str]:
         """Entries that are never release code."""
         tops = self.mounted | self.recorded
         return (set(BOX_OWNED_ENTRIES) | set(BOXMUNGE_ENTRIES) | set(self.recorded)
-                | {_staging_copy(t) for t in tops})
+                | {_staging_copy(t) for t in tops | self.staged})
 
     def occupied(self, name: str) -> list[Path]:
         """The server paths holding ``name``'s data: it and its staging copy."""
@@ -158,17 +159,21 @@ class DataDirs:
 
 
 def classify(project_dir: Path, release_tree: Path | None,
-             kept_trees: Iterable[Path]) -> DataDirs:
+             kept_trees: Iterable[Path], staged_compose: Path | None = None) -> DataDirs:
     """Classify the project's entries for installing ``release_tree``.
 
-    ``kept_trees`` (the rollback target, production's release during a
-    stage) are read only while the project has no record. An entry the live
-    compose.yml mounts read-only and the incoming release ships is code,
-    whatever an older release once mounted; one it only reads (the release
-    ships nothing for it) still holds the older release's data. Without an
-    incoming release, every kept mount counts: at worst a later bundle is
-    refused, never is data deleted. Raises ReleaseStateError for an
-    unreadable compose file or record.
+    ``kept_trees`` (the rollback target) are read only while the project
+    has no record. An entry the live compose.yml mounts read-only and the
+    incoming release ships is code, whatever an older release once mounted;
+    one it only reads (the release ships nothing for it) still holds the
+    older release's data. Without an incoming release, every kept mount
+    counts: at worst a later bundle is refused, never is data deleted.
+    Raises ReleaseStateError for an unreadable compose file or record.
+
+    ``staged_compose`` is the staged release's compose.yml in the slot: its
+    mounts' ``-staging`` copies are staging's data while the release is
+    staged, so no production install prunes them. Production never ran the
+    staged release, so nothing it mounts is recorded.
     """
     live_binds = bind_dirs(project_dir / "compose.yml", project_dir)
     release_binds: dict[str, bool] = {}
@@ -197,8 +202,9 @@ def classify(project_dir: Path, release_tree: Path | None,
         n for n in candidates if dirs.occupied(n)}
     recorded -= set(BOX_OWNED_ENTRIES) | set(BOXMUNGE_ENTRIES)
     seeded = recorded - release - live_rw - (stored or set())
+    staged = frozenset(bind_dirs(staged_compose, project_dir)) if staged_compose else frozenset()
     return replace(dirs, recorded=frozenset(recorded), seeded=frozenset(seeded),
-                   adopted=frozenset(adopted - recorded))
+                   adopted=frozenset(adopted - recorded), staged=staged)
 
 
 def save_record(dirs: DataDirs) -> None:

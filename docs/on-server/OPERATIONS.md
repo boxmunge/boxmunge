@@ -181,14 +181,8 @@ exist (staging could not start: create the file, for `secrets.env` with `secrets
 `compose.yml` drops explicit volume and network `name:` lines (validation only allows the project's
 own name, which Compose would choose anyway), `container_name:` and `ports:`. Bind mounts of release
 code and configuration (`./appconfig:/etc/app:ro`, config and secret `file:` entries) work in both
-environments without copying any data:
-
-- production mounts its own copy of each, kept in `.releases/live-mounts/` and refreshed from
-  production's release whenever its compose overlay is generated (deploy, rollback, resume,
-  upgrade). A refresh never removes a file production is reading: changed files are replaced
-  whole, and a file that is itself a mount source is rewritten in place. Installing a staged
-  release does not touch these copies;
-- staging mounts the staged release itself.
+environments without copying any data: production mounts its project directory's, staging the
+staged release's own in `.releases/staged/release/`.
 
 The staged release lives in `.releases/staged/`, so the project directory stays production's and
 production starts as usual during a stage (upgrade restarts, container updates, `recover`,
@@ -220,10 +214,11 @@ Two behaviour changes in this release:
 - `stage` refuses a service that mounts the whole project directory (`.:/app`), which staging and
   production cannot each have a copy of. Mount the subdirectories the service needs instead.
 
-Production's smoke checks keep running the production release's own `boxmunge-scripts/` while a
-release is staged (production mounts a copy kept in `.releases/live-scripts/`), so a smoke check
-that only the staged release passes does not fail production. Production switches to the new
-scripts when `promote` deploys them.
+Each environment mounts its own release's `boxmunge-scripts/`: production's smoke checks run the
+project directory's, staging's the staged release's, so a smoke check that only the staged release
+passes does not fail production. Production switches to the new scripts when `promote` installs
+them. The `.releases/live-scripts/` copy boxmunge 0.10.1 mounted for production is removed after
+production's next full start once no container mounts it.
 
 Staging keeps its own data between stages. To start it from a copy of production's, set
 `staging: {copy_data: true}` in the manifest. `stage` then:

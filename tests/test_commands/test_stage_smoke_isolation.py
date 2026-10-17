@@ -23,6 +23,7 @@ from boxmunge.compose import prepare_compose_override
 from boxmunge.docker import DockerError
 from boxmunge.manifest import load_manifest
 from boxmunge.project_registry import add_project
+from boxmunge.release_txn import load_txn
 from boxmunge.staged_release import load_slot, release_dir, slot_dir
 
 from tests.bundle_helpers import manifest_text, place_bundle
@@ -99,11 +100,13 @@ def test_promote_switches_production_to_the_staged_script(staged) -> None:
     assert _prod_smoke(staged) == "staged check\n"
 
 
-def test_promote_failing_before_any_start_keeps_production_on_its_own_script(
+def test_promote_failing_in_its_hook_leaves_the_install_open_and_the_slot_ready(
     paths,
 ) -> None:
-    """A pre-deploy hook that fails runs before any container is touched:
-    production still runs its own release, so it keeps its own script."""
+    """A pre-deploy hook that fails runs before any container is touched, but
+    after the staged release is installed in the project dir (as for any
+    deploy): the install stays open and the slot stays promotable. Production
+    mounts the project dir's scripts, so it sees the installed release's."""
     add_project("myapp", paths)
     _bundle(paths, V1, "prod check\n")
     with _docker():
@@ -115,7 +118,8 @@ def test_promote_failing_before_any_start_keeps_production_on_its_own_script(
     with _docker():
         assert run_stage("myapp", paths) == 0
         assert run_promote("myapp", paths) == 1
-    assert _prod_smoke(paths) == "prod check\n"
+    assert load_txn(paths, "myapp") is not None
+    assert _prod_smoke(paths) == "staged check\n"
     assert load_slot(paths, "myapp").state == "ready"
 
 

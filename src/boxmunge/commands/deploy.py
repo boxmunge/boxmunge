@@ -228,8 +228,7 @@ def generate_release_config(project_name: str, paths: BoxPaths, manifest: dict,
     print("  Generating Caddy config...")
     prepare_caddy_config(paths, manifest)
     print("  Generating compose overlay...")
-    prepare_compose_override(paths, manifest, component=component,
-                             release_root=paths.project_dir(project_name))
+    prepare_compose_override(paths, manifest, component=component)
 
 
 def replace_release(project_name: str, paths: BoxPaths, manifest: dict,

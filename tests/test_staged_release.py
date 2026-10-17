@@ -127,3 +127,17 @@ def test_drop_slot(paths) -> None:
     swap_in(paths, P)
     drop_slot(paths, P)
     assert load_slot(paths, P) is None
+
+
+def test_leaving_retired_drops_the_switch_result(paths) -> None:
+    """Only a retired slot records replace_release's exit code; a slot taken
+    back to `starting` (a re-stage over it) must not keep it, or load_slot
+    refuses the slot."""
+    meta = _build(paths)
+    swap_in(paths, P)
+    retired = update_meta(paths, P, meta, state="retired", switch_rc=1)
+    assert load_slot(paths, P).switch_rc == 1
+    update_meta(paths, P, retired, state="starting")
+    assert load_slot(paths, P).switch_rc is None
+    update_meta(paths, P, retired, cleanup_incomplete="x")
+    assert load_slot(paths, P).switch_rc == 1

@@ -58,14 +58,11 @@ Key features:
         install.json          # the open install transaction (only while an install runs)
         previous.superseded/  # the rollback target an open install replaced, until it closes
         staged/               # the slot: the staged release (release/), its compose files, meta.json
-        live-mounts/          # production's copies of the release code it bind-mounts
-        live-scripts/         # production's copy of boxmunge-scripts/ (smoke checks)
         live.json             # bundle name of the installed release
   inbox/                      # uploaded bundles awaiting deployment
   state/                      # operational state (deploy:deploy 755)
     health/                   # per-project health state JSON
     deploy/                   # per-project deploy state JSON
-    staging/                  # per-project staging state
   docs/                       # on-server documentation (root:root 755)
   logs/                       # boxmunge operational logs (deploy:deploy 755)
     boxmunge.log              # today's entries (UTC); writers rotate it under a lock
@@ -241,7 +238,7 @@ Operational state is stored as JSON files under `/opt/boxmunge/state/`:
 
 - `state/health/<project>.json` -- last check time, status, consecutive failure count, alert state, failure reason
 - `state/deploy/<project>.json` -- current ref (the bundle name, e.g. `myapp-2026-10-13T101500123456`, or the git commit), deploy timestamp, pre-deploy snapshot filename, recent history
-- `state/staging/<project>/` -- staging environment state
+- `<project>/.releases/staged/meta.json` -- the staged release (id, ref, state); there is none while nothing is staged
 
 All state writes are atomic: the new content is written to a temporary file in the same directory, then renamed into place with `os.rename()`. This prevents partial reads if a check or deploy runs concurrently.
 

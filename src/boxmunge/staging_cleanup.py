@@ -33,7 +33,6 @@ from boxmunge.data_helper import empty_dir
 from boxmunge.docker import staging_compose_project
 from boxmunge.log import log_operation, log_warning
 from boxmunge.release import project_data_dirs
-from boxmunge.staged_release import release_dir, slot_dir
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -60,18 +59,16 @@ def _production_sources(project_dir: Path) -> list[str]:
     return sorted({r for r in rels if r and r != "."})
 
 
-def retired_staging_copies(project_dir: Path, staged: Path | None = None) -> list[Path]:
+def retired_staging_copies(project_dir: Path) -> list[Path]:
     """``-staging`` copies of data entries the live release does not mount.
 
-    ``staged`` is the slot's release being unstaged: the entries it mounts
-    read-write are data only staging used, never recorded in production's
-    tree, so their copies are staging's too."""
+    While a release is staged, the entries it mounts (DataDirs.staged) are
+    data only staging used, never recorded in production's tree, so their
+    copies are staging's too."""
     if not project_dir.is_dir():
         return []
     dirs = project_data_dirs(project_dir)
-    data = set(dirs.recorded) | set(BOX_OWNED_ENTRIES)
-    if staged is not None:
-        data |= project_data_dirs(project_dir, staged).release
+    data = set(dirs.recorded) | set(BOX_OWNED_ENTRIES) | set(dirs.staged)
     mounted = {rel.split(os.sep, 1)[0] for rel in _production_sources(project_dir)}
     return sorted(
         e for e in project_dir.iterdir()
@@ -125,11 +122,8 @@ def remove_retired_staging_data(paths: BoxPaths, project_name: str) -> list[Path
     the ones before it are gone and logged. Old-layout copies are reported.
     """
     project_dir = paths.project_dir(project_name)
-    slot = slot_dir(paths, project_name)
-    # A linked slot is refused by its own cores; nothing is read through it.
-    staged = release_dir(slot) if slot.is_dir() and not slot.is_symlink() else None
     removed: list[Path] = []
-    for path in retired_staging_copies(project_dir, staged):
+    for path in retired_staging_copies(project_dir):
         _remove(project_name, path)
         print(f"  Removed staging's {path.name} (production does not mount "
               f"{path.name[:-len(_SUFFIX)]}).")

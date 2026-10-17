@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -46,9 +47,10 @@ from boxmunge.compose_own_files import container_bind_problems
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import compose_up, start_containers
 from boxmunge.docker_run import DockerError
+from boxmunge.fileutil import discard_dir
 from boxmunge.intake import IntakeError, validate_release_tree
 from boxmunge.legacy_stage import legacy_refusal, legacy_stage
-from boxmunge.log import log_error
+from boxmunge.log import log_error, log_warning
 from boxmunge.notify import notify
 from boxmunge.paths import RESERVED_PROJECT_NAMES
 from boxmunge.release_txn import load_txn, stale_reason, start_refusal
@@ -251,7 +253,8 @@ def compose_up_checked(
     starting, which still mounts nothing yet but fixes every bind source in
     the containers it creates). Staging runs from the slot, with its own
     files. A production up of every service clears the slot's
-    production_stopped marker. Raises ComposeRefused or DockerError."""
+    production_stopped marker and sweeps 0.10.1's live-scripts copy.
+    Raises ComposeRefused or DockerError."""
     check_start(paths, project_name, component=component, compose_files=compose_files,
                 staging=staging, record=record, deploying=deploying, txn=txn)
     if staging:
@@ -265,6 +268,7 @@ def compose_up_checked(
     # A partial up (restore's one service) may leave the rest stopped.
     if start and not services:
         _clear_production_stopped(paths, project_name, component)
+        _sweep_live_scripts(paths, project_name, component)
 
 
 def _clear_production_stopped(paths: BoxPaths, project_name: str, component: str) -> None:
@@ -282,6 +286,32 @@ def _clear_production_stopped(paths: BoxPaths, project_name: str, component: str
         log_error(component, message, paths, project=project_name)
         notify(paths, f"{project_name}: staged slot unreadable", message,
                component=component, project=project_name, priority=1)
+
+
+def _sweep_live_scripts(paths: BoxPaths, project_name: str, component: str) -> None:
+    """boxmunge 0.10.1 mounted production's smoke scripts from
+    .releases/live-scripts. Once production's overlay no longer names it and
+    no container of the project mounts it, it is removed. Production is up
+    by now, so a failure to tell or to remove is said, not raised."""
+    live = paths.project_releases(project_name) / "live-scripts"
+    if not os.path.lexists(live):
+        return
+    try:
+        overlay = paths.project_compose_override(project_name)
+        if overlay.exists() and "live-scripts" in overlay.read_text():
+            return
+        roots = {str(live), os.path.realpath(live)}
+        if any(src == root or src.startswith(root + os.sep)
+               for src, _rw in docker_containers.container_bind_sources(project_name)
+               for root in roots):
+            return
+        discard_dir(live)
+    except (OSError, DockerError) as e:
+        message = (f"{project_name}: production is running, but {live} (the smoke-script "
+                   f"copy boxmunge 0.10.1 mounted) was not removed: {e}. The next "
+                   f"production start tries again; if it is not a directory, inspect it.")
+        print(f"WARNING: {message}", file=sys.stderr)
+        log_warning(component, message, paths, project=project_name)
 
 
 def check_containers_start(paths: BoxPaths, project_name: str, *, component: str) -> None:

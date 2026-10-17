@@ -34,7 +34,7 @@ from boxmunge.lifecycle import is_blocked
 from boxmunge.production_stopped import (
     ProductionDownError, mark_stopped, production_down, start_again,
 )
-from boxmunge.release import project_data_dirs
+from boxmunge.release import project_data_dirs, staged_box_state
 from boxmunge.staged_release import load_slot, release_dir, slot_dir
 from boxmunge.staging_copy_plan import (
     CopyPlan, StagingDataError, Store, copy_sources, plan_copy, stores,
@@ -58,7 +58,7 @@ def plan_staging_copy(paths: BoxPaths, project: str, manifest: dict[str, Any],
     data dirs are its own release's: production's from the project dir,
     staging's from the slot's release."""
     project_dir = paths.project_dir(project)
-    staged = project_data_dirs(project_dir, release_dir(slot_dir(paths, project))).box_state()
+    staged = staged_box_state(project_dir, release_dir(slot_dir(paths, project)))
     plan = plan_copy(
         stores(prod_model, project, project_dir, project_data_dirs(project_dir).box_state(),
                staging=False),

@@ -20,6 +20,7 @@ from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.inbox_cmd import collect_inbox
 from boxmunge.commands.status import HEALTH_STATES
 from boxmunge.cve.quarantine import read_quarantine_state
+from boxmunge.legacy_stage import legacy_staging_state
 from boxmunge.pause import read_paused_state
 from boxmunge.project_registry import is_registered
 from boxmunge.paths import BoxPaths
@@ -69,7 +70,9 @@ def _project_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
     deployed = has_dir and (project_dir / "manifest.yml").exists()
     deploy = read_state(paths.project_deploy_state(name))
     health = read_state(paths.project_health_state(name))
-    staging = read_state(paths.project_staging_state(name))
+    # The slot is not read here yet: this reports the state file boxmunge
+    # 0.10.1 wrote (boxmunge.legacy_stage).
+    staging = read_state(legacy_staging_state(paths, name))
     paused = read_paused_state(name, paths)
     if paused is not None and not isinstance(paused.get("paused_at"), str):
         raise StateError(f"Paused state {paths.project_paused_state(name)} has no paused_at "

@@ -302,7 +302,7 @@ def test_a_promote_killed_as_replace_release_returned_finishes_the_switch(
 
 
 def test_a_promote_killed_after_retiring_only_closes_and_tears_down(paths, tmp_path) -> None:
-    from boxmunge.commands import deploy as deploy_mod
+    from boxmunge.commands import deploy_tree
     from unittest.mock import patch
     from tests.txn_helpers import hook_runs
     _staged_with_hook_and_backups(paths, tmp_path)
@@ -310,7 +310,7 @@ def test_a_promote_killed_after_retiring_only_closes_and_tears_down(paths, tmp_p
     with staging_docker_off() as docker, fake_backups(taken):
         assert crash_at("txn.switched", lambda: run_promote("myapp", paths)) == 137
         docker["up"].reset_mock()
-        with patch.object(deploy_mod, "replace_release") as replace:
+        with patch.object(deploy_tree, "replace_release") as replace:
             assert run_promote("myapp", paths) == 0
         replace.assert_not_called()
         docker["up"].assert_not_called()

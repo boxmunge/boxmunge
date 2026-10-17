@@ -57,9 +57,10 @@ def run_smoke_in_container(
     read secrets.env. Containers are found by their Compose labels, which
     needs no compose file either; every running replica is tested.
 
-    The compose overlay mounts the release's boxmunge-scripts/ at
-    /boxmunge-scripts (production its own copy, so a stage cannot change
-    it), and localhost:PORT naturally reaches the service.
+    The compose overlay mounts boxmunge-scripts/ at /boxmunge-scripts: each
+    environment mounts its own release's boxmunge-scripts/ (production's
+    project dir, staging's slot), and localhost:PORT naturally reaches the
+    service.
 
     Returns the first failing result, or ok if all pass.
     """

@@ -267,7 +267,7 @@ def tmp_root(tmp_path: Path) -> Path:
     root = tmp_path / "boxmunge"
     for subdir in [
         "bin", "config", "caddy/sites", "projects", "state/health",
-        "state/deploy", "state/staging", "templates/project", "docs", "logs",
+        "state/deploy", "templates/project", "docs", "logs",
         "inbox/.tmp", "inbox/.consumed",
     ]:
         (root / subdir).mkdir(parents=True)

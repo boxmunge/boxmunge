@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from boxmunge.legacy_stage import legacy_staging_state
 from boxmunge.paths import BoxPaths
 from boxmunge.ulid import generate_ulid
 
@@ -148,7 +149,7 @@ def _write_state(paths: BoxPaths, project: FixtureProject, project_id: str,
         "failure_reason": project.failure_reason,
     })
     if project.staged:
-        write_json(paths.project_staging_state(name),
+        write_json(legacy_staging_state(paths, name),
                    {"active": True, "ref": ref(name, now - timedelta(hours=1))})
     if project.paused_reason is not None:
         write_json(paths.project_paused_state(name), {

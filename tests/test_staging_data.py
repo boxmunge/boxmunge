@@ -39,7 +39,7 @@ def _stores(project_dir: Path, volumes=(), binds=(), *, staging=False,
 
 def test_stores_are_production_data_and_staging_copies(tmp_path: Path) -> None:
     prod = _stores(tmp_path, ["pgdata", "myapp_files"],
-                   ["data/db", "data", "uploads/img", "appconfig", ".releases/live-mounts/x"])
+                   ["data/db", "data", "uploads/img", "appconfig", ".releases/previous/x"])
     assert [(s.kind, s.key, s.ref) for s in prod] == [
         ("bind", "./data", str(tmp_path / "data")),  # data/db lies inside it
         ("bind", "./uploads/img", str(tmp_path / "uploads/img")),

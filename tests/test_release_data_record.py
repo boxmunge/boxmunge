@@ -476,7 +476,7 @@ class TestKeptReleasesOnlySeedTheRecord:
         assert (project / "conf" / "app.conf").read_text() == "new conf"
 
     def test_without_an_incoming_release_a_kept_mount_counts(self, tmp_path: Path) -> None:
-        """prestage_to_previous / discard_* know no incoming release: they
+        """discard_previous_release knows no incoming release: it
         must not drop data the live release only reads."""
         from boxmunge.data_dirs import classify
         project = _live_with_old_rollback_target(tmp_path, CONF_RO)

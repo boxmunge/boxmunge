@@ -210,3 +210,17 @@ def test_copy_plan_knows_the_staged_releases_own_data_dirs(paths) -> None:
     plan = copy.call_args.args[2]
     assert [(s.key, d.key) for s, d in plan.pairs] == [("./uploads", "./media")]
     assert plan.pairs[0][1].ref == str(paths.project_dir("myapp") / "media-staging")
+
+
+def test_restage_over_a_slot_whose_switch_failed(paths) -> None:
+    """Retiring an old slot back to `starting` drops its switch_rc: a slot
+    left `starting` with one would be refused by load_slot (Task 20 review)."""
+    from boxmunge.staged_release import update_meta
+    prod_and_stage(paths)
+    update_meta(paths, "myapp", load_slot(paths, "myapp"), state="retired", switch_rc=1)
+    place_bundle(paths, timestamp=V3)
+    with staging_docker_off() as docker:
+        docker["down_retire"].side_effect = DockerError("down failed")
+        assert run_stage("myapp", paths, ref=V3) == 1
+    meta = load_slot(paths, "myapp")
+    assert meta.state == "starting" and meta.switch_rc is None

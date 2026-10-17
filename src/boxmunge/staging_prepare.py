@@ -20,7 +20,7 @@ from boxmunge.compose import generate_staging_compose_override, load_user_compos
 from boxmunge.compose_mounts import has_env_substitution
 from boxmunge.compose_validate import validate_user_compose
 from boxmunge.fileutil import atomic_write_text
-from boxmunge.release import project_data_dirs
+from boxmunge.release import staged_box_state
 from boxmunge.security_overlay import services_with_off_profile
 from boxmunge.staged_release import (
     STAGING_BASE, STAGING_OVERLAY, release_dir, slot_dir, staging_target, staging_target_for,
@@ -54,7 +54,7 @@ def write_staging_files(paths: BoxPaths, project: str, manifest: dict[str, Any],
                         release: Path, dest_dir: Path) -> dict:
     """Write staging's base and overlay for the release in ``release`` into
     ``dest_dir``; returns the resolved user compose model."""
-    box_state = project_data_dirs(paths.project_dir(project), release).box_state()
+    box_state = staged_box_state(paths.project_dir(project), release)
     user_compose = load_user_compose(release / "compose.yml", project)
     # mode=0o644: read by `docker compose` in deploy and root contexts.
     atomic_write_text(dest_dir / STAGING_OVERLAY, generate_staging_compose_override(
