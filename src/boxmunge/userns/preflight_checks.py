@@ -118,10 +118,13 @@ def volumes(inv: Inventory, r: Report) -> None:
 
 
 def images(inv: Inventory, r: Report) -> None:
+    loose = [img.id[7:19] for img in inv.images if not img.carried]
+    if loose:
+        r.notes.append(f"{len(loose)} image(s) with no tag that no container runs are not "
+                       f"carried across (nothing finds them after a recreate): "
+                       f"{', '.join(loose[:10])}" + (" ..." if len(loose) > 10 else ""))
     for img in inv.images:
         if not img.carried:
-            r.notes.append(f"image {img.id[:19]} has no tag and is not carried across "
-                           f"(nothing references it after a recreate)")
             continue
         if img.refs:
             r.notes.append(f"{', '.join(img.refs)}: pulled again by digest once its layers are "

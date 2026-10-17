@@ -111,7 +111,7 @@ def test_high_ids_in_an_image_are_refused(paths, quiet, monkeypatch) -> None:
     inv = _inv(quiet, images=[ImageEntry("sha256:i", ["x:1"], 1, True),
                               ImageEntry("sha256:u", [], 1, False)])
     text = _run(paths, inv).text()
-    assert "ids above 65535" in text and "no tag and is not carried" in text
+    assert "ids above 65535" in text and "1 image(s) with no tag that no container runs" in text
 
 
 def test_shift_problems_are_refused_per_tree(paths, quiet, monkeypatch) -> None:

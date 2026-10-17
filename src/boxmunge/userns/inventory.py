@@ -234,9 +234,12 @@ def take_inventory(paths: BoxPaths) -> Inventory:
             if m.type == "volume" and m.name in anonymous:
                 m.kind = "anonymous"
     used = {c.image_id for c in containers}
-    image_ids = sorted(set(_run(["docker", "image", "ls", "-q", "--no-trunc"],
+    # -a: Docker 29 leaves untagged images (one pulled only by digest) out of ls.
+    image_ids = sorted(set(_run(["docker", "image", "ls", "-a", "-q", "--no-trunc"],
                                 capture=True).stdout.split()))
-    images = [ImageEntry(id=d["Id"], tags=sorted(d.get("RepoTags") or []),
+    # The containerd store lists a name@digest among RepoTags; it is no tag.
+    images = [ImageEntry(id=d["Id"], tags=sorted(t for t in d.get("RepoTags") or []
+                                                 if "@" not in t),
                          size=int(d.get("Size") or 0), in_use=d["Id"] in used,
                          refs=sorted({c.image_ref for c in containers
                                       if c.image_id == d["Id"] and "@sha256:" in c.image_ref}))

@@ -59,6 +59,7 @@ def _docker(paths, tmp_path):
         elif cmd[:3] == ["docker", "volume", "ls"]:
             r.stdout = "\n".join(v["Name"] for v in volumes)
         elif cmd[:3] == ["docker", "image", "ls"]:
+            assert "-a" in cmd
             r.stdout = "sha256:img\nsha256:loose\nsha256:img\n"
         elif cmd[:3] == ["docker", "network", "ls"]:
             r.stdout = "n1\n"
@@ -71,7 +72,8 @@ def _docker(paths, tmp_path):
             r.stdout = json.dumps(volumes)
         elif cmd[:3] == ["docker", "image", "inspect"]:
             assert cmd[3:] == ["sha256:img", "sha256:loose"]
-            r.stdout = json.dumps([{"Id": "sha256:img", "RepoTags": ["postgres:16"], "Size": 10},
+            r.stdout = json.dumps([{"Id": "sha256:img", "Size": 10,
+                                    "RepoTags": ["postgres:16", "postgres@sha256:" + "f" * 64]},
                                    {"Id": "sha256:loose", "RepoTags": None, "Size": 5}])
         else:
             raise AssertionError(cmd)
@@ -99,6 +101,7 @@ def test_inventory_from_docker(paths, tmp_path, monkeypatch) -> None:
     assert inv.data_binds() == [f"{paths.projects}/shop/uploads"]  # normalised
     assert [i.in_use for i in inv.images] == [True, False]
     assert inv.images[0].refs == ["postgres:16@sha256:" + "f" * 64] and inv.images[0].carried
+    assert inv.images[0].tags == ["postgres:16"]  # the containerd store's name@digest is no tag
     assert not inv.images[1].carried
     assert inv.network["ipam"]["Config"] == [{"Subnet": "172.30.0.0/16"}]
     assert Inventory.from_json(json.loads(json.dumps(inv.to_json()))) == inv
