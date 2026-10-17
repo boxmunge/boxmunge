@@ -11,7 +11,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from boxmunge.log import log_operation
-from boxmunge.production_stopped import DOWN_TITLE, ProductionDownError, start_again_from
+from boxmunge.production_stopped import (
+    DOWN_ALERT, DOWN_TITLE, ProductionDownError, start_again_from,
+)
 from boxmunge.project_alerts import alert_once, clear_alert
 from boxmunge.release_txn import open_install_reason
 from boxmunge.staged_release import SlotError, StagedRelease, load_slot
@@ -20,7 +22,6 @@ if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 SLOT_ALERT = "staged-slot"
-DOWN_ALERT = "production-down"
 
 
 def tick_hold(name: str, paths: BoxPaths, read_only: bool) -> int | None:
@@ -67,7 +68,7 @@ def _stopped_for_copy(name: str, paths: BoxPaths, meta: StagedRelease,
     if not started:
         return None
     # The app may still be booting: smoke now could fail critically and take
-    # down what was just started. The next tick runs inside the grace window.
+    # down what was just started, so smoke runs on the next tick.
     print(f"{name}: WARNING (production started again after staging's data copy; "
           f"checked next tick)")
     return 1

@@ -23,6 +23,7 @@ from boxmunge.docker_run import DockerError
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_error, log_operation
 from boxmunge.notify import notify
+from boxmunge.project_alerts import clear_alert
 from boxmunge.staged_release import (
     SlotError, StagedRelease, clear_production_stopped, load_slot, update_meta,
 )
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
 
 PROD_FILES = ["compose.yml", "compose.boxmunge.yml"]
 DOWN_TITLE = "{project}: production is down"
+DOWN_ALERT = "production-down"  # project_alerts kind of the tick's once-per-error page
 
 
 class ProductionDownError(DockerError):
@@ -100,8 +102,8 @@ def production_down(paths: BoxPaths, project: str, component: str,
 
 
 def _record_started(paths: BoxPaths, project: str) -> None:
-    # The health tick's grace window starts here, as after a deploy, resume
-    # or recover: an app still booting does not fail its next smoke.
+    # As after a deploy, resume or recover. The app may still be booting, so
+    # the health tick runs no smoke now; smoke runs on the next tick.
     path = paths.project_deploy_state(project)
     state = read_state(path)
     state["last_started_at"] = datetime.now(timezone.utc).isoformat()
@@ -140,6 +142,8 @@ def start_again_from(paths: BoxPaths, project: str, meta: StagedRelease | None, 
                   component=component, page=page)
     # The up path has cleared it already; this reloads, so it writes at most once.
     clear_production_stopped(paths, project)
+    # Whoever started it (tick, recover, stage, unstage), a relapse is paged again.
+    clear_alert(paths, project, DOWN_ALERT)
     _record_started(paths, project)
     print("  Production started again.")
     if alert:

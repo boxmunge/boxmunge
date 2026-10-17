@@ -29,8 +29,8 @@ def _last_started(paths) -> str | None:
 
 
 def test_tick_starts_production_again(paths, fake_containers, capsys) -> None:
-    """The app may still be booting: smoke waits for the next tick, which
-    the grace window (last_started_at) then covers."""
+    """The app may still be booting: smoke runs on the next tick, not now.
+    last_started_at is bumped, as after a deploy, resume or recover."""
     _stopped(paths, fake_containers)
     before = _last_started(paths)
     with patch("boxmunge.compose_guard.start_containers") as start, \
@@ -86,6 +86,27 @@ def test_a_failure_after_a_success_pages_again(paths, fake_containers) -> None:
             _check_one("myapp", paths, read_only=False)
         with patch("boxmunge.compose_guard.start_containers"):
             assert _check_one("myapp", paths, read_only=False) == 1
+        update_meta(paths, "myapp", load_slot(paths, "myapp"), production_stopped=marker)
+        with patch("boxmunge.compose_guard.start_containers", side_effect=DockerError("no")):
+            _check_one("myapp", paths, read_only=False)
+    assert page.call_count == 2
+
+
+def test_a_start_outside_the_tick_clears_its_alert(paths, fake_containers) -> None:
+    """recover (or stage, unstage) starting production again forgets the
+    tick's production-down alert, so a relapse is paged again."""
+    from boxmunge.commands.check_holds import DOWN_ALERT
+    from boxmunge.project_alerts import alert_state
+    _stopped(paths, fake_containers)
+    marker = load_slot(paths, "myapp").production_stopped
+    with patch("boxmunge.production_stopped.notify"), \
+            patch("boxmunge.project_alerts.notify", return_value=True) as page:
+        with patch("boxmunge.compose_guard.start_containers", side_effect=DockerError("no")):
+            _check_one("myapp", paths, read_only=False)
+        assert alert_state(paths, "myapp", DOWN_ALERT).exists()
+        with patch("boxmunge.compose_guard.start_containers"):
+            assert recover_locked("myapp", paths) == 0
+        assert not alert_state(paths, "myapp", DOWN_ALERT).exists()
         update_meta(paths, "myapp", load_slot(paths, "myapp"), production_stopped=marker)
         with patch("boxmunge.compose_guard.start_containers", side_effect=DockerError("no")):
             _check_one("myapp", paths, read_only=False)
