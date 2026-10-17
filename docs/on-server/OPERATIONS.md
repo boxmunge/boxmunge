@@ -1406,13 +1406,14 @@ the downtime.
 
 `userns-migrate` takes every project lock, runs the checks again, saves every image to
 `/var/lib/boxmunge-userns/images/`, backs up every project (`premigrate`, the last two kept) and
-syncs the backups off-site. Downtime starts there: it stops the boxmunge timers and every container, switches the
-daemon, loads the images, moves each volume into the remapped root, shifts the owners of volume and
-bind data by S, makes `caddy/Caddyfile` 0644, and brings each project back behind the maintenance
-page until its smoke tests pass. A project that does not come back stays on the maintenance page;
-the others carry on. If the remapped daemon does not start, the original `daemon.json` is put back
-and the box restarts on its untouched old root, timers included; fix the cause (an edit to
-`daemon.json` is kept, as long as it names no `userns-remap`) and run it again.
+syncs the backups off-site. Downtime starts there: it stops the boxmunge timers and every container,
+switches the daemon (the stopped daemon's bridge interfaces are deleted, as a reboot would; Docker
+makes them again), loads the images, moves each volume into the remapped root, shifts the owners of
+volume and bind data by S, makes `caddy/Caddyfile` 0644, and brings each project back behind the
+maintenance page until its smoke tests pass. A project that does not come back stays on the
+maintenance page; the others carry on. If the remapped daemon does not start, the original
+`daemon.json` is put back and the box restarts on its untouched old root, timers included; fix the
+cause (an edit to `daemon.json` is kept, as long as it names no `userns-remap`) and run it again.
 
 Every step is journalled in the root-only `/opt/boxmunge/upgrade-root/userns-migration.json`. After
 any failure, kill or power cut, run the same command again to resume, or `userns-rollback` to put the
