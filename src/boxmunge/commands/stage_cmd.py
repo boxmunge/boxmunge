@@ -20,6 +20,7 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 from boxmunge.commands.unstage_cmd import teardown_staging_locked
+from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import LockError, discard_dir, durable_rename_dir, project_lock
 from boxmunge.git_slot import (
@@ -192,7 +193,7 @@ def _intake_git(project: str, paths: BoxPaths, ref: str | None,
                 return 1
     except IntakeError as e:
         return report_refusal(e)
-    except (GitRefError, ManifestError, OSError) as e:
+    except (GitRefError, ManifestError, ReleaseStateError, OSError) as e:
         print(f"ERROR: {e}\nNothing was changed.", file=sys.stderr)
         log_error("stage", f"Stage refused: {e}", paths, project=project)
         return 1

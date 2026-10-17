@@ -103,7 +103,8 @@ def prove_disjoint_git(project_name: str, paths: BoxPaths, sha: str,
                 materialise(paths.project_dir(project_name), sha, release,
                             made=slot_made(paths, project_name))
                 _prove(paths, project_name, release)
-    except (StagingIsolationError, GitRefError, ManifestError, OSError) as e:
+    except (StagingIsolationError, GitRefError, ManifestError, ReleaseStateError,
+            OSError) as e:
         print(f"ERROR: {e}\n  Nothing was changed. {advice}", file=sys.stderr)
         return False
     return True

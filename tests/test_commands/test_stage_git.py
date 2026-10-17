@@ -160,3 +160,15 @@ def test_a_slot_staged_before_the_rule_is_refused_by_promote_and_unstaged(paths,
         assert run_unstage("myapp", paths) == 0
     assert load_slot(paths, "myapp") is None
     assert "cannot tell which -staging entries" in capsys.readouterr().out
+
+
+def test_an_unreadable_data_dir_record_refuses_the_stage_cleanly(paths, tmp_path,
+                                                                 capsys) -> None:
+    pdir, work = git_project(paths, tmp_path)
+    commit(work, {"VERSION": "staged\n"}, "staged")
+    (pdir / ".releases" / "data-dirs.json").write_text("{not json")
+    with staging_docker_off():
+        assert run_stage("myapp", paths) == 1
+    err = capsys.readouterr().err
+    assert "data-dirs.json" in err and "Nothing was changed" in err
+    assert load_slot(paths, "myapp") is None

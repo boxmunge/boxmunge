@@ -175,3 +175,19 @@ def test_a_commit_whose_manifest_is_a_link_is_not_deployed(paths, tmp_path, caps
         assert run_deploy("myapp", paths, dry_run=True) == 1
     assert "manifest.yml at" in capsys.readouterr().err
     assert _head(pdir) == before and load_txn(paths, "myapp") is None
+
+
+def test_an_unreadable_record_during_a_stage_refuses_the_deploy_cleanly(paths, tmp_path,
+                                                                        capsys) -> None:
+    pdir, work = git_project(paths, tmp_path)
+    before = _head(pdir)
+    commit(work, {"VERSION": "staged\n"}, "staged")
+    with staging_docker_off():
+        assert run_stage("myapp", paths) == 0
+    commit(work, {"VERSION": "hotfix\n"}, "hotfix")
+    (pdir / ".releases" / "data-dirs.json").write_text("{not json")
+    with staging_docker_off():
+        assert run_deploy("myapp", paths) == 1
+    err = capsys.readouterr().err
+    assert "data-dirs.json" in err and "Nothing was changed" in err
+    assert _head(pdir) == before and load_txn(paths, "myapp") is None
