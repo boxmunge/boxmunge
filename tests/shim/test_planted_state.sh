@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tests/shim/test_planted_state.sh — upgrade-state/ is deploy-writable, so
-# deploy can plant a FIFO or a link at any name in it. The root shim must
+# deploy can plant a FIFO or a link at any name in it, including the legacy
+# upgrade.lock older shims take (test_upgrade_lock.sh). The root shim must
 # refuse each without blocking (a hang holds upgrade.lock, so every later
 # upgrade and probation check is skipped) and without creating or reading
 # a link's target, naming the file and saying to remove it.
@@ -199,7 +200,7 @@ new_root a
 other="$(mktemp)"
 RC=0
 OUT="$(BM_UPGRADE_LOCK_FD=9 bash "$SHIM" check-probation 9<>"$other" 2>&1)" || RC=$?
-expect 1 "is not $BOXMUNGE_ROOT/$STATE/upgrade.lock" "a lock descriptor for another file is refused"
+expect 1 "fd 9 is not $BOXMUNGE_ROOT/upgrade-root/upgrade.lock" "a lock descriptor for another file is refused"
 rm -f "$other"
 drop_root
 

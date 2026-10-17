@@ -178,11 +178,11 @@ reads from that directory is checked before use:
   minutes for clock steps) counts as expired, so a forged far-future value
   cannot hold off upgrades.
 - `blocklist.json` must be a JSON object keyed by semver versions.
-- None of these files, nor `upgrade.lock`, may be a symlink, a FIFO or
-  anything but a plain file. Root opens them without following a link or
-  blocking (bash never opens `upgrade.lock` by name: Python opens it and hands
-  the shim the descriptor), and writes them by rename from a temp file it
-  wrote through its own descriptor, so a planted link is replaced, not
+- None of these files, nor the legacy `upgrade.lock` (below), may be a
+  symlink, a FIFO or anything but a plain file. Root opens them without
+  following a link or blocking (bash never opens a lock by name: Python opens
+  it and hands the shim the descriptor), and writes them by rename from a temp
+  file it wrote through its own descriptor, so a planted link is replaced, not
   followed.
 - The shim runs from `/` with `PYTHONSAFEPATH=1`, so a module planted in the
   caller's working directory is never imported as root.
@@ -193,7 +193,14 @@ the file as `supervisor` and re-run.
 
 The shim deletes a venv slot only while the live one runs, and never the live
 one. State deploy must not influence is root-only: the crash-safety markers
-inside the venv slots and the interruption counts in `/opt/boxmunge/upgrade-root/`.
+inside the venv slots, and the interruption counts and `upgrade.lock` in
+`/opt/boxmunge/upgrade-root/` (root, 0700). One upgrade runs at a time because
+the shim, `auto-update`, `check-probation` and `legacy-stage` all hold that
+lock, which deploy cannot replace. Shims up to 0.10.1 locked
+`upgrade-state/upgrade.lock` instead, and the one that installs this release
+keeps running until its upgrade ends, so every taker locks that file too (after
+the root-only one). Deploy can still swap that legacy file, which matters only
+while a 0.10.1 shim or venv is running; it goes once no box can run one.
 
 ### Files root writes in deploy-writable directories
 

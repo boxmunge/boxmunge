@@ -40,11 +40,13 @@ def _lock(paths) -> None:
         pass
 
 
+@pytest.mark.parametrize("which", ["upgrade_lock", "legacy_upgrade_lock"])
 @pytest.mark.parametrize("kind", KINDS)
-def test_upgrade_lock_refuses_a_planted_file(paths, tmp_path, kind) -> None:
-    planted = _plant(paths.upgrade_lock, kind, tmp_path)
-    with pytest.raises(UpgradeStateError, match=f"{paths.upgrade_lock}.*Remove it"):
-        _within(lambda: _lock(paths), planted if kind == "fifo" else paths.upgrade_lock)
+def test_upgrade_lock_refuses_a_planted_file(paths, tmp_path, kind, which) -> None:
+    lock = getattr(paths, which)
+    planted = _plant(lock, kind, tmp_path)
+    with pytest.raises(UpgradeStateError, match=f"{lock}.*Remove it"):
+        _within(lambda: _lock(paths), planted if kind == "fifo" else lock)
     if kind == "link":
         assert planted.read_text() == "{}"
     if kind == "dangling-link":

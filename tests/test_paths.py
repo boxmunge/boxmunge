@@ -68,7 +68,8 @@ class TestUpgradeStatePaths:
 
     def test_upgrade_lock_path(self, tmp_path):
         paths = BoxPaths(root=tmp_path / "bm")
-        assert paths.upgrade_lock == paths.upgrade_state / "upgrade.lock"
+        assert paths.upgrade_lock == tmp_path / "bm" / "upgrade-root" / "upgrade.lock"
+        assert paths.legacy_upgrade_lock == paths.upgrade_state / "upgrade.lock"
 
     def test_active_slot_path(self, tmp_path):
         paths = BoxPaths(root=tmp_path / "bm")

@@ -22,7 +22,18 @@ st /stub/bin/cosign 'exit 0'
 st /stub/bin/visudo 'exit 0'
 st /stub/bin/sha256sum "if [[ \"\$1\" == -c ]]; then cat >/dev/null; exit 0; fi; exec $REALSHA \"\$@\""
 st /mockvenv/bin/pip 'exit 0'
-st /mockvenv/bin/boxmunge-server 'case "$1" in --version) echo "boxmunge 1.5.0";; esac; exit 0'
+# `upgrade --apply` runs while the old shim, which locks only the legacy
+# upgrade-state/upgrade.lock, is mid-upgrade and has installed the new shim:
+# the new shim must see that upgrade and stay out of it.
+st /mockvenv/bin/boxmunge-server 'case "$1" in
+    --version) echo "boxmunge 1.5.0";;
+    upgrade) if [[ "$2" == --apply ]]; then
+        for c in "target 1.5.1" check-probation; do
+            rc=0; bash /opt/boxmunge/bin/boxmunge-upgrade $c > "/tmp/during-${c%% *}.log" 2>&1 || rc=$?
+            echo "rc=$rc" >> "/tmp/during-${c%% *}.log"
+        done
+    fi;;
+esac; exit 0'
 st /mockvenv/bin/python 'if [[ "$1" == "-" ]]; then cat >/dev/null; exit 0; fi
 case "$2" in
     *write_probation*) printf "{\"version\": \"%s\", \"previous_slot\": \"%s\", \"started_at\": \"x\", \"expires_at\": \"%s\"}\n" \
@@ -68,6 +79,11 @@ for c in "check-probation" "run 1.5.1 https://example.com/x" "target 1.5.1"; do
     # shellcheck disable=SC2086  # word-split the subcommand on purpose
     out="$(bash "$R/bin/boxmunge-upgrade" $c 2>&1)" || rc=$?
     echo "CMD ${c%% *} rc=$rc :: $(echo "$out" | tr '\n' ' ' | cut -c1-2000)"
+done
+for f in /tmp/during-*.log; do
+    [[ -e "$f" ]] || continue
+    name="${f#/tmp/during-}"
+    echo "DURING ${name%.log} $(tail -n 1 "$f") :: $(head -n -1 "$f" | tr '\n' ' ' | cut -c1-2000)"
 done
 echo "--- hop log"
 cat /tmp/hop.log

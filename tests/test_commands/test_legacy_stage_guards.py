@@ -17,7 +17,7 @@ from tests.test_commands.legacy_cmd_helpers import legacy_run
 
 
 def _held_upgrade_lock(paths) -> int:
-    paths.upgrade_state.mkdir(parents=True, exist_ok=True)
+    paths.upgrade_lock.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(paths.upgrade_lock, os.O_WRONLY | os.O_CREAT, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     return fd

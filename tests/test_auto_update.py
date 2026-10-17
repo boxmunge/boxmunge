@@ -195,7 +195,7 @@ class TestUpgradeLock:
     def _hold(self, paths: BoxPaths) -> int:
         import fcntl
         import os
-        paths.upgrade_state.mkdir(parents=True, exist_ok=True)
+        paths.upgrade_lock.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(paths.upgrade_lock, os.O_CREAT | os.O_WRONLY)
         fcntl.flock(fd, fcntl.LOCK_EX)
         return fd
@@ -238,7 +238,7 @@ class TestUpgradeLock:
     def test_symlinked_lock_is_refused(self, paths, tmp_path) -> None:
         import pytest
         from boxmunge.upgrade_state import upgrade_lock
-        paths.upgrade_state.mkdir(parents=True, exist_ok=True)
+        paths.upgrade_lock.parent.mkdir(parents=True, exist_ok=True)
         victim = tmp_path / "victim"
         victim.write_text("keep")
         paths.upgrade_lock.symlink_to(victim)

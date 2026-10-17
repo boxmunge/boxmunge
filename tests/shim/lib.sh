@@ -63,7 +63,18 @@ expect() {
 
 FAKEBIN="$(mktemp -d)"
 if ! command -v flock >/dev/null 2>&1; then
-    printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKEBIN/flock"
+    # `flock -n <fd>`, the one form the shim uses. A flock(2) lock belongs to
+    # the open file description, which Python shares with its caller, so the
+    # lock is held, and contended, exactly as with util-linux flock.
+    cat > "$FAKEBIN/flock" <<'EOF'
+#!/usr/bin/env bash
+[[ "$#" -eq 2 && "$1" == -n ]] || { echo "flock stand-in: only 'flock -n <fd>'" >&2; exit 64; }
+exec python3 -c 'import fcntl, sys
+try:
+    fcntl.flock(int(sys.argv[1]), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(1)' "$2"
+EOF
 fi
 if ! command -v timeout >/dev/null 2>&1; then
     # timeout [--kill-after=N] <secs> cmd...
