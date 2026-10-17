@@ -3,9 +3,9 @@
 
 Run through the upgrade shim (`sudo /opt/boxmunge/bin/boxmunge-upgrade
 userns-migrate [--check] | userns-rollback | userns-commit`), which holds
-upgrade.lock and refuses a migration during a probation. migrate, rollback
-and commit refuse to run unless they inherited the shim's lock (its
-descriptor 9, on upgrade.lock, locked), so they cannot race an upgrade.
+upgrade.lock (and the legacy lock) and refuses a migration during a
+probation. migrate, rollback and commit refuse to run unless they inherited
+both of the shim's locks, held, so they cannot race an upgrade.
 Not in the deploy shell's command list.
 """
 from __future__ import annotations
@@ -13,6 +13,7 @@ from __future__ import annotations
 import fcntl
 import os
 import sys
+from pathlib import Path
 
 from boxmunge.commands.argv import parse_args, usage_error
 from boxmunge.docker_run import DockerError
@@ -31,27 +32,35 @@ from boxmunge.userns.volumes import VolumeError
 
 _SUBCOMMANDS = ("check", "migrate", "rollback", "commit")
 _SHIM = "sudo /opt/boxmunge/bin/boxmunge-upgrade"
-SHIM_LOCK_FD = 9  # scripts/boxmunge-upgrade.d/state.sh, acquire_lock
+# scripts/boxmunge-upgrade.d/state.sh, acquire_lock: the root-only lock on
+# descriptor 9, the legacy one older shims take on 8.
+SHIM_LOCK_FDS = (9, 8)
 
 
-def require_upgrade_lock_held(paths: BoxPaths, fd: int = SHIM_LOCK_FD) -> None:
-    """Refuse unless `fd` is upgrade.lock and the lock is held: the shim
-    took it on that descriptor and handed it down."""
-    shim = f"ERROR: run this through the shim: {_SHIM} userns-<subcommand>"
+def _held_on(fd: int, path: Path) -> bool:
+    """Is `fd` the lock file at `path`, and is that lock held?"""
     try:
-        held, name = os.fstat(fd), os.lstat(paths.upgrade_lock)
+        held, name = os.fstat(fd), os.lstat(path)
     except OSError:
-        raise SystemExit(shim) from None
+        return False
     if (held.st_dev, held.st_ino) != (name.st_dev, name.st_ino):
-        raise SystemExit(shim)
-    probe = open_regular_nofollow(paths.upgrade_lock, os.O_RDONLY)
+        return False
+    probe = open_regular_nofollow(path, os.O_RDONLY)
     try:
         fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        return  # held, by the descriptor the shim passed down
+        return True  # held, by the descriptor the shim passed down
     finally:
         os.close(probe)
-    raise SystemExit(shim)
+    return False
+
+
+def require_upgrade_lock_held(paths: BoxPaths, fds: tuple[int, int] = SHIM_LOCK_FDS) -> None:
+    """Refuse unless the shim took both upgrade locks on these descriptors
+    and handed them down, so no upgrade can run beside the migration."""
+    locks = (paths.upgrade_lock, paths.legacy_upgrade_lock)
+    if not all(_held_on(fd, path) for fd, path in zip(fds, locks)):
+        raise SystemExit(f"ERROR: run this through the shim: {_SHIM} userns-<subcommand>")
 
 
 def run_check(paths: BoxPaths) -> int:

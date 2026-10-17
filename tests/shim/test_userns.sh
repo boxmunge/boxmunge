@@ -8,9 +8,9 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
 # recording_server: env-a's boxmunge-server records its arguments, and
-# whether it inherited the shim's lock descriptor.
+# whether it inherited the shim's two lock descriptors.
 recording_server() {
-    mock_server a 'printf "%s fd9=%s\n" "$*" "$([[ -e /proc/self/fd/9 || -e /dev/fd/9 ]] && echo yes || echo no)" >> "$BOXMUNGE_ROOT/calls"; exit 0'
+    mock_server a 'printf "%s locks=%s\n" "$*" "$([[ -e /dev/fd/9 && -e /dev/fd/8 ]] && echo yes || echo no)" >> "$BOXMUNGE_ROOT/calls"; exit 0'
 }
 calls() { cat "$BOXMUNGE_ROOT/calls" 2>/dev/null || true; }
 
@@ -30,11 +30,11 @@ drop_root
 new_root a; recording_server
 run_shim userns-migrate
 expect 0 "" "userns-migrate runs"
-[[ "$(calls)" == "userns migrate fd9=yes" ]] && pass "migrate calls userns migrate holding the lock" \
+[[ "$(calls)" == "userns migrate locks=yes" ]] && pass "migrate calls userns migrate holding the lock" \
     || fail "migrate: $(calls)"
 run_shim userns-rollback
 run_shim userns-commit
-[[ "$(calls)" == *"userns rollback fd9=yes"*"userns commit fd9=yes"* ]] \
+[[ "$(calls)" == *"userns rollback locks=yes"*"userns commit locks=yes"* ]] \
     && pass "rollback and commit run under the lock" || fail "rollback/commit: $(calls)"
 drop_root
 

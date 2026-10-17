@@ -33,40 +33,51 @@ def test_an_unknown_subcommand_is_a_usage_error(capsys) -> None:
     assert e.value.code == 2 and "unknown subcommand" in capsys.readouterr().err
 
 
-def _lock_file(paths):
-    paths.upgrade_lock.parent.mkdir(parents=True, exist_ok=True)
-    return os.open(paths.upgrade_lock, os.O_WRONLY | os.O_CREAT, 0o600)
+def _lock_files(paths):
+    fds = []
+    for path in (paths.upgrade_lock, paths.legacy_upgrade_lock):
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fds.append(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600))
+    return tuple(fds)
 
 
-def test_refuses_without_the_shims_lock(paths) -> None:
-    fd = _lock_file(paths)
+def test_refuses_without_the_shims_locks(paths) -> None:
+    fds = _lock_files(paths)
     try:
         with pytest.raises(SystemExit, match="run this through the shim"):
-            userns_cmd.require_upgrade_lock_held(paths, fd)  # the file, but not locked
+            userns_cmd.require_upgrade_lock_held(paths, fds)  # the files, not locked
+        fcntl.flock(fds[0], fcntl.LOCK_EX)
+        with pytest.raises(SystemExit, match="run this through the shim"):
+            userns_cmd.require_upgrade_lock_held(paths, fds)  # the legacy one is not held
     finally:
-        os.close(fd)
+        for fd in fds:
+            os.close(fd)
     with pytest.raises(SystemExit, match="run this through the shim"):
-        userns_cmd.require_upgrade_lock_held(paths, 987)  # no such descriptor
+        userns_cmd.require_upgrade_lock_held(paths, (987, 986))  # no such descriptors
 
 
 def test_refuses_a_descriptor_on_another_file(paths, tmp_path) -> None:
-    os.close(_lock_file(paths))
+    fds = _lock_files(paths)
     other = os.open(tmp_path / "other", os.O_WRONLY | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(other, fcntl.LOCK_EX)
+        for fd in (other, fds[1]):
+            fcntl.flock(fd, fcntl.LOCK_EX)
         with pytest.raises(SystemExit, match="run this through the shim"):
-            userns_cmd.require_upgrade_lock_held(paths, other)
+            userns_cmd.require_upgrade_lock_held(paths, (other, fds[1]))
     finally:
-        os.close(other)
+        for fd in (other, *fds):
+            os.close(fd)
 
 
-def test_accepts_the_lock_the_shim_handed_down(paths) -> None:
-    fd = _lock_file(paths)
+def test_accepts_the_locks_the_shim_handed_down(paths) -> None:
+    fds = _lock_files(paths)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)  # the shim's open file description
-        userns_cmd.require_upgrade_lock_held(paths, fd)
+        for fd in fds:
+            fcntl.flock(fd, fcntl.LOCK_EX)  # the shim's open file descriptions
+        userns_cmd.require_upgrade_lock_held(paths, fds)
     finally:
-        os.close(fd)
+        for fd in fds:
+            os.close(fd)
 
 
 def test_check_reports_a_journal_instead_of_scanning(paths, monkeypatch, capsys) -> None:
