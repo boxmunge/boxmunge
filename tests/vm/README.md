@@ -11,6 +11,22 @@ and restore with data integrity verification.
 - Python 3.x
 - The `boxmunge` CLI installed (`pip install -e ./cli`)
 - ~1GB disk for the cached Debian cloud image
+- Outbound network for `qemu-system-x86_64`. With QEMU user-mode networking
+  every guest connection, DNS included, is made by the qemu process on the
+  host, so an application firewall (Little Snitch, LuLu) that blocks it leaves
+  the guest with "no DNS". Homebrew's qemu is ad-hoc signed: an allow rule
+  stops matching after `brew upgrade qemu`. The test checks guest egress right
+  after boot and stops with this explanation if it fails.
+
+## Host key
+
+The harness generates the VM's ed25519 host key for each run, installs it
+through cloud-init, and records it in `~/.ssh/known_hosts` for
+`[localhost]:12222` and `[localhost]:19220` before the VM boots. server-setup
+finds the key there, so it never runs `ssh-keyscan` (macOS's ssh-keyscan
+returns nothing from Debian 13's sshd when scanning several key types at
+once), and the harness's own SSH checks the key strictly. Teardown removes
+the entries.
 
 ## Usage
 
@@ -51,8 +67,8 @@ make test-vm
 The VM is left running so you can SSH in and debug:
 
 ```bash
-ssh -o StrictHostKeyChecking=no -i .cache/vm/test_key -p 12222 test@localhost
-ssh -o StrictHostKeyChecking=no -i .cache/vm/test_key -p 19220 supervisor@localhost
+ssh -p 12222 test@localhost
+ssh -p 19220 supervisor@localhost
 ```
 
 Run `./tests/vm/vm-test.py teardown` when done.
