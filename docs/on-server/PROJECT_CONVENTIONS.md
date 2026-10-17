@@ -20,7 +20,6 @@ Each project lives at `/opt/boxmunge/projects/<project-name>/`. The directory st
     smoke.sh                   # Health check (strongly recommended; 755)
     backup.sh                  # Backup to stdout (required if backup.type != none)
     restore.sh                 # Restore from stdin (required if backup.type != none)
-    migrate.sh                 # Optional pre-deploy migration (755)
   backups/                     # Managed by boxmunge
   data/                        # Persistent volumes (managed by project)
   repo/                        # Git clone (source: git projects only)
@@ -444,7 +443,6 @@ The `boxmunge-scripts/` directory is the project's side of the integration. boxm
 | `smoke.sh` | After every deploy, and periodically by the health monitor | Strongly recommended |
 | `backup.sh` | On scheduled backup runs and `snapshot_before_deploy` | Required if `backup.type != none` |
 | `restore.sh` | During a restore operation | Required if `backup.type != none` |
-| `migrate.sh` | During deploy, before containers restart, after `pre_deploy` | Optional |
 
 ---
 

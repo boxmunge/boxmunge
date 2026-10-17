@@ -33,6 +33,11 @@ def test_documented_hooks_are_a_command_and_its_arguments() -> None:
         assert not SHELL_SYNTAX.search(value), f"{where}: {value!r} needs a shell"
 
 
+def test_no_doc_promises_a_migrate_script() -> None:
+    for path in [*(REPO / "docs" / "on-server").glob("*.md"), REPO / "README.md"]:
+        assert "migrate.sh" not in path.read_text(), path
+
+
 @pytest.fixture
 def project(tmp_path: Path) -> tuple[BoxPaths, Path]:
     paths = BoxPaths(root=tmp_path / "bm")

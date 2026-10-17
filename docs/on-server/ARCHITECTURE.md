@@ -47,7 +47,6 @@ Key features:
         smoke.sh
         backup.sh
         restore.sh
-        migrate.sh
       backups/                # encrypted local backup archives
       data/                   # persistent volume mounts
       repo/                   # git clone (source: git projects only)
