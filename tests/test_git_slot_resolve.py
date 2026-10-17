@@ -358,3 +358,34 @@ def test_hostile_operator_refs_refused_before_git_runs(tmp_path, ref) -> None:
     with patch.object(git_slot, "_git") as run, pytest.raises(GitRefError):
         resolve_ref(tmp_path, ref)
     run.assert_not_called()
+
+
+@pytest.mark.parametrize("stderr,hint,not_hint", [
+    ("error: cannot open '.git/FETCH_HEAD': Permission denied", "chown -R", "SSH key"),
+    ("fatal: Unable to create '/r/.git/shallow.lock': Permission denied", "chown -R", "SSH key"),
+    ("git@example.com: Permission denied (publickey).\r\nfatal: Could not read from remote "
+     "repository.", "SSH key", "chown"),
+    ("Host key verification failed.\nfatal: Could not read from remote repository.",
+     "host key", "chown"),
+    ("fatal: unable to access 'https://example.com/r.git/': Could not resolve host", "", ""),
+])
+def test_a_failed_fetch_hints_only_at_its_own_cause(tmp_path, stderr, hint, not_hint) -> None:
+    done = subprocess.CompletedProcess(["git"], 128, "", stderr)
+    with patch.object(git_slot, "_git", return_value=done), \
+            pytest.raises(GitRefError) as excinfo:
+        fetch(tmp_path)
+    message = str(excinfo.value)
+    assert message.startswith(f"git fetch in {tmp_path} failed: ")
+    if hint:
+        assert hint in message and not_hint not in message
+    else:
+        assert "chown" not in message and "SSH key" not in message
+
+
+def test_the_fetch_hint_names_deploy_when_root_runs_boxmunge(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(git_slot, "running_as_root", lambda: True)
+    done = subprocess.CompletedProcess(["git"], 1, "", "error: cannot open "
+                                       "'.git/FETCH_HEAD': Permission denied")
+    with patch.object(git_slot, "_git", return_value=done), \
+            pytest.raises(GitRefError, match=f"chown -R deploy:deploy {tmp_path}"):
+        fetch(tmp_path)

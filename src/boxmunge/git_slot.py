@@ -120,10 +120,34 @@ def fetch(repo: Path) -> None:
     result = _git(["fetch", "-q", "--prune", "--tags", "--no-recurse-submodules", "origin"],
                   repo, timeout=GIT_TIMEOUT)
     if result.returncode != 0:
-        hint = (f" (files in {repo}/.git are not the deploy user's, who runs git: "
-                f"chown -R deploy:deploy {repo}, then retry)"
-                if "Permission denied" in result.stderr else "")
-        raise GitRefError(f"git fetch in {repo} failed: {result.stderr.strip()}{hint}")
+        raise GitRefError(f"git fetch in {repo} failed: {result.stderr.strip()}"
+                          f"{_fetch_hint(repo, result.stderr)}")
+
+
+# git's own words for a file it cannot write in the repository, and for a
+# remote that refused who asked (ssh, or https credentials).
+_LOCAL_PERMISSION = re.compile(r"(cannot open|unable to create|insufficient permission)"
+                               r"[^\n]*", re.IGNORECASE)
+_REMOTE_AUTH = re.compile(r"Permission denied \(publickey|Host key verification failed|"
+                          r"Authentication failed|could not read Username")
+
+
+def _git_user() -> str:
+    """Who runs git: deploy when boxmunge runs as root (_as_deploy)."""
+    return "deploy" if running_as_root() else pwd.getpwuid(os.getuid()).pw_name
+
+
+def _fetch_hint(repo: Path, stderr: str) -> str:
+    user = _git_user()
+    if _REMOTE_AUTH.search(stderr):
+        return (f" (origin refused {user}, who runs git: boxmunge fetches as {user}, "
+                f"with {user}'s own SSH key, known_hosts and credentials, also when run "
+                f"as root. Give that key access to the repository, or add origin's host "
+                f"key for {user}, then retry)")
+    if _LOCAL_PERMISSION.search(stderr) and "Permission denied" in stderr:
+        return (f" (files in {repo}/.git are not writable by {user}, who runs git: "
+                f"chown -R {user}:{user} {repo}, then retry)")
+    return ""
 
 
 def resolve_ref(repo: Path, ref: str) -> str:
