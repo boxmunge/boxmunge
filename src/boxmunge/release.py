@@ -36,7 +36,7 @@ from boxmunge.data_dirs import (
     start_record, warn_retained,
 )
 from boxmunge.fileutil import atomic_write_text, discard_dir, fsync_dir, sync_entries
-from boxmunge.fs_nofollow import chmod_nofollow
+from boxmunge.fs_nofollow import chmod_nofollow, chown_tree_deploy, mkdir_p_deploy
 from boxmunge.staged_release import SLOT, release_dir
 
 if TYPE_CHECKING:
@@ -300,7 +300,7 @@ def install_release(tree: Path, project_dir: Path,
     """
     dirs = _classify(project_dir, tree)
     _check(tree, dirs)
-    project_dir.mkdir(parents=True, exist_ok=True)
+    mkdir_p_deploy(project_dir)
     copies = [] if has_record(project_dir) else start_record(dirs, announce)
 
     # Classify everything before changing anything.
@@ -325,9 +325,14 @@ def install_release(tree: Path, project_dir: Path,
         _install_entry(item, dest_item)
         installed.append(dest_item)
 
-    (project_dir / "backups").mkdir(exist_ok=True)
-    (project_dir / "data").mkdir(exist_ok=True)
+    mkdir_p_deploy(project_dir / "backups")
+    mkdir_p_deploy(project_dir / "data")
     _make_scripts_executable(installed)
+    # Release code is deploy's whoever installs it (an operator's sudo):
+    # the pre-deploy hook, run as deploy, writes into it, and the next
+    # install by deploy replaces it.
+    for entry in installed:
+        chown_tree_deploy(entry)
     retained = dirs.retained()
     warn_retained(dirs, retained)
     return KeptData(retained=retained, copies=copies)
@@ -369,7 +374,7 @@ def previous_meta_text(ref: str, data_snapshot: str | None, replaced_at: str,
 def mark_live(paths: BoxPaths, project_name: str, ref: str) -> None:
     """Record which release ref the project dir's code now is."""
     meta = _live_meta(paths, project_name)
-    meta.parent.mkdir(parents=True, exist_ok=True)
+    mkdir_p_deploy(meta.parent)
     atomic_write_text(meta, live_meta_text(ref), mode=0o644)
 
 

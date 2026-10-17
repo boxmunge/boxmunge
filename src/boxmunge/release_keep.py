@@ -17,6 +17,7 @@ from boxmunge.data_dirs import naming_set_aside, set_aside_announcer
 from boxmunge.fileutil import (
     atomic_write_text, discard_dir, durable_rename, durable_rename_dir, fsync_dir, sync_tree,
 )
+from boxmunge.fs_nofollow import chown_tree_deploy, mkdir_p_deploy
 from boxmunge.release import _copy_entry, _ensure_record, live_code_entries, previous_meta_text
 
 if TYPE_CHECKING:
@@ -53,9 +54,10 @@ def keep_previous_release_txn(paths: BoxPaths, project: str, txn: InstallTxn,
     building, prev, prev_meta, sup_dir, sup_meta = _names(paths, project)
     project_dir = paths.project_dir(project)
     discard_dir(building)
-    building.mkdir(parents=True)
+    mkdir_p_deploy(building)
     for entry in live_code_entries(project_dir, release_tree):
         _copy_entry(entry, building / entry.name)
+    chown_tree_deploy(building)  # deploy discards or reinstates it later
     copies = _ensure_record(project_dir, release_tree,
                             set_aside_announcer(paths, project, "deploy"))
     with naming_set_aside(copies):

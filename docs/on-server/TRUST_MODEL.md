@@ -230,7 +230,9 @@ becomes a boundary if deploy ever loses docker access, or if agent trust is spli
 trust. Those operations then need dir-fd traversal.
 
 Project code never runs on the host as root. An operator who runs `prod-deploy`, `rollback` or
-`promote` with sudo makes boxmunge root, and the `pre_deploy` hook still runs as deploy: root
+`promote` with sudo makes boxmunge root. The release code root installs, and the copy it keeps
+as the previous release, are handed to deploy (re-owned through directory descriptors, never
+following a link), as if deploy had installed them. The `pre_deploy` hook still runs as deploy: root
 switches to deploy's uid, gid and groups for it, with the deploy shell's environment, no stdin,
 its own session (no terminal of root's to push input into) and no other inherited descriptor.
 A deploy interrupted while its hook runs (Ctrl-C, an error) kills the hook's whole process group,

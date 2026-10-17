@@ -2,7 +2,7 @@
 
 Runs tests/integration/uid_hook/run_hook.py as real root in a throwaway
 Debian 13 container with a real deploy account, the way an operator's
-`sudo boxmunge-server prod-deploy` would run the hook.
+`sudo boxmunge-server prod-deploy` installs releases and runs their hook.
 """
 import json
 import subprocess
@@ -34,7 +34,7 @@ def seen() -> dict:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     report = json.loads(result.stdout.strip().splitlines()[-1])
-    assert report["rc"] == 0, result.stdout + result.stderr
+    assert report["rcs"] == [0, 0], result.stdout + result.stderr
     lines = report["report"].splitlines()
     report["facts"] = dict(line.split("=", 1) for line in lines if not line.startswith("env:"))
     report["env"] = dict(line[4:].split("=", 1) for line in lines if line.startswith("env:"))
@@ -64,3 +64,8 @@ def test_the_hook_gets_deploys_shell_environment(seen: dict) -> None:
 
 def test_ctrl_c_on_a_deploy_kills_what_its_hook_started(seen: dict) -> None:
     assert seen["survivors"] == [], seen
+
+
+def test_a_release_root_installed_is_deploys_so_the_hook_can_build_in_it(seen: dict) -> None:
+    assert seen["build_output"] == "building\n", seen
+    assert seen["not_deploys"] == [], seen
