@@ -91,8 +91,9 @@ def _log_opt_outs(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
 def prepare_release_users(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, Any], *,
                           component: str, rollback: bool = False) -> dict[str, ServiceUser]:
     """Build/pull, inspect, decide every service's user, check, record.
-    Raises DeployRefused (nothing recorded), DockerError or RunAsError (the
-    record cannot be read)."""
+    A rollback (`rollback`) keeps what the record decided; one with no
+    record only builds. Raises DeployRefused (nothing recorded), DockerError
+    or RunAsError (the record cannot be read)."""
     carried = read_users(paths, target.project, staging=target.staging) if rollback else None
     model, services = resolved_services(target)
     tags = _built_tags(services)
@@ -135,6 +136,13 @@ def _decide_and_record(paths: BoxPaths, target: ReleaseTarget, manifest: dict[st
                        carried: dict[str, ServiceUser] | None,
                        component: str) -> dict[str, ServiceUser]:
     build_and_pull(target, services)
+    if carried == {}:
+        # A rollback of a project whose users no deploy has decided: it
+        # goes back to running as its images say, as it did; its next
+        # deploy decides.
+        print("  No deploy has decided this project's users yet; the restored release "
+              "runs its services as their images say until the next deploy.")
+        return {}
     facts = {name: image_facts(str(svc.get("image"))) for name, svc in services.items()}
     users, warnings = decide_users(as_written(services, compose_users(target)), facts,
                                    manifest, carried)

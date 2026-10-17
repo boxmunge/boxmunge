@@ -173,3 +173,11 @@ def test_a_refusal_points_built_image_names_back(paths, images, monkeypatch) -> 
         di.prepare_release_users(paths, production_target(paths, "shop"), MANIFEST,
                                  component="deploy")
     assert calls == [["docker", "tag", "sha256:" + "1" * 64, "boxmunge.invalid/shop/web"]]
+
+
+def test_a_rollback_of_an_undecided_project_stays_undecided(paths, images, monkeypatch) -> None:
+    _resolved(monkeypatch, SERVICES)
+    assert di.prepare_release_users(paths, production_target(paths, "shop"), MANIFEST,
+                                    component="rollback", rollback=True) == {}
+    assert images == [["db", "web"]]  # still built: the start does not build
+    assert read_users(paths, "shop") == {}

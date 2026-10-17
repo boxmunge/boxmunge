@@ -52,7 +52,11 @@ mkdir -p $R/{config,projects,state/deploy,state/health,caddy/sites,inbox,stashes
 printf 'hostname: box.example.com\nadmin_email: ops@example.com\n' > $R/config/boxmunge.yml
 echo 0.10.1 > $R/config/version
 
-release() {  # release <dir> <version> <source>
+release() {  # release <dir> <version> <source> [declared]
+    # `declared`: the services say who they run as, which the new release
+    # requires of a registry image without USER and 0.10.1 does not know.
+    local app='{internal: true}'
+    [[ "${4:-}" == declared ]] && app='{internal: true, security: {user: image, reason: test}}'
     mkdir -p "$1"
     cat > "$1/manifest.yml" <<EOF
 schema_version: 3
@@ -60,7 +64,7 @@ id: 01LEGACYTEST00000000000000
 project: $P
 source: $3
 hosts: [$P.example.com]
-services: {app: {internal: true}}
+services: {app: $app}
 backup: {type: none}
 EOF
     [[ "$3" == git ]] && printf 'repo: /tmp/origin.git\nref: main\n' >> "$1/manifest.yml"
@@ -73,13 +77,13 @@ services:
     environment: {VERSION: $2}
 EOF
 }
-bundle() {  # bundle <version> <hour>: an inbox bundle named the way reception names it
+bundle() {  # bundle <version> <hour> [declared]: an inbox bundle named as reception names it
     local d; d=$(mktemp -d)
-    release "$d/$P" "$1" bundle
+    release "$d/$P" "$1" bundle "${3:-}"
     tar -C "$d" -czf "$R/inbox/$P-2026-10-16T${2}0000000000.tar.gz" "$P"
 }
-commit() {  # commit <version>: a commit of the release to the origin's main
-    release /tmp/work "$1" git
+commit() {  # commit <version> [declared]: a commit of the release to the origin's main
+    release /tmp/work "$1" git "${2:-}"
     git -C /tmp/work add -A
     git -C /tmp/work -c user.name=t -c user.email=t@example.com commit -qm "$1"
     git -C /tmp/work push -q origin HEAD:main
@@ -202,8 +206,8 @@ resolve)
         run ROLLBACK new rollback "$P" --yes
         fact PROD_VERSION_ROLLED_BACK "$(version "$P")"
     fi
-    if [[ "$KIND" == git ]]; then commit v3; run DEPLOY_AFTER new prod-deploy "$P" --ref main
-    else bundle v3 11; run DEPLOY_AFTER new prod-deploy "$P" --ref 2026-10-16T11; fi
+    if [[ "$KIND" == git ]]; then commit v3 declared; run DEPLOY_AFTER new prod-deploy "$P" --ref main
+    else bundle v3 11 declared; run DEPLOY_AFTER new prod-deploy "$P" --ref 2026-10-16T11; fi
     fact PROD_VERSION_DEPLOYED "$(version "$P")" ;;
 *) echo "usage: legacy_upgrade.sh <kind> <rollback|failed-apply|resolve> <project>" >&2; exit 2 ;;
 esac
