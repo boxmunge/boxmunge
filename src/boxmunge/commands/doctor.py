@@ -196,6 +196,19 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
     else:
         check("Docker userns remap", userns.status == "ok", userns.detail)
 
+    if docker_available:
+        from boxmunge.health_checks.service_users import GUIDE, pending_declarations
+        pending, unchecked = pending_declarations(paths)
+        if pending:
+            warn("Service users declared", f"the next deploy of each project refuses "
+                 f"these registry services until manifest.yml says who they run as "
+                 f"(security.user; the refusal prints the lines): {', '.join(pending)}. "
+                 f"See {GUIDE}")
+        if unchecked:
+            warn("Service users declared", "cannot check: " + "; ".join(unchecked))
+        if not pending and not unchecked:
+            check("Service users declared", True)
+
     # Report
     if as_json:
         print(json.dumps(results, indent=2))

@@ -307,3 +307,18 @@ def image_user_drift(paths: BoxPaths, project: str, changed: dict[str, str]) -> 
         if identity(new) != identity(rec.image_user):
             drift.append(f"{svc}: image user {rec.image_user or 'root'} -> {new or 'root'}")
     return drift
+
+
+def default_user_hint(paths: BoxPaths, project: str, service: str, *,
+                      staging: bool = False) -> str | None:
+    """A line for a failing service that took the 10001:10001 default."""
+    try:
+        user = read_users(paths, project, staging=staging).get(service)
+    except RunAsError as e:
+        return f"  HINT: {e}"
+    if user is None or user.source != SOURCE_DEFAULT:
+        return None
+    return (f"  HINT: {service} runs as {DEFAULT_USER}, the default for a build: service "
+            f"whose image sets no USER, and that uid has no passwd entry in the image. If "
+            f"the app needs one, or must write where 10001 cannot, add USER to its "
+            f"Dockerfile or declare security.user in manifest.yml.")

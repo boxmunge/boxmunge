@@ -43,6 +43,7 @@ from boxmunge.cve.suppressions import (
 from boxmunge.fleet import PROJECT_INPUT_ERRORS
 from boxmunge.log import log_error
 from boxmunge.manifest import ManifestError, load_manifest
+from boxmunge.run_as import RunAsError, read_users
 from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import read_registry
 from boxmunge.state import StateError
@@ -89,6 +90,7 @@ class ProjectSecurity:
     quarantine_state: dict | None
     scan_state: dict | None
     active_suppressions: tuple
+    users: dict
 
 
 def load_project_security(project: str, paths: BoxPaths) -> ProjectSecurity:
@@ -116,6 +118,10 @@ def load_project_security(project: str, paths: BoxPaths) -> ProjectSecurity:
         supps = load_suppressions(_suppressions_path(paths, project))
     except SuppressionsError as e:
         raise SecurityViewError(f"failed to load suppressions: {e}") from e
+    try:
+        users = read_users(paths, project)
+    except RunAsError as e:
+        raise SecurityViewError(str(e)) from e
     today = datetime.now(timezone.utc).date()
     return ProjectSecurity(
         manifest=manifest,
@@ -126,6 +132,7 @@ def load_project_security(project: str, paths: BoxPaths) -> ProjectSecurity:
         quarantine_state=qstate,
         scan_state=scan_state,
         active_suppressions=active_suppressions(supps, today=today),
+        users=users,
     )
 
 
@@ -144,6 +151,7 @@ def _per_project_view(project: str, as_json: bool, paths: BoxPaths) -> int:
         quarantine_state=view.quarantine_state,
         scan_state=view.scan_state,
         active_suppressions=view.active_suppressions,
+        users=view.users,
     ))
     return 0
 

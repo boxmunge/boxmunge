@@ -155,6 +155,7 @@ def test_status_json_names_the_scan_basis(box):
         load_manifest(box.project_manifest("demo")), posture="balanced",
         dangerously_disable_quarantine=False, quarantined=False, quarantine_state=None,
         scan_state=read_scan_state(box.project_scan_state("demo")), active_suppressions=(),
+        users={},
     ))
     assert (payload["cve"]["scan_basis"], payload["cve"]["stopped_reason"]) == (
         BASIS_STARTUP_IMAGES, "paused")

@@ -25,7 +25,7 @@ from boxmunge.docker import (
 )
 from boxmunge.log import log_error
 from boxmunge.release_target import DeployRefused, staging_release_target
-from boxmunge.run_as import RunAsError
+from boxmunge.run_as import RunAsError, default_user_hint
 from boxmunge.security_warn import warn_off_services, warn_writable_state
 from boxmunge.staged_release import SlotError, release_dir, slot_dir, staging_target
 from boxmunge.staging_copy_plan import StagingDataError
@@ -160,8 +160,9 @@ def bring_up_staging(paths: BoxPaths, project: str, manifest: dict[str, Any]) ->
         print("  Running smoke tests in containers...")
         from boxmunge.commands.check import run_smoke_in_container
         target = staging_target(paths, project)
-        result = run_smoke_in_container(release, manifest, [],
-                                        project_name=target.project_name, logs_target=target)
+        result = run_smoke_in_container(
+            release, manifest, [], project_name=target.project_name, logs_target=target,
+            hint=lambda svc: default_user_hint(paths, project, svc, staging=True))
         if result.status == "ok":
             print("  Smoke tests passed.")
         else:

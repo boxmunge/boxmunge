@@ -99,6 +99,23 @@ def _format_findings_block(scan_state: dict[str, Any]) -> list[str]:
     return lines
 
 
+def user_lines(manifest: dict[str, Any], users: dict[str, Any]) -> list[str]:
+    """Who each service runs as, from the users record (run_as)."""
+    from boxmunge.run_as import SOURCE_MANIFEST, declared_user, describe
+    if not users:
+        return ["Service users: not decided: deployed before boxmunge decided who each "
+                "service runs as; the next deploy decides them", ""]
+    lines = ["Service users (decided at the last deploy):"]
+    for svc, user in sorted(users.items()):
+        text = describe(user)
+        if user.source == SOURCE_MANIFEST and user.user in (None, "0:0"):
+            _value, reason = declared_user(manifest.get("security"),
+                                           (manifest.get("services") or {}).get(svc))
+            text += f", reason: {reason!r}"
+        lines.append(f"  {svc + ':':<18} {text}")
+    return [*lines, ""]
+
+
 def format_project_text(
     manifest: dict[str, Any],
     *,
@@ -108,6 +125,7 @@ def format_project_text(
     quarantine_state: dict[str, Any] | None,
     scan_state: dict[str, Any] | None,
     active_suppressions: tuple[Any, ...],
+    users: dict[str, Any],
 ) -> str:
     """Render the per-project text view.
 
@@ -151,6 +169,8 @@ def format_project_text(
         _, writable_desc = describe_state(svc)
         lines.append(f"    writable:          {writable_desc}")
         lines.append("")
+
+    lines += user_lines(manifest, users)
 
     # CVE section ---------------------------------------------------------
     lines.append("CVE state:")
@@ -218,6 +238,7 @@ def format_project_json(
     quarantine_state: dict[str, Any] | None,
     scan_state: dict[str, Any] | None,
     active_suppressions: tuple[Any, ...],
+    users: dict[str, Any],
 ) -> str:
     """Render the per-project JSON view.
 
@@ -243,6 +264,9 @@ def format_project_json(
         enriched = dict(fragment)
         enriched["writable"] = writable_json(svc_block)
         payload["services"][svc_name] = enriched
+
+    payload["users"] = {svc: {"user": u.user, "source": u.source, "image_user": u.image_user}
+                        for svc, u in sorted(users.items())} or None
 
     findings_payload: list[dict[str, Any]] = []
     if scan_state is not None:
