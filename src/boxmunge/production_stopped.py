@@ -102,8 +102,8 @@ def production_down(paths: BoxPaths, project: str, component: str,
 
 
 def _record_started(paths: BoxPaths, project: str) -> None:
-    # As after a deploy, resume or recover. The app may still be booting, so
-    # the health tick runs no smoke now; smoke runs on the next tick.
+    # Recorded as after a deploy, resume or recover, whoever started
+    # production again (tick, recover, stage, unstage).
     path = paths.project_deploy_state(project)
     state = read_state(path)
     state["last_started_at"] = datetime.now(timezone.utc).isoformat()

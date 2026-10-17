@@ -25,8 +25,9 @@ def _raw_rename(node: ast.AST) -> bool:
         return False
     if node.func.attr in ("rename", "renames"):
         return True
-    # str.replace and dataclasses.replace are not renames; os.replace and
-    # shutil.move are.
+    if node.func.attr == "replace" and len(node.args) == 1 and not node.keywords:
+        return True  # Path.replace(dest); str.replace takes two arguments
+    # dataclasses.replace is not a rename; os.replace and shutil.move are.
     return (isinstance(node.func.value, ast.Name)
             and (node.func.value.id, node.func.attr) in (("os", "replace"), ("shutil", "move")))
 
@@ -44,8 +45,9 @@ def test_no_raw_renames() -> None:
 
 def test_the_census_sees_a_raw_rename() -> None:
     tree = ast.parse("import os, shutil\nfrom os import replace\n"
-                     "p.rename(q)\nos.replace(a, b)\nshutil.move(a, b)\n'x'.replace('a', 'b')\n")
-    assert sum(_raw_rename(node) for node in ast.walk(tree)) == 4
+                     "p.rename(q)\nos.replace(a, b)\nshutil.move(a, b)\np.replace(q)\n"
+                     "'x'.replace('a', 'b')\nreplace(meta, phase=1)\n")
+    assert sum(_raw_rename(node) for node in ast.walk(tree)) == 5
 
 
 def test_slot_is_synced_before_it_is_swapped_in(paths) -> None:

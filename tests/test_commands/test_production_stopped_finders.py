@@ -95,7 +95,7 @@ def test_a_failure_after_a_success_pages_again(paths, fake_containers) -> None:
 def test_a_start_outside_the_tick_clears_its_alert(paths, fake_containers) -> None:
     """recover (or stage, unstage) starting production again forgets the
     tick's production-down alert, so a relapse is paged again."""
-    from boxmunge.commands.check_holds import DOWN_ALERT
+    from boxmunge.production_stopped import DOWN_ALERT
     from boxmunge.project_alerts import alert_state
     _stopped(paths, fake_containers)
     marker = load_slot(paths, "myapp").production_stopped
