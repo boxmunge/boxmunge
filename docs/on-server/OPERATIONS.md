@@ -778,7 +778,8 @@ The alert names your options:
   release's containers may have started, the pre-deploy hook is not run again);
 - `prod-deploy <project> --abandon`, while nothing has reached production's
   data: the old release's files go back (a first deploy's code is removed; a
-  git project checks the replaced commit out again);
+  git project checks the replaced commit out again, and a first git deploy's
+  checkout stays, with nothing running it);
   containers and data were never touched, and a staged release stays staged
   and promotable. If it is interrupted, run it again;
 - `rollback <project>`, once a pre-deploy hook may have run (this install's,
