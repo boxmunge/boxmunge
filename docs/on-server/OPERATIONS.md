@@ -208,7 +208,8 @@ Until it is resolved:
 - backups continue with the manifest of the release the containers run, told from the evidence
   `legacy-stage` prints; if that evidence cannot be read (Docker unavailable, an unreadable
   reflog or `.releases/prestage/`, a commit that does not resolve), the backup is skipped with
-  an alert naming the cause. For a git project the dump still runs through the project's
+  an alert naming the cause (a never-deployed git project's is skipped without one: it has no
+  data). For a git project the dump still runs through the project's
   `compose.yml`, which is the staged checkout's: if the staged release renamed the backup
   service, the backup fails with an error until the stage is resolved;
 - a CVE quarantine is held, not taken (it would stop production), with a high-priority alert
@@ -1636,7 +1637,9 @@ For a git project it runs git as the deploy user, so `repo/` must be deploy's: o
   evidence is when the stage was made, the deploy state's ref, the staged ref, production's
   release, and whether production's containers are `untouched` (all created before the stage)
   or `recreated` (started from the staged files: a failed 0.10.1 promote, or a recreate during
-  the stage). A `leftover` (a 0.10.1 promote whose unstage did not finish) has no evidence and
+  the stage). A git stage that changed no code (no `--ref`, or the deployed commit) is
+  `untouched` without that time ("not needed: the stage changed no code"), so `repo/`'s reflog
+  is not read. A `leftover` (a 0.10.1 promote whose unstage did not finish) has no evidence and
   allows only `--discard`.
 - `--discard` throws the staged release away, puts production's release back and recreates
   production from it on this release's overlay. For `untouched` and `leftover`, production keeps

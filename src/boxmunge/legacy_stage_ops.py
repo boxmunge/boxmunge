@@ -259,6 +259,8 @@ def _pairing_snapshot(paths: BoxPaths, project: str, ev: Evidence) -> str | None
         elif ev.classification == "untouched":
             name = _snapshot_production(paths, project)
         else:
+            if ev.t is None:  # a recreated classification is made against T
+                raise LegacyStageError("a recreated stage's evidence has no stage time")
             after = predeploy_snapshots(paths, project, after=ev.t)
             name = after[0] if after else None
         rec = update_record(paths, project, snapshot=name or "")

@@ -154,7 +154,10 @@ class EvidenceError(Exception):
 @dataclass(frozen=True)
 class Evidence:
     classification: str            # "untouched" | "recreated"
-    t: datetime                    # when the stage changed the project dir
+    # When the stage changed the project dir; None when it changed no code
+    # (git), where it is not needed and may not be readable (a clone-only
+    # reflog, or none).
+    t: datetime | None
     current_ref: str | None        # the deploy state's
     staged_ref: str | None         # as recorded
     production_ref: str | None     # bundle: the kept release's ref; git: current_ref's SHA
@@ -168,7 +171,9 @@ class Evidence:
         staged = self.staged_ref
         if self.staged_sha and self.staged_sha != self.staged_ref:
             staged = f"{staged} ({self.staged_sha})"
-        lines = [f"stage made at {self.t.isoformat()}",
+        made = (f"stage made at {self.t.isoformat()}" if self.t is not None
+                else "stage made at: not needed: the stage changed no code")
+        lines = [made,
                  f"deploy state current_ref: {self.current_ref}",
                  f"staged ref: {staged}",
                  f"production's release: {self.production_ref}"]
@@ -289,8 +294,8 @@ def evidence(paths: BoxPaths, project: str, stage: LegacyStage) -> Evidence:
         staged = staged_sha = _git_full(repo, shown, "staged ref", notes) if recorded else "?"
         if staged is None or (staged != "?" and staged == production):
             # The stage changed no code: whatever runs, runs production's.
-            return Evidence("untouched", stage_time(paths, project, stage), current, shown,
-                            production, head, tuple(notes), staged_sha)
+            return Evidence("untouched", None, current, shown, production, head,
+                            tuple(notes), staged_sha)
     t = stage_time(paths, project, stage)
     try:
         created = docker_containers.created_times(project)

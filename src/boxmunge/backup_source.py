@@ -11,7 +11,8 @@ both skip. A manifest or install record that cannot be read is an error
 
 A stage left by boxmunge 0.10.1 comes first: its evidence says which
 release the containers run. Only evidence that cannot be read (Docker,
-the reflog, the prestage, a ref) skips, with an alert naming the cause.
+the reflog, the prestage, a ref) skips, with an alert naming the cause; a
+never-deployed git project skips without one (it has no data).
 """
 from __future__ import annotations
 
@@ -76,7 +77,8 @@ def _legacy(paths: BoxPaths, project: str, stage: LegacyStage) -> BackupSource:
     try:
         ev = evidence(paths, project, stage)
         running = (_running_commit(pdir / "repo", ev.current_ref)
-                   if stage.kind == "git" and ev.classification == "untouched" else None)
+                   if stage.kind == "git" and ev.classification == "untouched"
+                   and ev.current_ref is not None else None)
         kept = pdir / ".releases" / "prestage" / "release"
         problem = (real_dir_problem(kept)
                    if stage.kind == "bundle" and ev.classification == "untouched" else None)
@@ -89,6 +91,9 @@ def _legacy(paths: BoxPaths, project: str, stage: LegacyStage) -> BackupSource:
     if ev.classification == "recreated":
         # Production was started from the staged files in the project dir.
         return BackupSource(load_manifest(pdir / "manifest.yml"))
+    if stage.kind == "git" and ev.classification == "untouched" and ev.current_ref is None:
+        return BackupSource(None, skip=(
+            "it was never deployed (a 0.10.1 stage of its clone): production has no data"))
     if running is not None:
         # The dump still execs through the project dir's compose.yml, which
         # follows repo/'s staged checkout: if the staged release renamed the
