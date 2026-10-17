@@ -32,6 +32,7 @@ from boxmunge.release_txn import (
     InstallTxn, advance, close_txn, load_txn, open_txn, stale_reason, start_refusal, supersede_txn,
 )
 from boxmunge.staged_release import has_slot, sweep_debris
+from boxmunge.staging_copies import slot_made
 from boxmunge.staging_isolation import StagingIsolationError, check_install_isolation
 from boxmunge.state import read_state
 
@@ -99,7 +100,8 @@ def prove_disjoint_git(project_name: str, paths: BoxPaths, sha: str,
                 os.chmod(scratch, 0o755)  # made 0700; as root, git runs as deploy below it
                 release = Path(scratch) / "release"
                 release.mkdir()
-                materialise(paths.project_dir(project_name), sha, release)
+                materialise(paths.project_dir(project_name), sha, release,
+                            made=slot_made(paths, project_name))
                 _prove(paths, project_name, release)
     except (StagingIsolationError, GitRefError, ManifestError, OSError) as e:
         print(f"ERROR: {e}\n  Nothing was changed. {advice}", file=sys.stderr)

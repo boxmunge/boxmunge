@@ -22,6 +22,7 @@ import re
 import stat
 import subprocess
 from pathlib import Path
+from collections.abc import Collection
 from typing import Any
 
 from boxmunge.fs_nofollow import (
@@ -227,7 +228,8 @@ SUBMODULE_WARN = ("submodules are not checked out; neither production nor stagin
                   "will have them")
 
 
-def materialise(project_dir: Path, sha: str, release: Path) -> list[str]:
+def materialise(project_dir: Path, sha: str, release: Path, *,
+                made: Collection[str] = ()) -> list[str]:
     """Check ``sha`` out in ``release/repo``, a local clone of production's
     repository, and copy production's other release-code entries beside it
     (spec 'Git-sourced projects', steps 3-4). ``release`` is an empty
@@ -239,9 +241,11 @@ def materialise(project_dir: Path, sha: str, release: Path) -> list[str]:
     (--template=) and none of production's config, so nothing in that
     deploy-writable .git (hooks, fsmonitor, filter drivers) runs; a commit
     that would need a filter driver is refused, as are links that leave
-    the staged release: staging runs only from the staged tree.
+    the staged release: staging runs only from the staged tree. ``made``
+    is what the current slot records that staging created (staging_copies).
     """
     _require_full_sha(sha, "stage")
+    _refuse_foreign_copies(project_dir, made)
     source, clone = project_dir / "repo", release / "repo"
     # As root, git runs as deploy: only the clone's own directory is deploy's
     # while root copies into release/, so deploy cannot plant names there.
@@ -291,13 +295,31 @@ def _refuse_filters(clone: Path, sha: str) -> None:
                 f"filter attributes, or unstage and deploy it with prod-deploy")
 
 
+def _refuse_foreign_copies(project_dir: Path, made: Collection[str]) -> None:
+    """A top-level ``-staging`` entry that is not box state or staging's
+    copy (staging_copies) would be copied into the staged release as code:
+    refused, as a bundle's is (bundle.check_bundle_contents)."""
+    from boxmunge.bundle import STAGING_SUFFIX, STAGING_SUFFIX_REASON
+    from boxmunge.staging_copies import is_staging_copy, production_view
+    dirs = production_view(project_dir)
+    state = dirs.box_state()
+    foreign = sorted(n for n in os.listdir(project_dir) if n.endswith(STAGING_SUFFIX)
+                     and n not in state and not is_staging_copy(n, dirs, made))
+    if foreign:
+        raise GitRefError(f"{project_dir}: {', '.join(foreign)}: {STAGING_SUFFIX_REASON} "
+                          f"(a git stage copies the project directory's release files "
+                          f"into the staged release)")
+
+
 def copy_project_entries(project_dir: Path, release: Path) -> None:
     """Production's release-code entries other than repo/ (.env, project.env,
     boxmunge-scripts/, operator-placed files) are copied verbatim, links as
     links and never through one (fs_nofollow.copy_entry_nofollow); a link
     into repo/ (production's are absolute) is recreated as a relative link
     to the slot's repo/. Box state and staging's ``-staging`` copies stay in
-    the project dir. The current slot is not read (a re-stage replaces it)."""
+    the project dir (materialise refused any other ``-staging`` entry). The
+    current slot is not read (a re-stage replaces it)."""
+    from boxmunge.bundle import STAGING_SUFFIX
     from boxmunge.release import project_data_dirs
     state = project_data_dirs(project_dir, with_staged=False).box_state()
     repo = os.path.normpath(project_dir / "repo")
@@ -306,8 +328,8 @@ def copy_project_entries(project_dir: Path, release: Path) -> None:
         dest = os.open(release, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             for name in sorted(os.listdir(src)):
-                if name in state or name.endswith("-staging"):
-                    continue
+                if name in state or name.endswith(STAGING_SUFFIX):
+                    continue  # box state, or staging's copy of it (checked above)
                 if stat.S_ISLNK(os.stat(name, dir_fd=src, follow_symlinks=False).st_mode):
                     target = os.path.normpath(os.path.join(project_dir,
                                                            os.readlink(name, dir_fd=src)))

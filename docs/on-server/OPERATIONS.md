@@ -109,7 +109,9 @@ leaves production on its own commit. A `.gitmodules` is staged with a warning: s
 checked out in neither production nor staging. A commit whose `.gitattributes` assigns a `filter`
 (Git LFS, for example) cannot be staged, because the staged checkout runs no filter drivers and
 would not have production's files; nor can one with a symbolic link that resolves outside the
-staged release. Deploy such a commit with `prod-deploy`.
+staged release. Deploy such a commit with `prod-deploy`. As a bundle may not ship a top-level
+`*-staging` entry, a git stage is refused while the project directory holds one that is neither
+production's data nor staging's copy: rename it.
 
 A git project's `manifest.yml` and `compose.yml` are symlinks into `repo/`, so every deploy
 reads the repository's files. boxmunge never writes them. When an upgrade raises the manifest

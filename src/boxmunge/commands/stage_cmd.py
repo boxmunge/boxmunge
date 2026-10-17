@@ -176,7 +176,7 @@ def _intake_git(project: str, paths: BoxPaths, ref: str | None,
         with incoming_workspace(paths, project) as workspace:
             tree = workspace / "release"
             tree.mkdir()
-            warnings = materialise(project_dir, sha, tree)
+            warnings = materialise(project_dir, sha, tree, made=slot_made(paths, project))
             manifest = validate_release_tree(tree, project, paths, "stage")
             if not _precheck(project, paths, manifest, tree, workspace):
                 return 1

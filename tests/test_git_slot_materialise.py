@@ -27,7 +27,7 @@ def project(tmp_path):
     (pdir / "boxmunge-scripts" / "smoke.sh").write_text("true\n")
     (pdir / "secrets.env").write_text("S=1\n")
     (pdir / "data").mkdir()
-    (pdir / "uploads-staging").mkdir()
+    (pdir / "data-staging").mkdir()        # staging's copy of production's data/
     return pdir, work
 
 
@@ -66,7 +66,7 @@ def test_project_entries_copied_and_links_made_relative(project, tmp_path) -> No
     assert (release / "compose.yml").read_text() == "services: {}\n"
     assert (release / ".env").read_text() == "X=1\n"
     assert (release / "boxmunge-scripts" / "smoke.sh").read_text() == "true\n"
-    for state in ("secrets.env", "data", "uploads-staging"):             # box state stays
+    for state in ("secrets.env", "data", "data-staging"):                # box state stays
         assert not os.path.lexists(release / state)
 
 
@@ -158,3 +158,33 @@ def test_only_the_clone_is_deploys_while_root_copies(project, tmp_path, monkeypa
     release = _release(tmp_path)
     materialise(pdir, git("rev-parse", "HEAD", cwd=pdir / "repo"), release)
     assert calls == [("repo", False, False), ("release", False, True)]
+
+
+def test_a_copy_the_slot_made_stays_in_the_project_dir(project, tmp_path) -> None:
+    pdir, _work = project
+    (pdir / "media-staging").mkdir()
+    release = _release(tmp_path)
+    materialise(pdir, git("rev-parse", "HEAD", cwd=pdir / "repo"), release,
+                made=("media-staging",))
+    assert not os.path.lexists(release / "media-staging")
+
+
+@pytest.mark.parametrize("entry", ["foo-staging", "app.db-staging"])
+def test_a_project_entry_named_staging_is_refused(project, tmp_path, entry) -> None:
+    """As a bundle may not ship one: staging would take it for its copy."""
+    pdir, _work = project
+    (pdir / entry).mkdir()
+    release = _release(tmp_path)
+    with pytest.raises(GitRefError, match=f"{entry}: the -staging suffix is reserved"):
+        materialise(pdir, git("rev-parse", "HEAD", cwd=pdir / "repo"), release)
+    assert not os.path.lexists(release / "repo")
+
+
+def test_the_suffix_only_counts_at_the_project_top(project, tmp_path) -> None:
+    """A commit's own names are nested under repo/, as a bundle's nested
+    names are allowed."""
+    pdir, work = project
+    sha = _push(pdir, work, {"cache-staging/x": "nested is fine"})
+    release = _release(tmp_path)
+    materialise(pdir, sha, release)
+    assert (release / "repo" / "cache-staging" / "x").read_text() == "nested is fine"

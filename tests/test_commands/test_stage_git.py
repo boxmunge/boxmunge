@@ -95,3 +95,19 @@ def test_a_git_stage_leaves_the_inbox_alone(paths, tmp_path) -> None:
     with staging_docker_off():
         assert run_stage("myapp", paths) == 0
     assert bundle.exists()
+
+
+def test_a_project_entry_named_staging_refuses_the_stage(paths, tmp_path, capsys) -> None:
+    """Mirrors the bundle rule: the git stage copies the project dir's release
+    files into the slot, and a foo-staging there is not staging's copy."""
+    pdir, work = git_project(paths, tmp_path)
+    (pdir / "foo-staging").mkdir()
+    (pdir / "foo-staging" / "code.txt").write_text("prod code")
+    commit(work, {"VERSION": "staged\n"}, "staged")
+    with staging_docker_off() as docker:
+        assert run_stage("myapp", paths) == 1
+        docker["up"].assert_not_called()
+    err = capsys.readouterr().err
+    assert "foo-staging: the -staging suffix is reserved" in err and "Nothing was changed" in err
+    assert load_slot(paths, "myapp") is None
+    assert (pdir / "foo-staging" / "code.txt").read_text() == "prod code"

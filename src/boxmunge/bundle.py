@@ -182,7 +182,7 @@ _PLACEHOLDER_DIRS = frozenset({"data", "backups", "security"})
 # (staging_copies): a release's own top-level ``foo-staging`` would be what
 # staging mounts for ``./foo``, and what unstage removes.
 STAGING_SUFFIX = "-staging"
-_STAGING_SUFFIX_REASON = ("the -staging suffix is reserved for staging's copies of the "
+STAGING_SUFFIX_REASON = ("the -staging suffix is reserved for staging's copies of the "
                           "project's entries; rename it")
 _PLACEHOLDER_FILES = frozenset({".gitkeep", ".keep"})
 
@@ -214,7 +214,7 @@ def check_bundle_contents(tree: Path) -> list[str]:
         name = entry.name
         reason = BOX_OWNED_ENTRIES.get(name) or BOXMUNGE_ENTRIES.get(name)
         if reason is None and name.endswith(STAGING_SUFFIX):
-            reason = _STAGING_SUFFIX_REASON
+            reason = STAGING_SUFFIX_REASON
         if reason is None:
             continue
         if name in _PLACEHOLDER_DIRS and is_placeholder(entry):
