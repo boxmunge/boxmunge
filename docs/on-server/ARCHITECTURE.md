@@ -136,6 +136,8 @@ The `deploy` user runs a restricted boxmunge shell. Agents connect as `deploy`.
   reach the root upgrade shim through a sudo rule that permits exactly
   `boxmunge-upgrade auto` and `boxmunge-upgrade target <version>`, nothing else
 - Documentation is accessed via `agent-help <topic>`, not by reading files
+- Gets no SSH forwarding, tunnels or client environment beyond the locale, so nothing
+  bypasses the shell (TRUST_MODEL.md, "SSH access")
 
 This is the complete interface for agents. There is nothing else.
 

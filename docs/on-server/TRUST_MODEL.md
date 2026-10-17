@@ -16,7 +16,7 @@ boxmunge's defences are calibrated against a specific set of attackers. Future e
 
 ### Out of scope (current product)
 
-- **Malicious operators** — anyone with `supervisor` or `deploy` SSH access is fully trusted. The restricted shell is a UX guard against accidents and a reduction in agent context-pollution surface, not a privilege boundary against a determined attacker who already has a key.
+- **Malicious operators** — whoever holds the `supervisor` key is root by design and fully trusted. The `deploy` key is trusted with every project on the box (single owner), not with the host: it reaches only the restricted shell, whose allowlist is all it can run (see "SSH access" below). A way for the deploy key to run anything else is a security bug.
 - **Malicious agents / MCP tools** — at present, agents and tools invoked through the deploy shell or MCP are treated equivalently to operators. A future product evolution may split agent trust from operator trust; today they are the same principal. MCP and the shell do take the same privileged paths: MCP `upgrade` uses the shell's sudo route to the upgrade shim, and MCP `restore`/`rollback` require an explicit `confirm: true`.
 
 ### Single human operator
@@ -40,6 +40,15 @@ The `deploy` user can operate on any project — this is by design, not a gap. T
 
 **Secrets** are file-permission isolated — each project's `secrets.env` is mode 600, owned by the deploy user. The deploy user can read any project's secrets (single-owner assumption).
 
+**SSH access** is key-only for every account. boxmunge's sshd settings are in `/etc/ssh/sshd_config.d/00-boxmunge.conf`. That file sorts before every other drop-in, and sshd keeps the first value it reads, so a cloud image's `50-cloud-init.conf` saying `PasswordAuthentication yes` has no effect.
+- Password, keyboard-interactive and root logins are off for everyone.
+- X11, TCP and stream-local forwarding, agent forwarding and tunnels are off for everyone. A `Match User deploy` block keeps them off for deploy even if you open forwarding for supervisor in a Match block of your own.
+- deploy accepts no client environment beyond `LANG`, `LC_*`, `COLORTERM` and `NO_COLOR`, and `~/.ssh/environment` and `~/.ssh/rc` are ignored. A variable such as `BASH_ENV` could otherwise run code before the shell does.
+
+Every install, and every upgrade whose installer changed, rewrites the file. It then checks with `sshd -t` and `sshd -T` that sshd gives deploy and supervisor these settings. If sshd does not, the install puts the previous file back, leaves the running sshd alone and fails, naming what to change. An upgrade then stops before switching releases and blocklists that version: fix the setting, then `sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist <version>`. `health` reports the file as missing or changed (`sshd-hardening`).
+
+A second factor through keyboard-interactive (`AuthenticationMethods publickey,keyboard-interactive`, a TOTP PAM module for example) cannot be kept. With keyboard-interactive off, `sshd -t` refuses that configuration, so the install fails as above without locking anyone out. To keep two factors, use a FIDO2 security key (`ssh-keygen -t ed25519-sk`), which sshd treats as a public key. Then remove the `AuthenticationMethods` line and re-run the installer.
+
 **Uploads** reach the box only through the restricted shell's `scp -t` path, which
 files them into the inbox. SFTP is disabled for deploy: OpenSSH's sftp-server cannot
 be confined to the inbox without chrooting every deploy session, and unconfined it
@@ -58,7 +67,7 @@ the shell and the `boxmunge-sftp` subsystem wrapper refuse it. Clients upload wi
 
 - **Network** — every routed service (and Caddy) shares the `boxmunge-proxy` Docker network, so a routed container can open connections to another project's routed services on their ports. Services that are not routed (`internal: true`, or not in the manifest) sit only on their project's own networks. There is no network policy between routed services. Acceptable for single-owner.
 - **Docker daemon, kernel, and host resources** — all projects run on one Docker daemon and one kernel; container hardening limits, but does not remove, what a compromised container can do to its neighbours (CPU, memory, and disk are shared unless `limits` are set).
-- **Docker group** — the deploy user is in the `docker` group, which is effectively equivalent to root on the host (a user can mount the host filesystem via `docker run -v /:/host`). This is an intentional trade-off: the deploy user needs to run `docker compose` for deployments, and Docker's permission model requires group membership. The restricted shell limits what the deploy user does *directly*, but it is not a privilege boundary against a determined attacker who already has SSH access as deploy. Key-only authentication is the real perimeter.
+- **Docker group** — the deploy user is in the `docker` group, which is effectively equivalent to root on the host (a user can mount the host filesystem via `docker run -v /:/host`). This is an intentional trade-off: the deploy user needs to run `docker compose` for deployments, and Docker's permission model requires group membership. Because of that, the restricted shell is the boundary for the deploy key: deploy's login shell is the restricted shell, sshd opens no channel that bypasses it, and the shell runs only its allowlist, in an environment it cleans first. Code that runs as the deploy user any other way, through a bug in an allowlisted command for example, is root.
 - **Backup encryption key** — the deploy user can read the age identity key at `/opt/boxmunge/config/backup.key` (mode 640, group deploy). This is required for backup and restore operations to work without sudo. An authenticated deploy user can decrypt any backup snapshot.
 - **Backups** — the deploy user can trigger backup/restore for any project.
 
