@@ -22,7 +22,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from boxmunge.fs_nofollow import running_as_root
+from boxmunge.fs_nofollow import chown_tree_deploy, running_as_root
 
 GIT_TIMEOUT = 300
 _FULL_SHA = re.compile(r"[0-9a-f]{40}")
@@ -186,3 +186,103 @@ def show_manifest(repo: Path, sha: str) -> str:
     if result.returncode != 0:
         raise GitRefError(f"cannot read manifest.yml at {sha}: {result.stderr.strip()}")
     return result.stdout
+
+
+SUBMODULE_WARN = ("submodules are not checked out; neither production nor staging "
+                  "will have them")
+
+
+def materialise(project_dir: Path, sha: str, release: Path) -> list[str]:
+    """Check ``sha`` out in ``release/repo``, a local clone of production's
+    repository, and copy production's other release-code entries beside it
+    (spec 'Git-sourced projects', steps 3-4). ``release`` is an empty
+    directory. Returns the warnings to print. Production's HEAD, work tree
+    and refs are never changed.
+
+    The clone hardlinks production's objects and keeps no alternates, so it
+    is independent of production's repository. It gets no hooks
+    (--template=) and none of production's config, so nothing in that
+    deploy-writable .git (hooks, fsmonitor, filter drivers) runs; a commit
+    that would need a filter driver is refused, as are links that leave
+    the staged release: staging runs only from the staged tree.
+    """
+    _require_full_sha(sha, "stage")
+    source, clone = project_dir / "repo", release / "repo"
+    chown_tree_deploy(release)  # as root, git runs as deploy and creates repo/ here
+    result = _git(["clone", "-q", "--local", "--no-checkout", "--template=", "--",
+                   str(source), str(clone)], source, timeout=GIT_TIMEOUT)
+    if result.returncode != 0:
+        raise GitRefError(f"cloning {source} into {clone} failed: {result.stderr.strip()}")
+    _refuse_filters(clone, sha)
+    checkout_detached(clone, sha)
+    copy_project_entries(project_dir, release)
+    _refuse_escaping_links(release)
+    chown_tree_deploy(release)
+    return [SUBMODULE_WARN] if os.path.lexists(clone / ".gitmodules") else []
+
+
+def _assigns_filter(attributes: str) -> bool:
+    """Whether a .gitattributes text sets `filter=` on a pattern or in a
+    macro (`[attr]lfs filter=lfs ...`); comments and unsets do not."""
+    for line in attributes.splitlines():
+        fields = line.split()
+        if fields and not fields[0].startswith("#") \
+                and any(f.startswith("filter=") for f in fields[1:]):
+            return True
+    return False
+
+
+def _refuse_filters(clone: Path, sha: str) -> None:
+    listing = _git(["ls-tree", "-r", "-z", "--name-only", "--end-of-options", sha], clone)
+    if listing.returncode != 0:
+        raise GitRefError(f"cannot list the files of {sha}: {listing.stderr.strip()}")
+    for name in listing.stdout.split("\0"):
+        if name != ".gitattributes" and not name.endswith("/.gitattributes"):
+            continue
+        blob = _git(["cat-file", "blob", "--end-of-options", f"{sha}:{name}"], clone)
+        if blob.returncode != 0:
+            raise GitRefError(f"cannot read {name} at {sha}: {blob.stderr.strip()}")
+        if _assigns_filter(blob.stdout):
+            raise GitRefError(
+                f"{name} assigns a git filter (Git LFS, say) at {sha}. The staged checkout "
+                f"runs no filter drivers, so staging would not run the files production's "
+                f"checkout has. Stage a commit without filter attributes, or deploy this "
+                f"one with prod-deploy")
+
+
+def copy_project_entries(project_dir: Path, release: Path) -> None:
+    """Production's release-code entries other than repo/ (.env, project.env,
+    boxmunge-scripts/, operator-placed files) are copied verbatim, links as
+    links; a link into repo/ (production's are absolute) is recreated as a
+    relative link to the slot's repo/. Box state and staging's ``-staging``
+    copies stay in the project dir. The current slot is not read (a
+    re-stage replaces it)."""
+    from boxmunge.release import _copy_entry, project_data_dirs
+    state = project_data_dirs(project_dir, with_staged=False).box_state()
+    repo = os.path.normpath(project_dir / "repo")
+    for entry in sorted(project_dir.iterdir()):
+        if entry.name in state or entry.name.endswith("-staging"):
+            continue
+        dest = release / entry.name
+        if entry.is_symlink():
+            target = os.path.normpath(os.path.join(project_dir, os.readlink(entry)))
+            if target == repo or target.startswith(repo + os.sep):
+                os.symlink(os.path.relpath(target, project_dir), dest)
+                continue
+        _copy_entry(entry, dest)
+
+
+def _refuse_escaping_links(release: Path) -> None:
+    root = os.path.realpath(release)
+    for dirpath, dirnames, filenames in os.walk(release):
+        for name in dirnames + filenames:
+            path = os.path.join(dirpath, name)
+            if not os.path.islink(path):
+                continue
+            real = os.path.realpath(path)
+            if real != root and not real.startswith(root + os.sep):
+                raise GitRefError(
+                    f"{os.path.relpath(path, release)} is a link that resolves outside the "
+                    f"staged release (to {real}); staging runs only from the staged tree. "
+                    f"Make it a relative link that stays inside the repository or the "
+                    f"project's release files")
