@@ -162,6 +162,8 @@ promotion, `promote` exits 1 and asks you to run `unstage`. A promote that is ki
 running `promote` again, which resumes the install from where it stopped (after the switch it
 does not run the `pre_deploy` hook again or take a new snapshot). If the switch had already ended,
 the rerun only tears staging down, and still exits 1 with the rollback options if the switch failed.
+The `Promoted` log line and `promote` webhook go out once per promotion, however often it is rerun.
+A killed `unstage` is likewise finished by running it again.
 
 `prod-deploy` and `rollback` work while a release is staged; staging is left as it is, and the
 next `promote` keeps whatever production then runs as its previous release. Before anything

@@ -73,6 +73,29 @@ def test_promote_crash_then_rerun_finishes_truthfully(paths, tmp_path, capsys,
     assert len(taken) == (1 if point == "txn.before_open" else 0)
 
 
+@pytest.mark.parametrize("point", ["txn.switched", "slot.discarding"])
+def test_promote_announces_once_however_it_is_killed(paths, tmp_path, capsys,
+                                                       point) -> None:
+    """Killed before staging was down (txn.switched) or while dropping the
+    announced slot (slot.discarding): the rerun says production is promoted
+    and logs and fires the promotion exactly once."""
+    pdir = _staged(paths, tmp_path)
+    with staging_docker_off(), fake_backups([]):
+        assert crash_at(point, lambda: run_promote("myapp", paths)) == 137
+        capsys.readouterr()
+        assert run_promote("myapp", paths, dry_run=True) == 0
+        assert run_promote("myapp", paths) == 0
+        out = capsys.readouterr().out
+        assert run_promote("myapp", paths) == 1          # nothing is staged now
+    assert "promoted to production" in out
+    assert (pdir / "VERSION").read_text() == "v2\n"
+    assert not [p for p in paths.project_releases("myapp").iterdir()
+                if p.name.startswith("staged")]
+    log = paths.log_file.read_text()
+    assert log.count("from staging to production") == 1
+    assert log.count("failed to fire promote webhook") == 1
+
+
 def test_abandoning_a_promote_leaves_the_slot_promotable(paths) -> None:
     from boxmunge.commands.deploy import run_deploy
     from boxmunge.commands.rollback import find_rollback_target

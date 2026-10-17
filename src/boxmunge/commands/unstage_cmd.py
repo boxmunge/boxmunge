@@ -3,13 +3,14 @@
 Production's tree is not touched: the slot holds release code only, and
 staging's data copies stay (they are reused by the next stage), except
 copies of entries production no longer mounts. Each step is idempotent and
-the slot is removed last, so a failed unstage is finished by running it
-again.
+the slot is removed last, so a failed (or killed) unstage is finished by
+running it again: the slot's debris alone is still staging to tear down.
 """
 from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from boxmunge.caddy_journal import remove_site
@@ -21,8 +22,8 @@ from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.production_stopped import start_again, unreadable_slot_discarded
 from boxmunge.release_txn import load_txn, options_text
 from boxmunge.staged_release import (
-    SlotError, StagedRelease, drop_slot, has_slot, load_slot, manual_teardown, staging_target,
-    sweep_debris, update_meta,
+    SlotError, StagedRelease, drop_slot, has_slot, load_slot, manual_teardown,
+    promoted_debris, slot_debris, staging_target, sweep_debris, update_meta,
 )
 from boxmunge.staging_cleanup import remove_retired_staging_data
 
@@ -62,19 +63,28 @@ def _stop_staging(project: str, paths: BoxPaths, meta: StagedRelease | None,
     return True
 
 
-def teardown_staging_locked(project: str, paths: BoxPaths, *, component: str = "unstage") -> bool:
+def teardown_staging_locked(project: str, paths: BoxPaths, *, component: str = "unstage",
+                            promoted: Callable[[], None] | None = None) -> bool:
     """Take staging down and drop the slot. Caller holds the lock. Returns
     False if a step failed (each failure is reported, never raised: stage
-    and promote call this in their own failure paths)."""
+    and promote call this in their own failure paths). ``promoted`` is
+    promote's announcement, made once staging is down and before the slot
+    is dropped as promoted (staged_release.drop_slot)."""
     try:
-        return _teardown(project, paths, component)
-    except OSError as e:
+        if not _take_down(project, paths, component):
+            return False
+        if promoted is not None:
+            promoted()
+        drop_slot(paths, project, promoted=promoted is not None)
+        return True
+    except (OSError, SlotError) as e:
         print(f"ERROR: Tearing staging down failed: {e}", file=sys.stderr)
         log_error(component, f"Tearing staging down failed: {e}", paths, project=project)
         return False
 
 
-def _teardown(project: str, paths: BoxPaths, component: str) -> bool:
+def _take_down(project: str, paths: BoxPaths, component: str) -> bool:
+    """Everything but dropping the slot, each step idempotent."""
     sweep_debris(paths, project)  # refuses a planted link before any compose call
     meta = _read_meta(project, paths, component)
     if meta is not None and meta.production_stopped:
@@ -102,7 +112,6 @@ def _teardown(project: str, paths: BoxPaths, component: str) -> bool:
         print(f"ERROR: Removing retired staging data failed: {e}", file=sys.stderr)
         log_error(component, f"Removing retired staging data failed: {e}", paths, project=project)
         return False
-    drop_slot(paths, project)
     return True
 
 
@@ -135,9 +144,11 @@ def unstage_locked(project: str, paths: BoxPaths, dry_run: bool = False) -> int:
     """The unstage core. Caller holds the project lock; never takes it."""
     if refuse_if_legacy_stage(paths, project):
         return 1
-    if not staging_exists(project, paths):
+    if not staging_exists(project, paths) and not slot_debris(paths, project):
         print(f"ERROR: No staging found for '{project}'.", file=sys.stderr)
         return 1
+    if not dry_run and not staging_exists(project, paths) and promoted_debris(paths, project):
+        return _finish_promoted_drop(project, paths)
     if _refuse_if_promoting(project, paths):
         return 1
     if dry_run:
@@ -152,6 +163,19 @@ def unstage_locked(project: str, paths: BoxPaths, dry_run: bool = False) -> int:
     print(f"{project}: staging torn down.")
     from boxmunge.webhooks import webhook_safe
     webhook_safe("unstage", project, paths)
+    return 0
+
+
+def _finish_promoted_drop(project: str, paths: BoxPaths) -> int:
+    """A promote was killed while dropping the slot it had announced: the
+    removal is all that is left, and it was a promotion, not an unstage."""
+    try:
+        sweep_debris(paths, project)
+    except OSError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    print(f"{project}: removed what an interrupted promote left of the staged slot; "
+          f"nothing is staged.")
     return 0
 
 

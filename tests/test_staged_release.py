@@ -64,6 +64,28 @@ def test_a_malformed_made_list_is_a_slot_error(paths, made) -> None:
         load_slot(paths, P)
 
 
+@pytest.mark.parametrize("fields", [{"announced": True}, {"announced": 1},
+                                    {"announced": "yes", "state": "retired", "switch_rc": 0}])
+def test_only_a_retired_slot_is_announced(paths, fields) -> None:
+    _build(paths)
+    swap_in(paths, P)
+    path = slot_dir(paths, P) / "meta.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), **fields}))
+    with pytest.raises(SlotError, match="announced"):
+        load_slot(paths, P)
+
+
+def test_drop_slot_goes_through_its_debris(paths) -> None:
+    from boxmunge.staged_release import slot_debris
+    from tests.txn_helpers import crash_at
+    _build(paths)
+    swap_in(paths, P)
+    assert crash_at("slot.discarding", lambda: drop_slot(paths, P, promoted=True)) == 137
+    assert [p.name for p in slot_debris(paths, P)] == ["staged.promoted.discarded"]
+    sweep_debris(paths, P)
+    assert slot_debris(paths, P) == [] and load_slot(paths, P) is None
+
+
 def test_made_round_trips(paths) -> None:
     building = building_dir(paths, P)
     release_dir(building).mkdir(parents=True)

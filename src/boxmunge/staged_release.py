@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from boxmunge.crashpoint import crash_point
 from boxmunge.docker import staging_compose_project
 from boxmunge.fileutil import (
     DISCARDED, atomic_write_text, discard_dir, durable_rename_dir, sweep_discarded,
@@ -31,6 +32,9 @@ if TYPE_CHECKING:
 
 SLOT = "staged"
 BUILDING = "staged.building"
+# A promoted slot is dropped under this name: its debris says the promotion
+# was announced and only the slot's removal was left (promote's rerun).
+PROMOTED = "staged.promoted"
 STAGING_BASE = "compose.staging-base.yml"
 STAGING_OVERLAY = "compose.boxmunge-staging.yml"
 META_VERSION = 1
@@ -58,6 +62,9 @@ class StagedRelease:
     # the one it replaced (staging_copies): only these, and copies of
     # production's data, are staging's to mount and remove.
     made: tuple[str, ...] = ()
+    # promote's "Promoted" log line and webhook went out (recorded just
+    # before they are sent), so a rerun after a kill never repeats them.
+    announced: bool = False
 
 
 def new_meta(kind: str, ref: str, bundle_sha256: str | None,
@@ -108,7 +115,8 @@ def load_slot(paths: BoxPaths, project: str) -> StagedRelease | None:
                              production_stopped=doc.get("production_stopped"),
                              cleanup_incomplete=doc.get("cleanup_incomplete"),
                              switch_rc=doc.get("switch_rc"),
-                             made=_made(doc.get("made", []), path))
+                             made=_made(doc.get("made", []), path),
+                             announced=doc.get("announced", False))
     except KeyError as e:
         raise SlotError(f"{path} is missing {e}") from e
     if meta.kind not in KINDS or meta.state not in STATES:
@@ -117,6 +125,9 @@ def load_slot(paths: BoxPaths, project: str) -> StagedRelease | None:
         raise SlotError(f"{path} has state {meta.state!r} with switch_rc "
                         f"{meta.switch_rc!r}: a retired slot records replace_release's "
                         f"exit code (an integer), and no other slot has one")
+    if type(meta.announced) is not bool or (meta.announced and meta.state != "retired"):
+        raise SlotError(f"{path} has announced {meta.announced!r} with state "
+                        f"{meta.state!r}: only a retired slot's promotion is announced")
     if not _valid_marker(meta.production_stopped):
         raise SlotError(f"{path} has a malformed production_stopped marker "
                         f"{meta.production_stopped!r}: expected null or "
@@ -208,8 +219,29 @@ def swap_in(paths: BoxPaths, project: str) -> None:
     discard_dir(old)
 
 
-def drop_slot(paths: BoxPaths, project: str) -> None:
-    discard_dir(slot_dir(paths, project))
+def drop_slot(paths: BoxPaths, project: str, *, promoted: bool = False) -> None:
+    """Remove the slot through ``staged.discarded`` (``staged.promoted.discarded``
+    once promote has announced it), which sweep_debris removes after a kill."""
+    slot = slot_dir(paths, project)
+    if not os.path.lexists(slot):
+        return
+    debris = slot.with_name(f"{PROMOTED if promoted else SLOT}{DISCARDED}")
+    discard_dir(debris)
+    durable_rename_dir(slot, debris)
+    crash_point("slot.discarding")
+    discard_dir(debris)
+
+
+def slot_debris(paths: BoxPaths, project: str) -> list[Path]:
+    """What a killed stage, unstage or promote left of a slot."""
+    releases = paths.project_releases(project)
+    return [p for p in (releases / BUILDING, releases / f"{SLOT}{DISCARDED}",
+                        releases / f"{PROMOTED}{DISCARDED}") if os.path.lexists(p)]
+
+
+def promoted_debris(paths: BoxPaths, project: str) -> bool:
+    """A promote was killed while removing the slot it had announced."""
+    return os.path.lexists(paths.project_releases(project) / f"{PROMOTED}{DISCARDED}")
 
 
 @dataclass(frozen=True)

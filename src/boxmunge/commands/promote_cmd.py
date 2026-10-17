@@ -14,6 +14,7 @@ _teardown (in _teardown_after on success).
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -26,8 +27,10 @@ from boxmunge.intake import IntakeError, check_installable, report_refusal, vali
 from boxmunge.log import log_error, log_operation
 from boxmunge.probation import clear_probation_if_active
 from boxmunge.release_txn import InstallTxn, close_txn, load_txn, options_text
+from boxmunge.release import live_ref
 from boxmunge.staged_release import (
-    SlotError, StagedRelease, load_slot, release_dir, slot_dir, update_meta,
+    SlotError, StagedRelease, has_slot, load_slot, promoted_debris, release_dir, slot_dir,
+    sweep_debris, update_meta,
 )
 
 if TYPE_CHECKING:
@@ -65,7 +68,7 @@ def run_promote(project: str, paths: BoxPaths, dry_run: bool = False) -> int:
 
 def promote_locked(project: str, paths: BoxPaths, dry_run: bool = False) -> int:
     """The promote core. Caller holds the project lock; never takes it."""
-    found = _eligibility(project, paths)
+    found = _eligibility(project, paths, dry_run)
     if isinstance(found, int):
         return found
     if dry_run:
@@ -87,16 +90,22 @@ def promote_locked(project: str, paths: BoxPaths, dry_run: bool = False) -> int:
     return _teardown_after(project, paths, found.meta.ref)
 
 
-def _eligibility(project: str, paths: BoxPaths) -> _Promotion | int:
+def _eligibility(project: str, paths: BoxPaths, dry_run: bool) -> _Promotion | int:
     """Step 1, under the lock: not blocked, registered, a readable slot
-    that finished staging (or this slot's open promote, to resume)."""
+    that finished staging (or this slot's open promote, to resume). Crash
+    debris goes first (a dry run leaves it): a promote killed while
+    dropping its announced slot is finished here."""
     if not deploy_eligible(project, paths):
         return 1
     txn = None
     try:
+        if not has_slot(paths, project) and promoted_debris(paths, project):
+            return _finish_dropped(project, paths, dry_run)
+        if not dry_run:
+            sweep_debris(paths, project)
         txn = load_txn(paths, project)
         meta = load_slot(paths, project)
-    except (SlotError, ReleaseStateError) as e:
+    except (SlotError, ReleaseStateError, OSError) as e:
         print(f"ERROR: Cannot promote '{project}': {e}. {_unreadable_advice(project, txn)}",
               file=sys.stderr)
         return 1
@@ -124,6 +133,18 @@ def _unreadable_advice(project: str, txn: InstallTxn | None) -> str:
         return "Stage again, or unstage."
     return (f"The promote of {txn.ref} is open (phase {txn.phase}) and cannot resume "
             f"without it: {options_text(project, txn, rerun=False)}")
+
+
+def _finish_dropped(project: str, paths: BoxPaths, dry_run: bool) -> int:
+    """Staging was down and the promotion announced; only the slot's
+    removal was left (staged_release.drop_slot)."""
+    if dry_run:
+        print("[DRY RUN] Would finish removing the promoted staged slot")
+        return 0
+    sweep_debris(paths, project)
+    print(f"{project}: promoted to production; finished removing the staged slot an "
+          f"interrupted promote left. Production runs {live_ref(paths, project)}.")
+    return 0
 
 
 def _finish_retired(project: str, paths: BoxPaths, found: _Promotion) -> int:
@@ -234,10 +255,11 @@ def _report_failed(project: str, paths: BoxPaths, meta: StagedRelease, rc: int) 
     return rc if rc == 3 else 1
 
 
-def _teardown(project: str, paths: BoxPaths) -> bool:
+def _teardown(project: str, paths: BoxPaths,
+              announce: Callable[[], None] | None = None) -> bool:
     """Step 5: the unstage core, under the same lock."""
     print("  Tearing down staging...")
-    if teardown_staging_locked(project, paths, component=COMPONENT):
+    if teardown_staging_locked(project, paths, component=COMPONENT, promoted=announce):
         return True
     print(f"ERROR: {project} is live in production, but tearing down staging failed "
           f"(see above). Run 'unstage {project}' to finish.", file=sys.stderr)
@@ -247,14 +269,26 @@ def _teardown(project: str, paths: BoxPaths) -> bool:
 
 
 def _teardown_after(project: str, paths: BoxPaths, ref: str) -> int:
-    if not _teardown(project, paths):
+    if not _teardown(project, paths, announce=lambda: _announce(project, paths, ref)):
         return 1
+    print(f"{project}: promoted to production successfully.")
+    return 0
+
+
+def _announce(project: str, paths: BoxPaths, ref: str) -> None:
+    """The "Promoted" log line and webhook, once per slot: recorded in the
+    slot first, so a rerun after a kill never repeats them (a kill between
+    the record and the log line, with no I/O to wait on, loses them)."""
+    meta = load_slot(paths, project)
+    if meta is None:
+        raise SlotError(f"the staged slot of '{project}' is gone")
+    if meta.announced:
+        return
+    update_meta(paths, project, meta, announced=True)
     log_operation(COMPONENT, f"Promoted {ref} from staging to production", paths,
                   project=project, detail={"ref": ref})
-    print(f"{project}: promoted to production successfully.")
     from boxmunge.webhooks import webhook_safe
     webhook_safe("promote", project, paths)
-    return 0
 
 
 def report_failed_after_switch(project: str, paths: BoxPaths, staged_ref: str) -> None:

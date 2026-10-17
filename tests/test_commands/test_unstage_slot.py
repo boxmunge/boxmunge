@@ -145,3 +145,38 @@ def test_unstage_with_unreadable_meta_logs_and_pages(paths) -> None:
     entries = [json.loads(line) for line in paths.log_file.read_text().splitlines()]
     assert any(e["level"] == "warn" and "boxmunge recover myapp" in e["msg"]
                for e in entries)
+
+
+def _left(paths) -> list[str]:
+    return sorted(p.name for p in paths.project_releases("myapp").iterdir()
+                  if p.name.startswith("staged"))
+
+
+def test_an_unstage_killed_dropping_the_slot_finishes_on_rerun(paths, capsys) -> None:
+    from tests.txn_helpers import crash_at
+    prod_and_stage(paths)
+    with staging_docker_off():
+        assert crash_at("slot.discarding", lambda: run_unstage("myapp", paths)) == 137
+        assert _left(paths) == ["staged.discarded"]
+        capsys.readouterr()
+        assert run_unstage("myapp", paths, dry_run=True) == 0
+        assert _left(paths) == ["staged.discarded"]   # a dry run changes nothing
+        assert run_unstage("myapp", paths) == 0
+    assert "staging torn down" in capsys.readouterr().out
+    assert _left(paths) == []
+    assert paths.log_file.read_text().count("Unstaged") == 1
+
+
+def test_unstage_after_a_promote_killed_dropping_the_slot(paths, capsys) -> None:
+    """The removal was the promotion's: unstage finishes it as that."""
+    from boxmunge.commands.promote_cmd import run_promote
+    from tests.txn_helpers import crash_at
+    prod_and_stage(paths)
+    with staging_docker_off():
+        assert crash_at("slot.discarding", lambda: run_promote("myapp", paths)) == 137
+        assert _left(paths) == ["staged.promoted.discarded"]
+        capsys.readouterr()
+        assert run_unstage("myapp", paths) == 0
+    assert "interrupted promote" in capsys.readouterr().out
+    assert _left(paths) == []
+    assert "Unstaged" not in paths.log_file.read_text()
