@@ -49,6 +49,11 @@ class Exclusions:
     def names(self) -> set[str]:
         return set(self.legacy) | set(self.install) | set(self.busy) | set(self.undetermined)
 
+    def by_cause(self) -> dict[str, list[str]]:
+        """The excluded names by why, for the upgrade's log entry."""
+        return {"legacy_stage": sorted(self.legacy), "undetermined": sorted(self.undetermined),
+                "open_install": sorted(self.install), "busy": sorted(self.busy)}
+
 
 def migrate_one(paths: BoxPaths, project_dir: Path) -> str | None:
     """One project's manifest at the current schema on disk: "written", or

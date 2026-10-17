@@ -140,7 +140,7 @@ def _finish(paths: BoxPaths, label: str, migrated: ManifestMigration, regen: Reg
             "migrated": migrated.written,
             "migrated_in_memory": migrated.in_memory,
             "git_unlinked": sorted(migrated.unlinked),
-            "excluded": sorted(excluded.names()),
+            "excluded": excluded.by_cause(),
             "restarted": restart.succeeded,
             "skipped_locked": restart.skipped_locked,
             "monitor_stopped": restart.monitor_stopped,
