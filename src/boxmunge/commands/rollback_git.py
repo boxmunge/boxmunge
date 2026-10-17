@@ -20,6 +20,7 @@ from boxmunge.commands.rollback import (
     start_rolled_back,
 )
 from boxmunge.crashpoint import crash_point
+from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.git_slot import (
     GitRefError, checkout_detached, head_sha, manifest_at, resolve_recorded_ref,
 )
@@ -76,8 +77,16 @@ def roll_back_git(project_name: str, paths: BoxPaths, target: RollbackTarget,
             return 1
         fields = {"source": "rollback", "ref": target.ref, "staged_id": None,
                   "replaced_ref": replaced, "snapshot": target.snapshot}
-        txn = (supersede_txn(paths, project_name, txn, phase="committed", **fields)
-               if txn is not None else open_txn(paths, project_name, **fields))
+        try:
+            txn = (supersede_txn(paths, project_name, txn, phase="committed", **fields)
+                   if txn is not None else open_txn(paths, project_name, **fields))
+        except (GitRefError, OSError, ReleaseStateError) as e:
+            print(f"ERROR: Recording the rollback to {target.ref} failed: {e}. Nothing was "
+                  f"changed; rerun 'rollback {project_name}' once the cause is fixed.",
+                  file=sys.stderr)
+            log_error("rollback", f"Opening the rollback to {target.ref} failed: {e}", paths,
+                      project=project_name)
+            return 1
     crash_point("rollback.committed")
     print(f"--- Checking out {target.ref} ---")
     try:  # idempotent: a resume makes sure the tree is the target
@@ -89,7 +98,10 @@ def roll_back_git(project_name: str, paths: BoxPaths, target: RollbackTarget,
                   project=project_name)
         return 1
     if not txn.reached("installed"):
-        txn = advance(paths, project_name, txn, "installed")
+        advanced = _advance(project_name, paths, txn, "installed")
+        if advanced is None:
+            return 1
+        txn = advanced
     crash_point("rollback.installed")
     try:
         manifest = validate_release_tree(paths.project_dir(project_name), project_name,
@@ -100,6 +112,21 @@ def roll_back_git(project_name: str, paths: BoxPaths, target: RollbackTarget,
         if target.snapshot and not restore_rolled_back_data(
                 project_name, paths, manifest, target.snapshot, txn):
             return 1
-        txn = advance(paths, project_name, txn, "data_restored")
+        advanced = _advance(project_name, paths, txn, "data_restored")
+        if advanced is None:
+            return 1
+        txn = advanced
     crash_point("rollback.data_restored")
     return start_rolled_back(project_name, paths, manifest, target, txn)
+
+
+def _advance(project_name: str, paths: BoxPaths, txn: InstallTxn,
+             phase: str) -> InstallTxn | None:
+    try:
+        return advance(paths, project_name, txn, phase)
+    except (GitRefError, OSError) as e:
+        print(f"ERROR: Recording the rollback's progress ({phase}) failed: {e}. Rerun "
+              f"'rollback {project_name}' once the cause is fixed: it carries on from "
+              f"{txn.phase}.", file=sys.stderr)
+        log_error("rollback", f"Recording {phase} failed: {e}", paths, project=project_name)
+        return None

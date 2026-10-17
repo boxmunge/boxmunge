@@ -29,8 +29,10 @@ from boxmunge.git_slot import GitRefError, checkout_detached, head_sha, material
 from boxmunge.intake import IntakeError, validate_release_tree
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.release_txn import (
-    InstallTxn, advance, close_txn, load_txn, open_txn, stale_reason, start_refusal, supersede_txn,
+    InstallTxn, advance, close_txn, load_txn, open_txn, options_text, stale_reason,
+    start_refusal, supersede_txn,
 )
+from boxmunge.log import log_error
 from boxmunge.staged_release import has_slot, sweep_debris
 from boxmunge.staging_copies import slot_made
 from boxmunge.staging_isolation import StagingIsolationError, check_install_isolation
@@ -75,7 +77,10 @@ def deploy_git_locked(project_name: str, paths: BoxPaths, req: GitDeploy) -> int
     if not prove_disjoint_git(project_name, paths, req.sha, req.candidate, advice=advice):
         return 1
     if txn is not None:
-        txn = _fix_forward(project_name, paths, req, txn)
+        forward = _fix_forward(project_name, paths, req, txn)
+        if isinstance(forward, int):
+            return forward
+        txn = forward
     if txn is None:
         opened = _open(project_name, paths, req)
         if isinstance(opened, int):
@@ -127,16 +132,38 @@ def _open(project_name: str, paths: BoxPaths, req: GitDeploy) -> InstallTxn | in
         return 1
     snapshot = snapshot_live_release(project_name, paths, req.no_snapshot) if deployed else None
     crash_point("txn.before_open")
-    txn = open_txn(paths, project_name, source=req.source, ref=req.sha,
-                   replaced_ref=replaced, staged_id=req.staged_id, snapshot=snapshot or "")
+    try:
+        txn = open_txn(paths, project_name, source=req.source, ref=req.sha,
+                       replaced_ref=replaced, staged_id=req.staged_id, snapshot=snapshot or "")
+    except (GitRefError, OSError) as e:
+        print(f"ERROR: Recording the install of {req.sha} failed: {e}. Nothing was changed "
+              f"(the snapshot {snapshot or 'none'} was kept); deploy again once the cause "
+              f"is fixed.", file=sys.stderr)
+        log_error(req.component, f"Opening the install of {req.sha} failed: {e}", paths,
+                  project=project_name)
+        return 1
     crash_point("txn.committed")
     return txn
 
 
 def _fix_forward(project_name: str, paths: BoxPaths, req: GitDeploy,
-                 old: InstallTxn) -> InstallTxn | None:
+                 old: InstallTxn) -> InstallTxn | None | int:
     """A different commit over an open install (spec: fix-forward). None:
-    the old one was closed (nothing was checked out) and a fresh one opens."""
+    the old one was closed (nothing was checked out) and a fresh one opens;
+    an exit code: recording it failed, and the old one is as it was."""
+    try:
+        return _supersede(project_name, paths, req, old)
+    except (GitRefError, OSError, ReleaseStateError) as e:
+        print(f"ERROR: Deploying {req.sha} over the unfinished install of {old.ref} could "
+              f"not be recorded: {e}. That install is as it was: "
+              f"{options_text(project_name, old)}.", file=sys.stderr)
+        log_error(req.component, f"Superseding the install of {old.ref} failed: {e}", paths,
+                  project=project_name)
+        return 1
+
+
+def _supersede(project_name: str, paths: BoxPaths, req: GitDeploy,
+               old: InstallTxn) -> InstallTxn | None:
     if old.source == "rollback":
         # Its target is now this deploy's replaced release; from data_restored
         # the data is the target's, so a new snapshot pairs with it.
@@ -159,19 +186,27 @@ def _fix_forward(project_name: str, paths: BoxPaths, req: GitDeploy,
 
 def _checkout_and_switch(project_name: str, paths: BoxPaths, req: GitDeploy,
                          txn: InstallTxn) -> int:
-    if not txn.reached("previous_kept"):
-        txn = advance(paths, project_name, txn, "previous_kept")  # git keeps no previous tree
-    crash_point("txn.previous_kept")
     tree_req = TreeDeploy(tree=None, ref=req.sha, source=req.source, manifest={},
                           staged_id=req.staged_id, component=req.component,
                           on_switched=req.on_switched)
+    try:
+        if not txn.reached("previous_kept"):
+            txn = advance(paths, project_name, txn, "previous_kept")  # git keeps no previous tree
+    except (GitRefError, OSError) as e:
+        return report_left_open(project_name, paths, txn, tree_req,
+                                f"recording its progress failed: {e}")
+    crash_point("txn.previous_kept")
     try:  # idempotent, so a resume at any phase makes sure the tree is the SHA
         checkout_detached(paths.project_dir(project_name) / "repo", req.sha)
     except GitRefError as e:
         return report_left_open(project_name, paths, txn, tree_req,
                                 f"checking out {req.sha} failed: {e}")
-    if not txn.reached("installed"):
-        txn = advance(paths, project_name, txn, "installed")
+    try:
+        if not txn.reached("installed"):
+            txn = advance(paths, project_name, txn, "installed")
+    except (GitRefError, OSError) as e:
+        return report_left_open(project_name, paths, txn, tree_req,
+                                f"{req.sha} is checked out, but recording that failed: {e}")
     crash_point("txn.installed")
     if req.on_installed is not None:
         req.on_installed()
