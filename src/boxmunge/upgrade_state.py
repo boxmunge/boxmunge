@@ -45,16 +45,19 @@ def _read_json(path: Path) -> dict[str, Any]:
     except json.JSONDecodeError as e:
         logging.getLogger("boxmunge").error("Corrupt JSON in %s: %s", path, e)
         raise
+    except UnicodeDecodeError as e:
+        raise UpgradeStateError(
+            f"{path} is not UTF-8 text ({e.reason}); inspect it and repair or remove it") from e
     except OSError as e:
         logging.getLogger("boxmunge").error("Cannot read %s: %s", path, e)
         raise UpgradeStateError.of(path, e) from e
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
-    """Write JSON atomically. rename(2) replaces whatever deploy left at the
-    name, a link or a FIFO included, without opening or following it, so a
-    write needs no refusal: refusing would let deploy fail the shim's
-    probation write after the venv swap and so force a rollback."""
+    """Write JSON atomically. A link or FIFO deploy left at the name needs no
+    refusal: rename(2) replaces the name itself, never opening or following
+    what is there. (Deploy can still make a write fail, e.g. with a
+    directory at the name, as it can remove any file here.)"""
     atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
 

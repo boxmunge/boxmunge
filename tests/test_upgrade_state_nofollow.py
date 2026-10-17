@@ -108,3 +108,31 @@ def test_auto_update_reports_a_planted_lock(paths, tmp_path, capsys, monkeypatch
     assert _within(lambda: run_auto_update(paths), fifo) == 1
     err = capsys.readouterr().err
     assert f"{paths.upgrade_lock}" in err and "Remove it" in err
+
+
+def test_a_blocklist_that_is_not_utf8_is_a_named_error(paths) -> None:
+    paths.blocklist.parent.mkdir(parents=True, exist_ok=True)
+    paths.blocklist.write_bytes(b'{"\xff": {}}')
+    with pytest.raises(UpgradeStateError, match=f"{paths.blocklist} is not UTF-8"):
+        is_blocklisted(paths, "1.2.3")
+
+
+def test_discovery_reports_a_planted_blocklist_as_an_error_action(
+        paths, tmp_path, capsys) -> None:
+    """The shim shows the message of an error action; a traceback would
+    reach it only as "Discovery failed"."""
+    import json
+    from unittest.mock import patch
+    from boxmunge.commands.discover_update_cmd import cmd_discover_update
+    fifo = _plant(paths.blocklist, "fifo", tmp_path)
+    candidate = {"version": "9.9.9", "class": "security", "url": "https://example.com/x"}
+    with patch("boxmunge.commands.discover_update_cmd.BoxPaths", return_value=paths), \
+            patch("boxmunge.upgrade_discovery.read_installed_version", return_value="0.3.5"), \
+            patch("boxmunge.upgrade_discovery._check_endpoint", return_value={}), \
+            patch("boxmunge.upgrade_discovery._read_endpoint", return_value=(candidate, None)):
+        with pytest.raises(SystemExit) as exc:
+            _within(lambda: cmd_discover_update(["--json"]), fifo)
+    assert exc.value.code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["action"] == "error"
+    assert str(paths.blocklist) in out["message"] and "Remove it" in out["message"]
