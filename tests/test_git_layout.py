@@ -16,12 +16,13 @@ import pytest
 import yaml
 
 from boxmunge.commands.check import run_check
-from boxmunge.commands.upgrade_steps import check_upgrade, migrate_project_manifests
+from boxmunge.commands.upgrade_steps import check_upgrade
 from boxmunge.fileutil import project_lock
 from boxmunge.git_layout import relink_advice, unlinked_files, unlinked_projects
 from boxmunge.manifest import CURRENT_SCHEMA_VERSION, ManifestError, write_manifest
 from boxmunge.paths import BoxPaths
 from boxmunge.project_alerts import alert_state
+from boxmunge.upgrade_exclusions import apply_projects
 
 NAME = "gitapp"
 MANIFEST = {
@@ -110,8 +111,8 @@ class TestUpgradeReports:
     ) -> None:
         _damage(project)
         with patch("boxmunge.project_alerts.notify", return_value=True) as notify:
-            result = migrate_project_manifests(paths)
-            migrate_project_manifests(paths)
+            result = apply_projects(paths)[0]
+            apply_projects(paths)[0]
         assert "ln -sfn repo/manifest.yml" in result.unlinked[NAME]
         notify.assert_called_once()
         assert "ln -sfn repo/manifest.yml" in notify.call_args.args[2]
@@ -119,13 +120,13 @@ class TestUpgradeReports:
         subprocess.run(["ln", "-sfn", "repo/manifest.yml", str(project / "manifest.yml")],
                        check=True)
         with patch("boxmunge.project_alerts.notify", return_value=True) as notify:
-            assert migrate_project_manifests(paths).unlinked == {}
+            assert apply_projects(paths)[0].unlinked == {}
         notify.assert_not_called()
         assert not alert_state(paths, NAME, "git-layout").exists()
 
         _damage(project)
         with patch("boxmunge.project_alerts.notify", return_value=True) as notify:
-            migrate_project_manifests(paths)
+            apply_projects(paths)[0]
         notify.assert_called_once()
 
     def test_absent_schema_version_alert_says_to_set_it(
@@ -134,7 +135,7 @@ class TestUpgradeReports:
         bare = {k: v for k, v in MANIFEST.items() if k != "schema_version"}
         (project / "repo" / "manifest.yml").write_text(yaml.safe_dump(bare))
         with patch("boxmunge.project_alerts.notify", return_value=True) as notify:
-            assert migrate_project_manifests(paths).in_memory == [NAME]
+            assert apply_projects(paths)[0].in_memory == [NAME]
         body = notify.call_args.args[2]
         assert "has no schema_version" in body
         assert f"Set schema_version: {CURRENT_SCHEMA_VERSION} in the repository" in body
@@ -152,7 +153,7 @@ class TestWriteGuards:
             path.unlink()
             path.symlink_to(target)
 
-        with patch("boxmunge.fileutil._fchown_deploy", side_effect=swap):
+        with patch("boxmunge.fileutil.fchown_deploy", side_effect=swap):
             with pytest.raises(ManifestError, match="is a symlink"):
                 write_manifest(path, MANIFEST)
         assert path.is_symlink() and target.read_text() == "# the repository's\n"
@@ -165,7 +166,7 @@ class TestWriteGuards:
                               "schema_version": 2})
         (pdir / "manifest.yml").write_text(old)
         with project_lock("bundled", paths):
-            result = migrate_project_manifests(paths)
-        assert (result.written, result.skipped_locked) == ([], ["bundled"])
+            migration, _regen, excluded = apply_projects(paths)
+        assert (migration.written, excluded.busy) == ([], ["bundled"])
         assert (pdir / "manifest.yml").read_text() == old
-        assert migrate_project_manifests(paths).written == ["bundled"]
+        assert apply_projects(paths)[0].written == ["bundled"]

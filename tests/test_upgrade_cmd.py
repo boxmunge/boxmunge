@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from boxmunge.commands.upgrade_steps import migrate_project_manifests
+from boxmunge.upgrade_exclusions import apply_projects, migrate_one
 from boxmunge.manifest import (
     CURRENT_SCHEMA_VERSION, ManifestError, load_manifest_as_written,
 )
@@ -59,12 +59,10 @@ class TestMigratePostValidation:
         }
         mf = _write_manifest(paths_stub, "demo", v1)
 
-        migrated = migrate_project_manifests(paths_stub)
+        assert migrate_one(paths_stub, mf.parent) == "written"
 
-        assert migrated.written == ["demo"]
-        assert migrated.in_memory == []
         on_disk = yaml.safe_load(mf.read_text())
-        # migrate_project_manifests migrates to CURRENT_SCHEMA_VERSION, which
+        # migrate_one migrates to CURRENT_SCHEMA_VERSION, which
         # rolls forward with every release. Pin against the manifest module to
         # avoid this test needing edits on every schema bump.
         from boxmunge.manifest import CURRENT_SCHEMA_VERSION
@@ -73,7 +71,7 @@ class TestMigratePostValidation:
     def test_post_migration_validation_failure_raises(
         self, paths_stub
     ) -> None:
-        """If a migration produces an invalid manifest, migrate_project_manifests
+        """If a migration produces an invalid manifest, migrate_one
         must raise MigrationError and leave the original manifest on disk."""
 
         # Inject a bad migration that produces an invalid manifest
@@ -102,7 +100,7 @@ class TestMigratePostValidation:
             mf = _write_manifest(paths_stub, "demo", v1)
 
             with pytest.raises(MigrationError, match="failed validation"):
-                migrate_project_manifests(paths_stub)
+                migrate_one(paths_stub, mf.parent)
 
             # On-disk manifest must be unchanged.
             assert mf.read_text() == original_text
@@ -122,7 +120,7 @@ class TestMigrateFailLoud:
 
     def test_corrupted_manifest_raises_manifest_error(self, paths_stub) -> None:
         """A project whose manifest is not a YAML mapping must cause
-        migrate_project_manifests to raise ManifestError (was: silently
+        the apply to raise ManifestError (was: silently
         skipped)."""
         proj = paths_stub.projects / "broken"
         proj.mkdir(parents=True)
@@ -130,7 +128,7 @@ class TestMigrateFailLoud:
         (proj / "manifest.yml").write_text("- just\n- a\n- list\n")
 
         with pytest.raises(ManifestError, match="not a YAML mapping"):
-            migrate_project_manifests(paths_stub)
+            apply_projects(paths_stub)
 
     def test_migrate_manifest_failure_raises(self, paths_stub) -> None:
         """A project where migrate_manifest itself raises must propagate the
@@ -155,7 +153,7 @@ class TestMigrateFailLoud:
             _write_manifest(paths_stub, "demo", v1)
 
             with pytest.raises(MigrationError, match="simulated migration failure"):
-                migrate_project_manifests(paths_stub)
+                apply_projects(paths_stub)
         finally:
             if original_v1_to_v2 is not None:
                 register_migration(1, 2, original_v1_to_v2)
@@ -183,16 +181,16 @@ class TestGitManifestNeverWritten:
         paths.project_compose("gitapp").symlink_to(repo / "compose.yml")
         return target
 
-    def _migrate(self, paths, delivered: bool = True):
+    def _migrate(self, paths, delivered: bool = True, name: str = "gitapp"):
         with patch("boxmunge.project_alerts.notify",
                    return_value=delivered) as notify:
-            result = migrate_project_manifests(paths)
+            result = migrate_one(paths, paths.project_dir(name))
         return result, notify
 
     def test_link_is_kept_and_alert_sent(self, paths, linked) -> None:
         before = linked.read_bytes()
         result, notify = self._migrate(paths)
-        assert (result.written, result.in_memory) == ([], ["gitapp"])
+        assert result == "in_memory"
         link = paths.project_manifest("gitapp")
         assert link.is_symlink() and link.resolve() == linked.resolve()
         assert linked.read_bytes() == before
@@ -233,8 +231,8 @@ class TestGitManifestNeverWritten:
         pdir.mkdir(parents=True)
         (pdir / "manifest.yml").write_text(yaml.safe_dump(
             {**self.V2, "source": "bundle", "project": "bundled"}))
-        result, notify = self._migrate(paths)
-        assert result.written == ["bundled"]
+        result, notify = self._migrate(paths, name="bundled")
+        assert result == "written"
         notify.assert_not_called()
         on_disk = load_manifest_as_written(pdir / "manifest.yml")
         assert on_disk["schema_version"] == CURRENT_SCHEMA_VERSION

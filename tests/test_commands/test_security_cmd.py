@@ -1850,6 +1850,7 @@ def test_scan_does_not_warn_when_runtimes_declared(
     )
 
 
+@pytest.mark.usefixtures("docker_down")  # its quarantine reloads Caddy
 def test_scan_does_not_warn_under_paranoid_posture(
     monkeypatch, tmp_path,
 ) -> None:

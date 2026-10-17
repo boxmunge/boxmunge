@@ -210,6 +210,7 @@ class TestDamagedRegistry:
             assert run_deploy("myapp", paths) == 0
         assert "old-staging\n" in registry.read_text()
 
+    @pytest.mark.usefixtures("docker_down")  # doctor probes the docker CLI
     def test_doctor_fails_naming_the_line(self, paths: BoxPaths) -> None:
         import contextlib
         import io
@@ -250,6 +251,7 @@ class TestOverlappingNames:
         add_project(a, paths)
         add_project(b, paths)
 
+    @pytest.mark.usefixtures("docker_down")  # doctor probes the docker CLI
     def test_existing_pair_keeps_working_and_doctor_warns(self, paths: BoxPaths) -> None:
         from boxmunge.commands.doctor import run_doctor
         from boxmunge.project_registry import add_project, load_registered_projects

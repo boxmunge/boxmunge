@@ -94,7 +94,6 @@ class BoxPaths:
         self.state = root / "state"
         self.health_state = self.state / "health"
         self.deploy_state = self.state / "deploy"
-        self.staging_state = self.state / "staging"
         # Action API jobs: finished records and event logs here, every
         # unfinished (queued or running) record under queue/.
         self.jobs_dir = self.state / "jobs"
@@ -222,14 +221,6 @@ class BoxPaths:
     def project_staging_caddy_site(self, name: str) -> Path:
         name = _checked(name)
         return self.caddy_sites / f"{name}-staging.conf"
-
-    def project_staging_compose_override(self, name: str) -> Path:
-        name = _checked(name)
-        return self.projects / name / "compose.boxmunge-staging.yml"
-
-    def project_staging_state(self, name: str) -> Path:
-        name = _checked(name)
-        return self.staging_state / f"{name}.json"
 
     def project_alerts_dir(self, name: str) -> Path:
         """The once-only alerts last sent for a project (see project_alerts)."""

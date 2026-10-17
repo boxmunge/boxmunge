@@ -31,7 +31,7 @@ def test_running_project(fixture_paths) -> None:
     assert shop["health"]["status"] == "ok" and shop["health"]["failure_reason"] is None
     assert shop["deploy"]["current_ref"].startswith("shop-")
     assert len(shop["deploy"]["history"]) == 1
-    assert shop["staging"] == {"active": False, "ref": None}
+    assert shop["staging"] == {"active": False, "id": None, "ref": None, "state": None}
     assert shop["paused"] is None and shop["quarantine"] is None
 
 
@@ -45,10 +45,23 @@ def test_paused_quarantined_staged_and_pre_registered(fixture_paths) -> None:
     assert billing["quarantine"]["action_complete"] is True
     wiki = _call(fixture_paths, "project.get", {"project": "wiki"})
     assert wiki["staging"]["active"] is True and wiki["staging"]["ref"].startswith("wiki-")
+    assert wiki["staging"]["state"] == "ready" and wiki["staging"]["id"]
     assert wiki["health"]["consecutive_failures"] == 3
     newapp = _call(fixture_paths, "project.get", {"project": "newapp"})
     assert newapp["lifecycle"] == "pre_registered"
     assert newapp["deploy"] == {"current_ref": None, "deployed_at": None, "history": []}
+
+
+def test_an_open_install_and_a_0_10_1_stage(fixture_paths) -> None:
+    shop = _call(fixture_paths, "project.get", {"project": "shop"})
+    assert shop["install"]["source"] == "bundle" and shop["install"]["phase"] == "installed"
+    assert shop["install"]["ref"].startswith("shop-") and shop["install"]["id"]
+    assert shop["legacy_stage"] is None
+    blog = _call(fixture_paths, "project.get", {"project": "blog"})
+    assert blog["legacy_stage"] == {"kind": "bundle", "evidence": "untouched"}
+    assert blog["install"] is None
+    wiki = _call(fixture_paths, "project.get", {"project": "wiki"})
+    assert wiki["install"] is None and wiki["legacy_stage"] is None
 
 
 def test_monitor_stopped_project(fixture_paths) -> None:

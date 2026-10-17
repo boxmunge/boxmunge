@@ -17,6 +17,7 @@ from boxmunge.docker import DockerError
 from boxmunge.lifecycle import is_blocked
 from boxmunge.paths import BoxPaths
 from boxmunge.project_alerts import alert_state
+from boxmunge.legacy_stage import legacy_staging_state
 from boxmunge.project_registry import add_project, is_registered
 from boxmunge.state import write_state
 
@@ -30,7 +31,7 @@ def _state_files(paths: BoxPaths) -> list[Path]:
         paths.project_paused_state(NAME),
         paths.project_quarantine_state(NAME),
         paths.project_scan_state(NAME),
-        paths.project_staging_state(NAME),
+        legacy_staging_state(paths, NAME),
         paths.container_update_target_state(NAME),
         alert_state(paths, NAME, "manifest-schema"),
         alert_state(paths, NAME, "git-layout"),
@@ -206,6 +207,7 @@ def test_a_forced_delete_is_refused_while_containers_exist(box, monkeypatch, cap
     from boxmunge.commands import project_delete_cmd as pd
     _no_helper(monkeypatch)
     monkeypatch.setattr(pd, "_teardown", lambda name, paths: ["production: boom"])
+    monkeypatch.setattr(pd, "caddy_reload", lambda *a, **k: None)
     fake_containers.run(NAME, "db", "sha256:x")
     _refused(box, capsys, pd.delete_locked(NAME, box, force=True), "myapp-db-1")
 

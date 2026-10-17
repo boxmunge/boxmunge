@@ -49,7 +49,7 @@ def integration_root(tmp_path_factory) -> Path:
     root = tmp_path_factory.mktemp("boxmunge-int")
     for subdir in [
         "bin", "config", "caddy/sites", "projects", "state/health",
-        "state/deploy", "state/staging", "docs", "logs",
+        "state/deploy", "docs", "logs",
         "inbox/.tmp", "inbox/.consumed", "system",
     ]:
         (root / subdir).mkdir(parents=True)

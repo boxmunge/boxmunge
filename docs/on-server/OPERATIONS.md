@@ -141,62 +141,97 @@ After verifying the staging environment:
   unstage myapp
   ```
 
-Staging runs from the project directory, so `stage` installs the staged release there and keeps the
-production release aside in `.releases/prestage/`. Production's running containers are not touched.
-`promote` deploys the staged release (never a newer bundle that arrived in the inbox meanwhile) and
-keeps the displaced production release as the `rollback` target. `unstage` puts the production
-release's files back. While a release is staged, `prod-deploy` and `rollback` refuse: promote or
-unstage first.
+The staged release lives in its own tree, `.releases/staged/` (the slot), and staging runs from
+there: `stage` never writes production's files, and production's running containers are only
+stopped for a `staging.copy_data` copy, then started again. A stage that fails, first or re-stage,
+is torn down completely. `promote` deploys the staged release (never a newer bundle that arrived in
+the inbox meanwhile). `unstage` takes staging down and drops the slot; if it cannot remove the
+staging containers it keeps the slot, records why, and prints the commands to finish by hand.
 
-A `promote` that fails before any production container is touched (a failing `pre_deploy` hook)
-leaves the stage as it was. Once it has started the staged release's containers, production runs
-that release even if a later step fails (`compose up` errors part-way, Caddy rejects the site, smoke
-fails): the error says `production now runs <ref>` and what `rollback` would do, and the displaced
-production release becomes the previous release, exactly as after a failed `prod-deploy`. `rollback`
-returns to it with the data snapshot taken before the promotion (it refuses, and says so, if the
-project keeps backups but that snapshot could not be taken). Staging is left up: `unstage` removes
-it, and never puts the old release's files back under the new containers. If staging cannot be
-torn down after a successful promotion, `promote` exits 1 and asks you to run `unstage`.
+`promote` is an ordinary production deploy whose release is the staged one, in the same install
+transaction as `prod-deploy`. A `promote` that fails before any production container is touched (a
+failing `pre_deploy` hook) leaves the install open, as a failed `prod-deploy` does, and the stage as
+it was: rerun `promote`, or deploy a fix. Once it has started the staged release's containers,
+production runs that release even if a later step fails (`compose up` errors part-way, Caddy
+rejects the site, smoke fails): the error says `production now runs <ref>` and what `rollback`
+would do, and the displaced production release becomes the previous release, exactly as after a
+failed `prod-deploy`. `rollback` returns to it with the data snapshot taken (with production's own
+manifest) before the promotion. The stage is then marked retired, so it is never promoted twice;
+staging is left up and `unstage` removes it. If staging cannot be torn down after a successful
+promotion, `promote` exits 1 and asks you to run `unstage`. A promote that is killed is finished by
+running `promote` again, which resumes the install from where it stopped (after the switch it
+does not run the `pre_deploy` hook again or take a new snapshot). If the switch had already ended,
+the rerun only tears staging down, and still exits 1 with the rollback options if the switch failed.
+The `Promoted` log line and `promote` webhook go out once per promotion, however often it is rerun.
+A killed `unstage` is likewise finished by running it again.
 
-If a promote is killed after it started production, `unstage`, `stage` and `prod-deploy` refuse
-until `promote` is run again. That rerun finishes the switch: it does not run the `pre_deploy` hook
-again or take a new snapshot (production data may already have changed), and however it ends, even
-if it fails, the displaced release becomes the previous release with the snapshot taken before the
-first attempt. After that, `unstage`, `rollback` and `prod-deploy` work as after any failed deploy.
+`prod-deploy` and `rollback` work while a release is staged; staging is left as it is, and the
+next `promote` keeps whatever production then runs as its previous release. Before anything
+changes, each proves production's next release shares nothing with staging (as `stage` does,
+below) and refuses with "Nothing was changed" if it would. Such a release whose `compose.yml` uses
+`include:` or `extends: file:` cannot be checked this way and is refused: unstage first, or move
+those services into `compose.yml`. A git project's `prod-deploy` and `rollback` cannot be checked
+yet and are refused while a release is staged: unstage first.
 
 Staging and production share no Docker resource. Before installing anything, `stage` resolves
-both with `docker compose config` (`-p myapp` and `-p myapp-staging`) and refuses if they would
-share a volume, network, network alias, container name or bind-mount source, or if staging would
-build an image tag production runs. It checks again before starting anything. The staging copy of
+staging from the staged release, and production both as it runs and as it would run once the
+release is promoted, with `docker compose config` (`-p myapp` and `-p myapp-staging`). It refuses
+if staging would share a volume, network, network alias, container name or bind-mount source with
+either, or build an image tag production runs, and if a service needs an `env_file` that does not
+exist (staging could not start: create the file, for `secrets.env` with `secrets set`, or mark it
+`required: false`). It checks again before starting anything. The staging copy of
 `compose.yml` drops explicit volume and network `name:` lines (validation only allows the project's
-own name, which Compose would choose anyway), `container_name:` and `ports:`. Bind mounts of release
+own name, which Compose would choose anyway) and `ports:`. Bind mounts of release
 code and configuration (`./appconfig:/etc/app:ro`, config and secret `file:` entries) work in both
-environments without copying any data:
+environments without copying any data: production mounts its project directory's, staging the
+staged release's own in `.releases/staged/release/`.
 
-- production mounts its own copy of each, kept in `.releases/live-mounts/` and refreshed from
-  production's release whenever its compose overlay is generated (deploy, rollback, resume,
-  upgrade). A refresh never removes a file production is reading: changed files are replaced
-  whole, and a file that is itself a mount source is rewritten in place. Installing a staged
-  release does not touch these copies;
-- staging mounts the staged release itself.
+The staged release lives in `.releases/staged/`, so the project directory stays production's and
+production starts as usual during a stage (upgrade restarts, container updates, `recover`,
+`resume`, `security resume`, `restore`). A release staged by boxmunge 0.10.1 is different: it put
+the staged release's files in the project directory. For such a project `stage`, `unstage`,
+`promote`, `prod-deploy`, `rollback`, `restore`, `resume`, `recover`, `pause` and `data adopt`
+refuse directly, naming `boxmunge-server legacy-stage <project>`; background starts (upgrade
+restarts, container updates) and `security resume` are refused with a "start refused" alert (see
+Troubleshooting). If boxmunge cannot tell whether such a stage is on disk (for example `state/`
+cannot be read), it refuses the same way and says so; the health check then runs no smoke test
+and reports a warning, a backup is skipped with an alert, a due CVE quarantine is not taken (the
+scan reports why), and an upgrade leaves the project as it is with a high-priority alert. Fix the
+cause (usually permissions) and retry; a project the upgrade left this way keeps its previous
+configs until you deploy, resume or recover it. Its
+running containers are left as they are. How to resolve it: "Upgrading from 0.10.1 with a
+release staged".
+Until it is resolved:
 
-Production's running containers keep their configuration, but the staged release's `compose.yml`
-and `.env` are in the project directory while it is staged. A production `compose up` there (the
-restart after an upgrade, `recover`) resolves the staged `compose.yml`, not production's, and so
-recreates production from the staged release. boxmunge therefore refuses every production
-recreate while a release is staged: upgrade restarts, container updates, `recover`, `resume`,
-`security resume` and `restore` leave production's running containers as they are and raise a
-"start refused" alert (see Troubleshooting). Promote or unstage first; the next run picks it up.
+- the health check runs no smoke test and takes no critical action for it, reports it as
+  `legacy-stage`, and alerts (high priority) at most once a day;
+- backups continue with the manifest of the release the containers run, told from the evidence
+  `legacy-stage` prints; if that evidence cannot be read (Docker unavailable, an unreadable
+  reflog or `.releases/prestage/`, a commit that does not resolve), the backup is skipped with
+  an alert naming the cause (a never-deployed git project's is skipped without one: it has no
+  data). For a git project the dump still runs through the project's
+  `compose.yml`, which is the staged checkout's: if the staged release renamed the backup
+  service, the backup fails with an error until the stage is resolved;
+- a CVE quarantine is held, not taken (it would stop production), with a high-priority alert
+  naming the finding. Scans and their reports run as usual.
 
 A bind mount, config or secret file in a data directory (any directory a release has mounted
 read-write) or another server-owned entry (`data/`, `secrets.env`) points staging at the entry's
-`-staging` copy: `./uploads/img` becomes `./uploads-staging/img`. Staging never reads
+`-staging` copy in the project dir: `./uploads/img` becomes `<project>/uploads-staging/img`,
+an absolute path. Staging never reads
 production's copy, so a config or secret `file:` in a data directory (`./data/key.pem`) must exist
 in staging's copy (`./data-staging/key.pem`): `stage` copies it with `copy_data`, and without
 `copy_data` refuses, naming the file to put there. Such a file may not sit in a directory a service
 of the release mounts read-write: a container could replace it with a symlink to any host file,
 which Docker would mount on the container's next start, so validation refuses it (SECURITY.md,
 "Project isolation").
+
+Staging builds from the staged release. A `build` context, `dockerfile` or additional context
+that names release code by absolute path in the project dir (`<project>/src`) is staging's
+staged copy of it; one in a data directory or another server-owned entry, or one in `.releases/`
+or `repo/`, is refused. So is an absolute `dockerfile` in the project when the context is not:
+use paths relative to the release. `stage` also checks what each build input resolves to (with
+`${VAR}` filled in) and refuses one in the project dir outside the staged release.
 
 Two behaviour changes in this release:
 
@@ -209,14 +244,11 @@ Two behaviour changes in this release:
 - `stage` refuses a service that mounts the whole project directory (`.:/app`), which staging and
   production cannot each have a copy of. Mount the subdirectories the service needs instead.
 
-A production overlay written by an older boxmunge still mounts release code from the project
-directory. `stage` refuses to run beside it, before installing anything, and names the mount;
-an upgrade or a redeploy of production regenerates the overlay.
-
-Production's smoke checks keep running the production release's own `boxmunge-scripts/` while a
-release is staged (production mounts a copy kept in `.releases/live-scripts/`), so a smoke check
-that only the staged release passes does not fail production. Production switches to the new
-scripts when `promote` deploys them.
+Each environment mounts its own release's `boxmunge-scripts/`: production's smoke checks run the
+project directory's, staging's the staged release's, so a smoke check that only the staged release
+passes does not fail production. Production switches to the new scripts when `promote` installs
+them. The `.releases/live-scripts/` copy boxmunge 0.10.1 mounted for production is removed after
+production's next full start once no container mounts it.
 
 Staging keeps its own data between stages. To start it from a copy of production's, set
 `staging: {copy_data: true}` in the manifest. `stage` then:
@@ -232,7 +264,18 @@ Staging keeps its own data between stages. To start it from a copy of production
    files included; a staging copy of the wrong type, such as a directory where production has a
    file, is removed with a `NOTE`), copies production's data in, and starts production again whatever happened,
    even if it was interrupted. If production cannot be started again, `stage` fails with
-   `PRODUCTION IS DOWN` and the `docker start` command to run;
+   `PRODUCTION IS DOWN` and the `docker start` command to run. If `stage` itself was killed during
+   the copy, the slot's `production_stopped` marker names the containers it stopped: the next health
+   check (or `stage`, `unstage` or `recover`) starts them again and alerts, and the health check
+   never applies its critical stop while the marker stands. After such a start the health check runs
+   smoke on its next run; while an install is open it reports the
+   install instead and starts nothing. A start that keeps failing is reported on every run and
+   alerted once per error. If the slot's `meta.json` cannot be
+   read, the health check cannot tell, so it reports the project `CRITICAL`, alerts once and leaves
+   production alone: run `recover <project>` (it starts production with its compose files), then
+   `unstage <project>`. `unstage` and a new `stage` replace such a slot, and with it any marker;
+   each logs a warning and sends a priority-1 alert naming `recover <project>`. `pause` takes the
+   stop over (`resume` starts production);
 5. starts staging only after every copy succeeded.
 
 The copies run in the data helper, a short-lived container from the box's own `boxmunge-system`
@@ -265,7 +308,11 @@ fails rather than staging on stale data.
 
 `unstage` (and `promote`, which ends with it) removes `-staging` copies of data directories the
 production release no longer mounts, logging each one; copies of directories production still
-mounts are kept for the next stage. Staging's named volumes are kept.
+mounts are kept for the next stage. Staging's named volumes are kept. Only staging's own copies
+are ever mounted or removed: the copy of an entry production mounts or records as data, or one the
+staged slot records that staging created. A `-staging` entry in the project dir that is neither
+(release code an older bundle shipped, or an operator's) makes `stage` refuse a release that would
+mount it ("is not staging's copy"), and `unstage` reports and leaves it. Rename it in the release.
 
 A stage that fails after installing its release (staging containers fail to start, the staging data
 copy fails, Caddy rejects the staging site) cleans up after itself: staging containers, the staging Caddy site and compose files are
@@ -668,7 +715,7 @@ How it works for a bundle project: every deploy that replaces a release keeps th
 pre-deploy data snapshot. Rollback validates that release again (manifest, identity, compose
 hardening), installs it, restores the snapshot, and starts it. Secrets, suppressions, `data/` and
 `backups/` are never part of a release, so they are not rolled back. For a promoted staging
-release, the previous release is the production release that `stage` displaced. A git project
+release, the previous release is the production release that `promote` replaced. A git project
 restores the snapshot and checks out the previous ref.
 
 A deploy that fails after it started the new release's containers still counts as having replaced
@@ -682,7 +729,8 @@ Rollback refuses, with the reason, instead of doing half a rollback:
   to go back to; deploy a known-good bundle instead);
 - when the project has backups configured but no snapshot was taken before the last deploy (the
   backup failed or `--no-snapshot` was used), or that snapshot is no longer in `backups/`;
-- while a staged release is installed (`promote` or `unstage` first);
+- for a git project, while a release is staged (`unstage` first; a bundle project's rollback works
+  during a stage, as above);
 - while an install is open whose pre-deploy hook has not run yet: nothing reached production's
   containers or data, so `prod-deploy <project> --abandon` puts the old files back instead (see
   "An interrupted or failed install").
@@ -696,25 +744,32 @@ snapshot again, and anything written to the data in those seconds is lost.
 
 ## An interrupted or failed install
 
-Every bundle production install (`prod-deploy`, `rollback`) is recorded in
-`<project>/.releases/install.json` until it finishes. While it is open, nothing
-else starts the project's containers: upgrades, `resume`, `recover`,
-container updates and `restore` refuse and say why, and `stage` and `promote`
-wait too. The alert names your options:
+Every bundle production install (`prod-deploy`, `rollback`, `promote`) is
+recorded in `<project>/.releases/install.json` until it finishes. While it is
+open, nothing else starts the project's containers: upgrades, `resume`,
+`recover`, container updates, `restore` and `stage` refuse and say why. A
+`promote` does not wait: it resumes its own open install, and over another
+command's it deploys the staged release as a fix (the last option below).
+The alert names your options:
 
-- run the same command again (`prod-deploy <project> --ref <bundle>`, or
-  `rollback <project>`): it carries on from where it stopped, with the data
-  snapshot it took before it started (once the new release's containers may
-  have started, the pre-deploy hook is not run again);
+- run the same command again (`prod-deploy <project> --ref <bundle>`,
+  `rollback <project>` or `promote <project>`): it carries on from where it
+  stopped, with the data snapshot it took before it started (once the new
+  release's containers may have started, the pre-deploy hook is not run again);
 - `prod-deploy <project> --abandon`, while nothing has reached production's
   data: the old release's files go back (a first deploy's code is removed);
-  containers and data were never touched. If it is interrupted, run it again;
+  containers and data were never touched, and a staged release stays staged
+  and promotable. If it is interrupted, run it again;
 - `rollback <project>`, once a pre-deploy hook may have run (this install's,
   or an earlier attempt's it replaced): the old release with the snapshot taken
   before the first attempt;
-- or deploy a fix (another bundle): it keeps the same rollback target and
+- or deploy a fix (another bundle, or `promote`): it keeps the same rollback target and
   snapshot, and it can no longer be abandoned once an earlier attempt's hook
   ran. This is also the way out of a first deploy whose hook keeps failing.
+
+While an install is open the health check runs no smoke and takes no critical
+action (the install may already have replaced the smoke scripts): `check-all`
+reports the project as `WARNING (install open: ...)`, naming these options.
 
 A failure once the containers were started (compose, Caddy or the smoke test)
 closes the install as before: production may run the new release, and
@@ -724,9 +779,7 @@ While an install is open, backups use the manifest and compose file of the
 release the containers still run, and are skipped with an alert when that is
 ambiguous (an attempt may have started its containers). A platform upgrade
 leaves the project alone: its configs are not regenerated and it is not
-restarted, and the upgrade alerts about it. The health check still reads the
-project directory's manifest, which may be the half-installed release's;
-finish the install promptly.
+restarted, and the upgrade alerts about it.
 
 If the record no longer matches the files (after a platform rollback, or a hand
 edit), it is reported as stale and nothing is resumed automatically: check that
@@ -974,11 +1027,12 @@ containers are left alone, and a high-priority alert names the reason. The
 alert for one project and reason repeats at most once a day (so a timer
 does not page every run); the refusal is logged every time:
 
-- **"a release is staged"** — while a release is staged the project
-  directory holds the staged release's files, so production is not
-  recreated from them (upgrade restarts, container updates, `recover`,
-  `resume`, `security resume` and `restore` all wait). Running containers
-  keep running. `promote` or `unstage`, and the next run picks it up.
+- **"has a release staged by boxmunge 0.10.1"** — the project directory
+  may hold that stage's files, so production is not recreated from them
+  (upgrade restarts, container updates and `security resume` wait with
+  this alert; `recover`, `resume`, `restore` and `data adopt` refuse on
+  the terminal without one). Running containers keep running. Resolve it with `boxmunge-server legacy-stage <project>`; the
+  next run picks it up. This alert does not mean tampering.
 - **"an install of <ref> ... is open at phase <phase>"** — a deploy or
   rollback stopped part-way, so the project directory may hold a
   half-installed release. The alert names the options for that phase; see
@@ -1473,8 +1527,17 @@ How an upgrade is applied and undone:
    with the file it points to, or remove it, and retry. A stash that fails, for this or any
    reason, is logged as an error and sends a local alert; the standby venv is dropped and the
    release is not blocklisted, so auto-update retries it once the box is fixed.
-3. The venvs swap and `upgrade --apply` migrates manifests, regenerates every project's Caddy
-   site and compose overlay, reloads Caddy and restarts projects. A bundle project's manifest
+3. The venvs swap and `upgrade --apply` first rewrites the latest stash without the symlink
+   members an older release wrote, so a rollback's `stash restore` cannot abort on them (a
+   failure leaves the stash as it is, sends a high-priority alert and does not stop the
+   upgrade). It then migrates manifests and regenerates every project's Caddy site and compose
+   overlay, project by project under that project's lock, reloads Caddy and restarts projects.
+   Three kinds of project are left exactly as they are (not migrated, regenerated or
+   restarted), reported as `LEFT AS IS` or `Skipped (busy)`, alerted, and do not fail the
+   upgrade: one with a release staged by boxmunge 0.10.1 (one high-priority alert per project;
+   resolve it with `boxmunge-server legacy-stage <project>`; the dry run names it too), one
+   with an open install, and one busy with another operation (it keeps its previous configs
+   until its next deploy, resume or recover). A bundle project's manifest
    is rewritten at the new schema. A git project's is not: its `manifest.yml` links into
    `repo/`, so it is migrated in memory and you are alerted once to update it in the
    repository (see "Deploying a New Project (Git)"). A failure in any of these
@@ -1500,6 +1563,16 @@ alert. An interruption is not reported as a release failure. The first one of a 
 blocklist it, so auto-update retries; a second one does. Promotion and `clear-blocklist` reset the
 count. Interrupted before the swap, the previous release simply stays live. A rollback that is
 itself interrupted is finished by the next health-timer run.
+
+Before a rollback swaps back, the release being rolled back from tears down every project's
+staged release (`boxmunge-server staging-teardown-all --reason platform-rollback`, run by the
+shim; an older release does not know `.releases/staged/`) and sends one high-priority alert
+per project: "staged release discarded by the platform rollback; re-stage it". A staged release
+that an interrupted `promote` still needs is kept, and so is one whose teardown fails or whose
+project is busy: the alert says why and names the commands that remove it by hand. If the
+teardown itself does not finish (it is stopped after 10 minutes), one high-priority alert names
+those commands for every project still holding `.releases/staged/`. It never blocks the
+rollback, and the older release ignores what is left.
 
 A rollback swaps the venvs back, restores the stash, and re-runs `upgrade --apply` with the
 previous release, so its overlays and Caddy sites are regenerated and projects restarted on
@@ -1531,6 +1604,63 @@ validator would refuse, as `<project>: would be refused by this release's compos
 The dry run writes nothing and sends no alert. The upgrade shim runs it as a pre-flight check
 against the new release before touching anything, so `upgrade --dry-run` run by hand
 reports against the installed release.
+
+## Upgrading from 0.10.1 with a release staged
+
+Unstage before upgrading. If a project still has a release staged by 0.10.1,
+the upgrade leaves it exactly as it is: the dry run says "<p>: a release
+staged by boxmunge 0.10.1 (<kind>) will be left as is; after the upgrade,
+resolve it with boxmunge-server legacy-stage <p>", the apply alerts once,
+and the health check alerts again at most once a day until it is resolved. The project keeps running its current containers
+and is backed up; starts, deploys and pause are refused, quarantine is held,
+and health smoke checks are suspended.
+
+Run `boxmunge-server legacy-stage <p>` to see what production runs (this works
+during probation too). Once probation has ended, run `--discard` (put production's release back; with
+`--confirm-recreated` if production was already started from the staged files)
+or `--keep-staged` (treat the staged release as promoted). If it is
+interrupted, run the same command again.
+
+`legacy-stage` is operator-only: run it as root (`sudo boxmunge-server legacy-stage <p>`); the
+deploy shell and MCP do not offer it. It takes the project's lock (if the project is busy, try
+again). `--discard` and `--keep-staged` refuse while a platform rollback is still possible:
+during probation (it says when probation ends) or while an interrupted upgrade or rollback is
+pending. They also refuse while a platform upgrade is running ("a platform upgrade is in
+progress; run it again after it finishes"): from its stash to its swap there is no probation yet,
+but a rollback would still restore that stash. A `probation.json` it cannot read refuses too,
+naming the file to fix or remove. With no flag it works in all of these cases; except during an
+upgrade it adds "Not available yet: <why>".
+For a git project it runs git as the deploy user, so `repo/` must be deploy's: one cloned with
+`sudo` is refused with the fix (`chown -R deploy:deploy <p>/repo`, then retry).
+
+- With no flag it prints the evidence and the choices it allows, and changes nothing. The
+  evidence is when the stage was made, the deploy state's ref, the staged ref, production's
+  release, and whether production's containers are `untouched` (all created before the stage)
+  or `recreated` (started from the staged files: a failed 0.10.1 promote, or a recreate during
+  the stage). A git stage that changed no code (no `--ref`, or the deployed commit) is
+  `untouched` without that time ("not needed: the stage changed no code"), so `repo/`'s reflog
+  is not read. A `leftover` (a 0.10.1 promote whose unstage did not finish) has no evidence and
+  allows only `--discard`.
+- `--discard` throws the staged release away, puts production's release back and recreates
+  production from it on this release's overlay. For `untouched` and `leftover`, production keeps
+  the release it runs. For `recreated` it also needs `--confirm-recreated`: discarding the staged
+  files changes what runs, and data the staged code wrote stays (it names the newest pre-deploy
+  snapshot for a manual `restore`).
+- `--keep-staged` treats the staged release as promoted. For `untouched` it first takes a
+  pre-deploy snapshot with production's manifest; for `recreated`, `rollback` uses the newest
+  pre-deploy snapshot taken after the stage; with none, `rollback` refuses ("no pre-deploy data
+  snapshot was taken when that release was replaced ...").
+
+The choice is recorded first, and a rerun must name the same one. The command then stops staging,
+removes the staging site, puts the code in place, cleans up the staging files, drops the stage
+record (last), and finishes what the upgrade skipped: manifest migration, config regeneration and
+a start of production. It alerts once the stage is resolved. It never touches the stash.
+
+An install left open by an interrupted deploy (see "An interrupted or failed install") is also
+left as is by the upgrade. A record that no longer matches the files, after a platform rollback to
+0.10.1 and a redeploy by it, is reported as stale; check production, then drop it as root with
+`boxmunge-server install-txn <project> --drop`.
+
 
 ## Querying Logs
 

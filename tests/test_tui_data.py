@@ -2,6 +2,8 @@
 
 from datetime import datetime, timezone
 
+import pytest
+
 from boxmunge.tui.data import (
     load_all_project_status,
     load_host_info,
@@ -55,6 +57,7 @@ class TestLoadAllProjectStatus:
         assert result[0].current_ref == ""
 
 
+@pytest.mark.usefixtures("docker_down")  # the host panel asks Docker whether Caddy runs
 class TestLoadHostInfo:
     def test_loads_hostname_from_config(self, paths: BoxPaths) -> None:
         config_file = paths.config_file

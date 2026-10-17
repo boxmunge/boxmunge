@@ -9,7 +9,8 @@ changed; a failed install, hook or config generation leaves it open (rerun,
 --abandon before hook_started, rollback from hook_started on, or a
 different deploy); once replace_release returns, it is closed whatever the
 result. A rerun of the same source and ref resumes from the recorded phase,
-reusing the recorded snapshot.
+reusing the recorded snapshot. While a release is staged, a new install
+(fresh or fix-forward) first proves itself disjoint from staging (D8).
 """
 from __future__ import annotations
 
@@ -24,7 +25,6 @@ from boxmunge.commands.deploy import (
 from boxmunge.commands.deploy_steps import snapshot_live_release
 from boxmunge.crashpoint import crash_point
 from boxmunge.data_dirs import ReleaseStateError, SetAsideError, log_kept, set_aside_announcer
-from boxmunge.fileutil import sweep_discarded
 from boxmunge.intake import IntakeError, report_refusal, validate_release_tree
 from boxmunge.log import log_error
 from boxmunge.release import (
@@ -37,6 +37,8 @@ from boxmunge.release_txn import (
     InstallTxn, advance, close_txn, load_txn, open_txn, options_text, stale_reason,
     start_refusal, supersede_txn,
 )
+from boxmunge.staged_release import has_slot, sweep_debris
+from boxmunge.staging_isolation import StagingIsolationError, check_install_isolation
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -58,7 +60,7 @@ class TreeDeploy:
 def deploy_tree_locked(project_name: str, paths: BoxPaths, req: TreeDeploy) -> int:
     """The tree-deploy core. Caller holds the project lock; never takes it."""
     try:
-        sweep_discarded(paths.project_releases(project_name))
+        sweep_debris(paths, project_name)
         txn = load_txn(paths, project_name)
         if txn is not None and not stale_reason(paths, project_name, txn):
             ensure_kept_pairing(paths, project_name, txn)
@@ -76,7 +78,40 @@ def deploy_tree_locked(project_name: str, paths: BoxPaths, req: TreeDeploy) -> i
     return _fresh(project_name, paths, req)
 
 
+def _prove_disjoint(project_name: str, paths: BoxPaths, req: TreeDeploy) -> bool:
+    """D8: while a release is staged, production's next release must share
+    nothing with staging. Checked before the transaction commits."""
+    if req.tree is None:
+        if not has_slot(paths, project_name):
+            return True
+        print(f"ERROR: An install of {req.ref} without a release tree cannot be proved "
+              f"apart from the staged release. This should be unreachable (stage is "
+              f"refused while an install is open). Nothing was changed; unstage "
+              f"{project_name} first.", file=sys.stderr)
+        return False
+    try:
+        check_install_isolation(paths, project_name, req.tree, req.manifest)
+    except (StagingIsolationError, OSError) as e:
+        print(f"ERROR: {e}\n  Nothing was changed. {_disjoint_advice(req)}", file=sys.stderr)
+        return False
+    return True
+
+
+def _disjoint_advice(req: TreeDeploy) -> str:
+    # Unstaging would drop the very release a promote installs.
+    if req.source == "staged":
+        return ("The staged release itself conflicts with staging: stage a fixed "
+                "release, then promote it.")
+    return "Fix the release, or unstage first."
+
+
 def _fresh(project_name: str, paths: BoxPaths, req: TreeDeploy) -> int:
+    if not _prove_disjoint(project_name, paths, req):
+        return 1
+    return _open(project_name, paths, req)
+
+
+def _open(project_name: str, paths: BoxPaths, req: TreeDeploy) -> int:
     deployed = (paths.project_dir(project_name) / "manifest.yml").exists()
     try:
         replaced = live_ref(paths, project_name) if deployed else None
@@ -157,6 +192,10 @@ def _switch(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTxn
     rc = replace_release(project_name, paths, req.manifest, req.ref, txn.snapshot or None,
                          component=req.component, txn=txn.id)
     crash_point("txn.replaced")
+    # on_switched must stay the first write after replace_release returns:
+    # nothing durable separates the two, so a crash before it is a crash
+    # inside replace_release (resumed from switching), and promote's
+    # `retired` write in it is the record that the switch ended.
     if req.on_switched is not None:
         req.on_switched(rc)
     crash_point("txn.switched")
@@ -187,7 +226,11 @@ def _resume(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTxn
 
 def _fix_forward(project_name: str, paths: BoxPaths, req: TreeDeploy,
                  old: InstallTxn) -> int:
-    """A different deploy over an open install (spec: fix-forward)."""
+    """A different deploy over an open install (spec: fix-forward). The
+    isolation proof comes first: a refused deploy leaves the open install
+    exactly as it was."""
+    if not _prove_disjoint(project_name, paths, req):
+        return 1
     if old.source == "rollback":
         return _over_rollback(project_name, paths, req, old)
     if not old.reached("previous_kept"):
@@ -195,7 +238,7 @@ def _fix_forward(project_name: str, paths: BoxPaths, req: TreeDeploy,
               f"deploying {req.ref} instead.")
         restore_superseded(paths, project_name, old)
         close_txn(paths, project_name, old)
-        return _fresh(project_name, paths, req)
+        return _open(project_name, paths, req)
     print(f"Deploying {req.ref} over the unfinished install of {old.ref}. The rollback "
           f"target stays {old.replaced_ref or 'none (first deploy)'}, paired with "
           f"{old.snapshot or 'no data snapshot'}; no new snapshot is taken.")

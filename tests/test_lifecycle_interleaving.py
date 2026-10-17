@@ -20,12 +20,12 @@ from boxmunge.commands import (
 )
 from boxmunge.pause import write_paused_state
 from boxmunge.project_registry import add_project
-from boxmunge.release_staging import has_prestage
+from boxmunge.staged_release import load_slot
 from boxmunge.state import write_state
 
 from tests.bundle_helpers import place_bundle
 from tests.test_commands.test_restore_cmd import _setup_project
-from tests.test_commands.test_stage_promote_release import V1, V2, _docker, _prod_v1_staged_v2
+from tests.stage_helpers import V1, V2, prod_and_stage, staging_docker_off as _docker
 
 NAME = "myapp"
 
@@ -82,18 +82,18 @@ def test_stage_never_starts_once_blocked(paths, marker) -> None:
             _marker_at_lock(stage_cmd, marker):
         assert stage_cmd.run_stage(NAME, paths, ref=V2) == 1
     up.assert_not_called()
-    assert not has_prestage(paths, NAME)
+    assert load_slot(paths, NAME) is None
     assert _version(paths) == "v1\n"
 
 
 @MARKERS
 def test_promote_never_starts_once_blocked(paths, marker) -> None:
-    _prod_v1_staged_v2(paths)
+    prod_and_stage(paths)
     with _docker(), patch("boxmunge.compose_guard.compose_up") as up, \
             _marker_at_lock(promote_cmd, marker):
         assert promote_cmd.run_promote(NAME, paths) == 1
     up.assert_not_called()
-    assert has_prestage(paths, NAME)
+    assert load_slot(paths, NAME).state == "ready"
 
 
 @MARKERS

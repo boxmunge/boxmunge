@@ -5,8 +5,8 @@ Codebase review findings 03 and 12. A stage is run for real (containers are
 not started); then both environments' models are resolved the way they run,
 `-p <project>` against `-p <project>-staging`, and every volume, network,
 alias, container name and bind source is compared. Production's mounts of
-release code must still show production's release while the staged one is
-installed in the project dir, and staging's must show the staged release.
+release code show production's release, and staging's show the staged
+release in the slot (.releases/staged/release).
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from boxmunge.commands.deploy import run_deploy
 from boxmunge.commands.stage_cmd import run_stage
 from boxmunge.commands.unstage_cmd import run_unstage
 from boxmunge.project_registry import add_project
+from boxmunge.staged_release import release_dir, slot_dir, staging_target
 from boxmunge.staging_isolation import (
     identities, overlaps, production_model, staging_model,
 )
@@ -62,7 +63,8 @@ def _compose(project: str) -> str:
 def _no_containers():
     with patch("boxmunge.compose_guard.compose_up"), \
             patch("boxmunge.commands.deploy.caddy_reload"), \
-            patch("boxmunge.commands.stage_cmd.caddy_reload"), \
+            patch("boxmunge.staging_bringup.caddy_reload"), \
+            patch("boxmunge.stage_slot.compose_down"), \
             patch("boxmunge.commands.unstage_cmd.compose_down"), \
             patch("boxmunge.commands.unstage_cmd.caddy_reload"):
         yield
@@ -94,6 +96,10 @@ def staged(paths):
     return project
 
 
+def _staging(paths, project: str) -> dict:
+    return staging_model(staging_target(paths, project))
+
+
 def _source(model: dict, service: str, target: str) -> Path:
     entry, = [v for v in model["services"][service]["volumes"] if v["target"] == target]
     return Path(entry["source"])
@@ -101,7 +107,7 @@ def _source(model: dict, service: str, target: str) -> Path:
 
 def test_production_and_staging_share_nothing(paths, staged) -> None:
     project_dir = paths.project_dir(staged)
-    prod, staging = production_model(paths, staged), staging_model(paths, staged)
+    prod, staging = production_model(paths, staged), _staging(paths, staged)
     prod_ids = identities(prod, staged, project_dir)
     staging_ids = identities(staging, f"{staged}-staging", project_dir)
     assert overlaps(prod_ids, staging_ids) == []
@@ -114,13 +120,16 @@ def test_production_and_staging_share_nothing(paths, staged) -> None:
 
 
 def test_production_keeps_reading_its_own_release(paths, staged) -> None:
-    """Review finding 12: stage installed V2 in the project dir, yet what
-    production mounts is V1, and staging gets V2 without copy_data."""
+    """Review finding 12: production mounts V1, from its own tree, and
+    staging gets V2, from the slot, without copy_data."""
     project_dir = paths.project_dir(staged)
-    assert (project_dir / "appconfig" / "settings").read_text() == "staged-config"
-    prod, staging = production_model(paths, staged), staging_model(paths, staged)
+    assert (project_dir / "appconfig" / "settings").read_text() == "prod-config"
+    release = release_dir(slot_dir(paths, staged))
+    assert (release / "appconfig" / "settings").read_text() == "staged-config"
+    prod, staging = production_model(paths, staged), _staging(paths, staged)
     assert (_source(prod, "web", "/etc/app") / "settings").read_text() == "prod-config"
     assert _source(prod, "web", "/etc/site.conf").read_text() == "prod-site"
+    assert _source(staging, "web", "/etc/app") == release / "appconfig"
     assert (_source(staging, "web", "/etc/app") / "settings").read_text() == "staged-config"
     assert _source(staging, "web", "/etc/site.conf").read_text() == "staged-site"
     assert Path(prod["configs"]["appconf"]["file"]).read_text() == "prod-conf"
@@ -136,33 +145,6 @@ def test_unstage_leaves_production_reading_its_release(paths, staged) -> None:
     assert (_source(prod, "web", "/etc/app") / "settings").read_text() == "prod-config"
 
 
-def test_a_stage_beside_an_older_production_overlay_is_refused(paths, capsys) -> None:
-    """Production's overlay predates its own copies: it mounts ./appconfig
-    from the project dir, which staging would replace. Refused before
-    anything is installed, naming that mount and nothing else."""
-    project = f"bmst{uuid.uuid4().hex[:8]}"
-    add_project(project, paths)
-    place_bundle(paths, project, V1, {**_release(project, "prod")})
-    place_bundle(paths, project, V2, {**_release(project, "staged")})
-    with _no_containers():
-        assert run_deploy(project, paths, ref=V1) == 0
-    overlay = paths.project_compose_override(project)
-    doc = yaml.safe_load(overlay.read_text())
-    for svc in doc["services"].values():
-        svc["volumes"] = [v for v in svc.get("volumes", [])
-                          if ".releases/live-mounts" not in str(v)]
-    overlay.write_text(yaml.safe_dump(doc))
-    with _no_containers():
-        assert run_stage(project, paths, ref=V2) == 1
-    err = capsys.readouterr().err
-    assert "generated by an older boxmunge" in err and "appconfig" in err
-    assert "whole project directory" not in err
-    assert "Nothing was changed" in err
-    pdir = paths.project_dir(project)
-    assert (pdir / "appconfig" / "settings").read_text() == "prod-config"
-    assert not (pdir / ".releases" / "prestage").exists()
-
-
 def test_a_whole_project_mount_is_refused_before_install(paths, capsys) -> None:
     project = f"bmst{uuid.uuid4().hex[:8]}"
     add_project(project, paths)
@@ -176,8 +158,40 @@ def test_a_whole_project_mount_is_refused_before_install(paths, capsys) -> None:
         assert run_deploy(project, paths, ref=V1) == 0
         assert run_stage(project, paths, ref=V2) == 1
     err = capsys.readouterr().err
-    assert "staging web:/srv/all mounts the whole project directory" in err
-    assert "older boxmunge" not in err
+    # Staging mounts its own release read-only, which I3 allows; production
+    # would mount the whole project directory once this release is promoted.
+    assert ("production after promoting this release web:/srv/all mounts the "
+            "whole project directory") in err
+    assert "staging web:/srv/all mounts the whole project directory" not in err
     pdir = paths.project_dir(project)
     assert (pdir / "appconfig" / "settings").read_text() == "prod-config"
-    assert not (pdir / ".releases" / "prestage").exists()
+    assert not (pdir / ".releases" / "staged").exists()
+
+
+def test_promote_proves_and_installs_the_staged_release(paths, staged) -> None:
+    """D8 resolves the staged release as production would run it, for real,
+    then promote installs it and drops the slot."""
+    from boxmunge.commands.promote_cmd import run_promote
+    with _no_containers():
+        assert run_promote(staged, paths) == 0
+    project_dir = paths.project_dir(staged)
+    assert (project_dir / "appconfig" / "settings").read_text() == "staged-config"
+    assert not slot_dir(paths, staged).exists()
+    assert not list(paths.project_releases(staged).glob(".isolation-*"))
+
+
+def test_a_deploy_during_a_stage_sharing_staging_data_is_refused(paths, staged, capsys) -> None:
+    release = _release(staged, "hotfix")
+    doc = yaml.safe_load(release["compose.yml"])
+    doc["services"]["web"]["volumes"].append("./uploads-staging:/u2")
+    release["compose.yml"] = yaml.safe_dump(doc)
+    place_bundle(paths, staged, "2026-10-13T110000000000", release)
+    with _no_containers():
+        assert run_deploy(staged, paths, ref="2026-10-13T110000000000") == 1
+    err = capsys.readouterr().err
+    assert "share these with production after this install" in err
+    assert "Nothing was changed" in err
+    project_dir = paths.project_dir(staged)
+    assert (project_dir / "appconfig" / "settings").read_text() == "prod-config"
+    assert not (project_dir / ".releases" / "install.json").exists()
+    assert not list(paths.project_releases(staged).glob(".isolation-*"))

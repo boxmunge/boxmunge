@@ -24,19 +24,6 @@ def notify_locked_skips(paths: BoxPaths, skipped_locked: list[str]) -> None:
            f"deploy.", component="upgrade")
 
 
-def notify_install_open(paths: BoxPaths, install_open: dict[str, str]) -> None:
-    """One priority-1 alert per upgrade naming every project left alone
-    because an install is open."""
-    if not install_open:
-        return
-    from boxmunge.notify import notify
-    lines = "\n".join(f"- {name}: {why}" for name, why in sorted(install_open.items()))
-    notify(paths, "upgrade — install in progress",
-           f"{len(install_open)} project(s) have an unfinished install. Their configs "
-           f"were not regenerated and they were not restarted:\n{lines}",
-           component="upgrade", priority=1)
-
-
 def notify_refused(paths: BoxPaths, refused: dict[str, str]) -> None:
     """One priority-1 alert per upgrade naming every refused project.
 

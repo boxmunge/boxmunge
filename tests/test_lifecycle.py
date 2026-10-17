@@ -127,6 +127,9 @@ class TestComposeUpCallersUseIsBlocked:
             "boxmunge/docker.py",
             # Start checks — callers above it gate on is_blocked.
             "boxmunge/compose_guard.py",
+            # Staging's bring-up for stage_locked, which refuses a blocked
+            # project (refuse_if_blocked) under the lock before it.
+            "boxmunge/staging_bringup.py",
         }
 
         missing: list[str] = []

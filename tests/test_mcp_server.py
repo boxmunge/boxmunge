@@ -218,3 +218,10 @@ class TestNewToolsRegistered:
         from boxmunge.mcp_server import _TOOL_DEFS
         names = [t["name"] for t in _TOOL_DEFS]
         assert "handshake" in names
+
+    def test_stage_tool_offers_a_bundle_only(self) -> None:
+        """This build refuses to stage a git project."""
+        from boxmunge.mcp_server import _TOOL_DEFS
+        stage = next(t for t in _TOOL_DEFS if t["name"] == "stage")
+        ref = stage["inputSchema"]["properties"]["ref"]["description"]
+        assert "bundle" in ref.lower() and "git" not in ref.lower()

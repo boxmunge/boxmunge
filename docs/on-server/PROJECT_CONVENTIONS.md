@@ -50,6 +50,7 @@ on the server changes (`ERROR:` naming each entry, exit 1):
 | `caddy.override.conf` | Used verbatim as the project's Caddy config, so only an operator places it, on the server |
 | `repo/` | The clone of a git-sourced project |
 | `.releases/`, `compose.boxmunge*.yml`, `compose.staging-base.yml` | Written by boxmunge itself |
+| any top-level `<name>-staging` (`foo-staging/`, `app.db-staging`) | Reserved for staging's copies of the project's entries: staging's copy of `./foo` is `foo-staging`. Rename it |
 
 The archive itself must hold exactly one top-level directory (the project), and only regular files,
 directories and links. A link must resolve inside the project directory: a bundle with an absolute

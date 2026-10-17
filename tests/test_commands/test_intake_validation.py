@@ -88,7 +88,7 @@ class TestStageRejectsBeforeTouchingLiveTree:
         place_bundle(paths, timestamp="2026-10-13T100000000000",
                      files={"compose.yml": HOSTILE_COMPOSE})
         with patch("boxmunge.compose_guard.compose_up") as up, \
-                patch("boxmunge.commands.stage_cmd.caddy_reload"):
+                patch("boxmunge.staging_bringup.caddy_reload"):
             rc = run_stage("myapp", paths)
 
         assert rc == 3

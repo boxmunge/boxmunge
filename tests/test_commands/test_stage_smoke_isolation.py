@@ -1,10 +1,10 @@
 """Production is checked with its own smoke script while a release is staged.
 
-`stage` installs the staged release into the project dir production runs
-from. Production's overlay used to mount ./boxmunge-scripts from there, so
-after a stage, `check` ran the staged release's smoke.sh against the
-production release; a check only the new release passes marked production
-FAILING, and one exiting 2 got it stopped by the health monitor.
+`stage` used to install the staged release into the project dir production
+runs from, and production's overlay mounted ./boxmunge-scripts from there,
+so `check` ran the staged release's smoke.sh against the production
+release. The staged release now lives in the slot; production's tree, and
+its script, stay production's.
 """
 from __future__ import annotations
 
@@ -23,7 +23,8 @@ from boxmunge.compose import prepare_compose_override
 from boxmunge.docker import DockerError
 from boxmunge.manifest import load_manifest
 from boxmunge.project_registry import add_project
-from boxmunge.release_staging import has_prestage
+from boxmunge.release_txn import load_txn
+from boxmunge.staged_release import load_slot, release_dir, slot_dir
 
 from tests.bundle_helpers import manifest_text, place_bundle
 
@@ -51,7 +52,8 @@ def _docker(deploy_up=None):
             patch("boxmunge.commands.deploy.caddy_reload"), \
             patch("boxmunge.commands.check.run_smoke_in_container",
                   return_value=SmokeResult("ok", "")), \
-            patch("boxmunge.commands.stage_cmd.caddy_reload"), \
+            patch("boxmunge.staging_bringup.caddy_reload"), \
+            patch("boxmunge.stage_slot.compose_down"), \
             patch("boxmunge.commands.unstage_cmd.compose_down"), \
             patch("boxmunge.commands.unstage_cmd.caddy_reload"):
         yield
@@ -79,7 +81,9 @@ def staged(paths):
 
 def test_stage_leaves_production_on_its_own_smoke_script(staged) -> None:
     pdir = staged.project_dir("myapp")
-    assert (pdir / "boxmunge-scripts" / "smoke.sh").read_text() == "staged check\n"
+    assert (pdir / "boxmunge-scripts" / "smoke.sh").read_text() == "prod check\n"
+    staged_smoke = release_dir(slot_dir(staged, "myapp")) / "boxmunge-scripts" / "smoke.sh"
+    assert staged_smoke.read_text() == "staged check\n"
     assert _prod_smoke(staged) == "prod check\n"
 
 
@@ -96,11 +100,13 @@ def test_promote_switches_production_to_the_staged_script(staged) -> None:
     assert _prod_smoke(staged) == "staged check\n"
 
 
-def test_promote_failing_before_any_start_keeps_production_on_its_own_script(
+def test_promote_failing_in_its_hook_leaves_the_install_open_and_the_slot_ready(
     paths,
 ) -> None:
-    """A pre-deploy hook that fails runs before any container is touched:
-    production still runs its own release, so it keeps its own script."""
+    """A pre-deploy hook that fails runs before any container is touched, but
+    after the staged release is installed in the project dir (as for any
+    deploy): the install stays open and the slot stays promotable. Production
+    mounts the project dir's scripts, so it sees the installed release's."""
     add_project("myapp", paths)
     _bundle(paths, V1, "prod check\n")
     with _docker():
@@ -112,8 +118,9 @@ def test_promote_failing_before_any_start_keeps_production_on_its_own_script(
     with _docker():
         assert run_stage("myapp", paths) == 0
         assert run_promote("myapp", paths) == 1
-    assert _prod_smoke(paths) == "prod check\n"
-    assert has_prestage(paths, "myapp")
+    assert load_txn(paths, "myapp") is not None
+    assert _prod_smoke(paths) == "staged check\n"
+    assert load_slot(paths, "myapp").state == "ready"
 
 
 def test_promote_failing_once_containers_started_runs_the_staged_script(
@@ -124,7 +131,7 @@ def test_promote_failing_once_containers_started_runs_the_staged_script(
     with _docker(deploy_up=DockerError("boom")):
         assert run_promote("myapp", staged) == 1
     assert _prod_smoke(staged) == "staged check\n"
-    assert not has_prestage(staged, "myapp")
+    assert load_slot(staged, "myapp").state == "retired"
 
 
 def test_unstage_keeps_production_on_its_own_script(staged) -> None:

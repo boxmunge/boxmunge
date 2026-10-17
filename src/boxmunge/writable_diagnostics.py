@@ -185,6 +185,22 @@ DEFAULT_SCAN_DELAY_SECONDS = 8
 _sleep_fn: Callable[[float], None] = time.sleep
 
 
+def _compose_logs(project_dir: Path, service: str, tail: int, project: str) -> str:
+    # Lazy import: keeps writable_diagnostics importable where docker isn't.
+    from boxmunge.docker import compose_logs_capture
+    return compose_logs_capture(
+        project_dir, service=service, tail=tail,
+        compose_files=["compose.yml", "compose.boxmunge.yml"], project_name=project,
+    )
+
+
+def _production_logs(project_dir: Path, manifest: dict[str, Any],
+                     tail: int) -> Callable[[str], str]:
+    """The default fetcher: a service's logs through production's compose
+    files in ``project_dir`` (_compose_logs, stubbed in the unit tier)."""
+    return lambda svc: _compose_logs(project_dir, svc, tail, manifest["project"])
+
+
 def run_post_deploy_diagnostics(
     project_dir: Path,
     manifest: dict[str, Any],
@@ -247,19 +263,7 @@ def run_post_deploy_diagnostics(
     sleep_fn(sleep_seconds)
 
     if log_fetcher is None:
-        # Lazy import — keeps writable_diagnostics importable in
-        # contexts where docker isn't installed (eg. CI unit tests).
-        from boxmunge.docker import compose_logs_capture
-
-        compose_files = ["compose.yml", "compose.boxmunge.yml"]
-
-        def _default_fetch(svc: str) -> str:
-            return compose_logs_capture(
-                project_dir, service=svc, tail=200,
-                compose_files=compose_files, project_name=manifest["project"],
-            )
-
-        log_fetcher = _default_fetch
+        log_fetcher = _production_logs(project_dir, manifest, tail=200)
 
     hints: dict[str, str] = {}
     for svc_name in targets:
@@ -311,17 +315,7 @@ def enrich_failure_with_writable_hint(
         return failure_message
 
     if log_fetcher is None:
-        from boxmunge.docker import compose_logs_capture
-
-        compose_files = ["compose.yml", "compose.boxmunge.yml"]
-
-        def _default_fetch(svc: str) -> str:
-            return compose_logs_capture(
-                project_dir, service=svc, tail=tail,
-                compose_files=compose_files, project_name=manifest["project"],
-            )
-
-        log_fetcher = _default_fetch
+        log_fetcher = _production_logs(project_dir, manifest, tail=tail)
 
     try:
         logs = log_fetcher(service)

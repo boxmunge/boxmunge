@@ -83,6 +83,23 @@ longer match, after a platform rollback or a hand edit, or one that cannot
 be read. Check first that production is what .releases/live.json says. A
 record that still matches is refused: rerun, --abandon, rollback or deploy
 a fix instead.""",
+    "legacy-stage": """\
+Usage: boxmunge legacy-stage <project> [--discard [--confirm-recreated] | --keep-staged]
+
+Resolve a release staged by boxmunge 0.10.1 before this upgrade. Without a
+flag, shows what production runs and the choices, and changes nothing.
+--discard throws the staged release away and puts production's back (with
+--confirm-recreated when production was already started from the staged
+files); --keep-staged treats it as promoted. Refused while a platform
+rollback is still possible (probation). If interrupted, run the same
+command again. Operator-only: run it as root, as boxmunge-server.""",
+    "staging-teardown-all": """\
+Usage: boxmunge staging-teardown-all --reason platform-rollback
+
+Tear down every project's staged release and alert to re-stage it. Run by
+the upgrade shim before a platform rollback swaps back (an older release
+does not know the staged slot); a failure is alerted with that project's
+manual commands and never blocks the rollback. Operator-only: run as root.""",
     "rollback": """\
 Usage: boxmunge rollback <project> [--yes]
 

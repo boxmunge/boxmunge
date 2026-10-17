@@ -15,8 +15,8 @@ Installing a release replaces all release code (entries the new release no
 longer ships are removed) and never touches box state. Before an upgrade the
 live code is copied to ``.releases/previous/``, with ``previous.json``
 recording its ref and the data snapshot taken just before it was replaced.
-That pair is exactly what `rollback` restores. The production release kept
-aside while another one is staged is in boxmunge.release_staging.
+That pair is exactly what `rollback` restores. The staged release lives in
+its own tree (boxmunge.staged_release).
 """
 from __future__ import annotations
 
@@ -30,16 +30,14 @@ from typing import TYPE_CHECKING
 from boxmunge.bundle import (
     BOX_OWNED_ENTRIES, BOXMUNGE_ENTRIES, BundleError, is_placeholder,
 )
-from boxmunge.compose_mounts import PROD_SMOKE_SOURCE
 from boxmunge.data_dirs import (
     Announce, DataDirs, KeptData, ReleaseStateError, classify, entry_label,
     has_record, holds_data, record_path, save_record,
     start_record, warn_retained,
 )
-from boxmunge.fileutil import (
-    atomic_write_text, chmod_nofollow, chown_tree_deploy, discard_dir, fsync_dir,
-    mkdir_p_deploy, sync_entries,
-)
+from boxmunge.fileutil import atomic_write_text, discard_dir, fsync_dir, sync_entries
+from boxmunge.fs_nofollow import chmod_nofollow
+from boxmunge.staged_release import SLOT, release_dir
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -65,7 +63,6 @@ class PreviousRelease:
 
 
 _PREVIOUS = "previous"
-_PRESTAGE = "prestage"
 
 
 def previous_dir(paths: BoxPaths, project_name: str) -> Path:
@@ -81,13 +78,30 @@ def _live_meta(paths: BoxPaths, project_name: str) -> Path:
 
 
 def _kept_trees(project_dir: Path) -> list[Path]:
-    """Kept releases' code: the rollback target and, during a stage, production."""
-    releases = project_dir / ".releases"
-    return [releases / _PREVIOUS, releases / _PRESTAGE / "release"]
+    """The kept release's code: the rollback target."""
+    return [project_dir / ".releases" / _PREVIOUS]
 
 
-def _classify(project_dir: Path, release_tree: Path | None) -> DataDirs:
-    return classify(project_dir, release_tree, _kept_trees(project_dir))
+def _staged_compose(project_dir: Path) -> Path | None:
+    """The staged release's compose.yml, while a release is staged. A linked
+    slot is refused by its own cores; nothing is read through it. Whatever
+    lies at the name is passed on: data_dirs reads it without following a
+    link or blocking on a FIFO, and refuses anything but a regular file."""
+    slot = project_dir / ".releases" / SLOT
+    if not slot.is_dir() or slot.is_symlink():
+        return None
+    if os.path.islink(release_dir(slot)):
+        raise ReleaseStateError(f"{release_dir(slot)} is a symbolic link, where the staged "
+                                f"release's own tree belongs; nothing is read through it. "
+                                f"Unstage, or remove it by hand and stage again")
+    compose = release_dir(slot) / "compose.yml"
+    return compose if os.path.lexists(compose) else None
+
+
+def _classify(project_dir: Path, release_tree: Path | None, *,
+              with_staged: bool = True) -> DataDirs:
+    return classify(project_dir, release_tree, _kept_trees(project_dir),
+                    _staged_compose(project_dir) if with_staged else None)
 
 
 def _ensure_record(project_dir: Path, release_tree: Path | None = None,
@@ -143,8 +157,7 @@ def _check(tree: Path, dirs: DataDirs) -> None:
         labels = ", ".join(entry_label(e) for e in seeded)
         raise BundleError(
             f"The release ships content for {labels}, which the release kept "
-            f"for rollback (or production's, during a stage) bind-mounts "
-            f"read-write, so boxmunge treats it as data: this project has no "
+            f"for rollback bind-mounts read-write, so boxmunge treats it as data: this project has no "
             f"record of its data directories yet ({record_path(dirs.project_dir)}). "
             f"If it is data, remove it from the bundle. If it is code, write "
             f"that file yourself listing only the directories that really hold "
@@ -237,13 +250,25 @@ def live_code_entries(project_dir: Path, release_tree: Path | None = None) -> li
     return sorted(e for e in project_dir.iterdir() if e.name not in state)
 
 
-def project_data_dirs(project_dir: Path, release_tree: Path | None = None) -> DataDirs:
+def project_data_dirs(project_dir: Path, release_tree: Path | None = None, *,
+                      with_staged: bool = True) -> DataDirs:
     """The project's entries as the live release, or once ``release_tree``
-    is installed, classifies them (see module docstring)."""
-    dirs = _classify(project_dir, release_tree)
+    is installed, classifies them (see module docstring). ``with_staged``
+    False leaves the current slot's mounts out (DataDirs.staged)."""
+    dirs = _classify(project_dir, release_tree, with_staged=with_staged)
     if release_tree is None:
         return dirs
     return dirs.after_install({e.name for e in release_tree.iterdir()})
+
+
+def staged_box_state(project_dir: Path, staged_release: Path) -> set[str]:
+    """Box state as the staged release sees it: the entries the staging base
+    rewrite points at ``-staging`` copies, so also the stores the data copy
+    pairs. (Production's own classification during a stage only keeps those
+    copies from being pruned: DataDirs.staged.) The current slot is not
+    read: ``staged_release`` is the staged view, and during a re-stage an
+    old slot's unreadable compose.yml must not fail the new stage."""
+    return project_data_dirs(project_dir, staged_release, with_staged=False).box_state()
 
 
 def install_release(tree: Path, project_dir: Path,
@@ -366,30 +391,3 @@ def sync_release_code(project_dir: Path) -> None:
     """Make the release code install_release wrote durable, before an
     install records that it is in place."""
     sync_entries(live_code_entries(project_dir), project_dir)
-
-
-# --- production smoke scripts ---------------------------------------------
-# Production containers mount a copy of their release's boxmunge-scripts/,
-# not the project dir's, which `stage` overwrites with the staged release's
-# scripts while production keeps running. The copy changes only when
-# production's overlay is regenerated.
-
-def sync_live_scripts(paths: BoxPaths, project_name: str, release_root: Path) -> None:
-    """Make production's smoke-script copy mirror ``release_root``'s scripts.
-
-    Refreshed in place so a running container's bind mount (resolved to the
-    directory inode at start) keeps seeing it. A release without
-    boxmunge-scripts/ leaves the copy empty.
-    """
-    dest = paths.project_dir(project_name) / PROD_SMOKE_SOURCE
-    src = release_root / "boxmunge-scripts"
-    if dest.is_symlink() or (dest.exists() and not dest.is_dir()):
-        raise ReleaseStateError(f"{dest} is not a directory")
-    mkdir_p_deploy(dest)
-    chmod_nofollow(dest, 0o755)
-    if src.is_dir() and not src.is_symlink():
-        _refresh_dir_in_place(src, dest)
-    else:
-        for child in dest.iterdir():
-            _remove(child)
-    chown_tree_deploy(dest)

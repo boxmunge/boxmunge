@@ -6,10 +6,10 @@ from boxmunge.compose import generate_compose_override, generate_staging_compose
 
 
 # The overlay writes long-syntax mounts so a path is never read as options.
-_PROD_SMOKE_MOUNT = {"type": "bind", "source": "./.releases/live-scripts",
-                     "target": "/boxmunge-scripts", "read_only": True,
-                     "bind": {"create_host_path": True}}
-_STAGING_SMOKE_MOUNT = {**_PROD_SMOKE_MOUNT, "source": "./boxmunge-scripts"}
+# Relative in both environments: each mounts its own release's scripts.
+_SMOKE_MOUNT = {"type": "bind", "source": "./boxmunge-scripts",
+                "target": "/boxmunge-scripts", "read_only": True,
+                "bind": {"create_host_path": True}}
 
 
 def _volume(source: str, target: str) -> dict[str, str]:
@@ -212,10 +212,10 @@ class TestSmokeScriptMount:
         content = generate_compose_override(manifest, user_compose={})
         parsed = yaml.safe_load(content)
         assert parsed["services"]["web"]["volumes"] == [
-            _PROD_SMOKE_MOUNT]
+            _SMOKE_MOUNT]
 
     def test_staging_mounts_the_staged_scripts(self) -> None:
-        """Staging runs the staged release's scripts from the project dir."""
+        """Staging runs the staged release's scripts from the slot."""
         manifest = {
             "project": "myapp",
             "services": {"web": {
@@ -226,7 +226,7 @@ class TestSmokeScriptMount:
         content = generate_staging_compose_override(manifest, user_compose={})
         parsed = yaml.safe_load(content)
         assert parsed["services"]["web"]["volumes"] == [
-            _STAGING_SMOKE_MOUNT]
+            _SMOKE_MOUNT]
 
     def test_only_smoke_services_get_mount(self) -> None:
         """Only services with smoke get the volume mount."""
@@ -655,7 +655,7 @@ class TestWritableOverlay:
         assert web["tmpfs"] == ["/tmp"]
         # Volumes are NOT introduced into State 1 services.
         assert "volumes" not in web or web.get("volumes") == [
-            _PROD_SMOKE_MOUNT
+            _SMOKE_MOUNT
         ]
 
     # --- State MANAGED ----------------------------------------------------
@@ -723,7 +723,7 @@ class TestWritableOverlay:
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
         # Smoke mount must still be present.
-        assert _PROD_SMOKE_MOUNT in web["volumes"]
+        assert _SMOKE_MOUNT in web["volumes"]
         # And the persistent volume too.
         assert _volume("demo_dbdata", "/app/data") in web["volumes"]
 
@@ -778,7 +778,7 @@ class TestWritableOverlay:
         override = generate_compose_override(m, user_compose={})
         parsed = yaml.safe_load(override)
         web = parsed["services"]["web"]
-        assert _PROD_SMOKE_MOUNT in web.get(
+        assert _SMOKE_MOUNT in web.get(
             "volumes", []
         )
 
@@ -819,3 +819,16 @@ class TestBuiltImageNames:
         services = yaml.safe_load(generate_staging_compose_override(
             self._MANIFEST, user_compose=self._USER))["services"]
         assert services["web"]["image"] == "boxmunge.invalid/myapp-staging/web"
+
+
+def test_production_env_files_names_only_files_that_exist(paths) -> None:
+    from boxmunge.compose import production_env_files
+    project_dir = paths.project_dir("myapp")
+    project_dir.mkdir(parents=True)
+    assert production_env_files(paths, "myapp") == {}
+    paths.host_secrets.write_text("")
+    (project_dir / "project.env").write_text("")
+    paths.project_secrets("myapp").write_text("")
+    assert production_env_files(paths, "myapp") == {
+        "host_secrets": str(paths.host_secrets), "project_env": "./project.env",
+        "project_secrets": "./secrets.env"}

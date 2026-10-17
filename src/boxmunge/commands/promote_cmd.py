@@ -1,107 +1,333 @@
-"""boxmunge promote <project> — promote staging to production."""
+# SPDX-License-Identifier: Apache-2.0
+"""boxmunge promote <project> — deploy the staged release to production.
+
+Promote is an ordinary install (deploy_tree_locked, source "staged") whose
+tree is the slot's release, never a newer inbox bundle. Once
+replace_release returns the slot is marked retired, so it is never
+promoted twice; on success staging is torn down. A killed promote is
+finished by running promote again.
+
+promote_locked runs the spec's steps as named functions, in order:
+_eligibility, _verify_slot, _deploy_tree (whose switch ends in _retire),
+_teardown (in _teardown_after on success).
+"""
 from __future__ import annotations
+
 import sys
-from typing import TYPE_CHECKING
-from boxmunge.commands.deploy import deploy_locked
-from boxmunge.commands.promote_release import (
-    Promotion, deploy_staged_locked, report_failed_after_switch,
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+from boxmunge.commands.deploy import deploy_eligible
+from boxmunge.commands.deploy_tree import TreeDeploy, deploy_tree_locked
+from boxmunge.commands.unstage_cmd import teardown_staging_locked
+from boxmunge.data_dirs import ReleaseStateError
+from boxmunge.fileutil import LockError, project_lock
+from boxmunge.intake import IntakeError, check_installable, report_refusal, validate_release_tree
+from boxmunge.log import log_error, log_operation
+from boxmunge.probation import clear_probation_if_active
+from boxmunge.release_txn import InstallTxn, close_txn, load_txn, options_text
+from boxmunge.release import live_ref
+from boxmunge.staged_release import (
+    SlotError, StagedRelease, has_slot, load_slot, promoted_debris, release_dir, slot_dir,
+    sweep_debris, update_meta,
 )
-from boxmunge.commands.unstage_cmd import unstage_locked
-from boxmunge.fileutil import project_lock, LockError
-from boxmunge.lifecycle import refuse_if_blocked
-from boxmunge.log import log_operation
-from boxmunge.state import read_state
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
+COMPONENT = "promote"
 
-def run_promote(project_name: str, paths: BoxPaths, dry_run: bool = False) -> int:
+
+class _RetireFailed(Exception):
+    """Recording the slot as retired failed after replace_release returned;
+    the install stays open at switching."""
+
+    def __init__(self, rc: int, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.rc = rc
+        self.cause = cause
+
+
+@dataclass(frozen=True)
+class _Promotion:
+    meta: StagedRelease
+    txn: InstallTxn | None
+    resuming: bool  # the open install is this slot's promote
+
+
+def run_promote(project: str, paths: BoxPaths, dry_run: bool = False) -> int:
     """promote: take the project lock and promote staging to production."""
     try:
-        with project_lock(project_name, paths):
-            return promote_locked(project_name, paths, dry_run)
+        with project_lock(project, paths):
+            return promote_locked(project, paths, dry_run)
     except LockError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
 
-def promote_locked(project_name: str, paths: BoxPaths, dry_run: bool = False) -> int:
-    """The promote core. Caller holds the project lock; never takes it.
-
-    Deploy and unstage run as cores under the same lock, so nothing can
-    land between production going live and staging being torn down.
-    """
-    if refuse_if_blocked(project_name, paths):
-        return 1
-    staging_state = read_state(paths.project_staging_state(project_name))
-    if not staging_state.get("active"):
-        print(f"ERROR: No active staging for '{project_name}'.", file=sys.stderr)
-        return 1
+def promote_locked(project: str, paths: BoxPaths, dry_run: bool = False) -> int:
+    """The promote core. Caller holds the project lock; never takes it."""
+    found = _eligibility(project, paths, dry_run)
+    if isinstance(found, int):
+        return found
     if dry_run:
-        print(f"[DRY RUN] Would promote '{project_name}' from staging to production")
+        what = ("finish tearing down staging" if found.meta.state == "retired"
+                else f"promote '{project}' ({found.meta.ref}) to production")
+        print(f"[DRY RUN] Would {what}")
         return 0
-    return _run_promote_inner(project_name, paths, staging_state)
+    if found.meta.state == "retired":
+        return _finish_retired(project, paths, found)
+    manifest = _verify_slot(project, paths, found)
+    if isinstance(manifest, int):
+        return manifest
+    try:
+        rc = _deploy_tree(project, paths, found.meta, manifest)
+    except _RetireFailed as e:
+        return _report_retire_failed(project, paths, found.meta.ref, e)
+    if rc != 0:
+        return _report_failed(project, paths, found.meta, rc)
+    return _teardown_after(project, paths, found.meta.ref)
 
 
-def _run_promote_inner(
-    project_name: str, paths: BoxPaths, staging_state: dict,
-) -> int:
-    print(f"Promoting {project_name} from staging to production...")
-
-    # Deploy to production FIRST — staging stays live as fallback
-    print("  Deploying to production...")
-    deployed = _deploy_to_production(project_name, paths, staging_state)
-    if deployed.rc != 0:
-        if deployed.switched:
-            print(f"ERROR: Production deploy failed after the switch (see above). "
-                  f"Staging is still up; run 'unstage {project_name}' to remove "
-                  f"it.", file=sys.stderr)
-        else:
-            print("ERROR: Production deploy failed. Staging is still live.",
-                  file=sys.stderr)
-        # Preserve hardening-rejection exit code (3) so operators can
-        # distinguish security policy failures from generic deploy errors.
-        return deployed.rc if deployed.rc == 3 else 1
-
-    # Only tear down staging after successful production deploy
-    print("  Tearing down staging...")
-    if unstage_locked(project_name, paths) != 0:
-        print(f"ERROR: {project_name} is live in production, but tearing down "
-              f"staging failed (see above). Run 'unstage {project_name}' to "
-              f"finish.", file=sys.stderr)
-        log_operation("promote", "Promoted; staging teardown incomplete", paths,
-                      project=project_name)
+def _eligibility(project: str, paths: BoxPaths, dry_run: bool) -> _Promotion | int:
+    """Step 1, under the lock: not blocked, registered, a readable slot
+    that finished staging (or this slot's open promote, to resume). Crash
+    debris goes first (a dry run leaves it): a promote killed while
+    dropping its announced slot is finished here."""
+    if not deploy_eligible(project, paths):
         return 1
+    txn = None
+    try:
+        if not has_slot(paths, project) and promoted_debris(paths, project):
+            return _finish_dropped(project, paths, dry_run)
+        if not dry_run:
+            sweep_debris(paths, project)
+        txn = load_txn(paths, project)
+        meta = load_slot(paths, project)
+    except (SlotError, ReleaseStateError, OSError) as e:
+        print(f"ERROR: Cannot promote '{project}': {e}. {_unreadable_advice(project, txn)}",
+              file=sys.stderr)
+        return 1
+    if meta is None:
+        print(f"ERROR: No staged release for '{project}'.", file=sys.stderr)
+        return 1
+    if meta.kind != "bundle":
+        print(f"ERROR: Cannot promote '{project}': it is a git stage, which this build of "
+              f"boxmunge cannot promote. Unstage it and deploy with prod-deploy.",
+              file=sys.stderr)
+        return 1
+    resuming = txn is not None and txn.source == "staged" and txn.staged_id == meta.id
+    if meta.state == "starting" and not resuming:
+        print(f"ERROR: Cannot promote '{project}': the stage did not finish; stage again "
+              f"or unstage.", file=sys.stderr)
+        return 1
+    return _Promotion(meta, txn, resuming)
 
-    log_operation("promote", "Promoted from staging to production", paths, project=project_name)
-    print(f"{project_name}: promoted to production successfully.")
 
-    from boxmunge.webhooks import webhook_safe
-    webhook_safe("promote", project_name, paths)
+def _unreadable_advice(project: str, txn: InstallTxn | None) -> str:
+    """A slot record that cannot be read under this project's open promote
+    cannot be resumed, and unstage keeps the slot for it: name the
+    install's own ways out instead of a stage that would be refused."""
+    if txn is None or txn.source != "staged":
+        return "Stage again, or unstage."
+    return (f"The promote of {txn.ref} is open (phase {txn.phase}) and cannot resume "
+            f"without it: {options_text(project, txn, rerun=False)}")
 
+
+def _finish_dropped(project: str, paths: BoxPaths, dry_run: bool) -> int:
+    """Staging was down and the promotion announced; only the slot's
+    removal was left (staged_release.drop_slot)."""
+    if dry_run:
+        print("[DRY RUN] Would finish removing the promoted staged slot")
+        return 0
+    sweep_debris(paths, project)
+    print(f"{project}: promoted to production; finished removing the staged slot an "
+          f"interrupted promote left. Production runs {live_ref(paths, project)}.")
     return 0
 
 
-def _deploy_to_production(project_name: str, paths: BoxPaths,
-                          staging_state: dict) -> Promotion:
-    """A bundle project deploys the release `stage` installed, never a newer
-    inbox bundle; a git project deploys the staged ref."""
-    if (paths.project_dir(project_name) / "repo").exists():
-        staged_ref = staging_state.get("ref")
-        ref_arg = staged_ref if staged_ref and staged_ref != "latest" else None
-        state_path = paths.project_deploy_state(project_name)
-        started_before = read_state(state_path).get("last_started_at")
-        rc = deploy_locked(project_name, paths, ref=ref_arg, component="promote")
-        # The deploy records a start once its containers may have started
-        # (deploy.replace_release), so a failure after that point is one
-        # past the switch.
-        switched = read_state(state_path).get("last_started_at") != started_before
-        if rc != 0 and switched:
-            current = read_state(state_path).get("current_ref", "the staged ref")
-            report_failed_after_switch(project_name, paths, current, certain=True)
-        return Promotion(rc, switched=switched)
-    return deploy_staged_locked(project_name, paths)
+def _finish_retired(project: str, paths: BoxPaths, found: _Promotion) -> int:
+    """A promote killed after replace_release returned: production was
+    switched to the staged release, so only the close and the teardown are
+    left. The slot records how the switch ended, and live.json what runs
+    now (a deploy may have replaced it since), so a rerun says both."""
+    if found.resuming:
+        close_txn(paths, project, found.txn)
+    ref = found.meta.ref
+    try:
+        live = live_ref(paths, project)
+    except ReleaseStateError as e:
+        print(f"ERROR: Cannot tell which release is live: {e}", file=sys.stderr)
+        return 1
+    since = "" if live == ref else f", and {live} has been deployed since"
+    if found.meta.switch_rc == 0:
+        print(f"{ref} is already live in production; finishing the teardown of staging."
+              if live == ref else f"{ref} was promoted, but {live} is live now (deployed "
+              f"since); finishing the teardown of staging.")
+        return _teardown_after(project, paths, ref, live)
+    print(f"{ref} was switched to production but its promotion failed{since}; finishing "
+          f"the teardown of staging.")
+    if not _teardown(project, paths):
+        return 1
+    if live != ref:
+        print(f"ERROR: staging was torn down; the promotion of {ref} failed after "
+              f"production was switched{since}.", file=sys.stderr)
+        return 1
+    print(f"ERROR: staging was torn down, but the promotion of {ref} failed after "
+          f"production was switched (see 'rollback {project}' below).", file=sys.stderr)
+    report_failed_after_switch(project, paths, ref)
+    return 1
+
+
+def _verify_slot(project: str, paths: BoxPaths, found: _Promotion) -> dict[str, Any] | int:
+    """Step 2: the slot's release must pass this boxmunge's checks (upgrades
+    do not migrate the slot). A resume skips check_installable: the
+    release is already partly in the project dir."""
+    release = release_dir(slot_dir(paths, project))
+    try:
+        manifest = validate_release_tree(release, project, paths, COMPONENT)
+        if not found.resuming:
+            check_installable(release, paths.project_dir(project))
+    except IntakeError as e:
+        print("  The staged release no longer passes this boxmunge's checks; stage it "
+              "again.", file=sys.stderr)
+        return report_refusal(e)
+    return manifest
+
+
+def _deploy_tree(project: str, paths: BoxPaths, meta: StagedRelease,
+                 manifest: dict[str, Any]) -> int:
+    """Step 3: the same install core as a bundle deploy, over the slot's tree."""
+    print(f"Promoting {project} ({meta.ref}) from staging to production...")
+    return deploy_tree_locked(project, paths, TreeDeploy(
+        tree=release_dir(slot_dir(paths, project)), ref=meta.ref, source="staged",
+        staged_id=meta.id, manifest=manifest, component=COMPONENT,
+        on_installed=lambda: clear_probation_if_active(paths, "deploy"),
+        on_switched=lambda rc: _retire(project, paths, rc)))
+
+
+def _retire(project: str, paths: BoxPaths, rc: int) -> None:
+    """Step 4, once replace_release returns (any result) and before the
+    transaction closes: the slot is never promoted again, and it records
+    how the switch ended for a rerun that only has the teardown left."""
+    try:
+        meta = load_slot(paths, project)
+        if meta is None:
+            raise SlotError(f"the staged slot of '{project}' is gone")
+        update_meta(paths, project, meta, state="retired", switch_rc=rc)
+    except (SlotError, OSError) as e:
+        raise _RetireFailed(rc, e) from e
+
+
+def _report_retire_failed(project: str, paths: BoxPaths, ref: str, e: _RetireFailed) -> int:
+    ended = "succeeded" if e.rc == 0 else f"failed (exit code {e.rc})"
+    print(f"ERROR: The switch of production to {ref} {ended}, but recording the staged "
+          f"slot as retired failed: {e}. "
+          f"{_options_now(project, paths, ref, isinstance(e.cause, OSError))}.",
+          file=sys.stderr)
+    log_error(COMPONENT, f"Promotion of {ref}: recording the staged slot as retired "
+              f"failed: {e}", paths, project=project)
+    return 1
+
+
+def _options_now(project: str, paths: BoxPaths, ref: str, slot_readable: bool) -> str:
+    """The open install's ways out, read now, for a report that cannot rely
+    on the slot record."""
+    try:
+        txn = load_txn(paths, project)
+    except ReleaseStateError as e:
+        return f"The install record cannot be read either: {e}"
+    if txn is None:
+        report_failed_after_switch(project, paths, ref)
+        return f"'unstage {project}' removes staging"
+    if not slot_readable:
+        return _unreadable_advice(project, txn)
+    return (f"The install of {txn.ref} stays open at {txn.phase}: "
+            f"{options_text(project, txn)}")
+
+
+def _report_failed(project: str, paths: BoxPaths, meta: StagedRelease, rc: int) -> int:
+    try:
+        now = load_slot(paths, project)
+    except SlotError as e:
+        print(f"ERROR: The promotion of {meta.ref} failed, and the staged slot's record "
+              f"cannot be read now ({e}). {_options_now(project, paths, meta.ref, False)}.",
+              file=sys.stderr)
+        log_error(COMPONENT, f"Promotion of {meta.ref} failed, and the staged slot's "
+                  f"record cannot be read: {e}", paths, project=project)
+        return rc if rc == 3 else 1
+    if now is not None and now.state == "retired":
+        report_failed_after_switch(project, paths, meta.ref)
+        print(f"  Staging is still up; run 'unstage {project}' to remove it.",
+              file=sys.stderr)
+    else:
+        print("ERROR: Production deploy failed. Staging is still live.", file=sys.stderr)
+    # A hardening rejection keeps its exit code (3) so operators can tell
+    # security policy failures from other deploy errors.
+    return rc if rc == 3 else 1
+
+
+def _teardown(project: str, paths: BoxPaths,
+              announce: Callable[[], None] | None = None) -> bool:
+    """Step 5: the unstage core, under the same lock."""
+    print("  Tearing down staging...")
+    if teardown_staging_locked(project, paths, component=COMPONENT, promoted=announce):
+        return True
+    print(f"ERROR: {project} is live in production, but tearing down staging failed "
+          f"(see above). Run 'unstage {project}' to finish.", file=sys.stderr)
+    log_operation(COMPONENT, "Staging teardown after the switch incomplete", paths,
+                  project=project)
+    return False
+
+
+def _teardown_after(project: str, paths: BoxPaths, ref: str, live: str | None = None) -> int:
+    """The teardown after a successful switch to ``ref``; ``live`` is what
+    runs now when a deploy has replaced it since."""
+    if not _teardown(project, paths, announce=lambda: _announce(project, paths, ref)):
+        return 1
+    if live is None or live == ref:
+        print(f"{project}: promoted to production successfully.")
+    else:
+        print(f"{project}: {ref} was promoted and staging is torn down; production "
+              f"runs {live}.")
+    return 0
+
+
+def _announce(project: str, paths: BoxPaths, ref: str) -> None:
+    """The "Promoted" log line and webhook, once per slot: recorded in the
+    slot first, so a rerun after a kill never repeats them (a kill between
+    the record and the log line, with no I/O to wait on, loses them)."""
+    meta = load_slot(paths, project)
+    if meta is None:
+        raise SlotError(f"the staged slot of '{project}' is gone")
+    if meta.announced:
+        return
+    update_meta(paths, project, meta, announced=True)
+    log_operation(COMPONENT, f"Promoted {ref} from staging to production", paths,
+                  project=project, detail={"ref": ref})
+    from boxmunge.webhooks import webhook_safe
+    webhook_safe("promote", project, paths)
+
+
+def report_failed_after_switch(project: str, paths: BoxPaths, staged_ref: str) -> None:
+    # rollback imports deploy, which this module also builds on: imported
+    # here, where it is needed, rather than at module load.
+    from boxmunge.commands.rollback import RollbackUnavailable, find_rollback_target
+    print(f"ERROR: The promotion failed after production was switched: production now "
+          f"runs {staged_ref}.", file=sys.stderr)
+    try:
+        target = find_rollback_target(paths, project)
+    except RollbackUnavailable as e:
+        print(f"  'rollback {project}' is not available: {e}. Fix the cause and deploy "
+              f"again.", file=sys.stderr)
+    else:
+        data = (f"restores the data snapshot {target.snapshot} taken before the promotion"
+                if target.snapshot else "has no data to restore (backup.type: none)")
+        print(f"  'rollback {project}' returns to {target.ref} and {data}. Or fix the "
+              f"cause and deploy again.", file=sys.stderr)
+    log_error("deploy", f"Promotion of {staged_ref} failed after production was switched "
+              f"to it", paths, project=project)
 
 
 def cmd_promote(args: list[str]) -> None:

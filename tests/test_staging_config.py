@@ -119,8 +119,8 @@ class TestStagingEmitsOffWarning:
             _reset_logger()
 
     def test_stage_cmd_imports_helper(self) -> None:
-        """Confirm stage_cmd.py imports warn_off_services (wiring sanity)."""
-        from boxmunge.commands import stage_cmd
-        assert hasattr(stage_cmd, "warn_off_services"), (
-            "stage_cmd must import warn_off_services to emit SECURITY OFF"
+        """Confirm staging_bringup imports warn_off_services (wiring sanity)."""
+        from boxmunge import staging_bringup
+        assert hasattr(staging_bringup, "warn_off_services"), (
+            "staging_bringup must import warn_off_services to emit SECURITY OFF"
         )

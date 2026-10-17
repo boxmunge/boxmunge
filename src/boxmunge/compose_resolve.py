@@ -34,20 +34,21 @@ class ComposeResolveError(Exception):
 
 
 @contextmanager
-def _missing_env_files_present(compose_path: Path) -> Iterator[None]:
+def _missing_env_files_present(compose_path: Path, base: Path | None = None) -> Iterator[None]:
     """Make absent in-project service env files exist while Compose resolves.
 
     A bundle is validated in an extraction directory, where on-box files such
     as secrets.env do not exist, and some Compose versions refuse to resolve
     a model whose env_file is missing, even with --no-env-resolution. Each
-    missing env file that stays inside the compose file's directory is
+    missing env file that stays inside ``base`` (the directory Compose
+    resolves relative paths against, by default the compose file's) is
     created empty for the duration of the call and removed afterwards.
     Validation never reads their values. A placeholder that somehow
     survived could not reach a live project: installing a release that
     carries secrets.env is refused.
     """
     created: list[Path] = []
-    base = compose_path.parent
+    base = base or compose_path.parent
     try:
         doc = yaml.safe_load(compose_path.read_text())
     except (OSError, yaml.YAMLError):
@@ -119,19 +120,23 @@ def _literal_service_names(path: Path, root: Path, seen: set[Path]) -> set[str]:
     return names
 
 
-def resolve_compose_config(compose_path: Path, project_name: str) -> dict[str, Any]:
+def resolve_compose_config(compose_path: Path, project_name: str, *,
+                           project_directory: Path | None = None) -> dict[str, Any]:
     """Return the fully resolved compose model for one compose file, with
     every profile: validation and the overlay cover profiled services too.
+    ``project_directory`` resolves a compose file kept beside the release
+    it describes (staging's base, in the slot).
 
     Fails closed: a service the literal files declare (with their includes)
     but the model lacks would go unchecked and unhardened, for example on a
     Compose that ignored `--profile '*'`."""
+    cwd = project_directory or compose_path.parent
+    files = [str(compose_path)] if project_directory else [compose_path.name]
+    extra = {"project_directory": project_directory} if project_directory else {}
     try:
-        with _missing_env_files_present(compose_path):
-            out = docker.compose_config(
-                compose_path.parent, [compose_path.name], project_name=project_name,
-                all_profiles=True,
-            )
+        with _missing_env_files_present(compose_path, cwd):
+            out = docker.compose_config(cwd, files, project_name=project_name,
+                                        all_profiles=True, **extra)
     except docker.DockerError as e:
         raise ComposeResolveError(
             f"`docker compose config` could not resolve {compose_path.name}: {e}"
@@ -240,7 +245,8 @@ class _ReferenceWalk:
             self.files.append(Path(host_path_forms(ref, base)[0]))
         return True
 
-    def visit(self, path: Path) -> None:
+    def visit(self, path: Path, base: Path | None = None) -> None:
+        """``base`` resolves the file's relative paths (default: its directory)."""
         key = str(path.resolve())
         if key in self._seen or not path.is_file():
             return  # Compose itself reports a missing file.
@@ -253,7 +259,7 @@ class _ReferenceWalk:
             return
         if not isinstance(doc, dict):
             return
-        base = path.parent
+        base = base or path.parent
         for compose_paths, env_files, project_dir in _include_entries(doc):
             for ref in compose_paths:
                 if self._confined(f"{path.name}: include", ref, base):
@@ -286,10 +292,12 @@ class _ReferenceWalk:
 
 
 def walk_references(
-    compose_path: Path, roots: tuple[Path, ...],
+    compose_path: Path, roots: tuple[Path, ...], *, base: Path | None = None,
 ) -> tuple[list[str], list[Path]]:
     """Return (every include/extends/env_file/label_file reference that
-    leaves the project, every file the compose file makes Compose read)."""
+    leaves the project, every file the compose file makes Compose read).
+    ``base`` is the project directory Compose resolves the file from, when
+    that is not the file's own directory."""
     walk = _ReferenceWalk(roots)
-    walk.visit(compose_path)
+    walk.visit(compose_path, base)
     return walk.problems, walk.files

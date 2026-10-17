@@ -70,6 +70,15 @@ def _is_ssh(ref: str) -> bool:
     return ref.startswith(_SSH_PREFIXES)
 
 
+def is_local_ref(ref: str, *, additional: bool = False) -> bool:
+    """True for a build input Compose reads from this host's filesystem: not
+    a URL or other scheme, not an SSH git context and, for an additional
+    context, not ``service:<name>``."""
+    if _has_scheme(ref) or _is_ssh(ref):
+        return False
+    return not (additional and ref.startswith("service:"))
+
+
 _SSH_ADVICE = (
     "is fetched over SSH, so Compose hands the build the deploying user's "
     "SSH agent. Use an https:// git URL, or vendor the code into the project."

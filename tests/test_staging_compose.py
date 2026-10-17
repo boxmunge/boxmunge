@@ -16,7 +16,7 @@ DATA = {"data", "uploads", "secrets.env"}
 def _base(tmp_path: Path, doc: object, box_state: set[str] = DATA) -> dict:
     compose = tmp_path / "compose.yml"
     compose.write_text(doc if isinstance(doc, str) else yaml.safe_dump(doc))
-    return yaml.safe_load(generate_staging_compose_base(compose, box_state))
+    return yaml.safe_load(generate_staging_compose_base(compose, box_state, tmp_path))
 
 
 def _volumes(tmp_path: Path, *entries: object) -> list:
@@ -26,11 +26,12 @@ def _volumes(tmp_path: Path, *entries: object) -> list:
 
 def test_data_mounts_move_to_the_entrys_staging_copy(tmp_path: Path) -> None:
     assert _volumes(tmp_path, "./data:/app/data", "./uploads/img:/img:ro", "./data/db/:/db") == [
-        "./data-staging:/app/data", "./uploads-staging/img:/img:ro", "./data-staging/db:/db"]
+        f"{tmp_path}/data-staging:/app/data", f"{tmp_path}/uploads-staging/img:/img:ro",
+        f"{tmp_path}/data-staging/db:/db"]
 
 
 def test_release_code_mounts_keep_the_staged_release(tmp_path: Path) -> None:
-    """The project dir holds the staged release; production mounts its own copy."""
+    """Release code stays relative: it resolves inside the staged release."""
     assert _volumes(tmp_path, "./appconfig:/etc/app:ro", "./nginx.conf:/etc/n.conf:ro") == [
         "./appconfig:/etc/app:ro", "./nginx.conf:/etc/n.conf:ro"]
 
@@ -38,7 +39,7 @@ def test_release_code_mounts_keep_the_staged_release(tmp_path: Path) -> None:
 def test_absolute_sources(tmp_path: Path) -> None:
     inside = f"{tmp_path}/data/db:/db"
     assert _volumes(tmp_path, inside, "/srv/shared:/shared") == [
-        "./data-staging/db:/db", "/srv/shared-staging:/shared"]
+        f"{tmp_path}/data-staging/db:/db", "/srv/shared-staging:/shared"]
 
 
 def test_long_syntax_and_volumes(tmp_path: Path) -> None:
@@ -46,14 +47,14 @@ def test_long_syntax_and_volumes(tmp_path: Path) -> None:
                     {"type": "bind", "source": "./data", "target": "/data"},
                     {"type": "volume", "source": "cache", "target": "/cache"},
                     "dbdata:/var/lib/db", "/anon")
-    assert vols[0]["source"] == "./data-staging"
+    assert vols[0]["source"] == f"{tmp_path}/data-staging"
     assert vols[1]["source"] == "cache"
     assert vols[2:] == ["dbdata:/var/lib/db", "/anon"]
 
 
-def test_explicit_names_ports_and_container_names_are_dropped(tmp_path: Path) -> None:
+def test_explicit_names_and_ports_are_dropped(tmp_path: Path) -> None:
     base = _base(tmp_path, {
-        "services": {"web": {"image": "nginx", "container_name": "myapp-web",
+        "services": {"web": {"image": "nginx",
                              "ports": ["8080:80"], "networks": ["internal"]}},
         "volumes": {"data": {"name": "myapp_data"}},
         "networks": {"internal": {"name": "myapp_internal"}},
@@ -92,5 +93,5 @@ def test_config_and_secret_files_in_box_state_use_staging_copies(tmp_path: Path)
         "secrets": {"env": {"file": "./secrets.env"}},
     })
     assert base["configs"] == {"app": {"file": "./conf/app.conf"},
-                               "tls": {"file": "./data-staging/tls.pem"}}
-    assert base["secrets"] == {"env": {"file": "./secrets.env-staging"}}
+                               "tls": {"file": f"{tmp_path}/data-staging/tls.pem"}}
+    assert base["secrets"] == {"env": {"file": f"{tmp_path}/secrets.env-staging"}}

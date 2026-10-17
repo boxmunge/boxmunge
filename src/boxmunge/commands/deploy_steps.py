@@ -57,6 +57,12 @@ def record_deploy_state(
     write_state(state_path, new_state)
 
 
+def snapshot_wanted(manifest: dict) -> bool:
+    """Whether a release with this manifest takes a pre-deploy snapshot."""
+    return bool(manifest.get("deploy", {}).get("snapshot_before_deploy", True)
+                and manifest.get("backup", {}).get("type", "none") != "none")
+
+
 def take_pre_deploy_snapshot(
     project_name: str, paths: BoxPaths, manifest: dict, no_snapshot: bool,
 ) -> str | None:
@@ -64,9 +70,7 @@ def take_pre_deploy_snapshot(
 
     `manifest` is the manifest of the release whose data is being saved.
     """
-    snapshot_enabled = manifest.get("deploy", {}).get("snapshot_before_deploy", True)
-    backup_type = manifest.get("backup", {}).get("type", "none")
-    if not snapshot_enabled or no_snapshot or backup_type == "none":
+    if no_snapshot or not snapshot_wanted(manifest):
         return None
     print("  Taking pre-deploy snapshot...")
     from boxmunge.backup import BackupKind

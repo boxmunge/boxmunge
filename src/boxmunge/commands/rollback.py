@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from boxmunge.commands.deploy import (
-    deploy_locked, generate_release_config, replace_release, run_pre_deploy_hook,
+    GIT_WHILE_STAGED, deploy_locked, generate_release_config, replace_release, run_pre_deploy_hook,
 )
 from boxmunge.commands.restore import restore_locked
 from boxmunge.compose import prepare_compose_override
@@ -25,6 +25,7 @@ from boxmunge.intake import (
     IntakeError, check_installable, report_refusal, validate_release_tree,
 )
 from boxmunge.lifecycle import refuse_if_blocked
+from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_error, log_operation
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.paths import BoxPaths
@@ -33,12 +34,13 @@ from boxmunge.release import (
     ReleaseStateError, discard_previous_release, install_release, live_ref,
     load_previous_release, mark_live, sync_release_code,
 )
-from boxmunge.release_staging import has_prestage
 from boxmunge.release_keep import ensure_kept_pairing
 from boxmunge.release_txn import (
     InstallTxn, advance, close_txn, load_txn, open_txn, stale_reason, start_refusal,
     supersede_txn,
 )
+from boxmunge.staged_release import has_slot, sweep_debris
+from boxmunge.staging_isolation import StagingIsolationError, check_install_isolation
 from boxmunge.state import read_state
 
 
@@ -96,6 +98,8 @@ def find_rollback_target(paths: BoxPaths, project_name: str,
         raise RollbackUnavailable("the project has not been deployed")
 
     if (project_dir / "repo").exists():
+        if has_slot(paths, project_name):
+            raise RollbackUnavailable(GIT_WHILE_STAGED.format(p=project_name))
         state = read_state(paths.project_deploy_state(project_name))
         history = state.get("history", [])
         if not history or not history[0].get("ref"):
@@ -105,10 +109,6 @@ def find_rollback_target(paths: BoxPaths, project_name: str,
             _backup_type(project_dir / "manifest.yml"), paths, project_name)
         return RollbackTarget(ref=history[0]["ref"], snapshot=snapshot, tree=None)
 
-    if has_prestage(paths, project_name):
-        raise RollbackUnavailable(
-            f"a staged release is installed; run 'promote {project_name}' or "
-            f"'unstage {project_name}' first")
     try:
         previous = load_previous_release(paths, project_name)
     except ReleaseStateError as e:
@@ -133,7 +133,7 @@ def find_rollback_target(paths: BoxPaths, project_name: str,
 
 def run_rollback(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
     """rollback: show the plan, confirm, take the project lock and roll back."""
-    if refuse_if_blocked(project_name, paths):
+    if refuse_if_blocked(project_name, paths) or refuse_if_legacy_stage(paths, project_name):
         return 1
     # Checked before the prompt too (and again under the lock): an open
     # install may make a rollback meaningless, or already finished.
@@ -181,7 +181,7 @@ def rollback_locked(project_name: str, paths: BoxPaths,
     ``expected`` is the plan the operator confirmed: if the deploy state
     changed since, nothing is done.
     """
-    if refuse_if_blocked(project_name, paths):
+    if refuse_if_blocked(project_name, paths) or refuse_if_legacy_stage(paths, project_name):
         return 1
     ok, txn = _open_install(project_name, paths)
     if not ok:
@@ -302,6 +302,12 @@ def _roll_back_release(project_name: str, paths: BoxPaths, target: RollbackTarge
         check_installable(tree, paths.project_dir(project_name))
     except IntakeError as e:
         return report_refusal(e)
+    try:  # D8, before the transaction opens
+        sweep_debris(paths, project_name)
+        check_install_isolation(paths, project_name, tree, manifest)
+    except (StagingIsolationError, OSError) as e:
+        print(f"ERROR: {e}\n  Nothing was changed.", file=sys.stderr)
+        return 1
     txn = current
     if txn is None or txn.source != "rollback":
         try:

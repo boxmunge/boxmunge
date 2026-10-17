@@ -58,6 +58,8 @@ def test_overlay_volumes_resolve_as_structured_mounts(tmp_path: Path) -> None:
     assert mounts["/app/data"]["source"] == "myapp_data"
     assert mounts["/app/data"].get("read_only") is not True
     assert mounts["/boxmunge-scripts"]["type"] == "bind"
+    # Production mounts its own release's scripts from the project dir.
+    assert mounts["/boxmunge-scripts"]["source"] == str(compose.parent / "boxmunge-scripts")
     assert mounts["/boxmunge-scripts"]["read_only"] is True
     # Same bind options as the short-syntax mount it replaced (Compose
     # prints its implied create_host_path as an empty `bind`).

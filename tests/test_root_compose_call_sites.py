@@ -141,9 +141,8 @@ def test_the_scan_finds_the_checked_call_sites() -> None:
     assert sites == [
         "commands/data_cmd.py", "commands/deploy.py", "commands/recover_cmd.py", "commands/restore.py",
         "commands/resume_cmd.py", "commands/rollback.py", "commands/security_resume.py",
-        "commands/stage_cmd.py",
         "commands/upgrade_steps.py", "container_update.py", "cve/quarantine.py",
-        "staging_data.py",
+        "legacy_stage_ops.py", "production_stopped.py", "staging_bringup.py", "staging_data.py",
     ]
 
 
@@ -274,8 +273,12 @@ def test_restore_refuses_before_stopping_the_project(tampered) -> None:
 
 def test_staging_copy_refuses_before_stopping_production(tampered) -> None:
     from boxmunge import staging_data
+    from boxmunge.staged_release import load_slot, new_meta, slot_dir, write_meta
     from boxmunge.staging_copy_plan import CopyPlan
     paths = tampered[0]
+    # The slot the copy would record production's stop in.
+    (slot_dir(paths, NAME) / "release").mkdir(parents=True)
+    write_meta(slot_dir(paths, NAME), new_meta("bundle", f"{NAME}-v2", None))
     uploads = str(paths.project_dir(NAME) / "data" / "uploads")
     with patch.object(staging_data, "_running",
                       side_effect=lambda p: [f"{NAME}-web-1"] if p == NAME else []), \
@@ -286,21 +289,31 @@ def test_staging_copy_refuses_before_stopping_production(tampered) -> None:
         with pytest.raises(ComposeRefused):
             staging_data.copy_production_data(paths, NAME, CopyPlan())
     assert not [c for c in run.call_args_list if c.args[0][:2] == ["docker", "stop"]]
+    assert load_slot(paths, NAME).production_stopped is None
     _assert_refused(tampered)
 
 
 # ---------------------------------------------------------------------------
-# While a release is staged, production is not recreated from its files
+# While boxmunge 0.10.1's stage is on disk, production is not recreated from
+# the project directory's files
 # ---------------------------------------------------------------------------
 
+LEGACY = "has a release staged by boxmunge 0.10.1"
 
-@pytest.fixture
-def staged(tampered):
-    """An untampered project with a release staged over it."""
+
+def _untamper(tampered):
     paths = tampered[0]
     uploads = paths.project_dir(NAME) / "data" / "uploads"
     uploads.unlink()
     uploads.mkdir()
+    return tampered
+
+
+@pytest.fixture
+def staged(tampered):
+    """An untampered project with a release staged over it by 0.10.1 (the
+    old layout: production's release kept in .releases/prestage/)."""
+    paths = _untamper(tampered)[0]
     (paths.project_releases(NAME) / "prestage" / "release").mkdir(parents=True)
     return tampered
 
@@ -310,7 +323,7 @@ def _assert_refused_while_staged(staged) -> None:
     up.assert_not_called()
     start.assert_not_called()
     assert any("start refused" in t for t in sent), sent
-    assert "a release is staged" in paths.log_file.read_text()
+    assert LEGACY in paths.log_file.read_text()
 
 
 def test_upgrade_restart_refuses_while_staged(staged) -> None:
@@ -321,14 +334,17 @@ def test_upgrade_restart_refuses_while_staged(staged) -> None:
     _assert_refused_while_staged(staged)
 
 
-def test_recover_refuses_while_staged(staged) -> None:
+def test_recover_refuses_while_staged(staged, capsys) -> None:
     from boxmunge.commands import recover_cmd
     from boxmunge.state import write_state
     paths = staged[0]
     write_state(paths.project_health_state(NAME), {"status": "critical_stopped"})
     with patch.object(recover_cmd, "caddy_reload"):
         assert recover_cmd.run_recover(NAME, paths, yes=True) == 1
-    _assert_refused_while_staged(staged)
+    # recover's core refuses a legacy stage before it reaches a start.
+    staged[2].assert_not_called()
+    staged[3].assert_not_called()
+    assert "boxmunge-server legacy-stage shop" in capsys.readouterr().err
 
 
 def test_container_update_refuses_while_staged(staged, fake_containers) -> None:
@@ -343,7 +359,7 @@ def test_container_update_refuses_while_staged(staged, fake_containers) -> None:
             patch.object(cu, "detect_image_changes", return_value={"web": "nginx:1.28"}), \
             patch.object(cu, "tag_image") as retag:
         result = update_project(paths, target, dry_run=False)
-    assert result["status"] == "failed" and "a release is staged" in result["reason"]
+    assert result["status"] == "failed" and LEGACY in result["reason"]
     retag.assert_not_called()
     _assert_refused_while_staged(staged)
 
@@ -357,13 +373,36 @@ def test_staged_project_starts_once_unstaged(staged) -> None:
     up.assert_called_once()
 
 
-def test_promote_and_staging_starts_are_allowed_while_staged(staged) -> None:
+def test_container_start_refuses_while_staged(staged) -> None:
+    from boxmunge.compose_guard import start_containers_checked
+    with patch("boxmunge.docker_containers.container_bind_sources", return_value=[]), \
+            pytest.raises(ComposeRefused, match="legacy-stage"):
+        start_containers_checked(staged[0], NAME, [f"{NAME}-web-1"], component="data-adopt")
+    _assert_refused_while_staged(staged)
+
+
+def test_production_and_staging_starts_are_allowed_while_slot_staged(tampered) -> None:
+    """A stage in the slot leaves the project directory as production's:
+    production starts as usual, and staging runs from the slot."""
     from boxmunge.compose_guard import compose_up_checked, start_containers_checked
-    paths, _, up, start = staged
-    compose_up_checked(paths, NAME, component="promote", compose_files=["compose.yml"],
-                       record=True, promoting=True)
-    compose_up_checked(paths, NAME, component="stage", compose_files=["compose.yml"],
-                       staging=True, record=True)
+    from boxmunge.staged_release import new_meta, release_dir, slot_dir, write_meta
+    paths, _, up, start = _untamper(tampered)
+    # Staging runs from the slot, with its own files, whatever production's hold.
+    slot = slot_dir(paths, NAME)
+    release = release_dir(slot)
+    release.mkdir(parents=True)
+    pdir = paths.project_dir(NAME)
+    (release / "manifest.yml").write_text((pdir / "manifest.yml").read_text())
+    (release / "compose.yml").write_text(yaml.safe_dump({"services": {"web": {
+        "image": "nginx:1.28"}}}))
+    (slot / "compose.staging-base.yml").write_text((release / "compose.yml").read_text())
+    (slot / "compose.boxmunge-staging.yml").write_text("services: {}\n")
+    write_meta(slot, new_meta("bundle", f"{NAME}-v2", None))
+    compose_up_checked(paths, NAME, component="stage", staging=True, record=True)
+    assert up.call_args.kwargs["project_directory"] == release
+    compose_up_checked(paths, NAME, component="upgrade", compose_files=["compose.yml"],
+                       record=True)
+    assert up.call_args.args[0] == paths.project_dir(NAME)
     with patch("boxmunge.docker_containers.container_bind_sources", return_value=[]):
         start_containers_checked(paths, NAME, [f"{NAME}-web-1"], component="stage")
     assert up.call_count == 2

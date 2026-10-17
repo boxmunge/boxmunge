@@ -57,15 +57,12 @@ Key features:
         previous.json         # its bundle name and pre-deploy data snapshot
         install.json          # the open install transaction (only while an install runs)
         previous.superseded/  # the rollback target an open install replaced, until it closes
-        prestage/             # production code displaced by `stage`, until promote/unstage
-        live-mounts/          # production's copies of the release code it bind-mounts
-        live-scripts/         # production's copy of boxmunge-scripts/ (smoke checks)
+        staged/               # the slot: the staged release (release/), its compose files, meta.json
         live.json             # bundle name of the installed release
   inbox/                      # uploaded bundles awaiting deployment
   state/                      # operational state (deploy:deploy 755)
     health/                   # per-project health state JSON
     deploy/                   # per-project deploy state JSON
-    staging/                  # per-project staging state
   docs/                       # on-server documentation (root:root 755)
   logs/                       # boxmunge operational logs (deploy:deploy 755)
     boxmunge.log              # today's entries (UTC); writers rotate it under a lock
@@ -200,7 +197,7 @@ boxmunge supports two project sources, declared in `manifest.yml` via the `sourc
 12. Record state -- write deploy state JSON atomically
 13. Log the deployment -- append to boxmunge operational log
 
-A bundle that fails validation stays in the inbox (it is not moved to `.consumed/`) and the command exits non-zero: 3 for a compose hardening rejection, 1 otherwise. `stage` uses the same unpack-validate-install path, but keeps the production release in `.releases/prestage/` instead of step 5 and takes no snapshot.
+A bundle that fails validation stays in the inbox (it is not moved to `.consumed/`) and the command exits non-zero: 3 for a compose hardening rejection, 1 otherwise. `stage` uses the same unpack and validate steps, then moves the release into its own tree, `.releases/staged/`, instead of installing it; it takes no snapshot.
 
 If any step fails, the deploy stops and reports the failure. No automatic rollback -- the operator or agent decides what to do next.
 
@@ -211,12 +208,14 @@ Steps 5 to 9 of a bundle deploy, and every bundle rollback, run inside an instal
 `stage <project>` follows the same steps but deploys to the staging environment at `staging.<hostname>`. After verification:
 
 - `promote <project>` -- deploys the staged release to production, then tears down staging
-- `unstage <project>` -- tears down staging and puts the production release's files back
+- `unstage <project>` -- tears down staging and drops the staged release; production is not touched
 
-The staged release is installed in the project directory (staging containers run from it); the
-production release it displaces is kept in `.releases/prestage/` until promote or unstage. A stage
-that fails after installing cleans up the same way unstage does. Staging state is tracked under
-`state/staging/`.
+The staged release lives in its own tree, the slot `.releases/staged/`: `release/` is the staged
+release, staging's compose files sit beside it, and `meta.json` records the stage (its ref, an id,
+and whether it is `starting`, `ready`, or `retired` once promoted). Staging containers run from `release/`
+(`--project-directory`); production's project directory is never written by a stage. A stage that
+fails after the slot is in place is torn down the same way unstage does it, and a re-stage that
+fails tears everything down too.
 
 ---
 
@@ -239,7 +238,7 @@ Operational state is stored as JSON files under `/opt/boxmunge/state/`:
 
 - `state/health/<project>.json` -- last check time, status, consecutive failure count, alert state, failure reason
 - `state/deploy/<project>.json` -- current ref (the bundle name, e.g. `myapp-2026-10-13T101500123456`, or the git commit), deploy timestamp, pre-deploy snapshot filename, recent history
-- `state/staging/<project>/` -- staging environment state
+- `<project>/.releases/staged/meta.json` -- the staged release (id, ref, state); there is none while nothing is staged
 
 All state writes are atomic: the new content is written to a temporary file in the same directory, then renamed into place with `os.rename()`. This prevents partial reads if a check or deploy runs concurrently.
 
@@ -386,6 +385,17 @@ See `agent-help writable` and `PROJECT_CONVENTIONS.md` for the schema reference.
   and writes nothing.
   A failed gate (config regeneration, Caddy reload, restart, self-test) fails the upgrade; it is never reported
   as a warning followed by "Upgrade complete".
+  The apply first rewrites the latest stash without the symlink members an older release wrote (a git
+  project's links into `repo/`), so a rollback's `stash restore` cannot abort on them: it writes a verified copy
+  beside the original and renames it over it, and on any failure leaves the original and alerts. Before a
+  rollback swaps back, the release being rolled back from tears down every staged release
+  (`staging-teardown-all`), since an older release does not know `.releases/staged/`.
+- Stages left by boxmunge 0.10.1 (`legacy_stage.py`, the only code that knows the old layout): 0.10.1 staged
+  into the project directory (`.releases/prestage/` held production's release, `state/staging/<project>.json`
+  recorded the stage). Such a project is detected read-only, left exactly as it is by the upgrade, refused for
+  every start and lifecycle command, backed up with the manifest of the release its containers run, and
+  resolved by `boxmunge-server legacy-stage <project>` (see OPERATIONS.md, "Upgrading from 0.10.1 with a
+  release staged"). `state/legacy-stages.json` dedupes its daily alert and records a started resolution.
 
 ## CVE Policy Module
 

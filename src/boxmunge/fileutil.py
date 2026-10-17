@@ -36,9 +36,7 @@ is released.
 """
 
 import fcntl
-import logging
 import os
-import pwd
 import shutil
 import stat
 import tempfile
@@ -46,156 +44,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
 
+from boxmunge.fs_nofollow import fchown_deploy, mkdir_p_deploy, open_regular_nofollow
+
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
-
-
-def _deploy_owner() -> tuple[int, int] | None:
-    """deploy's (uid, gid) when running as root and deploy exists, else None.
-
-    KeyError means no deploy user (bootstrap not done yet, or a dev/test
-    machine), where there is nothing to hand ownership to.
-    """
-    if os.getuid() != 0:
-        return None
-    try:
-        pw = pwd.getpwnam("deploy")
-    except KeyError:
-        return None
-    return pw.pw_uid, pw.pw_gid
-
-
-def _warn_chown(what: str, e: OSError) -> None:
-    # Audit I-NEW-1 / C-NEW-4: perms drift, ENOSPC, EROFS, EIO and races
-    # are logged for a forensic trail but do not raise; the caller uses
-    # this best-effort and a real perms problem resurfaces where the file
-    # is needed.
-    logging.getLogger("boxmunge").warning("chown(%s, deploy) failed: %s", what, e)
-
-
-def _chown_deploy(path: str) -> None:
-    """Best-effort chown to the deploy user when running as root.
-
-    Never follows a symlink: these paths sit in directories the deploy user
-    can write, so deploy could swap the entry for a link between our
-    creating it and this call. On a link, only the link itself is
-    re-owned, which grants nothing.
-    """
-    owner = _deploy_owner()
-    if owner is None:
-        return
-    try:
-        os.chown(path, *owner, follow_symlinks=False)
-    except OSError as e:
-        _warn_chown(path, e)
-
-
-def _fchown_deploy(fd: int, what: str) -> None:
-    """Best-effort chown of an open descriptor to deploy (see _chown_deploy)."""
-    owner = _deploy_owner()
-    if owner is None:
-        return
-    try:
-        os.fchown(fd, *owner)
-    except OSError as e:
-        _warn_chown(what, e)
-
-
-def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
-    """os.open that refuses a symlink, a non-regular file or an extra hard link.
-
-    For root opening a name in a directory the deploy user can write: a
-    planted symlink (or a hard link to another file) would otherwise make
-    root read, write, chmod or chown a file outside it.
-    """
-    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
-    st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-        os.close(fd)
-        raise OSError(
-            f"{path} is not a plain regular file (mode {oct(st.st_mode)}, "
-            f"{st.st_nlink} links); refusing to use it. Remove it so it can be recreated."
-        )
-    return fd
-
-
-def chmod_nofollow(path: Path, mode: int | None = None, add: int = 0) -> None:
-    """chmod that refuses a symlink rather than following it.
-
-    Sets ``mode``, or adds ``add`` to the current bits. Linux has no lchmod,
-    so the file is pinned with an O_PATH descriptor (which needs no read
-    permission, so a 0000 file of the caller's own still works) and chmod'd
-    through its /proc/self/fd entry. Elsewhere lchmod does the same job.
-    """
-    if hasattr(os, "O_PATH"):
-        fd = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
-        try:
-            st = os.fstat(fd)
-            if stat.S_ISLNK(st.st_mode):
-                raise OSError(f"{path} is a symlink; refusing to chmod through it")
-            new = mode if mode is not None else stat.S_IMODE(st.st_mode) | add
-            os.chmod(f"/proc/self/fd/{fd}", new)
-        finally:
-            os.close(fd)
-        return
-    st = os.lstat(path)
-    if stat.S_ISLNK(st.st_mode):
-        raise OSError(f"{path} is a symlink; refusing to chmod through it")
-    new = mode if mode is not None else stat.S_IMODE(st.st_mode) | add
-    os.chmod(path, new, follow_symlinks=False)
-
-
-def mkdir_p_deploy(path: Path) -> None:
-    """mkdir -p, then chown each newly-created directory to deploy.
-
-    Plain ``Path.mkdir(parents=True, exist_ok=True)`` running as root leaves
-    every new intermediate directory owned by root. A subsequent atomic-write
-    from the unprivileged deploy shell then can't create a tempfile in the
-    new directory and fails with EACCES — observed when `security suppress`
-    tried to write the first entry into a root-owned `<project>/security/`
-    that an earlier root-run code path had created.
-
-    This helper creates the same chain but chowns each directory we
-    actually create to deploy. Pre-existing directories are intentionally
-    left untouched: we don't want to retroactively re-own legitimately
-    root-owned parents (e.g. /opt/boxmunge itself). Best-effort like
-    `_chown_deploy` — silent when not running as root or when the deploy
-    user does not yet exist.
-    """
-    to_create: list[Path] = []
-    cur = path
-    while not cur.exists():
-        to_create.append(cur)
-        parent = cur.parent
-        if parent == cur:
-            break
-        cur = parent
-    for p in reversed(to_create):
-        try:
-            p.mkdir()
-        except FileExistsError:
-            # Race: another process created it between exists() and mkdir().
-            # Don't chown — ownership belongs to whoever won the race.
-            continue
-        _chown_deploy(str(p))
-
-
-def chown_tree_deploy(path: Path) -> None:
-    """Best-effort chown of ``path`` and everything under it to deploy.
-
-    For trees a root-run path (upgrade) copies that the deploy shell must
-    later replace. Links are re-owned, never followed. Same best-effort
-    rules as ``_chown_deploy``.
-    """
-    if os.getuid() != 0:
-        return
-    _chown_deploy(str(path))
-    for root, dirs, files in os.walk(path):
-        for name in dirs + files:
-            target = os.path.join(root, name)
-            if os.path.islink(target):
-                continue
-            _chown_deploy(target)
 
 
 def open_shared_lockfile(path: Path) -> int:
@@ -224,7 +76,7 @@ def open_shared_lockfile(path: Path) -> int:
         os.fchmod(fd, 0o660)
     except OSError:
         pass  # not the owner: root, which owns it, set it up
-    _fchown_deploy(fd, str(path))
+    fchown_deploy(fd, str(path))
     return fd
 
 
@@ -241,6 +93,11 @@ def fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+class RenamedNotSyncedError(OSError):
+    """durable_rename renamed the file, but syncing its directory failed:
+    path already holds the new content, though a crash may bring back the old."""
+
+
 def durable_rename(tmp_path: Path, path: Path) -> None:
     """Rename a fully written temp file over path, durably.
 
@@ -248,6 +105,8 @@ def durable_rename(tmp_path: Path, path: Path) -> None:
     the rename and the directory after it, so after a crash path holds
     either the old content or the complete new content, never an empty or
     partial file, and never the old content once this has returned.
+    Raises RenamedNotSyncedError (an OSError) when only the directory sync
+    failed, so a caller can tell a done rename from a failed one.
     """
     fd = open_regular_nofollow(tmp_path, os.O_RDONLY)
     try:
@@ -255,7 +114,12 @@ def durable_rename(tmp_path: Path, path: Path) -> None:
     finally:
         os.close(fd)
     os.rename(tmp_path, path)
-    fsync_dir(path.parent)
+    try:
+        fsync_dir(path.parent)
+    except OSError as e:
+        raise RenamedNotSyncedError(
+            e.errno, f"{tmp_path.name} was renamed to {path}, but {path.parent} was not "
+            f"synced: {e.strerror or e}") from e
 
 
 class LinkedTargetError(OSError):
@@ -302,7 +166,7 @@ def atomic_write_bytes(
             if owner is not None:
                 os.fchown(f.fileno(), *owner)
             else:
-                _fchown_deploy(f.fileno(), tmp_name)
+                fchown_deploy(f.fileno(), tmp_name)
         if refuse_link and path.is_symlink():
             raise LinkedTargetError(f"{path} is a symlink; refusing to replace it")
         durable_rename(tmp_path, path)

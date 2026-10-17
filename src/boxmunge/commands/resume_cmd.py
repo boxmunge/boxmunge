@@ -23,6 +23,7 @@ from boxmunge.docker import compose_pull, caddy_reload, DockerError
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.lifecycle import BlockReason, is_blocked
+from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import clear_paused_state, is_paused, release_restart_policies
@@ -129,6 +130,8 @@ def resume_locked(
     Returns the exit code and, if the post-resume smoke test failed, its
     message, so the caller can alert after releasing the lock.
     """
+    if refuse_if_legacy_stage(paths, project_name):
+        return 1, None
     if not _refuse_unless_resumable(project_name, paths):
         return 1, None
     project_dir = paths.project_dir(project_name)

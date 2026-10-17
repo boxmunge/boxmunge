@@ -34,7 +34,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from boxmunge.fileutil import open_regular_nofollow
+from boxmunge.fs_nofollow import open_regular_nofollow
 
 ARCHIVE_DAYS = 90
 

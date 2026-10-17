@@ -499,7 +499,7 @@ The compose validator rejects:
 
 These cross-validators run on every entry point that materialises a
 project from its manifest+compose: `prod-deploy`, `stage`, `promote`,
-`resume`, and the `regenerate_configs` step of `upgrade`. All of them
+`resume`, and the config regeneration step of `upgrade`. All of them
 reject the operation with **exit code 3** if `posture: strict` or
 `dangerously_disable_quarantine: true` is set without `read_only: true`
 on every service. Exit 3 is the reserved code for compose hardening
@@ -913,7 +913,7 @@ resume <project>` and abort before touching containers or configs.
 
 **Skip with a logged ops entry (background sweeps):**
 
-- `upgrade` — `regenerate_configs` re-renders the maintenance Caddy
+- `upgrade` — its config regeneration re-renders the maintenance Caddy
   fragment for the quarantined project (so the maintenance UX
   persists across the upgrade) and `restart_projects` skips
   `compose up` entirely. The project's containers stay stopped.

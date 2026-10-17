@@ -55,25 +55,28 @@ def _open_at_installed(paths):
         assert crash_at("txn.installed", lambda: run_deploy(P, paths, ref=V3)) == 137
 
 
-# --- C1: stage and promote wait for an open install --------------------------
+# --- C1: stage waits for an open install; promote needs a slot --------------------------
 
 def test_stage_refused_while_an_install_is_open(paths, capsys) -> None:
     from boxmunge.commands.stage_cmd import run_stage
     _failed_v2(paths)
     place_bundle(paths, timestamp=V3, files={"VERSION": "v3\n"})
     before = load_txn(paths, P)
-    with docker_off(), patch("boxmunge.commands.stage_cmd.caddy_reload"):
+    with docker_off(), patch("boxmunge.staging_bringup.caddy_reload"):
         assert run_stage(P, paths, ref=V3) == 1
     assert load_txn(paths, P) == before
-    assert not (_rel(paths) / "prestage").exists()
+    assert not (_rel(paths) / "staged").exists()
     assert "is open at phase hook_started" in capsys.readouterr().err
 
 
-def test_the_promote_core_refused_while_an_install_is_open(paths, capsys) -> None:
-    from boxmunge.commands.promote_release import deploy_staged_locked
+def test_the_promote_core_leaves_an_open_install_alone_without_a_slot(paths, capsys) -> None:
+    """With a slot, promote fixes forward over it (test_promote_slot)."""
+    from boxmunge.commands.promote_cmd import promote_locked
     _failed_v2(paths)
-    assert deploy_staged_locked(P, paths).rc == 1
-    assert "is open at phase hook_started" in capsys.readouterr().err
+    before = load_txn(paths, P)
+    assert promote_locked(P, paths) == 1
+    assert load_txn(paths, P) == before
+    assert f"No staged release for '{P}'" in capsys.readouterr().err
 
 
 def test_options_offer_only_what_exists_in_this_release(paths) -> None:

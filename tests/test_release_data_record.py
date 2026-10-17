@@ -261,16 +261,44 @@ def test_deploy_and_rollback_keep_retired_data(paths) -> None:
     assert retained and all(e["project"] == "myapp" for e in retained)
 
 
+def test_stage_and_unstage_leave_production_data(paths, capsys) -> None:
+    """A staged release that drops the mount lives in the slot: production's
+    data, which it still writes, is not touched by stage or unstage."""
+    from boxmunge.commands.deploy import run_deploy
+    from boxmunge.commands.stage_cmd import run_stage
+    from boxmunge.commands.unstage_cmd import run_unstage
+    from boxmunge.project_registry import add_project
+    from tests.bundle_helpers import place_bundle
+    from tests.stage_helpers import staging_docker_off
+
+    add_project("myapp", paths)
+    pdir = paths.project_dir("myapp")
+    place_bundle(paths, timestamp="2026-10-13T090000000000",
+                 files={"compose.yml": MOUNTS_UPLOADS})
+    with staging_docker_off():
+        assert run_deploy("myapp", paths) == 0
+    (pdir / "uploads" / "photo.jpg").write_text("USER UPLOAD")
+    for hour in (10, 11):
+        place_bundle(paths, timestamp=f"2026-10-13T{hour}0000000000",
+                     files={"compose.yml": NO_MOUNTS})
+    with staging_docker_off():
+        assert run_stage("myapp", paths, ref="2026-10-13T100000000000") == 0
+        assert run_stage("myapp", paths, ref="2026-10-13T110000000000") == 0
+        assert (pdir / "compose.yml").read_text() == MOUNTS_UPLOADS
+        assert run_unstage("myapp", paths) == 0
+    assert (pdir / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
+    assert "uploads/ holds data" not in capsys.readouterr().out
+
+
 def test_stage_unstage_and_promote_keep_retired_data(paths, capsys) -> None:
-    """A staged release that drops the mount shares the project dir with
-    production, which still writes there."""
+    """A promoted release that drops the mount keeps production's data."""
     from boxmunge.commands.deploy import run_deploy
     from boxmunge.commands.promote_cmd import run_promote
     from boxmunge.commands.stage_cmd import run_stage
     from boxmunge.commands.unstage_cmd import run_unstage
     from boxmunge.project_registry import add_project
     from tests.bundle_helpers import place_bundle
-    from tests.test_commands.test_stage_promote_release import _docker as _stage_docker
+    from tests.stage_helpers import staging_docker_off as _stage_docker
 
     add_project("myapp", paths)
     pdir = paths.project_dir("myapp")
@@ -296,9 +324,6 @@ def test_stage_unstage_and_promote_keep_retired_data(paths, capsys) -> None:
         assert run_deploy("myapp", paths, ref=without_mount(13)) == 0
     assert (pdir / "uploads" / "photo.jpg").read_text() == "USER UPLOAD"
     assert "uploads/ holds data" in capsys.readouterr().out
-    log = [json.loads(line) for line in paths.log_file.read_text().splitlines()]
-    assert any(e["component"] == "stage" and e["level"] == "warn"
-               and "uploads/" in e["msg"] for e in log)
 
 
 # --- projects deployed before the record existed ------------------------------
@@ -366,7 +391,7 @@ class TestPreUpgradeProjects:
         from boxmunge.commands.promote_cmd import run_promote
         from boxmunge.commands.stage_cmd import run_stage
         from tests.bundle_helpers import place_bundle
-        from tests.test_commands.test_stage_promote_release import _docker as _stage_docker
+        from tests.stage_helpers import staging_docker_off as _stage_docker
         deploy = _deployer(paths)
         pdir = paths.project_dir("myapp")
         assert deploy(9, MOUNTS_UPLOADS) == 0
@@ -451,7 +476,7 @@ class TestKeptReleasesOnlySeedTheRecord:
         assert (project / "conf" / "app.conf").read_text() == "new conf"
 
     def test_without_an_incoming_release_a_kept_mount_counts(self, tmp_path: Path) -> None:
-        """prestage_to_previous / discard_* know no incoming release: they
+        """discard_previous_release knows no incoming release: it
         must not drop data the live release only reads."""
         from boxmunge.data_dirs import classify
         project = _live_with_old_rollback_target(tmp_path, CONF_RO)

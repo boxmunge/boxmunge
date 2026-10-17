@@ -8,7 +8,9 @@ build live). ``recover`` is the missing first-class un-stop: it restarts the
 *same* build the monitor stopped — no image pull, no rebuild — restores Caddy
 routing, runs the smoke test, and resets health state.
 
-Precondition: the project is in ``critical_stopped``. A *paused* project uses
+Precondition: the project is in ``critical_stopped``, or staging's data
+copy stopped it and crashed (the slot's production_stopped marker: recover
+starts it again, as the health tick would). A *paused* project uses
 ``resume``; a CVE-*quarantined* project uses ``security resume`` (both have
 their own safety checks) — recover refuses and points at the right command
 rather than silently doing the wrong thing.
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import sys
 from datetime import datetime, timezone
+from enum import Enum
 
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.compose import prepare_compose_override
@@ -25,42 +28,96 @@ from boxmunge.docker import caddy_reload, DockerError
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.lifecycle import BlockReason, is_blocked
+from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import is_paused
 from boxmunge.paths import BoxPaths
+from boxmunge.production_stopped import ProductionDownError, start_again_from
+from boxmunge.staged_release import SlotError, load_slot
 from boxmunge.state import read_state, write_state
 
 
-def _monitor_stopped_health(project_name: str, paths: BoxPaths) -> dict | None:
-    """Return the health state if the project can be recovered, else None.
+class CopyStop(Enum):
+    """What recover found of a staging copy's stop (_start_after_copy)."""
+    NONE = "none"              # the slot records no stop
+    RESTARTED = "restarted"    # production was started again
+    UNREADABLE = "unreadable"  # the slot cannot name what was stopped
+    FAILED = "failed"          # the start failed, said loudly; the marker is kept
 
-    Prints why on refusal. Paused / quarantined projects are routed to
-    their dedicated recovery paths rather than restarted here (which would
-    bypass those checks).
-    """
+
+def _held_by_lift(project_name: str, paths: BoxPaths) -> bool:
+    """Paused / quarantined projects are routed to their dedicated recovery
+    paths rather than restarted here (which would bypass those checks).
+    Prints why when held."""
     if is_paused(project_name, paths):
         print(
             f"ERROR: Project '{project_name}' is paused, not monitor-stopped. "
             f"Use: boxmunge resume {project_name}",
             file=sys.stderr,
         )
-        return None
+        return True
     block = is_blocked(project_name, paths)
     if block and block.reason is BlockReason.QUARANTINED:
         print(f"ERROR: {block.refuse_message}", file=sys.stderr)
-        return None
+        return True
+    return False
 
+
+def _monitor_stopped_health(project_name: str, paths: BoxPaths, *,
+                            quiet: bool = False) -> dict | None:
+    """Return the health state if the project can be recovered, else None.
+
+    Prints why on refusal; ``quiet`` leaves out "not monitor-stopped" (the
+    caller has already started production for another reason).
+    """
+    if _held_by_lift(project_name, paths):
+        return None
     health = read_state(paths.project_health_state(project_name))
     status = health.get("status", "unknown")
     if status != "critical_stopped":
-        print(
-            f"ERROR: Project '{project_name}' is not in a monitor-stopped "
-            f"state (health status: {status}). Nothing to recover.",
-            file=sys.stderr,
-        )
+        if not quiet:
+            print(
+                f"ERROR: Project '{project_name}' is not in a monitor-stopped "
+                f"state (health status: {status}). Nothing to recover.",
+                file=sys.stderr,
+            )
         return None
     return health
+
+
+def _copy_stop_pending(project_name: str, paths: BoxPaths) -> CopyStop | None:
+    """Before the lock: UNREADABLE when the slot cannot say whether
+    staging's data copy stopped production, RESTARTED when it says it did
+    (recover would start it again), None otherwise."""
+    try:
+        meta = load_slot(paths, project_name)
+    except SlotError:
+        return CopyStop.UNREADABLE
+    if meta is not None and meta.production_stopped is not None:
+        return CopyStop.RESTARTED
+    return None
+
+
+def _start_after_copy(project_name: str, paths: BoxPaths) -> CopyStop:
+    """Start production first if staging's data copy left it stopped. With
+    an unreadable slot nothing can be named, so recover goes on to start
+    production with its compose files, as the slot's messages tell the
+    operator."""
+    try:
+        meta = load_slot(paths, project_name)
+    except SlotError as e:
+        print(f"  WARN: {project_name}'s staged slot cannot be read ({e}), so whether "
+              f"staging's data copy stopped production cannot be told; starting "
+              f"production with its compose files.")
+        return CopyStop.UNREADABLE
+    try:
+        # A restart records last_started_at itself (the grace window).
+        restarted = start_again_from(paths, project_name, meta, component="recover",
+                                     alert=True)
+    except ProductionDownError:
+        return CopyStop.FAILED
+    return CopyStop.RESTARTED if restarted else CopyStop.NONE
 
 
 def run_recover(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
@@ -73,13 +130,19 @@ def run_recover(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
     if not project_dir.exists() or not (project_dir / "manifest.yml").exists():
         print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
         return 1
-    health = _monitor_stopped_health(project_name, paths)
+    copy_stop = _copy_stop_pending(project_name, paths)
+    health = {} if copy_stop else _monitor_stopped_health(project_name, paths)
     if health is None:
         return 1
 
     if not yes:
         reason = health.get("failure_reason", "")
-        print(f"This will recover monitor-stopped '{project_name}':")
+        print(f"This will recover stopped '{project_name}':")
+        if copy_stop is CopyStop.RESTARTED:
+            print("  - Start the production containers that staging's data copy stopped")
+        elif copy_stop is CopyStop.UNREADABLE:
+            print("  - Bring production up with its compose files (the staged slot cannot "
+                  "be read to name what staging's data copy stopped)")
         if reason:
             print(f"  - Stopped for: {reason}")
         print("  - Restart the SAME build (no image pull, no rebuild)")
@@ -99,9 +162,23 @@ def run_recover(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
 
 def recover_locked(project_name: str, paths: BoxPaths) -> int:
     """Restart the stopped build. Caller holds the project lock."""
-    health = _monitor_stopped_health(project_name, paths)
-    if health is None:
+    if refuse_if_legacy_stage(paths, project_name):
         return 1
+    copy = _start_after_copy(project_name, paths)
+    if copy is CopyStop.FAILED:
+        return 1
+    if copy is CopyStop.UNREADABLE:
+        if _held_by_lift(project_name, paths):
+            return 1
+        health = read_state(paths.project_health_state(project_name))
+    else:
+        restarted = copy is CopyStop.RESTARTED
+        health = _monitor_stopped_health(project_name, paths, quiet=restarted)
+        if health is None:
+            if not restarted:
+                return 1
+            print(f"{project_name}: production started again after staging's data copy.")
+            return 0
     try:
         manifest = load_manifest(paths.project_manifest(project_name))
     except ManifestError as e:

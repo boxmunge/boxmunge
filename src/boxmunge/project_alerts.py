@@ -19,7 +19,7 @@ from boxmunge.log import log_error, log_warning
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 
-ALERT_KINDS = ("manifest-schema", "git-layout")
+ALERT_KINDS = ("manifest-schema", "git-layout", "staged-slot", "production-down")
 
 
 def alert_state(paths: BoxPaths, project: str, kind: str) -> Path:
@@ -46,13 +46,14 @@ def _already_alerted(paths: BoxPaths, project: str, kind: str, key: dict[str, An
 
 def alert_once(
     paths: BoxPaths, project: str, kind: str, key: dict[str, Any], *,
-    title: str, message: str, component: str,
+    title: str, message: str, component: str, priority: int = 0,
 ) -> None:
     """Log `message` as a warning and alert, unless this key was alerted."""
     if _already_alerted(paths, project, kind, key):
         return
     log_warning(component, message, paths, project=project)
-    if not notify(paths, title, message, component=component, project=project):
+    if not notify(paths, title, message, component=component, project=project,
+                  priority=priority):
         return
     record = alert_state(paths, project, kind)
     try:

@@ -9,14 +9,10 @@ import yaml
 from boxmunge import built_images, compose_resolve
 from boxmunge.bind_sources import refresh_overlay_hash
 from boxmunge.compose_images import built_image_name
-from boxmunge.compose_mounts import PROD_SMOKE_SOURCE, STAGING_SMOKE_SOURCE
+from boxmunge.compose_mounts import SMOKE_SOURCE
 from boxmunge.fileutil import atomic_write_text
-from boxmunge.live_mounts import LiveMounts, plan_live_mounts, sync_live_mounts
-from boxmunge.manifest import load_manifest
 from boxmunge.paths import BoxPaths
 from boxmunge.published_ports import overlay_ports
-from boxmunge.release import project_data_dirs, sync_live_scripts
-from boxmunge.release_staging import production_release_root
 from boxmunge.compose_hardening import hardening_fragment
 from boxmunge.security_warn import (
     warn_off_services, warn_published_ports, warn_writable_state,
@@ -114,10 +110,8 @@ def _build_service_override(
         # mount (an absent scripts dir surfaces as a smoke failure).
         svc_volumes: list[dict[str, Any]] = []
         if svc.get("smoke"):
-            # Production mounts its own copy: `stage` overwrites the project
-            # dir's scripts while production keeps running.
-            source = PROD_SMOKE_SOURCE if alias_prefix is None else STAGING_SMOKE_SOURCE
-            svc_volumes.append({"type": "bind", "source": source,
+            # Relative: each environment mounts its own release's scripts.
+            svc_volumes.append({"type": "bind", "source": SMOKE_SOURCE,
                                 "target": "/boxmunge-scripts", "read_only": True,
                                 "bind": {"create_host_path": True}})
 
@@ -239,7 +233,6 @@ def generate_compose_override(
     env_files: dict[str, str] | None = None,
     *,
     user_compose: dict[str, Any],
-    live_mounts: LiveMounts | None = None,
 ) -> str:
     """Generate compose.boxmunge.yml content.
 
@@ -250,11 +243,8 @@ def generate_compose_override(
     `user_compose`: the parsed user compose.yml dict, the same document
     `validate_user_compose` checked. Required: without it the overlay
     could not see compose-only services, and they would run unhardened.
-    `live_mounts`: production's mounts of release code re-pointed at its
-    own copies (see live_mounts).
     """
-    return _render_override(manifest, env_files, user_compose, alias_prefix=None,
-                            live_mounts=live_mounts or LiveMounts())
+    return _render_override(manifest, env_files, user_compose, alias_prefix=None)
 
 
 def _render_override(
@@ -262,22 +252,17 @@ def _render_override(
     env_files: dict[str, str] | None,
     user_compose: dict[str, Any],
     alias_prefix: str | None,
-    live_mounts: LiveMounts = LiveMounts(),
 ) -> str:
     env_file_list = _build_env_file_list(env_files)
     services = _build_service_override(
         manifest, env_file_list, user_compose=user_compose, alias_prefix=alias_prefix,
     )
-    for svc_name, entries in live_mounts.volumes.items():
-        svc = services.setdefault(svc_name, {})
-        svc["volumes"] = [*svc.get("volumes", []), *entries]
     override: dict[str, Any] = {"networks": {"boxmunge-proxy": {"external": True}}}
     if services:
         override["services"] = services
     top_level_volumes = _build_top_level_volumes(manifest)
     if top_level_volumes:
         override["volumes"] = top_level_volumes
-    override.update(live_mounts.files)
     return yaml.dump(override, default_flow_style=False, sort_keys=False)
 
 
@@ -298,55 +283,40 @@ def load_user_compose(compose_path: Path, project_name: str) -> dict[str, Any]:
         raise ComposeError(f"cannot resolve {compose_path}: {e}") from e
 
 
+def production_env_files(paths: BoxPaths, project_name: str) -> dict[str, str]:
+    """The env files production's overlay names: those that exist, the
+    project's relative to the project dir it runs from."""
+    env_files: dict[str, str] = {}
+    if paths.host_secrets.exists():
+        env_files["host_secrets"] = str(paths.host_secrets)
+    if (paths.project_dir(project_name) / "project.env").exists():
+        env_files["project_env"] = "./project.env"
+    if paths.project_secrets(project_name).exists():
+        env_files["project_secrets"] = "./secrets.env"
+    return env_files
+
+
 def prepare_compose_override(
     paths: BoxPaths,
     manifest: dict[str, Any],
     component: str = "deploy",
-    release_root: Path | None = None,
 ) -> None:
-    """Generate compose.boxmunge.yml for a project, and refresh the copy of
-    the smoke scripts it mounts.
+    """Generate compose.boxmunge.yml for the release in the project dir.
 
     `component` labels the SECURITY OFF log entry so callers from upgrade /
     resume don't misattribute the warning as "deploy". Lives here, not in
     commands/, to avoid `commands/`-to-`commands/` imports (audit A-2).
-
-    `release_root` holds the release production will run. Deploy passes the
-    project dir (a promote deploys the staged release there); everyone else
-    regenerates for the release production already runs, which during a
-    stage is the kept one, not the staged one in the project dir. Its
-    compose.yml is the one production runs, and its mounted release code is
-    copied for production (see live_mounts).
     """
     project_name = manifest["project"]
     project_dir = paths.project_dir(project_name)
-    if release_root is None:
-        release_root = production_release_root(paths, project_name)
-        if release_root != project_dir:
-            # The caller read the staged release's manifest from the project dir.
-            manifest = load_manifest(release_root / "manifest.yml")
-    sync_live_scripts(paths, project_name, release_root)
     override_path = paths.project_compose_override(project_name)
     override_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Build env_files based on which files exist
-    env_files: dict[str, str] = {}
-    if paths.host_secrets.exists():
-        env_files["host_secrets"] = str(paths.host_secrets)
-    project_env = paths.project_dir(project_name) / "project.env"
-    if project_env.exists():
-        env_files["project_env"] = "./project.env"
-    project_secrets = paths.project_secrets(project_name)
-    if project_secrets.exists():
-        env_files["project_secrets"] = "./secrets.env"
+    env_files = production_env_files(paths, project_name)
 
-    user_compose = load_user_compose(release_root / "compose.yml", project_name)
-    live_mounts = plan_live_mounts(user_compose, release_root, project_data_dirs(project_dir).box_state())
-    sync_live_mounts(project_dir, release_root, live_mounts)
-
+    user_compose = load_user_compose(project_dir / "compose.yml", project_name)
     content = generate_compose_override(
         manifest, env_files=env_files or None, user_compose=user_compose,
-        live_mounts=live_mounts,
     )
     atomic_write_text(override_path, content)
     refresh_overlay_hash(project_dir, paths.project_bind_record(project_name))

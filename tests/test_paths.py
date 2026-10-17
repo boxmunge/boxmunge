@@ -29,14 +29,6 @@ class TestStagingPaths:
         assert paths.project_staging_caddy_site("myapp") == \
             paths.caddy_sites / "myapp-staging.conf"
 
-    def test_staging_compose_override(self, paths: BoxPaths) -> None:
-        assert paths.project_staging_compose_override("myapp") == \
-            paths.projects / "myapp" / "compose.boxmunge-staging.yml"
-
-    def test_staging_state(self, paths: BoxPaths) -> None:
-        assert paths.project_staging_state("myapp") == \
-            paths.state / "staging" / "myapp.json"
-
 
 class TestScanStatePath:
     def test_project_scan_state(self, paths: BoxPaths) -> None:

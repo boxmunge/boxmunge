@@ -21,16 +21,22 @@ from boxmunge.intake import (
     report_refusal, validate_release_tree,
 )
 from boxmunge.lifecycle import refuse_if_blocked
+from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
 from boxmunge.release import ReleaseStateError, live_ref, previous_dir
-from boxmunge.release_staging import has_prestage
 from boxmunge.source import (
     SourceError, bundle_ref, consume_bundle, resolve_bundle_source,
 )
+from boxmunge.staged_release import has_slot
 from boxmunge.state import read_state
+
+# Until git installs are tree-based, a git deploy or rollback has no
+# candidate tree to prove apart from staging (D8): refused, not skipped.
+GIT_WHILE_STAGED = ("unstage {p} first: git installs cannot yet prove isolation from a "
+                    "staged release")
 
 
 def _run_deploy_inner(
@@ -48,13 +54,10 @@ def _run_deploy_inner(
     # Git projects have a repo/ dir and pull their code in place. Bundle
     # projects take a release from the inbox.
     if not is_new and (project_dir / "repo").exists():
+        if has_slot(paths, project_name):
+            print(f"ERROR: {GIT_WHILE_STAGED.format(p=project_name)}.", file=sys.stderr)
+            return 1
         return _deploy_repo(project_name, paths, ref, no_snapshot, dry_run, component)
-
-    if has_prestage(paths, project_name):
-        print(f"ERROR: '{project_name}' has a staged release installed. Run "
-              f"'promote {project_name}' to deploy it, or 'unstage "
-              f"{project_name}' to discard it, first.", file=sys.stderr)
-        return 1
 
     try:
         bundle_path = resolve_bundle_source(project_name, paths, ref=ref)
@@ -187,13 +190,11 @@ def _start_release(
     actual_ref: str,
     snapshot_name: str | None,
     component: str,
-    promoting: bool = False,
 ) -> int:
     """Run pre-deploy, generate config, start, smoke-test, record.
 
     The release on disk has already passed validate_release_tree and its
-    pre-deploy snapshot (if any) has been taken. `promoting`: it is the
-    staged release, which production may start from while it is staged.
+    pre-deploy snapshot (if any) has been taken.
     """
     print(f"Deploying {project_name} (ref: {actual_ref})...")
     rc = run_pre_deploy_hook(project_name, paths, manifest)
@@ -201,7 +202,7 @@ def _start_release(
         return rc
     generate_release_config(project_name, paths, manifest, component)
     return replace_release(project_name, paths, manifest, actual_ref, snapshot_name,
-                           component=component, promoting=promoting)
+                           component=component)
 
 
 def run_pre_deploy_hook(project_name: str, paths: BoxPaths, manifest: dict) -> int:
@@ -227,14 +228,12 @@ def generate_release_config(project_name: str, paths: BoxPaths, manifest: dict,
     print("  Generating Caddy config...")
     prepare_caddy_config(paths, manifest)
     print("  Generating compose overlay...")
-    prepare_compose_override(paths, manifest, component=component,
-                             release_root=paths.project_dir(project_name))
+    prepare_compose_override(paths, manifest, component=component)
 
 
 def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
                     actual_ref: str, snapshot_name: str | None,
-                    component: str = "deploy", promoting: bool = False,
-                    txn: str | None = None) -> int:
+                    component: str = "deploy", txn: str | None = None) -> int:
     """Start the release in production, route it, smoke-test, record.
 
     From the container start on, production runs (or partly runs) this
@@ -243,14 +242,13 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
     with the snapshot taken before this deploy. Only a first deploy that
     fails records nothing, so a retry is still treated as a first deploy.
 
-    `promoting` is true when the release is the staged one a `promote`
-    deploys: production may start from it even while it is staged. `txn`
-    is the id of the install transaction this start finishes (release_txn).
+    `txn` is the id of the install transaction this start finishes
+    (release_txn).
     """
     first_deploy = "current_ref" not in read_state(paths.project_deploy_state(project_name))
     rc = 1
     try:
-        rc = _start_and_verify(project_name, paths, manifest, component, promoting, txn)
+        rc = _start_and_verify(project_name, paths, manifest, component, txn)
     finally:
         if rc == 0 or not first_deploy:
             record_deploy_state(paths, project_name, actual_ref, snapshot_name)
@@ -267,15 +265,14 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
 
 
 def _start_and_verify(project_name: str, paths: BoxPaths, manifest: dict,
-                      component: str = "deploy", promoting: bool = False,
-                      txn: str | None = None) -> int:
+                      component: str = "deploy", txn: str | None = None) -> int:
     project_dir = paths.project_dir(project_name)
     print("  Starting containers...")
     compose_files = ["compose.yml", "compose.boxmunge.yml"]
     try:
         compose_up_checked(paths, project_name, component=component,
-                           compose_files=compose_files, record=True, promoting=promoting,
-                           deploying=True, txn=txn)
+                           compose_files=compose_files, record=True, deploying=True,
+                           txn=txn)
     except DockerError as e:
         print(f"  ERROR: {e}", file=sys.stderr)
         log_error("deploy", f"Deploy failed: container start: {e}", paths, project=project_name)
@@ -326,7 +323,7 @@ def _has_rollback_target(paths: BoxPaths, project_name: str) -> bool:
 def deploy_eligible(project_name: str, paths: BoxPaths) -> bool:
     """Checked by every deploy core under the project lock, immediately
     before anything changes. Prints why and returns False if not."""
-    if refuse_if_blocked(project_name, paths):
+    if refuse_if_blocked(project_name, paths) or refuse_if_legacy_stage(paths, project_name):
         return False
     from boxmunge.project_registry import is_registered
     if not is_registered(project_name, paths):

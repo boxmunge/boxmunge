@@ -15,6 +15,7 @@ from boxmunge import staging_data
 from boxmunge.docker_run import DockerError
 from boxmunge.manifest import validate_manifest
 from boxmunge.paths import BoxPaths
+from boxmunge.staged_release import new_meta, slot_dir, write_meta
 from boxmunge.staging_copy_plan import (
     StagingDataError, Store, copy_sources, plan_copy, stores,
 )
@@ -38,7 +39,7 @@ def _stores(project_dir: Path, volumes=(), binds=(), *, staging=False,
 
 def test_stores_are_production_data_and_staging_copies(tmp_path: Path) -> None:
     prod = _stores(tmp_path, ["pgdata", "myapp_files"],
-                   ["data/db", "data", "uploads/img", "appconfig", ".releases/live-mounts/x"])
+                   ["data/db", "data", "uploads/img", "appconfig", ".releases/previous/x"])
     assert [(s.kind, s.key, s.ref) for s in prod] == [
         ("bind", "./data", str(tmp_path / "data")),  # data/db lies inside it
         ("bind", "./uploads/img", str(tmp_path / "uploads/img")),
@@ -145,8 +146,6 @@ class _Docker:
         monkeypatch.setattr("boxmunge.compose_guard.check_containers_start",
                             lambda paths, project, component: self.checks.append("before start"))
 
-    fail_stop = fail_start = False
-
     def __call__(self, cmd, capture=False, check=True, timeout=None):
         self.calls.append(cmd)
         if cmd[:3] == ["docker", "volume", "inspect"] and cmd[3] not in self.volumes:
@@ -155,10 +154,6 @@ class _Docker:
             raise DockerError("cp: write error: No space left on device")
         if cmd[:2] == ["docker", "rm"]:
             raise DockerError("Error response from daemon: No such container: x")
-        if cmd[:2] == ["docker", "stop"] and self.fail_stop:
-            raise DockerError("container myapp-web-1 did not stop")
-        if cmd[:2] == ["docker", "start"] and self.fail_start:
-            raise DockerError("Cannot connect to the Docker daemon")
 
         class Done:
             returncode = 0
@@ -179,10 +174,23 @@ def _plan(tmp_path: Path):
                      "myapp")
 
 
-def test_copy_stops_production_around_a_complete_replacement(tmp_path, monkeypatch) -> None:
+def _slot(paths: BoxPaths, fake_containers, names: list[str]) -> None:
+    """A slot to record production's stop in, and the containers it stops
+    (the start-again around a copy: tests/test_staging_copy_marker.py)."""
+    slot = slot_dir(paths, "myapp")
+    (slot / "release").mkdir(parents=True)
+    write_meta(slot, new_meta("bundle", "myapp-v2", None))
+    for name in names:
+        fake_containers.run("myapp", name.split("-")[1], "sha256:1", name=name)
+
+
+def test_copy_stops_production_around_a_complete_replacement(tmp_path, monkeypatch,
+                                                              fake_containers) -> None:
     docker = _Docker(monkeypatch, volumes={"myapp_pgdata", "myapp-staging_pgdata"},
                      running={"myapp": ["myapp-web-1"]})
-    staging_data.copy_production_data(BoxPaths(tmp_path / "bm"), "myapp", _plan(tmp_path))
+    paths = BoxPaths(tmp_path / "bm")
+    _slot(paths, fake_containers, ["myapp-web-1"])
+    staging_data.copy_production_data(paths, "myapp", _plan(tmp_path))
     assert docker.verbs()[-4:] == ["stop", "run", "run", "start"]
     assert docker.checks == ["before stop", "before start"]
     runs = [c for c in docker.calls if c[1] == "run"]
@@ -191,15 +199,6 @@ def test_copy_stops_production_around_a_complete_replacement(tmp_path, monkeypat
     assert "type=volume,src=myapp-staging_pgdata,dst=/dst" in copy
     # Hidden entries are removed too, and the destination proven empty.
     assert "/dst/.[!.]*" in copy and 'ls -A /dst' in copy
-
-
-def test_production_restarts_when_a_copy_fails(tmp_path, monkeypatch) -> None:
-    docker = _Docker(monkeypatch, volumes={"myapp_pgdata", "myapp-staging_pgdata"},
-                     running={"myapp": ["myapp-web-1"]})
-    docker.fail_copy = True
-    with pytest.raises(DockerError, match="No space"):
-        staging_data.copy_production_data(BoxPaths(tmp_path / "bm"), "myapp", _plan(tmp_path))
-    assert docker.calls[-1][:2] == ["docker", "start"]
 
 
 def test_a_missing_production_volume_is_never_created(tmp_path, monkeypatch) -> None:
@@ -219,26 +218,6 @@ def test_each_copy_container_is_named_and_force_removed(tmp_path, monkeypatch) -
     name = run[run.index("--name") + 1]
     assert name.startswith("boxmunge-myapp-staging-copy-")
     assert rm == ["docker", "rm", "-f", name]
-
-
-def test_production_restarts_when_stopping_it_fails(tmp_path, monkeypatch) -> None:
-    docker = _Docker(monkeypatch, volumes={"myapp_pgdata", "myapp-staging_pgdata"},
-                     running={"myapp": ["myapp-web-1", "myapp-db-1"]})
-    docker.fail_stop = True
-    with pytest.raises(DockerError, match="did not stop"):
-        staging_data.copy_production_data(BoxPaths(tmp_path / "bm"), "myapp", _plan(tmp_path))
-    assert docker.calls[-1] == ["docker", "start", "myapp-web-1", "myapp-db-1"]
-
-
-def test_production_left_down_is_said_loudly(tmp_path, monkeypatch, capsys) -> None:
-    docker = _Docker(monkeypatch, volumes={"myapp_pgdata", "myapp-staging_pgdata"},
-                     running={"myapp": ["myapp-web-1"]})
-    docker.fail_copy = docker.fail_start = True
-    with pytest.raises(staging_data.ProductionDownError) as raised:
-        staging_data.copy_production_data(BoxPaths(tmp_path / "bm"), "myapp", _plan(tmp_path))
-    assert "No space" in str(raised.value.__cause__)
-    err = capsys.readouterr().err
-    assert "PRODUCTION IS DOWN" in err and "docker start myapp-web-1" in err
 
 
 def test_running_staging_is_refused(tmp_path, monkeypatch) -> None:

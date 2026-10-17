@@ -130,7 +130,7 @@ def test_deploy_stage_update_and_delete_use_platform_names(project) -> None:
 
     # Regenerating the overlay (deploy, upgrade) drops every name the
     # labels prove this project built; the running container keeps its image.
-    prepare_compose_override(paths, manifest, release_root=project_dir)
+    prepare_compose_override(paths, manifest)
     assert local_image_id(f"{name}-web") is None
     assert local_image_id(f"{name}-custom") is None
     assert local_image_id(_REGISTRY_IMAGE) is not None
@@ -163,7 +163,7 @@ def test_deploy_stage_update_and_delete_use_platform_names(project) -> None:
     assert _container_image(f"{name}-web-1") == built
 
     # Staging builds under its own name and leaves production's alone.
-    write_staging_files(paths, name, manifest, project_dir, project_dir, box_state=set())
+    write_staging_files(paths, name, manifest, project_dir, project_dir)
     compose_up(project_dir, compose_files=STAGING_FILES, project_name=f"{name}-staging")
     assert _container_image(f"{name}-staging-web-1") == f"boxmunge.invalid/{name}-staging/web"
     assert local_image_id(built) is not None
@@ -184,7 +184,7 @@ def test_own_build_run_by_another_service_is_not_pulled(project) -> None:
                                      "depends_on": ["web"]}
     (project_dir / "compose.yml").write_text(yaml.safe_dump(compose))
     validate_user_compose(project_dir / "compose.yml", paths, project_name=name)
-    prepare_compose_override(paths, manifest, release_root=project_dir)
+    prepare_compose_override(paths, manifest)
     files = ["compose.yml", "compose.boxmunge.yml"]
     compose_up(project_dir, compose_files=files, project_name=name)
     result = update_project(paths, UpdateTarget(
@@ -213,7 +213,7 @@ def test_untagging_leaves_a_prefix_sharing_projects_image_alone(tmp_path: Path) 
         shared = f"{foo_bar}-web"
         assert local_image_id(shared) is not None
         manifest = {"project": foo, "hosts": ["foo.example.com"], "services": {}}
-        prepare_compose_override(paths, manifest, release_root=paths.project_dir(foo))
+        prepare_compose_override(paths, manifest)
         assert local_image_id(shared) is not None
     finally:
         _remove_everything(foo, [paths.project_dir(foo), paths.project_dir(foo_bar)])
@@ -226,7 +226,7 @@ def test_profiled_service_is_hardened_in_the_overlay(project) -> None:
     compose = yaml.safe_load((project_dir / "compose.yml").read_text())
     compose["services"]["ops"] = {"image": _REGISTRY_IMAGE, "profiles": ["ops"]}
     (project_dir / "compose.yml").write_text(yaml.safe_dump(compose))
-    prepare_compose_override(paths, manifest, release_root=project_dir)
+    prepare_compose_override(paths, manifest)
     overlay = yaml.safe_load((project_dir / "compose.boxmunge.yml").read_text())
     assert "no-new-privileges:true" in overlay["services"]["ops"]["security_opt"]
     out = subprocess.run(
@@ -255,7 +255,7 @@ def test_old_names_of_a_removed_service_are_untagged(project) -> None:
     assert local_image_id(f"{name}-old") is not None
     del compose["services"]["old"]
     (project_dir / "compose.yml").write_text(yaml.safe_dump(compose))
-    prepare_compose_override(paths, manifest, release_root=project_dir)
+    prepare_compose_override(paths, manifest)
     assert local_image_id(f"{name}-old") is None
 
 
@@ -269,11 +269,11 @@ def test_untag_keeps_an_image_another_projects_container_uses(project) -> None:
                     "--label", f"com.docker.compose.project={name}x",
                     f"{name}-custom"], check=True, capture_output=True)
     try:
-        prepare_compose_override(paths, manifest, release_root=project_dir)
+        prepare_compose_override(paths, manifest)
         assert local_image_id(f"{name}-custom") is not None
     finally:
         subprocess.run(["docker", "rm", "-f", other], capture_output=True, check=False)
-    prepare_compose_override(paths, manifest, release_root=project_dir)
+    prepare_compose_override(paths, manifest)
     assert local_image_id(f"{name}-custom") is None
 
 
@@ -304,7 +304,7 @@ def test_untag_does_not_depend_on_repo_digests(project, local_registry) -> None:
         capture_output=True, text=True, check=True).stdout.strip()
     assert digests != "0"
     try:
-        prepare_compose_override(paths, manifest, release_root=project_dir)
+        prepare_compose_override(paths, manifest)
         # The name this project gave its build goes, digests or not. (The
         # registry name is the test's own, not one this project produced, so
         # whether it goes depends on whether Compose labelled the build.)
@@ -333,7 +333,7 @@ def test_unlabelled_build_is_owned_through_the_projects_container(project) -> No
                     "--label", "com.docker.compose.service=plainsvc", plain],
                    check=True, capture_output=True)
     try:
-        prepare_compose_override(paths, manifest, release_root=project_dir)
+        prepare_compose_override(paths, manifest)
         assert local_image_id(plain) is None
     finally:
         subprocess.run(["docker", "rm", "-f", container], capture_output=True, check=False)
@@ -361,7 +361,7 @@ def test_unlabelled_build_of_a_bare_from_keeps_the_base_images_name(project) -> 
     container = f"{name}-thin-1"
     _labelled_container(container, name, "thin", f"{name}-thin")
     try:
-        prepare_compose_override(paths, manifest, release_root=project_dir)
+        prepare_compose_override(paths, manifest)
         assert local_image_id(f"{name}-thin") is None
         assert local_image_id(base) is not None
     finally:
@@ -379,7 +379,7 @@ def test_own_image_only_service_still_on_the_old_name_protects_it(project) -> No
     worker = f"{name}-worker-1"
     _labelled_container(worker, name, "worker", f"{name}-custom")
     try:
-        prepare_compose_override(paths, manifest, release_root=project_dir)
+        prepare_compose_override(paths, manifest)
         assert local_image_id(f"{name}-custom") is not None
     finally:
         subprocess.run(["docker", "rm", "-f", worker], capture_output=True, check=False)

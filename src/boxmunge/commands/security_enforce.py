@@ -20,9 +20,12 @@ from boxmunge.cve.quarantine import (
     is_quarantined,
     quarantine_action_complete,
     quarantine_project,
+    read_quarantine_state,
     reassert_quarantine,
 )
+from boxmunge.legacy_stage import cannot_tell, legacy_stage
 from boxmunge.log import log_warning
+from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 
 
@@ -34,6 +37,9 @@ class Enforcement:
     # The quarantine landed on this attempt: a new one, or an earlier
     # partial one completed. The QUARANTINED alert is due.
     landed: bool = False
+    # The CVE that would have quarantined the project, held because a
+    # 0.10.1 stage is in place (spec "On the beta, until it is resolved").
+    held: str | None = None
 
 
 def enforce(
@@ -46,11 +52,21 @@ def enforce(
 
     An existing record is re-asserted whatever this scan found, so a
     partially failed action converges (audit B-03). During grace no NEW
-    quarantine fires; the heads-up alert summarises what would.
+    quarantine fires; the heads-up alert summarises what would. For a
+    project with a 0.10.1 stage both are held (Enforcement.held); when it
+    cannot be told whether one is on disk, a due action is not taken and
+    is reported as the error.
     """
     project_dir = paths.project_dir(project)
     try:
+        try:
+            legacy = legacy_stage(paths, project) is not None
+        except OSError as e:
+            return _undetermined(paths, project, e, due=headline is not None and not in_grace)
         if is_quarantined(project, paths):
+            if legacy:
+                # Re-asserting stops the containers again: production's.
+                return _hold(paths, project, _recorded_cve(project, paths), reasserting=True)
             was_complete = quarantine_action_complete(project, paths)
             reassert_quarantine(
                 project, paths, project_dir=project_dir,
@@ -58,6 +74,8 @@ def enforce(
             )
             return Enforcement(landed=not was_complete)
         if headline is not None and not in_grace:
+            if legacy:
+                return _hold(paths, project, headline[1].finding.cve_id, reasserting=False)
             quarantine_project(
                 project, paths, project_dir=project_dir,
                 hosts=hosts, compose_files=compose_files,
@@ -67,6 +85,41 @@ def enforce(
     except QuarantineError as e:
         return Enforcement(error=f"quarantine action failed for {project!r}: {e}")
     return Enforcement()
+
+
+def _undetermined(paths: BoxPaths, project: str, error: OSError, *, due: bool) -> Enforcement:
+    """A 0.10.1 stage may be on disk: acting could stop production, so a due
+    action (a new quarantine, or re-asserting a recorded one) is not taken
+    and is reported. A record that cannot be read either is reported too."""
+    not_taken = f"quarantine action not taken: {cannot_tell(project, error)}"
+    try:
+        due = due or is_quarantined(project, paths)
+    except OSError as e:
+        return Enforcement(error=f"{not_taken}; its quarantine record cannot be read either: {e}")
+    return Enforcement(error=not_taken if due else None)
+
+
+def _recorded_cve(project: str, paths: BoxPaths) -> str:
+    cve = (read_quarantine_state(project, paths) or {}).get("cve_id")
+    if not isinstance(cve, str) or not cve:
+        raise QuarantineError(f"the quarantine record of {project!r} names no cve_id")
+    return cve
+
+
+def _hold(paths: BoxPaths, project: str, cve: str, *, reasserting: bool) -> Enforcement:
+    """Hold, not take or re-assert, the quarantine of a project with a 0.10.1
+    stage: it would stop production, and security resume and legacy-stage
+    stay refused until probation ends."""
+    action = ("its quarantine for {cve} would be re-asserted" if reasserting
+              else "it would be quarantined for {cve}").format(cve=cve)
+    message = (f"{project}: {action}, but it has a release staged by boxmunge 0.10.1: "
+               f"a quarantine would stop production, and security resume and "
+               f"legacy-stage stay refused until probation ends. Resolve it with "
+               f"`boxmunge-server legacy-stage {project}`.")
+    log_warning("cve-scan", message, paths, project=project, detail={"cve": cve})
+    notify(paths, f"{project}: quarantine held", message,
+           component="cve-scan", project=project, priority=1)
+    return Enforcement(held=cve)
 
 
 def announce_quarantine(

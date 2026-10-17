@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,6 +14,7 @@ from boxmunge.docker_run import DockerError
 # Bound at import: conftest's fake_containers replaces the module attributes.
 project_containers = docker_containers.project_containers
 local_image = docker_containers.local_image
+created_times = docker_containers.created_times
 
 _IMG = "sha256:" + "a" * 64
 
@@ -107,6 +109,29 @@ def test_docker_failure_is_not_an_empty_answer(monkeypatch):
     monkeypatch.setattr(docker_containers, "_run", run)
     with pytest.raises(DockerError):
         project_containers("demo")
+
+
+def test_created_times_read_docker_nanosecond_times(daemon):
+    web, worker = _container("demo-web-1", "web"), _container("demo-worker-1", "worker")
+    web["Created"] = "2026-10-01T12:00:00.123456789Z"
+    worker["Created"] = "2026-10-01T14:00:00+02:00"
+    daemon["containers"] = [web, worker]
+    assert created_times("demo") == {
+        "demo-web-1": datetime(2026, 10, 1, 12, 0, 0, 123456, tzinfo=timezone.utc),
+        "demo-worker-1": datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)}
+    assert "label=com.docker.compose.project=demo" in daemon["calls"][0]
+
+
+def test_created_times_of_no_containers_is_empty(daemon):
+    assert created_times("demo") == {}
+
+
+def test_an_unreadable_created_time_fails_loudly(daemon):
+    web = _container("demo-web-1", "web")
+    web["Created"] = "yesterday"
+    daemon["containers"] = [web]
+    with pytest.raises(DockerError, match="yesterday"):
+        created_times("demo")
 
 
 def _completed(returncode: int, stdout: str = "", stderr: str = "") -> MagicMock:

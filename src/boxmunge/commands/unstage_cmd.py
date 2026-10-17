@@ -1,160 +1,185 @@
-"""boxmunge unstage <project> — tear down staging, leave production untouched.
+"""boxmunge unstage <project> — take staging down and drop the slot.
 
-Unstage removes whatever a stage left behind, whether or not the stage got
-as far as recording itself active (audit C-13): staging containers, the
-staging Caddy site and compose files, and the staged release in the project
-dir, which is replaced by the production release stage kept aside.
+Production's tree is not touched: the slot holds release code only, and
+staging's data copies stay (they are reused by the next stage), except
+copies of entries production no longer mounts. Each step is idempotent and
+the slot is removed last, so a failed (or killed) unstage is finished by
+running it again: the slot's debris alone is still staging to tear down.
 """
 from __future__ import annotations
+
+import os
 import sys
+from collections.abc import Callable
 from typing import TYPE_CHECKING
+
 from boxmunge.caddy_journal import remove_site
-from boxmunge.docker import caddy_config_lock, compose_down, caddy_reload, DockerError
-from boxmunge.fileutil import project_lock, LockError
+from boxmunge.data_dirs import ReleaseStateError
+from boxmunge.docker import DockerError, caddy_config_lock, caddy_reload, compose_down
+from boxmunge.fileutil import LockError, project_lock
 from boxmunge.log import log_error, log_operation
-from boxmunge.release_staging import has_prestage, prestage_replaced, restore_prestage
+from boxmunge.legacy_stage import refuse_if_legacy_stage
+from boxmunge.production_stopped import start_again, unreadable_slot_discarded
+from boxmunge.release_txn import load_txn, options_text
+from boxmunge.staged_release import (
+    SlotError, StagedRelease, drop_slot, has_slot, load_slot, manual_teardown,
+    promoted_debris, slot_debris, staging_target, sweep_debris, update_meta,
+)
 from boxmunge.staging_cleanup import remove_retired_staging_data
-from boxmunge.state import read_state, write_state
 
 if TYPE_CHECKING:
-    from pathlib import Path
     from boxmunge.paths import BoxPaths
 
 
-def _staging_files(project_name: str, paths: BoxPaths) -> list[Path]:
-    return [
-        paths.project_staging_caddy_site(project_name),
-        paths.project_staging_compose_override(project_name),
-        paths.project_dir(project_name) / "compose.staging-base.yml",
-        paths.project_bind_record(project_name, staging=True),
-    ]
+def staging_exists(project: str, paths: BoxPaths) -> bool:
+    return has_slot(paths, project) or paths.project_staging_caddy_site(project).exists()
 
 
-def staging_exists(project_name: str, paths: BoxPaths) -> bool:
-    """True if any trace of a stage exists: state, files, or a kept release."""
-    return (
-        bool(read_state(paths.project_staging_state(project_name)).get("active"))
-        or any(p.exists() for p in _staging_files(project_name, paths))
-        or has_prestage(paths, project_name)
-    )
+def _read_meta(project: str, paths: BoxPaths, component: str) -> StagedRelease | None:
+    try:
+        return load_slot(paths, project)
+    except SlotError as e:
+        unreadable_slot_discarded(paths, project, component, e, "tearing staging down "
+                                  "with the slot's compose files")
+        return None
 
 
-def refuse_if_promotion_interrupted(project_name: str, paths: BoxPaths) -> bool:
-    """Print why and return True if a promote switched production to the
-    staged release but stopped before it finished.
-
-    The kept production release then no longer describes what production
-    runs: putting it back (unstage) or staging over it would put old files
-    under the new containers. Finishing the promote resolves it.
-    """
-    if not (has_prestage(paths, project_name) and prestage_replaced(paths, project_name)):
+def _stop_staging(project: str, paths: BoxPaths, meta: StagedRelease | None,
+                  component: str) -> bool:
+    """compose down <p>-staging with the slot's files. On failure nothing
+    else is removed, so a retry can still reach the containers."""
+    target = staging_target(paths, project)
+    try:
+        compose_down(target.cwd, **target.kwargs())
+    except DockerError as e:
+        print(f"ERROR: Removing the staging containers failed: {e}. Nothing else was "
+              f"removed, so 'unstage {project}' can retry. By hand: "
+              f"{manual_teardown(paths, project)}", file=sys.stderr)
+        log_error(component, f"Staging container teardown failed: {e}", paths,
+                  project=project)
+        if meta is not None:
+            update_meta(paths, project, meta, cleanup_incomplete=str(e))
         return False
-    print(f"ERROR: An earlier promote of '{project_name}' was interrupted after "
-          f"it started the staged release in production, so the kept production "
-          f"release no longer matches what is running. Run 'promote "
-          f"{project_name}' to finish it; 'rollback {project_name}' then returns "
-          f"to the earlier release.", file=sys.stderr)
     return True
 
 
-def _remove_staging_containers(project_name: str, paths: BoxPaths) -> str | None:
-    """compose down the staging project. Returns the error, or None."""
-    project_dir = paths.project_dir(project_name)
-    if not paths.project_staging_compose_override(project_name).exists():
-        return None
-    staging_base = project_dir / "compose.staging-base.yml"
-    base = "compose.staging-base.yml" if staging_base.exists() else "compose.yml"
+def teardown_staging_locked(project: str, paths: BoxPaths, *, component: str = "unstage",
+                            promoted: Callable[[], None] | None = None) -> bool:
+    """Take staging down and drop the slot. Caller holds the lock. Returns
+    False if a step failed (each failure is reported, never raised: stage
+    and promote call this in their own failure paths). ``promoted`` is
+    promote's announcement, made once staging is down and before the slot
+    is dropped as promoted (staged_release.drop_slot)."""
     try:
-        compose_down(project_dir, compose_files=[base, "compose.boxmunge-staging.yml"],
-                     project_name=f"{project_name}-staging")
-    except DockerError as e:
-        return str(e)
-    return None
-
-
-def teardown_staging(project_name: str, paths: BoxPaths) -> bool:
-    """Remove every staging artefact and put production's release back.
-
-    Idempotent. Returns False if a step failed (each failure is reported).
-    If the staging containers cannot be removed, nothing else is touched:
-    the compose files that reach them stay, and the staging state records
-    the incomplete cleanup, so running unstage again retries it. After
-    that, the remaining steps all run so as much as possible is cleaned up.
-    """
-    if refuse_if_promotion_interrupted(project_name, paths):
-        return False
-    state_path = paths.project_staging_state(project_name)
-    error = _remove_staging_containers(project_name, paths)
-    if error is not None:
-        print(f"ERROR: Removing the staging containers failed: {error}. Nothing "
-              f"else was removed; the staging compose files are kept so "
-              f"'unstage {project_name}' can retry.", file=sys.stderr)
-        log_error("unstage", f"Staging container teardown failed: {error}",
-                  paths, project=project_name)
-        write_state(state_path, {**read_state(state_path), "cleanup_incomplete": error})
+        if not _take_down(project, paths, component):
+            return False
+        if promoted is not None:
+            promoted()
+        drop_slot(paths, project, promoted=promoted is not None)
+        return True
+    except (OSError, SlotError) as e:
+        print(f"ERROR: Tearing staging down failed: {e}", file=sys.stderr)
+        log_error(component, f"Tearing staging down failed: {e}", paths, project=project)
         return False
 
-    ok = True
+
+def _take_down(project: str, paths: BoxPaths, component: str) -> bool:
+    """Everything but dropping the slot, each step idempotent."""
+    sweep_debris(paths, project)  # refuses a planted link before any compose call
+    meta = _read_meta(project, paths, component)
+    if meta is not None and meta.production_stopped:
+        try:
+            start_again(paths, project, component=component, alert=True)
+        except DockerError:
+            return False  # said loudly; the marker is kept for the next try
+        meta = _read_meta(project, paths, component)
+    if has_slot(paths, project) and not _stop_staging(project, paths, meta, component):
+        return False
     with caddy_config_lock(paths.state):
-        remove_site(paths.caddy, paths.project_staging_caddy_site(project_name))
-    for path in _staging_files(project_name, paths):
-        path.unlink(missing_ok=True)
-
-    if has_prestage(paths, project_name):
-        try:
-            restore_prestage(paths, project_name)
-            print("  Production release files restored.")
-        except (OSError, ValueError) as e:
-            print(f"ERROR: Restoring the production release files failed: {e}",
-                  file=sys.stderr)
-            log_error("unstage", f"Restoring the production release failed: {e}",
-                      paths, project=project_name)
-            ok = False
-
-    # Only once staging is down and production's release is back: which
-    # copies are retired depends on what production's compose.yml mounts.
-    if ok:
-        try:
-            remove_retired_staging_data(paths, project_name)
-        except (OSError, ValueError, DockerError) as e:
-            print(f"ERROR: Removing retired staging data failed: {e}", file=sys.stderr)
-            log_error("unstage", f"Removing retired staging data failed: {e}",
-                      paths, project=project_name)
-            ok = False
-
+        remove_site(paths.caddy, paths.project_staging_caddy_site(project))
     try:
         caddy_reload(paths.caddy, paths.state)
     except DockerError as e:
         print(f"  WARN: Caddy reload failed: {e}")
+    record = paths.project_bind_record(project, staging=True)
+    if os.path.lexists(record):
+        record.unlink()
+    # Which copies are retired depends on what production's compose.yml
+    # mounts; that file is always production's now.
+    try:
+        remove_retired_staging_data(paths, project, meta.made if meta is not None else ())
+    except (OSError, ValueError, DockerError) as e:
+        print(f"ERROR: Removing retired staging data failed: {e}", file=sys.stderr)
+        log_error(component, f"Removing retired staging data failed: {e}", paths, project=project)
+        return False
+    return True
 
-    write_state(state_path, {"active": False})
-    return ok
+
+def promote_needs_slot(project: str, paths: BoxPaths) -> str | None:
+    """Why an open promote needs this slot to resume, or None. A slot or
+    install record that cannot be read cannot be told apart from that one,
+    so it is kept too. Caller holds the lock."""
+    try:
+        txn = load_txn(paths, project)
+    except ReleaseStateError as e:
+        return str(e)
+    if txn is None or txn.source != "staged":
+        return None
+    try:
+        meta = load_slot(paths, project)
+    except SlotError as e:
+        return (f"'{project}' has a promote open (phase {txn.phase}) and the staged "
+                f"slot's record cannot be read ({e}), so the install may need this slot. "
+                f"{options_text(project, txn)}.")
+    if meta is None or txn.staged_id != meta.id:
+        return None
+    return (f"'{project}' is being promoted from this staged release (phase "
+            f"{txn.phase}); its install needs the slot. {options_text(project, txn)}.")
 
 
-def unstage_locked(project_name: str, paths: BoxPaths, dry_run: bool = False) -> int:
+def _refuse_if_promoting(project: str, paths: BoxPaths) -> bool:
+    reason = promote_needs_slot(project, paths)
+    if reason is not None:
+        print(f"ERROR: {reason}", file=sys.stderr)
+    return reason is not None
+
+
+def unstage_locked(project: str, paths: BoxPaths, dry_run: bool = False) -> int:
     """The unstage core. Caller holds the project lock; never takes it."""
-    if not staging_exists(project_name, paths):
-        print(f"ERROR: No staging found for '{project_name}'.", file=sys.stderr)
+    if refuse_if_legacy_stage(paths, project):
         return 1
-    if refuse_if_promotion_interrupted(project_name, paths):
+    if not staging_exists(project, paths) and not slot_debris(paths, project):
+        print(f"ERROR: No staging found for '{project}'.", file=sys.stderr)
+        return 1
+    if not dry_run and not staging_exists(project, paths) and promoted_debris(paths, project):
+        return _finish_promoted_drop(project, paths)
+    if _refuse_if_promoting(project, paths):
         return 1
     if dry_run:
-        print(f"[DRY RUN] Would tear down staging for '{project_name}'")
+        print(f"[DRY RUN] Would tear down staging for '{project}'")
         return 0
-
-    print(f"Unstaging {project_name}...")
-    if not teardown_staging(project_name, paths):
-        print(f"ERROR: Staging for '{project_name}' was only partly torn down; "
-              f"fix the errors above and run 'unstage {project_name}' again.",
-              file=sys.stderr)
+    print(f"Unstaging {project}...")
+    if not teardown_staging_locked(project, paths):
+        print(f"ERROR: Staging for '{project}' was only partly torn down; fix the errors "
+              f"above and run 'unstage {project}' again.", file=sys.stderr)
         return 1
-
-    log_operation("unstage", "Unstaged", paths, project=project_name)
-    print(f"{project_name}: staging torn down.")
-
+    log_operation("unstage", "Unstaged", paths, project=project)
+    print(f"{project}: staging torn down.")
     from boxmunge.webhooks import webhook_safe
-    webhook_safe("unstage", project_name, paths)
+    webhook_safe("unstage", project, paths)
+    return 0
 
+
+def _finish_promoted_drop(project: str, paths: BoxPaths) -> int:
+    """A promote was killed while dropping the slot it had announced: the
+    removal is all that is left, and it was a promotion, not an unstage."""
+    try:
+        sweep_debris(paths, project)
+    except OSError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    print(f"{project}: removed what an interrupted promote left of the staged slot; "
+          f"nothing is staged.")
     return 0
 
 

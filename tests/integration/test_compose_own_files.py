@@ -66,8 +66,8 @@ OWN_FILE_MOUNTS = {
     "secrets.env": "./secrets.env:/srv/secrets.env",
     "generated overlay": "./compose.boxmunge.yml:/srv/o.yml",
     "kept releases": "./.releases:/srv/releases",
-    "production smoke scripts": "./.releases/live-scripts:/srv/s",
-    "staged smoke scripts": "./boxmunge-scripts:/srv/s",
+    "inside kept releases": "./.releases/previous:/srv/p",
+    "smoke scripts": "./boxmunge-scripts:/srv/s",
     "CVE suppressions": "./security:/srv/security",
 }
 
@@ -78,7 +78,7 @@ def test_read_write_mount_of_own_files_is_refused(tmp_path: Path, volume) -> Non
     project_dir = _project(paths, [volume])
     for name in (".env", "secrets.env", "compose.boxmunge.yml"):
         (project_dir / name).write_text("")
-    for name in (".releases/live-scripts", "boxmunge-scripts", "security"):
+    for name in (".releases/previous", "boxmunge-scripts", "security"):
         (project_dir / name).mkdir(parents=True)
     with pytest.raises(ComposeSecurityError, match="read-only"):
         validate_user_compose(project_dir / "compose.yml", paths, project_name=PROJECT)

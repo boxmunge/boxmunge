@@ -9,6 +9,9 @@ import pytest
 from boxmunge.commands.doctor import cmd_doctor
 from boxmunge.paths import BoxPaths
 
+# Doctor probes the docker CLI (Compose version, the system container, Caddy).
+pytestmark = pytest.mark.usefixtures("docker_down")
+
 
 class TestDoctorJson:
     """Audit H-5: `--json` must suppress the banner so output stays parseable."""

@@ -284,14 +284,6 @@ def test_container_mount_outside_the_project_is_refused(box) -> None:
             check_containers_start(paths, NAME, component="stage")
 
 
-def test_staging_keeps_its_own_record(box) -> None:
-    paths, *_ = box
-    compose_up_checked(paths, NAME, component="stage", compose_files=["compose.yml"],
-                       staging=True, record=True)
-    assert paths.project_bind_record(NAME, staging=True).exists()
-    assert not paths.project_bind_record(NAME).exists()
-
-
 def test_platform_start_is_only_for_platform_stacks(box) -> None:
     paths, project_dir, up, *_ = box
     with pytest.raises(ValueError, match="not a platform stack"):
@@ -300,15 +292,14 @@ def test_platform_start_is_only_for_platform_stacks(box) -> None:
     assert up.call_args.kwargs["project_name"] == "caddy"
 
 
-def test_starting_containers_during_a_stage_ignores_the_staged_files(box) -> None:
-    """While staged, the project dir holds the staged release: compose.yml
-    no longer hashes to production's record. A `docker start` reads no
-    compose file, so it is checked on the containers' mounts alone."""
+def test_starting_containers_reads_no_compose_file(box) -> None:
+    """A `docker start` reads no compose file, so a compose.yml that no
+    longer hashes to production's record does not refuse it: it is checked
+    on the containers' mounts alone."""
     paths, project_dir, _, start, _ = box
     _deploy(paths)
     (project_dir / "compose.yml").write_text(yaml.safe_dump({"services": {"web": {
         "image": "nginx:1.28", "volumes": ["./data/uploads:/uploads"]}}}))
-    (paths.project_releases(NAME) / "prestage" / "release").mkdir(parents=True)
     with patch("boxmunge.docker_containers.container_bind_sources",
                return_value=[(str(project_dir / "data" / "uploads"), True)]):
         start_containers_checked(paths, NAME, [f"{NAME}-web-1"], component="stage")

@@ -7,8 +7,9 @@ from pathlib import Path
 
 from boxmunge.paths import BoxPaths
 
-# Provides the `system_container` fixture (a fake boxmunge-system container).
-pytest_plugins = ["tests.fake_system_container"]
+# Provides the `system_container` fixture (a fake boxmunge-system container),
+# and refuses real docker spawns outside the integration tier.
+pytest_plugins = ["tests.fake_system_container", "tests.real_docker_guard"]
 
 
 @pytest.fixture(autouse=True)
@@ -55,6 +56,17 @@ def _no_writable_diagnostic_sleep(monkeypatch):
         "boxmunge.writable_diagnostics._sleep_fn",
         lambda _: None,
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_writable_diagnostic_logs(request, monkeypatch):
+    """Outside the integration tier the writable diagnostics' default log
+    fetch (after a deploy, on a smoke failure) finds no logs, as on a box
+    without Docker; tests that need logs pass `log_fetcher=...`."""
+    if request.node.get_closest_marker("integration"):
+        return
+    monkeypatch.setattr("boxmunge.writable_diagnostics._compose_logs",
+                        lambda project_dir, service, tail, project: "")
 
 
 class FakeContainers:
@@ -160,6 +172,9 @@ def fake_containers(request, monkeypatch) -> FakeContainers:
                             lambda project_name: [])
         monkeypatch.setattr("boxmunge.docker_containers.container_mounts",
                             lambda project_name: [])
+        # The legacy-stage evidence asks when production's containers were made.
+        monkeypatch.setattr("boxmunge.docker_containers.created_times",
+                            lambda project_name: {})
     return fake
 
 
@@ -267,7 +282,7 @@ def tmp_root(tmp_path: Path) -> Path:
     root = tmp_path / "boxmunge"
     for subdir in [
         "bin", "config", "caddy/sites", "projects", "state/health",
-        "state/deploy", "state/staging", "templates/project", "docs", "logs",
+        "state/deploy", "templates/project", "docs", "logs",
         "inbox/.tmp", "inbox/.consumed",
     ]:
         (root / subdir).mkdir(parents=True)

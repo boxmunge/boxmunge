@@ -30,6 +30,8 @@ from boxmunge.compose_mounts import host_path_forms, is_bind_entry, volume_sourc
 
 # Project entries boxmunge reads or runs, relative to the project directory.
 # repo/.git, not repo/: git runs hooks from it on the next deploy's fetch.
+# compose.boxmunge-staging.yml and compose.staging-base.yml are a 0.10.1
+# stage's files (legacy_stage), reserved until the upgrade floor passes the beta.
 CONTROL_ENTRIES: tuple[str, ...] = (
     "compose.yml", "manifest.yml", ".env", "project.env", "secrets.env",
     "compose.boxmunge.yml", "compose.boxmunge-staging.yml", "compose.staging-base.yml",
@@ -149,13 +151,20 @@ def _bind_problems(
 
 def own_file_problems(
     doc: dict[str, Any], base_dir: Path, project_dir: Path, read_files: Iterable[Path],
+    *, in_place: bool = False,
 ) -> list[str]:
     """Every bind mount that would let a container change what boxmunge
     reads, or redirect another mount. `read_files` are the compose, include,
-    extends, env and label files the compose file makes Compose read."""
-    protected = _protected(base_dir, project_dir, read_files)
+    extends, env and label files the compose file makes Compose read.
+
+    By default `base_dir` stands in for the project dir the release will be
+    installed in (a bundle under intake). `in_place`: the model runs from
+    `base_dir` where it is (staging, from the slot's release inside
+    `.releases`), so every path is located where it really lies."""
+    stand_in = project_dir if in_place else base_dir
+    protected = _protected(stand_in, project_dir, read_files)
     binds = [(user, abs_src, rw) for user, _raw, abs_src, rw in service_binds(doc, base_dir)]
-    return _bind_problems(binds, base_dir, project_dir, protected, binds)
+    return _bind_problems(binds, stand_in, project_dir, protected, binds)
 
 
 def container_bind_problems(

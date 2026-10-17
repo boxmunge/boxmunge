@@ -15,6 +15,7 @@ from boxmunge.commands.deploy import run_deploy
 from boxmunge.commands.stage_cmd import run_stage
 from boxmunge.commands.unstage_cmd import run_unstage
 from boxmunge.project_registry import add_project
+from boxmunge.staged_release import load_slot
 
 from tests.bundle_helpers import place_bundle
 
@@ -25,6 +26,7 @@ V2 = "2026-10-13T100000000000"
 @contextmanager
 def _containers():
     with patch("boxmunge.compose_guard.compose_up"), \
+            patch("boxmunge.stage_slot.compose_down"), \
             patch("boxmunge.commands.unstage_cmd.compose_down"):
         yield
 
@@ -49,8 +51,7 @@ def test_rejected_staging_site_fails_the_stage_and_cleans_up(paths, capsys) -> N
     with _containers(), _caddy_rejects():
         assert run_stage("myapp", paths) == 1
     assert not paths.project_staging_caddy_site("myapp").exists()
-    assert not paths.project_staging_compose_override("myapp").exists()
-    assert (paths.project_dir("myapp") / ".releases" / "prestage").exists() is False
+    assert load_slot(paths, "myapp") is None
     err = capsys.readouterr().err
     assert "ERROR" in err and "myapp-staging.conf" in err
     assert "previous routing was restored" in err
@@ -88,7 +89,7 @@ def test_caddy_not_running_is_still_a_warning(paths, capsys) -> None:
 
 def test_unstage_removes_the_site_and_forgets_its_journal_entry(paths) -> None:
     _prod(paths)
-    with _containers(), patch("boxmunge.commands.stage_cmd.caddy_reload"), \
+    with _containers(), patch("boxmunge.staging_bringup.caddy_reload"), \
             patch("boxmunge.commands.unstage_cmd.caddy_reload"):
         assert run_stage("myapp", paths) == 0
         site = paths.project_staging_caddy_site("myapp")

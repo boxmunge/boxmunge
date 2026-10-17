@@ -11,8 +11,9 @@
 # early. Everything read from it is therefore untrusted input to this root
 # process. Each value is checked against a strict allowlist before it can
 # reach an executable path, a URL, or an rm -rf, and anything else stops the
-# shim. Symlinks are refused, and writes go through rename(2), so a planted
-# link is replaced rather than followed.
+# shim. Symlinks are refused, every read opens without following a link or
+# blocking on a FIFO (read_untrusted), and writes go through rename(2), so a
+# planted link is replaced rather than followed.
 # ---------------------------------------------------------------------------
 SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
 ACTIVE_SLOT=""
@@ -31,7 +32,32 @@ require_semver() {  # require_semver <value> <where>
 }
 
 refuse_symlink() {
-    [[ ! -L "$1" ]] || die "$1 is a symlink; refusing to use it as root"
+    [[ ! -L "$1" ]] || die "$1 is a symlink; refusing to use it as root. Remove it and re-run."
+}
+
+# read_untrusted <file>: print a deploy-writable file. A FIFO would block a
+# plain read forever with upgrade.lock held, and a link swapped in after
+# refuse_symlink would be read through, so the file is opened O_NOFOLLOW |
+# O_NONBLOCK and anything but a regular file is refused. Use it as
+# value="$(read_untrusted <file>)" || exit 1 (it has already said why).
+read_untrusted() {
+    local rc=0
+    python3 - "$1" <<'PYRU' || rc=$?
+import errno, os, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+except OSError as e:
+    sys.exit(3 if e.errno == errno.ELOOP else f"{sys.argv[1]}: {e.strerror}")
+with os.fdopen(fd, "rb") as f:
+    if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+        sys.exit(3)
+    sys.stdout.buffer.write(f.read())
+PYRU
+    case "$rc" in
+        0) ;;
+        3) die "$1 is a symlink, FIFO or other non-regular file; refusing to read it as root. Remove it and re-run." ;;
+        *) die "Cannot read $1; inspect it and repair or remove it" ;;
+    esac
 }
 
 # replace_file <src> <dest>: rename(2), which never follows a link at <dest>.
@@ -50,8 +76,8 @@ replace_file() {
 load_active_slot() {
     local from_file="" from_link="" target
     refuse_symlink "$ACTIVE_SLOT_FILE"
-    if [[ -f "$ACTIVE_SLOT_FILE" ]]; then
-        from_file="$(cat "$ACTIVE_SLOT_FILE")"
+    if [[ -e "$ACTIVE_SLOT_FILE" ]]; then
+        from_file="$(read_untrusted "$ACTIVE_SLOT_FILE")" || exit 1
         require_slot "$from_file" "$ACTIVE_SLOT_FILE"
     fi
     if [[ -L "$BOXMUNGE_ROOT/env-active" ]]; then
@@ -77,11 +103,27 @@ active_venv() { echo "$BOXMUNGE_ROOT/env-$ACTIVE_SLOT"; }
 
 # acquire_lock [skip]: take upgrade.lock once per run. With "skip", a busy
 # lock exits 0 (the health timer retries on its next fire); otherwise it dies.
+#
+# Deploy can plant anything at upgrade.lock, and swap it between any check
+# and the open. Every bash redirection follows a link, and the writing ones
+# create a missing target, so bash never opens it: open_lock_and_reexec has
+# Python open it without following a link or blocking on a FIFO, refuse
+# anything but a plain regular file, put it on fd 9 and run this shim again
+# with the same arguments. That run finds BM_UPGRADE_LOCK_FD=9 and checks fd
+# 9 is upgrade.lock itself before it takes the flock.
 acquire_lock() {
     [[ "$LOCK_HELD" -eq 1 ]] && return 0
-    mkdir -p "$STATE_DIR"
-    refuse_symlink "$LOCK_FILE"
-    exec 9>>"$LOCK_FILE"
+    if [[ "${BM_UPGRADE_LOCK_FD:-}" != 9 ]]; then
+        mkdir -p "$STATE_DIR"
+        refuse_symlink "$LOCK_FILE"
+        open_lock_and_reexec
+    fi
+    unset BM_UPGRADE_LOCK_FD  # children inherit fd 9, never the claim that it is checked
+    python3 -c 'import os, stat, sys
+fd, name = os.fstat(9), os.lstat(sys.argv[1])
+sys.exit(not (stat.S_ISREG(fd.st_mode) and (fd.st_dev, fd.st_ino) == (name.st_dev, name.st_ino)))' \
+        "$LOCK_FILE" 2>/dev/null \
+        || die "fd 9 is not $LOCK_FILE (it was replaced, or the descriptor came from elsewhere); refusing to lock it. Remove it and re-run."
     if ! flock -n 9; then
         [[ "${1:-}" == "skip" ]] && { log "Another upgrade is in progress; skipping"; exit 0; }
         die "Another upgrade is in progress"
@@ -89,18 +131,46 @@ acquire_lock() {
     LOCK_HELD=1
 }
 
+# open_lock_and_reexec: see acquire_lock. Replaces this process; prints a
+# FATAL line like die() when upgrade.lock cannot be used.
+open_lock_and_reexec() {
+    exec python3 -c '
+import errno, os, stat, sys, time
+path, shell, shim, args = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+
+def fatal(what):
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    sys.exit(f"{now} boxmunge-upgrade: FATAL: {path} {what}; refusing to use it as root. Remove it and re-run.")
+
+try:
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+except OSError as e:
+    fatal("is a symlink" if e.errno == errno.ELOOP else f"cannot be opened ({e.strerror})")
+st = os.fstat(fd)
+if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+    fatal("is not a plain regular file")
+os.set_blocking(fd, True)
+if fd != 9:
+    os.dup2(fd, 9)
+    os.close(fd)
+os.set_inheritable(9, True)
+os.environ["BM_UPGRADE_LOCK_FD"] = "9"
+os.execv(shell, [shell, shim, *args])
+' "$LOCK_FILE" "$BASH" "$SHIM_PATH" "${SHIM_ARGS[@]+"${SHIM_ARGS[@]}"}"
+}
+
 # is_blocklisted <version>: 0 if listed, 1 if not. A blocklist that is not a
 # JSON object keyed by semver strings is corrupt or tampered with: stop.
 is_blocklisted() {
-    local rc=0
+    local rc=0 content
     refuse_symlink "$BLOCKLIST_FILE"
-    [[ -f "$BLOCKLIST_FILE" ]] || return 1
-    BM_VERSION="$1" BM_BLOCKLIST="$BLOCKLIST_FILE" BM_SEMVER_RE="$SEMVER_RE" python3 - <<'PYBL' || rc=$?
+    [[ -e "$BLOCKLIST_FILE" ]] || return 1
+    content="$(read_untrusted "$BLOCKLIST_FILE")" || exit 1
+    BM_VERSION="$1" BM_BLOCKLIST="$content" BM_SEMVER_RE="$SEMVER_RE" python3 - <<'PYBL' || rc=$?
 import json, os, re, sys
 try:
-    with open(os.environ["BM_BLOCKLIST"]) as f:
-        bl = json.load(f)
-except (OSError, ValueError) as e:
+    bl = json.loads(os.environ["BM_BLOCKLIST"])
+except ValueError as e:
     print(f"blocklist unreadable: {e}", file=sys.stderr)
     sys.exit(3)
 pattern = re.compile(os.environ["BM_SEMVER_RE"])
@@ -115,12 +185,30 @@ PYBL
     esac
 }
 
+# write_active_slot_file <slot>: the temp file is written, chmod'd and synced
+# through the descriptor that created it. upgrade-state/ is deploy-writable,
+# so reopening the temp by name could follow a link deploy renamed over it.
 write_active_slot_file() {
-    local tmp
-    tmp="$(mktemp "$STATE_DIR/.active-slot.XXXXXX")"
-    echo "$1" > "$tmp"
-    chmod 0644 "$tmp"
-    replace_file "$tmp" "$ACTIVE_SLOT_FILE"
+    BM_SLOT="$1" BM_FILE="$ACTIVE_SLOT_FILE" python3 - <<'PYAS'
+import os, tempfile
+path = os.environ["BM_FILE"]
+directory = os.path.dirname(path)
+fd, tmp = tempfile.mkstemp(dir=directory, prefix=".active-slot.")
+try:
+    with os.fdopen(fd, "w") as f:
+        f.write(os.environ["BM_SLOT"] + "\n")
+        f.flush()
+        os.fchmod(f.fileno(), 0o644)
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    if os.path.lexists(tmp):
+        os.unlink(tmp)
+    raise
+dir_fd = os.open(directory, os.O_RDONLY)
+os.fsync(dir_fd)
+os.close(dir_fd)
+PYAS
 }
 
 add_blocklist() {

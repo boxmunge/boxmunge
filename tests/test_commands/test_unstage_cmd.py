@@ -1,19 +1,24 @@
 """Tests for boxmunge unstage command."""
 from unittest.mock import patch
+
 from boxmunge.commands.unstage_cmd import run_unstage
-from boxmunge.state import write_state, read_state
+from boxmunge.staged_release import load_slot, new_meta, slot_dir, write_meta
+
 
 class TestRunUnstage:
     def _setup_staging(self, paths):
         pdir = paths.project_dir("testapp")
-        pdir.mkdir(parents=True, exist_ok=True)
+        (pdir / "manifest.yml").parent.mkdir(parents=True, exist_ok=True)
         (pdir / "manifest.yml").write_text("project: testapp\n")
         (pdir / "compose.yml").write_text("services:\n  web:\n    image: nginx\n")
-        paths.project_staging_compose_override("testapp").write_text(
+        slot = slot_dir(paths, "testapp")
+        (slot / "release").mkdir(parents=True)
+        (slot / "compose.staging-base.yml").write_text("services: {}\n")
+        (slot / "compose.boxmunge-staging.yml").write_text(
             "networks:\n  boxmunge-proxy:\n    external: true\n")
+        write_meta(slot, new_meta("bundle", "testapp-v2", None))
         paths.project_staging_caddy_site("testapp").write_text(
             "staging.testapp.example.com {}\n")
-        write_state(paths.project_staging_state("testapp"), {"active": True})
 
     @patch("boxmunge.commands.unstage_cmd.caddy_reload")
     @patch("boxmunge.commands.unstage_cmd.compose_down")
@@ -34,18 +39,20 @@ class TestRunUnstage:
 
     @patch("boxmunge.commands.unstage_cmd.caddy_reload")
     @patch("boxmunge.commands.unstage_cmd.compose_down")
-    def test_removes_staging_compose_override(self, mock_down, mock_reload, paths):
+    def test_drops_the_slot_and_its_compose_files(self, mock_down, mock_reload, paths):
         self._setup_staging(paths)
         run_unstage("testapp", paths)
-        assert not paths.project_staging_compose_override("testapp").exists()
+        assert load_slot(paths, "testapp") is None
+        assert not slot_dir(paths, "testapp").exists()
 
     @patch("boxmunge.commands.unstage_cmd.caddy_reload")
     @patch("boxmunge.commands.unstage_cmd.compose_down")
-    def test_clears_staging_state(self, mock_down, mock_reload, paths):
+    def test_leaves_production_files(self, mock_down, mock_reload, paths):
         self._setup_staging(paths)
         run_unstage("testapp", paths)
-        state = read_state(paths.project_staging_state("testapp"))
-        assert state.get("active") is not True
+        pdir = paths.project_dir("testapp")
+        assert (pdir / "manifest.yml").read_text() == "project: testapp\n"
+        assert (pdir / "compose.yml").exists()
 
     def test_fails_no_active_staging(self, paths):
         pdir = paths.project_dir("testapp")

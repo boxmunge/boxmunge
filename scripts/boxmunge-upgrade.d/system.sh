@@ -109,7 +109,9 @@ install_docs() {
 }
 
 cmd_install_docs() {
-    install_docs "${1:?Usage: boxmunge-upgrade install-docs <dir>}" || die "install-docs failed"
+    local src="${1:?Usage: boxmunge-upgrade install-docs <dir>}"
+    [[ "$src" == /* ]] || die "install-docs needs an absolute path (the shim runs from /), not '$src'"
+    install_docs "$src" || die "install-docs failed"
 }
 
 # seed_slot_docs <slot>: a slot installed by install.sh (or an older shim)

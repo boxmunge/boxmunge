@@ -7,9 +7,12 @@ it. A copy of anything production no longer mounts (an entry a release
 retired, or one only the unstaged release used) is disposable staging data
 that would otherwise keep the entry in the data-dir record for good (see
 data_dirs). `unstage`, and `promote` through it, removes those copies once
-staging's containers are down and production's release is back in place,
-and logs each removal. An entry production itself mounts or records as data
-is never a copy, whatever its name (``./cache-staging:/c``).
+staging's containers are down, before the slot is dropped,
+and logs each removal. Only staging's own copies are removed
+(staging_copies): an entry production itself mounts or records as data is
+never a copy, whatever its name (``./cache-staging:/c``), and neither is a
+``-staging`` entry staging did not create (a release's own code), which is
+reported and left alone.
 
 Staging once put a nested mount's copy beside the mounted path, inside
 production's data directory (``data/db`` -> ``data/db-staging``), and kept
@@ -20,6 +23,7 @@ there, so both are only reported, with the command to delete them.
 from __future__ import annotations
 
 import os
+from collections.abc import Collection
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -33,6 +37,7 @@ from boxmunge.data_helper import empty_dir
 from boxmunge.docker import staging_compose_project
 from boxmunge.log import log_operation, log_warning
 from boxmunge.release import project_data_dirs
+from boxmunge.staging_copies import foreign_copies, is_staging_copy, production_view
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -59,25 +64,40 @@ def _production_sources(project_dir: Path) -> list[str]:
     return sorted({r for r in rels if r and r != "."})
 
 
-def retired_staging_copies(project_dir: Path) -> list[Path]:
-    """``-staging`` copies of data entries the live release does not mount."""
+def retired_staging_copies(project_dir: Path, made: Collection[str]) -> list[Path]:
+    """Staging's ``-staging`` copies (staging_copies) of entries the live
+    release does not mount: copies of data production no longer mounts,
+    and those the slot records that staging made (``made``), for the
+    entries only the staged release used. Production's tree records
+    nothing of those, so only the slot tells such a copy from a release's
+    own ``foo-staging``."""
     if not project_dir.is_dir():
         return []
-    dirs = project_data_dirs(project_dir)
-    data = set(dirs.recorded) | set(BOX_OWNED_ENTRIES)
+    dirs = production_view(project_dir)
     mounted = {rel.split(os.sep, 1)[0] for rel in _production_sources(project_dir)}
     return sorted(
         e for e in project_dir.iterdir()
-        if e.name.endswith(_SUFFIX) and e.name[:-len(_SUFFIX)] in data
-        and e.name[:-len(_SUFFIX)] not in mounted
-        and e.name not in mounted and e.name not in dirs.recorded
+        if is_staging_copy(e.name, dirs, made)
+        and e.name[:-len(_SUFFIX)] not in mounted and e.name not in mounted
     )
+
+
+def not_staging_s(project_dir: Path, made: Collection[str]) -> list[Path]:
+    """``-staging`` entries the staged release would use read-write that are
+    not staging's: a release's own code, or an operator's. Never removed."""
+    if not project_dir.is_dir():
+        return []
+    foreign = foreign_copies(project_dir, made)
+    names = (f"{base}{_SUFFIX}" for base in project_data_dirs(project_dir).staged_rw)
+    return sorted(project_dir / n for n in names
+                  if n in foreign and os.path.lexists(project_dir / n))
 
 
 def old_layout_copies(project_dir: Path) -> list[Path]:
     """Copies the earlier staging layout made: beside a nested data mount
     (``data/db-staging``), and of release code (``appconfig-staging``),
-    which staging now reads from the staged release itself."""
+    which staging now reads from the staged release itself. Code is what
+    production mounts, or what the staged release mounts only read-only."""
     if not project_dir.is_dir():
         return []
     dirs = project_data_dirs(project_dir)
@@ -85,13 +105,17 @@ def old_layout_copies(project_dir: Path) -> list[Path]:
     sources = _production_sources(project_dir)
     mounted = {rel.split(os.sep, 1)[0] for rel in sources}
     found = set()
+    code_tops = set(dirs.staged - dirs.staged_rw)
     for rel in sources:
         top = rel.split(os.sep, 1)[0]
-        nested, code = project_dir / f"{rel}{_SUFFIX}", project_dir / f"{top}{_SUFFIX}"
+        nested = project_dir / f"{rel}{_SUFFIX}"
         if os.sep in rel and top in data and os.path.lexists(nested):
             found.add(nested)
-        if (top not in data and code.name not in mounted and code.name not in dirs.recorded
-                and os.path.lexists(code)):
+        code_tops.add(top)
+    for top in code_tops - data:
+        code = project_dir / f"{top}{_SUFFIX}"
+        if code.name not in mounted and code.name not in dirs.recorded \
+                and os.path.lexists(code):
             found.add(code)
     return sorted(found)
 
@@ -111,15 +135,18 @@ def _remove(project_name: str, path: Path) -> None:
         path.unlink()
 
 
-def remove_retired_staging_data(paths: BoxPaths, project_name: str) -> list[Path]:
+def remove_retired_staging_data(paths: BoxPaths, project_name: str,
+                                made: Collection[str]) -> list[Path]:
     """Remove (and log) every retired staging copy; returns those removed.
+    ``made`` is the slot's record of the copies staging created.
 
     Raises OSError or DockerError for the copy that could not be removed;
-    the ones before it are gone and logged. Old-layout copies are reported.
+    the ones before it are gone and logged. Old-layout copies, and entries
+    the staged release mounted that are not staging's, are reported.
     """
     project_dir = paths.project_dir(project_name)
     removed: list[Path] = []
-    for path in retired_staging_copies(project_dir):
+    for path in retired_staging_copies(project_dir, made):
         _remove(project_name, path)
         print(f"  Removed staging's {path.name} (production does not mount "
               f"{path.name[:-len(_SUFFIX)]}).")
@@ -127,6 +154,13 @@ def remove_retired_staging_data(paths: BoxPaths, project_name: str) -> list[Path
                       f"release does not mount {path.name[:-len(_SUFFIX)]}",
                       paths, project=project_name, detail={"removed": str(path)})
         removed.append(path)
+    for path in not_staging_s(project_dir, made):
+        print(f"  NOTE: {path} is not staging's copy (staging did not create it, and "
+              f"it is no copy of production's data), so it is left alone. If it is "
+              f"release code, rename it in the release: the -staging suffix is "
+              f"reserved for staging's copies.")
+        log_warning("unstage", f"Left {path.name}, which staging did not create",
+                    paths, project=project_name, detail={"path": str(path)})
     for path in old_layout_copies(project_dir):
         print(f"  NOTE: {path} looks like a staging copy from an earlier boxmunge, "
               f"which staging no longer uses. It is left alone; if nothing needs "
