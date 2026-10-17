@@ -5,8 +5,10 @@ and the hook tries to read it through /proc/self/fd/7 and by name.
 """
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from boxmunge.commands.deploy import run_pre_deploy_hook
@@ -43,7 +45,41 @@ os.environ.update(HOME="/root", USER="root", SUDO_USER="supervisor", BASH_ENV="/
 os.chmod("/tmp", 0o1777)
 rc = run_pre_deploy_hook("demo", paths, {"deploy": {"pre_deploy": "boxmunge-scripts/pre-deploy.sh"}})
 report = Path("/tmp/hook-report").read_text() if Path("/tmp/hook-report").exists() else ""
+
+
+def interrupted_hook_survivors() -> list[str]:
+    """Ctrl-C a deploy whose hook started a child: what is left running.
+    The terminal signals the foreground group: boxmunge, not the hook's own
+    session."""
+    slow = project / "boxmunge-scripts" / "slow.sh"
+    slow.write_text("#!/bin/sh\nsleep 3001 &\nsleep 3002\n")
+    slow.chmod(0o755)
+    pid = os.fork()
+    if pid == 0:
+        os.setpgid(0, 0)
+        try:
+            run_pre_deploy_hook("demo", paths, {"deploy": {"pre_deploy": str(slow)}})
+        except KeyboardInterrupt:
+            os._exit(0)
+        os._exit(1)
+    time.sleep(2)
+    os.killpg(pid, signal.SIGINT)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0, "the deploy was not interrupted"
+    time.sleep(0.5)
+    left = []
+    for entry in Path("/proc").iterdir():
+        try:
+            cmd = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode()
+        except OSError:
+            continue
+        if "sleep 300" in cmd:
+            left.append(cmd)
+    return left
+
+
+survivors = interrupted_hook_survivors()
 pw = __import__("pwd").getpwnam("deploy")
 print(json.dumps({"rc": rc, "report": report, "deploy_uid": pw.pw_uid,
-                  "deploy_gid": pw.pw_gid, "project": str(project)}))
+                  "deploy_gid": pw.pw_gid, "project": str(project), "survivors": survivors}))
 sys.exit(0)

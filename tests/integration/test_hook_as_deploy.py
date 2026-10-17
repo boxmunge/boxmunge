@@ -60,3 +60,7 @@ def test_the_hook_gets_deploys_shell_environment(seen: dict) -> None:
     assert env["PATH"] == "/usr/local/bin:/usr/bin:/bin", env
     for name in ("SUDO_USER", "BASH_ENV", "PYTHONPATH"):
         assert name not in env, env
+
+
+def test_ctrl_c_on_a_deploy_kills_what_its_hook_started(seen: dict) -> None:
+    assert seen["survivors"] == [], seen

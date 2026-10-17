@@ -38,9 +38,9 @@ _SPAWN_MODULES = set(_SPAWNERS) | {"asyncio.subprocess"}
 # A new spawn site fails test_every_spawn_is_classified until it is one or
 # the other. "?" is a program the scan cannot read from the source.
 NOT_DOCKER = {
+    ("as_deploy.py", "run_as_deploy", "?"): "manifest pre_deploy host command, as deploy",
     ("commands/add_git_project_cmd.py", "run_add_git_project", "git"): "clones the project repo",
     ("commands/auto_update_cmd.py", "run_auto_update", "?"): "execs the upgrade shim, whose boxmunge-server scrubs its own docker calls",
-    ("commands/deploy.py", "run_pre_deploy_hook", "?"): "manifest pre_deploy host command (tracked separately)",
     ("commands/doctor.py", "run_doctor", "systemctl"): "reads timer state",
     ("commands/logs.py", "_show_host_logs", "journalctl"): "reads the journal",
     ("cve/scanner.py", "refresh_db", "trivy"): "trivy DB download; never reads project compose files, needs HOME for its cache",

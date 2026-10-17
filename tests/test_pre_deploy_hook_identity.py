@@ -9,7 +9,9 @@ proves it with a real root and a real deploy user.
 """
 import os
 import pwd
+import signal
 import subprocess
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,10 +40,11 @@ def _spawn_as_root(paths: BoxPaths, getpwnam=lambda name: DEPLOY):
             patch("boxmunge.as_deploy.running_as_root", return_value=True), \
             patch("boxmunge.as_deploy.pwd.getpwnam", side_effect=getpwnam), \
             patch("boxmunge.as_deploy.os.getgrouplist", return_value=[1500, 998]), \
-            patch("boxmunge.commands.deploy.subprocess.run") as run:
-        run.return_value = subprocess.CompletedProcess([], 0, "", "")
+            patch("boxmunge.as_deploy.subprocess.Popen") as popen:
+        popen.return_value.communicate.return_value = ("", "")
+        popen.return_value.returncode = 0
         rc = run_pre_deploy_hook("demo", paths, MANIFEST)
-    return rc, run
+    return rc, popen
 
 
 def test_root_runs_the_hook_as_deploy(paths: BoxPaths) -> None:
@@ -89,3 +92,32 @@ def test_deploy_runs_the_hook_as_itself_in_its_shell_environment(paths: BoxPaths
     assert seen["HOME"] == pwd.getpwuid(os.getuid()).pw_dir
     for name in ("LD_PRELOAD", "PYTHONPATH", "BASH_ENV", "SUDO_USER"):
         assert name not in seen
+
+
+def test_an_interrupted_hook_takes_everything_it_started_with_it(paths: BoxPaths) -> None:
+    """Its own session keeps the terminal's Ctrl-C from reaching the hook's
+    children, so boxmunge, interrupted, kills the hook's process group."""
+    project_dir = paths.project_dir("demo")
+    script = project_dir / "slow.sh"
+    script.write_text("#!/bin/sh\nsleep 300 &\necho $! > child.pid\nwait\n")
+    script.chmod(0o755)
+
+    def interrupt(*_):
+        raise KeyboardInterrupt
+    previous = signal.signal(signal.SIGALRM, interrupt)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 1.0)
+        with pytest.raises(KeyboardInterrupt):
+            run_pre_deploy_hook("demo", paths, {"deploy": {"pre_deploy": "./slow.sh"}})
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    child = int((project_dir / "child.pid").read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    pytest.fail(f"the hook's child {child} outlived the interrupted deploy")

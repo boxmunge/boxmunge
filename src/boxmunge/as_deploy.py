@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import os
 import pwd
+import signal
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from boxmunge.fs_nofollow import running_as_root
@@ -66,3 +68,29 @@ def deploy_spawn_args() -> dict[str, Any]:
             "extra_groups": os.getgrouplist(account.pw_name, account.pw_gid),
             "env": shell_environment(os.environ, account),
             "stdin": subprocess.DEVNULL, "start_new_session": True}
+
+
+def run_as_deploy(argv: Sequence[str], cwd: Path) -> subprocess.CompletedProcess:
+    """Run argv with deploy_spawn_args, capturing its output as text.
+
+    In its own session, a terminal's Ctrl-C or hangup reaches only
+    boxmunge, so whatever stops boxmunge here (an interrupt, an error)
+    first kills the command's whole process group: nothing it started
+    keeps running after the project lock is released. Raises
+    CalledProcessError on a non-zero exit, NoDeployUser, or OSError when
+    the command cannot start.
+    """
+    proc = subprocess.Popen(list(argv), shell=False, cwd=cwd, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, **deploy_spawn_args())
+    try:
+        stdout, stderr = proc.communicate()
+    except BaseException:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # the group has already gone
+        proc.wait()
+        raise
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, stdout, stderr)
+    return subprocess.CompletedProcess(proc.args, 0, stdout, stderr)

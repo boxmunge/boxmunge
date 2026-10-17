@@ -233,6 +233,8 @@ Project code never runs on the host as root. An operator who runs `prod-deploy`,
 `promote` with sudo makes boxmunge root, and the `pre_deploy` hook still runs as deploy: root
 switches to deploy's uid, gid and groups for it, with the deploy shell's environment, no stdin,
 its own session (no terminal of root's to push input into) and no other inherited descriptor.
+A deploy interrupted while its hook runs (Ctrl-C, an error) kills the hook's whole process group,
+so nothing the hook started outlives the deploy.
 On a host with no deploy user the hook is not run and the deploy fails, saying so.
 
 ### What deploy may ask root to do
