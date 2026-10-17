@@ -250,7 +250,7 @@ the `default` profile silently — most projects need nothing here.
 | `cap_drop` | list[str] | dangerous-cap list | If specified, REPLACES the default list. |
 | `published_ports` | list | — | Project level only. Opt-in host-published ports, each `{service, port, reason}` plus optional `host_port`, `protocol`, `host_ip` (default `127.0.0.1`). See SECURITY.md, "Published ports". |
 | `cap_add` | list[str] | `[]` | Capabilities to keep; subtracted from `cap_drop`. Canonical names only (`NET_RAW`). The denylist in SECURITY.md (`SYS_ADMIN`, `SYS_MODULE`, `ALL`, ...) is rejected. |
-| `user` | string | — | Who the service runs as: `root`, `image` (the image's own user), or a quoted `"<uid>:<gid>"` (each 1..65535). `root` and `image` **require `reason`**. See "Who a service runs as". |
+| `user` | string | — | Per service only, or project-wide as a default. Who the service runs as: `root`, `image` (the image's own user), or a quoted `"<uid>:<gid>"` (each 1..65535). `root` and `image` **require `reason`**. See "Who a service runs as". |
 
 ### Per-service `security:`
 
@@ -298,14 +298,15 @@ next deploy (`boxmunge security <project>` shows it). In order:
 6. else the deploy is **refused**, printing the manifest.yml lines to add.
 
 A registry image whose `USER` is empty or root (postgres, mysql, mariadb, redis, nginx, node,
-python, caddy all are) needs a declaration. A service only compose.yml defines is declared under
-`services:` with `internal: true`, which also gives it a read-only root filesystem: list the paths
-it writes outside its volumes as compose.yml `tmpfs:` entries. A `security` block needs
+python, caddy all are) needs a declaration. For a service only compose.yml defines, add an entry
+that holds nothing but its `security` block (`user`, and `reason` when it is root or image), with no
+`port`, `routes` or `internal: true`: it declares who the service runs as and changes nothing else
+(no read-only root filesystem, env files or proxy network). A `security` block needs
 `schema_version: 2` or later.
 
 | Image family | Add under `services.<svc>` |
 |---|---|
-| postgres | `security: {user: image, reason: "postgres entrypoint drops to postgres"}` (and `tmpfs: [/var/run/postgresql]` in compose.yml) |
+| postgres | `security: {user: image, reason: "postgres entrypoint drops to postgres"}` |
 | mysql, mariadb | `security: {user: image, reason: "entrypoint initialises as root, drops to mysql"}` |
 | redis | `security: {user: "999:1000"}` for `redis:*-alpine`, `"999:999"` for the Debian tags |
 | nginx | `security: {user: image, reason: "master runs as root, workers as nginx"}` |

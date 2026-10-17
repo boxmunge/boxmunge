@@ -23,9 +23,11 @@ def bundle(project: str, services: dict, *, declare: dict | None = None,
     ulid = ("01" + project.upper()).ljust(26, "0")
     manifest = yaml.safe_load(manifest_text(project, ulid=ulid))
     manifest["schema_version"] = 3
+    # A declared service gets an entry holding only its security block; the
+    # others an internal entry, so the manifest has services to name.
     manifest["services"] = {
-        name: {"internal": True, "writable": {"external": True},
-               **({"security": declare[name]} if declare and name in declare else {})}
+        name: ({"security": declare[name]} if declare and name in declare
+               else {"internal": True, "writable": {"external": True}})
         for name in services}
     compose = {"services": services, **({"volumes": {v: {} for v in volumes}} if volumes else {})}
     return {"manifest.yml": yaml.safe_dump(manifest), "compose.yml": yaml.safe_dump(compose),
@@ -59,10 +61,17 @@ def teardown(paths, project: str) -> None:
                        cwd=project_dir, capture_output=True, timeout=120)
 
 
+def _health(test: str) -> dict:
+    return {"test": ["CMD-SHELL", test], "interval": "1s", "retries": 120}
+
+
 PG = {"image": "postgres:16-alpine", "environment": {"POSTGRES_PASSWORD": "x"},
-      "volumes": ["pgdata:/var/lib/postgresql/data"], "tmpfs": ["/var/run/postgresql"],
-      "healthcheck": {"test": ["CMD-SHELL", "pg_isready -U postgres"], "interval": "1s",
-                      "retries": 60}}
+      "volumes": ["pgdata:/var/lib/postgresql/data"], "healthcheck": _health("pg_isready -U postgres")}
+MYSQL = {"image": "mysql:8.4", "environment": {"MYSQL_ROOT_PASSWORD": "x"},
+         "volumes": ["mysqldata:/var/lib/mysql"],
+         "healthcheck": _health("mysqladmin ping -h 127.0.0.1 -px --silent")}
+NGINX = {"image": "nginx:1.27-alpine", "healthcheck": _health("wget -qO- http://127.0.0.1/")}
+IMAGE = {"user": "image", "reason": "the entrypoint starts as root and drops privileges"}
 
 
 def case_registry_root_refused(paths, p, capsys) -> None:
@@ -71,12 +80,21 @@ def case_registry_root_refused(paths, p, capsys) -> None:
 
 
 def case_declared_image_runs(paths, p, capsys) -> None:
-    declare = {"db": {"user": "image", "reason": "postgres drops to postgres"}}
-    rc, out = deploy(paths, p, bundle(p, {"db": PG}, declare=declare, volumes=("pgdata",)), capsys)
+    """postgres, mysql and nginx as their images' users, redis as 999:1000,
+    each from an entry holding only its security block."""
+    services = {"db": PG, "mysql": MYSQL, "web": NGINX,
+                "cache": {"image": "redis:7-alpine", "volumes": ["data:/data"],
+                          "healthcheck": _health("redis-cli ping | grep -q PONG")}}
+    declare = {"db": IMAGE, "mysql": IMAGE, "web": IMAGE, "cache": {"user": "999:1000"}}
+    rc, out = deploy(paths, p, bundle(p, services, declare=declare,
+                                      volumes=("pgdata", "mysqldata", "data")), capsys)
     assert rc == 0, out
-    compose(paths, p, "up", "-d", "--wait", "db")
-    assert compose(paths, p, "exec", "-T", "db", "id", "-u").strip() == "0"  # starts as root
-    assert "postgres" in compose(paths, p, "exec", "-T", "db", "ps", "-o", "user", "-o", "comm")
+    compose(paths, p, "up", "-d", "--wait")
+    overlay = yaml.safe_load((paths.project_dir(p) / "compose.boxmunge.yml").read_text())
+    assert overlay["services"]["cache"]["user"] == "999:1000"
+    assert not {"read_only", "env_file"} & set(overlay["services"]["db"])  # nothing else changes
+    assert "postgres" in compose(paths, p, "exec", "-T", "db", "ps", "-o", "user,comm")
+    assert compose(paths, p, "exec", "-T", "cache", "redis-cli", "SAVE").strip() == "OK"
 
 
 def case_redis_saves_after_recreate(paths, p, capsys) -> None:
