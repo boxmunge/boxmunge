@@ -21,6 +21,7 @@ from boxmunge.commands.upgrade_steps import (
     Restart,
     UpgradeGateError,
     check_upgrade,
+    git_ownership_warnings,
     restart_projects,
 )
 from boxmunge.commands.upgrade_notify import notify_locked_skips, notify_refused
@@ -81,6 +82,8 @@ def _migrate_regenerate_reload(
         print("  No migrations needed (projects left as is are not migrated)."
               if excluded.names() else "  No migrations needed.")
     for advice in migrated.unlinked.values():
+        print(f"  WARNING: {advice}", file=sys.stderr)
+    for advice in git_ownership_warnings(paths):
         print(f"  WARNING: {advice}", file=sys.stderr)
     print(f"  Regenerated: {len(regen.processed)} project(s)")
     for name, why in sorted(regen.refused.items()):
