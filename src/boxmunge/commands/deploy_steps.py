@@ -16,6 +16,7 @@ def record_deploy_state(
     project_name: str,
     ref: str,
     snapshot: str | None,
+    replaced_ref: str | None = None,
 ) -> None:
     """Record a deploy in the state file, pushing previous to history.
 
@@ -24,6 +25,11 @@ def record_deploy_state(
     the release that is already current again (a retry after a failed
     deploy, or a redeploy) keeps both: the newer snapshot holds data this
     release may already have changed.
+
+    ``replaced_ref`` is the release the install transaction replaced, when
+    it is not the recorded current one (a fix-forward over a rollback, or
+    over an attempt that switched): that is the rollback target, paired
+    with ``snapshot``, so history[0] names it.
     """
     state_path = paths.project_deploy_state(project_name)
     current = read_state(state_path)
@@ -32,9 +38,11 @@ def record_deploy_state(
     if current.get("current_ref") == ref:
         snapshot = current.get("pre_deploy_snapshot", "")
     elif "current_ref" in current:
+        replaced = replaced_ref or current["current_ref"]
         history.insert(0, {
-            "ref": current["current_ref"],
-            "deployed_at": current.get("deployed_at", ""),
+            "ref": replaced,
+            "deployed_at": (current.get("deployed_at", "")
+                            if replaced == current["current_ref"] else ""),
             "snapshot": current.get("pre_deploy_snapshot", ""),
         })
         history = history[:10]

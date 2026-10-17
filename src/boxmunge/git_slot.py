@@ -19,11 +19,14 @@ from __future__ import annotations
 import os
 import pwd
 import re
+import stat
 import subprocess
 from pathlib import Path
 from typing import Any
 
-from boxmunge.fs_nofollow import chown_tree_deploy, running_as_root
+from boxmunge.fs_nofollow import (
+    chmod_nofollow, chown_tree_deploy, copy_entry_nofollow, running_as_root,
+)
 
 GIT_TIMEOUT = 300
 _FULL_SHA = re.compile(r"[0-9a-f]{40}")
@@ -116,7 +119,10 @@ def fetch(repo: Path) -> None:
     result = _git(["fetch", "-q", "--prune", "--tags", "--no-recurse-submodules", "origin"],
                   repo, timeout=GIT_TIMEOUT)
     if result.returncode != 0:
-        raise GitRefError(f"git fetch in {repo} failed: {result.stderr.strip()}")
+        hint = (f" (files in {repo}/.git are not the deploy user's, who runs git: "
+                f"chown -R deploy:deploy {repo}, then retry)"
+                if "Permission denied" in result.stderr else "")
+        raise GitRefError(f"git fetch in {repo} failed: {result.stderr.strip()}{hint}")
 
 
 def resolve_ref(repo: Path, ref: str) -> str:
@@ -179,7 +185,10 @@ def checkout_detached(repo: Path, sha: str) -> None:
                    "--end-of-options", sha], repo,
                   timeout=GIT_TIMEOUT)
     if result.returncode != 0:
-        raise GitRefError(f"git checkout {sha} in {repo} failed: {result.stderr.strip()}")
+        raise GitRefError(
+            f"git checkout {sha} in {repo} failed: {result.stderr.strip()}. If an earlier "
+            f"checkout was interrupted, remove {repo}/.git/index.lock if it is there and "
+            f"run 'git -C {repo} checkout -f --detach {sha}' as the deploy user, then retry")
 
 
 def is_full_sha(ref: str) -> bool:
@@ -234,7 +243,12 @@ def materialise(project_dir: Path, sha: str, release: Path) -> list[str]:
     """
     _require_full_sha(sha, "stage")
     source, clone = project_dir / "repo", release / "repo"
-    chown_tree_deploy(release)  # as root, git runs as deploy and creates repo/ here
+    # As root, git runs as deploy: only the clone's own directory is deploy's
+    # while root copies into release/, so deploy cannot plant names there.
+    chmod_nofollow(release, 0o755)  # whatever root's umask: deploy must reach repo/
+    clone.mkdir()
+    chmod_nofollow(clone, 0o755)
+    chown_tree_deploy(clone)
     result = _git(["clone", "-q", "--local", "--no-checkout", "--template=", "--",
                    str(source), str(clone)], source, timeout=GIT_TIMEOUT)
     if result.returncode != 0:
@@ -243,7 +257,7 @@ def materialise(project_dir: Path, sha: str, release: Path) -> list[str]:
     checkout_detached(clone, sha)
     copy_project_entries(project_dir, release)
     _refuse_escaping_links(release)
-    chown_tree_deploy(release)
+    chown_tree_deploy(release)  # the slot is deploy's, as the user's own stage makes it
     return [SUBMODULE_WARN] if os.path.lexists(clone / ".gitmodules") else []
 
 
@@ -280,23 +294,31 @@ def _refuse_filters(clone: Path, sha: str) -> None:
 def copy_project_entries(project_dir: Path, release: Path) -> None:
     """Production's release-code entries other than repo/ (.env, project.env,
     boxmunge-scripts/, operator-placed files) are copied verbatim, links as
-    links; a link into repo/ (production's are absolute) is recreated as a
-    relative link to the slot's repo/. Box state and staging's ``-staging``
-    copies stay in the project dir. The current slot is not read (a
-    re-stage replaces it)."""
-    from boxmunge.release import _copy_entry, project_data_dirs
+    links and never through one (fs_nofollow.copy_entry_nofollow); a link
+    into repo/ (production's are absolute) is recreated as a relative link
+    to the slot's repo/. Box state and staging's ``-staging`` copies stay in
+    the project dir. The current slot is not read (a re-stage replaces it)."""
+    from boxmunge.release import project_data_dirs
     state = project_data_dirs(project_dir, with_staged=False).box_state()
     repo = os.path.normpath(project_dir / "repo")
-    for entry in sorted(project_dir.iterdir()):
-        if entry.name in state or entry.name.endswith("-staging"):
-            continue
-        dest = release / entry.name
-        if entry.is_symlink():
-            target = os.path.normpath(os.path.join(project_dir, os.readlink(entry)))
-            if target == repo or target.startswith(repo + os.sep):
-                os.symlink(os.path.relpath(target, project_dir), dest)
-                continue
-        _copy_entry(entry, dest)
+    src = os.open(project_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        dest = os.open(release, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            for name in sorted(os.listdir(src)):
+                if name in state or name.endswith("-staging"):
+                    continue
+                if stat.S_ISLNK(os.stat(name, dir_fd=src, follow_symlinks=False).st_mode):
+                    target = os.path.normpath(os.path.join(project_dir,
+                                                           os.readlink(name, dir_fd=src)))
+                    if target == repo or target.startswith(repo + os.sep):
+                        os.symlink(os.path.relpath(target, project_dir), name, dir_fd=dest)
+                        continue
+                copy_entry_nofollow(src, name, dest)
+        finally:
+            os.close(dest)
+    finally:
+        os.close(src)
 
 
 def _refuse_escaping_links(release: Path) -> None:

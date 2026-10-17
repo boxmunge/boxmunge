@@ -14,6 +14,7 @@ of the commit, or from the git slot itself when promoting it.
 """
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from dataclasses import dataclass, replace
@@ -95,6 +96,7 @@ def prove_disjoint_git(project_name: str, paths: BoxPaths, sha: str,
         else:
             with tempfile.TemporaryDirectory(dir=paths.project_releases(project_name),
                                              prefix=".isolation-") as scratch:
+                os.chmod(scratch, 0o755)  # made 0700; as root, git runs as deploy below it
                 release = Path(scratch) / "release"
                 release.mkdir()
                 materialise(paths.project_dir(project_name), sha, release)
@@ -111,14 +113,15 @@ def _prove(paths: BoxPaths, project_name: str, release: Path) -> None:
 
 
 def _open(project_name: str, paths: BoxPaths, req: GitDeploy) -> InstallTxn | int:
+    # A project added with add-git-project has its checkout and manifest
+    # before its first deploy, but nothing runs yet: a first deploy replaces
+    # no release (no rollback target, no snapshot), as a bundle's does.
+    deployed = "current_ref" in read_state(paths.project_deploy_state(project_name))
     try:
-        replaced = head_sha(paths.project_dir(project_name) / "repo")
+        replaced = head_sha(paths.project_dir(project_name) / "repo") if deployed else None
     except GitRefError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
-    # A project added with add-git-project has its manifest before its first
-    # deploy, but nothing runs yet whose data a snapshot would save.
-    deployed = "current_ref" in read_state(paths.project_deploy_state(project_name))
     snapshot = snapshot_live_release(project_name, paths, req.no_snapshot) if deployed else None
     crash_point("txn.before_open")
     txn = open_txn(paths, project_name, source=req.source, ref=req.sha,

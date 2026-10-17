@@ -197,7 +197,7 @@ def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy,
               f"it, so its pre-deploy hook is not run again and no new snapshot is taken.")
     crash_point("txn.switching")
     rc = replace_release(project_name, paths, req.manifest, req.ref, txn.snapshot or None,
-                         component=req.component, txn=txn.id)
+                         component=req.component, txn=txn.id, replaced_ref=txn.replaced_ref)
     crash_point("txn.replaced")
     # on_switched must stay the first write after replace_release returns:
     # nothing durable separates the two, so a crash before it is a crash

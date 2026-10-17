@@ -77,3 +77,54 @@ def test_a_git_rollback_during_a_stage_leaves_staging(paths, tmp_path) -> None:
         assert run_stage("myapp", paths) == 0
         assert run_rollback("myapp", paths, yes=True) == 0
     assert _head(pdir) == a and load_slot(paths, "myapp").ref == staged
+
+
+def test_a_fix_over_a_failed_rollback_keeps_its_target_for_the_next_rollback(paths,
+                                                                           tmp_path) -> None:
+    """B runs over A; a rollback to A fails before it switches, and C is
+    deployed over it. The rollback target is A (the rollback's), with A's
+    snapshot: never B, whose data the snapshot predates."""
+    pdir, work = git_project(paths, tmp_path)
+    a = _head(pdir)
+    with staging_docker_off():
+        assert run_deploy("myapp", paths, ref=commit(work, {"VERSION": "B\n"}, "B")) == 0
+        assert crash_at("rollback.installed",
+                        lambda: run_rollback("myapp", paths, yes=True)) == 137
+        c = commit(work, {"VERSION": "C\n"}, "C")
+        assert run_deploy("myapp", paths) == 0
+    state = read_state(paths.project_deploy_state("myapp"))
+    assert state["current_ref"] == c and state["history"][0]["ref"] == a
+    with staging_docker_off():
+        assert run_rollback("myapp", paths, yes=True) == 0
+    assert _head(pdir) == a
+
+
+def test_a_first_git_deploy_has_nothing_to_roll_back_to(paths, tmp_path, capsys) -> None:
+    from boxmunge.backup_source import backup_source
+    pdir, work = git_project(paths, tmp_path, deploy=False, backup="postgres")
+    added = _head(pdir)
+    commit(work, {"manifest.yml": git_manifest(tmp_path / "origin.git", backup="postgres",
+                                               extra="deploy:\n  pre_deploy: 'false'\n")},
+           "bad hook")
+    with staging_docker_off():
+        assert run_deploy("myapp", paths) == 1
+        txn = load_txn(paths, "myapp")
+        assert txn.replaced_ref is None and txn.snapshot == ""
+        assert run_rollback("myapp", paths, yes=True) == 1
+    assert "first deploy" in capsys.readouterr().err
+    assert "not running yet" in backup_source(paths, "myapp").skip
+    with staging_docker_off():
+        assert run_deploy("myapp", paths, ref=commit(
+            work, {"manifest.yml": git_manifest(tmp_path / "origin.git")}, "fix")) == 0
+    assert load_txn(paths, "myapp") is None and _head(pdir) != added
+
+
+def test_abandoning_a_first_git_deploy_leaves_its_checkout(paths, tmp_path, capsys) -> None:
+    from boxmunge.commands.install_abandon import run_abandon
+    pdir, work = git_project(paths, tmp_path, deploy=False)
+    tip = _head(pdir)
+    with staging_docker_off():
+        assert crash_at("txn.installed", lambda: run_deploy("myapp", paths)) == 137
+        assert run_abandon("myapp", paths) == 0
+    assert load_txn(paths, "myapp") is None and _head(pdir) == tip
+    assert f"repo/ stays checked out at {tip}" in capsys.readouterr().out

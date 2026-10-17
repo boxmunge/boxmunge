@@ -105,6 +105,10 @@ if [[ "$KIND" == git ]]; then
     commit v2
     # 0.10.1 checks the ref out in repo/ without pulling: name the fetched commit.
     run STAGE old stage "$P" --ref origin/main
+    # Run as deploy (the stand-in above), 0.10.1's fetches leave deploy's files in .git.
+    # The beta fetches as deploy without the system config, so the local origin
+    # (a remote server on a box) must be readable by deploy without safe.directory.
+    chown -R deploy: "$R/projects/$P/repo" /tmp/origin.git
 else
     run ADD old project-add "$P"
     bundle v1 09; run DEPLOY_V1 old prod-deploy "$P" --ref 2026-10-16T09

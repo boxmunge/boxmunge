@@ -189,7 +189,7 @@ def _intake_git(project: str, paths: BoxPaths, ref: str | None,
                 return 1
     except IntakeError as e:
         return report_refusal(e)
-    except (GitRefError, ManifestError) as e:
+    except (GitRefError, ManifestError, OSError) as e:
         print(f"ERROR: {e}\nNothing was changed.", file=sys.stderr)
         log_error("stage", f"Stage refused: {e}", paths, project=project)
         return 1

@@ -17,10 +17,10 @@ def git_manifest(origin: Path, backup: str = "none", extra: str = "") -> str:
 
 
 def git_project(paths, tmp_path, backup: str = "none", compose: str = SAFE_COMPOSE,
-                files: dict[str, str] | None = None) -> tuple[Path, Path]:
+                files: dict[str, str] | None = None, deploy: bool = True) -> tuple[Path, Path]:
     """(project dir, work clone): myapp cloned from tmp_path/origin.git, its
     compose.yml and manifest.yml linked into repo/ as add-git-project does,
-    and deployed once."""
+    and (unless ``deploy`` is False) deployed once."""
     origin, work = origin_with(tmp_path, {"compose.yml": compose, "VERSION": "A\n",
                                           **(files or {})})
     commit(work, {"manifest.yml": git_manifest(origin, backup)}, "manifest")
@@ -30,6 +30,7 @@ def git_project(paths, tmp_path, backup: str = "none", compose: str = SAFE_COMPO
     git("clone", "-q", str(origin), str(pdir / "repo"), cwd=tmp_path)
     for name in ("compose.yml", "manifest.yml"):
         os.symlink(pdir / "repo" / name, pdir / name)
-    with staging_docker_off():
-        assert run_deploy("myapp", paths) == 0
+    if deploy:
+        with staging_docker_off():
+            assert run_deploy("myapp", paths) == 0
     return pdir, work

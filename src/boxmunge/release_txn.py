@@ -316,7 +316,9 @@ def rerun_command(project: str, txn: InstallTxn) -> str:
 
 def abandon_text(project: str, txn: InstallTxn) -> str:
     if txn.replaced_ref is None:
-        return (f"'prod-deploy {project} --abandon' removes this first deploy's code "
+        what = ("abandons this first deploy" if is_full_sha(txn.ref) else
+                "removes this first deploy's code")
+        return (f"'prod-deploy {project} --abandon' {what} "
                 f"(containers and data are untouched)")
     return (f"'prod-deploy {project} --abandon' puts {txn.replaced_ref}'s files back "
             f"(containers and data are untouched)")

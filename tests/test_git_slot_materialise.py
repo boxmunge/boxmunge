@@ -145,15 +145,16 @@ def test_only_a_full_sha_is_materialised(project, tmp_path) -> None:
         materialise(pdir, git("rev-parse", "HEAD", cwd=pdir / "repo")[:12], _release(tmp_path))
 
 
-def test_the_release_is_handed_to_deploy_before_git_writes_it(project, tmp_path,
-                                                              monkeypatch) -> None:
-    """As root, git runs as deploy: the empty release dir root made must be
-    deploy's before the clone, and what root copied in is handed over after."""
+def test_only_the_clone_is_deploys_while_root_copies(project, tmp_path, monkeypatch) -> None:
+    """As root, git runs as deploy: the clone's empty directory is handed to
+    deploy before the clone, and the rest of release/ only once root has
+    copied into it and checked its links, so deploy cannot plant a name
+    there for root to write through."""
     from boxmunge import git_slot
     pdir, _work = project
     calls = []
-    monkeypatch.setattr(git_slot, "chown_tree_deploy",
-                        lambda path: calls.append((path, (path / "repo").exists())))
+    monkeypatch.setattr(git_slot, "chown_tree_deploy", lambda path: calls.append(
+        (path.name, os.path.lexists(path / ".git"), os.path.lexists(path / ".env"))))
     release = _release(tmp_path)
     materialise(pdir, git("rev-parse", "HEAD", cwd=pdir / "repo"), release)
-    assert calls == [(release, False), (release, True)]
+    assert calls == [("repo", False, False), ("release", False, True)]

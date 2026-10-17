@@ -242,7 +242,8 @@ def generate_release_config(project_name: str, paths: BoxPaths, manifest: dict,
 
 def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
                     actual_ref: str, snapshot_name: str | None,
-                    component: str = "deploy", txn: str | None = None) -> int:
+                    component: str = "deploy", txn: str | None = None,
+                    replaced_ref: str | None = None) -> int:
     """Start the release in production, route it, smoke-test, record.
 
     From the container start on, production runs (or partly runs) this
@@ -252,7 +253,8 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
     fails records nothing, so a retry is still treated as a first deploy.
 
     `txn` is the id of the install transaction this start finishes
-    (release_txn).
+    (release_txn), and `replaced_ref` the release it replaced (the
+    rollback target; see record_deploy_state).
     """
     first_deploy = "current_ref" not in read_state(paths.project_deploy_state(project_name))
     rc = 1
@@ -260,7 +262,7 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
         rc = _start_and_verify(project_name, paths, manifest, component, txn)
     finally:
         if rc == 0 or not first_deploy:
-            record_deploy_state(paths, project_name, actual_ref, snapshot_name)
+            record_deploy_state(paths, project_name, actual_ref, snapshot_name, replaced_ref)
     if rc != 0:
         return rc
 

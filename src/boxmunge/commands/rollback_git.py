@@ -39,6 +39,9 @@ def git_rollback_target(paths: BoxPaths, project_name: str,
     repo = paths.project_dir(project_name) / "repo"
     if txn is not None and txn.source == "rollback":
         ref, snapshot, note = txn.ref, txn.snapshot, "finishing the interrupted rollback"
+    elif txn is not None and txn.replaced_ref is None:
+        raise RollbackUnavailable(f"the unfinished install of {txn.ref} is the project's first "
+                                  f"deploy: there is no release to go back to. Deploy a fix")
     elif txn is not None:
         ref, snapshot = txn.replaced_ref, txn.snapshot
         note = f"replaced by the unfinished install of {txn.ref}"

@@ -37,7 +37,9 @@ def _put_code_back(project_name: str, paths: BoxPaths, txn: InstallTxn) -> None:
     CODE_RESTORED is recorded."""
     project_dir = paths.project_dir(project_name)
     if (project_dir / "repo").is_dir():
-        checkout_detached(project_dir / "repo", txn.replaced_ref)
+        # A first deploy replaced nothing that ran: its checkout stays.
+        if txn.replaced_ref is not None:
+            checkout_detached(project_dir / "repo", txn.replaced_ref)
         return
     if txn.replaced_ref is None:
         for entry in live_code_entries(project_dir):
@@ -114,7 +116,9 @@ def abandon_locked(project_name: str, paths: BoxPaths) -> int:
         log_error("deploy", f"Abandon of {txn.ref} failed: {e}", paths, project=project_name)
         return 1
     close_txn(paths, project_name, txn)
+    git = (paths.project_dir(project_name) / "repo").is_dir()
     back = (f"{txn.replaced_ref}'s files are back" if txn.replaced_ref else
+            f"repo/ stays checked out at {txn.ref}, which nothing runs" if git else
             "the first deploy's code was removed")
     print(f"{project_name}: abandoned the install of {txn.ref}; {back}. Containers and "
           f"data were not touched.")
