@@ -71,44 +71,107 @@ drop_root
 
 # --- writes and opens by name in upgrade-state ----------------------------
 
-# HOSTILE: prepend to PATH. Its mktemp, python3 and timeout stand in for
-# deploy winning a race: each swaps a name in upgrade-state for a link to
-# $VICTIM just after root created or checked it, then runs the real tool.
+# HOSTILE: prepend to PATH. Its python3 stands in for deploy winning a race:
+# with SWAP_LOCK it swaps upgrade.lock for a link to $VICTIM just after root
+# checked it; with SLOT_PLANT it runs that Python file ahead of the script
+# that rewrites active-slot (the only stdin script naming .active-slot.).
 HOSTILE="$(mktemp -d)"
-REAL_MKTEMP="$(command -v mktemp)"
 REAL_PYTHON="$(command -v python3)"
-cat > "$HOSTILE/mktemp" <<EOS
+export REAL_PYTHON
+cat > "$HOSTILE/python3" <<'EOS'
 #!/usr/bin/env bash
-out="\$("$REAL_MKTEMP" "\$@")"
-if [[ "\$*" == *upgrade-state/.active-slot.* ]]; then rm -f "\$out"; ln -s "\$VICTIM" "\$out"; fi
-echo "\$out"
-EOS
-cat > "$HOSTILE/python3" <<EOS
-#!/usr/bin/env bash
-for a in "\$@"; do
-    if [[ "\$a" == */upgrade-state/upgrade.lock && -n "\${SWAP_LOCK:-}" ]]; then
-        rm -f "\$a"; ln -s "\$VICTIM" "\$a"
+for a in "$@"; do
+    if [[ "$a" == */upgrade-state/upgrade.lock && -n "${SWAP_LOCK:-}" ]]; then
+        rm -f "$a"; ln -s "$VICTIM" "$a"
     fi
 done
-exec "$REAL_PYTHON" "\$@"
+if [[ "$#" -eq 1 && "$1" == - && -n "${SLOT_PLANT:-}" ]]; then
+    script="$(cat)"
+    [[ "$script" == *'prefix=".active-slot."'* ]] && script="$(cat "$SLOT_PLANT")
+$script"
+    exec "$REAL_PYTHON" -c "$script"
+fi
+exec "$REAL_PYTHON" "$@"
 EOS
 chmod +x "$HOSTILE"/*
+PLANTS="$(mktemp -d)"
+# mkstemp's names are random: make its first two tries the names deploy
+# planted links at, as if deploy had guessed them.
+cat > "$PLANTS/guessed_names.py" <<'EOS'
+import tempfile as _t
+_random = _t._get_candidate_names
+def _guessed():
+    yield from ("planted1", "planted2")
+    yield from _random()
+_t._get_candidate_names = _guessed
+EOS
+# Deploy renames a link to $VICTIM over the temp the moment mkstemp made it.
+cat > "$PLANTS/swapped_temp.py" <<'EOS'
+import os as _os, tempfile as _t
+_real = _t.mkstemp
+def _swapped(*args, **kwargs):
+    fd, tmp = _real(*args, **kwargs)
+    _os.unlink(tmp)
+    _os.symlink(_os.environ["VICTIM"], tmp)
+    return fd, tmp
+_t.mkstemp = _swapped
+EOS
 
-# The active-slot rewrite after an interrupted swap (env-active is the truth)
-# never writes through a temp file deploy swapped for a link.
-new_root a
-echo "b" > "$BOXMUNGE_ROOT/$STATE/active-slot"
-echo "1.2.3" > "$BOXMUNGE_ROOT/env-b/upgrade-inflight"
-VICTIM="$(mktemp)"
-echo "precious" > "$VICTIM"
-export VICTIM
-PATH="$HOSTILE:$PATH" run_shim check-probation
-[[ "$(cat "$VICTIM")" == "precious" ]] && pass "active-slot rewrite did not write through a swapped temp" \
-    || fail "root wrote the active slot through a swapped temp: $(cat "$VICTIM")"
-[[ "$(cat "$BOXMUNGE_ROOT/$STATE/active-slot")" == "a" && ! -L "$BOXMUNGE_ROOT/$STATE/active-slot" ]] \
-    && pass "active-slot rewritten to the live slot" || fail "active-slot not rewritten: $OUT"
-rm -f "$VICTIM"
+# slot_rewrite_root: an interrupted swap (env-active says a, active-slot b,
+# an upgrade-inflight marker), so check-probation rewrites active-slot; and
+# a precious $VICTIM outside upgrade-state, mode 0600.
+slot_rewrite_root() {
+    new_root a
+    echo "b" > "$BOXMUNGE_ROOT/$STATE/active-slot"
+    echo "1.2.3" > "$BOXMUNGE_ROOT/env-b/upgrade-inflight"
+    VICTIM="$(mktemp -d)/victim"
+    echo "precious" > "$VICTIM"
+    chmod 600 "$VICTIM"
+    export VICTIM
+}
+
+victim_untouched() {  # victim_untouched <description>
+    [[ "$(cat "$VICTIM")" == "precious" && "$(stat -c %a "$VICTIM" 2>/dev/null \
+        || stat -f %Lp "$VICTIM")" == 600 ]] \
+        && pass "$1" || fail "$1: $VICTIM is now $(ls -l "$VICTIM"): $(cat "$VICTIM")"
+}
+
+# Links planted at the temp names the rewrite tries (one to $VICTIM, one
+# dangling) are skipped, never opened, followed or replaced.
+slot_rewrite_root
+dangling="$(dirname "$VICTIM")/created-by-root"
+ln -s "$VICTIM" "$BOXMUNGE_ROOT/$STATE/.active-slot.planted1"
+ln -s "$dangling" "$BOXMUNGE_ROOT/$STATE/.active-slot.planted2"
+SLOT_PLANT="$PLANTS/guessed_names.py" PATH="$HOSTILE:$PATH" run_shim check-probation
+expect 0 "following env-active" "active-slot rewrite with links planted at its temp names runs"
+victim_untouched "a link planted at a temp name was not written through"
+[[ ! -e "$dangling" ]] && pass "a dangling link at a temp name was not followed to create its target" \
+    || fail "root created $dangling through a planted temp name"
+[[ "$(readlink "$BOXMUNGE_ROOT/$STATE/.active-slot.planted1")" == "$VICTIM" \
+    && "$(readlink "$BOXMUNGE_ROOT/$STATE/.active-slot.planted2")" == "$dangling" ]] \
+    && pass "the planted links were left as they were" || fail "a planted link was replaced"
+[[ -f "$BOXMUNGE_ROOT/$STATE/active-slot" && ! -L "$BOXMUNGE_ROOT/$STATE/active-slot" \
+    && "$(cat "$BOXMUNGE_ROOT/$STATE/active-slot")" == "a" ]] \
+    && pass "active-slot rewritten as a regular file naming the live slot" \
+    || fail "active-slot not rewritten as a regular file: $OUT"
+rm -rf "$(dirname "$VICTIM")"
 drop_root
+
+# A link renamed over the temp after mkstemp made it: root writes, fchmods
+# and fsyncs the file it created, so $VICTIM is untouched. The rename then
+# puts deploy's link at active-slot (as deploy could itself, the directory
+# being deploy's), and the next run refuses it rather than reading through.
+slot_rewrite_root
+SLOT_PLANT="$PLANTS/swapped_temp.py" PATH="$HOSTILE:$PATH" run_shim check-probation
+victim_untouched "a link swapped over the temp was not written or chmod'd through"
+[[ -L "$BOXMUNGE_ROOT/$STATE/active-slot" ]] && pass "the race left deploy's link at active-slot" \
+    || fail "the swap stand-in did not run: $OUT"
+run_shim check-probation
+expect 1 "is a symlink" "the next run refuses the link the race left at active-slot"
+victim_untouched "the next run did not read or write through that link"
+rm -rf "$(dirname "$VICTIM")"
+drop_root
+unset VICTIM
 
 # upgrade.lock swapped for a link after the shim's checks, right before it
 # is opened: neither an existing target nor a missing one is opened or made.
@@ -157,6 +220,6 @@ expect 0 "" "check-probation runs from a deploy-controlled directory"
 rm -rf "$evil"
 drop_root
 
-rm -rf "$HOSTILE"
+rm -rf "$HOSTILE" "$PLANTS"
 
 finish
