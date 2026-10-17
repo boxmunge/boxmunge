@@ -40,6 +40,7 @@ def _docker_run(mounts: dict[str, str], script: str) -> subprocess.CompletedProc
 def probe() -> dict[str, str]:
     result = _docker_run(
         {str(REPO / "bootstrap"): "/bootstrap", str(REPO / "src"): "/src",
+         str(REPO / "install.sh"): "/install.sh",
          str(REPO / "tests/integration/sshd_hardening_probe.sh"): "/probe.sh"},
         "bash /probe.sh",
     )
@@ -53,6 +54,9 @@ def probe() -> dict[str, str]:
         elif tag == "SETTINGS":
             phase, user, settings = rest.split(" ", 2)
             lines[f"SETTINGS {phase} {user}"] = settings
+        elif tag == "SERVER":
+            phase, _, output = rest.partition(" ")
+            lines[f"SERVER {phase}"] = output
         elif tag in ("COMMAND", "TTY", "REFUSED", "INBOX"):
             lines[tag] = rest
     return lines
@@ -78,7 +82,7 @@ def test_with_the_drop_in_deploy_gets_key_logins_and_the_session_only(
         probe: dict[str, str], phase: str) -> None:
     assert _verdicts(probe, phase) == dict.fromkeys(CHANNELS, "refused")
     deploy = _settings(probe, phase, "deploy")
-    for setting in LOGINS + CLOSED + ("permittty yes",):
+    for setting in LOGINS + CLOSED + ("permittty yes", "permituserenvironment no"):
         assert setting in deploy
 
 
@@ -97,6 +101,9 @@ def test_deploys_match_block_ends_with_its_file(probe: dict[str, str]) -> None:
         assert "port 922" in settings and "maxauthtries 3" in settings
     supervisor = _settings(probe, "fleet-after", "supervisor")
     assert "disableforwarding no" in supervisor and "permituserrc yes" in supervisor
+    deploy = [s for s in _settings(probe, "fleet-after", "deploy") if s.startswith("acceptenv")]
+    assert sorted(deploy) == ["acceptenv COLORTERM", "acceptenv LANG", "acceptenv LC_*",
+                              "acceptenv NO_COLOR"]
 
 
 def test_an_operator_may_open_forwarding_for_supervisor_alone(probe: dict[str, str]) -> None:
@@ -104,8 +111,18 @@ def test_an_operator_may_open_forwarding_for_supervisor_alone(probe: dict[str, s
     assert probe["relaxed-after supervisor tcp-L"] == "allowed"
 
 
+def test_a_client_bash_env_runs_code_only_before_the_fix(probe: dict[str, str]) -> None:
+    assert probe["env-before deploy bash-env"] == "allowed"
+    # sshd pins deploy's AcceptEnv: the variable never arrives.
+    assert probe["env-after-sshd deploy bash-env"] == "refused"
+    assert "BASH_ENV=unset" in probe["SERVER env-after-sshd"]
+    # Widened again by a later Match block: sh and the shell drop it.
+    assert probe["env-after-wrapper deploy bash-env"] == "refused"
+    assert probe["SERVER env-after-wrapper"] == "boxmunge-server ran: status BASH_ENV=unset"
+
+
 def test_deploy_commands_tty_and_scp_uploads_still_work(probe: dict[str, str]) -> None:
-    assert probe["COMMAND"] == "boxmunge-server ran: status --json"
+    assert probe["COMMAND"] == "boxmunge-server ran: status --json BASH_ENV=unset"
     assert probe["REFUSED"].startswith("ERROR: Unknown command 'cat'")
     assert int(probe["TTY"]) >= 1
     assert probe["INBOX"].startswith("demo-") and probe["INBOX"].endswith(".tar.gz")
@@ -137,6 +154,22 @@ def test_sshd_hardening_sh_is_idempotent_and_fails_loudly_on_trixie() -> None:
         f"{_RUN} 2>/tmp/err; echo shadowed=$?; cat /tmp/err\n"
         f"tail -1 {_DROPIN}\n"
         "rm /etc/ssh/sshd_config.d/00-aaa.conf\n"
+        # A later Match block widening deploy's AcceptEnv, or a user environment
+        # file allowed first: both refused.
+        "printf 'Match User deploy\\n    AcceptEnv *\\n' > /etc/ssh/sshd_config.d/30-widen.conf\n"
+        f"{_RUN} 2>/tmp/err; echo widened=$?; cat /tmp/err\n"
+        "rm /etc/ssh/sshd_config.d/30-widen.conf\n"
+        "echo 'PermitUserEnvironment yes' > /etc/ssh/sshd_config.d/00-aaa.conf\n"
+        f"{_RUN} 2>/tmp/err; echo userenv=$?; cat /tmp/err\n"
+        "rm /etc/ssh/sshd_config.d/00-aaa.conf\n"
+        # keyboard-interactive 2FA cannot be satisfied once it is off: sshd -t
+        # refuses, the drop-in is put back, and nothing is reloaded.
+        f"cp {_DROPIN} /tmp/before.conf; echo '# 2fa' >> {_DROPIN}\n"
+        "cp /etc/ssh/sshd_config /tmp/main.conf\n"
+        "echo 'AuthenticationMethods publickey,keyboard-interactive' >> /etc/ssh/sshd_config\n"
+        f"{_RUN} 2>/tmp/err; echo twofactor=$?; cat /tmp/err; tail -1 {_DROPIN}\n"
+        "echo reloads-now=$(grep -c . /tmp/systemctl.log)\n"
+        f"cp /tmp/main.conf /etc/ssh/sshd_config; cp /tmp/before.conf {_DROPIN}\n"
         # sshd that never reads the drop-in directory: refused, new file removed.
         f"rm {_DROPIN}; sed -i '/^Include/d' /etc/ssh/sshd_config\n"
         f"{_RUN} 2>/tmp/err; echo noinclude=$?; cat /tmp/err\n"
@@ -154,6 +187,11 @@ def test_sshd_hardening_sh_is_idempotent_and_fails_loudly_on_trixie() -> None:
                     "deploy: AllowAgentForwarding no"):
         assert missing in out
     assert "# stale" in out  # the previous drop-in was put back as it was
+    assert "widened=1" in out and "AcceptEnv LANG LC_* COLORTERM NO_COLOR and nothing more" in out
+    assert "acceptenv *" in out
+    assert "userenv=1" in out and "deploy: PermitUserEnvironment no" in out
+    assert "twofactor=1" in out and "keyboard-interactive" in out
+    assert "# 2fa" in out and "reloads-now=1" in out
     assert "noinclude=1" in out and "Include /etc/ssh/sshd_config.d/*.conf" in out
     assert "removed" in out
     assert "invalid=1" in out and "Bogus" in out

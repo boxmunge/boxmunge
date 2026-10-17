@@ -10,6 +10,7 @@
 # sshd configurations. Prints one line per attempt:
 #   RESULT <phase> <user> <channel> <allowed|refused>
 # plus the effective sshd settings for deploy and supervisor in each phase.
+# shellcheck disable=SC2016  # stub bodies and BASH_ENV are literal on purpose
 set -uo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
@@ -19,17 +20,33 @@ set -e
 
 printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/systemctl
 chmod +x /usr/local/bin/systemctl
-# The shell hands allowed commands to boxmunge-server; a stand-in echoes them.
-printf '#!/bin/sh\necho "boxmunge-server ran: $*"\n' > /usr/local/bin/boxmunge-server
+# The shell hands allowed commands to boxmunge-server. The stand-in is bash,
+# like the real wrapper, so a BASH_ENV that reached it would run.
+printf '#!/usr/bin/env bash\necho "boxmunge-server ran: $* BASH_ENV=${BASH_ENV-unset}"\n' \
+    > /usr/local/bin/boxmunge-server
 chmod +x /usr/local/bin/boxmunge-server
 ssh-keygen -A >/dev/null
-mkdir -p /run/sshd /opt/boxmunge/bin /root/.ssh
+mkdir -p /run/sshd /opt/boxmunge/bin /opt/boxmunge/env-active/bin /root/.ssh
 
-cat > /opt/boxmunge/bin/boxmunge-shell <<'SHELL'
-#!/bin/sh
-PYTHONPATH=/src exec python3 -c 'from boxmunge.shell import main; main()' "$@"
-SHELL
-chmod 755 /opt/boxmunge/bin/boxmunge-shell
+# The venv as install.sh leaves it, with the package from /src: its python
+# and the boxmunge-shell entry point. The login shell is install.sh's own
+# wrapper (WRAPPER_NOW); WRAPPER_BEFORE is the one earlier releases wrote.
+ln -s /usr/bin/python3 /opt/boxmunge/env-active/bin/python
+cat > /opt/boxmunge/env-active/bin/boxmunge-shell <<'ENTRY'
+#!/opt/boxmunge/env-active/bin/python
+import sys
+sys.path.insert(0, "/src")
+from boxmunge.shell import main
+sys.exit(main())
+ENTRY
+chmod 755 /opt/boxmunge/env-active/bin/boxmunge-shell
+WRAPPER_NOW="$(sed -n "/^cat > \"\${BOXMUNGE_ROOT}\/bin\/boxmunge-shell\" <<'WRAPPER'$/,/^WRAPPER$/p" \
+    /install.sh | sed '1d;$d')"
+[[ "${WRAPPER_NOW}" == "#!/bin/sh"* ]] || { echo "WRAPPER_NOT_FOUND"; exit 1; }
+WRAPPER_BEFORE='#!/usr/bin/env bash
+exec /opt/boxmunge/env-active/bin/boxmunge-shell "$@"'
+wrapper() { printf '%s\n' "$1" > /opt/boxmunge/bin/boxmunge-shell; chmod 755 /opt/boxmunge/bin/boxmunge-shell; }
+wrapper "${WRAPPER_NOW}"
 groupadd -f docker
 useradd -m -s /opt/boxmunge/bin/boxmunge-shell deploy
 useradd -m -s /bin/bash supervisor
@@ -128,7 +145,7 @@ probe_deploy() {
 # maxauthtries come from the main file, which sshd reads after the drop-ins).
 settings() {
     echo "SETTINGS ${PHASE} $1 $(sshd -T -C "user=$1,host=localhost,addr=127.0.0.1" \
-        | grep -E '^(passwordauthentication|kbdinteractiveauthentication|permitrootlogin|disableforwarding|allowtcpforwarding|allowstreamlocalforwarding|allowagentforwarding|x11forwarding|permittunnel|gatewayports|permituserrc|permittty|port|maxauthtries) ' \
+        | grep -E '^(passwordauthentication|kbdinteractiveauthentication|permitrootlogin|disableforwarding|allowtcpforwarding|allowstreamlocalforwarding|allowagentforwarding|x11forwarding|permittunnel|gatewayports|permituserrc|permittty|permituserenvironment|acceptenv|port|maxauthtries) ' \
         | sort | tr '\n' ',')"
 }
 
@@ -158,6 +175,33 @@ printf 'Match User supervisor\n    AllowTcpForwarding yes\n' > /etc/ssh/sshd_con
 bash /bootstrap/sshd-hardening.sh >/dev/null || exit 1
 restart_sshd; probe_deploy
 forward supervisor tcp-L "-L7703:127.0.0.1:7777" 7703
+
+# A client variable that runs code: bash expands BASH_ENV before it runs a
+# script, so this needs no file on the box. Prints whether it ran and what
+# boxmunge-server saw.
+inject() {
+    rm -f /tmp/pwned
+    local out
+    out="$(BASH_ENV='$(touch /tmp/pwned)' "${SSH[@]}" -o SendEnv=BASH_ENV deploy@127.0.0.1 status 2>&1)"
+    local verdict=refused
+    [[ -e /tmp/pwned ]] && verdict=allowed
+    report deploy bash-env "${verdict}"
+    echo "SERVER ${PHASE} ${out}"
+}
+# 4. Before: the wrapper earlier releases wrote, and an operator's drop-in
+#    accepting BASH_ENV from clients.
+PHASE=env-before; rm -f "${DROPIN}"; wrapper "${WRAPPER_BEFORE}"
+printf 'AcceptEnv BASH_ENV\n' > /etc/ssh/sshd_config.d/20-env.conf
+restart_sshd; inject
+# 5. The drop-in pins deploy's AcceptEnv, so sshd no longer passes it.
+PHASE=env-after-sshd; bash /bootstrap/sshd-hardening.sh >/dev/null || exit 1
+restart_sshd; inject
+# 6. A Match block added after install widens it again (AcceptEnv adds up):
+#    the wrapper and the shell still keep it from running anything.
+PHASE=env-after-wrapper; wrapper "${WRAPPER_NOW}"
+printf 'Match User deploy\n    AcceptEnv BASH_ENV\n' > /etc/ssh/sshd_config.d/30-widen.conf
+restart_sshd; inject
+rm /etc/ssh/sshd_config.d/20-env.conf /etc/ssh/sshd_config.d/30-widen.conf; restart_sshd
 
 # The session itself still works: allowlisted commands and scp uploads.
 echo "COMMAND $("${SSH[@]}" deploy@127.0.0.1 status --json 2>&1)"

@@ -67,6 +67,7 @@ class TestParseErrors:
         with pytest.raises(ValueError):
             parse_shell_command(line)
 
+    @patch.dict("os.environ")  # main() narrows the process environment
     @patch("boxmunge.shell.subprocess.run")
     def test_main_rejects_unparseable_command(
         self, mock_run: MagicMock, capsys: pytest.CaptureFixture[str],

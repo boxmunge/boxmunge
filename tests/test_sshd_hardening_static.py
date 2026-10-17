@@ -13,7 +13,9 @@ AUTH = {"PasswordAuthentication": "no", "KbdInteractiveAuthentication": "no",
 FORWARDING = {"X11Forwarding": "no", "AllowTcpForwarding": "no",
               "AllowStreamLocalForwarding": "no", "AllowAgentForwarding": "no",
               "PermitTunnel": "no", "GatewayPorts": "no"}
+SESSION = {"PermitUserEnvironment": "no"}
 DEPLOY_ONLY = {"DisableForwarding": "yes", "PermitUserRC": "no"}
+ACCEPTENV = "AcceptEnv LANG LC_* COLORTERM NO_COLOR"
 
 
 def _array(name: str) -> dict[str, str]:
@@ -33,17 +35,22 @@ def _settings(lines: list[str]) -> dict[str, str]:
 def test_the_drop_in_says_what_the_effective_settings_are_checked_against() -> None:
     assert _array("AUTH") == AUTH
     assert _array("FORWARDING") == FORWARDING
+    assert _array("SESSION") == SESSION
     assert _array("DEPLOY_ONLY") == DEPLOY_ONLY
     globals_, match = DROPIN.split("\nMatch User deploy\n")
-    assert _settings(globals_.splitlines()) == {**AUTH, **FORWARDING}
+    assert _settings(globals_.splitlines()) == {**AUTH, **FORWARDING, **SESSION}
     lines = match.splitlines()
     assert all(line.startswith("    ") for line in lines)
-    assert _settings([line.strip() for line in lines]) == {**FORWARDING, **DEPLOY_ONLY}
+    assert lines[0].strip() == ACCEPTENV
+    assert _settings([line.strip() for line in lines[1:]]) == {**FORWARDING, **DEPLOY_ONLY}
+    accepted = sorted(f"acceptenv {name}" for name in ACCEPTENV.split()[1:])
+    assert f'DEPLOY_ACCEPTENV="{chr(10).join(accepted)}"' in SCRIPT
     assert "Match" not in match
 
 
 def test_the_effective_settings_are_checked_for_both_accounts() -> None:
-    assert 'missing_for deploy "${AUTH[@]}" "${FORWARDING[@]}" "${DEPLOY_ONLY[@]}"' in SCRIPT
+    assert ('missing_for deploy "${AUTH[@]}" "${FORWARDING[@]}" "${SESSION[@]}" '
+            '"${DEPLOY_ONLY[@]}"') in SCRIPT
     assert 'missing_for supervisor "${AUTH[@]}"' in SCRIPT
     assert '/usr/sbin/sshd -T -C "user=${user}' in SCRIPT
     assert SCRIPT.index("/usr/sbin/sshd -t") < SCRIPT.index("systemctl try-reload-or-restart ssh")

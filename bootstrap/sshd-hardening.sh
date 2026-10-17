@@ -13,7 +13,8 @@
 # deploy's restricted shell is the boundary for its key, and deploy is in
 # the docker group, so any SSH channel that never reaches the shell is root:
 # `ssh -N -L /tmp/d.sock:/var/run/docker.sock deploy@box` hands the client
-# the Docker socket. Forwarding is off for everyone (supervisor has a full
+# the Docker socket, and a client variable such as BASH_ENV could run code
+# before the shell does. Forwarding is off for everyone (supervisor has a full
 # shell and needs none), and a Match block keeps it off for deploy even if
 # an operator's own Match block opens it for supervisor. A Match block in an
 # included file ends with that file, so it cannot capture the main file's
@@ -44,10 +45,19 @@ FORWARDING=(
     "PermitTunnel no"
     "GatewayPorts no"
 )
+# Global only (sshd refuses it in a Match block); checked for deploy.
+SESSION=(
+    "PermitUserEnvironment no"
+)
 DEPLOY_ONLY=(
     "DisableForwarding yes"
     "PermitUserRC no"
 )
+# The client variables deploy's sessions may receive: exactly these.
+DEPLOY_ACCEPTENV="acceptenv COLORTERM
+acceptenv LANG
+acceptenv LC_*
+acceptenv NO_COLOR"
 
 # missing_for <user> <setting>...: prints the settings sshd would not give
 # <user>, one per line.
@@ -63,9 +73,18 @@ missing_for() {
 
 # Every account gets key-only logins. Forwarding is checked for deploy only:
 # an operator may open it for supervisor in a Match block of their own.
+# AcceptEnv values add up across Match blocks, so deploy's must be exactly
+# the drop-in's: a later Match block could otherwise pass it BASH_ENV.
 ineffective_settings() {
-    missing_for deploy "${AUTH[@]}" "${FORWARDING[@]}" "${DEPLOY_ONLY[@]}"
+    missing_for deploy "${AUTH[@]}" "${FORWARDING[@]}" "${SESSION[@]}" "${DEPLOY_ONLY[@]}"
     missing_for supervisor "${AUTH[@]}"
+    local accepted
+    accepted="$(/usr/sbin/sshd -T -C "user=deploy,host=localhost,addr=127.0.0.1" \
+        | grep '^acceptenv ' | LC_ALL=C sort)"
+    if [[ "${accepted}" != "${DEPLOY_ACCEPTENV}" ]]; then
+        echo "deploy: AcceptEnv LANG LC_* COLORTERM NO_COLOR and nothing more" \
+             "(sshd -T shows: ${accepted//$'\n'/, })"
+    fi
 }
 
 [[ -f "${SOURCE}" ]] || { echo "ERROR: ${SOURCE} is missing from the release bundle." >&2; exit 1; }

@@ -481,9 +481,13 @@ exec /opt/boxmunge/env-active/bin/boxmunge-server "$@"
 WRAPPER
 chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-server"
 
+# deploy's login shell runs before any check, with whatever environment the
+# SSH client got through: sh reads no startup file for a script (bash would
+# run $BASH_ENV) and python -I ignores PYTHON* variables. The shell then
+# drops the rest (shell.restrict_environment).
 cat > "${BOXMUNGE_ROOT}/bin/boxmunge-shell" <<'WRAPPER'
-#!/usr/bin/env bash
-exec /opt/boxmunge/env-active/bin/boxmunge-shell "$@"
+#!/bin/sh
+exec /opt/boxmunge/env-active/bin/python -I /opt/boxmunge/env-active/bin/boxmunge-shell "$@"
 WRAPPER
 chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-shell"
 

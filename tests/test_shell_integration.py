@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 from boxmunge.shell import main, run_command, ALLOWED_COMMANDS
 
 
+@patch.dict(os.environ)  # main() narrows the process environment
 class TestShellMain:
     @patch("boxmunge.shell.dispatch_command")
     def test_main_reads_dash_c(self, mock_dispatch: MagicMock) -> None:
