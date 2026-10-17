@@ -346,7 +346,7 @@ upgrade_to() {
                 "ERROR: bundled install.sh has syntax errors; refusing to run system upgrade" system_upgrade
         fi
         local new_hash current_hash
-        new_hash="$(sha256sum "$new_install_sh" | awk '{print $1}')"
+        new_hash="$( (cd "$tmp_download/boxmunge" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}')"
         current_hash="$(cat "$installer_hash_file" 2>/dev/null || echo "")"
         if [[ "$new_hash" != "$current_hash" ]]; then
             log "install.sh changed (current=${current_hash:0:8}, new=${new_hash:0:8}); running system upgrade..."

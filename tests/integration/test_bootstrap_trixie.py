@@ -39,6 +39,8 @@ def _run_on_trixie(script: str, timeout: int = 900) -> subprocess.CompletedProce
         ["docker", "run", "--rm", "--name", name,
          "-v", f"{REPO / 'bootstrap'}:/bootstrap:ro",
          "-v", f"{REPO / 'install.sh'}:/install.sh:ro",
+         # sshd-hardening.sh installs the drop-in from the package (/bootstrap/../src).
+         "-v", f"{REPO / 'src'}:/src:ro",
          IMAGE, "bash", "-c", _PRELUDE + script],
         capture_output=True, text=True, timeout=timeout, check=False,
     )

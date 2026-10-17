@@ -102,6 +102,17 @@ class TestEndpointSelection:
                           "class": "breakfix", "source": "endpoint",
                           "current_version": "0.3.0", "blocked": None}
 
+    @pytest.mark.parametrize("content", ["{not json", "[]"])
+    @patch("urllib.request.urlopen")
+    def test_unreadable_blocklist_is_an_error_naming_the_file(self, mock_open, tmp_path, content):
+        mock_open.return_value = _endpoint(**FULL)
+        paths = _setup(tmp_path)
+        paths.blocklist.write_text(content)
+        result = discover_update(paths, mode="breakfix")
+        assert result["action"] == "error"
+        assert str(paths.blocklist) in result["message"]
+        assert "refuses to install" in result["message"]
+
     @pytest.mark.parametrize("reason", [{"breaking_release": "0.4.0"}, {"major": 1}])
     @patch("urllib.request.urlopen")
     def test_blocked_is_passed_through(self, mock_open, tmp_path, reason):

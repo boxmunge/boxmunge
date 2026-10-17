@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# bootstrap/sshd.sh — sshd hardening: key-only logins, named accounts, no forwarding.
+# bootstrap/sshd.sh — sshd: port, named accounts, session limits; then the
+# drop-in with key-only logins and no forwarding (sshd-hardening.sh).
 # Sourced by init-host.sh after deploy and supervisor exist (lockout prevention).
 : "${SSH_PORT:?}" "${DEPLOY_USER:?}"
 
@@ -17,9 +18,6 @@ _set_sshd() {
 }
 
 _set_sshd Port            "${SSH_PORT}"
-_set_sshd PermitRootLogin no
-_set_sshd PasswordAuthentication no
-_set_sshd ChallengeResponseAuthentication no
 _set_sshd UsePAM yes
 
 # Session and access limits
@@ -28,17 +26,14 @@ _set_sshd LoginGraceTime 30
 _set_sshd ClientAliveInterval 300
 _set_sshd ClientAliveCountMax 2
 
-# Restrict SSH features — deploy user must not tunnel or forward
-_set_sshd AllowTcpForwarding no
-_set_sshd GatewayPorts no
-_set_sshd PermitTunnel no
-_set_sshd X11Forwarding no
-
 # Only named accounts may log in
 _set_sshd AllowUsers "${DEPLOY_USER} supervisor"
 
 # Note: the sshd Subsystem directive for SFTP is wired in install.sh, after
 # the wrapper binary exists at /opt/boxmunge/bin/boxmunge-sftp. Doing it here
 # would create a window where sshd points at a non-existent wrapper.
+
+# Logins and forwarding. Before the restart, so sshd never serves without it.
+bash "$(dirname "${BASH_SOURCE[0]}")/sshd-hardening.sh"
 
 systemctl restart sshd

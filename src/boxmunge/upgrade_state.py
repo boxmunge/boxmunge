@@ -30,27 +30,42 @@ class UpgradeStateError(OSError):
         return cls(detail if str(path) in detail else f"{path}: {detail}")
 
 
+# What each state file holds, so an error can say how to repair it.
+_REPAIR = {
+    "blocklist.json": "it must be a JSON object mapping each version this box refuses "
+                      "to install to why ({}: none). Repair it as root; deleting it "
+                      "forgets every refused version",
+    "probation.json": "it records an upgrade still on probation. Repair it as root, or "
+                      "delete it to end probation",
+}
+
+
 def _read_json(path: Path) -> dict[str, Any]:
-    """Read a JSON file. Returns empty dict if missing. Raises on corrupt.
+    """Read a JSON object file. Returns empty dict if missing.
 
     upgrade-state/ is deploy-writable and root reads it, so the file is
     opened without following a link and without blocking on a FIFO
-    (read_text_nofollow); either is an UpgradeStateError naming the file.
+    (read_text_nofollow). That, text that is not UTF-8 or not a JSON object
+    is an UpgradeStateError naming the file: guessing at its contents could
+    install a version this box refused, or skip a probation rollback.
     """
     import logging
     try:
-        return json.loads(read_text_nofollow(path))
+        data = json.loads(read_text_nofollow(path))
     except FileNotFoundError:
         return {}
     except json.JSONDecodeError as e:
-        logging.getLogger("boxmunge").error("Corrupt JSON in %s: %s", path, e)
-        raise
+        raise UpgradeStateError(
+            f"{path} is not valid JSON ({e}); {_REPAIR[path.name]}") from e
     except UnicodeDecodeError as e:
         raise UpgradeStateError(
             f"{path} is not UTF-8 text ({e.reason}); inspect it and repair or remove it") from e
     except OSError as e:
         logging.getLogger("boxmunge").error("Cannot read %s: %s", path, e)
         raise UpgradeStateError.of(path, e) from e
+    if not isinstance(data, dict):
+        raise UpgradeStateError(f"{path} is not a JSON object; {_REPAIR[path.name]}")
+    return data
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:

@@ -8,7 +8,7 @@ import yaml
 
 from boxmunge.fileutil import LinkedTargetError, atomic_write_text
 from boxmunge.manifest_fields import (
-    SERVICE_NAME_RE, host_problem, port_problem, route_path_problem,
+    SERVICE_NAME_RE, deploy_problems, host_problem, port_problem, route_path_problem,
 )
 from boxmunge.migration import MigrationError, migrate_manifest
 
@@ -351,6 +351,8 @@ def validate_manifest(
                 f"'backup.service' to the compose service the dump/restore "
                 f"command runs in."
             )
+
+    errors.extend(deploy_problems(manifest.get("deploy", {})))
 
     # Smoke tests — per-service
     has_any_smoke = any(

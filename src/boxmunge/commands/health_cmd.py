@@ -414,6 +414,10 @@ def collect_health(paths: BoxPaths) -> HealthReport:
     from boxmunge.health_checks.userns import check_docker_userns
     report.checks.append(check_docker_userns(paths))
 
+    from boxmunge.health_checks.sshd import check_sshd_deploy_env, check_sshd_hardening
+    report.checks.append(check_sshd_hardening())
+    report.checks.append(check_sshd_deploy_env())
+
     from boxmunge.health_checks.security import (
         check_cve_scan_freshness,
         check_security_profiles,

@@ -47,7 +47,6 @@ Key features:
         smoke.sh
         backup.sh
         restore.sh
-        migrate.sh
       backups/                # encrypted local backup archives
       data/                   # persistent volume mounts
       repo/                   # git clone (source: git projects only)
@@ -137,6 +136,8 @@ The `deploy` user runs a restricted boxmunge shell. Agents connect as `deploy`.
   reach the root upgrade shim through a sudo rule that permits exactly
   `boxmunge-upgrade auto` and `boxmunge-upgrade target <version>`, nothing else
 - Documentation is accessed via `agent-help <topic>`, not by reading files
+- Gets no SSH forwarding, tunnels or client environment beyond the locale, so nothing
+  bypasses the shell (TRUST_MODEL.md, "SSH access")
 
 This is the complete interface for agents. There is nothing else.
 
@@ -189,7 +190,7 @@ boxmunge supports two project sources, declared in `manifest.yml` via the `sourc
 4. Pre-deploy snapshot -- encrypted backup of the current data, taken with the outgoing release's own backup configuration (unless `--no-snapshot`)
 5. Keep the outgoing release -- its code is copied to `.releases/previous/` and paired with that snapshot, for `rollback`
 6. Install -- only a release that passed every check replaces the live project files
-7. Pre-deploy command -- run `deploy.pre_deploy` from manifest if defined (e.g., migrations)
+7. Pre-deploy command -- run `deploy.pre_deploy` from manifest if defined, on the host in the project directory, without a shell (PROJECT_CONVENTIONS.md)
 8. Generate configs -- write Caddy site config and compose overlay (networking, env_files, resource limits)
 9. Start containers -- re-validate the installed files, check every bind source without following symlinks and record its kind (creating missing ones as directories), then `docker compose up -d` with overlay. Every later start (upgrade, container update, `recover`, `resume`, `restore`) repeats the check against that record first; see TRUST_MODEL.md, "Container Escape and Root Restarts"
 10. Reload Caddy -- graceful, zero-downtime

@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Syntax rules for the manifest fields that are written into configs.
+"""Syntax rules for the manifest fields that are written into configs or run.
 
 Hosts, route paths and ports end up in the Caddyfile, and service names in
-compose, so each is checked strictly. Used by manifest.validate_manifest.
+compose, so each is checked strictly; deploy.pre_deploy is run as a command.
+Used by manifest.validate_manifest.
 """
 
 import re
+import shlex
 
 SERVICE_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9\-]{0,62}$')
 
@@ -81,3 +83,27 @@ def port_problem(port: object) -> str | None:
     if not 1 <= port <= _MAX_PORT:
         return f"must be from 1 to {_MAX_PORT}, got {port}"
     return None
+
+
+def deploy_problems(deploy: object) -> list[str]:
+    """Why the manifest's deploy: block cannot be used, if it cannot.
+
+    pre_deploy is split into words with shlex and run without a shell
+    (commands.deploy.run_pre_deploy_hook), so it must be a string shlex can
+    split. Absent, empty or null means no hook.
+    """
+    if not isinstance(deploy, dict):
+        return [f"'deploy' must be a mapping, got {type(deploy).__name__}"]
+    hook = deploy.get("pre_deploy")
+    if hook is None or hook == "":
+        return []
+    if not isinstance(hook, str):
+        return [f"deploy.pre_deploy must be a string (a command and its arguments, "
+                f"e.g. \"boxmunge-scripts/pre-deploy.sh\"), got {type(hook).__name__}"]
+    try:
+        shlex.split(hook)
+    except ValueError as e:
+        return [f"deploy.pre_deploy {hook!r} cannot be split into words ({e}). "
+                "Check its quoting; it runs without a shell, so put anything with "
+                "&&, pipes or redirects in a script and name the script here."]
+    return []

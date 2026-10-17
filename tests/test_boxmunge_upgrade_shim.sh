@@ -256,42 +256,7 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# install.sh fingerprint write smoke test: create a stand-in install.sh in a
-# tmpdir, run the 4-line hash-write fragment with BOXMUNGE_ROOT pointed at
-# the tmpdir, assert state/installer.sha256 matches sha256sum of the source.
-#
-# Skipped on platforms without sha256sum (e.g. macOS without coreutils) —
-# the fingerprint write target is Debian-only and the production code path
-# uses sha256sum which is part of coreutils.
-if command -v sha256sum >/dev/null 2>&1; then
-    fp_dir="$(mktemp -d)"
-    mkdir -p "$fp_dir/state"
-    cat > "$fp_dir/install.sh" <<'EOF'
-#!/usr/bin/env bash
-echo "stand-in"
-EOF
-    expected_hash="$(sha256sum "$fp_dir/install.sh" | awk '{print $1}')"
-    (
-        BOXMUNGE_ROOT="$fp_dir"
-        SCRIPT_DIR="$fp_dir"
-        INSTALLER_HASH_FILE="${BOXMUNGE_ROOT}/state/installer.sha256"
-        mkdir -p "$(dirname "${INSTALLER_HASH_FILE}")"
-        sha256sum "${SCRIPT_DIR}/install.sh" 2>/dev/null \
-            | awk '{print $1}' > "${INSTALLER_HASH_FILE}.tmp"
-        mv -f "${INSTALLER_HASH_FILE}.tmp" "${INSTALLER_HASH_FILE}"
-    )
-    written_hash="$(cat "$fp_dir/state/installer.sha256" 2>/dev/null || echo "")"
-    if [[ "$written_hash" == "$expected_hash" && -n "$expected_hash" ]]; then
-        echo "PASS: install.sh fingerprint write fragment produces sha256 of source"
-        PASS=$((PASS + 1))
-    else
-        echo "FAIL: install.sh fingerprint mismatch (expected '$expected_hash', got '$written_hash')"
-        FAIL=$((FAIL + 1))
-    fi
-    rm -rf "$fp_dir"
-else
-    echo "SKIP: install.sh fingerprint smoke test (sha256sum not available)"
-fi
+# The fingerprint itself is exercised by tests/test_installer_fingerprint.py.
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

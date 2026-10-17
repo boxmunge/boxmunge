@@ -20,7 +20,6 @@ Each project lives at `/opt/boxmunge/projects/<project-name>/`. The directory st
     smoke.sh                   # Health check (strongly recommended; 755)
     backup.sh                  # Backup to stdout (required if backup.type != none)
     restore.sh                 # Restore from stdin (required if backup.type != none)
-    migrate.sh                 # Optional pre-deploy migration (755)
   backups/                     # Managed by boxmunge
   data/                        # Persistent volumes (managed by project)
   repo/                        # Git clone (source: git projects only)
@@ -203,8 +202,12 @@ backup:
 
 # Deploy behaviour.
 deploy:
-  # Shell command(s) run before containers are restarted.
-  pre_deploy: "npm ci --prefix frontend && npm run build --prefix frontend"
+  # Command run on the host, in the project directory, before containers are
+  # restarted; a non-zero exit stops the deploy. It is split into words but run
+  # without a shell: `&&`, pipes, redirects and `$VAR` are passed to the program
+  # as plain arguments, so put more than one step in a script (mode 0755).
+  # Builds (npm ci, asset compilation) belong in the image's Dockerfile.
+  pre_deploy: "boxmunge-scripts/pre-deploy.sh"
 
   # If true, boxmunge takes a backup before deploying.
   snapshot_before_deploy: true
@@ -226,6 +229,7 @@ boxmunge validates `manifest.yml` on every deploy and rejects invalid manifests 
 8. **`limits`** fields are optional per service. `limits.memory` accepts Docker memory format (e.g., `256m`, `1g`). `limits.cpus` accepts a numeric string (e.g., `"0.5"`, `"2.0"`).
 9. **If `backup.type` is not `none`**, both `dump_command` and `restore_command` are mandatory. A backup you cannot restore is not a backup.
 10. **Per-service `smoke` is strongly recommended.** Each service can declare a `smoke: boxmunge-scripts/smoke.sh` field. The script is exec'd inside the running container, so `localhost:PORT` naturally works. boxmunge warns if no services have a smoke test.
+11. **`deploy` must be a mapping, and `deploy.pre_deploy`, when set, a string** that splits into words the way a shell would (balanced quotes). It runs without a shell, so `&&`, pipes and redirects belong in a script that `pre_deploy` names.
 
 ---
 
@@ -440,7 +444,6 @@ The `boxmunge-scripts/` directory is the project's side of the integration. boxm
 | `smoke.sh` | After every deploy, and periodically by the health monitor | Strongly recommended |
 | `backup.sh` | On scheduled backup runs and `snapshot_before_deploy` | Required if `backup.type != none` |
 | `restore.sh` | During a restore operation | Required if `backup.type != none` |
-| `migrate.sh` | During deploy, before containers restart, after `pre_deploy` | Optional |
 
 ---
 

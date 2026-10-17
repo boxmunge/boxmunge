@@ -481,42 +481,10 @@ exec /opt/boxmunge/env-active/bin/boxmunge-server "$@"
 WRAPPER
 chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-server"
 
-cat > "${BOXMUNGE_ROOT}/bin/boxmunge-shell" <<'WRAPPER'
-#!/usr/bin/env bash
-exec /opt/boxmunge/env-active/bin/boxmunge-shell "$@"
-WRAPPER
-chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-shell"
-
-# boxmunge-sftp is a real script in scripts/ so the upgrade shim's
-# self-update loop can refresh it from a release bundle (audit C-NEW-6).
-# Copy from the bundle, not an inline heredoc.
-cp "${SCRIPT_DIR}/scripts/boxmunge-sftp" "${BOXMUNGE_ROOT}/bin/boxmunge-sftp"
-chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-sftp"
-
-# ---------------------------------------------------------------------------
-# Wire sshd's SFTP subsystem to boxmunge-sftp.
-#
-# The wrapper refuses SFTP for deploy (sftp-server cannot be confined to the
-# inbox without chrooting every deploy session, and unconfined it exposes
-# everything deploy can read and write) and execs the real sftp-server for
-# everyone else. deploy uploads with legacy scp (`scp -O`), which the
-# restricted shell receives through `scp -t`. Idempotent; runs on every
-# install/upgrade so the wiring cannot drift.
-# ---------------------------------------------------------------------------
-SSHD_CONFIG="/etc/ssh/sshd_config"
-SFTP_SUBSYSTEM_LINE="Subsystem sftp ${BOXMUNGE_ROOT}/bin/boxmunge-sftp"
-if grep -qxF "${SFTP_SUBSYSTEM_LINE}" "${SSHD_CONFIG}"; then
-    echo "  sshd Subsystem already wired to boxmunge-sftp"
-else
-    if grep -qE '^Subsystem[[:space:]]+sftp[[:space:]]' "${SSHD_CONFIG}"; then
-        sed -i "s|^Subsystem[[:space:]]\\+sftp[[:space:]].*|${SFTP_SUBSYSTEM_LINE}|" "${SSHD_CONFIG}"
-    else
-        printf '\n%s\n' "${SFTP_SUBSYSTEM_LINE}" >> "${SSHD_CONFIG}"
-    fi
-    /usr/sbin/sshd -t
-    systemctl reload ssh 2>/dev/null || systemctl reload sshd
-    echo "  sshd Subsystem rewired to boxmunge-sftp + reload sent"
-fi
+# deploy's login shell and SFTP wrapper, sshd's SFTP Subsystem, and boxmunge's
+# sshd drop-in (key-only logins, no forwarding for deploy).
+# shellcheck source=bootstrap/install-ssh.sh
+source "${SCRIPT_DIR}/bootstrap/install-ssh.sh"
 
 # ---------------------------------------------------------------------------
 # Install the boxmunge-upgrade shim (orchestrates auto-updates)
@@ -595,10 +563,10 @@ if [[ "${INSTALLED_VERSION}" != "unknown" && "${FROM_UPGRADE_SHIM}" -eq 0 ]]; th
 fi
 
 # ---------------------------------------------------------------------------
-# Record the installer fingerprint (sha256 of this script as it was applied)
-# so the upgrade shim can detect when a future release ships an install.sh
-# that differs from the one this host already ran — and re-invoke install.sh
-# automatically before flipping to the new venv. Without this, system-level
+# Record the installer fingerprint (install.sh and the files it installs
+# from, as applied) so the upgrade shim can detect when a future release
+# ships an installer that differs from the one this host already ran, and
+# re-invoke install.sh automatically before flipping to the new venv. Without this, system-level
 # changes (new apt packages, new systemd units, install.sh-only migrations)
 # silently require a manual `bash boxmunge-install.sh` after every upgrade.
 # Written last so a partial install (which exits earlier under `set -e`)
@@ -607,8 +575,10 @@ fi
 # ---------------------------------------------------------------------------
 INSTALLER_HASH_FILE="${BOXMUNGE_ROOT}/state/installer.sha256"
 mkdir -p "$(dirname "${INSTALLER_HASH_FILE}")"
-sha256sum "${SCRIPT_DIR}/install.sh" 2>/dev/null \
-    | awk '{print $1}' > "${INSTALLER_HASH_FILE}.tmp"
+# Covers install.sh and the files it installs from: a release that changes
+# only bootstrap/sshd-hardening.sh must re-run it too. The shim computes the
+# same fingerprint over a new bundle (tests/test_installer_fingerprint.py).
+(cd "${SCRIPT_DIR}" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}' > "${INSTALLER_HASH_FILE}.tmp"
 mv -f "${INSTALLER_HASH_FILE}.tmp" "${INSTALLER_HASH_FILE}"
 chown root:deploy "${INSTALLER_HASH_FILE}" 2>/dev/null || true
 chmod 0644 "${INSTALLER_HASH_FILE}"
