@@ -67,3 +67,46 @@ def test_a_hook_that_cannot_start_is_a_clear_error(project, capsys, command, pro
     err = capsys.readouterr().err
     assert "Pre-deploy command cannot run" in err and problem in err
     assert "without a shell" in err
+
+
+def _manifest(deploy: object) -> dict:
+    import yaml
+
+    from tests.test_manifest import VALID_MANIFEST
+    manifest = yaml.safe_load(VALID_MANIFEST)
+    manifest["deploy"] = deploy
+    return manifest
+
+
+@pytest.mark.parametrize("deploy,problem", [
+    ({"pre_deploy": "echo 'x"}, "cannot be split into words"),
+    ({"pre_deploy": 123}, "must be a string"),
+    ({"pre_deploy": ["npm", "ci"]}, "must be a string"),
+    ("npm ci", "'deploy' must be a mapping"),
+])
+def test_an_unusable_pre_deploy_is_a_manifest_error(deploy, problem) -> None:
+    from boxmunge.manifest import validate_manifest
+    errors, _ = validate_manifest(_manifest(deploy), "myapp")
+    assert any(problem in error for error in errors), errors
+
+
+@pytest.mark.parametrize("hook", [None, "", "boxmunge-scripts/pre-deploy.sh --flag 'a b'"])
+def test_a_usable_pre_deploy_validates(hook) -> None:
+    from boxmunge.manifest import validate_manifest
+    errors, _ = validate_manifest(_manifest({"pre_deploy": hook}), "myapp")
+    assert errors == []
+
+
+def test_a_kept_release_with_an_unparseable_hook_fails_cleanly(project, capsys) -> None:
+    paths, _ = project
+    assert run_pre_deploy_hook("demo", paths, {"deploy": {"pre_deploy": "echo 'x"}}) == 1
+    assert "cannot be split into words" in capsys.readouterr().err
+
+
+def test_a_missing_project_directory_is_named_as_such(tmp_path: Path, capsys) -> None:
+    paths = BoxPaths(root=tmp_path / "bm")
+    manifest = {"deploy": {"pre_deploy": "boxmunge-scripts/pre-deploy.sh"}}
+    assert run_pre_deploy_hook("demo", paths, manifest) == 1
+    err = capsys.readouterr().err
+    assert "project directory" in err and "does not exist" in err
+    assert "Pre-deploy command cannot run" not in err

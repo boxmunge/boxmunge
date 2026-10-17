@@ -229,6 +229,7 @@ boxmunge validates `manifest.yml` on every deploy and rejects invalid manifests 
 8. **`limits`** fields are optional per service. `limits.memory` accepts Docker memory format (e.g., `256m`, `1g`). `limits.cpus` accepts a numeric string (e.g., `"0.5"`, `"2.0"`).
 9. **If `backup.type` is not `none`**, both `dump_command` and `restore_command` are mandatory. A backup you cannot restore is not a backup.
 10. **Per-service `smoke` is strongly recommended.** Each service can declare a `smoke: boxmunge-scripts/smoke.sh` field. The script is exec'd inside the running container, so `localhost:PORT` naturally works. boxmunge warns if no services have a smoke test.
+11. **`deploy` must be a mapping, and `deploy.pre_deploy`, when set, a string** that splits into words the way a shell would (balanced quotes). It runs without a shell, so `&&`, pipes and redirects belong in a script that `pre_deploy` names.
 
 ---
 

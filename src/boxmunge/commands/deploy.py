@@ -211,13 +211,24 @@ def run_pre_deploy_hook(project_name: str, paths: BoxPaths, manifest: dict) -> i
     It runs on the host in the project directory, split into words but with
     no shell, so `&&`, pipes and `$VAR` reach the program as arguments.
     """
-    pre_deploy = manifest.get("deploy", {}).get("pre_deploy", "")
+    from boxmunge.manifest_fields import deploy_problems
+    deploy = manifest.get("deploy", {})
+    problems = deploy_problems(deploy)
+    if problems:  # validated on deploy; a release kept from before may not be
+        print(f"  ERROR: {problems[0]}", file=sys.stderr)
+        return 1
+    pre_deploy = deploy.get("pre_deploy")
     if not pre_deploy:
         return 0
+    project_dir = paths.project_dir(project_name)
+    if not project_dir.is_dir():
+        print(f"  ERROR: Pre-deploy cannot run: the project directory {project_dir} "
+              "does not exist.", file=sys.stderr)
+        return 1
     print(f"  Running pre-deploy: {pre_deploy}")
     try:
         subprocess.run(
-            shlex.split(pre_deploy), shell=False, cwd=paths.project_dir(project_name),
+            shlex.split(pre_deploy), shell=False, cwd=project_dir,
             check=True, capture_output=True, text=True,
         )
     except subprocess.CalledProcessError as e:
