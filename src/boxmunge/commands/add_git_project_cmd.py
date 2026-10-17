@@ -1,10 +1,11 @@
 """boxmunge add-git-project — create a project from a git repo."""
 from __future__ import annotations
 
-import subprocess
 import sys
 from typing import TYPE_CHECKING
 
+from boxmunge.fs_nofollow import chown_tree_deploy, mkdir_p_deploy
+from boxmunge.git_slot import GitRefError, clone
 from boxmunge.identity import check_project_identity, register_project_identity
 from boxmunge.log import log_operation
 from boxmunge.manifest import load_manifest_as_written, validate_manifest, ManifestError
@@ -32,13 +33,9 @@ def run_add_git_project(
     repo_dir = project_dir / "repo"
     print(f"Cloning {repo_url}...")
     try:
-        clone_cmd = ["git", "clone"]
-        if ref:
-            clone_cmd.extend(["--branch", ref])
-        clone_cmd.extend([repo_url, str(repo_dir)])
-        subprocess.run(clone_cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        print(f"ERROR: Git clone failed: {e.stderr}", file=sys.stderr)
+        clone(repo_url, repo_dir, ref or None)
+    except GitRefError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
     manifest_path = repo_dir / "manifest.yml"
@@ -68,19 +65,22 @@ def run_add_git_project(
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
-    project_dir.mkdir(parents=True, exist_ok=True)
-    (project_dir / "backups").mkdir(exist_ok=True)
-    (project_dir / "data").mkdir(exist_ok=True)
+    # The project tree is deploy's whoever adds it (an operator's sudo):
+    # clone made repo/ as deploy, and the rest is handed over here.
+    mkdir_p_deploy(project_dir / "backups")
+    mkdir_p_deploy(project_dir / "data")
 
     # Symlink compose.yml and manifest.yml from repo to project root
     compose_src = repo_dir / "compose.yml"
     compose_dst = project_dir / "compose.yml"
     if compose_src.exists() and not compose_dst.exists():
         compose_dst.symlink_to(compose_src)
+        chown_tree_deploy(compose_dst)  # the link itself, never its target
 
     manifest_dst = project_dir / "manifest.yml"
     if not manifest_dst.exists():
         manifest_dst.symlink_to(manifest_path)
+        chown_tree_deploy(manifest_dst)
 
     register_project_identity(name, manifest_id, paths)
 

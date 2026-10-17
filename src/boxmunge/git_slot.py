@@ -27,7 +27,7 @@ from typing import Any
 
 from boxmunge.as_deploy import NoDeployUser, deploy_account, run_as_deploy
 from boxmunge.fs_nofollow import (
-    chmod_nofollow, chown_tree_deploy, copy_entry_nofollow, running_as_root,
+    chmod_nofollow, chown_tree_deploy, copy_entry_nofollow, mkdir_p_deploy, running_as_root,
 )
 
 GIT_TIMEOUT = 300
@@ -113,6 +113,25 @@ def fetch(repo: Path) -> None:
     if result.returncode != 0:
         raise GitRefError(f"git fetch in {repo} failed: {result.stderr.strip()}"
                           f"{_fetch_hint(repo, result.stderr)}")
+
+
+def clone(url: str, dest: Path, ref: str | None = None) -> None:
+    """Clone `url` into `dest`, which must not exist, at `ref` if given.
+
+    Like every git call it runs through _git: as root, as deploy, so the
+    repository is deploy's from the start. dest's parent is made
+    deploy-owned first; one that exists must already be deploy's."""
+    if ref is not None:
+        _check_name(ref)
+    if os.path.lexists(dest):
+        raise GitRefError(f"{dest} already exists; remove it and retry")
+    mkdir_p_deploy(dest.parent)
+    branch = ["--branch", ref] if ref is not None else []
+    result = _git(["clone", "-q", "--no-recurse-submodules", *branch, "--", url, str(dest)],
+                  dest.parent, timeout=GIT_TIMEOUT)
+    if result.returncode != 0:
+        hint = _fetch_hint(dest, result.stderr) if _REMOTE_AUTH.search(result.stderr) else ""
+        raise GitRefError(f"git clone of {url} failed: {result.stderr.strip()}{hint}")
 
 
 # git's own words for a file it cannot write in the repository, and for a
