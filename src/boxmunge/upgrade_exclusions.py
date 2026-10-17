@@ -23,7 +23,9 @@ from boxmunge.commands.upgrade_steps import (
 )
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.git_layout import alert_old_schema, alert_unlinked, relink_advice
-from boxmunge.legacy_stage import LegacyStage, alert_legacy, cannot_tell, records_path
+from boxmunge.legacy_stage import (
+    LegacyStage, alert_legacy, cannot_tell_left_as_is, records_path,
+)
 from boxmunge.log import log_error, log_warning
 from boxmunge.manifest import load_manifest, load_manifest_as_written, write_manifest
 from boxmunge.migration import MigrationError
@@ -99,7 +101,7 @@ def apply_projects(paths: BoxPaths) -> tuple[ManifestMigration, Regeneration, Ex
                 elif isinstance(why, LegacyStage):
                     excluded.legacy[name] = why.kind
                 elif isinstance(why, OSError):
-                    excluded.undetermined[name] = cannot_tell(name, why)
+                    excluded.undetermined[name] = cannot_tell_left_as_is(name, why)
                 elif isinstance(why, InstallTxn):
                     excluded.install[name] = install_exclusion_text(paths, name, why)
                 else:
@@ -139,8 +141,7 @@ def notify_exclusions(paths: BoxPaths, excluded: Exclusions) -> None:
     if excluded.undetermined:
         lines = "\n".join(f"- {n}: {why}" for n, why in sorted(excluded.undetermined.items()))
         _summary(paths, "upgrade: projects that may hold a 0.10.1 stage left as they are",
-                 f"The upgrade did not migrate, regenerate or restart these projects; fix "
-                 f"what stops the check, then run boxmunge-server legacy-stage <project>:\n"
+                 f"The upgrade did not migrate, regenerate or restart these projects:\n"
                  f"{lines}", priority=1)
     if excluded.busy:
         _summary(paths, "upgrade: busy projects skipped",

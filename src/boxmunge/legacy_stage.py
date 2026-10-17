@@ -110,9 +110,21 @@ def legacy_refusal(project: str, stage: LegacyStage) -> str:
             f"boxmunge-server legacy-stage {project}")
 
 
-def cannot_tell(project: str, error: OSError) -> str:
-    """Why a detection that raised (legacy_stage) cannot tell."""
+def _undetermined(project: str, error: OSError) -> str:
     return f"cannot tell whether a 0.10.1 stage is on disk for '{project}': {error}"
+
+
+def cannot_tell(project: str, error: OSError) -> str:
+    """Why a detection that raised (legacy_stage) cannot tell, and what to do."""
+    return f"{_undetermined(project, error)}; fix the permissions (or the error shown), then retry"
+
+
+def cannot_tell_left_as_is(project: str, error: OSError) -> str:
+    """cannot_tell for a project the upgrade left as it is: a retry is not
+    the way back to this release's configs; a deploy, resume or recover is."""
+    return (f"{_undetermined(project, error)}; it keeps its previous configs: fix the "
+            f"cause, then deploy, resume or recover {project}. If a 0.10.1 stage turns "
+            f"out to exist, boxmunge-server legacy-stage {project} resolves it")
 
 
 def legacy_stage_refusal(paths: BoxPaths, project: str) -> str | None:

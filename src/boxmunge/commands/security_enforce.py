@@ -62,10 +62,7 @@ def enforce(
         try:
             legacy = legacy_stage(paths, project) is not None
         except OSError as e:
-            # A 0.10.1 stage may be on disk: acting could stop production.
-            due = is_quarantined(project, paths) or (headline is not None and not in_grace)
-            return Enforcement(error=(f"quarantine action not taken: {cannot_tell(project, e)}"
-                                      if due else None))
+            return _undetermined(paths, project, e, due=headline is not None and not in_grace)
         if is_quarantined(project, paths):
             if legacy:
                 # Re-asserting stops the containers again: production's.
@@ -88,6 +85,18 @@ def enforce(
     except QuarantineError as e:
         return Enforcement(error=f"quarantine action failed for {project!r}: {e}")
     return Enforcement()
+
+
+def _undetermined(paths: BoxPaths, project: str, error: OSError, *, due: bool) -> Enforcement:
+    """A 0.10.1 stage may be on disk: acting could stop production, so a due
+    action (a new quarantine, or re-asserting a recorded one) is not taken
+    and is reported. A record that cannot be read either is reported too."""
+    not_taken = f"quarantine action not taken: {cannot_tell(project, error)}"
+    try:
+        due = due or is_quarantined(project, paths)
+    except OSError as e:
+        return Enforcement(error=f"{not_taken}; its quarantine record cannot be read either: {e}")
+    return Enforcement(error=not_taken if due else None)
 
 
 def _recorded_cve(project: str, paths: BoxPaths) -> str:

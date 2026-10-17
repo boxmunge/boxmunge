@@ -22,7 +22,7 @@ from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.release_txn import InstallTxn, load_txn, stale_reason, start_refusal
 from boxmunge.docker import DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
-from boxmunge.legacy_stage import LegacyStage, cannot_tell, legacy_stage
+from boxmunge.legacy_stage import LegacyStage, cannot_tell_left_as_is, legacy_stage
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import (
@@ -290,7 +290,7 @@ def _left_as_is_line(paths: BoxPaths, name: str) -> str | None:
         unreadable = _unreadable_release_files(paths, name, why)[1]
         return line if unreadable is None else f"{line} ({unreadable})"
     if isinstance(why, OSError):
-        return f"{name}: {cannot_tell(name, why)}; the project will be left as is"
+        return f"{name}: the project will be left as is: {cannot_tell_left_as_is(name, why)}"
     return f"{name}: {why}; the project will be left as is"
 
 

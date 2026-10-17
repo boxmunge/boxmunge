@@ -4,7 +4,10 @@ is never read as "no stage": every consumer holds or reports, none crashes
 and none acts as if production's files were in the project directory."""
 from __future__ import annotations
 
+import os
 from unittest.mock import patch
+
+import pytest
 
 from boxmunge.backup_source import backup_source
 from boxmunge.commands.check import _check_one
@@ -100,3 +103,83 @@ def test_legacy_stage_command_refuses(paths, capsys) -> None:
     with _undetectable("boxmunge.commands.legacy_stage_cmd"):
         assert legacy_stage_locked(paths, "myapp", None, False) == 1
     assert CANNOT_TELL in capsys.readouterr().err
+
+
+# -- D fix wave ---------------------------------------------------------------
+
+RETRY = "fix the permissions (or the error shown), then retry"
+
+
+def test_every_consumer_says_what_to_do(paths, capsys) -> None:
+    with _undetectable("boxmunge.commands.check"), \
+            patch("boxmunge.commands.check.update_health_state") as health:
+        _check_one("myapp", paths, read_only=False)
+    assert RETRY in health.call_args.args[2]
+    with _undetectable("boxmunge.backup_source"):
+        assert RETRY in backup_source(paths, "myapp").skip
+    with _undetectable("boxmunge.commands.security_enforce"):
+        assert RETRY in enforce(paths, "myapp", hosts=[], compose_files=[],
+                                headline=object(), in_grace=False).error
+    with _undetectable("boxmunge.commands.legacy_stage_cmd"):
+        legacy_stage_locked(paths, "myapp", None, False)
+    assert RETRY in capsys.readouterr().err
+
+
+UPGRADE_ADVICE = ("it keeps its previous configs: fix the cause, then deploy, "
+                  "resume or recover myapp. If a 0.10.1 stage turns out to exist, "
+                  "boxmunge-server legacy-stage myapp resolves it")
+
+
+def test_the_upgrade_says_what_to_do_for_the_named_project(paths) -> None:
+    _deployed(paths)
+    with _undetectable("boxmunge.commands.upgrade_steps"):
+        _m, _r, excluded = apply_projects(paths)
+        dry = check_upgrade(paths)
+    assert any(UPGRADE_ADVICE in line for line in dry)
+    with patch("boxmunge.upgrade_exclusions.notify") as summary:
+        notify_exclusions(paths, excluded)
+    body = summary.call_args.args[2]
+    assert f"- myapp: {CANNOT_TELL}" in body and UPGRADE_ADVICE in body
+    assert "<project>" not in body and "then retry" not in body
+
+
+def _quarantined(paths) -> None:
+    record = paths.project_quarantine_state("myapp")
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text('{"cve_id": "CVE-2026-0001"}\n')
+
+
+def test_a_quarantine_is_not_reasserted_when_it_cannot_tell(paths) -> None:
+    _quarantined(paths)
+    with _undetectable("boxmunge.commands.security_enforce"), \
+            patch("boxmunge.commands.security_enforce.reassert_quarantine") as reassert:
+        outcome = enforce(paths, "myapp", hosts=[], compose_files=[],
+                          headline=None, in_grace=True)
+    reassert.assert_not_called()
+    assert outcome.error is not None and CANNOT_TELL in outcome.error
+
+
+def test_an_unreadable_quarantine_record_does_not_escape_enforce(paths) -> None:
+    with _undetectable("boxmunge.commands.security_enforce"), \
+            patch("boxmunge.commands.security_enforce.is_quarantined",
+                  side_effect=PermissionError(13, "record denied")):
+        outcome = enforce(paths, "myapp", hosts=[], compose_files=[],
+                          headline=None, in_grace=False)
+    assert outcome.error is not None and CANNOT_TELL in outcome.error
+    assert "record denied" in outcome.error
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads through mode 000")
+def test_a_real_permission_error_reaches_the_dry_run(paths) -> None:
+    """No patch: an unsearchable state/staging/ makes the detection raise
+    EACCES, which the dry run reports instead of crashing or reading "no stage"."""
+    _deployed(paths)
+    staging = paths.state / "staging"
+    staging.mkdir(exist_ok=True)
+    staging.chmod(0)
+    try:
+        dry = check_upgrade(paths)
+    finally:
+        staging.chmod(0o755)
+    assert any(CANNOT_TELL in line and "Permission denied" in line and "left as is" in line
+               for line in dry)
