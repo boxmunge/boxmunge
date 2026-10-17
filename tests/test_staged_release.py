@@ -141,3 +141,16 @@ def test_leaving_retired_drops_the_switch_result(paths) -> None:
     assert load_slot(paths, P).switch_rc is None
     update_meta(paths, P, retired, cleanup_incomplete="x")
     assert load_slot(paths, P).switch_rc == 1
+
+
+def test_a_switch_result_passed_with_another_state_is_refused(paths) -> None:
+    """Dropping a carried-over result is a reset; dropping one the caller
+    passes would lose it silently."""
+    meta = _build(paths)
+    swap_in(paths, P)
+    with pytest.raises(ValueError, match="switch_rc"):
+        update_meta(paths, P, meta, state="ready", switch_rc=0)
+    with pytest.raises(ValueError, match="switch_rc"):
+        update_meta(paths, P, meta, switch_rc=1)  # meta is starting
+    update_meta(paths, P, meta, state="ready", switch_rc=None)
+    assert load_slot(paths, P).switch_rc is None

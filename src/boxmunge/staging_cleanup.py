@@ -62,13 +62,16 @@ def _production_sources(project_dir: Path) -> list[str]:
 def retired_staging_copies(project_dir: Path) -> list[Path]:
     """``-staging`` copies of data entries the live release does not mount.
 
-    While a release is staged, the entries it mounts (DataDirs.staged) are
-    data only staging used, never recorded in production's tree, so their
-    copies are staging's too."""
+    While a release is staged, the entries it mounts read-write
+    (DataDirs.staged_rw) are data only staging used, never recorded in
+    production's tree, so their copies are staging's too. A copy of an entry
+    it mounts read-only is not: staging reads that from the staged release,
+    so such a copy is 0.10.1's code copy or the operator's
+    (old_layout_copies reports it)."""
     if not project_dir.is_dir():
         return []
     dirs = project_data_dirs(project_dir)
-    data = set(dirs.recorded) | set(BOX_OWNED_ENTRIES) | set(dirs.staged)
+    data = set(dirs.recorded) | set(BOX_OWNED_ENTRIES) | set(dirs.staged_rw)
     mounted = {rel.split(os.sep, 1)[0] for rel in _production_sources(project_dir)}
     return sorted(
         e for e in project_dir.iterdir()
@@ -81,7 +84,8 @@ def retired_staging_copies(project_dir: Path) -> list[Path]:
 def old_layout_copies(project_dir: Path) -> list[Path]:
     """Copies the earlier staging layout made: beside a nested data mount
     (``data/db-staging``), and of release code (``appconfig-staging``),
-    which staging now reads from the staged release itself."""
+    which staging now reads from the staged release itself. Code is what
+    production mounts, or what the staged release mounts only read-only."""
     if not project_dir.is_dir():
         return []
     dirs = project_data_dirs(project_dir)
@@ -89,13 +93,17 @@ def old_layout_copies(project_dir: Path) -> list[Path]:
     sources = _production_sources(project_dir)
     mounted = {rel.split(os.sep, 1)[0] for rel in sources}
     found = set()
+    code_tops = set(dirs.staged - dirs.staged_rw)
     for rel in sources:
         top = rel.split(os.sep, 1)[0]
-        nested, code = project_dir / f"{rel}{_SUFFIX}", project_dir / f"{top}{_SUFFIX}"
+        nested = project_dir / f"{rel}{_SUFFIX}"
         if os.sep in rel and top in data and os.path.lexists(nested):
             found.add(nested)
-        if (top not in data and code.name not in mounted and code.name not in dirs.recorded
-                and os.path.lexists(code)):
+        code_tops.add(top)
+    for top in code_tops - data:
+        code = project_dir / f"{top}{_SUFFIX}"
+        if code.name not in mounted and code.name not in dirs.recorded \
+                and os.path.lexists(code):
             found.add(code)
     return sorted(found)
 

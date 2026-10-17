@@ -287,6 +287,10 @@ def _clear_production_stopped(paths: BoxPaths, project_name: str, component: str
                component=component, project=project_name, priority=1)
 
 
+# The bind source boxmunge 0.10.1's production overlay used for the copy.
+LIVE_SCRIPTS_SOURCE = "./.releases/live-scripts"
+
+
 def _sweep_live_scripts(paths: BoxPaths, project_name: str, component: str) -> None:
     """boxmunge 0.10.1 mounted production's smoke scripts from
     .releases/live-scripts. Once production's overlay no longer names it and
@@ -297,7 +301,7 @@ def _sweep_live_scripts(paths: BoxPaths, project_name: str, component: str) -> N
         return
     try:
         overlay = paths.project_compose_override(project_name)
-        if overlay.exists() and "live-scripts" in overlay.read_text():
+        if overlay.exists() and LIVE_SCRIPTS_SOURCE in overlay.read_text():
             return
         roots = {str(live), os.path.realpath(live)}
         if any(src == root or src.startswith(root + os.sep)

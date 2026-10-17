@@ -130,10 +130,14 @@ def _valid_marker(marker: Any) -> bool:
 def update_meta(paths: BoxPaths, project: str, meta: StagedRelease,
                 **changes: Any) -> StagedRelease:
     """Write ``meta`` with ``changes``. Only a retired slot records the
-    switch's exit code, so any other state drops it (load_slot refuses a
-    slot that keeps one)."""
+    switch's exit code, so any other state drops one carried over from
+    ``meta`` (load_slot refuses a slot that keeps one); passing one with
+    another state is a caller's error, raised as ValueError."""
     new = replace(meta, **changes)
     if new.state != "retired":
+        if changes.get("switch_rc") is not None:
+            raise ValueError(f"switch_rc {changes['switch_rc']!r} is recorded only with "
+                             f"state 'retired', not {new.state!r}")
         new = replace(new, switch_rc=None)
     write_meta(slot_dir(paths, project), new)
     return new

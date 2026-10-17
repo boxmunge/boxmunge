@@ -123,6 +123,7 @@ class DataDirs:
     seeded: frozenset[str] = frozenset()  # recorded only because a kept release mounts it
     adopted: frozenset[str] = frozenset()  # kept release mounted it rw; now shipped as code
     staged: frozenset[str] = frozenset()  # top-level binds of the staged release (the slot)
+    staged_rw: frozenset[str] = frozenset()  # those it mounts read-write: staging's data
 
     def box_state(self) -> set[str]:
         """Entries that are never release code."""
@@ -202,9 +203,10 @@ def classify(project_dir: Path, release_tree: Path | None,
         n for n in candidates if dirs.occupied(n)}
     recorded -= set(BOX_OWNED_ENTRIES) | set(BOXMUNGE_ENTRIES)
     seeded = recorded - release - live_rw - (stored or set())
-    staged = frozenset(bind_dirs(staged_compose, project_dir)) if staged_compose else frozenset()
+    staged_binds = bind_dirs(staged_compose, project_dir) if staged_compose else {}
     return replace(dirs, recorded=frozenset(recorded), seeded=frozenset(seeded),
-                   adopted=frozenset(adopted - recorded), staged=staged)
+                   adopted=frozenset(adopted - recorded), staged=frozenset(staged_binds),
+                   staged_rw=frozenset(d for d, rw in staged_binds.items() if rw))
 
 
 def save_record(dirs: DataDirs) -> None:

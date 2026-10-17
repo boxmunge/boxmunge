@@ -91,9 +91,10 @@ def _staged_compose(project_dir: Path) -> Path | None:
     return compose if slot.is_dir() and not slot.is_symlink() and compose.is_file() else None
 
 
-def _classify(project_dir: Path, release_tree: Path | None) -> DataDirs:
+def _classify(project_dir: Path, release_tree: Path | None, *,
+              with_staged: bool = True) -> DataDirs:
     return classify(project_dir, release_tree, _kept_trees(project_dir),
-                    _staged_compose(project_dir))
+                    _staged_compose(project_dir) if with_staged else None)
 
 
 def _ensure_record(project_dir: Path, release_tree: Path | None = None,
@@ -242,10 +243,12 @@ def live_code_entries(project_dir: Path, release_tree: Path | None = None) -> li
     return sorted(e for e in project_dir.iterdir() if e.name not in state)
 
 
-def project_data_dirs(project_dir: Path, release_tree: Path | None = None) -> DataDirs:
+def project_data_dirs(project_dir: Path, release_tree: Path | None = None, *,
+                      with_staged: bool = True) -> DataDirs:
     """The project's entries as the live release, or once ``release_tree``
-    is installed, classifies them (see module docstring)."""
-    dirs = _classify(project_dir, release_tree)
+    is installed, classifies them (see module docstring). ``with_staged``
+    False leaves the current slot's mounts out (DataDirs.staged)."""
+    dirs = _classify(project_dir, release_tree, with_staged=with_staged)
     if release_tree is None:
         return dirs
     return dirs.after_install({e.name for e in release_tree.iterdir()})
@@ -255,8 +258,10 @@ def staged_box_state(project_dir: Path, staged_release: Path) -> set[str]:
     """Box state as the staged release sees it: the entries the staging base
     rewrite points at ``-staging`` copies, so also the stores the data copy
     pairs. (Production's own classification during a stage only keeps those
-    copies from being pruned: DataDirs.staged.)"""
-    return project_data_dirs(project_dir, staged_release).box_state()
+    copies from being pruned: DataDirs.staged.) The current slot is not
+    read: ``staged_release`` is the staged view, and during a re-stage an
+    old slot's unreadable compose.yml must not fail the new stage."""
+    return project_data_dirs(project_dir, staged_release, with_staged=False).box_state()
 
 
 def install_release(tree: Path, project_dir: Path,
