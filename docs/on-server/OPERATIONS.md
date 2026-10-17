@@ -1218,6 +1218,10 @@ other source on each run: `/etc/subuid` and `/etc/subgid` (exactly one range of 
 `userns-remap` in `/etc/docker/daemon.json` (`boxmunge-remap:boxmunge-remap`), and the running
 daemon (remapped, `overlay2` storage, data root ending in `/S.S`).
 
+- **Freshly installed:** remapped from the first boot. `init-host.sh` creates `boxmunge-remap`
+  and its ranges, writes `daemon.json` before Docker first starts, records S, and journals the
+  migration as committed, so there is nothing to migrate. It refuses a host whose Docker already
+  has containers or volumes, and a `daemon.json` it did not write.
 - **Not migrated:** a warning. Deploys go on as before.
 - **A source cannot be read** (for example a `daemon.json` only root can read) on a box where neither
   the record nor `daemon.json` names `boxmunge-remap`: a warning naming the file. Deploys go on under
@@ -1247,7 +1251,8 @@ runs remapped and print the command that recreates it.
 
 Caddy runs remapped as container root, so on a remapped box `/opt/boxmunge/caddy/logs` belongs to
 S:S (the host's CrowdSec reads it as root). `docker-userns` reports an error when it is missing, is
-not a directory, or has another owner, and prints the fix.
+not a directory, or has another owner, and prints the fix. Caddy reads `caddy/Caddyfile` through
+the "other" permission bits, so the file is 0644; `caddy/` itself stays 0750.
 
 ### Alerts not configured
 

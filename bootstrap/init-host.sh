@@ -143,6 +143,9 @@ apt-get install -y -qq \
 # Step 3: Install Docker (official repo)
 # ---------------------------------------------------------------------------
 echo "##BOXMUNGE:STEP:3:15:Installing Docker"
+# User-namespace remapping, configured before Docker's first start; sets USERNS_OFFSET.
+source "$(dirname "$0")/userns.sh"
+userns_before_docker
 banner "Step 3/14: Installing Docker"
 if command -v docker &>/dev/null; then
     echo "Docker already installed — skipping."
@@ -374,12 +377,10 @@ install -d -m 775 -o root -g "${DEPLOY_USER}" \
 install -d -m 700 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" \
     "${BOXMUNGE_ROOT}/caddy/.site-journal"
 
-# caddy/logs holds Caddy's JSON access log (bind-mounted to /var/log/caddy in
-# the container). The Caddy container writes here as root; the host's CrowdSec
-# daemon (also root) reads it. Caddy writes the log file itself as 0600, so the
-# dir need not be world-readable.
-install -d -m 750 -o root -g root \
-    "${BOXMUNGE_ROOT}/caddy/logs"
+# caddy/logs holds Caddy's JSON access log (bind-mounted to /var/log/caddy).
+# Caddy writes here as its remapped root (host uid S); the host's CrowdSec
+# (root) reads it. Caddy makes the log 0600, so the dir is not world-readable.
+userns_caddy_logs "${USERNS_OFFSET}"
 
 install -d -m 755 -o root -g root \
     "${BOXMUNGE_ROOT}/templates" \
@@ -398,21 +399,12 @@ install -d -m 755 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" "${BOXMUNGE_ROOT}/inbo
 install -d -m 755 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" "${BOXMUNGE_ROOT}/inbox/.consumed"
 
 # ---------------------------------------------------------------------------
-# Step 10: Configure Docker logging
+# Step 10: Start Docker remapped
 # ---------------------------------------------------------------------------
-echo "##BOXMUNGE:STEP:11:15:Configuring Docker logging"
-banner "Step 10/14: Configuring Docker logging defaults"
-install -d -m 755 /etc/docker
-cat > /etc/docker/daemon.json <<'EOF'
-{
-    "log-driver": "json-file",
-    "log-opts": {
-        "max-size": "50m",
-        "max-file": "5"
-    }
-}
-EOF
+echo "##BOXMUNGE:STEP:11:15:Starting Docker remapped"
+banner "Step 10/14: Starting Docker remapped (daemon.json from userns.sh)"
 systemctl restart docker
+userns_verify "${USERNS_OFFSET}"
 
 # ---------------------------------------------------------------------------
 # Step 11: Create Docker network and backup key; write boxmunge.yml
@@ -465,6 +457,8 @@ if [ "$SELF_SIGNED_TLS" = "true" ]; then
 fi
 chmod 640 "${BOXMUNGE_ROOT}/config/boxmunge.yml"
 chown root:"${DEPLOY_USER}" "${BOXMUNGE_ROOT}/config/boxmunge.yml"
+userns_record "${USERNS_OFFSET}"
+userns_journal_committed "${USERNS_OFFSET}"
 
 # ---------------------------------------------------------------------------
 # Step 12: Install boxmunge CLI
@@ -507,54 +501,13 @@ cat > "${BOXMUNGE_ROOT}/caddy/Caddyfile" <<EOF
 import /etc/caddy/sites/*.conf
 EOF
 fi
-chmod 640 "${BOXMUNGE_ROOT}/caddy/Caddyfile"
+# Remapped Caddy reads it as an "other" user; caddy/ (0750) still hides it from the host's.
+chmod 644 "${BOXMUNGE_ROOT}/caddy/Caddyfile"
 chown root:"${DEPLOY_USER}" "${BOXMUNGE_ROOT}/caddy/Caddyfile"
 
-cat > "${BOXMUNGE_ROOT}/caddy/compose.yml" <<'EOF'
-# Caddy reverse proxy — managed by boxmunge
-# Do not edit directly. Changes are made via boxmunge commands.
-
-services:
-  caddy:
-    image: caddy:2-alpine
-    container_name: boxmunge-caddy
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./sites:/etc/caddy/sites:ro
-      - ./maintenance:/etc/caddy/maintenance:ro
-      # Writable bind mount (not a named volume) so the host's CrowdSec
-      # daemon can read access.log directly. read_only above locks only the
-      # container rootfs, not mounted volumes.
-      - ./logs:/var/log/caddy
-      - caddy_data:/data
-      - caddy_config:/config
-    networks:
-      - boxmunge-proxy
-    read_only: true
-    cap_drop:
-      - ALL
-    cap_add:
-      - NET_BIND_SERVICE
-    healthcheck:
-      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
-volumes:
-  caddy_data:
-  caddy_config:
-
-networks:
-  boxmunge-proxy:
-    external: true
-EOF
-chmod 640 "${BOXMUNGE_ROOT}/caddy/compose.yml"
-chown root:"${DEPLOY_USER}" "${BOXMUNGE_ROOT}/caddy/compose.yml"
+# The bundle's caddy/compose.yml, which install.sh keeps current on upgrades.
+install -m 640 -o root -g "${DEPLOY_USER}" "$(dirname "$0")/../caddy/compose.yml" \
+    "${BOXMUNGE_ROOT}/caddy/compose.yml"
 
 # Start Caddy
 docker compose -f "${BOXMUNGE_ROOT}/caddy/compose.yml" up -d
