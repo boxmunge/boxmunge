@@ -10,7 +10,9 @@ is pointed at by absolute path: bind mounts and config/secret files at
 the entry's ``-staging`` copy in the project dir, env files at the file
 itself (Compose reads them; nothing is mounted). A path that leaves the
 project is made absolute against the project dir, so it means what it
-means for production (a bind gets the ``-staging`` suffix). Explicit
+means for production (a bind gets the ``-staging`` suffix). A build
+context in box state is refused: staging would build from other files
+than production. Explicit
 names and published ports are dropped; staging_isolation then proves the
 result disjoint.
 """
@@ -58,7 +60,8 @@ def _staging_volume(entry: Any, project_dir: Path, box_state: set[str]) -> Any:
     return ":".join([new, *entry.split(":")[1:]])
 
 
-def _staging_env_file(entry: Any, project_dir: Path, box_state: set[str]) -> Any:
+def _staging_read_file(entry: Any, project_dir: Path, box_state: set[str]) -> Any:
+    """An env_file or label_file entry: Compose reads the file, nothing mounts it."""
     if isinstance(entry, str):
         return staging_source(entry, project_dir, box_state, bind=False)
     if isinstance(entry, dict) and isinstance(entry.get("path"), str):
@@ -66,18 +69,51 @@ def _staging_env_file(entry: Any, project_dir: Path, box_state: set[str]) -> Any
     return entry
 
 
-def _outside_only(path: str, project_dir: Path) -> str:
-    """Build inputs stay relative unless they leave the project."""
-    if os.path.isabs(path) or "://" in path or project_relative(path, project_dir) is not None:
+def _build_input(path: str, project_dir: Path, box_state: set[str], what: str) -> str:
+    """A local build input stays relative unless it leaves the project.
+    One in box state is refused: staging would build from release/'s copy
+    of the name while production builds from the data itself."""
+    if "://" in path:
         return path
-    return os.path.normpath(os.path.join(project_dir, path))
+    rel = project_relative(path, project_dir)
+    if rel is None:
+        return path if os.path.isabs(path) or path.startswith("~") \
+            else os.path.normpath(os.path.join(project_dir, path))
+    top = rel.partition(os.sep)[0]
+    if top in box_state:
+        raise ComposeError(
+            f"build {what} {path!r} is in {top}, which the project dir keeps as "
+            f"server-owned state, not release code, so staging and production "
+            f"would build from different files. Build from release code: move "
+            f"the build inputs into a directory the release carries.")
+    return path
 
 
-def _staging_build(build: Any, project_dir: Path) -> Any:
+def _staging_contexts(contexts: Any, project_dir: Path, box_state: set[str]) -> Any:
+    def one(name: str, ref: str) -> str:
+        return _build_input(ref, project_dir, box_state, f"additional_contexts.{name}")
+    if isinstance(contexts, dict):
+        return {k: one(k, v) if isinstance(v, str) else v for k, v in contexts.items()}
+    if not isinstance(contexts, list):
+        return contexts
+    out = []
+    for entry in contexts:
+        name, sep, ref = entry.partition("=") if isinstance(entry, str) else ("", "", "")
+        out.append(f"{name}={one(name, ref)}" if sep else entry)
+    return out
+
+
+def _staging_build(build: Any, project_dir: Path, box_state: set[str]) -> Any:
     if isinstance(build, str):
-        return _outside_only(build, project_dir)
-    if isinstance(build, dict) and isinstance(build.get("context"), str):
-        return {**build, "context": _outside_only(build["context"], project_dir)}
+        return _build_input(build, project_dir, box_state, "context")
+    if not isinstance(build, dict):
+        return build
+    build = dict(build)
+    if isinstance(build.get("context"), str):
+        build["context"] = _build_input(build["context"], project_dir, box_state, "context")
+    if "additional_contexts" in build:
+        build["additional_contexts"] = _staging_contexts(
+            build["additional_contexts"], project_dir, box_state)
     return build
 
 
@@ -142,10 +178,10 @@ def generate_staging_compose_base(compose_path: Path, box_state: set[str],
         volumes = svc.get("volumes")
         if isinstance(volumes, list):
             svc["volumes"] = [_staging_volume(v, project_dir, box_state) for v in volumes]
-        env = svc.get("env_file")
-        if env is not None:
-            entries = env if isinstance(env, list) else [env]
-            svc["env_file"] = [_staging_env_file(e, project_dir, box_state) for e in entries]
+        for key in ("env_file", "label_file"):
+            if svc.get(key) is not None:
+                entries = svc[key] if isinstance(svc[key], list) else [svc[key]]
+                svc[key] = [_staging_read_file(e, project_dir, box_state) for e in entries]
         if "build" in svc:
-            svc["build"] = _staging_build(svc["build"], project_dir)
+            svc["build"] = _staging_build(svc["build"], project_dir, box_state)
     return yaml.dump(doc, default_flow_style=False, sort_keys=False)

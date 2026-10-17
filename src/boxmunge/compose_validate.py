@@ -311,7 +311,8 @@ def validate_user_compose(
 
     `project_directory` is where Compose resolves the file's relative
     paths when that is not the file's own directory (staging's base sits
-    in the slot beside the release it runs from).
+    in the slot beside the release it runs from). The model then runs in
+    place, so the own-file rules locate its mounts where they lie.
 
     Raises ComposeSecurityError on the first hostile key in a non-off
     service, or if the file cannot be read, parsed, or resolved.
@@ -376,7 +377,8 @@ def validate_user_compose(
     services = doc.get("services") or {}
 
     isolation = isolation_problems(doc, project_name, base_dir, roots)
-    isolation += own_file_problems(doc, base_dir, paths.project_dir(project_name), read_files)
+    isolation += own_file_problems(doc, base_dir, paths.project_dir(project_name), read_files,
+                                   in_place=project_directory is not None)
     if isolation:
         raise ComposeSecurityError(isolation[0] + _profile_note(services, isolation[0]))
     remapped = _remapped(paths)

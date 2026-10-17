@@ -86,15 +86,63 @@ def test_validator_resolves_the_base_from_the_slot(paths, tmp_path, monkeypatch)
     assert seen[0]["project_directory"] == slot / "release"
 
 
-def test_validator_protects_the_env_files_the_slot_base_reads(paths) -> None:
+def test_reference_walk_reads_relative_files_from_the_project_directory(tmp_path) -> None:
     """Compose reads a relative env_file from the project directory (the
-    staged release), so that is the file no container may write."""
-    from boxmunge.compose_validate import ComposeSecurityError, validate_user_compose
+    staged release), so that is the file the own-file rules protect."""
+    from boxmunge.compose_resolve import walk_references
+    release = tmp_path / "release"
+    release.mkdir()
+    base = tmp_path / "compose.staging-base.yml"
+    base.write_text(yaml.safe_dump({"services": {"web": {
+        "image": "nginx", "env_file": ["./app.env"], "label_file": "./labels"}}}))
+    problems, files = walk_references(base, (release, tmp_path), base=release)
+    assert problems == [] and {release / "app.env", release / "labels"} <= set(files)
+
+
+def _validate_slot_base(paths, doc: dict) -> None:
+    from boxmunge.compose_validate import validate_user_compose
     slot = paths.project_releases("myapp") / "staged"
     (slot / "release").mkdir(parents=True)
-    (slot / "release" / "app.env").write_text("A=1\n")
-    (slot / "compose.staging-base.yml").write_text(yaml.safe_dump({"services": {"web": {
-        "image": "nginx", "env_file": ["./app.env"], "volumes": ["./app.env:/app.env"]}}}))
-    with pytest.raises(ComposeSecurityError, match="rewrite app.env"):
-        validate_user_compose(slot / "compose.staging-base.yml", paths, project_name="myapp",
-                              project_directory=slot / "release")
+    (slot / "compose.staging-base.yml").write_text(yaml.safe_dump(doc))
+    validate_user_compose(slot / "compose.staging-base.yml", paths, project_name="myapp",
+                          project_directory=slot / "release")
+
+
+def test_validator_refuses_a_writable_mount_of_the_slots_release(paths) -> None:
+    """Staging runs the release where it is, in the slot: a container that
+    could write it would plant files promote carries into production."""
+    from boxmunge.compose_validate import ComposeSecurityError
+    with pytest.raises(ComposeSecurityError, match=r"rewrite \.releases"):
+        _validate_slot_base(paths, {"services": {"web": {
+            "image": "nginx", "volumes": ["./src:/x"]}}})
+
+
+def test_validator_locates_slot_and_project_paths_in_one_space(paths) -> None:
+    """The release's appconfig/x is not inside production's appconfig."""
+    prod = paths.project_dir("myapp")
+    _validate_slot_base(paths, {"services": {"web": {"image": "nginx", "volumes": [
+        f"{prod}/appconfig:/a", "./appconfig/x:/b:ro"]}}})
+
+
+def test_label_files_resolve_like_env_files(tmp_path) -> None:
+    web = _web(tmp_path, label_file=["./labels", "../l", "./data/l"])
+    assert web["label_file"] == ["./labels", f"{P.parent}/l", f"{P}/data/l"]
+    assert _web(tmp_path, label_file="../l")["label_file"] == [f"{P.parent}/l"]
+
+
+def test_additional_contexts_that_leave_the_project_are_made_absolute(tmp_path) -> None:
+    build = _web(tmp_path, build={"context": ".", "additional_contexts": {
+        "a": "../lib", "b": "./vendor", "c": "docker-image://alpine", "d": "service:base"}})["build"]
+    assert build["additional_contexts"] == {"a": f"{P.parent}/lib", "b": "./vendor",
+                                            "c": "docker-image://alpine", "d": "service:base"}
+    listed = _web(tmp_path, build={"context": ".", "additional_contexts": ["a=../lib"]})["build"]
+    assert listed["additional_contexts"] == [f"a={P.parent}/lib"]
+
+
+@pytest.mark.parametrize("build", [
+    "./data", {"context": f"{P}/uploads/x"},
+    {"context": ".", "additional_contexts": {"a": "./data/src"}},
+])
+def test_box_state_build_contexts_are_refused(tmp_path, build) -> None:
+    with pytest.raises(ComposeError, match="Build from release code"):
+        _web(tmp_path, build=build)
