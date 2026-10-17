@@ -444,7 +444,7 @@ class TestOpenRegularNofollow:
     def test_a_fifo_is_refused_without_blocking(self, tmp_path: Path) -> None:
         """No O_NONBLOCK from the caller: the open itself must not wait for
         a writer on a planted FIFO."""
-        from boxmunge.fileutil import open_regular_nofollow
+        from boxmunge.fs_nofollow import open_regular_nofollow
         from tests.fifo_guard import raised_without_blocking
         fifo = tmp_path / "meta.json"
         os.mkfifo(fifo)
@@ -453,7 +453,7 @@ class TestOpenRegularNofollow:
 
     def test_the_descriptor_it_returns_blocks(self, tmp_path: Path) -> None:
         import fcntl
-        from boxmunge.fileutil import open_regular_nofollow
+        from boxmunge.fs_nofollow import open_regular_nofollow
         path = tmp_path / "f"
         path.write_text("x")
         fd = open_regular_nofollow(path, os.O_RDONLY)
@@ -463,7 +463,7 @@ class TestOpenRegularNofollow:
             os.close(fd)
 
     def test_read_text_nofollow(self, tmp_path: Path) -> None:
-        from boxmunge.fileutil import read_text_nofollow
+        from boxmunge.fs_nofollow import read_text_nofollow
         from tests.fifo_guard import raised_without_blocking
         path = tmp_path / "f"
         path.write_text("text ✓\n")

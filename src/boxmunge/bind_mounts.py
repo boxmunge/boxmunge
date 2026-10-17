@@ -15,7 +15,7 @@ from typing import Any
 import yaml
 
 from boxmunge.compose_mounts import volume_source
-from boxmunge.fileutil import read_text_nofollow
+from boxmunge.fs_nofollow import read_text_nofollow
 
 
 class BindMountError(ValueError):
@@ -92,7 +92,7 @@ def bind_mounted_dirs(compose_path: Path, project_dir: Path, *,
     """Map each bind-mounted top-level project dir to True if any mount of it
     is read-write. A missing compose file mounts nothing. ``nofollow``
     reads the file without following a link or blocking on a FIFO
-    (fileutil.read_text_nofollow), refusing anything but a regular file.
+    (fs_nofollow.read_text_nofollow), refusing anything but a regular file.
 
     Raises BindMountError if the file exists but cannot be classified: a
     guess here decides whether live data is deleted.

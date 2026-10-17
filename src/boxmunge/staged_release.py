@@ -23,9 +23,9 @@ from typing import TYPE_CHECKING, Any
 from boxmunge.crashpoint import crash_point
 from boxmunge.docker import staging_compose_project
 from boxmunge.fileutil import (
-    DISCARDED, atomic_write_text, discard_dir, durable_rename_dir, read_text_nofollow,
-    sweep_discarded,
+    DISCARDED, atomic_write_text, discard_dir, durable_rename_dir, sweep_discarded,
 )
+from boxmunge.fs_nofollow import read_text_nofollow
 from boxmunge.ulid import generate_ulid
 
 if TYPE_CHECKING:
