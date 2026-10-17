@@ -19,7 +19,7 @@ import sys
 
 from boxmunge.commands.upgrade_steps import (
     ManifestMigration, Regeneration, _links_into_repository, _migrated, _project_dirs,
-    _regenerate_project, exclusion, require_manifest,
+    _regenerate_project, exclusion, install_exclusion_text, require_manifest,
 )
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.git_layout import alert_old_schema, alert_unlinked, relink_advice
@@ -28,7 +28,7 @@ from boxmunge.log import log_error, log_warning
 from boxmunge.manifest import load_manifest, load_manifest_as_written, write_manifest
 from boxmunge.migration import MigrationError
 from boxmunge.notify import notify
-from boxmunge.release_txn import InstallTxn, start_refusal, stale_reason
+from boxmunge.release_txn import InstallTxn
 from boxmunge.state import StateError
 
 if TYPE_CHECKING:
@@ -97,8 +97,7 @@ def apply_projects(paths: BoxPaths) -> tuple[ManifestMigration, Regeneration, Ex
                 elif isinstance(why, LegacyStage):
                     excluded.legacy[name] = why.kind
                 elif isinstance(why, InstallTxn):
-                    excluded.install[name] = start_refusal(
-                        name, why, stale_reason(paths, name, why))
+                    excluded.install[name] = install_exclusion_text(paths, name, why)
                 else:
                     excluded.install[name] = str(why)
         except LockError:
@@ -130,11 +129,21 @@ def notify_exclusions(paths: BoxPaths, excluded: Exclusions) -> None:
             print(f"  WARNING: {message}", file=sys.stderr)
     if excluded.install:
         lines = "\n".join(f"- {n}: {why}" for n, why in sorted(excluded.install.items()))
-        notify(paths, "upgrade: projects with an open install left as they are",
-               f"The upgrade did not migrate, regenerate or restart these projects:\n{lines}",
-               component="upgrade", priority=1)
+        _summary(paths, "upgrade: projects with an open install left as they are",
+                 f"The upgrade did not migrate, regenerate or restart these projects:\n{lines}",
+                 priority=1)
     if excluded.busy:
-        notify(paths, "upgrade: busy projects skipped",
-               f"These projects were busy and keep their previous configs until their next "
-               f"deploy, resume or recover: {', '.join(sorted(excluded.busy))}",
-               component="upgrade")
+        _summary(paths, "upgrade: busy projects skipped",
+                 f"These projects were busy and keep their previous configs until their next "
+                 f"deploy, resume or recover: {', '.join(sorted(excluded.busy))}")
+
+
+def _summary(paths: BoxPaths, title: str, body: str, *, priority: int = 0) -> None:
+    """notify, but an OSError (an unwritable state or log file on the way) is
+    printed and logged instead: the projects were still left as they are."""
+    try:
+        notify(paths, title, body, component="upgrade", priority=priority)
+    except OSError as e:
+        message = f"Alert not sent ({title}): {type(e).__name__}: {e}. {body}"
+        print(f"  WARNING: {message}", file=sys.stderr)
+        log_error("upgrade", message, paths)

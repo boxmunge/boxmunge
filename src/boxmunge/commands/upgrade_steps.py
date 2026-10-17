@@ -19,7 +19,7 @@ from boxmunge.compose import generate_compose_override, load_user_compose, prepa
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
 from boxmunge.data_dirs import ReleaseStateError
-from boxmunge.release_txn import InstallTxn, load_txn
+from boxmunge.release_txn import InstallTxn, load_txn, stale_reason, start_refusal
 from boxmunge.docker import DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
 from boxmunge.legacy_stage import LegacyStage, legacy_stage
@@ -80,6 +80,26 @@ def exclusion(paths: BoxPaths, name: str) -> LegacyStage | InstallTxn | ReleaseS
         return load_txn(paths, name)
     except ReleaseStateError as e:
         return e
+
+
+def _unreadable_release_files(paths: BoxPaths, name: str, txn: InstallTxn) -> tuple[str | None, str | None]:
+    """(stale_reason, None), or (None, why the release files the stale check
+    reads cannot be read). The project is excluded either way, so an
+    unreadable live.json or previous.json is reported, never fatal."""
+    try:
+        return stale_reason(paths, name, txn), None
+    except (ReleaseStateError, OSError) as e:
+        return None, (f"its release files cannot be read ({type(e).__name__}: {e}); "
+                      f"inspect {paths.project_releases(name)}")
+
+
+def install_exclusion_text(paths: BoxPaths, name: str, txn: InstallTxn) -> str:
+    """Why the apply leaves a project with an open install as it is."""
+    stale, unreadable = _unreadable_release_files(paths, name, txn)
+    if unreadable is not None:
+        return (f"an install of {txn.ref} ({txn.source}) is open at phase {txn.phase}; "
+                f"{unreadable}")
+    return start_refusal(name, txn, stale)
 
 
 def _addressable(project_dir: Path, paths: BoxPaths) -> bool:
@@ -262,7 +282,9 @@ def _left_as_is_line(paths: BoxPaths, name: str) -> str | None:
                 f"as is; after the upgrade, resolve it with boxmunge-server legacy-stage "
                 f"{name}")
     if isinstance(why, InstallTxn):
-        return f"{name}: an install ({why.ref}, {why.phase}) is open; the project will be left as is"
+        line = f"{name}: an install ({why.ref}, {why.phase}) is open; the project will be left as is"
+        unreadable = _unreadable_release_files(paths, name, why)[1]
+        return line if unreadable is None else f"{line} ({unreadable})"
     return f"{name}: {why}; the project will be left as is"
 
 

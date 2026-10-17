@@ -228,3 +228,45 @@ def test_no_migrations_line_says_left_projects_are_not_migrated(paths, capsys) -
         assert _apply(paths) == 0
     assert "No migrations needed (projects left as is are not migrated)." in \
         capsys.readouterr().out
+
+
+# -- Fix round 2 ---------------------------------------------------------------
+
+def _unreadable_live_json(paths) -> None:
+    live = paths.project_releases("myapp") / "live.json"
+    live.unlink()
+    live.mkdir()
+
+
+def test_an_open_install_with_unreadable_release_files_is_excluded_not_fatal(
+        paths, capsys) -> None:
+    _deployed(paths)
+    _open_install(paths)
+    _unreadable_live_json(paths)
+    _m, _r, excluded = apply_projects(paths)
+    assert "an install of myapp-x (bundle) is open" in excluded.install["myapp"]
+    assert "IsADirectoryError" in excluded.install["myapp"]
+    with patch("boxmunge.upgrade_exclusions.notify"):
+        assert _apply(paths) == 0
+    assert "LEFT AS IS: myapp:" in capsys.readouterr().out
+
+
+def test_dry_run_reports_the_same_unreadable_release_files(paths, capsys) -> None:
+    _deployed(paths)
+    txn = _open_install(paths)
+    _unreadable_live_json(paths)
+    capsys.readouterr()
+    assert _run_dry(paths) == 0
+    line = next(l for l in capsys.readouterr().out.splitlines() if "myapp:" in l)
+    assert f"myapp: an install (myapp-x, {txn.phase}) is open; the project will be left as is" in line
+    assert "IsADirectoryError" in line
+
+
+def test_a_summary_alert_that_raises_never_fails_the_apply(paths, capsys) -> None:
+    excluded = Exclusions(install={"a": "why"}, busy=["b"])
+    with patch("boxmunge.upgrade_exclusions.notify", side_effect=OSError("disk full")):
+        notify_exclusions(paths, excluded)
+    err = capsys.readouterr().err
+    assert err.count("WARNING") == 2 and "disk full" in err
+    errors = [l for l in paths.log_file.read_text().splitlines() if '"error"' in l]
+    assert sum("disk full" in l for l in errors) == 2
