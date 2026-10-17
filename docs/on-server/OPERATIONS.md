@@ -1564,9 +1564,12 @@ itself interrupted is finished by the next health-timer run.
 Before a rollback swaps back, the release being rolled back from tears down every project's
 staged release (`boxmunge-server staging-teardown-all --reason platform-rollback`, run by the
 shim; an older release does not know `.releases/staged/`) and sends one high-priority alert
-per project: "staged release discarded by the platform rollback; re-stage it". If a teardown
-fails, or the project is busy, the alert names the commands that remove it by hand; it never
-blocks the rollback, and the older release ignores what is left.
+per project: "staged release discarded by the platform rollback; re-stage it". A staged release
+that an interrupted `promote` still needs is kept, and so is one whose teardown fails or whose
+project is busy: the alert says why and names the commands that remove it by hand. If the
+teardown itself does not finish (it is stopped after 10 minutes), one high-priority alert names
+those commands for every project still holding `.releases/staged/`. It never blocks the
+rollback, and the older release ignores what is left.
 
 A rollback swaps the venvs back, restores the stash, and re-runs `upgrade --apply` with the
 previous release, so its overlays and Caddy sites are regenerated and projects restarted on

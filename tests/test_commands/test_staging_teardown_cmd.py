@@ -8,10 +8,11 @@ import pytest
 from boxmunge.commands.staging_teardown_cmd import cmd_staging_teardown_all, run_staging_teardown_all
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import project_lock
+from boxmunge.release_txn import open_txn
 from boxmunge.staged_release import load_slot
-from tests.stage_helpers import prod_and_stage, staging_docker_off
+from tests.stage_helpers import V1, prod_and_stage, staging_docker_off
 
-DISCARDED = "staged release discarded by the platform rollback; re-stage it"
+DISCARDED_ALERT = "staged release discarded by the platform rollback; re-stage it"
 
 
 def _alerts():
@@ -29,7 +30,7 @@ def test_every_slot_is_torn_down_and_alerted(paths) -> None:
     with staging_docker_off(), notify:
         assert run_staging_teardown_all(paths, "platform-rollback") == 0
     assert load_slot(paths, "myapp") is None
-    assert [a["body"] for a in sent] == [DISCARDED]
+    assert [a["body"] for a in sent] == [DISCARDED_ALERT]
     assert sent[0]["priority"] == 1 and sent[0]["project"] == "myapp"
 
 
@@ -72,7 +73,45 @@ def test_one_failing_project_does_not_stop_the_next(paths) -> None:
         assert run_staging_teardown_all(paths, "platform-rollback") == 0
     assert load_slot(paths, "myapp") is None
     bodies = {a["project"]: a["body"] for a in sent}
-    assert bodies["myapp"] == DISCARDED and "rm -rf" in bodies["other"]
+    assert bodies["myapp"] == DISCARDED_ALERT and "rm -rf" in bodies["other"]
+
+
+def test_a_slot_an_open_promote_needs_is_kept_and_alerted(paths) -> None:
+    prod_and_stage(paths)
+    meta = load_slot(paths, "myapp")
+    open_txn(paths, "myapp", source="staged", ref=meta.ref, replaced_ref=f"myapp-{V1}",
+             staged_id=meta.id, snapshot="")
+    sent, notify = _alerts()
+    with staging_docker_off() as docker, notify:
+        assert run_staging_teardown_all(paths, "platform-rollback") == 0
+    docker["down"].assert_not_called()
+    assert load_slot(paths, "myapp") == meta
+    assert len(sent) == 1 and sent[0]["priority"] == 1
+    body = sent[0]["body"]
+    assert "being promoted from this staged release" in body
+    assert "rerun 'promote myapp' to finish it" in body and "rm -rf" in body
+
+
+def test_an_unreadable_install_record_keeps_the_slot(paths) -> None:
+    prod_and_stage(paths)
+    (paths.project_releases("myapp") / "install.json").write_text("{not json")
+    sent, notify = _alerts()
+    with staging_docker_off(), notify:
+        assert run_staging_teardown_all(paths, "platform-rollback") == 0
+    assert load_slot(paths, "myapp") is not None
+    assert "install-txn myapp --drop" in sent[0]["body"]
+
+
+def test_an_invalid_project_directory_is_reported_and_skipped(paths, capsys) -> None:
+    prod_and_stage(paths)
+    bad = paths.projects / "web-staging" / ".releases" / "staged"
+    bad.mkdir(parents=True)
+    sent, notify = _alerts()
+    with staging_docker_off(), notify:
+        assert run_staging_teardown_all(paths, "platform-rollback") == 0
+    assert load_slot(paths, "myapp") is None
+    assert [a["project"] for a in sent] == ["myapp"]
+    assert "web-staging" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("argv", [[], ["--reason", "whim"], ["--reason"]])

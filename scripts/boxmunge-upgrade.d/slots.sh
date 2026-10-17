@@ -76,15 +76,16 @@ report_failure(os.environ['BM_VERSION'], os.environ['BM_FROM_VERSION'], os.envir
 }
 
 send_notification() {
-    local title="$1" message="$2"
-    BM_TITLE="$title" BM_MESSAGE="$message" "$(active_venv)/bin/python" -c "
+    local title="$1" message="$2" priority="${3:-0}"
+    BM_TITLE="$title" BM_MESSAGE="$message" BM_PRIORITY="$priority" "$(active_venv)/bin/python" -c "
 import os
 from boxmunge.config import load_config
 from boxmunge.pushover import send_notification
 from boxmunge.paths import BoxPaths
 config = load_config(BoxPaths())
 po = config.get('pushover', {})
-send_notification(po.get('user_key',''), po.get('app_token',''), os.environ['BM_TITLE'], os.environ['BM_MESSAGE'])
+send_notification(po.get('user_key',''), po.get('app_token',''), os.environ['BM_TITLE'], os.environ['BM_MESSAGE'],
+                  int(os.environ['BM_PRIORITY']))
 " 2>/dev/null || true
 }
 
@@ -146,6 +147,25 @@ legacy_caddy_log_note() {
     fi
 }
 
+# teardown_before_rollback: staging-teardown-all with the active (new)
+# release. It alerts per project itself and exits 0 even when a project
+# fails; a non-zero exit means it did not finish (killed by the timeout,
+# crashed, or could not start), so which projects still hold a slot is
+# unknown and the alert here names the generic manual commands. It never
+# blocks the rollback. The 600 s budget covers one compose down per staged
+# project; a box with many slack staging stacks may need longer, and then
+# keeps the rest (harmless to the older release) with this alert.
+teardown_before_rollback() {
+    local rc=0
+    timeout --kill-after=10 600 "$(active_venv)/bin/boxmunge-server" staging-teardown-all \
+        --reason platform-rollback || rc=$?
+    [[ "$rc" -ne 0 ]] || return 0
+    local msg="staging teardown before the rollback did not finish (exit $rc); staged releases may remain under <p>/.releases/staged/; the older release ignores them; remove each with: docker compose -p <p>-staging --project-directory <p>/.releases/staged/release -f <p>/.releases/staged/compose.staging-base.yml -f <p>/.releases/staged/compose.boxmunge-staging.yml down, then rm -rf <p>/.releases/staged and rm caddy/sites/<p>-staging.conf"
+    log "WARN: $msg"
+    bm_log warn upgrade "staging teardown before the rollback did not finish" "{\"exit\": $rc}"
+    send_notification "boxmunge rollback: staged releases not torn down" "$msg" 1
+}
+
 # complete_rollback <new_version> <from_version> <stage> <prev_slot> <count>:
 # everything after the marker. Safe to run again after a crash part-way: the
 # swap is skipped once done, the stash restore and re-apply are idempotent,
@@ -157,13 +177,9 @@ complete_rollback() {
 
     # D14: the release being rolled back from tears down its staged releases
     # (an older release does not know .releases/staged/). Only before the
-    # swap: once swapped, the active venv is the older release. It alerts per
-    # project, and neither a failure nor a hang (killed by the timeout: one
-    # compose down per staged project) blocks the rollback.
+    # swap: once swapped, the active venv is the older release.
     if [[ "$ACTIVE_SLOT" != "$prev_slot" ]]; then
-        timeout --kill-after=10 600 "$(active_venv)/bin/boxmunge-server" staging-teardown-all \
-            --reason platform-rollback \
-            || log "WARN: staging teardown before the rollback failed (alerted per project)"
+        teardown_before_rollback
     fi
     [[ "$ACTIVE_SLOT" == "$prev_slot" ]] || swap_to "$prev_slot"
     # Any probation ended with this rollback. Left behind, it would name the
