@@ -15,7 +15,7 @@ from boxmunge.bind_sources import BindSourceError
 from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.caddy_journal import write_site
 from boxmunge.compose import ComposeError, load_user_compose
-from boxmunge.commands import deploy_images
+from boxmunge.commands import deploy_images, deploy_storage
 from boxmunge.compose_guard import compose_up_checked
 from boxmunge.compose_resolve import ComposeResolveError
 from boxmunge.compose_validate import ComposeSecurityError
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 STORAGE_ERRORS = (BindSourceError, ComposeError, ComposeSecurityError, OSError,
                   ReleaseStateError, StagingDataError, StagingIsolationError, SlotError)
 # ... and the release's own refusal to start, found once its images are built.
-BRING_UP_ERRORS = (*STORAGE_ERRORS, DeployRefused, DockerError)
+BRING_UP_ERRORS = (*STORAGE_ERRORS, DeployRefused, DockerError, RunAsError)
 
 
 def _staging_auth(project_name: str, paths: BoxPaths) -> tuple[str, str] | None:
@@ -82,11 +82,13 @@ def _prepare_storage(paths: BoxPaths, project: str, manifest: dict[str, Any]) ->
     warn_off_services(paths, manifest, component="stage")
     warn_writable_state(paths, manifest, user_compose, component="stage")
     plan = check_staging_storage(paths, project, manifest)
+    if plan is not None:
+        prepare_destinations(paths, project, plan)
+    deploy_storage.prepare_storage(paths, staging_release_target(paths, project))
     if plan is None:
         return
     # Create staging (and so its volumes) without starting it, then copy
     # into it while neither side runs.
-    prepare_destinations(paths, project, plan)
     print("  Creating staging containers for the data copy...")
     compose_up_checked(paths, project, component="stage", staging=True,
                        record=True, deploying=True, build=False, start=False)

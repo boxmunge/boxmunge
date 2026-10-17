@@ -7,7 +7,8 @@ import sys
 from pathlib import Path
 
 from boxmunge.caddy import prepare_caddy_config
-from boxmunge.commands import deploy_images
+from boxmunge.bind_sources import BindSourceError
+from boxmunge.commands import deploy_images, deploy_storage
 from boxmunge.commands.deploy_steps import (
     post_deploy_diagnostics, record_deploy_state, smoke_ok, take_pre_deploy_snapshot,
     update_repo,
@@ -316,11 +317,12 @@ def _start_and_verify(project_name: str, paths: BoxPaths, manifest: dict,
     print("  Starting containers...")
     compose_files = ["compose.yml", "compose.boxmunge.yml"]
     try:
+        deploy_storage.prepare_storage(paths, production_target(paths, project_name))
         # generate_release_config built every image the users were decided from.
         compose_up_checked(paths, project_name, component=component,
                            compose_files=compose_files, record=True, deploying=True,
                            build=False, txn=txn)
-    except DockerError as e:
+    except (DockerError, BindSourceError, RunAsError) as e:
         print(f"  ERROR: {e}", file=sys.stderr)
         log_error("deploy", f"Deploy failed: container start: {e}", paths, project=project_name)
         return 1
