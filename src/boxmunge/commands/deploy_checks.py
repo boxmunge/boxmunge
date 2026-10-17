@@ -283,3 +283,17 @@ def release_problems(paths: BoxPaths, target: ReleaseTarget, model: dict[str, An
         refusals += replacement_problems(target, model, services)
         refusals += user_change_problems(paths, target, model, services, users, offset)
     return refusals, warnings
+
+
+def writable_by_a_container(project: str, source: str, *, below: bool) -> str | None:
+    """A read-write bind of one of the project's containers (production's or
+    staging's, running or not) that holds `source` (`below`: strictly
+    inside it), or None. Such a container could swap a component of the
+    path for a link between a check and the helper's use of it."""
+    norm = os.path.normpath(source)
+    for compose_project in (project, f"{project}-staging"):
+        for bound, rw in docker_containers.container_bind_sources(compose_project):
+            top = os.path.normpath(bound)
+            if rw and (norm.startswith(top + "/") or (not below and norm == top)):
+                return top
+    return None

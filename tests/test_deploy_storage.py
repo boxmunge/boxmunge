@@ -25,6 +25,8 @@ def _setup(paths, monkeypatch, *, offset=0, existing=frozenset(), probe=None, mo
     monkeypatch.setattr(ds, "resolved_services", lambda target: (model or {}, services))
     monkeypatch.setattr(ds, "remap_offset", lambda paths: offset)
     monkeypatch.setattr(ds, "run_helper", lambda label, mounts, script: calls.append((mounts, script)))
+    monkeypatch.setattr(ds, "mkdir_under", lambda label, root, rel, ids:
+                        calls.append(("mkdir", root, str(rel), ids)))
     monkeypatch.setattr(ds, "volume_labels", lambda name: {} if name in existing else None)
     monkeypatch.setattr(ds, "image_facts", lambda ref: ImageFacts("sha256:" + "a" * 64, "", ()))
     monkeypatch.setattr(ds, "probe_dir", lambda image, path, off: probe)
@@ -37,9 +39,7 @@ def _setup(paths, monkeypatch, *, offset=0, existing=frozenset(), probe=None, mo
 def test_missing_rw_source_is_made_by_the_daemon_and_given_to_the_user(paths, monkeypatch) -> None:
     target, calls = _setup(paths, monkeypatch)
     ds.prepare_storage(paths, target)
-    mounts, script = calls[0]
-    assert mounts == ["-v", f"{paths.project_dir('shop') / 'data' / 'uploads'}:/x"]
-    assert script == "chown 10001:10001 /x"
+    assert calls[0] == ("mkdir", paths.project_dir("shop"), "data/uploads", (10001, 10001))
     assert (paths.project_dir("shop") / "data").is_dir()  # parents as deploy
     assert not (paths.project_dir("shop") / "conf").exists()  # read-only: the start check makes it
 
@@ -54,7 +54,7 @@ def test_a_parent_reached_through_a_link_is_refused(paths, monkeypatch, tmp_path
 
 def test_a_source_the_v_syntax_would_misread_is_refused(paths, monkeypatch) -> None:
     project_dir = paths.project_dir("shop")
-    target, calls = _setup(paths, monkeypatch, volumes=[
+    target, calls = _setup(paths, monkeypatch, offset=S, volumes=[
         {"type": "bind", "source": str(project_dir / "a:b"), "target": "/u"}])
     with pytest.raises(BindSourceError, match="misread"):
         ds.prepare_storage(paths, target)
@@ -92,3 +92,15 @@ def test_remapped_box_makes_rw_sources_through_the_helper_even_for_root(paths, m
     write_users(paths, "shop", {"app": ServiceUser("0:0", "manifest")})
     ds.prepare_storage(paths, target)
     assert calls == [(["-v", f"{paths.project_dir('shop') / 'data' / 'uploads'}:/x"], "true")]
+
+
+def test_a_source_inside_a_containers_rw_bind_is_refused(paths, monkeypatch) -> None:
+    """An old release's container mounting ./data read-write could swap
+    data/uploads for a link before the helper makes it."""
+    target, calls = _setup(paths, monkeypatch)
+    data = paths.project_dir("shop") / "data"
+    monkeypatch.setattr("boxmunge.docker_containers.container_bind_sources",
+                        lambda p: [(str(data), True)] if p == "shop" else [])
+    with pytest.raises(BindSourceError, match="mounts read-write"):
+        ds.prepare_storage(paths, target)
+    assert calls == []

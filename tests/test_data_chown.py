@@ -22,6 +22,8 @@ def _setup(paths, monkeypatch, volumes_exist=True):
     monkeypatch.setattr(data_cmd, "volume_labels", lambda n: {} if volumes_exist else None)
     monkeypatch.setattr(data_cmd, "run_helper", lambda label, mounts, script:
                         calls.append((mounts[1], script)))
+    monkeypatch.setattr(data_cmd, "chown_under", lambda label, root, rel, ids:
+                        calls.append((f"{root}:{rel}", ids)))
     return project_dir, calls
 
 
@@ -31,8 +33,7 @@ def test_chown_stops_chowns_every_persistent_mount_and_records(paths, monkeypatc
                                 "db": ServiceUser(None, "manifest")})
     data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
     assert calls[0][:2] == ["docker", "stop"]
-    assert calls[1:] == [(f"type=bind,src={project_dir / 'uploads'},dst=/x",
-                          "chown -R -h 10001:10001 /x"),
+    assert calls[1:] == [(f"{project_dir}:uploads", (10001, 10001)),
                          ("type=volume,src=shop_cache,dst=/x", "chown -R -h 10001:10001 /x")]
     users = read_users(paths, "shop")
     assert users["app"] == ServiceUser("10001:10001", "data-chown", "node")
@@ -65,3 +66,11 @@ def test_a_service_without_data_is_refused(paths, monkeypatch, capsys) -> None:
 @pytest.mark.parametrize("spec", ["0:0", "10001", "70000:1", "a:b", "1:0"])
 def test_bad_ids_are_refused(paths, spec) -> None:
     assert data_cmd.run_data_chown(paths, "shop", "app", spec) == 2
+
+
+def test_a_bind_inside_another_containers_rw_bind_is_refused(paths, monkeypatch) -> None:
+    project_dir, calls = _setup(paths, monkeypatch)
+    monkeypatch.setattr("boxmunge.docker_containers.container_bind_sources",
+                        lambda p: [(str(project_dir), True)] if p == "shop" else [])
+    with pytest.raises(data_cmd.DataError, match="mounts read-write"):
+        data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))

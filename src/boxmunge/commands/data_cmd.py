@@ -23,16 +23,19 @@ user (deploy refuses a user change over data the old user owns).
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import re
 import sys
 
 from boxmunge.bind_sources import BindSourceError, project_rel, source_kind
-from boxmunge.commands.deploy_checks import persistent, service_mounts, volume_name
+from boxmunge.commands.deploy_checks import (
+    persistent, service_mounts, volume_name, writable_by_a_container,
+)
 from boxmunge.compose_resolve import ComposeResolveError
 from boxmunge.compose_guard import check_containers_start, start_containers_checked
 from boxmunge.data_helper import (
-    COMPOSE_VOLUME_LABEL, compose_volume_labels, copy_into_volume, is_anonymous, run_helper,
-    volume, volume_is_empty, volume_labels,
+    COMPOSE_VOLUME_LABEL, chown_under, compose_volume_labels, copy_into_volume, is_anonymous,
+    run_helper, volume, volume_is_empty, volume_labels,
 )
 from boxmunge.docker import COMPOSE_PROJECT_LABEL
 from boxmunge.docker_containers import container_mounts, project_containers
@@ -170,23 +173,27 @@ def run_data_adopt(paths: BoxPaths, project: str, service: str, path: str, name:
 
 def _chown_mount(paths: BoxPaths, project: str, model: dict, m, ids: tuple[int, int]) -> bool:
     """Give one persistent mount to `ids`; False when it does not exist yet
-    (mounting it would create it, unlabelled or root-owned)."""
+    (mounting it would create it, unlabelled or root-owned). A bind is
+    reached inside the helper with only the project dir mounted, so a link
+    a container planted on the way leads nowhere on the host."""
+    print(f"  Giving {m.source} to {ids[0]}:{ids[1]}...")
     if m.kind == "bind":
         project_dir = paths.project_dir(project)
         if not os.path.lexists(str(m.source)):
             return False
-        source_kind(project_dir, project_rel(str(m.source), project_dir), create=False)
-        if any(c in str(m.source) for c in ',"'):
-            raise BindSourceError(f"bind source {m.source} contains ',' or '\"', which the "
-                                  f"helper's --mount would misread; rename it")
-        where = ["--mount", f"type=bind,src={m.source},dst=/x"]
-    else:
-        name = volume_name(model, project, str(m.source))
-        if volume_labels(name) is None:
-            return False
-        where = volume(name, "/x")
-    print(f"  Giving {m.source} to {ids[0]}:{ids[1]}...")
-    run_helper(f"{project}-chown", where, f"chown -R -h {ids[0]}:{ids[1]} /x")
+        holder = writable_by_a_container(project, str(m.source), below=True)
+        if holder is not None:
+            raise DataError(f"{m.source} lies inside {holder}, which a container of "
+                            f"{project} mounts read-write; give {holder} itself to "
+                            f"{ids[0]}:{ids[1]}, or stop mounting it read-write")
+        rel = project_rel(str(m.source), project_dir)
+        source_kind(project_dir, rel, create=False)
+        chown_under(f"{project}-chown", project_dir, Path(rel), ids)
+        return True
+    name = volume_name(model, project, str(m.source))
+    if volume_labels(name) is None:
+        return False
+    run_helper(f"{project}-chown", volume(name, "/x"), f"chown -R -h {ids[0]}:{ids[1]} /x")
     return True
 
 

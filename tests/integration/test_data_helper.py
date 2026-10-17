@@ -88,3 +88,36 @@ def test_empty_under_empties_container_owned_data(helper_image, tmp_path) -> Non
     data_helper.empty_under("it", project, Path("data/pg"))
     assert list((project / "data" / "pg").iterdir()) == []
 
+
+
+def _project_with_link(tmp_path) -> tuple[Path, Path]:
+    """A project whose data/ a container swapped for a link to a sibling."""
+    sibling = tmp_path / "sibling"
+    (sibling / "uploads").mkdir(parents=True)
+    project = tmp_path / "projects" / "myapp"
+    project.mkdir(parents=True)
+    (project / "data").symlink_to(sibling)
+    return project, sibling
+
+
+def test_mkdir_under_refuses_a_planted_link_on_the_way(helper_image, tmp_path) -> None:
+    project, sibling = _project_with_link(tmp_path)
+    with pytest.raises(data_helper.DockerError, match="through a symlink"):
+        data_helper.mkdir_under("it", project, Path("data/new"), (10001, 10001))
+    assert not (sibling / "new").exists()
+
+
+def test_chown_under_refuses_a_planted_link_and_gives_the_rest(helper_image, tmp_path) -> None:
+    project, sibling = _project_with_link(tmp_path)
+    with pytest.raises(data_helper.DockerError, match="through a symlink"):
+        data_helper.chown_under("it", project, Path("data/uploads"), (10001, 10001))
+    real = project / "uploads"
+    real.mkdir()
+    (real / "f").write_text("x")
+    data_helper.mkdir_under("it", project, Path("made"), (10001, 10001))
+    data_helper.chown_under("it", project, Path("uploads"), (10001, 10001))
+    assert data_helper.run_helper(
+        "it", ["-v", f"{project}:/x:ro"],
+        '[ "$(stat -c %u /x/uploads/f)" = 10001 ] && [ "$(stat -c %u /x/made)" = 10001 ]',
+        check=False) == 0
+    data_helper.empty_dir("it", real)

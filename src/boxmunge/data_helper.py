@@ -108,6 +108,39 @@ def empty_under(label: str, root: Path, rel: Path) -> None:
                f'rm -rf "$t"/* "$t"/.[!.]* "$t"/..?* && [ -z "$(ls -A "$t")" ]')
 
 
+def _under(root: Path, rel: Path) -> str:
+    """The quoted in-helper path of `rel` under `root` mounted at /p."""
+    if rel.is_absolute() or not rel.parts or ".." in rel.parts or str(rel) == ".":
+        raise ValueError(f"{rel} is not a path inside {root}")
+    return shlex.quote(f"/p/{rel.as_posix()}")
+
+
+_NO_LINKS = ('[ "$(readlink -f "$d")" = "$d" ] '
+             '|| {{ echo "{what} is reached through a symlink; nothing was changed" >&2; '
+             'exit 3; }}')
+
+
+def mkdir_under(label: str, root: Path, rel: Path, ids: tuple[int, int] | None) -> None:
+    """Make `root`/`rel` (its parent exists) and give it to `ids`, reached
+    inside the helper with only `root` mounted, as empty_under does: a link
+    on the way is refused, and could only lead within the helper anyway.
+    The helper must be able to write the parent (an unremapped box)."""
+    t = _under(root, rel)
+    chown = f' && chown {ids[0]}:{ids[1]} "$t"' if ids else ""
+    run_helper(label, ["-v", f"{root}:/p"],
+               f't={t}; d=$(dirname "$t"); ' + _NO_LINKS.format(what="$d")
+               + f'; mkdir "$t"{chown}')
+
+
+def chown_under(label: str, root: Path, rel: Path, ids: tuple[int, int]) -> None:
+    """chown -R -h `root`/`rel` to `ids`, reached as mkdir_under reaches it:
+    links on the way are refused, and links inside are changed themselves."""
+    t = _under(root, rel)
+    run_helper(label, ["-v", f"{root}:/p"],
+               f't={t}; d="$t"; ' + _NO_LINKS.format(what="$t")
+               + f'; chown -R -h {ids[0]}:{ids[1]} "$t"')
+
+
 def copy_into_volume(label: str, src: str, dst: str) -> None:
     """Replace volume `dst`'s contents with a copy of `src`, owners kept."""
     run_helper(label, [*volume(src, "/src", ro=True), *volume(dst, "/dst")],
