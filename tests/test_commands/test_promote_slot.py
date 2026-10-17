@@ -181,16 +181,6 @@ def test_isolation_scratch_left_by_a_kill_is_swept_by_deploy_and_rollback(paths)
     assert not list(releases.glob(".isolation-*"))
 
 
-def test_a_git_slot_is_refused_by_this_build(paths, capsys) -> None:
-    prod_and_stage(paths)
-    update_meta(paths, "myapp", load_slot(paths, "myapp"), kind="git")
-    with staging_docker_off() as docker:
-        assert run_promote("myapp", paths) == 1
-        docker["up"].assert_not_called()
-    assert "it is a git stage" in capsys.readouterr().err
-    assert load_txn(paths, "myapp") is None
-
-
 def test_a_candidate_using_include_is_refused_while_staged(paths, capsys) -> None:
     """Its include would be read from production's files, not its own."""
     prod_and_stage(paths)
@@ -397,45 +387,6 @@ def test_an_install_without_a_tree_is_refused_while_staged(paths, capsys) -> Non
     assert deploy_tree_locked("myapp", paths, req) == 1
     assert "should be unreachable" in capsys.readouterr().err
     assert load_txn(paths, "myapp") is None
-
-
-def _git_project_with_a_slot(paths):
-    import yaml
-    from boxmunge.project_registry import add_project
-    from boxmunge.staged_release import new_meta, write_meta
-    from boxmunge.state import write_state
-    add_project("myapp", paths)
-    pdir = paths.project_dir("myapp")
-    (pdir / "repo").mkdir(parents=True)
-    (pdir / "manifest.yml").write_text(yaml.safe_dump({
-        "project": "myapp", "hosts": ["myapp.example.com"],
-        "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
-        "backup": {"type": "none"}}))
-    write_state(paths.project_deploy_state("myapp"), {
-        "current_ref": "abc", "history": [{"ref": "def", "snapshot": ""}]})
-    slot = slot_dir(paths, "myapp")
-    (slot / "release").mkdir(parents=True)
-    write_meta(slot, new_meta("bundle", "myapp-v2", None))
-
-
-def test_a_git_deploy_is_refused_while_a_release_is_staged(paths, capsys) -> None:
-    from unittest.mock import patch
-    _git_project_with_a_slot(paths)
-    with patch("boxmunge.commands.deploy.update_repo") as update:
-        assert run_deploy("myapp", paths) == 1
-    update.assert_not_called()
-    assert ("unstage myapp first: git installs cannot yet prove isolation from a staged "
-            "release") in capsys.readouterr().err
-
-
-def test_a_git_rollback_is_refused_while_a_release_is_staged(paths, capsys) -> None:
-    from unittest.mock import patch
-    _git_project_with_a_slot(paths)
-    with patch("boxmunge.commands.deploy.update_repo") as update:
-        assert run_rollback("myapp", paths, yes=True) == 1
-    update.assert_not_called()
-    assert ("unstage myapp first: git installs cannot yet prove isolation from a staged "
-            "release") in capsys.readouterr().err
 
 
 def test_a_rerun_says_which_release_is_live(paths, capsys) -> None:

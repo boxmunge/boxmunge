@@ -102,13 +102,15 @@ if [[ "$KIND" == git ]]; then
     run ADD old add-git-project "$P" /tmp/origin.git
     # The deploy shell runs add-git-project as deploy, so the clone is deploy's.
     # 0.10.1 runs here as root: safe.directory stands in for running it as deploy
-    # (the beta runs git as deploy, without the system config).
+    # (the beta runs git as deploy, which reads the system config too).
     chown -R deploy: "$R/projects/$P/repo"
     git config --system --add safe.directory '*'
     run DEPLOY_V1 old prod-deploy "$P"
     commit v2
     # 0.10.1 checks the ref out in repo/ without pulling: name the fetched commit.
     run STAGE old stage "$P" --ref origin/main
+    # Run as deploy (the stand-in above), 0.10.1's fetches leave deploy's files in .git.
+    chown -R deploy: "$R/projects/$P/repo"
 else
     run ADD old project-add "$P"
     bundle v1 09; run DEPLOY_V1 old prod-deploy "$P" --ref 2026-10-16T09

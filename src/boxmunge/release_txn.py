@@ -9,7 +9,9 @@ except the core resuming it. ``expect`` holds the SHA-256 of live.json and
 previous.json as this transaction last left them: a mismatch that none of
 the transaction's own steps explains means something outside it changed
 production (an older release after a platform rollback, a hand edit), and
-nothing is resumed, abandoned or dropped automatically.
+nothing is resumed, abandoned or dropped automatically. A git project
+keeps no live.json: its ``expect`` also records repo/'s HEAD, which must
+be the install's ref, the replaced one, or HEAD as it last left it.
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.fileutil import atomic_write_text, fsync_dir
 from boxmunge.fs_nofollow import read_text_nofollow
+from boxmunge.git_slot import GitRefError, head_sha, is_full_sha
 from boxmunge.release import live_meta_text
 from boxmunge.release_keep import discard_superseded, kept_previous_text, superseded_paths
 from boxmunge.ulid import generate_ulid
@@ -109,10 +112,24 @@ def _text_sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def current_expect(paths: BoxPaths, project: str) -> dict[str, str | None]:
+def _files_expect(paths: BoxPaths, project: str) -> dict[str, str | None]:
     releases = paths.project_releases(project)
     return {"live_json_sha256": _sha(releases / "live.json"),
             "previous_json_sha256": _sha(releases / "previous.json")}
+
+
+def _repo_head(paths: BoxPaths, project: str) -> str | None:
+    """repo/'s HEAD for a git project, None for a bundle one. Raises GitRefError."""
+    repo = paths.project_dir(project) / "repo"
+    return head_sha(repo) if repo.is_dir() else None
+
+
+def current_expect(paths: BoxPaths, project: str) -> dict[str, str | None]:
+    expect = _files_expect(paths, project)
+    head = _repo_head(paths, project)
+    if head is not None:
+        expect["repo_head"] = head
+    return expect
 
 
 def _write(paths: BoxPaths, project: str, txn: InstallTxn) -> None:
@@ -230,7 +247,7 @@ def stale_reason(paths: BoxPaths, project: str, txn: InstallTxn) -> str | None:
     keep's previous.json, live.json naming ``ref`` or ``replaced_ref``), so a
     crash between a step and its phase write is never called stale.
     """
-    now = current_expect(paths, project)
+    now = _files_expect(paths, project)
     live_ok = {txn.expect["live_json_sha256"], _text_sha(live_meta_text(txn.ref)),
                _text_sha(live_meta_text(txn.replaced_ref)) if txn.replaced_ref else None}
     prev_ok = {txn.expect["previous_json_sha256"], txn.previous_before,
@@ -248,7 +265,20 @@ def stale_reason(paths: BoxPaths, project: str, txn: InstallTxn) -> str | None:
                         and _sha(sup_meta) == txn.previous_before)
     if now["previous_json_sha256"] not in prev_ok and not keep_in_progress:
         problems.append("previous.json was changed by something other than this install")
+    problems += _head_problems(paths, project, txn)
     return "; ".join(problems) or None
+
+
+def _head_problems(paths: BoxPaths, project: str, txn: InstallTxn) -> list[str]:
+    """A git install checks out ``ref`` (or, abandoning, ``replaced_ref``);
+    a fix-forward finds HEAD where the attempt it superseded left it."""
+    try:
+        head = _repo_head(paths, project)
+    except GitRefError as e:
+        return [f"repo/'s HEAD cannot be read: {e}"]
+    if head is None or head in (txn.ref, txn.replaced_ref, txn.expect.get("repo_head")):
+        return []
+    return [f"repo/ is checked out at {head}, neither {txn.ref} nor {txn.replaced_ref}"]
 
 
 def open_install_reason(paths: BoxPaths, project: str, txn: str | None = None) -> str | None:
@@ -286,15 +316,16 @@ def rerun_command(project: str, txn: InstallTxn) -> str:
 
 def abandon_text(project: str, txn: InstallTxn) -> str:
     if txn.replaced_ref is None:
-        return (f"'prod-deploy {project} --abandon' removes this first deploy's code "
+        what = ("abandons this first deploy" if is_full_sha(txn.ref) else
+                "removes this first deploy's code")
+        return (f"'prod-deploy {project} --abandon' {what} "
                 f"(containers and data are untouched)")
     return (f"'prod-deploy {project} --abandon' puts {txn.replaced_ref}'s files back "
             f"(containers and data are untouched)")
 
 
-# Only bundle installs are transactions in this release; promote and git
-# deploys join when they are rebuilt on it.
-FIX_FORWARD = "or deploy a fix (a different bundle)"
+def _fix_forward(txn: InstallTxn) -> str:
+    return (f"or deploy a fix (a different {'commit' if is_full_sha(txn.ref) else 'bundle'})")
 
 
 def options_text(project: str, txn: InstallTxn, *, rerun: bool = True) -> str:
@@ -308,7 +339,7 @@ def options_text(project: str, txn: InstallTxn, *, rerun: bool = True) -> str:
     if txn.source != "rollback" and txn.data_may_have_changed() and txn.replaced_ref:
         lines.append(f"'rollback {project}' restores {txn.snapshot or 'no data snapshot'} "
                      f"with {txn.replaced_ref}")
-    lines.append(FIX_FORWARD)
+    lines.append(_fix_forward(txn))
     return "; ".join(lines)
 
 

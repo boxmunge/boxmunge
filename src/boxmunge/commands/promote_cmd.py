@@ -2,13 +2,15 @@
 """boxmunge promote <project> — deploy the staged release to production.
 
 Promote is an ordinary install (deploy_tree_locked, source "staged") whose
-tree is the slot's release, never a newer inbox bundle. Once
+tree is the slot's release, never a newer inbox bundle; a git slot runs
+the git deploy (git_deploy.deploy_git_locked) of exactly its SHA, never
+the branch's tip. Once
 replace_release returns the slot is marked retired, so it is never
 promoted twice; on success staging is torn down. A killed promote is
 finished by running promote again.
 
 promote_locked runs the spec's steps as named functions, in order:
-_eligibility, _verify_slot, _deploy_tree (whose switch ends in _retire),
+_eligibility, _verify_slot, _deploy (whose switch ends in _retire),
 _teardown (in _teardown_after on success).
 """
 from __future__ import annotations
@@ -20,9 +22,11 @@ from typing import TYPE_CHECKING, Any
 
 from boxmunge.commands.deploy import deploy_eligible
 from boxmunge.commands.deploy_tree import TreeDeploy, deploy_tree_locked
+from boxmunge.commands.git_deploy import GitDeploy, deploy_git_locked
 from boxmunge.commands.unstage_cmd import teardown_staging_locked
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.fileutil import LockError, project_lock
+from boxmunge.git_slot import GitRefError, is_full_sha, require_regular_control_files, rev_parse
 from boxmunge.intake import IntakeError, check_installable, report_refusal, validate_release_tree
 from boxmunge.log import log_error, log_operation
 from boxmunge.probation import clear_probation_if_active
@@ -82,7 +86,7 @@ def promote_locked(project: str, paths: BoxPaths, dry_run: bool = False) -> int:
     if isinstance(manifest, int):
         return manifest
     try:
-        rc = _deploy_tree(project, paths, found.meta, manifest)
+        rc = _deploy(project, paths, found.meta, manifest)
     except _RetireFailed as e:
         return _report_retire_failed(project, paths, found.meta.ref, e)
     if rc != 0:
@@ -111,11 +115,6 @@ def _eligibility(project: str, paths: BoxPaths, dry_run: bool) -> _Promotion | i
         return 1
     if meta is None:
         print(f"ERROR: No staged release for '{project}'.", file=sys.stderr)
-        return 1
-    if meta.kind != "bundle":
-        print(f"ERROR: Cannot promote '{project}': it is a git stage, which this build of "
-              f"boxmunge cannot promote. Unstage it and deploy with prod-deploy.",
-              file=sys.stderr)
         return 1
     resuming = txn is not None and txn.source == "staged" and txn.staged_id == meta.id
     if meta.state == "starting" and not resuming:
@@ -183,11 +182,14 @@ def _finish_retired(project: str, paths: BoxPaths, found: _Promotion) -> int:
 def _verify_slot(project: str, paths: BoxPaths, found: _Promotion) -> dict[str, Any] | int:
     """Step 2: the slot's release must pass this boxmunge's checks (upgrades
     do not migrate the slot). A resume skips check_installable: the
-    release is already partly in the project dir."""
+    release is already partly in the project dir. A git slot's SHA must be
+    a commit production's repository still has: its checkout happens there."""
     release = release_dir(slot_dir(paths, project))
     try:
         manifest = validate_release_tree(release, project, paths, COMPONENT)
-        if not found.resuming:
+        if found.meta.kind == "git":
+            _require_commit(paths, project, found.meta.ref)
+        elif not found.resuming:
             check_installable(release, paths.project_dir(project))
     except IntakeError as e:
         print("  The staged release no longer passes this boxmunge's checks; stage it "
@@ -196,15 +198,42 @@ def _verify_slot(project: str, paths: BoxPaths, found: _Promotion) -> dict[str, 
     return manifest
 
 
-def _deploy_tree(project: str, paths: BoxPaths, meta: StagedRelease,
-                 manifest: dict[str, Any]) -> int:
-    """Step 3: the same install core as a bundle deploy, over the slot's tree."""
+def _require_commit(paths: BoxPaths, project: str, sha: str) -> None:
+    if not is_full_sha(sha):
+        raise IntakeError(f"the git stage records {sha!r}, not a full commit SHA")
+    try:
+        found = rev_parse(paths.project_dir(project) / "repo", sha)
+    except GitRefError as e:
+        raise IntakeError(str(e)) from e
+    if found != sha:
+        raise IntakeError(f"production's repository no longer has the staged commit {sha}")
+    try:
+        require_regular_control_files(paths.project_dir(project) / "repo", sha)
+    except GitRefError as e:
+        raise IntakeError(str(e)) from e
+
+
+def _deploy(project: str, paths: BoxPaths, meta: StagedRelease,
+            manifest: dict[str, Any]) -> int:
+    """Step 3: the same install core as a deploy of that kind, over the
+    slot's release (a git slot: its SHA, proved apart from staging with
+    the slot's own clone)."""
     print(f"Promoting {project} ({meta.ref}) from staging to production...")
+    release = release_dir(slot_dir(paths, project))
+
+    def installed() -> None:
+        clear_probation_if_active(paths, "deploy")
+
+    def switched(rc: int) -> None:
+        _retire(project, paths, rc)
+
+    if meta.kind == "git":
+        return deploy_git_locked(project, paths, GitDeploy(
+            sha=meta.ref, source="staged", staged_id=meta.id, component=COMPONENT,
+            candidate=release, on_installed=installed, on_switched=switched))
     return deploy_tree_locked(project, paths, TreeDeploy(
-        tree=release_dir(slot_dir(paths, project)), ref=meta.ref, source="staged",
-        staged_id=meta.id, manifest=manifest, component=COMPONENT,
-        on_installed=lambda: clear_probation_if_active(paths, "deploy"),
-        on_switched=lambda rc: _retire(project, paths, rc)))
+        tree=release, ref=meta.ref, source="staged", staged_id=meta.id, manifest=manifest,
+        component=COMPONENT, on_installed=installed, on_switched=switched))
 
 
 def _retire(project: str, paths: BoxPaths, rc: int) -> None:

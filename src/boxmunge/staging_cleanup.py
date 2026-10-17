@@ -32,7 +32,7 @@ import yaml
 from boxmunge.bind_mounts import project_relative
 from boxmunge.bundle import BOX_OWNED_ENTRIES
 from boxmunge.compose_mounts import is_bind_entry, volume_source
-from boxmunge.data_dirs import holds_data
+from boxmunge.data_dirs import ReleaseStateError, holds_data
 from boxmunge.data_helper import empty_dir
 from boxmunge.docker import staging_compose_project
 from boxmunge.log import log_operation, log_warning
@@ -154,14 +154,24 @@ def remove_retired_staging_data(paths: BoxPaths, project_name: str,
                       f"release does not mount {path.name[:-len(_SUFFIX)]}",
                       paths, project=project_name, detail={"removed": str(path)})
         removed.append(path)
-    for path in not_staging_s(project_dir, made):
+    try:
+        foreign, old = not_staging_s(project_dir, made), old_layout_copies(project_dir)
+    except ReleaseStateError as e:
+        # Only these reports read the slot's compose.yml; the copies removed
+        # above were found from production's view and the slot's record.
+        print(f"  WARN: cannot tell which -staging entries the staged release used ({e}); "
+              f"none was removed on its account, and none is reported.")
+        log_warning("unstage", f"Could not read the staged release's mounts: {e}",
+                    paths, project=project_name)
+        foreign, old = [], []
+    for path in foreign:
         print(f"  NOTE: {path} is not staging's copy (staging did not create it, and "
               f"it is no copy of production's data), so it is left alone. If it is "
               f"release code, rename it in the release: the -staging suffix is "
               f"reserved for staging's copies.")
         log_warning("unstage", f"Left {path.name}, which staging did not create",
                     paths, project=project_name, detail={"path": str(path)})
-    for path in old_layout_copies(project_dir):
+    for path in old:
         print(f"  NOTE: {path} looks like a staging copy from an earlier boxmunge, "
               f"which staging no longer uses. It is left alone; if nothing needs "
               f"it, delete it with: rm -rf {path}")

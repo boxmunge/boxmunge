@@ -104,3 +104,23 @@ def test_an_unreadable_install_record_is_an_error(paths, project, capsys) -> Non
         assert backup_locked(P, paths) == 1
     inner.assert_not_called()
     assert "install.json" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("phase", ["previous_kept", "installed", "hook_started"])
+def test_a_git_install_backs_up_with_the_replaced_commits_manifest(paths, tmp_path,
+                                                                   phase) -> None:
+    """Git keeps no previous/: the running release's manifest is the
+    replaced commit's, read from the repository."""
+    from boxmunge.commands.deploy import run_deploy
+    from tests.git_helpers import commit
+    from tests.git_project_helpers import git_manifest, git_project
+    from tests.stage_helpers import staging_docker_off
+    from tests.txn_helpers import crash_at
+    git_project(paths, tmp_path, backup="postgres")
+    commit(tmp_path / "work", {"manifest.yml": git_manifest(tmp_path / "origin.git",
+                                                            backup="none")}, "B")
+    with staging_docker_off(), patch("boxmunge.commands.backup_cmd.backup_locked",
+                                     return_value=1):
+        assert crash_at(f"txn.{phase}", lambda: run_deploy("myapp", paths)) == 137
+    source = backup_source(paths, "myapp")
+    assert source.manifest["backup"]["type"] == "postgres" and source.compose_file is None

@@ -10,6 +10,8 @@ is put back, which only the operator can decide to do.
 """
 from __future__ import annotations
 
+import os
+import pwd
 from pathlib import Path
 from typing import Any
 
@@ -105,3 +107,32 @@ def alert_old_schema(paths: BoxPaths, project: str, written: object) -> None:
                {"repository_schema": written, "current_schema": CURRENT_SCHEMA_VERSION},
                title=f"{project}: update manifest.yml in the repository",
                message=schema_advice(project, written), component="upgrade")
+
+
+def repo_ownership_advice(project_dir: Path) -> str | None:
+    """git runs as the deploy user, also under sudo (git_slot): name a git
+    project whose repo/ (or a file at the top of its .git, such as a
+    FETCH_HEAD an earlier root-run fetch left) deploy does not own, with
+    the fix. None for a bundle project, or a box with no deploy user (git
+    then runs as its caller, and git_slot refuses root-run git)."""
+    repo = project_dir / "repo"
+    if not repo.is_dir() or repo.is_symlink():
+        return None
+    try:
+        deploy = pwd.getpwnam("deploy").pw_uid
+    except KeyError:
+        return None
+    dot_git = repo / ".git"
+    try:
+        tops = sorted(dot_git.iterdir()) if dot_git.is_dir() and not dot_git.is_symlink() else []
+        foreign = [p for p in [repo, dot_git, *tops]
+                   if os.path.lexists(p) and os.lstat(p).st_uid != deploy]
+    except OSError as e:
+        return (f"{project_dir.name}: cannot check who owns {repo} ({e}); git runs as the "
+                f"deploy user, so it must be deploy's: chown -R deploy:deploy {repo}")
+    if not foreign:
+        return None
+    more = f" and {len(foreign) - 1} more" if len(foreign) > 1 else ""
+    return (f"{project_dir.name}: {foreign[0]}{more} is not owned by the deploy user, who "
+            f"now runs this project's git (also under sudo); its git deploys, stages and "
+            f"rollbacks fail until you run: chown -R deploy:deploy {repo}")

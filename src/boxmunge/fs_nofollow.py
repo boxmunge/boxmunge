@@ -212,3 +212,56 @@ def chown_tree_deploy(path: Path) -> None:
                     _warn_chown(os.path.join(str(path), root, name), e)
     finally:
         os.close(top)
+
+
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def copy_entry_nofollow(src_dir: int, name: str, dest_dir: int) -> None:
+    """Copy entry ``name`` of the open directory ``src_dir`` into the open
+    directory ``dest_dir``, never through a link on either side: a link is
+    copied as a link; a regular file through descriptors that refuse a link
+    and never block on a FIFO, its destination created exclusively (a name
+    planted there is refused, not written through); a directory
+    recursively, through directory descriptors. Modes are kept without the
+    setuid and setgid bits. Anything else raises OSError."""
+    st = os.stat(name, dir_fd=src_dir, follow_symlinks=False)
+    # Never setuid or setgid: root makes these files, in a tree deploy owns.
+    mode = stat.S_IMODE(st.st_mode) & 0o1777
+    if stat.S_ISLNK(st.st_mode):
+        os.symlink(os.readlink(name, dir_fd=src_dir), name, dir_fd=dest_dir)
+    elif stat.S_ISREG(st.st_mode):
+        _copy_file(src_dir, name, dest_dir, mode)
+    elif stat.S_ISDIR(st.st_mode):
+        os.mkdir(name, 0o700, dir_fd=dest_dir)
+        src = os.open(name, _DIR_FLAGS, dir_fd=src_dir)
+        try:
+            dest = os.open(name, _DIR_FLAGS, dir_fd=dest_dir)
+            try:
+                for child in sorted(os.listdir(src)):
+                    copy_entry_nofollow(src, child, dest)
+                os.fchmod(dest, mode)
+            finally:
+                os.close(dest)
+        finally:
+            os.close(src)
+    else:
+        raise OSError(f"{name} is not a file, directory or link; refusing to copy it")
+
+
+def _copy_file(src_dir: int, name: str, dest_dir: int, mode: int) -> None:
+    src = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                  dir_fd=src_dir)
+    try:
+        if not stat.S_ISREG(os.fstat(src).st_mode):
+            raise OSError(f"{name} changed while it was copied; refusing to copy it")
+        dest = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                       0o600, dir_fd=dest_dir)
+        try:
+            while chunk := os.read(src, 1 << 20):
+                os.write(dest, chunk)
+            os.fchmod(dest, mode)
+        finally:
+            os.close(dest)
+    finally:
+        os.close(src)

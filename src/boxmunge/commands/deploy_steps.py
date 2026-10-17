@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Individual deploy steps: snapshot, repo update, diagnostics, smoke, state."""
+"""Individual deploy steps: snapshot, diagnostics, smoke, state."""
 
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +16,7 @@ def record_deploy_state(
     project_name: str,
     ref: str,
     snapshot: str | None,
+    replaced_ref: str | None = None,
 ) -> None:
     """Record a deploy in the state file, pushing previous to history.
 
@@ -25,6 +25,11 @@ def record_deploy_state(
     the release that is already current again (a retry after a failed
     deploy, or a redeploy) keeps both: the newer snapshot holds data this
     release may already have changed.
+
+    ``replaced_ref`` is the release the install transaction replaced, when
+    it is not the recorded current one (a fix-forward over a rollback, or
+    over an attempt that switched): that is the rollback target, paired
+    with ``snapshot``, so history[0] names it.
     """
     state_path = paths.project_deploy_state(project_name)
     current = read_state(state_path)
@@ -33,9 +38,11 @@ def record_deploy_state(
     if current.get("current_ref") == ref:
         snapshot = current.get("pre_deploy_snapshot", "")
     elif "current_ref" in current:
+        replaced = replaced_ref or current["current_ref"]
         history.insert(0, {
-            "ref": current["current_ref"],
-            "deployed_at": current.get("deployed_at", ""),
+            "ref": replaced,
+            "deployed_at": (current.get("deployed_at", "")
+                            if replaced == current["current_ref"] else ""),
             "snapshot": current.get("pre_deploy_snapshot", ""),
         })
         history = history[:10]
@@ -99,37 +106,6 @@ def snapshot_live_release(
               f"restore data.")
         return None
     return take_pre_deploy_snapshot(project_name, paths, live_manifest, no_snapshot)
-
-
-def update_repo(repo_dir: Path, deploy_ref: str, manifest: dict) -> str | None:
-    """Fetch and check out deploy_ref; return the short HEAD sha, None on error."""
-    if manifest.get("repo", ""):
-        print(f"  Pulling {deploy_ref}...")
-        try:
-            subprocess.run(
-                ["git", "fetch", "origin"], cwd=repo_dir, check=True,
-                capture_output=True, text=True,
-            )
-            subprocess.run(
-                ["git", "checkout", deploy_ref], cwd=repo_dir, check=True,
-                capture_output=True, text=True,
-            )
-            subprocess.run(
-                ["git", "pull", "--ff-only", "origin", deploy_ref],
-                cwd=repo_dir, check=False, capture_output=True, text=True,
-            )
-        except subprocess.CalledProcessError as e:
-            print(f"  ERROR: Git pull failed: {e.stderr}", file=sys.stderr)
-            return None
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=repo_dir, capture_output=True, text=True, check=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        print(f"  ERROR: Cannot read the deployed git ref: {e}", file=sys.stderr)
-        return None
-    return result.stdout.strip()
 
 
 def post_deploy_diagnostics(

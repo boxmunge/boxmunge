@@ -29,7 +29,7 @@ from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import (
     CURRENT_SCHEMA_VERSION, ManifestError, load_manifest_as_written, validate_manifest,
 )
-from boxmunge.git_layout import relink_advice, unlinked_files
+from boxmunge.git_layout import relink_advice, repo_ownership_advice, unlinked_files
 from boxmunge.migration import migrate_manifest, MigrationError
 from boxmunge.pause import render_maintenance_caddy_config
 from boxmunge.fleet import report_project_failure
@@ -296,6 +296,18 @@ def _left_as_is_line(paths: BoxPaths, name: str) -> str | None:
     return f"{name}: {why}; the project will be left as is"
 
 
+def git_ownership_warnings(paths: BoxPaths) -> list[str]:
+    """The apply's warning for each git project whose repo/ the deploy user,
+    who runs its git, does not own (logged; the upgrade goes on)."""
+    found = []
+    for project_dir in _project_dirs(paths):
+        advice = repo_ownership_advice(project_dir)
+        if advice is not None:
+            log_warning("upgrade", advice, paths, project=project_dir.name)
+            found.append(advice)
+    return found
+
+
 def check_upgrade(paths: BoxPaths) -> list[str]:
     """Dry run of migrate + regenerate: everything is rendered in memory and
     nothing is written, locked or logged. Raises on anything that would make
@@ -303,6 +315,9 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
     report = []
     for project_dir in _project_dirs(paths):
         name = project_dir.name
+        owner = repo_ownership_advice(project_dir)
+        if owner is not None:
+            report.append(f"WARNING {owner}")
         left = _left_as_is_line(paths, name)
         if left is not None:
             report.append(left)

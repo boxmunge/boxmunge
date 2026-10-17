@@ -184,7 +184,7 @@ boxmunge supports two project sources, declared in `manifest.yml` via the `sourc
 
 `deploy <project>` executes these steps in order:
 
-1. Resolve source -- locate the bundle in the inbox, or pull from the git repo
+1. Resolve source -- locate the bundle in the inbox, or fetch the git repo and resolve the ref to a full commit SHA (checked out, detached, once the snapshot below is taken)
 2. Unpack -- a bundle is extracted into `projects/<project>/.releases/incoming/`, not over the live project
 3. Validate -- manifest schema and required fields (`id`, `source`, `project`, `hosts`, services), project identity (ULID), the user `compose.yml` against the hardening floor, and the bundle's contents against the server's data directories. For a bundle all of this runs on the unpacked copy: a rejected bundle never touches the live project files, so no later timer or restart can start it
 4. Pre-deploy snapshot -- encrypted backup of the current data, taken with the outgoing release's own backup configuration (unless `--no-snapshot`)

@@ -2,9 +2,11 @@
 
 A bundle project puts back the release the last deploy replaced (kept in
 ``.releases/previous/``) together with the data snapshot taken just before
-that deploy. A git project restores that snapshot and checks out the
-previous ref. Whenever either half is missing, rollback refuses and says
-why; it never reports success for a half-done rollback (audit C-02).
+that deploy. A git project checks out the commit the last deploy (or an
+open install) replaced and restores that snapshot (commands/rollback_git).
+Both run in a `rollback` install transaction. Whenever either half is
+missing, rollback refuses and says why; it never reports success for a
+half-done rollback (audit C-02).
 """
 
 import os
@@ -13,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from boxmunge.commands.deploy import (
-    GIT_WHILE_STAGED, deploy_locked, replace_release, run_pre_deploy_hook,
+    replace_release, run_pre_deploy_hook,
 )
 from boxmunge.commands.release_config import decide_release_users, generate_release_config
 from boxmunge.commands.restore import restore_locked
@@ -42,9 +44,8 @@ from boxmunge.release_txn import (
     InstallTxn, advance, close_txn, load_txn, open_txn, stale_reason, start_refusal,
     supersede_txn,
 )
-from boxmunge.staged_release import has_slot, sweep_debris
+from boxmunge.staged_release import sweep_debris
 from boxmunge.staging_isolation import StagingIsolationError, check_install_isolation
-from boxmunge.state import read_state
 
 
 class RollbackUnavailable(Exception):
@@ -69,7 +70,7 @@ def _backup_type(manifest_path: Path) -> str:
     return manifest.get("backup", {}).get("type", "none")
 
 
-def _required_snapshot(snapshot: str, backup_type: str, paths: BoxPaths,
+def required_snapshot(snapshot: str, backup_type: str, paths: BoxPaths,
                        project_name: str) -> str:
     """The data snapshot to restore ("" for a project with no data)."""
     if backup_type == "none":
@@ -101,16 +102,8 @@ def find_rollback_target(paths: BoxPaths, project_name: str,
         raise RollbackUnavailable("the project has not been deployed")
 
     if (project_dir / "repo").exists():
-        if has_slot(paths, project_name):
-            raise RollbackUnavailable(GIT_WHILE_STAGED.format(p=project_name))
-        state = read_state(paths.project_deploy_state(project_name))
-        history = state.get("history", [])
-        if not history or not history[0].get("ref"):
-            raise RollbackUnavailable("there is no previous deploy in its history")
-        snapshot = _required_snapshot(
-            state.get("pre_deploy_snapshot", ""),
-            _backup_type(project_dir / "manifest.yml"), paths, project_name)
-        return RollbackTarget(ref=history[0]["ref"], snapshot=snapshot, tree=None)
+        from boxmunge.commands.rollback_git import git_rollback_target
+        return git_rollback_target(paths, project_name, txn)
 
     try:
         previous = load_previous_release(paths, project_name)
@@ -126,7 +119,7 @@ def find_rollback_target(paths: BoxPaths, project_name: str,
     if (txn is not None and txn.source != "rollback" and txn.replaced_ref is not None
             and not txn.abandoning and txn.reached("previous_kept")):
         paired = txn.snapshot
-    snapshot = _required_snapshot(
+    snapshot = required_snapshot(
         paired, _backup_type(previous.tree / "manifest.yml"), paths, project_name)
     return RollbackTarget(
         ref=previous.ref, snapshot=snapshot, tree=previous.tree,
@@ -236,7 +229,9 @@ def _open_install(project_name: str, paths: BoxPaths) -> tuple[bool, InstallTxn 
 def _rollback_finished(paths: BoxPaths, project_name: str, txn: InstallTxn | None) -> bool:
     """A rollback that reached switching drops its target's metadata only
     once production runs the target: a crash after that left it open."""
+    # A git rollback keeps no previous.json: its rerun replays the switch.
     return (txn is not None and txn.source == "rollback" and txn.reached("switching")
+            and not (paths.project_dir(project_name) / "repo").is_dir()
             and not os.path.lexists(paths.project_releases(project_name) / "previous.json"))
 
 
@@ -270,11 +265,8 @@ def _run_rollback_inner(
     project_name: str, paths: BoxPaths, target: RollbackTarget, txn: InstallTxn | None,
 ) -> int:
     if target.tree is None:
-        if target.snapshot and not _restore_data(project_name, paths, target.snapshot, None):
-            return 1
-        print("\n--- Redeploying previous version ---")
-        rc = deploy_locked(project_name, paths, ref=target.ref, no_snapshot=True,
-                           component="rollback")
+        from boxmunge.commands.rollback_git import roll_back_git
+        rc = roll_back_git(project_name, paths, target, txn)
     else:
         rc = _roll_back_release(project_name, paths, target, target.tree, txn)
     if rc != 0:
@@ -339,15 +331,15 @@ def _roll_back_release(project_name: str, paths: BoxPaths, target: RollbackTarge
         txn = advance(paths, project_name, txn, "installed")
     crash_point("rollback.installed")
     if not txn.reached("data_restored"):
-        if target.snapshot and not _restore_rolled_back_data(
+        if target.snapshot and not restore_rolled_back_data(
                 project_name, paths, manifest, target.snapshot, txn):
             return 1
         txn = advance(paths, project_name, txn, "data_restored")
     crash_point("rollback.data_restored")
-    return _start_rolled_back(project_name, paths, manifest, target, txn)
+    return start_rolled_back(project_name, paths, manifest, target, txn)
 
 
-def _restore_rolled_back_data(project_name: str, paths: BoxPaths, manifest: dict,
+def restore_rolled_back_data(project_name: str, paths: BoxPaths, manifest: dict,
                               snapshot: str, txn: InstallTxn) -> bool:
     # restore runs the restored release's compose; give it a matching
     # overlay, and record its files and mounts as a deploy does (it was
@@ -368,7 +360,7 @@ def _restore_rolled_back_data(project_name: str, paths: BoxPaths, manifest: dict
     return _restore_data(project_name, paths, snapshot, txn.id)
 
 
-def _start_rolled_back(project_name: str, paths: BoxPaths, manifest: dict,
+def start_rolled_back(project_name: str, paths: BoxPaths, manifest: dict,
                        target: RollbackTarget, txn: InstallTxn) -> int:
     print("\n--- Starting the previous release ---")
     if not txn.reached("switching"):
@@ -393,7 +385,7 @@ def _start_rolled_back(project_name: str, paths: BoxPaths, manifest: dict,
     crash_point("rollback.switching")
     rc = replace_release(project_name, paths, manifest, target.ref, None,
                          component="rollback", txn=txn.id)
-    if rc == 0:
+    if rc == 0 and target.tree is not None:
         discard_previous_release(paths, project_name)
     close_txn(paths, project_name, txn)
     return rc
