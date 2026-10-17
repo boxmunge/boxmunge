@@ -144,3 +144,16 @@ def test_never_deployed_git_discard_leaves_the_checkout(paths, legacy_git, capsy
     assert "never deployed" in capsys.readouterr().out
     assert legacy_stage(paths, "myapp") is None
     legacy_run.up.assert_not_called()
+
+
+def test_clean_up_removes_only_copies_of_production_data(paths, legacy) -> None:
+    """A 0.10.1 stage has no slot recording what staging made: its copy of
+    production's data goes, a -staging entry that is no such copy stays."""
+    from boxmunge.legacy_stage_ops import _clean_up
+    (legacy / "data-staging").mkdir()
+    own = legacy / "assets-staging"
+    own.mkdir()
+    (own / "keep.txt").write_text("code\n")
+    _clean_up(paths, "myapp")
+    assert not (legacy / "data-staging").exists()
+    assert (own / "keep.txt").read_text() == "code\n"

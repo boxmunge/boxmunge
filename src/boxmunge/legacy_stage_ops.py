@@ -299,8 +299,10 @@ def _production_code(paths: BoxPaths, project: str, stage: LegacyStage,
 
 
 def _clean_up(paths: BoxPaths, project: str) -> None:
-    """Step 5."""
-    remove_retired_staging_data(paths, project)
+    """Step 5. A 0.10.1 stage has no slot, so nothing records a copy it
+    made of an entry only its staged release used: only copies of
+    production's data are staging's (staging_copies)."""
+    remove_retired_staging_data(paths, project, made=())
     pdir = paths.project_dir(project)
     for path in (*(pdir / name for name in LEGACY_STAGING_FILES),
                  paths.project_bind_record(project, staging=True)):
