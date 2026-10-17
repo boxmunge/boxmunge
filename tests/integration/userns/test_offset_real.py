@@ -64,4 +64,7 @@ def test_docker_userns_agrees_with_what_remapped_root_can_write(dind_record) -> 
                               capture_output=True).returncode == 0
     assert check_docker_userns(dind_record).status == "error" and not caddy_writes()
     os.chown(logs, s, s)
+    logs.chmod(0o550)  # the owner's, but not writable by it
+    assert check_docker_userns(dind_record).status == "error" and not caddy_writes()
+    logs.chmod(0o750)
     assert check_docker_userns(dind_record).status == "ok" and caddy_writes()

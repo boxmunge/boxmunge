@@ -49,6 +49,21 @@ def test_caddy_logs_must_belong_to_container_root(paths, monkeypatch) -> None:
     assert f"chown -hR {S}:{S} {paths.caddy / 'logs'}" in check.detail
 
 
+@pytest.mark.parametrize("mode", [0o500, 0o650, 0o600])
+def test_caddy_logs_must_be_writable_by_its_owner(paths, monkeypatch, mode) -> None:
+    """S:S is not enough: Caddy has no DAC override, so without the owner's
+    write and search bits it still cannot create access.log."""
+    remap_box(paths, monkeypatch)
+    logs = _caddy_logs(paths, monkeypatch, S, S)
+    logs.chmod(mode)
+    try:
+        check = hc.check_docker_userns(paths)
+    finally:
+        logs.chmod(0o750)
+    assert check.status == "error" and f"mode {mode:04o}" in check.detail
+    assert f"sudo chmod 750 {logs}" in check.detail
+
+
 def test_missing_caddy_logs_is_an_error_not_a_crash(paths, monkeypatch) -> None:
     remap_box(paths, monkeypatch)
     check = hc.check_docker_userns(paths)

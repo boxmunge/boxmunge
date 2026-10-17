@@ -84,6 +84,12 @@ def _caddy_logs_problem(paths: BoxPaths, s: int) -> str | None:
         return (f"{logs} is owned by {st.st_uid}:{st.st_gid}, not {s}:{s} (Caddy's root in "
                 f"the remapped namespace), so Caddy cannot write its access log. Fix "
                 f"(-h: never through a link Caddy made): sudo chown -hR {s}:{s} {logs}")
+    # Caddy has no DAC override (cap_drop ALL): owning the directory is not
+    # enough without the owner's write and search bits.
+    if st.st_mode & 0o300 != 0o300:
+        return (f"{logs} is {s}:{s} but mode {stat.S_IMODE(st.st_mode):04o}, which its owner "
+                f"cannot create files in, so Caddy cannot write its access log. "
+                f"Fix: sudo chmod 750 {logs}")
     return None
 
 
