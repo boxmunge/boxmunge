@@ -6,8 +6,9 @@ Root timers and deploy-user commands coordinate through advisory flocks.
 To rule out deadlock, a process only ever acquires them in this order
 (outermost first) and releases them in reverse:
 
-1. ``upgrade-state/upgrade.lock``: one platform upgrade at a time (upgrade
-   shim, ``auto-update``, ``check-probation``).
+1. ``upgrade-root/upgrade.lock``, then the legacy ``upgrade-state/upgrade.lock``
+   older shims take: one platform upgrade at a time (upgrade shim,
+   ``auto-update``, ``check-probation``, ``legacy-stage``).
 2. ``state/container-updates/.lock``: one ``container-update`` run at a time.
 3. ``state/<project>.lock`` (``project_lock``): every mutation of one
    project's compose, Caddy, or lifecycle state: deploy, stage, promote,

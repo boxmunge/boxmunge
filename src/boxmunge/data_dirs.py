@@ -24,6 +24,7 @@ directory is an operator's deliberate act, never a side effect of a deploy.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 from contextlib import contextmanager
@@ -35,6 +36,7 @@ from typing import TYPE_CHECKING, Callable, Iterable, Iterator
 from boxmunge.bind_mounts import BindMountError, bind_mounted_dirs
 from boxmunge.bundle import BOX_OWNED_ENTRIES, BOXMUNGE_ENTRIES, is_placeholder
 from boxmunge.fileutil import atomic_write_text
+from boxmunge.fs_nofollow import mkdir_p_deploy
 from boxmunge.log import log_warning
 
 if TYPE_CHECKING:
@@ -215,7 +217,7 @@ def classify(project_dir: Path, release_tree: Path | None,
 def save_record(dirs: DataDirs) -> None:
     """Persist ``dirs.recorded``, before anything it protects can change."""
     path = record_path(dirs.project_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    mkdir_p_deploy(path.parent)
     doc = {"version": RECORD_VERSION, "data_dirs": sorted(dirs.recorded)}
     atomic_write_text(path, json.dumps(doc) + "\n", mode=0o644)
 
@@ -255,7 +257,9 @@ def set_aside_announcer(paths: BoxPaths, project_name: str, component: str) -> A
 
 
 def _move_contents(entry: Path, dest: Path) -> None:
-    dest.mkdir(parents=True)
+    if dest.exists():
+        raise FileExistsError(errno.EEXIST, "already exists", str(dest))
+    mkdir_p_deploy(dest)
     if entry.is_dir() and not entry.is_symlink():
         # Move the contents, not the directory: a running container's
         # read-only bind mount resolves to the directory's inode.

@@ -204,7 +204,7 @@ def test_a_git_failure_is_an_error_not_no_commit(tmp_path) -> None:
 
 def test_a_git_timeout_is_a_git_ref_error(tmp_path) -> None:
     hung = subprocess.TimeoutExpired(["git"], 60)
-    with patch.object(git_slot.subprocess, "run", side_effect=hung), \
+    with patch.object(git_slot, "run_as_deploy", side_effect=hung), \
             pytest.raises(GitRefError, match="timed out"):
         checkout_detached(tmp_path, "a" * 40)
 
@@ -221,34 +221,32 @@ def test_run_as_root_git_runs_as_the_deploy_user(repos, monkeypatch) -> None:
     """The repository is deploy's: its config (filters, fsmonitor) must never
     run as root, and git refuses a repository another user owns."""
     import pwd
-    *_, prod = repos
-    seen = {}
-    real = subprocess.run
 
-    def run(argv, **kw):
+    from boxmunge import as_deploy
+    *_, prod = repos
+    seen, argvs = {}, []
+    real = subprocess.Popen
+
+    def popen(argv, **kw):
+        argvs.append(argv)
         seen.update(kw)
         return real(argv, **{k: v for k, v in kw.items()
                              if k not in ("user", "group", "extra_groups")})
-    monkeypatch.setattr(git_slot, "running_as_root", lambda: True)
+    for module in (git_slot, as_deploy):
+        monkeypatch.setattr(module, "running_as_root", lambda: True)
     owner = prod.stat().st_uid  # deploy owns the repository
     monkeypatch.setattr(git_slot.pwd, "getpwnam", lambda name: pwd.struct_passwd(
         (name, "x", owner, 5678, "", "/home/deploy", "/bin/sh")))
     monkeypatch.setenv("SUDO_USER", "operator")
-    monkeypatch.setattr(git_slot.subprocess, "run", run)
-    argvs = []
-    real_run = run
-
-    def recording(argv, **kw):
-        argvs.append(argv)
-        return real_run(argv, **kw)
-    monkeypatch.setattr(git_slot.subprocess, "run", recording)
+    monkeypatch.setattr(as_deploy.subprocess, "Popen", popen)
     assert head_sha(prod)
+    # Deploy's uid and gid, none of its groups (a hook gets docker; git does not).
     assert (seen["user"], seen["group"], seen["extra_groups"]) == (owner, 5678, [])
     # Nothing of root's session reaches a process deploy controls.
     assert seen["stdin"] is subprocess.DEVNULL and seen["start_new_session"] is True
-    # The config deploy-run git reads: deploy's (HOME) and the system's.
-    assert seen["env"]["HOME"] == "/home/deploy"
-    assert set(seen["env"]) <= {"PATH", "HOME", "LANG"}
+    # The deploy shell's environment: deploy's config (HOME) and the system's.
+    assert seen["env"]["HOME"] == "/home/deploy" and seen["env"]["USER"] == "deploy"
+    assert "SUDO_USER" not in seen["env"]
     assert argvs[0][1:3] == ["-c", "core.hooksPath=/dev/null"]
 
 

@@ -39,12 +39,14 @@ export PYTHONSAFEPATH=1
 
 BOXMUNGE_ROOT="${BOXMUNGE_ROOT:-/opt/boxmunge}"
 STATE_DIR="$BOXMUNGE_ROOT/upgrade-state"
-LOCK_FILE="$STATE_DIR/upgrade.lock"
 ACTIVE_SLOT_FILE="$STATE_DIR/active-slot"
 BLOCKLIST_FILE="$STATE_DIR/blocklist.json"
 PROBATION_FILE="$STATE_DIR/probation.json"
-# Root-only (BOXMUNGE_ROOT is root:root 0755); see failure_count in state.sh.
+# Root-only (BOXMUNGE_ROOT is root:root 0755); see acquire_lock and
+# failure_count in state.sh.
 UPGRADE_ROOT_DIR="$BOXMUNGE_ROOT/upgrade-root"
+LOCK_FILE="$UPGRADE_ROOT_DIR/upgrade.lock"
+LEGACY_LOCK_FILE="$STATE_DIR/upgrade.lock"
 INTERRUPTED_FILE="$UPGRADE_ROOT_DIR/interrupted.json"
 PIP_FAILURES_FILE="$UPGRADE_ROOT_DIR/pip-failures.json"
 # The last release whose bundle has no requirements-mcp.txt. Every install

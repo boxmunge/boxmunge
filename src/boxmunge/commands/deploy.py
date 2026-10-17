@@ -198,8 +198,11 @@ def run_pre_deploy_hook(project_name: str, paths: BoxPaths, manifest: dict) -> i
     """The manifest's pre-deploy command. Production is not touched yet.
 
     It runs on the host in the project directory, split into words but with
-    no shell, so `&&`, pipes and `$VAR` reach the program as arguments.
+    no shell, so `&&`, pipes and `$VAR` reach the program as arguments. It
+    is project code, so it runs as deploy in the deploy shell's environment,
+    also when an operator deploys with sudo (as_deploy).
     """
+    from boxmunge.as_deploy import NoDeployUser, run_as_deploy
     from boxmunge.manifest_fields import deploy_problems
     deploy = manifest.get("deploy", {})
     problems = deploy_problems(deploy)
@@ -216,10 +219,11 @@ def run_pre_deploy_hook(project_name: str, paths: BoxPaths, manifest: dict) -> i
         return 1
     print(f"  Running pre-deploy: {pre_deploy}")
     try:
-        subprocess.run(
-            shlex.split(pre_deploy), shell=False, cwd=project_dir,
-            check=True, capture_output=True, text=True,
-        )
+        run_as_deploy(shlex.split(pre_deploy), project_dir, supplementary_groups=True)
+    except NoDeployUser as e:
+        print(f"  ERROR: Pre-deploy not run: {e}. Create the deploy user (install.sh "
+              "does), or deploy as deploy through its shell.", file=sys.stderr)
+        return 1
     except subprocess.CalledProcessError as e:
         print(f"  ERROR: Pre-deploy failed: {e.stderr}", file=sys.stderr)
         return 1

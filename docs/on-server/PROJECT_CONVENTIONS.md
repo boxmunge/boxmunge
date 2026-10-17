@@ -208,6 +208,8 @@ deploy:
   # restarted; a non-zero exit stops the deploy. It is split into words but run
   # without a shell: `&&`, pipes, redirects and `$VAR` are passed to the program
   # as plain arguments, so put more than one step in a script (mode 0755).
+  # It runs as deploy, with the deploy shell's environment and no stdin, also
+  # when an operator deploys with sudo.
   # Builds (npm ci, asset compilation) belong in the image's Dockerfile.
   pre_deploy: "boxmunge-scripts/pre-deploy.sh"
 

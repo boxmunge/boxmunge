@@ -5,7 +5,8 @@ into bin/ (v0.6.x shims never re-run install.sh at all; later ones re-run it
 only when it changed, and it can fail). So the bundle's shim must be one
 self-contained file. Each case builds the real bundle (`make bundle`), runs
 shim_hop.sh as root in a throwaway container with a released old shim, and
-checks the shim it leaves installed.
+checks the shim it leaves installed, and that the new shim, once installed,
+waits for the old shim's upgrade (which locks only the legacy upgrade.lock).
 
 The old shims in old_shims/ are copies of released files: v0.10.1 (the
 latest release before the shim was split, identical to main at the time)
@@ -53,6 +54,8 @@ def _hop(bundle: Path, mode: str, old_shim: str) -> dict[str, str]:
     facts["hop_rc"] = re.search(r"^HOP rc=(\d+)$", result.stdout, re.M).group(1)
     for name, rc, out in re.findall(r"^CMD (\S+) rc=(\d+) :: (.*)$", result.stdout, re.M):
         facts[f"{name}_rc"], facts[f"{name}_out"] = rc, out
+    for name, rc, out in re.findall(r"^DURING (\S+) rc=(\d+) :: (.*)$", result.stdout, re.M):
+        facts[f"during_{name}_rc"], facts[f"during_{name}_out"] = rc, out
     facts["log"] = result.stdout
     return facts
 
@@ -82,6 +85,12 @@ def test_old_shim_hop_leaves_a_working_shim(bundle: Path, old_shim: str, mode: s
     upgraded = mode == "ok" or old_shim.endswith("v0.6.3")
     if upgraded:
         assert facts["hop_rc"] == "0", log
+        # Mid-hop, the old shim holds only the legacy lock; the new shim it
+        # installed must not start a second upgrade or act on probation.
+        assert facts["during_target_rc"] == "1", log
+        assert "Another upgrade is in progress" in facts["during_target_out"], log
+        assert facts["during_check-probation_rc"] == "0", log
+        assert "Another upgrade is in progress; skipping" in facts["during_check-probation_out"], log
         assert facts["LIVE"] == "/opt/boxmunge/env-b" and facts["PROBATION"] == "yes", log
         # The new shim honours the probation the old one started.
         assert facts["run_rc"] == "0" and "is on probation" in facts["run_out"], log

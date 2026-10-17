@@ -25,8 +25,9 @@ from pathlib import Path
 from collections.abc import Collection
 from typing import Any
 
+from boxmunge.as_deploy import NoDeployUser, deploy_account, run_as_deploy
 from boxmunge.fs_nofollow import (
-    chmod_nofollow, chown_tree_deploy, copy_entry_nofollow, running_as_root,
+    chmod_nofollow, chown_tree_deploy, copy_entry_nofollow, mkdir_p_deploy, running_as_root,
 )
 
 GIT_TIMEOUT = 300
@@ -56,37 +57,24 @@ def _require_deploy_owned(repo: Path, uid: int) -> None:
                               f"uid {owner}")
 
 
-def _as_deploy(repo: Path) -> dict:
-    """subprocess arguments that run git as the deploy user when we are root.
-    The repository and its config are deploy's, so whatever git runs from
-    them (filters, fsmonitor) is deploy's code: it runs as deploy, with no
-    stdin, in its own session (no controlling terminal to inject into) and
-    a minimal environment (git refuses another user's repository anyway).
-    It reads the config git run by deploy itself reads: deploy's own and
-    the root-owned system config (/etc/gitconfig), so a command run with
-    sudo sees the filters, proxy and safe.directory the deploy shell does."""
-    if not running_as_root():
-        return {}
-    try:
-        pw = pwd.getpwnam("deploy")
-    except KeyError as e:
-        raise GitRefError("running as root, git runs as the deploy user, and there is no "
-                          "deploy user") from e
-    _require_deploy_owned(repo, pw.pw_uid)
-    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": pw.pw_dir,
-           "LANG": os.environ.get("LANG", "C.UTF-8")}
-    return {"user": pw.pw_uid, "group": pw.pw_gid, "extra_groups": [], "env": env,
-            "stdin": subprocess.DEVNULL, "start_new_session": True}
-
-
 def _git(args: list[str], cwd: Path, *, timeout: int = 60) -> subprocess.CompletedProcess:
-    """git's result; a hang or output that is not UTF-8 raises GitRefError,
-    so callers handle one error type. The repository's hooks never run."""
+    """git's result; a hang, output that is not UTF-8 or no deploy user to
+    run it as root raises GitRefError, so callers handle one error type.
+
+    The repository and its config are deploy's, so whatever git runs from
+    them (filters) is deploy's code: as root it runs as deploy, without
+    deploy's supplementary groups, and like every run it gets the deploy
+    shell's environment, no stdin and its own session (as_deploy). It reads
+    the config git run by deploy itself reads: deploy's own and the system
+    config (/etc/gitconfig). The repository's hooks and fsmonitor never run."""
     try:
-        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null",
-                               "-c", "core.fsmonitor=false", *args], cwd=cwd,
-                              capture_output=True, text=True, timeout=timeout, check=False,
-                              **_as_deploy(cwd))
+        if running_as_root():
+            _require_deploy_owned(cwd, deploy_account().pw_uid)
+        return run_as_deploy(["git", "-c", "core.hooksPath=/dev/null",
+                              "-c", "core.fsmonitor=false", *args], cwd,
+                             supplementary_groups=False, timeout=timeout, check=False)
+    except NoDeployUser as e:
+        raise GitRefError(str(e)) from e
     except subprocess.TimeoutExpired as e:
         raise GitRefError(f"git {args[0]} in {cwd} timed out after {timeout}s") from e
     except UnicodeDecodeError as e:
@@ -127,6 +115,25 @@ def fetch(repo: Path) -> None:
                           f"{_fetch_hint(repo, result.stderr)}")
 
 
+def clone(url: str, dest: Path, ref: str | None = None) -> None:
+    """Clone `url` into `dest`, which must not exist, at `ref` if given.
+
+    Like every git call it runs through _git: as root, as deploy, so the
+    repository is deploy's from the start. dest's parent is made
+    deploy-owned first; one that exists must already be deploy's."""
+    if ref is not None:
+        _check_name(ref)
+    if os.path.lexists(dest):
+        raise GitRefError(f"{dest} already exists; remove it and retry")
+    mkdir_p_deploy(dest.parent)
+    branch = ["--branch", ref] if ref is not None else []
+    result = _git(["clone", "-q", "--no-recurse-submodules", *branch, "--", url, str(dest)],
+                  dest.parent, timeout=GIT_TIMEOUT)
+    if result.returncode != 0:
+        hint = _fetch_hint(dest, result.stderr) if _REMOTE_AUTH.search(result.stderr) else ""
+        raise GitRefError(f"git clone of {url} failed: {result.stderr.strip()}{hint}")
+
+
 # git's own words for a file it cannot write in the repository, and for a
 # remote that refused who asked (ssh, or https credentials).
 _LOCAL_PERMISSION = re.compile(r"(cannot open|unable to create|insufficient permission)"
@@ -136,7 +143,7 @@ _REMOTE_AUTH = re.compile(r"Permission denied \(publickey|Host key verification 
 
 
 def _git_user() -> str:
-    """Who runs git: deploy when boxmunge runs as root (_as_deploy)."""
+    """Who runs git: deploy when boxmunge runs as root (_git)."""
     return "deploy" if running_as_root() else pwd.getpwuid(os.getuid()).pw_name
 
 

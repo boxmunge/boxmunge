@@ -104,27 +104,44 @@ active_venv() { echo "$BOXMUNGE_ROOT/env-$ACTIVE_SLOT"; }
 # acquire_lock [skip]: take upgrade.lock once per run. With "skip", a busy
 # lock exits 0 (the health timer retries on its next fire); otherwise it dies.
 #
-# Deploy can plant anything at upgrade.lock, and swap it between any check
+# upgrade.lock is in root-only upgrade-root/, so deploy cannot replace it to
+# let a second upgrade run. Shims up to 0.10.1 lock upgrade-state/upgrade.lock
+# (LEGACY_LOCK_FILE) instead: the one that installs this shim keeps running,
+# holding only that, until its upgrade ends, and a 0.10.1 venv that upgrade
+# rolls back to locks only that too. So this shim locks both, the root-only
+# one first; the legacy lock matters only against those. It goes once no box
+# can run a 0.10.1 shim or venv: when a release's pre-flight refuses to be
+# installed over 0.10.1 or earlier.
+#
+# Deploy can plant anything at the legacy lock, and swap it between any check
 # and the open. Every bash redirection follows a link, and the writing ones
-# create a missing target, so bash never opens it: open_lock_and_reexec has
-# Python open it without following a link or blocking on a FIFO, refuse
-# anything but a plain regular file, put it on fd 9 and run this shim again
-# with the same arguments. That run finds BM_UPGRADE_LOCK_FD=9 and checks fd
-# 9 is upgrade.lock itself before it takes the flock.
+# create a missing target, so bash never opens a lock: open_lock_and_reexec
+# has Python open both without following a link or blocking on a FIFO, refuse
+# anything but a plain regular file, put them on fds 9 and 8 and run this shim
+# again with the same arguments. That run finds BM_UPGRADE_LOCK_FD=9 and
+# checks fds 9 and 8 are the two lock files before it takes the flocks.
 acquire_lock() {
     [[ "$LOCK_HELD" -eq 1 ]] && return 0
     if [[ "${BM_UPGRADE_LOCK_FD:-}" != 9 ]]; then
+        refuse_symlink "$UPGRADE_ROOT_DIR"
+        [[ -d "$UPGRADE_ROOT_DIR" ]] || mkdir -m 0700 "$UPGRADE_ROOT_DIR"
         mkdir -p "$STATE_DIR"
         refuse_symlink "$LOCK_FILE"
+        refuse_symlink "$LEGACY_LOCK_FILE"
         open_lock_and_reexec
     fi
-    unset BM_UPGRADE_LOCK_FD  # children inherit fd 9, never the claim that it is checked
-    python3 -c 'import os, stat, sys
-fd, name = os.fstat(9), os.lstat(sys.argv[1])
-sys.exit(not (stat.S_ISREG(fd.st_mode) and (fd.st_dev, fd.st_ino) == (name.st_dev, name.st_ino)))' \
-        "$LOCK_FILE" 2>/dev/null \
-        || die "fd 9 is not $LOCK_FILE (it was replaced, or the descriptor came from elsewhere); refusing to lock it. Remove it and re-run."
-    if ! flock -n 9; then
+    unset BM_UPGRADE_LOCK_FD  # children inherit fds 9 and 8, never the claim that they are checked
+    local why
+    why="$(python3 -c 'import os, stat, sys
+for fd, path in ((9, sys.argv[1]), (8, sys.argv[2])):
+    try:
+        held, name = os.fstat(fd), os.lstat(path)
+    except OSError:
+        sys.exit(f"fd {fd} is not {path}")
+    if not (stat.S_ISREG(held.st_mode) and (held.st_dev, held.st_ino) == (name.st_dev, name.st_ino)):
+        sys.exit(f"fd {fd} is not {path}")' "$LOCK_FILE" "$LEGACY_LOCK_FILE" 2>&1)" \
+        || die "$why (it was replaced, or the descriptor came from elsewhere); refusing to lock it. Remove it and re-run."
+    if ! flock -n 9 || ! flock -n 8; then
         [[ "${1:-}" == "skip" ]] && { log "Another upgrade is in progress; skipping"; exit 0; }
         die "Another upgrade is in progress"
     fi
@@ -132,31 +149,32 @@ sys.exit(not (stat.S_ISREG(fd.st_mode) and (fd.st_dev, fd.st_ino) == (name.st_de
 }
 
 # open_lock_and_reexec: see acquire_lock. Replaces this process; prints a
-# FATAL line like die() when upgrade.lock cannot be used.
+# FATAL line like die() when a lock file cannot be used.
 open_lock_and_reexec() {
     exec python3 -c '
 import errno, os, stat, sys, time
-path, shell, shim, args = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+locks, shell, shim, args = sys.argv[1:3], sys.argv[3], sys.argv[4], sys.argv[5:]
 
-def fatal(what):
+def fatal(path, what):
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     sys.exit(f"{now} boxmunge-upgrade: FATAL: {path} {what}; refusing to use it as root. Remove it and re-run.")
 
-try:
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-except OSError as e:
-    fatal("is a symlink" if e.errno == errno.ELOOP else f"cannot be opened ({e.strerror})")
-st = os.fstat(fd)
-if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-    fatal("is not a plain regular file")
-os.set_blocking(fd, True)
-if fd != 9:
-    os.dup2(fd, 9)
-    os.close(fd)
-os.set_inheritable(9, True)
+for path, target in zip(locks, (9, 8)):
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    except OSError as e:
+        fatal(path, "is a symlink" if e.errno == errno.ELOOP else f"cannot be opened ({e.strerror})")
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        fatal(path, "is not a plain regular file")
+    os.set_blocking(fd, True)
+    if fd != target:
+        os.dup2(fd, target)
+        os.close(fd)
+    os.set_inheritable(target, True)
 os.environ["BM_UPGRADE_LOCK_FD"] = "9"
 os.execv(shell, [shell, shim, *args])
-' "$LOCK_FILE" "$BASH" "$SHIM_PATH" "${SHIM_ARGS[@]+"${SHIM_ARGS[@]}"}"
+' "$LOCK_FILE" "$LEGACY_LOCK_FILE" "$BASH" "$SHIM_PATH" "${SHIM_ARGS[@]+"${SHIM_ARGS[@]}"}"
 }
 
 # is_blocklisted <version>: 0 if listed, 1 if not. A blocklist that is not a

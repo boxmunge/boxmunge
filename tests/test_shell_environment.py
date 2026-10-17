@@ -6,7 +6,8 @@ from unittest.mock import patch
 
 import pytest
 
-from boxmunge.shell import SHELL_PATH, main, restrict_environment
+from boxmunge.as_deploy import SHELL_PATH
+from boxmunge.shell import main, restrict_environment
 
 CLIENT = {
     "BASH_ENV": "$(touch /tmp/pwned)", "ENV": "/tmp/x", "LD_PRELOAD": "/tmp/x.so",

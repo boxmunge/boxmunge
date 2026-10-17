@@ -113,7 +113,8 @@ staged release. Deploy such a commit with `prod-deploy`. As a bundle may not shi
 `*-staging` entry, a git stage is refused while the project directory holds one that is neither
 production's data nor staging's copy: rename it.
 
-boxmunge always runs git as the deploy user, also when a command runs as root (with `sudo`):
+boxmunge always runs git as the deploy user, also when a command runs as root (with `sudo`),
+including the clone `add-git-project` makes, so the project tree it leaves is deploy's:
 `repo/` must be deploy's, origin must accept deploy's SSH key or credentials, and git reads
 deploy's own config and the system's (`/etc/gitconfig`), the same in the deploy shell and under
 `sudo`. An upgrade's dry run and apply warn about each git project whose `repo/` deploy does not

@@ -9,7 +9,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, TYPE_CHECKING
@@ -126,18 +126,37 @@ class UpgradeInProgress(Exception):
 
 @contextmanager
 def upgrade_lock(paths: BoxPaths) -> Iterator[None]:
-    """Hold upgrade.lock, the flock the upgrade shim takes, without waiting.
+    """Hold the locks the upgrade shim takes, without waiting.
 
-    Raises UpgradeInProgress if it is held. The directory is deploy-writable,
-    so the file is opened with open_regular_nofollow: a planted link or FIFO
-    is an UpgradeStateError naming it, instead of root creating or opening
-    some other file, or blocking on the FIFO.
+    Raises UpgradeInProgress if either is held. upgrade.lock is in root-only
+    upgrade-root/, so deploy cannot replace it to let two upgrades run. The
+    legacy lock in upgrade-state/ is what shims up to 0.10.1 and their venvs
+    take, and one of them is still running while it upgrades a box to this
+    release (acquire_lock in scripts/boxmunge-upgrade.d/state.sh says when
+    it can go). Both are opened with open_regular_nofollow, so a planted
+    link or FIFO is an UpgradeStateError naming it, instead of root opening
+    some other file or blocking on the FIFO.
     """
-    paths.upgrade_state.mkdir(parents=True, exist_ok=True)
+    if paths.upgrade_root.is_symlink():
+        raise UpgradeStateError(f"{paths.upgrade_root} is a symlink; refusing to use it "
+                                "as root. Remove it and re-run.")
+    for directory, mode in ((paths.upgrade_root, 0o700), (paths.upgrade_state, 0o777)):
+        try:
+            directory.mkdir(mode=mode, parents=True, exist_ok=True)
+        except OSError as e:
+            raise UpgradeStateError.of(directory, e) from e
+    with ExitStack() as held:
+        for lock in (paths.upgrade_lock, paths.legacy_upgrade_lock):
+            held.enter_context(_flock(lock))
+        yield
+
+
+@contextmanager
+def _flock(path: Path) -> Iterator[None]:
     try:
-        fd = open_regular_nofollow(paths.upgrade_lock, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+        fd = open_regular_nofollow(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
     except OSError as e:
-        raise UpgradeStateError.of(paths.upgrade_lock, e) from e
+        raise UpgradeStateError.of(path, e) from e
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

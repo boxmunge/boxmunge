@@ -124,7 +124,12 @@ class BoxPaths:
         self.upgrade_state = root / "upgrade-state"
         self.blocklist = self.upgrade_state / "blocklist.json"
         self.probation = self.upgrade_state / "probation.json"
-        self.upgrade_lock = self.upgrade_state / "upgrade.lock"
+        # Root-only (BOXMUNGE_ROOT is root:root 0755): deploy cannot replace
+        # the lock there to let a second upgrade run. The legacy lock is the
+        # one shims up to 0.10.1 take (upgrade_state.upgrade_lock).
+        self.upgrade_root = root / "upgrade-root"
+        self.upgrade_lock = self.upgrade_root / "upgrade.lock"
+        self.legacy_upgrade_lock = self.upgrade_state / "upgrade.lock"
         self.active_slot = self.upgrade_state / "active-slot"
         self.cosign_pub = self.config / "cosign.pub"
         self.container_update_state = self.state / "container-updates"
