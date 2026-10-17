@@ -38,14 +38,13 @@ _SPAWN_MODULES = set(_SPAWNERS) | {"asyncio.subprocess"}
 # A new spawn site fails test_every_spawn_is_classified until it is one or
 # the other. "?" is a program the scan cannot read from the source.
 NOT_DOCKER = {
-    ("as_deploy.py", "run_as_deploy", "?"): "manifest pre_deploy host command, as deploy",
+    ("as_deploy.py", "run_as_deploy", "?"): "the manifest's pre_deploy hook, and git in the project's repo or the slot's clone",
     ("commands/add_git_project_cmd.py", "run_add_git_project", "git"): "clones the project repo",
     ("commands/auto_update_cmd.py", "run_auto_update", "?"): "execs the upgrade shim, whose boxmunge-server scrubs its own docker calls",
     ("commands/doctor.py", "run_doctor", "systemctl"): "reads timer state",
     ("commands/logs.py", "_show_host_logs", "journalctl"): "reads the journal",
     ("cve/scanner.py", "refresh_db", "trivy"): "trivy DB download; never reads project compose files, needs HOME for its cache",
     ("cve/scanner.py", "scan_image", "trivy"): "trivy scans an image from the daemon; never reads project compose files",
-    ("git_slot.py", "_git", "git"): "runs git in the project's repo or the slot's clone",
     ("health_checks/hardening.py", "_run", "?"): "host hardening probes (ufw, systemctl, sshd) with an sbin PATH",
     ("mcp_tools.py", "run_subprocess_tool", "?"): "runs the upgrade shim argv",
     ("os_updates.py", "_systemctl", "systemctl"): "reads apt timer and unit state",

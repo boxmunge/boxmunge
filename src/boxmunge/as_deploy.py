@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Running a command the way the deploy shell runs it.
 
-The deploy shell hands its commands only the variables below. Project code
-that runs on the host (the manifest's pre_deploy hook) is deploy's
-(TRUST_MODEL.md), so it gets the same environment, and when boxmunge runs
-as root (an operator's sudo) it drops to deploy rather than run as root.
+The deploy shell hands its commands only the variables below. Code that
+runs on the host from a project is deploy's (TRUST_MODEL.md): the
+manifest's pre_deploy hook, and git in the project's repository, whose
+config can run filters. It gets the same environment, and when boxmunge
+runs as root (an operator's sudo) it drops to deploy rather than run as root.
 """
 from __future__ import annotations
 
@@ -47,10 +48,20 @@ def shell_environment(source: Mapping[str, str], account: pwd.struct_passwd) -> 
     return env
 
 
-def deploy_spawn_args() -> dict[str, Any]:
+def deploy_account() -> pwd.struct_passwd:
+    """The deploy user. Raises NoDeployUser on a host without one."""
+    try:
+        return pwd.getpwnam("deploy")
+    except KeyError as e:
+        raise NoDeployUser("running as root, deploy's code runs as the deploy user, "
+                           "and this host has no deploy user") from e
+
+
+def deploy_spawn_args(*, supplementary_groups: bool) -> dict[str, Any]:
     """subprocess arguments that run a command as the deploy shell would.
 
-    As root they switch to deploy's uid, gid and groups. Either way the
+    As root they switch to deploy's uid and gid, and to deploy's
+    supplementary groups (docker, for a hook) or none. Either way the
     command gets the shell's environment, no stdin, and its own session:
     without a controlling terminal it cannot push input into the terminal
     of a root operator (TIOCSTI). Raises NoDeployUser as root with no
@@ -59,31 +70,30 @@ def deploy_spawn_args() -> dict[str, Any]:
     if not running_as_root():
         return {"env": shell_environment(os.environ, pwd.getpwuid(os.getuid())),
                 "stdin": subprocess.DEVNULL, "start_new_session": True}
-    try:
-        account = pwd.getpwnam("deploy")
-    except KeyError as e:
-        raise NoDeployUser("running as root, project code runs as the deploy user, "
-                           "and this host has no deploy user") from e
-    return {"user": account.pw_uid, "group": account.pw_gid,
-            "extra_groups": os.getgrouplist(account.pw_name, account.pw_gid),
+    account = deploy_account()
+    groups = os.getgrouplist(account.pw_name, account.pw_gid) if supplementary_groups else []
+    return {"user": account.pw_uid, "group": account.pw_gid, "extra_groups": groups,
             "env": shell_environment(os.environ, account),
             "stdin": subprocess.DEVNULL, "start_new_session": True}
 
 
-def run_as_deploy(argv: Sequence[str], cwd: Path) -> subprocess.CompletedProcess:
+def run_as_deploy(argv: Sequence[str], cwd: Path, *, supplementary_groups: bool,
+                  timeout: float | None = None,
+                  check: bool = True) -> subprocess.CompletedProcess:
     """Run argv with deploy_spawn_args, capturing its output as text.
 
     In its own session, a terminal's Ctrl-C or hangup reaches only
-    boxmunge, so whatever stops boxmunge here (an interrupt, an error)
-    first kills the command's whole process group: nothing it started
-    keeps running after the project lock is released. Raises
-    CalledProcessError on a non-zero exit, NoDeployUser, or OSError when
-    the command cannot start.
+    boxmunge, so whatever stops boxmunge here (an interrupt, a timeout, an
+    error) first kills the command's whole process group: nothing it
+    started keeps running after the project lock is released. Raises
+    TimeoutExpired, CalledProcessError on a non-zero exit when `check`,
+    NoDeployUser, or OSError when the command cannot start.
     """
     proc = subprocess.Popen(list(argv), shell=False, cwd=cwd, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, **deploy_spawn_args())
+                            stderr=subprocess.PIPE, text=True,
+                            **deploy_spawn_args(supplementary_groups=supplementary_groups))
     try:
-        stdout, stderr = proc.communicate()
+        stdout, stderr = proc.communicate(timeout=timeout)
     except BaseException:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -91,6 +101,6 @@ def run_as_deploy(argv: Sequence[str], cwd: Path) -> subprocess.CompletedProcess
             pass  # the group has already gone
         proc.wait()
         raise
-    if proc.returncode != 0:
+    if check and proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, proc.args, stdout, stderr)
-    return subprocess.CompletedProcess(proc.args, 0, stdout, stderr)
+    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)

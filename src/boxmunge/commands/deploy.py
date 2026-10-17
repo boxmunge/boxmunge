@@ -219,7 +219,7 @@ def run_pre_deploy_hook(project_name: str, paths: BoxPaths, manifest: dict) -> i
         return 1
     print(f"  Running pre-deploy: {pre_deploy}")
     try:
-        run_as_deploy(shlex.split(pre_deploy), project_dir)
+        run_as_deploy(shlex.split(pre_deploy), project_dir, supplementary_groups=True)
     except NoDeployUser as e:
         print(f"  ERROR: Pre-deploy not run: {e}. Create the deploy user (install.sh "
               "does), or deploy as deploy through its shell.", file=sys.stderr)
