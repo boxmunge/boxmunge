@@ -26,6 +26,7 @@ VOLUME = f"{PROJECT}_data"
 # A local tag: carried by docker save/load alone, so the many migrations of
 # the crash sweeps never ask a registry (test_images_real covers digests).
 IMAGE = "boxmunge.invalid/dind/sweep:1"
+PROXY_SUBNET = "172.31.250.0/24"  # boxmunge-proxy, recreated with it on the switch
 COMPOSE = f"""services:
   app:
     image: {IMAGE}
@@ -82,6 +83,7 @@ def make_box(paths: BoxPaths) -> None:
     add_project(PROJECT, paths)
     docker("pull", "-q", BUSYBOX)
     docker("tag", BUSYBOX, IMAGE)
+    docker("network", "create", "--subnet", PROXY_SUBNET, "boxmunge-proxy")
     compose_up(paths)
     docker("exec", container(), "sh", "-c", SEED)
 
@@ -132,3 +134,10 @@ def stand_ins(monkeypatch) -> None:
 
 def offset_of(paths: BoxPaths) -> int:
     return uo.recorded_offset(paths) or 0
+
+
+def proxy_routes() -> list[str]:
+    """Host routes for the proxy network's subnet: exactly one, or traffic to
+    published ports may leave through a dead daemon's bridge."""
+    out = subprocess.run(["ip", "route"], capture_output=True, text=True, check=True).stdout
+    return [line for line in out.splitlines() if line.startswith(PROXY_SUBNET)]

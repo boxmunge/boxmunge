@@ -125,13 +125,18 @@ def _soak_volumes(j: Journal, rinv: Inventory, old_root: Path, new_root: Path,
 
 
 def _remove_remapped_containers() -> None:
-    """Nothing needs the remapped daemon's containers again (the bring-up
+    """Nothing needs the remapped daemon's containers or networks again (the bring-up
     recreates from compose on the old daemon, and the remapped root goes).
     Removed, a reboot during the restore cannot have their restart policies
     start them on data that is only partly unshifted."""
     ids = _run(["docker", "ps", "-aq", "--no-trunc"], capture=True).stdout.split()
     if ids:
         _run(["docker", "rm", "-f", *ids], capture=True, timeout=900)
+    # Its networks too, so no bridge of theirs outlives the remapped root.
+    nets = _run(["docker", "network", "ls", "-q", "--filter", "type=custom"],
+                capture=True).stdout.split()
+    if nets:
+        _run(["docker", "network", "rm", *nets], capture=True)
 
 
 def _leftovers(paths: BoxPaths, j: Journal, save: Save) -> None:

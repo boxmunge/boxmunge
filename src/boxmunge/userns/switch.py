@@ -117,11 +117,30 @@ def prior_store(inv: Inventory) -> dict:
             "size": dir_size(root / "overlay2") + dir_size(root / "image")}
 
 
-def to_remapped(paths: BoxPaths, daemon_json: str | None, s: int,
-                daemon: DaemonControl) -> None:
+_SYS_NET = Path("/sys/class/net")
+
+
+def drop_bridges(names: list[str]) -> None:
+    """Delete a stopped daemon's bridge interfaces, as a reboot would (the
+    daemon makes them again when it starts). Left in place, each keeps its
+    subnet's route, and the next daemon's bridge for the same subnet (the
+    proxy network is recreated with its recorded subnet) would sit behind
+    a second route the kernel may prefer: published ports would break."""
+    for name in names:
+        if not os.path.lexists(_SYS_NET / name):
+            continue
+        result = subprocess.run(["ip", "link", "delete", name], capture_output=True, text=True,
+                                check=False)
+        if result.returncode != 0:
+            raise MigrationError(f"ip link delete {name} failed: {result.stderr.strip()}")
+
+
+def to_remapped(paths: BoxPaths, daemon_json: str | None, s: int, daemon: DaemonControl,
+                bridges: list[str]) -> None:
     """Stop the daemon, write the merged daemon.json and the record, start it."""
     from boxmunge.userns.daemon_config import merged_daemon_json
     daemon.stop()
+    drop_bridges(bridges)
     merged = merged_daemon_json(daemon_json.encode() if daemon_json is not None else None)
     write_daemon_json(merged.decode())
     uo.write_offset_record(paths, s)

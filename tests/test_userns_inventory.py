@@ -62,10 +62,17 @@ def _docker(paths, tmp_path):
             assert "-a" in cmd
             r.stdout = "sha256:img\nsha256:loose\nsha256:img\n"
         elif cmd[:3] == ["docker", "network", "ls"]:
-            r.stdout = "n1\n"
+            r.stdout = "b0\nb1\nb2\n" if "driver=bridge" in cmd else "n1\n"
         elif cmd[:3] == ["docker", "network", "inspect"]:
-            r.stdout = json.dumps([{"Driver": "bridge", "IPAM": {"Config": [
-                {"Subnet": "172.30.0.0/16"}]}, "Options": None, "Labels": {}}])
+            if cmd[3:] == ["b0", "b1", "b2"]:
+                r.stdout = json.dumps([
+                    {"Name": "bridge", "Id": "b0" * 32},
+                    {"Name": "boxmunge-proxy", "Id": "0123456789ab" + "f" * 52, "Options": None},
+                    {"Name": "shop_default", "Id": "e" * 64,
+                     "Options": {"com.docker.network.bridge.name": "br-shop"}}])
+            else:
+                r.stdout = json.dumps([{"Driver": "bridge", "IPAM": {"Config": [
+                    {"Subnet": "172.30.0.0/16"}]}, "Options": None, "Labels": {}}])
         elif cmd[:3] == ["docker", "container", "inspect"]:
             r.stdout = json.dumps(containers)
         elif cmd[:3] == ["docker", "volume", "inspect"]:
@@ -104,6 +111,7 @@ def test_inventory_from_docker(paths, tmp_path, monkeypatch) -> None:
     assert inv.images[0].tags == ["postgres:16"]  # the containerd store's name@digest is no tag
     assert not inv.images[1].carried
     assert inv.network["ipam"]["Config"] == [{"Subnet": "172.30.0.0/16"}]
+    assert inv.bridges == ["br-0123456789ab", "br-shop"]  # docker0 is every daemon's
     assert Inventory.from_json(json.loads(json.dumps(inv.to_json()))) == inv
 
 

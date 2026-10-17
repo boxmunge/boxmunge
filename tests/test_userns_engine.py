@@ -270,3 +270,14 @@ def test_a_failure_before_the_downtime_leaves_the_timers_running(paths, box) -> 
     with pytest.raises(RuntimeError, match="power cut"):
         _migrate(paths, timers)
     assert timers.calls == []
+
+
+def test_a_stopped_daemons_bridges_are_deleted_as_a_reboot_would(monkeypatch, tmp_path) -> None:
+    sysnet = tmp_path / "net"
+    (sysnet / "br-0123456789ab").mkdir(parents=True)
+    monkeypatch.setattr(sw, "_SYS_NET", sysnet)
+    ran = []
+    monkeypatch.setattr(sw.subprocess, "run", lambda cmd, **kw: ran.append(cmd) or
+                        type("R", (), {"returncode": 0, "stderr": ""})())
+    sw.drop_bridges(["br-0123456789ab", "br-gone"])
+    assert ran == [["ip", "link", "delete", "br-0123456789ab"]]

@@ -47,6 +47,7 @@ def box(tmp_path_factory):
         down = ("compose", "-p", mb.PROJECT, "down", "-v")
         if journal is not None and journal.phase == "committed":
             mb.docker(*down, cwd=paths.project_dir(mb.PROJECT), check=False)
+            mb.docker("network", "rm", "boxmunge-proxy", check=False)
             daemon = ProcessDaemon()
             daemon.stop()
             write_daemon_json(prior_daemon_json())
@@ -54,6 +55,7 @@ def box(tmp_path_factory):
         elif journal is not None and journal.phase != "rolled-back":
             _rollback(paths, root.parent / "img")
         mb.docker(*down, cwd=paths.project_dir(mb.PROJECT), check=False)
+        mb.docker("network", "rm", "boxmunge-proxy", check=False)
 
 
 def _migrate(paths, images) -> None:
@@ -67,6 +69,7 @@ def _rollback(paths, images) -> None:
 def _as_before(paths, before) -> None:
     assert not mb.daemon_remapped() and uo.recorded_offset(paths) is None
     assert (mb.view(), mb.host_owners(paths)) == before
+    assert len(mb.proxy_routes()) == 1, mb.proxy_routes()
 
 
 def _migrated(paths, before) -> None:
@@ -74,6 +77,7 @@ def _migrated(paths, before) -> None:
     assert s > 0 and mb.daemon_remapped() and load_journal(paths).phase == "applied"
     assert mb.view() == before[0]
     assert mb.host_owners(paths) == {k: (u + s, g + s) for k, (u, g) in before[1].items()}
+    assert len(mb.proxy_routes()) == 1, mb.proxy_routes()
 
 
 def test_migrate_then_roll_back(box) -> None:

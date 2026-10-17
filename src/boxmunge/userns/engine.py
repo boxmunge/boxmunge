@@ -117,7 +117,7 @@ def _prepare(paths: BoxPaths, j: Journal, inv: Inventory, save: Save) -> None:
 def _switch(paths: BoxPaths, j: Journal, inv: Inventory, daemon: DaemonControl,
             timers: TimerControl, save: Save) -> None:
     try:
-        to_remapped(paths, j.daemon_json, j.offset, daemon)
+        to_remapped(paths, j.daemon_json, j.offset, daemon, inv.bridges)
         if uo.remap_offset(paths) != j.offset:
             raise MigrationError("the daemon came up with another offset")
     except Exception as e:

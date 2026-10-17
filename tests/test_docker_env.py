@@ -54,6 +54,7 @@ NOT_DOCKER = {
     ("userns/daemon_ctl.py", "_systemctl", "systemctl"): "stops and starts docker.service and the boxmunge timers",
     ("userns/switch.py", "_checked", "?"): "useradd/usermod: creates the remap identity",
     ("userns/switch.py", "create_identity", "id"): "asks whether the remap identity exists",
+    ("userns/switch.py", "drop_bridges", "ip"): "deletes a stopped daemon's bridge interfaces",
     ("version.py", "get_build_version", "git"): "reads the source commit",
 }
 

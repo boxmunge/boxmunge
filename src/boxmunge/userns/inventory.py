@@ -104,6 +104,9 @@ class Inventory:
     projects: list[str] = field(default_factory=list)
     record_data: list[str] = field(default_factory=list)
     remapped: bool = False  # the daemon already runs containers in a user namespace
+    # The host interfaces of its bridge networks other than docker0, which
+    # outlive the daemon (switch.drop_bridges).
+    bridges: list[str] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -219,6 +222,18 @@ def _network() -> dict[str, Any]:
             "options": doc.get("Options") or {}, "labels": doc.get("Labels") or {}}
 
 
+def _bridges() -> list[str]:
+    ids = _run(["docker", "network", "ls", "-q", "--no-trunc", "--filter", "driver=bridge"],
+               capture=True).stdout.split()
+    out = []
+    for doc in _json(["docker", "network", "inspect", *ids]) if ids else []:
+        if doc.get("Name") == "bridge":
+            continue  # docker0: every daemon on the host uses the same one
+        name = (doc.get("Options") or {}).get("com.docker.network.bridge.name")
+        out.append(name or f"br-{doc['Id'][:12]}")
+    return sorted(out)
+
+
 def take_inventory(paths: BoxPaths) -> Inventory:
     info = docker_info()
     driver_type = dict(info.get("DriverStatus") or []).get("driver-type", "")
@@ -256,4 +271,5 @@ def take_inventory(paths: BoxPaths) -> Inventory:
                      server_version=str(info.get("ServerVersion")),
                      containers=containers, volumes=volumes, images=images, network=_network(),
                      projects=projects, record_data=_record_data(paths, projects, containers),
-                     remapped="name=userns" in (info.get("SecurityOptions") or []))
+                     remapped="name=userns" in (info.get("SecurityOptions") or []),
+                     bridges=_bridges())
