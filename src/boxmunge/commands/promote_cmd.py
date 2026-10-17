@@ -9,7 +9,7 @@ finished by running promote again.
 
 promote_locked runs the spec's steps as named functions, in order:
 _eligibility, _verify_slot, _deploy_tree (whose switch ends in _retire),
-_teardown_after.
+_teardown (in _teardown_after on success).
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from boxmunge.fileutil import LockError, project_lock
 from boxmunge.intake import IntakeError, check_installable, report_refusal, validate_release_tree
 from boxmunge.log import log_error, log_operation
 from boxmunge.probation import clear_probation_if_active
-from boxmunge.release_txn import InstallTxn, close_txn, load_txn
+from boxmunge.release_txn import InstallTxn, close_txn, load_txn, options_text
 from boxmunge.staged_release import (
     SlotError, StagedRelease, load_slot, release_dir, slot_dir, update_meta,
 )
@@ -68,7 +68,6 @@ def promote_locked(project: str, paths: BoxPaths, dry_run: bool = False) -> int:
     manifest = _verify_slot(project, paths, found)
     if isinstance(manifest, int):
         return manifest
-    clear_probation_if_active(paths, "deploy")
     rc = _deploy_tree(project, paths, found.meta, manifest)
     if rc != 0:
         return _report_failed(project, paths, found.meta, rc)
@@ -80,11 +79,12 @@ def _eligibility(project: str, paths: BoxPaths) -> _Promotion | int:
     that finished staging (or this slot's open promote, to resume)."""
     if not deploy_eligible(project, paths):
         return 1
+    txn = None
     try:
-        meta = load_slot(paths, project)
         txn = load_txn(paths, project)
+        meta = load_slot(paths, project)
     except (SlotError, ReleaseStateError) as e:
-        print(f"ERROR: Cannot promote '{project}': {e}. Stage again, or unstage.",
+        print(f"ERROR: Cannot promote '{project}': {e}. {_unreadable_advice(project, txn)}",
               file=sys.stderr)
         return 1
     if meta is None:
@@ -103,14 +103,34 @@ def _eligibility(project: str, paths: BoxPaths) -> _Promotion | int:
     return _Promotion(meta, txn, resuming)
 
 
+def _unreadable_advice(project: str, txn: InstallTxn | None) -> str:
+    """A slot record that cannot be read under this project's open promote
+    cannot be resumed, and unstage keeps the slot for it: name the
+    install's own ways out instead of a stage that would be refused."""
+    if txn is None or txn.source != "staged":
+        return "Stage again, or unstage."
+    return (f"The promote of {txn.ref} is open (phase {txn.phase}) and cannot resume "
+            f"without it: {options_text(project, txn, rerun=False)}")
+
+
 def _finish_retired(project: str, paths: BoxPaths, found: _Promotion) -> int:
     """A promote killed after replace_release returned: production runs the
-    staged release, so only the close and the teardown are left."""
+    staged release, so only the close and the teardown are left. The slot
+    records how the switch ended, so a rerun reports it truthfully."""
     if found.resuming:
         close_txn(paths, project, found.txn)
-    print(f"{found.meta.ref} is already live in production; finishing the teardown of "
-          f"staging.")
-    return _teardown_after(project, paths, found.meta.ref)
+    ref = found.meta.ref
+    if found.meta.switch_rc == 0:
+        print(f"{ref} is already live in production; finishing the teardown of staging.")
+        return _teardown_after(project, paths, ref)
+    print(f"{ref} was switched to production but its promotion failed; finishing the "
+          f"teardown of staging.")
+    if not _teardown(project, paths):
+        return 1
+    print(f"ERROR: staging was torn down, but the promotion of {ref} failed after "
+          f"production was switched (see 'rollback {project}' below).", file=sys.stderr)
+    report_failed_after_switch(project, paths, ref)
+    return 1
 
 
 def _verify_slot(project: str, paths: BoxPaths, found: _Promotion) -> dict[str, Any] | int:
@@ -136,13 +156,15 @@ def _deploy_tree(project: str, paths: BoxPaths, meta: StagedRelease,
     return deploy_tree_locked(project, paths, TreeDeploy(
         tree=release_dir(slot_dir(paths, project)), ref=meta.ref, source="staged",
         staged_id=meta.id, manifest=manifest, component=COMPONENT,
-        on_switched=lambda _rc: _retire(project, paths)))
+        on_installed=lambda: clear_probation_if_active(paths, "deploy"),
+        on_switched=lambda rc: _retire(project, paths, rc)))
 
 
-def _retire(project: str, paths: BoxPaths) -> None:
+def _retire(project: str, paths: BoxPaths, rc: int) -> None:
     """Step 4, once replace_release returns (any result) and before the
-    transaction closes: the slot is never promoted again."""
-    update_meta(paths, project, load_slot(paths, project), state="retired")
+    transaction closes: the slot is never promoted again, and it records
+    how the switch ended for a rerun that only has the teardown left."""
+    update_meta(paths, project, load_slot(paths, project), state="retired", switch_rc=rc)
 
 
 def _report_failed(project: str, paths: BoxPaths, meta: StagedRelease, rc: int) -> int:
@@ -158,14 +180,20 @@ def _report_failed(project: str, paths: BoxPaths, meta: StagedRelease, rc: int) 
     return rc if rc == 3 else 1
 
 
-def _teardown_after(project: str, paths: BoxPaths, ref: str) -> int:
+def _teardown(project: str, paths: BoxPaths) -> bool:
     """Step 5: the unstage core, under the same lock."""
     print("  Tearing down staging...")
-    if not teardown_staging_locked(project, paths, component=COMPONENT):
-        print(f"ERROR: {project} is live in production, but tearing down staging failed "
-              f"(see above). Run 'unstage {project}' to finish.", file=sys.stderr)
-        log_operation(COMPONENT, "Promoted; staging teardown incomplete", paths,
-                      project=project)
+    if teardown_staging_locked(project, paths, component=COMPONENT):
+        return True
+    print(f"ERROR: {project} is live in production, but tearing down staging failed "
+          f"(see above). Run 'unstage {project}' to finish.", file=sys.stderr)
+    log_operation(COMPONENT, "Staging teardown after the switch incomplete", paths,
+                  project=project)
+    return False
+
+
+def _teardown_after(project: str, paths: BoxPaths, ref: str) -> int:
+    if not _teardown(project, paths):
         return 1
     log_operation(COMPONENT, f"Promoted {ref} from staging to production", paths,
                   project=project, detail={"ref": ref})

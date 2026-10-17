@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from boxmunge.commands.deploy import (
-    deploy_locked, generate_release_config, replace_release, run_pre_deploy_hook,
+    GIT_WHILE_STAGED, deploy_locked, generate_release_config, replace_release, run_pre_deploy_hook,
 )
 from boxmunge.commands.restore import restore_locked
 from boxmunge.compose import prepare_compose_override
@@ -38,7 +38,7 @@ from boxmunge.release_txn import (
     InstallTxn, advance, close_txn, load_txn, open_txn, stale_reason, start_refusal,
     supersede_txn,
 )
-from boxmunge.staged_release import sweep_debris
+from boxmunge.staged_release import has_slot, sweep_debris
 from boxmunge.staging_isolation import StagingIsolationError, check_install_isolation
 from boxmunge.state import read_state
 
@@ -97,6 +97,8 @@ def find_rollback_target(paths: BoxPaths, project_name: str,
         raise RollbackUnavailable("the project has not been deployed")
 
     if (project_dir / "repo").exists():
+        if has_slot(paths, project_name):
+            raise RollbackUnavailable(GIT_WHILE_STAGED.format(p=project_name))
         state = read_state(paths.project_deploy_state(project_name))
         history = state.get("history", [])
         if not history or not history[0].get("ref"):

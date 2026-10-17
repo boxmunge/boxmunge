@@ -160,14 +160,16 @@ manifest) before the promotion. The stage is then marked retired, so it is never
 staging is left up and `unstage` removes it. If staging cannot be torn down after a successful
 promotion, `promote` exits 1 and asks you to run `unstage`. A promote that is killed is finished by
 running `promote` again, which resumes the install from where it stopped (after the switch it
-does not run the `pre_deploy` hook again or take a new snapshot).
+does not run the `pre_deploy` hook again or take a new snapshot). If the switch had already ended,
+the rerun only tears staging down, and still exits 1 with the rollback options if the switch failed.
 
 `prod-deploy` and `rollback` work while a release is staged; staging is left as it is, and the
 next `promote` keeps whatever production then runs as its previous release. Before anything
 changes, each proves production's next release shares nothing with staging (as `stage` does,
 below) and refuses with "Nothing was changed" if it would. Such a release whose `compose.yml` uses
 `include:` or `extends: file:` cannot be checked this way and is refused: unstage first, or move
-those services into `compose.yml`.
+those services into `compose.yml`. A git project's `prod-deploy` and `rollback` cannot be checked
+yet and are refused while a release is staged: unstage first.
 
 Staging and production share no Docker resource. Before installing anything, `stage` resolves
 staging from the staged release, and production both as it runs and as it would run once the

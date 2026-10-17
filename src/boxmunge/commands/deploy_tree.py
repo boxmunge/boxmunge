@@ -37,7 +37,7 @@ from boxmunge.release_txn import (
     InstallTxn, advance, close_txn, load_txn, open_txn, options_text, stale_reason,
     start_refusal, supersede_txn,
 )
-from boxmunge.staged_release import sweep_debris
+from boxmunge.staged_release import has_slot, sweep_debris
 from boxmunge.staging_isolation import StagingIsolationError, check_install_isolation
 
 if TYPE_CHECKING:
@@ -82,7 +82,13 @@ def _prove_disjoint(project_name: str, paths: BoxPaths, req: TreeDeploy) -> bool
     """D8: while a release is staged, production's next release must share
     nothing with staging. Checked before the transaction commits."""
     if req.tree is None:
-        return True
+        if not has_slot(paths, project_name):
+            return True
+        print(f"ERROR: An install of {req.ref} without a release tree cannot be proved "
+              f"apart from the staged release. This should be unreachable (stage is "
+              f"refused while an install is open). Nothing was changed; unstage "
+              f"{project_name} first.", file=sys.stderr)
+        return False
     try:
         check_install_isolation(paths, project_name, req.tree, req.manifest)
     except (StagingIsolationError, OSError) as e:
@@ -179,6 +185,10 @@ def _switch(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTxn
     rc = replace_release(project_name, paths, req.manifest, req.ref, txn.snapshot or None,
                          component=req.component, txn=txn.id)
     crash_point("txn.replaced")
+    # on_switched must stay the first write after replace_release returns:
+    # nothing durable separates the two, so a crash before it is a crash
+    # inside replace_release (resumed from switching), and promote's
+    # `retired` write in it is the record that the switch ended.
     if req.on_switched is not None:
         req.on_switched(rc)
     crash_point("txn.switched")

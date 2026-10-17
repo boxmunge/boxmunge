@@ -152,4 +152,3 @@ def test_candidate_model_refuses_include_and_extends_files(paths, tmp_path, comp
     scratch.mkdir()
     with pytest.raises(StagingIsolationError, match="Unstage first, or remove include/extends"):
         candidate_model(paths, "myapp", tree, {"project": "myapp", "services": {}}, scratch)
-

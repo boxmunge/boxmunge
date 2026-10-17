@@ -53,6 +53,7 @@ class StagedRelease:
     state: str
     production_stopped: dict[str, Any] | None = None
     cleanup_incomplete: str | None = None
+    switch_rc: int | None = None  # replace_release's result, recorded when retired
 
 
 def new_meta(kind: str, ref: str, bundle_sha256: str | None) -> StagedRelease:
@@ -99,11 +100,16 @@ def load_slot(paths: BoxPaths, project: str) -> StagedRelease | None:
     try:
         meta = StagedRelease(**{k: doc[k] for k in _REQUIRED},
                              production_stopped=doc.get("production_stopped"),
-                             cleanup_incomplete=doc.get("cleanup_incomplete"))
+                             cleanup_incomplete=doc.get("cleanup_incomplete"),
+                             switch_rc=doc.get("switch_rc"))
     except KeyError as e:
         raise SlotError(f"{path} is missing {e}") from e
     if meta.kind not in KINDS or meta.state not in STATES:
         raise SlotError(f"{path} has kind {meta.kind!r} and state {meta.state!r}")
+    if not (type(meta.switch_rc) is int if meta.state == "retired" else meta.switch_rc is None):
+        raise SlotError(f"{path} has state {meta.state!r} with switch_rc "
+                        f"{meta.switch_rc!r}: a retired slot records replace_release's "
+                        f"exit code (an integer), and no other slot has one")
     if not _valid_marker(meta.production_stopped):
         raise SlotError(f"{path} has a malformed production_stopped marker "
                         f"{meta.production_stopped!r}: expected null or "

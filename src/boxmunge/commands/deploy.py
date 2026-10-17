@@ -29,7 +29,13 @@ from boxmunge.release import ReleaseStateError, live_ref, previous_dir
 from boxmunge.source import (
     SourceError, bundle_ref, consume_bundle, resolve_bundle_source,
 )
+from boxmunge.staged_release import has_slot
 from boxmunge.state import read_state
+
+# Until git installs are tree-based, a git deploy or rollback has no
+# candidate tree to prove apart from staging (D8): refused, not skipped.
+GIT_WHILE_STAGED = ("unstage {p} first: git installs cannot yet prove isolation from a "
+                    "staged release")
 
 
 def _run_deploy_inner(
@@ -47,6 +53,9 @@ def _run_deploy_inner(
     # Git projects have a repo/ dir and pull their code in place. Bundle
     # projects take a release from the inbox.
     if not is_new and (project_dir / "repo").exists():
+        if has_slot(paths, project_name):
+            print(f"ERROR: {GIT_WHILE_STAGED.format(p=project_name)}.", file=sys.stderr)
+            return 1
         return _deploy_repo(project_name, paths, ref, no_snapshot, dry_run, component)
 
     try:

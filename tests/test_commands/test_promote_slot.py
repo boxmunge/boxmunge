@@ -4,6 +4,7 @@ from __future__ import annotations
 from boxmunge.commands.deploy import run_deploy
 from boxmunge.commands.promote_cmd import run_promote
 from boxmunge.commands.rollback import find_rollback_target, run_rollback
+from boxmunge.docker_run import DockerError
 from boxmunge.release_txn import load_txn
 from boxmunge.staged_release import load_slot, slot_dir, update_meta
 from tests.bundle_helpers import SAFE_COMPOSE, place_bundle
@@ -82,7 +83,6 @@ def test_prod_deploy_mounting_a_staging_copy_is_refused(paths, capsys) -> None:
 
 def test_failed_promote_after_the_switch_keeps_staging_for_unstage(paths, capsys) -> None:
     prod_and_stage(paths, staged_files={"manifest.yml": hook_manifest("true")})
-    from boxmunge.docker_run import DockerError
     with staging_docker_off() as docker:
         docker["up"].side_effect = DockerError("up failed")
         assert run_promote("myapp", paths) == 1
@@ -246,7 +246,6 @@ def test_the_pre_promote_snapshot_uses_productions_manifest(paths) -> None:
 
 
 def test_a_failed_teardown_after_promote_says_to_unstage(paths, capsys) -> None:
-    from boxmunge.docker_run import DockerError
     pdir = prod_and_stage(paths)
     with staging_docker_off() as docker:
         docker["down"].side_effect = DockerError("down failed")
@@ -261,9 +260,176 @@ def test_dry_run_changes_nothing_even_for_a_retired_slot(paths, capsys) -> None:
     prod_and_stage(paths)
     with staging_docker_off() as docker:
         assert run_promote("myapp", paths, dry_run=True) == 0
-        update_meta(paths, "myapp", load_slot(paths, "myapp"), state="retired")
+        update_meta(paths, "myapp", load_slot(paths, "myapp"), state="retired", switch_rc=0)
         assert run_promote("myapp", paths, dry_run=True) == 0
         docker["up"].assert_not_called()
         docker["down"].assert_not_called()
     assert load_slot(paths, "myapp").state == "retired"
     assert "[DRY RUN] Would finish tearing down staging" in capsys.readouterr().out
+
+
+# -- fix round 1 -----------------------------------------------------------
+
+def _staged_with_hook_and_backups(paths, tmp_path):
+    from tests.bundle_helpers import manifest_text
+    from tests.txn_helpers import flaky_hook
+    hook = flaky_hook(tmp_path, failures=0)
+    return prod_and_stage(
+        paths, prod_files={"manifest.yml": manifest_text(backup="postgres")},
+        staged_files={"manifest.yml": manifest_text(backup="postgres")
+                      + f"deploy:\n  pre_deploy: '{hook}'\n"})
+
+
+def test_a_promote_killed_as_replace_release_returned_finishes_the_switch(
+        paths, tmp_path) -> None:
+    """No write separates replace_release returning from `retired`: the
+    rerun finishes the switch as from `switching` (spec), once."""
+    from tests.txn_helpers import hook_runs
+    pdir = _staged_with_hook_and_backups(paths, tmp_path)
+    taken: list[dict] = []
+    with staging_docker_off() as docker, fake_backups(taken):
+        assert crash_at("txn.replaced", lambda: run_promote("myapp", paths)) == 137
+        assert load_txn(paths, "myapp").phase == "switching"
+        assert load_slot(paths, "myapp").state == "ready"
+        assert hook_runs(tmp_path) == 1
+        docker["up"].reset_mock()
+        assert run_promote("myapp", paths) == 0
+        assert docker["up"].called      # the switch is finished
+    assert hook_runs(tmp_path) == 1     # the hook is not run again
+    assert len(list(paths.project_backups("myapp").glob("*"))) == 1  # one snapshot
+    assert (pdir / "VERSION").read_text() == "v2\n"
+    assert load_slot(paths, "myapp") is None and load_txn(paths, "myapp") is None
+
+
+def test_a_promote_killed_after_retiring_only_closes_and_tears_down(paths, tmp_path) -> None:
+    from boxmunge.commands import deploy as deploy_mod
+    from unittest.mock import patch
+    from tests.txn_helpers import hook_runs
+    _staged_with_hook_and_backups(paths, tmp_path)
+    taken: list[dict] = []
+    with staging_docker_off() as docker, fake_backups(taken):
+        assert crash_at("txn.switched", lambda: run_promote("myapp", paths)) == 137
+        docker["up"].reset_mock()
+        with patch.object(deploy_mod, "replace_release") as replace:
+            assert run_promote("myapp", paths) == 0
+        replace.assert_not_called()
+        docker["up"].assert_not_called()
+    assert hook_runs(tmp_path) == 1
+    assert load_slot(paths, "myapp") is None and load_txn(paths, "myapp") is None
+
+
+def test_a_rerun_after_a_failed_switch_does_not_claim_success(paths, capsys) -> None:
+    prod_and_stage(paths)
+    with staging_docker_off() as docker:
+        docker["up"].side_effect = DockerError("up failed")
+        assert run_promote("myapp", paths) == 1
+        assert load_slot(paths, "myapp").switch_rc == 1
+        docker["up"].side_effect = None
+        capsys.readouterr()
+        assert run_promote("myapp", paths) == 1
+    out, err = capsys.readouterr()
+    assert "promoted to production successfully" not in out
+    assert "staging was torn down" in err and "failed after production was switched" in err
+    assert "'rollback myapp' returns to" in err
+    assert load_slot(paths, "myapp") is None
+
+
+def test_a_rerun_after_a_successful_switch_reports_success(paths, capsys) -> None:
+    prod_and_stage(paths)
+    with staging_docker_off() as docker:
+        docker["down"].side_effect = DockerError("down failed")
+        assert run_promote("myapp", paths) == 1
+        assert load_slot(paths, "myapp").switch_rc == 0
+        docker["down"].side_effect = None
+        capsys.readouterr()
+        assert run_promote("myapp", paths) == 0
+    assert "promoted to production successfully" in capsys.readouterr().out
+
+
+def test_a_retired_slot_must_record_its_switch_result(paths) -> None:
+    import json
+    import pytest
+    from boxmunge.staged_release import SlotError
+    prod_and_stage(paths)
+    meta = slot_dir(paths, "myapp") / "meta.json"
+    doc = json.loads(meta.read_text())
+    for state, rc in (("retired", None), ("ready", 0), ("retired", True), ("retired", "0")):
+        meta.write_text(json.dumps({**doc, "state": state, "switch_rc": rc}))
+        with pytest.raises(SlotError, match="switch_rc"):
+            load_slot(paths, "myapp")
+
+
+def test_an_unreadable_slot_under_an_open_promote_names_the_installs_options(
+        paths, capsys) -> None:
+    prod_and_stage(paths)
+    with staging_docker_off():
+        assert crash_at("txn.switching", lambda: run_promote("myapp", paths)) == 137
+        (slot_dir(paths, "myapp") / "meta.json").write_text("[]")
+        capsys.readouterr()
+        assert run_promote("myapp", paths) == 1
+    err = capsys.readouterr().err
+    assert "Stage again" not in err
+    assert "promote of myapp-" in err and "'rollback myapp' restores" in err
+
+
+def test_a_refused_promote_leaves_upgrade_probation_alone(paths) -> None:
+    from unittest.mock import patch
+    from boxmunge.staging_isolation import StagingIsolationError
+    from boxmunge.upgrade_state import read_probation, write_probation
+    prod_and_stage(paths)
+    write_probation(paths, "9.9.9", "a")
+    with staging_docker_off(), patch("boxmunge.commands.deploy_tree.check_install_isolation",
+                                     side_effect=StagingIsolationError("shared")):
+        assert run_promote("myapp", paths) == 1
+    assert read_probation(paths) is not None
+    with staging_docker_off():
+        assert run_promote("myapp", paths) == 0
+    assert read_probation(paths) is None
+
+
+def test_an_install_without_a_tree_is_refused_while_staged(paths, capsys) -> None:
+    from boxmunge.commands.deploy_tree import TreeDeploy, deploy_tree_locked
+    prod_and_stage(paths)
+    req = TreeDeploy(tree=None, ref="myapp-x", source="bundle", manifest={})
+    assert deploy_tree_locked("myapp", paths, req) == 1
+    assert "should be unreachable" in capsys.readouterr().err
+    assert load_txn(paths, "myapp") is None
+
+
+def _git_project_with_a_slot(paths):
+    import yaml
+    from boxmunge.project_registry import add_project
+    from boxmunge.staged_release import new_meta, write_meta
+    from boxmunge.state import write_state
+    add_project("myapp", paths)
+    pdir = paths.project_dir("myapp")
+    (pdir / "repo").mkdir(parents=True)
+    (pdir / "manifest.yml").write_text(yaml.safe_dump({
+        "project": "myapp", "hosts": ["myapp.example.com"],
+        "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}},
+        "backup": {"type": "none"}}))
+    write_state(paths.project_deploy_state("myapp"), {
+        "current_ref": "abc", "history": [{"ref": "def", "snapshot": ""}]})
+    slot = slot_dir(paths, "myapp")
+    (slot / "release").mkdir(parents=True)
+    write_meta(slot, new_meta("bundle", "myapp-v2", None))
+
+
+def test_a_git_deploy_is_refused_while_a_release_is_staged(paths, capsys) -> None:
+    from unittest.mock import patch
+    _git_project_with_a_slot(paths)
+    with patch("boxmunge.commands.deploy.update_repo") as update:
+        assert run_deploy("myapp", paths) == 1
+    update.assert_not_called()
+    assert ("unstage myapp first: git installs cannot yet prove isolation from a staged "
+            "release") in capsys.readouterr().err
+
+
+def test_a_git_rollback_is_refused_while_a_release_is_staged(paths, capsys) -> None:
+    from unittest.mock import patch
+    _git_project_with_a_slot(paths)
+    with patch("boxmunge.commands.deploy.update_repo") as update:
+        assert run_rollback("myapp", paths, yes=True) == 1
+    update.assert_not_called()
+    assert ("unstage myapp first: git installs cannot yet prove isolation from a staged "
+            "release") in capsys.readouterr().err
