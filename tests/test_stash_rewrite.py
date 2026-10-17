@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import tarfile
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -224,7 +225,7 @@ def test_the_rewritable_format_is_0_10_1s_not_the_create_format(paths, tmp_path)
 
 def test_a_failed_directory_sync_reports_the_rewrite_truthfully(paths, tmp_path) -> None:
     archive = _stash(paths, tmp_path)
-    with patch.object(stash_rewrite, "fsync_dir", side_effect=OSError("EIO")), \
+    with patch("boxmunge.fileutil.fsync_dir", side_effect=OSError("EIO")), \
             patch.object(stash_rewrite, "notify") as alert:
         result = sanitize_latest_stash(paths)
     assert result.changed and result.dropped == ["projects/g/compose.yml"]
@@ -252,3 +253,9 @@ def test_stale_rewrite_temps_are_swept_first(paths, tmp_path) -> None:
     assert [p.name for p in paths.stashes.iterdir()] == [archive.name]
     swept = " ".join(c.args[1] for c in warned.call_args_list)
     assert f"{REWRITE_PREFIX}1.tmp" in swept and f"{REWRITE_PREFIX}{os.getpid()}.tmp" in swept
+
+
+def test_renames_go_through_fileutil() -> None:
+    """Durable writes only through fileutil (plan Global Constraints)."""
+    source = Path(stash_rewrite.__file__).read_text()
+    assert "os.rename" not in source and ".rename(" not in source and "os.replace" not in source

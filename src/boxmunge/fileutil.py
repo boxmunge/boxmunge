@@ -261,6 +261,11 @@ def fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+class RenamedNotSyncedError(OSError):
+    """durable_rename renamed the file, but syncing its directory failed:
+    path already holds the new content, though a crash may bring back the old."""
+
+
 def durable_rename(tmp_path: Path, path: Path) -> None:
     """Rename a fully written temp file over path, durably.
 
@@ -268,6 +273,8 @@ def durable_rename(tmp_path: Path, path: Path) -> None:
     the rename and the directory after it, so after a crash path holds
     either the old content or the complete new content, never an empty or
     partial file, and never the old content once this has returned.
+    Raises RenamedNotSyncedError (an OSError) when only the directory sync
+    failed, so a caller can tell a done rename from a failed one.
     """
     fd = open_regular_nofollow(tmp_path, os.O_RDONLY)
     try:
@@ -275,7 +282,12 @@ def durable_rename(tmp_path: Path, path: Path) -> None:
     finally:
         os.close(fd)
     os.rename(tmp_path, path)
-    fsync_dir(path.parent)
+    try:
+        fsync_dir(path.parent)
+    except OSError as e:
+        raise RenamedNotSyncedError(
+            e.errno, f"{tmp_path.name} was renamed to {path}, but {path.parent} was not "
+            f"synced: {e.strerror or e}") from e
 
 
 class LinkedTargetError(OSError):

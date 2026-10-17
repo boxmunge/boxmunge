@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from boxmunge.fileutil import fsync_dir, open_regular_nofollow
+from boxmunge.fileutil import RenamedNotSyncedError, durable_rename, open_regular_nofollow
 from boxmunge.log import log_operation, log_warning
 from boxmunge.notify import notify
 from boxmunge.stash import META_FILENAME, list_stashes
@@ -103,10 +103,10 @@ def _sweep_stale(paths: BoxPaths) -> None:
                     f"rewrite that did not finish", paths)
 
 
-def _rewrite(paths: BoxPaths, original: Path, tmp: Path) -> list[str]:
-    """The dropped members' names; [] when there was nothing to drop.
-    Removes its copy and raises on any failure before the rename; the
-    caller makes the rename durable."""
+def _rewrite(paths: BoxPaths, original: Path, tmp: Path) -> tuple[list[str], str | None]:
+    """The dropped members' names ([] when there was nothing to drop), and
+    the error when the copy replaced the original but the directory sync
+    failed. Removes its copy and raises on any failure before the rename."""
     created = False
     try:
         # stashes/ is deploy-writable: never read through a planted link.
@@ -117,7 +117,7 @@ def _rewrite(paths: BoxPaths, original: Path, tmp: Path) -> list[str]:
             _check_format(tar, members)
             dropped = [m.name for m in members if m.issym()]
             if not dropped:
-                return []
+                return [], None
             keep = [m for m in members if not m.issym()]
             want = [_record(tar, m) for m in keep]
             _sweep_stale(paths)
@@ -126,9 +126,12 @@ def _rewrite(paths: BoxPaths, original: Path, tmp: Path) -> list[str]:
                          | os.O_CLOEXEC, 0o600)
             created = True
             _write_copy(fd, (st.st_uid, st.st_gid), tar, keep)
-        _verify(tmp, want)   # also refuses a temp that is no longer a plain file
-        os.rename(tmp, original)   # the copy's data was fsynced in _write_copy
-        return dropped
+        _verify(tmp, want)
+        try:
+            durable_rename(tmp, original)
+        except RenamedNotSyncedError as e:
+            return dropped, f"{type(e).__name__}: {e}"
+        return dropped, None
     except BaseException:
         if created:
             tmp.unlink(missing_ok=True)
@@ -145,7 +148,7 @@ def sanitize_latest_stash(paths: BoxPaths) -> SanitizeResult:
     original = stashes[0]
     tmp = paths.stashes / f"{REWRITE_PREFIX}{os.getpid()}.tmp"
     try:
-        dropped = _rewrite(paths, original, tmp)
+        dropped, sync_error = _rewrite(paths, original, tmp)
     except Exception as e:  # noqa: BLE001 - never raises; the failure is alerted
         error = f"{type(e).__name__}: {e}"
         message = (f"The latest stash {original.name} could not be rewritten without its "
@@ -160,16 +163,13 @@ def sanitize_latest_stash(paths: BoxPaths) -> SanitizeResult:
         log_operation("upgrade", f"Dropped link member {name} from stash {original.name}", paths)
     if not dropped:
         return SanitizeResult(False)
-    try:
-        fsync_dir(paths.stashes)
-    except OSError as e:
-        error = f"{type(e).__name__}: {e}"
+    if sync_error is not None:
         message = (f"The latest stash {original.name} was rewritten without its link members, "
-                   f"but syncing {paths.stashes} failed ({error}). Until it is synced, a crash "
+                   f"but syncing {paths.stashes} failed ({sync_error}). Until it is synced, a crash "
                    f"may bring back the original, and then a rollback's stash restore may abort "
                    f"on git links. Run `sync` on the host now.")
         log_warning("upgrade", message, paths)
         notify(paths, "upgrade: stash rewrite not durable", message, component="upgrade",
                priority=1)
-        return SanitizeResult(True, dropped, error)
+        return SanitizeResult(True, dropped, sync_error)
     return SanitizeResult(True, dropped)

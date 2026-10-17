@@ -388,6 +388,26 @@ class TestDurability:
         assert events == ["fsync-file", "rename", "fsync-dir"]
         assert target.read_bytes() == b"ciphertext" and not tmp.exists()
 
+    def test_durable_rename_says_when_only_the_directory_sync_failed(self, tmp_path: Path) -> None:
+        """The rename is done: callers must be able to tell that from a failed rename."""
+        from boxmunge.fileutil import RenamedNotSyncedError, durable_rename
+        tmp, target = tmp_path / ".new.tmp", tmp_path / "data"
+        tmp.write_bytes(b"new")
+        target.write_bytes(b"old")
+        with patch("boxmunge.fileutil.fsync_dir", side_effect=OSError(5, "EIO")), \
+                pytest.raises(RenamedNotSyncedError, match="renamed .* not synced") as caught:
+            durable_rename(tmp, target)
+        assert isinstance(caught.value, OSError)
+        assert target.read_bytes() == b"new" and not tmp.exists()
+
+    def test_durable_rename_failing_rename_is_a_plain_oserror(self, tmp_path: Path) -> None:
+        from boxmunge.fileutil import RenamedNotSyncedError, durable_rename
+        tmp = tmp_path / ".new.tmp"
+        tmp.write_bytes(b"new")
+        with pytest.raises(OSError) as caught:
+            durable_rename(tmp, tmp_path / "missing-dir" / "data")
+        assert not isinstance(caught.value, RenamedNotSyncedError)
+
     def test_mode_and_owner_are_set_before_the_file_is_visible(self, tmp_path: Path) -> None:
         target = tmp_path / "secret.yml"
         seen: list[tuple[str, int]] = []
