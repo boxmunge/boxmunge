@@ -436,3 +436,36 @@ def test_a_git_rollback_is_refused_while_a_release_is_staged(paths, capsys) -> N
     update.assert_not_called()
     assert ("unstage myapp first: git installs cannot yet prove isolation from a staged "
             "release") in capsys.readouterr().err
+
+
+def test_a_rerun_says_which_release_is_live(paths, capsys) -> None:
+    """Killed after the switch, then another bundle deployed over the open
+    install: the rerun tears staging down and says what is live now."""
+    pdir = prod_and_stage(paths)
+    place_bundle(paths, timestamp=V3, files={"VERSION": "v3\n"})
+    with staging_docker_off():
+        assert crash_at("txn.switched", lambda: run_promote("myapp", paths)) == 137
+        assert run_deploy("myapp", paths, ref=V3) == 0
+        capsys.readouterr()
+        assert run_promote("myapp", paths) == 0
+    out = capsys.readouterr().out
+    assert "already live" not in out
+    assert f"myapp-{V2} was promoted, but myapp-{V3} is live now" in out
+    assert (pdir / "VERSION").read_text() == "v3\n"
+    assert load_slot(paths, "myapp") is None and load_txn(paths, "myapp") is None
+
+
+def test_a_rerun_after_a_failed_switch_and_a_deploy_says_what_is_live(paths, capsys) -> None:
+    prod_and_stage(paths)
+    place_bundle(paths, timestamp=V3, files={"VERSION": "v3\n"})
+    with staging_docker_off() as docker:
+        docker["up"].side_effect = DockerError("up failed")
+        assert run_promote("myapp", paths) == 1
+        docker["up"].side_effect = None
+        assert run_deploy("myapp", paths, ref=V3) == 0
+        capsys.readouterr()
+        assert run_promote("myapp", paths) == 1
+    out, err = capsys.readouterr()
+    assert f"myapp-{V3} has been deployed since" in err
+    assert f"production now runs myapp-{V2}" not in err
+    assert load_slot(paths, "myapp") is None

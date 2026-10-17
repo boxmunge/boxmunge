@@ -148,18 +148,31 @@ def _finish_dropped(project: str, paths: BoxPaths, dry_run: bool) -> int:
 
 
 def _finish_retired(project: str, paths: BoxPaths, found: _Promotion) -> int:
-    """A promote killed after replace_release returned: production runs the
-    staged release, so only the close and the teardown are left. The slot
-    records how the switch ended, so a rerun reports it truthfully."""
+    """A promote killed after replace_release returned: production was
+    switched to the staged release, so only the close and the teardown are
+    left. The slot records how the switch ended, and live.json what runs
+    now (a deploy may have replaced it since), so a rerun says both."""
     if found.resuming:
         close_txn(paths, project, found.txn)
     ref = found.meta.ref
+    try:
+        live = live_ref(paths, project)
+    except ReleaseStateError as e:
+        print(f"ERROR: Cannot tell which release is live: {e}", file=sys.stderr)
+        return 1
+    since = "" if live == ref else f", and {live} has been deployed since"
     if found.meta.switch_rc == 0:
-        print(f"{ref} is already live in production; finishing the teardown of staging.")
-        return _teardown_after(project, paths, ref)
-    print(f"{ref} was switched to production but its promotion failed; finishing the "
-          f"teardown of staging.")
+        print(f"{ref} is already live in production; finishing the teardown of staging."
+              if live == ref else f"{ref} was promoted, but {live} is live now (deployed "
+              f"since); finishing the teardown of staging.")
+        return _teardown_after(project, paths, ref, live)
+    print(f"{ref} was switched to production but its promotion failed{since}; finishing "
+          f"the teardown of staging.")
     if not _teardown(project, paths):
+        return 1
+    if live != ref:
+        print(f"ERROR: staging was torn down; the promotion of {ref} failed after "
+              f"production was switched{since}.", file=sys.stderr)
         return 1
     print(f"ERROR: staging was torn down, but the promotion of {ref} failed after "
           f"production was switched (see 'rollback {project}' below).", file=sys.stderr)
@@ -268,10 +281,16 @@ def _teardown(project: str, paths: BoxPaths,
     return False
 
 
-def _teardown_after(project: str, paths: BoxPaths, ref: str) -> int:
+def _teardown_after(project: str, paths: BoxPaths, ref: str, live: str | None = None) -> int:
+    """The teardown after a successful switch to ``ref``; ``live`` is what
+    runs now when a deploy has replaced it since."""
     if not _teardown(project, paths, announce=lambda: _announce(project, paths, ref)):
         return 1
-    print(f"{project}: promoted to production successfully.")
+    if live is None or live == ref:
+        print(f"{project}: promoted to production successfully.")
+    else:
+        print(f"{project}: {ref} was promoted and staging is torn down; production "
+              f"runs {live}.")
     return 0
 
 
