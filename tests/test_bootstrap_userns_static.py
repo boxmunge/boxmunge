@@ -19,6 +19,19 @@ def test_init_host_sources_userns_before_installing_docker() -> None:
     assert len(text.splitlines()) < 602
 
 
+def test_userns_refusals_come_before_init_host_changes_anything() -> None:
+    text = _init_host()
+    assert text.index("userns_preflight") < text.index("apt-get update")
+    assert text.index("userns_preflight") > text.index('if [[ "$(id -u)" -ne 0 ]]')
+
+
+def test_daemon_json_is_written_after_the_identity() -> None:
+    body = (BOOT / "userns.sh").read_text().split("userns_before_docker() {", 1)[1]
+    body = body.split("\n}", 1)[0]
+    assert body.index("userns_identity") < body.index("userns_daemon_json")
+
+
+
 def test_caddy_logs_is_created_for_caddys_remapped_root() -> None:
     """Never root-owned first and chowned later: docker-userns errors on that,
     and a chown that follows a link would hand its target to container root."""

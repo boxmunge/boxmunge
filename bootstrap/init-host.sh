@@ -97,6 +97,11 @@ if [[ -z "${SSH_KEY}" ]]; then
     exit 1
 fi
 
+# User-namespace remapping refuses a host that is not fresh before anything
+# changes; sets USERNS_OFFSET.
+source "$(dirname "$0")/userns.sh"
+userns_preflight
+
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
@@ -143,8 +148,7 @@ apt-get install -y -qq \
 # Step 3: Install Docker (official repo)
 # ---------------------------------------------------------------------------
 echo "##BOXMUNGE:STEP:3:15:Installing Docker"
-# User-namespace remapping, configured before Docker's first start; sets USERNS_OFFSET.
-source "$(dirname "$0")/userns.sh"
+# User-namespace remapping, configured before Docker's first start (userns.sh).
 userns_before_docker
 banner "Step 3/14: Installing Docker"
 if command -v docker &>/dev/null; then

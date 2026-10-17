@@ -132,27 +132,35 @@ _userns_daemon_json_text() {
 EOF
 }
 
-# userns_daemon_json: write daemon.json. One already there that says anything
+# userns_daemon_json_check: a daemon.json already there that says anything
 # else is the operator's: it is refused, never overwritten.
+userns_daemon_json_check() {
+    local path=/etc/docker/daemon.json
+    [[ -e "$path" || -L "$path" ]] || return 0
+    [[ "$(cat "$path")" == "$(_userns_daemon_json_text)" ]] && return 0
+    _userns_error "$path already exists and is not the one init-host.sh writes:" \
+        "$(tr '\n' ' ' < "$path"). Move it aside and run init-host.sh again; add your" \
+        "settings back afterwards."
+}
+
 userns_daemon_json() {
     local path=/etc/docker/daemon.json
-    if [[ -e "$path" || -L "$path" ]]; then
-        [[ "$(cat "$path")" == "$(_userns_daemon_json_text)" ]] && return 0
-        _userns_error "$path already exists and is not the one init-host.sh writes:" \
-            "$(tr '\n' ' ' < "$path"). Move it aside and run init-host.sh again; add your" \
-            "settings back afterwards."
-        return 1
-    fi
+    userns_daemon_json_check || return 1
     # 0644 whatever root's umask: deploy reads it (offset.daemon_json_userns).
     install -d -m 755 /etc/docker && _userns_daemon_json_text > "$path" && chmod 644 "$path"
 }
 
-# userns_before_docker: everything before Docker's first start; sets
-# USERNS_OFFSET. Every refusal comes before the identity is created.
+# userns_preflight: every refusal, before init-host changes anything; sets
+# USERNS_OFFSET (allocating also refuses malformed subid files).
+userns_preflight() {
+    userns_refuse_existing_docker && userns_daemon_json_check || return 1
+    USERNS_OFFSET="$(userns_allocate)"
+}
+
+# userns_before_docker: the identity, then daemon.json, before Docker's first
+# start, so a daemon.json is never left naming an identity that is not there.
 userns_before_docker() {
-    userns_refuse_existing_docker || return 1
-    USERNS_OFFSET="$(userns_allocate)" || return 1
-    userns_daemon_json && userns_identity "$USERNS_OFFSET"
+    userns_identity "$USERNS_OFFSET" && userns_daemon_json
 }
 
 # userns_verify <S>: the running daemon is remapped as daemon.json says.

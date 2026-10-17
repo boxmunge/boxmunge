@@ -20,6 +20,7 @@ printf '{SUBUID}' > /etc/subuid
 printf '{SUBGID}' > /etc/subgid
 . /bootstrap/userns.sh
 umask 077  # root's umask must not decide what deploy can read
+userns_preflight
 userns_before_docker
 S="$USERNS_OFFSET"; echo "S=$S"
 userns_identity "$S"
@@ -86,6 +87,12 @@ try() {
     if ( "$@" ) >/tmp/out 2>/tmp/err; then echo "$name=ok:$(tr '\n' ' ' </tmp/out)"
     else echo "$name=refused:$(tr '\n' ' ' </tmp/err)"; fi
 }
+no_group() {  # identity refused: daemon.json must not name it
+    useradd --system -N -g nogroup --no-create-home boxmunge-remap
+    userns_preflight && userns_before_docker; local rc=$?
+    echo "daemon_json=$(test -e /etc/docker/daemon.json && echo written || echo absent)" >&2
+    userdel boxmunge-remap; return $rc
+}
 link_logs() { mkdir -p /tmp/bm/caddy /victim; ln -sfn /victim /tmp/bm/caddy/logs; userns_caddy_logs 1048576; }
 file_logs() { mkdir -p /tmp/bm2/caddy; : > /tmp/bm2/caddy/logs; BOXMUNGE_ROOT=/tmp/bm2 userns_caddy_logs 1048576; }
 malformed() { printf 'alice:x:65536\n' > /etc/subuid; userns_allocate; }
@@ -108,7 +115,7 @@ zeros() {
 }
 foreign_first() {
     mkdir -p /etc/docker; echo '{"debug": true}' > /etc/docker/daemon.json
-    userns_before_docker; local rc=$?
+    userns_preflight; local rc=$?
     echo "ranges=$(grep -c . /etc/subuid)" >&2; return $rc
 }
 fake_docker() { printf '#!/bin/sh\n%s\n' "$1" > /usr/local/bin/docker; chmod +x /usr/local/bin/docker; }
@@ -118,6 +125,7 @@ docker_down() { fake_docker 'exit 1'; userns_refuse_existing_docker; }
 docker_empty() { fake_docker 'exit 0'; userns_refuse_existing_docker; }
 info() { fake_docker "echo '$1'"; userns_verify 1048576; }
 foreign_json() { mkdir -p /etc/docker; echo '{"data-root": "/srv/docker"}' > /etc/docker/daemon.json; userns_daemon_json; }
+try no_group no_group
 try link_logs link_logs; echo "victim=$(stat -c '%u:%g' /victim)"
 try file_logs file_logs
 try malformed malformed
@@ -149,6 +157,8 @@ def test_userns_bootstrap_refusals_on_trixie(tmp_path: Path) -> None:
     result = _run_on_trixie(REFUSALS)
     assert result.returncode == 0, result.stdout + result.stderr
     out = _outputs(result.stdout)
+    assert out["no_group"].startswith("refused:") and "without a group" in out["no_group"]
+    assert "daemon_json=absent" in out["no_group"]
     assert out["link_logs"].startswith("refused:") and "link" in out["link_logs"]
     assert out["victim"] == "0:0"
     assert out["file_logs"].startswith("refused:") and "not a directory" in out["file_logs"]

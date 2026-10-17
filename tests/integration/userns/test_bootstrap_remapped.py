@@ -86,12 +86,12 @@ def test_fresh_install_is_remapped_and_caddy_works(daemon, tmp_path: Path) -> No
     assert used.returncode != 0 and "userns-migrate" in used.stderr
     # The prior daemon.json is not init-host's: refused, not overwritten.
     prior = DAEMON_JSON.read_text()
-    foreign = userns("userns_before_docker")
+    foreign = userns("userns_preflight")
     assert foreign.returncode != 0 and "Move it aside" in foreign.stderr
     assert DAEMON_JSON.read_text() == prior
     DAEMON_JSON.unlink()
 
-    before = userns('userns_before_docker && echo "$USERNS_OFFSET"')
+    before = userns('userns_preflight && userns_before_docker && echo "$USERNS_OFFSET"')
     assert before.returncode == 0, before.stderr
     s = int(before.stdout)
     daemon.stop()  # init-host Step 10: systemctl restart docker

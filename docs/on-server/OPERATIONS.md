@@ -1220,8 +1220,8 @@ daemon (remapped, `overlay2` storage, data root ending in `/S.S`).
 
 - **Freshly installed:** remapped from the first boot. `init-host.sh` creates `boxmunge-remap`
   and its ranges, writes `daemon.json` before Docker first starts, records S, and journals the
-  migration as committed, so there is nothing to migrate. It refuses a host whose Docker already
-  has containers or volumes, and a `daemon.json` it did not write.
+  migration as committed, so there is nothing to migrate. Before it changes anything, it refuses a
+  host whose Docker already has containers or volumes, and a `daemon.json` it did not write.
 - **Not migrated:** a warning. Deploys go on as before.
 - **A source cannot be read** (for example a `daemon.json` only root can read) on a box where neither
   the record nor `daemon.json` names `boxmunge-remap`: a warning naming the file. Deploys go on under
