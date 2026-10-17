@@ -43,7 +43,7 @@ def _compose(project: str) -> str:
     return yaml.safe_dump({
         "services": {
             "web": {
-                "image": "nginx", "container_name": f"{project}-web",
+                "image": "nginx",
                 "networks": ["internal"], "configs": ["appconf"],
                 "volumes": ["data:/var/data", "./appconfig:/etc/app:ro",
                             "./site.conf:/etc/site.conf:ro", "./uploads:/uploads"],
@@ -107,7 +107,7 @@ def test_production_and_staging_share_nothing(paths, staged) -> None:
     assert overlaps(prod_ids, staging_ids) == []
     assert staging_ids.volumes >= {f"{staged}-staging_data"}
     assert staging_ids.networks >= {f"{staged}-staging_internal"}
-    assert f"{staged}-web" in prod_ids.containers
+    assert f"{staged}-web-1" in prod_ids.containers
     assert f"{staged}-staging-web-1" in staging_ids.containers
     assert _source(staging, "db", "/var/lib/postgresql/data") == \
         project_dir / "dbdata-staging" / "pg"

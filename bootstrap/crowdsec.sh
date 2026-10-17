@@ -33,14 +33,13 @@ fi
 # update, `cscli collections install` fails with "Downloaded version doesn't
 # match index". --force re-enables collections the package already symlinked
 # (otherwise install aborts on "tainted, won't enable unless --force").
-cscli hub update 2>/dev/null || true
-cscli collections install crowdsecurity/linux --force 2>/dev/null || true
-cscli collections install crowdsecurity/sshd --force 2>/dev/null || true
-# Parses boxmunge-caddy's JSON access log (see acquisition below). Purpose-built
-# for Caddy's native JSON format — replaces the old nginx collection, which was
-# installed on the assumption Caddy emitted nginx-compatible CLF but was never
-# actually fed any logs.
-cscli collections install crowdsecurity/caddy --force 2>/dev/null || true
+cscli hub update
+cscli collections install crowdsecurity/linux --force
+cscli collections install crowdsecurity/sshd --force
+# Parses boxmunge-caddy's JSON access log, which CrowdSec reads from the
+# container's stdout through Docker. install.sh writes that acquisition once
+# Caddy runs (bootstrap/crowdsec-acquis.sh).
+cscli collections install crowdsecurity/caddy --force
 
 if [[ -f /etc/crowdsec/acquis.yaml ]]; then
     if ! grep -q "journalctl" /etc/crowdsec/acquis.yaml; then
@@ -49,23 +48,9 @@ if [[ -f /etc/crowdsec/acquis.yaml ]]; then
 ---
 source: journalctl
 journalctl_filter:
-  - "_SYSTEMD_UNIT=sshd.service"
+  - "_SYSTEMD_UNIT=ssh.service"
 labels:
   type: syslog
-EOF
-    fi
-
-    # Caddy access log — JSON, bind-mounted out of the boxmunge-caddy container.
-    # Feeds the crowdsecurity/caddy parser for HTTP-layer detection/banning.
-    if ! grep -q "caddy/logs/access.log" /etc/crowdsec/acquis.yaml; then
-        cat >> /etc/crowdsec/acquis.yaml <<EOF
-
----
-source: file
-filenames:
-  - ${BOXMUNGE_ROOT:-/opt/boxmunge}/caddy/logs/access.log
-labels:
-  type: caddy
 EOF
     fi
 fi

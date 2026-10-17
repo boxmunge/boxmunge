@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
-from boxmunge.docker import compose_command
+from boxmunge.docker import COMPOSE_PROJECT_LABEL, compose_command
 from boxmunge.docker_run import docker_env
 from boxmunge.fleet import PROJECT_INPUT_ERRORS
 from boxmunge.lifecycle import is_blocked
@@ -91,19 +91,31 @@ def check_docker_running() -> HealthCheck:
 
 
 def check_caddy_container() -> HealthCheck:
-    """Check if Caddy container is running and healthy."""
+    """Check if Caddy container is running and healthy.
+
+    The host's CrowdSec follows boxmunge-caddy by name, so a container of
+    that name from any compose project but the platform's own `caddy`
+    (caddy/compose.yml) is an error: CrowdSec would read its output as
+    Caddy's. Compose sets the project label itself; a service cannot."""
     try:
         result = subprocess.run(
             ["docker", "inspect", "--format",
-             "{{.State.Health.Status}}", "boxmunge-caddy"],
+             f'{{{{.State.Health.Status}}}}|{{{{index .Config.Labels "{COMPOSE_PROJECT_LABEL}"}}}}',
+             "boxmunge-caddy"],
             capture_output=True, text=True, check=False, timeout=10,
             env=docker_env(),
         )
-        status = result.stdout.strip()
-        if status == "healthy":
-            return HealthCheck("caddy", "ok", "Caddy container healthy")
         if result.returncode != 0:
             return HealthCheck("caddy", "error", "Caddy container not found")
+        status, _, project = result.stdout.strip().partition("|")
+        if project != "caddy":
+            return HealthCheck(
+                "caddy", "error",
+                f"boxmunge-caddy belongs to compose project {project!r}, not the "
+                f"platform's caddy: CrowdSec reads its output as Caddy's. Remove it "
+                f"and run: docker compose -f /opt/boxmunge/caddy/compose.yml up -d")
+        if status == "healthy":
+            return HealthCheck("caddy", "ok", "Caddy container healthy")
         return HealthCheck("caddy", "warn", f"Caddy container status: {status}")
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return HealthCheck("caddy", "error", "Could not check Caddy container")

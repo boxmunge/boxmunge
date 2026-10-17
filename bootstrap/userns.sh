@@ -174,22 +174,6 @@ userns_verify() {
             "(security options $opts, driver $driver, root dir $root)"
 }
 
-# userns_caddy_logs <S>: Caddy runs remapped as container root, host uid S,
-# and appends its access log here. Created with that owner, never chowned:
-# a chown would follow a link left in its place.
-userns_caddy_logs() {
-    local logs="${BOXMUNGE_ROOT}/caddy/logs"
-    if [[ -L "$logs" ]]; then
-        _userns_error "$logs is a link; remove it and run init-host.sh again"
-        return 1
-    fi
-    if [[ -e "$logs" && ! -d "$logs" ]]; then
-        _userns_error "$logs is not a directory; remove it and run init-host.sh again"
-        return 1
-    fi
-    install -d -m 750 -o "$1" -g "$1" "$logs"
-}
-
 # userns_record <S>: append the record boxmunge.userns.offset reads.
 userns_record() {
     local cfg="${BOXMUNGE_ROOT}/config/boxmunge.yml"

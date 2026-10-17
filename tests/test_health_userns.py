@@ -18,20 +18,6 @@ def test_unmigrated_box_warns_with_the_check_command(paths) -> None:
     assert "userns-migrate --check" in check.detail
 
 
-def _caddy_logs(paths, monkeypatch, uid: int, gid: int):
-    """caddy/logs as a directory owned uid:gid (a unit test cannot chown to S)."""
-    import os
-    logs = paths.caddy / "logs"
-    logs.mkdir(parents=True)
-    real = os.lstat
-
-    def lstat(p):
-        st = real(p)
-        return os.stat_result((*st[:4], uid, gid, *st[6:])) if str(p) == str(logs) else st
-    monkeypatch.setattr(hc.os, "lstat", lstat)
-    return logs
-
-
 def _caddyfile(paths, mode: int = 0o644):
     caddyfile = paths.caddy / "Caddyfile"
     caddyfile.write_text("import /etc/caddy/sites/*.conf\n")
@@ -41,35 +27,9 @@ def _caddyfile(paths, mode: int = 0o644):
 
 def test_remapped_box_is_ok(paths, monkeypatch) -> None:
     remap_box(paths, monkeypatch)
-    _caddy_logs(paths, monkeypatch, S, S)
     _caddyfile(paths)
     check = hc.check_docker_userns(paths)
     assert check.status == "ok" and str(S) in check.detail
-
-
-def test_caddy_logs_must_belong_to_container_root(paths, monkeypatch) -> None:
-    """Caddy runs remapped as container root (host uid S) and appends to
-    caddy/logs/access.log; owned by host root, it cannot."""
-    remap_box(paths, monkeypatch)
-    _caddy_logs(paths, monkeypatch, 0, 0)
-    check = hc.check_docker_userns(paths)
-    assert check.status == "error" and "caddy/logs" in check.detail
-    assert f"chown -hR {S}:{S} {paths.caddy / 'logs'}" in check.detail
-
-
-@pytest.mark.parametrize("mode", [0o500, 0o650, 0o600])
-def test_caddy_logs_must_be_writable_by_its_owner(paths, monkeypatch, mode) -> None:
-    """S:S is not enough: Caddy has no DAC override, so without the owner's
-    write and search bits it still cannot create access.log."""
-    remap_box(paths, monkeypatch)
-    logs = _caddy_logs(paths, monkeypatch, S, S)
-    logs.chmod(mode)
-    try:
-        check = hc.check_docker_userns(paths)
-    finally:
-        logs.chmod(0o750)
-    assert check.status == "error" and f"mode {mode:04o}" in check.detail
-    assert f"sudo chmod 750 {logs}" in check.detail
 
 
 @pytest.mark.parametrize("mode", [0o640, 0o600, 0o440])
@@ -77,7 +37,6 @@ def test_caddyfile_must_be_readable_by_other(paths, monkeypatch, mode) -> None:
     """Remapped, Caddy's root (host uid S) is neither the owner nor in the
     group of a root:deploy Caddyfile: it reads through the "other" bits."""
     remap_box(paths, monkeypatch)
-    _caddy_logs(paths, monkeypatch, S, S)
     caddyfile = _caddyfile(paths, mode)
     check = hc.check_docker_userns(paths)
     assert check.status == "error" and f"mode {mode:04o}" in check.detail
@@ -86,7 +45,6 @@ def test_caddyfile_must_be_readable_by_other(paths, monkeypatch, mode) -> None:
 
 def test_missing_or_linked_caddyfile_is_an_error(paths, monkeypatch, tmp_path) -> None:
     remap_box(paths, monkeypatch)
-    _caddy_logs(paths, monkeypatch, S, S)
     check = hc.check_docker_userns(paths)
     assert check.status == "error" and "Caddyfile does not exist" in check.detail
     (tmp_path / "real").write_text("x")
@@ -96,24 +54,12 @@ def test_missing_or_linked_caddyfile_is_an_error(paths, monkeypatch, tmp_path) -
     assert check.status == "error" and "not a regular file" in check.detail
 
 
-def test_missing_caddy_logs_is_an_error_not_a_crash(paths, monkeypatch) -> None:
+def test_remapped_box_needs_no_caddy_log_directory(paths, monkeypatch) -> None:
+    """Caddy logs to stdout, so no directory belongs to its remapped root."""
     remap_box(paths, monkeypatch)
-    check = hc.check_docker_userns(paths)
-    assert check.status == "error" and "caddy/logs" in check.detail
-    assert "does not exist" in check.detail
-
-
-def test_symlinked_caddy_logs_is_an_error(paths, monkeypatch, tmp_path) -> None:
-    remap_box(paths, monkeypatch)
-    (tmp_path / "elsewhere").mkdir()
-    (paths.caddy / "logs").symlink_to(tmp_path / "elsewhere")
-    check = hc.check_docker_userns(paths)
-    assert check.status == "error" and "not a directory" in check.detail
-
-
-def test_unremapped_box_never_looks_at_caddy_logs(paths) -> None:
+    _caddyfile(paths)
     assert not (paths.caddy / "logs").exists()
-    assert hc.check_docker_userns(paths).status == "warn"
+    assert hc.check_docker_userns(paths).status == "ok"
 
 
 def test_flipped_daemon_is_an_error(paths, monkeypatch) -> None:

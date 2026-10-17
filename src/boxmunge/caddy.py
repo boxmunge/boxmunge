@@ -9,23 +9,59 @@ from boxmunge.manifest import get_all_routes
 from boxmunge.paths import BoxPaths
 
 
+# Access-log fields that carry text from a client or an upstream, each cut to
+# this many characters; every other such field is dropped. CrowdSec's docker
+# source drops a line over 64 KiB and loses the lines after it while it
+# restarts the tail, and Caddy JSON-escapes a byte into up to six. So no
+# request or response header is logged (any number, at any length), nor the
+# TLS details (a client's SNI runs to 64 KiB): only the User-Agent, appended
+# as a field of its own. A test walks every field a real Caddy emits and
+# fails on one that is neither here nor bounded by Caddy itself.
+ACCESS_LOG_FIELD_LIMITS = {
+    "request>uri": 2048,
+    "request>host": 256,
+    "request>method": 32,
+    "user_agent": 512,
+    "user_id": 256,
+}
+ACCESS_LOG_DROPPED = ("request>headers", "request>tls", "resp_headers")
+
+
+def _longer_than(limit: int) -> str:
+    """A regexp capturing the first `limit` characters of a longer value and
+    matching nothing shorter, which the filter then leaves untouched. Fixed
+    widths, not `.{0,n}`: a bounded range costs Go's regexp engine far more
+    per request. Go refuses a repeat count above 1000, so a longer limit is
+    a run of such groups."""
+    chunks = [1000] * (limit // 1000) + ([limit % 1000] if limit % 1000 else [])
+    return "^(" + "".join(f".{{{n}}}" for n in chunks) + ").+$"
+
+
 def _access_log_lines() -> list[str]:
     """Caddy access-log directive lines for a site block.
 
-    Emits JSON to a shared host-mounted file (`/var/log/caddy/access.log`,
-    bind-mounted from `/opt/boxmunge/caddy/logs`) that the host's CrowdSec
-    `crowdsecurity/caddy` parser ingests for HTTP-layer detection. Every site
-    block writes to the same path; Caddy dedupes file writers by filename, so
-    this is safe. Caddy self-rotates the file (lumberjack), keeping rotation
-    out of logrotate — consistent with the rest of the box.
+    JSON on the container's stdout (Caddy's own runtime log stays on
+    stderr). The host's CrowdSec reads it through the Docker API
+    (`source: docker`, stdout only) with boxmunge's own parser
+    (bootstrap/crowdsec-acquis.sh): the hub's caddy parser needs the request
+    headers logged. Never a file: one would sit in a directory the remapped
+    Caddy owns, and root CrowdSec would open whatever Caddy left there (a
+    FIFO, a link to a root-only file). caddy/compose.yml's json-file logging
+    rotates it.
     """
+    fields = [f"                {name} delete" for name in ACCESS_LOG_DROPPED]
+    fields += [f'                {name} regexp "{_longer_than(limit)}" "${{1}}"'
+               for name, limit in ACCESS_LOG_FIELD_LIMITS.items()]
     return [
+        "    log_append user_agent {http.request.header.User-Agent}",
         "    log {",
-        "        output file /var/log/caddy/access.log {",
-        "            roll_size 50MiB",
-        "            roll_keep 5",
+        "        output stdout",
+        "        format filter {",
+        "            wrap json",
+        "            fields {",
+        *fields,
+        "            }",
         "        }",
-        "        format json",
         "    }",
     ]
 

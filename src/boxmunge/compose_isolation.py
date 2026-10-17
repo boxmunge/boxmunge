@@ -10,7 +10,8 @@ read host files (secrets, configs, build inputs; see compose_build) only
 from inside its own directory. It may not publish ports on the host
 either; a port that must be published is declared in the manifest (see
 `published_ports`). Nor may it hand a service to anything outside its
-containers (`provider`, `models`). The shared `boxmunge-proxy` network is
+containers (`provider`, `models`), nor name its containers itself
+(`container_name`). The shared `boxmunge-proxy` network is
 attached by boxmunge's overlay for routed services; a compose file may
 not join it itself, by `networks:` or by `network_mode`, nor join another
 container's pid or ipc namespace. Images it builds stay in its own image
@@ -188,11 +189,31 @@ def _service_networks(svc: dict[str, Any]) -> dict[str, Any]:
     return nets if isinstance(nets, dict) else {}
 
 
+def _container_name_problem(svc_name: str, svc: dict[str, Any], project: str) -> str | None:
+    """Compose names every container `<project>-<service>-<n>` itself, inside
+    the project. A fixed name could be another project's while that one is
+    absent, or boxmunge's own (boxmunge-caddy, which the host's CrowdSec
+    follows by name), and no prefix rule is safe: project names may contain
+    hyphens and `boxmunge` is a valid one."""
+    if "container_name" not in svc:
+        return None
+    return (
+        f"service {svc_name}: container_name is not allowed. Compose names the "
+        f"container itself ({project}-{svc_name}-1), which keeps it inside the "
+        f"project; a fixed name could take another project's container or "
+        f"boxmunge's own. Remove container_name and reach the service by its "
+        f"service name."
+    )
+
+
 def _check_service(
-    svc_name: str, svc: dict[str, Any], declared: set[str],
+    svc_name: str, svc: dict[str, Any], declared: set[str], project: str,
     base_dir: Path, roots: tuple[Path, ...],
 ) -> list[str]:
     problems: list[str] = []
+    container_name = _container_name_problem(svc_name, svc, project)
+    if container_name:
+        problems.append(container_name)
     # Declared networks are all project-local (_check_networks refuses
     # external ones), so a service joining only those, with any aliases,
     # cannot place a name on a network another project shares.
@@ -251,7 +272,7 @@ def isolation_problems(
     services = doc.get("services") or {}
     for svc_name, svc in services.items():
         if isinstance(svc, dict):
-            problems += _check_service(svc_name, svc, declared, base_dir, roots)
+            problems += _check_service(svc_name, svc, declared, project, base_dir, roots)
     if isinstance(services, dict):
         dockerfiles = {
             name: local_dockerfile(svc.get("build"), base_dir, roots)

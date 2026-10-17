@@ -37,7 +37,7 @@ def _write_project(paths, name, manifest_extra=None, with_backup=False):
         manifest.update(manifest_extra)
     (pdir / "manifest.yml").write_text(yaml.dump(manifest))
     (pdir / "compose.yml").write_text(
-        "services:\n  web:\n    image: nginx:1.25\n    container_name: " + name + "_web_1\n"
+        "services:\n  web:\n    image: nginx:1.25\n"
     )
     mark_deployed(paths, name)
 

@@ -13,15 +13,29 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./sites:/etc/caddy/sites:ro
       - ./maintenance:/etc/caddy/maintenance:ro
-      # Writable bind mount (not a named volume) so the host's CrowdSec
-      # daemon can read access.log directly. read_only above locks only the
-      # container rootfs, not mounted volumes.
-      - ./logs:/var/log/caddy
       - caddy_data:/data
       - caddy_config:/config
     networks:
       - boxmunge-proxy
+    # Site access logs go to stdout as JSON; the host's CrowdSec reads them
+    # through the Docker API (bootstrap/crowdsec-acquis.sh), so no host file
+    # this container could replace is ever opened by root. Pinned to a
+    # driver the Docker API can read back, rotated.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     read_only: true
+    # Site configs of releases before Caddy logged to stdout write
+    # /var/log/caddy/access.log; a rollback to one regenerates them. Container
+    # memory only, never a host path, read by nothing: it keeps a rolled-back
+    # Caddy starting (CrowdSec sees no HTTP traffic until the next upgrade).
+    # Sized for those configs' own rotation (50 MiB, 5 kept), so it never
+    # fills; memory is used only as Caddy writes. Remove once no rollback
+    # target predates the stdout log.
+    tmpfs:
+      - /var/log/caddy:size=320m,mode=0700
     cap_drop:
       - ALL
     cap_add:

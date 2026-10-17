@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A fresh install on a real daemon: bootstrap/userns.sh remaps Docker before
 its first start, and Caddy, laid out as init-host.sh lays it out, serves and
-writes its access log under the remap. docker-userns is ok on the first run."""
+logs its access lines to stdout under the remap. docker-userns is ok on the first run."""
 from __future__ import annotations
 
 import os
@@ -47,7 +47,7 @@ def daemon():
     d.start()
 
 
-def _init_host_caddy(root: Path, s: int) -> None:
+def _init_host_caddy(root: Path) -> None:
     """caddy/ with init-host.sh's owners and modes (Steps 9 and 13)."""
     caddy = root / "caddy"
     caddy.mkdir(parents=True, mode=0o750)
@@ -56,13 +56,12 @@ def _init_host_caddy(root: Path, s: int) -> None:
     os.chown(caddy / "sites", 0, DEPLOY_GID)
     (caddy / "maintenance").mkdir(mode=0o755)
     os.chown(caddy / "maintenance", 0, DEPLOY_GID)
-    assert userns(f'userns_caddy_logs {s}', root).returncode == 0
     caddyfile = caddy / "Caddyfile"
     caddyfile.write_text("{\n    email ops@example.com\n}\n\nimport /etc/caddy/sites/*.conf\n")
     os.chown(caddyfile, 0, DEPLOY_GID)
     os.chmod(caddyfile, 0o644)
     site = caddy / "sites" / "fresh.conf"
-    site.write_text(":80 {\n    log {\n        output file /var/log/caddy/access.log\n"
+    site.write_text(":80 {\n    log {\n        output stdout\n        format json\n"
                     "    }\n    respond \"fresh\"\n}\n")
     os.chmod(site, 0o644)
     shutil.copy(REPO / "caddy" / "compose.yml", caddy / "compose.yml")
@@ -103,7 +102,7 @@ def test_fresh_install_is_remapped_and_caddy_works(daemon, tmp_path: Path) -> No
     (root / "config").mkdir(parents=True)
     (root / "config" / "boxmunge.yml").write_text(
         "hostname: dind.localhost\nadmin_email: ops@example.com\n")
-    _init_host_caddy(root, s)
+    _init_host_caddy(root)
     done = userns(f"userns_record {s} && userns_journal_committed {s}", root)
     assert done.returncode == 0, done.stderr
 
@@ -121,8 +120,10 @@ def test_fresh_install_is_remapped_and_caddy_works(daemon, tmp_path: Path) -> No
         assert up.returncode == 0, up.stderr + docker("logs", "boxmunge-caddy", check=False).stderr
         served = docker("exec", "boxmunge-caddy", "wget", "-qO-", "http://127.0.0.1/")
         assert served.stdout == "fresh"
-        log = root / "caddy" / "logs" / "access.log"
-        assert log.stat().st_size > 0 and (log.stat().st_uid, log.stat().st_gid) == (s, s)
+        # stdout only: what CrowdSec's docker source reads (follow_stderr: false).
+        access = subprocess.run(["docker", "logs", "boxmunge-caddy"], env=docker_env(),
+                                capture_output=True, text=True, check=True).stdout
+        assert '"msg":"handled request"' in access
         check = check_docker_userns(BoxPaths(root=root))
         assert check.status == "ok", check.detail
     finally:
