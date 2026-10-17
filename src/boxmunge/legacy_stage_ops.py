@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -22,14 +23,14 @@ from boxmunge.caddy_journal import remove_site
 from boxmunge.commands.deploy_steps import record_deploy_state, snapshot_wanted
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.upgrade_steps import (
-    _compose_refusal, _write_maintenance_site, require_manifest,
+    compose_refusal, require_manifest, write_maintenance_page,
 )
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_guard import check_start, compose_up_checked
 from boxmunge.data_dirs import log_kept, set_aside_announcer
 from boxmunge.docker import DockerError, caddy_config_lock, caddy_reload, compose_down
 from boxmunge.fileutil import (
-    atomic_write_text, chown_tree_deploy, discard_dir, durable_rename_dir, fsync_dir,
+    DISCARDED, atomic_write_text, chown_tree_deploy, discard_dir, durable_rename_dir, fsync_dir,
 )
 from boxmunge.git_layout import alert_unlinked, relink_advice
 from boxmunge.legacy_stage import (
@@ -94,8 +95,23 @@ def predeploy_snapshots(paths: BoxPaths, project: str,
 
 # -- 0.10.1's prestage operations, on this release's durable helpers --------
 
+def _require_real_dir(path) -> None:
+    """The kept trees are deploy-writable: a link there would have root copy
+    or re-own whatever it points at."""
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        raise LegacyStageError(f"{path} does not exist") from None
+    if not stat.S_ISDIR(mode):
+        raise LegacyStageError(f"{path} is not a directory (a link or a file); refusing "
+                               f"to read through it. Inspect it by hand")
+
+
 def _prestage_ref(paths: BoxPaths, project: str) -> str | None:
-    meta = paths.project_releases(project) / "prestage" / "meta.json"
+    prestage = paths.project_releases(project) / "prestage"
+    _require_real_dir(paths.project_releases(project))
+    _require_real_dir(prestage)
+    meta = prestage / "meta.json"
     ref = json.loads(meta.read_text()).get("ref")
     if ref is not None and not isinstance(ref, str):
         raise LegacyStageError(f"{meta}: ref {ref!r} is not a string")
@@ -104,11 +120,13 @@ def _prestage_ref(paths: BoxPaths, project: str) -> str | None:
 
 def restore_prestage_0101(paths: BoxPaths, project: str) -> None:
     """Put the kept production release back (0.10.1's restore_prestage,
-    without its discard: step 6 does that)."""
+    without its discard: step 6 does that). For a stage of a never-deployed
+    project the kept release is empty, so the project dir returns to that."""
     pdir, releases = paths.project_dir(project), paths.project_releases(project)
     ref = _prestage_ref(paths, project)
-    kept = install_release(releases / "prestage" / "release", pdir,
-                           set_aside_announcer(paths, project, COMPONENT))
+    tree = releases / "prestage" / "release"
+    _require_real_dir(tree)
+    kept = install_release(tree, pdir, set_aside_announcer(paths, project, COMPONENT))
     log_kept(paths, project, kept, COMPONENT)
     if ref is None:
         if os.path.lexists(releases / "live.json"):
@@ -123,20 +141,25 @@ def restore_prestage_0101(paths: BoxPaths, project: str) -> None:
 def prestage_to_previous_0101(paths: BoxPaths, project: str, snapshot: str | None,
                               replaced_by: str) -> None:
     """The kept production release becomes the rollback target (0.10.1's
-    prestage_to_previous, without its discard). Safe to rerun after the move."""
+    prestage_to_previous, without its discard). The move is recorded before
+    it is made, so a rerun trusts previous/ only when this command put it there."""
     ref = _prestage_ref(paths, project)
     if ref is None:
         return  # the stage was a first deploy: nothing to roll back to
     releases = paths.project_releases(project)
     tree, previous = releases / "prestage" / "release", releases / "previous"
     if os.path.lexists(tree):
+        _require_real_dir(tree)
+        update_record(paths, project, previous_moved=True)
         if os.path.lexists(releases / "previous.json"):
             (releases / "previous.json").unlink()
             fsync_dir(releases)
         discard_dir(previous)
         durable_rename_dir(tree, previous)
-    elif not previous.is_dir():
-        raise LegacyStageError(f"{tree} is gone and {previous} does not hold it")
+    elif not (get_record(paths, project) or {}).get("previous_moved"):
+        raise LegacyStageError(f"{tree} (production's kept release) is missing, and this "
+                               f"command did not move it; inspect .releases/ by hand")
+    _require_real_dir(previous)
     atomic_write_text(releases / "previous.json", previous_meta_text(
         ref, snapshot, datetime.now(timezone.utc).isoformat(), replaced_by), mode=0o644)
     chown_tree_deploy(previous)
@@ -166,8 +189,8 @@ def _remove_staging_site(paths: BoxPaths, project: str) -> None:
 
 
 def _snapshot_production(paths: BoxPaths, project: str) -> str | None:
-    """A pre-deploy snapshot of the untouched production, with the manifest
-    and compose file of the release its containers run (backup_source)."""
+    """A new pre-deploy snapshot of the untouched production, with the
+    manifest and compose file of the release its containers run (backup_source)."""
     from boxmunge.backup_source import backup_source
     from boxmunge.commands.backup_cmd import backup_locked, list_snapshots
     source = backup_source(paths, project)
@@ -175,20 +198,32 @@ def _snapshot_production(paths: BoxPaths, project: str) -> str | None:
         raise LegacyStageError(f"production cannot be backed up: {source.skip}")
     if not snapshot_wanted(source.manifest):
         return None
+    block = is_blocked(project, paths)
+    if block:
+        raise LegacyStageError(
+            f"{project} is {block.reason.value}, so no pre-deploy snapshot of production can "
+            f"be taken, and resuming it is refused while the stage is in place; use --discard")
+    before = {p.name for p in list_snapshots(paths, project)}
     print("  Taking pre-deploy snapshot...")
     if backup_locked(project, paths, kind=BackupKind.PREDEPLOY, manifest=source.manifest,
                      compose_file=source.compose_file) != 0:
         raise LegacyStageError("the pre-deploy snapshot failed (see above); without it a "
                                "rollback could not restore production's data")
-    snaps = list_snapshots(paths, project)
-    return snaps[0].name if snaps else None
+    new = [p.name for p in list_snapshots(paths, project) if p.name not in before]
+    if not new:
+        raise LegacyStageError("the backup made no new pre-deploy snapshot; without one a "
+                               "rollback could not restore production's data")
+    return new[0]
 
 
 def _pairing_snapshot(paths: BoxPaths, project: str, ev: Evidence) -> str | None:
-    """The snapshot the kept production release pairs with, decided once."""
+    """The snapshot the kept production release pairs with, decided once.
+    A never-deployed project has no data to pair."""
     rec = get_record(paths, project) or {}
     if "snapshot" not in rec:
-        if ev.classification == "untouched":
+        if ev.current_ref is None:
+            name = None
+        elif ev.classification == "untouched":
             name = _snapshot_production(paths, project)
         else:
             after = predeploy_snapshots(paths, project, after=ev.t)
@@ -199,18 +234,21 @@ def _pairing_snapshot(paths: BoxPaths, project: str, ev: Evidence) -> str | None
 
 def _production_code(paths: BoxPaths, project: str, stage: LegacyStage,
                      ev: Evidence | None, choice: str) -> None:
-    """Step 4."""
+    """Step 4. --discard reads nothing from the evidence, so a resumed one
+    needs none (step 4 changes what the evidence reads)."""
     if stage.kind == "leftover":
         return  # production runs the release a 0.10.1 promote installed
-    assert ev is not None
     if choice == "discard":
         if stage.kind == "bundle":
             restore_prestage_0101(paths, project)
         else:
             from boxmunge.git_slot import checkout_detached, resolve_recorded_ref
             repo = paths.project_dir(project) / "repo"
-            checkout_detached(repo, resolve_recorded_ref(repo, ev.current_ref or ""))
+            current = read_state(paths.project_deploy_state(project)).get("current_ref")
+            checkout_detached(repo, resolve_recorded_ref(repo, current or ""))
         return
+    if ev is None:
+        raise LegacyStageError("--keep-staged needs the evidence of what production runs")
     snapshot = _pairing_snapshot(paths, project, ev)
     staged = ev.staged_ref if stage.kind == "bundle" else ev.head
     if not staged:
@@ -232,28 +270,35 @@ def _clean_up(paths: BoxPaths, project: str) -> None:
             fsync_dir(path.parent)
 
 
-def _drop_stage_record(paths: BoxPaths, project: str) -> None:
-    """Step 6, last: detection is true until this is done."""
+def drop_stage_record(paths: BoxPaths, project: str) -> None:
+    """Step 6, last: detection is true until this is done (for a git or
+    leftover stage whose state is not active, until step 5)."""
     state = legacy_staging_state(paths, project)
     if os.path.lexists(state):
         state.unlink()
         fsync_dir(state.parent)
-    discard_dir(paths.project_releases(project) / "prestage")
+    releases = paths.project_releases(project)
+    discard_dir(releases / "prestage")
+    discard_dir(releases / f"prestage{DISCARDED}")  # a crash inside the discard above
 
 
 def finish_apply(paths: BoxPaths, project: str) -> None:
     """Step 7: what the upgrade apply skipped (the manifest migration and the
     configs), then production recreated on this release's overlay as a
     deploy does. A paused, quarantined or monitor-stopped project is left
-    stopped, with its bind sources recorded for the command that starts it."""
+    stopped, with its bind sources recorded for the command that starts it.
+    A never-deployed project (a discarded first stage) has nothing to do."""
     pdir = paths.project_dir(project)
+    if not os.path.lexists(pdir / "manifest.yml"):
+        print(f"  {project} was never deployed: nothing to start.")
+        return
     manifest_path = require_manifest(pdir)
     unlinked = alert_unlinked(paths, pdir, load_manifest_as_written(manifest_path))
     if unlinked:
         print(f"  WARN: {relink_advice(pdir, unlinked)}")
     migrate_one(paths, pdir)
     manifest = load_manifest(manifest_path)
-    refusal = _compose_refusal(paths, project, manifest)
+    refusal = compose_refusal(paths, project, manifest)
     if refusal is not None:
         raise LegacyStageError(f"compose.yml is refused: {refusal}. Fix it and run this "
                                f"again, or deploy a fixed release")
@@ -263,7 +308,7 @@ def finish_apply(paths: BoxPaths, project: str) -> None:
             "the health monitor stopped it; `recover` starts it"
             if is_monitor_stopped(project, paths) else None)
     if block:
-        _write_maintenance_site(paths, project, manifest)
+        write_maintenance_page(paths, project, manifest)
     else:
         prepare_caddy_config(paths, manifest)
     if held:
@@ -286,7 +331,7 @@ def resolve(paths: BoxPaths, project: str, stage: LegacyStage, ev: Evidence | No
     _remove_staging_site(paths, project)
     _production_code(paths, project, stage, ev, choice)
     _clean_up(paths, project)
-    _drop_stage_record(paths, project)
+    drop_stage_record(paths, project)
     finish_apply(paths, project)
 
 

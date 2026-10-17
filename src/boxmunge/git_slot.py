@@ -19,6 +19,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from boxmunge.fileutil import running_as_root
+
 GIT_TIMEOUT = 300
 _FULL_SHA = re.compile(r"[0-9a-f]{40}")
 _SHORT_SHA = re.compile(r"[0-9a-f]{4,39}")
@@ -32,26 +34,30 @@ class GitRefError(ValueError):
 
 def _as_deploy() -> dict:
     """subprocess arguments that run git as the deploy user when we are root.
-    The repository and its config are deploy's: a filter or fsmonitor
-    command there must never run as root (and git refuses a repository
-    another user owns)."""
-    if os.geteuid() != 0:
+    The repository and its config are deploy's, so whatever git runs from
+    them (filters, fsmonitor) is deploy's code: it runs as deploy, with no
+    stdin, in its own session (no controlling terminal to inject into) and
+    a minimal environment (git refuses another user's repository anyway)."""
+    if not running_as_root():
         return {}
     try:
         pw = pwd.getpwnam("deploy")
     except KeyError as e:
         raise GitRefError("running as root, git runs as the deploy user, and there is no "
                           "deploy user") from e
-    return {"user": pw.pw_uid, "group": pw.pw_gid, "extra_groups": [],
-            "env": {**os.environ, "HOME": pw.pw_dir}}
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": pw.pw_dir,
+           "LANG": os.environ.get("LANG", "C.UTF-8"), "GIT_CONFIG_NOSYSTEM": "1"}
+    return {"user": pw.pw_uid, "group": pw.pw_gid, "extra_groups": [], "env": env,
+            "stdin": subprocess.DEVNULL, "start_new_session": True}
 
 
 def _git(args: list[str], cwd: Path, *, timeout: int = 60) -> subprocess.CompletedProcess:
     """git's result; a hang or output that is not UTF-8 raises GitRefError,
-    so callers handle one error type."""
+    so callers handle one error type. The repository's hooks never run."""
     try:
-        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
-                              timeout=timeout, check=False, **_as_deploy())
+        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args], cwd=cwd,
+                              capture_output=True, text=True, timeout=timeout, check=False,
+                              **_as_deploy())
     except subprocess.TimeoutExpired as e:
         raise GitRefError(f"git {args[0]} in {cwd} timed out after {timeout}s") from e
     except UnicodeDecodeError as e:
@@ -113,8 +119,8 @@ def _require_full_sha(sha: str, what: str) -> None:
 def checkout_detached(repo: Path, sha: str) -> None:
     """Check out `sha` with HEAD detached; the repository's hooks never run."""
     _require_full_sha(sha, "check out")
-    result = _git(["-c", "core.hooksPath=/dev/null", "checkout", "-q", "--detach",
-                   "--end-of-options", sha], repo, timeout=GIT_TIMEOUT)
+    result = _git(["checkout", "-q", "--detach", "--end-of-options", sha], repo,
+                  timeout=GIT_TIMEOUT)
     if result.returncode != 0:
         raise GitRefError(f"git checkout {sha} in {repo} failed: {result.stderr.strip()}")
 

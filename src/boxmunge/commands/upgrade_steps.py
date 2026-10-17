@@ -152,7 +152,7 @@ def _links_into_repository(project_dir: Path) -> bool:
     return (project_dir / "manifest.yml").is_symlink()
 
 
-def _compose_refusal(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> str | None:
+def compose_refusal(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> str | None:
     """Why this release's compose validator refuses the project, or None.
 
     Pure: the dry run calls it too, and must log nothing.
@@ -171,7 +171,7 @@ def _compose_refusal(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> st
     return None
 
 
-def _write_maintenance_site(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> None:
+def write_maintenance_page(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> None:
     hosts = manifest.get("hosts", [])
     if not hosts:
         return
@@ -228,7 +228,7 @@ def _regenerate_project(
     # resume regenerate both when the project comes back.
     block = is_blocked(name, paths)
     if block:
-        _write_maintenance_site(paths, name, manifest)
+        write_maintenance_page(paths, name, manifest)
         log_operation("upgrade", block.skip_message, paths, project=name)
         if not paths.project_bind_record(name).exists():
             _record_bind_sources(paths, name)
@@ -238,7 +238,7 @@ def _regenerate_project(
     # old configs and running containers are left untouched; the upgrade
     # itself goes on, since rolling back would only restore the validator
     # that let the file in.
-    refusal = _compose_refusal(paths, name, manifest)
+    refusal = compose_refusal(paths, name, manifest)
     if refusal is not None:
         regen.refused[name] = refusal
         log_error("upgrade", f"Compose validation refused {name}: {refusal}. Its "
@@ -318,7 +318,7 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
                 render_maintenance_caddy_config(manifest["hosts"])
             report.append(f"{name}: {block.reason.value}; keeps its maintenance page")
             continue
-        refusal = _compose_refusal(paths, name, manifest)
+        refusal = compose_refusal(paths, name, manifest)
         if refusal is not None:
             report.append(f"{name}: would be refused by this release's compose "
                           f"validator and left on its current configs and "

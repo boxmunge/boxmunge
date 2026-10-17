@@ -227,13 +227,25 @@ def test_run_as_root_git_runs_as_the_deploy_user(repos, monkeypatch) -> None:
         seen.update(kw)
         return real(argv, **{k: v for k, v in kw.items()
                              if k not in ("user", "group", "extra_groups")})
-    monkeypatch.setattr(git_slot.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(git_slot, "running_as_root", lambda: True)
     monkeypatch.setattr(git_slot.pwd, "getpwnam", lambda name: pwd.struct_passwd(
         (name, "x", 1234, 5678, "", "/home/deploy", "/bin/sh")))
+    monkeypatch.setenv("SUDO_USER", "operator")
     monkeypatch.setattr(git_slot.subprocess, "run", run)
+    argvs = []
+    real_run = run
+
+    def recording(argv, **kw):
+        argvs.append(argv)
+        return real_run(argv, **kw)
+    monkeypatch.setattr(git_slot.subprocess, "run", recording)
     assert head_sha(prod)
     assert (seen["user"], seen["group"], seen["extra_groups"]) == (1234, 5678, [])
-    assert seen["env"]["HOME"] == "/home/deploy"
+    # Nothing of root's session reaches a process deploy controls.
+    assert seen["stdin"] is subprocess.DEVNULL and seen["start_new_session"] is True
+    assert seen["env"]["HOME"] == "/home/deploy" and seen["env"]["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert set(seen["env"]) <= {"PATH", "HOME", "LANG", "GIT_CONFIG_NOSYSTEM"}
+    assert argvs[0][1:3] == ["-c", "core.hooksPath=/dev/null"]
 
 
 def test_run_as_root_without_a_deploy_user_git_is_refused(repos, monkeypatch) -> None:
@@ -241,7 +253,7 @@ def test_run_as_root_without_a_deploy_user_git_is_refused(repos, monkeypatch) ->
 
     def missing(name):
         raise KeyError(name)
-    monkeypatch.setattr(git_slot.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(git_slot, "running_as_root", lambda: True)
     monkeypatch.setattr(git_slot.pwd, "getpwnam", missing)
     with pytest.raises(GitRefError, match="deploy user"):
         head_sha(prod)

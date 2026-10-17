@@ -15,8 +15,8 @@ from boxmunge.legacy_stage import (
     Evidence, EvidenceError, LegacyStage, evidence, get_record, legacy_stage, update_record,
 )
 from boxmunge.legacy_stage_ops import (
-    LegacyStageError, allowed_choices, finish_apply, platform_rollback_possible,
-    predeploy_snapshots, report_resolved, resolve,
+    LegacyStageError, allowed_choices, drop_stage_record, finish_apply,
+    platform_rollback_possible, predeploy_snapshots, report_resolved, resolve,
 )
 from boxmunge.manifest import ManifestError
 from boxmunge.migration import MigrationError
@@ -33,8 +33,10 @@ STEP_ERRORS = (DockerError, OSError, ValueError, LegacyStageError, ManifestError
 
 def _show(project: str, stage: LegacyStage, ev: Evidence | None) -> None:
     print(f"{project}: a release staged by boxmunge 0.10.1 ({stage.kind}).")
-    lines = ev.describe() if ev else [
-        "production runs the release a 0.10.1 promote installed; staging was left behind"]
+    lines = (ev.describe() if ev else
+             ["production runs the release a 0.10.1 promote installed; staging was left "
+              "behind"] if stage.kind == "leftover" else
+             ["a --discard of it was started; the evidence is not read again"])
     for line in lines:
         print(f"  {line}")
 
@@ -43,6 +45,24 @@ def _choices_text(stage: LegacyStage, ev: Evidence | None) -> str:
     recreated = ev is not None and ev.classification == "recreated"
     return ", ".join(f"--{c}" + (" --confirm-recreated" if c == "discard" and recreated else "")
                      for c in allowed_choices(stage))
+
+
+RECREATED_WARNING = ("production was started from the staged files, so discarding them "
+                     "changes what runs, and data the staged code wrote stays")
+
+
+def _restore_hint(paths: BoxPaths, project: str) -> str:
+    newest = predeploy_snapshots(paths, project)
+    if not newest:
+        return "there is no pre-deploy snapshot"
+    return (f"the newest pre-deploy snapshot is {newest[0]} (boxmunge restore {project} "
+            f"{newest[0]})")
+
+
+def _needs_confirmation(ev: Evidence | None, choice: str, recorded: str | None) -> bool:
+    # Once recorded, the evidence no longer tells: step 4 changes what it reads.
+    return (not recorded and choice == "discard" and ev is not None
+            and ev.classification == "recreated")
 
 
 def _refusal(paths: BoxPaths, project: str, stage: LegacyStage, ev: Evidence | None,
@@ -54,15 +74,9 @@ def _refusal(paths: BoxPaths, project: str, stage: LegacyStage, ev: Evidence | N
     if recorded and recorded != choice:
         return (f"a resolution with --{recorded} was started and must be finished: run "
                 f"boxmunge-server legacy-stage {project} --{recorded}")
-    # Once recorded, the evidence no longer tells: step 4 changes what it reads.
-    if (not recorded and choice == "discard" and ev is not None
-            and ev.classification == "recreated" and not confirm_recreated):
-        newest = predeploy_snapshots(paths, project)
-        restore = (f"the newest pre-deploy snapshot is {newest[0]} (boxmunge restore "
-                   f"{project} {newest[0]})" if newest else "there is no pre-deploy snapshot")
-        return ("production was started from the staged files, so discarding them changes "
-                "what runs, and data the staged code wrote stays; " + restore +
-                ". To go ahead, rerun with --discard --confirm-recreated")
+    if _needs_confirmation(ev, choice, recorded) and not confirm_recreated:
+        return (f"{RECREATED_WARNING}; {_restore_hint(paths, project)}. To go ahead, rerun "
+                f"with --discard --confirm-recreated")
     return None
 
 
@@ -90,6 +104,7 @@ def _finish_resolved(paths: BoxPaths, project: str, choice: str | None,
         return 0 if choice is None else 1
     print(f"Finishing the resolution of {project}'s 0.10.1 stage (--{recorded})...")
     try:
+        drop_stage_record(paths, project)  # a stage detection lost at step 5
         finish_apply(paths, project)
     except STEP_ERRORS as e:
         print(f"ERROR: {e}. Run the same command again to finish.", file=sys.stderr)
@@ -113,7 +128,10 @@ def legacy_stage_locked(paths: BoxPaths, project: str, choice: str | None,
         print(f"ERROR: Not yet: {why}. Run it again after that.", file=sys.stderr)
         return 1
     ev = None
-    if stage.kind != "leftover":
+    resumed_discard = choice == "discard" and recorded == "discard"
+    # A resumed --discard needs no evidence, and step 4 may have made it
+    # unreadable (a never-deployed project's live.json is gone).
+    if stage.kind != "leftover" and not resumed_discard:
         try:
             ev = evidence(paths, project, stage)
         except EvidenceError as e:
@@ -132,6 +150,9 @@ def legacy_stage_locked(paths: BoxPaths, project: str, choice: str | None,
     if refusal:
         print(f"ERROR: {refusal[0].upper()}{refusal[1:]}.", file=sys.stderr)
         return 1
+    if _needs_confirmation(ev, choice, recorded):
+        print(f"WARNING: {RECREATED_WARNING[0].upper()}{RECREATED_WARNING[1:]}; "
+              f"{_restore_hint(paths, project)}.")
     if recorded:
         print(f"Resuming the resolution with --{choice}...")
     try:
@@ -149,7 +170,7 @@ def run_legacy_stage(paths: BoxPaths, project: str, choice: str | None,
         with project_lock(project, paths):
             return legacy_stage_locked(paths, project, choice, confirm_recreated)
     except LockError as e:
-        print(f"ERROR: {e}; try again shortly.", file=sys.stderr)
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
 
