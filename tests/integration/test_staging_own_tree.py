@@ -305,7 +305,7 @@ def test_restore_during_a_stage_uses_production_files(int_paths, system_containe
             docker("exec", _live(project), "sh", "-c", "echo backed-up > /data/rows")
             docker("exec", _staged(project), "sh", "-c", "echo staging-own > /data/rows")
             assert run_backup(project, paths) == 0
-            (pdir / "data" / "rows").write_text("changed since\n")
+            docker("exec", _live(project), "sh", "-c", "echo 'changed since' > /data/rows")
             assert run_restore(project, paths, yes=True) == 0
         assert (pdir / "data" / "rows").read_text() == "backed-up\n"
         assert (pdir / "data-staging" / "rows").read_text() == "staging-own\n"
