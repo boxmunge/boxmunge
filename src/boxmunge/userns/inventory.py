@@ -93,6 +93,7 @@ class Inventory:
     network: dict[str, Any] = field(default_factory=dict)
     projects: list[str] = field(default_factory=list)
     record_data: list[str] = field(default_factory=list)
+    remapped: bool = False  # the daemon already runs containers in a user namespace
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -233,4 +234,5 @@ def take_inventory(paths: BoxPaths) -> Inventory:
                      root=str(info.get("DockerRootDir")),
                      server_version=str(info.get("ServerVersion")),
                      containers=containers, volumes=volumes, images=images, network=_network(),
-                     projects=projects, record_data=_record_data(paths, projects, containers))
+                     projects=projects, record_data=_record_data(paths, projects, containers),
+                     remapped="name=userns" in (info.get("SecurityOptions") or []))

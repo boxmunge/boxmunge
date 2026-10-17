@@ -12,9 +12,9 @@ above them, so nothing follows a symlink (userns.walk); symlinks and
 sockets are lchowned.
 
 chown clears setuid, and setgid on a group-executable file. The scan lists
-those entries with their modes; the caller journals the list before the
-first shift and passes it to every later one, so a crash between an entry's
-chown and its chmod is repaired by walking again. Idempotent otherwise.
+those entries with their modes; the caller journals the list before each
+shift and passes it back, so a crash between an entry's chown and its chmod
+is repaired by walking again. Idempotent otherwise.
 """
 from __future__ import annotations
 
@@ -185,11 +185,11 @@ def scan_tree(root: Path, offset: int, direction: Direction) -> Scan:
 def shift_tree(root: Path, offset: int, direction: Direction,
                setid: dict[str, int] | None = None) -> ShiftReport:
     """Scan, then shift every entry. Raises ShiftRefused before any change.
-    `setid` is the first scan's list (see the module docstring)."""
+    `setid` is the journalled list of an earlier scan (module docstring)."""
     scan = scan_tree(root, offset, direction)
     if scan.problems:
         raise ShiftRefused(root, scan.problems)
-    modes = scan.setid if setid is None else setid
+    modes = {**scan.setid, **(setid or {})}  # the journalled list knows the original modes
     report = ShiftReport()
 
     def visit(rel, st, fd, dir_fd, name):
