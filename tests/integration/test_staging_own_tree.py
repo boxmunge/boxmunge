@@ -150,6 +150,27 @@ def test_absolute_build_inputs_in_the_project_build_the_staged_tree(paths) -> No
         assert "version=v1" in Path(live[1]).read_text()
 
 
+def test_an_interpolated_build_context_naming_production_is_refused(paths, capsys) -> None:
+    """`${ROOT}/img` with ROOT=<project dir> in the release's .env gets past
+    the literal rewrite; the resolved staging model is what is checked."""
+    with slot_project(paths) as project:
+        pdir = paths.project_dir(project)
+        for ref, version in ((V1, "v1"), (V2, "v2")):
+            compose = {"services": {"app": {"build": {"context": "${ROOT}/img"},
+                                            "network_mode": "none",
+                                            "environment": {"VERSION": version}}}}
+            place_bundle(paths, project, ref, {
+                **release(project, version), "compose.yml": yaml.safe_dump(compose),
+                ".env": f"TAG={version}\nROOT={pdir}\n", "img/Dockerfile": "FROM scratch\n"})
+        with no_caddy(), patch("boxmunge.compose_guard.compose_up"):
+            assert run_deploy(project, paths, ref=V1) == 0
+            capsys.readouterr()
+            assert run_stage(project, paths, ref=V2) != 0
+        err = capsys.readouterr().err
+        assert f"{pdir}/img" in err and "build from the staged release" in err
+        assert not slot_dir(paths, project).exists()
+
+
 def test_stage_and_unstage_leave_production_untouched(paths, project) -> None:
     with no_caddy():
         assert run_deploy(project, paths, ref=V1) == 0

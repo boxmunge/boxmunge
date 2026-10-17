@@ -28,6 +28,7 @@ import yaml
 
 from boxmunge.bind_mounts import project_relative
 from boxmunge.compose import generate_compose_override, load_user_compose, production_env_files
+from boxmunge.compose_build import is_local_ref
 from boxmunge.compose_mounts import is_bind_entry, volume_source
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
 from boxmunge.docker import staging_compose_project
@@ -150,9 +151,48 @@ def _read_only(entry: Any) -> bool:
     return len(parts) > 2 and "ro" in parts[2].split(",")
 
 
+def _build_inputs(build: Any) -> Iterator[tuple[str, str]]:
+    """(what, host path) of each local input of a resolved build: Compose has
+    made the context and additional contexts absolute; a relative dockerfile
+    is resolved against the context."""
+    if not isinstance(build, dict):
+        return
+    context = build.get("context")
+    local = isinstance(context, str) and is_local_ref(context)
+    if local:
+        yield "context", context
+    dockerfile = build.get("dockerfile")
+    if isinstance(dockerfile, str) and (os.path.isabs(dockerfile) or local):
+        yield "dockerfile", os.path.join(context if local else "", dockerfile)
+    contexts = build.get("additional_contexts")
+    if isinstance(contexts, list):
+        contexts = dict(str(e).partition("=")[::2] for e in contexts)
+    for name, ref in _mapping(contexts).items():
+        if isinstance(ref, str) and is_local_ref(ref, additional=True):
+            yield f"additional_contexts.{name}", ref
+
+
+def _build_problems(name: str, build: Any, project_dir: Path, roots: set[str]) -> list[str]:
+    """Staging builds only from the staged release: a build input elsewhere
+    in the project dir (named by interpolation, say, which the base rewrite
+    cannot see) would build production's files, or its data."""
+    problems = []
+    for what, ref in _build_inputs(build):
+        path = os.path.normpath(ref)
+        forms = dict.fromkeys((path, os.path.realpath(path)))
+        if any(project_relative(form, project_dir, literal=True) is not None
+               and not any(form == r or form.startswith(r + os.sep) for r in roots)
+               for form in forms):
+            problems.append(f"staging service {name} build {what} reads {path}, which is "
+                            f"production's; build from the staged release (a path "
+                            f"relative to the release)")
+    return problems
+
+
 def separation_problems(model: dict[str, Any], project_dir: Path, release: Path) -> list[str]:
     """I3: staging mounts nothing of production's except its -staging copies
-    (read-write) and the slot's release (read-only)."""
+    (read-write) and the slot's release (read-only), and builds only from
+    the slot's release."""
     roots = {os.path.normpath(release), os.path.realpath(release)}
 
     def check(src: str, ro: bool, what: str) -> list[str]:
@@ -170,6 +210,8 @@ def separation_problems(model: dict[str, Any], project_dir: Path, release: Path)
         for entry in (svc.get("volumes") or []) if isinstance(svc, dict) else []:
             if is_bind_entry(entry):
                 problems += check(volume_source(entry), _read_only(entry), f"service {name}")
+        if isinstance(svc, dict):
+            problems += _build_problems(name, svc.get("build"), project_dir, roots)
     for section in ("configs", "secrets"):
         for key, decl in _mapping(model.get(section)).items():
             if isinstance(_mapping(decl).get("file"), str):

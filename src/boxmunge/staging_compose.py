@@ -29,6 +29,7 @@ import yaml
 from boxmunge.bind_mounts import project_relative
 from boxmunge.bundle import BOXMUNGE_ENTRIES
 from boxmunge.compose import ComposeError
+from boxmunge.compose_build import is_local_ref
 from boxmunge.compose_mounts import is_bind_entry, volume_source
 from boxmunge.staged_release import STAGING_BASE, STAGING_OVERLAY
 
@@ -82,13 +83,16 @@ def _outside(path: str, project_dir: Path) -> str:
 def _release_code(path: str, base: str, project_dir: Path, box_state: set[str],
                   what: str) -> str | None:
     """Where in the project a local build input lies (``path`` resolved
-    against ``base`` as Compose resolves it), or None outside it. Box state
+    against ``base`` as Compose resolves it; a relative one on its literal
+    path, as the release's own links are not production's), or None
+    outside it. Box state
     is refused: staging would build from release/'s copy of the name while
     production builds from the data itself. boxmunge's own entries are no
     release code at all, so nothing in the staged release stands for them."""
     if path.startswith("~"):
         return None
-    rel = project_relative(os.path.join(base, path), project_dir)
+    rel = project_relative(os.path.join(base, path), project_dir,
+                           literal=not os.path.isabs(path))
     if rel is None:
         return None
     top = rel.partition(os.sep)[0]
@@ -110,27 +114,27 @@ def _unmappable(path: str, what: str, why: str) -> ComposeError:
         f"dockerfile, relative to a build context in the release).")
 
 
-def _local_input(path: str, project_dir: Path, box_state: set[str], what: str) -> str:
+def _local_input(path: str, project_dir: Path, box_state: set[str], what: str,
+                 *, additional: bool = False) -> str:
     """A build context or additional context. Compose resolves a relative
     one against the project directory, which for staging is the staged
     release; an absolute one naming release code in the project dir would
     build production's copy, so it becomes the same path relative to the
-    release."""
-    if "://" in path:
+    release (as does a relative one that leaves the project and re-enters it)."""
+    if not is_local_ref(path, additional=additional):
         return path
     rel = _release_code(path, str(project_dir), project_dir, box_state, what)
     if rel is None:
         return _outside(path, project_dir)
-    if not os.path.isabs(path):
-        return path
-    return "." if rel == "." else os.path.join(".", rel)
+    canonical = "." if rel == "." else os.path.join(".", rel)
+    return path if os.path.normpath(path) == os.path.normpath(canonical) else canonical
 
 
 def _dockerfile(dockerfile: str, context: str, project_dir: Path, box_state: set[str]) -> str:
     """Compose resolves a relative dockerfile against the build context, so
     release code is named relative to staging's context; only an in-project
     context resolves in the staged release."""
-    remote = "://" in context
+    remote = not is_local_ref(context)
     if remote and not os.path.isabs(dockerfile):
         return dockerfile  # a file of the remote context
     prod_context = os.path.normpath(os.path.join(project_dir, os.path.expanduser(context)))
@@ -144,14 +148,14 @@ def _dockerfile(dockerfile: str, context: str, project_dir: Path, box_state: set
     if context_rel is None:
         raise _unmappable(dockerfile, "dockerfile", f"is release code in the project dir "
                           f"but the build context {context!r} is not in the release")
-    if not os.path.isabs(dockerfile):
-        return dockerfile
-    return os.path.relpath(rel, context_rel)
+    canonical = os.path.relpath(rel, context_rel)
+    return dockerfile if os.path.normpath(dockerfile) == canonical else canonical
 
 
 def _staging_contexts(contexts: Any, project_dir: Path, box_state: set[str]) -> Any:
     def one(name: str, ref: str) -> str:
-        return _local_input(ref, project_dir, box_state, f"additional_contexts.{name}")
+        return _local_input(ref, project_dir, box_state, f"additional_contexts.{name}",
+                            additional=True)
     if isinstance(contexts, dict):
         return {k: one(k, v) if isinstance(v, str) else v for k, v in contexts.items()}
     if not isinstance(contexts, list):

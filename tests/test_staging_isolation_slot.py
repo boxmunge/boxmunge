@@ -152,3 +152,39 @@ def test_candidate_model_refuses_include_and_extends_files(paths, tmp_path, comp
     scratch.mkdir()
     with pytest.raises(StagingIsolationError, match="Unstage first, or remove include/extends"):
         candidate_model(paths, "myapp", tree, {"project": "myapp", "services": {}}, scratch)
+
+
+def _build(**build) -> dict:
+    return {"services": {"web": {"image": "boxmunge.invalid/myapp-staging/web", "build": build}}}
+
+
+@pytest.mark.parametrize("build", [
+    {"context": str(RELEASE / "src")},
+    {"context": str(RELEASE / "src"), "dockerfile": "../docker/Dockerfile"},
+    {"context": str(RELEASE), "dockerfile": str(RELEASE / "Dockerfile"),
+     "additional_contexts": {"v": str(RELEASE / "vendor"), "i": "docker-image://alpine",
+                             "s": "service:base", "g": "https://example.com/r.git"}},
+    {"context": "https://example.com/r.git", "dockerfile": "Dockerfile"},
+    {"context": "git@example.com:r.git", "dockerfile": "Dockerfile"},
+    {"context": "/srv/lib", "dockerfile": "Dockerfile"},     # outside: validation's to judge
+])
+def test_separation_allows_builds_from_the_staged_release(paths, build) -> None:
+    assert separation_problems(_build(**build), P, RELEASE) == []
+
+
+@pytest.mark.parametrize("build,named", [
+    ({"context": str(P / "src")}, f"{P}/src"),
+    ({"context": str(RELEASE / "src"), "dockerfile": str(P / "Dockerfile")}, f"{P}/Dockerfile"),
+    ({"context": str(RELEASE / "src"), "dockerfile": "../../../../Dockerfile"}, f"{P}/Dockerfile"),
+    ({"context": str(RELEASE), "additional_contexts": {"v": str(P / "vendor")}}, f"{P}/vendor"),
+    ({"context": str(RELEASE), "additional_contexts": [f"v={P}/data-staging"]},
+     f"{P}/data-staging"),
+    ({"context": "https://example.com/r.git", "dockerfile": str(P / "Dockerfile")},
+     f"{P}/Dockerfile"),
+])
+def test_separation_refuses_builds_from_production(paths, build, named) -> None:
+    """Interpolation (`context: ${ROOT}/src`) gets past the literal rewrite:
+    the resolved model is what staging builds from."""
+    problems = separation_problems(_build(**build), P, RELEASE)
+    assert len(problems) == 1 and named in problems[0]
+    assert "build from the staged release" in problems[0]

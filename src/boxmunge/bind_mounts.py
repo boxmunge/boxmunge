@@ -28,18 +28,21 @@ def _is_read_only(entry: Any) -> bool:
     return len(parts) >= 3 and "ro" in parts[2].split(",")
 
 
-def project_relative(source: str, project_dir: Path) -> str | None:
+def project_relative(source: str, project_dir: Path, *, literal: bool = False) -> str | None:
     """A bind source's path inside the project dir ("." for the dir itself),
-    or None when it lies outside it."""
+    or None when it lies outside it. Spelled forms are tried before resolved
+    ones, so the answer does not depend on set order. ``literal`` never
+    follows the source's own links: for a path the caller joined from a
+    relative input, whose links are production's, not the release's."""
     if source.startswith("~"):
         return None
     found: str | None = None
     # Compare both spelled and resolved paths: /opt may be a symlink.
-    for base in {os.path.normpath(project_dir), os.path.realpath(project_dir)}:
-        candidates = {os.path.normpath(os.path.join(base, source))}
-        if os.path.isabs(source):
-            candidates.add(os.path.realpath(source))
-        for path in candidates:
+    for base in dict.fromkeys((os.path.normpath(project_dir), os.path.realpath(project_dir))):
+        candidates = [os.path.normpath(os.path.join(base, source))]
+        if os.path.isabs(source) and not literal:
+            candidates.append(os.path.realpath(source))
+        for path in dict.fromkeys(candidates):
             rel = os.path.relpath(path, base)
             if rel == ".." or rel.startswith(".." + os.sep):
                 continue

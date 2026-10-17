@@ -209,7 +209,8 @@ Staging builds from the staged release. A `build` context, `dockerfile` or addit
 that names release code by absolute path in the project dir (`<project>/src`) is staging's
 staged copy of it; one in a data directory or another server-owned entry, or one in `.releases/`
 or `repo/`, is refused. So is an absolute `dockerfile` in the project when the context is not:
-use paths relative to the release.
+use paths relative to the release. `stage` also checks what each build input resolves to (with
+`${VAR}` filled in) and refuses one in the project dir outside the staged release.
 
 Two behaviour changes in this release:
 

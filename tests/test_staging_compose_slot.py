@@ -2,6 +2,7 @@
 """Each row of the spec's 'How each path in the staged compose.yml resolves'."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -209,3 +210,62 @@ def test_unmappable_build_inputs_in_the_project_are_refused(tmp_path, build, nam
         _web(tmp_path, build=build)
     assert named in str(e.value)
 
+
+
+@pytest.mark.parametrize("build,want", [
+    ({"context": "../myapp/src"}, {"context": "./src"}),           # leaves and re-enters
+    ({"context": "../myapp"}, {"context": "."}),
+    ({"context": "./src", "dockerfile": "../../myapp/docker/Dockerfile"},
+     {"context": "./src", "dockerfile": "../docker/Dockerfile"}),
+    ({"context": ".", "additional_contexts": {"v": "../myapp/vendor"}},
+     {"context": ".", "additional_contexts": {"v": "./vendor"}}),
+])
+def test_paths_that_reenter_the_project_are_written_canonically(tmp_path, build, want) -> None:
+    assert _web(tmp_path, build=build)["build"] == want
+
+
+def test_a_path_reentering_the_project_into_box_state_is_refused(tmp_path) -> None:
+    with pytest.raises(ComposeError, match="Build from release code"):
+        _web(tmp_path, build={"context": "../myapp/data"})
+
+
+@pytest.mark.parametrize("build", [
+    {"context": "git@example.com:r.git", "dockerfile": "Dockerfile"},
+    {"context": "ssh://git@example.com/r.git", "dockerfile": "Dockerfile"},
+    {"context": ".", "additional_contexts": {"s": "service:base", "g": "git@example.com:r.git"}},
+])
+def test_remote_contexts_are_left_as_compose_build_reads_them(tmp_path, build) -> None:
+    assert _web(tmp_path, build=build)["build"] == build
+
+
+def test_an_in_project_dockerfile_with_an_ssh_context_is_refused(tmp_path) -> None:
+    with pytest.raises(ComposeError, match="relative to the release"):
+        _web(tmp_path, build={"context": "git@example.com:r.git", "dockerfile": f"{P}/Dockerfile"})
+
+
+def test_relative_inputs_are_judged_on_the_literal_path(tmp_path) -> None:
+    """Production's src -> data link does not make the release's src box state."""
+    project = tmp_path / "myapp"
+    (project / "data").mkdir(parents=True)
+    (project / "src").symlink_to(project / "data")
+    compose = tmp_path / "compose.yml"
+    compose.write_text(yaml.safe_dump({"services": {"web": {"build": {
+        "context": ".", "dockerfile": "src/Dockerfile"}}}}))
+    base = yaml.safe_load(generate_staging_compose_base(compose, {"data"}, project))
+    assert base["services"]["web"]["build"] == {"context": ".", "dockerfile": "src/Dockerfile"}
+
+
+def test_project_relative_is_deterministic_and_literal_on_request(tmp_path) -> None:
+    """Spelled forms win over resolved ones whatever the hash seed."""
+    import subprocess
+    import sys
+    project = tmp_path / "myapp"
+    (project / "data").mkdir(parents=True)
+    (project / "link").symlink_to(project / "data")
+    code = ("import sys; from pathlib import Path; from boxmunge.bind_mounts import "
+            "project_relative as r; p = Path(sys.argv[1]); "
+            "print(r(str(p / 'link/x'), p), r(str(p / 'link/x'), p, literal=True))")
+    seen = {subprocess.run([sys.executable, "-c", code, str(project)], check=True, text=True,
+                           capture_output=True, env={**os.environ, "PYTHONHASHSEED": str(seed)}
+                           ).stdout.strip() for seed in range(6)}
+    assert seen == {"link/x link/x"}
