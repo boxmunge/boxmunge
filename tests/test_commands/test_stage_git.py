@@ -111,3 +111,52 @@ def test_a_project_entry_named_staging_refuses_the_stage(paths, tmp_path, capsys
     assert "foo-staging: the -staging suffix is reserved" in err and "Nothing was changed" in err
     assert load_slot(paths, "myapp") is None
     assert (pdir / "foo-staging" / "code.txt").read_text() == "prod code"
+
+
+def _link_compose(work) -> str:
+    """A commit whose top-level compose.yml links to deploy/compose.yml."""
+    from tests.bundle_helpers import SAFE_COMPOSE
+    (work / "deploy").mkdir()
+    (work / "deploy" / "compose.yml").write_text(SAFE_COMPOSE)
+    os.remove(work / "compose.yml")
+    os.symlink("deploy/compose.yml", work / "compose.yml")
+    return commit(work, {}, "linked compose")
+
+
+def test_a_commit_whose_compose_is_a_link_is_not_staged(paths, tmp_path, capsys) -> None:
+    pdir, work = git_project(paths, tmp_path)
+    head = git("rev-parse", "HEAD", cwd=pdir / "repo")
+    _link_compose(work)
+    with staging_docker_off():
+        assert run_stage("myapp", paths) == 1
+    err = capsys.readouterr().err
+    assert "compose.yml at" in err and "is a symbolic link" in err
+    assert "Nothing was changed" in err
+    assert load_slot(paths, "myapp") is None
+    assert git("rev-parse", "HEAD", cwd=pdir / "repo") == head
+
+
+def test_a_slot_staged_before_the_rule_is_refused_by_promote_and_unstaged(paths, tmp_path,
+                                                                         capsys) -> None:
+    """A slot whose clone's compose.yml is a link (staged before the rule):
+    promote refuses before changing anything, and unstage removes it."""
+    from unittest.mock import patch
+
+    from boxmunge.commands.promote_cmd import run_promote
+    from boxmunge.commands.unstage_cmd import run_unstage
+    from boxmunge.release_txn import load_txn
+    pdir, work = git_project(paths, tmp_path)
+    head = git("rev-parse", "HEAD", cwd=pdir / "repo")
+    _link_compose(work)
+    with staging_docker_off(), \
+            patch("boxmunge.commands.stage_cmd.require_regular_control_files"):
+        assert run_stage("myapp", paths) == 0
+    capsys.readouterr()
+    with staging_docker_off():
+        assert run_promote("myapp", paths) == 1
+        assert "is a symbolic link" in capsys.readouterr().err
+        assert load_txn(paths, "myapp") is None
+        assert git("rev-parse", "HEAD", cwd=pdir / "repo") == head
+        assert run_unstage("myapp", paths) == 0
+    assert load_slot(paths, "myapp") is None
+    assert "cannot tell which -staging entries" in capsys.readouterr().out

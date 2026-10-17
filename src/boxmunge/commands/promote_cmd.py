@@ -26,7 +26,7 @@ from boxmunge.commands.git_deploy import GitDeploy, deploy_git_locked
 from boxmunge.commands.unstage_cmd import teardown_staging_locked
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.fileutil import LockError, project_lock
-from boxmunge.git_slot import GitRefError, is_full_sha, rev_parse
+from boxmunge.git_slot import GitRefError, is_full_sha, require_regular_control_files, rev_parse
 from boxmunge.intake import IntakeError, check_installable, report_refusal, validate_release_tree
 from boxmunge.log import log_error, log_operation
 from boxmunge.probation import clear_probation_if_active
@@ -207,6 +207,10 @@ def _require_commit(paths: BoxPaths, project: str, sha: str) -> None:
         raise IntakeError(str(e)) from e
     if found != sha:
         raise IntakeError(f"production's repository no longer has the staged commit {sha}")
+    try:
+        require_regular_control_files(paths.project_dir(project) / "repo", sha)
+    except GitRefError as e:
+        raise IntakeError(str(e)) from e
 
 
 def _deploy(project: str, paths: BoxPaths, meta: StagedRelease,

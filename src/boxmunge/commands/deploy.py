@@ -152,13 +152,16 @@ def _deploy_repo(
     """Fetch origin, resolve the ref (--ref, else the live manifest's) to a
     full SHA, and deploy exactly that commit (commands/git_deploy.py)."""
     from boxmunge.commands.git_deploy import GitDeploy, deploy_git_locked
-    from boxmunge.git_slot import GitRefError, fetch, resolve_ref
+    from boxmunge.git_slot import (
+        GitRefError, fetch, require_regular_control_files, resolve_ref,
+    )
     repo_dir = paths.project_dir(project_name) / "repo"
     try:
         wanted = ref or load_manifest(paths.project_manifest(project_name)).get("ref", "main")
         print(f"  Fetching {wanted}...")
         fetch(repo_dir)
         sha = resolve_ref(repo_dir, wanted)
+        require_regular_control_files(repo_dir, sha)
     except (ManifestError, GitRefError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

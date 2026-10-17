@@ -160,3 +160,18 @@ def test_a_git_deploy_sharing_with_staging_is_refused(paths, tmp_path, capsys) -
     err = capsys.readouterr().err
     assert "share" in err and "Nothing was changed" in err
     assert _head(pdir) == before and load_txn(paths, "myapp") is None
+
+
+def test_a_commit_whose_manifest_is_a_link_is_not_deployed(paths, tmp_path, capsys) -> None:
+    import os
+    pdir, work = git_project(paths, tmp_path)
+    before = _head(pdir)
+    (work / "conf").mkdir()
+    os.rename(work / "manifest.yml", work / "conf" / "manifest.yml")
+    os.symlink("conf/manifest.yml", work / "manifest.yml")
+    commit(work, {}, "linked manifest")
+    with staging_docker_off():
+        assert run_deploy("myapp", paths) == 1
+        assert run_deploy("myapp", paths, dry_run=True) == 1
+    assert "manifest.yml at" in capsys.readouterr().err
+    assert _head(pdir) == before and load_txn(paths, "myapp") is None

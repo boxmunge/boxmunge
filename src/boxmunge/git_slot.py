@@ -192,6 +192,32 @@ def checkout_detached(repo: Path, sha: str) -> None:
             f"run 'git -C {repo} checkout -f --detach {sha}' as the deploy user, then retry")
 
 
+CONTROL_FILES = ("compose.yml", "manifest.yml")
+_REGULAR_MODES = ("100644", "100755")
+
+
+def require_regular_control_files(repo: Path, sha: str) -> None:
+    """Refuse a commit whose top-level compose.yml or manifest.yml is not a
+    regular file (a link, say), read from the commit before anything is
+    checked out. boxmunge reads a staged release's files as root without
+    following links, so a git stage and a git deploy hold to one rule. A
+    missing file is left for validation to name."""
+    _require_full_sha(sha, "check")
+    result = _git(["ls-tree", "-z", "--end-of-options", sha, "--", *CONTROL_FILES], repo)
+    if result.returncode != 0:
+        raise GitRefError(f"cannot list {', '.join(CONTROL_FILES)} at {sha}: "
+                          f"{result.stderr.strip()}")
+    for entry in filter(None, result.stdout.split("\0")):
+        meta, _, name = entry.partition("\t")
+        mode = meta.split(" ", 1)[0]
+        if mode not in _REGULAR_MODES:
+            what = "a symbolic link" if mode == "120000" else f"not a regular file (mode {mode})"
+            raise GitRefError(
+                f"{name} at {sha} is {what}. boxmunge reads a git project's {name} "
+                f"without following links: commit the file itself at the top of the "
+                f"repository (not a link to it), then deploy or stage that commit")
+
+
 def is_full_sha(ref: str) -> bool:
     """A git install's ref: deploys and stages record full commit SHAs."""
     return bool(_FULL_SHA.fullmatch(ref or ""))

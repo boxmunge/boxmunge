@@ -22,7 +22,9 @@ from typing import TYPE_CHECKING, Any
 from boxmunge.commands.unstage_cmd import teardown_staging_locked
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import LockError, discard_dir, durable_rename_dir, project_lock
-from boxmunge.git_slot import GitRefError, fetch, materialise, resolve_ref
+from boxmunge.git_slot import (
+    GitRefError, fetch, materialise, require_regular_control_files, resolve_ref,
+)
 from boxmunge.identity import register_project_identity
 from boxmunge.intake import (
     IntakeError, check_installable, extract_candidate, incoming_workspace,
@@ -173,6 +175,7 @@ def _intake_git(project: str, paths: BoxPaths, ref: str | None,
         print(f"  Fetching {wanted}...")
         fetch(project_dir / "repo")
         sha = resolve_ref(project_dir / "repo", wanted)
+        require_regular_control_files(project_dir / "repo", sha)
         with incoming_workspace(paths, project) as workspace:
             tree = workspace / "release"
             tree.mkdir()
