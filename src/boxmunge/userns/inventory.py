@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from boxmunge.data_helper import is_anonymous
+from boxmunge.docker import COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL
 from boxmunge.docker_run import run as _run
 from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import load_registered_projects
@@ -170,8 +171,8 @@ def _container(doc: dict[str, Any], paths: BoxPaths) -> ContainerEntry:
               for m in doc.get("Mounts") or []]
     return ContainerEntry(
         id=str(doc["Id"]), name=name,
-        compose_project=labels.get("com.docker.compose.project", ""),
-        service=labels.get("com.docker.compose.service", ""),
+        compose_project=labels.get(COMPOSE_PROJECT_LABEL, ""),
+        service=labels.get(COMPOSE_SERVICE_LABEL, ""),
         image_id=str(doc.get("Image")), running=bool((doc.get("State") or {}).get("Running")),
         privileged=host.get("Privileged") is True, pid=str(host.get("PidMode") or ""),
         network=str(host.get("NetworkMode") or ""), ipc=str(host.get("IpcMode") or ""),

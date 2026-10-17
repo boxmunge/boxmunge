@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import traceback
 from contextlib import contextmanager
 from typing import Callable, Iterator
 
@@ -122,8 +123,11 @@ def crash_before(n: int, fn: Callable[[], object]) -> int:
             with _patched(hit):
                 fn()
         except BaseException:  # noqa: BLE001 - the parent reads the exit code
+            traceback.print_exc()
             code = 1
         finally:
+            sys.stdout.flush()
+            sys.stderr.flush()
             os._exit(code)
     _, status = os.waitpid(pid, 0)
     return os.waitstatus_to_exitcode(status)

@@ -111,11 +111,13 @@ def test_a_kill_at_any_step_of_the_migration_is_recoverable(box) -> None:
     print(f"\nmigration: {len(labels)} changes, {len(points)} kill points")
     started = time.monotonic()
     for n in points:
+        at = time.monotonic()
         assert crash_before(n, lambda: _migrate(paths, images)) == 137, (n, labels[n - 1])
         try:
             _recover(paths, images, before, n)
         except BaseException as e:
             raise AssertionError(f"after a kill before change {n} ({labels[n - 1]}): {e}") from e
+        print(f"kill {n} ({labels[n - 1]}): recovered in {time.monotonic() - at:.0f}s")
     print(f"swept in {time.monotonic() - started:.0f}s")
 
 
