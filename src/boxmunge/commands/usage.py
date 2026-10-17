@@ -139,11 +139,16 @@ confirmation unless --yes. If container teardown fails, nothing is deleted
 and the command exits 1; --force deletes anyway. Does not support --dry-run.""",
     "data": """\
 Usage: boxmunge data adopt <project> <service>:<path> <name>
+       boxmunge data chown <project> <service> <uid>:<gid>
 
-Copy the service's anonymous volume at <path> into a new named volume
+adopt copies the service's anonymous volume at <path> into a new named volume
 <project>_<name> that the next deploy adopts. Stops the service's containers
 for the copy and starts them again. Then add <name>:<path> to the service and
-deploy. The anonymous volume is kept until you remove it.""",
+deploy. The anonymous volume is kept until you remove it.
+
+chown stops the service, gives its read-write binds and named volumes to
+<uid>:<gid>, and leaves it stopped until you deploy, which runs it as that
+user.""",
     "inbox": """\
 Usage: boxmunge inbox [project] [--json]
        boxmunge inbox clean [project] [--yes]

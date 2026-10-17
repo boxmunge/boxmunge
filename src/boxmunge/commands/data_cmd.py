@@ -13,16 +13,25 @@ again afterwards, whatever happens, as staging's data copy does (the start
 checks of compose_guard apply both before the stop and at the start). The
 anonymous volume is left in place for the operator to remove once the
 redeployed service runs on the named one.
+
+`data chown <project> <service> <uid>:<gid>` is the one deliberate change of
+a service's data ownership: it stops the service, gives its read-write
+binds and named volumes to <uid>:<gid> through the helper, records that
+user, and leaves the service stopped for the deploy that runs it as that
+user (deploy refuses a user change over data the old user owns).
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 
+from boxmunge.bind_sources import BindSourceError, project_rel, source_kind
+from boxmunge.commands.deploy_checks import persistent, service_mounts, volume_name
 from boxmunge.compose_guard import check_containers_start, start_containers_checked
 from boxmunge.data_helper import (
-    COMPOSE_VOLUME_LABEL, compose_volume_labels, copy_into_volume, is_anonymous,
-    volume_is_empty, volume_labels,
+    COMPOSE_VOLUME_LABEL, compose_volume_labels, copy_into_volume, is_anonymous, run_helper,
+    volume, volume_is_empty, volume_labels,
 )
 from boxmunge.docker import COMPOSE_PROJECT_LABEL
 from boxmunge.docker_containers import container_mounts, project_containers
@@ -31,10 +40,15 @@ from boxmunge.fileutil import LockError, project_lock
 from boxmunge.legacy_stage import legacy_stage_refusal
 from boxmunge.log import log_operation
 from boxmunge.paths import BoxPaths
+from boxmunge.release_target import production_target, resolved_services
+from boxmunge.run_as import (
+    MAX_ID, SOURCE_CHOWN, RunAsError, ServiceUser, numeric_ids, read_users, write_users,
+)
 
 _VOLUME_NAME = re.compile(r"[a-z0-9][a-z0-9_.-]{0,62}")
 _STOP_TIMEOUT = 15
-_USAGE = "usage: boxmunge data adopt <project> <service>:<path> <name>"
+_USAGE = ("usage: boxmunge data adopt <project> <service>:<path> <name> | "
+          "boxmunge data chown <project> <service> <uid>:<gid>")
 
 
 class DataError(Exception):
@@ -153,16 +167,88 @@ def run_data_adopt(paths: BoxPaths, project: str, service: str, path: str, name:
     return 0
 
 
+def _chown_mount(paths: BoxPaths, project: str, model: dict, m, ids: tuple[int, int]) -> bool:
+    """Give one persistent mount to `ids`; False when it does not exist yet
+    (mounting it would create it, unlabelled or root-owned)."""
+    if m.kind == "bind":
+        project_dir = paths.project_dir(project)
+        if not os.path.lexists(str(m.source)):
+            return False
+        source_kind(project_dir, project_rel(str(m.source), project_dir), create=False)
+        if any(c in str(m.source) for c in ',"'):
+            raise BindSourceError(f"bind source {m.source} contains ',' or '\"', which the "
+                                  f"helper's --mount would misread; rename it")
+        where = ["--mount", f"type=bind,src={m.source},dst=/x"]
+    else:
+        name = volume_name(model, project, str(m.source))
+        if volume_labels(name) is None:
+            return False
+        where = volume(name, "/x")
+    print(f"  Giving {m.source} to {ids[0]}:{ids[1]}...")
+    run_helper(f"{project}-chown", where, f"chown -R -h {ids[0]}:{ids[1]} /x")
+    return True
+
+
+def chown_locked(paths: BoxPaths, project: str, service: str, ids: tuple[int, int]) -> None:
+    """Stop the service, chown its persistent mounts to `ids`, record the
+    user. Caller holds the project lock. The service is left stopped: its
+    next start (the deploy) runs it as `ids`. Raises DataError, DockerError,
+    BindSourceError or RunAsError."""
+    refusal = legacy_stage_refusal(paths, project)
+    if refusal is not None:
+        raise DataError(refusal)
+    model, services = resolved_services(production_target(paths, project))
+    if service not in services:
+        raise DataError(f"{project} has no service {service}")
+    mounts = persistent(service_mounts(services[service]))
+    if not mounts:
+        raise DataError(f"service {service} of {project} keeps no data in a read-write "
+                        f"bind or a named volume; there is nothing to chown")
+    users = read_users(paths, project)
+    running = _running(project, service)
+    if running:
+        print(f"  Stopping {', '.join(running)}; it stays stopped until you deploy.")
+        _run(["docker", "stop", "-t", str(_STOP_TIMEOUT), *running], capture=True)
+    done = [m.target for m in mounts if _chown_mount(paths, project, model, m, ids)]
+    image_user = users[service].image_user if service in users else ""
+    users[service] = ServiceUser(f"{ids[0]}:{ids[1]}", SOURCE_CHOWN, image_user)
+    write_users(paths, project, users)
+    log_operation("data-chown", f"Gave {service}'s data to {ids[0]}:{ids[1]}", paths,
+                  project=project, detail={"mounts": done})
+    print(f"Done. Deploy {project} now: {service} runs as {ids[0]}:{ids[1]} from its "
+          f"next start.")
+
+
+def run_data_chown(paths: BoxPaths, project: str, service: str, spec: str) -> int:
+    ids = numeric_ids(spec)
+    if ids is None or not all(1 <= i <= MAX_ID for i in ids):
+        print(f"ERROR: {spec!r} must be <uid>:<gid>, each between 1 and {MAX_ID} "
+              f"(data chown never gives data to root)", file=sys.stderr)
+        return 2
+    try:
+        with project_lock(project, paths):
+            chown_locked(paths, project, service, ids)
+    except (DataError, DockerError, LockError, BindSourceError, RunAsError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _usage_error(detail: str = "") -> None:
+    print(f"ERROR: {detail}{_USAGE}", file=sys.stderr)
+    sys.exit(2)
+
+
 def cmd_data(args: list[str]) -> None:
     from boxmunge.commands.argv import parse_args, require_project_name
-    if not args or args[0] != "adopt":
-        print(f"ERROR: {_USAGE}", file=sys.stderr)
-        sys.exit(2)
+    if not args or args[0] not in ("adopt", "chown"):
+        _usage_error()
     parsed = parse_args("data", args[1:], min_positional=3, max_positional=3)
     project = require_project_name("data", parsed.positional[0])
+    if args[0] == "chown":
+        sys.exit(run_data_chown(BoxPaths(), project, parsed.positional[1],
+                                parsed.positional[2]))
     service, sep, path = parsed.positional[1].partition(":")
     if not sep or not service or not path.startswith("/"):
-        print(f"ERROR: the second argument is <service>:<absolute path in the container>; "
-              f"{_USAGE}", file=sys.stderr)
-        sys.exit(2)
+        _usage_error("the second argument is <service>:<absolute path in the container>; ")
     sys.exit(run_data_adopt(BoxPaths(), project, service, path, parsed.positional[2]))

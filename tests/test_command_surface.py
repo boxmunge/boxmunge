@@ -48,6 +48,7 @@ BASE_ARGS: dict[str, list[str]] = {
 # Subcommand forms that need their own coverage.
 EXTRA_FORMS: list[list[str]] = [
     ["inbox", "clean"],
+    ["data", "chown", "myapp", "app", "10001:10001"],
     ["secrets", "set", "myapp", "KEY=value"],
     ["secrets", "set", "--host", "KEY=value"],
     ["secrets", "get", "myapp", "KEY"],
