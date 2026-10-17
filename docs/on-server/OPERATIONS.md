@@ -287,7 +287,11 @@ fails rather than staging on stale data.
 
 `unstage` (and `promote`, which ends with it) removes `-staging` copies of data directories the
 production release no longer mounts, logging each one; copies of directories production still
-mounts are kept for the next stage. Staging's named volumes are kept.
+mounts are kept for the next stage. Staging's named volumes are kept. Only staging's own copies
+are ever mounted or removed: the copy of an entry production mounts or records as data, or one the
+staged slot records that staging created. A `-staging` entry in the project dir that is neither
+(release code an older bundle shipped, or an operator's) makes `stage` refuse a release that would
+mount it ("is not staging's copy"), and `unstage` reports and leaves it. Rename it in the release.
 
 A stage that fails after installing its release (staging containers fail to start, the staging data
 copy fails, Caddy rejects the staging site) cleans up after itself: staging containers, the staging Caddy site and compose files are

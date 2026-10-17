@@ -366,3 +366,21 @@ def test_restore_during_a_stage_uses_production_files(int_paths, system_containe
         assert (pdir / "data" / "rows").read_text() == "backed-up\n"
         assert (pdir / "data-staging" / "rows").read_text() == "staging-own\n"
         _production_is_v1(paths, project, staging)
+
+
+def test_production_code_named_staging_is_never_staging_s(paths) -> None:
+    """Review of #80: a release installed before bundles were refused the
+    -staging suffix ships foo-staging/ as code, which production does not
+    mount, and the staged release mounts ./foo read-write. Staging's copy
+    of ./foo would be production's code dir, mounted read-write and then
+    deleted by unstage: the stage is refused and the code survives."""
+    with slot_project(paths, {V2: {"volumes": ["./foo:/foo"]}}) as project:
+        pdir = paths.project_dir(project)
+        with no_caddy():
+            assert run_deploy(project, paths, ref=V1) == 0
+            (pdir / "foo-staging").mkdir()
+            (pdir / "foo-staging" / "code.txt").write_text("prod code")
+            assert run_stage(project, paths, ref=V2) == 1
+            assert containers(f"{project}-staging") == {}
+            assert run_unstage(project, paths) == 1  # nothing was staged
+        assert (pdir / "foo-staging" / "code.txt").read_text() == "prod code"

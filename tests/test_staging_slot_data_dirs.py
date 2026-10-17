@@ -8,6 +8,7 @@ from boxmunge.compose_guard import compose_up_checked
 from boxmunge.data_dirs import classify
 from boxmunge.release import project_data_dirs
 from boxmunge.staging_cleanup import retired_staging_copies
+from boxmunge.staging_copies import slot_made
 from tests.bundle_helpers import SAFE_COMPOSE, place_bundle
 from tests.stage_helpers import V3, prod_and_stage, staging_docker_off
 
@@ -42,7 +43,9 @@ def test_classify_reads_the_staged_compose_only_when_given(tmp_path) -> None:
 def test_unstage_retires_the_copy_only_the_staged_release_mounted(paths) -> None:
     pdir = prod_and_stage(paths, staged_files={"compose.yml": UPLOADS})
     (pdir / "uploads-staging").mkdir(exist_ok=True)  # stage made its placeholder
-    assert retired_staging_copies(pdir) == [pdir / "uploads-staging"]
+    made = slot_made(paths, "myapp")
+    assert made == ("uploads-staging",)  # claimed before staging first mounted it
+    assert retired_staging_copies(pdir, made) == [pdir / "uploads-staging"]
 
 
 def test_live_scripts_from_0_10_1_are_swept_after_a_production_up(paths) -> None:
@@ -107,7 +110,7 @@ def test_a_read_only_staged_mount_leaves_its_old_copy_reported_only(paths) -> No
     (pdir / "conf-staging" / "x").write_text("operator's\n")
     assert project_data_dirs(pdir).staged == {"conf"}
     assert project_data_dirs(pdir).staged_rw == frozenset()
-    assert retired_staging_copies(pdir) == []
+    assert retired_staging_copies(pdir, slot_made(paths, "myapp")) == []
     assert pdir / "conf-staging" in old_layout_copies(pdir)
 
 

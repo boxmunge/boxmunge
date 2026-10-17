@@ -26,11 +26,12 @@ from boxmunge.staged_release import (
     STAGING_BASE, STAGING_OVERLAY, release_dir, slot_dir, staging_target, staging_target_for,
 )
 from boxmunge.staging_compose import generate_staging_compose_base
+from boxmunge.staging_copies import claim_new_copies, foreign_copies, slot_made
 from boxmunge.staging_copy_plan import CopyPlan, StagingDataError, copy_sources
 from boxmunge.staging_data import plan_staging_copy
 from boxmunge.staging_isolation import (
     StagingIsolationError, candidate_model, check_isolation, production_model, resolving,
-    separation_problems, staging_model,
+    separation_problems, staging_copy_tops, staging_model,
 )
 
 if TYPE_CHECKING:
@@ -116,8 +117,12 @@ def validate_staging_base(paths: BoxPaths, project: str, manifest: dict[str, Any
 
 def _refuse_shared(paths: BoxPaths, project: str, staging: dict[str, Any], release: Path,
                    productions: list[tuple[str, dict[str, Any]]]) -> None:
-    """I3 on staging's model, then nothing shared with any production."""
-    problems = separation_problems(staging, paths.project_dir(project), release)
+    """I3 on staging's model, then nothing shared with any production. The
+    copies staging may use are the current slot's (a re-stage carries them
+    over) and copies of production's data."""
+    project_dir = paths.project_dir(project)
+    problems = separation_problems(staging, project_dir, release,
+                                   foreign_copies(project_dir, slot_made(paths, project)))
     if problems:
         raise StagingIsolationError(
             "staging cannot be kept apart from production:\n  - " + "\n  - ".join(problems))
@@ -174,7 +179,8 @@ def precheck_candidate(paths: BoxPaths, project: str, manifest: dict[str, Any],
 def check_staging_storage(paths: BoxPaths, project: str,
                           manifest: dict[str, Any]) -> CopyPlan | None:
     """Validate the slot's staging files, prove staging disjoint from
-    production, and plan the copy. Returns the plan, or None."""
+    production, claim in the slot the copies staging is about to create
+    (staging_copies), and plan the copy. Returns the plan, or None."""
     slot = slot_dir(paths, project)
     validate_staging_base(paths, project, manifest, slot, release_dir(slot))
     with resolving():
@@ -182,6 +188,8 @@ def check_staging_storage(paths: BoxPaths, project: str,
         prod = production_model(paths, project)
     _refuse_shared(paths, project, staging, release_dir(slot),
                    [("production", prod)] if prod else [])
+    claim_new_copies(paths, project,
+                     staging_copy_tops(staging, paths.project_dir(project), release_dir(slot)))
     plan = None
     if copy_sources(manifest) is not None:
         if prod is None:

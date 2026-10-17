@@ -27,7 +27,7 @@ def test_only_copies_of_unmounted_data_are_retired(paths) -> None:
     for name in ("uploads-staging", "media-staging", "appconfig-staging"):
         (pdir / name).mkdir()
         (pdir / name / "f").write_text("staging's")
-    assert retired_staging_copies(pdir) == [pdir / "media-staging"]
+    assert retired_staging_copies(pdir, ()) == [pdir / "media-staging"]
 
 
 def test_removal_is_logged_and_leaves_production_data(paths) -> None:
@@ -35,7 +35,7 @@ def test_removal_is_logged_and_leaves_production_data(paths) -> None:
     (pdir / "media").mkdir()
     (pdir / "media" / "photo").write_text("production's")
     (pdir / "media-staging").mkdir()
-    assert remove_retired_staging_data(paths, "myapp") == [pdir / "media-staging"]
+    assert remove_retired_staging_data(paths, "myapp", ()) == [pdir / "media-staging"]
     assert not (pdir / "media-staging").exists()
     assert (pdir / "media" / "photo").read_text() == "production's"
     log = (paths.root / "logs" / "boxmunge.log").read_text()
@@ -49,11 +49,11 @@ def test_an_entry_production_mounts_is_never_a_staging_copy(paths) -> None:
     for name in ("cache", "cache-staging"):
         (pdir / name).mkdir()
         (pdir / name / "f").write_text("production's")
-    assert retired_staging_copies(pdir) == []
+    assert retired_staging_copies(pdir, ()) == []
     pdir_compose = pdir / "compose.yml"
     pdir_compose.write_text("services:\n  web:\n    image: x\n")
     # No longer mounted, but recorded as data in its own right: still kept.
-    assert retired_staging_copies(pdir) == []
+    assert retired_staging_copies(pdir, ()) == []
 
 
 def test_old_layout_copies_are_reported_not_removed(paths, capsys) -> None:
@@ -62,7 +62,7 @@ def test_old_layout_copies_are_reported_not_removed(paths, capsys) -> None:
     (pdir / "data" / "db").mkdir(parents=True)
     (pdir / "data" / "db-staging").mkdir()
     (pdir / "data" / "db-staging" / "f").write_text("old staging copy")
-    assert remove_retired_staging_data(paths, "myapp") == []
+    assert remove_retired_staging_data(paths, "myapp", ()) == []
     assert (pdir / "data" / "db-staging" / "f").exists()
     assert f"rm -rf {pdir / 'data' / 'db-staging'}" in capsys.readouterr().out
 
@@ -73,7 +73,7 @@ def test_old_copies_of_release_code_are_reported(paths, capsys) -> None:
     (pdir / "appconfig").mkdir()
     (pdir / "appconfig-staging").mkdir()
     (pdir / "appconfig-staging" / "settings").write_text("old staging copy")
-    assert remove_retired_staging_data(paths, "myapp") == []
+    assert remove_retired_staging_data(paths, "myapp", ()) == []
     assert (pdir / "appconfig-staging" / "settings").exists()
     assert f"rm -rf {pdir / 'appconfig-staging'}" in capsys.readouterr().out
 
@@ -89,5 +89,5 @@ def test_a_copy_holding_data_is_emptied_by_the_helper(paths, monkeypatch) -> Non
         emptied.append((label, path))
         (path / "photo").unlink()
     monkeypatch.setattr(staging_cleanup, "empty_dir", empty)
-    assert remove_retired_staging_data(paths, "myapp") == [pdir / "media-staging"]
+    assert remove_retired_staging_data(paths, "myapp", ()) == [pdir / "media-staging"]
     assert emptied == [("myapp-staging-cleanup", pdir / "media-staging")]

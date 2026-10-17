@@ -97,7 +97,7 @@ def _teardown(project: str, paths: BoxPaths, component: str) -> bool:
     # Which copies are retired depends on what production's compose.yml
     # mounts; that file is always production's now.
     try:
-        remove_retired_staging_data(paths, project)
+        remove_retired_staging_data(paths, project, meta.made if meta is not None else ())
     except (OSError, ValueError, DockerError) as e:
         print(f"ERROR: Removing retired staging data failed: {e}", file=sys.stderr)
         log_error(component, f"Removing retired staging data failed: {e}", paths, project=project)

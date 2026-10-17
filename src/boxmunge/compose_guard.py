@@ -57,6 +57,7 @@ from boxmunge.release_txn import load_txn, stale_reason, start_refusal
 from boxmunge.staged_release import (
     SlotError, clear_production_stopped, load_slot, staging_target,
 )
+from boxmunge.staging_copies import foreign_copies
 from boxmunge.staging_isolation import separation_problems
 
 if TYPE_CHECKING:
@@ -162,7 +163,8 @@ def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
         model = compose_resolve.resolve_deployed_config(
             target.cwd, target.files, target.project_name, all_profiles=True,
             project_directory=target.project_directory, env_file=target.env_file)
-        problems = separation_problems(model, project_dir, release)
+        problems = separation_problems(model, project_dir, release,
+                                       foreign_copies(project_dir, meta.made))
         if problems:
             raise BindSourceError(problems[0])
         sources = bind_sources.model_sources(model, project_dir)
@@ -175,7 +177,8 @@ def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
             bind_sources.check_sources(project_dir, sources, rec["sources"])
             bind_sources.check_control(project_dir, read_files, rec["control"],
                                        control_root=release)
-    except (IntakeError, compose_resolve.ComposeResolveError, BindSourceError, OSError) as e:
+    except (IntakeError, compose_resolve.ComposeResolveError, BindSourceError, OSError,
+            ReleaseStateError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
 
 

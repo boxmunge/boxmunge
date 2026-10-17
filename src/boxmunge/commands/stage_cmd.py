@@ -37,6 +37,7 @@ from boxmunge.staged_release import (
     sweep_debris, update_meta,
 )
 from boxmunge.staging_bringup import STORAGE_ERRORS, bring_up_staging
+from boxmunge.staging_copies import slot_made
 from boxmunge.staging_prepare import precheck_candidate
 
 if TYPE_CHECKING:
@@ -155,7 +156,9 @@ def _intake_bundle(project: str, paths: BoxPaths, ref: str | None,
             if dry_run:
                 print(f"[DRY RUN] Would stage '{project}'")
                 return 0
-            meta = new_meta("bundle", bundle_ref(bundle_path), _sha256(bundle_path))
+            # The copies the slot being replaced made stay staging's.
+            meta = new_meta("bundle", bundle_ref(bundle_path), _sha256(bundle_path),
+                            made=slot_made(paths, project))
             if not _build_slot(project, paths, tree, manifest, meta):
                 return 1
     except IntakeError as e:

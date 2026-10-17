@@ -177,6 +177,13 @@ BOXMUNGE_ENTRIES: dict[str, str] = {
 # Directories that may ship as empty placeholders (data/.gitkeep is a common
 # repo convention). They carry nothing, so they are dropped with a note.
 _PLACEHOLDER_DIRS = frozenset({"data", "backups", "security"})
+
+# Staging keeps its copy of a project entry as ``<entry>-staging`` beside it
+# (staging_copies): a release's own top-level ``foo-staging`` would be what
+# staging mounts for ``./foo``, and what unstage removes.
+STAGING_SUFFIX = "-staging"
+_STAGING_SUFFIX_REASON = ("the -staging suffix is reserved for staging's copies of the "
+                          "project's entries; rename it")
 _PLACEHOLDER_FILES = frozenset({".gitkeep", ".keep"})
 
 
@@ -198,13 +205,16 @@ def check_bundle_contents(tree: Path) -> list[str]:
     """Enforce the bundle content policy on an extracted tree.
 
     Drops empty placeholder dirs (returning a note for each) and raises
-    BundleError naming every entry the bundle may not carry.
+    BundleError naming every entry the bundle may not carry: box-owned and
+    boxmunge's own entries, and any top-level ``*-staging`` name.
     """
     notes: list[str] = []
     refused: list[str] = []
     for entry in sorted(tree.iterdir(), key=lambda p: p.name):
         name = entry.name
         reason = BOX_OWNED_ENTRIES.get(name) or BOXMUNGE_ENTRIES.get(name)
+        if reason is None and name.endswith(STAGING_SUFFIX):
+            reason = _STAGING_SUFFIX_REASON
         if reason is None:
             continue
         if name in _PLACEHOLDER_DIRS and is_placeholder(entry):
@@ -216,8 +226,8 @@ def check_bundle_contents(tree: Path) -> list[str]:
         refused.append(f"  {label}: {reason}")
     if refused:
         raise BundleError(
-            "Bundle contains entries a deploy must never overwrite:\n"
+            "Bundle contains entries a bundle may not carry:\n"
             + "\n".join(refused)
-            + "\nRemove them from the bundle and upload it again."
+            + "\nRemove (or rename) them in the bundle and upload it again."
         )
     return notes

@@ -142,12 +142,15 @@ def test_rollback_during_a_stage_is_allowed(paths) -> None:
 
 def test_rollback_to_a_release_sharing_with_staging_is_refused(paths, capsys) -> None:
     """The rollback target mounts what is staging's copy; production as it
-    ran when the stage was proved did not."""
+    ran when the stage was proved did not. (Read-only: had it mounted
+    uploads-staging read-write, that would be production's recorded data,
+    which the stage itself refuses to mount.)"""
     from boxmunge.commands.stage_cmd import run_stage
     from boxmunge.project_registry import add_project
     add_project("myapp", paths)
     va, vb = "2026-10-16T080000000000", "2026-10-16T083000000000"
-    place_bundle(paths, timestamp=va, files={"VERSION": "va\n", "compose.yml": _SHARING})
+    place_bundle(paths, timestamp=va, files={"VERSION": "va\n", "compose.yml":
+                                             _SHARING.replace(":/u'", ":/u:ro'")})
     place_bundle(paths, timestamp=vb, files={"VERSION": "vb\n"})
     place_bundle(paths, timestamp=V2, files={
         "compose.yml": SAFE_COMPOSE + "    volumes: ['./uploads:/u']\n"})

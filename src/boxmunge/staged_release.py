@@ -54,13 +54,19 @@ class StagedRelease:
     production_stopped: dict[str, Any] | None = None
     cleanup_incomplete: str | None = None
     switch_rc: int | None = None  # replace_release's result, recorded when retired
+    # The top-level ``-staging`` entries staging created for this stage or
+    # the one it replaced (staging_copies): only these, and copies of
+    # production's data, are staging's to mount and remove.
+    made: tuple[str, ...] = ()
 
 
-def new_meta(kind: str, ref: str, bundle_sha256: str | None) -> StagedRelease:
+def new_meta(kind: str, ref: str, bundle_sha256: str | None,
+             made: tuple[str, ...] = ()) -> StagedRelease:
     if kind not in KINDS:
         raise ValueError(f"unknown slot kind {kind!r}")
     return StagedRelease(id=generate_ulid(), kind=kind, ref=ref, bundle_sha256=bundle_sha256,
-                         staged_at=datetime.now(timezone.utc).isoformat(), state="starting")
+                         staged_at=datetime.now(timezone.utc).isoformat(), state="starting",
+                         made=tuple(made))
 
 
 def slot_dir(paths: BoxPaths, project: str) -> Path:
@@ -101,7 +107,8 @@ def load_slot(paths: BoxPaths, project: str) -> StagedRelease | None:
         meta = StagedRelease(**{k: doc[k] for k in _REQUIRED},
                              production_stopped=doc.get("production_stopped"),
                              cleanup_incomplete=doc.get("cleanup_incomplete"),
-                             switch_rc=doc.get("switch_rc"))
+                             switch_rc=doc.get("switch_rc"),
+                             made=_made(doc.get("made", []), path))
     except KeyError as e:
         raise SlotError(f"{path} is missing {e}") from e
     if meta.kind not in KINDS or meta.state not in STATES:
@@ -115,6 +122,15 @@ def load_slot(paths: BoxPaths, project: str) -> StagedRelease | None:
                         f"{meta.production_stopped!r}: expected null or "
                         f"{{\"at\": <time>, \"containers\": [<name>, ...]}}")
     return meta
+
+
+def _made(names: Any, path: Path) -> tuple[str, ...]:
+    if not isinstance(names, list) or not all(
+            isinstance(n, str) and n.endswith("-staging") and n != "-staging"
+            and "/" not in n and "\0" not in n for n in names):
+        raise SlotError(f"{path} has a malformed made list {names!r}: expected the "
+                        f"top-level '<entry>-staging' names staging created")
+    return tuple(names)
 
 
 def _valid_marker(marker: Any) -> bool:

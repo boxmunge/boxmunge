@@ -189,10 +189,38 @@ def _build_problems(name: str, build: Any, project_dir: Path, roots: set[str]) -
     return problems
 
 
-def separation_problems(model: dict[str, Any], project_dir: Path, release: Path) -> list[str]:
-    """I3: staging mounts nothing of production's except its -staging copies
-    (read-write) and the slot's release (read-only), and builds only from
-    the slot's release."""
+def _mounted(model: dict[str, Any]) -> Iterator[tuple[str, bool, str]]:
+    """(source, read-only, what) of each host path a staging model mounts."""
+    for name, svc in _mapping(model.get("services")).items():
+        for entry in (svc.get("volumes") or []) if isinstance(svc, dict) else []:
+            if is_bind_entry(entry):
+                yield volume_source(entry), _read_only(entry), f"service {name}"
+    for section in ("configs", "secrets"):
+        for key, decl in _mapping(model.get(section)).items():
+            if isinstance(_mapping(decl).get("file"), str):
+                yield decl["file"], True, f"{section[:-1]} {key}"
+
+
+def _copy_top(src: str, project_dir: Path, release: Path) -> str | None:
+    """The top-level ``-staging`` entry a staging source lies in, if any."""
+    path = os.path.normpath(os.path.join(release, os.path.expanduser(src)))
+    rel = project_relative(path, project_dir)
+    top = rel.split(os.sep, 1)[0] if rel not in (None, ".") else None
+    return top if top is not None and top.endswith("-staging") else None
+
+
+def staging_copy_tops(model: dict[str, Any], project_dir: Path, release: Path) -> set[str]:
+    """The top-level ``-staging`` entries a staging model mounts."""
+    tops = (_copy_top(src, project_dir, release) for src, _ro, _what in _mounted(model))
+    return {t for t in tops if t is not None}
+
+
+def separation_problems(model: dict[str, Any], project_dir: Path, release: Path,
+                        foreign: set[str]) -> list[str]:
+    """I3: staging mounts nothing of production's except staging's own
+    -staging copies (read-write; ``foreign`` names the -staging entries that
+    are not staging's, staging_copies) and the slot's release (read-only),
+    and builds only from the slot's release."""
     roots = {os.path.normpath(release), os.path.realpath(release)}
 
     def check(src: str, ro: bool, what: str) -> list[str]:
@@ -200,22 +228,25 @@ def separation_problems(model: dict[str, Any], project_dir: Path, release: Path)
         if any(path == r or path.startswith(r + os.sep) for r in roots):
             return [] if ro else [f"staging {what} mounts the staged release ({path}) "
                                   f"read-write; mount release code read-only"]
-        rel = project_relative(path, project_dir)
-        if rel is None or rel.split(os.sep, 1)[0].endswith("-staging"):
+        if project_relative(path, project_dir) is None:
             return []
-        return [f"staging {what} mounts {path}, which is production's"]
+        top = _copy_top(src, project_dir, release)
+        if top is None:
+            return [f"staging {what} mounts {path}, which is production's"]
+        if top in foreign:
+            return [f"staging {what} mounts {path}, but {project_dir / top} is not staging's "
+                    f"copy: staging did not create it, and production's release (or an "
+                    f"operator) put it there, so staging must not write it. Rename it in "
+                    f"production's release (the -staging suffix is reserved for staging's "
+                    f"copies), or move it aside if nothing needs it, then stage again"]
+        return []
 
     problems: list[str] = []
+    for src, ro, what in _mounted(model):
+        problems += check(src, ro, what)
     for name, svc in _mapping(model.get("services")).items():
-        for entry in (svc.get("volumes") or []) if isinstance(svc, dict) else []:
-            if is_bind_entry(entry):
-                problems += check(volume_source(entry), _read_only(entry), f"service {name}")
         if isinstance(svc, dict):
             problems += _build_problems(name, svc.get("build"), project_dir, roots)
-    for section in ("configs", "secrets"):
-        for key, decl in _mapping(model.get(section)).items():
-            if isinstance(_mapping(decl).get("file"), str):
-                problems += check(decl["file"], True, f"{section[:-1]} {key}")
     return problems
 
 

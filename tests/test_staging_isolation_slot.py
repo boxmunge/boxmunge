@@ -26,12 +26,12 @@ def _bind(src: str, ro: bool = False) -> dict:
 
 def test_separation_allows_the_slot_read_only_and_staging_copies(paths) -> None:
     model = _svc(_bind(str(RELEASE / "appconfig"), ro=True), _bind(str(P / "uploads-staging")))
-    assert separation_problems(model, P, RELEASE) == []
+    assert separation_problems(model, P, RELEASE, set()) == []
 
 
 def test_separation_refuses_production_paths_and_a_writable_slot(paths) -> None:
     model = _svc(_bind(str(P / "uploads")), _bind(str(RELEASE / "cache")))
-    problems = separation_problems(model, P, RELEASE)
+    problems = separation_problems(model, P, RELEASE, set())
     assert any("production's" in p for p in problems)
     assert any("read-write" in p for p in problems)
 
@@ -62,7 +62,7 @@ def test_install_isolation_without_a_slot_is_a_no_op(paths, tmp_path) -> None:
 def test_separation_reads_short_syntax_and_config_files(paths) -> None:
     model = {"services": {"web": {"volumes": [f"{RELEASE}/conf:/c:ro", f"{RELEASE}/x:/x"]}},
              "configs": {"c": {"file": str(P / "appconfig" / "c.conf")}}}
-    problems = separation_problems(model, P, RELEASE)
+    problems = separation_problems(model, P, RELEASE, set())
     assert len(problems) == 2
     assert "service web mounts the staged release" in problems[0]
     assert f"config c mounts {P}/appconfig/c.conf, which is production's" in problems[1]
@@ -169,7 +169,7 @@ def _build(**build) -> dict:
     {"context": "/srv/lib", "dockerfile": "Dockerfile"},     # outside: validation's to judge
 ])
 def test_separation_allows_builds_from_the_staged_release(paths, build) -> None:
-    assert separation_problems(_build(**build), P, RELEASE) == []
+    assert separation_problems(_build(**build), P, RELEASE, set()) == []
 
 
 @pytest.mark.parametrize("build,named", [
@@ -185,6 +185,6 @@ def test_separation_allows_builds_from_the_staged_release(paths, build) -> None:
 def test_separation_refuses_builds_from_production(paths, build, named) -> None:
     """Interpolation (`context: ${ROOT}/src`) gets past the literal rewrite:
     the resolved model is what staging builds from."""
-    problems = separation_problems(_build(**build), P, RELEASE)
+    problems = separation_problems(_build(**build), P, RELEASE, set())
     assert len(problems) == 1 and named in problems[0]
     assert "build from the staged release" in problems[0]

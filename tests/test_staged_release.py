@@ -54,6 +54,25 @@ def test_unreadable_meta_is_a_slot_error(paths, bad) -> None:
         load_slot(paths, P)
 
 
+@pytest.mark.parametrize("made", ["x-staging", ["foo"], ["a/b-staging"], ["-staging"], [1]])
+def test_a_malformed_made_list_is_a_slot_error(paths, made) -> None:
+    _build(paths)
+    swap_in(paths, P)
+    path = slot_dir(paths, P) / "meta.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "made": made}))
+    with pytest.raises(SlotError, match="made"):
+        load_slot(paths, P)
+
+
+def test_made_round_trips(paths) -> None:
+    building = building_dir(paths, P)
+    release_dir(building).mkdir(parents=True)
+    meta = new_meta("bundle", "myapp-v2", None, made=("media-staging",))
+    write_meta(building, meta)
+    swap_in(paths, P)
+    assert load_slot(paths, P).made == ("media-staging",)
+
+
 def test_symlinked_slot_is_a_slot_error(paths, tmp_path) -> None:
     paths.project_releases(P).mkdir(parents=True)
     os.symlink(tmp_path, slot_dir(paths, P))

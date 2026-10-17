@@ -96,6 +96,30 @@ class TestBoxOwnedEntriesRefused:
         assert check_bundle_contents(src) == []
         assert (src / "project.env").exists()
 
+    @pytest.mark.parametrize("entry", ["foo-staging/code.txt", "app.db-staging",
+                                       "uploads-staging/.gitkeep"])
+    def test_staging_suffix_is_reserved(self, tmp_path: Path, entry: str) -> None:
+        """Staging keeps its copy of ``<entry>`` as ``<entry>-staging``: a
+        release's own top-level ``foo-staging`` would be what staging mounts
+        for ``./foo``, and what unstage removes."""
+        src = tmp_path / "bundle"
+        _make_bundle(src)
+        target = src / entry
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("" if entry.endswith(".gitkeep") else "code")
+        with pytest.raises(BundleError) as exc:
+            check_bundle_contents(src)
+        top = entry.split("/")[0]
+        assert top in str(exc.value)
+        assert "reserved" in str(exc.value) and "rename" in str(exc.value)
+
+    def test_staging_suffix_only_counts_at_the_top(self, tmp_path: Path) -> None:
+        src = tmp_path / "bundle"
+        _make_bundle(src)
+        (src / "conf" / "app-staging").mkdir(parents=True)
+        (src / "conf" / "app-staging" / "x").write_text("nested is fine")
+        assert check_bundle_contents(src) == []
+
     def test_copy_refuses_box_owned_entry(self, tmp_path: Path) -> None:
         """copy_project_files never writes box-owned state, even if called
         without the content check."""
