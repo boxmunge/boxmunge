@@ -36,6 +36,16 @@ if TYPE_CHECKING:
 COMPONENT = "promote"
 
 
+class _RetireFailed(Exception):
+    """Recording the slot as retired failed after replace_release returned;
+    the install stays open at switching."""
+
+    def __init__(self, rc: int, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.rc = rc
+        self.cause = cause
+
+
 @dataclass(frozen=True)
 class _Promotion:
     meta: StagedRelease
@@ -68,7 +78,10 @@ def promote_locked(project: str, paths: BoxPaths, dry_run: bool = False) -> int:
     manifest = _verify_slot(project, paths, found)
     if isinstance(manifest, int):
         return manifest
-    rc = _deploy_tree(project, paths, found.meta, manifest)
+    try:
+        rc = _deploy_tree(project, paths, found.meta, manifest)
+    except _RetireFailed as e:
+        return _report_retire_failed(project, paths, found.meta.ref, e)
     if rc != 0:
         return _report_failed(project, paths, found.meta, rc)
     return _teardown_after(project, paths, found.meta.ref)
@@ -164,11 +177,52 @@ def _retire(project: str, paths: BoxPaths, rc: int) -> None:
     """Step 4, once replace_release returns (any result) and before the
     transaction closes: the slot is never promoted again, and it records
     how the switch ended for a rerun that only has the teardown left."""
-    update_meta(paths, project, load_slot(paths, project), state="retired", switch_rc=rc)
+    try:
+        meta = load_slot(paths, project)
+        if meta is None:
+            raise SlotError(f"the staged slot of '{project}' is gone")
+        update_meta(paths, project, meta, state="retired", switch_rc=rc)
+    except (SlotError, OSError) as e:
+        raise _RetireFailed(rc, e) from e
+
+
+def _report_retire_failed(project: str, paths: BoxPaths, ref: str, e: _RetireFailed) -> int:
+    ended = "succeeded" if e.rc == 0 else f"failed (exit code {e.rc})"
+    print(f"ERROR: The switch of production to {ref} {ended}, but recording the staged "
+          f"slot as retired failed: {e}. "
+          f"{_options_now(project, paths, ref, isinstance(e.cause, OSError))}.",
+          file=sys.stderr)
+    log_error(COMPONENT, f"Promotion of {ref}: recording the staged slot as retired "
+              f"failed: {e}", paths, project=project)
+    return 1
+
+
+def _options_now(project: str, paths: BoxPaths, ref: str, slot_readable: bool) -> str:
+    """The open install's ways out, read now, for a report that cannot rely
+    on the slot record."""
+    try:
+        txn = load_txn(paths, project)
+    except ReleaseStateError as e:
+        return f"The install record cannot be read either: {e}"
+    if txn is None:
+        report_failed_after_switch(project, paths, ref)
+        return f"'unstage {project}' removes staging"
+    if not slot_readable:
+        return _unreadable_advice(project, txn)
+    return (f"The install of {txn.ref} stays open at {txn.phase}: "
+            f"{options_text(project, txn)}")
 
 
 def _report_failed(project: str, paths: BoxPaths, meta: StagedRelease, rc: int) -> int:
-    now = load_slot(paths, project)
+    try:
+        now = load_slot(paths, project)
+    except SlotError as e:
+        print(f"ERROR: The promotion of {meta.ref} failed, and the staged slot's record "
+              f"cannot be read now ({e}). {_options_now(project, paths, meta.ref, False)}.",
+              file=sys.stderr)
+        log_error(COMPONENT, f"Promotion of {meta.ref} failed, and the staged slot's "
+                  f"record cannot be read: {e}", paths, project=project)
+        return rc if rc == 3 else 1
     if now is not None and now.state == "retired":
         report_failed_after_switch(project, paths, meta.ref)
         print(f"  Staging is still up; run 'unstage {project}' to remove it.",

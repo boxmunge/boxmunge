@@ -92,10 +92,17 @@ def _prove_disjoint(project_name: str, paths: BoxPaths, req: TreeDeploy) -> bool
     try:
         check_install_isolation(paths, project_name, req.tree, req.manifest)
     except (StagingIsolationError, OSError) as e:
-        print(f"ERROR: {e}\n  Nothing was changed. Fix the release, or unstage first.",
-              file=sys.stderr)
+        print(f"ERROR: {e}\n  Nothing was changed. {_disjoint_advice(req)}", file=sys.stderr)
         return False
     return True
+
+
+def _disjoint_advice(req: TreeDeploy) -> str:
+    # Unstaging would drop the very release a promote installs.
+    if req.source == "staged":
+        return ("The staged release itself conflicts with staging: stage a fixed "
+                "release, then promote it.")
+    return "Fix the release, or unstage first."
 
 
 def _fresh(project_name: str, paths: BoxPaths, req: TreeDeploy) -> int:
