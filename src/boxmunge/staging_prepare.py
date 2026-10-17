@@ -29,6 +29,7 @@ from boxmunge.staging_compose import generate_staging_compose_base
 from boxmunge.staging_copies import claim_new_copies, foreign_copies, slot_made
 from boxmunge.staging_copy_plan import CopyPlan, StagingDataError, copy_sources
 from boxmunge.staging_data import plan_staging_copy
+from boxmunge.user_entries import USER_ENTRIES
 from boxmunge.staging_isolation import (
     StagingIsolationError, candidate_model, check_isolation, production_model, resolving,
     separation_problems, staging_copy_tops, staging_model,
@@ -123,7 +124,7 @@ def validate_staging_base(paths: BoxPaths, project: str, manifest: dict[str, Any
         files_dir / STAGING_BASE, paths, project_name=project,
         off_services={svc for svc, _ in services_with_off_profile(manifest)},
         cve_policy=manifest.get("security"), manifest_services=manifest.get("services"),
-        project_directory=release)
+        user_entries=manifest.get(USER_ENTRIES), project_directory=release)
 
 
 def _refuse_shared(paths: BoxPaths, project: str, staging: dict[str, Any], release: Path,

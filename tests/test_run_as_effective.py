@@ -69,12 +69,16 @@ def test_compose_only_registry_root_image_is_refused_with_lines_that_paste() -> 
     with pytest.raises(RunAsError) as e:
         effective_user("db", REGISTRY, manifest, "")
     text = str(e.value)
-    assert "postgres:16-alpine" in text and "internal: true" in text
-    assert 'user: "<uid>:<gid>"' in text
+    assert "postgres:16-alpine" in text and "internal: true" not in text
+    assert "changes nothing else about it" in text and 'user: "<uid>:<gid>"' in text
     fixed = _pasted(text, manifest)
-    assert effective_user("db", REGISTRY, fixed, "").source == "manifest"
     from boxmunge.run_as import validate_user_field
+    from boxmunge.user_entries import USER_ENTRIES, split_user_entries, user_entry_problems
+    assert user_entry_problems("db", fixed["services"]["db"]) == []
     validate_user_field(fixed["services"]["db"]["security"], "db")
+    loaded = split_user_entries(fixed)
+    assert "db" not in loaded["services"] and "db" in loaded[USER_ENTRIES]
+    assert effective_user("db", REGISTRY, loaded, "").source == "manifest"
 
 
 def test_a_declared_service_is_told_to_add_a_security_block() -> None:

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.fs_nofollow import read_text_nofollow
+from boxmunge.user_entries import service_entry
 from boxmunge.security_overlay import PROFILE_OFF, SecurityValidationError, effective_profile
 
 if TYPE_CHECKING:
@@ -188,7 +189,7 @@ class ServiceUser:
 
 
 def _profile_off(manifest: dict[str, Any], service: str) -> bool:
-    svc = (manifest.get("services") or {}).get(service)
+    svc = service_entry(manifest, service)
     svc_sec = svc.get("security") if isinstance(svc, dict) else None
     return effective_profile(manifest.get("security"), svc_sec) == PROFILE_OFF
 
@@ -196,17 +197,13 @@ def _profile_off(manifest: dict[str, Any], service: str) -> bool:
 def declaration_text(service: str, manifest: dict[str, Any]) -> str:
     """Where to put, and the manifest.yml lines that declare, `service`
     running as its image's own user, for the manifest as it stands."""
-    services = manifest.get("services") or {}
-    own = services.get(service) if isinstance(services, dict) else None
+    own = service_entry(manifest, service)
     sec = own.get("security") if isinstance(own, dict) else None
     lines = ["services:", f"  {service}:"]
     if not isinstance(own, dict):
-        where = (f"add to manifest.yml's services (compose.yml alone defines {service}, "
-                 f"so `internal: true` declares it to carry the setting; a declared "
-                 f"service also gets a read-only root filesystem and the project's env "
-                 f"files, so list any path it writes outside its volumes as a compose.yml "
-                 f"`tmpfs:` entry, as PostgreSQL needs /var/run/postgresql)")
-        lines.append("    internal: true")
+        where = (f"add to manifest.yml's services (compose.yml alone defines {service}; "
+                 f"an entry holding only security says who it runs as and changes "
+                 f"nothing else about it)")
     elif isinstance(sec, dict):
         where = f"merge into services.{service}.security in manifest.yml"
     else:
@@ -238,7 +235,7 @@ def effective_user(service: str, svc: dict[str, Any], manifest: dict[str, Any],
     if compose_user is not None:
         return ServiceUser(compose_user, SOURCE_COMPOSE, image_user)
     declared, _reason = declared_user(manifest.get("security"),
-                                      (manifest.get("services") or {}).get(service))
+                                      service_entry(manifest, service))
     if declared is not None:
         value = {USER_ROOT: "0:0", USER_IMAGE: None}.get(declared, declared)
         return ServiceUser(value, SOURCE_MANIFEST, image_user)

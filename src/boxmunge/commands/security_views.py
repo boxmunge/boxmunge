@@ -102,6 +102,7 @@ def _format_findings_block(scan_state: dict[str, Any]) -> list[str]:
 def user_lines(manifest: dict[str, Any], users: dict[str, Any]) -> list[str]:
     """Who each service runs as, from the users record (run_as)."""
     from boxmunge.run_as import SOURCE_MANIFEST, declared_user, describe
+    from boxmunge.user_entries import service_entry
     if not users:
         return ["Service users: not decided: deployed before boxmunge decided who each "
                 "service runs as; the next deploy decides them", ""]
@@ -110,7 +111,7 @@ def user_lines(manifest: dict[str, Any], users: dict[str, Any]) -> list[str]:
         text = describe(user)
         if user.source == SOURCE_MANIFEST and user.user in (None, "0:0"):
             _value, reason = declared_user(manifest.get("security"),
-                                           (manifest.get("services") or {}).get(svc))
+                                           service_entry(manifest, svc))
             text += f", reason: {reason!r}"
         lines.append(f"  {svc + ':':<18} {text}")
     return [*lines, ""]

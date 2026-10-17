@@ -201,9 +201,11 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
         pending, unchecked = pending_declarations(paths)
         if pending:
             warn("Service users declared", f"the next deploy of each project refuses "
-                 f"these registry services until manifest.yml says who they run as "
-                 f"(security.user; the refusal prints the lines): {', '.join(pending)}. "
-                 f"See {GUIDE}")
+                 f"these registry services until manifest.yml says who they run as: "
+                 f"{', '.join(pending)}. For each, add services.<svc>.security.user (with a "
+                 f"reason for root or image); for a compose-only service an entry holding "
+                 f"only that security block is enough and changes nothing else. The "
+                 f"refusal prints the lines. See {GUIDE}")
         if unchecked:
             warn("Service users declared", "cannot check: " + "; ".join(unchecked))
         if not pending and not unchecked:

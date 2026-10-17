@@ -17,6 +17,7 @@ from boxmunge.caddy import generate_caddy_config, prepare_caddy_config
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.compose import generate_compose_override, load_user_compose, prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
+from boxmunge.user_entries import USER_ENTRIES, split_user_entries
 from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.release_txn import InstallTxn, load_txn, stale_reason, start_refusal
@@ -169,6 +170,7 @@ def compose_refusal(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> str
             project_name=name,
             cve_policy=manifest.get("security"),
             manifest_services=manifest.get("services"),
+            user_entries=manifest.get(USER_ENTRIES),
         )
     except ComposeSecurityError as e:
         return str(e)
@@ -318,6 +320,7 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
                 report.append(f"{name}: migration OK (schema v{written or 1} "
                               f"-> v{CURRENT_SCHEMA_VERSION})")
             manifest = migrated
+        manifest = split_user_entries(manifest)  # as loading does
         block = is_blocked(name, paths)
         if block:
             if manifest.get("hosts"):

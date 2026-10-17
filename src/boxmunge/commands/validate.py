@@ -5,6 +5,7 @@ import sys
 
 from boxmunge.manifest import load_manifest_as_written, validate_manifest, ManifestError
 from boxmunge.paths import BoxPaths
+from boxmunge.user_entries import split_user_entries
 
 
 def _gather_validation(
@@ -54,7 +55,8 @@ def _gather_validation(
     if not compose_path.exists():
         warnings.append(f"Compose file missing: {compose_path.name}")
     else:
-        warnings.extend(_undeclared_service_warnings(project_name, manifest, compose_path))
+        warnings.extend(_undeclared_service_warnings(
+            project_name, split_user_entries(manifest), compose_path))
 
     return errors, warnings
 

@@ -28,6 +28,7 @@ from boxmunge.run_as import (
     SOURCE_MANIFEST, RunAsError, ServiceUser, declared_user, describe, effective_user,
     read_users, write_users,
 )
+from boxmunge.user_entries import service_entry
 from boxmunge.userns.offset import RemapError, remap_offset
 
 _BUILD_TIMEOUT = 1800
@@ -83,7 +84,7 @@ def _log_opt_outs(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
     for name, user in sorted(users.items()):
         if user.source == SOURCE_MANIFEST and user.user in (None, "0:0"):
             _value, reason = declared_user(manifest.get("security"),
-                                           (manifest.get("services") or {}).get(name))
+                                           service_entry(manifest, name))
             log_operation(component, f"service {name} runs as {describe(user)}, reason: "
                           f"{reason}", paths, project=target.project)
 

@@ -11,6 +11,9 @@ from boxmunge.manifest_fields import (
     SERVICE_NAME_RE, deploy_problems, host_problem, port_problem, route_path_problem,
 )
 from boxmunge.migration import MigrationError, migrate_manifest
+from boxmunge.user_entries import (
+    USER_ENTRIES, is_user_entry, split_user_entries, user_entry_problems,
+)
 
 CURRENT_SCHEMA_VERSION = 3
 
@@ -58,12 +61,13 @@ def at_current_schema(manifest: dict[str, Any], path: Path) -> dict[str, Any]:
     version = manifest.get("schema_version")
     if isinstance(version, bool) or not isinstance(version, int):
         return manifest
-    if not 1 <= version < CURRENT_SCHEMA_VERSION:
+    if not 1 <= version <= CURRENT_SCHEMA_VERSION:
         return manifest
     try:
-        return migrate_manifest(manifest, CURRENT_SCHEMA_VERSION)
+        current = migrate_manifest(manifest, CURRENT_SCHEMA_VERSION)
     except MigrationError as e:
         raise ManifestError(f"Cannot migrate manifest {path}: {e}") from e
+    return split_user_entries(current)
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
@@ -114,6 +118,9 @@ def validate_manifest(
     if not isinstance(manifest, dict):
         errors.append("manifest.yml must be a YAML mapping at the top level")
         return errors, warnings
+    if USER_ENTRIES in manifest:
+        errors.append(f"'{USER_ENTRIES}' is boxmunge's own name for the user-only service "
+                      f"entries; write those under services:")
 
     # Schema version check
     schema_version = manifest.get("schema_version", 1)
@@ -178,6 +185,9 @@ def validate_manifest(
                 errors.append(f"Service name '{svc_name}' is invalid. Must be lowercase alphanumeric with hyphens.")
             if not isinstance(svc, dict):
                 errors.append(f"Service '{svc_name}' must be a mapping.")
+                continue
+            if is_user_entry(svc) and "security" in svc:
+                errors += user_entry_problems(svc_name, svc)
                 continue
             routes = svc.get("routes", [])
             if "internal" in svc and not isinstance(svc["internal"], bool):
