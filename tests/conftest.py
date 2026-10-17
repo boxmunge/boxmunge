@@ -158,6 +158,8 @@ def fake_containers(request, monkeypatch) -> FakeContainers:
         # off the integration tier there are none unless a test says otherwise.
         monkeypatch.setattr("boxmunge.docker_containers.container_bind_sources",
                             lambda project_name: [])
+        monkeypatch.setattr("boxmunge.docker_containers.container_mounts",
+                            lambda project_name: [])
     return fake
 
 

@@ -120,10 +120,14 @@ def compose_down(
     compose_files: list[str] | None = None,
     *,
     project_name: str,
+    remove_orphans: bool = False,
 ) -> None:
-    """Run docker compose down in the project directory."""
+    """Run docker compose down in the project directory (`remove_orphans`:
+    also containers of services the files no longer define)."""
     cmd = compose_command(project_name, compose_files)
     cmd.append("down")
+    if remove_orphans:
+        cmd.append("--remove-orphans")
     _run(cmd, cwd=project_dir)
 
 

@@ -8,37 +8,39 @@ created but not started, so Compose has made its volumes). Every source
 must exist: Docker would otherwise create an empty volume and the copy
 would "succeed" with no data. Each destination is emptied completely,
 hidden entries included, before the source is copied in.
+
+Every copy and removal runs in the data helper (data_helper): the data
+belongs to container users, and on a remapped box to host ids deploy can
+neither read nor write. Production's stores are mounted read-only.
 """
 from __future__ import annotations
 
 import os
 import shlex
 import sys
-import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from boxmunge import docker_containers
 from boxmunge.compose_guard import check_containers_start, start_containers_checked
+from boxmunge.data_helper import EMPTY_X, run_helper
 from boxmunge.docker import staging_compose_project
 from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.release import project_data_dirs
 from boxmunge.staging_copy_plan import (
     CopyPlan, StagingDataError, Store, copy_sources, plan_copy, stores,
 )
-from boxmunge.staging_placeholders import make_placeholder
+from boxmunge.staging_placeholders import copy_label, make_placeholder
+from boxmunge.userns.offset import RemapError, remap_offset
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 __all__ = ["ProductionDownError", "StagingDataError", "copy_production_data",
-           "plan_staging_copy", "prepare_destinations", "run_throwaway"]
+           "plan_staging_copy", "prepare_destinations"]
 
-COPY_IMAGE = "busybox:1.36"
-_COPY_TIMEOUT = 1800
 _STOP_TIMEOUT = 15
-# Empty /dst, hidden entries included, and prove it is empty.
-_EMPTY_DST = 'rm -rf /dst/* /dst/.[!.]* /dst/..?* && [ -z "$(ls -A /dst)" ]'
+_EMPTY_DST = EMPTY_X.replace("/x", "/dst")
 
 
 def plan_staging_copy(paths: BoxPaths, project: str, manifest: dict[str, Any],
@@ -110,36 +112,87 @@ def _mount(store: Store, at: str, ro: bool) -> list[str]:
     return ["--mount", f"type={store.kind},src={store.ref},dst={at}" + (",readonly" if ro else "")]
 
 
-def run_throwaway(project: str, mounts: list[str], script: str) -> None:
-    """Run ``script`` in a named, networkless busybox container.
-
-    `docker run --rm` alone outlives an interrupted boxmunge (the CLI's
-    signals go to the container's PID 1, which ignores them), so the
-    container is named and always force-removed afterwards.
-    """
-    name = f"boxmunge-{staging_compose_project(project)}-copy-{uuid.uuid4().hex[:8]}"
+def _remapped(paths: BoxPaths) -> bool:
     try:
-        _run(["docker", "run", "--rm", "--name", name, "--network", "none", *mounts,
-              COPY_IMAGE, "sh", "-c", script], capture=True, timeout=_COPY_TIMEOUT)
-    finally:
-        try:
-            _run(["docker", "rm", "-f", name], capture=True)
-        except DockerError as e:
-            if "no such container" not in str(e).lower():
-                raise
+        return remap_offset(paths) != 0
+    except RemapError as e:
+        raise StagingDataError(f"cannot tell whether the box is remapped, so nothing was "
+                               f"copied: {e}") from e
 
 
-def _copy(project: str, src: Store, dest: Store, is_file: bool) -> None:
-    source = _mount(src, "/src", True)
+def _refuse_top_level_files(paths: BoxPaths, project: str, plan: CopyPlan,
+                            kinds: list[bool]) -> None:
+    """A single-file store directly in the project directory is copied by
+    replacing a file there, which no container can do on a remapped box
+    (the directory is deploy's). Refused before anything changes."""
+    project_dir = paths.project_dir(project)
+    files = [src.key for (src, dest), is_file in zip(plan.pairs, kinds)
+             if is_file and dest.kind == "bind" and Path(dest.ref).parent == project_dir]
+    if files and _remapped(paths):
+        raise StagingDataError(
+            f"staging cannot copy production's single-file store {', '.join(files)} on a "
+            f"remapped box: the copy would have to write into the project directory, "
+            f"which containers cannot. Mount a directory holding the file instead "
+            f"(e.g. ./db/app.db rather than ./app.db).")
+
+
+def _top_entry(project_dir: Path, ref: str) -> tuple[Path, list[str]]:
+    """The project directory's entry holding `ref`, and the parts below it.
+
+    Docker resolves a -v source's links on the host as root, and data
+    directories are written by containers, so only a top entry is mounted
+    (no container can write the project directory itself); the rest is
+    resolved inside the helper (_resolved)."""
+    rel = Path(os.path.relpath(ref, project_dir))
+    if not rel.parts or rel.parts[0] in (".", "..") or ".." in rel.parts:
+        raise StagingDataError(f"{ref} is not inside {project_dir}; refusing to copy it")
+    top = project_dir / rel.parts[0]
+    if top.is_symlink():
+        raise StagingDataError(f"{top} is a symlink; refusing to copy through it. "
+                               f"Remove it (rm {top}) and stage again.")
+    return top, list(rel.parts[1:])
+
+
+def _resolved(var: str, path: str) -> str:
+    """Shell that sets `var` to `path` and refuses it unless it exists and
+    is reached without a link (resolved in the helper's own namespace)."""
+    return (f'{var}={shlex.quote(path)} && [ -e "${var}" ] && '
+            f'[ "$(readlink -f "${var}")" = "${var}" ] || {{ echo "{path} is missing or '
+            f'reached through a symlink; nothing copied" >&2; exit 3; }}; ')
+
+
+def _source(project_dir: Path, src: Store) -> tuple[list[str], str]:
+    """Production's store, mounted read-only, and the shell that finds it as $s."""
+    if src.kind == "volume":
+        return _mount(src, "/src", True), "s=/src; "
+    top, rest = _top_entry(project_dir, src.ref)
+    return ["-v", f"{top}:/srcroot:ro"], _resolved("s", "/".join(["/srcroot", *rest]))
+
+
+def _copy_job(project_dir: Path, src: Store, dest: Store,
+              is_file: bool) -> tuple[list[str], str]:
+    """The helper's mounts and script for one pair, planned (and every link
+    on the host side refused) before production is stopped."""
+    mounts, script = _source(project_dir, src)
+    if dest.kind == "volume":  # exists (verified)
+        return ([*mounts, *_mount(dest, "/dst", False)],
+                f'{script}{_EMPTY_DST} && cp -a "$s"/. /dst/')
+    rel = Path(os.path.relpath(dest.ref, project_dir))
+    if is_file and len(rel.parts) == 1:
+        # A file directly in the project directory: mount that directory,
+        # which no container can write, and replace the file whole.
+        name = shlex.quote(rel.parts[0])
+        return ([*mounts, "-v", f"{project_dir}:/dst"],
+                f'{script}rm -rf /dst/{name} && cp -a "$s" /dst/{name}')
+    top, rest = _top_entry(project_dir, dest.ref)
+    mounts += ["-v", f"{top}:/dst"]
     if is_file:
-        # Mount the destination's directory; the file is replaced whole.
-        name = shlex.quote(Path(dest.ref).name)
-        run_throwaway(project, [*source, "-v", f"{Path(dest.ref).parent}:/dst"],
-                      f"rm -rf /dst/{name} && cp -a /src /dst/{name}")
-        return
-    # A staging volume exists (verified); -v creates a missing directory.
-    dst = _mount(dest, "/dst", False) if dest.kind == "volume" else ["-v", f"{dest.ref}:/dst"]
-    run_throwaway(project, [*source, *dst], f"{_EMPTY_DST} && cp -a /src/. /dst/")
+        name = shlex.quote(rest[-1])
+        return mounts, (f'{script}{_resolved("d", "/".join(["/dst", *rest[:-1]]))}'
+                        f'rm -rf "$d"/{name} && cp -a "$s" "$d"/{name}')
+    return mounts, (f'{script}{_resolved("d", "/".join(["/dst", *rest]))}'
+                    f'rm -rf "$d"/* "$d"/.[!.]* "$d"/..?* && [ -z "$(ls -A "$d")" ] '
+                    f'&& cp -a "$s"/. "$d"/')
 
 
 def _remove_wrong_type(project: str, project_dir: Path, dest: Store, top: str,
@@ -151,23 +204,27 @@ def _remove_wrong_type(project: str, project_dir: Path, dest: Store, top: str,
     print(f"  NOTE: staging's {dest.ref} is {have}, but production's {dest.key} is "
           f"{want}; removing staging's copy before the copy replaces it.")
     if rest:
-        run_throwaway(project, ["-v", f"{project_dir / top}:/x"], f"rm -rf /x/{shlex.quote(rest)}")
+        run_helper(copy_label(project), ["-v", f"{project_dir / top}:/x"],
+                   f"rm -rf /x/{shlex.quote(rest)}")
     elif os.path.isdir(dest.ref) and not os.path.islink(dest.ref):
-        run_throwaway(project, ["-v", f"{dest.ref}:/x"], _EMPTY_DST.replace("/dst", "/x"))
+        run_helper(copy_label(project), ["-v", f"{dest.ref}:/x"], EMPTY_X)
         os.rmdir(dest.ref)
     else:
         os.unlink(dest.ref)
 
 
-def prepare_destinations(project: str, project_dir: Path, plan: CopyPlan) -> None:
+def prepare_destinations(paths: BoxPaths, project: str, plan: CopyPlan) -> None:
     """Make each bind destination exist, as the type production's source is,
     before Compose creates staging's containers (it refuses a missing config
     or secret file, and would create any other missing source as a
     directory). The copy replaces these placeholders."""
-    for src, dest in plan.pairs:
+    project_dir = paths.project_dir(project)
+    kinds = [_is_file(src, "production") for src, _dest in plan.pairs]
+    _refuse_top_level_files(paths, project, plan, kinds)
+    remapped = _remapped(paths)
+    for (src, dest), is_file in zip(plan.pairs, kinds):
         if dest.kind != "bind":
             continue
-        is_file = _is_file(src, "production")
         top, _, rest = os.path.relpath(dest.ref, project_dir).partition(os.sep)
         holder = project_dir / top
         if rest and os.path.lexists(holder) and (holder.is_symlink() or not holder.is_dir()):
@@ -181,7 +238,7 @@ def prepare_destinations(project: str, project_dir: Path, plan: CopyPlan) -> Non
             _remove_wrong_type(project, project_dir, dest, top, rest,
                                "a file" if is_file else "a directory")
         make_placeholder(project, project_dir, os.path.relpath(dest.ref, project_dir),
-                         is_file)
+                         is_file, remapped=remapped)
 
 
 def _running(compose_project: str) -> list[str]:
@@ -223,6 +280,10 @@ def copy_production_data(paths: BoxPaths, project: str, plan: CopyPlan) -> None:
             f"staging containers are running ({', '.join(staging_running)}); "
             f"refusing to replace their data underneath them.")
     kinds = verify_plan(plan)
+    _refuse_top_level_files(paths, project, plan, kinds)
+    project_dir = paths.project_dir(project)
+    jobs = [_copy_job(project_dir, src, dest, is_file)
+            for (src, dest), is_file in zip(plan.pairs, kinds)]
     stopped = _running(project)
     if stopped:
         check_containers_start(paths, project, component="stage")
@@ -231,9 +292,9 @@ def copy_production_data(paths: BoxPaths, project: str, plan: CopyPlan) -> None:
         if stopped:
             print(f"  Stopping production for the copy: {', '.join(stopped)}")
             _run(["docker", "stop", "-t", str(_STOP_TIMEOUT), *stopped], capture=True)
-        for (src, dest), is_file in zip(plan.pairs, kinds):
+        for (src, dest), (mounts, script) in zip(plan.pairs, jobs):
             print(f"  Copying production {src.label} to staging {dest.label}...")
-            _copy(project, src, dest, is_file)
+            run_helper(copy_label(project), mounts, script)
     except BaseException as e:  # noqa: BLE001 - re-raised; kept as the cause
         cause = e
         raise

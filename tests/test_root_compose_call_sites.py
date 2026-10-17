@@ -59,11 +59,42 @@ def _builds_docker_command(func: ast.AST) -> bool:
     return False
 
 
+# `docker volume create` and `docker network create` start no container:
+# exactly those argv prefixes, not a "volume" or "network" value elsewhere.
+_NOT_CONTAINER_OBJECTS = {"volume", "network"}
+
+
+def _literal(node: ast.AST) -> object:
+    return node.value if isinstance(node, ast.Constant) else None
+
+
 def _start_verbs(func: ast.AST) -> list[int]:
     """Lines where a start verb is a literal element of an argv list."""
-    return [elt.lineno for node in ast.walk(func) if isinstance(node, (ast.List, ast.Tuple))
-            for elt in node.elts
-            if isinstance(elt, ast.Constant) and elt.value in _START_VERBS]
+    lines = []
+    for node in ast.walk(func):
+        if not isinstance(node, (ast.List, ast.Tuple)):
+            continue
+        elts = node.elts
+        exempt = (len(elts) > 2 and _literal(elts[0]) == "docker"
+                  and _literal(elts[1]) in _NOT_CONTAINER_OBJECTS)
+        lines += [elt.lineno for i, elt in enumerate(elts)
+                  if _literal(elt) in _START_VERBS and not (exempt and i == 2)]
+    return lines
+
+
+@pytest.mark.parametrize("argv, flagged", [
+    ('["docker", "volume", "create", x]', False),
+    ('["docker", "network", "create", x]', False),
+    ('["docker", "create", x]', True),
+    ('["docker", "container", "create", x]', True),
+    ('["docker", "compose", "-p", p, "up", "-d"]', True),
+    ('["docker", "compose", "--profile", "network", "up"]', True),
+    ('["docker", "compose", "--profile", "volume", "create"]', True),
+    ('["docker", "volume", "rm", x, "start"]', True),
+])
+def test_the_scan_tells_container_starts_from_other_creates(argv, flagged) -> None:
+    func = ast.parse(f"def f():\n    run({argv})\n").body[0]
+    assert _builds_docker_command(func) and bool(_start_verbs(func)) is flagged
 
 
 def test_only_the_guard_calls_the_compose_start_primitives() -> None:
@@ -108,7 +139,7 @@ def test_the_scan_finds_the_checked_call_sites() -> None:
     sites = sorted({rel for rel, tree in _modules() if rel != GUARD
                     for _ in _calls(tree, names)})
     assert sites == [
-        "commands/deploy.py", "commands/recover_cmd.py", "commands/restore.py",
+        "commands/data_cmd.py", "commands/deploy.py", "commands/recover_cmd.py", "commands/restore.py",
         "commands/resume_cmd.py", "commands/rollback.py", "commands/security_resume.py",
         "commands/stage_cmd.py",
         "commands/upgrade_steps.py", "container_update.py", "cve/quarantine.py",

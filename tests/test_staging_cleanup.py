@@ -76,3 +76,18 @@ def test_old_copies_of_release_code_are_reported(paths, capsys) -> None:
     assert remove_retired_staging_data(paths, "myapp") == []
     assert (pdir / "appconfig-staging" / "settings").exists()
     assert f"rm -rf {pdir / 'appconfig-staging'}" in capsys.readouterr().out
+
+
+def test_a_copy_holding_data_is_emptied_by_the_helper(paths, monkeypatch) -> None:
+    from boxmunge import staging_cleanup
+    pdir = _project(paths, "services:\n  web:\n    image: x\n", ["media"])
+    (pdir / "media-staging").mkdir()
+    (pdir / "media-staging" / "photo").write_text("a container's")
+    emptied = []
+
+    def empty(label, path):
+        emptied.append((label, path))
+        (path / "photo").unlink()
+    monkeypatch.setattr(staging_cleanup, "empty_dir", empty)
+    assert remove_retired_staging_data(paths, "myapp") == [pdir / "media-staging"]
+    assert emptied == [("myapp-staging-cleanup", pdir / "media-staging")]

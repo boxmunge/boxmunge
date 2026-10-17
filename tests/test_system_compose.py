@@ -35,3 +35,8 @@ def test_runs_as_the_deploy_uid_from_install() -> None:
     user = _service()["user"]
     assert user.startswith("${BOXMUNGE_UID:?")
     assert ":${BOXMUNGE_GID:?" in user
+
+
+def test_the_system_image_is_named_for_the_data_helper() -> None:
+    from boxmunge.data_helper import HELPER_IMAGE
+    assert _service()["image"] == HELPER_IMAGE

@@ -31,6 +31,8 @@ from tests.bundle_helpers import manifest_text, place_bundle
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(shutil.which("docker") is None, reason="docker CLI not on PATH"),
+    # Copies, placeholders and cleanup run in the data helper.
+    pytest.mark.usefixtures("helper_image"),
 ]
 
 V1 = "2026-10-13T090000000000"

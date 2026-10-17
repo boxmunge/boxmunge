@@ -120,6 +120,13 @@ Usage: boxmunge project-delete <project> [--yes] [--force]
 Destructive: stop the project, remove its files, and deregister it. Asks for
 confirmation unless --yes. If container teardown fails, nothing is deleted
 and the command exits 1; --force deletes anyway. Does not support --dry-run.""",
+    "data": """\
+Usage: boxmunge data adopt <project> <service>:<path> <name>
+
+Copy the service's anonymous volume at <path> into a new named volume
+<project>_<name> that the next deploy adopts. Stops the service's containers
+for the copy and starts them again. Then add <name>:<path> to the service and
+deploy. The anonymous volume is kept until you remove it.""",
     "inbox": """\
 Usage: boxmunge inbox [project] [--json]
        boxmunge inbox clean [project] [--yes]

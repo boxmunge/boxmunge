@@ -24,6 +24,7 @@ BASE_ARGS: dict[str, list[str]] = {
     "backup": ["myapp"],
     "bundle": ["./myapp"],
     "check": ["myapp"],
+    "data": ["adopt", "myapp", "db:/data", "pgdata"],
     "diff": ["myapp"],
     "logs": ["myapp"],
     "pause": ["myapp"],

@@ -235,6 +235,16 @@ Staging keeps its own data between stages. To start it from a copy of production
    `PRODUCTION IS DOWN` and the `docker start` command to run;
 5. starts staging only after every copy succeeded.
 
+The copies run in the data helper, a short-lived container from the box's own `boxmunge-system`
+image (`boxmunge.invalid/system/system`, never pulled) running as root with no network, a read-only
+root filesystem and only the capabilities a copy needs, so owners and 0600 files carry over;
+production's stores are mounted read-only. A symlink on the way to a store or a copy (for
+example `data-staging/a` pointing elsewhere) makes `stage` refuse the copy before anything is
+written; remove the link and stage again. If that image is missing, `stage` says to build it with
+`docker compose -f /opt/boxmunge/system/compose.yml build`. On a box with user-namespace remapping, a
+single-file store directly in the project directory (`./app.db`) is refused before anything stops:
+mount a directory holding the file instead (`./db/app.db`).
+
 If the staged release renames a store (production uses `pgdata`, the staged release `newdata`),
 `stage` refuses until the manifest says where the data comes from:
 
@@ -720,6 +730,35 @@ project-delete myapp --force
 
 `--force` warns that containers named `myapp-*` may still be running. Check with `docker ps` as the
 supervisor user.
+
+Data the containers wrote belongs to their users, so directories you cannot remove yourself are
+emptied first by the data helper (the container `stage` copies data with). If that fails,
+`project-delete` stops with an error and the project stays registered; run it again once the cause
+is fixed. The helper is not used while any container of the project or its staging still exists
+(including `compose run` containers and ones a forced delete left behind): the delete then fails,
+naming them, until you remove them with `docker rm -f`.
+
+## Naming an Anonymous Volume
+
+A service that mounts a path with no volume name (`- /var/lib/postgresql/data`, or an image
+`VOLUME` no named mount covers) keeps its data in an anonymous volume, which survives only because
+Compose hands it from one container to the next; `compose down -v` or a recreate elsewhere loses
+it. Give it a name without losing the data:
+
+```
+data adopt myapp db:/var/lib/postgresql/data pgdata
+```
+
+This stops the service's containers, creates the volume `myapp_pgdata` labelled as Compose labels
+its own, copies the anonymous volume into it (owners kept), and starts the containers again. Then
+add `pgdata:/var/lib/postgresql/data` to the service's `volumes` (and `pgdata: {}` under top-level
+`volumes`) and deploy. To use a `writable.persistent` entry instead, adopt with the name the
+platform gives it, `<project>_<entry name>` (`data adopt myapp db:/var/lib/postgresql/data
+myapp_pgdata` for an entry named `pgdata`); otherwise the deploy starts on a new, empty volume. The
+anonymous volume is left in place; remove it once the service runs on the named one. `data adopt`
+refuses a path that is already a named volume, and a target volume that exists with data or without
+Compose's labels. If the stop or the copy fails, the new volume is removed and the containers
+started again.
 
 ---
 

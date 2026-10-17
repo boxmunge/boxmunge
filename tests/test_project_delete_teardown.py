@@ -72,7 +72,7 @@ def _delete(paths: BoxPaths, down, reload_=None, **kw) -> int:
 class TestTeardownFailure:
     @pytest.mark.parametrize("failing", ["prod", "staging"])
     def test_failed_teardown_deletes_nothing(self, box, failing, capsys):
-        def down(project_dir, compose_files=None, project_name=None):
+        def down(project_dir, compose_files=None, project_name=None, remove_orphans=False):
             is_staging = project_name == f"{NAME}-staging"
             if (failing == "staging") == is_staging:
                 raise DockerError("daemon unreachable")
@@ -127,3 +127,105 @@ def test_bad_registry_line_neither_blocks_the_delete_nor_is_dropped(box):
     assert _delete(box, MagicMock()) == 0
     assert not box.project_dir(NAME).exists()
     assert registry.read_text() == "old-staging\n"
+
+
+class TestContainerOwnedData:
+    """Data a container wrote belongs to its user (S+N on a remapped box),
+    which deploy cannot remove; the helper empties it first."""
+
+    def test_is_emptied_by_the_helper_before_the_tree_goes(self, box, monkeypatch):
+        from boxmunge.commands import project_delete_cmd as pd
+        pdir = box.project_dir(NAME)
+        (pdir / "pgdata").mkdir()
+        (pdir / "pgdata" / "PG_VERSION").write_text("16")
+        seen = []
+        monkeypatch.setattr(pd, "container_owned_dirs", lambda root: [root / "pgdata"])
+
+        def empty(label, root, rel):
+            seen.append((label, root, rel, sorted(p.name for p in (root / rel).iterdir())))
+            (root / rel / "PG_VERSION").unlink()
+        monkeypatch.setattr(pd, "empty_under", empty)
+        assert _delete(box, MagicMock()) == 0
+        assert seen == [("myapp-delete", pdir, Path("pgdata"), ["PG_VERSION"])]
+        assert not pdir.exists()
+
+    def test_a_failed_helper_keeps_the_project_for_a_retry(self, box, monkeypatch, capsys):
+        from boxmunge.commands import project_delete_cmd as pd
+        pdir = box.project_dir(NAME)
+        monkeypatch.setattr(pd, "container_owned_dirs", lambda root: [root / "pgdata"])
+
+        def empty(label, root, rel):
+            raise DockerError("rm: can't remove '/p/pgdata/f': Permission denied")
+        monkeypatch.setattr(pd, "empty_under", empty)
+        assert _delete(box, MagicMock()) == 1
+        assert pdir.exists() and is_registered(NAME, box)
+        err = capsys.readouterr().err
+        assert "Permission denied" in err and "project-delete" in err
+
+    def test_teardown_removes_orphans_too(self, box):
+        down = MagicMock()
+        assert _delete(box, down) == 0
+        assert down.call_count == 2
+        assert all(c.kwargs.get("remove_orphans") is True for c in down.call_args_list)
+
+
+def _no_helper(monkeypatch):
+    from boxmunge.commands import project_delete_cmd as pd
+    monkeypatch.setattr(pd, "container_owned_dirs", lambda root: [root / "pgdata"])
+    monkeypatch.setattr(pd, "empty_under", lambda *a: pytest.fail("helper used"))
+
+
+def _refused(box, capsys, rc, name):
+    assert rc == 1
+    assert box.project_dir(NAME).exists() and is_registered(NAME, box)
+    err = capsys.readouterr().err
+    assert name in err and "still exist" in err
+
+
+def test_a_one_off_survivor_is_refused(box, monkeypatch, capsys, fake_containers):
+    """`compose down` leaves `compose run` containers running."""
+    _no_helper(monkeypatch)
+    fake_containers.run(NAME, "db", "sha256:x", name="myapp-db-run-1a2b", oneoff=True)
+    _refused(box, capsys, _delete(box, MagicMock()), "myapp-db-run-1a2b")
+
+
+def test_a_retry_without_compose_files_is_refused_while_containers_exist(
+        box, monkeypatch, capsys, fake_containers):
+    """A retry after a partial forced delete runs no teardown at all."""
+    _no_helper(monkeypatch)
+    for f in ("compose.yml", "compose.boxmunge.yml", "compose.boxmunge-staging.yml"):
+        (box.project_dir(NAME) / f).unlink()
+    fake_containers.run(f"{NAME}-staging", "db", "sha256:x", running=False)
+    down = MagicMock()
+    _refused(box, capsys, _delete(box, down), "myapp-staging-db-1")
+    down.assert_not_called()
+
+
+def test_a_forced_delete_is_refused_while_containers_exist(box, monkeypatch, capsys,
+                                                           fake_containers):
+    from boxmunge.commands import project_delete_cmd as pd
+    _no_helper(monkeypatch)
+    monkeypatch.setattr(pd, "_teardown", lambda name, paths: ["production: boom"])
+    fake_containers.run(NAME, "db", "sha256:x")
+    _refused(box, capsys, pd.delete_locked(NAME, box, force=True), "myapp-db-1")
+
+
+def test_emptied_dirs_are_removed_even_when_unreadable(box, monkeypatch):
+    """CI on Linux: an emptied 0700 directory of uid 999 cannot be listed by
+    deploy, and rmtree lists every directory it removes; rmdir needs only
+    the parent's write permission."""
+    from boxmunge.commands import project_delete_cmd as pd
+    pdir = box.project_dir(NAME)
+    (pdir / "pgdata" / "base").mkdir(parents=True)
+    monkeypatch.setattr(pd, "container_owned_dirs", lambda root: [root / "pgdata"])
+
+    def empty(label, root, rel):
+        (root / rel / "base").rmdir()
+        (root / rel).chmod(0)  # as deploy sees 999's 0700 directory
+    monkeypatch.setattr(pd, "empty_under", empty)
+    try:
+        assert _delete(box, MagicMock()) == 0
+    finally:
+        if (pdir / "pgdata").exists():
+            (pdir / "pgdata").chmod(0o755)
+    assert not pdir.exists()

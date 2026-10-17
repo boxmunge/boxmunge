@@ -20,6 +20,7 @@ from boxmunge.commands.log_cmd import cmd_log
 from boxmunge.commands.logs import cmd_logs
 from boxmunge.commands.promote_cmd import cmd_promote
 from boxmunge.commands.project_delete_cmd import cmd_project_delete
+from boxmunge.commands.data_cmd import cmd_data
 from boxmunge.commands.restore import cmd_restore
 from boxmunge.commands.rollback import cmd_rollback
 from boxmunge.commands.stage_cmd import cmd_stage
@@ -60,6 +61,7 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "inbox": cmd_inbox,
     "rollback": cmd_rollback,
     "project-delete": cmd_project_delete,
+    "data": cmd_data,
     "check": cmd_check,
     "check-all": cmd_check_all,
     "log": cmd_log,
@@ -106,7 +108,7 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
 # unwinding them would leave the interpreter waiting on their non-daemon
 # I/O threads, so they would only stop on SIGKILL.
 UNWIND_ON_SIGTERM = frozenset({
-    "prod-deploy", "stage", "promote", "unstage", "rollback", "project-delete",
+    "prod-deploy", "stage", "promote", "unstage", "rollback", "project-delete", "data",
     "add-git-project", "pause", "resume", "recover",
     "backup", "backup-all", "restore", "test-restore", "self-test",
     "check-all", "security", "container-update", "upgrade", "auto-update",

@@ -181,14 +181,22 @@ def _system_compose(project: str, override: Path) -> list[str]:
             "-f", str(_REPO / "system" / "compose.yml"), "-f", str(override)]
 
 
+def system_image(container_name: str) -> str:
+    """The session's own tag of the system image (see real_system_container)."""
+    from boxmunge.data_helper import HELPER_IMAGE
+    return f"{HELPER_IMAGE}:{container_name}"
+
+
 @pytest.fixture(scope="session")
 def real_system_container(integration_root: Path, tmp_path_factory):
     """Build system/Dockerfile and start it from system/compose.yml.
 
     Mounts point at the integration root (the compose file's BOXMUNGE_CONFIG
     and BOXMUNGE_PROJECTS variables). Only the container name is overridden,
-    so a developer's real boxmunge-system is never touched. Yields the name;
-    tests use ``system_container`` to point the module at it.
+    so a developer's real boxmunge-system is never touched, and the image's
+    tag (``system_image``), so neither is the box's data-helper image. Yields
+    the name; tests use ``system_container`` or ``helper_image`` to point
+    the modules at them.
     """
     import uuid
 
@@ -203,6 +211,7 @@ def real_system_container(integration_root: Path, tmp_path_factory):
         "services:\n"
         "  system:\n"
         f"    container_name: {name}\n"
+        f"    image: {system_image(name)}\n"
     )
     # The same variables install.sh writes to system/.env on a real box.
     owner = paths.projects.stat()
@@ -219,7 +228,7 @@ def real_system_container(integration_root: Path, tmp_path_factory):
             pytest.fail(f"system container failed to start:\n{up.stdout}\n{up.stderr}")
         yield name
     finally:
-        subprocess.run(cmd + ["down", "--volumes", "--rmi", "local"], env=env,
+        subprocess.run(cmd + ["down", "--volumes", "--rmi", "all"], env=env,
                        capture_output=True, timeout=120, check=False)
 
 
@@ -232,3 +241,13 @@ def system_container(real_system_container: str, monkeypatch) -> str:
 
     monkeypatch.setattr(sc, "CONTAINER_NAME", real_system_container)
     return real_system_container
+
+
+@pytest.fixture
+def helper_image(real_system_container: str, monkeypatch) -> str:
+    """Point the data helper at the session's system image for one test."""
+    import boxmunge.data_helper as dh
+
+    image = system_image(real_system_container)
+    monkeypatch.setattr(dh, "HELPER_IMAGE", image)
+    return image
