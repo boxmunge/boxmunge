@@ -195,6 +195,18 @@ owns (`projects/<p>/backups`, a `state/` subdirectory, `inbox/.tmp`) for a symli
 write below it can land elsewhere. Deploy is root-equivalent through the docker group anyway;
 these checks are defence in depth, not a boundary.
 
+Only the deploy uid can write `projects/`, `projects/<p>/` and `<p>/.releases/` (all
+deploy:deploy 0755). That includes project code that runs on the host as deploy (the
+`pre_deploy` hook and what it launches) and the boxmunge-system container (deploy uid). No
+service, staging, build or data-helper container can, and no smoke script can. Read-write binds
+may not be the project directory, a control entry or `.releases`, and remapped container uids
+are "other" on those 0755 directories. So root operations that walk these paths by name
+(`legacy-stage` restore and chown, `install_release` when root runs it, slot teardown, stash
+restore, project-delete under sudo) are protected against a planted final component, but not
+against a parent swapped by deploy. That is acceptable because deploy is root-equivalent. It
+becomes a boundary if deploy ever loses docker access, or if agent trust is split from operator
+trust. Those operations then need dir-fd traversal.
+
 ### What deploy may ask root to do
 
 `/etc/sudoers.d/boxmunge-deploy` grants deploy exactly two shim invocations:
