@@ -134,6 +134,18 @@ do_rollback() {
     complete_rollback "$new_version" "$from_version" "$stage" "$prev_slot" "$count"
 }
 
+# legacy_caddy_log_note <version>: what the active (previous) release costs CrowdSec. A
+# release from before Caddy logged to stdout writes Caddy's access log to a
+# tmpfs inside the container that nothing reads (caddy/compose.yml), so
+# HTTP-layer detection is off until the next upgrade. Read from that
+# release's own root-owned code, never from the deploy-writable site files.
+legacy_caddy_log_note() {
+    if grep -qsF "output file /var/log/caddy/access.log" \
+            "$(active_venv)"/lib/python3*/site-packages/boxmunge/caddy.py; then
+        echo " HTTP-layer detection is off until the next upgrade: $1 writes Caddy's access log to a file CrowdSec does not read."
+    fi
+}
+
 # complete_rollback <new_version> <from_version> <stage> <prev_slot> <count>:
 # everything after the marker. Safe to run again after a crash part-way: the
 # swap is skipped once done, the stash restore and re-apply are idempotent,
@@ -165,6 +177,12 @@ complete_rollback() {
         "re-apply of the previous release" "$rc" "$output"
 
     refresh_docs_for_slot "$prev_slot"
+    local note
+    note="$(legacy_caddy_log_note "$from_version")"
+    if [[ -n "$note" ]]; then
+        log "WARNING:$note"
+        bm_log warn upgrade "HTTP-layer detection off after rollback" "{\"version\": \"$from_version\"}"
+    fi
     # The box is back on the previous release. Drop the marker before any
     # bookkeeping, the interruption count included: if that fails (a corrupt
     # interrupted.json, say), the next fire must not restore and re-apply
@@ -181,11 +199,11 @@ complete_rollback() {
             outcome="interrupted $count times, now blocklisted"
         fi
         bm_log warn upgrade "interrupted upgrade rolled back" "{\"version\": \"$new_version\", \"interruptions\": $count}"
-        send_notification "boxmunge ROLLBACK" "Rolled back $new_version: the upgrade was interrupted ($outcome)"
+        send_notification "boxmunge ROLLBACK" "Rolled back $new_version: the upgrade was interrupted ($outcome).$note"
     else
         add_blocklist "$new_version" "$stage"
         report_failure "$new_version" "$from_version" "$stage"
-        send_notification "boxmunge ROLLBACK" "Rolled back $new_version (stage: $stage)"
+        send_notification "boxmunge ROLLBACK" "Rolled back $new_version (stage: $stage).$note"
     fi
 
     log "Rollback complete: reverted to $from_version"

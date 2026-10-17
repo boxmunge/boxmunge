@@ -94,4 +94,30 @@ run_shim check-probation
     || fail "the next fire restored again: $(calls)"
 drop_root
 
+# Rolled back to a release from before Caddy logged to stdout: its Caddy writes
+# the access log nowhere CrowdSec reads, and the operator is told so.
+legacy_rollback() {
+    probation_failure_setup
+    local pkg="$BOXMUNGE_ROOT/env-b/lib/python3.13/site-packages/boxmunge"
+    mkdir -p "$pkg"
+    if [[ "$1" == legacy ]]; then
+        printf '%s\n' '        "        output file /var/log/caddy/access.log {",' > "$pkg/caddy.py"
+    else
+        printf '%s\n' '        "        output stdout",' > "$pkg/caddy.py"
+    fi
+    printf '#!/usr/bin/env bash\necho "$BM_MESSAGE" >> "$BOXMUNGE_ROOT/notified"\nexit 0\n' \
+        > "$BOXMUNGE_ROOT/env-b/bin/python"
+    run_shim check-probation
+}
+legacy_rollback legacy
+expect 1 "HTTP-layer detection is off until the next upgrade" "a rollback to a file-logging release says detection is off"
+grep -qF "HTTP-layer detection is off until the next upgrade" "$BOXMUNGE_ROOT/notified" \
+    && pass "the rollback alert says HTTP-layer detection is off" \
+    || fail "alert lacks the detection note: $(cat "$BOXMUNGE_ROOT/notified" 2>/dev/null)"
+drop_root
+legacy_rollback stdout
+[[ "$OUT" != *"HTTP-layer detection is off"* ]] && pass "a rollback to a stdout-logging release says nothing" \
+    || fail "spurious detection note: $OUT"
+drop_root
+
 finish
