@@ -7,8 +7,11 @@ legacy_stage_ops). Operator-only: it runs as root, outside the deploy shell.
 from __future__ import annotations
 
 import sys
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
+from boxmunge.commands.upgrade_steps import UpgradeGateError
+from boxmunge.compose_guard import ComposeRefused
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.legacy_stage import (
@@ -22,14 +25,24 @@ from boxmunge.legacy_stage_ops import (
 from boxmunge.manifest import ManifestError
 from boxmunge.migration import MigrationError
 from boxmunge.state import StateError
+from boxmunge.upgrade_state import UpgradeInProgress, upgrade_lock
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 # What a step can fail with. GitRefError, ReleaseStateError and ComposeError
-# are ValueErrors; ComposeRefused and the data helper's errors DockerErrors.
+# are ValueErrors; ComposeRefused and the data helper's errors DockerErrors;
+# UpgradeGateError an unwritable maintenance page.
 STEP_ERRORS = (DockerError, OSError, ValueError, LegacyStageError, ManifestError,
-               MigrationError, StateError)
+               MigrationError, StateError, UpgradeGateError)
+
+
+def _step_failed(e: Exception) -> int:
+    """A refused start needs its cause fixed first; anything else a rerun finishes."""
+    advice = ("Fix what it refuses, then run the same command again" if isinstance(e, ComposeRefused)
+              else "Run the same command again to finish")
+    print(f"ERROR: {e}. {advice}.", file=sys.stderr)
+    return 1
 
 
 def _show(project: str, stage: LegacyStage, ev: Evidence | None) -> None:
@@ -108,8 +121,7 @@ def _finish_resolved(paths: BoxPaths, project: str, choice: str | None,
         drop_stage_record(paths, project)  # a stage detection lost at step 5
         finish_apply(paths, project)
     except STEP_ERRORS as e:
-        print(f"ERROR: {e}. Run the same command again to finish.", file=sys.stderr)
-        return 1
+        return _step_failed(e)
     return _report(paths, project, recorded)
 
 
@@ -164,16 +176,24 @@ def legacy_stage_locked(paths: BoxPaths, project: str, choice: str | None,
         update_record(paths, project, kind=stage.kind, choice=choice)
         resolve(paths, project, stage, ev, choice)
     except STEP_ERRORS as e:
-        print(f"ERROR: {e}. Run the same command again to finish.", file=sys.stderr)
-        return 1
+        return _step_failed(e)
     return _report(paths, project, choice)
 
 
 def run_legacy_stage(paths: BoxPaths, project: str, choice: str | None,
                      confirm_recreated: bool) -> int:
+    """A resolution holds upgrade.lock (lock order: outside the project lock).
+    The shim holds it from before its stash until after the swap, a window no
+    marker or probation shows: a resolution there would be put back by a
+    rollback's stash restore. Showing the evidence needs no such guard."""
     try:
-        with project_lock(project, paths):
-            return legacy_stage_locked(paths, project, choice, confirm_recreated)
+        with upgrade_lock(paths) if choice is not None else nullcontext():
+            with project_lock(project, paths):
+                return legacy_stage_locked(paths, project, choice, confirm_recreated)
+    except UpgradeInProgress:
+        print("ERROR: a platform upgrade is in progress; run it again after it finishes.",
+              file=sys.stderr)
+        return 1
     except LockError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

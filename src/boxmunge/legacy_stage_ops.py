@@ -27,7 +27,11 @@ from boxmunge.commands.upgrade_steps import (
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_guard import check_start, compose_up_checked
 from boxmunge.data_dirs import log_kept, set_aside_announcer
-from boxmunge.docker import DockerError, caddy_config_lock, caddy_reload, compose_down
+from boxmunge import docker_containers
+from boxmunge.docker import (
+    DockerError, caddy_config_lock, caddy_reload, compose_down, compose_project_filter,
+    staging_compose_project,
+)
 from boxmunge.fileutil import (
     DISCARDED, atomic_write_text, chown_tree_deploy, discard_dir, durable_rename_dir, fsync_dir,
     read_text_nofollow,
@@ -58,10 +62,26 @@ class LegacyStageError(Exception):
     """The legacy stage cannot be resolved as asked."""
 
 
+def _probation(paths: BoxPaths) -> dict | None:
+    """The probation record, or None. The shim treats any file there as a
+    probation (and refuses a malformed one), so one that is not a record
+    raises rather than reading as "no probation"."""
+    if not os.path.lexists(paths.probation):
+        return None
+    doc = read_probation(paths)
+    if not isinstance(doc, dict) or not doc:
+        raise ValueError("it is not a probation record (a non-empty JSON object)")
+    return doc
+
+
 def platform_rollback_possible(paths: BoxPaths) -> str | None:
     """Why a platform rollback could still restore the pre-upgrade stash
     (which holds the staged files) over a resolved production, or None."""
-    probation = read_probation(paths)
+    try:
+        probation = _probation(paths)
+    except (OSError, ValueError) as e:  # a JSONDecodeError is a ValueError
+        return (f"cannot tell whether a platform rollback is possible: {e}; fix or remove "
+                f"{paths.probation}")
     if probation:
         return (f"the upgrade to {probation.get('version')} is on probation until "
                 f"{probation.get('expires_at')}; a platform rollback would restore the "
@@ -167,12 +187,28 @@ def prestage_to_previous_0101(paths: BoxPaths, project: str, snapshot: str | Non
 def _stop_legacy_staging(paths: BoxPaths, project: str) -> None:
     """Step 2. Recorded once done: after step 4 the base compose.yml is
     production's, which may no longer hold the staging overlay's services."""
+    if (get_record(paths, project) or {}).get("staging_down"):
+        return
+    staging = staging_compose_project(project)
     files = legacy_staging_compose(paths.project_dir(project))
-    if files is None or (get_record(paths, project) or {}).get("staging_down"):
+    if files is None:
+        _refuse_orphaned_staging(staging)
         return
     compose_down(paths.project_dir(project), compose_files=files,
-                 project_name=f"{project}-staging", remove_orphans=True)
+                 project_name=staging, remove_orphans=True)
     update_record(paths, project, staging_down=True)
+
+
+def _refuse_orphaned_staging(staging: str) -> None:
+    """0.10.1's teardown unlinks the overlay even after a failed compose down,
+    so staging's containers can outlive their compose files: never call such
+    a stage resolved while they run."""
+    left = docker_containers.project_containers(staging)
+    if left:
+        raise LegacyStageError(
+            f"{len(left)} container(s) of {staging} are still there but their compose files "
+            f"are gone; remove them with: docker ps -aq {' '.join(compose_project_filter(staging))}"
+            f" | xargs docker rm -f")
 
 
 def _remove_staging_site(paths: BoxPaths, project: str) -> None:
@@ -279,6 +315,9 @@ def drop_stage_record(paths: BoxPaths, project: str) -> None:
         state.unlink()
         fsync_dir(state.parent)
     releases = paths.project_releases(project)
+    if not os.path.lexists(releases):
+        return
+    _require_real_dir(releases)  # a git or leftover stage reached no earlier check
     discard_dir(releases / "prestage")
     discard_dir(releases / f"prestage{DISCARDED}")  # a crash inside the discard above
 

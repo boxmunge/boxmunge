@@ -1624,7 +1624,11 @@ interrupted, run the same command again.
 deploy shell and MCP do not offer it. It takes the project's lock (if the project is busy, try
 again). `--discard` and `--keep-staged` refuse while a platform rollback is still possible:
 during probation (it says when probation ends) or while an interrupted upgrade or rollback is
-pending. With no flag it works then too and adds "Not available yet: <why>".
+pending. They also refuse while a platform upgrade is running ("a platform upgrade is in
+progress; run it again after it finishes"): from its stash to its swap there is no probation yet,
+but a rollback would still restore that stash. A `probation.json` it cannot read refuses too,
+naming the file to fix or remove. With no flag it works in all of these cases; except during an
+upgrade it adds "Not available yet: <why>".
 For a git project it runs git as the deploy user, so `repo/` must be deploy's: one cloned with
 `sudo` is refused with the fix (`chown -R deploy:deploy <p>/repo`, then retry).
 
