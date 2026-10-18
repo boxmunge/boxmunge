@@ -14,9 +14,12 @@ and restore with data integrity verification.
 - Outbound network for `qemu-system-x86_64`. With QEMU user-mode networking
   every guest connection, DNS included, is made by the qemu process on the
   host, so an application firewall (Little Snitch, LuLu) that blocks it leaves
-  the guest with "no DNS". Homebrew's qemu is ad-hoc signed: an allow rule
-  stops matching after `brew upgrade qemu`. The test checks guest egress right
-  after boot and stops with this explanation if it fails.
+  the guest with "no DNS", or reaching some hosts and not others. Homebrew's
+  qemu is ad-hoc signed: an allow rule stops matching after `brew upgrade
+  qemu`. Right after boot the tests probe every host the install reaches
+  (Debian and Docker packages, GitHub and its release-asset host, Docker Hub
+  and its layer store, Alpine's CDN) and stop with this explanation, listing
+  each host that failed.
 
 ## Host key
 
@@ -74,6 +77,21 @@ ssh -p 19220 supervisor@localhost
 ```
 
 Run `./tests/vm/vm-test.py teardown` when done.
+
+## Other scenarios
+
+- `tests/vm/vm-staging.py <scenario>` — a 0.10.1 box upgrading to this tree's
+  build around a stage (`discard`, `keep-then-rollback`, `hotfix-during-stage`,
+  `probation-rollback`).
+- `tests/vm/vm-userns.py docker29|docker28` — the user-namespace migration
+  rehearsal: a 0.10.1 box (Docker 29 on the containerd store, or Docker 28 on
+  overlay2) upgrades, does what `userns-migrate --check` asks, migrates while
+  the host measures the downtime through Caddy, survives a kill -9 and a power
+  cut in each phase, soaks, rolls back, migrates again and commits. It prints
+  the figures OPERATIONS.md's table records and writes them to
+  `.cache/vm/vm-userns/results-<flavour>.json`.
+
+Both take `teardown`, and leave the VM running on failure.
 
 ## First run
 

@@ -374,8 +374,7 @@ def boot() -> None:
     vm.build_cloud_init_iso(vm.detect_ssh_pubkey())
     vm.create_overlay_disk()
     vm.launch_qemu()
-    if not vm.wait_for_ssh(vm.PORTS["ssh_initial"]):
-        raise RuntimeError("SSH did not become available")
+    vm.wait_for_ssh(vm.PORTS["ssh_initial"])  # raises with ssh's last error
     vm.verify_target_is_debian(vm.PORTS["ssh_initial"])
     vm.step_pass("VM booted and verified as Debian")
 
