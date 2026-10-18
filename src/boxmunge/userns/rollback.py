@@ -28,7 +28,7 @@ from boxmunge.userns.commit import COMMIT_STARTED
 from boxmunge.userns.daemon_ctl import DaemonControl, TimerControl, daemon_answers
 from boxmunge.userns.engine import Save, project_locks, shift_journalled
 from boxmunge.userns.images import IMAGES_DIR, load_all, remove_tars, save_all
-from boxmunge.userns.inventory import Inventory, take_inventory
+from boxmunge.userns.inventory import Inventory, outermost, take_inventory
 from boxmunge.userns.marker import clear_marker, set_marker
 from boxmunge.userns.journal import FORWARD, ROLLBACK, Journal, load_journal, save_journal
 from boxmunge.userns.preflight import PreflightRefused, preflight
@@ -94,7 +94,7 @@ def _restore_data(paths: BoxPaths, j: Journal, rinv: Inventory, finv: Inventory,
                              seed=str(data_dir(new_root, v.name)))
             j.items[key] = "restored"
             save()
-    for source in sorted(set(rinv.data_binds()) | set(finv.data_binds())):
+    for source in outermost(set(rinv.data_binds()) | set(finv.data_binds())):
         key = f"rb-bind:{source}"
         if j.items.get(key) != "restored" and os.path.lexists(source):
             shift_journalled(j, Path(source), Direction.INVERSE, save, f"rb:{source}",

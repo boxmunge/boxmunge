@@ -14,7 +14,7 @@ from pathlib import Path
 
 from boxmunge.paths import BoxPaths
 from boxmunge.userns.daemon_config import DEFAULT_DATA_ROOT
-from boxmunge.userns.inventory import CONTAINERD_STORE, Inventory
+from boxmunge.userns.inventory import CONTAINERD_STORE, Inventory, outermost
 from boxmunge.userns.layers import LayerScanError, image_high_ids
 from boxmunge.userns.shift import Direction, scan_tree
 from boxmunge.userns.walk import closed_to_other
@@ -146,7 +146,7 @@ def images(inv: Inventory, r: Report) -> None:
 
 def shifted_trees(inv: Inventory, extra_binds: list[str]) -> list[Path]:
     """Every tree the migration shifts: bind data and named volumes' data."""
-    trees = [Path(p) for p in sorted(set(inv.data_binds()) | set(extra_binds))]
+    trees = [Path(p) for p in outermost(set(inv.data_binds()) | set(extra_binds))]
     return trees + [Path(v.mountpoint) for v in inv.volumes if not v.anonymous]
 
 

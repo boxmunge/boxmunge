@@ -151,3 +151,14 @@ def test_containers_removed_since_are_kept_for_the_bring_up(paths, tmp_path, mon
     earlier.containers[0].running = True
     later = Inventory("overlay2", "", "/v", "29.9.0").with_running_from(earlier)
     assert [(c.id, c.running) for c in later.containers] == [("c1", True)]
+
+
+def test_a_tree_inside_another_is_shifted_with_it_not_again() -> None:
+    """data-dirs records `storage` for ./storage/pg: shifting storage and then
+    storage/pg would find pg's ids shifted already and refuse, the box down."""
+    assert inv_mod.outermost({"/p/storage/pg", "/p/storage", "/p/storage-staging", "/p/st"}) == [
+        "/p/st", "/p/storage", "/p/storage-staging"]
+    inv = Inventory("overlay2", "", "/v", "29.9.0", record_data=["/p/storage"], containers=[
+        inv_mod.ContainerEntry("c", "c", "p", "db", "i", True, False, "", "", "", "", [
+            inv_mod.MountEntry("bind", "/p/storage/pg", "/d", True, "", "data")])])
+    assert inv.data_binds() == ["/p/storage"]

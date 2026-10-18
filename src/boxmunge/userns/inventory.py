@@ -122,9 +122,10 @@ class Inventory:
 
     def data_binds(self) -> list[str]:
         """Every read-write bind source to shift, plus recorded data entries
-        and their staging copies that no container mounts right now."""
+        and their staging copies that no container mounts right now; a tree
+        inside another is left out, since the outer one's shift covers it."""
         mounted = {m.source for c in self.containers for m in c.mounts if m.kind == "data"}
-        return sorted(mounted | set(self.record_data))
+        return outermost(mounted | set(self.record_data))
 
     def with_running_from(self, earlier: Inventory) -> Inventory:
         """A fresh inventory taken after a partial quiesce keeps who was
@@ -137,6 +138,16 @@ class Inventory:
         present = {c.id for c in self.containers}
         self.containers += [c for c in earlier.containers if c.id not in present]
         return self
+
+
+def outermost(trees: set[str] | list[str]) -> list[str]:
+    """The trees no other one contains, sorted. Shifting a tree and then one
+    inside it would find the inner one's ids shifted already, and refuse."""
+    kept: list[str] = []
+    for tree in sorted(set(trees)):
+        if not any(tree.startswith(outer.rstrip("/") + "/") for outer in kept):
+            kept.append(tree)
+    return kept
 
 
 def _json(cmd: list[str]) -> list[dict[str, Any]]:
