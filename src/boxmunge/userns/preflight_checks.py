@@ -12,6 +12,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.paths import BoxPaths
 from boxmunge.userns.daemon_config import DEFAULT_DATA_ROOT
 from boxmunge.userns.inventory import CONTAINERD_STORE, Inventory, outermost
@@ -142,6 +143,19 @@ def images(inv: Inventory, r: Report) -> None:
                               f"above 65535 "
                               f"({', '.join(high[:5])}), which a remapped daemon cannot load. "
                               f"Rebuild or replace it and redeploy")
+
+
+def registries(inv: Inventory, r: Report) -> None:
+    """Each image run by digest is pulled again by that digest after its
+    load, during the downtime; its registry must answer now. Pulling a
+    digest that is present changes nothing but asks the registry."""
+    for ref in sorted({ref for img in inv.images if img.carried for ref in img.refs}):
+        try:
+            _run(["docker", "pull", "-q", ref], capture=True, timeout=300)
+        except DockerError as e:
+            r.refusals.append(f"{ref}: its registry did not answer ({e}); the migration pulls "
+                              f"it again by digest during the downtime. Retry once it answers, "
+                              f"or deploy the service with an image built or tagged here")
 
 
 def shifted_trees(inv: Inventory, extra_binds: list[str]) -> list[Path]:

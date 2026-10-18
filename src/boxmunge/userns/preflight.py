@@ -180,6 +180,7 @@ def preflight(paths: BoxPaths, inv: Inventory, *, direction: str, offset: int,
     _lifecycle(paths, inv, r, forward=forward)
     checks.containers(inv, r)
     checks.volumes(inv, r, forward=forward)
+    checks.registries(inv, r)
     checks.data(inv, offset, Direction.FORWARD if forward else Direction.INVERSE, r,
                 extra_binds or [])
     if forward:

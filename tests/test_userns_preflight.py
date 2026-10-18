@@ -22,6 +22,7 @@ def quiet(monkeypatch, paths, tmp_path):
     monkeypatch.setattr(pf, "compose_version_problem", lambda: None)
     monkeypatch.setattr(checks, "scan_tree", lambda tree, s, d: Scan([], 1))
     monkeypatch.setattr(checks, "image_high_ids", lambda image_id: [])
+    monkeypatch.setattr(checks, "_run", lambda *a, **kw: pytest.fail(f"ran {a}"))
     monkeypatch.setattr(pf, "_undeclared_root", lambda paths, r: None)
     monkeypatch.setattr(pf, "_compose_users", lambda paths, inv, r: None)
     paths.config_file.write_text("hostname: h\nadmin_email: a@b.c\nbackup_remote: \"remote:box\"\n")
@@ -223,3 +224,23 @@ def test_tarballs_a_stopped_run_wrote_need_no_new_space(paths, quiet, monkeypatc
     assert _run(paths, inv).ok  # 3300 needed, 1000 of it written already
     (images_dir / "a.tar").unlink()
     assert "2500 bytes free, 3300 needed" in _run(paths, inv).text()
+
+
+@pytest.mark.parametrize("direction", [FORWARD, ROLLBACK])
+def test_a_registry_that_does_not_answer_is_refused_before_any_downtime(paths, quiet,
+                                                                      monkeypatch, direction):
+    pulled = []
+
+    def pull(cmd, capture=False, timeout=None):
+        pulled.append(cmd[3])
+        if "down" in cmd[3]:
+            raise checks.DockerError("dial tcp: i/o timeout")
+    monkeypatch.setattr(checks, "_run", pull)
+    inv = _inv(quiet, images=[
+        ImageEntry("sha256:a", [], 1, True, refs=["up.example/a@sha256:" + "1" * 64]),
+        ImageEntry("sha256:b", ["b:1"], 1, True, refs=["down.example/b@sha256:" + "2" * 64]),
+        ImageEntry("sha256:c", ["c:1"], 1, True)])
+    text = _run(paths, inv, direction).text()
+    assert pulled == ["down.example/b@sha256:" + "2" * 64, "up.example/a@sha256:" + "1" * 64]
+    assert "REFUSED: down.example/b@sha256:" in text and "registry did not answer" in text
+    assert "up.example" not in text.split("NOTE")[0]
