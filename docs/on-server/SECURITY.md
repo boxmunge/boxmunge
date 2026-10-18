@@ -5,13 +5,18 @@ when you must, and what's coming in future tiers.
 
 ## TL;DR for agents
 
-- **Defaults are silent.** Every service deployed via boxmunge runs with
+- **Most defaults are silent.** Every service deployed via boxmunge runs with
   `no-new-privileges`, Tini init, a 512-process ceiling, and a list of
   dangerous Linux capabilities dropped. That includes services that appear
   only in `compose.yml` (databases, caches, sidecars). Services declared in
   the manifest also get a read-only root filesystem; undeclared ones do not
   yet, and every deploy, stage, and validate warns about each of them. You do
   nothing to get this.
+- **Services run as a non-root user.** A `build:` service whose image sets
+  no non-root `USER` runs as 10001:10001; a registry image that would run
+  as root needs `security.user` in the manifest (`image` or `root` with a
+  reason, or `"<uid>:<gid>"`), or the deploy is refused with the lines to
+  add (PROJECT_CONVENTIONS.md, "Who a service runs as").
 - **Don't disable hardening to "ship faster".** If a specific protection
   is in your way, relax that one field. Setting `profile: off` requires
   a reason and triggers a repeated deploy-time warning on every operation.
@@ -22,12 +27,12 @@ when you must, and what's coming in future tiers.
 
 | Profile | Behaviour |
 |---|---|
-| `default` | All v0.5 hardening applied. The silent floor. |
-| `off` | Nothing applied. Requires `reason`. Triggers deploy warnings. |
-| `strict` (reserved) | Tier 3 — adds `read_only` rootfs, non-root user, `cap_drop: ALL`. Requires project changes. |
-| `paranoid` (reserved) | Tier 8 — adds auto-generated seccomp + user-namespace remapping. |
+| `default` | Everything in "What `default` applies" below. The floor. |
+| `off` | No hardening overlay, and the image's own user. Requires `reason`. Triggers deploy warnings. Project isolation, the bind-source rules, the remapped-box refusals and the start checks still apply. |
+| `strict` (reserved) | Tier 3 — adds `cap_drop: ALL`. Requires project changes. |
+| `paranoid` (reserved) | Tier 8 — adds auto-generated seccomp. |
 
-The profile ladder is `off → default → strict → paranoid`. v0.5 ships with `default` and `off` only. The reserved names will be honoured in future tiers; manifests using them today fail validation rather than silently doing nothing.
+The profile ladder is `off → default → strict → paranoid`. Only `default` and `off` exist today. The reserved names will be honoured in future tiers; manifests using them today fail validation rather than silently doing nothing.
 
 ## What `default` applies
 
@@ -55,7 +60,12 @@ cap_drop:
 cap_add: []
 read_only: true             # v0.8
 tmpfs: ["/tmp"]              # v0.8
+user: "10001:10001"          # a build: service whose image sets no non-root USER
 ```
+
+The `user:` line is the deploy's decision for that service (PROJECT_CONVENTIONS.md, "Who a service
+runs as"): the recorded `security.user`, a `data chown`, or the 10001:10001 default; nothing for a
+service that runs as its image's user.
 
 These caps are NOT in Docker's default deny list, but are dangerous and rarely needed by application code. `NET_RAW` is the only borderline drop — it powers `ping`, `traceroute`, and a few health-check scripts. If your app actually needs it, opt back in via `cap_add`.
 
@@ -72,7 +82,7 @@ project-level `security:` block (a project-level `profile: "off"` covers it
 too). It does **not** get `read_only: true` or the `/tmp` tmpfs yet: a platform
 upgrade regenerates every overlay, so turning read-only on for these services
 would break existing databases across the fleet at the next upgrade. Every
-`deploy`, `stage`, and `validate` prints a `[WARNING]` naming each undeclared
+`prod-deploy`, `stage`, and `validate` prints a `[WARNING]` naming each undeclared
 service. A future release will make a read-only root filesystem the default for
 undeclared services too, so opt in now.
 
@@ -144,7 +154,7 @@ get into the habit of writing it correctly the first time.
 Requirements:
 
 - `reason` must be a non-empty string. Schema validation rejects missing or blank reasons.
-- Every `stage`, `promote`, `deploy`, `prod-deploy`, `resume`, and `upgrade` will print a multi-line `[WARNING] SECURITY OFF` message including the reason. This is by design and not silenceable except by removing `profile: off`.
+- Every `stage`, `promote`, `prod-deploy`, `resume`, and `upgrade` will print a multi-line `[WARNING] SECURITY OFF` message including the reason. This is by design and not silenceable except by removing `profile: off`.
 - `boxmunge health` raises a warning for any project with services on `profile: off`.
 
 ## Inheritance and resolution
@@ -193,9 +203,9 @@ active or not: a profiled service still starts when something names it
 | `security_opt` with `unconfined`, `label:disable`, `no-new-privileges:false`, or a custom `seccomp` profile file | Disables a kernel confinement layer. `seccomp=runtime/default` is fine. |
 | `devices`, `device_cgroup_rules`, `gpus`, `deploy.resources.reservations.devices` | Exposes host devices. |
 | `cgroup_parent` that is absolute or contains `..` | Escapes the container cgroup. |
-| A bind mount of a protected host path, anything inside one, or any parent of one | Protected: the Docker and containerd sockets and state, `/proc`, `/sys`, `/dev`, `/etc`, `/boot`, `/root`, `/home`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, and the boxmunge root outside `projects/`. Paths are compared after `~` expansion, joining relative paths to the project directory, collapsing `..` and `//`, and resolving symlinks, so `/run` (the parent of `/run/docker.sock`), `/tmp/../etc`, and `../../config` are all refused. |
+| A bind mount of a protected host path, anything inside one, or any parent of one (refused under every profile) | Protected: the Docker and containerd sockets and state, `/proc`, `/sys`, `/dev`, `/etc`, `/boot`, `/root`, `/home`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, and the boxmunge root outside `projects/`. Paths are compared after `~` expansion, joining relative paths to the project directory, collapsing `..` and `//`, and resolving symlinks, so `/run` (the parent of `/run/docker.sock`), `/tmp/../etc`, and `../../config` are all refused. |
 | `${VAR}` or `$VAR` inside a bind-mount source | The path cannot be verified. Write it literally. |
-| A bind mount outside the project directory | One project must not read or write another's files. Use paths such as `./data`; an absolute path is fine if it is inside `/opt/boxmunge/projects/<project>/`. Symlinks are resolved before the check. |
+| A bind mount outside the project directory (refused under every profile) | One project must not read or write another's files. Use paths such as `./data`; an absolute path is fine if it is inside `/opt/boxmunge/projects/<project>/`. Symlinks are resolved before the check. |
 | `build.network: host`, `build.privileged`, `build.entitlements` | Build steps run in a container too; keep them off the host network and unprivileged. |
 | A long-syntax mount of `type: npipe` or `type: cluster` | Its source cannot be checked. Use `bind` (inside the project), `volume`, `tmpfs` or `image`. |
 
@@ -212,7 +222,8 @@ list) can be added back. In the manifest, write capability names in canonical
 form: upper case, no `CAP_` prefix (`NET_RAW`, not `cap_net_raw`).
 
 Services on `profile: "off"` get a logged warning for each of these instead
-of a rejection. On a box whose Docker daemon remaps user namespaces
+of a rejection, except bind sources outside the project or on a protected host path: every start of
+the containers refuses those, so validation does too, under every profile. On a box whose Docker daemon remaps user namespaces
 (OPERATIONS.md, "User-namespace remapping"), `privileged: true` and `pid`,
 `network_mode` or `ipc` set to `host` are refused even under `profile: "off"`:
 the remapped daemon cannot start them, so a service that needs them cannot run
@@ -345,14 +356,13 @@ Without `allow_wildcard_hosts: true`, manifest validation refuses to deploy. Wit
 
 | Not applied | Reason | When |
 |---|---|---|
-| Non-root user enforcement | Many container images run as root. | Tier 3 (`strict`). |
 | `cap_drop: ALL` | We drop only the dangerous subset. Full drop breaks several apps. | Tier 3 (`strict`). |
 | Default memory/CPU caps | Existing `limits` field is the user's tool. | Never imposed by default. |
 | Egress allowlist | Default-deny outbound needs network design. | Tier 4. |
 | Custom seccomp profile | Docker's default seccomp already applies. | Tier 8 (`paranoid`). |
-| Image scanning, digest pinning | Detection-without-remediation is a UX trap. | Tier 2 (v0.6) with auto-remediation pipeline. |
+| Digest pinning | Not applied; images are scanned, and quarantined on a CVE, instead (see "CVE policy"). | — |
 
-(`read_only: true` rootfs was on this list through v0.7; v0.8 promoted it to a default-profile baseline. See "What `default` applies" above.)
+(`read_only: true` rootfs was on this list through v0.7; v0.8 promoted it to a default-profile baseline. A non-root user is decided at every deploy (TL;DR above), and user-namespace remapping is the platform's, not a profile's (TRUST_MODEL.md, "User namespaces").)
 
 See `agent-help architecture` and the on-server `TRUST_MODEL.md` for adjacent context (host hardening, restricted shell, platform container hardening).
 
