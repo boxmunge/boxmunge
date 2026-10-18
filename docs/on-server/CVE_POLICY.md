@@ -885,8 +885,8 @@ project's active suppressions.
 ## Quarantine enforcement across the lifecycle (v0.7.0)
 
 Once a project is quarantined, every operational entry point honours
-that state until `boxmunge security resume <project>` lifts it. There
-is no other path back.
+that state until a deploy of a fixed release or `boxmunge security resume
+<project>` lifts it. Both scan what they would start first and fail closed.
 
 The quarantine record (`state/deploy/<project>.quarantined.json`) says
 `action_complete: false` until the maintenance page is routed **and** the
@@ -902,14 +902,13 @@ The behaviour splits into two camps:
 
 **Refuse with exit 1 (operator-initiated mutations):**
 
-- `prod-deploy <project>` / `deploy`
-- `stage <project>`
-- `promote <project>`
 - `resume <project>` (the pause-resume command — distinct from
-  `security resume`)
+  `security resume`), `rollback`, `restore`, `recover`
 
-These print an error pointing the operator at `boxmunge security
-resume <project>` and abort before touching containers or configs.
+These print an error naming the two ways out and abort before touching
+containers or configs. `prod-deploy`, `promote` and `stage` are how a fix
+ships, so they go ahead only through the scan described in "Recovering a
+quarantined project"; a project that is also paused is refused.
 
 **Skip with a logged ops entry (background sweeps):**
 
@@ -926,9 +925,9 @@ resume <project>` and abort before touching containers or configs.
   failure counts.
 
 In both camps the skip is recorded via `log_operation` and visible in
-`boxmunge log --component <component>`. Only `boxmunge security
-resume <project>` lifts the quarantine; it re-scans first and fails
-closed (see "Recovering a quarantined project" below).
+`boxmunge log --component <component>`. Only a deploy of a fixed release
+or `boxmunge security resume <project>` lifts the quarantine; both scan
+first and fail closed (see "Recovering a quarantined project" below).
 
 ## Recovering a quarantined project
 
@@ -978,6 +977,27 @@ The lift starts the containers **without rebuilding** (`compose up` with
 no `--build`), so the images that come back are the ones the re-scan just
 cleared.
 
+5. **Or deploy a fixed release.** For a `build:` service the fix is a new
+   release (a rebuilt base image, an updated package). `prod-deploy` and
+   `promote` of a quarantined project build and pull the release's images
+   under candidate names, then, before the pre-deploy hook and before
+   anything is stopped, started or switched, scan every image the release
+   would start, as `security resume` does (same fail-closed rules), with
+   the release's own `security:` posture and the project's suppressions.
+   A quarantine-level finding, a failed or skipped image scan, or an image
+   that cannot be identified refuses the release: the error names each
+   CVE, package, service and image and the fix, the candidates are
+   removed, and the quarantine stays. The install is left open before its
+   hook, so `prod-deploy <project> --abandon` or a different release
+   (fix-forward) ends it. A clean release deploys as usual; once its smoke
+   test passes the quarantine is lifted (restart policies restored to the
+   containers the deploy did not recreate) with a "quarantine lifted by
+   deploying <ref>" alert. If it fails after the switch, the quarantine
+   stays and the next scan puts the maintenance page back; deploy again or
+   `security resume`. `rollback`, `restore` and `recover` stay refused.
+   `stage` of a quarantined project scans staging's images the same way;
+   production stays quarantined until the promote, which scans again.
+
 This is distinct from `boxmunge resume` (which lifts a manual `pause`).
 The two are independent: if the project is also paused, `security resume`
 lifts only the quarantine. The maintenance page stays up and the
@@ -988,8 +1008,9 @@ containers stay stopped until `boxmunge resume <project>` lifts the pause.
 `docker-ce` upgrade). So the quarantine action also sets every project
 container's restart policy to `no` with `docker update`, saving each
 original policy in the quarantine record; `security resume` restores them
-before starting the containers. Nothing else restarts a quarantined
-project. `pause` holds restart policies the same way; when a quarantine
+before starting the containers, and a deploy that lifts the quarantine
+restores them to the containers it did not recreate. Nothing else
+restarts a quarantined project. `pause` holds restart policies the same way; when a quarantine
 is lifted from a project that is still paused, the pause record takes over
 the saved policies and `boxmunge resume` restores them.
 

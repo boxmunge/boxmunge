@@ -239,7 +239,8 @@ upstream fix:
 security <project>
 ```
 
-Once a fix lands, rebuild and redeploy the image, then resume.
+Once a fix lands, rebuild and deploy it: the deploy scans its images first
+and lifts the quarantine once it is live (no `security resume` needed).
 
 ### D. dangerously_disable_quarantine
 
