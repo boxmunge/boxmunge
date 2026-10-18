@@ -25,6 +25,7 @@ from pathlib import Path
 
 from boxmunge.commands.check import run_check
 from boxmunge.docker_run import run as _run
+from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import deployed_among, load_registered_projects
 from boxmunge.userns import offset as uo
@@ -34,6 +35,7 @@ from boxmunge.userns.journal import FORWARD, Journal, load_journal, save_journal
 from boxmunge.userns.preflight_checks import dir_size
 from boxmunge.userns.switch import MigrationError
 
+COMPONENT = "userns-commit"
 SOAK = timedelta(hours=48)
 # Journalled before the first deletion: from then on there is no rollback.
 COMMIT_STARTED = "commit-before"
@@ -132,7 +134,21 @@ def _checked(paths: BoxPaths, j: Journal | None, now: datetime) -> Journal:
 
 def commit(paths: BoxPaths, *, now: datetime | None = None,
            images_dir: Path = IMAGES_DIR) -> Journal:
-    j = _checked(paths, load_journal(paths), now or datetime.now(timezone.utc))
+    """Delete the old root, after the soak; alert how it went."""
+    try:
+        j = _commit(paths, now or datetime.now(timezone.utc), images_dir)
+    except BaseException as e:
+        notify(paths, "userns commit stopped", f"{e}. Run userns-commit again once it is "
+               f"fixed (if it began deleting the old root, there is no rollback any more)",
+               component=COMPONENT, priority=1)
+        raise
+    notify(paths, "userns migration committed", "The old Docker root is deleted; rollback is "
+           "no longer offered.", component=COMPONENT, priority=0)
+    return j
+
+
+def _commit(paths: BoxPaths, now: datetime, images_dir: Path) -> Journal:
+    j = _checked(paths, load_journal(paths), now)
     prior = j.prior_store
     old_root = Path(Inventory.from_json(j.inventory).root)
     if COMMIT_STARTED not in j.items:

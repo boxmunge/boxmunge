@@ -98,3 +98,17 @@ def _final(paths: BoxPaths, j: Journal, results: dict[str, str]) -> None:
            "\n".join(lines) + "\nSoak for 48 hours, then: sudo /opt/boxmunge/bin/boxmunge-upgrade "
            "userns-commit. To undo: sudo /opt/boxmunge/bin/boxmunge-upgrade userns-rollback",
            component=COMPONENT, priority=1)
+
+
+def report_back(paths: BoxPaths, j: Journal, prefix: str, title: str, component: str) -> None:
+    """The alert once a rollback or an abort has the box running on its old
+    daemon: each project's result, and whether CrowdSec tails Caddy."""
+    lines = [f"{k.split(':', 1)[1]}: {v}" for k, v in sorted(j.items.items())
+             if k.startswith(f"{prefix}:")]
+    failed = [line for line in lines if ": failed" in line]
+    crowdsec = crowdsec_tails_caddy()
+    if crowdsec:
+        print(f"ERROR: {crowdsec}", file=sys.stderr)
+        lines.append(f"ERROR: {crowdsec}")
+    notify(paths, title + (f"; {len(failed)} project(s) did not come back" if failed else ""),
+           "\n".join(lines) or "no project to bring back", component=component, priority=1)

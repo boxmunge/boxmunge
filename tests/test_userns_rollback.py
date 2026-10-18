@@ -72,6 +72,8 @@ def remapped(paths, monkeypatch, tmp_path):
     monkeypatch.setattr(rb, "remove_tars", lambda d: events.append("tars removed"))
     monkeypatch.setattr(rb, "notify", lambda *a, **kw: True)
     monkeypatch.setattr(rb, "_refuse_soak_edit", lambda j: None)
+    monkeypatch.setattr(rb, "report_back", lambda paths, j, prefix, title, c: events.append(
+        f"report {prefix}"))
     return events, new_root
 
 
@@ -195,3 +197,15 @@ def test_the_original_daemon_json_comes_back_with_its_mode(monkeypatch) -> None:
     sw.write_daemon_json("{}", [0o600, 0, 0])
     sw.write_daemon_json("{}")
     assert written[0] == (0o600, (0, 0)) and written[1][0] == 0o644
+
+
+def test_the_box_running_again_is_reported(paths, monkeypatch) -> None:
+    from boxmunge.userns import steps
+    sent = []
+    monkeypatch.setattr(steps, "notify", lambda p, title, body, **kw: sent.append((title, body)))
+    monkeypatch.setattr(steps, "crowdsec_tails_caddy", lambda: None)
+    j = Journal(ROLLBACK, "rolled-back", S, items={"rb-project:a": "up",
+                                                  "rb-project:b": "failed: smoke"})
+    steps.report_back(paths, j, "rb-project", "userns migration rolled back", "userns-rollback")
+    assert sent == [("userns migration rolled back; 1 project(s) did not come back",
+                     "a: up\nb: failed: smoke")]

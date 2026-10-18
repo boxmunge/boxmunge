@@ -20,6 +20,14 @@ def _journal(paths, root, prior):
                                 applied_at=APPLIED.isoformat()))
 
 
+@pytest.fixture(autouse=True)
+def alerts(monkeypatch):
+    sent = []
+    monkeypatch.setattr(cm, "notify", lambda p, title, body, **kw: sent.append(
+        (title, kw["priority"])) or True)
+    return sent
+
+
 @pytest.fixture
 def remapped(monkeypatch):
     monkeypatch.setattr(cm.uo, "remap_offset", lambda paths: S)
@@ -153,3 +161,12 @@ def test_data_the_migration_did_not_carry_stops_the_commit(paths, tmp_path, rema
     with pytest.raises(cm.MigrationError, match="still hold data the migration did not carry"):
         cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
     assert (left / "row").exists() and load_journal(paths).phase == "applied"
+
+
+def test_a_commit_alerts_how_it_went(paths, tmp_path, remapped, alerts) -> None:
+    _journal(paths, tmp_path, {"driver_type": "", "store_root": str(tmp_path / "overlay2"),
+                               "size": 0})
+    with pytest.raises(cm.MigrationError):
+        cm.commit(paths, now=APPLIED)
+    cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
+    assert alerts == [("userns commit stopped", 1), ("userns migration committed", 0)]

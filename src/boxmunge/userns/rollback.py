@@ -30,6 +30,7 @@ from boxmunge.userns.engine import Save, project_locks, shift_journalled
 from boxmunge.userns.images import IMAGES_DIR, load_all, remove_tars, save_all
 from boxmunge.userns.inventory import Inventory, outermost, take_inventory
 from boxmunge.userns.marker import clear_marker, set_marker
+from boxmunge.userns.steps import report_back
 from boxmunge.userns.journal import FORWARD, ROLLBACK, Journal, load_journal, save_journal
 from boxmunge.userns.preflight import PreflightRefused, preflight
 from boxmunge.userns.shift import Direction
@@ -55,6 +56,7 @@ def _abort(paths: BoxPaths, j: Journal, daemon: DaemonControl, timers: TimerCont
     clear_marker(paths)
     j.direction, j.phase, j.failed = ROLLBACK, "rolled-back", None
     save()
+    report_back(paths, j, "abort", "userns migration abandoned before the switch", COMPONENT)
     return j
 
 
@@ -288,4 +290,5 @@ def rollback(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,
                    f"boxmunge timers are stopped. Re-run userns-rollback to resume.",
                    component=COMPONENT, priority=1)
             raise
-        return j
+    report_back(paths, j, "rb-project", "userns migration rolled back", COMPONENT)
+    return j
