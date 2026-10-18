@@ -1822,7 +1822,7 @@ log --project myapp --containers
 
 `log` lists the last 50 matching entries from every project: `--project` scopes it to one,
 `--tail N` changes the count, and `--all` lists every match (not with `--tail`). `--containers`
-needs `--project`.
+needs `--project` (it is refused without one).
 
 ---
 

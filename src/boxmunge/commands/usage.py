@@ -185,7 +185,10 @@ Validate manifest, env files and compose without deploying. Read-only.""",
 Usage: boxmunge log [--project P] [--component C] [--level L] [--since DUR]
                     [--tail N | --all] [--containers] [--json]
 
-Query the structured operational audit log. DUR is e.g. 30m, 2h, 7d.""",
+Query the structured operational audit log: the last 50 matching entries
+from every project, unless --project, --tail N or --all (every match) says
+otherwise. DUR is e.g. 30m, 2h, 7d. --containers adds the project's
+container logs and needs --project.""",
     "logs": """\
 Usage: boxmunge logs <project> [service] [--tail N] [--follow]
        boxmunge logs --host
