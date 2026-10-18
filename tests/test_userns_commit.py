@@ -134,3 +134,10 @@ def test_an_old_containerd_root_still_in_use_is_left(paths, tmp_path, remapped) 
     with pytest.raises(cm.MigrationError, match="may still be in use"):
         cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
     assert store.is_dir()
+
+
+def test_a_missing_store_measures_nothing(tmp_path) -> None:
+    from boxmunge.userns.preflight_checks import dir_size
+    assert dir_size(tmp_path / "gone") == 0
+    (tmp_path / "f").write_bytes(b"x" * 10000)
+    assert dir_size(tmp_path) >= 10000

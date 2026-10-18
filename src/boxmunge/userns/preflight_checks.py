@@ -184,10 +184,23 @@ def filesystem(inv: Inventory, r: Report) -> None:
 
 
 def dir_size(path: Path) -> int:
+    """Bytes on disk under `path`, on its own filesystem only (as du -x): a
+    running container's merged overlay mount below it is not counted."""
+    try:
+        dev = os.lstat(path).st_dev
+    except FileNotFoundError:
+        return 0
     total = 0
     for dirpath, dirnames, filenames in os.walk(path):
+        kept = []
         for name in dirnames + filenames:
-            total += os.lstat(os.path.join(dirpath, name)).st_blocks * 512
+            st = os.lstat(os.path.join(dirpath, name))
+            if st.st_dev != dev:
+                continue
+            total += st.st_blocks * 512
+            if name in dirnames:
+                kept.append(name)
+        dirnames[:] = kept
     return total
 
 
