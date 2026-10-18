@@ -9,8 +9,9 @@ USERNS_JOURNAL="$UPGRADE_ROOT_DIR/userns-migration.json"
 # would start the system container in the remapped namespace.
 FIRST_USERNS_RELEASE="0.11.0"
 
-# userns_state: "<direction> <phase>" from the journal, or nothing when
-# there is none. The directory is root-only; the file is still opened
+# userns_state: "<direction> <phase>" from the journal ("forward commit"
+# for an applied migration whose commit began), or nothing when there is
+# none. The directory is root-only; the file is still opened
 # without following a link.
 userns_state() {
     refuse_symlink "$UPGRADE_ROOT_DIR"
@@ -22,6 +23,8 @@ with os.fdopen(fd) as f:
     doc = json.load(f)
 d, p = doc["direction"], doc["phase"]
 assert isinstance(d, str) and isinstance(p, str) and d.isalpha() and p.replace("-", "").isalpha()
+if p == "applied" and "commit-before" in (doc.get("items") or {}):
+    p = "commit"
 print(d, p)' 2>/dev/null || die "$USERNS_JOURNAL is malformed; inspect it (boxmunge-server userns check)"
 }
 
@@ -30,15 +33,25 @@ print(d, p)' 2>/dev/null || die "$USERNS_JOURNAL is malformed; inspect it (boxmu
 userns_guard_target() {
     local state
     state="$(userns_state)"
-    if [[ "$state" == "forward applied" || "$state" == "forward committed" ]] \
+    if [[ "$state" == "forward applied" || "$state" == "forward commit" || "$state" == "forward committed" ]] \
             && semver_lt "$1" "$FIRST_USERNS_RELEASE"; then
         die "Refusing $1: this box's Docker daemon is remapped (userns migration ${state#* }), and releases before $FIRST_USERNS_RELEASE would start the system container in the remapped namespace."
     fi
 }
 
-# userns_refuse_mid_migration <version> <mode>: no upgrade while a migration
-# or its rollback is stopped part-way: an upgrade restarts projects, which
-# would start them on data that is only partly shifted.
+# userns_finish <state>: the subcommand that finishes a stopped <state>.
+userns_finish() {
+    case "$1" in
+        "forward commit") echo "userns-commit" ;;
+        rollback\ *) echo "userns-rollback" ;;
+        *) echo "userns-migrate (to resume) or userns-rollback" ;;
+    esac
+}
+
+# userns_refuse_mid_migration <version> <mode>: no upgrade while a migration,
+# its rollback or its commit is stopped part-way: an upgrade restarts
+# projects, which would start them on data that is only partly shifted, or
+# from a store being deleted.
 userns_refuse_mid_migration() {
     local state
     state="$(userns_state)"
@@ -50,7 +63,7 @@ userns_refuse_mid_migration() {
         log "Not upgrading to $1: a userns $state is in progress. Deferred; auto-update retries on its next run."
         exit 0
     fi
-    die "Not upgrading to $1: a userns migration stopped at ${state#* }. Finish it first: userns-migrate to resume, or userns-rollback."
+    die "Not upgrading to $1: a userns $state is stopped part-way. Finish it first: sudo $BOXMUNGE_ROOT/bin/boxmunge-upgrade $(userns_finish "$state")."
 }
 
 userns_run() {  # userns_run <check|migrate|rollback|commit>

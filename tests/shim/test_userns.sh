@@ -85,18 +85,26 @@ drop_root
 
 new_root a; journal forward rebuilt
 run_shim target 1.5.0
-expect 1 "a userns migration stopped at rebuilt" "no upgrade while a migration is stopped part-way"
+expect 1 "a userns forward rebuilt is stopped part-way. Finish it first: sudo $BOXMUNGE_ROOT/bin/boxmunge-upgrade userns-migrate (to resume) or userns-rollback" \
+    "no upgrade while a migration is stopped part-way"
 run_shim run 1.5.0 https://example.com/x security
 expect 0 "Deferred" "the timer's run is deferred mid-migration"
 journal rollback rb-restored
 run_shim target 1.5.0
-expect 1 "stopped at rb-restored" "no upgrade while a rollback is stopped part-way"
+expect 1 "rollback rb-restored is stopped part-way. Finish it first: sudo $BOXMUNGE_ROOT/bin/boxmunge-upgrade userns-rollback." \
+    "no upgrade while a rollback is stopped part-way, naming the rollback"
+printf '{"version": 1, "direction": "forward", "phase": "applied", "offset": 1048576, "items": {"commit-before": "100"}}\n' \
+    > "$BOXMUNGE_ROOT/upgrade-root/userns-migration.json"
+run_shim target 1.5.0
+expect 1 "boxmunge-upgrade userns-commit." "no upgrade while a commit is stopped part-way"
 drop_root
 
 new_root a; mkdir -m 700 "$BOXMUNGE_ROOT/upgrade-root"
 echo 'not json' > "$BOXMUNGE_ROOT/upgrade-root/userns-migration.json"
 run_shim target 1.5.0
 expect 1 "is malformed" "a malformed journal stops an upgrade"
+PATH="$BUSYLOCK:$PATH" run_shim force-target 0.10.2
+expect 1 "Another upgrade is in progress" "force-target reads the journal only under the lock"
 drop_root
 
 new_root a; mkdir -m 700 "$BOXMUNGE_ROOT/upgrade-root"

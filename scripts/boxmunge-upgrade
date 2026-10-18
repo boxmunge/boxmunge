@@ -167,6 +167,7 @@ upgrade_to() {
     check_policy "$version" "$mode"
     refuse_during_probation "$version" "$mode"
     userns_refuse_mid_migration "$version" "$mode"
+    [[ "$mode" != "force" ]] || userns_guard_target "$version"
     cmd_install_sudoers
     seed_slot_docs "$ACTIVE_SLOT"
 
@@ -461,7 +462,6 @@ cmd_target() {
 cmd_force_target() {
     [[ $# -eq 1 ]] || die "Usage: boxmunge-upgrade force-target <version>"
     require_semver "$1" "requested version"
-    userns_guard_target "$1"
     log "Operator-forced upgrade: $1"
     upgrade_to "$1" force
 }
