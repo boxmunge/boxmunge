@@ -14,7 +14,9 @@ sockets are lchowned.
 chown clears setuid, and setgid on a group-executable file. The scan lists
 those entries with their modes; the caller journals the list before each
 shift and passes it back, so a crash between an entry's chown and its chmod
-is repaired by walking again. Idempotent otherwise.
+is repaired by walking again. A listed mode is put back only on a regular
+file whose mode is that one, or that one less what chown clears: never on
+an entry something else has changed since. Idempotent otherwise.
 """
 from __future__ import annotations
 
@@ -146,6 +148,16 @@ def _problems(rel: str, st: os.stat_result, fd: int | None, offset: int,
     return out
 
 
+def _cleared(mode: int) -> int:
+    """`mode` as chown leaves it: an entry in this state lost its bits to
+    our chown; one in any other (a file a container replaced) is left as
+    it is."""
+    mode &= ~stat.S_ISUID
+    if mode & stat.S_IXGRP:
+        mode &= ~stat.S_ISGID
+    return mode
+
+
 def _loses_mode(st: os.stat_result) -> bool:
     """Would chown clear a bit of this entry's mode (setuid, or setgid on a
     group-executable non-directory)?"""
@@ -219,7 +231,8 @@ def shift_tree(root: Path, offset: int, direction: Direction,
             else:
                 os.chown(name, uid, gid, dir_fd=dir_fd, follow_symlinks=False)
             report.changed += 1
-        if rel in modes and fd is not None:
+        if rel in modes and fd is not None and stat.S_ISREG(st.st_mode) \
+                and stat.S_IMODE(st.st_mode) in (modes[rel], _cleared(modes[rel])):
             os.fchmod(fd, modes[rel])
 
     walk(root, visit)

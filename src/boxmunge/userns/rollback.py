@@ -75,6 +75,13 @@ def _where(old_root: Path, name: str) -> str:
     return "stayed" if os.path.lexists(data_dir(old_root, name)) else "old"
 
 
+def _unfinished(j: Journal, item: str, key: str) -> str | None:
+    """The forward shift's setuid list, as a seed, only for a tree whose
+    forward shift never finished: a kill inside it may have cleared a bit.
+    A finished one's list is stale (the soak changed the tree since)."""
+    return None if j.items.get(item) == "shifted" else key
+
+
 def _restore_data(paths: BoxPaths, j: Journal, rinv: Inventory, finv: Inventory,
                   old_root: Path, new_root: Path, save: Save) -> None:
     for v in rinv.volumes:
@@ -90,15 +97,16 @@ def _restore_data(paths: BoxPaths, j: Journal, rinv: Inventory, finv: Inventory,
             save()
         if j.items[key] == "moved":
             tree = data_dir(old_root, v.name)
+            forward = str(data_dir(new_root, v.name))
             shift_journalled(j, tree, Direction.INVERSE, save, f"rb:{tree}",
-                             seed=str(data_dir(new_root, v.name)))
+                             seed=_unfinished(j, f"volume:{v.name}", forward))
             j.items[key] = "restored"
             save()
     for source in outermost(set(rinv.data_binds()) | set(finv.data_binds())):
         key = f"rb-bind:{source}"
         if j.items.get(key) != "restored" and os.path.lexists(source):
             shift_journalled(j, Path(source), Direction.INVERSE, save, f"rb:{source}",
-                             seed=source)
+                             seed=_unfinished(j, f"bind:{source}", source))
             j.items[key] = "restored"
             save()
     if j.items.get("caddyfile") == "0644" and j.caddyfile_mode is not None \

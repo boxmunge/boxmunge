@@ -114,3 +114,17 @@ def test_the_walk_counts_every_entry_once(tmp_path) -> None:
     scan = scan_tree(tmp_path, S, Direction.INVERSE)
     assert scan.problems == [] and scan.entries == 6
     assert stat.S_ISFIFO(os.lstat(tmp_path / "fifo").st_mode)
+
+
+def test_a_journalled_mode_is_put_back_only_on_the_file_it_was_taken_from(tmp_path) -> None:
+    """A container may replace a once-setuid file during the soak: the
+    rollback must not make the new one setuid. A listed mode is put back
+    only where the file shows it, or it less what chown clears."""
+    (tmp_path / "replaced").write_text("x")
+    os.chmod(tmp_path / "replaced", 0o644)
+    (tmp_path / "cleared").write_text("x")
+    os.chmod(tmp_path / "cleared", 0o755)
+    shift.shift_tree(tmp_path, S, Direction.INVERSE,
+                     {"replaced": 0o4755, "cleared": 0o4755})
+    assert stat.S_IMODE(os.lstat(tmp_path / "replaced").st_mode) == 0o644
+    assert stat.S_IMODE(os.lstat(tmp_path / "cleared").st_mode) == 0o4755
