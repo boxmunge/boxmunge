@@ -38,12 +38,13 @@ class Box:
         self.findings: dict[str, tuple] = {}
         self.failing: set[str] = set()
         self.scanned: list[str] = []
-        services = {"web": {"image": candidate_name("demo", "web")},
-                    "db": {"image": "postgres:16"}, "cache": {"image": "redis:7"}}
-        monkeypatch.setattr(gate, "resolved_services", lambda target: ({}, services))
+        # As the scratch overlay resolves (builds under candidate names).
+        self.services = {"web": {"image": candidate_name("demo", "web")},
+                         "db": {"image": "postgres:16"}, "cache": {"image": "redis:7"}}
+        monkeypatch.setattr(gate, "resolved_services", lambda target: ({}, self.services))
         monkeypatch.setattr(gate.docker_containers, "local_image", self.images.get)
         monkeypatch.setattr(gate, "resolve_deployed_config",
-                            lambda *a, **k: {"services": {n: {} for n in services}})
+                            lambda *a, **k: {"services": {n: {} for n in self.services}})
         monkeypatch.setattr(gate, "refresh_db", lambda: None)
         monkeypatch.setattr("boxmunge.commands.security_scan_core.scan_image", self._scan)
 
@@ -147,13 +148,77 @@ def test_missing_trivy_refuses(box, monkeypatch) -> None:
     assert "trivy is not installed" in str(e.value)
 
 
+def _as_switched(box) -> None:
+    """The release's real overlay: builds under their own names."""
+    box.services = {**box.services, "web": {"image": "boxmunge.invalid/demo/web"}}
+
+
+def test_require_unchanged_accepts_the_release_as_scanned(box) -> None:
+    clearance = box.clear()
+    _as_switched(box)
+    gate.require_unchanged(box.paths, clearance)
+
+
 def test_require_unchanged_refuses_a_moved_name(box) -> None:
     clearance = box.clear()
-    gate.require_unchanged(clearance)
+    _as_switched(box)
     box.images["postgres:16"] = LocalImage("sha256:" + "d" * 64, ())
     with pytest.raises(gate.QuarantineRefused) as e:
-        gate.require_unchanged(clearance)
-    assert "service db: postgres:16 no longer names the image that was scanned" in str(e.value)
+        gate.require_unchanged(box.paths, clearance)
+    assert "service db would start postgres:16 (sha256:ddd" in str(e.value)
+
+
+def test_require_unchanged_refuses_a_release_its_hook_rewrote(box) -> None:
+    clearance = box.clear()
+    _as_switched(box)
+    box.services = {**box.services, "db": {"image": "postgres:17"}, "extra": {"image": "x:1"}}
+    with pytest.raises(gate.QuarantineRefused) as e:
+        gate.require_unchanged(box.paths, clearance)
+    text = str(e.value)
+    assert "service db would start postgres:17" in text
+    assert "service extra was not in the release that was scanned" in text
+
+
+def test_a_service_reusing_a_build_is_scanned_as_the_new_build(box) -> None:
+    box.services["worker"] = {"image": "boxmunge.invalid/demo/web"}
+    clearance = box.clear()
+    assert clearance.images["worker"] == ("boxmunge.invalid/demo/web", "sha256:" + "a" * 64)
+    assert box.scanned.count("sha256:" + "a" * 64) == 1  # one image, scanned once
+    _as_switched(box)
+    gate.require_unchanged(box.paths, clearance)
+
+
+def test_a_corrupt_quarantine_record_refuses(box) -> None:
+    box.paths.project_quarantine_state("demo").write_text(json.dumps({"cve_id": 7}))
+    with pytest.raises(gate.QuarantineRefused) as e:
+        box.clear()
+    assert "is corrupt" in str(e.value) and box.scanned == []
+
+
+def _container(name, service, image_id, oneoff=False):
+    from boxmunge.docker_containers import ProjectContainer
+    return ProjectContainer(name=name, service=service, image_id=image_id, repo_digests=(),
+                            running=True, health=None, oneoff=oneoff, exit_code=None,
+                            restart_policy="no")
+
+
+def test_the_lift_needs_every_container_on_a_scanned_image(box, monkeypatch) -> None:
+    clearance = box.clear()
+    running = [_container("demo-web-1", "web", "sha256:" + "a" * 64),
+               _container("demo-db-1", "db", "sha256:" + "e" * 64),  # pulled anew by `up`
+               _container("demo-tool-run-1", "tool", "sha256:f", oneoff=True)]
+    monkeypatch.setattr(gate.docker_containers, "project_containers", lambda p: running)
+    with pytest.raises(gate.QuarantineError) as e:
+        gate._verify_running(clearance)
+    assert str(e.value) == f"demo-db-1 runs sha256:{'e' * 64}, not a scanned image"
+    running[1] = _container("demo-db-1", "db", "sha256:" + "b" * 64)
+    assert gate._verify_running(clearance) == {"demo-web-1": "web", "demo-db-1": "db"}
+
+
+def test_held_containers_get_their_release_policy(box) -> None:
+    box.services = {"web": {"image": "w", "restart": "always"}, "db": {"image": "d"}}
+    assert gate._release_policies(box.paths, "demo", {"demo-web-1": "web", "demo-db-1": "db"}) \
+        == {"demo-web-1": "always", "demo-db-1": "no"}
 
 
 def test_replace_release_starts_nothing_unscanned_while_quarantined(box, monkeypatch,

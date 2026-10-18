@@ -16,10 +16,11 @@ from boxmunge.commands.deploy_steps import (
 )
 from boxmunge.compose import ComposeError
 from boxmunge.compose_guard import compose_up_checked
-from boxmunge.commands.quarantine_gate import Clearance, lift_after_deploy, require_unchanged
+from boxmunge.commands.quarantine_gate import (
+    Clearance, lift_after_deploy, production_now, require_unchanged,
+)
 from boxmunge.compose_resolve import ComposeResolveError
 from boxmunge.cve.quarantine import is_quarantined
-from boxmunge.docker_containers import created_times
 from boxmunge.docker import CaddyConfigRejected, caddy_reload, DockerError
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.identity import register_project_identity
@@ -201,7 +202,7 @@ def _start_release(
         decision = decide_release_users(project_name, paths, manifest, component)
     except (DeployRefused, DockerError) as e:
         print(f"ERROR: {project_name} cannot start as it is; nothing was run or changed "
-              f"(production runs its previous containers). Fix the following and deploy "
+              f"({production_now(paths, project_name)}). Fix the following and deploy "
               f"again:\n{e}", file=sys.stderr)
         log_error(component, f"Deploy refused before the start: {e}", paths,
                   project=project_name)
@@ -211,10 +212,11 @@ def _start_release(
         return rc
     try:
         generate_release_config(project_name, paths, manifest, component, decision.users)
-    except (OSError, ValueError) as e:
-        print(f"ERROR: {project_name} was not started: production still runs its "
-              f"previous containers. Fix the following and deploy again:\n{e}",
-              file=sys.stderr)
+        if decision.clearance is not None:
+            require_unchanged(paths, decision.clearance)
+    except (OSError, ValueError, DeployRefused) as e:
+        print(f"ERROR: {project_name} was not started ({production_now(paths, project_name)})."
+              f" Fix the following and deploy again:\n{e}", file=sys.stderr)
         log_error(component, f"Deploy refused before the start: {e}", paths,
                   project=project_name)
         return 1
@@ -322,16 +324,14 @@ def _start_and_verify(project_name: str, paths: BoxPaths, manifest: dict,
     compose_files = ["compose.yml", "compose.boxmunge.yml"]
     try:
         promote_candidates(paths, project_name)
-        if clearance is not None:
-            require_unchanged(clearance)
-            before = created_times(project_name)
         deploy_storage.prepare_storage(paths, production_target(paths, project_name))
         # generate_release_config built every image the users were decided from.
+        # A quarantine's fix starts only the scanned images (no pull, no build).
         compose_up_checked(paths, project_name, component=component,
                            compose_files=compose_files, record=True, deploying=True,
-                           build=False, txn=txn)
+                           build=False, txn=txn, pinned=clearance is not None)
     except (DockerError, BindSourceError, RunAsError, ComposeResolveError, RemapError,
-            ComposeError, DeployRefused, OSError) as e:
+            ComposeError, OSError) as e:
         print(f"  ERROR: {e}", file=sys.stderr)
         log_error("deploy", f"Deploy failed: container start: {e}", paths, project=project_name)
         return 1
@@ -349,7 +349,7 @@ def _start_and_verify(project_name: str, paths: BoxPaths, manifest: dict,
     if not smoke_ok(project_name, paths, project_dir, manifest, compose_files):
         return 1
     if clearance is not None:
-        return lift_after_deploy(paths, project_name, ref, clearance, before, txn=txn,
+        return lift_after_deploy(paths, project_name, ref, clearance, txn=txn,
                                  component=component)
     return 0
 
@@ -364,7 +364,8 @@ def _caddy_rejected(project_name: str, paths: BoxPaths,
     print(f"  The new release's containers are running behind the previous "
           f"routing. Fix the site config and deploy again"
           + (f", or run 'rollback {project_name}' to return to the previous "
-             f"release." if _has_rollback_target(paths, project_name) else "."),
+             f"release." if _has_rollback_target(paths, project_name)
+             and not is_quarantined(project_name, paths) else "."),
           file=sys.stderr)
     if error.refused:
         print(f"ERROR: some site files were not restored: {error.refused}",

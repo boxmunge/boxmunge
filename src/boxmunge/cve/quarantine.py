@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Collection
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -317,12 +317,10 @@ def _pin_restart_policies(
 
 
 def _restore_restart_policies(project_name: str, state: dict[str, Any],
-                              recreated: Collection[str] = ()) -> None:
+                              restore: Mapping[str, str] | None = None) -> None:
     """Give each still-existing container its pre-quarantine policy back,
-    except those in ``recreated``: a deploy recreated them with its own
-    release's policy, which a saved one from before must not overwrite."""
-    saved = {name: policy for name, policy in (state.get("restart_policies") or {}).items()
-             if name not in recreated}
+    or the policies in ``restore`` instead."""
+    saved = state.get("restart_policies") or {} if restore is None else restore
     try:
         restart_hold.release(project_name, saved)
     except DockerError as e:
@@ -337,7 +335,7 @@ def lift_quarantine(
     *,
     project_caddy_site_content: str | None,
     compose_files: list[str],
-    recreated: Collection[str] = (),
+    restore: Mapping[str, str] | None = None,
     txn: str | None = None,
     component: str = "security-resume",
 ) -> None:
@@ -352,8 +350,9 @@ def lift_quarantine(
     4. Clear the quarantine state file (LAST — only after restart succeeds).
 
     A deploy that shipped a fix (commands/quarantine_gate) lifts it at the
-    end of its install transaction ``txn``, naming the containers it
-    ``recreated``; the up then starts nothing new.
+    end of its install transaction ``txn``, and has the policies to
+    ``restore``: its release's own, since the saved ones may be an earlier
+    release's. The up then starts nothing new.
 
     ``project_caddy_site_content=None`` lifts the quarantine but leaves the
     project down: the maintenance page stays and nothing starts. Used when
@@ -419,10 +418,12 @@ def lift_quarantine(
         ) from e
 
     # 3. Restart containers, with their own restart policies back.
-    _restore_restart_policies(project_name, state, recreated)
+    _restore_restart_policies(project_name, state, restore)
     try:
+        # Pinned: only the local images that were scanned, never a pull or
+        # a build (`pull_policy`) of something that was not.
         compose_up_checked(paths, project_name, component=component,
-                           compose_files=compose_files, build=False, txn=txn)
+                           compose_files=compose_files, build=False, pinned=True, txn=txn)
     except DockerError as e:
         raise QuarantineError(
             f"Failed to restart containers for {project_name!r}: {e}",

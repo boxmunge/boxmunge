@@ -104,9 +104,12 @@ def compose_up(
     force_recreate: bool = False,
     start: bool = True,
     services: list[str] | None = None,
+    pinned: bool = False,
 ) -> None:
     """Run docker compose up -d; force_recreate replaces unchanged containers
-    too, and `services` limits it to those services.
+    too, and `services` limits it to those services. ``pinned`` starts only
+    images already in the local store: no pull and no build, whatever a
+    service's `pull_policy` says.
 
     ``start=False`` (``--no-start``) builds and creates the project's
     networks, volumes and containers without starting any of them.
@@ -120,6 +123,8 @@ def compose_up(
         cmd.append("--no-start")
     if build:
         cmd.append("--build")
+    if pinned:
+        cmd.extend(["--pull", "never", "--no-build"])
     if force_recreate:
         cmd.append("--force-recreate")
     cmd.extend(services or [])

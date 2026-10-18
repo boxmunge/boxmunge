@@ -183,12 +183,14 @@ class TestQuarantinedDeploy:
                                               {"web": ("nginx", "sha256:x")})
         monkeypatch.setattr("boxmunge.commands.release_config.clear_release",
                             lambda *a: clearance)
-        checked, lifted = [], []
-        monkeypatch.setattr("boxmunge.commands.deploy.require_unchanged", checked.append)
-        times = iter([{"testapp-web-1": 1}, {"testapp-web-1": 2}])
-        monkeypatch.setattr("boxmunge.commands.deploy.created_times", lambda p: next(times))
-        monkeypatch.setattr(quarantine_gate.docker_containers, "created_times",
-                            lambda p: next(times))
+        checked, lifted, pinned = [], [], []
+        monkeypatch.setattr("boxmunge.commands.deploy_tree.require_unchanged",
+                            lambda paths_, c: checked.append(c))
+        monkeypatch.setattr(quarantine_gate, "_verify_running",
+                            lambda c: {"testapp-web-1": "web"})
+        monkeypatch.setattr(quarantine_gate, "_release_policies",
+                            lambda paths_, project, services: {"testapp-web-1": "always"})
+        mock_up.side_effect = lambda *a, **k: pinned.append(k["pinned"])
 
         def lift(project, paths_, **kw):
             lifted.append((project, kw))
@@ -198,7 +200,8 @@ class TestQuarantinedDeploy:
         out = capsys.readouterr().out
         assert checked == [clearance]
         ((project, kw),) = lifted
-        assert project == "testapp" and kw["recreated"] == {"testapp-web-1"}
+        assert project == "testapp" and kw["restore"] == {"testapp-web-1": "always"}
+        assert pinned == [True]  # only the scanned local images: no pull, no build
         assert kw["txn"] is not None  # the lift's start belongs to this install
         assert "testapp-web:8080" in kw["project_caddy_site_content"]  # the routed site
         assert "Quarantine (CVE-2026-0001) lifted by deploying" in out

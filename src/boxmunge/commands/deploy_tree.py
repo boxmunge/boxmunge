@@ -25,7 +25,9 @@ from boxmunge.commands.deploy_steps import snapshot_live_release
 from boxmunge.commands.release_config import (
     ReleaseDecision, decide_release_users, generate_release_config,
 )
+from boxmunge.commands.quarantine_gate import require_unchanged
 from boxmunge.crashpoint import crash_point
+from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker_run import DockerError
 from boxmunge.data_dirs import ReleaseStateError, SetAsideError, log_kept, set_aside_announcer
 from boxmunge.intake import IntakeError, report_refusal, validate_release_tree
@@ -223,6 +225,13 @@ def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: I
     except (OSError, ValueError) as e:
         return report_left_open(project_name, paths, txn, req,
                                 f"generating its configs failed: {e}")
+    if decision.clearance is not None:
+        try:
+            require_unchanged(paths, decision.clearance)
+        except DeployRefused as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return report_left_open(project_name, paths, txn, req,
+                                    "it no longer starts the images that were scanned")
     if not resumed_switch:
         txn = advance(paths, project_name, txn, "switching")
     else:
@@ -246,10 +255,12 @@ def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: I
 
 def report_left_open(project_name: str, paths: BoxPaths, txn: InstallTxn, req: TreeDeploy,
                      why: str, rc: int = 1, *, rerun: bool = True) -> int:
+    options = options_text(project_name, txn, rerun=rerun,
+                           quarantined=is_quarantined(project_name, paths))
     print(f"ERROR: The install of {req.ref} stopped at {txn.phase}: {why}. This attempt "
           f"did not start or change production's containers, and other starts of "
-          f"{project_name} are refused until this install is finished: "
-          f"{options_text(project_name, txn, rerun=rerun)}.", file=sys.stderr)
+          f"{project_name} are refused until this install is finished: {options}.",
+          file=sys.stderr)
     log_error(req.component, f"Install of {req.ref} left open at {txn.phase}: {why}",
               paths, project=project_name)
     return rc

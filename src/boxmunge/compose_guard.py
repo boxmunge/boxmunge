@@ -249,7 +249,7 @@ def compose_up_checked(
     compose_files: list[str] | None = None, staging: bool = False, record: bool = False,
     deploying: bool = False, build: bool = True,
     force_recreate: bool = False, services: list[str] | None = None, start: bool = True,
-    txn: str | None = None,
+    txn: str | None = None, pinned: bool = False,
 ) -> None:
     """check_start, then `docker compose up` (`start=False`: create without
     starting, which still mounts nothing yet but fixes every bind source in
@@ -262,11 +262,11 @@ def compose_up_checked(
     if staging:
         target = staging_target(paths, project_name)
         compose_up(target.cwd, build=build, force_recreate=force_recreate,
-                   services=services, start=start, **target.kwargs())
+                   services=services, start=start, pinned=pinned, **target.kwargs())
         return
     compose_up(paths.project_dir(project_name), compose_files=compose_files, build=build,
                project_name=project_name, force_recreate=force_recreate,
-               services=services, start=start)
+               services=services, start=start, pinned=pinned)
     # A partial up (restore's one service) may leave the rest stopped.
     if start and not services:
         _clear_production_stopped(paths, project_name, component)

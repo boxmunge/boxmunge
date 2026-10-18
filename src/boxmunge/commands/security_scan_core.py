@@ -335,7 +335,8 @@ def audit_targets(
 ) -> ProjectScan:
     """An audit-only scan of exactly ``targets`` under the given policy:
     nothing is written, alerted or enforced. A release not yet deployed is
-    judged by its own manifest, suppressions and compose (quarantine_gate)."""
+    judged by its own manifest and compose, with the project's suppressions
+    (quarantine_gate)."""
     _check_declared_runtimes(project, meta)
     results, failed, skipped, warnings = _scan_targets(paths, project, targets)
     decisions = _evaluate(paths, project, meta, profile, supps, results, kev)

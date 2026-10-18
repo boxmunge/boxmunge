@@ -211,8 +211,9 @@ def test_a_quarantined_git_project_ships_its_fix_through_the_scan(paths, tmp_pat
             raise quarantine_gate.QuarantineRefused(["CVE-2026-0001 in openssl, service web"])
         return quarantine_gate.Clearance("myapp", "CVE-2026-0001", {})
     monkeypatch.setattr("boxmunge.commands.release_config.clear_release", scan)
-    monkeypatch.setattr("boxmunge.commands.deploy.created_times", lambda p: {})
-    monkeypatch.setattr(quarantine_gate.docker_containers, "created_times", lambda p: {})
+    monkeypatch.setattr("boxmunge.commands.deploy_tree.require_unchanged", lambda *a: None)
+    monkeypatch.setattr(quarantine_gate, "_verify_running", lambda c: {})
+    monkeypatch.setattr(quarantine_gate, "_release_policies", lambda *a: {})
     monkeypatch.setattr(quarantine_gate, "lift_quarantine",
                         lambda project, paths_, **kw: clear_quarantine_state(project, paths_))
     with staging_docker_off():

@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any
 
 from boxmunge import docker_containers
@@ -34,14 +33,19 @@ from boxmunge.compose_images import built_image_name
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
 from boxmunge.cve.kev import load_kev
 from boxmunge.cve.policy import Disposition, FindingDisposition
-from boxmunge.cve.quarantine import QuarantineError, lift_quarantine, read_quarantine_state
+from boxmunge.cve.quarantine import (
+    QuarantineError, checked_quarantine_record, is_quarantined, lift_quarantine,
+    read_quarantine_state,
+)
 from boxmunge.cve.scan_state import BASIS_STARTUP_IMAGES
 from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
 from boxmunge.docker_run import DockerError
 from boxmunge.log import log_error, log_operation
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
-from boxmunge.release_target import DeployRefused, ReleaseTarget, resolved_services
+from boxmunge.release_target import (
+    DeployRefused, ReleaseTarget, production_target, resolved_services,
+)
 
 
 class QuarantineRefused(DeployRefused):
@@ -66,33 +70,45 @@ class Clearance:
 def start_images(target: ReleaseTarget) -> tuple[dict[str, StartImage], dict[str, str]]:
     """Every service's image as the release would start it (all profiles,
     as deploy_images builds and pulls them), and the services whose image
-    cannot be named. A build and a held-back image pulled again wait under
-    candidate names; the switch gives them their own (promote_candidates)."""
+    cannot be named. A build, a service that names one of this project's
+    builds, and a held-back image pulled again wait under candidate names
+    until the switch gives them their own (promote_candidates)."""
     _model, services = resolved_services(target)
+    cp = target.compose_project
+    builds = {built_image_name(cp, n): candidate_name(cp, n) for n in services}
+    built_from = {candidate: built for built, candidate in builds.items()}
     starts: dict[str, StartImage] = {}
     unnamed: dict[str, str] = {}
     for name, svc in sorted(services.items()):
         ref = svc.get("image")
         if not isinstance(ref, str) or not ref:
             unnamed[name] = "has no image reference, so the image it would start is unknown"
-            continue
-        candidate = candidate_name(target.compose_project, name)
-        if ref == candidate:
-            starts[name] = StartImage(candidate, built_image_name(target.compose_project, name))
-        elif not target.staging and docker_containers.local_image(candidate) is not None:
-            starts[name] = StartImage(candidate, ref)
+        elif ref in built_from:
+            starts[name] = StartImage(ref, built_from[ref])
+        elif target.staging:
+            starts[name] = StartImage(ref, ref)
+        elif ref in builds and docker_containers.local_image(builds[ref]) is not None:
+            starts[name] = StartImage(builds[ref], ref)
+        elif docker_containers.local_image(candidate_name(cp, name)) is not None:
+            starts[name] = StartImage(candidate_name(cp, name), ref)
         else:
             starts[name] = StartImage(ref, ref)
     return starts, unnamed
 
 
+def production_now(paths: BoxPaths, project: str) -> str:
+    """Where production stands when a deploy stops before its start."""
+    if is_quarantined(project, paths):
+        return "production stays CVE-quarantined behind its maintenance page"
+    return "production runs its previous containers"
+
+
 def _quarantined_cve(paths: BoxPaths, project: str) -> str:
+    path = paths.project_quarantine_state(project)
     try:
-        state = read_quarantine_state(project, paths)
+        return checked_quarantine_record(read_quarantine_state(project, paths), path)["cve_id"]
     except QuarantineError as e:
-        raise QuarantineRefused([f"{e}. Nothing was started."]) from e
-    cve = (state or {}).get("cve_id")
-    return cve if isinstance(cve, str) and cve else "<unknown>"
+        raise QuarantineRefused([f"{e} Nothing was started."]) from e
 
 
 def _scan(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, Any],
@@ -119,9 +135,11 @@ def _scan(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, Any],
             continue
         ids[name] = image.image_id
         targets.append(ScanTarget(name, image.image_ref))
+    # Services sharing an image are scanned once: the budget is the project's.
+    once = list({t.image_ref: t for t in targets}.values())
     scan = audit_targets(
         paths, project, meta=meta, profile=hardening_profile(meta, user_model), supps=supps,
-        targets=targets, unidentified=unidentified, kev=load_kev(paths),
+        targets=once, unidentified=unidentified, kev=load_kev(paths),
         basis=BASIS_STARTUP_IMAGES)
     return scan, ids, targets
 
@@ -184,50 +202,94 @@ def clear_release(paths: BoxPaths, target: ReleaseTarget,
             f"suppress one that does not apply (`boxmunge security suppress <CVE> --project "
             f"{project} --until <YYYY-MM-DD> --reason <text>`; a CISA KEV finding cannot "
             f"be suppressed) and deploy again."])
-    print(f"  Scan: clear ({len(ids)} image(s), no quarantine-level findings).")
+    print(f"  Scan: clear ({len(ids)} service image(s), no quarantine-level finding under "
+          f"the release's security policy).")
     return Clearance(project, cve, {n: (starts[n].final_ref, ids[n]) for n in starts})
 
 
-def require_unchanged(clearance: Clearance) -> None:
-    """At the switch, after the candidates got their names: each name the
-    release starts must still be the image that was scanned."""
-    moved = []
-    for service, (ref, image_id) in sorted(clearance.images.items()):
-        image = docker_containers.local_image(ref)
-        if image is None or image.image_id != image_id:
-            moved.append(f"service {service}: {ref} no longer names the image that was "
-                         f"scanned ({image_id})")
-    if moved:
-        raise QuarantineRefused([*moved, "Nothing was started; deploy again."])
-
-
-def lift_after_deploy(paths: BoxPaths, project: str, ref: str, clearance: Clearance,
-                      before: dict[str, datetime], *, txn: str | None, component: str) -> int:
-    """The release is live and its smoke test passed: lift the quarantine.
-    ``before``: each container's creation time before the start, so the
-    held restart policies go back only to the containers it did not
-    recreate. Returns 0, or 1 with the failure reported."""
+def require_unchanged(paths: BoxPaths, clearance: Clearance) -> None:
+    """Once the release's configs are written, before the switch: the
+    release must still start exactly what was scanned (the hook may have
+    rewritten compose.yml or an env file since). Raises QuarantineRefused."""
     try:
-        now = docker_containers.created_times(project)
-        recreated = {name for name, created in now.items() if before.get(name) != created}
+        starts, unnamed = start_images(production_target(paths, clearance.project))
+        now = {name: (start.final_ref, docker_containers.local_image(start.scan_ref))
+               for name, start in starts.items()}
+    except (ComposeResolveError, DockerError) as e:
+        raise QuarantineRefused([f"Checking what the release starts failed: {e}",
+                                 "Nothing was started; deploy again."]) from e
+    moved = [f"service {name}: {why}" for name, why in sorted(unnamed.items())]
+    for name in sorted(set(now) | set(clearance.images)):
+        if name not in clearance.images:
+            moved.append(f"service {name} was not in the release that was scanned")
+            continue
+        if name not in now:
+            moved.append(f"service {name} is no longer in the release")
+            continue
+        (ref, image), (scanned_ref, scanned_id) = now[name], clearance.images[name]
+        if ref != scanned_ref or image is None or image.image_id != scanned_id:
+            moved.append(f"service {name} would start {ref} "
+                         f"({image.image_id if image else 'not in the local image store'}), "
+                         f"not the scanned {scanned_ref} ({scanned_id})")
+    if moved:
+        raise QuarantineRefused([*moved, "The release changed after its images were scanned "
+                                 "(by its pre-deploy hook?). Nothing was started; the "
+                                 "quarantine stays in place. Deploy again."])
+
+
+def _verify_running(clearance: Clearance) -> dict[str, str]:
+    """Every container the project runs must be a scanned image; returns
+    {container: its service}."""
+    services: dict[str, str] = {}
+    wrong = []
+    for c in docker_containers.project_containers(clearance.project):
+        if c.oneoff:
+            continue
+        services[c.name] = c.service
+        scanned = clearance.images.get(c.service)
+        if scanned is None or c.image_id != scanned[1]:
+            wrong.append(f"{c.name} runs {c.image_id}, not a scanned image")
+    if wrong:
+        raise QuarantineError("; ".join(wrong))
+    return services
+
+
+def _release_policies(paths: BoxPaths, project: str,
+                      services: dict[str, str]) -> dict[str, str]:
+    """{container: its release's own restart policy}: what compose gives a
+    container it creates, so a held one the deploy did not recreate gets the
+    same, never a policy saved from an earlier release."""
+    _model, model = resolved_services(production_target(paths, project))
+    return {name: str(model[svc].get("restart") or "no") for name, svc in services.items()}
+
+
+def lift_after_deploy(paths: BoxPaths, project: str, ref: str, clearance: Clearance, *,
+                      txn: str | None, component: str) -> int:
+    """The release is live and its smoke test passed: check that every
+    container runs a scanned image, then lift the quarantine. Returns 0, or
+    1 with the failure reported (the quarantine stays)."""
+    try:
+        policies = _release_policies(paths, project, _verify_running(clearance))
         site = paths.project_caddy_site(project).read_text()
         lift_quarantine(project, paths, project_caddy_site_content=site,
                         compose_files=["compose.yml", "compose.boxmunge.yml"],
-                        recreated=recreated, txn=txn, component=component)
-    except (QuarantineError, DockerError, OSError) as e:
-        print(f"ERROR: {ref} is deployed and its images were scanned clean, but lifting the "
-              f"quarantine ({clearance.cve_id}) failed: {e}. The quarantine stays in place "
-              f"and the next scan re-asserts it; run `boxmunge security resume {project}` "
-              f"once the cause is fixed.", file=sys.stderr)
+                        restore=policies, txn=txn, component=component)
+    except (QuarantineError, DockerError, ComposeResolveError, OSError) as e:
+        print(f"ERROR: {ref} is deployed, but lifting the quarantine ({clearance.cve_id}) "
+              f"failed: {e}. The quarantine stays in place and the next scan re-asserts it; "
+              f"run `boxmunge security resume {project}` once the cause is fixed.",
+              file=sys.stderr)
         log_error(component, f"Lifting the quarantine after deploying {ref} failed: {e}",
                   paths, project=project)
         return 1
     message = f"quarantine ({clearance.cve_id}) lifted by deploying {ref}"
-    print(f"  {message[0].upper()}{message[1:]}: every image it starts was scanned clean.")
+    print(f"  {message[0].upper()}{message[1:]}: every image it runs was scanned, with no "
+          f"quarantine-level finding under the release's security policy.")
     log_operation(component, f"CVE {message}", paths, project=project,
                   detail={"cve_id": clearance.cve_id, "ref": ref})
     notify(paths, f"{project}: quarantine lifted by deploying {ref}",
            f"The CVE quarantine of {project} ({clearance.cve_id}) was lifted by deploying "
-           f"{ref}: every image it starts was scanned with no quarantine-level finding.",
+           f"{ref}: every image it runs was scanned, with no quarantine-level finding under "
+           f"the release's security policy.",
            component=component, project=project, priority=0)
     return 0

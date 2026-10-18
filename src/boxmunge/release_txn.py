@@ -328,15 +328,18 @@ def _fix_forward(txn: InstallTxn) -> str:
     return (f"or deploy a fix (a different {'commit' if is_full_sha(txn.ref) else 'bundle'})")
 
 
-def options_text(project: str, txn: InstallTxn, *, rerun: bool = True) -> str:
+def options_text(project: str, txn: InstallTxn, *, rerun: bool = True,
+                 quarantined: bool = False) -> str:
     """The operator's ways out of an open install, for its phase. ``rerun``
-    False leaves out resuming it (its bundle is gone)."""
+    False leaves out resuming it (its bundle is gone); ``quarantined``
+    leaves out rollback, which a CVE quarantine refuses."""
     if txn.abandoning:
         return f"rerun 'prod-deploy {project} --abandon' to finish abandoning it"
     lines = [f"rerun '{rerun_command(project, txn)}' to finish it"] if rerun else []
     if not txn.data_may_have_changed():
         lines.append(abandon_text(project, txn))
-    if txn.source != "rollback" and txn.data_may_have_changed() and txn.replaced_ref:
+    if txn.source != "rollback" and txn.data_may_have_changed() and txn.replaced_ref \
+            and not quarantined:
         lines.append(f"'rollback {project}' restores {txn.snapshot or 'no data snapshot'} "
                      f"with {txn.replaced_ref}")
     lines.append(_fix_forward(txn))

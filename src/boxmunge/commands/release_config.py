@@ -6,8 +6,9 @@ images carry a candidate tag, so production's image names and files stay
 as they were until the switch, whatever is refused or fails before it; it
 decides and checks every service's user (deploy_images) and records
 nothing. A CVE-quarantined project's release is scanned there too, before
-the hook (quarantine_gate), so a refusal leaves its install abandonable. generate_release_config writes the Caddy site and the overlay
-with those users, then the users record. promote_candidates, at the
+the hook (quarantine_gate), so a refusal leaves its install abandonable.
+generate_release_config writes the Caddy site and the overlay with those
+users, then the users record. promote_candidates, at the
 switch, moves the built names onto the candidates the users were decided
 from, just before the start, which does not build.
 """
@@ -31,11 +32,10 @@ from boxmunge.compose import (
 from boxmunge.compose_images import BUILT_IMAGE_HOST, built_image_name
 from boxmunge.compose_resolve import ComposeResolveError
 from boxmunge.cve.quarantine import is_quarantined
-from boxmunge.docker_run import run as _run
+from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.paths import BoxPaths
 from boxmunge.release_target import DeployRefused, production_target
 from boxmunge.run_as import RunAsError, ServiceUser
-
 
 
 def _built(user_compose: dict[str, Any], project: str) -> list[str]:
@@ -86,8 +86,12 @@ def decide_release_users(project_name: str, paths: BoxPaths, manifest: dict,
                 return ReleaseDecision(users)
             try:
                 return ReleaseDecision(users, clear_release(paths, target, manifest))
-            except QuarantineRefused:
-                remove_candidates(project_name)
+            except QuarantineRefused as refused:
+                try:
+                    remove_candidates(project_name)
+                except DockerError as e:
+                    raise QuarantineRefused([*refused.problems, f"Removing its candidate "
+                                             f"images failed too: {e}"]) from e
                 raise
     except (RunAsError, ComposeResolveError, ComposeError) as e:
         raise DeployRefused([str(e)]) from e
