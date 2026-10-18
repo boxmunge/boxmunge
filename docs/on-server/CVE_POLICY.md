@@ -43,8 +43,8 @@ workflow, and recovery.
   suppressions file cannot be read is listed with the reason (`unreadable` in
   JSON, an `ERROR:` line on stderr) and the command exits 1; fix or restore
   that file rather than reading the counts as complete.
-- **Recover with `boxmunge security resume <project>`** after a fix lands or
-  you've added a suppression.
+- **Recover** after a suppression with `boxmunge security resume <project>`;
+  with a fix, rebuild or fix the image and `prod-deploy` it: the deploy is refused unless the new release's images clear every quarantine-level finding, and a successful deploy lifts the quarantine.
 
 ## The promise
 
@@ -116,7 +116,7 @@ For every finding, `evaluate_finding` runs these gates in order:
    project is quarantined with a priority-1 alert that names the overridden
    suppression. A fix only helps once it is actually running: a fixable KEV
    finding quarantines under `balanced`, `strict` and `paranoid`, and the
-   alert says a fix exists — rebuild, redeploy, then `security resume`.
+   alert says a fix exists: rebuild or fix the image and `prod-deploy` it: the deploy is refused unless the new release's images clear every quarantine-level finding, and a successful deploy lifts the quarantine.
    **Exception, `relaxed`:** a fixable KEV finding does not quarantine;
    instead a priority-1 alert naming the CVE and the unapplied fix is sent
    on **every scan** while it is live (`IGNORED_FIXED`).
@@ -157,8 +157,9 @@ For every finding, `evaluate_finding` runs these gates in order:
 8. **Distro deprioritized** (balanced/strict) — `Status ∈ {will_not_fix,
    fix_deferred, not_affected, under_investigation}` → `INFORMATIONAL`. The
    distro already judged the finding low-risk; the site stays up. A new such
-   finding is listed once in the new-findings digest, whose explanation quotes
-   the distro status and severity.
+   finding is listed once in the new-findings digest (its top five, with a
+   count of the rest), whose explanation quotes the distro status and
+   severity.
 9. **No distro verdict** (balanced/strict) — `distro_severity(finding) is None`
    (only NVD/GHSA data; the distro issued no rating) → `INFORMATIONAL`. Below
    `paranoid`, the engine does not quarantine on an NVD rating the distro never
@@ -422,7 +423,11 @@ As of v0.8, boxmunge's default-profile overlay applies `read_only: true`
 and `tmpfs: ['/tmp']` by default. Apps that legitimately need writable
 rootfs must declare `read_only: false` explicitly in their user
 `compose.yml`, which incurs the +1 penalty above. Missing the field
-means the overlay's `read_only: true` default applies — no penalty.
+on a service the manifest declares means the overlay's `read_only: true`
+default applies — no penalty. A service only compose.yml defines gets no
+read-only root from the overlay, so it counts as read-only only when
+compose.yml says `read_only: true`: declare it in the manifest
+(`internal: true` with a `writable:` block) or set the key.
 
 This inverts the v0.7.x semantics where missing `read_only` was
 penalised even though the system never actually enforced it. v0.8 is
@@ -433,10 +438,11 @@ The overlay generator's user-wins rule: if your `compose.yml` declares
 `read_only` (true or false) on a service, the overlay omits its
 own `read_only` fragment for that service. Compose merge then leaves
 your literal value alone — no merge conflict, no need for a redundancy-
-rejection rule. The same rule applies to `tmpfs: ['/tmp']`: if a service
-with `writable.external: true` (v0.9; compose-side `tmpfs:` and volumes
-are refused otherwise) declares a `tmpfs` or `volumes` entry that targets
-`/tmp`, the overlay omits its own.
+rejection rule. The same rule applies to `tmpfs: ['/tmp']`: when a
+service's compose.yml claims `/tmp` (a `tmpfs`, a bind or a volume), the
+overlay omits its own. On a manifest service without
+`writable.external: true`, compose-side `tmpfs:` and named volumes are
+refused (v0.9); binds are allowed.
 
 ### Overlay-aware penalty (v0.6.2)
 
@@ -449,19 +455,14 @@ declaring it in user compose would trigger a Compose merge duplicate-
 rejection error anyway; see the v0.6.3 dedupe note in
 "Recommendations" below.)
 
-The same overlay-aware logic applies to `read_only` from v0.8: a
-project that doesn't redeclare `read_only` in user compose is treated
-as fully hardened (the overlay provides it). Only an explicit
-`read_only: false` in user compose triggers the +1 penalty.
-
-For `no-new-privileges` and capabilities the calculator judges each
-service with what the overlay applies to it, so a relaxation made in the
-manifest counts like its compose.yml spelling: `security.no_new_privileges:
-false` and a `security.cap_add` list each add +1. A service on `profile:
-off` gets no hardening baseline: its compose.yml and any manifest
-`cap_add` are judged. `read_only` is judged from compose.yml alone (an
-explicit `read_only: false`), so a service only compose.yml defines, which
-the overlay leaves writable, is not penalised for that.
+The calculator judges each service with what the overlay applies to it.
+A service the manifest declares (not on `profile: off`) is read-only
+unless compose.yml says `read_only: false`; a compose-only service, or one
+on `profile: off`, only when compose.yml says `read_only: true`. A
+relaxation made in the manifest counts like its compose.yml spelling:
+`security.no_new_privileges: false` and a `security.cap_add` list each add
++1. A service on `profile: off` gets no hardening baseline: its
+compose.yml and any manifest `cap_add` are judged.
 
 ### v0.9 writable: surface and the penalty
 

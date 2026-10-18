@@ -345,7 +345,7 @@ Every service in `compose.boxmunge.yml` receives:
 - for services the manifest declares, `read_only: true` and a `/tmp` tmpfs.
 - the user the deploy decided (10001:10001 for a `build:` service whose image sets no non-root `USER`).
 
-These defaults are the floor. A project whose registry images run as root needs a `security.user` declaration before its next deploy (`boxmunge doctor` lists them); the rest applies at the next deploy with no edits.
+These defaults are the floor. A project whose registry images run as root needs a `security.user` declaration (or a compose `user:`, or `profile: off`) before its next deploy (`boxmunge doctor` lists them); the rest applies at the next deploy with no edits.
 
 ### How to relax a protection
 

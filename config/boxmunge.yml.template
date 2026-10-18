@@ -1,5 +1,7 @@
-# boxmunge host configuration: the keys of /opt/boxmunge/config/boxmunge.yml,
-# which bootstrap/init-host.sh writes. Edited by hand, as root.
+# boxmunge host configuration: a reference copy of the keys
+# /opt/boxmunge/config/boxmunge.yml accepts. bootstrap/init-host.sh writes
+# most of them at install; the rest (container_updates, auto_update) take
+# the defaults in src/boxmunge/config.py until set. Edited by hand, as root.
 
 hostname: __HOSTNAME__
 ssh_port: 922
@@ -28,6 +30,14 @@ reboot:
 logging:
   docker_max_size: "50m"
   docker_max_file: 5
+
+# Daily container updates (the container-update timer): re-pull and recreate
+# Caddy and every project's image: services. A project opts out in its
+# manifest with container_updates: {enabled: false}. strategy is
+# leave_broken or rollback_to_previous.
+container_updates:
+  enabled: true
+  strategy: leave_broken
 
 # Platform auto-update (the auto-update timer, every 6 hours).
 # Security releases are always applied automatically. Break-fix releases

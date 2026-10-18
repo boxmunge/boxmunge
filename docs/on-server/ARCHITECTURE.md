@@ -343,7 +343,7 @@ The `default` profile (applied when no `security:` block is present) injects int
 - `read_only: true` and a `/tmp` tmpfs, for services the manifest declares
 - the decided `user:` (10001:10001 for a `build:` service whose image sets no non-root `USER`)
 
-A project whose registry images run as root needs `security.user` declarations before its next deploy (`boxmunge doctor` lists them); everything else applies with no edits.
+A project whose registry images run as root needs `security.user` declarations (or a compose `user:`, or `profile: off`) before its next deploy (`boxmunge doctor` lists them); everything else applies with no edits.
 
 ### Relaxation
 

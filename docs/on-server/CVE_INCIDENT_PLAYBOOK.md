@@ -57,9 +57,10 @@ For every finding marked `QUARANTINE` or `STILL_RUNNING_AT_RISK`:
 If the finding has `fix_available: true` (and a `fixed_version`, in
 `security <project> --json`), a fixed package exists but the running image
 predates it. boxmunge does not rebuild images: a `build:` service needs a
-rebuild (pull the fixed base image) and a redeploy, and an `image:` service
-gets a fixed tag only from container-update, which the operator runs. Hand
-that off. A fixable finding not on KEV is `IGNORED_FIXED` and does not
+rebuild (pull the fixed base image) and a redeploy. An `image:` service
+gets a fix published under the same tag from the daily container-update
+(on unless the manifest sets `container_updates: {enabled: false}`), and a
+fix under a new tag from a release that names it, deployed. Hand that off. A fixable finding not on KEV is `IGNORED_FIXED` and does not
 quarantine; a fixable KEV finding is still `QUARANTINE` until the fix is
 running (under `relaxed` it keeps running and alerts every scan).
 

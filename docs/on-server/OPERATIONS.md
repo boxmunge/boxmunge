@@ -377,8 +377,7 @@ prod-deploy myapp
 ```
 
 Promoting, or deploying, recreates production's containers through Compose: expect a restart's
-worth of downtime (longer for a stage with `staging.copy_data`, which stops production for the
-copy).
+worth of downtime. A `stage` with `staging.copy_data` stops production for the copy.
 
 A release that stops bind-mounting a data directory (say `./uploads`) does not delete it: the
 deploy keeps it and prints `WARNING: uploads/ holds data but this release's compose.yml does not
@@ -783,8 +782,8 @@ snapshot again, and anything written to the data in those seconds is lost.
 Every production install (`prod-deploy`, `rollback`, `promote`, bundle or git) is
 recorded in `<project>/.releases/install.json` until it finishes. While it is
 open, nothing else starts the project's containers: upgrades, `resume`,
-`recover`, container updates, `restore`, `stage`, `data adopt` and `data chown` refuse and say
-why. A
+`recover`, container updates, `restore`, `stage` and `data adopt` (while the service runs)
+refuse and say why; `data chown` still works, on the installed release. A
 `promote` does not wait: it resumes its own open install, and over another
 command's it deploys the staged release as a fix (the last option below).
 
@@ -904,8 +903,8 @@ Compose's labels. If the stop or the copy fails, the new volume is removed and t
 started again.
 
 Adopt before deploying the release that names the volume. Deploying it first is refused (the
-service would start on the empty named volume) and leaves the install open, which refuses the
-adopt's restart of the service: run `prod-deploy myapp --abandon`, then `data adopt`, then deploy
+service would start on the empty named volume) and leaves the install open, and while it is
+open `data adopt` refuses up front, before it stops anything: run `prod-deploy myapp --abandon`, then `data adopt`, then deploy
 again.
 
 ---
@@ -1905,8 +1904,8 @@ Configure your AI agent (Claude Code, Cursor, etc.) to use boxmunge via MCP:
 The agent discovers the tools automatically: `prod_deploy`, `stage`, `promote`, `unstage`,
 `rollback`, `check`, `backup`, `restore`, `validate`, `secrets`, `upgrade`, `self_test`, `health`,
 `log`, `status`, `inbox`, `agent_help`, `project_add`, `project_delete`, `project_list` and
-`handshake`. Everything else (`prod-deploy --abandon`, `data`, `pause`, `resume`, `recover`,
-`security`, `logs`) is the deploy shell's only.
+`handshake`. The deploy shell's other commands (`prod-deploy --abandon`, `data`, `pause`, `resume`,
+`recover`, `security`, `logs`, ...) are not MCP tools.
 
 `restore` and `rollback` replace a project's running state, so they only run when called with
 `confirm: true`. `upgrade` goes through the same root upgrade shim as the shell's `upgrade`

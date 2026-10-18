@@ -19,8 +19,8 @@ That's the real promise — not just "easy hosting," but one less tool you have 
 - **Encrypted backups that actually restore** — mandatory restore commands; `self-test` proves the backup and restore pipeline on a canary project
 - **Staged deploys** — stage a release beside production, verify it, promote it. Promoting
   recreates production's containers from the staged release, so expect a restart's worth of
-  downtime, and longer for a project whose stage copies production's data (`staging.copy_data`
-  stops production for the copy)
+  downtime; a stage that copies production's data (`staging.copy_data`) stops production for the
+  copy
 - **Host security hardening out of the box** — firewall, intrusion detection, kernel hardening, automatic security updates
 - **Signed releases** — every release's `SHA256SUMS` is keyless-signed via Sigstore (cosign + Fulcio + Rekor), and the upgrade shim verifies the signature against this repo's release workflow before installing — unsigned releases are refused
 - **Per-container security hardening** — every service runs with no-new-privileges, dropped Linux capabilities, and PID limits by default; built images run as a non-root user unless the manifest says otherwise, and Docker remaps user namespaces so a container's root is an unprivileged host user (from the first boot on a new server; an existing one migrates once, when the operator runs `boxmunge-upgrade userns-migrate`); see `agent-help security` on the server

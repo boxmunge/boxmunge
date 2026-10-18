@@ -15,8 +15,8 @@ when you must, and what's coming in future tiers.
 - **Services run as a non-root user.** A `build:` service whose image sets
   no non-root `USER` runs as 10001:10001; a registry image that would run
   as root needs `security.user` in the manifest (`image` or `root` with a
-  reason, or `"<uid>:<gid>"`), or the deploy is refused with the lines to
-  add (PROJECT_CONVENTIONS.md, "Who a service runs as").
+  reason, or `"<uid>:<gid>"`), or a compose `user:`, or `profile: off`;
+  otherwise the deploy is refused with the lines to add (PROJECT_CONVENTIONS.md, "Who a service runs as").
 - **Don't disable hardening to "ship faster".** If a specific protection
   is in your way, relax that one field. Setting `profile: off` requires
   a reason and triggers a repeated deploy-time warning on every operation.

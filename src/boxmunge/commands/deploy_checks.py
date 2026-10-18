@@ -161,8 +161,8 @@ def replacement_problems(target: ReleaseTarget, model: dict[str, Any],
                     f"`boxmunge data adopt {target.project} {svc_name}:{new.target} "
                     f"{name.removeprefix(target.compose_project + '_')}`, then deploy "
                     f"again. If this deploy left its install open (as reported below), "
-                    f"run `prod-deploy {target.project} --abandon` before the adopt: an "
-                    f"open install refuses the adopt's restart of the service")
+                    f"run `prod-deploy {target.project} --abandon` before the adopt: while "
+                    f"an install is open, the adopt of a running service is refused")
     return problems
 
 

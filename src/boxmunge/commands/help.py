@@ -103,7 +103,7 @@ Options (run 'help <command>' to see exactly which a command accepts):
 
 An unknown or unsupported flag is an error (exit 2); nothing is run.
 
-Upload bundles with: scp -O -P <ssh port, 922 by default> bundle.tar.gz deploy@<host>:
+Upload bundles with: scp -O -P 922 (or the SSH port chosen at install) bundle.tar.gz deploy@<host>:
 
 If you are an AI agent, run: agent-help
 """
