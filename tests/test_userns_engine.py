@@ -43,6 +43,7 @@ def box(paths, monkeypatch, tmp_path):
     monkeypatch.setattr(en, "_final", lambda paths, j, results: calls.append("final"))
     monkeypatch.setattr(en, "ensure_prior", lambda *a: calls.append("ensure_prior"))
     monkeypatch.setattr(en, "_ensure_remapped", lambda *a: calls.append("ensure_remapped"))
+    monkeypatch.setattr(en, "disk_before_downtime", lambda inv, d: None)
 
     def step(name, phase):
         def run(*args, **kwargs):
@@ -321,3 +322,35 @@ def test_a_switch_undone_clears_the_marker(paths, monkeypatch, tmp_path) -> None
         en._switch(paths, j, Inventory("overlay2", "", str(tmp_path), "29.9.0"), _Daemon(),
                    FakeTimers(), lambda: save_journal(paths, j))
     assert migration_in_progress(paths) is None
+
+
+def test_too_little_space_after_the_backups_stops_before_the_downtime(paths, box,
+                                                                      monkeypatch) -> None:
+    calls, _ = box
+    from boxmunge.userns import steps
+    monkeypatch.setattr(en, "disk_before_downtime", steps.disk_before_downtime)
+    monkeypatch.setattr(steps, "disk", lambda inv, r, d: r.refusals.append("10 bytes free"))
+    with pytest.raises(en.MigrationError, match="nothing was stopped"):
+        _migrate(paths)
+    assert "quiesce" not in calls and "_prepare" in calls
+
+
+def test_crowdsec_must_tail_the_recreated_caddy(monkeypatch, tmp_path) -> None:
+    from boxmunge.userns import steps
+    log = tmp_path / "crowdsec.log"
+    log.write_text("old line\n")
+    monkeypatch.setattr(steps, "CROWDSEC_LOG", log)
+    monkeypatch.setattr(steps, "_CROWDSEC_WAIT", 0.2)
+    monkeypatch.setattr(steps.shutil, "which", lambda name: "/usr/bin/cscli")
+    ran = []
+    monkeypatch.setattr(steps.subprocess, "run", lambda cmd, **kw: ran.append(cmd) or
+                        type("R", (), {"returncode": 0, "stderr": ""})())
+    assert "is not reading boxmunge-caddy" in steps.crowdsec_tails_caddy()
+    assert ran == [["systemctl", "restart", "crowdsec"]]
+    def restarted(cmd, **kw):
+        log.write_text('old line\nlevel=info msg="start tail for container boxmunge-caddy"\n')
+        return type("R", (), {"returncode": 0, "stderr": ""})()
+    monkeypatch.setattr(steps.subprocess, "run", restarted)
+    assert steps.crowdsec_tails_caddy() is None
+    monkeypatch.setattr(steps.shutil, "which", lambda name: None)
+    assert steps.crowdsec_tails_caddy() is None  # not installed: nothing to check

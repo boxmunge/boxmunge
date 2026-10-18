@@ -24,15 +24,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator
 
-from boxmunge.backup import BackupKind
 from boxmunge.docker_run import run as _run
 from boxmunge.fileutil import project_lock
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
-from boxmunge.pause import is_paused
 from boxmunge.project_registry import load_registered_projects
 from boxmunge.userns import offset as uo
 from boxmunge.userns.bringup import bring_up, quiesce
+from boxmunge.userns.steps import _backups, _final, disk_before_downtime
 from boxmunge.userns.daemon_ctl import DaemonControl, TimerControl, daemon_answers
 from boxmunge.userns.images import IMAGES_DIR, load_all, save_all
 from boxmunge.userns.inventory import PROXY_NETWORK, Inventory, take_inventory
@@ -96,21 +95,6 @@ def _phase0(paths: BoxPaths, j: Journal | None, timers: TimerControl,
                        timers=timers.state(), caddyfile_mode=caddyfile_mode(paths))
     j.inventory = inv.to_json()
     return j
-
-
-def _backups(paths: BoxPaths, inv: Inventory) -> None:
-    from boxmunge.commands.backup_cmd import backup_locked, run_backup_sync
-    for p in inv.projects:
-        if not paths.project_manifest(p).exists():
-            continue
-        if is_paused(p, paths):
-            print(f"  {p} is paused: no pre-migration backup (its containers are stopped); "
-                  f"its data is carried like any other")
-            continue
-        if backup_locked(p, paths, kind=BackupKind.PREMIGRATE) != 0:
-            raise MigrationError(f"the pre-migration backup of {p} failed; nothing was stopped")
-    if run_backup_sync(paths) != 0:
-        raise MigrationError("backup-sync failed; nothing was stopped")
 
 
 def _prepare(paths: BoxPaths, j: Journal, inv: Inventory, save: Save) -> None:
@@ -199,21 +183,6 @@ def _rebuild(paths: BoxPaths, j: Journal, inv: Inventory, images_dir: Path, save
     save()
 
 
-def _final(paths: BoxPaths, j: Journal, results: dict[str, str]) -> None:
-    from boxmunge.commands.check import run_check_all
-    from boxmunge.commands.security_actions import cmd_security_scan
-    from boxmunge.commands.self_test_cmd import run_self_test
-    checks = {"cve-scan": cmd_security_scan([], paths),
-              "check-all": run_check_all(paths, read_only=False),
-              "self-test": run_self_test(paths)}
-    lines = [f"{p}: {status}" for p, status in sorted(results.items())]
-    lines += [f"{name}: exit {rc}" for name, rc in checks.items()]
-    notify(paths, "userns migration applied",
-           "\n".join(lines) + "\nSoak for 48 hours, then: sudo /opt/boxmunge/bin/boxmunge-upgrade "
-           "userns-commit. To undo: sudo /opt/boxmunge/bin/boxmunge-upgrade userns-rollback",
-           component=COMPONENT, priority=1)
-
-
 def _ensure_remapped(paths: BoxPaths, j: Journal, daemon: DaemonControl) -> None:
     """After the switch: the remapped daemon runs, exactly as journalled."""
     if not daemon_answers():
@@ -261,6 +230,7 @@ def migrate(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,
                 save_all(inv.images, j, images_dir, save)
                 if not j.reached("prepared"):
                     _prepare(paths, j, inv, save)
+                disk_before_downtime(inv, images_dir)
             # From here until the box runs again: no timer, no project command.
             set_marker(paths, FINISH)
             timers.stop_all()

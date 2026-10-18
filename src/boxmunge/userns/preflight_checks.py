@@ -212,12 +212,13 @@ def _existing(path: Path) -> Path:
 
 def disk(inv: Inventory, r: Report, images_dir: Path) -> None:
     carried = sum(i.size for i in inv.images if i.carried)
-    # The tarballs, then the same layers unpacked; tarballs an interrupted
-    # run already wrote need no new space.
+    # The tarballs, the same layers unpacked, and a rollback's own tarballs
+    # (written while these still exist), +10%; tarballs an interrupted run
+    # already wrote need no new space.
     written = sum(t.stat().st_size for t in images_dir.glob("*.tar")) if images_dir.is_dir() else 0
-    need = max(0, int(1.1 * 2 * carried) - written)
+    need = max(0, int(1.1 * 3 * carried) - written)
     free = min(shutil.disk_usage(_existing(images_dir)).free,
                shutil.disk_usage(_existing(Path(inv.root))).free)
     if free < need:
-        r.refusals.append(f"{free} bytes free, {need} needed for the image tarballs and their "
-                          f"import (+10%)")
+        r.refusals.append(f"{free} bytes free, {need} needed for the image tarballs, their "
+                          f"import and a rollback's tarballs (+10%)")
