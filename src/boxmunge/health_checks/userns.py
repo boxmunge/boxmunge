@@ -37,6 +37,8 @@ _SHIM = "sudo /opt/boxmunge/bin/boxmunge-upgrade"
 _CHECK_COMMAND = f"{_SHIM} userns-migrate --check"
 _ALERT_INTERVAL = timedelta(hours=24)
 REMINDER = "not committed"
+RUNNING = "migration running"
+PROC_LOCKS = "/proc/locks"
 _REMINDER_AFTER = timedelta(days=7)
 
 
@@ -54,6 +56,9 @@ def _journal_check(paths: BoxPaths, now: datetime) -> HealthCheck | None:
         return HealthCheck(NAME, "error", str(e))
     if j is None or j.phase in ("committed", "rolled-back"):
         return None
+    if _lock_held(paths):  # the migration holds upgrade.lock: it is running, not stopped
+        return HealthCheck(NAME, "warn", f"{RUNNING}: the userns {j.direction} is at "
+                           f"{j.phase}; projects are on the maintenance page until it ends")
     if j.direction == FORWARD and j.phase == "applied" and "commit-before" in j.items:
         return HealthCheck(NAME, "error", f"a userns-commit stopped part-way, after it began "
                            f"deleting the old root; finish it: {_SHIM} userns-commit")
@@ -64,11 +69,30 @@ def _journal_check(paths: BoxPaths, now: datetime) -> HealthCheck | None:
                                f"{applied:%Y-%m-%d}. Commit it ({_SHIM} userns-commit) or roll "
                                f"it back ({_SHIM} userns-rollback)")
         return None
-    resume = "userns-migrate" if j.direction == FORWARD else "userns-rollback"
+    finish = (f"Resume: {_SHIM} userns-migrate, or roll back: {_SHIM} userns-rollback"
+              if j.direction == FORWARD else f"Finish it: {_SHIM} userns-rollback")
     return HealthCheck(NAME, "error",
                        f"the userns {j.direction} migration was interrupted at {j.phase}"
-                       + (f" ({j.failed})" if j.failed else "")
-                       + f". Resume: {_SHIM} {resume}, or roll back: {_SHIM} userns-rollback")
+                       + (f" ({j.failed})" if j.failed else "") + f". {finish}")
+
+
+def _lock_held(paths: BoxPaths) -> bool:
+    """Does any process hold upgrade.lock? Read from /proc/locks, never by
+    taking it: a probe of the lock would make the shim's own non-blocking
+    take of it fail."""
+    try:
+        st = os.stat(paths.upgrade_lock)
+    except FileNotFoundError:
+        return False
+    with open(PROC_LOCKS, encoding="ascii") as f:
+        for line in f:
+            fields = line.split()
+            if len(fields) > 5 and fields[1] == "FLOCK":
+                major, minor, inode = fields[5].split(":")
+                if (int(inode) == st.st_ino and os.makedev(int(major, 16), int(minor, 16))
+                        == st.st_dev):
+                    return True
+    return False
 
 
 def _unclaimed_detail(error: RemapError) -> str:
@@ -89,8 +113,8 @@ def _unclaimed_detail(error: RemapError) -> str:
 
 def check_docker_userns(paths: BoxPaths, *, now: datetime | None = None) -> HealthCheck:
     journal = _journal_check(paths, now or datetime.now(timezone.utc))
-    if journal is not None and journal.status == "error":
-        return journal
+    if journal is not None and (journal.status == "error" or journal.detail.startswith(RUNNING)):
+        return journal  # running: the daemon's sources may disagree until it ends
     try:
         s = remap_offset(paths)
     except RemapError as e:

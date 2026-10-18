@@ -1,6 +1,7 @@
 """docker-userns: warn until migrated, error when the daemon disagrees."""
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -218,7 +219,7 @@ def test_an_interrupted_rollback_names_the_rollback(paths, monkeypatch) -> None:
     _as_root(monkeypatch)
     detail = hc.check_docker_userns(paths).detail
     assert "rollback migration was interrupted at rb-restored" in detail
-    assert "Resume: sudo /opt/boxmunge/bin/boxmunge-upgrade userns-rollback" in detail
+    assert "Finish it: sudo /opt/boxmunge/bin/boxmunge-upgrade userns-rollback" in detail
 
 
 def test_the_journal_is_not_read_as_deploy(paths, monkeypatch) -> None:
@@ -259,3 +260,25 @@ def test_a_commit_stopped_part_way_is_an_error(paths, monkeypatch) -> None:
     _as_root(monkeypatch)
     check = hc.check_docker_userns(paths)
     assert check.status == "error" and "finish it: sudo" in check.detail
+
+
+def test_a_migration_holding_the_lock_is_running_not_interrupted(paths, monkeypatch,
+                                                                tmp_path) -> None:
+    """Every normal migration passes through these phases: while it holds
+    upgrade.lock, check-all must not page anyone about it."""
+    import fcntl
+
+    from boxmunge.userns.journal import FORWARD, Journal, save_journal
+    save_journal(paths, Journal(FORWARD, "switched", S))
+    _as_root(monkeypatch)
+    paths.upgrade_lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(paths.upgrade_lock, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        sent = []
+        monkeypatch.setattr(hc, "notify", lambda *a, **kw: sent.append(a) or True)
+        check = hc.alert_docker_userns(paths, now=T0)
+        assert check.status == "warn" and "migration running" in check.detail and sent == []
+    finally:
+        os.close(fd)
+    assert hc.check_docker_userns(paths).status == "error"  # released, still at switched
