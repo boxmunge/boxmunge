@@ -117,9 +117,9 @@ def test_no_module_builds_its_own_compose_start_command() -> None:
     assert not offenders, f"hand-built docker start commands: {offenders}"
 
 
-def test_platform_starts_are_only_for_caddy() -> None:
+def test_platform_starts_are_container_update_and_the_migration() -> None:
     sites = [rel for rel, tree in _modules() for _ in _calls(tree, {"compose_up_platform"})]
-    assert sites == ["container_update.py"]
+    assert sites == ["container_update.py", "userns/bringup.py", "userns/bringup.py"]
 
 
 def test_only_self_test_starts_the_canary_unchecked() -> None:
@@ -143,6 +143,7 @@ def test_the_scan_finds_the_checked_call_sites() -> None:
         "commands/resume_cmd.py", "commands/rollback.py", "commands/security_resume.py",
         "commands/upgrade_steps.py", "container_update.py", "cve/quarantine.py",
         "legacy_stage_ops.py", "production_stopped.py", "staging_bringup.py", "staging_data.py",
+        "userns/bringup.py",
     ]
 
 

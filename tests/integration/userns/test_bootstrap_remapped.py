@@ -14,6 +14,7 @@ import pytest
 from boxmunge.docker_run import docker_env
 from boxmunge.health_checks.userns import check_docker_userns
 from boxmunge.paths import BoxPaths
+from boxmunge.userns.journal import load_journal
 from tests.integration.userns.conftest import USERNS_DIND
 from tests.integration.userns.dockerd import (
     BUSYBOX, DAEMON_JSON, ProcessDaemon, prior_daemon_json, write_daemon_json,
@@ -105,6 +106,8 @@ def test_fresh_install_is_remapped_and_caddy_works(daemon, tmp_path: Path) -> No
     _init_host_caddy(root)
     done = userns(f"userns_record {s} && userns_journal_committed {s}", root)
     assert done.returncode == 0, done.stderr
+    journal = load_journal(BoxPaths(root=root))  # the migration's reader, as root
+    assert (journal.phase, journal.offset, journal.fresh_install) == ("committed", s, True)
 
     docker("pull", "-q", CADDY)
     caddyfile = root / "caddy" / "Caddyfile"

@@ -42,6 +42,7 @@ BASE_ARGS: dict[str, list[str]] = {
     "test-restore": ["myapp"],
     "unstage": ["myapp"],
     "validate": ["myapp"],
+    "userns": ["check"],
     "_discover-update": ["--json"],
 }
 

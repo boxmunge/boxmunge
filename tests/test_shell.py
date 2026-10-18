@@ -132,6 +132,7 @@ class TestAllowedCommands:
             "install-txn",       # Operator-only: dropping a stale install record.
             "legacy-stage",      # Operator-only (root): resolves a stage left by 0.10.1.
             "staging-teardown-all",  # Root-only: run by the upgrade shim before a rollback.
+            "userns",            # Root-only: the userns migration, through the upgrade shim.
         }
 
         for cmd in COMMANDS:
