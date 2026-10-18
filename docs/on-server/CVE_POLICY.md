@@ -982,21 +982,26 @@ cleared.
    `promote` of a quarantined project build and pull the release's images
    under candidate names, then, before the pre-deploy hook and before
    anything is stopped, started or switched, scan every image the release
-   would start, as `security resume` does (same fail-closed rules), with
-   the release's own `security:` posture and the project's suppressions.
-   A quarantine-level finding, a failed or skipped image scan, or an image
-   that cannot be identified refuses the release: the error names each
-   CVE, package, service and image and the fix, the candidates are
-   removed, and the quarantine stays. The install is left open before its
-   hook, so `prod-deploy <project> --abandon` or a different release
-   (fix-forward) ends it. A clean release deploys as usual; once its smoke
-   test passes the quarantine is lifted (restart policies restored to the
-   containers the deploy did not recreate) with a "quarantine lifted by
-   deploying <ref>" alert. If it fails after the switch, the quarantine
-   stays and the next scan puts the maintenance page back; deploy again or
-   `security resume`. `rollback`, `restore` and `recover` stay refused.
-   `stage` of a quarantined project scans staging's images the same way;
-   production stays quarantined until the promote, which scans again.
+   would start with `security resume`'s fail-closed rules, under the
+   release's own `security:` block and the project's suppressions. Unlike
+   resume, services of every profile are scanned, since the release builds
+   and pulls them all. A quarantine-level finding, a failed or skipped
+   image scan, or an image that cannot be identified refuses the release:
+   the error names each CVE, package, service and image and the fix, the
+   candidates are removed, and the quarantine stays. A first attempt
+   leaves the install open before its hook, so `prod-deploy <project>
+   --abandon` or a different release (fix-forward) ends it; a resumed
+   install stays at its phase. A clean release deploys as usual, refused
+   if its hook changed what it would start, and starts only the scanned
+   local images (no pull or build, whatever `pull_policy` says). Once its
+   smoke test passes and every container is checked to run a scanned
+   image, the quarantine is lifted, held containers get their release's
+   own restart policy, and a "quarantine lifted by deploying <ref>" alert
+   is sent. If it fails after the switch, the quarantine stays and the
+   next scan puts the maintenance page back; deploy again or `security
+   resume`. `rollback`, `restore` and `recover` stay refused. `stage` of a
+   quarantined project scans staging's images the same way; production
+   stays quarantined until the promote, which scans again.
 
 This is distinct from `boxmunge resume` (which lifts a manual `pause`).
 The two are independent: if the project is also paused, `security resume`
@@ -1008,9 +1013,10 @@ containers stay stopped until `boxmunge resume <project>` lifts the pause.
 `docker-ce` upgrade). So the quarantine action also sets every project
 container's restart policy to `no` with `docker update`, saving each
 original policy in the quarantine record; `security resume` restores them
-before starting the containers, and a deploy that lifts the quarantine
-restores them to the containers it did not recreate. Nothing else
-restarts a quarantined project. `pause` holds restart policies the same way; when a quarantine
+before starting the containers (it starts only the local images it
+scanned), and a deploy that lifts the quarantine gives each container its
+release's own policy. Nothing else restarts a quarantined project.
+`pause` holds restart policies the same way; when a quarantine
 is lifted from a project that is still paused, the pause record takes over
 the saved policies and `boxmunge resume` restores them.
 
