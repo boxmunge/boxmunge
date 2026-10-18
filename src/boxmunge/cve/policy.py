@@ -338,7 +338,7 @@ def evaluate_finding(
         )
 
     # 6. Relaxed: KEV is the ONLY quarantine trigger (already handled at step
-    # 3). Every non-KEV finding is informational regardless of distro
+    # 1). Every non-KEV finding is informational regardless of distro
     # severity — the most hands-off tier, for operators who accept
     # severity-based risk.
     if posture is Posture.RELAXED:

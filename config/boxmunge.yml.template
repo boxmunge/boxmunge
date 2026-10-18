@@ -1,5 +1,5 @@
-# boxmunge host configuration
-# Installed to /opt/boxmunge/config/boxmunge.yml during init-host.
+# boxmunge host configuration: the keys of /opt/boxmunge/config/boxmunge.yml,
+# which bootstrap/init-host.sh writes. Edited by hand, as root.
 
 hostname: __HOSTNAME__
 ssh_port: 922
@@ -11,6 +11,12 @@ pushover:
 
 backup_remote: ""
 
+# alert_threshold: failed checks in a row before a project alerts. The
+# other health, reboot and logging values are recorded at install, and
+# changing them changes nothing: the health timer runs every 5 minutes
+# (boxmunge-health.timer), unattended-upgrades reboots in the window set in
+# /etc/apt/apt.conf.d/20auto-upgrades, and Docker rotates container logs as
+# /etc/docker/daemon.json says.
 health:
   check_interval_minutes: 5
   alert_threshold: 3

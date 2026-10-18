@@ -18,11 +18,11 @@ Each project lives at `/opt/boxmunge/projects/<project-name>/`. The directory st
   caddy.override.conf          # Optional: operator-placed Caddy config override
   boxmunge-scripts/
     smoke.sh                   # Health check (strongly recommended; 755)
-    backup.sh                  # Backup to stdout (required if backup.type != none)
-    restore.sh                 # Restore from stdin (required if backup.type != none)
   backups/                     # Managed by boxmunge
   data/                        # Persistent volumes (managed by project)
   repo/                        # Git clone (source: git projects only)
+  .releases/                   # Managed by boxmunge: previous/ (rollback target),
+                               # staged/ (the staged release), live.json, install.json
 ```
 
 ### What a bundle may contain
@@ -100,7 +100,7 @@ that really hold data (`{"version": 1, "data_dirs": ["uploads"]}`, or an empty l
 ```yaml
 # REQUIRED. Unique identifier for this project (ULID).
 # Generated automatically by `boxmunge bundle` if missing.
-id: 01JQXYZ1234567890ABCDEF
+id: 01JQXYZ1234567890ABCDEFGHJ
 
 # REQUIRED. Must match the project's directory name exactly.
 project: myapp
@@ -135,14 +135,11 @@ hosts:
 # REQUIRED. One or more services. Each key is the Docker Compose service name.
 services:
   frontend:
-    # Type of service. Valid values: web, worker, cron.
-    # "web" services are proxied by Caddy. Others are not.
-    type: web
-
-    # REQUIRED for type:web. The container port Caddy proxies to.
+    # REQUIRED unless internal: true. The container port Caddy proxies to.
     port: 3000
 
-    # REQUIRED for type:web. At least one route required.
+    # REQUIRED unless internal: true. At least one route required. A service
+    # with routes is proxied by Caddy and joins the proxy network.
     # Routes are dicts with a `path` key. `/` catches every request no other
     # route matches. Any other path is an exact match unless it ends in `*`:
     # `/api/*` routes everything under /api/, while `/api/` routes only the
@@ -150,8 +147,9 @@ services:
     routes:
       - path: /
 
-    # If true, excluded from the Caddy proxy (internal service only).
-    # Defaults to false.
+    # If true, the service may omit port and routes (a database, cache or
+    # worker declared for its read-only root and writable: paths). Defaults
+    # to false.
     internal: false
 
     # Optional. Path Caddy uses for active health checks.
@@ -167,7 +165,6 @@ services:
       cpus: "1.0"
 
   backend:
-    type: web
     port: 8000
     routes:
       - path: /api/*
@@ -179,8 +176,8 @@ services:
       cpus: "2.0"
 
   worker:
-    # Workers are not proxied; no port or routes needed.
-    type: worker
+    # Not proxied: no port or routes.
+    internal: true
     limits:
       memory: 256m
 
@@ -188,6 +185,10 @@ services:
 backup:
   # Valid values: none, postgres, mysql, files, custom.
   type: postgres
+
+  # REQUIRED unless the manifest has exactly one service: the compose
+  # service the dump and restore commands run in.
+  service: db
 
   # REQUIRED if type != none. Command run inside the container via `sh -c`.
   # These execute as arbitrary shell inside the target container (not on the host).
@@ -224,14 +225,14 @@ deploy:
 boxmunge validates `manifest.yml` on every deploy and rejects invalid manifests with a clear error. The rules are:
 
 1. **`schema_version`**, when present, must be an unquoted integer from 1 to the newest version this boxmunge supports (currently 3). Absent means 1. An older schema is migrated to the current one when boxmunge reads the manifest; an upgrade also rewrites a bundle project's file, but never a git project's, which you update in the repository.
-2. **`id` is required** and must be a valid ULID. Generated automatically by `boxmunge bundle` if missing from the source manifest.
+2. **`id` is required** (a ULID). Generated automatically by `boxmunge bundle` if missing from the source manifest.
 3. **`project` is required** and must exactly match the project's directory name. A mismatch is an error. Project names are lowercase letters, digits, and hyphens (1-63 characters, starting with a letter or digit). Names ending in `-staging` are reserved, because boxmunge runs a project's staging copy as `<project>-staging`; `caddy` and `system` are reserved for the platform's own containers. A project created under such a name before it was reserved cannot be managed; fleet commands (`check-all`, `health`, `status`, container updates, upgrades) report it as an error and carry on with the other projects. Recreate it under another name.
 4. **`source` is required** and must be `bundle` or `git`.
 5. **`repo` is required if `source: git`**. The `ref` field defaults to `main` if omitted.
 6. **`hosts` is required** and must contain at least one hostname. Wildcard hosts (e.g. `*.example.com`) are rejected unless the manifest top level sets `allow_wildcard_hosts: true` — see SECURITY.md for the trade-off.
-7. **Each `web` service must have `port`** and **at least one entry in `routes`**, unless it sets `internal: true` (a service Caddy does not route to, declared to give it a read-only root filesystem and `writable:` paths), which may omit both. `internal` must be `true` or `false`. Routes must be dicts with a `path` key. Both values are written into the Caddy config, so they are checked strictly: `port` is an unquoted integer from 1 to 65535, and `path` starts with `/` and contains only letters, digits, `.`, `_`, `~`, `-`, and `/`, with an optional trailing `*` (`/`, `/api/*`, `/static*`). Spaces, braces, quotes, and wildcards in the middle of a path are rejected. `/` is the catch-all; every other path matches exactly unless it ends in `*`, so a path ending in `/` without `*` (such as `/api/`) draws a warning: it would not route `/api/health`.
+7. **Each service must have `port`** and **at least one entry in `routes`**, unless it sets `internal: true` or is an entry holding only its `security` block ("Who a service runs as") (a service Caddy does not route to, declared to give it a read-only root filesystem and `writable:` paths), which may omit both. `internal` must be `true` or `false`. Routes must be dicts with a `path` key. Both values are written into the Caddy config, so they are checked strictly: `port` is an unquoted integer from 1 to 65535, and `path` starts with `/` and contains only letters, digits, `.`, `_`, `~`, `-`, and `/`, with an optional trailing `*` (`/`, `/api/*`, `/static*`). Spaces, braces, quotes, and wildcards in the middle of a path are rejected. `/` is the catch-all; every other path matches exactly unless it ends in `*`, so a path ending in `/` without `*` (such as `/api/`) draws a warning: it would not route `/api/health`.
 8. **`limits`** fields are optional per service. `limits.memory` accepts Docker memory format (e.g., `256m`, `1g`). `limits.cpus` accepts a numeric string (e.g., `"0.5"`, `"2.0"`).
-9. **If `backup.type` is not `none`**, both `dump_command` and `restore_command` are mandatory. A backup you cannot restore is not a backup.
+9. **If `backup.type` is not `none`**, both `dump_command` and `restore_command` are mandatory, and `backup.service` is too unless the manifest has exactly one service. A backup you cannot restore is not a backup.
 10. **Per-service `smoke` is strongly recommended.** Each service can declare a `smoke: boxmunge-scripts/smoke.sh` field. The script is exec'd inside the running container, so `localhost:PORT` naturally works. boxmunge warns if no services have a smoke test.
 11. **`deploy` must be a mapping, and `deploy.pre_deploy`, when set, a string** that splits into words the way a shell would (balanced quotes). It runs without a shell, so `&&`, pipes and redirects belong in a script that `pre_deploy` names.
 
@@ -355,12 +356,14 @@ boxmunge generates `compose.boxmunge.yml` alongside `compose.yml`. **Do not edit
 
 `compose.boxmunge.yml` adds:
 
-- **Proxy network** -- the `boxmunge-proxy` external network to every non-internal `web` service, with project-scoped network aliases (e.g., `myapp-frontend`, `myapp-backend`)
+- **Proxy network** -- the `boxmunge-proxy` external network to every service with `routes`, with project-scoped network aliases (e.g., `myapp-frontend`, `myapp-backend`)
 - **Environment files** -- `env_file` entries for `project.env` and `secrets.env`, injecting both non-secret config and CLI-managed secrets into containers
 - **Resource limits** -- `deploy.resources.limits` for services declaring `limits` in the manifest, enforcing memory and CPU constraints
 - **Container hardening** -- under the `default` security profile (the silent floor): `security_opt: ["no-new-privileges:true"]`, `init: true`, `pids_limit: 512`, a curated `cap_drop` list, and (v0.8) `read_only: true` and `tmpfs: ['/tmp']`. Services the manifest does not list (databases, caches, sidecars) get the same flags, resolved against the project-level `security:` block, **except** `read_only` and the `/tmp` tmpfs. Every deploy, stage, and validate warns about each undeclared service; a future release will make read-only the default for them too. To give one a read-only root filesystem now, declare it under `services:` with `internal: true` (no `port` or `routes` needed) and a `writable:` block, as shown in SECURITY.md ("Services that are not in the manifest").
 
-Services with `internal: true` are excluded from the proxy network.
+- **Run user** -- `user:` from the decision in "Who a service runs as" (10001:10001 for a `build:` service whose image sets no non-root `USER`, a numeric `security.user`, or a `data chown`).
+
+A service without `routes` stays off the proxy network.
 
 ### v0.8 read-only rootfs default
 
@@ -493,8 +496,9 @@ The `boxmunge-scripts/` directory is the project's side of the integration. boxm
 | Script | When called | Required? |
 |---|---|---|
 | `smoke.sh` | After every deploy, and periodically by the health monitor | Strongly recommended |
-| `backup.sh` | On scheduled backup runs and `snapshot_before_deploy` | Required if `backup.type != none` |
-| `restore.sh` | During a restore operation | Required if `backup.type != none` |
+
+Backups run the manifest's `backup.dump_command` and `restore_command` inside `backup.service`; no
+script is needed for them.
 
 ---
 
@@ -526,7 +530,7 @@ boxmunge reads one message from stderr and uses it in alerts and logs:
 
 For exit code `1`, boxmunge performs **message-aware deduplication**: if the same message repeats across consecutive checks, only the first occurrence triggers an alert (until the message changes or the check recovers).
 
-For exit code `2` (critical), boxmunge stops all project containers and marks the project `critical_stopped`. The project will not restart until an explicit deploy.
+For exit code `2` (critical), boxmunge stops all project containers and marks the project `critical_stopped`. The project stays down until `recover <project>` (the same build) or a deploy.
 
 ### Example Smoke Scripts
 

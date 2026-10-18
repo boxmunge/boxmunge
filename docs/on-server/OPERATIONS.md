@@ -31,7 +31,7 @@ The standard workflow for deploying a project from a bundle.
    inbox
    ```
 
-4. Stage the project (deploys to `staging.<hostname>`):
+4. Stage the project (deploys to `staging.<host>` for each manifest host):
 
    ```
    stage myapp
@@ -142,7 +142,7 @@ ln -sfn repo/manifest.yml /opt/boxmunge/projects/myapp/manifest.yml
 
 ## Staging a Project
 
-Staging deploys a project alongside production at `staging.<hostname>`, allowing verification before promoting.
+Staging deploys a project alongside production at `staging.<host>` (each manifest host), allowing verification before promoting.
 
 Stage the project:
 
@@ -157,7 +157,8 @@ the services into `compose.yml` to stage them.
 
 After verifying the staging environment:
 
-- **Promote** -- tears down staging and deploys to production:
+- **Promote** -- deploys the staged release to production (production's containers are recreated),
+  then tears staging down:
 
   ```
   promote myapp
@@ -205,7 +206,7 @@ attribute, a link out of the tree).
 Staging and production share no Docker resource. Before installing anything, `stage` resolves
 staging from the staged release, and production both as it runs and as it would run once the
 release is promoted, with `docker compose config` (`-p myapp` and `-p myapp-staging`). It refuses
-if staging would share a volume, network, network alias, container name or bind-mount source with
+if staging would share a volume, network, network alias or bind-mount source with
 either, or build an image tag production runs, and if a service needs an `env_file` that does not
 exist (staging could not start: create the file, for `secrets.env` with `secrets set`, or mark it
 `required: false`). It checks again before starting anything. The staging copy of
@@ -219,8 +220,8 @@ The staged release lives in `.releases/staged/`, so the project directory stays 
 production starts as usual during a stage (upgrade restarts, container updates, `recover`,
 `resume`, `security resume`, `restore`). A release staged by boxmunge 0.10.1 is different: it put
 the staged release's files in the project directory. For such a project `stage`, `unstage`,
-`promote`, `prod-deploy`, `rollback`, `restore`, `resume`, `recover`, `pause` and `data adopt`
-refuse directly, naming `boxmunge-server legacy-stage <project>`; background starts (upgrade
+`promote`, `prod-deploy`, `rollback`, `restore`, `resume`, `recover`, `pause`, `data adopt` and
+`data chown` refuse directly, naming `boxmunge-server legacy-stage <project>`; background starts (upgrade
 restarts, container updates) and `security resume` are refused with a "start refused" alert (see
 Troubleshooting). If boxmunge cannot tell whether such a stage is on disk (for example `state/`
 cannot be read), it refuses the same way and says so; the health check then runs no smoke test
@@ -375,6 +376,10 @@ names now:
 prod-deploy myapp
 ```
 
+Promoting, or deploying, recreates production's containers through Compose: expect a restart's
+worth of downtime (longer for a stage with `staging.copy_data`, which stops production for the
+copy).
+
 A release that stops bind-mounting a data directory (say `./uploads`) does not delete it: the
 deploy keeps it and prints `WARNING: uploads/ holds data but this release's compose.yml does not
 mount it`. Once neither the running release nor the rollback target needs that data, delete it on
@@ -478,10 +483,11 @@ List bundles in the inbox:
 inbox
 ```
 
-Remove old bundles:
+Remove every bundle in the inbox, or one project's, including ones not deployed yet (it asks first
+unless `--yes`):
 
 ```
-inbox clean
+inbox clean [<project>] [--yes]
 ```
 
 ---
@@ -576,7 +582,7 @@ logs --boxmunge
 
 The operational log records every boxmunge action with timestamp, level, project, and message. It is the first place to check when something happened unexpectedly.
 
-It lives in `/opt/boxmunge/logs/boxmunge.log`. The first write of each UTC day moves the previous day's file to `boxmunge.log.YYYY-MM-DD`; 90 days of archives are kept. `logs --boxmunge`, `log` and the health check's 24-hour error count read the archives their window or `--tail` reaches into, so nothing drops out at midnight. Writers take `logs/.boxmunge.log.lock`; if it stays held for 5 seconds the entry is dropped with an error on stderr naming the lock, rather than hanging the command. `health` warns (`operational-log`) if the active file's first line is not a log entry, which stops all logging until the file is moved aside.
+It lives in `/opt/boxmunge/logs/boxmunge.log`. The first write of each UTC day moves the previous day's file to `boxmunge.log.YYYY-MM-DD`; 90 days of archives are kept. `log` and the health check's 24-hour error count read the archives their window or `--tail` reaches into (`logs --boxmunge` prints the last 100 lines), so nothing drops out at midnight. Writers take `logs/.boxmunge.log.lock`; if it stays held for 5 seconds the entry is dropped with an error on stderr naming the lock, rather than hanging the command. `health` warns (`operational-log`) if the active file's first line is not a log entry, which stops all logging until the file is moved aside.
 
 A line in a log file that is not a JSON entry (torn by a crash, or hand-edited) is never skipped silently. `log` prints every entry it can read, then a `WARNING: <file>:<line>: ...` on stderr for each torn line, and exits 1, so `--json` output stays parseable and scripts still notice. The MCP `log` tool returns the same warnings and fails, the action API's `oplog.query` fails naming the line, and the health check's `recent-errors` warns, since a torn line may have been an error. Repair or delete the line named.
 
@@ -649,6 +655,7 @@ Every snapshot is named `<project>-<UTC timestamp>-<kind>.tar.gz.age`, for examp
 |---|---|---|
 | `nightly` | `backup-all` (the 02:00 timer) | `backup.retention` in the manifest (default 7) |
 | `predeploy` | `prod-deploy`'s pre-deploy snapshot (`deploy.snapshot_before_deploy`) | 5 |
+| `premigrate` | `userns-migrate`, before its downtime (not for a paused project) | 2 |
 | `preupdate` | the container-update timer, only when a pulled image changed and the project is about to be recreated | 3 |
 | `prerestore` | `restore`, a safety snapshot of the data about to be replaced (unless `--no-safety-snapshot`) | 3 |
 | `manual` | `backup <project>`, the MCP `backup` tool, the console, `self-test` | 5 |
@@ -718,7 +725,7 @@ started, for the safety snapshot and the restore, and every service is stopped a
 whether or not the restore succeeded. Then run `recover myapp`, which starts it on the restored data
 and runs the smoke test that clears the stop.
 
-Safety snapshots sit alongside the nightly backups and are pruned by the same retention.
+Safety snapshots are kept separately: the three newest `prerestore` snapshots per project.
 
 Verify that a backup restores successfully (non-destructive):
 
@@ -776,9 +783,17 @@ snapshot again, and anything written to the data in those seconds is lost.
 Every production install (`prod-deploy`, `rollback`, `promote`, bundle or git) is
 recorded in `<project>/.releases/install.json` until it finishes. While it is
 open, nothing else starts the project's containers: upgrades, `resume`,
-`recover`, container updates, `restore` and `stage` refuse and say why. A
+`recover`, container updates, `restore`, `stage`, `data adopt` and `data chown` refuse and say
+why. A
 `promote` does not wait: it resumes its own open install, and over another
 command's it deploys the staged release as a fix (the last option below).
+
+A bundle or git deploy that is refused after its files are installed, but before its pre-deploy
+hook runs, leaves the install open too: a service whose user cannot be decided or would change over
+data the old user owns, an empty named volume about to replace a full anonymous one, a read-only
+bind a remapped container cannot read, or an image that does not build or pull. Production keeps
+its old containers. The refusal says what to fix (`data chown`, or `prod-deploy <project>
+--abandon` and then `data adopt`); then deploy again.
 The alert names your options:
 
 - run the same command again (`prod-deploy <project> --ref <bundle or full SHA>`,
@@ -854,12 +869,17 @@ naming them, until you remove them with `docker rm -f`.
 
 Projects deployed before boxmunge decided who each service runs as keep running as their images
 say; health warns `service-users` for them until each one's next deploy decides (see
-PROJECT_CONVENTIONS.md, "Who a service runs as"). That deploy refuses every registry service whose
-image runs as root until its manifest declares `security.user`, printing the lines to add. Run
+PROJECT_CONVENTIONS.md, "Who a service runs as"). Every deploy refuses a registry service whose
+image sets no non-root `USER`, unless compose.yml gives it a `user:`, it is on `profile: off`, or
+the manifest declares `services.<svc>.security: {user: ..., reason: ...}` (a reason is required
+for `root` and `image`); the refusal prints the lines to add. Run
 `boxmunge doctor` first: it lists every such service on the box, so you can add them all before
 deploying. A `build:` service with no `USER` moves to 10001:10001 at that deploy; if it keeps data
 the old user owns, the deploy is refused until `data chown <project> <service> 10001:10001` (or a
-`security.user` that keeps the old user).
+`security.user` that keeps the old user). `data chown` stops the service and leaves it stopped:
+deploy straight after. A refused deploy of a new bundle leaves its install open (see
+[An interrupted or failed install](#an-interrupted-or-failed-install)); `data chown` works on the
+release it installed, and `prod-deploy <project>` then finishes it.
 
 ## Naming an Anonymous Volume
 
@@ -883,14 +903,20 @@ refuses a path that is already a named volume, and a target volume that exists w
 Compose's labels. If the stop or the copy fails, the new volume is removed and the containers
 started again.
 
+Adopt before deploying the release that names the volume. Deploying it first is refused (the
+service would start on the empty named volume) and leaves the install open, which refuses the
+adopt's restart of the service: run `prod-deploy myapp --abandon`, then `data adopt`, then deploy
+again.
+
 ---
 
 ## Concurrent Operations
 
 Every command that changes a project holds that project's lock while it works: `prod-deploy`,
 `stage`, `promote`, `unstage`, `rollback`, `restore`, `backup`, `pause`, `resume`, `recover`,
-`project-delete`, the daily `container-update` (for the whole backup, pull, recreate, and rollback
-sequence), the CVE scan, and the 5-minute health check. Only one of them runs against a project at a
+`project-delete`, `data adopt`, `data chown`, `prod-deploy --abandon`, `security resume`, and, run
+as root, `legacy-stage` and `install-txn --drop`, the daily `container-update` (for the whole
+backup, pull, recreate, and rollback sequence), the CVE scan, and the 5-minute health check. Only one of them runs against a project at a
 time.
 
 If another operation holds the lock, an operator command fails at once and changes nothing:
@@ -978,6 +1004,12 @@ Then `curl -I https://your-paused-host/` and confirm it returns `HTTP/1.1 503` w
 
 ## Host Maintenance
 
+SSH is key-only for every account, with forwarding off, through
+`/etc/ssh/sshd_config.d/00-boxmunge.conf`, which every install and installer-changing upgrade
+rewrites and checks with `sshd -t`; a keyboard-interactive second factor makes the install fail
+(use a FIDO2 key instead). TRUST_MODEL.md, "SSH access", has the details; `health` reports the file
+(`sshd-hardening`, `sshd-deploy-env`).
+
 Verify the host is correctly configured:
 
 ```
@@ -1014,7 +1046,7 @@ boxmunge runs Compose without `HOME` or `DOCKER_CONFIG` (see TRUST_MODEL.md, "Co
 
 | Who runs Compose | Credentials used |
 |---|---|
-| deploy (`deploy`, `stage`, `resume`, `restore`, ...) | `/home/deploy/.docker/config.json` |
+| deploy (`prod-deploy`, `stage`, `resume`, `restore`, ...) | `/home/deploy/.docker/config.json` |
 | root (the container-update and other timers, upgrades, `sudo boxmunge ...`) | `/root/.docker/config.json` |
 
 A project that pulls from a private registry needs a login for both users. Run these as `supervisor`:
@@ -1111,7 +1143,7 @@ file linking outside the project is refused.
 
 ### Manifest validation rejects a wildcard host
 
-If `validate` or `deploy` reports `wildcard host '*.example.com' requires 'allow_wildcard_hosts: true' at the manifest top level`, that's the deliberate opt-in gate for wildcards. boxmunge runs single-tenant, but a wildcard on one project can still capture traffic intended for adjacent projects on the same Caddy. Add the flag explicitly when you mean it:
+If `validate` or `prod-deploy` reports `wildcard host '*.example.com' requires 'allow_wildcard_hosts: true' at the manifest top level`, that's the deliberate opt-in gate for wildcards. boxmunge runs single-tenant, but a wildcard on one project can still capture traffic intended for adjacent projects on the same Caddy. Add the flag explicitly when you mean it:
 
 ```yaml
 allow_wildcard_hosts: true
@@ -1155,11 +1187,11 @@ services:
           mount: /var/lib/postgresql/data
 ```
 
-Then `deploy` (or `upgrade`) the project. The overlay generator regenerates `compose.boxmunge.yml` with the requested tmpfs/volumes, and the container starts cleanly.
+Then `prod-deploy` (or `upgrade`) the project. The overlay generator regenerates `compose.boxmunge.yml` with the requested tmpfs/volumes, and the container starts cleanly.
 
 #### Externally-managed services
 
-If the app needs unusual writability that boxmunge's abstraction doesn't model (bind mounts, shared host paths, esoteric tmpfs options), opt out of manifest management for that service:
+If the app needs unusual writability that boxmunge's abstraction doesn't model (bind mounts inside the project, esoteric tmpfs options), opt out of manifest management for that service:
 
 ```yaml
 services:
@@ -1168,7 +1200,7 @@ services:
       external: true        # boxmunge defers all tmpfs/volumes to your compose.yml
 ```
 
-This declares "I'll handle writability via compose.yml directly for this service." Boxmunge emits no tmpfs (not even `/tmp`) and no volumes. Compose-side `tmpfs:` and `volumes:` declarations are accepted as-is. An `[INFO]` warning fires every deploy as a visible reminder of the delegated state.
+This declares "I'll handle writability via compose.yml directly for this service." Boxmunge emits no tmpfs (not even `/tmp`) and no volumes. Compose-side `tmpfs:` and `volumes:` declarations are taken from compose.yml, and still pass the usual compose validation (a bind source must be inside the project). An `[INFO]` warning fires every deploy as a visible reminder of the delegated state.
 
 `read_only: true` still applies under `external` — to opt out of read-only rootfs separately, declare `read_only: false` in compose.yml (which emits a `[WARNING]` every deploy and incurs a CVE hardening penalty).
 
@@ -1220,7 +1252,7 @@ validate myapp
 If the config looks stale, redeploy to regenerate:
 
 ```
-prod-deploy myapp --no-snapshot
+prod-deploy myapp
 ```
 
 If deeper Caddy investigation is needed (container logs, config file inspection), this requires the **supervisor** user.
@@ -1273,6 +1305,19 @@ Issues requiring system-level investigation or repair (systemd timers, file perm
 
 ---
 
+### docker-userns reports an error
+
+A migration stopped part-way, or the daemon is not remapped as `boxmunge.yml` records (deploys are
+refused until that is fixed). If the check names a migration phase, the supervisor user resumes it
+(`sudo /opt/boxmunge/bin/boxmunge-upgrade userns-migrate`) or undoes it (`userns-rollback`).
+Otherwise Docker restarted without `userns-remap`, on another storage driver or with another data
+root: the supervisor user compares `/etc/docker/daemon.json` with the keys in
+[User-namespace remapping](#user-namespace-remapping) and `docker info`, puts the file back and
+restarts Docker. A `caddy/Caddyfile` that is not world-readable is fixed with the `chmod` the check
+prints.
+
+---
+
 ### Need to recover from a bad deploy
 
 **Option 1: Rollback** (fastest if the previous state was good)
@@ -1311,12 +1356,15 @@ the exit code. The MCP `health` tool runs the same checks.
 | `permissions`, `age-key` | the backup key or host secrets have the wrong mode, or the backup key is missing or invalid | fix as the supervisor user |
 | `project-containers`, `lifecycle` | a deployed project has no running containers, or is quarantined or stopped by the health monitor | `check <project>`, `logs <project>`, `recover <project>` |
 | `config-drift` | a project's Caddy site config differs from what its manifest generates | redeploy the project |
-| `recent-errors` | more than 10 errors in the log in the last 24 hours | `log --level error --since 24h` |
+| `recent-errors` | more than 10 errors in the log in the last 24 hours | `log --level error --since 24h --all` |
 | `alerts` | Pushover is not configured, so nothing on this box can alert you | see [Alerts not configured](#alerts-not-configured) |
 | `container-updates` | the daily container update failed for a target (also when a service it updates has no container, so its running image is unknown), or has not run for 48 hours | `log --component container-update`; the entry ends with the command's own error output |
 | `platform-updates` | a security or break-fix release cannot be installed automatically | see [Upgrading the Platform](#upgrading-the-platform) |
 | `docker-userns` | Docker does not remap user namespaces yet, remaps them with another identity, or a source cannot be read on a box boxmunge has not remapped (warning; deploys go on); or the record or `daemon.json` claims boxmunge's remap and a source disagrees, or a remapped box's `caddy/Caddyfile` is not a world-readable regular file (error, alerted once a day) | see [User-namespace remapping](#user-namespace-remapping) |
 | `security-profiles` | a service runs with `profile: off` | review the reason in its manifest |
+| `service-users` | a deployed project's services have no recorded user yet (its next deploy decides them, and refuses an undeclared root registry image) | `doctor` lists the lines to add; see [Service Users After an Upgrade](#service-users-after-an-upgrade) |
+| `sshd-hardening`, `sshd-deploy-env` | `00-boxmunge.conf` is missing or changed, or a later sshd setting widens what deploy accepts (error; `sshd-deploy-env` needs root) | the supervisor user re-runs the installer, or removes the widening setting |
+| `operational-log` | the active log file's first line is not a log entry, which stops all logging | move the file aside (see [Reading Logs](#reading-logs)) |
 | `cve-scan` | a deployed project has not been scanned for 36 hours, was never scanned, or its last scan was incomplete | `security scan <project>`; see `agent-help cve` |
 | `ufw`, `crowdsec`, `aide`, `auditd`, `sysctl` | a host hardening component is off or misconfigured | `doctor`, then the supervisor user |
 | `auto-updates` | OS security updates are not being fetched or installed | see [OS security updates](#os-security-updates) |
@@ -1496,7 +1544,7 @@ retried on the next run. Its state is in `/opt/boxmunge/state/os-updates.json`.
 ## Command Exit Codes
 
 The boxmunge CLI uses these conventions across mutating commands
-(`deploy`, `stage`, `promote`, `resume`, `upgrade`):
+(`prod-deploy`, `stage`, `promote`, `resume`, `upgrade`):
 
 - `0` — success
 - `1` — generic operational failure (image pull, smoke test, Caddy reload, etc.)
@@ -1650,7 +1698,7 @@ How an upgrade is applied and undone:
    the validator that let the file in. The upgrade gives the project no new overlay or Caddy
    site, and **does not restart or rebuild it**: the upgrade leaves its running containers as
    they were. The upgrade output prints `REFUSED: <project>: <reason>`, the refusal is logged
-   as an error (`log <project>`), and one priority-1 Pushover alert lists every refused
+   as an error (`log --project <project>`), and one priority-1 Pushover alert lists every refused
    project. Fix the compose file and redeploy. This covers the upgrade only. Other root-run
    operations that recreate containers (the daily container-update, for one) do not consult
    the upgrade's refusal.
@@ -1772,6 +1820,10 @@ log --json
 log --project myapp --containers
 ```
 
+`log` lists the last 50 matching entries from every project: `--project` scopes it to one,
+`--tail N` changes the count, and `--all` lists every match (not with `--tail`). `--containers`
+needs `--project`.
+
 ---
 
 ## CVE Policy
@@ -1850,7 +1902,11 @@ Configure your AI agent (Claude Code, Cursor, etc.) to use boxmunge via MCP:
 }
 ```
 
-The agent will discover all available tools automatically. Available tools include: prod-deploy, stage, promote, backup, restore, rollback, health, log, secrets, upgrade, and more.
+The agent discovers the tools automatically: `prod_deploy`, `stage`, `promote`, `unstage`,
+`rollback`, `check`, `backup`, `restore`, `validate`, `secrets`, `upgrade`, `self_test`, `health`,
+`log`, `status`, `inbox`, `agent_help`, `project_add`, `project_delete`, `project_list` and
+`handshake`. Everything else (`prod-deploy --abandon`, `data`, `pause`, `resume`, `recover`,
+`security`, `logs`) is the deploy shell's only.
 
 `restore` and `rollback` replace a project's running state, so they only run when called with
 `confirm: true`. `upgrade` goes through the same root upgrade shim as the shell's `upgrade`

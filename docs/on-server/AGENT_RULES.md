@@ -100,8 +100,8 @@ Do not pass `--yes` reflexively. Confirm the target project and the effect befor
 - `help <command>` or `<command> --help` shows a command's usage. Neither runs the command.
 - A flag a command does not implement is an error (exit 2) and nothing runs. Read the usage
   rather than guessing flags.
-- `--dry-run` exists only on `prod-deploy`, `stage`, `promote`, `unstage`, `upgrade` and
-  `container-update`. Other commands, including `project-delete`, `rollback`, `restore` and
+- `--dry-run` exists only on `prod-deploy`, `stage`, `promote`, `unstage` and `upgrade`
+  (and the operator-only `container-update`). Other commands, including `project-delete`, `rollback`, `restore` and
   `pause`, reject it. There is no way to preview those; confirm the target before running them.
 
 ---
@@ -124,12 +124,13 @@ If a task requires any of the above, it requires the **supervisor** user. Note t
 ## Safe Practices
 
 - Use `diff <project>` before deploying to preview changes
-- Use `stage` + `promote` instead of `deploy` when you want to verify first
+- Use `stage` + `promote` instead of `prod-deploy` when you want to verify first
 - Run `validate <project>` before deploying -- it catches config errors early
 - Run `doctor` if anything seems wrong or unexpected
 - Read error messages carefully -- boxmunge gives clear, actionable errors; do not skip them
 - Check `status` before and after making changes
 - Do not retry a failed operation blindly -- understand why it failed first
+- If a deploy says its install was left open, take one of the ways out it prints: run it again, `prod-deploy <project> --abandon` (before its pre-deploy hook ran), `rollback <project>` (after), or deploy a fix. Nothing else starts the project until then
 - Set secrets before the first deploy so containers start with the right environment
 - If asked about container security or you are about to relax a `security:` setting, run `security <project>` first to see the current effective posture, and read `agent-help security` for the full model
 - If a CVE alert arrives (Pushover or otherwise), or you see `QUARANTINED` / `STILL_RUNNING_AT_RISK` / expired-suppression in `security` output, follow `agent-help cve-incident` end to end. Don't suppress without a concrete exploitability reason; don't resume a project without first re-scanning to confirm no quarantine-level findings remain.
@@ -143,7 +144,7 @@ If a task requires any of the above, it requires the **supervisor** user. Note t
 1. `inbox` -- confirm bundle is present
 2. `secrets set <project> KEY=value` -- set required secrets
 3. `stage <project>` -- deploy to staging
-4. `check <project>` -- verify health
+4. Verify the staging site at `https://staging.<host>` (stage prints it)
 5. `promote <project>` -- go live
 
 ### New project from git
@@ -151,7 +152,7 @@ If a task requires any of the above, it requires the **supervisor** user. Note t
 1. `add-git-project <name> <repo-url> [--ref REF]` -- register the project
 2. `secrets set <project> KEY=value` -- set required secrets
 3. `stage <project>` -- deploy to staging
-4. `check <project>` -- verify health
+4. Verify the staging site at `https://staging.<host>` (stage prints it)
 5. `promote <project>` -- go live
 
 ### Updating an existing project
@@ -159,7 +160,7 @@ If a task requires any of the above, it requires the **supervisor** user. Note t
 1. `inbox` -- confirm new bundle arrived (or use git)
 2. `diff <project>` -- preview changes
 3. `stage <project>` -- stage the update
-4. `check <project>` -- verify health
+4. Verify the staging site at `https://staging.<host>` (stage prints it)
 5. `promote <project>` -- promote to production
 
 ---

@@ -30,7 +30,7 @@ boxmunge init --server box.example.com --host myapp.example.com
 
 # 3. Register it on the server (once), then ship it
 boxmunge remote project-add myapp
-boxmunge stage            # bundle, upload, deploy to staging.<server>
+boxmunge stage            # bundle, upload, deploy to staging.<each manifest host>
 boxmunge promote          # staging becomes production
 #    or: boxmunge prod-deploy   (skip staging)
 ```

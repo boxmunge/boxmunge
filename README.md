@@ -8,7 +8,7 @@ Bring a fresh Debian VPS. Point your projects at it. Go back to building things.
 
 boxmunge turns a single server into a managed home for all your web projects. Each project gets its own Docker Compose setup, its own domain, its own backups — but they share the same box, the same automatic TLS, the same security hardening. You don't configure any of that. It's just there.
 
-And here's what makes it feel like 2026: **your AI agent can run the whole thing.** Every boxmunge command works over SSH, so the same agent that helps you write code can deploy it, check on it, back it up, and restore it. You don't need to learn boxmunge. You don't need to learn Docker networking or Caddy configuration or UFW rules. You build your web project, your agent handles the rest.
+And here's what makes it feel like 2026: **your AI agent can run the whole thing.** Every day-to-day boxmunge command works over SSH, so the same agent that helps you write code can deploy it, check on it, back it up, and restore it. You don't need to learn boxmunge. You don't need to learn Docker networking or Caddy configuration or UFW rules. You build your web project, your agent handles the rest.
 
 That's the real promise — not just "easy hosting," but one less tool you have to carry in your head.
 
@@ -16,12 +16,15 @@ That's the real promise — not just "easy hosting," but one less tool you have 
 
 - **All your projects on one VPS** — each isolated in Docker Compose, sharing the server
 - **Automatic HTTPS** — Caddy + Let's Encrypt, zero configuration
-- **Encrypted backups that actually restore** — mandatory restore commands, tested by a self-test that proves it works
-- **Zero-downtime deploys** — stage, verify, promote
+- **Encrypted backups that actually restore** — mandatory restore commands; `self-test` proves the backup and restore pipeline on a canary project
+- **Staged deploys** — stage a release beside production, verify it, promote it. Promoting
+  recreates production's containers from the staged release, so expect a restart's worth of
+  downtime, and longer for a project whose stage copies production's data (`staging.copy_data`
+  stops production for the copy)
 - **Host security hardening out of the box** — firewall, intrusion detection, kernel hardening, automatic security updates
 - **Signed releases** — every release's `SHA256SUMS` is keyless-signed via Sigstore (cosign + Fulcio + Rekor), and the upgrade shim verifies the signature against this repo's release workflow before installing — unsigned releases are refused
-- **Per-container security hardening** — every service runs with no-new-privileges, dropped Linux capabilities, and PID limits by default; see `agent-help security` on the server
-- **AI-native operations** — every command works over SSH and via MCP, designed for agents from day one
+- **Per-container security hardening** — every service runs with no-new-privileges, dropped Linux capabilities, and PID limits by default; built images run as a non-root user unless the manifest says otherwise, and Docker remaps user namespaces so a container's root is an unprivileged host user (from the first boot on a new server; an existing one migrates once, when the operator runs `boxmunge-upgrade userns-migrate`); see `agent-help security` on the server
+- **AI-native operations** — every day-to-day command works over SSH, and the core lifecycle commands via MCP; designed for agents from day one
 
 ## Getting started
 
@@ -61,8 +64,8 @@ pipx install boxmunge                         # see INSTALL.md
 cd myapp
 boxmunge init --server your-server.example.com --host myapp.example.com
 boxmunge remote project-add myapp            # once: register the project on the server
-boxmunge stage                                # bundle, upload, deploy to staging.<hostname>
-boxmunge promote                              # swap staging into production
+boxmunge stage                                # bundle, upload, deploy to staging.myapp.example.com
+boxmunge promote                              # deploy the staged release to production
 ```
 
 A manifest looks like this (`init` writes one with a project id):
@@ -79,8 +82,13 @@ services:
     port: 8080
     routes:
       - path: /
+  db:                          # postgres, from compose.yml: who it runs as
+    security:
+      user: image
+      reason: "postgres entrypoint drops to postgres"
 backup:
   type: postgres
+  service: db
   dump_command: "pg_dump -U myuser mydb"
   restore_command: "psql -U myuser mydb"
 ```
