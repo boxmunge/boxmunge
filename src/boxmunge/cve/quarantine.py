@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Collection
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -315,10 +316,15 @@ def _pin_restart_policies(
     return {**state, "restart_policies": saved}
 
 
-def _restore_restart_policies(project_name: str, state: dict[str, Any]) -> None:
-    """Give each still-existing container its pre-quarantine policy back."""
+def _restore_restart_policies(project_name: str, state: dict[str, Any],
+                              recreated: Collection[str] = ()) -> None:
+    """Give each still-existing container its pre-quarantine policy back,
+    except those in ``recreated``: a deploy recreated them with its own
+    release's policy, which a saved one from before must not overwrite."""
+    saved = {name: policy for name, policy in (state.get("restart_policies") or {}).items()
+             if name not in recreated}
     try:
-        restart_hold.release(project_name, state.get("restart_policies") or {})
+        restart_hold.release(project_name, saved)
     except DockerError as e:
         raise QuarantineError(
             f"Failed to restore restart policies for {project_name!r}: {e}",
@@ -331,6 +337,9 @@ def lift_quarantine(
     *,
     project_caddy_site_content: str | None,
     compose_files: list[str],
+    recreated: Collection[str] = (),
+    txn: str | None = None,
+    component: str = "security-resume",
 ) -> None:
     """Lift quarantine and restore normal serving.
 
@@ -341,6 +350,10 @@ def lift_quarantine(
     3. Restore the saved restart policies, then compose_up WITHOUT a build,
        so the exact images the resume re-scan cleared come back (B-20).
     4. Clear the quarantine state file (LAST — only after restart succeeds).
+
+    A deploy that shipped a fix (commands/quarantine_gate) lifts it at the
+    end of its install transaction ``txn``, naming the containers it
+    ``recreated``; the up then starts nothing new.
 
     ``project_caddy_site_content=None`` lifts the quarantine but leaves the
     project down: the maintenance page stays and nothing starts. Used when
@@ -406,10 +419,10 @@ def lift_quarantine(
         ) from e
 
     # 3. Restart containers, with their own restart policies back.
-    _restore_restart_policies(project_name, state)
+    _restore_restart_policies(project_name, state, recreated)
     try:
-        compose_up_checked(paths, project_name, component="security-resume",
-                           compose_files=compose_files, build=False)
+        compose_up_checked(paths, project_name, component=component,
+                           compose_files=compose_files, build=False, txn=txn)
     except DockerError as e:
         raise QuarantineError(
             f"Failed to restart containers for {project_name!r}: {e}",

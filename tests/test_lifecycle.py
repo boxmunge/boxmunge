@@ -8,7 +8,7 @@ from pathlib import Path
 from boxmunge.cve.policy import Disposition, FindingDisposition
 from boxmunge.cve.quarantine import write_quarantine_state
 from boxmunge.cve.scanner import Finding, Severity
-from boxmunge.lifecycle import Block, BlockReason, is_blocked
+from boxmunge.lifecycle import Block, BlockReason, is_blocked, refuse_if_blocked
 from boxmunge.pause import write_paused_state
 from boxmunge.paths import BoxPaths
 
@@ -95,6 +95,37 @@ class TestIsBlocked:
         # Severity stored as the enum's `.value` (e.g. "Critical").
         assert block.detail["severity"] == "Critical"
         assert block.detail["image_ref"] == "myimage:latest"
+
+
+class TestRefuseIfBlocked:
+    """A deploy, promote or stage may ship a quarantine's fix (its images
+    are scanned first, commands/quarantine_gate); every other flow, and
+    any paused project, is refused."""
+
+    def test_quarantine_refuses_other_flows_naming_both_ways_out(self, paths, capsys):
+        _quarantine(paths, "myapp")
+        assert refuse_if_blocked("myapp", paths) is True
+        err = capsys.readouterr().err
+        assert "Deploy a fixed release" in err and "images are scanned first" in err
+        assert "boxmunge security resume myapp" in err
+
+    def test_quarantine_alone_lets_a_fix_through(self, paths, capsys):
+        _quarantine(paths, "myapp")
+        assert refuse_if_blocked("myapp", paths, ships_fix=True) is False
+        out = capsys.readouterr().out
+        assert "CVE-2026-9999" in out and "scanned before anything starts" in out
+
+    def test_pause_refuses_a_fix(self, paths, capsys):
+        write_paused_state("myapp", paths)
+        assert refuse_if_blocked("myapp", paths, ships_fix=True) is True
+        assert "boxmunge resume myapp" in capsys.readouterr().err
+
+    def test_paused_and_quarantined_refuses_a_fix(self, paths, capsys):
+        write_paused_state("myapp", paths)
+        _quarantine(paths, "myapp")
+        assert refuse_if_blocked("myapp", paths, ships_fix=True) is True
+        err = capsys.readouterr().err
+        assert "paused and CVE-quarantined" in err and "does not end a pause" in err
 
 
 class TestComposeUpCallersUseIsBlocked:

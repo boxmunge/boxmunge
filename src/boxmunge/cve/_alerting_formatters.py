@@ -83,8 +83,9 @@ def format_quarantine_alert(project: str, hits: Sequence[Hit]) -> Alert:
         "",
         "Service stopped, maintenance page active.",
         "",
-        f"To resume: boxmunge security resume {project}",
-        "(after the CVE is fixed upstream or you add a suppression)",
+        "To recover: deploy a fixed release (its images are scanned first; the",
+        "quarantine lifts once it is live), or once the CVE is fixed upstream or",
+        f"suppressed: boxmunge security resume {project}",
     ])
     return Alert(kind="quarantine", title=title, body=body, priority=1)
 

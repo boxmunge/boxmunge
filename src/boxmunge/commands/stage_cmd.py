@@ -64,7 +64,8 @@ def _sha256(path: Path) -> str:
 
 def _eligible(project: str, paths: BoxPaths) -> bool:
     """Step 1, under the lock: not blocked, registered, no open install."""
-    if refuse_if_blocked(project, paths) or refuse_if_legacy_stage(paths, project):
+    if refuse_if_blocked(project, paths, ships_fix=True) \
+            or refuse_if_legacy_stage(paths, project):
         return False
     if not is_registered(project, paths):
         print(f"ERROR: Project '{project}' is not registered on this server. "

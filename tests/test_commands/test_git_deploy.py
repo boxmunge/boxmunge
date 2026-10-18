@@ -191,3 +191,37 @@ def test_an_unreadable_record_during_a_stage_refuses_the_deploy_cleanly(paths, t
     err = capsys.readouterr().err
     assert "data-dirs.json" in err and "Nothing was changed" in err
     assert _head(pdir) == before and load_txn(paths, "myapp") is None
+
+
+def test_a_quarantined_git_project_ships_its_fix_through_the_scan(paths, tmp_path, capsys,
+                                                                  monkeypatch) -> None:
+    """The git install core reaches the same scan (commands/quarantine_gate)
+    before the hook: a refusal leaves the install abandonable at
+    `installed`; a clean commit deploys and lifts the quarantine."""
+    from boxmunge.commands import quarantine_gate
+    from boxmunge.cve.quarantine import clear_quarantine_state, is_quarantined
+    from tests.test_commands.cve_helpers import seed_quarantine
+    pdir, work = git_project(paths, tmp_path)
+    before = _head(pdir)
+    seed_quarantine(paths, "myapp")
+    bad = commit(work, {"VERSION": "bad\n"}, "still vulnerable")
+
+    def scan(paths_, target, manifest):
+        if _head(pdir) == bad:
+            raise quarantine_gate.QuarantineRefused(["CVE-2026-0001 in openssl, service web"])
+        return quarantine_gate.Clearance("myapp", "CVE-2026-0001", {})
+    monkeypatch.setattr("boxmunge.commands.release_config.clear_release", scan)
+    monkeypatch.setattr("boxmunge.commands.deploy.created_times", lambda p: {})
+    monkeypatch.setattr(quarantine_gate.docker_containers, "created_times", lambda p: {})
+    monkeypatch.setattr(quarantine_gate, "lift_quarantine",
+                        lambda project, paths_, **kw: clear_quarantine_state(project, paths_))
+    with staging_docker_off():
+        assert run_deploy("myapp", paths) == 1
+        assert "CVE-2026-0001 in openssl, service web" in capsys.readouterr().err
+        assert load_txn(paths, "myapp").phase == "installed"
+        assert run_abandon("myapp", paths) == 0
+        assert _head(pdir) == before and is_quarantined("myapp", paths)
+        fixed = commit(work, {"VERSION": "fixed\n"}, "fixed")
+        assert run_deploy("myapp", paths) == 0
+    assert _head(pdir) == fixed and not is_quarantined("myapp", paths)
+    assert "lifted by deploying" in capsys.readouterr().out

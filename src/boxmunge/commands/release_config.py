@@ -5,7 +5,8 @@ decide_release_users builds the release from a scratch overlay whose built
 images carry a candidate tag, so production's image names and files stay
 as they were until the switch, whatever is refused or fails before it; it
 decides and checks every service's user (deploy_images) and records
-nothing. generate_release_config writes the Caddy site and the overlay
+nothing. A CVE-quarantined project's release is scanned there too, before
+the hook (quarantine_gate), so a refusal leaves its install abandonable. generate_release_config writes the Caddy site and the overlay
 with those users, then the users record. promote_candidates, at the
 switch, moves the built names onto the candidates the users were decided
 from, just before the start, which does not build.
@@ -13,6 +14,7 @@ from, just before the start, which does not build.
 from __future__ import annotations
 
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,11 +24,13 @@ from boxmunge import docker_containers, user_drift
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.commands import deploy_images
 from boxmunge.commands.deploy_images import CANDIDATE, candidate_name
+from boxmunge.commands.quarantine_gate import Clearance, QuarantineRefused, clear_release
 from boxmunge.compose import (
     ComposeError, load_user_compose, prepare_compose_override, render_compose_override,
 )
 from boxmunge.compose_images import BUILT_IMAGE_HOST, built_image_name
 from boxmunge.compose_resolve import ComposeResolveError
+from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker_run import run as _run
 from boxmunge.paths import BoxPaths
 from boxmunge.release_target import DeployRefused, production_target
@@ -48,11 +52,21 @@ def _candidate_overlay(text: str, user_compose: dict[str, Any], project: str) ->
     return yaml.safe_dump(doc, sort_keys=False)
 
 
+@dataclass(frozen=True)
+class ReleaseDecision:
+    users: dict[str, ServiceUser]
+    # Set when the project is CVE-quarantined: the release's images were
+    # scanned clean, and its deploy lifts the quarantine (quarantine_gate).
+    clearance: Clearance | None = None
+
+
 def decide_release_users(project_name: str, paths: BoxPaths, manifest: dict,
-                         component: str) -> dict[str, ServiceUser]:
+                         component: str) -> ReleaseDecision:
     """Build the release installed in the project dir under candidate tags,
     and decide and check who each service runs as; nothing is recorded.
-    Raises DeployRefused or DockerError."""
+    A quarantined project's release is then scanned, and its candidates
+    removed if that refuses it. Raises DeployRefused (QuarantineRefused)
+    or DockerError."""
     print("  Building images and deciding who each service runs as...")
     remove_candidates(project_name)
     try:
@@ -63,10 +77,18 @@ def decide_release_users(project_name: str, paths: BoxPaths, manifest: dict,
             overlay.write_text(_candidate_overlay(
                 render_compose_override(paths, manifest, user_compose), user_compose,
                 project_name))
-            return deploy_images.prepare_release_users(
-                paths, production_target(paths, project_name, overlay), manifest,
+            target = production_target(paths, project_name, overlay)
+            users = deploy_images.prepare_release_users(
+                paths, target, manifest,
                 component=component, rollback=component == "rollback",
                 refetch=user_drift.held_back(paths, project_name))
+            if not is_quarantined(project_name, paths):
+                return ReleaseDecision(users)
+            try:
+                return ReleaseDecision(users, clear_release(paths, target, manifest))
+            except QuarantineRefused:
+                remove_candidates(project_name)
+                raise
     except (RunAsError, ComposeResolveError, ComposeError) as e:
         raise DeployRefused([str(e)]) from e
 

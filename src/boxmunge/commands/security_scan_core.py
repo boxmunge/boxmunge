@@ -34,6 +34,7 @@ from boxmunge.commands.security_enforce import (
 )
 from boxmunge.cve.alerting import emit_scan_alerts
 from boxmunge.cve.grace import GraceError, init_grace_if_missing
+from boxmunge.cve.hardening import HardeningProfile
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.policy import (
     FindingDisposition,
@@ -267,6 +268,87 @@ def _scan_targets(
     return results, failed, skipped, warnings
 
 
+def _check_declared_runtimes(project: str, meta: ProjectMeta) -> None:
+    """`declared` is loop-invariant (one manifest, many images), so it is
+    validated once before any Trivy scan runs: a malformed
+    security.runtimes then fails in milliseconds, and no early return can
+    skip validation (load_manifest does not validate the security: block)."""
+    if meta.declared_runtimes is None:
+        return
+    try:
+        effective_runtimes((), declared=meta.declared_runtimes)
+    except (ValueError, TypeError) as e:
+        raise RuntimeError(
+            f"project {project!r}: invalid security.runtimes in manifest: {e}"
+        ) from e
+
+
+def _evaluate(
+    paths: BoxPaths, project: str, meta: ProjectMeta, profile: HardeningProfile,
+    supps: tuple[Suppression, ...], results: list[ScanResult], kev: KevCatalog,
+) -> list[ProjectDecision]:
+    """One decision per scanned image, under the project's policy."""
+    posture, dangerously, declared = meta.posture, meta.dangerously, meta.declared_runtimes
+    decisions: list[ProjectDecision] = []
+    today = _today()
+
+    def kev_lookup(cid: str) -> bool:
+        return kev.is_known_exploited(cid, today=today)
+
+    # Collected across every image but logged at most once per project scan.
+    dropped_lang_types: set[str] = set()
+    empty_runtime_exempted: set[str] = set()
+    for sr in results:
+        # `declared` was validated first; this only infers from lang_types.
+        runtimes = effective_runtimes(sr.lang_types, declared=declared)
+        if declared is None:
+            # An unmapped Trivy lang-pkgs Type is dropped by infer_runtimes,
+            # which biases toward OVER-exemption; surface it.
+            dropped_lang_types |= unrecognised_lang_types(sr.lang_types)
+        decision = evaluate_project(
+            project, sr,
+            posture=posture,
+            hardening_profile=profile,
+            dangerously_disable_quarantine=dangerously,
+            suppressions=supps,
+            today=today,
+            kev_lookup=kev_lookup,
+            runtimes=runtimes,
+        )
+        decisions.append(decision)
+        if declared is None and not runtimes and posture in (
+            Posture.BALANCED, Posture.STRICT,
+        ):
+            empty_runtime_exempted |= gate_exempted_packages(
+                decision, posture=posture, dangerously=dangerously,
+                suppressions=supps, today=today, kev_lookup=kev_lookup,
+            )
+
+    log_relevance_gaps(paths, project, dropped_lang_types, empty_runtime_exempted)
+    return decisions
+
+
+def audit_targets(
+    paths: BoxPaths, project: str, *, meta: ProjectMeta, profile: HardeningProfile,
+    supps: tuple[Suppression, ...], targets: list[ScanTarget],
+    unidentified: dict[str, str], kev: KevCatalog, basis: str,
+) -> ProjectScan:
+    """An audit-only scan of exactly ``targets`` under the given policy:
+    nothing is written, alerted or enforced. A release not yet deployed is
+    judged by its own manifest, suppressions and compose (quarantine_gate)."""
+    _check_declared_runtimes(project, meta)
+    results, failed, skipped, warnings = _scan_targets(paths, project, targets)
+    decisions = _evaluate(paths, project, meta, profile, supps, results, kev)
+    return ProjectScan(
+        project=project, posture=meta.posture_str, dangerously=meta.dangerously,
+        decisions=tuple(decisions),
+        warnings=tuple(_unscanned(unidentified=unidentified) + warnings),
+        failed_images=tuple(failed), skipped_images=tuple(skipped),
+        unidentified=tuple(unidentified.items()), basis=basis,
+        headline=headline_of(decisions),
+    )
+
+
 def scan_one_project_locked(
     paths: BoxPaths, project: str, *,
     in_grace: bool,
@@ -276,21 +358,8 @@ def scan_one_project_locked(
 ) -> ProjectScan:
     """Inner scan body. Caller MUST hold the per-project lock."""
     meta = load_project_meta(paths, project)
-    posture = meta.posture
     dangerously = meta.dangerously
-    # `declared` is loop-invariant (one manifest, many images), so validate
-    # it once before any Trivy scan runs: a malformed security.runtimes then
-    # fails in milliseconds, and no early return below can skip validation
-    # (load_manifest does not validate the security: block).
-    declared = meta.declared_runtimes
-    if declared is not None:
-        try:
-            effective_runtimes((), declared=declared)
-        except (ValueError, TypeError) as e:
-            raise RuntimeError(
-                f"project {project!r}: invalid security.runtimes in "
-                f"manifest: {e}"
-            ) from e
+    _check_declared_runtimes(project, meta)
     profile = hardening_profile(meta, load_user_model(paths, project))
     # Host-scoped suppressions are for reviewed, accepted-risk findings; the
     # relevance gate handles "base-image package the project never invokes".
@@ -326,42 +395,7 @@ def scan_one_project_locked(
 
     results, failed, skipped, scan_warnings = _scan_targets(paths, project, targets)
     warnings.extend(scan_warnings)
-    decisions: list[ProjectDecision] = []
-    today = _today()
-
-    def kev_lookup(cid: str) -> bool:
-        return kev.is_known_exploited(cid, today=today)
-
-    # Collected across every image but logged at most once per project scan.
-    dropped_lang_types: set[str] = set()
-    empty_runtime_exempted: set[str] = set()
-    for sr in results:
-        # `declared` was validated above; this only infers from lang_types.
-        runtimes = effective_runtimes(sr.lang_types, declared=declared)
-        if declared is None:
-            # An unmapped Trivy lang-pkgs Type is dropped by infer_runtimes,
-            # which biases toward OVER-exemption; surface it.
-            dropped_lang_types |= unrecognised_lang_types(sr.lang_types)
-        decision = evaluate_project(
-            project, sr,
-            posture=posture,
-            hardening_profile=profile,
-            dangerously_disable_quarantine=dangerously,
-            suppressions=supps,
-            today=today,
-            kev_lookup=kev_lookup,
-            runtimes=runtimes,
-        )
-        decisions.append(decision)
-        if declared is None and not runtimes and posture in (
-            Posture.BALANCED, Posture.STRICT,
-        ):
-            empty_runtime_exempted |= gate_exempted_packages(
-                decision, posture=posture, dangerously=dangerously,
-                suppressions=supps, today=today, kev_lookup=kev_lookup,
-            )
-
-    log_relevance_gaps(paths, project, dropped_lang_types, empty_runtime_exempted)
+    decisions = _evaluate(paths, project, meta, profile, supps, results, kev)
 
     headline = headline_of(decisions)
     # Audit-only callers (resume re-scan, audit A-3) are the lift flow

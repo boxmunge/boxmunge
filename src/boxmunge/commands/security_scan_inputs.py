@@ -70,7 +70,14 @@ def project_compose_files(paths: BoxPaths, project: str) -> list[str]:
 
 def load_project_meta(paths: BoxPaths, project: str) -> ProjectMeta:
     """Load the manifest, validate the security: block."""
-    manifest = load_manifest(paths.project_manifest(project))
+    return project_meta(project, load_manifest(paths.project_manifest(project)),
+                        project_compose_files(paths, project))
+
+
+def project_meta(project: str, manifest: dict[str, Any],
+                 compose_files: list[str]) -> ProjectMeta:
+    """Validate a manifest's security: block (the deployed one's, or a
+    release's not yet deployed)."""
     sec_block = manifest.get("security") or {}
     if not isinstance(sec_block, dict):
         raise ProjectScanError(
@@ -95,7 +102,7 @@ def load_project_meta(paths: BoxPaths, project: str) -> ProjectMeta:
         dangerously=ddq,
         declared_runtimes=sec_block.get("runtimes"),
         hosts=list(manifest.get("hosts") or []),
-        compose_files=project_compose_files(paths, project),
+        compose_files=compose_files,
     )
 
 

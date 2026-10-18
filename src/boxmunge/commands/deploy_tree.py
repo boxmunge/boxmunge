@@ -22,7 +22,9 @@ from typing import TYPE_CHECKING, Callable
 
 from boxmunge.commands.deploy import replace_release, run_pre_deploy_hook
 from boxmunge.commands.deploy_steps import snapshot_live_release
-from boxmunge.commands.release_config import decide_release_users, generate_release_config
+from boxmunge.commands.release_config import (
+    ReleaseDecision, decide_release_users, generate_release_config,
+)
 from boxmunge.crashpoint import crash_point
 from boxmunge.docker_run import DockerError
 from boxmunge.data_dirs import ReleaseStateError, SetAsideError, log_kept, set_aside_announcer
@@ -44,7 +46,6 @@ from boxmunge.staging_isolation import StagingIsolationError, check_install_isol
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
-    from boxmunge.run_as import ServiceUser
 
 
 @dataclass(frozen=True)
@@ -170,16 +171,18 @@ def _install(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTx
     crash_point("txn.installed")
     if req.on_installed is not None:
         req.on_installed()
-    # Before the hook: a refusal leaves the install abandonable.
-    users = _decide(project_name, paths, req, txn)
-    if isinstance(users, int):
-        return users
-    return switch_and_close(project_name, paths, req, txn, users)
+    # Before the hook: a refusal (users, or a quarantined project's scan)
+    # leaves the install abandonable.
+    decision = _decide(project_name, paths, req, txn)
+    if isinstance(decision, int):
+        return decision
+    return switch_and_close(project_name, paths, req, txn, decision)
 
 
 def _decide(project_name: str, paths: BoxPaths, req: TreeDeploy,
-            txn: InstallTxn) -> dict[str, ServiceUser] | int:
-    """The release's users, or the exit code of a refusal (reported)."""
+            txn: InstallTxn) -> ReleaseDecision | int:
+    """The release's users (and, for a quarantined project, its scan's
+    clearance), or the exit code of a refusal (reported)."""
     try:
         return decide_release_users(project_name, paths, req.manifest, req.component)
     except DeployRefused as e:
@@ -195,15 +198,15 @@ def _decide(project_name: str, paths: BoxPaths, req: TreeDeploy,
 
 
 def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTxn,
-                     users: dict[str, ServiceUser] | None = None) -> int:
-    """From installed: the users (`users`, decided before the hook, or
-    decided here first), the hook (unless resuming at switching), configs,
+                     decision: ReleaseDecision | None = None) -> int:
+    """From installed: the users (`decision`, made before the hook, or
+    made here first), the hook (unless resuming at switching), configs,
     replace_release, then close."""
-    if users is None:
+    if decision is None:
         decided = _decide(project_name, paths, req, txn)
         if isinstance(decided, int):
             return decided
-        users = decided
+        decision = decided
     resumed_switch = txn.reached("switching")
     if not resumed_switch:
         if not txn.reached("hook_started"):
@@ -215,7 +218,8 @@ def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: I
             return report_left_open(project_name, paths, txn, req, "the pre-deploy hook failed",
                                     rc)
     try:
-        generate_release_config(project_name, paths, req.manifest, req.component, users)
+        generate_release_config(project_name, paths, req.manifest, req.component,
+                                decision.users)
     except (OSError, ValueError) as e:
         return report_left_open(project_name, paths, txn, req,
                                 f"generating its configs failed: {e}")
@@ -226,7 +230,8 @@ def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: I
               f"it, so its pre-deploy hook is not run again and no new snapshot is taken.")
     crash_point("txn.switching")
     rc = replace_release(project_name, paths, req.manifest, req.ref, txn.snapshot or None,
-                         component=req.component, txn=txn.id, replaced_ref=txn.replaced_ref)
+                         component=req.component, txn=txn.id, replaced_ref=txn.replaced_ref,
+                         clearance=decision.clearance)
     crash_point("txn.replaced")
     # on_switched must stay the first write after replace_release returns:
     # nothing durable separates the two, so a crash before it is a crash

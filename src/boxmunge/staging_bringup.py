@@ -18,7 +18,9 @@ from boxmunge.compose import ComposeError, load_user_compose
 from boxmunge.commands import deploy_images, deploy_storage
 from boxmunge.compose_guard import compose_up_checked
 from boxmunge.compose_resolve import ComposeResolveError
+from boxmunge.commands.quarantine_gate import clear_release
 from boxmunge.compose_validate import ComposeSecurityError
+from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import (
     CaddyConfigRejected, DockerError, caddy_config_lock, caddy_reload,
@@ -62,12 +64,16 @@ def _staging_auth(project_name: str, paths: BoxPaths) -> tuple[str, str] | None:
 
 def _decide_users(paths: BoxPaths, project: str, manifest: dict[str, Any]) -> None:
     """Build staging's images, decide and record who each service runs as
-    (deploy_images), and write the slot's overlay with those users."""
+    (deploy_images), and write the slot's overlay with those users. A
+    CVE-quarantined project's staging starts only if every image it would
+    start scans clean (quarantine_gate); production stays quarantined."""
     slot = slot_dir(paths, project)
     print("  Building images and deciding who each service runs as...")
     try:
         users = deploy_images.prepare_release_users(
             paths, staging_release_target(paths, project), manifest, component="stage")
+        if is_quarantined(project, paths):
+            clear_release(paths, staging_release_target(paths, project), manifest)
     except (RunAsError, ComposeResolveError) as e:
         raise DeployRefused([str(e)]) from e
     write_staging_overlay(paths, project, manifest, release_dir(slot), slot, users)
