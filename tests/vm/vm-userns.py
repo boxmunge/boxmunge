@@ -11,8 +11,8 @@ tree's build (vm-staging.py's release plumbing), does what `userns-migrate
 while the host measures the downtime through Caddy, runs the platform's own
 checks and a reboot, survives a kill -9 and a power cut in each phase,
 soaks with a deploy, rolls back, migrates again and commits. The measured
-figures (image MB, files shifted, downtime, bytes reclaimed) are printed and
-written to .cache/vm/vm-userns/results-<flavour>.json for OPERATIONS.md.
+figures (image MB, files shifted, downtime, bytes reclaimed) are printed as
+a table row and written to .cache/vm/vm-userns/results-<flavour>.json.
 
 A fresh beta install is remapped from its first boot: vm-test.py checks it.
 
@@ -162,7 +162,11 @@ class Downtime:
 
     def _poll(self) -> None:
         while not self._stop.is_set():
-            if vm.curl_vm(PROBE[1], PROBE[0])[0] != 200:
+            try:
+                code = vm.curl_vm(PROBE[1], PROBE[0])[0]
+            except (subprocess.SubprocessError, OSError):
+                code = 0  # no answer is downtime too
+            if code != 200:
                 self.failed.append(time.time())
             self._stop.wait(1)
 
@@ -233,11 +237,15 @@ def platform_checks() -> None:
 
 
 def _killer(phase: str, how: str) -> str:
-    """Start the migration and stop it hard once the journal reaches `phase`."""
-    stop = ("pkill -9 -f 'boxmunge-upgrade userns-migrate'; pkill -9 -f 'boxmunge-server userns'"
-            if how == "kill" else "echo b > /proc/sysrq-trigger")
+    """Start the migration in its own process group and stop it hard once
+    the journal reaches `phase`: SIGKILL to the whole group (the shim and
+    the Python core it runs), or a power cut a moment after this script
+    has answered."""
+    stop = ("kill -9 -- -\"$pg\"" if how == "kill" else
+            "setsid sh -c 'sleep 2; echo b > /proc/sysrq-trigger' > /dev/null 2>&1 < /dev/null &")
     return f"""set -e
-setsid nohup {SHIM} userns-migrate > /root/userns-killed.log 2>&1 < /dev/null &
+setsid {SHIM} userns-migrate > /root/userns-killed.log 2>&1 < /dev/null &
+pg=$!
 for i in $(seq 3000); do
     p=$(python3 -c "import json; print(json.load(open('{JOURNAL}'))['phase'])" 2>/dev/null || true)
     case "$p" in {'|'.join(PHASES[PHASES.index(phase):])}|applied) break ;; esac
@@ -274,13 +282,13 @@ def soak_rollback_commit(results: dict) -> None:
         ("migrate", "root", f"{SHIM} userns-migrate", 0),
         deploy("vmapp", "v3"),
         ("an upload during the soak", "root",
-         f"echo soak > {upload2} && chown --reference={upload2}/.. {upload2}", 0),
+         f"echo soak > {upload2} && chown --reference={upload2.rsplit('/', 1)[0]} {upload2}", 0),
         ("userns-rollback", "root", f"{SHIM} userns-rollback", 0),
         ("the soak's deploy and upload are kept", "root",
          f"grep -qx v3 /opt/boxmunge/projects/vmapp/VERSION && grep -qx soak {upload2}", 0),
         *seeds_hold("after the soak's rollback"),
         ("migrate again", "root", f"{SHIM} userns-migrate", 0),
-        ("commit is refused during the soak", "root", f"{SHIM} userns-commit", 1, "48"),
+        ("commit is refused during the soak", "root", f"{SHIM} userns-commit", 1, "soak until"),
         ("end the soak", "root", END_SOAK, 0),
     ])
     before = int(st.ssh("root", STORE_BYTES).stdout.strip())

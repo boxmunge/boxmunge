@@ -73,23 +73,28 @@ def box():
         exports.mkdir()
         (exports / "dump.sql").write_text("-- old\n")
         os.chown(exports / "dump.sql", 1234, 1234)
-        yield paths, images
-        _teardown(paths)
-    subprocess.run(["umount", str(work)], check=True)
+        try:
+            yield paths, images
+        finally:
+            try:
+                _teardown()
+            finally:
+                subprocess.run(["umount", str(work)], check=True)
 
 
-def _teardown(paths: BoxPaths) -> None:
-    """Leave the daemon as the next module expects it: prior store, no box."""
+def _teardown() -> None:
+    """Leave the daemon as the next module expects it: on the prior store,
+    running, with nothing of this box left. Whatever a failed test left
+    behind (a stopped daemon, a remapped one, a half-written journal), the
+    daemon is restarted on the prior daemon.json first."""
+    daemon = ProcessDaemon()
+    daemon.stop()
+    write_daemon_json(prior_daemon_json())
+    daemon.start()
     for name in sb.sh("docker", "ps", "-aq").split():
-        sb.sh("docker", "rm", "-f", "-v", name, check=False)
-    sb.sh("docker", "volume", "prune", "-af", check=False)
-    sb.sh("docker", "network", "rm", "boxmunge-proxy", check=False)
-    journal = load_journal(paths)
-    if journal is not None and journal.phase not in ("rolled-back",):
-        daemon = ProcessDaemon()
-        daemon.stop()
-        write_daemon_json(prior_daemon_json())
-        daemon.start()
+        sb.sh("docker", "rm", "-f", "-v", name)
+    sb.sh("docker", "volume", "prune", "-af")
+    sb.sh("docker", "network", "rm", "boxmunge-proxy", check=False)  # gone after a commit
 
 
 def _check(paths: BoxPaths, images: Path):

@@ -176,7 +176,9 @@ def effective_hardening_profile(
     applied: dict[str, dict[str, Any]],
     off: set[str],
 ) -> HardeningProfile:
-    """The profile of compose.yml with what boxmunge's overlay applies.
+    """The profile of compose.yml with the no-new-privileges and capabilities
+    boxmunge's overlay applies; read_only and privileged as
+    hardening_profile_from_compose judges them.
 
     `applied`: service -> the settings the overlay gives it
     (security_overlay.resolve_security); `off`: the services on profile off,

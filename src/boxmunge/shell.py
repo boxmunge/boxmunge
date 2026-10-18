@@ -110,7 +110,7 @@ This is a restricted shell. Available commands:
   inbox               List uploaded bundles
   secrets             Manage secrets
 
-Upload bundles with: scp -O -P 922 bundle.tar.gz deploy@<host>:
+Upload bundles with: scp -O -P <ssh port, 922 by default> bundle.tar.gz deploy@<host>:
 
 Run 'help' for the full command list.
 """

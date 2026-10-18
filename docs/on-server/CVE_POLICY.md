@@ -454,11 +454,14 @@ project that doesn't redeclare `read_only` in user compose is treated
 as fully hardened (the overlay provides it). Only an explicit
 `read_only: false` in user compose triggers the +1 penalty.
 
-The calculator judges each service with what the overlay actually
-applies to it, so a relaxation made in the manifest counts like its
-compose.yml spelling: `security.no_new_privileges: false` and a
-`security.cap_add` list each add +1. A service on `profile: off` gets no
-overlay and is judged on its compose.yml alone.
+For `no-new-privileges` and capabilities the calculator judges each
+service with what the overlay applies to it, so a relaxation made in the
+manifest counts like its compose.yml spelling: `security.no_new_privileges:
+false` and a `security.cap_add` list each add +1. A service on `profile:
+off` gets no hardening baseline: its compose.yml and any manifest
+`cap_add` are judged. `read_only` is judged from compose.yml alone (an
+explicit `read_only: false`), so a service only compose.yml defines, which
+the overlay leaves writable, is not penalised for that.
 
 ### v0.9 writable: surface and the penalty
 

@@ -115,12 +115,14 @@ def hardening_profile(meta: ProjectMeta, user_model: dict[str, Any]) -> Hardenin
     """Overlay-aware hardening profile for the penalty calculation.
 
     ``user_model`` is compose.yml as Compose resolves it, so a setting that
-    arrives through `include:` or `extends:` counts. Each service is judged
-    with what boxmunge's overlay applies to it (resolved from the same
-    security blocks the overlay is built from): the project does not lose
-    points for an overlay default it did not redeclare, and a manifest
-    relaxation the overlay emits (no_new_privileges: false, cap_add) counts
-    as a deviation.
+    arrives through `include:` or `extends:` counts. no-new-privileges and
+    capabilities are judged with what boxmunge's overlay applies to each
+    service (resolved from the same security blocks the overlay is built
+    from): no penalty for an overlay default the project did not redeclare,
+    and a manifest relaxation the overlay emits (no_new_privileges: false,
+    cap_add) counts as a deviation. read_only stays a compose.yml judgement
+    (hardening_profile_from_compose): only an explicit read_only: false
+    counts, also for compose-only services the overlay leaves writable.
     """
     project_sec = meta.manifest.get("security")
     declared = meta.manifest.get("services") or {}

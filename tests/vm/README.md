@@ -88,8 +88,8 @@ Run `./tests/vm/vm-test.py teardown` when done.
   overlay2) upgrades, does what `userns-migrate --check` asks, migrates while
   the host measures the downtime through Caddy, survives a kill -9 and a power
   cut in each phase, soaks, rolls back, migrates again and commits. It prints
-  the figures OPERATIONS.md's table records and writes them to
-  `.cache/vm/vm-userns/results-<flavour>.json`.
+  the measured figures (image MB, files shifted, downtime, bytes reclaimed)
+  and writes them to `.cache/vm/vm-userns/results-<flavour>.json`.
 
 Both take `teardown`, and leave the VM running on failure.
 
