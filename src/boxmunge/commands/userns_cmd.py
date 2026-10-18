@@ -25,7 +25,7 @@ from boxmunge.userns.daemon_config import DaemonConfigError
 from boxmunge.userns.images import IMAGES_DIR, ImageError
 from boxmunge.userns.inventory import take_inventory
 from boxmunge.userns.journal import FORWARD, JournalError, load_journal
-from boxmunge.userns.preflight import PreflightRefused, preflight
+from boxmunge.userns.preflight import PreflightRefused, Report, preflight
 from boxmunge.userns.shift import ShiftRefused
 from boxmunge.userns.switch import MigrationError, host_ids
 from boxmunge.userns.volumes import VolumeError
@@ -63,20 +63,33 @@ def require_upgrade_lock_held(paths: BoxPaths, fds: tuple[int, int] = SHIM_LOCK_
         raise SystemExit(f"ERROR: run this through the shim: {_SHIM} userns-<subcommand>")
 
 
+def _journal_verdict(journal) -> str | None:
+    if journal is None or journal.phase == "rolled-back":
+        return None
+    if journal.direction == FORWARD and "commit-before" in journal.items:
+        return f"a userns-commit stopped part-way; finish it: {_SHIM} userns-commit"
+    if journal.direction == FORWARD and journal.phase in ("applied", "committed"):
+        return f"already {journal.phase} (offset {journal.offset})"
+    if journal.direction == FORWARD:
+        return (f"a userns migration stopped at {journal.phase}; resume it: {_SHIM} "
+                f"userns-migrate, or undo it: {_SHIM} userns-rollback")
+    return f"a userns rollback stopped at {journal.phase}; finish it: {_SHIM} userns-rollback"
+
+
 def run_check(paths: BoxPaths) -> int:
-    journal = load_journal(paths)
-    if journal is not None and journal.phase != "rolled-back":
-        if journal.direction == FORWARD and journal.phase in ("applied", "committed"):
-            print(f"VERDICT: already {journal.phase} (offset {journal.offset})")
-        else:
-            print(f"VERDICT: a userns {journal.direction} is in progress (phase "
-                  f"{journal.phase}); resume it with the same command, or "
-                  f"{_SHIM} userns-rollback")
-        return 0
-    s = uo.allocate_offset(uo.ETC, host_ids())
-    report = preflight(paths, take_inventory(paths), direction=FORWARD, offset=s,
-                       images_dir=IMAGES_DIR)
-    print(f"remap offset: {s}")
+    """One read-only pass that always ends with a verdict and exits 0: what
+    stops it (the journal, the subid files, the daemon) is a refusal row."""
+    try:
+        verdict = _journal_verdict(load_journal(paths))
+        if verdict is not None:
+            print(f"VERDICT: {verdict}")
+            return 0
+        s = uo.allocate_offset(uo.ETC, host_ids())
+        report = preflight(paths, take_inventory(paths), direction=FORWARD, offset=s,
+                           images_dir=IMAGES_DIR)
+        print(f"remap offset: {s}")
+    except (JournalError, uo.RemapError, DockerError, OSError, ValueError) as e:
+        report = Report(refusals=[f"the check could not run to the end: {e}"])
     print(report.text())
     return 0  # a report, never a failed upgrade
 

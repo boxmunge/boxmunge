@@ -244,3 +244,10 @@ def test_a_registry_that_does_not_answer_is_refused_before_any_downtime(paths, q
     assert pulled == ["down.example/b@sha256:" + "2" * 64, "up.example/a@sha256:" + "1" * 64]
     assert "REFUSED: down.example/b@sha256:" in text and "registry did not answer" in text
     assert "up.example" not in text.split("NOTE")[0]
+
+
+def test_an_interrupted_upgrade_is_refused(paths, quiet) -> None:
+    (paths.root / "env-b").mkdir()
+    (paths.root / "env-b" / "upgrade-inflight").write_text("1.5.0")
+    text = _run(paths, _inv(quiet)).text()
+    assert "an upgrade or its rollback was interrupted" in text and "env-b/upgrade-inflight" in text

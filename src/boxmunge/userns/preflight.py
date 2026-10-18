@@ -66,6 +66,13 @@ def _project_state(paths: BoxPaths, p: str, r: Report) -> None:
 def _lifecycle(paths: BoxPaths, inv: Inventory, r: Report, *, forward: bool) -> None:
     if forward and paths.probation.exists():
         r.refusals.append("an upgrade probation is open; migrate after it ends")
+    markers = [m for slot in ("a", "b") for m in (paths.root / f"env-{slot}" / "upgrade-inflight",
+                                                   paths.root / f"env-{slot}" / "rollback-inflight")
+               if os.path.lexists(m)]
+    if forward and markers:
+        r.refusals.append(f"an upgrade or its rollback was interrupted ({', '.join(map(str, markers))}); "
+                          f"the health timer's check-probation finishes it within minutes; "
+                          f"migrate after that")
     try:
         if forward and not load_config(paths).get("backup_remote"):
             r.refusals.append("backup_remote is not configured; the migration syncs a fresh "
