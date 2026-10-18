@@ -103,7 +103,9 @@ def volumes(inv: Inventory, r: Report, *, forward: bool) -> None:
     for v in inv.volumes:
         if v.driver != "local" or v.options:
             r.refusals.append(f"volume {v.name}: driver {v.driver!r} with options {v.options}; only "
-                              f"plain local volumes can be moved")
+                              f"plain local volumes can be moved. Copy its data into a plain "
+                              f"local volume, point the service at that one and redeploy, then "
+                              f"remove this one (docker volume rm {v.name})")
         if not (v.anonymous and v.has_data):
             continue
         if v.attached:

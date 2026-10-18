@@ -250,6 +250,7 @@ Upgrade the boxmunge platform. From the deploy shell, plain `upgrade` and
   --skip-self-test  Skip the post-upgrade self-test""",
     "userns": """\
 Usage: boxmunge userns {check|migrate|rollback|commit}
+       (on the server: boxmunge-server userns ..., as the shim runs it)
 
 Root only, through the upgrade shim: sudo /opt/boxmunge/bin/boxmunge-upgrade
 userns-migrate [--check] | userns-rollback | userns-commit. See OPERATIONS.md,
