@@ -58,7 +58,10 @@ def _changes_box(argv) -> str | None:
 @contextmanager
 def _patched(record: Callable[[str], None]) -> Iterator[None]:
     def hit(label: str) -> None:
-        if label.split("@")[1] not in _INSIDE_ATOMIC_WRITE:
+        # Inside shutil (rmtree's own unlinks, counted once as the rmtree)
+        # or an atomic write's temp file: no change of its own.
+        if (label.split("@")[1] not in _INSIDE_ATOMIC_WRITE
+                and sys._getframe(2).f_code.co_filename != shutil.__file__):
             record(label)
 
     saved = {name: getattr(os, name) for name in _OS_CALLS}
