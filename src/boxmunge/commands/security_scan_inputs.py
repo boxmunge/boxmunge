@@ -115,25 +115,25 @@ def hardening_profile(meta: ProjectMeta, user_model: dict[str, Any]) -> Hardenin
     """Overlay-aware hardening profile for the penalty calculation.
 
     ``user_model`` is compose.yml as Compose resolves it, so a setting that
-    arrives through `include:` or `extends:` counts. no-new-privileges and
-    capabilities are judged with what boxmunge's overlay applies to each
-    service (resolved from the same security blocks the overlay is built
-    from): no penalty for an overlay default the project did not redeclare,
-    and a manifest relaxation the overlay emits (no_new_privileges: false,
-    cap_add) counts as a deviation. read_only stays a compose.yml judgement
-    (hardening_profile_from_compose): only an explicit read_only: false
-    counts, also for compose-only services the overlay leaves writable.
+    arrives through `include:` or `extends:` counts. Each service is judged
+    with what boxmunge's overlay applies to it, resolved from the same
+    security blocks the overlay is built from: no penalty for an overlay
+    default the project did not redeclare, and a manifest relaxation the
+    overlay emits (no_new_privileges: false, cap_add) counts as a
+    deviation. The overlay gives a read-only root only to the manifest's
+    declared services, so a compose-only service is read-only only when
+    compose.yml says so.
     """
     project_sec = meta.manifest.get("security")
     declared = meta.manifest.get("services") or {}
-    applied, off = {}, set()
+    applied, read_only_by_overlay = {}, set()
     for svc in (user_model.get("services") or {}):
         entry = declared.get(svc)
         svc_sec = entry.get("security") if isinstance(entry, dict) else None
         applied[svc] = resolve_security(project_sec, svc_sec)
-        if effective_profile(project_sec, svc_sec) == PROFILE_OFF:
-            off.add(svc)
-    return effective_hardening_profile(user_model, applied, off)
+        if isinstance(entry, dict) and effective_profile(project_sec, svc_sec) != PROFILE_OFF:
+            read_only_by_overlay.add(svc)
+    return effective_hardening_profile(user_model, applied, read_only_by_overlay)
 
 
 def load_user_model(paths: BoxPaths, project: str) -> dict[str, Any]:

@@ -7,7 +7,7 @@ LoC budget. Pure functions and one frozen dataclass; no I/O, no decisions.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 _MAX_HARDENING_PENALTY = 2
@@ -171,29 +171,49 @@ def hardening_profile_from_compose(
     )
 
 
+def _literal_no_new_privileges(svc: dict[str, Any]) -> bool:
+    sec_opt = svc.get("security_opt") or []
+    if not isinstance(sec_opt, list):
+        return False
+    return "no-new-privileges:true" in sec_opt and "no-new-privileges:false" not in sec_opt
+
+
 def effective_hardening_profile(
     compose: dict[str, Any],
     applied: dict[str, dict[str, Any]],
-    off: set[str],
+    read_only_by_overlay: set[str],
 ) -> HardeningProfile:
-    """The profile of compose.yml with the no-new-privileges and capabilities
-    boxmunge's overlay applies; read_only and privileged as
-    hardening_profile_from_compose judges them.
+    """The profile of compose.yml with what boxmunge's overlay applies.
 
     `applied`: service -> the settings the overlay gives it
-    (security_overlay.resolve_security); `off`: the services on profile off,
-    which get no hardening baseline. The overlay carries the manifest's
-    relaxations, which compose.yml alone does not show:
-    `security.no_new_privileges: false` drops no-new-privileges, and
-    `security.cap_add` adds capabilities. Both weaken the profile as their
-    compose.yml spellings would.
+    (security_overlay.resolve_security; no hardening baseline on profile
+    off, only the manifest's own overrides). `read_only_by_overlay`: the
+    services the overlay gives a read-only root (the manifest's declared
+    services not on profile off; compose.py leaves the others writable).
+
+    A service is read-only when compose.yml says `read_only: true`, or the
+    overlay makes it so and compose.yml does not say `read_only: false`. It
+    keeps no-new-privileges when the overlay or compose.yml sets it (the
+    manifest's `no_new_privileges: false` removes the overlay's), and adds
+    capabilities through either compose.yml's `cap_add` or the manifest's.
     """
-    base = hardening_profile_from_compose(
-        compose, services_with_overlay=set(applied) - off)
-    no_new_privileges, extra_caps = base.no_new_privileges, base.extra_caps_added
-    for svc, settings in applied.items():
-        if svc not in off and "no-new-privileges:true" not in settings.get("security_opt", []):
-            no_new_privileges = False
-        if settings.get("cap_add"):
+    services = compose.get("services") or {}
+    read_only, no_new_privileges, extra_caps, privileged = True, True, False, False
+    for name, svc in (services.items() if isinstance(services, dict) else ()):
+        if not isinstance(svc, dict):
+            continue
+        settings = applied.get(name, {})
+        if name in read_only_by_overlay:
+            read_only = read_only and svc.get("read_only") is not False
+        else:
+            read_only = read_only and svc.get("read_only") is True
+        no_new_privileges = no_new_privileges and (
+            "no-new-privileges:true" in settings.get("security_opt", [])
+            or _literal_no_new_privileges(svc))
+        cap_add = svc.get("cap_add") or []
+        if (isinstance(cap_add, list) and cap_add) or settings.get("cap_add"):
             extra_caps = True
-    return replace(base, no_new_privileges=no_new_privileges, extra_caps_added=extra_caps)
+        if svc.get("privileged") is True:
+            privileged = True
+    return HardeningProfile(read_only=read_only, no_new_privileges=no_new_privileges,
+                            extra_caps_added=extra_caps, privileged=privileged)
