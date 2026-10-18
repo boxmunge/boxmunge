@@ -29,7 +29,8 @@ def box(remapped_daemon):
 
 CASES = [nc.case_registry_root_refused, nc.case_declared_image_runs,
          nc.case_redis_saves_after_recreate, nc.case_image_owned_target_refused,
-         nc.case_chowned_target_survives_recreates, nc.case_imageless_target_chowned_once]
+         nc.case_chowned_target_survives_recreates, nc.case_imageless_target_chowned_once,
+         nc.case_user_change_needs_chown]
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.__name__)
