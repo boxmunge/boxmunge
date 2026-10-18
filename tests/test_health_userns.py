@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -262,6 +263,7 @@ def test_a_commit_stopped_part_way_is_an_error(paths, monkeypatch) -> None:
     assert check.status == "error" and "finish it: sudo" in check.detail
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc/locks: Linux only")
 def test_a_migration_holding_the_lock_is_running_not_interrupted(paths, monkeypatch,
                                                                 tmp_path) -> None:
     """Every normal migration passes through these phases: while it holds

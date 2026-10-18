@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import stat
 
 import pytest
@@ -12,6 +13,9 @@ from boxmunge.userns.shift import Direction, mount_points_under, scan_tree
 from boxmunge.userns.walk import closed_to_other, open_parent_nofollow
 
 S = 1048576
+# A scan reads /proc/self/mountinfo, listxattr and FS_IOC_GETFLAGS: Linux only,
+# as the boxes it runs on.
+LINUX = pytest.mark.skipif(sys.platform != "linux", reason="the shift's scan is Linux only")
 
 
 @pytest.mark.parametrize("value, direction, expected", [
@@ -43,6 +47,7 @@ def test_mountinfo_escapes_are_decoded(tmp_path) -> None:
     assert mount_points_under(tmp_path, info) == [f"{tmp_path}/m p"]
 
 
+@LINUX
 def test_a_hard_link_to_an_inode_outside_the_tree_is_refused(tmp_path) -> None:
     tree = tmp_path / "tree"
     tree.mkdir()
@@ -52,6 +57,7 @@ def test_a_hard_link_to_an_inode_outside_the_tree_is_refused(tmp_path) -> None:
     assert any("hard link to a file outside the tree" in p for p in problems)
 
 
+@LINUX
 def test_hard_links_inside_the_tree_are_fine(tmp_path) -> None:
     (tmp_path / "a").write_text("x")
     os.link(tmp_path / "a", tmp_path / "b")
@@ -75,6 +81,7 @@ def test_a_link_on_the_way_to_the_root_is_refused(tmp_path) -> None:
         open_parent_nofollow(tmp_path / "project" / "data")
 
 
+@LINUX
 def test_the_scan_lists_entries_a_chown_would_strip(tmp_path) -> None:
     for name, mode in (("suid", 0o4755), ("sgid-x", 0o2750), ("sgid-nox", 0o2640),
                        ("plain", 0o755)):
@@ -85,6 +92,7 @@ def test_the_scan_lists_entries_a_chown_would_strip(tmp_path) -> None:
     assert scan_tree(tmp_path, S, Direction.INVERSE).setid == {"suid": 0o4755, "sgid-x": 0o2750}
 
 
+@LINUX
 def test_too_many_setid_files_are_refused(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(shift, "MAX_SETID", 1)
     for name in ("a", "b"):
@@ -106,6 +114,7 @@ def test_entries_closed_to_other_are_listed(tmp_path) -> None:
     assert closed_to_other(tmp_path / "open.txt") == []
 
 
+@LINUX
 def test_the_walk_counts_every_entry_once(tmp_path) -> None:
     (tmp_path / "a" / "b").mkdir(parents=True)
     (tmp_path / "a" / "b" / "f").write_text("x")
@@ -116,6 +125,7 @@ def test_the_walk_counts_every_entry_once(tmp_path) -> None:
     assert stat.S_ISFIFO(os.lstat(tmp_path / "fifo").st_mode)
 
 
+@LINUX
 def test_a_journalled_mode_is_put_back_only_on_the_file_it_was_taken_from(tmp_path) -> None:
     """A container may replace a once-setuid file during the soak: the
     rollback must not make the new one setuid. A listed mode is put back
