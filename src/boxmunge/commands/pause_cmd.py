@@ -9,6 +9,7 @@ from boxmunge.fileutil import LockError, atomic_write_text, project_lock
 from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
+from boxmunge.lifecycle import migration_refusal
 from boxmunge.pause import (
     hold_restart_policies, is_paused, mark_pause_complete, pause_action_complete,
     render_maintenance_caddy_config, write_paused_state,
@@ -95,6 +96,10 @@ def pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int:
     held. If a step fails the record stays incomplete and says so, and
     running pause again finishes it.
     """
+    refusal = migration_refusal(f"Pausing '{project_name}'", paths)
+    if refusal:
+        print(f"ERROR: {refusal}", file=sys.stderr)
+        return 1
     if refuse_if_legacy_stage(paths, project_name):
         return 1
     # Re-check under the lock: a pause may have landed while the operator

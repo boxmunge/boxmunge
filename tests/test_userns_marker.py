@@ -59,6 +59,11 @@ def test_resume_recover_and_security_resume_refuse(migrating, capsys) -> None:
     assert security_resume_locked(migrating, "shop") != 0 and _refused(capsys)
 
 
+def test_pause_refuses(migrating, capsys) -> None:
+    from boxmunge.commands.pause_cmd import pause_locked
+    assert pause_locked("shop", migrating, None) == 1 and _refused(capsys)
+
+
 def test_backups_refuse(migrating, capsys) -> None:
     from boxmunge.commands.backup_cmd import backup_locked
     assert backup_locked("shop", migrating) == 1 and _refused(capsys)
