@@ -116,10 +116,13 @@ def volumes(inv: Inventory, r: Report, *, forward: bool) -> None:
                 f"Adopt it: boxmunge data adopt {c.compose_project} {c.service}:{m.destination} "
                 f"<name>, add <name>:{m.destination} to the service, and redeploy")
         else:
-            fate = ("is left in the old root; userns-commit deletes it" if forward
-                    else "is deleted with the remapped root")
-            r.notes.append(f"dangling anonymous volume {v.name[:12]} "
-                           f"({dir_size(Path(v.mountpoint))} bytes) {fate}")
+            r.refusals.append(
+                f"anonymous volume {v.name} holds {dir_size(Path(v.mountpoint))} bytes and no "
+                f"container uses it; it would be left behind and deleted "
+                f"{'by userns-commit' if forward else 'with the remapped root'}. "
+                f"Copy out what you need (docker run --rm -v {v.name}:/v:ro -v \"$PWD\":/out "
+                f"<image with tar> tar -C /v -cf /out/{v.name[:12]}.tar .), then remove it: "
+                f"docker volume rm {v.name}")
 
 
 def images(inv: Inventory, r: Report) -> None:

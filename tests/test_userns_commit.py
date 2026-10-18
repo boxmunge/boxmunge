@@ -141,3 +141,15 @@ def test_a_missing_store_measures_nothing(tmp_path) -> None:
     assert dir_size(tmp_path / "gone") == 0
     (tmp_path / "f").write_bytes(b"x" * 10000)
     assert dir_size(tmp_path) >= 10000
+
+
+def test_data_the_migration_did_not_carry_stops_the_commit(paths, tmp_path, remapped) -> None:
+    left = tmp_path / "volumes" / ("a" * 64) / "_data"
+    left.mkdir(parents=True)
+    (left / "row").write_text("42")
+    (tmp_path / "volumes" / "moved").mkdir()  # its _data left with the migration
+    _journal(paths, tmp_path, {"driver_type": "", "store_root": str(tmp_path / "overlay2"),
+                               "size": 0})
+    with pytest.raises(cm.MigrationError, match="still hold data the migration did not carry"):
+        cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
+    assert (left / "row").exists() and load_journal(paths).phase == "applied"

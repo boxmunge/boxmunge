@@ -98,11 +98,12 @@ def test_anonymous_data_is_refused_with_adopt_guidance(paths, quiet) -> None:
     assert "boxmunge data adopt shop app:/var/lib/postgresql/data <name>" in text
 
 
-def test_a_dangling_anonymous_volume_is_only_reported(paths, quiet) -> None:
+def test_a_dangling_anonymous_volume_holding_data_is_refused(paths, quiet) -> None:
     inv = _inv(quiet, volumes=[VolumeEntry("b" * 64, "local", {}, {}, str(quiet), False, True,
                                            True)])
-    report = _run(paths, inv)
-    assert report.ok and "dangling anonymous volume bbbbbbbbbbbb" in report.text()
+    text = _run(paths, inv).text()
+    assert f"anonymous volume {'b' * 64} holds" in text and "deleted by userns-commit" in text
+    assert f"docker volume rm {'b' * 64}" in text
 
 
 def test_high_ids_in_an_image_are_refused(paths, quiet, monkeypatch) -> None:

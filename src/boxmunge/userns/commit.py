@@ -17,6 +17,7 @@ offered.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import time
 from datetime import datetime, timedelta, timezone
@@ -91,6 +92,21 @@ def _drop_managed_root(old_root: Path, s: int, store_root: Path) -> None:
         shutil.rmtree(store_root)
 
 
+def _old_volumes_with_data(old_root: Path) -> list[str]:
+    """Old-root volumes whose _data is still there and not empty: every
+    carried volume's _data moved out of the old root."""
+    volumes = old_root / "volumes"
+    if not volumes.is_dir():
+        return []
+    left = []
+    for entry in sorted(os.scandir(volumes), key=lambda e: e.name):
+        data = Path(entry.path) / "_data"
+        if entry.is_dir(follow_symlinks=False) and data.is_dir() and not data.is_symlink() \
+                and any(os.scandir(data)):
+            left.append(str(data))
+    return left
+
+
 def _checked(paths: BoxPaths, j: Journal | None, now: datetime) -> Journal:
     if j is None or j.direction != FORWARD or j.phase != "applied":
         raise MigrationError(f"nothing to commit (journal: "
@@ -101,6 +117,12 @@ def _checked(paths: BoxPaths, j: Journal | None, now: datetime) -> Journal:
     if uo.remap_offset(paths) != j.offset:
         raise MigrationError("the daemon is not remapped as the journal says; see "
                              "docker-userns in health")
+    left = _old_volumes_with_data(Path(Inventory.from_json(j.inventory).root))
+    if left:
+        raise MigrationError(
+            f"volumes in the old root still hold data the migration did not carry: "
+            f"{', '.join(left)}. Commit would delete them. Copy out what you need, then "
+            f"delete their directories by hand, and run userns-commit again")
     projects = deployed_among(load_registered_projects(paths), paths)
     unhealthy = [p for p in projects if run_check(p, paths, verbose=False) != 0]
     if unhealthy:
