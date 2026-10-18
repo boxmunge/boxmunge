@@ -41,6 +41,7 @@ from boxmunge.userns.preflight import PreflightRefused, preflight
 from boxmunge.userns.shift import Direction, scan_tree, shift_tree
 from boxmunge.userns.switch import (
     CADDYFILE_MODE, MigrationError, back_to_prior, caddyfile_mode, create_identity,
+    daemon_json_owner,
     ensure_prior, host_ids, prior_store, read_daemon_json, set_caddyfile_mode, to_remapped,
 )
 from boxmunge.userns.volumes import data_dir, move, recreate
@@ -91,6 +92,7 @@ def _phase0(paths: BoxPaths, j: Journal | None, timers: TimerControl,
         raise PreflightRefused(report)
     if j is None:
         return Journal(FORWARD, "started", s, daemon_json=read_daemon_json(),
+                       daemon_json_owner=daemon_json_owner(),
                        prior_store=prior_store(inv), inventory=inv.to_json(),
                        timers=timers.state(), caddyfile_mode=caddyfile_mode(paths))
     j.inventory = inv.to_json()
@@ -111,7 +113,7 @@ def _switch(paths: BoxPaths, j: Journal, inv: Inventory, daemon: DaemonControl,
         if uo.remap_offset(paths) != j.offset:
             raise MigrationError("the daemon came up with another offset")
     except Exception as e:
-        back_to_prior(paths, j.daemon_json, j.offset, daemon)
+        back_to_prior(paths, j.daemon_json, j.offset, daemon, j.daemon_json_owner)
         for key in [k for k in j.items if k.startswith("restart:")]:
             del j.items[key]  # an earlier failed switch's restart says nothing about this one
         bring_up(paths, inv, j, save, component=COMPONENT, prefix="restart")
@@ -210,7 +212,9 @@ def migrate(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,
     j = _refuse_rerun(load_journal(paths))
     with project_locks(paths, sorted(load_registered_projects(paths))):
         if j is not None and not j.reached("switched"):
-            j.daemon_json = ensure_prior(paths, j.daemon_json, j.offset, daemon)
+            prior = ensure_prior(paths, j.daemon_json, j.offset, daemon, j.daemon_json_owner)
+            if prior != j.daemon_json:  # the operator's fix, kept with its own mode
+                j.daemon_json, j.daemon_json_owner = prior, daemon_json_owner()
             save_journal(paths, j)
         elif j is not None:
             _ensure_remapped(paths, j, daemon)

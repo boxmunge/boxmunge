@@ -46,7 +46,18 @@ def read_daemon_json() -> str | None:
         return f.read().decode()
 
 
-def write_daemon_json(text: str | None) -> None:
+def daemon_json_owner() -> list[int] | None:
+    """[mode, uid, gid] of daemon.json, or None when there is none."""
+    try:
+        st = os.lstat(daemon_json_path())
+    except FileNotFoundError:
+        return None
+    return [stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid]
+
+
+def write_daemon_json(text: str | None, owner: list[int] | None = None) -> None:
+    """`owner`: the original's [mode, uid, gid] when it is put back; the
+    migration's own file is root's 0644 (deploy reads userns-remap in it)."""
     path = daemon_json_path()
     if text is None:
         if os.path.lexists(path):
@@ -58,8 +69,8 @@ def write_daemon_json(text: str | None) -> None:
         # it creates to deploy, who could then rewrite the daemon's config.
         os.mkdir(path.parent, 0o755)
         fsync_dir(path.parent.parent)
-    # 0644: deploy reads userns-remap from it (offset.daemon_json_userns).
-    atomic_write_bytes(path, text.encode(), mode=0o644, owner=(os.geteuid(), os.getegid()))
+    mode, uid, gid = owner or [0o644, os.geteuid(), os.getegid()]
+    atomic_write_bytes(path, text.encode(), mode=mode, owner=(uid, gid))
 
 
 def host_ids() -> set[int]:
@@ -148,16 +159,17 @@ def to_remapped(paths: BoxPaths, daemon_json: str | None, s: int, daemon: Daemon
 
 
 def back_to_prior(paths: BoxPaths, daemon_json: str | None, s: int,
-                  daemon: DaemonControl) -> None:
-    """Stop the daemon, put the original daemon.json back, drop the record, start it."""
+                  daemon: DaemonControl, owner: list[int] | None = None) -> None:
+    """Stop the daemon, put the original daemon.json back (with its mode and
+    owner), drop the record, start it."""
     daemon.stop()
-    write_daemon_json(daemon_json)
+    write_daemon_json(daemon_json, owner)
     uo.remove_offset_record(paths, s)
     daemon.start()
 
 
 def ensure_prior(paths: BoxPaths, daemon_json: str | None, s: int,
-                 daemon: DaemonControl) -> str | None:
+                 daemon: DaemonControl, owner: list[int] | None = None) -> str | None:
     """Before the switch completed: the old daemon runs on its prior config.
 
     A crash inside the switch left the merged daemon.json (this migration's
@@ -177,7 +189,7 @@ def ensure_prior(paths: BoxPaths, daemon_json: str | None, s: int,
               f"prior config")
         daemon_json = now
     if now == ours or uo.recorded_offset(paths) is not None:
-        back_to_prior(paths, daemon_json, s, daemon)
+        back_to_prior(paths, daemon_json, s, daemon, owner)
     elif not daemon_answers():
         daemon.start()
     return daemon_json

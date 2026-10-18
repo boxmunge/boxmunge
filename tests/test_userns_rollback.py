@@ -10,6 +10,7 @@ from boxmunge.userns.preflight import Report
 from tests.integration.userns.dockerd import FakeTimers
 
 S = 1048576
+_REFUSE_SOAK_EDIT = rb._refuse_soak_edit  # before the fixture stands it in
 
 
 def _vol(name):
@@ -61,7 +62,7 @@ def remapped(paths, monkeypatch, tmp_path):
     monkeypatch.setattr(rb, "shift_journalled", lambda j, tree, d, save, key, seed=None: events.append(
         f"unshift {tree.name if tree.name != '_data' else tree.parent.name}"))
     monkeypatch.setattr(rb, "set_caddyfile_mode", lambda p, mode: events.append(f"caddyfile {mode:o}"))
-    monkeypatch.setattr(rb, "back_to_prior", lambda paths, text, s, daemon: (
+    monkeypatch.setattr(rb, "back_to_prior", lambda paths, text, s, daemon, owner=None: (
         events.append(f"daemon.json {text}"), daemon.stop(), daemon.start()))
     monkeypatch.setattr(rb, "_verify_prior_store", lambda j: events.append("prior store verified"))
     monkeypatch.setattr(rb, "recreate", lambda v: events.append(f"create {v.name}"))
@@ -70,6 +71,7 @@ def remapped(paths, monkeypatch, tmp_path):
     monkeypatch.setattr(rb, "bring_up", lambda *a, **kw: events.append("bring-up"))
     monkeypatch.setattr(rb, "remove_tars", lambda d: events.append("tars removed"))
     monkeypatch.setattr(rb, "notify", lambda *a, **kw: True)
+    monkeypatch.setattr(rb, "_refuse_soak_edit", lambda j: None)
     return events, new_root
 
 
@@ -170,3 +172,26 @@ def test_the_rollback_scans_the_forward_binds_too(paths, remapped, monkeypatch) 
     monkeypatch.setattr(rb, "preflight", lambda *a, **kw: seen.update(kw) or Report())
     rb.rollback(paths, daemon=_Daemon(remapped[0]), timers=FakeTimers())
     assert seen["extra_binds"] and seen["extra_binds"][0].endswith("uploads")
+
+
+def test_a_daemon_json_changed_during_the_soak_stops_the_rollback(paths, remapped,
+                                                                monkeypatch) -> None:
+    from boxmunge.userns.daemon_config import merged_daemon_json
+    j = load_journal(paths)
+    (rb.uo.ETC / "docker").mkdir(exist_ok=True)
+    (rb.uo.ETC / "docker" / "daemon.json").write_bytes(merged_daemon_json(j.daemon_json.encode()))
+    _REFUSE_SOAK_EDIT(j)  # the migration's own file: fine
+    (rb.uo.ETC / "docker" / "daemon.json").write_text('{"debug": true}')
+    with pytest.raises(rb.MigrationError, match="would drop that change"):
+        _REFUSE_SOAK_EDIT(j)
+
+
+def test_the_original_daemon_json_comes_back_with_its_mode(monkeypatch) -> None:
+    from boxmunge.userns import switch as sw
+    written = []
+    monkeypatch.setattr(sw, "atomic_write_bytes", lambda path, data, mode, owner:
+                        written.append((mode, owner)))
+    (sw.uo.ETC / "docker").mkdir(exist_ok=True)
+    sw.write_daemon_json("{}", [0o600, 0, 0])
+    sw.write_daemon_json("{}")
+    assert written[0] == (0o600, (0, 0)) and written[1][0] == 0o644

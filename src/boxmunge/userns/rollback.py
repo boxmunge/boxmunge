@@ -34,7 +34,8 @@ from boxmunge.userns.journal import FORWARD, ROLLBACK, Journal, load_journal, sa
 from boxmunge.userns.preflight import PreflightRefused, preflight
 from boxmunge.userns.shift import Direction
 from boxmunge.userns.switch import (
-    MigrationError, back_to_prior, ensure_prior, set_caddyfile_mode,
+    MigrationError, back_to_prior, daemon_json_path, ensure_prior, read_daemon_json,
+    set_caddyfile_mode,
 )
 from boxmunge.userns.volumes import data_dir, move, recreate
 
@@ -45,7 +46,7 @@ _PLATFORM = frozenset({"caddy", "system"})
 def _abort(paths: BoxPaths, j: Journal, daemon: DaemonControl, timers: TimerControl,
            images_dir: Path, save: Save) -> Journal:
     """Before the switch nothing was carried: restart what was stopped."""
-    j.daemon_json = ensure_prior(paths, j.daemon_json, j.offset, daemon)
+    j.daemon_json = ensure_prior(paths, j.daemon_json, j.offset, daemon, j.daemon_json_owner)
     if j.phase != "started":  # a quiesce may have begun
         bring_up(paths, Inventory.from_json(j.inventory), j, save, component=COMPONENT,
                  prefix="abort")
@@ -169,6 +170,7 @@ def _leftovers(paths: BoxPaths, j: Journal, save: Save) -> None:
 def _start(paths: BoxPaths, j: Journal, daemon: DaemonControl, images_dir: Path) -> Journal:
     """Inventory the remapped daemon and run the inverse preflight (again
     on every resume before the quiesce: the soak goes on until then)."""
+    _refuse_soak_edit(j)
     if not daemon_answers():
         daemon.start()
     if uo.remap_offset(paths) != j.offset:
@@ -187,6 +189,20 @@ def _start(paths: BoxPaths, j: Journal, daemon: DaemonControl, images_dir: Path)
         j.direction, j.phase = ROLLBACK, "rb-started"
     j.rollback_inventory = inv.to_json()
     return j
+
+
+def _refuse_soak_edit(j: Journal) -> None:
+    """Putting the original daemon.json back would drop a change made to
+    the migration's one during the soak, silently: the operator decides."""
+    from boxmunge.userns.daemon_config import merged_daemon_json
+    ours = merged_daemon_json(j.daemon_json.encode() if j.daemon_json is not None
+                              else None).decode()
+    if read_daemon_json() != ours:
+        raise MigrationError(
+            f"{daemon_json_path()} changed since the migration wrote it; rolling back puts "
+            f"the original back and would drop that change. Make the same change to the "
+            f"original too (the journal holds it), or put back the migration's own file, "
+            f"then run userns-rollback again")
 
 
 def _refuse(j: Journal | None) -> Journal:
@@ -224,7 +240,7 @@ def _reverse(paths: BoxPaths, j: Journal, daemon: DaemonControl, rb_images: Path
         j.phase = "rb-restored"
         save()
     if not j.reached("rb-switched"):
-        back_to_prior(paths, j.daemon_json, j.offset, daemon)
+        back_to_prior(paths, j.daemon_json, j.offset, daemon, j.daemon_json_owner)
         _verify_prior_store(j)
         j.phase = "rb-switched"
         save()

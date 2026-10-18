@@ -42,6 +42,7 @@ class Journal:
     phase: str
     offset: int
     daemon_json: str | None = None
+    daemon_json_owner: list[int] | None = None  # [mode, uid, gid] of the original
     prior_store: dict[str, Any] = field(default_factory=dict)
     inventory: dict[str, Any] = field(default_factory=dict)
     rollback_inventory: dict[str, Any] = field(default_factory=dict)
@@ -60,7 +61,7 @@ class Journal:
 
 
 _TYPES: dict[str, tuple[type, ...]] = {
-    "daemon_json": (str, type(None)), "prior_store": (dict,), "inventory": (dict,),
+    "daemon_json": (str, type(None)), "daemon_json_owner": (list, type(None)), "prior_store": (dict,), "inventory": (dict,),
     "rollback_inventory": (dict,), "items": (dict,), "timers": (dict,), "image_map": (dict,),
     "setid": (dict,), "caddyfile_mode": (int, type(None)), "applied_at": (str, type(None)),
     "failed": (str, type(None)), "fresh_install": (bool,),
