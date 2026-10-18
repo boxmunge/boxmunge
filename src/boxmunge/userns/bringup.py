@@ -22,7 +22,7 @@ from boxmunge.data_helper import HELPER_IMAGE
 from boxmunge.docker import caddy_reload
 from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.fileutil import atomic_write_text
-from boxmunge.lifecycle import is_blocked
+from boxmunge.lifecycle import lifecycle_block
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.paths import BoxPaths
 from boxmunge.pause import render_maintenance_caddy_config
@@ -92,7 +92,7 @@ def _platform(paths: BoxPaths, projects: list[str], journal: Journal, prefix: st
     compose_up_platform(paths.system, ["compose.yml"], "system", build=rebuild)
     connect(paths)
     for p in projects:
-        if not is_blocked(p, paths) and journal.items.get(f"{prefix}:{p}") != "up":
+        if not lifecycle_block(p, paths) and journal.items.get(f"{prefix}:{p}") != "up":
             _maintenance(paths, p)
     compose_up_platform(paths.caddy, ["compose.yml"], "caddy", build=False)
     caddy_reload(paths.caddy, paths.state)
@@ -107,7 +107,7 @@ def bring_up(paths: BoxPaths, inv: Inventory, journal: Journal, save: Callable[[
         key = f"{prefix}:{p}"
         if journal.items.get(key) == "up":
             continue
-        block = is_blocked(p, paths)
+        block = lifecycle_block(p, paths)
         try:
             if block:
                 prepare_compose_override(paths, load_manifest(paths.project_manifest(p)),

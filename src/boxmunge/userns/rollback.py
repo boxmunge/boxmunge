@@ -29,6 +29,7 @@ from boxmunge.userns.daemon_ctl import DaemonControl, TimerControl, daemon_answe
 from boxmunge.userns.engine import Save, project_locks, shift_journalled
 from boxmunge.userns.images import IMAGES_DIR, load_all, remove_tars, save_all
 from boxmunge.userns.inventory import Inventory, take_inventory
+from boxmunge.userns.marker import clear_marker, set_marker
 from boxmunge.userns.journal import FORWARD, ROLLBACK, Journal, load_journal, save_journal
 from boxmunge.userns.preflight import PreflightRefused, preflight
 from boxmunge.userns.shift import Direction
@@ -50,6 +51,7 @@ def _abort(paths: BoxPaths, j: Journal, daemon: DaemonControl, timers: TimerCont
                  prefix="abort")
     remove_tars(images_dir)
     timers.restore(j.timers)
+    clear_marker(paths)
     j.direction, j.phase, j.failed = ROLLBACK, "rolled-back", None
     save()
     return j
@@ -202,6 +204,7 @@ def _reverse(paths: BoxPaths, j: Journal, daemon: DaemonControl, rb_images: Path
         save_all(rinv.images, j, rb_images, save, prefix="rb-image")
         j.phase = "rb-saved"
         save()
+        set_marker(paths, "userns-rollback")
         quiesce(rinv)
         _remove_remapped_containers()
         daemon.stop()
@@ -251,6 +254,7 @@ def rollback(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,
             _reverse(paths, j, daemon, images_dir / "rollback", save)
             remove_tars(images_dir)
             timers.restore(j.timers)
+            clear_marker(paths)
             j.phase = "rolled-back"
             save()
         except BaseException as e:

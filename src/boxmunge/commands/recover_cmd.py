@@ -58,7 +58,7 @@ def _held_by_lift(project_name: str, paths: BoxPaths) -> bool:
         )
         return True
     block = is_blocked(project_name, paths)
-    if block and block.reason is BlockReason.QUARANTINED:
+    if block and block.reason in (BlockReason.QUARANTINED, BlockReason.MIGRATING):
         print(f"ERROR: {block.refuse_message}", file=sys.stderr)
         return True
     return False

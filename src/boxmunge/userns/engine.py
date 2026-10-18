@@ -36,6 +36,7 @@ from boxmunge.userns.bringup import bring_up, quiesce
 from boxmunge.userns.daemon_ctl import DaemonControl, TimerControl, daemon_answers
 from boxmunge.userns.images import IMAGES_DIR, load_all, save_all
 from boxmunge.userns.inventory import PROXY_NETWORK, Inventory, take_inventory
+from boxmunge.userns.marker import clear_marker, set_marker
 from boxmunge.userns.journal import FORWARD, ROLLBACK, Journal, load_journal, save_journal
 from boxmunge.userns.preflight import PreflightRefused, preflight
 from boxmunge.userns.shift import Direction, scan_tree, shift_tree
@@ -46,6 +47,11 @@ from boxmunge.userns.switch import (
 from boxmunge.userns.volumes import data_dir, move, recreate
 
 COMPONENT = "userns-migrate"
+FINISH = "userns-migrate (to resume) or userns-rollback"
+
+
+class SwitchUndone(MigrationError):
+    """The remapped daemon did not start; the box runs on its old root again."""
 Save = Callable[[], None]
 
 
@@ -126,9 +132,10 @@ def _switch(paths: BoxPaths, j: Journal, inv: Inventory, daemon: DaemonControl,
             del j.items[key]  # an earlier failed switch's restart says nothing about this one
         bring_up(paths, inv, j, save, component=COMPONENT, prefix="restart")
         timers.restore(j.timers)
+        clear_marker(paths)  # nothing was carried: the box is as before
         j.phase, j.failed = "prepared", f"the remapped daemon did not start: {e}"
         save()
-        raise MigrationError(f"the remapped daemon did not start ({e}). daemon.json was "
+        raise SwitchUndone(f"the remapped daemon did not start ({e}). daemon.json was "
                              f"restored and the box restarted on its old root; fix the cause, "
                              f"then run userns-migrate again, or userns-rollback") from e
     j.phase = "switched"
@@ -247,33 +254,40 @@ def migrate(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,
             save_journal(paths, journal)
 
         inv = Inventory.from_json(j.inventory)
-        stopped = False
+        stopped = False  # the timers, as this run left them
         try:
             j.failed = None
             if not j.reached("switched"):
                 save_all(inv.images, j, images_dir, save)
                 if not j.reached("prepared"):
                     _prepare(paths, j, inv, save)
-                timers.stop_all()  # from here until the box runs again
-                stopped = True
+            # From here until the box runs again: no timer, no project command.
+            set_marker(paths, FINISH)
+            timers.stop_all()
+            stopped = True
+            if not j.reached("switched"):
                 quiesce(inv)  # again on a resume: the old daemon may have restarted some
                 j.phase = "quiesced"
                 save()
-                _switch(paths, j, inv, daemon, timers, save)
-            timers.stop_all()
-            stopped = True
+                try:
+                    _switch(paths, j, inv, daemon, timers, save)
+                except SwitchUndone:
+                    stopped = False  # the box runs on its old root, timers too
+                    raise
             if not j.reached("rebuilt"):
                 _rebuild(paths, j, inv, images_dir, save)
             results = bring_up(paths, inv, j, save, component=COMPONENT)
             timers.restore(j.timers)
+            stopped = False
+            clear_marker(paths)
             j.phase, j.failed = "applied", None
             j.applied_at = datetime.now(timezone.utc).isoformat()
             save()
         except BaseException as e:
             j.failed = j.failed or f"{j.phase}: {e}"
             save()
-            held = ("The boxmunge timers are stopped. " if stopped and j.phase != "prepared"
-                    else "")
+            held = ("The boxmunge timers are stopped, and every project command refuses "
+                    "until it is finished. " if stopped else "")
             notify(paths, "userns migration stopped", f"Stopped after phase {j.phase}: {e}. "
                    f"{held}Re-run userns-migrate to resume, or userns-rollback.",
                    component=COMPONENT, priority=1)

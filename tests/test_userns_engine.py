@@ -72,7 +72,7 @@ def test_a_clean_run_goes_through_every_phase(paths, box) -> None:
     j = _migrate(paths, timers)
     assert calls == [*STEPS, "final"] and j.phase == "applied" and j.applied_at
     assert load_journal(paths).timers == FakeTimers().state()
-    assert [c[0] for c in timers.calls] == ["stop", "stop", "restore"]
+    assert [c[0] for c in timers.calls] == ["stop", "restore"]
     assert calls.index("_prepare") < calls.index("quiesce")
 
 
@@ -281,3 +281,43 @@ def test_a_stopped_daemons_bridges_are_deleted_as_a_reboot_would(monkeypatch, tm
                         type("R", (), {"returncode": 0, "stderr": ""})())
     sw.drop_bridges(["br-0123456789ab", "br-gone"])
     assert ran == [["ip", "link", "delete", "br-0123456789ab"]]
+
+
+def test_the_marker_holds_from_the_quiesce_until_the_box_runs_again(paths, box, monkeypatch) -> None:
+    calls, crash = box
+    from boxmunge.userns.marker import migration_in_progress
+    seen = {}
+    real_prepare, real_quiesce = en._prepare, en.quiesce
+    monkeypatch.setattr(en, "_prepare", lambda *a: (seen.update(prepare=migration_in_progress(
+        paths)), real_prepare(*a)))
+    monkeypatch.setattr(en, "quiesce", lambda inv: (seen.update(quiesce=migration_in_progress(
+        paths)), real_quiesce(inv)))
+    crash["_rebuild"] = True
+    with pytest.raises(RuntimeError):
+        _migrate(paths)
+    assert seen == {"prepare": None, "quiesce": en.FINISH}  # backups run before it
+    assert migration_in_progress(paths) == en.FINISH  # stopped part-way: it stays
+    _migrate(paths)
+    assert migration_in_progress(paths) is None
+
+
+def test_a_quiesce_failure_says_the_timers_are_stopped(paths, box, monkeypatch) -> None:
+    calls, crash = box
+    sent = []
+    monkeypatch.setattr(en, "notify", lambda p, t, body, **kw: sent.append(body) or True)
+    crash["quiesce"] = True
+    with pytest.raises(RuntimeError):
+        _migrate(paths)
+    assert "timers are stopped" in sent[0] and "every project command refuses" in sent[0]
+
+
+def test_a_switch_undone_clears_the_marker(paths, monkeypatch, tmp_path) -> None:
+    from boxmunge.userns.marker import migration_in_progress, set_marker
+    _etc, _original, j = _real_switch_box(paths, monkeypatch, tmp_path)
+    set_marker(paths, en.FINISH)
+    monkeypatch.setattr(en.uo, "remap_offset", lambda paths: 0)
+    monkeypatch.setattr(en, "bring_up", lambda *a, **kw: None)
+    with pytest.raises(en.SwitchUndone):
+        en._switch(paths, j, Inventory("overlay2", "", str(tmp_path), "29.9.0"), _Daemon(),
+                   FakeTimers(), lambda: save_journal(paths, j))
+    assert migration_in_progress(paths) is None

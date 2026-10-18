@@ -42,6 +42,7 @@ from boxmunge.docker_containers import container_mounts, project_containers
 from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.legacy_stage import legacy_stage_refusal
+from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation
 from boxmunge.paths import BoxPaths
 from boxmunge.release_target import production_target, resolved_services
@@ -121,9 +122,16 @@ def _remove_partial(target: str) -> None:
               file=sys.stderr)
 
 
+def _refuse_if_migrating(paths: BoxPaths, project: str) -> None:
+    block = is_blocked(project, paths)
+    if block is not None and block.reason is BlockReason.MIGRATING:
+        raise DataError(block.refuse_message)
+
+
 def adopt_locked(paths: BoxPaths, project: str, service: str, path: str, name: str) -> None:
     """The adopt core. Caller holds the project lock. Raises DataError,
     DockerError or ComposeRefused (a DockerError) naming what failed."""
+    _refuse_if_migrating(paths, project)
     refusal = legacy_stage_refusal(paths, project)
     if refusal is not None:
         raise DataError(refusal)
@@ -202,6 +210,7 @@ def chown_locked(paths: BoxPaths, project: str, service: str, ids: tuple[int, in
     user. Caller holds the project lock. The service is left stopped: its
     next start (the deploy) runs it as `ids`. Raises DataError, DockerError,
     BindSourceError or RunAsError."""
+    _refuse_if_migrating(paths, project)
     refusal = legacy_stage_refusal(paths, project)
     if refusal is not None:
         raise DataError(refusal)

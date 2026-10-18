@@ -131,6 +131,10 @@ def _update_project_locked(paths: BoxPaths, target: UpdateTarget,
     # Paused projects DO get a dry-run pre-fetch so resume time stays short
     # and the operator sees pending updates in the log.
     block = is_blocked(target.name, paths)
+    if block and block.reason is BlockReason.MIGRATING:
+        log_operation("container-update", block.skip_message, paths, project=target.name)
+        return {"name": target.name, "status": "migrating",
+                "previous_digests": {}, "current_digests": {}}
     if block and block.reason is BlockReason.QUARANTINED:
         log_operation("container-update", block.skip_message, paths, project=target.name)
         return {"name": target.name, "status": "quarantined",
@@ -215,6 +219,13 @@ def run_container_update(
     containers. Reports which targets WOULD change. The pulled images remain
     in local Docker storage (harmless — they'll be used the next real run).
     """
+    # Caddy too: no target may be recreated while the daemon is migrating.
+    from boxmunge.lifecycle import migration_refusal
+    refusal = migration_refusal("container-update", paths)
+    if refusal:
+        print(f"ERROR: {refusal}", file=sys.stderr)
+        log_warning("container-update", refusal, paths)
+        return 1
     # Step 0: Lock
     paths.container_update_state.mkdir(parents=True, exist_ok=True)
     # state/ is deploy-writable: open("w") would follow a planted symlink and

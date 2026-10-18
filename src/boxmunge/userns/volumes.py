@@ -61,8 +61,12 @@ def move(src_root: Path, dst_root: Path, name: str) -> None:
         raise VolumeError(f"{src} is not a directory; refusing to move it")
     if os.path.lexists(dst):
         if not _real_dir(dst) or any(os.scandir(dst)):
-            raise VolumeError(f"{dst} is not the empty directory Docker just created; "
-                              f"refusing to replace it")
+            raise VolumeError(
+                f"{dst} is not the empty directory Docker just created, so {src} (the "
+                f"volume's data) is not moved over it. Something wrote to volume {name} on "
+                f"the target daemon since the migration stopped. Keep what it holds if you "
+                f"need it (it is not the volume's data), empty it, then run the same "
+                f"command again")
     elif not _real_dir(dst.parent):
         raise VolumeError(f"{dst.parent} does not exist: create volume {name} on the "
                           f"target daemon first")

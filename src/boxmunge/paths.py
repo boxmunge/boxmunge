@@ -132,6 +132,9 @@ class BoxPaths:
         self.upgrade_lock = self.upgrade_root / "upgrade.lock"
         self.legacy_upgrade_lock = self.upgrade_state / "upgrade.lock"
         self.userns_journal = self.upgrade_root / "userns-migration.json"
+        # Root's, world-readable, in the root-only-writable top directory:
+        # while it exists no command may change a project (lifecycle).
+        self.userns_marker = root / "userns-migrating"
         self.active_slot = self.upgrade_state / "active-slot"
         self.cosign_pub = self.config / "cosign.pub"
         self.container_update_state = self.state / "container-updates"

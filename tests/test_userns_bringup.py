@@ -49,7 +49,7 @@ def box(paths, monkeypatch):
     monkeypatch.setattr(bu, "prepare_compose_override",
                         lambda paths, m, component: events.append(("overlay", m["project"])))
     held = Block(reason=BlockReason.PAUSED, detail={}, refuse_message="", skip_message="")
-    monkeypatch.setattr(bu, "is_blocked", lambda p, paths: held if p == "held" else None)
+    monkeypatch.setattr(bu, "lifecycle_block", lambda p, paths: held if p == "held" else None)
 
     def up(paths, p, **kw):
         events.append(("up", p, tuple(kw["services"]), kw["record"], kw["build"]))
