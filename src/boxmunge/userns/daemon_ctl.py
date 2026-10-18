@@ -75,18 +75,23 @@ class SystemdDaemon:
 
 
 class SystemdTimers:
+    """Timers are disabled, not only stopped, for the downtime: a reboot
+    then starts none of them on a box in between two daemons. The journal
+    holds which were enabled; those are enabled and started again."""
+
     def state(self) -> dict[str, bool]:
-        return {t: _systemctl("is-active", "--quiet", t).returncode == 0 for t in BOXMUNGE_TIMERS}
+        return {t: _systemctl("is-enabled", "--quiet", t).returncode == 0
+                for t in BOXMUNGE_TIMERS}
 
     def stop_all(self) -> None:
-        result = _systemctl("stop", *BOXMUNGE_TIMERS)
+        result = _systemctl("disable", "--now", *BOXMUNGE_TIMERS)
         if result.returncode != 0:
-            raise ControlError(f"systemctl stop of the boxmunge timers failed: "
+            raise ControlError(f"systemctl disable --now of the boxmunge timers failed: "
                                f"{result.stderr.strip()}")
 
     def restore(self, state: dict[str, bool]) -> None:
-        active = sorted(t for t, on in state.items() if on)
-        if active:
-            result = _systemctl("start", *active)
+        enabled = sorted(t for t, on in state.items() if on)
+        if enabled:
+            result = _systemctl("enable", "--now", *enabled)
             if result.returncode != 0:
-                raise ControlError(f"restarting timers {active} failed: {result.stderr.strip()}")
+                raise ControlError(f"re-enabling timers {enabled} failed: {result.stderr.strip()}")

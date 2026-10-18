@@ -19,7 +19,7 @@ def _systemctl(monkeypatch, rc_for):
     return calls
 
 
-def test_timers_are_read_stopped_and_only_active_ones_restarted(monkeypatch) -> None:
+def test_timers_are_read_disabled_and_only_enabled_ones_restored(monkeypatch) -> None:
     calls = _systemctl(monkeypatch, lambda a: 0 if a[-1] == "boxmunge-health.timer" else 3)
     timers = SystemdTimers()
     state = timers.state()
@@ -28,7 +28,9 @@ def test_timers_are_read_stopped_and_only_active_ones_restarted(monkeypatch) -> 
                         subprocess.CompletedProcess(a, 0, "", ""))
     timers.stop_all()
     timers.restore(state)
-    assert calls[-2][0] == "stop" and calls[-1] == ("start", "boxmunge-health.timer")
+    assert calls[0][:2] == ("is-enabled", "--quiet")
+    assert calls[-2][:2] == ("disable", "--now")  # survives a reboot
+    assert calls[-1] == ("enable", "--now", "boxmunge-health.timer")
 
 
 def test_a_failed_daemon_start_is_loud(monkeypatch) -> None:
