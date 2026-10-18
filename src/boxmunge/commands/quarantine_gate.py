@@ -35,12 +35,13 @@ from boxmunge.cve.kev import load_kev
 from boxmunge.cve.policy import Disposition, FindingDisposition
 from boxmunge.cve.quarantine import (
     QuarantineError, checked_quarantine_record, is_quarantined, lift_quarantine,
-    read_quarantine_state,
+    read_quarantine_state, reassert_quarantine,
 )
+from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.cve.scan_state import BASIS_STARTUP_IMAGES
 from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
 from boxmunge.docker_run import DockerError
-from boxmunge.log import log_error, log_operation
+from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 from boxmunge.release_target import (
@@ -237,21 +238,51 @@ def require_unchanged(paths: BoxPaths, clearance: Clearance) -> None:
                                  "quarantine stays in place. Deploy again."])
 
 
-def _verify_running(clearance: Clearance) -> dict[str, str]:
-    """Every container the project runs must be a scanned image; returns
-    {container: its service}."""
+def _verify_running(paths: BoxPaths, clearance: Clearance, component: str) -> dict[str, str]:
+    """Every running container must be on a scanned image. Returns
+    {container: its service} of those the lift gives a restart policy back:
+    a stopped container on another image (an inactive profile's, left from
+    an earlier release) stays held at "no", so a daemon restart cannot
+    start it, and is named."""
     services: dict[str, str] = {}
-    wrong = []
+    wrong, held = [], []
     for c in docker_containers.project_containers(clearance.project):
         if c.oneoff:
             continue
-        services[c.name] = c.service
         scanned = clearance.images.get(c.service)
-        if scanned is None or c.image_id != scanned[1]:
+        if scanned is not None and c.image_id == scanned[1]:
+            services[c.name] = c.service
+        elif c.running:
             wrong.append(f"{c.name} runs {c.image_id}, not a scanned image")
+        else:
+            held.append(c.name)
     if wrong:
         raise QuarantineError("; ".join(wrong))
+    if held:
+        message = (f"stopped containers on images this deploy did not scan keep restart "
+                   f"policy \"no\": {', '.join(held)}; remove them if they are not needed")
+        print(f"  WARNING: {message}")
+        log_warning(component, message, paths, project=clearance.project)
     return services
+
+
+_CONDITIONS = {"none": "no", "any": "always", "on-failure": "on-failure"}
+
+
+def _policy(svc: dict[str, Any]) -> str:
+    """The restart policy compose gives a container of ``svc``."""
+    if svc.get("restart"):
+        return str(svc["restart"])
+    rule = (svc.get("deploy") or {}).get("restart_policy") or {}
+    condition = rule.get("condition")
+    if not condition:
+        return "no"
+    if condition not in _CONDITIONS:
+        raise QuarantineError(f"deploy.restart_policy.condition {condition!r} is not one "
+                              f"of {', '.join(_CONDITIONS)}")
+    attempts = rule.get("max_attempts")
+    return f"on-failure:{attempts}" if condition == "on-failure" and attempts else \
+        _CONDITIONS[condition]
 
 
 def _release_policies(paths: BoxPaths, project: str,
@@ -260,7 +291,30 @@ def _release_policies(paths: BoxPaths, project: str,
     container it creates, so a held one the deploy did not recreate gets the
     same, never a policy saved from an earlier release."""
     _model, model = resolved_services(production_target(paths, project))
-    return {name: str(model[svc].get("restart") or "no") for name, svc in services.items()}
+    gone = sorted({svc for svc in services.values() if svc not in model})
+    if gone:
+        raise QuarantineError(f"services {', '.join(gone)} are no longer in the release")
+    return {name: _policy(model[svc]) for name, svc in services.items()}
+
+
+def keep_quarantined(paths: BoxPaths, project: str) -> None:
+    """A fix's deploy stopped after its configs replaced the maintenance
+    site: re-assert the quarantine now (maintenance page, stop, held
+    restart policies) rather than leave its hosts routed to nothing until
+    the next scan. A failure is said loudly; the next scan retries it."""
+    try:
+        hosts = list(load_manifest(paths.project_manifest(project)).get("hosts") or [])
+        files = ["compose.yml"] + (["compose.boxmunge.yml"]
+                                   if paths.project_compose_override(project).exists() else [])
+        reassert_quarantine(project, paths, project_dir=paths.project_dir(project),
+                            hosts=hosts, compose_files=files)
+    except (QuarantineError, ManifestError, OSError) as e:
+        print(f"ERROR: {project} stays CVE-quarantined, but putting its maintenance page "
+              f"back failed: {e}. The next scan retries it.", file=sys.stderr)
+        return
+    print(f"  {project} stays CVE-quarantined: its maintenance page is back and its "
+          f"containers are stopped. Deploy a fix again, or run `boxmunge security resume "
+          f"{project}`.", file=sys.stderr)
 
 
 def lift_after_deploy(paths: BoxPaths, project: str, ref: str, clearance: Clearance, *,
@@ -269,7 +323,8 @@ def lift_after_deploy(paths: BoxPaths, project: str, ref: str, clearance: Cleara
     container runs a scanned image, then lift the quarantine. Returns 0, or
     1 with the failure reported (the quarantine stays)."""
     try:
-        policies = _release_policies(paths, project, _verify_running(clearance))
+        policies = _release_policies(paths, project,
+                                     _verify_running(paths, clearance, component))
         site = paths.project_caddy_site(project).read_text()
         lift_quarantine(project, paths, project_caddy_site_content=site,
                         compose_files=["compose.yml", "compose.boxmunge.yml"],

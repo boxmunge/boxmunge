@@ -289,7 +289,7 @@ def open_install_reason(paths: BoxPaths, project: str, txn: str | None = None) -
         return str(e)
     if open_txn is None or open_txn.id == txn:
         return None
-    return start_refusal(project, open_txn, stale_reason(paths, project, open_txn))
+    return start_refusal(paths, project, open_txn, stale_reason(paths, project, open_txn))
 
 
 def refuse_if_install_open(paths: BoxPaths, project: str, *, component: str,
@@ -346,10 +346,18 @@ def options_text(project: str, txn: InstallTxn, *, rerun: bool = True,
     return "; ".join(lines)
 
 
-def start_refusal(project: str, txn: InstallTxn, stale: str | None) -> str:
+def start_refusal(paths: BoxPaths, project: str, txn: InstallTxn, stale: str | None) -> str:
     if stale:
         return (f"an install of {txn.ref} ({txn.source}, phase {txn.phase}) is recorded "
                 f"in .releases/install.json, but {stale}. Check that production is what "
                 f"live.json says, then run 'boxmunge-server install-txn {project} --drop'")
     return (f"an install of {txn.ref} ({txn.source}) is open at phase {txn.phase}: "
-            f"{options_text(project, txn)}")
+            f"{options_text(project, txn, quarantined=quarantined(paths, project))}")
+
+
+def quarantined(paths: BoxPaths, project: str) -> bool:
+    """For the ways out an install offers: a quarantine refuses rollback."""
+    # cve.quarantine starts containers through compose_guard, which imports
+    # this module: imported here, not at module load.
+    from boxmunge.cve.quarantine import is_quarantined
+    return is_quarantined(project, paths)

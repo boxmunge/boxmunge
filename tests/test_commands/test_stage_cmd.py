@@ -229,6 +229,7 @@ class TestQuarantinedStage:
         self._quarantine(paths)
         monkeypatch.setattr("boxmunge.staging_bringup.clear_release", lambda *a: None)
         assert run_stage("testapp", paths) == 0
+        assert [c.kwargs["pinned"] for c in mock_up.call_args_list] == [True]
         assert load_slot(paths, "testapp").state == "ready"
         assert paths.project_quarantine_state("testapp").exists()
 

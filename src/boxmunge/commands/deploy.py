@@ -17,7 +17,7 @@ from boxmunge.commands.deploy_steps import (
 from boxmunge.compose import ComposeError
 from boxmunge.compose_guard import compose_up_checked
 from boxmunge.commands.quarantine_gate import (
-    Clearance, lift_after_deploy, production_now, require_unchanged,
+    Clearance, keep_quarantined, lift_after_deploy, production_now, require_unchanged,
 )
 from boxmunge.compose_resolve import ComposeResolveError
 from boxmunge.cve.quarantine import is_quarantined
@@ -217,6 +217,8 @@ def _start_release(
     except (OSError, ValueError, DeployRefused) as e:
         print(f"ERROR: {project_name} was not started ({production_now(paths, project_name)})."
               f" Fix the following and deploy again:\n{e}", file=sys.stderr)
+        if decision.clearance is not None:
+            keep_quarantined(paths, project_name)
         log_error(component, f"Deploy refused before the start: {e}", paths,
                   project=project_name)
         return 1
@@ -301,10 +303,7 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
             record_deploy_state(paths, project_name, actual_ref, snapshot_name, replaced_ref)
     if rc != 0:
         if clearance is not None:
-            print(f"  The CVE quarantine of {project_name} ({clearance.cve_id}) stays in "
-                  f"place: the next scan puts the maintenance page back. Deploy again, or "
-                  f"run `boxmunge security resume {project_name}`, which scans what would "
-                  f"start.", file=sys.stderr)
+            keep_quarantined(paths, project_name)
         return rc
 
     log_operation("deploy", f"Deploy completed ref={actual_ref}", paths,

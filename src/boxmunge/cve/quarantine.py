@@ -320,7 +320,7 @@ def _restore_restart_policies(project_name: str, state: dict[str, Any],
                               restore: Mapping[str, str] | None = None) -> None:
     """Give each still-existing container its pre-quarantine policy back,
     or the policies in ``restore`` instead."""
-    saved = state.get("restart_policies") or {} if restore is None else restore
+    saved = (state.get("restart_policies") or {}) if restore is None else restore
     try:
         restart_hold.release(project_name, saved)
     except DockerError as e:

@@ -116,6 +116,8 @@ def compose_up(
 
     Call it through boxmunge.compose_guard, which checks the project first.
     """
+    if build and pinned:
+        raise ValueError("compose_up: a pinned up does not build")
     cmd = compose_command(project_name, compose_files,
                           project_directory=project_directory, env_file=env_file)
     cmd.extend(["up", "-d", "--remove-orphans"])

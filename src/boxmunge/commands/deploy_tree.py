@@ -25,7 +25,7 @@ from boxmunge.commands.deploy_steps import snapshot_live_release
 from boxmunge.commands.release_config import (
     ReleaseDecision, decide_release_users, generate_release_config,
 )
-from boxmunge.commands.quarantine_gate import require_unchanged
+from boxmunge.commands.quarantine_gate import keep_quarantined, require_unchanged
 from boxmunge.crashpoint import crash_point
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker_run import DockerError
@@ -76,7 +76,7 @@ def deploy_tree_locked(project_name: str, paths: BoxPaths, req: TreeDeploy) -> i
     if txn is not None:
         stale = stale_reason(paths, project_name, txn)
         if stale or txn.abandoning:
-            print(f"ERROR: {start_refusal(project_name, txn, stale)}.", file=sys.stderr)
+            print(f"ERROR: {start_refusal(paths, project_name, txn, stale)}.", file=sys.stderr)
             return 1
         if (txn.source, txn.ref, txn.staged_id) == (req.source, req.ref, req.staged_id):
             return _resume(project_name, paths, req, txn)
@@ -223,6 +223,8 @@ def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: I
         generate_release_config(project_name, paths, req.manifest, req.component,
                                 decision.users)
     except (OSError, ValueError) as e:
+        if decision.clearance is not None:
+            keep_quarantined(paths, project_name)
         return report_left_open(project_name, paths, txn, req,
                                 f"generating its configs failed: {e}")
     if decision.clearance is not None:
@@ -230,6 +232,7 @@ def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: I
             require_unchanged(paths, decision.clearance)
         except DeployRefused as e:
             print(f"ERROR: {e}", file=sys.stderr)
+            keep_quarantined(paths, project_name)
             return report_left_open(project_name, paths, txn, req,
                                     "it no longer starts the images that were scanned")
     if not resumed_switch:
@@ -339,7 +342,7 @@ def bundle_resume_problem(project_name: str, paths: BoxPaths, txn: InstallTxn,
     stale = stale_reason(paths, project_name, txn)
     if stale or txn.abandoning or txn.source != "bundle" \
             or not _names(project_name, ref, txn.ref):
-        return start_refusal(project_name, txn, stale)
+        return start_refusal(paths, project_name, txn, stale)
     if not txn.reached("installed"):
         return (f"The install of {txn.ref} cannot be resumed: its bundle is no longer in "
                 f"the inbox and the install had not finished (phase {txn.phase}). Upload "

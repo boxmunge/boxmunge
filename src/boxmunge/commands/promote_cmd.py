@@ -274,7 +274,7 @@ def _options_now(project: str, paths: BoxPaths, ref: str, slot_readable: bool) -
     if not slot_readable:
         return _unreadable_advice(project, txn)
     return (f"The install of {txn.ref} stays open at {txn.phase}: "
-            f"{options_text(project, txn)}")
+            f"{options_text(project, txn, quarantined=is_quarantined(project, paths))}")
 
 
 def _report_failed(project: str, paths: BoxPaths, meta: StagedRelease, rc: int) -> int:

@@ -212,10 +212,10 @@ def _open_install(project_name: str, paths: BoxPaths) -> tuple[bool, InstallTxn 
         return True, None
     stale = stale_reason(paths, project_name, txn)
     if stale:
-        print(f"ERROR: {start_refusal(project_name, txn, stale)}.", file=sys.stderr)
+        print(f"ERROR: {start_refusal(paths, project_name, txn, stale)}.", file=sys.stderr)
         return False, None
     if txn.abandoning:
-        print(f"ERROR: Cannot roll back {project_name}: {start_refusal(project_name, txn, None)}.",
+        print(f"ERROR: Cannot roll back {project_name}: {start_refusal(paths, project_name, txn, None)}.",
               file=sys.stderr)
         return False, None
     if not txn.data_may_have_changed():

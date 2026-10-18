@@ -187,7 +187,7 @@ class TestQuarantinedDeploy:
         monkeypatch.setattr("boxmunge.commands.deploy_tree.require_unchanged",
                             lambda paths_, c: checked.append(c))
         monkeypatch.setattr(quarantine_gate, "_verify_running",
-                            lambda c: {"testapp-web-1": "web"})
+                            lambda paths_, c, component: {"testapp-web-1": "web"})
         monkeypatch.setattr(quarantine_gate, "_release_policies",
                             lambda paths_, project, services: {"testapp-web-1": "always"})
         mock_up.side_effect = lambda *a, **k: pinned.append(k["pinned"])

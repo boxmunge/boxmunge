@@ -92,7 +92,7 @@ def abandon_locked(project_name: str, paths: BoxPaths) -> int:
         return 1
     stale = stale_reason(paths, project_name, txn)
     if stale:
-        print(f"ERROR: {start_refusal(project_name, txn, stale)}.", file=sys.stderr)
+        print(f"ERROR: {start_refusal(paths, project_name, txn, stale)}.", file=sys.stderr)
         return 1
     refusal = _refusal(project_name, txn)
     if refusal:

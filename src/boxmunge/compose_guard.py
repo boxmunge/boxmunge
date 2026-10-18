@@ -128,7 +128,7 @@ def _refuse_if_install_open(paths: BoxPaths, project_name: str, component: str,
         raise _refused(paths, project_name, component, str(e), tampering=False) from e
     if open_txn is None or open_txn.id == txn:
         return
-    reason = start_refusal(project_name, open_txn, stale_reason(paths, project_name, open_txn))
+    reason = start_refusal(paths, project_name, open_txn, stale_reason(paths, project_name, open_txn))
     raise _refused(paths, project_name, component, reason, tampering=False)
 
 
