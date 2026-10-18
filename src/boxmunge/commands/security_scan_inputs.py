@@ -17,7 +17,7 @@ from typing import Any
 from boxmunge import docker_containers
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
-from boxmunge.cve.hardening import HardeningProfile, hardening_profile_from_compose
+from boxmunge.cve.hardening import HardeningProfile, effective_hardening_profile
 from boxmunge.cve.policy import PolicyError, Posture, parse_posture
 from boxmunge.cve.security_policy import security_policy
 from boxmunge.cve.scan_state import BASIS_CONTAINERS, BASIS_STARTUP_IMAGES
@@ -29,7 +29,7 @@ from boxmunge.docker_run import DockerError
 from boxmunge.lifecycle import is_blocked
 from boxmunge.manifest import load_manifest
 from boxmunge.paths import BoxPaths
-from boxmunge.security_overlay import services_with_off_profile
+from boxmunge.security_overlay import PROFILE_OFF, effective_profile, resolve_security
 
 
 class ProjectScanError(RuntimeError):
@@ -115,16 +115,23 @@ def hardening_profile(meta: ProjectMeta, user_model: dict[str, Any]) -> Hardenin
     """Overlay-aware hardening profile for the penalty calculation.
 
     ``user_model`` is compose.yml as Compose resolves it, so a setting that
-    arrives through `include:` or `extends:` counts. Services with profile
-    != off get boxmunge's hardening overlay applied at runtime, so the
-    policy does not penalise a project for relying on overlay defaults
-    (e.g. no-new-privileges) it did not redeclare in compose.yml.
+    arrives through `include:` or `extends:` counts. Each service is judged
+    with what boxmunge's overlay applies to it (resolved from the same
+    security blocks the overlay is built from): the project does not lose
+    points for an overlay default it did not redeclare, and a manifest
+    relaxation the overlay emits (no_new_privileges: false, cap_add) counts
+    as a deviation.
     """
-    off_services = {svc for svc, _ in services_with_off_profile(meta.manifest)}
-    overlay_services = set((user_model.get("services") or {}).keys()) - off_services
-    return hardening_profile_from_compose(
-        user_model, services_with_overlay=overlay_services,
-    )
+    project_sec = meta.manifest.get("security")
+    declared = meta.manifest.get("services") or {}
+    applied, off = {}, set()
+    for svc in (user_model.get("services") or {}):
+        entry = declared.get(svc)
+        svc_sec = entry.get("security") if isinstance(entry, dict) else None
+        applied[svc] = resolve_security(project_sec, svc_sec)
+        if effective_profile(project_sec, svc_sec) == PROFILE_OFF:
+            off.add(svc)
+    return effective_hardening_profile(user_model, applied, off)
 
 
 def load_user_model(paths: BoxPaths, project: str) -> dict[str, Any]:

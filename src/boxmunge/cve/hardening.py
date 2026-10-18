@@ -7,7 +7,7 @@ LoC budget. Pure functions and one frozen dataclass; no I/O, no decisions.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 _MAX_HARDENING_PENALTY = 2
@@ -169,3 +169,29 @@ def hardening_profile_from_compose(
         extra_caps_added=project_extra_caps_added,
         privileged=project_privileged,
     )
+
+
+def effective_hardening_profile(
+    compose: dict[str, Any],
+    applied: dict[str, dict[str, Any]],
+    off: set[str],
+) -> HardeningProfile:
+    """The profile of compose.yml with what boxmunge's overlay applies.
+
+    `applied`: service -> the settings the overlay gives it
+    (security_overlay.resolve_security); `off`: the services on profile off,
+    which get no hardening baseline. The overlay carries the manifest's
+    relaxations, which compose.yml alone does not show:
+    `security.no_new_privileges: false` drops no-new-privileges, and
+    `security.cap_add` adds capabilities. Both weaken the profile as their
+    compose.yml spellings would.
+    """
+    base = hardening_profile_from_compose(
+        compose, services_with_overlay=set(applied) - off)
+    no_new_privileges, extra_caps = base.no_new_privileges, base.extra_caps_added
+    for svc, settings in applied.items():
+        if svc not in off and "no-new-privileges:true" not in settings.get("security_opt", []):
+            no_new_privileges = False
+        if settings.get("cap_add"):
+            extra_caps = True
+    return replace(base, no_new_privileges=no_new_privileges, extra_caps_added=extra_caps)
