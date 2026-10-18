@@ -379,8 +379,18 @@ def _validate_off(paths: BoxPaths, svc: dict) -> None:
     validate_user_compose(compose, paths, project_name="myapp", off_services={"web"})
 
 
-def test_f09_profile_off_relaxes_bind_confinement_with_warning(paths: BoxPaths) -> None:
-    _validate_off(paths, {"volumes": ["/srv/media:/m"]})
+def test_f09_profile_off_does_not_relax_bind_confinement(paths: BoxPaths) -> None:
+    """Every start refuses a bind source outside the project (compose_guard),
+    whatever the profile, so validation refuses it too rather than letting
+    the deploy fail at its start."""
+    with pytest.raises(ComposeSecurityError, match="outside the project directory") as e:
+        _validate_off(paths, {"volumes": ["/srv/media:/m"]})
+    assert "security.profile: off" not in str(e.value)
+
+
+def test_f09_profile_off_does_not_relax_protected_host_paths(paths: BoxPaths) -> None:
+    with pytest.raises(ComposeSecurityError, match="protected host path"):
+        _validate_off(paths, {"volumes": ["/etc:/host-etc:ro"]})
 
 
 def test_f09_profile_off_does_not_relax_network_confinement(paths: BoxPaths) -> None:

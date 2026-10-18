@@ -437,9 +437,11 @@ services:
         assert "service web" in captured.err
         assert "profile: off" in captured.err
 
-    def test_off_service_with_hostile_volume_warns_only(
+    def test_off_service_bind_outside_the_project_is_still_refused(
         self, tmp_path: Path, paths
     ) -> None:
+        """Every start refuses a bind source outside the project, so profile
+        off cannot relax it at validation either."""
         compose = _write(tmp_path / "compose.yml", """
 services:
   web:
@@ -447,8 +449,8 @@ services:
     volumes:
       - /var/run/docker.sock:/sock
 """)
-        # No raise.
-        validate_user_compose(compose, paths, off_services={"web"}, project_name="myapp")
+        with pytest.raises(ComposeSecurityError, match="protected host path"):
+            validate_user_compose(compose, paths, off_services={"web"}, project_name="myapp")
 
     def test_non_off_service_in_same_compose_still_raises(
         self, tmp_path: Path, paths
@@ -981,8 +983,8 @@ services:
   web:
     image: nginx
     volumes:
-      - /proc:/host/proc
-      - /etc:/host/etc
+      - ${DATA_A}:/a
+      - ${DATA_B}:/b
 """)
         validate_user_compose(compose, paths, off_services={"web"}, project_name="myapp")
         captured = capsys.readouterr()

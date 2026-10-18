@@ -31,6 +31,7 @@ class Finding(NamedTuple):
     key: str
     value: str
     advice: str = HARDENING_ADVICE
+    relaxable: bool = True  # False: refused under `profile: off` too
 
 
 # Keys that Docker reads as booleans. A non-boolean value (for example the
@@ -281,7 +282,7 @@ def service_findings(
     for rule in _RULES:
         findings.extend(rule(svc))
     findings.extend(
-        Finding("volumes", entry, advice)
-        for entry, advice in check_volumes(svc, base_dir, paths, roots)
+        Finding("volumes", entry, advice, relaxable)
+        for entry, advice, relaxable in check_volumes(svc, base_dir, paths, roots)
     )
     return findings
