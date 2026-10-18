@@ -130,6 +130,10 @@ class TestComposeUpCallersUseIsBlocked:
             # Staging's bring-up for stage_locked, which refuses a blocked
             # project (refuse_if_blocked) under the lock before it.
             "boxmunge/staging_bringup.py",
+            # The userns migration's bring-up: it runs while its own marker
+            # blocks every other command, so it honours pause and
+            # quarantine only (lifecycle_block).
+            "boxmunge/userns/bringup.py",
         }
 
         missing: list[str] = []
