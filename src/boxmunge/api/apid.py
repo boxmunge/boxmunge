@@ -59,25 +59,28 @@ def run_dev(root: Path, socket_path: Path, plugin: str, *, exit_on_stdin_eof: bo
         signal.signal(sig, stop)
     watcher_failure: list[OSError] = []
     try:
-        signal.pthread_sigmask(signal.SIG_SETMASK, held)
-        if exit_on_stdin_eof:
-            threading.Thread(target=_stop_at_stdin_eof, args=(stop, watcher_failure),
-                             daemon=True).start()
-        print(f"boxmunge-apid DEV MODE: serving the fixture box {root} on {socket_path} "
-              f"as plugin:{plugin}, observe actions only. Not a real box. Ctrl-C stops.",
-              file=sys.stderr)
-        server.serve_forever()
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, held)
+            if exit_on_stdin_eof:
+                threading.Thread(target=_stop_at_stdin_eof, args=(stop, watcher_failure),
+                                 daemon=True).start()
+            print(f"boxmunge-apid DEV MODE: serving the fixture box {root} on {socket_path} "
+                  f"as plugin:{plugin}, observe actions only. Not a real box. Ctrl-C stops.",
+                  file=sys.stderr)
+            server.serve_forever()
+        finally:
+            server.server_close()
+            socket_path.unlink(missing_ok=True)
+        unwatched = (f"cannot watch stdin for --exit-on-stdin-eof: {watcher_failure[0]}"
+                     if watcher_failure else None)
+        try:
+            server.drain()  # nothing may still be running (or printing) as the interpreter exits
+        except ServerError as e:
+            raise ServerError(f"{e}; also {unwatched}" if unwatched else str(e)) from e
+        if unwatched:
+            raise ServerError(unwatched)
     finally:
-        server.server_close()
-        socket_path.unlink(missing_ok=True)
-    unwatched = (f"cannot watch stdin for --exit-on-stdin-eof: {watcher_failure[0]}"
-                 if watcher_failure else None)
-    try:
-        server.drain()  # nothing may still be running (or printing) as the interpreter exits
-    except ServerError as e:
-        raise ServerError(f"{e}; also {unwatched}" if unwatched else str(e)) from e
-    if unwatched:
-        raise ServerError(unwatched)
+        stop.close()
 
 
 _STDIN_FD = 0
@@ -88,28 +91,43 @@ class _ShutdownRequest:
     """Ask serve_forever to return, from a signal handler or a watcher thread.
 
     It must only request: raising out of a handler lands in arbitrary
-    socketserver code (a half-started request, a held lock), and starting a
-    thread there takes a non-reentrant lock the interrupted code may hold. So
-    a stopper thread, started once beforehand, waits on an event that callers
-    merely set; shutdown() blocks until serve_forever returns, which is why it
-    runs on that thread and never the main one."""
+    socketserver code, and anything that takes a lock (starting a thread,
+    Event.set) can deadlock when a second signal runs a nested handler on the
+    thread that holds it. So a request is one non-blocking write to a pipe (the
+    self-pipe trick); a stopper thread, started once beforehand, blocks reading
+    it and then calls shutdown(), which blocks until serve_forever returns and
+    so can never run on the main thread."""
 
     def __init__(self, server: UnixHTTPServer) -> None:
         self._server = server
-        self._event = threading.Event()
+        self._read, self._write = os.pipe()
+        os.set_blocking(self._write, False)
+        self._stopper = threading.Thread(target=self._stop_when_asked, daemon=True)
 
     def start_stopper(self) -> None:
-        threading.Thread(target=self._stop_when_asked, daemon=True).start()
+        self._stopper.start()
 
     def _stop_when_asked(self) -> None:
-        self._event.wait()
+        os.read(self._read, 1)  # a byte, or EOF once close() runs
         self._server.shutdown()
 
     def __call__(self, signum: int, frame: Any) -> None:
         self.request()
 
     def request(self) -> None:
-        self._event.set()
+        try:
+            os.write(self._write, b"x")
+        except BlockingIOError:
+            pass  # a full pipe already means "requested"
+
+    def close(self) -> None:
+        """Serving is over: nothing is left to stop, so late stop signals are
+        ignored rather than written to a closed pipe."""
+        for sig in _STOP_SIGNALS:
+            signal.signal(sig, signal.SIG_IGN)
+        os.close(self._write)  # wakes a stopper that was never asked
+        self._stopper.join()
+        os.close(self._read)
 
 
 def _stop_at_stdin_eof(stop: _ShutdownRequest, failure: list[OSError]) -> None:

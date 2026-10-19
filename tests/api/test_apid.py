@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from boxmunge.api import apid as apid_module
 from boxmunge.api.apid import _ShutdownRequest, build_dev_app, main
 from boxmunge.api.dev.fixture import FIXTURE_MARKER, make_fixture
 from tests.api.dev_apid import DevApid
@@ -131,8 +132,9 @@ def test_sigint_is_a_clean_shutdown_request(tmp_path, sock_path) -> None:
     assert not sock_path.exists()
 
 
-def test_a_stop_request_only_sets_an_event_and_starts_no_thread(monkeypatch) -> None:
-    """Thread.start() takes a non-reentrant lock a signal could land inside."""
+def test_a_stop_request_is_one_pipe_write_and_survives_a_nested_signal(monkeypatch) -> None:
+    """No thread start, no lock: a second signal's handler running inside the
+    first one's write must not deadlock, and the server still shuts down."""
     class Server:
         stopped = threading.Event()
 
@@ -142,14 +144,24 @@ def test_a_stop_request_only_sets_an_event_and_starts_no_thread(monkeypatch) -> 
     server = Server()
     stop = _ShutdownRequest(server)
     stop.start_stopper()
+    real_write, nested = os.write, []
+
+    def reentrant_write(fd, data):
+        if not nested:
+            nested.append(True)
+            stop(signal.SIGINT, None)  # the second signal, landing mid-handler
+        return real_write(fd, data)
 
     def no_threads(self, *args, **kwargs):
         raise AssertionError("a stop request started a thread")
 
+    monkeypatch.setattr(apid_module.os, "write", reentrant_write)
     monkeypatch.setattr(threading.Thread, "start", no_threads)
     stop(signal.SIGTERM, None)
     monkeypatch.undo()
     assert server.stopped.wait(5)
+    monkeypatch.setattr(apid_module.signal, "signal", lambda *args: None)  # keep pytest's own
+    stop.close()
 
 
 def test_stdin_already_closed_at_launch_stops_cleanly(tmp_path, sock_path) -> None:
