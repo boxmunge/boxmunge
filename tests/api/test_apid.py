@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -101,9 +102,14 @@ def test_the_server_stops_when_its_supervisor_is_killed_outright(tmp_path, sock_
     supervisor = subprocess.Popen(
         [sys.executable, "-c", _SUPERVISOR, str(tmp_path / "box"), str(sock_path)],
         env={**os.environ, "PYTHONPATH": f"{REPO / 'src'}{os.pathsep}{REPO}"},
-        stdout=subprocess.PIPE)
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    apid_pid = None
     try:
-        apid_pid = int(supervisor.stdout.readline())  # printed once the socket is up
+        line = supervisor.stdout.readline()  # the pid, printed once the socket is up
+        if not line:
+            supervisor.kill()
+            pytest.fail(f"supervisor never reported apid: {supervisor.stderr.read().decode()}")
+        apid_pid = int(line)
         assert _alive(apid_pid)
         supervisor.kill()
         supervisor.wait(timeout=10)
@@ -111,9 +117,44 @@ def test_the_server_stops_when_its_supervisor_is_killed_outright(tmp_path, sock_
     finally:
         supervisor.kill()
         supervisor.wait(timeout=10)
-        if (stray := _alive(apid_pid)):
+        stray = apid_pid is not None and _alive(apid_pid)
+        if stray:
             os.kill(apid_pid, signal.SIGKILL)
         assert not stray, "apid outlived its killed supervisor"
+
+
+def test_stdin_already_closed_at_launch_stops_cleanly(tmp_path, sock_path) -> None:
+    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+    apid = [sys.executable, "-m", "boxmunge.api.apid"]
+    subprocess.run([*apid, "--make-fixture", str(tmp_path / "box")], env=env, check=True,
+                   capture_output=True)
+    done = subprocess.run([*apid, "--dev", "--root", str(tmp_path / "box"), "--socket",
+                           str(sock_path), "--exit-on-stdin-eof"], env=env,
+                          stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+    assert done.returncode == 0, done.stderr.decode()
+    assert b"Traceback" not in done.stderr
+    assert not sock_path.exists()
+
+
+def test_stdin_that_cannot_be_watched_fails_loudly(tmp_path, sock_path) -> None:
+    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+    apid = [sys.executable, "-m", "boxmunge.api.apid"]
+    subprocess.run([*apid, "--make-fixture", str(tmp_path / "box")], env=env, check=True,
+                   capture_output=True)
+    cmd = " ".join(shlex.quote(a) for a in [
+        *apid, "--dev", "--root", str(tmp_path / "box"), "--socket", str(sock_path),
+        "--exit-on-stdin-eof"])
+    done = subprocess.run(["sh", "-c", f"{cmd} <&-"], env=env, capture_output=True, timeout=30)
+    assert done.returncode == 1 and b"ERROR:" in done.stderr, done.stderr.decode()
+    assert not sock_path.exists()
+
+
+def test_a_stop_right_after_the_socket_opens_always_cleans_up(tmp_path, sock_path) -> None:
+    for attempt in range(40):
+        with DevApid(tmp_path / "box", sock_path) as apid:
+            pass  # stop() runs the instant the socket first accepts
+        assert apid.returncode == 0, f"attempt {attempt}: {apid.stderr}"
+        assert not sock_path.exists(), f"attempt {attempt}: socket left behind"
 
 
 # Starts a dev apid the way the tests do, reports its pid, then dies without teardown.

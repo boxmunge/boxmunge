@@ -26,8 +26,11 @@ class DevApid:
     def start(self) -> "DevApid":
         env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
         apid = [sys.executable, "-m", "boxmunge.api.apid"]
-        subprocess.run([*apid, "--make-fixture", str(self.root)], env=env, check=True,
-                       capture_output=True)
+        if not self.root.exists():  # tests that start many servers share one fixture
+            made = subprocess.run([*apid, "--make-fixture", str(self.root)], env=env,
+                                  capture_output=True)
+            if made.returncode:
+                raise AssertionError(f"--make-fixture failed: {made.stderr.decode()}")
         self.proc = subprocess.Popen(
             [*apid, "--dev", "--root", str(self.root), "--socket", str(self.sock_path),
              "--plugin", self.plugin, "--exit-on-stdin-eof"],
@@ -55,24 +58,19 @@ class DevApid:
         raise AssertionError("apid did not start listening")
 
     def stop(self) -> None:
-        """SIGTERM, wait, and kill the whole group if it will not go."""
+        """SIGTERM the server's group, wait, and SIGKILL the group before reaping
+        if it will not go (killing after the reap could hit a recycled pgid)."""
         if self.proc is None:
             return
+        if self.proc.poll() is None:
+            os.killpg(self.proc.pid, signal.SIGTERM)
         try:
-            if self.proc.poll() is None:
-                self.proc.send_signal(signal.SIGTERM)
-            try:
-                _, err = self.proc.communicate(timeout=STOP_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                os.killpg(self.proc.pid, signal.SIGKILL)
-                self.proc.communicate()
-                raise AssertionError(f"apid ignored SIGTERM for {STOP_TIMEOUT}s")
-            self.stderr = err.decode()
-        finally:
-            try:
-                os.killpg(self.proc.pid, signal.SIGKILL)  # anything it left in its group
-            except ProcessLookupError:
-                pass
+            _, err = self.proc.communicate(timeout=STOP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+            self.proc.communicate()
+            raise AssertionError(f"apid ignored SIGTERM for {STOP_TIMEOUT}s")
+        self.stderr = err.decode()
 
     @property
     def returncode(self) -> int | None:
