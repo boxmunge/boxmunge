@@ -111,20 +111,29 @@ def _teardown() -> None:
 
 
 class MarkedTimers(FakeTimers):
-    """FakeTimers that also looks at the box at the moment the downtime
-    starts: the marker is set before the timers stop, and a project command
-    refuses on it."""
+    """FakeTimers that also looks at the box when the timers stop and when
+    they come back: the marker and the refusal of a project command on it.
+    The migration sets the marker before the timers stop; its rollback sets
+    it when it quiesces. Both clear it only after the timers are back."""
 
     def __init__(self, paths: BoxPaths) -> None:
         super().__init__()
         self.paths = paths
         self.at_stop: list[tuple[str | None, bool]] = []
+        self.at_restore: list[tuple[str | None, bool]] = []
+
+    def _seen(self) -> tuple[str | None, bool]:
+        block = is_blocked("shop", self.paths)
+        return (migration_in_progress(self.paths),
+                block is not None and block.reason is BlockReason.MIGRATING)
 
     def stop_all(self) -> None:
         super().stop_all()
-        block = is_blocked("shop", self.paths)
-        self.at_stop.append((migration_in_progress(self.paths),
-                             block is not None and block.reason is BlockReason.MIGRATING))
+        self.at_stop.append(self._seen())
+
+    def restore(self, state: dict[str, bool]) -> None:
+        super().restore(state)
+        self.at_restore.append(self._seen())
 
 
 def _check(paths: BoxPaths, images: Path):
@@ -253,7 +262,7 @@ def test_2_adopt_first_then_migrate(box, capsys) -> None:
     assert j.phase == "applied", (j.failed, j.items)
     # the marker was set before the timers stopped, refused a project command
     # (which prints why), and is cleared now the box runs again
-    assert timers.at_stop == [(engine.FINISH, True)]
+    assert timers.at_stop == timers.at_restore == [(engine.FINISH, True)]
     assert timers.calls[0] == ("stop", "*") and timers.calls[-1][0] == "restore"
     assert migration_in_progress(paths) is None and not refuse_if_blocked("shop", paths)
     capsys.readouterr()
@@ -288,7 +297,7 @@ def test_3_soak_then_rollback_keeps_everything(box, alerts) -> None:
     timers = MarkedTimers(paths)
     j = _rollback(paths, images, timers)
     assert j.phase == "rolled-back", (j.failed, j.items)
-    assert timers.at_stop == [("userns-rollback", True)]
+    assert timers.at_restore == [("userns-rollback", True)]
     assert migration_in_progress(paths) is None and not refuse_if_blocked("shop", paths)
     assert alerts == ["userns migration rolled back"]
     assert not _daemon_remapped() and uo.recorded_offset(paths) is None
