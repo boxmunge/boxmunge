@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import pytest
 
+from boxmunge.compose import ComposeError
+from boxmunge.system_container import SystemContainerError
 from boxmunge.userns import rollback as rb
 from boxmunge.userns.inventory import Inventory, VolumeEntry
 from boxmunge.userns.journal import FORWARD, ROLLBACK, Journal, load_journal, save_journal
@@ -139,6 +141,89 @@ def test_an_abort_before_any_stop_starts_nothing(paths, monkeypatch, tmp_path) -
     monkeypatch.setattr(rb, "bring_up", lambda *a, **kw: pytest.fail("brought up"))
     monkeypatch.setattr(rb, "remove_tars", lambda d: None)
     assert rb.rollback(paths, daemon=_Daemon([]), timers=FakeTimers()).phase == "rolled-back"
+
+
+def _alerts(monkeypatch):
+    sent = []
+    monkeypatch.setattr(rb, "notify", lambda p, title, body, **kw: sent.append(
+        (title, body, kw["priority"])) or True)
+    return sent
+
+
+def test_timers_are_disabled_only_after_the_image_save_and_the_marker(paths, remapped,
+                                                                      monkeypatch) -> None:
+    """stop_all is a persistent `disable --now`: before the marker says why, a kill
+    during the (long) image save would leave the box running with no timers."""
+    events, _ = remapped
+
+    class Timers(FakeTimers):
+        def stop_all(self):
+            events.append(f"timers stopped, marker {rb.migration_in_progress(paths)}")
+
+    rb.rollback(paths, daemon=_Daemon(events), timers=Timers())
+    assert events.index("save-images") < events.index(
+        "timers stopped, marker userns-rollback") < events.index("quiesce")
+
+
+def test_a_failed_image_save_leaves_the_timers_and_sets_no_marker(paths, remapped,
+                                                                  monkeypatch) -> None:
+    events, _ = remapped
+    sent = _alerts(monkeypatch)
+
+    def fail(*a, **kw):
+        raise rb.MigrationError("no space left")
+    monkeypatch.setattr(rb, "save_all", fail)
+    timers = FakeTimers()
+    with pytest.raises(rb.MigrationError, match="no space left"):
+        rb.rollback(paths, daemon=_Daemon(events), timers=timers)
+    assert timers.calls == [] and rb.migration_in_progress(paths) is None
+    assert load_journal(paths).failed.endswith("no space left")
+    (title, body, priority), = sent
+    assert title == "userns rollback stopped" and priority == 1
+    assert "marker is set" not in body and "re-run userns-rollback" in body
+
+
+def _abort_box(paths, monkeypatch, tmp_path):
+    from boxmunge.userns.marker import set_marker
+    save_journal(paths, Journal(FORWARD, "quiesced", S, timers={"t": True},
+                                inventory=Inventory("overlay2", "", str(tmp_path), "29").to_json()))
+    set_marker(paths, "userns-migrate (to resume) or userns-rollback")
+    monkeypatch.setattr(rb, "load_registered_projects", lambda p: set())
+    monkeypatch.setattr(rb, "ensure_prior", lambda *a: None)
+    monkeypatch.setattr(rb, "remove_tars", lambda d: None)
+    return _alerts(monkeypatch)
+
+
+def _bring_up_fails(error):
+    def fail(*a, **kw):
+        raise error
+    return fail
+
+
+@pytest.mark.parametrize("where, error", [
+    ("ensure_prior", rb.MigrationError("dockerd would not start")),
+    ("bring_up", SystemContainerError("the system container is down")),
+    ("compose_up_platform", ComposeError("caddy would not start")),
+])
+def test_an_abort_that_fails_is_journalled_and_alerted(paths, monkeypatch, tmp_path, where,
+                                                       error) -> None:
+    sent = _abort_box(paths, monkeypatch, tmp_path)
+    if where == "compose_up_platform":  # the real bring-up, whose platform step fails
+        from boxmunge.userns import bringup
+        monkeypatch.setattr(bringup, "_run", lambda *a, **kw: None)
+        monkeypatch.setattr(bringup, "compose_up_platform", _bring_up_fails(error))
+    else:
+        monkeypatch.setattr(rb, where, _bring_up_fails(error))
+    timers = FakeTimers()
+    with pytest.raises(type(error), match=str(error)):
+        rb.rollback(paths, daemon=_Daemon([]), timers=timers)
+    j = load_journal(paths)
+    assert j.phase == "quiesced" and j.failed == f"quiesced: {error}"
+    assert timers.calls == [] and rb.migration_in_progress(paths) is not None
+    (title, body, priority), = sent
+    assert title == "userns rollback stopped" and priority == 1 and str(error) in body
+    assert "marker is set" in body and "timers stay stopped" in body
+    assert "re-run userns-rollback" in body
 
 
 @pytest.mark.parametrize("journal, match", [

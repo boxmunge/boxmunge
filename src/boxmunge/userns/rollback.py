@@ -29,7 +29,7 @@ from boxmunge.userns.daemon_ctl import DaemonControl, TimerControl, daemon_answe
 from boxmunge.userns.engine import Save, project_locks, shift_journalled
 from boxmunge.userns.images import IMAGES_DIR, load_all, remove_tars, save_all
 from boxmunge.userns.inventory import Inventory, outermost, take_inventory
-from boxmunge.userns.marker import clear_marker, set_marker
+from boxmunge.userns.marker import clear_marker, migration_in_progress, set_marker
 from boxmunge.userns.steps import report_back
 from boxmunge.userns.journal import FORWARD, ROLLBACK, Journal, load_journal, save_journal
 from boxmunge.userns.preflight import PreflightRefused, preflight
@@ -220,8 +220,8 @@ def _refuse(j: Journal | None) -> Journal:
     return j
 
 
-def _reverse(paths: BoxPaths, j: Journal, daemon: DaemonControl, rb_images: Path,
-             save: Save) -> None:
+def _reverse(paths: BoxPaths, j: Journal, daemon: DaemonControl, timers: TimerControl,
+             rb_images: Path, save: Save) -> None:
     rinv, finv = Inventory.from_json(j.rollback_inventory), Inventory.from_json(j.inventory)
     old_root = Path(finv.root)
     new_root = old_root / f"{j.offset}.{j.offset}"
@@ -231,6 +231,7 @@ def _reverse(paths: BoxPaths, j: Journal, daemon: DaemonControl, rb_images: Path
         j.phase = "rb-saved"
         save()
         set_marker(paths, "userns-rollback")
+        timers.stop_all()  # persistent: only once the marker says why
         quiesce(rinv)
         _remove_remapped_containers()
         daemon.stop()
@@ -269,15 +270,15 @@ def rollback(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,
         save_journal(paths, journal)
 
     with project_locks(paths, sorted(load_registered_projects(paths))):
-        if j.direction == FORWARD and not j.reached("switched"):
-            return _abort(paths, j, daemon, timers, images_dir, save)
-        if j.direction == FORWARD or not j.reached("rb-quiesced"):
+        aborting = j.direction == FORWARD and not j.reached("switched")
+        if not aborting and (j.direction == FORWARD or not j.reached("rb-quiesced")):
             _start(paths, j, daemon, images_dir)
             save()
         try:
             j.failed = None
-            timers.stop_all()
-            _reverse(paths, j, daemon, images_dir / "rollback", save)
+            if aborting:
+                return _abort(paths, j, daemon, timers, images_dir, save)
+            _reverse(paths, j, daemon, timers, images_dir / "rollback", save)
             remove_tars(images_dir)
             timers.restore(j.timers)
             clear_marker(paths)
@@ -286,8 +287,10 @@ def rollback(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,
         except BaseException as e:
             j.failed = f"{j.phase}: {e}"
             save()
-            notify(paths, "userns rollback stopped", f"Stopped after {j.phase}: {e}. The "
-                   f"boxmunge timers are stopped. Re-run userns-rollback to resume.",
+            held = ("The marker is set, so every project command refuses, and the boxmunge "
+                    "timers stay stopped. " if migration_in_progress(paths) else "")
+            notify(paths, "userns rollback stopped", f"Stopped after {j.phase}: {e}. {held}"
+                   f"Fix the cause, then re-run userns-rollback to resume.",
                    component=COMPONENT, priority=1)
             raise
     report_back(paths, j, "rb-project", "userns migration rolled back", COMPONENT)
