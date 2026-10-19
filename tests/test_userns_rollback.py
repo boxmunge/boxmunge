@@ -142,10 +142,12 @@ def test_an_abort_from_started_still_brings_up_what_is_not_running(paths, monkey
     calls = []
     monkeypatch.setattr(rb, "load_registered_projects", lambda p: set())
     monkeypatch.setattr(rb, "ensure_prior", lambda *a: None)
-    monkeypatch.setattr(rb, "bring_up", lambda *a, **kw: calls.append(kw["prefix"]))
+    monkeypatch.setattr(rb, "bring_up", lambda *a, **kw: calls.append(
+        (kw["prefix"], kw["only_stopped"])))
     monkeypatch.setattr(rb, "remove_tars", lambda d: None)
     assert rb.rollback(paths, daemon=_Daemon([]), timers=FakeTimers()).phase == "rolled-back"
-    assert calls == ["abort"]
+    # The box ran on since the inventory: only what is not running now is started.
+    assert calls == [("abort", True)]
 
 
 def _alerts(monkeypatch):

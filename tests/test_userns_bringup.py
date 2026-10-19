@@ -1,8 +1,11 @@
 """Quiesce order; bring-up keeps failed projects on the maintenance page."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from boxmunge.commands.health_state import MONITOR_STOPPED
 from boxmunge.lifecycle import Block, BlockReason
 from boxmunge.userns import bringup as bu
 from boxmunge.userns.inventory import ContainerEntry, Inventory
@@ -102,3 +105,87 @@ def test_a_missing_system_image_is_rebuilt(paths, box, monkeypatch) -> None:
     bu.bring_up(paths, _inv(), Journal(FORWARD, "rebuilt", 1048576), lambda: None,
                 component="userns-migrate")
     assert box[0] == ("platform", "system", True)
+
+
+def _monitor_stop(paths, project) -> None:
+    paths.project_health_state(project).parent.mkdir(parents=True, exist_ok=True)
+    paths.project_health_state(project).write_text(json.dumps(
+        {"status": MONITOR_STOPPED, "stopped_at": "2026-10-19T00:00:00+00:00"}))
+
+
+def test_a_project_the_health_monitor_stopped_stays_down(paths, box) -> None:
+    """The monitor can stop a project while the box runs on before the switch; its
+    stop marker stands until `recover`, so starting it would leave a running project
+    marked stopped (nothing bumps last_started_at)."""
+    _monitor_stop(paths, "good")
+    results = bu.bring_up(paths, _inv(), Journal(FORWARD, "rebuilt", 1048576), lambda: None,
+                          component="userns-migrate")
+    assert results["good"] == "left stopped by the health monitor"
+    assert not [e for e in box if e[0] == "up" and e[1] == "good"]
+    assert ("overlay", "good") in box and ("route", "good") not in box
+    assert not paths.project_caddy_site("good").exists()  # its own page stays
+
+
+def _running(monkeypatch, running: dict[str, set[str]]) -> None:
+    """The containers Docker reports now: project -> the services running."""
+    def containers(project):
+        return [type("C", (), {"service": svc, "running": True, "oneoff": False})()
+                for svc in sorted(running.get(project, ()))]
+    monkeypatch.setattr(bu.docker_containers, "project_containers", containers)
+
+
+def _carried_on_inv():
+    return Inventory("overlay2", "", "/v", "29.9.0", projects=["good", "bad", "held"],
+                     containers=[_c("good-app-1", "good"), _c("good-worker-1", "good", "worker"),
+                                 _c("bad-app-1", "bad")])
+
+
+def test_an_abort_starts_only_the_services_that_are_not_running_now(
+        paths, box, monkeypatch) -> None:
+    _running(monkeypatch, {"good": {"app"}})
+    results = bu.bring_up(paths, _carried_on_inv(), Journal(FORWARD, "started", 1048576),
+                          lambda: None, component="userns-rollback", prefix="abort",
+                          only_stopped=True)
+    assert results["good"] == "up" and ("up", "good", ("worker",), True, False) in box
+
+
+def test_an_abort_leaves_a_healthy_running_project_alone(paths, box, monkeypatch) -> None:
+    """Putting it behind the maintenance page and running its smoke tests could strand
+    a healthy project there when a smoke test fails."""
+    _running(monkeypatch, {"good": {"app", "worker"}})
+    smoked = []
+    monkeypatch.setattr(bu, "smoke_ok", lambda p, *a: smoked.append(p) or False)
+    results = bu.bring_up(paths, _carried_on_inv(), Journal(FORWARD, "started", 1048576),
+                          lambda: None, component="userns-rollback", prefix="abort",
+                          only_stopped=True)
+    assert results["good"] == "already running"
+    assert not [e for e in box if e[0] in ("up", "route") and e[1] == "good"]
+    assert "good" not in smoked and not paths.project_caddy_site("good").exists()
+    assert results["bad"] == "failed: container exited"  # a stopped one is still started
+
+
+def test_an_abort_never_restarts_a_monitor_stopped_project(paths, box, monkeypatch) -> None:
+    _running(monkeypatch, {})
+    _monitor_stop(paths, "good")
+    results = bu.bring_up(paths, _carried_on_inv(), Journal(FORWARD, "started", 1048576),
+                          lambda: None, component="userns-rollback", prefix="abort",
+                          only_stopped=True)
+    assert results["good"] == "left stopped by the health monitor"
+    assert not [e for e in box if e[0] == "up" and e[1] == "good"]
+
+
+def test_a_rerun_migration_does_not_restart_a_project_stopped_since_the_first_attempt(
+        paths, box) -> None:
+    """with_running_from carries "was running" over from the earlier inventory, and
+    the monitor's stop removed the containers since: the bring-up still holds it."""
+    earlier = _carried_on_inv()
+    fresh = Inventory("overlay2", "", "/v", "29.9.0", projects=["good", "bad", "held"],
+                      containers=[_c("bad-app-1", "bad")])
+    inv = fresh.with_running_from(earlier)
+    assert [c.name for c in inv.containers if c.service and c.running] \
+        == ["bad-app-1", "good-app-1", "good-worker-1"]
+    _monitor_stop(paths, "good")
+    results = bu.bring_up(paths, inv, Journal(FORWARD, "rebuilt", 1048576), lambda: None,
+                          component="userns-migrate")
+    assert results["good"] == "left stopped by the health monitor"
+    assert not [e for e in box if e[0] == "up" and e[1] == "good"]

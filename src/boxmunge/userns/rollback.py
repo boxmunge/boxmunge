@@ -48,10 +48,12 @@ def _abort(paths: BoxPaths, j: Journal, daemon: DaemonControl, timers: TimerCont
            images_dir: Path, save: Save) -> Journal:
     """Before the switch nothing was carried: restart what was stopped. Also
     from `started`: an undone switch journals it, yet a project whose restart
-    failed during the undo is still down. Idempotent for running projects."""
+    failed during the undo is still down. The box has run on since the
+    inventory was taken, so only the services not running now are started, and
+    never a project the health monitor stopped."""
     j.daemon_json = ensure_prior(paths, j.daemon_json, j.offset, daemon, j.daemon_json_owner)
     bring_up(paths, Inventory.from_json(j.inventory), j, save, component=COMPONENT,
-             prefix="abort")
+             prefix="abort", only_stopped=True)
     remove_tars(images_dir)
     timers.restore(j.timers)
     clear_marker(paths)
