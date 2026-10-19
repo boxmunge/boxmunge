@@ -46,11 +46,12 @@ _PLATFORM = frozenset({"caddy", "system"})
 
 def _abort(paths: BoxPaths, j: Journal, daemon: DaemonControl, timers: TimerControl,
            images_dir: Path, save: Save) -> Journal:
-    """Before the switch nothing was carried: restart what was stopped."""
+    """Before the switch nothing was carried: restart what was stopped. Also
+    from `started`: an undone switch journals it, yet a project whose restart
+    failed during the undo is still down. Idempotent for running projects."""
     j.daemon_json = ensure_prior(paths, j.daemon_json, j.offset, daemon, j.daemon_json_owner)
-    if j.phase != "started":  # a quiesce may have begun
-        bring_up(paths, Inventory.from_json(j.inventory), j, save, component=COMPONENT,
-                 prefix="abort")
+    bring_up(paths, Inventory.from_json(j.inventory), j, save, component=COMPONENT,
+             prefix="abort")
     remove_tars(images_dir)
     timers.restore(j.timers)
     clear_marker(paths)

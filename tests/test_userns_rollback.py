@@ -133,14 +133,19 @@ def test_a_migration_stopped_before_the_switch_is_aborted(paths, monkeypatch, tm
     assert timers.calls == [("restore", '{"t": true}')]
 
 
-def test_an_abort_before_any_stop_starts_nothing(paths, monkeypatch, tmp_path) -> None:
+def test_an_abort_from_started_still_brings_up_what_is_not_running(paths, monkeypatch,
+                                                                  tmp_path) -> None:
+    """An undone switch journals `started`, but a project whose restart failed during
+    the undo is still down: the abort starts every project that should be running."""
     save_journal(paths, Journal(FORWARD, "started", S,
                                 inventory=Inventory("overlay2", "", str(tmp_path), "29").to_json()))
+    calls = []
     monkeypatch.setattr(rb, "load_registered_projects", lambda p: set())
     monkeypatch.setattr(rb, "ensure_prior", lambda *a: None)
-    monkeypatch.setattr(rb, "bring_up", lambda *a, **kw: pytest.fail("brought up"))
+    monkeypatch.setattr(rb, "bring_up", lambda *a, **kw: calls.append(kw["prefix"]))
     monkeypatch.setattr(rb, "remove_tars", lambda d: None)
     assert rb.rollback(paths, daemon=_Daemon([]), timers=FakeTimers()).phase == "rolled-back"
+    assert calls == ["abort"]
 
 
 def _alerts(monkeypatch):
