@@ -82,19 +82,27 @@ def box():
                 subprocess.run(["umount", str(work)], check=True)
 
 
-def _teardown() -> None:
-    """Leave the daemon as the next module expects it: on the prior store,
-    running, with nothing of this box left. Whatever a failed test left
-    behind (a stopped daemon, a remapped one, a half-written journal), the
-    daemon is restarted on the prior daemon.json first."""
-    daemon = ProcessDaemon()
-    daemon.stop()
-    write_daemon_json(prior_daemon_json())
-    daemon.start()
+def _clean_daemon() -> None:
     for name in sb.sh("docker", "ps", "-aq").split():
         sb.sh("docker", "rm", "-f", "-v", name)
     sb.sh("docker", "volume", "prune", "-af")
-    sb.sh("docker", "network", "rm", "boxmunge-proxy", check=False)  # gone after a commit
+    sb.sh("docker", "network", "rm", "boxmunge-proxy", check=False)  # absent after some failures
+
+
+def _teardown() -> None:
+    """Leave both stores empty of this box and the daemon on the prior one.
+    The remapped root outlives a commit, and later modules switch to it
+    (remapped_daemon), so it is emptied too, whichever daemon.json a failed
+    test left behind; then the daemon restarts on the prior daemon.json and
+    that store is emptied."""
+    daemon = ProcessDaemon()
+    daemon.stop()
+    daemon.start()  # on whatever daemon.json the scenario left
+    _clean_daemon()
+    daemon.stop()
+    write_daemon_json(prior_daemon_json())
+    daemon.start()
+    _clean_daemon()
 
 
 def _check(paths: BoxPaths, images: Path):
