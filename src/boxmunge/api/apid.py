@@ -54,6 +54,7 @@ def run_dev(root: Path, socket_path: Path, plugin: str, *, exit_on_stdin_eof: bo
     held = signal.pthread_sigmask(signal.SIG_BLOCK, _STOP_SIGNALS)
     server = UnixHTTPServer(socket_path, app, socket_mode=DEV_SOCKET_MODE, access_log=True)
     stop = _ShutdownRequest(server)
+    stop.start_stopper()
     for sig in _STOP_SIGNALS:
         signal.signal(sig, stop)
     watcher_failure: list[OSError] = []
@@ -69,9 +70,14 @@ def run_dev(root: Path, socket_path: Path, plugin: str, *, exit_on_stdin_eof: bo
     finally:
         server.server_close()
         socket_path.unlink(missing_ok=True)
-    server.drain()  # nothing may still be running (or printing) as the interpreter exits
-    if watcher_failure:
-        raise ServerError(f"cannot watch stdin for --exit-on-stdin-eof: {watcher_failure[0]}")
+    unwatched = (f"cannot watch stdin for --exit-on-stdin-eof: {watcher_failure[0]}"
+                 if watcher_failure else None)
+    try:
+        server.drain()  # nothing may still be running (or printing) as the interpreter exits
+    except ServerError as e:
+        raise ServerError(f"{e}; also {unwatched}" if unwatched else str(e)) from e
+    if unwatched:
+        raise ServerError(unwatched)
 
 
 _STDIN_FD = 0
@@ -82,21 +88,28 @@ class _ShutdownRequest:
     """Ask serve_forever to return, from a signal handler or a watcher thread.
 
     It must only request: raising out of a handler lands in arbitrary
-    socketserver code (a half-started request, a held lock). shutdown() blocks
-    until serve_forever returns, so it runs on its own thread, never the
-    main one."""
+    socketserver code (a half-started request, a held lock), and starting a
+    thread there takes a non-reentrant lock the interrupted code may hold. So
+    a stopper thread, started once beforehand, waits on an event that callers
+    merely set; shutdown() blocks until serve_forever returns, which is why it
+    runs on that thread and never the main one."""
 
     def __init__(self, server: UnixHTTPServer) -> None:
         self._server = server
-        self._requested = False
+        self._event = threading.Event()
+
+    def start_stopper(self) -> None:
+        threading.Thread(target=self._stop_when_asked, daemon=True).start()
+
+    def _stop_when_asked(self) -> None:
+        self._event.wait()
+        self._server.shutdown()
 
     def __call__(self, signum: int, frame: Any) -> None:
         self.request()
 
     def request(self) -> None:
-        if not self._requested:
-            self._requested = True
-            threading.Thread(target=self._server.shutdown, daemon=True).start()
+        self._event.set()
 
 
 def _stop_at_stdin_eof(stop: _ShutdownRequest, failure: list[OSError]) -> None:

@@ -9,12 +9,13 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
-from boxmunge.api.apid import build_dev_app, main
+from boxmunge.api.apid import _ShutdownRequest, build_dev_app, main
 from boxmunge.api.dev.fixture import FIXTURE_MARKER, make_fixture
 from tests.api.dev_apid import DevApid
 from tests.api.unix_http import call
@@ -128,6 +129,27 @@ def test_sigint_is_a_clean_shutdown_request(tmp_path, sock_path) -> None:
         apid.stop(signal.SIGINT)
     assert apid.returncode == 0 and "Traceback" not in apid.stderr, apid.stderr
     assert not sock_path.exists()
+
+
+def test_a_stop_request_only_sets_an_event_and_starts_no_thread(monkeypatch) -> None:
+    """Thread.start() takes a non-reentrant lock a signal could land inside."""
+    class Server:
+        stopped = threading.Event()
+
+        def shutdown(self) -> None:
+            self.stopped.set()
+
+    server = Server()
+    stop = _ShutdownRequest(server)
+    stop.start_stopper()
+
+    def no_threads(self, *args, **kwargs):
+        raise AssertionError("a stop request started a thread")
+
+    monkeypatch.setattr(threading.Thread, "start", no_threads)
+    stop(signal.SIGTERM, None)
+    monkeypatch.undo()
+    assert server.stopped.wait(5)
 
 
 def test_stdin_already_closed_at_launch_stops_cleanly(tmp_path, sock_path) -> None:
