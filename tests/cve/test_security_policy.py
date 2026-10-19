@@ -28,7 +28,9 @@ def test_the_policy_records_the_three_levers_sorted() -> None:
     (_policy(runtimes=["python", "node"]), _policy(runtimes=["python"]),
      ["security.runtimes [node, python] -> [python]"]),
     (_policy(runtimes=["python"]), _policy(runtimes=["node", "python"]), []),
-    (_policy(runtimes=["python"]), _policy(), []),
+    # Inference drops unrecognised languages: leaving a declared list is a relaxation.
+    (_policy(runtimes=["python"]), _policy(),
+     ["security.runtimes [python] -> inferred per image"]),
 ])
 def test_relaxations(before, after, expected) -> None:
     assert relaxations(before, after) == expected
