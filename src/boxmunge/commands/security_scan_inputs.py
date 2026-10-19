@@ -19,6 +19,7 @@ from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
 from boxmunge.cve.hardening import HardeningProfile, hardening_profile_from_compose
 from boxmunge.cve.policy import PolicyError, Posture, parse_posture
+from boxmunge.cve.security_policy import security_policy
 from boxmunge.cve.scan_state import BASIS_CONTAINERS, BASIS_STARTUP_IMAGES
 from boxmunge.cve.suppressions import Suppression, SuppressionsError, load_suppressions
 from boxmunge.deployed_inventory import (
@@ -46,6 +47,10 @@ class ProjectMeta:
     declared_runtimes: Any
     hosts: list[str]
     compose_files: list[str]
+
+    def policy(self) -> dict[str, Any]:
+        return security_policy(posture=self.posture, dangerously=self.dangerously,
+                               runtimes=self.declared_runtimes)
 
 
 @dataclass(frozen=True)

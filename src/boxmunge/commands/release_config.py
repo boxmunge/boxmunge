@@ -61,11 +61,12 @@ class ReleaseDecision:
 
 
 def decide_release_users(project_name: str, paths: BoxPaths, manifest: dict,
-                         component: str) -> ReleaseDecision:
+                         component: str, previous: dict | None = None) -> ReleaseDecision:
     """Build the release installed in the project dir under candidate tags,
     and decide and check who each service runs as; nothing is recorded.
     A quarantined project's release is then scanned, and its candidates
-    removed if that refuses it. Raises DeployRefused (QuarantineRefused)
+    removed if that refuses it. `previous` is the manifest the install
+    replaced (quarantine_gate.manifest_in_force). Raises DeployRefused (QuarantineRefused)
     or DockerError."""
     print("  Building images and deciding who each service runs as...")
     remove_candidates(project_name)
@@ -85,7 +86,7 @@ def decide_release_users(project_name: str, paths: BoxPaths, manifest: dict,
             if not is_quarantined(project_name, paths):
                 return ReleaseDecision(users)
             try:
-                return ReleaseDecision(users, clear_release(paths, target, manifest))
+                return ReleaseDecision(users, clear_release(paths, target, manifest, previous))
             except QuarantineRefused as refused:
                 try:
                     remove_candidates(project_name)

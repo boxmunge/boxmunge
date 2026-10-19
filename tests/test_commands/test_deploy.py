@@ -156,7 +156,7 @@ class TestQuarantinedDeploy:
         self._quarantine(paths)
         removed = []
 
-        def refuse(paths_, target, manifest):
+        def refuse(paths_, target, manifest, previous):
             raise QuarantineRefused(["CVE-2026-0001 (Critical) in openssl 1, service web"])
         monkeypatch.setattr("boxmunge.commands.release_config.clear_release", refuse)
         monkeypatch.setattr("boxmunge.commands.release_config.remove_candidates",
@@ -179,15 +179,18 @@ class TestQuarantinedDeploy:
         from boxmunge.commands import quarantine_gate
         from boxmunge.cve.quarantine import clear_quarantine_state
         self._quarantine(paths)
-        clearance = quarantine_gate.Clearance("testapp", "CVE-2026-0001",
-                                              {"web": ("nginx", "sha256:x")})
+        from tests.test_commands.cve_helpers import BALANCED, make_clearance
+        clearance = make_clearance("testapp", {"web": ("nginx", "sha256:x")}, before=BALANCED)
+        scans = []
+        monkeypatch.setattr("boxmunge.commands.deploy_tree.manifest_in_force",
+                            lambda paths_, project: {"security": {"posture": "strict"}})
         monkeypatch.setattr("boxmunge.commands.release_config.clear_release",
-                            lambda *a: clearance)
+                            lambda *a: scans.append(a) or clearance)
         checked, lifted, pinned = [], [], []
         monkeypatch.setattr("boxmunge.commands.deploy_tree.require_unchanged",
                             lambda paths_, c: checked.append(c))
         monkeypatch.setattr(quarantine_gate, "_verify_running",
-                            lambda paths_, c, component: {"testapp-web-1": "web"})
+                            lambda paths_, c, component, **kw: {"testapp-web-1": "web"})
         monkeypatch.setattr(quarantine_gate, "_release_policies",
                             lambda paths_, project, services: {"testapp-web-1": "always"})
         mock_up.side_effect = lambda *a, **k: pinned.append(k["pinned"])
@@ -199,6 +202,8 @@ class TestQuarantinedDeploy:
         assert run_deploy("testapp", paths) == 0
         out = capsys.readouterr().out
         assert checked == [clearance]
+        # The manifest the install replaced is the baseline for the lift's report.
+        assert scans[0][3]["security"] == {"posture": "strict"}
         ((project, kw),) = lifted
         assert project == "testapp" and kw["restore"] == {"testapp-web-1": "always"}
         assert pinned == [True]  # only the scanned local images: no pull, no build

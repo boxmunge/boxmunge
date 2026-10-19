@@ -15,7 +15,9 @@ from boxmunge.commands.deploy_images import candidate_name
 from boxmunge.cve.scanner import ScannerError, TrivyNotInstalledError
 from boxmunge.docker_containers import LocalImage
 from boxmunge.release_target import production_target
-from tests.test_commands.cve_helpers import finding, make_box, scan_result, seed_quarantine
+from tests.test_commands.cve_helpers import (
+    finding, make_box, make_clearance, scan_result, seed_quarantine,
+)
 
 KEV_CVE = "CVE-2026-7777"
 MANIFEST = {"project": "demo", "hosts": ["demo.example.com"], "services": {}}
@@ -268,3 +270,157 @@ def test_a_refused_switch_puts_the_maintenance_page_back(box, monkeypatch, capsy
     assert "its maintenance page is back" in err
     ((project, kw),) = reasserted
     assert project == "demo" and kw["hosts"] == ["demo.example.com"]
+
+
+# ---- the policy a lift is judged against ----
+
+BALANCED = {"posture": "balanced", "dangerously_disable_quarantine": False, "runtimes": None}
+RELAXED = {**MANIFEST, "security": {"posture": "relaxed"}}
+
+
+def test_a_release_that_relaxes_the_recorded_policy_is_flagged(box) -> None:
+    seed_quarantine(box.paths, policy=BALANCED)
+    clearance = box.clear(RELAXED)
+    assert clearance.quarantined_under == BALANCED
+    assert clearance.relaxed() == ["posture balanced -> relaxed"]
+    assert box.clear().relaxed() == []  # the same policy relaxes nothing
+
+
+def test_a_record_without_the_policy_is_compared_with_the_manifest_it_replaced(box) -> None:
+    clearance = box.clear(RELAXED)
+    assert clearance.quarantined_under is None and clearance.relaxed() == []
+    clearance = gate.clear_release(box.paths, production_target(box.paths, "demo"), RELAXED,
+                                   MANIFEST)
+    assert clearance.quarantined_under == BALANCED
+    assert clearance.relaxed() == ["posture balanced -> relaxed"]
+
+
+def test_the_recorded_policy_wins_over_the_replaced_manifest(box) -> None:
+    seed_quarantine(box.paths, policy={**BALANCED, "posture": "relaxed"})
+    clearance = gate.clear_release(box.paths, production_target(box.paths, "demo"), RELAXED,
+                                   MANIFEST)
+    assert clearance.relaxed() == []
+
+
+def test_a_malformed_recorded_policy_refuses(box) -> None:
+    seed_quarantine(box.paths, policy={"posture": "lax"})
+    with pytest.raises(gate.QuarantineRefused, match="policy"):
+        box.clear()
+
+
+def test_findings_left_running_at_risk_are_kept_for_the_report(box) -> None:
+    box.findings["postgres@sha256:" + "b" * 64] = (finding("CVE-2026-1234"),)
+    clearance = box.clear({**MANIFEST, "security": {"dangerously_disable_quarantine": True}})
+    assert clearance.at_risk and "CVE-2026-1234" in clearance.at_risk[0]
+    assert "service db" in clearance.at_risk[0]
+    assert clearance.relaxed() == [] and clearance.quarantined_under is None
+
+
+def test_require_unchanged_refuses_a_hook_that_dropped_hardening(box, monkeypatch) -> None:
+    clearance = box.clear()
+    _as_switched(box)
+    gate.require_unchanged(box.paths, clearance)
+    monkeypatch.setattr(gate, "resolve_deployed_config", lambda *a, **k: {
+        "services": {n: {"read_only": False} for n in box.services}})
+    with pytest.raises(gate.QuarantineRefused) as e:
+        gate.require_unchanged(box.paths, clearance)
+    assert "hardening of its services changed" in str(e.value)
+
+
+# ---- what a lift says ----
+
+def _lift(box, monkeypatch, clearance, *, start=None):
+    """lift_after_deploy with Docker and the notifier stubbed; returns
+    (exit code, notifications, log entries)."""
+    sent, logged = [], []
+    if start is None:
+        monkeypatch.setattr(gate, "_verify_running", lambda *a, **k: {})
+    monkeypatch.setattr(gate, "_release_policies", lambda *a: {})
+    monkeypatch.setattr(gate, "notify", lambda paths, title, body, **kw: sent.append(
+        (title, body, kw["priority"])))
+    monkeypatch.setattr(gate, "log_operation", lambda component, msg, paths, **kw: logged.append(
+        (msg, kw["detail"])))
+
+    def lift(project, paths, **kw):
+        if start:
+            start(kw["after_start"])
+    monkeypatch.setattr(gate, "lift_quarantine", lift)
+    box.paths.project_caddy_site("demo").parent.mkdir(parents=True, exist_ok=True)
+    box.paths.project_caddy_site("demo").write_text("site")
+    rc = gate.lift_after_deploy(box.paths, "demo", "demo-r2", clearance, txn=None,
+                                component="deploy")
+    return rc, sent, logged
+
+
+def test_a_clean_lift_keeps_its_wording(box, monkeypatch, capsys) -> None:
+    clearance = make_clearance("demo", before=BALANCED)
+    rc, sent, logged = _lift(box, monkeypatch, clearance)
+    out = capsys.readouterr().out
+    assert rc == 0 and "every image it runs was scanned, with no quarantine-level finding" in out
+    assert "relaxing" not in out and "unknown" not in out
+    assert sent[0][2] == 0 and logged[0][1] == {"cve_id": "CVE-2026-0001", "ref": "demo-r2"}
+
+
+def test_a_lift_by_relaxing_the_policy_says_so(box, monkeypatch, capsys) -> None:
+    clearance = make_clearance("demo", before=BALANCED, after={**BALANCED, "posture": "relaxed"},
+                               at_risk=["CVE-2026-9 (High) in libc 1, service db"])
+    rc, sent, logged = _lift(box, monkeypatch, clearance)
+    out = capsys.readouterr().out
+    assert rc == 0
+    for text in (out, sent[0][1]):
+        assert "by relaxing the security policy (posture balanced -> relaxed)" in text
+        assert "images were not shown to be fixed" in text
+        assert "Still running at risk: CVE-2026-9 (High) in libc 1, service db" in text
+    assert "relaxing the security policy" in sent[0][0] and sent[0][2] == 1
+    (message, detail), = logged
+    assert "relaxing the security policy" in message
+    assert detail["relaxed"] == ["posture balanced -> relaxed"]
+    assert detail["policy_before"] == BALANCED
+    assert detail["policy_after"] == {**BALANCED, "posture": "relaxed"}
+    assert detail["at_risk"] == ["CVE-2026-9 (High) in libc 1, service db"]
+
+
+def test_a_lift_with_no_known_baseline_says_the_policy_is_unknown(box, monkeypatch,
+                                                                  capsys) -> None:
+    rc, sent, logged = _lift(box, monkeypatch, make_clearance("demo"))
+    assert rc == 0
+    assert "Policy at quarantine time unknown" in capsys.readouterr().out
+    assert "Policy at quarantine time unknown" in sent[0][1]
+    assert logged[0][1]["policy_before"] is None
+
+
+def test_the_lifts_start_is_checked_and_the_quarantine_put_back(box, monkeypatch,
+                                                                capsys) -> None:
+    """`up` recreated a container on an image another project pulled since
+    the check: it is not lifted, and the maintenance page returns."""
+    clearance = make_clearance("demo", {"db": ("postgres:16", "sha256:" + "b" * 64)},
+                               before=BALANCED)
+    reasserted = []
+    monkeypatch.setattr(gate, "reassert_quarantine", lambda p, paths, **kw: reasserted.append(p))
+    states = iter(["b", "e"])  # the check before the lift, then after its start
+    monkeypatch.setattr(gate.docker_containers, "project_containers", lambda p: [
+        _container("demo-db-1", "db", "sha256:" + next(states) * 64)])
+    rc, sent, _logged = _lift(box, monkeypatch, clearance, start=lambda check: check())
+    err = capsys.readouterr().err
+    assert rc == 1 and sent == [] and reasserted == ["demo"]
+    assert "demo-db-1 runs sha256:" in err and "maintenance page is back" in err
+
+
+def test_a_staged_start_is_checked_against_the_staging_containers(box, monkeypatch) -> None:
+    clearance = make_clearance("demo", {"db": ("postgres:16", "sha256:" + "b" * 64)})
+    seen = []
+    monkeypatch.setattr(gate.docker_containers, "project_containers", lambda p: seen.append(p) or [
+        _container("demo-staging-db-1", "db", "sha256:" + "e" * 64)])
+    object.__setattr__(clearance, "compose_project", "demo-staging")
+    with pytest.raises(gate.QuarantineError, match="not a scanned image"):
+        gate.verify_started(box.paths, clearance, "stage")
+    assert seen == ["demo-staging"]
+
+
+def test_manifest_in_force_is_read_only_for_a_quarantined_project(box) -> None:
+    box.paths.project_manifest("demo").write_text("project: demo\nsecurity:\n  posture: strict\n")
+    assert gate.manifest_in_force(box.paths, "demo")["security"] == {"posture": "strict"}
+    box.paths.project_manifest("demo").write_text("[unreadable")
+    assert gate.manifest_in_force(box.paths, "demo") is None  # reported as unknown
+    box.paths.project_quarantine_state("demo").unlink()
+    assert gate.manifest_in_force(box.paths, "demo") is None

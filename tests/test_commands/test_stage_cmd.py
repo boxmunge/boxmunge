@@ -227,11 +227,38 @@ class TestQuarantinedStage:
     def test_clean_release_is_staged_and_production_stays_quarantined(
             self, mock_up, mock_reload, paths, monkeypatch):
         self._quarantine(paths)
-        monkeypatch.setattr("boxmunge.staging_bringup.clear_release", lambda *a: None)
+        from tests.test_commands.cve_helpers import make_clearance
+        clearance = make_clearance("testapp")
+        checked = []
+        monkeypatch.setattr("boxmunge.staging_bringup.clear_release", lambda *a: clearance)
+        monkeypatch.setattr("boxmunge.staging_bringup.verify_started",
+                            lambda paths_, c, component: checked.append((c, component)))
         assert run_stage("testapp", paths) == 0
         assert [c.kwargs["pinned"] for c in mock_up.call_args_list] == [True]
+        assert checked == [(clearance, "stage")]  # what the start ran, after the up
         assert load_slot(paths, "testapp").state == "ready"
         assert paths.project_quarantine_state("testapp").exists()
+
+    @patch("boxmunge.commands.unstage_cmd.caddy_reload")
+    @patch("boxmunge.commands.unstage_cmd.compose_down")
+    @patch("boxmunge.staging_bringup.caddy_reload")
+    @patch("boxmunge.compose_guard.compose_up")
+    def test_a_start_on_an_unscanned_image_is_torn_down(
+            self, mock_up, mock_reload, mock_down, mock_unstage_reload, paths, capsys,
+            monkeypatch):
+        from boxmunge.cve.quarantine import QuarantineError
+        from tests.test_commands.cve_helpers import make_clearance
+        self._quarantine(paths)
+        monkeypatch.setattr("boxmunge.staging_bringup.clear_release",
+                            lambda *a: make_clearance("testapp"))
+
+        def moved(paths_, c, component):
+            raise QuarantineError("testapp-staging-web-1 runs sha256:e, not a scanned image")
+        monkeypatch.setattr("boxmunge.staging_bringup.verify_started", moved)
+        assert run_stage("testapp", paths) == 1
+        assert "Staging does not run what was scanned" in capsys.readouterr().err
+        assert load_slot(paths, "testapp") is None
+        mock_reload.assert_not_called()
 
     def test_paused_and_quarantined_is_refused(self, paths, capsys):
         from boxmunge.pause import write_paused_state

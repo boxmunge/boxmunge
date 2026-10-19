@@ -13,9 +13,12 @@ state no release carries). A quarantine-level finding refuses the release.
 
 A production release that clears starts as any deploy does, and once its
 smoke test passes the quarantine is lifted (cve.quarantine.lift_quarantine).
-If it fails after the switch, the quarantine stays: the next scan puts the
-maintenance page back. Staging lifts nothing; production stays quarantined
-until the promote, which scans again.
+If it fails after the switch, the quarantine stays and keep_quarantined puts
+the maintenance page back and stops the containers at once. The release is
+judged under its own manifest's policy, so it may clear the quarantine by
+relaxing that policy; the lift then says so (Clearance.relaxed) against the
+policy the quarantine recorded. Staging lifts nothing; production stays
+quarantined until the promote, which scans again.
 """
 from __future__ import annotations
 
@@ -27,10 +30,11 @@ from boxmunge import docker_containers
 from boxmunge.commands.deploy_images import candidate_name
 from boxmunge.commands.security_scan_core import ProjectScan, audit_targets
 from boxmunge.commands.security_scan_inputs import (
-    ScanTarget, hardening_profile, load_all_suppressions, project_meta,
+    ProjectMeta, ProjectScanError, ScanTarget, hardening_profile, load_all_suppressions, project_meta,
 )
 from boxmunge.compose_images import built_image_name
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
+from boxmunge.cve.hardening import HardeningProfile
 from boxmunge.cve.kev import load_kev
 from boxmunge.cve.policy import Disposition, FindingDisposition
 from boxmunge.cve.quarantine import (
@@ -40,6 +44,7 @@ from boxmunge.cve.quarantine import (
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.cve.scan_state import BASIS_STARTUP_IMAGES
 from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
+from boxmunge.cve.security_policy import relaxations
 from boxmunge.docker_run import DockerError
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
@@ -62,10 +67,22 @@ class StartImage:
 @dataclass(frozen=True)
 class Clearance:
     """A production release scanned clean while its project is quarantined:
-    the quarantine it lifts, and {service: (name started under, image ID)}."""
+    the quarantine it lifts, {service: (name started under, image ID)}, the
+    hardening profile it was judged with (a hook must not change it), the
+    policy it was judged under and the one the quarantine recorded (None:
+    unknown), and the findings it leaves running at risk."""
     project: str
+    compose_project: str
     cve_id: str
     images: dict[str, tuple[str, str]]
+    profile: HardeningProfile
+    policy: dict[str, Any]
+    quarantined_under: dict[str, Any] | None
+    at_risk: tuple[str, ...]
+
+    def relaxed(self) -> list[str]:
+        """What the release loosened against the policy at quarantine time."""
+        return relaxations(self.quarantined_under, self.policy) if self.quarantined_under else []
 
 
 def start_images(target: ReleaseTarget) -> tuple[dict[str, StartImage], dict[str, str]]:
@@ -104,27 +121,31 @@ def production_now(paths: BoxPaths, project: str) -> str:
     return "production runs its previous containers"
 
 
-def _quarantined_cve(paths: BoxPaths, project: str) -> str:
+def _quarantine_record(paths: BoxPaths, project: str) -> dict[str, Any]:
     path = paths.project_quarantine_state(project)
     try:
-        return checked_quarantine_record(read_quarantine_state(project, paths), path)["cve_id"]
+        return checked_quarantine_record(read_quarantine_state(project, paths), path)
     except QuarantineError as e:
         raise QuarantineRefused([f"{e} Nothing was started."]) from e
 
 
-def _scan(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, Any],
-          starts: dict[str, StartImage], unnamed: dict[str, str],
-          ) -> tuple[ProjectScan, dict[str, str], list[ScanTarget]]:
-    """The audit-only scan, {service: image ID} of what it scanned, and the
-    scan's targets."""
-    project = target.project
+def _profile(target: ReleaseTarget, meta: ProjectMeta) -> HardeningProfile:
+    """The hardening the release's compose.yml and manifest give its services."""
     release = target.compose.project_directory or target.compose.cwd
-    refresh_db()
-    meta = project_meta(project, manifest, [])
-    supps = load_all_suppressions(paths, project)
-    user_model = resolve_deployed_config(
+    return hardening_profile(meta, resolve_deployed_config(
         release, ["compose.yml"], target.compose_project,
-        project_directory=target.compose.project_directory, env_file=target.compose.env_file)
+        project_directory=target.compose.project_directory, env_file=target.compose.env_file))
+
+
+def _scan(paths: BoxPaths, target: ReleaseTarget, meta: ProjectMeta,
+          starts: dict[str, StartImage], unnamed: dict[str, str],
+          ) -> tuple[ProjectScan, dict[str, str], list[ScanTarget], HardeningProfile]:
+    """The audit-only scan, {service: image ID} of what it scanned, the
+    scan's targets and the hardening profile it was judged with."""
+    project = target.project
+    refresh_db()
+    supps = load_all_suppressions(paths, project)
+    profile = _profile(target, meta)
     targets: list[ScanTarget] = []
     ids: dict[str, str] = {}
     unidentified = dict(unnamed)
@@ -139,10 +160,10 @@ def _scan(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, Any],
     # Services sharing an image are scanned once: the budget is the project's.
     once = list({t.image_ref: t for t in targets}.values())
     scan = audit_targets(
-        paths, project, meta=meta, profile=hardening_profile(meta, user_model), supps=supps,
+        paths, project, meta=meta, profile=profile, supps=supps,
         targets=once, unidentified=unidentified, kev=load_kev(paths),
         basis=BASIS_STARTUP_IMAGES)
-    return scan, ids, targets
+    return scan, ids, targets, profile
 
 
 def _fix_advice(f: FindingDisposition) -> str:
@@ -152,12 +173,13 @@ def _fix_advice(f: FindingDisposition) -> str:
     return "no fixed version is published yet: remove the package or wait for a fix"
 
 
-def _blocking_lines(scan: ProjectScan, services: dict[str, list[str]]) -> list[str]:
+def _finding_lines(scan: ProjectScan, services: dict[str, list[str]],
+                   disposition: Disposition) -> list[str]:
     lines: dict[tuple[str, str, str], str] = {}
     for decision in scan.decisions:
         service = ", ".join(services[decision.image_ref])
         for f in decision.findings:
-            if f.disposition != Disposition.QUARANTINE:
+            if f.disposition != disposition:
                 continue
             key = (f.finding.cve_id, f.finding.package, decision.image_ref)
             kev = ", CISA KEV: actively exploited" if f.kev_listed else ""
@@ -168,18 +190,25 @@ def _blocking_lines(scan: ProjectScan, services: dict[str, list[str]]) -> list[s
     return list(lines.values())
 
 
-def clear_release(paths: BoxPaths, target: ReleaseTarget,
-                  manifest: dict[str, Any]) -> Clearance:
+def clear_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, Any],
+                  previous: dict[str, Any] | None = None) -> Clearance:
     """Scan every image the release would start; return the clearance, or
-    raise QuarantineRefused naming each finding or unscanned image."""
+    raise QuarantineRefused naming each finding or unscanned image.
+    `previous` is the manifest the install replaced, the baseline for a
+    quarantine whose record predates the policy it keeps."""
     project = target.project
-    cve = _quarantined_cve(paths, project)
+    record = _quarantine_record(paths, project)
+    cve = record["cve_id"]
     where = "staging" if target.staging else "production"
     print(f"  Scanning every image this release would start ({project} is CVE-quarantined "
           f"for {cve})...")
     try:
         starts, unnamed = start_images(target)
-        scan, ids, scan_targets = _scan(paths, target, manifest, starts, unnamed)
+        meta = project_meta(project, manifest, [])
+        scan, ids, scan_targets, profile = _scan(paths, target, meta, starts, unnamed)
+        before = record.get("policy")
+        if before is None and previous is not None:
+            before = project_meta(project, previous, []).policy()
     except (TrivyNotInstalledError, RuntimeError, ComposeResolveError, DockerError) as e:
         raise QuarantineRefused([
             f"The scan of the release's images failed: {e}",
@@ -194,7 +223,7 @@ def clear_release(paths: BoxPaths, target: ReleaseTarget,
     services: dict[str, list[str]] = {}
     for target_ in scan_targets:
         services.setdefault(target_.image_ref, []).append(target_.service)
-    blocking = _blocking_lines(scan, services)
+    blocking = _finding_lines(scan, services, Disposition.QUARANTINE)
     if blocking:
         raise QuarantineRefused([
             *blocking,
@@ -205,18 +234,27 @@ def clear_release(paths: BoxPaths, target: ReleaseTarget,
             f"be suppressed) and deploy again."])
     print(f"  Scan: clear ({len(ids)} service image(s), no quarantine-level finding under "
           f"the release's security policy).")
-    return Clearance(project, cve, {n: (starts[n].final_ref, ids[n]) for n in starts})
+    return Clearance(
+        project, target.compose_project, cve,
+        {n: (starts[n].final_ref, ids[n]) for n in starts}, profile, meta.policy(), before,
+        tuple(_finding_lines(scan, services, Disposition.STILL_RUNNING_AT_RISK)))
 
 
 def require_unchanged(paths: BoxPaths, clearance: Clearance) -> None:
     """Once the release's configs are written, before the switch: the
     release must still start exactly what was scanned (the hook may have
-    rewritten compose.yml or an env file since). Raises QuarantineRefused."""
+    rewritten compose.yml or an env file since) and with the hardening it was
+    judged with (the hook may have dropped read_only or a cap_drop, which
+    would make a finding the hardening held down quarantine-level for what
+    runs). Raises QuarantineRefused."""
     try:
-        starts, unnamed = start_images(production_target(paths, clearance.project))
+        target = production_target(paths, clearance.project)
+        profile = _profile(target, project_meta(
+            clearance.project, load_manifest(paths.project_manifest(clearance.project)), []))
+        starts, unnamed = start_images(target)
         now = {name: (start.final_ref, docker_containers.local_image(start.scan_ref))
                for name, start in starts.items()}
-    except (ComposeResolveError, DockerError) as e:
+    except (ComposeResolveError, DockerError, ManifestError, ProjectScanError) as e:
         raise QuarantineRefused([f"Checking what the release starts failed: {e}",
                                  "Nothing was started; deploy again."]) from e
     moved = [f"service {name}: {why}" for name, why in sorted(unnamed.items())]
@@ -232,13 +270,17 @@ def require_unchanged(paths: BoxPaths, clearance: Clearance) -> None:
             moved.append(f"service {name} would start {ref} "
                          f"({image.image_id if image else 'not in the local image store'}), "
                          f"not the scanned {scanned_ref} ({scanned_id})")
+    if profile != clearance.profile:
+        moved.append(f"the hardening of its services changed from {clearance.profile} to "
+                     f"{profile}")
     if moved:
         raise QuarantineRefused([*moved, "The release changed after its images were scanned "
                                  "(by its pre-deploy hook?). Nothing was started; the "
                                  "quarantine stays in place. Deploy again."])
 
 
-def _verify_running(paths: BoxPaths, clearance: Clearance, component: str) -> dict[str, str]:
+def _verify_running(paths: BoxPaths, clearance: Clearance, component: str, *,
+                    warn_held: bool = True) -> dict[str, str]:
     """Every running container must be on a scanned image. Returns
     {container: its service} of those the lift gives a restart policy back:
     a stopped container on another image (an inactive profile's, left from
@@ -246,7 +288,7 @@ def _verify_running(paths: BoxPaths, clearance: Clearance, component: str) -> di
     start it, and is named."""
     services: dict[str, str] = {}
     wrong, held = [], []
-    for c in docker_containers.project_containers(clearance.project):
+    for c in docker_containers.project_containers(clearance.compose_project):
         if c.oneoff:
             continue
         scanned = clearance.images.get(c.service)
@@ -258,7 +300,7 @@ def _verify_running(paths: BoxPaths, clearance: Clearance, component: str) -> di
             held.append(c.name)
     if wrong:
         raise QuarantineError("; ".join(wrong))
-    if held:
+    if held and warn_held:
         message = (f"stopped containers on images this deploy did not scan keep restart "
                    f"policy \"no\": {', '.join(held)}; remove them if they are not needed")
         print(f"  WARNING: {message}")
@@ -317,18 +359,72 @@ def keep_quarantined(paths: BoxPaths, project: str) -> None:
           f"{project}`.", file=sys.stderr)
 
 
+def verify_started(paths: BoxPaths, clearance: Clearance, component: str) -> None:
+    """After a start, every running container of the release is still on a
+    scanned image: a tag another project pulled in between would have had
+    compose recreate it on one nobody scanned. Raises QuarantineError."""
+    _verify_running(paths, clearance, component, warn_held=False)
+
+
+def _lift_report(clearance: Clearance, ref: str) -> tuple[str, dict[str, Any]]:
+    """(what the lift says, the log detail) of a lift.
+    A scan that is clear only because the release loosened its security
+    policy says so, and what is left running at risk; it is not a fix."""
+    cve = clearance.cve_id
+    detail: dict[str, Any] = {"cve_id": cve, "ref": ref}
+    done = f"quarantine ({cve}) lifted by deploying {ref}"
+    relaxed = clearance.relaxed()
+    if relaxed:
+        risk = (f" Still running at risk: {'; '.join(clearance.at_risk)}." if clearance.at_risk
+                else "")
+        text = (f"{done}, by relaxing the security policy ({'; '.join(relaxed)}), not by a "
+                f"fix: the images were not shown to be fixed.{risk}")
+        detail.update(relaxed=relaxed, policy_before=clearance.quarantined_under,
+                      policy_after=clearance.policy, at_risk=list(clearance.at_risk))
+        return text[0].upper() + text[1:], detail
+    text = (f"{done}: every image it runs was scanned, with no quarantine-level finding "
+            f"under the release's security policy.")
+    if clearance.quarantined_under is None:
+        text += (" Policy at quarantine time unknown: a relaxation of the security policy "
+                 "cannot be ruled out.")
+        detail["policy_before"] = None
+    return text[0].upper() + text[1:], detail
+
+
+def manifest_in_force(paths: BoxPaths, project: str) -> dict[str, Any] | None:
+    """The on-box manifest of a quarantined project, read before an install
+    replaces it: the baseline for a quarantine whose record does not keep the
+    policy. None when the project is not quarantined or the manifest cannot
+    be read (the lift then reports the policy at quarantine time unknown)."""
+    if not is_quarantined(project, paths):
+        return None
+    try:
+        return load_manifest(paths.project_manifest(project))
+    except ManifestError:
+        return None
+
+
 def lift_after_deploy(paths: BoxPaths, project: str, ref: str, clearance: Clearance, *,
                       txn: str | None, component: str) -> int:
     """The release is live and its smoke test passed: check that every
-    container runs a scanned image, then lift the quarantine. Returns 0, or
-    1 with the failure reported (the quarantine stays)."""
+    container runs a scanned image, then lift the quarantine (checking again
+    once the lift's start is done, and putting the quarantine back if that
+    start moved a container onto an unscanned image). Returns 0, or 1 with
+    the failure reported (the quarantine stays)."""
+    def recheck() -> None:
+        try:
+            verify_started(paths, clearance, component)
+        except QuarantineError:
+            keep_quarantined(paths, project)
+            raise
+
     try:
         policies = _release_policies(paths, project,
                                      _verify_running(paths, clearance, component))
         site = paths.project_caddy_site(project).read_text()
         lift_quarantine(project, paths, project_caddy_site_content=site,
                         compose_files=["compose.yml", "compose.boxmunge.yml"],
-                        restore=policies, txn=txn, component=component)
+                        restore=policies, txn=txn, component=component, after_start=recheck)
     except (QuarantineError, DockerError, ComposeResolveError, OSError) as e:
         print(f"ERROR: {ref} is deployed, but lifting the quarantine ({clearance.cve_id}) "
               f"failed: {e}. The quarantine stays in place and the next scan re-asserts it; "
@@ -337,14 +433,14 @@ def lift_after_deploy(paths: BoxPaths, project: str, ref: str, clearance: Cleara
         log_error(component, f"Lifting the quarantine after deploying {ref} failed: {e}",
                   paths, project=project)
         return 1
-    message = f"quarantine ({clearance.cve_id}) lifted by deploying {ref}"
-    print(f"  {message[0].upper()}{message[1:]}: every image it runs was scanned, with no "
-          f"quarantine-level finding under the release's security policy.")
-    log_operation(component, f"CVE {message}", paths, project=project,
-                  detail={"cve_id": clearance.cve_id, "ref": ref})
-    notify(paths, f"{project}: quarantine lifted by deploying {ref}",
-           f"The CVE quarantine of {project} ({clearance.cve_id}) was lifted by deploying "
-           f"{ref}: every image it runs was scanned, with no quarantine-level finding under "
-           f"the release's security policy.",
-           component=component, project=project, priority=0)
+    message, detail = _lift_report(clearance, ref)
+    relaxed = bool(clearance.relaxed())
+    print(f"  {message}")
+    log_operation(component, f"CVE quarantine ({clearance.cve_id}) lifted by deploying {ref}"
+                  + (" by relaxing the security policy" if relaxed else ""),
+                  paths, project=project, detail=detail)
+    notify(paths, f"{project}: quarantine lifted by "
+           + (f"relaxing the security policy ({ref})" if relaxed else f"deploying {ref}"),
+           f"{project}: {message}",
+           component=component, project=project, priority=1 if relaxed else 0)
     return 0

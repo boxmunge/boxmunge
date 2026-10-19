@@ -200,19 +200,19 @@ def test_a_quarantined_git_project_ships_its_fix_through_the_scan(paths, tmp_pat
     `installed`; a clean commit deploys and lifts the quarantine."""
     from boxmunge.commands import quarantine_gate
     from boxmunge.cve.quarantine import clear_quarantine_state, is_quarantined
-    from tests.test_commands.cve_helpers import seed_quarantine
+    from tests.test_commands.cve_helpers import make_clearance, seed_quarantine
     pdir, work = git_project(paths, tmp_path)
     before = _head(pdir)
     seed_quarantine(paths, "myapp")
     bad = commit(work, {"VERSION": "bad\n"}, "still vulnerable")
 
-    def scan(paths_, target, manifest):
+    def scan(paths_, target, manifest, previous):
         if _head(pdir) == bad:
             raise quarantine_gate.QuarantineRefused(["CVE-2026-0001 in openssl, service web"])
-        return quarantine_gate.Clearance("myapp", "CVE-2026-0001", {})
+        return make_clearance("myapp")
     monkeypatch.setattr("boxmunge.commands.release_config.clear_release", scan)
     monkeypatch.setattr("boxmunge.commands.deploy_tree.require_unchanged", lambda *a: None)
-    monkeypatch.setattr(quarantine_gate, "_verify_running", lambda *a: {})
+    monkeypatch.setattr(quarantine_gate, "_verify_running", lambda *a, **k: {})
     monkeypatch.setattr(quarantine_gate, "_release_policies", lambda *a: {})
     monkeypatch.setattr(quarantine_gate, "lift_quarantine",
                         lambda project, paths_, **kw: clear_quarantine_state(project, paths_))

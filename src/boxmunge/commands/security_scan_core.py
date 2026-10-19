@@ -454,7 +454,7 @@ def _enforce(
 ) -> Enforcement:
     return enforce(
         paths, project, hosts=meta.hosts, compose_files=meta.compose_files,
-        headline=headline, in_grace=in_grace,
+        policy=meta.policy(), headline=headline, in_grace=in_grace,
     )
 
 

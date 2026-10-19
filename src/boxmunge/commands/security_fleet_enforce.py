@@ -63,7 +63,7 @@ def _apply(paths: BoxPaths, project: str, decisions: tuple[ProjectDecision, ...]
             meta = load_project_meta(paths, project)
             outcome = enforce(
                 paths, project, hosts=meta.hosts, compose_files=meta.compose_files,
-                headline=headline, in_grace=False,
+                policy=meta.policy(), headline=headline, in_grace=False,
             )
     except LockError:
         return "held by another operation; the next scan quarantines it"

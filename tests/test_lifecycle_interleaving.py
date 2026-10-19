@@ -45,7 +45,7 @@ def _pause(name, paths):
 @contextmanager
 def _scan_refuses():
     """The quarantine gate's scan finds the release still vulnerable."""
-    def refuse(paths, target, manifest):
+    def refuse(paths, target, manifest, previous=None):
         raise QuarantineRefused(["CVE-2099-0001 (Critical) in openssl 1, service web"])
     with patch("boxmunge.commands.release_config.clear_release", refuse), \
             patch("boxmunge.staging_bringup.clear_release", refuse):

@@ -16,7 +16,7 @@ reusing the recorded snapshot. While a release is staged, a new install
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -25,7 +25,9 @@ from boxmunge.commands.deploy_steps import snapshot_live_release
 from boxmunge.commands.release_config import (
     ReleaseDecision, decide_release_users, generate_release_config,
 )
-from boxmunge.commands.quarantine_gate import keep_quarantined, require_unchanged
+from boxmunge.commands.quarantine_gate import (
+    keep_quarantined, manifest_in_force, require_unchanged,
+)
 from boxmunge.crashpoint import crash_point
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker_run import DockerError
@@ -61,6 +63,9 @@ class TreeDeploy:
     no_snapshot: bool = False
     on_installed: Callable[[], None] | None = None   # after the code is in place
     on_switched: Callable[[int], None] | None = None  # after replace_release returns
+    # A quarantined project's manifest before this install replaced it; set by
+    # _fresh only (a resumed install has already replaced it).
+    previous_manifest: dict | None = None
 
 
 def deploy_tree_locked(project_name: str, paths: BoxPaths, req: TreeDeploy) -> int:
@@ -114,7 +119,8 @@ def _disjoint_advice(req: TreeDeploy) -> str:
 def _fresh(project_name: str, paths: BoxPaths, req: TreeDeploy) -> int:
     if not _prove_disjoint(project_name, paths, req):
         return 1
-    return _open(project_name, paths, req)
+    return _open(project_name, paths, replace(
+        req, previous_manifest=manifest_in_force(paths, project_name)))
 
 
 def _open(project_name: str, paths: BoxPaths, req: TreeDeploy) -> int:
@@ -186,7 +192,8 @@ def _decide(project_name: str, paths: BoxPaths, req: TreeDeploy,
     """The release's users (and, for a quarantined project, its scan's
     clearance), or the exit code of a refusal (reported)."""
     try:
-        return decide_release_users(project_name, paths, req.manifest, req.component)
+        return decide_release_users(project_name, paths, req.manifest, req.component,
+                                    req.previous_manifest)
     except DeployRefused as e:
         print(f"ERROR: {req.ref} cannot start as it is:\n{e}", file=sys.stderr)
         log_error(req.component, f"{req.ref} cannot start as it is: {e}", paths,

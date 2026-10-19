@@ -18,6 +18,7 @@ import uuid
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 from boxmunge.commands import quarantine_gate
 from boxmunge.cve.policy import Disposition, FindingDisposition
@@ -33,13 +34,18 @@ pytestmark = [pytest.mark.integration, skip_no_docker]
 
 CVE = "CVE-2026-4242"
 NOBODY = {"user": "65534:65534"}
+BALANCED = {"posture": "balanced", "dangerously_disable_quarantine": False, "runtimes": None}
 
 
-def _bundle(p: str, vulnerable: str, app_restart: str) -> dict[str, str]:
+def _bundle(p: str, vulnerable: str, app_restart: str, *,
+            read_only: bool = False) -> dict[str, str]:
     services = {
         "app": {"build": ".", "command": nc.SLEEP, "restart": app_restart},
         "side": {"image": nc.BUSYBOX, "command": nc.SLEEP, "restart": "always"},
     }
+    if read_only:  # what dangerously_disable_quarantine requires
+        for svc in services.values():
+            svc["read_only"] = True
     return nc.bundle(p, services, declare={"app": NOBODY, "side": NOBODY}, files={
         "Dockerfile": f"FROM {nc.BUSYBOX}\nLABEL vulnerable={vulnerable}\n"
                       f"RUN echo {uuid.uuid4().hex} > /release\n"})
@@ -87,7 +93,18 @@ def _quarantine(paths, p: str) -> None:
     quarantine_project(p, paths, project_dir=paths.project_dir(p),
                        hosts=[f"{p}.example.com"],
                        compose_files=["compose.yml", "compose.boxmunge.yml"],
-                       headline=headline, image_ref="app")
+                       headline=headline, image_ref="app", policy=BALANCED)
+
+
+def _stub_scanner(monkeypatch) -> Trivy:
+    trivy = Trivy()
+    monkeypatch.setattr("boxmunge.commands.security_scan_core.scan_image", trivy)
+    monkeypatch.setattr(quarantine_gate, "refresh_db", lambda: None)
+    # The suite keeps restart-policy holds off the daemon; these tests are about them.
+    monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies",
+                        project_restart_policies)
+    monkeypatch.setattr("boxmunge.restart_hold.set_restart_policy", set_restart_policy)
+    return trivy
 
 
 def _refused_unchanged(paths, p, capsys, files, before) -> str:
@@ -102,13 +119,7 @@ def _refused_unchanged(paths, p, capsys, files, before) -> str:
 
 def test_deploying_a_fix_to_a_quarantined_project(int_paths, capsys, monkeypatch) -> None:
     p = f"bmqf{uuid.uuid4().hex[:8]}"
-    trivy = Trivy()
-    monkeypatch.setattr("boxmunge.commands.security_scan_core.scan_image", trivy)
-    monkeypatch.setattr(quarantine_gate, "refresh_db", lambda: None)
-    # The suite keeps restart-policy holds off the daemon; this test is about them.
-    monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies",
-                        project_restart_policies)
-    monkeypatch.setattr("boxmunge.restart_hold.set_restart_policy", set_restart_policy)
+    trivy = _stub_scanner(monkeypatch)
     try:
         with patch("boxmunge.cve.quarantine.caddy_reload"):
             rc, out = nc.deploy(int_paths, p, _bundle(p, "yes", "unless-stopped"), capsys)
@@ -147,5 +158,36 @@ def test_deploying_a_fix_to_a_quarantined_project(int_paths, capsys, monkeypatch
         assert project_restart_policies(project_name=p) == {side: "always", app: "always"}
         assert _label(f"boxmunge.invalid/{p}/app") == "no"
         assert _candidates(p) == []
+    finally:
+        nc.teardown(int_paths, p)
+
+
+def test_a_release_that_relaxes_the_policy_lifts_and_says_so(int_paths, capsys,
+                                                            monkeypatch) -> None:
+    """The images still carry the finding: the release clears the quarantine
+    only by opting out of it, and the lift reports that, not a fix."""
+    p = f"bmqr{uuid.uuid4().hex[:8]}"
+    _stub_scanner(monkeypatch)
+    sent = []
+    monkeypatch.setattr(quarantine_gate, "notify",
+                        lambda paths, title, body, **kw: sent.append((title, body, kw)))
+    try:
+        with patch("boxmunge.cve.quarantine.caddy_reload"):
+            rc, out = nc.deploy(int_paths, p, _bundle(p, "yes", "unless-stopped"), capsys)
+            assert rc == 0, out
+            _quarantine(int_paths, p)
+            files = _bundle(p, "yes", "always", read_only=True)
+            manifest = yaml.safe_load(files["manifest.yml"])
+            manifest["security"] = {"dangerously_disable_quarantine": True}
+            files["manifest.yml"] = yaml.safe_dump(manifest)
+            rc, out = nc.deploy(int_paths, p, files, capsys)
+            assert rc == 0, out
+        assert not is_quarantined(p, int_paths)
+        assert "by relaxing the security policy (dangerously_disable_quarantine turned on)" in out
+        assert "images were not shown to be fixed" in out
+        assert f"Still running at risk: {CVE} (Critical) in openssl 1, service app" in out
+        ((title, body, kw),) = sent
+        assert "relaxing the security policy" in title and kw["priority"] == 1
+        assert "not shown to be fixed" in body
     finally:
         nc.teardown(int_paths, p)

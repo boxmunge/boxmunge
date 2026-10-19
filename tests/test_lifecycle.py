@@ -45,6 +45,7 @@ def _quarantine(
         project, paths,
         headline=_disposition(cve_id=cve_id),
         image_ref="myimage:latest",
+        policy={"posture": "balanced", "dangerously_disable_quarantine": False, "runtimes": None},
     )
 
 
