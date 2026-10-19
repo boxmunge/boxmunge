@@ -45,8 +45,11 @@ class Box:
                          "db": {"image": "postgres:16"}, "cache": {"image": "redis:7"}}
         monkeypatch.setattr(gate, "resolved_services", lambda target: ({}, self.services))
         monkeypatch.setattr(gate.docker_containers, "local_image", self.images.get)
+        # compose-only services (the manifest names none) count as read-only only when
+        # compose.yml says so
         monkeypatch.setattr(gate, "resolve_deployed_config",
-                            lambda *a, **k: {"services": {n: {} for n in self.services}})
+                            lambda *a, **k: {"services": {n: {"read_only": True}
+                                                          for n in self.services}})
         monkeypatch.setattr(gate, "refresh_db", lambda: None)
         monkeypatch.setattr("boxmunge.commands.security_scan_core.scan_image", self._scan)
 
