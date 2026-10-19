@@ -43,7 +43,8 @@ def relaxations(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
     """What *after* loosens against *before*, in words. A tighter posture is
     not listed. A runtime list counts when it may exempt packages the old
     judgement covered: declared where it was inferred, or missing a runtime
-    the old list had."""
+    the old list had. Declared to inferred counts as well: inference drops
+    languages it does not recognise, which biases toward exempting more."""
     found: list[str] = []
     order = [p.value for p in Posture]
     if order.index(after["posture"]) < order.index(before["posture"]):
@@ -51,6 +52,7 @@ def relaxations(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
     if after["dangerously_disable_quarantine"] and not before["dangerously_disable_quarantine"]:
         found.append("dangerously_disable_quarantine turned on")
     old, new = before["runtimes"], after["runtimes"]
-    if new is not None and (old is None or not set(old) <= set(new)):
+    if (new is None and old is not None) or (
+            new is not None and (old is None or not set(old) <= set(new))):
         found.append(f"security.runtimes {_runtimes(old)} -> {_runtimes(new)}")
     return found

@@ -387,7 +387,7 @@ def _lift_report(clearance: Clearance, ref: str) -> tuple[str, dict[str, Any]]:
     if clearance.quarantined_under is None:
         text += (" Policy at quarantine time unknown: a relaxation of the security policy "
                  "cannot be ruled out.")
-        detail["policy_before"] = None
+        detail["policy_baseline"] = "unknown"
     return text[0].upper() + text[1:], detail
 
 
@@ -435,12 +435,14 @@ def lift_after_deploy(paths: BoxPaths, project: str, ref: str, clearance: Cleara
         return 1
     message, detail = _lift_report(clearance, ref)
     relaxed = bool(clearance.relaxed())
+    unknown = detail.get("policy_baseline") == "unknown"
+    # Both cases are higher priority: a relaxation, or one that cannot be ruled out.
+    caveat = (" by relaxing the security policy" if relaxed
+              else " (policy at quarantine time unknown)" if unknown else "")
     print(f"  {message}")
     log_operation(component, f"CVE quarantine ({clearance.cve_id}) lifted by deploying {ref}"
-                  + (" by relaxing the security policy" if relaxed else ""),
-                  paths, project=project, detail=detail)
-    notify(paths, f"{project}: quarantine lifted by "
-           + (f"relaxing the security policy ({ref})" if relaxed else f"deploying {ref}"),
+                  + caveat, paths, project=project, detail=detail)
+    notify(paths, f"{project}: quarantine lifted by deploying {ref}" + caveat,
            f"{project}: {message}",
-           component=component, project=project, priority=1 if relaxed else 0)
+           component=component, project=project, priority=1 if relaxed or unknown else 0)
     return 0

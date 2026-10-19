@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Callable
 
 from boxmunge.commands.deploy_steps import snapshot_live_release
 from boxmunge.commands.deploy_tree import TreeDeploy, report_left_open, switch_and_close
+from boxmunge.commands.quarantine_gate import manifest_in_force
 from boxmunge.crashpoint import crash_point
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.git_slot import GitRefError, checkout_detached, head_sha, materialise
@@ -52,6 +53,9 @@ class GitDeploy:
     candidate: Path | None = None   # the commit already materialised (a git slot's release)
     on_installed: Callable[[], None] | None = None
     on_switched: Callable[[int], None] | None = None  # after replace_release returns
+    # A quarantined project's manifest before the checkout replaced it; set by
+    # deploy_git_locked when it opens the install (a resume's is already replaced).
+    previous_manifest: dict | None = None
 
 
 def deploy_git_locked(project_name: str, paths: BoxPaths, req: GitDeploy) -> int:
@@ -82,6 +86,7 @@ def deploy_git_locked(project_name: str, paths: BoxPaths, req: GitDeploy) -> int
             return forward
         txn = forward
     if txn is None:
+        req = replace(req, previous_manifest=manifest_in_force(paths, project_name))
         opened = _open(project_name, paths, req)
         if isinstance(opened, int):
             return opened
@@ -188,7 +193,8 @@ def _checkout_and_switch(project_name: str, paths: BoxPaths, req: GitDeploy,
                          txn: InstallTxn) -> int:
     tree_req = TreeDeploy(tree=None, ref=req.sha, source=req.source, manifest={},
                           staged_id=req.staged_id, component=req.component,
-                          on_switched=req.on_switched)
+                          on_switched=req.on_switched,
+                          previous_manifest=req.previous_manifest)
     try:
         if not txn.reached("previous_kept"):
             txn = advance(paths, project_name, txn, "previous_kept")  # git keeps no previous tree

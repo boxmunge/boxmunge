@@ -1007,11 +1007,13 @@ cleared.
 
    Because the release is judged under its own `security:` block, it can
    clear a quarantine by relaxing it (a lower `posture`,
-   `dangerously_disable_quarantine`, or a narrower `security.runtimes`)
+   `dangerously_disable_quarantine`, or declared `security.runtimes` narrowed or replaced by per-image
+   inference)
    instead of fixing the images. That is allowed, and it is reported: the
    quarantine record keeps the policy in force when the project was
    quarantined (an older record does not; the manifest the install
-   replaced is used, else "policy at quarantine time unknown" is said),
+   replaced is used, else "policy at quarantine time unknown" is said, with
+   a priority-1 alert and `policy_baseline: unknown` in the log detail),
    and a lift that relaxed it says so on the console, in the operation log
    (before and after) and in a priority-1 alert, listing what changed,
    that the images were not shown to be fixed, and any findings left
