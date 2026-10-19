@@ -161,7 +161,7 @@ def test_hardening_counts_settings_from_included_files(tmp_path):
     (project_dir / "compose.yml").write_text(
         "include:\n  - db.yml\nservices:\n  web:\n    image: nginx:1\n")
     meta = load_project_meta(paths, name)
-    assert hardening_profile(meta, load_user_model(paths, name)).extra_caps_added
+    assert hardening_profile(meta, load_user_model(paths, name)).applied.extra_caps_added
 
 
 def test_quarantined_project_without_containers_scans_what_resume_starts(tmp_path):
