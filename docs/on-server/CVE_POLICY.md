@@ -992,16 +992,30 @@ cleared.
    leaves the install open before its hook, so `prod-deploy <project>
    --abandon` or a different release (fix-forward) ends it; a resumed
    install stays at its phase. A clean release deploys as usual, refused
-   if its hook changed what it would start, and starts only the scanned
-   local images (no pull or build, whatever `pull_policy` says). Once its
-   smoke test passes and every container is checked to run a scanned
-   image, the quarantine is lifted, held containers get their release's
-   own restart policy, and a "quarantine lifted by deploying <ref>" alert
-   is sent. If it fails after the switch, the quarantine stays and the
-   next scan puts the maintenance page back; deploy again or `security
-   resume`. `rollback`, `restore` and `recover` stay refused. `stage` of a
-   quarantined project scans staging's images the same way; production
-   stays quarantined until the promote, which scans again.
+   if its hook changed what it would start or the hardening it was judged
+   with, and starts only the scanned local images (no pull or build,
+   whatever `pull_policy` says). Once its smoke test passes and every
+   container is checked to run a scanned image (again after the lift's
+   own start), the quarantine is lifted, held containers get their
+   release's own restart policy, and a "quarantine lifted by deploying
+   <ref>" alert is sent. If it fails after the switch, the quarantine
+   stays and the maintenance page is put back at once; deploy again or
+   `security resume`. `rollback`, `restore` and `recover` stay refused.
+   `stage` of a quarantined project scans staging's images the same way
+   (and checks what the start ran); production stays quarantined until
+   the promote, which scans again.
+
+   Because the release is judged under its own `security:` block, it can
+   clear a quarantine by relaxing it (a lower `posture`,
+   `dangerously_disable_quarantine`, or a narrower `security.runtimes`)
+   instead of fixing the images. That is allowed, and it is reported: the
+   quarantine record keeps the policy in force when the project was
+   quarantined (an older record does not; the manifest the install
+   replaced is used, else "policy at quarantine time unknown" is said),
+   and a lift that relaxed it says so on the console, in the operation log
+   (before and after) and in a priority-1 alert, listing what changed,
+   that the images were not shown to be fixed, and any findings left
+   running at risk.
 
 This is distinct from `boxmunge resume` (which lifts a manual `pause`).
 The two are independent: if the project is also paused, `security resume`
