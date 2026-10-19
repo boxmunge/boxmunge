@@ -14,8 +14,10 @@ units, arrives with plugin installation.
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -41,11 +43,13 @@ def build_dev_app(root: Path, plugin: str) -> ApiApp:
     return ApiApp(invoker, Principal.plugin(plugin, Tier.OBSERVE), mode="dev")
 
 
-def run_dev(root: Path, socket_path: Path, plugin: str) -> None:
+def run_dev(root: Path, socket_path: Path, plugin: str, *, exit_on_stdin_eof: bool = False) -> None:
     app = build_dev_app(root, plugin)
     prepare_socket_path(socket_path)
     server = UnixHTTPServer(socket_path, app, socket_mode=DEV_SOCKET_MODE, access_log=True)
     signal.signal(signal.SIGTERM, _interrupt)
+    if exit_on_stdin_eof:
+        threading.Thread(target=_stop_at_stdin_eof, daemon=True).start()
     print(f"boxmunge-apid DEV MODE: serving the fixture box {root} on {socket_path} "
           f"as plugin:{plugin}, observe actions only. Not a real box. Ctrl-C stops.",
           file=sys.stderr)
@@ -56,6 +60,13 @@ def run_dev(root: Path, socket_path: Path, plugin: str) -> None:
     finally:
         server.server_close()
         socket_path.unlink(missing_ok=True)
+
+
+def _stop_at_stdin_eof() -> None:
+    """Stop the server when stdin closes, which is how a supervising process
+    that is killed outright (no chance to signal us) still takes us down."""
+    sys.stdin.buffer.read()
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 def _interrupt(signum: int, frame: Any) -> None:
@@ -74,6 +85,9 @@ def _parser() -> argparse.ArgumentParser:
                       help="write a realistic fixture box into DIR (new or empty)")
     parser.add_argument("--root", type=Path, metavar="DIR", help="fixture box to serve")
     parser.add_argument("--socket", type=Path, metavar="PATH", help="unix socket to listen on")
+    parser.add_argument("--exit-on-stdin-eof", action="store_true",
+                        help="with --dev: stop when stdin closes, so a supervising "
+                             "process that dies cannot leave the server running")
     parser.add_argument("--plugin", default="dev", metavar="NAME",
                         help="plugin name the dev principal takes (default: dev)")
     return parser
@@ -86,6 +100,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--make-fixture takes only its directory")
     if args.dev and (args.root is None or args.socket is None):
         parser.error("--dev needs --root DIR and --socket PATH")
+    if args.exit_on_stdin_eof and not args.dev:
+        parser.error("--exit-on-stdin-eof only applies to --dev")
     try:
         if args.make_fixture is not None:
             make_fixture(args.make_fixture)
@@ -93,7 +109,8 @@ def main(argv: list[str] | None = None) -> None:
                   f"Serve it with: boxmunge-apid --dev --root {args.make_fixture} "
                   f"--socket ./api.sock")
             return
-        run_dev(args.root, args.socket, args.plugin)
+        run_dev(args.root, args.socket, args.plugin,
+                    exit_on_stdin_eof=args.exit_on_stdin_eof)
     except (FixtureError, ServerError, ValueError, OSError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)

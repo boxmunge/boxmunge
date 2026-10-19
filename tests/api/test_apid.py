@@ -6,7 +6,6 @@ import ast
 import json
 import os
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -16,6 +15,7 @@ import pytest
 
 from boxmunge.api.apid import build_dev_app, main
 from boxmunge.api.dev.fixture import FIXTURE_MARKER, make_fixture
+from tests.api.dev_apid import DevApid
 from tests.api.unix_http import call
 
 REPO = Path(__file__).resolve().parents[2]
@@ -70,32 +70,8 @@ def test_dev_app_serves_observe_as_the_named_plugin(tmp_path) -> None:
     assert {entry["tier"] for entry in body["data"]["actions"]} == {"observe"}
 
 
-def _wait_for_socket(path: Path, proc: subprocess.Popen) -> None:
-    for _ in range(200):
-        if proc.poll() is not None:
-            pytest.fail(f"apid exited early: {proc.stderr.read().decode()}")
-        if path.exists():
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
-                try:
-                    probe.connect(str(path))
-                    return
-                except ConnectionRefusedError:
-                    pass
-        time.sleep(0.05)
-    pytest.fail("apid did not start listening")
-
-
 def test_dev_apid_end_to_end(tmp_path, sock_path) -> None:
-    root = tmp_path / "box"
-    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
-    apid = [sys.executable, "-m", "boxmunge.api.apid"]
-    subprocess.run([*apid, "--make-fixture", str(root)], env=env, check=True,
-                   capture_output=True)
-    proc = subprocess.Popen([*apid, "--dev", "--root", str(root), "--socket", str(sock_path),
-                             "--plugin", "webui"], env=env,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    try:
-        _wait_for_socket(sock_path, proc)
+    with DevApid(tmp_path / "box", sock_path) as apid:
         status, catalog = call(sock_path, "GET", "/v1/actions")
         assert status == 200 and catalog["data"]["principal"] == "plugin:webui"
         status, body = call(sock_path, "POST", "/v1/actions/status.get", {"params": {}})
@@ -103,15 +79,67 @@ def test_dev_apid_end_to_end(tmp_path, sock_path) -> None:
         status, body = call(sock_path, "POST", "/v1/actions/project.rollback",
                             {"params": {"project": "shop"}})
         assert status == 404 and body["error"]["code"] == "not_found"
-    finally:
-        proc.send_signal(signal.SIGTERM)
-        _, stderr = proc.communicate(timeout=10)
-    assert proc.returncode == 0, stderr.decode()
-    assert b"DEV MODE" in stderr
+    assert apid.returncode == 0, apid.stderr
+    assert "DEV MODE" in apid.stderr
     assert not sock_path.exists()
-    audit = [json.loads(line) for line in (root / "logs" / "audit.jsonl").read_text().splitlines()]
+    audit = [json.loads(line) for line in
+             (tmp_path / "box" / "logs" / "audit.jsonl").read_text().splitlines()]
     assert [(r["principal"], r["action"], r["outcome"], r["code"]) for r in audit] == [
         ("plugin:webui", "project.rollback", "refused", "not_found")]
+
+
+def test_a_failing_test_body_still_stops_the_server(tmp_path, sock_path) -> None:
+    with pytest.raises(AssertionError, match="body failed"):
+        with DevApid(tmp_path / "box", sock_path) as apid:
+            pid = apid.proc.pid
+            raise AssertionError("body failed")
+    assert not _alive(pid)
+
+
+def test_the_server_stops_when_its_supervisor_is_killed_outright(tmp_path, sock_path) -> None:
+    """The leak that ran for 33 hours: the test runner was SIGKILLed, so no teardown ran."""
+    supervisor = subprocess.Popen(
+        [sys.executable, "-c", _SUPERVISOR, str(tmp_path / "box"), str(sock_path)],
+        env={**os.environ, "PYTHONPATH": f"{REPO / 'src'}{os.pathsep}{REPO}"},
+        stdout=subprocess.PIPE)
+    try:
+        apid_pid = int(supervisor.stdout.readline())  # printed once the socket is up
+        assert _alive(apid_pid)
+        supervisor.kill()
+        supervisor.wait(timeout=10)
+        _wait_until_gone(apid_pid)
+    finally:
+        supervisor.kill()
+        supervisor.wait(timeout=10)
+        if (stray := _alive(apid_pid)):
+            os.kill(apid_pid, signal.SIGKILL)
+        assert not stray, "apid outlived its killed supervisor"
+
+
+# Starts a dev apid the way the tests do, reports its pid, then dies without teardown.
+_SUPERVISOR = """
+import os, signal, sys
+from pathlib import Path
+from tests.api.dev_apid import DevApid
+apid = DevApid(Path(sys.argv[1]), Path(sys.argv[2])).start()
+print(apid.proc.pid, flush=True)
+os.kill(os.getpid(), signal.SIGSTOP)
+"""
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _wait_until_gone(pid: int) -> None:
+    for _ in range(200):
+        if not _alive(pid):
+            return
+        time.sleep(0.05)
 
 
 def test_phase_a_installs_no_apid_service() -> None:
