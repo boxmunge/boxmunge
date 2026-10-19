@@ -59,6 +59,20 @@ def test_resume_recover_and_security_resume_refuse(migrating, capsys) -> None:
     assert security_resume_locked(migrating, "shop") != 0 and _refused(capsys)
 
 
+def test_project_delete_and_unstage_refuse(migrating, capsys, monkeypatch) -> None:
+    """A deploy-user project-delete would run compose down and remove images
+    mid-migration; unstage tears containers down too."""
+    from boxmunge.commands.project_delete_cmd import delete_locked
+    from boxmunge.commands.unstage_cmd import unstage_locked
+    monkeypatch.setattr("boxmunge.commands.project_delete_cmd._teardown",
+                        lambda *a: pytest.fail("torn down"))
+    monkeypatch.setattr("boxmunge.commands.unstage_cmd.sweep_debris",
+                        lambda *a: pytest.fail("swept"))
+    assert delete_locked("shop", migrating, force=True) == 1 and _refused(capsys)
+    assert migrating.project_dir("shop").is_dir()
+    assert unstage_locked("shop", migrating) == 1 and _refused(capsys)
+
+
 def test_pause_refuses(migrating, capsys) -> None:
     from boxmunge.commands.pause_cmd import pause_locked
     assert pause_locked("shop", migrating, None) == 1 and _refused(capsys)

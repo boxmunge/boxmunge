@@ -20,6 +20,7 @@ from boxmunge.data_helper import container_owned_dirs, empty_under
 from boxmunge.docker import DockerError, caddy_reload, compose_down, staging_compose_project
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.legacy_stage import legacy_staging_compose, legacy_staging_state
+from boxmunge.lifecycle import migration_refusal
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.paths import BoxPaths
 from boxmunge.project_alerts import ALERT_KINDS, alert_state
@@ -162,6 +163,10 @@ def _remove_project_dir(project_name: str, project_dir: Path) -> None:
 
 def delete_locked(project_name: str, paths: BoxPaths, force: bool) -> int:
     """Tear down and remove the project. Caller holds the project lock."""
+    refusal = migration_refusal(f"Deleting '{project_name}'", paths)
+    if refusal:
+        print(f"ERROR: {refusal}", file=sys.stderr)
+        return 1
     failures = _teardown(project_name, paths)
     if failures:
         detail = "; ".join(failures)

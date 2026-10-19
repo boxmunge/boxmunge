@@ -1420,9 +1420,9 @@ on its untouched old root, timers included; fix the cause (an edit to `daemon.js
 as it names no `userns-remap`) and run it again.
 
 From the moment the downtime starts until the box runs again, `/opt/boxmunge/userns-migrating`
-exists, and every command that could change a project (deploy, stage, promote, rollback, restore,
-pause and resume, recover, security resume and scan, backups, container-update, data adopt and
-chown, legacy-stage, self-test) refuses, naming the command that finishes the migration; so do the
+exists, and every command that could change a project (deploy, stage, unstage, promote, rollback,
+restore, pause and resume, recover, security resume and scan, backups, container-update,
+project-delete, data adopt and chown, legacy-stage, self-test) refuses, naming the command that finishes the migration; so do the
 timers' commands after a reboot. Every step is journalled in the root-only
 `/opt/boxmunge/upgrade-root/userns-migration.json`. After any failure, kill or power cut, run the
 same command again to resume, or `userns-rollback` to put the box back. `docker-userns` reports a
