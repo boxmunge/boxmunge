@@ -166,7 +166,29 @@ def test_data_the_migration_did_not_carry_stops_the_commit(paths, tmp_path, rema
 def test_a_commit_alerts_how_it_went(paths, tmp_path, remapped, alerts) -> None:
     _journal(paths, tmp_path, {"driver_type": "", "store_root": str(tmp_path / "overlay2"),
                                "size": 0})
-    with pytest.raises(cm.MigrationError):
+    with pytest.raises(cm.MigrationError, match="soak until"):
         cm.commit(paths, now=APPLIED)
+    assert alerts == []  # the operator committed early: a refusal, not a failure
     cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
-    assert alerts == [("userns commit stopped", 1), ("userns migration committed", 0)]
+    assert alerts == [("userns migration committed", 0)]
+
+
+def test_a_failure_once_the_commit_began_alerts(paths, tmp_path, monkeypatch, remapped,
+                                                alerts) -> None:
+    monkeypatch.setattr(cm, "_GC_WAIT", 0)
+    _journal(paths, tmp_path, {"driver_type": cm.CONTAINERD_STORE, "store_root": str(tmp_path),
+                               "containerd_address": "/run/x.sock", "namespace": "moby",
+                               "managed": False, "size": 10**9})
+    monkeypatch.setattr(cm, "_clean_containerd", lambda prior: None)
+    with pytest.raises(cm.MigrationError, match="only 0 bytes were freed"):
+        cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
+    assert alerts == [("userns commit stopped", 1)]
+
+
+@pytest.mark.parametrize("journal", [None, Journal(FORWARD, "rebuilt", S)])
+def test_nothing_to_commit_sends_no_alert(paths, journal, alerts) -> None:
+    if journal is not None:
+        save_journal(paths, journal)
+    with pytest.raises(cm.MigrationError, match="nothing to commit"):
+        cm.commit(paths, now=SOAKED)
+    assert alerts == []

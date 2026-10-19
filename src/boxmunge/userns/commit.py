@@ -134,9 +134,12 @@ def _checked(paths: BoxPaths, j: Journal | None, now: datetime) -> Journal:
 
 def commit(paths: BoxPaths, *, now: datetime | None = None,
            images_dir: Path = IMAGES_DIR) -> Journal:
-    """Delete the old root, after the soak; alert how it went."""
+    """Delete the old root, after the soak; alert how it went. A refusal before
+    anything is deleted (nothing to commit, still soaking, not healthy) is
+    only the operator's answer, not an alert."""
+    j = _checked(paths, load_journal(paths), now or datetime.now(timezone.utc))
     try:
-        j = _commit(paths, now or datetime.now(timezone.utc), images_dir)
+        j = _commit(paths, j, images_dir)
     except BaseException as e:
         notify(paths, "userns commit stopped", f"{e}. Run userns-commit again once it is "
                f"fixed (if it began deleting the old root, there is no rollback any more)",
@@ -147,8 +150,7 @@ def commit(paths: BoxPaths, *, now: datetime | None = None,
     return j
 
 
-def _commit(paths: BoxPaths, now: datetime, images_dir: Path) -> Journal:
-    j = _checked(paths, load_journal(paths), now)
+def _commit(paths: BoxPaths, j: Journal, images_dir: Path) -> Journal:
     prior = j.prior_store
     old_root = Path(Inventory.from_json(j.inventory).root)
     if COMMIT_STARTED not in j.items:
