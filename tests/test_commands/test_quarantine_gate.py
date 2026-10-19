@@ -359,6 +359,7 @@ def test_a_clean_lift_keeps_its_wording(box, monkeypatch, capsys) -> None:
     assert rc == 0 and "every image it runs was scanned, with no quarantine-level finding" in out
     assert "relaxing" not in out and "unknown" not in out
     assert sent[0][2] == 0 and logged[0][1] == {"cve_id": "CVE-2026-0001", "ref": "demo-r2"}
+    assert "unknown" not in sent[0][0] and "relaxing" not in logged[0][0]
 
 
 def test_a_lift_by_relaxing_the_policy_says_so(box, monkeypatch, capsys) -> None:
@@ -386,7 +387,10 @@ def test_a_lift_with_no_known_baseline_says_the_policy_is_unknown(box, monkeypat
     assert rc == 0
     assert "Policy at quarantine time unknown" in capsys.readouterr().out
     assert "Policy at quarantine time unknown" in sent[0][1]
-    assert logged[0][1]["policy_before"] is None
+    # Machine-visible, not only in the text: a higher-priority alert and a log field.
+    assert sent[0][2] == 1 and "policy at quarantine time unknown" in sent[0][0]
+    assert logged[0][1]["policy_baseline"] == "unknown" and "relaxed" not in logged[0][1]
+    assert "policy at quarantine time unknown" in logged[0][0]
 
 
 def test_the_lifts_start_is_checked_and_the_quarantine_put_back(box, monkeypatch,

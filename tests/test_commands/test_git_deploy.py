@@ -206,7 +206,10 @@ def test_a_quarantined_git_project_ships_its_fix_through_the_scan(paths, tmp_pat
     seed_quarantine(paths, "myapp")
     bad = commit(work, {"VERSION": "bad\n"}, "still vulnerable")
 
+    seen = []
+
     def scan(paths_, target, manifest, previous):
+        seen.append((manifest.get("security"), previous))
         if _head(pdir) == bad:
             raise quarantine_gate.QuarantineRefused(["CVE-2026-0001 in openssl, service web"])
         return make_clearance("myapp")
@@ -222,7 +225,13 @@ def test_a_quarantined_git_project_ships_its_fix_through_the_scan(paths, tmp_pat
         assert load_txn(paths, "myapp").phase == "installed"
         assert run_abandon("myapp", paths) == 0
         assert _head(pdir) == before and is_quarantined("myapp", paths)
-        fixed = commit(work, {"VERSION": "fixed\n"}, "fixed")
+        relaxed = "schema_version: 2\n" + git_manifest(
+            tmp_path / "origin.git", extra="security:\n  posture: relaxed\n")
+        fixed = commit(work, {"VERSION": "fixed\n", "manifest.yml": relaxed}, "fixed")
         assert run_deploy("myapp", paths) == 0
     assert _head(pdir) == fixed and not is_quarantined("myapp", paths)
     assert "lifted by deploying" in capsys.readouterr().out
+    # The manifest the checkout replaced is the lift's baseline, not the release's own.
+    release_policy, previous = seen[-1]
+    assert release_policy == {"posture": "relaxed"}
+    assert previous is not None and "security" not in previous
