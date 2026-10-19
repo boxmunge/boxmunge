@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -19,13 +20,17 @@ import pytest
 from boxmunge.commands.backup_cmd import list_snapshots, run_backup
 from boxmunge.commands.data_cmd import run_data_adopt
 from boxmunge.commands.install_abandon import run_abandon
+from boxmunge.commands.userns_cmd import run_check
 from boxmunge.commands.project_delete_cmd import run_project_delete
+from boxmunge.lifecycle import BlockReason, is_blocked, refuse_if_blocked
 from boxmunge.paths import BoxPaths
-from boxmunge.userns import engine
+from boxmunge.userns import commit as commit_mod
+from boxmunge.userns import engine, steps
 from boxmunge.userns import offset as uo
 from boxmunge.userns.commit import commit
 from boxmunge.userns.inventory import take_inventory
 from boxmunge.userns.journal import FORWARD, load_journal
+from boxmunge.userns.marker import migration_in_progress
 from boxmunge.userns.preflight import preflight
 from boxmunge.userns.rollback import rollback
 from boxmunge.userns.switch import host_ids
@@ -105,18 +110,46 @@ def _teardown() -> None:
     _clean_daemon()
 
 
+class MarkedTimers(FakeTimers):
+    """FakeTimers that also looks at the box at the moment the downtime
+    starts: the marker is set before the timers stop, and a project command
+    refuses on it."""
+
+    def __init__(self, paths: BoxPaths) -> None:
+        super().__init__()
+        self.paths = paths
+        self.at_stop: list[tuple[str | None, bool]] = []
+
+    def stop_all(self) -> None:
+        super().stop_all()
+        block = is_blocked("shop", self.paths)
+        self.at_stop.append((migration_in_progress(self.paths),
+                             block is not None and block.reason is BlockReason.MIGRATING))
+
+
 def _check(paths: BoxPaths, images: Path):
     s = uo.allocate_offset(uo.ETC, host_ids())
     return preflight(paths, take_inventory(paths), direction=FORWARD, offset=s,
                      images_dir=images)
 
 
-def _migrate(paths: BoxPaths, images: Path):
-    return engine.migrate(paths, daemon=ProcessDaemon(), timers=FakeTimers(), images_dir=images)
+def _migrate(paths: BoxPaths, images: Path, timers: FakeTimers | None = None):
+    return engine.migrate(paths, daemon=ProcessDaemon(), timers=timers or FakeTimers(),
+                          images_dir=images)
 
 
-def _rollback(paths: BoxPaths, images: Path):
-    return rollback(paths, daemon=ProcessDaemon(), timers=FakeTimers(), images_dir=images)
+def _rollback(paths: BoxPaths, images: Path, timers: FakeTimers | None = None):
+    return rollback(paths, daemon=ProcessDaemon(), timers=timers or FakeTimers(),
+                    images_dir=images)
+
+
+@pytest.fixture
+def alerts(monkeypatch):
+    """Every alert the migration, its rollback and its commit send."""
+    sent: list[str] = []
+    for mod in (steps, commit_mod):
+        monkeypatch.setattr(mod, "notify", lambda paths, title, *a, **kw: sent.append(title))
+    return sent
 
 
 def _daemon_remapped() -> bool:
@@ -124,7 +157,7 @@ def _daemon_remapped() -> bool:
                                              "{{json .SecurityOptions}}"))
 
 
-def test_1_check_reports_exactly_the_planted_problems(box) -> None:
+def test_1_check_reports_exactly_the_planted_problems(box, capsys) -> None:
     paths, images = box
     report = _check(paths, images)
     assert report.ok, report.text()
@@ -158,6 +191,13 @@ def test_1_check_reports_exactly_the_planted_problems(box) -> None:
         text = report.text()
         missing = [what for what, needle in planted.items() if needle not in text]
         assert not missing, f"{missing} not reported:\n{text}"
+        # the command: one pass over all of it, a verdict last, exit 0 either way
+        capsys.readouterr()
+        assert run_check(paths) == 0
+        out = capsys.readouterr().out.splitlines()
+        assert out[-1].startswith("VERDICT: not ready") and not any(
+            line.startswith("VERDICT") for line in out[:-1])
+        assert all(needle in "\n".join(out) for needle in planted.values())
     finally:
         (shop / "conf" / "app.ini").chmod(0o644)
         subprocess.run(["umount", str(uploads / "mnt")], check=True)
@@ -168,6 +208,9 @@ def test_1_check_reports_exactly_the_planted_problems(box) -> None:
         sb.sh("docker", "image", "rm", "boxmunge.invalid/dind/high-ids")
     report = _check(paths, images)
     assert report.ok, report.text()
+    capsys.readouterr()
+    assert run_check(paths) == 0
+    assert capsys.readouterr().out.splitlines()[-1] == "VERDICT: ready"
 
 
 def test_2_adopt_first_then_migrate(box, capsys) -> None:
@@ -188,15 +231,34 @@ def test_2_adopt_first_then_migrate(box, capsys) -> None:
     assert sb.deploy(paths, "anon", sb.anon_files("anon", named=True),
                      "2026-10-16T100000000002") == 0
     assert sb.in_container("anon", "keeper", "cat /held/x").strip() == "row"
+    # The adopted volume's old anonymous twin holds the data too, and nothing
+    # uses it: it would be deleted by userns-commit, so the check refuses until
+    # the operator has copied out what they need and removed it.
     report = _check(paths, images)
-    assert report.ok and "dangling anonymous volume" in report.text(), report.text()
+    dangling = re.findall(r"anonymous volume (\w+) holds \d+ bytes and no container uses it",
+                          "\n".join(report.refusals))
+    assert not report.ok and len(dangling) == 1, report.text()
+    assert "docker volume rm " + dangling[0] in report.text()
+    sb.sh("docker", "volume", "rm", dangling[0])
+    report = _check(paths, images)
+    assert report.ok, report.text()
 
     shop = paths.project_dir("shop")
     before = sb.owners(shop / "data" / "uploads")
     exports_owner = os.lstat(shop / "data" / "old-exports" / "dump.sql").st_uid
     ensure_identity()
-    j = _migrate(paths, images)
+    assert migration_in_progress(paths) is None
+    timers = MarkedTimers(paths)
+    j = _migrate(paths, images, timers)
     assert j.phase == "applied", (j.failed, j.items)
+    # the marker was set before the timers stopped, refused a project command
+    # (which prints why), and is cleared now the box runs again
+    assert timers.at_stop == [(engine.FINISH, True)]
+    assert timers.calls[0] == ("stop", "*") and timers.calls[-1][0] == "restore"
+    assert migration_in_progress(paths) is None and not refuse_if_blocked("shop", paths)
+    capsys.readouterr()
+    assert run_check(paths) == 0
+    assert f"VERDICT: already applied (offset {j.offset})" in capsys.readouterr().out
     assert _daemon_remapped() and uo.remap_offset(paths) == j.offset
     assert {k: v for k, v in j.items.items() if k.startswith("project:")} == {
         "project:anon": "up", "project:shop": "up"}
@@ -213,7 +275,7 @@ def test_2_adopt_first_then_migrate(box, capsys) -> None:
     assert len(list_snapshots(paths, "shop")) == snapshots + 1
 
 
-def test_3_soak_then_rollback_keeps_everything(box) -> None:
+def test_3_soak_then_rollback_keeps_everything(box, alerts) -> None:
     paths, images = box
     assert load_journal(paths).phase == "applied"
     assert sb.deploy(paths, "soak", sb.shop_files("soak"), "2026-10-16T120000000000") == 0
@@ -223,8 +285,12 @@ def test_3_soak_then_rollback_keeps_everything(box) -> None:
     uploads = paths.project_dir("shop") / "data" / "uploads"
     sb.in_container("shop", "web", "echo new > /uploads/written-during-soak")
     sb.sh("docker", "pull", "-q", "alpine:3.21")
-    j = _rollback(paths, images)
+    timers = MarkedTimers(paths)
+    j = _rollback(paths, images, timers)
     assert j.phase == "rolled-back", (j.failed, j.items)
+    assert timers.at_stop == [("userns-rollback", True)]
+    assert migration_in_progress(paths) is None and not refuse_if_blocked("shop", paths)
+    assert alerts == ["userns migration rolled back"]
     assert not _daemon_remapped() and uo.recorded_offset(paths) is None
     assert sb.psql("shop", "select count(*) from t") == "2"
     assert sb.psql("soak", "select v from t") == "7"
@@ -240,7 +306,7 @@ def test_3_soak_then_rollback_keeps_everything(box) -> None:
     assert sb.through_caddy("shop.localhost", "/written-during-soak") == (200, "new\n")
 
 
-def test_4_migrate_again_and_commit(box) -> None:
+def test_4_migrate_again_and_commit(box, alerts) -> None:
     paths, images = box
     assert load_journal(paths).phase == "rolled-back"
     assert run_project_delete("soak", paths, yes=True, force=True) == 0
@@ -251,6 +317,7 @@ def test_4_migrate_again_and_commit(box) -> None:
     committed = commit(paths, now=datetime.fromisoformat(j.applied_at) + timedelta(hours=49),
                        images_dir=images)
     assert committed.phase == "committed" and load_journal(paths).phase == "committed"
+    assert alerts == ["userns migration committed"]
     assert not Path(prior["store_root"]).exists() and not images.exists()
     assert sb.psql("shop", "select count(*) from t") == "2"
     assert sb.through_caddy("shop.localhost", "/pg") == (200, "b\n")
