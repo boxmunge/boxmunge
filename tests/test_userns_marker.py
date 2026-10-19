@@ -44,6 +44,24 @@ def test_deploy_stage_promote_rollback_restore_refuse(migrating, capsys) -> None
     assert restore_locked("shop", migrating, None) != 0 and _refused(capsys)
 
 
+def test_a_quarantined_projects_deploy_a_fix_refuses(migrating, capsys) -> None:
+    """A quarantine alone lets a deploy, stage or promote through to be scanned
+    (lifecycle.refuse_if_blocked, ships_fix); the migration marker never does."""
+    from boxmunge.commands.deploy import deploy_eligible
+    from boxmunge.commands.promote_cmd import promote_locked
+    from boxmunge.commands.stage_cmd import stage_locked
+    from boxmunge.lifecycle import refuse_if_blocked
+    from tests.test_commands.cve_helpers import seed_quarantine
+    seed_quarantine(migrating, "shop")
+    assert refuse_if_blocked("shop", migrating, ships_fix=True) and _refused(capsys)
+    assert not deploy_eligible("shop", migrating) and _refused(capsys)
+    assert stage_locked("shop", migrating) != 0 and _refused(capsys)
+    assert promote_locked("shop", migrating) != 0 and _refused(capsys)
+    clear_marker(migrating)  # the quarantine gating alone is unchanged
+    assert not refuse_if_blocked("shop", migrating, ships_fix=True)
+    assert "CVE-quarantined" in capsys.readouterr().out
+
+
 def test_promote_refuses(migrating, capsys) -> None:
     from boxmunge.commands.promote_cmd import promote_locked
     assert promote_locked("shop", migrating) != 0 and _refused(capsys)

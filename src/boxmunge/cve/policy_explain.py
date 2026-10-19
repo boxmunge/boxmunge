@@ -37,8 +37,9 @@ def explain_kev_quarantine(
     if fixed_version is not None:
         text += (
             f" A fix is available ({fixed_version}) but this image is not "
-            "running it: rebuild the image, redeploy, then `boxmunge security "
-            "resume`."
+            "running it: rebuild the image and deploy it. The deploy scans "
+            "its images before anything starts and lifts the quarantine once "
+            "it is live."
         )
     if overridden_until is not None:
         text += (

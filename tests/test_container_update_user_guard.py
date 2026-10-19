@@ -132,7 +132,7 @@ def test_the_deploy_decides_from_the_held_back_image_and_names_it_only_at_the_sw
     from boxmunge.commands.release_config import (
         decide_release_users, generate_release_config, promote_candidates,
     )
-    users = decide_release_users("shop", paths, _manifest(True), "deploy")
+    users = decide_release_users("shop", paths, _manifest(True), "deploy").users
     assert users["db"].image_user == "nginx"
     assert registry["postgres:16"] == OLD and registry[CANDIDATE] == NEW
     generate_release_config("shop", paths, _manifest(True), "deploy", users)

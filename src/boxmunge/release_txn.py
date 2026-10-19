@@ -289,7 +289,7 @@ def open_install_reason(paths: BoxPaths, project: str, txn: str | None = None) -
         return str(e)
     if open_txn is None or open_txn.id == txn:
         return None
-    return start_refusal(project, open_txn, stale_reason(paths, project, open_txn))
+    return start_refusal(paths, project, open_txn, stale_reason(paths, project, open_txn))
 
 
 def refuse_if_install_open(paths: BoxPaths, project: str, *, component: str,
@@ -328,25 +328,36 @@ def _fix_forward(txn: InstallTxn) -> str:
     return (f"or deploy a fix (a different {'commit' if is_full_sha(txn.ref) else 'bundle'})")
 
 
-def options_text(project: str, txn: InstallTxn, *, rerun: bool = True) -> str:
+def options_text(project: str, txn: InstallTxn, *, rerun: bool = True,
+                 quarantined: bool = False) -> str:
     """The operator's ways out of an open install, for its phase. ``rerun``
-    False leaves out resuming it (its bundle is gone)."""
+    False leaves out resuming it (its bundle is gone); ``quarantined``
+    leaves out rollback, which a CVE quarantine refuses."""
     if txn.abandoning:
         return f"rerun 'prod-deploy {project} --abandon' to finish abandoning it"
     lines = [f"rerun '{rerun_command(project, txn)}' to finish it"] if rerun else []
     if not txn.data_may_have_changed():
         lines.append(abandon_text(project, txn))
-    if txn.source != "rollback" and txn.data_may_have_changed() and txn.replaced_ref:
+    if txn.source != "rollback" and txn.data_may_have_changed() and txn.replaced_ref \
+            and not quarantined:
         lines.append(f"'rollback {project}' restores {txn.snapshot or 'no data snapshot'} "
                      f"with {txn.replaced_ref}")
     lines.append(_fix_forward(txn))
     return "; ".join(lines)
 
 
-def start_refusal(project: str, txn: InstallTxn, stale: str | None) -> str:
+def start_refusal(paths: BoxPaths, project: str, txn: InstallTxn, stale: str | None) -> str:
     if stale:
         return (f"an install of {txn.ref} ({txn.source}, phase {txn.phase}) is recorded "
                 f"in .releases/install.json, but {stale}. Check that production is what "
                 f"live.json says, then run 'boxmunge-server install-txn {project} --drop'")
     return (f"an install of {txn.ref} ({txn.source}) is open at phase {txn.phase}: "
-            f"{options_text(project, txn)}")
+            f"{options_text(project, txn, quarantined=quarantined(paths, project))}")
+
+
+def quarantined(paths: BoxPaths, project: str) -> bool:
+    """For the ways out an install offers: a quarantine refuses rollback."""
+    # cve.quarantine starts containers through compose_guard, which imports
+    # this module: imported here, not at module load.
+    from boxmunge.cve.quarantine import is_quarantined
+    return is_quarantined(project, paths)

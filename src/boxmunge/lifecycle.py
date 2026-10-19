@@ -78,15 +78,14 @@ def lifecycle_block(project_name: str, paths: BoxPaths) -> Block | None:
             detail=state,
             refuse_message=(
                 f"Project '{project_name}' is CVE-quarantined ({cve}). "
-                f"Run `boxmunge security resume {project_name}` to "
-                f"restore.\n"
-                f"       (Resume re-scans first; if a quarantine-level "
-                f"finding remains, you must suppress or wait for "
-                f"upstream fix.)"
+                f"Deploy a fixed release (prod-deploy or promote; its "
+                f"images are scanned first), or run `boxmunge security "
+                f"resume {project_name}` once the images it would start "
+                f"are clean."
             ),
             skip_message=(
-                f"Skipped quarantined project '{project_name}' — use "
-                f"`boxmunge security resume` to lift"
+                f"Skipped quarantined project '{project_name}' — deploy a "
+                f"fixed release or use `boxmunge security resume` to lift"
             ),
         )
     if is_paused(project_name, paths):
@@ -114,14 +113,35 @@ def migration_refusal(what: str, paths: BoxPaths) -> str | None:
             f"progress or stopped part-way. The supervisor finishes it: {SHIM} {finish}")
 
 
-def refuse_if_blocked(project_name: str, paths: BoxPaths) -> bool:
+def refuse_if_blocked(project_name: str, paths: BoxPaths, *,
+                      ships_fix: bool = False) -> bool:
     """Print the refusal and return True if the project is blocked.
 
     Operate cores call this under the project lock, immediately before
     they mutate: a pause or quarantine that completed while the caller
     waited for the lock must win (see boxmunge.fileutil, "Lock order").
+
+    ``ships_fix``: a deploy, promote or stage, which may carry the fix for
+    a quarantine. A quarantine alone lets it through, because it scans the
+    images its release would start before anything starts and refuses if
+    a quarantine-level finding remains (commands/quarantine_gate). A pause
+    is the operator's own decision and still refuses.
     """
     block = is_blocked(project_name, paths)
-    if block:
-        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
-    return block is not None
+    if block is None:
+        return False
+    if ships_fix and block.reason is BlockReason.QUARANTINED:
+        if not is_paused(project_name, paths):
+            cve = block.detail.get("cve_id", "<unknown>")
+            print(f"  {project_name} is CVE-quarantined ({cve}): "
+                  f"the images this release would start are scanned before anything "
+                  f"starts, and the release is refused if a quarantine-level finding "
+                  f"remains.")
+            return False
+        print(f"ERROR: Project '{project_name}' is paused and CVE-quarantined. A deploy "
+              f"does not end a pause: run `boxmunge security resume {project_name}` once "
+              f"its images are clean (it stays paused), then `boxmunge resume "
+              f"{project_name}`.", file=sys.stderr)
+        return True
+    print(f"ERROR: {block.refuse_message}", file=sys.stderr)
+    return True

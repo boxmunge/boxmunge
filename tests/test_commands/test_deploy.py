@@ -135,31 +135,91 @@ class TestRefusesPaused:
         assert "paused" in err.lower()
 
 
-class TestRefusesQuarantined:
-    """Wave 1: deploy must refuse a CVE-quarantined project so the platform
-    does not silently undo a security action on the next operator-driven
-    flow. Mirrors the paused-refusal pattern."""
+class TestQuarantinedDeploy:
+    """A deploy is how a quarantined project ships its fix: it passes the
+    quarantine gate only through the scan of the images its release would
+    start (commands/quarantine_gate, tested there), refused before
+    anything starts, and lifts the quarantine once it is live."""
+
+    def _quarantine(self, paths: BoxPaths) -> None:
+        from tests.test_commands.cve_helpers import seed_quarantine
+        add_project("testapp", paths)
+        _place_deploy_bundle(paths)
+        seed_quarantine(paths, "testapp")
 
     @patch("boxmunge.compose_guard.compose_up")
     @patch("boxmunge.commands.deploy.caddy_reload")
-    def test_refuses_quarantined_project(
-        self, mock_reload, mock_up, paths: BoxPaths, capsys,
+    def test_vulnerable_release_is_refused_and_nothing_starts(
+        self, mock_reload, mock_up, paths: BoxPaths, capsys, monkeypatch,
     ) -> None:
-        add_project("myapp", paths)
-        # Create the quarantine state file directly — exercising the
-        # is_quarantined() predicate without standing up a full scan flow.
-        paths.project_quarantine_state("myapp").parent.mkdir(
-            parents=True, exist_ok=True,
-        )
-        paths.project_quarantine_state("myapp").write_text("{}")
-        rc = run_deploy("myapp", paths)
-        assert rc == 1
+        from boxmunge.commands.quarantine_gate import QuarantineRefused
+        self._quarantine(paths)
+        removed = []
+
+        def refuse(paths_, target, manifest, previous):
+            raise QuarantineRefused(["CVE-2026-0001 (Critical) in openssl 1, service web"])
+        monkeypatch.setattr("boxmunge.commands.release_config.clear_release", refuse)
+        monkeypatch.setattr("boxmunge.commands.release_config.remove_candidates",
+                            removed.append)
+        assert run_deploy("testapp", paths) == 1
         err = capsys.readouterr().err
-        assert "quarantine" in err.lower()
-        assert "security resume" in err
-        # Mutating side effects MUST NOT have run.
+        assert "CVE-2026-0001 (Critical) in openssl 1, service web" in err
+        assert "--abandon" in err  # the install is left abandonable
+        assert removed == ["testapp", "testapp"]  # before the build, and after the refusal
+        assert paths.project_quarantine_state("testapp").exists()
         mock_up.assert_not_called()
         mock_reload.assert_not_called()
+        assert "current_ref" not in read_state(paths.project_deploy_state("testapp"))
+
+    @patch("boxmunge.compose_guard.compose_up")
+    @patch("boxmunge.commands.deploy.caddy_reload")
+    def test_clean_release_deploys_then_lifts(
+        self, mock_reload, mock_up, paths: BoxPaths, capsys, monkeypatch,
+    ) -> None:
+        from boxmunge.commands import quarantine_gate
+        from boxmunge.cve.quarantine import clear_quarantine_state
+        self._quarantine(paths)
+        from tests.test_commands.cve_helpers import BALANCED, make_clearance
+        clearance = make_clearance("testapp", {"web": ("nginx", "sha256:x")}, before=BALANCED)
+        scans = []
+        monkeypatch.setattr("boxmunge.commands.deploy_tree.manifest_in_force",
+                            lambda paths_, project: {"security": {"posture": "strict"}})
+        monkeypatch.setattr("boxmunge.commands.release_config.clear_release",
+                            lambda *a: scans.append(a) or clearance)
+        checked, lifted, pinned = [], [], []
+        monkeypatch.setattr("boxmunge.commands.deploy_tree.require_unchanged",
+                            lambda paths_, c: checked.append(c))
+        monkeypatch.setattr(quarantine_gate, "_verify_running",
+                            lambda paths_, c, component, **kw: {"testapp-web-1": "web"})
+        monkeypatch.setattr(quarantine_gate, "_release_policies",
+                            lambda paths_, project, services: {"testapp-web-1": "always"})
+        mock_up.side_effect = lambda *a, **k: pinned.append(k["pinned"])
+
+        def lift(project, paths_, **kw):
+            lifted.append((project, kw))
+            clear_quarantine_state(project, paths_)
+        monkeypatch.setattr(quarantine_gate, "lift_quarantine", lift)
+        assert run_deploy("testapp", paths) == 0
+        out = capsys.readouterr().out
+        assert checked == [clearance]
+        # The manifest the install replaced is the baseline for the lift's report.
+        assert scans[0][3]["security"] == {"posture": "strict"}
+        ((project, kw),) = lifted
+        assert project == "testapp" and kw["restore"] == {"testapp-web-1": "always"}
+        assert pinned == [True]  # only the scanned local images: no pull, no build
+        assert kw["txn"] is not None  # the lift's start belongs to this install
+        assert "testapp-web:8080" in kw["project_caddy_site_content"]  # the routed site
+        assert "Quarantine (CVE-2026-0001) lifted by deploying" in out
+        mock_up.assert_called()
+
+    def test_paused_and_quarantined_is_refused(self, paths: BoxPaths, capsys) -> None:
+        from boxmunge.pause import write_paused_state
+        self._quarantine(paths)
+        write_paused_state("testapp", paths)
+        assert run_deploy("testapp", paths) == 1
+        err = capsys.readouterr().err
+        assert "paused and CVE-quarantined" in err
+        assert not (paths.project_dir("testapp") / "manifest.yml").exists()
 
 
 class TestCvePolicyValidatorWiring:

@@ -24,6 +24,7 @@ from boxmunge.commands.deploy import deploy_eligible
 from boxmunge.commands.deploy_tree import TreeDeploy, deploy_tree_locked
 from boxmunge.commands.git_deploy import GitDeploy, deploy_git_locked
 from boxmunge.commands.unstage_cmd import teardown_staging_locked
+from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.git_slot import GitRefError, is_full_sha, require_regular_control_files, rev_parse
@@ -273,7 +274,7 @@ def _options_now(project: str, paths: BoxPaths, ref: str, slot_readable: bool) -
     if not slot_readable:
         return _unreadable_advice(project, txn)
     return (f"The install of {txn.ref} stays open at {txn.phase}: "
-            f"{options_text(project, txn)}")
+            f"{options_text(project, txn, quarantined=is_quarantined(project, paths))}")
 
 
 def _report_failed(project: str, paths: BoxPaths, meta: StagedRelease, rc: int) -> int:
@@ -345,12 +346,18 @@ def report_failed_after_switch(project: str, paths: BoxPaths, staged_ref: str) -
     from boxmunge.commands.rollback import RollbackUnavailable, find_rollback_target
     print(f"ERROR: The promotion failed after production was switched: production now "
           f"runs {staged_ref}.", file=sys.stderr)
-    try:
-        target = find_rollback_target(paths, project)
-    except RollbackUnavailable as e:
-        print(f"  'rollback {project}' is not available: {e}. Fix the cause and deploy "
-              f"again.", file=sys.stderr)
+    target = None
+    if is_quarantined(project, paths):
+        print(f"  It is still CVE-quarantined, so 'rollback {project}' is refused: fix the "
+              f"cause and promote or deploy again, or run `boxmunge security resume "
+              f"{project}`.", file=sys.stderr)
     else:
+        try:
+            target = find_rollback_target(paths, project)
+        except RollbackUnavailable as e:
+            print(f"  'rollback {project}' is not available: {e}. Fix the cause and deploy "
+                  f"again.", file=sys.stderr)
+    if target is not None:
         data = (f"restores the data snapshot {target.snapshot} taken before the promotion"
                 if target.snapshot else "has no data to restore (backup.type: none)")
         print(f"  'rollback {project}' returns to {target.ref} and {data}. Or fix the "

@@ -104,7 +104,7 @@ def install_exclusion_text(paths: BoxPaths, name: str, txn: InstallTxn) -> str:
     if unreadable is not None:
         return (f"an install of {txn.ref} ({txn.source}) is open at phase {txn.phase}; "
                 f"{unreadable}")
-    return start_refusal(name, txn, stale)
+    return start_refusal(paths, name, txn, stale)
 
 
 def _addressable(project_dir: Path, paths: BoxPaths) -> bool:

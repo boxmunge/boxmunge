@@ -173,6 +173,7 @@ class TestRunRestore:
         write_quarantine_state(
             "myapp", paths, headline=disposition,
             image_ref="myapp:1.0",
+            policy={"posture": "balanced", "dangerously_disable_quarantine": False, "runtimes": None},
         )
         exit_code = run_restore(
             "myapp", paths,
