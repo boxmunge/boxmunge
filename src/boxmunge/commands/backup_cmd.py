@@ -100,7 +100,7 @@ def backup_locked(
     warnings would be noise). Different rc shapes preserved by reason.
     """
     block = is_blocked(project_name, paths)
-    if block and block.reason is BlockReason.PAUSED:
+    if block and block.reason in (BlockReason.PAUSED, BlockReason.MIGRATING):
         print(f"ERROR: {block.refuse_message}", file=sys.stderr)
         return 1
     if block and block.reason is BlockReason.QUARANTINED:
@@ -300,6 +300,10 @@ def run_backup_all(paths: BoxPaths) -> int:
             block = is_blocked(name, paths)
             if block and block.reason is BlockReason.PAUSED:
                 print(f"  Skipping {name}: paused.")
+                continue
+            if block and block.reason is BlockReason.MIGRATING:
+                print(f"  Skipping {name}: {block.skip_message}.")
+                log_operation("backup", block.skip_message, paths, project=name)
                 continue
             if block and block.reason is BlockReason.QUARANTINED:
                 print(f"  Skipping {name}: CVE-quarantined.")

@@ -89,3 +89,9 @@ class TestPruneBackups:
         with pytest.raises(BackupError, match="retention"):
             prune_backups(tmp_path, "myapp", BackupKind.NIGHTLY, retention)
         assert f.exists()
+
+
+def test_premigrate_snapshots_keep_two() -> None:
+    from boxmunge.backup import SNAPSHOT_RETENTION, BackupKind
+    assert BackupKind("premigrate") is BackupKind.PREMIGRATE
+    assert SNAPSHOT_RETENTION[BackupKind.PREMIGRATE] == 2

@@ -1378,6 +1378,66 @@ is needed (see [Caddy access log](#caddy-access-log)). Caddy reads `caddy/Caddyf
 "other" permission bits, so the file is 0644 (`caddy/` itself stays 0750); `docker-userns` reports
 an error, with the `chmod`, when it is not.
 
+#### Migrating an existing box
+
+The supervisor user runs the migration through the upgrade shim, at a time chosen for the downtime
+(none of these is open to the deploy user):
+
+```bash
+sudo /opt/boxmunge/bin/boxmunge-upgrade userns-migrate --check   # read-only report
+sudo /opt/boxmunge/bin/boxmunge-upgrade userns-migrate           # run, or resume, the migration
+sudo /opt/boxmunge/bin/boxmunge-upgrade userns-rollback          # undo it (uncommitted or stopped part-way)
+sudo /opt/boxmunge/bin/boxmunge-upgrade userns-commit            # after the 48-hour soak: delete the old root
+```
+
+`--check` changes nothing and always exits 0; its last line is the verdict (what stops it, such as a
+daemon that does not answer, is a refusal too). Each `REFUSED:` line names one offender and what to
+do. It refuses, among others: Docker older than 28.0; a `daemon.json` with another `data-root`,
+`storage-driver`, `userns-remap` or `containerd-snapshotter: true`; an open upgrade probation, an
+interrupted upgrade, an open install transaction, a staged release (promote or unstage it), a 0.10.1
+stage, or a half-applied pause or quarantine; no `backup_remote`; a container boxmunge does not run;
+privileged or host-namespace services; an anonymous volume holding data (adopt it with `data adopt`,
+or copy it out and remove it when no container uses it); an image or data file owned by an id above
+65535; ACLs, file capabilities, immutable files, device nodes, mounts or outside hard links in data;
+a read-only bind that is not world-readable; a compose `user:` above 65535; a service that runs as
+its image's root in a project whose users were never decided (add the `security: {user: ...}` line
+it prints, deploy, then migrate); too little free space for the image tarballs, their import and a
+rollback's tarballs; and a registry that does not answer for an image run by digest: `docker load`
+keeps no digests, so such images are pulled again by digest once their layers are loaded, during the
+downtime. `NOTE:` lines report the prior store and the estimated downtime.
+
+`userns-migrate` takes every project lock, runs the checks again, saves every image to
+`/var/lib/boxmunge-userns/images/`, backs up every project (`premigrate`, the last two kept), syncs
+the backups off-site and checks the free space again. Downtime starts there: it disables the
+boxmunge timers (a reboot does not start them) and stops every container, switches the daemon (the
+stopped daemon's bridge interfaces are deleted, as a reboot would; Docker makes them again), loads
+the images, moves each volume into the remapped root, shifts the owners of volume and bind data by
+S, makes `caddy/Caddyfile` 0644, and brings each project back behind the maintenance page until its
+smoke tests pass. A project that does not come back stays on the maintenance page; the others carry
+on. Then the timers are enabled again and CrowdSec is restarted and checked to tail the new Caddy.
+If the remapped daemon does not start, the original `daemon.json` is put back and the box restarts
+on its untouched old root, timers included; fix the cause (an edit to `daemon.json` is kept, as long
+as it names no `userns-remap`) and run it again.
+
+From the moment the downtime starts until the box runs again, `/opt/boxmunge/userns-migrating`
+exists, and every command that could change a project (deploy, stage, unstage, promote, rollback,
+restore, pause and resume, recover, security resume and scan, backups, container-update,
+project-delete, data adopt and chown, legacy-stage, self-test) refuses, naming the command that finishes the migration; so do the
+timers' commands after a reboot. Every step is journalled in the root-only
+`/opt/boxmunge/upgrade-root/userns-migration.json`. After any failure, kill or power cut, run the
+same command again to resume, or `userns-rollback` to put the box back. `docker-userns` reports a
+running migration as a warning and one stopped part-way as an error naming the command that finishes
+it; no platform upgrade runs until it is finished. The rollback works from what the remapped daemon
+holds now, so projects, volumes and images created during the soak go back too; it refuses while
+`daemon.json` differs from the one the migration wrote (put your change into the original as well,
+or put the migration's file back), and gives the original back with its mode.
+
+After 48 hours with every project healthy, `userns-commit` deletes the old root's images and data;
+it refuses while a volume in the old root still holds data the migration did not carry, and there is
+no rollback once it has begun (a commit stopped part-way is finished by running it again; no upgrade
+runs meanwhile). An applied migration not committed after seven days is a daily warning. While the
+box is remapped, `force-target` refuses releases before 0.11.0.
+
 ### Alerts not configured
 
 `alerts` warns when `pushover.user_key` or `pushover.app_token` is missing from

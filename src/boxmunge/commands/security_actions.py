@@ -348,6 +348,11 @@ def _exit_code(paths: BoxPaths, run: FleetRun) -> int:
 
 def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
     """boxmunge security scan [project] | --apply-held."""
+    from boxmunge.lifecycle import migration_refusal
+    refusal = migration_refusal("security scan", paths)
+    if refusal:  # a quarantine would stop a project mid-migration
+        print(f"ERROR: {refusal}", file=sys.stderr)
+        return 1
     if args == ["--apply-held"]:
         return _cmd_apply_held(paths)
     parsed = _parse_scan_targets(args, paths)

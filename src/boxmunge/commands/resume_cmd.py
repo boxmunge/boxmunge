@@ -51,7 +51,7 @@ def _refuse_unless_resumable(project_name: str, paths: BoxPaths) -> bool:
     # first if both states exist (quarantine wins), so the refuse
     # message is the security one.
     block = is_blocked(project_name, paths)
-    if block and block.reason is BlockReason.QUARANTINED:
+    if block and block.reason in (BlockReason.QUARANTINED, BlockReason.MIGRATING):
         print(f"ERROR: {block.refuse_message}", file=sys.stderr)
         return False
     # Positive precondition: this command can only be invoked when the

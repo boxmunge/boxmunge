@@ -21,6 +21,7 @@ from boxmunge.cve.scan_state import BASIS_STARTUP_IMAGES
 from boxmunge.cve.kev import load_kev
 from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
 from boxmunge.fileutil import LockError, project_lock
+from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.pause import is_paused
@@ -107,6 +108,10 @@ def cmd_security_resume(args: list[str], paths: BoxPaths) -> int:
 def security_resume_locked(paths: BoxPaths, project: str) -> int:
     """The security-resume core: re-scan, then lift. Caller holds the
     project lock; never takes it."""
+    block = is_blocked(project, paths)
+    if block is not None and block.reason is BlockReason.MIGRATING:
+        _err(f"ERROR: {block.refuse_message}")
+        return 1
     if not is_quarantined(project, paths):
         _err(f"ERROR: project '{project}' is not quarantined.")
         return 1

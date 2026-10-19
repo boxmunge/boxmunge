@@ -16,11 +16,15 @@
 #   clear-blocklist <version>  operator only: forget a failed version
 #   install-sudoers            install.sh and upgrades: (re)write deploy's sudo rule
 #   install-docs <dir>         install.sh and upgrades: replace docs/ with <dir>/*.md
+#   userns-migrate [--check]   operator only: remap the Docker daemon (check: read-only report)
+#   userns-rollback            operator only: undo an uncommitted or interrupted migration
+#   userns-commit              operator only: delete the old root after the soak
 #
 # In the source tree the functions live in boxmunge-upgrade.d/ (state, slots,
-# probation, system). The release build (scripts/build-shim.py) inlines them,
-# so the shim a box runs is this one self-contained file: whatever installs it
-# (install.sh, or an older release's shim self-updating) copies only this file.
+# probation, system, userns). The release build (scripts/build-shim.py)
+# inlines them, so the shim a box runs is this one self-contained file:
+# whatever installs it (install.sh, or an older release's shim
+# self-updating) copies only this file.
 #
 # Cross-version contract: the crash-safety markers (upgrade-inflight,
 # rollback-inflight; see slots.sh) may be left by this shim and found by a
@@ -93,7 +97,7 @@ PYBM
 SHIM_LIB_DIR="$(dirname "$SHIM_PATH")/boxmunge-upgrade.d"
 [[ -d "$SHIM_LIB_DIR" ]] \
     || die "This is the unbuilt source shim and $SHIM_LIB_DIR is missing; install a release bundle, whose shim is built"
-for lib in state slots probation system; do
+for lib in state slots probation system userns; do
     # shellcheck source=/dev/null
     source "$SHIM_LIB_DIR/$lib.sh"
 done
@@ -162,6 +166,8 @@ upgrade_to() {
     acquire_lock
     check_policy "$version" "$mode"
     refuse_during_probation "$version" "$mode"
+    userns_refuse_mid_migration "$version" "$mode"
+    [[ "$mode" != "force" ]] || userns_guard_target "$version"
     cmd_install_sudoers
     seed_slot_docs "$ACTIVE_SLOT"
 
@@ -484,5 +490,8 @@ case "${1:-}" in
     clear-blocklist) shift; cmd_clear_blocklist "$@" ;;
     install-sudoers) cmd_install_sudoers ;;
     install-docs)    shift; cmd_install_docs "$@" ;;
-    *)               die "Usage: boxmunge-upgrade {run|auto|target|force-target|check-probation|clear-blocklist|install-sudoers|install-docs} [args]" ;;
+    userns-migrate)  shift; cmd_userns_migrate "$@" ;;
+    userns-rollback) shift; cmd_userns_rollback "$@" ;;
+    userns-commit)   shift; cmd_userns_commit "$@" ;;
+    *)               die "Usage: boxmunge-upgrade {run|auto|target|force-target|check-probation|clear-blocklist|install-sudoers|install-docs|userns-migrate|userns-rollback|userns-commit} [args]" ;;
 esac

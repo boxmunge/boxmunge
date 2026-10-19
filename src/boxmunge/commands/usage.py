@@ -248,6 +248,13 @@ Upgrade the boxmunge platform. From the deploy shell, plain `upgrade` and
   --dry-run         Check migrations and config regeneration; change nothing
   --apply           Migrate/regenerate/restart only (called by the shim)
   --skip-self-test  Skip the post-upgrade self-test""",
+    "userns": """\
+Usage: boxmunge userns {check|migrate|rollback|commit}
+       (on the server: boxmunge-server userns ..., as the shim runs it)
+
+Root only, through the upgrade shim: sudo /opt/boxmunge/bin/boxmunge-upgrade
+userns-migrate [--check] | userns-rollback | userns-commit. See OPERATIONS.md,
+"User-namespace remapping".""",
     "auto-update": """\
 Usage: boxmunge auto-update
 

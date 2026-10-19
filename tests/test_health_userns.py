@@ -1,6 +1,8 @@
 """docker-userns: warn until migrated, error when the daemon disagrees."""
 from __future__ import annotations
 
+import os
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -197,3 +199,88 @@ def test_future_alert_time_is_unusable_and_not_logged(paths, monkeypatch) -> Non
     hc.alert_docker_userns(paths, now=T0)
     assert len(sent) == 1
     assert "2999" not in paths.log_file.read_text()
+
+
+def _as_root(monkeypatch) -> None:
+    monkeypatch.setattr(hc, "_is_root", lambda: True)
+
+
+def test_an_interrupted_migration_is_an_error(paths, monkeypatch) -> None:
+    from boxmunge.userns.journal import FORWARD, Journal, save_journal
+    save_journal(paths, Journal(FORWARD, "rebuilt", S, failed="volume shop_data: no space"))
+    _as_root(monkeypatch)
+    check = hc.check_docker_userns(paths)
+    assert check.status == "error" and "interrupted at rebuilt" in check.detail
+    assert "no space" in check.detail and "userns-migrate" in check.detail
+
+
+def test_an_interrupted_rollback_names_the_rollback(paths, monkeypatch) -> None:
+    from boxmunge.userns.journal import ROLLBACK, Journal, save_journal
+    save_journal(paths, Journal(ROLLBACK, "rb-restored", S))
+    _as_root(monkeypatch)
+    detail = hc.check_docker_userns(paths).detail
+    assert "rollback migration was interrupted at rb-restored" in detail
+    assert "Finish it: sudo /opt/boxmunge/bin/boxmunge-upgrade userns-rollback" in detail
+
+
+def test_the_journal_is_not_read_as_deploy(paths, monkeypatch) -> None:
+    from boxmunge.userns.journal import FORWARD, Journal, save_journal
+    save_journal(paths, Journal(FORWARD, "rebuilt", S))
+    monkeypatch.setattr(hc, "_is_root", lambda: False)
+    assert hc.check_docker_userns(paths).status == "warn"  # the unmigrated warning
+
+
+def test_a_fresh_installs_committed_journal_is_ok(paths, monkeypatch) -> None:
+    from boxmunge.userns.journal import FORWARD, Journal, save_journal
+    remap_box(paths, monkeypatch)
+    _caddyfile(paths)
+    save_journal(paths, Journal(FORWARD, "committed", S, fresh_install=True))
+    _as_root(monkeypatch)
+    assert hc.check_docker_userns(paths).status == "ok"
+
+
+def test_uncommitted_after_seven_days_warns_and_reminds(paths, monkeypatch) -> None:
+    from boxmunge.userns.journal import FORWARD, Journal, save_journal
+    remap_box(paths, monkeypatch)
+    _caddyfile(paths)
+    save_journal(paths, Journal(FORWARD, "applied", S, applied_at=T0.isoformat()))
+    _as_root(monkeypatch)
+    sent = []
+    monkeypatch.setattr(hc, "notify", lambda p, title, body, **kw: sent.append(kw["priority"]) or True)
+    assert hc.check_docker_userns(paths, now=T0 + timedelta(days=6)).status == "ok"
+    check = hc.alert_docker_userns(paths, now=T0 + timedelta(days=8))
+    assert check.status == "warn" and "userns-commit" in check.detail and sent == [0]
+    hc.alert_docker_userns(paths, now=T0 + timedelta(days=8, hours=3))
+    assert sent == [0]  # once a day
+
+
+def test_a_commit_stopped_part_way_is_an_error(paths, monkeypatch) -> None:
+    from boxmunge.userns.journal import FORWARD, Journal, save_journal
+    save_journal(paths, Journal(FORWARD, "applied", S, applied_at=T0.isoformat(),
+                                items={"commit-before": "100"}))
+    _as_root(monkeypatch)
+    check = hc.check_docker_userns(paths)
+    assert check.status == "error" and "finish it: sudo" in check.detail
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc/locks: Linux only")
+def test_a_migration_holding_the_lock_is_running_not_interrupted(paths, monkeypatch,
+                                                                tmp_path) -> None:
+    """Every normal migration passes through these phases: while it holds
+    upgrade.lock, check-all must not page anyone about it."""
+    import fcntl
+
+    from boxmunge.userns.journal import FORWARD, Journal, save_journal
+    save_journal(paths, Journal(FORWARD, "switched", S))
+    _as_root(monkeypatch)
+    paths.upgrade_lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(paths.upgrade_lock, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        sent = []
+        monkeypatch.setattr(hc, "notify", lambda *a, **kw: sent.append(a) or True)
+        check = hc.alert_docker_userns(paths, now=T0)
+        assert check.status == "warn" and "migration running" in check.detail and sent == []
+    finally:
+        os.close(fd)
+    assert hc.check_docker_userns(paths).status == "error"  # released, still at switched

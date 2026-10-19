@@ -22,6 +22,7 @@ from boxmunge.legacy_stage_ops import (
     LegacyStageError, allowed_choices, drop_stage_record, finish_apply,
     platform_rollback_possible, predeploy_snapshots, report_resolved, resolve,
 )
+from boxmunge.lifecycle import migration_refusal
 from boxmunge.manifest import ManifestError
 from boxmunge.migration import MigrationError
 from boxmunge.state import StateError
@@ -128,6 +129,10 @@ def _finish_resolved(paths: BoxPaths, project: str, choice: str | None,
 def legacy_stage_locked(paths: BoxPaths, project: str, choice: str | None,
                         confirm_recreated: bool) -> int:
     """The core. Caller holds the project lock; never takes it."""
+    refusal = migration_refusal("A legacy-stage resolution", paths) if choice else None
+    if refusal:
+        print(f"ERROR: {refusal}", file=sys.stderr)
+        return 1
     try:
         recorded = (get_record(paths, project) or {}).get("choice")
     except StateError as e:

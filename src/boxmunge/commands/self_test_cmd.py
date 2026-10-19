@@ -239,6 +239,11 @@ def _finish(report: SelfTestReport, paths: BoxPaths, as_json: bool) -> int:
 
 def run_self_test(paths: BoxPaths, as_json: bool = False) -> int:
     """Run the full self-test lifecycle. Returns 0 on success."""
+    from boxmunge.lifecycle import migration_refusal
+    refusal = migration_refusal("self-test", paths)
+    if refusal:
+        print(f"ERROR: {refusal}", file=sys.stderr)
+        return 1
     report = SelfTestReport()
     canary_src = _canary_project_path()
     project_dir = paths.project_dir(CANARY_PROJECT)

@@ -4,7 +4,10 @@
 ok when remapped as recorded; warn on a box that has not migrated yet; error
 when the record, the subid files, daemon.json and the running daemon
 disagree (a daemon that restarted on another store or without remapping),
-or when a remapped Caddy cannot read caddy/Caddyfile.
+or when a remapped Caddy cannot read caddy/Caddyfile. Run as root, it also
+reads the migration journal: a migration or rollback stopped part-way is an
+error, and one applied more than seven days ago and not yet committed is a
+warning that reminds once a day.
 check-all, run by root's health timer, alerts on an error once a day.
 """
 from __future__ import annotations
@@ -23,15 +26,73 @@ from boxmunge.fs_nofollow import open_regular_nofollow
 from boxmunge.log import log_error
 from boxmunge.notify import notify
 from boxmunge.userns import offset
+from boxmunge.userns.journal import FORWARD, JournalError, load_journal
 from boxmunge.userns.offset import RemapError, remap_offset
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 NAME = "docker-userns"
-_CHECK_COMMAND = "sudo /opt/boxmunge/bin/boxmunge-upgrade userns-migrate --check"
+_SHIM = "sudo /opt/boxmunge/bin/boxmunge-upgrade"
+_CHECK_COMMAND = f"{_SHIM} userns-migrate --check"
 _ALERT_INTERVAL = timedelta(hours=24)
-_ALERTING = frozenset({"error"})
+REMINDER = "not committed"
+RUNNING = "migration running"
+PROC_LOCKS = "/proc/locks"
+_REMINDER_AFTER = timedelta(days=7)
+
+
+def _is_root() -> bool:
+    return os.geteuid() == 0
+
+
+def _journal_check(paths: BoxPaths, now: datetime) -> HealthCheck | None:
+    """The migration journal's word, when this user can read it (root)."""
+    if not _is_root():
+        return None  # the journal is root-only; check-all (root) reports it
+    try:
+        j = load_journal(paths)
+    except JournalError as e:
+        return HealthCheck(NAME, "error", str(e))
+    if j is None or j.phase in ("committed", "rolled-back"):
+        return None
+    if _lock_held(paths):  # the migration holds upgrade.lock: it is running, not stopped
+        return HealthCheck(NAME, "warn", f"{RUNNING}: the userns {j.direction} is at "
+                           f"{j.phase}; projects are on the maintenance page until it ends")
+    if j.direction == FORWARD and j.phase == "applied" and "commit-before" in j.items:
+        return HealthCheck(NAME, "error", f"a userns-commit stopped part-way, after it began "
+                           f"deleting the old root; finish it: {_SHIM} userns-commit")
+    if j.direction == FORWARD and j.phase == "applied":
+        applied = datetime.fromisoformat(str(j.applied_at))
+        if now - applied > _REMINDER_AFTER:
+            return HealthCheck(NAME, "warn", f"{REMINDER}: the userns migration was applied on "
+                               f"{applied:%Y-%m-%d}. Commit it ({_SHIM} userns-commit) or roll "
+                               f"it back ({_SHIM} userns-rollback)")
+        return None
+    finish = (f"Resume: {_SHIM} userns-migrate, or roll back: {_SHIM} userns-rollback"
+              if j.direction == FORWARD else f"Finish it: {_SHIM} userns-rollback")
+    return HealthCheck(NAME, "error",
+                       f"the userns {j.direction} migration was interrupted at {j.phase}"
+                       + (f" ({j.failed})" if j.failed else "") + f". {finish}")
+
+
+def _lock_held(paths: BoxPaths) -> bool:
+    """Does any process hold upgrade.lock? Read from /proc/locks, never by
+    taking it: a probe of the lock would make the shim's own non-blocking
+    take of it fail."""
+    try:
+        st = os.stat(paths.upgrade_lock)
+    except FileNotFoundError:
+        return False
+    with open(PROC_LOCKS, encoding="ascii") as f:
+        for line in f:
+            fields = line.split()
+            if len(fields) > 5 and fields[1] == "FLOCK":
+                major, minor, inode = fields[5].split(":")
+                if (int(inode) == st.st_ino and os.makedev(int(major, 16), int(minor, 16))
+                        == st.st_dev):
+                    return True
+    return False
 
 
 def _unclaimed_detail(error: RemapError) -> str:
@@ -50,7 +111,10 @@ def _unclaimed_detail(error: RemapError) -> str:
             f"says it does): {error}")
 
 
-def check_docker_userns(paths: BoxPaths) -> HealthCheck:
+def check_docker_userns(paths: BoxPaths, *, now: datetime | None = None) -> HealthCheck:
+    journal = _journal_check(paths, now or datetime.now(timezone.utc))
+    if journal is not None and (journal.status == "error" or journal.detail.startswith(RUNNING)):
+        return journal  # running: the daemon's sources may disagree until it ends
     try:
         s = remap_offset(paths)
     except RemapError as e:
@@ -65,6 +129,8 @@ def check_docker_userns(paths: BoxPaths) -> HealthCheck:
     problem = _caddyfile_problem(paths)
     if problem:
         return HealthCheck(NAME, "error", problem)
+    if journal is not None:
+        return journal  # the reminder to commit
     return HealthCheck(NAME, "ok", f"remapped: container uid N is host uid {s}+N (overlay2)")
 
 
@@ -115,19 +181,22 @@ def _past_time(value: object, now: datetime) -> bool:
 
 
 def alert_docker_userns(paths: BoxPaths, *, now: datetime | None = None) -> HealthCheck:
-    """Run the check; send a priority-1 alert for an error, once a day per cause.
-    An alert that was not delivered is tried again on the next run."""
-    check = check_docker_userns(paths)
-    if check.status not in _ALERTING:
-        return check
+    """Run the check; send a priority-1 alert for an error, and a priority-0
+    one for the reminder to commit, once a day per cause. An alert that was
+    not delivered is tried again on the next run."""
     now = now or datetime.now(timezone.utc)
+    check = check_docker_userns(paths, now=now)
+    reminder = check.detail.startswith(REMINDER)
+    if check.status != "error" and not reminder:
+        return check
     key = hashlib.sha256(check.detail.encode()).hexdigest()[:16]
     state = _alert_state(paths, now)
     last = state.get(key)
     if last and now - datetime.fromisoformat(last) < _ALERT_INTERVAL:
         return check
-    if notify(paths, "Docker user-namespace remapping is broken", check.detail,
-              component="health", priority=1):
+    title = ("Commit or roll back the userns migration" if reminder
+             else "Docker user-namespace remapping is broken")
+    if notify(paths, title, check.detail, component="health", priority=0 if reminder else 1):
         state[key] = now.isoformat()
         atomic_write_text(paths.state / "userns-alert.json", json.dumps(state) + "\n")
     return check
