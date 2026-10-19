@@ -86,6 +86,19 @@ would break existing databases across the fleet at the next upgrade. Every
 service. A future release will make a read-only root filesystem the default for
 undeclared services too, so opt in now.
 
+**It also costs CVE severity.** The CVE policy counts a compose-only service
+without `read_only: true` in `compose.yml` as writable: it adds +1 to the CVE
+severity of every finding in the **whole project**, not only that service's
+image (a manifest `cap_add` or `no_new_privileges: false` adds +1 the same
+way). A medium finding in the web image then judges as high. In 0.11.0 this
+**only warns**: a finding that only this penalty lifts over the posture's
+quarantine threshold is not quarantined and does not refuse a deploy; it is
+flagged `WARN` in `boxmunge security <project>`, in `boxmunge health`
+(`cve-hardening`) and in one alert per finding. **From 0.12 it quarantines.**
+To clear the warning, add `read_only: true` to the service in `compose.yml`
+(with a `tmpfs:` for what it writes), declare the service in the manifest as
+below, or accept the risk with a `security` declaration.
+
 To opt in, declare the service in the manifest. A service with `internal: true`
 needs no `port` or `routes`; give it a `writable:` block. Use `ephemeral:` for
 the paths it writes if it keeps no data in `compose.yml` volumes. For a

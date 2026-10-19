@@ -173,6 +173,24 @@ def format_fixable_alert(project: str, hits: Sequence[Hit]) -> Alert:
     return Alert(kind="fix_available", title=title, body=body, priority=0)
 
 
+def format_hardening_upcoming_alert(project: str, hits: Sequence[Hit]) -> Alert:
+    """Findings that quarantine from 0.12 but not now. Warned once per finding;
+    not quarantined. Priority 0."""
+    hits = _ordered(hits)
+    n = len(hits)
+    title = (f"[boxmunge:{project}] {n} CVE finding{'s' if n != 1 else ''} will "
+             f"quarantine from 0.12 (warning only)")
+    body = "\n".join([
+        f"Project: {project} — still running; nothing is quarantined for this in 0.11.0.",
+        *_listing(hits),
+        "",
+        hits[0].disposition.explanation,
+        "",
+        f"Details: boxmunge security {project}",
+    ])
+    return Alert(kind="hardening_upcoming", title=title, body=body, priority=0)
+
+
 def format_new_findings_alert(project: str, hits: Sequence[Hit]) -> Alert:
     """Digest of findings first seen this scan that do not quarantine. Priority 0."""
     hits = _ordered(hits)

@@ -67,7 +67,7 @@ _OPTIONAL_FINDING_KEYS: dict[str, dict[str, Any]] = {
     "status": nullable(machine_enum(VulnStatus)), "pkg_class": nullable(machine_enum(PkgClass)),
     "pkg_type": NULLABLE_STRING,
     "fix_available": NULLABLE_BOOLEAN, "kev_listed": NULLABLE_BOOLEAN,
-    "fix_would_quarantine": NULLABLE_BOOLEAN, "hardening_penalty": NULLABLE_INTEGER,
+    "fix_would_quarantine": NULLABLE_BOOLEAN, "hardening_would_quarantine": NULLABLE_BOOLEAN, "hardening_penalty": NULLABLE_INTEGER,
 }
 
 FINDING = obj({

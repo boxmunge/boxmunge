@@ -38,6 +38,7 @@ def finding(cve: str, severity: str, disposition: str, package: str,
         "attack_vector": "Network", "status": "fixed" if fixed else "affected",
         "pkg_class": "os-pkgs", "pkg_type": "debian", "kev_listed": False,
         "fix_would_quarantine": False,
+        "hardening_would_quarantine": False,
     }
 
 

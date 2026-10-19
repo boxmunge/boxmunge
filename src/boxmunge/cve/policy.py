@@ -58,7 +58,9 @@ from dataclasses import replace
 from datetime import date
 from typing import Callable
 
-from boxmunge.cve.hardening import HardeningProfile, calculate_hardening_penalty
+from boxmunge.cve.hardening import (
+    HardeningProfile, UpcomingHardening, calculate_hardening_penalty,
+)
 from boxmunge.cve.relevance import irrelevant_ecosystem
 from boxmunge.cve.scanner import (
     AttackVector,
@@ -85,6 +87,7 @@ from boxmunge.cve.policy_explain import (
     explain_av_filter,
     explain_distro_deprioritized,
     explain_fix_available,
+    explain_hardening_upcoming,
     explain_kev_fix_not_running,
     explain_kev_opted_out,
     explain_irrelevant_runtime,
@@ -417,6 +420,19 @@ def evaluate_finding(
     )
 
 
+def _flag_upcoming(
+    now: FindingDisposition, then: FindingDisposition, upcoming: UpcomingHardening,
+) -> FindingDisposition:
+    """``now`` under today's penalty, ``then`` under the 0.12 one."""
+    if now.disposition == Disposition.QUARANTINE or then.disposition != Disposition.QUARANTINE:
+        return now
+    return replace(
+        now, hardening_would_quarantine=True,
+        explanation=explain_hardening_upcoming(
+            upcoming.services, then.hardening_penalty - now.hardening_penalty,
+            then.explanation))
+
+
 def evaluate_project(
     project_name: str,
     scan_result: ScanResult,
@@ -428,6 +444,7 @@ def evaluate_project(
     today: date,
     kev_lookup: Callable[[str], bool] = _kev_never,
     runtimes: frozenset[str] | None = None,
+    upcoming: UpcomingHardening | None = None,
 ) -> ProjectDecision:
     """Aggregate per-finding decisions into a project-level decision.
 
@@ -435,22 +452,33 @@ def evaluate_project(
     through every per-finding evaluation — one penalty per project, not
     per finding. Findings in the result are sorted by effective severity
     desc, then cve_id asc, for deterministic ordering downstream.
+
+    ``upcoming`` is the stricter hardening the policy will apply from 0.12.
+    A finding that does not quarantine under ``hardening_profile`` but would
+    under it keeps its disposition and is flagged hardening_would_quarantine:
+    a warning, never a quarantine.
     """
     penalty = calculate_hardening_penalty(hardening_profile)
 
-    dispositions = tuple(
-        evaluate_finding(
+    def judge(f: Finding, hardening_penalty: int) -> FindingDisposition:
+        return evaluate_finding(
             f,
             posture=posture,
-            hardening_penalty=penalty,
+            hardening_penalty=hardening_penalty,
             dangerously_disable_quarantine=dangerously_disable_quarantine,
             suppressions=suppressions,
             today=today,
             kev_lookup=kev_lookup,
             runtimes=runtimes,
         )
-        for f in scan_result.findings
-    )
+
+    dispositions = tuple(judge(f, penalty) for f in scan_result.findings)
+    if upcoming is not None:
+        upcoming_penalty = calculate_hardening_penalty(upcoming.profile)
+        dispositions = tuple(
+            _flag_upcoming(d, judge(d.finding, upcoming_penalty), upcoming)
+            for d in dispositions
+        )
 
     sorted_dispositions = tuple(
         sorted(

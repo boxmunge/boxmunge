@@ -464,6 +464,23 @@ relaxation made in the manifest counts like its compose.yml spelling:
 +1. A service on `profile: off` gets no hardening baseline: its
 compose.yml and any manifest `cap_add` are judged.
 
+The penalty is project-wide: a compose-only service without
+`read_only: true` (a typical database) adds +1 to the severity of every
+finding in every image of the project, so a medium finding in the web image
+judges as high.
+
+**0.11.0 warns; 0.12 quarantines.** Releases before 0.11.0 treated every
+compose-only service as read-only. The calculator now applies the rule above,
+but until 0.12 the penalty that quarantines (and that refuses a deploy to a
+quarantined project) is still the old one. A finding that only the stricter
+penalty lifts over the posture's threshold keeps its disposition, is flagged
+`WARN` (`hardening_would_quarantine` in `security --json`), shows as a `cve-hardening` warning in
+`boxmunge health`, and is alerted once per finding (`will quarantine from
+0.12`, naming the service). A finding the old penalty already lifts
+quarantines as before. Fix it by adding `read_only: true` in `compose.yml`,
+declaring the service in the manifest so boxmunge hardens it, or accepting the
+risk with a `security` declaration.
+
 ### v0.9 writable: surface and the penalty
 
 The v0.9 `writable:` block (schema 3) is orthogonal to the read-only-
@@ -871,6 +888,7 @@ several findings are involved the title names the worst and adds
 | `[boxmunge:<project>] [STILL RUNNING — quarantine disabled by config] ACTIVELY EXPLOITED <CVE> (CISA KEV)` (every scan) | priority-1 |
 | `[boxmunge:<project>] ACTIVELY EXPLOITED — <CVE> fix available but not running (CISA KEV)` (`relaxed`, every scan) | priority-1 |
 | `[boxmunge:<project>] <N> fixable CVE findings over the quarantine gate — rebuild to apply the fix` | normal |
+| `[boxmunge:<project>] <N> CVE findings will quarantine from 0.12 (warning only)` (once per finding) | normal |
 | `[boxmunge:<project>] <N> new CVE findings (informational)` (digest, top 5 listed) | normal |
 | `[boxmunge:<project>] Suppression expired — <CVE>` | priority-1 |
 | `[<hostname>] Host suppression expired — <CVE>` (once per fleet scan) | priority-1 |

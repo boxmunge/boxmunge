@@ -46,6 +46,7 @@ from boxmunge.cve._alerting_fleet import (
 )
 from boxmunge.cve._alerting_formatters import (
     format_fixable_alert,
+    format_hardening_upcoming_alert,
     format_kev_at_risk_alert,
     format_kev_fix_pending_alert,
     format_new_findings_alert,
@@ -70,6 +71,7 @@ __all__ = [
     "format_kev_fix_pending_alert",
     "format_kev_at_risk_alert",
     "format_fixable_alert",
+    "format_hardening_upcoming_alert",
     "format_suppression_expired_alert",
     "format_host_suppression_expired_alert",
     "format_grace_heads_up_alert",
@@ -130,6 +132,17 @@ def findings_by_key(
     return out
 
 
+def hardening_upcoming_by_key(
+    decisions: Sequence[ProjectDecision],
+) -> dict[tuple[str, str], Hit]:
+    """(cve_id, package) → a finding flagged hardening_would_quarantine."""
+    return {
+        (fd.finding.cve_id, fd.finding.package): Hit(fd, decision.image_ref)
+        for decision in decisions for fd in decision.findings
+        if fd.hardening_would_quarantine
+    }
+
+
 def _scan_date(decisions: Sequence[ProjectDecision]) -> date | None:
     if not decisions:
         return None
@@ -157,8 +170,11 @@ def detect_transitions(
     fixable under relaxed (B-01) — is alerted on EVERY scan, not only on a
     transition.
 
+    A finding that quarantines from 0.12 but not now (hardening_would_quarantine)
+    is warned once, when it first carries the flag.
+
     Order: kev_at_risk, kev_fix_pending, still_running, suppression_expired,
-    fix_available, informational.
+    fix_available, hardening_upcoming, informational.
     """
     before = findings_by_key(prior)
     now = findings_by_key(current)
@@ -184,8 +200,15 @@ def detect_transitions(
         elif disp == Disposition.STILL_RUNNING_AT_RISK and changed:
             new_at_risk.append(hit)
         elif disp in (Disposition.INFORMATIONAL, Disposition.IGNORED_FIXED) and old is None:
-            # A new below-gate finding, fixable or not, is still reported.
-            new_info.append(hit)
+            # A new below-gate finding, fixable or not, is still reported;
+            # one that quarantines from 0.12 has its own warning below.
+            if not fd.hardening_would_quarantine:
+                new_info.append(hit)
+
+    # One warning per project per finding: only keys not already flagged.
+    flagged_before = hardening_upcoming_by_key(prior)
+    new_upcoming = [h for k, h in hardening_upcoming_by_key(current).items()
+                    if k not in flagged_before]
 
     project_expired: list[Suppression] = []
     host_expired: list[Suppression] = []
@@ -206,6 +229,8 @@ def detect_transitions(
         alerts.append(format_suppression_expired_alert(project_name, project_expired))
     if new_fixable:
         alerts.append(format_fixable_alert(project_name, new_fixable))
+    if new_upcoming:
+        alerts.append(format_hardening_upcoming_alert(project_name, new_upcoming))
     if new_info:
         alerts.append(format_new_findings_alert(project_name, new_info))
     return Transitions(alerts=tuple(alerts), host_expired=tuple(host_expired))

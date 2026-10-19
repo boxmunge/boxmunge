@@ -131,9 +131,11 @@ def make_clearance(project: str = "demo", images=None, *, before=None, after=BAL
     """A production release's clearance; `before` None is a quarantine whose
     record does not keep the policy."""
     from boxmunge.commands.quarantine_gate import Clearance
+    from boxmunge.commands.security_scan_inputs import ProjectHardening
     from boxmunge.cve.hardening import HardeningProfile
     return Clearance(project, project, "CVE-2026-0001", images or {},
-                     HardeningProfile(True, True, False, False), after, before, tuple(at_risk))
+                     ProjectHardening(HardeningProfile(True, True, False, False), None),
+                     after, before, tuple(at_risk))
 
 
 class Docker:

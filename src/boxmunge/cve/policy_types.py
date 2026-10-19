@@ -105,6 +105,10 @@ class FindingDisposition:
     # IGNORED_FIXED only: without the (not yet running) fix, this finding
     # would quarantine or run at risk under the project's posture.
     fix_would_quarantine: bool = False
+    # Not quarantine-level under the penalty applied today, but it is under
+    # the stricter hardening rule that takes full effect in 0.12: a warning
+    # in 0.11.0, never a quarantine.
+    hardening_would_quarantine: bool = False
 
 
 @dataclass(frozen=True)

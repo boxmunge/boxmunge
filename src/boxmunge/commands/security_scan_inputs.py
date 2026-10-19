@@ -17,7 +17,11 @@ from typing import Any
 from boxmunge import docker_containers
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
-from boxmunge.cve.hardening import HardeningProfile, effective_hardening_profile
+from boxmunge.cve import hardening
+from boxmunge.cve.hardening import (
+    HardeningProfile, UpcomingHardening, calculate_hardening_penalty,
+    effective_hardening_profile, hardening_profile_from_compose,
+)
 from boxmunge.cve.policy import PolicyError, Posture, parse_posture
 from boxmunge.cve.security_policy import security_policy
 from boxmunge.cve.scan_state import BASIS_CONTAINERS, BASIS_STARTUP_IMAGES
@@ -29,7 +33,9 @@ from boxmunge.docker_run import DockerError
 from boxmunge.lifecycle import is_blocked
 from boxmunge.manifest import load_manifest
 from boxmunge.paths import BoxPaths
-from boxmunge.security_overlay import PROFILE_OFF, effective_profile, resolve_security
+from boxmunge.security_overlay import (
+    PROFILE_OFF, effective_profile, resolve_security, services_with_off_profile,
+)
 
 
 class ProjectScanError(RuntimeError):
@@ -111,29 +117,75 @@ def project_meta(project: str, manifest: dict[str, Any],
     )
 
 
-def hardening_profile(meta: ProjectMeta, user_model: dict[str, Any]) -> HardeningProfile:
-    """Overlay-aware hardening profile for the penalty calculation.
+@dataclass(frozen=True)
+class ProjectHardening:
+    """The hardening the policy judges a project with, and, until 0.12
+    enforces the stricter rule, the profile it will judge from then on
+    (None: nothing differs)."""
 
-    ``user_model`` is compose.yml as Compose resolves it, so a setting that
-    arrives through `include:` or `extends:` counts. Each service is judged
-    with what boxmunge's overlay applies to it, resolved from the same
-    security blocks the overlay is built from: no penalty for an overlay
-    default the project did not redeclare, and a manifest relaxation the
-    overlay emits (no_new_privileges: false, cap_add) counts as a
-    deviation. The overlay gives a read-only root only to the manifest's
-    declared services, so a compose-only service is read-only only when
-    compose.yml says so.
-    """
+    applied: HardeningProfile
+    upcoming: UpcomingHardening | None
+
+
+def _overlay_view(meta: ProjectMeta, services: Any) -> tuple[dict[str, Any], set[str]]:
+    """Per service: what the overlay applies to it, and whether it gives it
+    a read-only root (only the manifest's declared services get one)."""
     project_sec = meta.manifest.get("security")
     declared = meta.manifest.get("services") or {}
-    applied, read_only_by_overlay = {}, set()
-    for svc in (user_model.get("services") or {}):
+    applied: dict[str, Any] = {}
+    read_only_by_overlay: set[str] = set()
+    for svc in services:
         entry = declared.get(svc)
         svc_sec = entry.get("security") if isinstance(entry, dict) else None
         applied[svc] = resolve_security(project_sec, svc_sec)
         if isinstance(entry, dict) and effective_profile(project_sec, svc_sec) != PROFILE_OFF:
             read_only_by_overlay.add(svc)
-    return effective_hardening_profile(user_model, applied, read_only_by_overlay)
+    return applied, read_only_by_overlay
+
+
+def _strict_profile(meta: ProjectMeta, model: dict[str, Any]) -> HardeningProfile:
+    applied, read_only_by_overlay = _overlay_view(meta, model.get("services") or {})
+    return effective_hardening_profile(model, applied, read_only_by_overlay)
+
+
+def _legacy_profile(meta: ProjectMeta, model: dict[str, Any]) -> HardeningProfile:
+    """The 0.10.1 judgement: every service the manifest does not put on
+    profile off counts as overlay-hardened, declared or not, and the
+    manifest's relaxations are not looked at."""
+    off = {svc for svc, _ in services_with_off_profile(meta.manifest)}
+    return hardening_profile_from_compose(
+        model, services_with_overlay=set(model.get("services") or {}) - off)
+
+
+def hardening_profile(meta: ProjectMeta, user_model: dict[str, Any]) -> ProjectHardening:
+    """Overlay-aware hardening profile for the penalty calculation.
+
+    ``user_model`` is compose.yml as Compose resolves it, so a setting that
+    arrives through `include:` or `extends:` counts. The strict rule judges
+    each service with what boxmunge's overlay applies to it, resolved from
+    the same security blocks the overlay is built from: no penalty for an
+    overlay default the project did not redeclare, and a manifest relaxation
+    the overlay emits (no_new_privileges: false, cap_add) counts as a
+    deviation. The overlay gives a read-only root only to the manifest's
+    declared services, so a compose-only service is read-only only when
+    compose.yml says so.
+
+    Until STRICT_HARDENING_PENALTY_ENFORCED, the profile applied is the
+    0.10.1 one; the strict one rides along when it would penalise more, with
+    the services that make the difference.
+    """
+    strict = _strict_profile(meta, user_model)
+    if hardening.STRICT_HARDENING_PENALTY_ENFORCED:
+        return ProjectHardening(strict, None)
+    legacy = _legacy_profile(meta, user_model)
+    if calculate_hardening_penalty(strict) <= calculate_hardening_penalty(legacy):
+        return ProjectHardening(legacy, None)
+    services = user_model.get("services") or {}
+    stricter = tuple(
+        name for name, svc in services.items()
+        if calculate_hardening_penalty(_strict_profile(meta, {"services": {name: svc}}))
+        > calculate_hardening_penalty(_legacy_profile(meta, {"services": {name: svc}})))
+    return ProjectHardening(legacy, UpcomingHardening(strict, stricter))
 
 
 def load_user_model(paths: BoxPaths, project: str) -> dict[str, Any]:

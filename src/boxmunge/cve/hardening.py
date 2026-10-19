@@ -12,6 +12,13 @@ from typing import Any
 
 _MAX_HARDENING_PENALTY = 2
 
+# The hardening penalty counts a compose-only service without `read_only: true`
+# as writable, and a manifest `cap_add` / `no_new_privileges: false` as a
+# relaxation. 0.11.0 only WARNS about the findings this would quarantine
+# ("would quarantine from 0.12"); the penalty it applies is still 0.10.1's.
+# 0.12 flips this to True, which makes the rule take full effect.
+STRICT_HARDENING_PENALTY_ENFORCED = False
+
 
 @dataclass(frozen=True)
 class HardeningProfile:
@@ -30,6 +37,15 @@ class HardeningProfile:
     no_new_privileges: bool
     extra_caps_added: bool
     privileged: bool
+
+
+@dataclass(frozen=True)
+class UpcomingHardening:
+    """The profile the policy will judge from 0.12, while 0.11.0 still judges
+    the 0.10.1 one, and the services whose settings make the difference."""
+
+    profile: HardeningProfile
+    services: tuple[str, ...]
 
 
 def calculate_hardening_penalty(profile: HardeningProfile) -> int:

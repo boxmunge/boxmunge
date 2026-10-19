@@ -196,3 +196,35 @@ def explain_threshold(
         f"{head}. Below {posture_label} threshold ({threshold_label}) — "
         f"informational."
     )
+
+
+HARDENING_UPCOMING_FIX = (
+    "Add `read_only: true` to the service in compose.yml, declare it in the "
+    "manifest so boxmunge hardens it, or accept the risk with a `security` "
+    "declaration."
+)
+
+
+def hardening_cause(services: tuple[str, ...]) -> str:
+    """Which services carry the extra penalty, and why it counts."""
+    named = ", ".join(services) if services else "the project's services"
+    return (
+        f"{named}: boxmunge does not harden it as the penalty assumes (a "
+        f"compose-only service without `read_only: true`, or a manifest "
+        f"`cap_add` / `no_new_privileges: false`)"
+    )
+
+
+def explain_hardening_upcoming(
+    services: tuple[str, ...], penalty: int, threshold_detail: str,
+) -> str:
+    """Why a finding that does not quarantine today will from 0.12, and the fix.
+
+    ``threshold_detail`` is the explanation the finding gets under the 0.12
+    penalty. 0.11.0 only warns."""
+    return (
+        f"WARNING, not quarantined yet: the stricter hardening penalty would "
+        f"quarantine this finding. From 0.12 that penalty applies. "
+        f"{threshold_detail} The extra penalty (+{penalty}) comes from "
+        f"{hardening_cause(services)}. {HARDENING_UPCOMING_FIX}"
+    )

@@ -1,15 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 """The CVE hardening penalty sees what the overlay applies, not only compose.yml.
 
+These tests judge with the rule enforced (STRICT_HARDENING_PENALTY_ENFORCED);
+tests/test_hardening_warn_first.py covers 0.11.0, which only warns about it.
+
 A manifest relaxation (`security.no_new_privileges: false`, `cap_add`) is
 emitted by the overlay; compose.yml alone does not show it, so it must still
 weaken the project's hardening profile.
 """
 from __future__ import annotations
 
-from boxmunge.commands.security_scan_inputs import ProjectMeta, hardening_profile
+import pytest
+
+from boxmunge.commands import security_scan_inputs
+from boxmunge.commands.security_scan_inputs import ProjectMeta
+from boxmunge.cve import hardening
 from boxmunge.cve.hardening import calculate_hardening_penalty
 from boxmunge.cve.policy import parse_posture
+
+@pytest.fixture(autouse=True)
+def _enforced(monkeypatch):
+    monkeypatch.setattr(hardening, "STRICT_HARDENING_PENALTY_ENFORCED", True)
+
+
+def hardening_profile(meta, model):
+    return security_scan_inputs.hardening_profile(meta, model).applied
+
 
 MODEL = {"services": {"web": {"image": "nginx:1"}, "db": {"image": "postgres:16"}}}
 
