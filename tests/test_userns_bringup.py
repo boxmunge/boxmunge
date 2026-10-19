@@ -189,3 +189,17 @@ def test_a_rerun_migration_does_not_restart_a_project_stopped_since_the_first_at
                           component="userns-migrate")
     assert results["good"] == "left stopped by the health monitor"
     assert not [e for e in box if e[0] == "up" and e[1] == "good"]
+
+
+@pytest.mark.parametrize("failed_key", ["restart:good", "abort:good", "project:good"])
+def test_an_abort_redoes_a_project_an_earlier_bring_up_left_failed(
+        paths, box, monkeypatch, failed_key) -> None:
+    """After an undone switch the restart puts the project behind the page; its
+    containers may run while its smoke tests failed. All services running is not
+    "healthy": the full bring-up gives it its routes back."""
+    _running(monkeypatch, {"good": {"app", "worker"}})
+    j = Journal(FORWARD, "started", 1048576, items={failed_key: "failed: its smoke tests failed"})
+    results = bu.bring_up(paths, _carried_on_inv(), j, lambda: None,
+                          component="userns-rollback", prefix="abort", only_stopped=True)
+    assert results["good"] == "up" and ("route", "good") in box
+    assert ("up", "good", ("app", "worker"), True, False) in box

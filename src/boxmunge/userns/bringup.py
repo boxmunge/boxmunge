@@ -96,6 +96,14 @@ def _held(paths: BoxPaths, project: str) -> str | None:
     return "stopped by the health monitor" if is_monitor_stopped(project, paths) else None
 
 
+def _failed_before(journal: Journal, project: str) -> bool:
+    """An earlier bring-up of this journal left the project failed: it may run
+    yet still sit behind the maintenance page (its smoke tests failed), so
+    only a full bring-up of it puts the site right."""
+    return any(str(journal.items.get(f"{prefix}:{project}", "")).startswith("failed")
+               for prefix in ("project", "restart", "abort"))
+
+
 def _project(paths: BoxPaths, project: str, services: list[str], component: str) -> None:
     manifest = load_manifest(paths.project_manifest(project))
     prepare_compose_override(paths, manifest, component=component)
@@ -132,11 +140,14 @@ def bring_up(paths: BoxPaths, inv: Inventory, journal: Journal, save: Callable[[
 
     ``only_stopped``: for a box that ran on since the inventory was taken (an
     abort before the switch). A project whose services all run now is not
-    touched: no maintenance page, no restart, no smoke test.
+    touched (no maintenance page, no restart, no smoke test) unless an earlier
+    bring-up of it failed (then it is brought up in full: compose up is a
+    no-op for what runs, and its smoke tests decide).
     """
     projects = [p for p in inv.projects if paths.project_manifest(p).exists()]
     held = {p: why for p in projects if (why := _held(paths, p))}
-    todo = {p: _services_to_start(inv, p, only_stopped) for p in projects if p not in held}
+    todo = {p: _services_to_start(inv, p, only_stopped and not _failed_before(journal, p))
+            for p in projects if p not in held}
     untouched = {p for p, services in todo.items()
                  if only_stopped and not services and _running_services(inv, p)}
     _platform(paths, [p for p in todo if p not in untouched], journal, prefix)

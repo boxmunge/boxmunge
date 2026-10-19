@@ -61,6 +61,7 @@ from typing import Callable
 from boxmunge.cve.hardening import (
     HardeningProfile, UpcomingHardening, calculate_hardening_penalty,
 )
+from boxmunge.cve.hardening_upcoming import flag_upcoming
 from boxmunge.cve.relevance import irrelevant_ecosystem
 from boxmunge.cve.scanner import (
     AttackVector,
@@ -87,7 +88,6 @@ from boxmunge.cve.policy_explain import (
     explain_av_filter,
     explain_distro_deprioritized,
     explain_fix_available,
-    explain_hardening_upcoming,
     explain_kev_fix_not_running,
     explain_kev_opted_out,
     explain_irrelevant_runtime,
@@ -420,19 +420,6 @@ def evaluate_finding(
     )
 
 
-def _flag_upcoming(
-    now: FindingDisposition, then: FindingDisposition, upcoming: UpcomingHardening,
-) -> FindingDisposition:
-    """``now`` under today's penalty, ``then`` under the 0.12 one."""
-    if now.disposition == Disposition.QUARANTINE or then.disposition != Disposition.QUARANTINE:
-        return now
-    return replace(
-        now, hardening_would_quarantine=True,
-        explanation=explain_hardening_upcoming(
-            upcoming.services, then.hardening_penalty - now.hardening_penalty,
-            then.explanation))
-
-
 def evaluate_project(
     project_name: str,
     scan_result: ScanResult,
@@ -476,7 +463,7 @@ def evaluate_project(
     if upcoming is not None:
         upcoming_penalty = calculate_hardening_penalty(upcoming.profile)
         dispositions = tuple(
-            _flag_upcoming(d, judge(d.finding, upcoming_penalty), upcoming)
+            flag_upcoming(d, judge(d.finding, upcoming_penalty), upcoming)
             for d in dispositions
         )
 
