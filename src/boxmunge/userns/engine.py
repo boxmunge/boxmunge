@@ -119,7 +119,9 @@ def _switch(paths: BoxPaths, j: Journal, inv: Inventory, daemon: DaemonControl,
         bring_up(paths, inv, j, save, component=COMPONENT, prefix="restart")
         timers.restore(j.timers)
         clear_marker(paths)  # nothing was carried: the box is as before
-        j.phase, j.failed = "prepared", f"the remapped daemon did not start: {e}"
+        # Back before "prepared": the box runs for however long the operator
+        # takes, so the next attempt makes its PREMIGRATE backups afresh.
+        j.phase, j.failed = "started", f"the remapped daemon did not start: {e}"
         save()
         raise SwitchUndone(f"the remapped daemon did not start ({e}). daemon.json was "
                              f"restored and the box restarted on its old root; fix the cause, "

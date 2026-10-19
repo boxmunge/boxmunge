@@ -14,6 +14,7 @@ from boxmunge.userns.preflight import Report
 from tests.integration.userns.dockerd import FakeTimers
 
 S = 1048576
+_REAL_SWITCH = en._switch  # the box fixture stubs it
 STEPS = ["save_all", "_prepare", "quiesce", "_switch", "_rebuild", "bring_up"]
 
 
@@ -153,7 +154,7 @@ def test_a_remapped_daemon_that_will_not_start_puts_everything_back(paths, monke
     assert sw.uo.recorded_offset(paths) is None
     assert daemon.calls == ["stop", "start", "stop", "start"] and brought == ["restart"]
     assert timers.calls[-1][0] == "restore"  # the box runs again, so do its timers
-    assert load_journal(paths).phase == "prepared"
+    assert load_journal(paths).phase == "started"  # not "prepared": see the next test
 
 
 def test_the_switch_writes_the_merged_config_and_the_record(paths, monkeypatch,
@@ -310,6 +311,28 @@ def test_a_quiesce_failure_says_the_timers_are_stopped(paths, box, monkeypatch) 
     with pytest.raises(RuntimeError):
         _migrate(paths)
     assert "timers are stopped" in sent[0] and "every project command refuses" in sent[0]
+
+
+def test_a_resume_after_an_undone_switch_backs_up_again(paths, box, monkeypatch) -> None:
+    """The box runs on its old root after SwitchUndone, maybe for weeks: the
+    backups taken before the failed switch are no protection for the next one."""
+    calls, _ = box
+    monkeypatch.setattr(en, "_switch", _REAL_SWITCH)
+    monkeypatch.setattr(en.uo, "remap_offset", lambda paths: S)
+    monkeypatch.setattr(en, "back_to_prior", lambda *a: None)
+    attempts = []
+
+    def to_remapped(*a):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise en.MigrationError("dockerd exited")
+
+    monkeypatch.setattr(en, "to_remapped", to_remapped)
+    with pytest.raises(en.SwitchUndone):
+        _migrate(paths)
+    assert calls.count("_prepare") == 1
+    assert _migrate(paths).phase == "applied"
+    assert calls.count("_prepare") == 2
 
 
 def test_a_switch_undone_clears_the_marker(paths, monkeypatch, tmp_path) -> None:
