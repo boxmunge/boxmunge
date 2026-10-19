@@ -212,10 +212,10 @@ def _open_install(project_name: str, paths: BoxPaths) -> tuple[bool, InstallTxn 
         return True, None
     stale = stale_reason(paths, project_name, txn)
     if stale:
-        print(f"ERROR: {start_refusal(project_name, txn, stale)}.", file=sys.stderr)
+        print(f"ERROR: {start_refusal(paths, project_name, txn, stale)}.", file=sys.stderr)
         return False, None
     if txn.abandoning:
-        print(f"ERROR: Cannot roll back {project_name}: {start_refusal(project_name, txn, None)}.",
+        print(f"ERROR: Cannot roll back {project_name}: {start_refusal(paths, project_name, txn, None)}.",
               file=sys.stderr)
         return False, None
     if not txn.data_may_have_changed():
@@ -350,7 +350,7 @@ def restore_rolled_back_data(project_name: str, paths: BoxPaths, manifest: dict,
     # record of the release it just replaced, and refuses.
     try:
         # The backup service restores as the user the restored release runs as.
-        users = decide_release_users(project_name, paths, manifest, "rollback")
+        users = decide_release_users(project_name, paths, manifest, "rollback").users
         # The backup service is the restored release's: its images get
         # their names now, not at the switch.
         promote_candidates(paths, project_name)
@@ -378,7 +378,7 @@ def start_rolled_back(project_name: str, paths: BoxPaths, manifest: dict,
                   f"once it is fixed.", file=sys.stderr)
             return rc
     try:
-        users = decide_release_users(project_name, paths, manifest, "rollback")
+        users = decide_release_users(project_name, paths, manifest, "rollback").users
         generate_release_config(project_name, paths, manifest, "rollback", users)
     except (DeployRefused, DockerError, OSError, ValueError) as e:
         print(f"ERROR: Generating the previous release's configs failed: {e}. Rerun "

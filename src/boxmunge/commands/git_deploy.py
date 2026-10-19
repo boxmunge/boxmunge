@@ -65,7 +65,7 @@ def deploy_git_locked(project_name: str, paths: BoxPaths, req: GitDeploy) -> int
     if txn is not None:
         stale = stale_reason(paths, project_name, txn)
         if stale or txn.abandoning:
-            print(f"ERROR: {start_refusal(project_name, txn, stale)}.", file=sys.stderr)
+            print(f"ERROR: {start_refusal(paths, project_name, txn, stale)}.", file=sys.stderr)
             return 1
         if (txn.source, txn.ref, txn.staged_id) == (req.source, req.sha, req.staged_id):
             print(f"Resuming the install of {req.sha} from {txn.phase}; the snapshot taken "

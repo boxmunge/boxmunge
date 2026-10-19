@@ -16,7 +16,11 @@ from boxmunge.commands.deploy_steps import (
 )
 from boxmunge.compose import ComposeError
 from boxmunge.compose_guard import compose_up_checked
+from boxmunge.commands.quarantine_gate import (
+    Clearance, keep_quarantined, lift_after_deploy, production_now, require_unchanged,
+)
 from boxmunge.compose_resolve import ComposeResolveError
+from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker import CaddyConfigRejected, caddy_reload, DockerError
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.identity import register_project_identity
@@ -195,10 +199,10 @@ def _start_release(
     """
     print(f"Deploying {project_name} (ref: {actual_ref})...")
     try:
-        users = decide_release_users(project_name, paths, manifest, component)
+        decision = decide_release_users(project_name, paths, manifest, component)
     except (DeployRefused, DockerError) as e:
         print(f"ERROR: {project_name} cannot start as it is; nothing was run or changed "
-              f"(production runs its previous containers). Fix the following and deploy "
+              f"({production_now(paths, project_name)}). Fix the following and deploy "
               f"again:\n{e}", file=sys.stderr)
         log_error(component, f"Deploy refused before the start: {e}", paths,
                   project=project_name)
@@ -207,16 +211,19 @@ def _start_release(
     if rc != 0:
         return rc
     try:
-        generate_release_config(project_name, paths, manifest, component, users)
-    except (OSError, ValueError) as e:
-        print(f"ERROR: {project_name} was not started: production still runs its "
-              f"previous containers. Fix the following and deploy again:\n{e}",
-              file=sys.stderr)
+        generate_release_config(project_name, paths, manifest, component, decision.users)
+        if decision.clearance is not None:
+            require_unchanged(paths, decision.clearance)
+    except (OSError, ValueError, DeployRefused) as e:
+        print(f"ERROR: {project_name} was not started ({production_now(paths, project_name)})."
+              f" Fix the following and deploy again:\n{e}", file=sys.stderr)
+        if decision.clearance is not None:
+            keep_quarantined(paths, project_name)
         log_error(component, f"Deploy refused before the start: {e}", paths,
                   project=project_name)
         return 1
     return replace_release(project_name, paths, manifest, actual_ref, snapshot_name,
-                           component=component)
+                           component=component, clearance=decision.clearance)
 
 
 def run_pre_deploy_hook(project_name: str, paths: BoxPaths, manifest: dict) -> int:
@@ -266,7 +273,8 @@ def run_pre_deploy_hook(project_name: str, paths: BoxPaths, manifest: dict) -> i
 def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
                     actual_ref: str, snapshot_name: str | None,
                     component: str = "deploy", txn: str | None = None,
-                    replaced_ref: str | None = None) -> int:
+                    replaced_ref: str | None = None,
+                    clearance: Clearance | None = None) -> int:
     """Start the release in production, route it, smoke-test, record.
 
     From the container start on, production runs (or partly runs) this
@@ -277,16 +285,25 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
 
     `txn` is the id of the install transaction this start finishes
     (release_txn), and `replaced_ref` the release it replaced (the
-    rollback target; see record_deploy_state).
+    rollback target; see record_deploy_state). `clearance` is the scan
+    that lets a CVE-quarantined project's release start (quarantine_gate);
+    its successful deploy lifts the quarantine.
     """
+    if clearance is None and is_quarantined(project_name, paths):
+        print(f"ERROR: {project_name} is CVE-quarantined and the images of {actual_ref} "
+              f"were not scanned; nothing was started.", file=sys.stderr)
+        return 1
     first_deploy = "current_ref" not in read_state(paths.project_deploy_state(project_name))
     rc = 1
     try:
-        rc = _start_and_verify(project_name, paths, manifest, component, txn)
+        rc = _start_and_verify(project_name, paths, manifest, component, txn,
+                               clearance, actual_ref)
     finally:
         if rc == 0 or not first_deploy:
             record_deploy_state(paths, project_name, actual_ref, snapshot_name, replaced_ref)
     if rc != 0:
+        if clearance is not None:
+            keep_quarantined(paths, project_name)
         return rc
 
     log_operation("deploy", f"Deploy completed ref={actual_ref}", paths,
@@ -299,7 +316,8 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
 
 
 def _start_and_verify(project_name: str, paths: BoxPaths, manifest: dict,
-                      component: str = "deploy", txn: str | None = None) -> int:
+                      component: str, txn: str | None, clearance: Clearance | None,
+                      ref: str) -> int:
     project_dir = paths.project_dir(project_name)
     print("  Starting containers...")
     compose_files = ["compose.yml", "compose.boxmunge.yml"]
@@ -307,9 +325,10 @@ def _start_and_verify(project_name: str, paths: BoxPaths, manifest: dict,
         promote_candidates(paths, project_name)
         deploy_storage.prepare_storage(paths, production_target(paths, project_name))
         # generate_release_config built every image the users were decided from.
+        # A quarantine's fix starts only the scanned images (no pull, no build).
         compose_up_checked(paths, project_name, component=component,
                            compose_files=compose_files, record=True, deploying=True,
-                           build=False, txn=txn)
+                           build=False, txn=txn, pinned=clearance is not None)
     except (DockerError, BindSourceError, RunAsError, ComposeResolveError, RemapError,
             ComposeError, OSError) as e:
         print(f"  ERROR: {e}", file=sys.stderr)
@@ -328,6 +347,9 @@ def _start_and_verify(project_name: str, paths: BoxPaths, manifest: dict,
 
     if not smoke_ok(project_name, paths, project_dir, manifest, compose_files):
         return 1
+    if clearance is not None:
+        return lift_after_deploy(paths, project_name, ref, clearance, txn=txn,
+                                 component=component)
     return 0
 
 
@@ -341,7 +363,8 @@ def _caddy_rejected(project_name: str, paths: BoxPaths,
     print(f"  The new release's containers are running behind the previous "
           f"routing. Fix the site config and deploy again"
           + (f", or run 'rollback {project_name}' to return to the previous "
-             f"release." if _has_rollback_target(paths, project_name) else "."),
+             f"release." if _has_rollback_target(paths, project_name)
+             and not is_quarantined(project_name, paths) else "."),
           file=sys.stderr)
     if error.refused:
         print(f"ERROR: some site files were not restored: {error.refused}",
@@ -361,7 +384,8 @@ def _has_rollback_target(paths: BoxPaths, project_name: str) -> bool:
 def deploy_eligible(project_name: str, paths: BoxPaths) -> bool:
     """Checked by every deploy core under the project lock, immediately
     before anything changes. Prints why and returns False if not."""
-    if refuse_if_blocked(project_name, paths) or refuse_if_legacy_stage(paths, project_name):
+    if refuse_if_blocked(project_name, paths, ships_fix=True) \
+            or refuse_if_legacy_stage(paths, project_name):
         return False
     from boxmunge.project_registry import is_registered
     if not is_registered(project_name, paths):

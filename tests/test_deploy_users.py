@@ -224,7 +224,9 @@ def test_a_rollbacks_restore_runs_the_restored_releases_images(paths, monkeypatc
     candidates are named before the restore, not at the switch."""
     from boxmunge.commands import rollback
     order: list[str] = []
-    monkeypatch.setattr(rollback, "decide_release_users", lambda *a: order.append("decide") or {})
+    from boxmunge.commands.release_config import ReleaseDecision
+    monkeypatch.setattr(rollback, "decide_release_users",
+                        lambda *a: order.append("decide") or ReleaseDecision({}))
     monkeypatch.setattr(rollback, "promote_candidates", lambda *a: order.append("promote"))
     monkeypatch.setattr(rollback, "prepare_compose_override", lambda *a, **k: None)
     monkeypatch.setattr(rollback, "check_start", lambda *a, **k: None)

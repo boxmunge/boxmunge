@@ -188,26 +188,84 @@ class TestRefusesPaused:
         assert "paused" in err.lower()
 
 
-class TestRefusesQuarantined:
-    """Wave 1: stage must refuse a CVE-quarantined project."""
+class TestQuarantinedStage:
+    """A quarantined project may stage a fix: staging starts only if every
+    image it would start scans clean (quarantine_gate), and production
+    stays quarantined until the promote, which scans again."""
+
+    def _quarantine(self, paths) -> None:
+        from tests.test_commands.cve_helpers import seed_quarantine
+        add_project("testapp", paths)
+        _place_real_bundle(paths)
+        seed_quarantine(paths, "testapp")
+
+    @patch("boxmunge.commands.unstage_cmd.caddy_reload")
+    @patch("boxmunge.commands.unstage_cmd.compose_down")
+    @patch("boxmunge.staging_bringup.caddy_reload")
+    @patch("boxmunge.compose_guard.compose_up")
+    def test_vulnerable_release_is_not_staged(self, mock_up, mock_reload, mock_down,
+                                              mock_unstage_reload, paths, capsys,
+                                              monkeypatch):
+        from boxmunge.commands.quarantine_gate import QuarantineRefused
+        self._quarantine(paths)
+        scanned = []
+
+        def refuse(paths_, target, manifest):
+            scanned.append(target.staging)
+            raise QuarantineRefused(["CVE-2026-0001 (Critical) in openssl 1, service web"])
+        monkeypatch.setattr("boxmunge.staging_bringup.clear_release", refuse)
+        assert run_stage("testapp", paths) == 1
+        err = capsys.readouterr().err
+        assert "CVE-2026-0001 (Critical) in openssl 1, service web" in err
+        assert scanned == [True]  # staging's own images
+        assert load_slot(paths, "testapp") is None  # torn down
+        mock_up.assert_not_called()
+        assert paths.project_quarantine_state("testapp").exists()
 
     @patch("boxmunge.staging_bringup.caddy_reload")
     @patch("boxmunge.compose_guard.compose_up")
-    def test_refuses_quarantined_project(self, mock_up, mock_reload, paths, capsys):
-        add_project("testapp", paths)
-        _place_real_bundle(paths)
-        paths.project_quarantine_state("testapp").parent.mkdir(
-            parents=True, exist_ok=True,
-        )
-        paths.project_quarantine_state("testapp").write_text("{}")
-        rc = run_stage("testapp", paths)
-        assert rc == 1
-        err = capsys.readouterr().err
-        assert "quarantine" in err.lower()
-        assert "security resume" in err
-        mock_up.assert_not_called()
+    def test_clean_release_is_staged_and_production_stays_quarantined(
+            self, mock_up, mock_reload, paths, monkeypatch):
+        self._quarantine(paths)
+        from tests.test_commands.cve_helpers import make_clearance
+        clearance = make_clearance("testapp")
+        checked = []
+        monkeypatch.setattr("boxmunge.staging_bringup.clear_release", lambda *a: clearance)
+        monkeypatch.setattr("boxmunge.staging_bringup.verify_started",
+                            lambda paths_, c, component: checked.append((c, component)))
+        assert run_stage("testapp", paths) == 0
+        assert [c.kwargs["pinned"] for c in mock_up.call_args_list] == [True]
+        assert checked == [(clearance, "stage")]  # what the start ran, after the up
+        assert load_slot(paths, "testapp").state == "ready"
+        assert paths.project_quarantine_state("testapp").exists()
+
+    @patch("boxmunge.commands.unstage_cmd.caddy_reload")
+    @patch("boxmunge.commands.unstage_cmd.compose_down")
+    @patch("boxmunge.staging_bringup.caddy_reload")
+    @patch("boxmunge.compose_guard.compose_up")
+    def test_a_start_on_an_unscanned_image_is_torn_down(
+            self, mock_up, mock_reload, mock_down, mock_unstage_reload, paths, capsys,
+            monkeypatch):
+        from boxmunge.cve.quarantine import QuarantineError
+        from tests.test_commands.cve_helpers import make_clearance
+        self._quarantine(paths)
+        monkeypatch.setattr("boxmunge.staging_bringup.clear_release",
+                            lambda *a: make_clearance("testapp"))
+
+        def moved(paths_, c, component):
+            raise QuarantineError("testapp-staging-web-1 runs sha256:e, not a scanned image")
+        monkeypatch.setattr("boxmunge.staging_bringup.verify_started", moved)
+        assert run_stage("testapp", paths) == 1
+        assert "Staging does not run what was scanned" in capsys.readouterr().err
+        assert load_slot(paths, "testapp") is None
         mock_reload.assert_not_called()
 
+    def test_paused_and_quarantined_is_refused(self, paths, capsys):
+        from boxmunge.pause import write_paused_state
+        self._quarantine(paths)
+        write_paused_state("testapp", paths)
+        assert run_stage("testapp", paths) == 1
+        assert "paused and CVE-quarantined" in capsys.readouterr().err
 
 class TestStageComposeRejectionExit3:
     """Audit H-N2: hardening rejection returns exit code 3, not 1."""

@@ -16,14 +16,20 @@ reusing the recorded snapshot. While a release is staged, a new install
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from boxmunge.commands.deploy import replace_release, run_pre_deploy_hook
 from boxmunge.commands.deploy_steps import snapshot_live_release
-from boxmunge.commands.release_config import decide_release_users, generate_release_config
+from boxmunge.commands.release_config import (
+    ReleaseDecision, decide_release_users, generate_release_config,
+)
+from boxmunge.commands.quarantine_gate import (
+    keep_quarantined, manifest_in_force, require_unchanged,
+)
 from boxmunge.crashpoint import crash_point
+from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker_run import DockerError
 from boxmunge.data_dirs import ReleaseStateError, SetAsideError, log_kept, set_aside_announcer
 from boxmunge.intake import IntakeError, report_refusal, validate_release_tree
@@ -44,7 +50,6 @@ from boxmunge.staging_isolation import StagingIsolationError, check_install_isol
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
-    from boxmunge.run_as import ServiceUser
 
 
 @dataclass(frozen=True)
@@ -58,6 +63,9 @@ class TreeDeploy:
     no_snapshot: bool = False
     on_installed: Callable[[], None] | None = None   # after the code is in place
     on_switched: Callable[[int], None] | None = None  # after replace_release returns
+    # A quarantined project's manifest before this install replaced it; set by
+    # _fresh only (a resumed install has already replaced it).
+    previous_manifest: dict | None = None
 
 
 def deploy_tree_locked(project_name: str, paths: BoxPaths, req: TreeDeploy) -> int:
@@ -73,7 +81,7 @@ def deploy_tree_locked(project_name: str, paths: BoxPaths, req: TreeDeploy) -> i
     if txn is not None:
         stale = stale_reason(paths, project_name, txn)
         if stale or txn.abandoning:
-            print(f"ERROR: {start_refusal(project_name, txn, stale)}.", file=sys.stderr)
+            print(f"ERROR: {start_refusal(paths, project_name, txn, stale)}.", file=sys.stderr)
             return 1
         if (txn.source, txn.ref, txn.staged_id) == (req.source, req.ref, req.staged_id):
             return _resume(project_name, paths, req, txn)
@@ -111,7 +119,8 @@ def _disjoint_advice(req: TreeDeploy) -> str:
 def _fresh(project_name: str, paths: BoxPaths, req: TreeDeploy) -> int:
     if not _prove_disjoint(project_name, paths, req):
         return 1
-    return _open(project_name, paths, req)
+    return _open(project_name, paths, replace(
+        req, previous_manifest=manifest_in_force(paths, project_name)))
 
 
 def _open(project_name: str, paths: BoxPaths, req: TreeDeploy) -> int:
@@ -170,18 +179,21 @@ def _install(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTx
     crash_point("txn.installed")
     if req.on_installed is not None:
         req.on_installed()
-    # Before the hook: a refusal leaves the install abandonable.
-    users = _decide(project_name, paths, req, txn)
-    if isinstance(users, int):
-        return users
-    return switch_and_close(project_name, paths, req, txn, users)
+    # Before the hook: a refusal (users, or a quarantined project's scan)
+    # leaves the install abandonable.
+    decision = _decide(project_name, paths, req, txn)
+    if isinstance(decision, int):
+        return decision
+    return switch_and_close(project_name, paths, req, txn, decision)
 
 
 def _decide(project_name: str, paths: BoxPaths, req: TreeDeploy,
-            txn: InstallTxn) -> dict[str, ServiceUser] | int:
-    """The release's users, or the exit code of a refusal (reported)."""
+            txn: InstallTxn) -> ReleaseDecision | int:
+    """The release's users (and, for a quarantined project, its scan's
+    clearance), or the exit code of a refusal (reported)."""
     try:
-        return decide_release_users(project_name, paths, req.manifest, req.component)
+        return decide_release_users(project_name, paths, req.manifest, req.component,
+                                    req.previous_manifest)
     except DeployRefused as e:
         print(f"ERROR: {req.ref} cannot start as it is:\n{e}", file=sys.stderr)
         log_error(req.component, f"{req.ref} cannot start as it is: {e}", paths,
@@ -195,15 +207,15 @@ def _decide(project_name: str, paths: BoxPaths, req: TreeDeploy,
 
 
 def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: InstallTxn,
-                     users: dict[str, ServiceUser] | None = None) -> int:
-    """From installed: the users (`users`, decided before the hook, or
-    decided here first), the hook (unless resuming at switching), configs,
+                     decision: ReleaseDecision | None = None) -> int:
+    """From installed: the users (`decision`, made before the hook, or
+    made here first), the hook (unless resuming at switching), configs,
     replace_release, then close."""
-    if users is None:
+    if decision is None:
         decided = _decide(project_name, paths, req, txn)
         if isinstance(decided, int):
             return decided
-        users = decided
+        decision = decided
     resumed_switch = txn.reached("switching")
     if not resumed_switch:
         if not txn.reached("hook_started"):
@@ -215,10 +227,21 @@ def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: I
             return report_left_open(project_name, paths, txn, req, "the pre-deploy hook failed",
                                     rc)
     try:
-        generate_release_config(project_name, paths, req.manifest, req.component, users)
+        generate_release_config(project_name, paths, req.manifest, req.component,
+                                decision.users)
     except (OSError, ValueError) as e:
+        if decision.clearance is not None:
+            keep_quarantined(paths, project_name)
         return report_left_open(project_name, paths, txn, req,
                                 f"generating its configs failed: {e}")
+    if decision.clearance is not None:
+        try:
+            require_unchanged(paths, decision.clearance)
+        except DeployRefused as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            keep_quarantined(paths, project_name)
+            return report_left_open(project_name, paths, txn, req,
+                                    "it no longer starts the images that were scanned")
     if not resumed_switch:
         txn = advance(paths, project_name, txn, "switching")
     else:
@@ -226,7 +249,8 @@ def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: I
               f"it, so its pre-deploy hook is not run again and no new snapshot is taken.")
     crash_point("txn.switching")
     rc = replace_release(project_name, paths, req.manifest, req.ref, txn.snapshot or None,
-                         component=req.component, txn=txn.id, replaced_ref=txn.replaced_ref)
+                         component=req.component, txn=txn.id, replaced_ref=txn.replaced_ref,
+                         clearance=decision.clearance)
     crash_point("txn.replaced")
     # on_switched must stay the first write after replace_release returns:
     # nothing durable separates the two, so a crash before it is a crash
@@ -241,10 +265,12 @@ def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: I
 
 def report_left_open(project_name: str, paths: BoxPaths, txn: InstallTxn, req: TreeDeploy,
                      why: str, rc: int = 1, *, rerun: bool = True) -> int:
+    options = options_text(project_name, txn, rerun=rerun,
+                           quarantined=is_quarantined(project_name, paths))
     print(f"ERROR: The install of {req.ref} stopped at {txn.phase}: {why}. This attempt "
           f"did not start or change production's containers, and other starts of "
-          f"{project_name} are refused until this install is finished: "
-          f"{options_text(project_name, txn, rerun=rerun)}.", file=sys.stderr)
+          f"{project_name} are refused until this install is finished: {options}.",
+          file=sys.stderr)
     log_error(req.component, f"Install of {req.ref} left open at {txn.phase}: {why}",
               paths, project=project_name)
     return rc
@@ -323,7 +349,7 @@ def bundle_resume_problem(project_name: str, paths: BoxPaths, txn: InstallTxn,
     stale = stale_reason(paths, project_name, txn)
     if stale or txn.abandoning or txn.source != "bundle" \
             or not _names(project_name, ref, txn.ref):
-        return start_refusal(project_name, txn, stale)
+        return start_refusal(paths, project_name, txn, stale)
     if not txn.reached("installed"):
         return (f"The install of {txn.ref} cannot be resumed: its bundle is no longer in "
                 f"the inbox and the install had not finished (phase {txn.phase}). Upload "

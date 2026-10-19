@@ -11,6 +11,7 @@ import pytest
 from boxmunge.cve.policy import (
     Disposition,
     FindingDisposition,
+    Posture,
 )
 from boxmunge.cve.scanner import Finding, Severity
 from boxmunge.cve.quarantine import (
@@ -22,8 +23,11 @@ from boxmunge.cve.quarantine import (
     read_quarantine_state,
     write_quarantine_state,
 )
+from boxmunge.cve.security_policy import security_policy
 from boxmunge.docker import DockerError
 from boxmunge.paths import BoxPaths
+
+POLICY = security_policy(posture=Posture.BALANCED, dangerously=False, runtimes=None)
 
 
 
@@ -89,6 +93,7 @@ class TestStateManagement:
             "myapp", paths,
             headline=_disposition(),
             image_ref="myapp:1.2.3",
+            policy=POLICY,
         )
         assert is_quarantined("myapp", paths) is True
 
@@ -110,6 +115,7 @@ class TestStateManagement:
             "myapp", paths,
             headline=headline,
             image_ref="myapp:1.2.3",
+            policy=POLICY,
         )
         data = json.loads(
             paths.project_quarantine_state("myapp").read_text(),
@@ -117,6 +123,7 @@ class TestStateManagement:
         assert data["cve_id"] == "CVE-2026-1234"
         assert data["severity"] == "High"
         assert data["effective_severity"] == "Critical"
+        assert data["policy"] == POLICY  # what a later lift is compared with
         assert data["explanation"] == "High elevated to Critical via penalty."
         assert data["image_ref"] == "myapp:1.2.3"
         assert "quarantined_at" in data
@@ -130,11 +137,13 @@ class TestStateManagement:
             "myapp", paths,
             headline=_disposition(cve_id="CVE-2026-0001"),
             image_ref="myapp:1.2.3",
+            policy=POLICY,
         )
         write_quarantine_state(
             "myapp", paths,
             headline=_disposition(cve_id="CVE-2026-9999"),
             image_ref="myapp:1.2.4",
+            policy=POLICY,
         )
         data = json.loads(
             paths.project_quarantine_state("myapp").read_text(),
@@ -155,6 +164,7 @@ class TestStateManagement:
             "myapp", paths,
             headline=_disposition(),
             image_ref="myapp:1.2.3",
+            policy=POLICY,
         )
         assert is_quarantined("myapp", paths)
         clear_quarantine_state("myapp", paths)
@@ -169,6 +179,7 @@ class TestStateManagement:
             "myapp", paths,
             headline=_disposition(cve_id="CVE-2026-0001"),
             image_ref="myapp:1.2.3",
+            policy=POLICY,
         )
         data = read_quarantine_state("myapp", paths)
         assert isinstance(data, dict)
@@ -214,6 +225,7 @@ class TestQuarantineProjectHappyPath:
                 compose_files=["compose.yml"],
                 headline=_disposition(),
                 image_ref="myapp:1.2.3",
+                policy=POLICY,
             )
 
         # The record is written first (incomplete), again with the original
@@ -252,6 +264,7 @@ class TestQuarantineProjectHappyPath:
                 compose_files=["compose.yml"],
                 headline=_disposition(),
                 image_ref="myapp:1.2.3",
+                policy=POLICY,
             )
 
         body = captured["caddy"]
@@ -282,6 +295,7 @@ class TestQuarantineProjectHappyPath:
                     explanation="Critical, no upstream fix — quarantine.",
                 ),
                 image_ref="myapp:1.2.3",
+                policy=POLICY,
             )
 
         data = json.loads(
@@ -317,6 +331,7 @@ class TestQuarantineProjectFailures:
                     compose_files=["compose.yml"],
                     headline=_disposition(),
                     image_ref="myapp:1.2.3",
+                    policy=POLICY,
                 )
 
         assert is_quarantined("myapp", paths)
@@ -340,6 +355,7 @@ class TestQuarantineProjectFailures:
                     compose_files=["compose.yml"],
                     headline=_disposition(),
                     image_ref="myapp:1.2.3",
+                    policy=POLICY,
                 )
 
         assert is_quarantined("myapp", paths)
@@ -363,6 +379,7 @@ class TestQuarantineProjectFailures:
                 compose_files=["compose.yml"],
                 headline=_disposition(cve_id="CVE-2026-0001"),
                 image_ref="myapp:1.2.3",
+                policy=POLICY,
             )
             # Second call should not raise.
             quarantine_project(
@@ -372,6 +389,7 @@ class TestQuarantineProjectFailures:
                 compose_files=["compose.yml"],
                 headline=_disposition(cve_id="CVE-2026-9999"),
                 image_ref="myapp:1.2.4",
+                policy=POLICY,
             )
 
         data = json.loads(
@@ -397,6 +415,7 @@ class TestLiftQuarantineHappyPath:
             "myapp", paths,
             headline=_disposition(),
             image_ref="myapp:1.2.3",
+            policy=POLICY,
         )
 
         call_order: list[str] = []
@@ -440,6 +459,7 @@ class TestLiftQuarantineHappyPath:
             "myapp", paths,
             headline=_disposition(),
             image_ref="myapp:1.2.3",
+            policy=POLICY,
         )
 
         # Capture state existence at the moment of compose_up.
@@ -480,6 +500,7 @@ class TestLiftQuarantineFailures:
             "myapp", paths,
             headline=_disposition(),
             image_ref="myapp:1.2.3",
+            policy=POLICY,
         )
 
         with patch(
@@ -495,6 +516,20 @@ class TestLiftQuarantineFailures:
                     compose_files=["compose.yml"],
                 )
 
+        assert is_quarantined("myapp", paths)
+
+    def test_a_failed_check_after_the_start_keeps_state(self, tmp_path: Path) -> None:
+        paths = _setup_paths(tmp_path)
+        write_quarantine_state("myapp", paths, headline=_disposition(),
+                               image_ref="myapp:1.2.3", policy=POLICY)
+
+        def check() -> None:
+            raise QuarantineError("a container runs an unscanned image")
+        with patch("boxmunge.cve.quarantine.caddy_reload"), \
+                patch("boxmunge.cve.quarantine.compose_up_checked"):
+            with pytest.raises(QuarantineError, match="unscanned"):
+                lift_quarantine("myapp", paths, project_caddy_site_content="NORMAL",
+                                compose_files=["compose.yml"], after_start=check)
         assert is_quarantined("myapp", paths)
 
     def test_idempotent_when_not_quarantined(self, tmp_path: Path) -> None:
@@ -558,6 +593,7 @@ class TestStructuredLogging:
                     compose_files=["compose.yml"],
                     headline=_disposition(cve_id="CVE-2026-7777"),
                     image_ref="myapp:1.2.3",
+                    policy=POLICY,
                 )
         finally:
             logger.removeHandler(h)
@@ -594,6 +630,7 @@ class TestStructuredLogging:
             "myapp", paths,
             headline=_disposition(),
             image_ref="myapp:1.2.3",
+            policy=POLICY,
         )
 
         records: list = []

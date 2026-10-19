@@ -29,11 +29,13 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from boxmunge.cve.policy import FindingDisposition
+from boxmunge.cve.security_policy import policy_problem
 from boxmunge import restart_hold
 from boxmunge.compose_guard import compose_up_checked
 from boxmunge.docker import DockerError, caddy_reload, compose_stop
@@ -70,6 +72,9 @@ def checked_quarantine_record(state: dict[str, Any] | None, path: Path) -> dict[
     bad = [key for key in QUARANTINE_TEXT_FIELDS if not isinstance(state.get(key), str)]
     if "action_complete" in state and not isinstance(state["action_complete"], bool):
         bad.append("action_complete")
+    # Absent from records written before it was kept; then the policy at the time is unknown.
+    if "policy" in state and policy_problem(state["policy"]):
+        bad.append("policy")
     if bad:
         raise QuarantineError(
             f"Quarantine state {path} is corrupt ({', '.join(bad)} missing or of the wrong "
@@ -119,11 +124,14 @@ def write_quarantine_state(
     *,
     headline: FindingDisposition,
     image_ref: str,
+    policy: dict[str, Any],
 ) -> dict[str, Any]:
     """Record quarantine state with ``action_complete: false``; return it.
 
     `headline` is the most-severe FindingDisposition that triggered the
-    quarantine. Overwrites existing state with the new headline if called
+    quarantine; `policy` the security policy it was judged under
+    (cve.security_policy), kept so a later release that lifts the quarantine
+    can be shown to have relaxed it. Overwrites existing state with the new headline if called
     again; the action is then incomplete until re-asserted.
     """
     data: dict[str, Any] = {
@@ -133,6 +141,7 @@ def write_quarantine_state(
         "effective_severity": headline.effective_severity.value,
         "explanation": headline.explanation,
         "image_ref": image_ref,
+        "policy": policy,
         "action_complete": False,
     }
     _write_record(project_name, paths, data)
@@ -166,6 +175,7 @@ def quarantine_project(
     compose_files: list[str],
     headline: FindingDisposition,
     image_ref: str,
+    policy: dict[str, Any],
 ) -> None:
     """Perform the full quarantine action.
 
@@ -212,6 +222,7 @@ def quarantine_project(
         project_name, paths,
         headline=headline,
         image_ref=image_ref,
+        policy=policy,
     )
     _complete_action(
         project_name, paths, state,
@@ -315,10 +326,13 @@ def _pin_restart_policies(
     return {**state, "restart_policies": saved}
 
 
-def _restore_restart_policies(project_name: str, state: dict[str, Any]) -> None:
-    """Give each still-existing container its pre-quarantine policy back."""
+def _restore_restart_policies(project_name: str, state: dict[str, Any],
+                              restore: Mapping[str, str] | None = None) -> None:
+    """Give each still-existing container its pre-quarantine policy back,
+    or the policies in ``restore`` instead."""
+    saved = (state.get("restart_policies") or {}) if restore is None else restore
     try:
-        restart_hold.release(project_name, state.get("restart_policies") or {})
+        restart_hold.release(project_name, saved)
     except DockerError as e:
         raise QuarantineError(
             f"Failed to restore restart policies for {project_name!r}: {e}",
@@ -331,6 +345,10 @@ def lift_quarantine(
     *,
     project_caddy_site_content: str | None,
     compose_files: list[str],
+    restore: Mapping[str, str] | None = None,
+    txn: str | None = None,
+    component: str = "security-resume",
+    after_start: Callable[[], None] | None = None,
 ) -> None:
     """Lift quarantine and restore normal serving.
 
@@ -341,6 +359,13 @@ def lift_quarantine(
     3. Restore the saved restart policies, then compose_up WITHOUT a build,
        so the exact images the resume re-scan cleared come back (B-20).
     4. Clear the quarantine state file (LAST — only after restart succeeds).
+
+    A deploy that shipped a fix (commands/quarantine_gate) lifts it at the
+    end of its install transaction ``txn``, and has the policies to
+    ``restore``: its release's own, since the saved ones may be an earlier
+    release's. The up then starts nothing new, and ``after_start`` checks
+    that (it raises QuarantineError if the up moved a container onto an
+    image that was not scanned); the state is cleared only after it passes.
 
     ``project_caddy_site_content=None`` lifts the quarantine but leaves the
     project down: the maintenance page stays and nothing starts. Used when
@@ -406,14 +431,19 @@ def lift_quarantine(
         ) from e
 
     # 3. Restart containers, with their own restart policies back.
-    _restore_restart_policies(project_name, state)
+    _restore_restart_policies(project_name, state, restore)
     try:
-        compose_up_checked(paths, project_name, component="security-resume",
-                           compose_files=compose_files, build=False)
+        # Pinned: only the local images that were scanned, never a pull or
+        # a build (`pull_policy`) of something that was not.
+        compose_up_checked(paths, project_name, component=component,
+                           compose_files=compose_files, build=False, pinned=True, txn=txn)
     except DockerError as e:
         raise QuarantineError(
             f"Failed to restart containers for {project_name!r}: {e}",
         ) from e
+
+    if after_start is not None:
+        after_start()
 
     # 4. Only now clear state — surviving past compose_up means the
     #    project is genuinely back online.

@@ -123,6 +123,19 @@ def seed_quarantine(paths: BoxPaths, name: str = "demo", **extra) -> None:
     }))
 
 
+BALANCED = {"posture": "balanced", "dangerously_disable_quarantine": False, "runtimes": None}
+
+
+def make_clearance(project: str = "demo", images=None, *, before=None, after=BALANCED,
+                   at_risk=()):
+    """A production release's clearance; `before` None is a quarantine whose
+    record does not keep the policy."""
+    from boxmunge.commands.quarantine_gate import Clearance
+    from boxmunge.cve.hardening import HardeningProfile
+    return Clearance(project, project, "CVE-2026-0001", images or {},
+                     HardeningProfile(True, True, False, False), after, before, tuple(at_risk))
+
+
 class Docker:
     """Records the Docker primitives the quarantine action calls.
 

@@ -19,6 +19,7 @@ from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
 from boxmunge.cve.hardening import HardeningProfile, hardening_profile_from_compose
 from boxmunge.cve.policy import PolicyError, Posture, parse_posture
+from boxmunge.cve.security_policy import security_policy
 from boxmunge.cve.scan_state import BASIS_CONTAINERS, BASIS_STARTUP_IMAGES
 from boxmunge.cve.suppressions import Suppression, SuppressionsError, load_suppressions
 from boxmunge.deployed_inventory import (
@@ -47,6 +48,10 @@ class ProjectMeta:
     hosts: list[str]
     compose_files: list[str]
 
+    def policy(self) -> dict[str, Any]:
+        return security_policy(posture=self.posture, dangerously=self.dangerously,
+                               runtimes=self.declared_runtimes)
+
 
 @dataclass(frozen=True)
 class ScanTarget:
@@ -70,7 +75,14 @@ def project_compose_files(paths: BoxPaths, project: str) -> list[str]:
 
 def load_project_meta(paths: BoxPaths, project: str) -> ProjectMeta:
     """Load the manifest, validate the security: block."""
-    manifest = load_manifest(paths.project_manifest(project))
+    return project_meta(project, load_manifest(paths.project_manifest(project)),
+                        project_compose_files(paths, project))
+
+
+def project_meta(project: str, manifest: dict[str, Any],
+                 compose_files: list[str]) -> ProjectMeta:
+    """Validate a manifest's security: block (the deployed one's, or a
+    release's not yet deployed)."""
     sec_block = manifest.get("security") or {}
     if not isinstance(sec_block, dict):
         raise ProjectScanError(
@@ -95,7 +107,7 @@ def load_project_meta(paths: BoxPaths, project: str) -> ProjectMeta:
         dangerously=ddq,
         declared_runtimes=sec_block.get("runtimes"),
         hosts=list(manifest.get("hosts") or []),
-        compose_files=project_compose_files(paths, project),
+        compose_files=compose_files,
     )
 
 

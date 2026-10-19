@@ -43,25 +43,36 @@ class TestRefusesPaused:
         assert "paused" in err.lower()
 
 
-class TestRefusesQuarantined:
-    """Wave 1: promote must refuse a CVE-quarantined project."""
+class TestQuarantinedPromote:
+    """A quarantined project may promote a fix: the install core scans
+    what it would start before the hook (quarantine_gate); a pause still
+    refuses."""
+
+    @patch("boxmunge.commands.promote_cmd.deploy_tree_locked", return_value=1)
+    @patch("boxmunge.commands.promote_cmd.teardown_staging_locked")
+    def test_quarantine_alone_reaches_the_install_core(
+        self, mock_teardown, mock_deploy, paths, capsys,
+    ):
+        from tests.test_commands.cve_helpers import seed_quarantine
+        prod_and_stage(paths)
+        seed_quarantine(paths, "myapp")
+        assert run_promote("myapp", paths) == 1
+        assert "scanned before anything starts" in capsys.readouterr().out
+        mock_deploy.assert_called_once()
+        mock_teardown.assert_not_called()
 
     @patch("boxmunge.commands.promote_cmd.deploy_tree_locked")
     @patch("boxmunge.commands.promote_cmd.teardown_staging_locked")
-    def test_refuses_quarantined_project(
+    def test_paused_and_quarantined_is_refused(
         self, mock_teardown, mock_deploy, paths, capsys,
     ):
+        from boxmunge.pause import write_paused_state
+        from tests.test_commands.cve_helpers import seed_quarantine
         prod_and_stage(paths)
-        paths.project_quarantine_state("myapp").parent.mkdir(
-            parents=True, exist_ok=True,
-        )
-        paths.project_quarantine_state("myapp").write_text("{}")
-        rc = run_promote("myapp", paths)
-        assert rc == 1
-        err = capsys.readouterr().err
-        assert "quarantine" in err.lower()
-        assert "security resume" in err
-        # Underlying mutating helpers MUST NOT have run.
+        seed_quarantine(paths, "myapp")
+        write_paused_state("myapp", paths)
+        assert run_promote("myapp", paths) == 1
+        assert "paused and CVE-quarantined" in capsys.readouterr().err
         mock_deploy.assert_not_called()
         mock_teardown.assert_not_called()
 

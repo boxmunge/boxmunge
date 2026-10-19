@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from boxmunge.cve.alerting import findings_by_key, format_quarantine_alert, send_alerts
 from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision
@@ -44,7 +45,7 @@ class Enforcement:
 
 def enforce(
     paths: BoxPaths, project: str, *,
-    hosts: list[str], compose_files: list[str],
+    hosts: list[str], compose_files: list[str], policy: dict[str, Any],
     headline: tuple[ProjectDecision, FindingDisposition] | None,
     in_grace: bool,
 ) -> Enforcement:
@@ -80,6 +81,7 @@ def enforce(
                 project, paths, project_dir=project_dir,
                 hosts=hosts, compose_files=compose_files,
                 headline=headline[1], image_ref=headline[0].image_ref,
+                policy=policy,
             )
             return Enforcement(landed=True)
     except QuarantineError as e:

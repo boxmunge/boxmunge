@@ -214,7 +214,8 @@ def _print_table(rows: list[dict[str, str]]) -> None:
             print(f"  {row['project']}: {cve} {sev} (since {since} UTC)")
             if explanation:
                 print(f"    reason: {explanation}")
-            print(f"    lift with: security resume {row['project']}")
+            print(f"    lift with: a deploy of a fixed release, or security resume "
+                  f"{row['project']}")
 
 
 def cmd_status(args: list[str]) -> None:

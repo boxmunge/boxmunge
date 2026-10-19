@@ -5,7 +5,9 @@ Each test inserts a real pause or quarantine marker at the exact moment the
 command acquires the project lock: the marker is written, then the real
 flock is taken. That is the interleaving a concurrent pause/quarantine
 produces when it finishes and releases its lock just before the waiting
-command gets it. Nothing may restart or change afterwards.
+command gets it. Nothing may restart or change afterwards; deploy, stage
+and promote, which may ship a quarantine's fix, start nothing unless the
+scan of what they would start clears it (here it refuses).
 """
 from __future__ import annotations
 
@@ -18,7 +20,9 @@ from boxmunge import fileutil
 from boxmunge.commands import (
     backup_cmd, check, deploy, promote_cmd, restore, rollback, stage_cmd, upgrade_steps,
 )
+from boxmunge.commands.quarantine_gate import QuarantineRefused
 from boxmunge.pause import write_paused_state
+from boxmunge.release_txn import load_txn
 from boxmunge.project_registry import add_project
 from boxmunge.staged_release import load_slot
 from boxmunge.state import write_state
@@ -36,6 +40,16 @@ def _quarantine(name, paths):
 
 def _pause(name, paths):
     write_paused_state(name, paths)
+
+
+@contextmanager
+def _scan_refuses():
+    """The quarantine gate's scan finds the release still vulnerable."""
+    def refuse(paths, target, manifest, previous=None):
+        raise QuarantineRefused(["CVE-2099-0001 (Critical) in openssl 1, service web"])
+    with patch("boxmunge.commands.release_config.clear_release", refuse), \
+            patch("boxmunge.staging_bringup.clear_release", refuse):
+        yield
 
 
 MARKERS = pytest.mark.parametrize("marker", [_quarantine, _pause], ids=["quarantine", "pause"])
@@ -65,10 +79,13 @@ def test_deploy_never_starts_once_blocked(paths, marker) -> None:
         assert deploy.run_deploy(NAME, paths, ref=V1) == 0
     place_bundle(paths, timestamp=V2, files={"VERSION": "v2\n"})
     with _docker(), patch("boxmunge.compose_guard.compose_up") as up, \
-            _marker_at_lock(deploy, marker):
+            _marker_at_lock(deploy, marker), _scan_refuses():
         assert deploy.run_deploy(NAME, paths, ref=V2) == 1
     up.assert_not_called()
-    assert _version(paths) == "v1\n"
+    if marker is _pause:
+        assert _version(paths) == "v1\n"
+    else:  # the scan follows the install, before the hook: left abandonable
+        assert load_txn(paths, NAME).phase == "installed"
 
 
 @MARKERS
@@ -79,7 +96,7 @@ def test_stage_never_starts_once_blocked(paths, marker) -> None:
         assert deploy.run_deploy(NAME, paths, ref=V1) == 0
     place_bundle(paths, timestamp=V2, files={"VERSION": "v2\n"})
     with _docker(), patch("boxmunge.compose_guard.compose_up") as up, \
-            _marker_at_lock(stage_cmd, marker):
+            _marker_at_lock(stage_cmd, marker), _scan_refuses():
         assert stage_cmd.run_stage(NAME, paths, ref=V2) == 1
     up.assert_not_called()
     assert load_slot(paths, NAME) is None
@@ -90,7 +107,7 @@ def test_stage_never_starts_once_blocked(paths, marker) -> None:
 def test_promote_never_starts_once_blocked(paths, marker) -> None:
     prod_and_stage(paths)
     with _docker(), patch("boxmunge.compose_guard.compose_up") as up, \
-            _marker_at_lock(promote_cmd, marker):
+            _marker_at_lock(promote_cmd, marker), _scan_refuses():
         assert promote_cmd.run_promote(NAME, paths) == 1
     up.assert_not_called()
     assert load_slot(paths, NAME).state == "ready"

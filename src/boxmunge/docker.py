@@ -104,15 +104,20 @@ def compose_up(
     force_recreate: bool = False,
     start: bool = True,
     services: list[str] | None = None,
+    pinned: bool = False,
 ) -> None:
     """Run docker compose up -d; force_recreate replaces unchanged containers
-    too, and `services` limits it to those services.
+    too, and `services` limits it to those services. ``pinned`` starts only
+    images already in the local store: no pull and no build, whatever a
+    service's `pull_policy` says.
 
     ``start=False`` (``--no-start``) builds and creates the project's
     networks, volumes and containers without starting any of them.
 
     Call it through boxmunge.compose_guard, which checks the project first.
     """
+    if build and pinned:
+        raise ValueError("compose_up: a pinned up does not build")
     cmd = compose_command(project_name, compose_files,
                           project_directory=project_directory, env_file=env_file)
     cmd.extend(["up", "-d", "--remove-orphans"])
@@ -120,6 +125,8 @@ def compose_up(
         cmd.append("--no-start")
     if build:
         cmd.append("--build")
+    if pinned:
+        cmd.extend(["--pull", "never", "--no-build"])
     if force_recreate:
         cmd.append("--force-recreate")
     cmd.extend(services or [])

@@ -120,6 +120,14 @@ def test_options_text_by_phase(paths, releases) -> None:
     assert "--abandon" not in text and "rollback myapp" in text and "snap-1" in text
 
 
+def test_a_quarantined_project_is_offered_no_rollback(paths, releases) -> None:
+    """A CVE quarantine refuses rollback; a fix (or abandon) is the way out."""
+    txn = _open(paths)
+    for phase in ("previous_kept", "installed", "hook_started"):
+        txn = advance(paths, P, txn, phase)
+    assert "rollback myapp" not in options_text(P, txn, quarantined=True)
+
+
 def test_a_first_deploy_offers_no_rollback(paths, releases) -> None:
     """A first deploy has no rollback target: a fix is the way out."""
     txn = _open(paths, replaced_ref=None, snapshot="")
