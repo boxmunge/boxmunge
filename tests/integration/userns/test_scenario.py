@@ -113,8 +113,8 @@ def _teardown() -> None:
 class MarkedTimers(FakeTimers):
     """FakeTimers that also looks at the box when the timers stop and when
     they come back: the marker and the refusal of a project command on it.
-    The migration sets the marker before the timers stop; its rollback sets
-    it when it quiesces. Both clear it only after the timers are back."""
+    The migration and its rollback set the marker before the timers stop
+    and clear it only after they are back."""
 
     def __init__(self, paths: BoxPaths) -> None:
         super().__init__()
@@ -297,7 +297,7 @@ def test_3_soak_then_rollback_keeps_everything(box, alerts) -> None:
     timers = MarkedTimers(paths)
     j = _rollback(paths, images, timers)
     assert j.phase == "rolled-back", (j.failed, j.items)
-    assert timers.at_restore == [("userns-rollback", True)]
+    assert timers.at_stop == timers.at_restore == [("userns-rollback", True)]
     assert migration_in_progress(paths) is None and not refuse_if_blocked("shop", paths)
     assert alerts == ["userns migration rolled back"]
     assert not _daemon_remapped() and uo.recorded_offset(paths) is None
