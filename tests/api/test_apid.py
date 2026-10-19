@@ -162,6 +162,22 @@ def test_a_stop_request_is_one_pipe_write_and_survives_a_nested_signal(monkeypat
     assert server.stopped.wait(5)
     monkeypatch.setattr(apid_module.signal, "signal", lambda *args: None)  # keep pytest's own
     stop.close()
+    stop.request()  # a late watcher write is harmless, not an error
+
+
+def test_a_failure_before_serving_raises_instead_of_hanging(tmp_path, sock_path) -> None:
+    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+    subprocess.run([sys.executable, "-m", "boxmunge.api.apid", "--make-fixture",
+                    str(tmp_path / "box")], env=env, check=True, capture_output=True)
+    script = (
+        "import sys\nfrom pathlib import Path\nfrom boxmunge.api import apid\n"
+        "def boom(*a, **k): raise OSError('banner failed')\n"
+        "apid.print = boom\n"
+        "apid.run_dev(Path(sys.argv[1]), Path(sys.argv[2]), 'webui')\n")
+    done = subprocess.run([sys.executable, "-c", script, str(tmp_path / "box"), str(sock_path)],
+                          env=env, capture_output=True, timeout=30)
+    assert done.returncode != 0 and b"banner failed" in done.stderr, done.stderr.decode()
+    assert not sock_path.exists()
 
 
 def test_stdin_already_closed_at_launch_stops_cleanly(tmp_path, sock_path) -> None:

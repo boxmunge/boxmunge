@@ -87,6 +87,9 @@ _STDIN_FD = 0
 _STOP_SIGNALS = frozenset({signal.SIGTERM, signal.SIGINT})
 
 
+_STOP, _QUIT = b"x", b"q"
+
+
 class _ShutdownRequest:
     """Ask serve_forever to return, from a signal handler or a watcher thread.
 
@@ -96,38 +99,44 @@ class _ShutdownRequest:
     thread that holds it. So a request is one non-blocking write to a pipe (the
     self-pipe trick); a stopper thread, started once beforehand, blocks reading
     it and then calls shutdown(), which blocks until serve_forever returns and
-    so can never run on the main thread."""
+    so can never run on the main thread.
+
+    The pipe is never closed: a watcher thread may still write to it, and
+    run_dev ends the process. close() wakes the stopper with a distinct byte
+    so it exits without calling shutdown(), which would hang if serve_forever
+    never started."""
 
     def __init__(self, server: UnixHTTPServer) -> None:
         self._server = server
         self._read, self._write = os.pipe()
         os.set_blocking(self._write, False)
-        self._stopper = threading.Thread(target=self._stop_when_asked, daemon=True)
+        self._closed = False
 
     def start_stopper(self) -> None:
-        self._stopper.start()
+        threading.Thread(target=self._stop_when_asked, daemon=True).start()
 
     def _stop_when_asked(self) -> None:
-        os.read(self._read, 1)  # a byte, or EOF once close() runs
-        self._server.shutdown()
+        if os.read(self._read, 1) == _STOP and not self._closed:
+            self._server.shutdown()
 
     def __call__(self, signum: int, frame: Any) -> None:
-        self.request()
+        self._send(_STOP)
 
     def request(self) -> None:
+        self._send(_STOP)
+
+    def _send(self, byte: bytes) -> None:
         try:
-            os.write(self._write, b"x")
+            os.write(self._write, byte)
         except BlockingIOError:
             pass  # a full pipe already means "requested"
 
     def close(self) -> None:
-        """Serving is over: nothing is left to stop, so late stop signals are
-        ignored rather than written to a closed pipe."""
+        """Serving is over: late stop signals are ignored, the stopper exits."""
         for sig in _STOP_SIGNALS:
             signal.signal(sig, signal.SIG_IGN)
-        os.close(self._write)  # wakes a stopper that was never asked
-        self._stopper.join()
-        os.close(self._read)
+        self._closed = True
+        self._send(_QUIT)
 
 
 def _stop_at_stdin_eof(stop: _ShutdownRequest, failure: list[OSError]) -> None:
