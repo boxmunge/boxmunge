@@ -57,13 +57,13 @@ class DevApid:
             time.sleep(0.05)
         raise AssertionError("apid did not start listening")
 
-    def stop(self) -> None:
-        """SIGTERM the server's group, wait, and SIGKILL the group before reaping
+    def stop(self, sig: int = signal.SIGTERM) -> None:
+        """Signal the server's group, wait, and SIGKILL the group before reaping
         if it will not go (killing after the reap could hit a recycled pgid)."""
         if self.proc is None:
             return
         if self.proc.poll() is None:
-            os.killpg(self.proc.pid, signal.SIGTERM)
+            os.killpg(self.proc.pid, sig)
         try:
             _, err = self.proc.communicate(timeout=STOP_TIMEOUT)
         except subprocess.TimeoutExpired:

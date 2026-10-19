@@ -366,3 +366,34 @@ def test_a_file_that_is_not_a_socket_is_refused(sock_path) -> None:
 def test_a_missing_path_needs_nothing(sock_path) -> None:
     prepare_socket_path(sock_path)
     assert not sock_path.exists()
+
+
+def test_drain_drops_an_idle_keepalive_connection_promptly(fixture_app, sock_path) -> None:
+    server = UnixHTTPServer(sock_path, fixture_app, socket_mode=0o600)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05},
+                              daemon=True)
+    thread.start()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as idle:
+        idle.connect(str(sock_path))
+        idle.sendall(b"GET /v1/actions HT")  # a request line that never finishes
+        for _ in range(100):  # wait until the server has a thread on it
+            if server._live:
+                break
+            time.sleep(0.02)
+        assert server._live
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+        server.drain(timeout=5)
+        assert not server._live
+
+
+def test_drain_fails_loudly_when_a_request_will_not_finish(fixture_app, sock_path) -> None:
+    server = UnixHTTPServer(sock_path, fixture_app, socket_mode=0o600)
+    stuck, _peer = socket.socketpair()
+    server._live.add(stuck)  # a request thread that never reports done
+    with pytest.raises(ServerError, match="1 requests still running"):
+        server.drain(timeout=0.1)
+    server.server_close()
+    stuck.close()
+    _peer.close()

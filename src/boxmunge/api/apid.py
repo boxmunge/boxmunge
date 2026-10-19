@@ -48,34 +48,58 @@ def run_dev(root: Path, socket_path: Path, plugin: str, *, exit_on_stdin_eof: bo
     if exit_on_stdin_eof:
         os.fstat(_STDIN_FD)  # a closed stdin must fail now, not leave the server unwatched
     prepare_socket_path(socket_path)
-    # The handler is in place and SIGTERM held back until we are inside the try below,
-    # so a stop request at any point after the bind unwinds through the socket cleanup.
-    signal.signal(signal.SIGTERM, _interrupt)
-    held = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    # Stop requests are held back until the handler is installed and we are inside
+    # the try below, so a stop at any point after the bind unwinds through the
+    # socket cleanup.
+    held = signal.pthread_sigmask(signal.SIG_BLOCK, _STOP_SIGNALS)
     server = UnixHTTPServer(socket_path, app, socket_mode=DEV_SOCKET_MODE, access_log=True)
+    stop = _ShutdownRequest(server)
+    for sig in _STOP_SIGNALS:
+        signal.signal(sig, stop)
     watcher_failure: list[OSError] = []
     try:
         signal.pthread_sigmask(signal.SIG_SETMASK, held)
         if exit_on_stdin_eof:
-            threading.Thread(target=_stop_at_stdin_eof, args=(watcher_failure,),
+            threading.Thread(target=_stop_at_stdin_eof, args=(stop, watcher_failure),
                              daemon=True).start()
         print(f"boxmunge-apid DEV MODE: serving the fixture box {root} on {socket_path} "
               f"as plugin:{plugin}, observe actions only. Not a real box. Ctrl-C stops.",
               file=sys.stderr)
         server.serve_forever()
-    except KeyboardInterrupt:
-        pass
     finally:
         server.server_close()
         socket_path.unlink(missing_ok=True)
+    server.drain()  # nothing may still be running (or printing) as the interpreter exits
     if watcher_failure:
         raise ServerError(f"cannot watch stdin for --exit-on-stdin-eof: {watcher_failure[0]}")
 
 
 _STDIN_FD = 0
+_STOP_SIGNALS = frozenset({signal.SIGTERM, signal.SIGINT})
 
 
-def _stop_at_stdin_eof(failure: list[OSError]) -> None:
+class _ShutdownRequest:
+    """Ask serve_forever to return, from a signal handler or a watcher thread.
+
+    It must only request: raising out of a handler lands in arbitrary
+    socketserver code (a half-started request, a held lock). shutdown() blocks
+    until serve_forever returns, so it runs on its own thread, never the
+    main one."""
+
+    def __init__(self, server: UnixHTTPServer) -> None:
+        self._server = server
+        self._requested = False
+
+    def __call__(self, signum: int, frame: Any) -> None:
+        self.request()
+
+    def request(self) -> None:
+        if not self._requested:
+            self._requested = True
+            threading.Thread(target=self._server.shutdown, daemon=True).start()
+
+
+def _stop_at_stdin_eof(stop: _ShutdownRequest, failure: list[OSError]) -> None:
     """Stop the server when stdin closes, which is how a supervising process
     that is killed outright (no chance to signal us) still takes us down.
     A watcher that cannot read stops the server too, with a failure to report."""
@@ -86,14 +110,7 @@ def _stop_at_stdin_eof(failure: list[OSError]) -> None:
             pass
     except OSError as e:
         failure.append(e)
-    os.kill(os.getpid(), signal.SIGTERM)
-
-
-def _interrupt(signum: int, frame: Any) -> None:
-    # One shot: a second stop request (an explicit SIGTERM racing the stdin-EOF
-    # one) must not raise again inside the shutdown path and kill us with SIGINT.
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    raise KeyboardInterrupt
+    stop.request()
 
 
 def _parser() -> argparse.ArgumentParser:

@@ -123,6 +123,13 @@ def test_the_server_stops_when_its_supervisor_is_killed_outright(tmp_path, sock_
         assert not stray, "apid outlived its killed supervisor"
 
 
+def test_sigint_is_a_clean_shutdown_request(tmp_path, sock_path) -> None:
+    with DevApid(tmp_path / "box", sock_path) as apid:
+        apid.stop(signal.SIGINT)
+    assert apid.returncode == 0 and "Traceback" not in apid.stderr, apid.stderr
+    assert not sock_path.exists()
+
+
 def test_stdin_already_closed_at_launch_stops_cleanly(tmp_path, sock_path) -> None:
     env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
     apid = [sys.executable, "-m", "boxmunge.api.apid"]
