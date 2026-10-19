@@ -149,6 +149,12 @@ def declare_and_adopt() -> None:
          "--reason 'userns rehearsal'", 0),
         *seeds_hold("after the declarations"),
     ])
+    # The adopted volume's anonymous twin still holds the data and no container
+    # uses it: the check refuses until it is removed (the adopt copied it).
+    check_report(["VERDICT: not ready", "and no container uses it"])
+    st.run_steps([("remove vmanon's old anonymous volume", "root",
+                   "docker volume ls -q -f dangling=true | grep -E '^[0-9a-f]{64}$' "
+                   "| xargs -r docker volume rm", 0)])
 
 
 class Downtime:
