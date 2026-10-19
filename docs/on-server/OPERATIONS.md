@@ -1468,7 +1468,8 @@ smoke tests pass. A project that does not come back stays on the maintenance pag
 on. Then the timers are enabled again and CrowdSec is restarted and checked to tail the new Caddy.
 If the remapped daemon does not start, the original `daemon.json` is put back and the box restarts
 on its untouched old root, timers included; fix the cause (an edit to `daemon.json` is kept, as long
-as it names no `userns-remap`) and run it again.
+as it names no `userns-remap`) and run it again; the next attempt makes the pre-migration backups
+afresh.
 
 From the moment the downtime starts until the box runs again, `/opt/boxmunge/userns-migrating`
 exists, and every command that could change a project (deploy, stage, unstage, promote, rollback,
