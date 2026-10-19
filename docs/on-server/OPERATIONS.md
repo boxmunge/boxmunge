@@ -1307,8 +1307,12 @@ Issues requiring system-level investigation or repair (systemd timers, file perm
 ### docker-userns reports an error
 
 A migration stopped part-way, or the daemon is not remapped as `boxmunge.yml` records (deploys are
-refused until that is fixed). If the check names a migration phase, the supervisor user resumes it
-(`sudo /opt/boxmunge/bin/boxmunge-upgrade userns-migrate`) or undoes it (`userns-rollback`).
+refused until that is fixed). The migration journal is root-only, so the migration states appear
+only in root's `check-all` and `sudo boxmunge health`; a migration still running is a warning
+(`migration running`, projects on the maintenance page). If the check names a migration phase, the
+supervisor user resumes it (`sudo /opt/boxmunge/bin/boxmunge-upgrade userns-migrate`) or undoes it
+(`userns-rollback`); until then every project command refuses, naming that command, and the boxmunge
+timers stay disabled.
 Otherwise Docker restarted without `userns-remap`, on another storage driver or with another data
 root: the supervisor user compares `/etc/docker/daemon.json` with the keys in
 [User-namespace remapping](#user-namespace-remapping) and `docker info`, puts the file back and
