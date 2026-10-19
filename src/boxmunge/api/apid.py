@@ -65,11 +65,17 @@ def run_dev(root: Path, socket_path: Path, plugin: str, *, exit_on_stdin_eof: bo
 def _stop_at_stdin_eof() -> None:
     """Stop the server when stdin closes, which is how a supervising process
     that is killed outright (no chance to signal us) still takes us down."""
-    sys.stdin.buffer.read()
+    # Raw fd reads: a daemon thread blocked inside sys.stdin's buffered reader
+    # holds its lock, and interpreter shutdown then aborts (SIGABRT) on it.
+    while os.read(sys.stdin.fileno(), 4096):
+        pass
     os.kill(os.getpid(), signal.SIGTERM)
 
 
 def _interrupt(signum: int, frame: Any) -> None:
+    # One shot: a second stop request (an explicit SIGTERM racing the stdin-EOF
+    # one) must not raise again inside the shutdown path and kill us with SIGINT.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
     raise KeyboardInterrupt
 
 
