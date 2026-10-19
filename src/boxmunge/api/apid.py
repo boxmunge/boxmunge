@@ -14,8 +14,10 @@ units, arrives with plugin installation.
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -41,25 +43,114 @@ def build_dev_app(root: Path, plugin: str) -> ApiApp:
     return ApiApp(invoker, Principal.plugin(plugin, Tier.OBSERVE), mode="dev")
 
 
-def run_dev(root: Path, socket_path: Path, plugin: str) -> None:
+def run_dev(root: Path, socket_path: Path, plugin: str, *, exit_on_stdin_eof: bool = False) -> None:
     app = build_dev_app(root, plugin)
+    if exit_on_stdin_eof:
+        os.fstat(_STDIN_FD)  # a closed stdin must fail now, not leave the server unwatched
     prepare_socket_path(socket_path)
+    # Stop requests are held back until the handler is installed and we are inside
+    # the try below, so a stop at any point after the bind unwinds through the
+    # socket cleanup.
+    held = signal.pthread_sigmask(signal.SIG_BLOCK, _STOP_SIGNALS)
     server = UnixHTTPServer(socket_path, app, socket_mode=DEV_SOCKET_MODE, access_log=True)
-    signal.signal(signal.SIGTERM, _interrupt)
-    print(f"boxmunge-apid DEV MODE: serving the fixture box {root} on {socket_path} "
-          f"as plugin:{plugin}, observe actions only. Not a real box. Ctrl-C stops.",
-          file=sys.stderr)
+    stop = _ShutdownRequest(server)
+    stop.start_stopper()
+    for sig in _STOP_SIGNALS:
+        signal.signal(sig, stop)
+    watcher_failure: list[OSError] = []
     try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, held)
+            if exit_on_stdin_eof:
+                threading.Thread(target=_stop_at_stdin_eof, args=(stop, watcher_failure),
+                                 daemon=True).start()
+            print(f"boxmunge-apid DEV MODE: serving the fixture box {root} on {socket_path} "
+                  f"as plugin:{plugin}, observe actions only. Not a real box. Ctrl-C stops.",
+                  file=sys.stderr)
+            server.serve_forever()
+        finally:
+            server.server_close()
+            socket_path.unlink(missing_ok=True)
+        unwatched = (f"cannot watch stdin for --exit-on-stdin-eof: {watcher_failure[0]}"
+                     if watcher_failure else None)
+        try:
+            server.drain()  # nothing may still be running (or printing) as the interpreter exits
+        except ServerError as e:
+            raise ServerError(f"{e}; also {unwatched}" if unwatched else str(e)) from e
+        if unwatched:
+            raise ServerError(unwatched)
     finally:
-        server.server_close()
-        socket_path.unlink(missing_ok=True)
+        stop.close()
 
 
-def _interrupt(signum: int, frame: Any) -> None:
-    raise KeyboardInterrupt
+_STDIN_FD = 0
+_STOP_SIGNALS = frozenset({signal.SIGTERM, signal.SIGINT})
+
+
+_STOP, _QUIT = b"x", b"q"
+
+
+class _ShutdownRequest:
+    """Ask serve_forever to return, from a signal handler or a watcher thread.
+
+    It must only request: raising out of a handler lands in arbitrary
+    socketserver code, and anything that takes a lock (starting a thread,
+    Event.set) can deadlock when a second signal runs a nested handler on the
+    thread that holds it. So a request is one non-blocking write to a pipe (the
+    self-pipe trick); a stopper thread, started once beforehand, blocks reading
+    it and then calls shutdown(), which blocks until serve_forever returns and
+    so can never run on the main thread.
+
+    The pipe is never closed: a watcher thread may still write to it, and
+    run_dev ends the process. close() wakes the stopper with a distinct byte
+    so it exits without calling shutdown(), which would hang if serve_forever
+    never started."""
+
+    def __init__(self, server: UnixHTTPServer) -> None:
+        self._server = server
+        self._read, self._write = os.pipe()
+        os.set_blocking(self._write, False)
+        self._closed = False
+
+    def start_stopper(self) -> None:
+        threading.Thread(target=self._stop_when_asked, daemon=True).start()
+
+    def _stop_when_asked(self) -> None:
+        if os.read(self._read, 1) == _STOP and not self._closed:
+            self._server.shutdown()
+
+    def __call__(self, signum: int, frame: Any) -> None:
+        self._send(_STOP)
+
+    def request(self) -> None:
+        self._send(_STOP)
+
+    def _send(self, byte: bytes) -> None:
+        try:
+            os.write(self._write, byte)
+        except BlockingIOError:
+            pass  # a full pipe already means "requested"
+
+    def close(self) -> None:
+        """Serving is over: late stop signals are ignored, the stopper exits."""
+        for sig in _STOP_SIGNALS:
+            signal.signal(sig, signal.SIG_IGN)
+        self._closed = True
+        self._send(_QUIT)
+
+
+def _stop_at_stdin_eof(stop: _ShutdownRequest, failure: list[OSError]) -> None:
+    """Stop the server when stdin closes, which is how a supervising process
+    that is killed outright (no chance to signal us) still takes us down.
+    A watcher that cannot read stops the server too, with a failure to report."""
+    # Raw fd reads: a daemon thread blocked inside sys.stdin's buffered reader
+    # holds its lock, and interpreter shutdown then aborts (SIGABRT) on it.
+    try:
+        while os.read(_STDIN_FD, 4096):
+            pass
+    except OSError as e:
+        failure.append(e)
+    stop.request()
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -74,6 +165,9 @@ def _parser() -> argparse.ArgumentParser:
                       help="write a realistic fixture box into DIR (new or empty)")
     parser.add_argument("--root", type=Path, metavar="DIR", help="fixture box to serve")
     parser.add_argument("--socket", type=Path, metavar="PATH", help="unix socket to listen on")
+    parser.add_argument("--exit-on-stdin-eof", action="store_true",
+                        help="with --dev: stop when stdin closes, so a supervising "
+                             "process that dies cannot leave the server running")
     parser.add_argument("--plugin", default="dev", metavar="NAME",
                         help="plugin name the dev principal takes (default: dev)")
     return parser
@@ -86,6 +180,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--make-fixture takes only its directory")
     if args.dev and (args.root is None or args.socket is None):
         parser.error("--dev needs --root DIR and --socket PATH")
+    if args.exit_on_stdin_eof and not args.dev:
+        parser.error("--exit-on-stdin-eof only applies to --dev")
     try:
         if args.make_fixture is not None:
             make_fixture(args.make_fixture)
@@ -93,7 +189,8 @@ def main(argv: list[str] | None = None) -> None:
                   f"Serve it with: boxmunge-apid --dev --root {args.make_fixture} "
                   f"--socket ./api.sock")
             return
-        run_dev(args.root, args.socket, args.plugin)
+        run_dev(args.root, args.socket, args.plugin,
+                    exit_on_stdin_eof=args.exit_on_stdin_eof)
     except (FixtureError, ServerError, ValueError, OSError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)

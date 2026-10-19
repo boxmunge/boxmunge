@@ -249,6 +249,10 @@ Dev mode serves only directories made by `--make-fixture`, only observe actions,
 `plugin:<name>` with an observe grant. It writes the audit log into the fixture
 (`logs/audit.jsonl`), where refused calls show up.
 
+When a test harness or supervisor starts the server, pass `--exit-on-stdin-eof` and give it a stdin
+pipe: the server stops when the pipe closes, so a supervisor that is killed outright cannot leave
+it running.
+
 ### Walkthrough
 
 ```sh

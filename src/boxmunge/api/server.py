@@ -38,6 +38,8 @@ MAX_BODY_BYTES = 64 * 1024
 REQUEST_TIMEOUT = 30.0
 # Connections served at once; one more is answered 503 and closed.
 MAX_CONNECTIONS = 16
+# Seconds a stopping server gives in-flight requests to finish.
+DRAIN_TIMEOUT = 5.0
 _CONTENT_LENGTH_RE = re.compile(r"[0-9]{1,9}")
 _BODY_KEYS = frozenset({"params", "approval"})
 _ACTIONS_PREFIX = "/v1/actions/"
@@ -278,16 +280,21 @@ class UnixHTTPServer(socketserver.ThreadingUnixStreamServer):
         self._socket_mode = socket_mode
         self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         self._max_connections = MAX_CONNECTIONS
+        self._live: set[Any] = set()  # connections with a request thread running
+        self._live_changed = threading.Condition()
         super().__init__(str(socket_path), _RequestHandler)
 
     def process_request(self, request: Any, client_address: Any) -> None:
         if not self._slots.acquire(blocking=False):
             self._refuse_busy(request)
             return
+        with self._live_changed:
+            self._live.add(request)
         try:
             super().process_request(request, client_address)
         except BaseException:
             self._slots.release()
+            self._request_done(request)
             raise
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
@@ -295,6 +302,26 @@ class UnixHTTPServer(socketserver.ThreadingUnixStreamServer):
             super().process_request_thread(request, client_address)
         finally:
             self._slots.release()
+            self._request_done(request)
+
+    def _request_done(self, request: Any) -> None:
+        with self._live_changed:
+            self._live.discard(request)
+            self._live_changed.notify_all()
+
+    def drain(self, timeout: float = DRAIN_TIMEOUT) -> None:
+        """After serve_forever has returned: let running requests finish and
+        drop idle keep-alive connections, so no handler thread is still alive
+        (and possibly printing) when the process exits."""
+        with self._live_changed:
+            for request in self._live:
+                try:
+                    request.shutdown(socket.SHUT_RD)  # an idle read sees EOF
+                except OSError:
+                    pass
+            if not self._live_changed.wait_for(lambda: not self._live, timeout):
+                raise ServerError(f"{len(self._live)} requests still running "
+                                  f"{timeout:g}s after shutdown")
 
     def _refuse_busy(self, request: Any) -> None:
         error = ActionError(ErrorCode.UNAVAILABLE,
