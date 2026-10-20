@@ -5,7 +5,7 @@
 # encryption, and storage.
 #
 # Example: PostgreSQL dump
-# docker compose exec -T db pg_dump -U "${POSTGRES_USER:-app}" appdb
+# docker compose exec -T db pg_dump --clean --if-exists -U "${POSTGRES_USER:-app}" appdb
 
 set -euo pipefail
 

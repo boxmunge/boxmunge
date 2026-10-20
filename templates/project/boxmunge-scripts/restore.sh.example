@@ -5,7 +5,7 @@
 # extraction before piping to this script.
 #
 # Example: PostgreSQL restore
-# docker compose exec -T db psql -U "${POSTGRES_USER:-app}" appdb
+# docker compose exec -T db psql -v ON_ERROR_STOP=1 --single-transaction -U "${POSTGRES_USER:-app}" appdb
 
 set -euo pipefail
 

@@ -193,10 +193,16 @@ backup:
   # REQUIRED if type != none. Command run inside the container via `sh -c`.
   # These execute as arbitrary shell inside the target container (not on the host).
   # The manifest author controls what runs here — treat these like Dockerfile RUN commands.
-  dump_command: "pg_dump -U $POSTGRES_USER $POSTGRES_DB"
+  # A restore must replace the data and fail rather than half-apply: --clean
+  # --if-exists puts DROP statements in the dump (a plain dump leaves the
+  # current rows in place), and ON_ERROR_STOP + --single-transaction make psql
+  # exit non-zero and roll back on any failed statement (psql otherwise exits
+  # 0). mysqldump already includes DROP TABLE and the mysql client stops at the
+  # first error, so `mysqldump -u app db` / `mysql -u app db` need no flags.
+  dump_command: "pg_dump --clean --if-exists -U $POSTGRES_USER $POSTGRES_DB"
 
   # REQUIRED if type != none. Command run inside the container via `sh -c`.
-  restore_command: "psql -U $POSTGRES_USER $POSTGRES_DB"
+  restore_command: "psql -v ON_ERROR_STOP=1 --single-transaction -U $POSTGRES_USER $POSTGRES_DB"
 
   # Number of nightly backups to keep (whole number, at least 1). Defaults to 7.
   # Pre-deploy, pre-update and manual snapshots have their own counts

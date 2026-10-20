@@ -73,8 +73,8 @@ def vmdb(version: str) -> dict[str, str]:
     services = {"db": db} if version == "v1" else {
         "db": {**db, "security": IMAGE}, "maria": {"security": IMAGE},
         "cache": {"security": {"user": "999:1000"}}}
-    backup = {"type": "postgres", "service": "db", "dump_command": "pg_dump -U postgres vm",
-              "restore_command": "psql -U postgres vm"}
+    backup = {"type": "postgres", "service": "db", "dump_command": "pg_dump --clean --if-exists -U postgres vm",
+              "restore_command": "psql -v ON_ERROR_STOP=1 --single-transaction -U postgres vm"}
     return {"manifest.yml": _manifest("vmdb", services, backup=backup),
             "compose.yml": yaml.safe_dump(compose)}
 
