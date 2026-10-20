@@ -322,6 +322,7 @@ def install_old_release(hostname: str, tarball: Path) -> None:
     if rc != 0:
         vm.step_fail("server-setup exited non-zero", log.read_text()[-3000:])
     vm.step_pass(f"server-setup installed {tarball.name}")
+    st.match_fleet_old_release_box()
     st.run_steps([(f"{st.OLD_VERSION} is live", "root", st.LIVE_IS_OLD, 0)])
 
 
