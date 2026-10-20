@@ -82,8 +82,13 @@ BACKUP_REMOTE = """set -e
 printf '[vmremote]\\ntype = local\\n' > /opt/boxmunge/config/rclone/rclone.conf
 chmod 0640 /opt/boxmunge/config/rclone/rclone.conf
 chgrp deploy /opt/boxmunge/config/rclone/rclone.conf
-grep -q '^backup_remote:' /opt/boxmunge/config/boxmunge.yml || \
+# boxmunge.yml ships `backup_remote: ""`: replace that line (adding one if absent).
+if grep -q '^backup_remote:' /opt/boxmunge/config/boxmunge.yml; then
+    sed -i 's|^backup_remote:.*|backup_remote: "vmremote:/tmp/offsite"|' /opt/boxmunge/config/boxmunge.yml
+else
     echo 'backup_remote: "vmremote:/tmp/offsite"' >> /opt/boxmunge/config/boxmunge.yml
+fi
+grep -qx 'backup_remote: "vmremote:/tmp/offsite"' /opt/boxmunge/config/boxmunge.yml
 """
 
 # Ends the soak without waiting 48 hours: the journal's applied_at moved back.
