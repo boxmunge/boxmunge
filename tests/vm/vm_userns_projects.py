@@ -12,8 +12,11 @@ anonymous one. vmapp has a v3, deployed during the soak.
 - vmapp: a built busybox httpd (the beta's 10001 default) serving a
   read-write bind, with `staging.copy_data`.
 
-The database services keep a writable root (`read_only: false`): the
-rehearsal is about who owns their data, not about their root filesystems.
+The database and web services declare `read_only: false`: the rehearsal is
+about who owns their data, not about their root filesystems. boxmunge 0.10.1
+ignores that declaration for services the manifest names (the overlay forces a
+read-only root), so each also lists the paths its image writes at startup as
+tmpfs, and runs read-only on 0.10.1 and on the beta alike.
 """
 from __future__ import annotations
 
@@ -40,8 +43,19 @@ def _manifest(project: str, services: dict, *, backup: dict | None = None,
     return yaml.safe_dump(doc, sort_keys=False)
 
 
-def _db(image: str, env: dict, volume: str | None, target: str) -> dict:
+# What each image writes outside its data volume at startup (0.10.1 ignores
+# read_only: false, see the module docstring). /tmp is listed so the overlay's
+# own /tmp tmpfs is left out rather than duplicated.
+PG_TMPFS = ["/var/run/postgresql", "/tmp"]
+MARIADB_TMPFS = ["/run/mysqld", "/tmp"]
+NGINX_TMPFS = ["/run", "/var/cache/nginx", "/tmp"]
+
+
+def _db(image: str, env: dict, volume: str | None, target: str,
+        tmpfs: list[str] | None = None) -> dict:
     svc = {"image": image, "environment": env, "read_only": False, "restart": "unless-stopped"}
+    if tmpfs:
+        svc["tmpfs"] = tmpfs
     if volume:
         svc["volumes"] = [f"{volume}:{target}"]
     return svc
@@ -50,9 +64,9 @@ def _db(image: str, env: dict, volume: str | None, target: str) -> dict:
 def vmdb(version: str) -> dict[str, str]:
     compose = {"services": {
         "db": _db("postgres:16-alpine", {"POSTGRES_PASSWORD": "vm", "POSTGRES_DB": "vm"},
-                  "pgdata", "/var/lib/postgresql/data"),
+                  "pgdata", "/var/lib/postgresql/data", PG_TMPFS),
         "maria": _db("mariadb:11", {"MARIADB_ROOT_PASSWORD": "vm", "MARIADB_DATABASE": "vm"},
-                     "mariadata", "/var/lib/mysql"),
+                     "mariadata", "/var/lib/mysql", MARIADB_TMPFS),
         "cache": _db("redis:7-alpine", {}, "redisdata", "/data"),
     }, "volumes": {"pgdata": {}, "mariadata": {}, "redisdata": {}}}
     db = {"internal": True, "writable": {"external": True}}
@@ -68,7 +82,7 @@ def vmdb(version: str) -> dict[str, str]:
 def vmanon(version: str) -> dict[str, str]:
     named = version != "v1"
     db = _db("postgres:16-alpine", {"POSTGRES_PASSWORD": "vm", "POSTGRES_DB": "vm"},
-             "pgdata" if named else None, "/var/lib/postgresql/data")
+             "pgdata" if named else None, "/var/lib/postgresql/data", PG_TMPFS)
     compose = {"services": {"db": db}, **({"volumes": {"pgdata": {}}} if named else {})}
     entry = {"internal": True, "writable": {"external": True}}
     services = {"db": {**entry, "security": IMAGE} if named else entry}
@@ -80,7 +94,7 @@ NODE = "require('http').createServer((q, s) => s.end('node ' + process.getuid())
 
 def vmweb(version: str) -> dict[str, str]:
     compose = {"services": {
-        "web": {"image": "nginx:1.27-alpine", "read_only": False},
+        "web": {"image": "nginx:1.27-alpine", "read_only": False, "tmpfs": NGINX_TMPFS},
         "api": {"image": "node:22-alpine", "command": ["node", "-e", NODE]},
     }}
     web = {"port": 80, "routes": [{"path": "/"}]}

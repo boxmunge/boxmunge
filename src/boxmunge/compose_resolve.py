@@ -120,12 +120,75 @@ def _literal_service_names(path: Path, root: Path, seen: set[Path]) -> set[str]:
     return names
 
 
+# ---------------------------------------------------------------------------
+# What the user wrote for `read_only`, which `config` loses.
+#
+# `config --format json` keeps `read_only: true` and DROPS `read_only: false`
+# (it omits fields at their zero value), so the model cannot tell "opted out
+# of the read-only rootfs" from "said nothing" and the overlay would force a
+# read-only root onto a service that asked for a writable one. The user's
+# intent is read from their compose.yml as written and put back.
+#
+# A service defined only through `extends:` / `include:` has no `read_only`
+# key in this file; that counts as "not declared", so a `read_only: false`
+# inherited from the extended/included file is still lost. Declare it on the
+# service itself.
+# ---------------------------------------------------------------------------
+
+
+def declared_read_only(compose_path: Path) -> dict[str, bool]:
+    """{service: value} for every service this file gives a `read_only` key.
+
+    Raises ComposeResolveError when the file cannot be parsed or a value is
+    not a literal boolean. An interpolated (`${X}`) or quoted value is
+    refused rather than guessed at: what it means depends on the
+    environment, and the opt-out must be unambiguous.
+    """
+    try:
+        doc = yaml.safe_load(compose_path.read_text())
+    except (OSError, yaml.YAMLError) as e:
+        raise ComposeResolveError(f"cannot read {compose_path.name} as written: {e}") from e
+    if not isinstance(doc, dict):
+        raise ComposeResolveError(f"{compose_path.name}: top level must be a mapping")
+    services = doc.get("services") or {}
+    if not isinstance(services, dict):
+        raise ComposeResolveError(f"{compose_path.name}: 'services' must be a mapping")
+    declared: dict[str, bool] = {}
+    for name, svc in services.items():
+        if not isinstance(svc, dict) or "read_only" not in svc:
+            continue
+        value = svc["read_only"]
+        if not isinstance(value, bool):
+            raise ComposeResolveError(
+                f"{compose_path.name}: service {name!r} has read_only: {value!r}, "
+                f"which is not a boolean. Write an unquoted true or false "
+                f"(boxmunge does not guess what an interpolated or quoted "
+                f"value means)."
+            )
+        declared[str(name)] = value
+    return declared
+
+
+def restore_read_only_false(model: dict[str, Any], compose_path: Path) -> None:
+    """Put each `read_only: false` the file declares back into the resolved
+    model, in place. The user's literal value wins over the model."""
+    services = model.get("services")
+    if not isinstance(services, dict):
+        return
+    for name, value in declared_read_only(compose_path).items():
+        svc = services.get(name)
+        if value is False and isinstance(svc, dict):
+            svc["read_only"] = False
+
+
 def resolve_compose_config(compose_path: Path, project_name: str, *,
                            project_directory: Path | None = None) -> dict[str, Any]:
     """Return the fully resolved compose model for one compose file, with
     every profile: validation and the overlay cover profiled services too.
     ``project_directory`` resolves a compose file kept beside the release
     it describes (staging's base, in the slot).
+
+    `read_only: false` is restored from the literal file (see above).
 
     Fails closed: a service the literal files declare (with their includes)
     but the model lacks would go unchecked and unhardened, for example on a
@@ -152,13 +215,14 @@ def resolve_compose_config(compose_path: Path, project_name: str, *,
             f"hardened. Upgrade Docker Compose (it must resolve every profile), "
             f"or remove the services."
         )
+    restore_read_only_false(model, compose_path)
     return model
 
 
 def resolve_deployed_config(
     project_dir: Path, compose_files: list[str], project_name: str,
     *, all_profiles: bool = False, project_directory: Path | None = None,
-    env_file: Path | None = None,
+    env_file: Path | None = None, user_compose: Path | None = None,
 ) -> dict[str, Any]:
     """Return the merged model a deployed project runs with.
 
@@ -167,6 +231,9 @@ def resolve_deployed_config(
     deployed project has its on-box env files, so nothing is stood in for:
     a missing one is the same error `up` would hit. ``project_directory``
     and ``env_file`` are passed to Compose (see docker.compose_config).
+    ``user_compose``: the user's own compose.yml when the model is built from
+    it alone; its `read_only: false` is restored (the model drops it). Not for
+    a model that merges boxmunge's overlay, which owns the merged value.
     """
     elsewhere = {k: v for k, v in (("project_directory", project_directory),
                                    ("env_file", env_file)) if v is not None}
@@ -179,7 +246,10 @@ def resolve_deployed_config(
         raise ComposeResolveError(
             f"`docker compose config` could not resolve {', '.join(compose_files)}: {e}"
         ) from e
-    return _parse_config(out)
+    model = _parse_config(out)
+    if user_compose is not None:
+        restore_read_only_false(model, user_compose)
+    return model
 
 
 def _as_list(value: Any) -> list[Any]:

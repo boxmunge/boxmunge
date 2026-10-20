@@ -135,7 +135,8 @@ def _profile(target: ReleaseTarget, meta: ProjectMeta) -> ProjectHardening:
     release = target.compose.project_directory or target.compose.cwd
     return hardening_profile(meta, resolve_deployed_config(
         release, ["compose.yml"], target.compose_project,
-        project_directory=target.compose.project_directory, env_file=target.compose.env_file))
+        project_directory=target.compose.project_directory, env_file=target.compose.env_file,
+        user_compose=release / "compose.yml"))
 
 
 def _scan(paths: BoxPaths, target: ReleaseTarget, meta: ProjectMeta,

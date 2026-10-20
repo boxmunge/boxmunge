@@ -286,7 +286,8 @@ def load_user_compose(compose_path: Path, project_name: str) -> dict[str, Any]:
     the overlay needs every service Compose will run, including ones that
     arrive through `include:` or `extends:`, and the user's own
     read_only / tmpfs declarations, so it reads the same resolved model
-    (`docker compose config`). Raises ComposeError if the file cannot be
+    (`docker compose config`, plus the user's `read_only: false`, which
+    that output drops). Raises ComposeError if the file cannot be
     resolved: generating an overlay without it would leave services
     unhardened.
     """

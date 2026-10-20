@@ -191,7 +191,9 @@ def hardening_profile(meta: ProjectMeta, user_model: dict[str, Any]) -> ProjectH
 def load_user_model(paths: BoxPaths, project: str) -> dict[str, Any]:
     """compose.yml resolved on its own: the user's settings, before the overlay."""
     try:
-        return resolve_deployed_config(paths.project_dir(project), ["compose.yml"], project)
+        return resolve_deployed_config(
+            paths.project_dir(project), ["compose.yml"], project,
+            user_compose=paths.project_dir(project) / "compose.yml")
     except ComposeResolveError as e:
         raise ProjectScanError(f"project {project!r}: {e}") from e
 
