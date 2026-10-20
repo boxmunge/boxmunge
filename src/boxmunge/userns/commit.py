@@ -4,13 +4,11 @@
 On the containerd store kept by dockerd's own containerd, the remapped
 daemon runs its own containerd from the remapped root, so the old one's
 root is a directory nothing uses any more, and it goes. With the system
-containerd, shared by both daemons, removing the images alone frees
-nothing: the old containers' leases and their `<id>-init`/rootfs snapshots
-still pin content. So leases go first, then snapshots (children before
-parents), then images (the remapped daemon, on overlay2, keeps none of
-them in containerd). Either way the store's size must have fallen by at
-least the old store's inventoried size, less 10%. On a graph driver,
-overlay2/ and image/ go.
+containerd, shared by both daemons, the old daemon's namespace is emptied
+through containerd's garbage collector (_clean_containerd), and checked
+empty. Either way the store's size must have fallen by at least the old
+store's inventoried size, less 10%. On a graph driver, overlay2/ and
+image/ go.
 The size before is journalled when the commit starts, so a resumed commit
 measures against the same figure. Once committed, rollback is no longer
 offered.
@@ -40,6 +38,10 @@ SOAK = timedelta(hours=48)
 # Journalled before the first deletion: from then on there is no rollback.
 COMMIT_STARTED = "commit-before"
 _GC_WAIT = 120
+_GC_LEASE = "boxmunge-userns-commit-gc"
+_LISTINGS = {"containers": ("containers", "ls", "-q"), "images": ("images", "ls", "-q"),
+             "leases": ("leases", "ls", "-q"), "content blobs": ("content", "ls", "-q"),
+             "snapshots": ("snapshots", "--snapshotter", "overlayfs", "ls")}
 _OLD_ROOT_DIRS = ("containers", "volumes", "image")
 
 
@@ -55,33 +57,53 @@ def _ctr(prior: dict, *args: str) -> str:
                 capture=True, timeout=600).stdout
 
 
-def snapshot_removal_order(listing: str) -> list[str]:
-    """Snapshot keys, children before their parents, from `ctr snapshots ls`."""
-    parent = {}
-    for line in listing.splitlines()[1:]:
-        cols = line.split()
-        if cols:
-            parent[cols[0]] = cols[1] if len(cols) > 2 else ""
-    order, remaining = [], dict(parent)
-    while remaining:
-        leaves = sorted(k for k in remaining if k not in remaining.values())
-        if not leaves:
-            raise MigrationError(f"snapshot parents form a cycle: {sorted(remaining)}")
-        order += leaves
-        for k in leaves:
-            del remaining[k]
-    return order
+def _collect(prior: dict) -> None:
+    """A synchronous garbage collection: deleting a lease with --sync waits
+    for one, snapshotter and content cleanup included, even when the lease
+    held nothing."""
+    _ctr(prior, "leases", "create", "--id", _GC_LEASE)
+    _ctr(prior, "leases", "rm", "--sync", _GC_LEASE)
+
+
+def _left_in_namespace(prior: dict) -> dict[str, int]:
+    """What the namespace still holds, by kind, with a count of each."""
+    left = {}
+    for kind, args in _LISTINGS.items():
+        lines = _ctr(prior, *args).splitlines()
+        if kind == "snapshots":
+            lines = lines[1:]  # it has no -q: drop its header
+        n = sum(1 for line in lines if line.strip())
+        if n:
+            left[kind] = n
+    return left
 
 
 def _clean_containerd(prior: dict) -> None:
+    """Empty the old daemon's namespace by releasing what roots it (leases,
+    images) and letting containerd collect the rest. Snapshots are not
+    removed by name: dockerd releases a removed container's rootfs by
+    deleting its lease, and the collector then deletes the container's
+    snapshots without striking them from their parent's list of children,
+    so every image a container was ever removed from refuses `ctr snapshots
+    rm` ("cannot remove snapshot with child") for good. The collector does
+    not read that list. Each step is idempotent, so a resumed commit runs
+    them all again; the remapped daemon's namespace is never named."""
     for lease in _ctr(prior, "leases", "ls", "-q").split():
         _ctr(prior, "leases", "rm", lease)
-    listing = _ctr(prior, "snapshots", "--snapshotter", "overlayfs", "ls")
-    for key in snapshot_removal_order(listing):
-        _ctr(prior, "snapshots", "--snapshotter", "overlayfs", "rm", key)
     images = _ctr(prior, "images", "ls", "-q").split()
     if images:
         _ctr(prior, "images", "rm", *images)
+    _collect(prior)
+    left = _left_in_namespace(prior)
+    if left:
+        what = ", ".join(f"{n} {kind}" for kind, n in left.items())
+        cmd = f"ctr --address {prior['containerd_address']} -n {prior['namespace']}"
+        raise MigrationError(
+            f"the old daemon's containerd namespace {prior['namespace']} still holds {what} "
+            f"after its leases and images were removed and containerd collected garbage: "
+            f"something else still references them. Look with `{cmd} containers ls` (and "
+            f"`snapshots --snapshotter overlayfs ls`, `content ls`), remove what holds them, "
+            f"then run userns-commit again")
 
 
 def _drop_managed_root(old_root: Path, s: int, store_root: Path) -> None:
