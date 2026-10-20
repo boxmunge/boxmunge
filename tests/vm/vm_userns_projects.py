@@ -48,7 +48,7 @@ def _manifest(project: str, services: dict, *, backup: dict | None = None,
 # own /tmp tmpfs is left out rather than duplicated.
 PG_TMPFS = ["/var/run/postgresql", "/tmp"]
 MARIADB_TMPFS = ["/run/mysqld", "/tmp"]
-NGINX_TMPFS = ["/run", "/var/cache/nginx", "/tmp"]
+NGINX_EPHEMERAL = ["/run", "/var/cache/nginx"]
 
 
 def _db(image: str, env: dict, volume: str | None, target: str,
@@ -94,10 +94,13 @@ NODE = "require('http').createServer((q, s) => s.end('node ' + process.getuid())
 
 def vmweb(version: str) -> dict[str, str]:
     compose = {"services": {
-        "web": {"image": "nginx:1.27-alpine", "read_only": False, "tmpfs": NGINX_TMPFS},
+        "web": {"image": "nginx:1.27-alpine", "read_only": False},
         "api": {"image": "node:22-alpine", "command": ["node", "-e", NODE]},
     }}
-    web = {"port": 80, "routes": [{"path": "/"}]}
+    # A routed manifest service: its writable paths belong in the manifest
+    # (compose-side tmpfs is refused without a writable: block), which both
+    # 0.10.1 and the beta honour; /tmp is in the baseline.
+    web = {"port": 80, "routes": [{"path": "/"}], "writable": {"ephemeral": NGINX_EPHEMERAL}}
     api = {"port": 3000, "routes": [{"path": "/api*"}]}
     if version != "v1":
         web["security"] = IMAGE
