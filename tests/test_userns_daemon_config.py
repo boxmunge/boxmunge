@@ -5,7 +5,9 @@ import json
 
 import pytest
 
-from boxmunge.userns.daemon_config import DaemonConfigError, merged_daemon_json
+from boxmunge.userns.daemon_config import (
+    DaemonConfigError, containerd_refusals, merged_daemon_json,
+)
 
 REMAP = {"userns-remap": "boxmunge-remap:boxmunge-remap", "storage-driver": "overlay2"}
 
@@ -48,3 +50,18 @@ def test_conflicts_are_refused_not_overwritten(doc, named) -> None:
 def test_unreadable_daemon_json_is_refused(raw) -> None:
     with pytest.raises(DaemonConfigError):
         merged_daemon_json(raw)
+
+
+@pytest.mark.parametrize("doc, named", [
+    ({"containerd-namespace": "moby"}, "containerd-namespace is set ('moby')"),
+    ({"containerd-namespace": "box"}, "remove it"),
+    ({"containerd": "/srv/containerd.sock"}, "containerd is '/srv/containerd.sock'"),
+])
+def test_containerd_keys_the_migration_cannot_follow_are_refused(doc, named) -> None:
+    assert any(named in problem for problem in containerd_refusals(doc))
+
+
+@pytest.mark.parametrize("doc", [{}, {"containerd": "/run/containerd/containerd.sock"},
+                                 {"containerd-plugin-namespace": "plugins"}])
+def test_the_system_containerd_socket_is_fine(doc) -> None:
+    assert containerd_refusals(doc) == []

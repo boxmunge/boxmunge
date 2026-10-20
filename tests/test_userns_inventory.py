@@ -91,7 +91,9 @@ def _docker(paths, tmp_path):
 def _info(monkeypatch, **info) -> None:
     monkeypatch.setattr(inv_mod, "docker_info", lambda: {
         "Driver": "overlayfs", "DriverStatus": [["driver-type", "io.containerd.snapshotter.v1"]],
-        "DockerRootDir": "/var/lib/docker", "ServerVersion": "29.9.0", **info})
+        "DockerRootDir": "/var/lib/docker", "ServerVersion": "29.9.0",
+        "Containerd": {"Address": "/run/containerd/containerd.sock",
+                       "Namespaces": {"Containers": "moby", "Plugins": "plugins.moby"}}, **info})
 
 
 def test_inventory_from_docker(paths, tmp_path, monkeypatch) -> None:
@@ -100,6 +102,8 @@ def test_inventory_from_docker(paths, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(inv_mod, "load_registered_projects", lambda p: {"shop"})
     inv = take_inventory(paths)
     assert (inv.driver, inv.driver_type) == ("overlayfs", inv_mod.CONTAINERD_STORE)
+    assert (inv.containerd_address, inv.containerd_namespace) == (
+        "/run/containerd/containerd.sock", "moby")
     by_name = {v.name: v for v in inv.volumes}
     assert by_name["a" * 64].anonymous and by_name["a" * 64].has_data and by_name["a" * 64].attached
     assert not by_name["shop_cache"].anonymous and not by_name["shop_cache"].has_data

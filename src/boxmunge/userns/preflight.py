@@ -27,7 +27,9 @@ from boxmunge.staged_release import has_slot, slot_debris
 from boxmunge.state import StateError, read_state
 from boxmunge.userns import offset as userns_offset
 from boxmunge.userns import preflight_checks as checks
-from boxmunge.userns.daemon_config import DaemonConfigError, merged_daemon_json
+from boxmunge.userns.daemon_config import (
+    DaemonConfigError, containerd_refusals, merged_daemon_json, parse_daemon_json,
+)
 from boxmunge.userns.inventory import Inventory
 from boxmunge.userns.journal import FORWARD
 from boxmunge.userns.preflight_checks import Report
@@ -44,8 +46,11 @@ class PreflightRefused(Exception):
 
 def _daemon_json(r: Report) -> None:
     path = userns_offset.ETC / "docker" / "daemon.json"
+    raw = path.read_bytes() if path.exists() else None
     try:
-        merged_daemon_json(path.read_bytes() if path.exists() else None)
+        merged_daemon_json(raw)
+        r.refusals.extend(f"{path}: {problem}" for problem in containerd_refusals(
+            parse_daemon_json(raw)))
     except DaemonConfigError as e:
         r.refusals.append(f"{path}: {e}")
 

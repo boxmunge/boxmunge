@@ -104,6 +104,10 @@ class Inventory:
     projects: list[str] = field(default_factory=list)
     record_data: list[str] = field(default_factory=list)
     remapped: bool = False  # the daemon already runs containers in a user namespace
+    # The containerd the daemon uses and its namespace in it, as docker info
+    # reports them ("" when it reports none).
+    containerd_address: str = ""
+    containerd_namespace: str = ""
     # The host interfaces of its bridge networks other than docker0, which
     # outlive the daemon (switch.drop_bridges).
     bridges: list[str] = field(default_factory=list)
@@ -245,6 +249,12 @@ def _bridges() -> list[str]:
     return sorted(out)
 
 
+def _containerd(info: dict[str, Any]) -> dict[str, str]:
+    c = info.get("Containerd") or {}
+    return {"containerd_address": str(c.get("Address") or ""),
+            "containerd_namespace": str((c.get("Namespaces") or {}).get("Containers") or "")}
+
+
 def take_inventory(paths: BoxPaths) -> Inventory:
     info = docker_info()
     driver_type = dict(info.get("DriverStatus") or []).get("driver-type", "")
@@ -283,4 +293,4 @@ def take_inventory(paths: BoxPaths) -> Inventory:
                      containers=containers, volumes=volumes, images=images, network=_network(),
                      projects=projects, record_data=_record_data(paths, projects, containers),
                      remapped="name=userns" in (info.get("SecurityOptions") or []),
-                     bridges=_bridges())
+                     bridges=_bridges(), **_containerd(info))

@@ -29,6 +29,14 @@ class _Daemon:
         self.calls.append("start")
 
 
+@pytest.fixture(autouse=True)
+def flushes(monkeypatch):
+    """The durability barrier, recorded (it flushes real filesystems)."""
+    seen: list[str] = []
+    monkeypatch.setattr(en, "barrier", lambda paths, j, images_dir: seen.append(j.phase))
+    return seen
+
+
 @pytest.fixture
 def box(paths, monkeypatch, tmp_path):
     calls: list[str] = []
@@ -52,9 +60,10 @@ def box(paths, monkeypatch, tmp_path):
             if crash.pop(name, False):
                 raise RuntimeError(f"power cut in {name}")
             j = next((a for a in args if isinstance(a, Journal)), None)
+            save = next((a for a in args if getattr(a, "__name__", "") == "save"), None)
             if j is not None and phase:
                 j.phase = phase
-                save_journal(paths, j)
+                save() if save else save_journal(paths, j)
             return {}
         return run
     for name, phase in [("_prepare", "prepared"), ("_switch", "switched"),
@@ -92,6 +101,31 @@ def test_resume_after_a_crash_in_each_step(paths, box, step) -> None:
     assert set(redone) <= {"save_all", "quiesce"}
     assert ("ensure_prior" in calls) == (STEPS.index(step) <= STEPS.index("_switch"))
     assert load_journal(paths).failed is None
+
+
+def test_each_phase_is_flushed_before_the_journal_records_it(paths, box, monkeypatch,
+                                                             flushes) -> None:
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(en, "barrier", lambda p, j, d: events.append(("flush", j.phase)))
+    real = en.save_journal
+    monkeypatch.setattr(en, "save_journal", lambda p, j: (events.append(("save", j.phase)),
+                                                          real(p, j)))
+    _migrate(paths)
+    for phase in ("quiesced", "switched", "rebuilt", "applied"):
+        at = events.index(("save", phase))
+        assert events[at - 1] == ("flush", phase), (phase, events)
+
+
+def test_a_flush_that_fails_leaves_the_journal_where_the_disk_is(paths, box,
+                                                                 monkeypatch) -> None:
+    def barrier(p, j, d):
+        if j.phase == "switched":
+            raise en.NotDurable("cannot flush the filesystem holding /var/lib/docker: EIO")
+    monkeypatch.setattr(en, "barrier", barrier)
+    with pytest.raises(en.NotDurable, match="EIO"):
+        _migrate(paths)
+    j = load_journal(paths)
+    assert j.phase == "quiesced" and j.failed is None
 
 
 def test_rerun_after_applied_refuses(paths, box) -> None:

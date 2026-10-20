@@ -31,6 +31,12 @@ class _Daemon:
         self.events.append("daemon start")
 
 
+@pytest.fixture(autouse=True)
+def flushes(monkeypatch):
+    """The durability barrier, stood in for (it flushes real filesystems)."""
+    monkeypatch.setattr(rb, "barrier", lambda paths, j, images_dir: None)
+
+
 @pytest.fixture
 def remapped(paths, monkeypatch, tmp_path):
     old_root = tmp_path / "docker"
@@ -96,6 +102,30 @@ def test_the_order_that_keeps_old_containers_safe(paths, remapped) -> None:
     j = load_journal(paths)
     assert j.phase == "rolled-back" and j.items["rb-volume:kept_v"] == "stayed"
     assert timers.calls[-1][0] == "restore"
+
+
+def test_each_rollback_phase_is_flushed_before_the_journal_records_it(
+        paths, remapped, monkeypatch) -> None:
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(rb, "barrier", lambda p, j, d: events.append(("flush", j.phase)))
+    real = rb.save_journal
+    monkeypatch.setattr(rb, "save_journal", lambda p, j: (events.append(("save", j.phase)),
+                                                          real(p, j)))
+    rb.rollback(paths, daemon=_Daemon([]), timers=FakeTimers())
+    for phase in ("rb-quiesced", "rb-restored", "rb-switched", "rb-rebuilt", "rolled-back"):
+        at = events.index(("save", phase))
+        assert events[at - 1] == ("flush", phase), (phase, events)
+
+
+def test_a_flush_that_fails_leaves_the_rollback_where_the_disk_is(paths, remapped,
+                                                                  monkeypatch) -> None:
+    def barrier(p, j, d):
+        if j.phase == "rb-switched":
+            raise rb.NotDurable("cannot flush the filesystem holding /var/lib/docker: EIO")
+    monkeypatch.setattr(rb, "barrier", barrier)
+    with pytest.raises(rb.NotDurable, match="EIO"):
+        rb.rollback(paths, daemon=_Daemon([]), timers=FakeTimers())
+    assert load_journal(paths).phase == "rb-restored"
 
 
 def test_resume_after_a_crash_mid_restore(paths, remapped, monkeypatch) -> None:

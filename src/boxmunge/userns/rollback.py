@@ -26,6 +26,7 @@ from boxmunge.userns import offset as uo
 from boxmunge.userns.bringup import bring_up, quiesce
 from boxmunge.userns.commit import COMMIT_STARTED
 from boxmunge.userns.daemon_ctl import DaemonControl, TimerControl, daemon_answers
+from boxmunge.userns.durable import NotDurable, barrier
 from boxmunge.userns.engine import Save, project_locks, shift_journalled
 from boxmunge.userns.images import IMAGES_DIR, load_all, remove_tars, save_all
 from boxmunge.userns.inventory import Inventory, outermost, take_inventory
@@ -270,6 +271,7 @@ def rollback(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,
     journal = j
 
     def save() -> None:
+        barrier(paths, journal, images_dir)
         save_journal(paths, journal)
 
     with project_locks(paths, sorted(load_registered_projects(paths))):
@@ -289,7 +291,8 @@ def rollback(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,
             save()
         except BaseException as e:
             j.failed = f"{j.phase}: {e}"
-            save()
+            if not isinstance(e, NotDurable):  # else the journal stays where the disk is
+                save_journal(paths, j)
             held = ("The marker is set, so every project command refuses, and the boxmunge "
                     "timers stay stopped. " if migration_in_progress(paths) else "")
             notify(paths, "userns rollback stopped", f"Stopped after {j.phase}: {e}. {held}"

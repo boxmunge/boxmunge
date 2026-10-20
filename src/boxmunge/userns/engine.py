@@ -33,6 +33,7 @@ from boxmunge.userns import offset as uo
 from boxmunge.userns.bringup import bring_up, quiesce
 from boxmunge.userns.steps import _backups, _final, disk_before_downtime
 from boxmunge.userns.daemon_ctl import DaemonControl, TimerControl, daemon_answers
+from boxmunge.userns.durable import NotDurable, barrier
 from boxmunge.userns.images import IMAGES_DIR, load_all, save_all
 from boxmunge.userns.inventory import PROXY_NETWORK, Inventory, take_inventory
 from boxmunge.userns.marker import clear_marker, set_marker
@@ -226,6 +227,7 @@ def migrate(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,
         journal = j
 
         def save() -> None:
+            barrier(paths, journal, images_dir)
             save_journal(paths, journal)
 
         inv = Inventory.from_json(j.inventory)
@@ -261,7 +263,8 @@ def migrate(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,
             save()
         except BaseException as e:
             j.failed = j.failed or f"{j.phase}: {e}"
-            save()
+            if not isinstance(e, NotDurable):  # else the journal stays where the disk is
+                save_journal(paths, j)
             held = ("The boxmunge timers are stopped, and every project command refuses "
                     "until it is finished. " if stopped else "")
             notify(paths, "userns migration stopped", f"Stopped after phase {j.phase}: {e}. "
