@@ -5,5 +5,5 @@
 # set rather than an unpinned isolated build env.
 # Regenerate with: make lock
 pytest>=8.0
-build>=1.2
+build>=1.6.1
 setuptools>=77
