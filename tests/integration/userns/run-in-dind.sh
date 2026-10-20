@@ -17,7 +17,21 @@ python3 -m venv /venv
     -r requirements.txt -r tests/integration/userns/requirements-dind.txt
 mkdir -p /etc/docker
 case "${BOXMUNGE_DIND_PRIOR_STORE:?set by the CI matrix}" in
-    containerd) echo '{}' > /etc/docker/daemon.json ;;
+    containerd) echo '{}' > /etc/docker/daemon.json
+        # The system containerd Docker's packages run as a service of its own,
+        # for test_commit_system_containerd (dockerd here embeds one). Kept off
+        # PATH, so dockerd keeps its embedded one for the other modules.
+        case "$(uname -m)" in
+            x86_64) arch=amd64 sum=02ad3a7e80d7d2c018c7134d5eca7e301283db6895f100b957fb52ad8e5a30fd ;;
+            aarch64) arch=arm64 sum=d3aba9347650505df79858bb9cbf1be52080fd8145f72dd9308d4936f487fb74 ;;
+            *) echo "no pinned containerd for $(uname -m)" >&2; exit 2 ;;
+        esac
+        tarball=/tmp/containerd-static.tar.gz
+        wget -qO "$tarball" "https://github.com/containerd/containerd/releases/download/v2.4.1/containerd-static-2.4.1-linux-$arch.tar.gz"
+        echo "$sum  $tarball" | sha256sum -c -s
+        mkdir -p /opt/containerd-system
+        tar -xzf "$tarball" -C /opt/containerd-system bin/containerd
+        export BOXMUNGE_DIND_SYSTEM_CONTAINERD=/opt/containerd-system/bin/containerd ;;
     overlay2) echo '{"storage-driver": "overlay2", "features": {"containerd-snapshotter": false}}' > /etc/docker/daemon.json ;;
     *) echo "unknown prior store $BOXMUNGE_DIND_PRIOR_STORE" >&2; exit 2 ;;
 esac
