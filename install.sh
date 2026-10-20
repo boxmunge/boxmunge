@@ -140,6 +140,27 @@ repair_unattended_origins() {
 repair_unattended_origins
 
 # ---------------------------------------------------------------------------
+# Prerequisites for the cosign and Trivy installs below.
+#
+# Both run before bootstrap/init-host.sh, which is what installs curl,
+# ca-certificates and gnupg on a fresh host, and Debian cloud images no
+# longer ship gnupg. Ensure them here so a fresh install cannot die with
+# "gpg: command not found". Failure is fatal (set -e): no fallback.
+# ---------------------------------------------------------------------------
+ensure_install_prereqs() {
+    local missing=()
+    command -v curl >/dev/null 2>&1 || missing+=(curl)
+    command -v gpg >/dev/null 2>&1 || missing+=(gnupg)
+    dpkg-query -W -f='${db:Status-Status}' ca-certificates 2>/dev/null \
+        | grep -q "^installed$" || missing+=(ca-certificates)
+    [[ ${#missing[@]} -eq 0 ]] && return 0
+    echo "  Installing prerequisites for the cosign/Trivy installs: ${missing[*]}"
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
+}
+ensure_install_prereqs
+
+# ---------------------------------------------------------------------------
 # Install cosign (used by the upgrade shim to verify release signatures).
 #
 # Idempotent: if the pinned version is already installed, this is a no-op.
