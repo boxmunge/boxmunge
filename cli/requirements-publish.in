@@ -4,6 +4,6 @@
 # The build runs with --no-isolation so setuptools comes from this hash-pinned
 # set rather than an unpinned isolated build env.
 # Regenerate with: make lock
-pytest>=8.0
+pytest>=9.1.1
 build>=1.2
 setuptools>=77
