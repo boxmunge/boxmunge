@@ -73,6 +73,35 @@ def test_only_an_unremapped_overlay_store_at_the_default_root_migrates(paths, qu
     assert needle in _run(paths, _inv(quiet, **kw)).text()
 
 
+SYSTEM, MANAGED = "/run/containerd/containerd.sock", "/var/run/docker/containerd/containerd.sock"
+_C8D = {"driver": "overlayfs", "driver_type": checks.CONTAINERD_STORE}
+
+
+@pytest.mark.parametrize("address, namespace, needle", [
+    ("", "", "reports no containerd address and namespace"),
+    ("/srv/c.sock", "moby", "uses containerd at /srv/c.sock"),
+    (SYSTEM, "box", "containerd namespace is 'box', not 'moby'"),
+])
+def test_a_containerd_the_commit_could_not_find_again_is_refused(paths, quiet, address,
+                                                                 namespace, needle) -> None:
+    inv = _inv(quiet, **_C8D, containerd_address=address, containerd_namespace=namespace)
+    assert needle in _run(paths, inv).text()
+
+
+@pytest.mark.parametrize("address", [SYSTEM, MANAGED])
+def test_dockerds_own_or_the_system_containerd_migrates(paths, quiet, address) -> None:
+    inv = _inv(quiet, **_C8D, containerd_address=address, containerd_namespace="moby")
+    assert "containerd" not in "\n".join(_run(paths, inv).refusals)
+
+
+def test_containerd_namespace_in_daemon_json_is_refused(paths, quiet, monkeypatch,
+                                                        tmp_path) -> None:
+    (tmp_path / "etc" / "docker").mkdir(parents=True)
+    (tmp_path / "etc" / "docker" / "daemon.json").write_text('{"containerd-namespace": "moby"}')
+    monkeypatch.setattr(pf.userns_offset, "ETC", tmp_path / "etc")
+    assert "containerd-namespace is set" in _run(paths, _inv(quiet)).text()
+
+
 def test_containers_boxmunge_does_not_run_are_refused(paths, quiet) -> None:
     inv = _inv(quiet, containers=[
         _container(name="portainer", compose_project=""),

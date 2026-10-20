@@ -16,6 +16,16 @@ from typing import Any
 from boxmunge.userns.offset import DAEMON_REMAP_VALUE
 
 DEFAULT_DATA_ROOT = "/var/lib/docker"
+# The containerd a daemon uses, as `docker info` reports it: dockerd's own
+# (started, or embedded, under its exec-root) or the system one Docker's
+# packages run as a service. A remapped daemon whose containerd namespace is
+# not set explicitly uses moby-<uid>.<gid> beside the old daemon's moby.
+MANAGED_CONTAINERD = frozenset({"/var/run/docker/containerd/containerd.sock",
+                                "/run/docker/containerd/containerd.sock"})
+SYSTEM_CONTAINERD = frozenset({"/run/containerd/containerd.sock",
+                               "/var/run/containerd/containerd.sock"})
+SYSTEM_CONTAINERD_ROOT = "/var/lib/containerd"
+DEFAULT_NAMESPACE = "moby"
 _LOG_KEYS: dict[str, Any] = {"log-driver": "json-file",
                              "log-opts": {"max-size": "50m", "max-file": "5"}}
 
@@ -51,6 +61,21 @@ def conflicts(doc: dict[str, Any]) -> list[str]:
         out.append(f"storage-driver is {doc['storage-driver']!r}, not overlay2")
     if doc.get("userns-remap", DAEMON_REMAP_VALUE) != DAEMON_REMAP_VALUE:
         out.append(f"userns-remap is already {doc['userns-remap']!r}")
+    return out
+
+
+def containerd_refusals(doc: dict[str, Any]) -> list[str]:
+    """Keys the migration refuses to start with (preflight only: a rollback
+    gives back the journalled daemon.json whatever it holds)."""
+    out = []
+    if "containerd-namespace" in doc:
+        out.append(f"containerd-namespace is set ({doc['containerd-namespace']!r}): a "
+                   f"remapped daemon would share that namespace with the old one, and "
+                   f"userns-commit could not tell the old images from the live ones; remove it")
+    if "containerd" in doc and doc["containerd"] not in SYSTEM_CONTAINERD:
+        out.append(f"containerd is {doc['containerd']!r}; the migration supports dockerd's own "
+                   f"containerd or the system one at "
+                   f"{' or '.join(sorted(SYSTEM_CONTAINERD))}; remove it or point it there")
     return out
 
 

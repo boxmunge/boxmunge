@@ -19,6 +19,9 @@ from pathlib import Path
 from boxmunge.fileutil import atomic_write_bytes, fsync_dir
 from boxmunge.paths import BoxPaths
 from boxmunge.userns import offset as uo
+from boxmunge.userns.daemon_config import (
+    MANAGED_CONTAINERD, SYSTEM_CONTAINERD, SYSTEM_CONTAINERD_ROOT,
+)
 from boxmunge.userns.daemon_ctl import DaemonControl, daemon_answers
 from boxmunge.userns.inventory import CONTAINERD_STORE, Inventory
 from boxmunge.userns.preflight_checks import dir_size
@@ -113,16 +116,21 @@ def prior_store(inv: Inventory) -> dict:
     """The store the old daemon used, and its size, for commit and rollback."""
     root = Path(inv.root)
     if inv.driver_type == CONTAINERD_STORE:
+        # As the daemon reports it (the preflight refused any other):
         # dockerd's own containerd keeps its root in the daemon's root (and a
         # remapped daemon's in the remapped root); the system containerd is
         # shared by both daemons.
-        managed = (root / "containerd" / "daemon").is_dir()
-        croot = root / "containerd" / "daemon" if managed else Path("/var/lib/containerd")
-        address = ("/var/run/docker/containerd/containerd.sock" if managed
-                   else "/run/containerd/containerd.sock")
+        address, namespace = inv.containerd_address, inv.containerd_namespace
+        if address in MANAGED_CONTAINERD:
+            managed, croot = True, root / "containerd" / "daemon"
+        elif address in SYSTEM_CONTAINERD:
+            managed, croot = False, Path(SYSTEM_CONTAINERD_ROOT)
+        else:
+            raise MigrationError(f"the daemon uses containerd at {address!r}, which the "
+                                 f"migration does not support (see userns-migrate --check)")
         return {"driver": inv.driver, "driver_type": inv.driver_type, "store_root": str(croot),
-                "containerd_address": address, "namespace": "moby", "managed": managed,
-                "size": dir_size(croot)}
+                "containerd": {"address": address, "namespace": namespace},
+                "managed": managed, "size": dir_size(croot)}
     return {"driver": inv.driver, "driver_type": inv.driver_type,
             "store_root": str(root / "overlay2"),
             "size": dir_size(root / "overlay2") + dir_size(root / "image")}

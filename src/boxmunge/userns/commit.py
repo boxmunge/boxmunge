@@ -4,20 +4,20 @@
 On the containerd store kept by dockerd's own containerd, the remapped
 daemon runs its own containerd from the remapped root, so the old one's
 root is a directory nothing uses any more, and it goes. With the system
-containerd, shared by both daemons, the old daemon's namespace is emptied
-through containerd's garbage collector (_clean_containerd), and checked
-empty. Either way the store's size must have fallen by at least the old
-store's inventoried size, less 10%. On a graph driver, overlay2/ and
-image/ go.
-The size before is journalled when the commit starts, so a resumed commit
-measures against the same figure. Once committed, rollback is no longer
-offered.
+containerd, shared by both daemons, the old daemon's namespace (as phase 0
+recorded it from docker info) is emptied through containerd's garbage
+collector (_clean_containerd), and checked empty: that check is the proof,
+since the store's size counts other namespaces, and blobs they share. On a
+graph driver, overlay2/ and image/ go; there, and for dockerd's own
+containerd, the store's size must have fallen by at least the old store's
+inventoried size, less 10%. The size before is journalled when the commit
+starts, so a resumed commit measures against the same figure. Once
+committed, rollback is no longer offered.
 """
 from __future__ import annotations
 
 import os
 import shutil
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -37,11 +37,10 @@ COMPONENT = "userns-commit"
 SOAK = timedelta(hours=48)
 # Journalled before the first deletion: from then on there is no rollback.
 COMMIT_STARTED = "commit-before"
-_GC_WAIT = 120
 _GC_LEASE = "boxmunge-userns-commit-gc"
 _LISTINGS = {"containers": ("containers", "ls", "-q"), "images": ("images", "ls", "-q"),
-             "leases": ("leases", "ls", "-q"), "content blobs": ("content", "ls", "-q"),
-             "snapshots": ("snapshots", "--snapshotter", "overlayfs", "ls")}
+             "leases": ("leases", "ls", "-q"), "content blobs": ("content", "ls", "-q")}
+_SNAPSHOTTER = "io.containerd.snapshotter.v1"
 _OLD_ROOT_DIRS = ("containers", "volumes", "image")
 
 
@@ -53,8 +52,21 @@ def _old_store_size(prior: dict, old_root: Path) -> int:
 
 
 def _ctr(prior: dict, *args: str) -> str:
-    return _run(["ctr", "--address", prior["containerd_address"], "-n", prior["namespace"], *args],
+    c = prior["containerd"]
+    return _run(["ctr", "--address", c["address"], "-n", c["namespace"], *args],
                 capture=True, timeout=600).stdout
+
+
+def _snapshotters(prior: dict) -> list[str]:
+    """The snapshotters containerd loaded (`ctr plugins ls`: TYPE ID PLATFORMS STATUS)."""
+    out = []
+    for line in _ctr(prior, "plugins", "ls").splitlines()[1:]:
+        cols = line.split()
+        if len(cols) >= 3 and cols[0] == _SNAPSHOTTER and cols[-1] == "ok":
+            out.append(cols[1])
+    if not out:
+        raise MigrationError("containerd lists no snapshotter that loaded (ctr plugins ls)")
+    return out
 
 
 def _collect(prior: dict) -> None:
@@ -67,15 +79,13 @@ def _collect(prior: dict) -> None:
 
 def _left_in_namespace(prior: dict) -> dict[str, int]:
     """What the namespace still holds, by kind, with a count of each."""
-    left = {}
-    for kind, args in _LISTINGS.items():
-        lines = _ctr(prior, *args).splitlines()
-        if kind == "snapshots":
-            lines = lines[1:]  # it has no -q: drop its header
-        n = sum(1 for line in lines if line.strip())
-        if n:
-            left[kind] = n
-    return left
+    listed = {kind: _ctr(prior, *args).splitlines() for kind, args in _LISTINGS.items()}
+    for name in _snapshotters(prior):
+        # snapshots ls has no -q: its first line is a header
+        listed[f"{name} snapshots"] = _ctr(prior, "snapshots", "--snapshotter", name,
+                                           "ls").splitlines()[1:]
+    left = {kind: sum(1 for line in lines if line.strip()) for kind, lines in listed.items()}
+    return {kind: n for kind, n in left.items() if n}
 
 
 def _clean_containerd(prior: dict) -> None:
@@ -97,12 +107,13 @@ def _clean_containerd(prior: dict) -> None:
     left = _left_in_namespace(prior)
     if left:
         what = ", ".join(f"{n} {kind}" for kind, n in left.items())
-        cmd = f"ctr --address {prior['containerd_address']} -n {prior['namespace']}"
+        c = prior["containerd"]
+        cmd = f"ctr --address {c['address']} -n {c['namespace']}"
         raise MigrationError(
-            f"the old daemon's containerd namespace {prior['namespace']} still holds {what} "
+            f"the old daemon's containerd namespace {c['namespace']} still holds {what} "
             f"after its leases and images were removed and containerd collected garbage: "
             f"something else still references them. Look with `{cmd} containers ls` (and "
-            f"`snapshots --snapshotter overlayfs ls`, `content ls`), remove what holds them, "
+            f"`snapshots --snapshotter <name> ls`, `content ls`), remove what holds them, "
             f"then run userns-commit again")
 
 
@@ -131,6 +142,35 @@ def _old_volumes_with_data(old_root: Path) -> list[str]:
     return left
 
 
+def _check_containerd(prior: dict, info: dict, s: int) -> None:
+    """The old daemon's containerd, as phase 0 recorded it, against the one
+    the remapped daemon reports. The migration changed only the remap keys,
+    so the remapped daemon must use the same containerd, in the namespace
+    dockerd derives from the old one (moby-<s>.<s>); in the old namespace
+    itself (containerd-namespace set), the commit would empty the live one."""
+    if "containerd" not in prior:
+        raise MigrationError(
+            "this migration was journalled before boxmunge recorded the old daemon's "
+            "containerd address and namespace (from docker info), and commit will not guess "
+            "which namespace held the old images. Run userns-rollback, then userns-migrate "
+            "again, and commit after its soak")
+    old = prior["containerd"]
+    live = info.get("Containerd") or {}
+    address, namespace = live.get("Address"), (live.get("Namespaces") or {}).get("Containers")
+    if address == old["address"] and namespace == old["namespace"]:
+        raise MigrationError(
+            f"the remapped daemon uses the old daemon's containerd namespace {namespace} "
+            f"(containerd-namespace is set), so commit cannot tell the old images from the "
+            f"live ones. Run userns-rollback, remove containerd-namespace from daemon.json or "
+            f"dockerd's flags, and migrate again")
+    want = f"{old['namespace']}-{s}.{s}"
+    if (address, namespace) != (old["address"], want):
+        raise MigrationError(
+            f"the remapped daemon uses containerd at {address}, namespace {namespace}, not "
+            f"{old['address']}, namespace {want} as the migration left it; daemon.json or "
+            f"dockerd's flags changed during the soak. Put them back, or run userns-rollback")
+
+
 def _checked(paths: BoxPaths, j: Journal | None, now: datetime) -> Journal:
     if j is None or j.direction != FORWARD or j.phase != "applied":
         raise MigrationError(f"nothing to commit (journal: "
@@ -141,6 +181,8 @@ def _checked(paths: BoxPaths, j: Journal | None, now: datetime) -> Journal:
     if uo.remap_offset(paths) != j.offset:
         raise MigrationError("the daemon is not remapped as the journal says; see "
                              "docker-userns in health")
+    if j.prior_store["driver_type"] == CONTAINERD_STORE:
+        _check_containerd(j.prior_store, uo.docker_info(), j.offset)
     left = _old_volumes_with_data(Path(Inventory.from_json(j.inventory).root))
     if left:
         raise MigrationError(
@@ -172,6 +214,15 @@ def commit(paths: BoxPaths, *, now: datetime | None = None,
     return j
 
 
+def _check_freed(prior: dict, old_root: Path, before: int) -> None:
+    """What was deleted as directories: the old store must have gone."""
+    freed = before - _old_store_size(prior, old_root)
+    if freed < 0.9 * prior["size"]:
+        raise MigrationError(f"only {freed} bytes were freed under {prior['store_root']}, not "
+                             f"the old store's {prior['size']} (less 10%); inspect what is "
+                             f"left, then run userns-commit again")
+
+
 def _commit(paths: BoxPaths, j: Journal, images_dir: Path) -> Journal:
     prior = j.prior_store
     old_root = Path(Inventory.from_json(j.inventory).root)
@@ -189,16 +240,8 @@ def _commit(paths: BoxPaths, j: Journal, images_dir: Path) -> Journal:
         _clean_containerd(prior)
     elif Path(prior["store_root"]).is_dir():
         shutil.rmtree(prior["store_root"])
-    deadline = time.monotonic() + _GC_WAIT
-    while True:  # containerd reclaims content in its own garbage collection
-        freed = before - _old_store_size(prior, old_root)
-        if freed >= 0.9 * prior["size"] or time.monotonic() > deadline:
-            break
-        time.sleep(5)
-    if freed < 0.9 * prior["size"]:
-        raise MigrationError(f"only {freed} bytes were freed under {prior['store_root']}, not "
-                             f"the old store's {prior['size']} (less 10%); inspect what is "
-                             f"left, then run userns-commit again")
+    if not (prior["driver_type"] == CONTAINERD_STORE and not prior["managed"]):
+        _check_freed(prior, old_root, before)
     j.phase = "committed"
     save_journal(paths, j)
     return j

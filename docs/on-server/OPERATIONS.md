@@ -1445,7 +1445,10 @@ sudo /opt/boxmunge/bin/boxmunge-upgrade userns-commit            # after the 48-
 `--check` changes nothing and always exits 0; its last line is the verdict (what stops it, such as a
 daemon that does not answer, is a refusal too). Each `REFUSED:` line names one offender and what to
 do. It refuses, among others: Docker older than 28.0; a `daemon.json` with another `data-root`,
-`storage-driver`, `userns-remap` or `containerd-snapshotter: true`; an open upgrade probation, an
+`storage-driver`, `userns-remap` or `containerd-snapshotter: true`, with `containerd-namespace`, or
+with a `containerd` socket other than the system one; a containerd image store on a containerd other
+than dockerd's own or the system one at `/run/containerd/containerd.sock`, or in a namespace other
+than `moby`; an open upgrade probation, an
 interrupted upgrade, an open install transaction, a staged release (promote or unstage it), a 0.10.1
 stage, or a half-applied pause or quarantine; no `backup_remote`; a container boxmunge does not run;
 privileged or host-namespace services; an anonymous volume holding data (adopt it with `data adopt`,
@@ -1485,8 +1488,11 @@ holds now, so projects, volumes and images created during the soak go back too; 
 `daemon.json` differs from the one the migration wrote (put your change into the original as well,
 or put the migration's file back), and gives the original back with its mode.
 
-After 48 hours with every project healthy, `userns-commit` deletes the old root's images and data;
-it refuses while a volume in the old root still holds data the migration did not carry, and there is
+After 48 hours with every project healthy, `userns-commit` deletes the old root's images and data
+(on the system containerd: everything in the old daemon's `moby` namespace, which it then checks is
+empty); it refuses while a volume in the old root still holds data the migration did not carry, or
+while the remapped daemon is not on the old daemon's containerd beside its namespace (as
+`moby-<S>.<S>`), and there is
 no rollback once it has begun (a commit stopped part-way is finished by running it again; no upgrade
 runs meanwhile). An applied migration not committed after seven days is a daily warning. While the
 box is remapped, `force-target` refuses releases before 0.11.0.

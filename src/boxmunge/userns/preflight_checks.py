@@ -14,7 +14,9 @@ from pathlib import Path
 
 from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.paths import BoxPaths
-from boxmunge.userns.daemon_config import DEFAULT_DATA_ROOT
+from boxmunge.userns.daemon_config import (
+    DEFAULT_DATA_ROOT, DEFAULT_NAMESPACE, MANAGED_CONTAINERD, SYSTEM_CONTAINERD,
+)
 from boxmunge.userns.inventory import CONTAINERD_STORE, Inventory, outermost
 from boxmunge.userns.layers import LayerScanError, image_high_ids
 from boxmunge.userns.shift import Direction, scan_tree
@@ -64,6 +66,29 @@ def prior_store(inv: Inventory, r: Report) -> None:
     if inv.root != DEFAULT_DATA_ROOT:
         r.refusals.append(f"the daemon's root is {inv.root}; the migration supports only "
                           f"{DEFAULT_DATA_ROOT}")
+    if inv.driver_type == CONTAINERD_STORE:
+        _containerd(inv, r)
+
+
+def _containerd(inv: Inventory, r: Report) -> None:
+    """The containerd store's containerd, as the daemon reports it: commit
+    and rollback act on what is recorded here."""
+    address, namespace = inv.containerd_address, inv.containerd_namespace
+    if not address or not namespace:
+        r.refusals.append("docker info reports no containerd address and namespace; the "
+                          "migration needs both to find the old images later (Docker 28 "
+                          "or newer reports them)")
+    elif address not in MANAGED_CONTAINERD | SYSTEM_CONTAINERD:
+        r.refusals.append(f"the daemon uses containerd at {address}; the migration supports "
+                          f"dockerd's own containerd or the system one at "
+                          f"{' or '.join(sorted(SYSTEM_CONTAINERD))} (dockerd's --containerd "
+                          f"or daemon.json's containerd)")
+    elif namespace != DEFAULT_NAMESPACE:
+        r.refusals.append(f"the daemon's containerd namespace is {namespace!r}, not "
+                          f"{DEFAULT_NAMESPACE!r}: a remapped daemon would share it with the "
+                          f"old one, and userns-commit could not tell the old images from the "
+                          f"live ones; remove containerd-namespace (daemon.json or dockerd's "
+                          f"flags)")
 
 
 def containers(inv: Inventory, r: Report) -> None:

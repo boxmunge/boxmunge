@@ -28,10 +28,27 @@ def alerts(monkeypatch):
     return sent
 
 
+SYSTEM = "/run/containerd/containerd.sock"
+MANAGED = "/var/run/docker/containerd/containerd.sock"
+
+
+def _live(monkeypatch, address=SYSTEM, namespace=f"moby-{S}.{S}") -> None:
+    """The remapped daemon's containerd, as docker info reports it."""
+    monkeypatch.setattr(cm.uo, "docker_info", lambda: {"Containerd": {
+        "Address": address, "Namespaces": {"Containers": namespace, "Plugins": "x"}}})
+
+
+def _c8d(store, address=SYSTEM, **kw) -> dict:
+    return {"driver_type": cm.CONTAINERD_STORE, "store_root": str(store),
+            "managed": address == MANAGED, "containerd": {"address": address,
+                                                          "namespace": "moby"}, **kw}
+
+
 @pytest.fixture
 def remapped(monkeypatch):
     monkeypatch.setattr(cm.uo, "remap_offset", lambda paths: S)
     monkeypatch.setattr(cm, "deployed_among", lambda names, paths: [])
+    _live(monkeypatch)
 
 
 def test_refuses_inside_the_soak_and_when_unhealthy(paths, tmp_path, monkeypatch, remapped) -> None:
@@ -88,17 +105,56 @@ def test_a_commit_resumed_after_a_crash_measures_against_the_first_size(
 
 
 def test_a_store_that_did_not_shrink_is_loud(paths, tmp_path, monkeypatch, remapped) -> None:
-    monkeypatch.setattr(cm, "_GC_WAIT", 0)
-    _journal(paths, tmp_path, {"driver_type": cm.CONTAINERD_STORE, "store_root": str(tmp_path),
-                               "containerd_address": "/run/x.sock", "namespace": "moby",
-                               "managed": False, "size": 10**9})
-    monkeypatch.setattr(cm, "_clean_containerd", lambda prior: None)
+    _journal(paths, tmp_path, {"driver_type": "", "store_root": str(tmp_path / "overlay2"),
+                               "size": 10**9})
     with pytest.raises(cm.MigrationError, match="only 0 bytes were freed"):
         cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
     assert load_journal(paths).phase == "applied"
 
 
-PRIOR = {"containerd_address": "/run/containerd/containerd.sock", "namespace": "moby"}
+def test_the_system_containerd_is_judged_by_the_namespace_not_its_size(
+        paths, tmp_path, monkeypatch, remapped) -> None:
+    """Other namespaces' content, and blobs they share, stay in its store."""
+    _journal(paths, tmp_path, _c8d(tmp_path, size=10**9))
+    cleaned = []
+    monkeypatch.setattr(cm, "_clean_containerd", cleaned.append)
+    assert cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img").phase == "committed"
+    assert cleaned == [_c8d(tmp_path, size=10**9)]
+
+
+def test_a_journal_without_the_recorded_containerd_is_refused(paths, tmp_path,
+                                                              remapped) -> None:
+    old = {"driver_type": cm.CONTAINERD_STORE, "store_root": str(tmp_path), "managed": False,
+           "containerd_address": SYSTEM, "namespace": "moby", "size": 0}
+    (tmp_path / "volumes").mkdir()
+    _journal(paths, tmp_path, old)
+    with pytest.raises(cm.MigrationError, match="journalled before boxmunge recorded.*"
+                                                "userns-rollback, then userns-migrate"):
+        cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
+    assert (tmp_path / "volumes").is_dir() and "commit-before" not in load_journal(paths).items
+
+
+@pytest.mark.parametrize("address, namespace, match", [
+    (SYSTEM, "moby", "uses the old daemon's containerd namespace moby"),
+    ("/srv/c.sock", f"moby-{S}.{S}", "changed during the soak"),
+    (SYSTEM, "moby-7.7", "not /run/containerd/containerd.sock, namespace moby-1048576"),
+])
+def test_a_remapped_daemon_not_beside_the_old_namespace_is_refused(
+        paths, tmp_path, monkeypatch, remapped, address, namespace, match) -> None:
+    _live(monkeypatch, address, namespace)
+    _journal(paths, tmp_path, _c8d(tmp_path, size=0))
+    monkeypatch.setattr(cm, "_clean_containerd", lambda prior: pytest.fail("cleaned"))
+    with pytest.raises(cm.MigrationError, match=match):
+        cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
+    assert "commit-before" not in load_journal(paths).items
+
+
+PRIOR = {"containerd": {"address": SYSTEM, "namespace": "moby"}}
+PLUGINS = ("TYPE ID PLATFORMS STATUS\n"
+           "io.containerd.snapshotter.v1 overlayfs linux/amd64 ok\n"
+           "io.containerd.snapshotter.v1 native linux/amd64 ok\n"
+           "io.containerd.snapshotter.v1 devmapper linux/amd64 skip\n"
+           "io.containerd.content.v1 content - ok\n")
 
 
 class FakeNamespace:
@@ -111,6 +167,7 @@ class FakeNamespace:
                  containers=(), pinned=False) -> None:
         self.leases, self.images, self.containers = set(leases), set(images), set(containers)
         self.snapshots, self.content = {"top", "base"}, {"sha256:a", "sha256:b"}
+        self.native: set[str] = set()  # another snapshotter's, which nothing pins
         self.pinned = pinned  # something outside the old daemon's roots holds them
         self.calls: list[tuple[str, ...]] = []
 
@@ -119,6 +176,8 @@ class FakeNamespace:
         self.calls.append(args)
         kind = args[0]
         verb = args[3] if kind == "snapshots" else args[1]
+        if kind == "plugins":
+            return PLUGINS
         if (kind, verb) == ("snapshots", "rm"):
             raise cm.MigrationError("cannot remove snapshot with child: failed precondition")
         if (kind, verb) == ("leases", "create"):
@@ -127,11 +186,13 @@ class FakeNamespace:
             self.leases -= set(a for a in args[2:] if a != "--sync")
             if "--sync" in args and not (self.leases or self.images or self.containers
                                          or self.pinned):
-                self.snapshots, self.content = set(), set()
+                self.snapshots, self.content, self.native = set(), set(), set()
         elif (kind, verb) == ("images", "rm"):
             self.images -= set(args[2:])
         elif kind == "snapshots":
-            return "KEY PARENT KIND\n" + "".join(f"{k}  Committed\n" for k in sorted(self.snapshots))
+            assert args[2] in ("overlayfs", "native"), args  # only the ones that loaded
+            held = self.snapshots if args[2] == "overlayfs" else self.native
+            return "KEY PARENT KIND\n" + "".join(f"{k}  Committed\n" for k in sorted(held))
         else:
             held = {"leases": self.leases, "images": self.images, "containers": self.containers,
                     "content": self.content}[kind]
@@ -160,8 +221,8 @@ def test_a_resumed_clean_with_nothing_left_to_remove_still_collects(monkeypatch)
 
 
 @pytest.mark.parametrize("kw, held", [
-    ({"containers": ("old",)}, "1 containers, 2 content blobs, 2 snapshots"),
-    ({"pinned": True}, "2 content blobs, 2 snapshots"),
+    ({"containers": ("old",)}, "1 containers, 2 content blobs, 2 overlayfs snapshots"),
+    ({"pinned": True}, "2 content blobs, 2 overlayfs snapshots"),
 ])
 def test_what_the_collector_leaves_is_loud(monkeypatch, kw, held) -> None:
     monkeypatch.setattr(cm, "_ctr", FakeNamespace(**kw))
@@ -171,25 +232,33 @@ def test_what_the_collector_leaves_is_loud(monkeypatch, kw, held) -> None:
         cm._clean_containerd(PRIOR)
 
 
-def test_dockerds_own_old_containerd_root_is_removed(paths, tmp_path, remapped) -> None:
+def test_snapshots_of_every_loaded_snapshotter_are_counted(monkeypatch) -> None:
+    ns = FakeNamespace(pinned=True)
+    ns.native = {"n1"}
+    monkeypatch.setattr(cm, "_ctr", ns)
+    with pytest.raises(cm.MigrationError, match="2 overlayfs snapshots, 1 native snapshots"):
+        cm._clean_containerd(PRIOR)
+
+
+def test_dockerds_own_old_containerd_root_is_removed(paths, tmp_path, monkeypatch,
+                                                    remapped) -> None:
     store = tmp_path / "containerd" / "daemon"
     (store / "io.containerd.content.v1.content").mkdir(parents=True)
     (store / "io.containerd.content.v1.content" / "blob").write_bytes(b"x" * 100000)
     (tmp_path / f"{S}.{S}" / "containerd" / "daemon").mkdir(parents=True)
-    prior = {"driver_type": cm.CONTAINERD_STORE, "store_root": str(store), "managed": True,
-             "containerd_address": "/var/run/docker/containerd/containerd.sock",
-             "namespace": "moby", "size": cm._old_store_size(
-                 {"driver_type": cm.CONTAINERD_STORE, "store_root": str(store)}, tmp_path)}
-    _journal(paths, tmp_path, prior)
+    _live(monkeypatch, MANAGED)
+    _journal(paths, tmp_path, _c8d(store, MANAGED, size=cm._old_store_size(
+        {"driver_type": cm.CONTAINERD_STORE, "store_root": str(store)}, tmp_path)))
     assert cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img").phase == "committed"
     assert not store.exists() and (tmp_path / f"{S}.{S}" / "containerd" / "daemon").is_dir()
 
 
-def test_an_old_containerd_root_still_in_use_is_left(paths, tmp_path, remapped) -> None:
+def test_an_old_containerd_root_still_in_use_is_left(paths, tmp_path, monkeypatch,
+                                                     remapped) -> None:
     store = tmp_path / "containerd" / "daemon"
     store.mkdir(parents=True)
-    _journal(paths, tmp_path, {"driver_type": cm.CONTAINERD_STORE, "store_root": str(store),
-                               "managed": True, "size": 0})
+    _live(monkeypatch, MANAGED)
+    _journal(paths, tmp_path, _c8d(store, MANAGED, size=0))
     with pytest.raises(cm.MigrationError, match="may still be in use"):
         cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
     assert store.is_dir()
@@ -226,11 +295,8 @@ def test_a_commit_alerts_how_it_went(paths, tmp_path, remapped, alerts) -> None:
 
 def test_a_failure_once_the_commit_began_alerts(paths, tmp_path, monkeypatch, remapped,
                                                 alerts) -> None:
-    monkeypatch.setattr(cm, "_GC_WAIT", 0)
-    _journal(paths, tmp_path, {"driver_type": cm.CONTAINERD_STORE, "store_root": str(tmp_path),
-                               "containerd_address": "/run/x.sock", "namespace": "moby",
-                               "managed": False, "size": 10**9})
-    monkeypatch.setattr(cm, "_clean_containerd", lambda prior: None)
+    _journal(paths, tmp_path, {"driver_type": "", "store_root": str(tmp_path / "overlay2"),
+                               "size": 10**9})
     with pytest.raises(cm.MigrationError, match="only 0 bytes were freed"):
         cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
     assert alerts == [("userns commit stopped", 1)]
@@ -243,3 +309,29 @@ def test_nothing_to_commit_sends_no_alert(paths, journal, alerts) -> None:
     with pytest.raises(cm.MigrationError, match="nothing to commit"):
         cm.commit(paths, now=SOAKED)
     assert alerts == []
+
+
+@pytest.mark.parametrize("address, managed, root", [
+    (MANAGED, True, "{docker}/containerd/daemon"),
+    ("/run/docker/containerd/containerd.sock", True, "{docker}/containerd/daemon"),
+    (SYSTEM, False, "/var/lib/containerd"),
+])
+def test_the_prior_store_is_the_containerd_the_daemon_reports(tmp_path, address, managed,
+                                                               root) -> None:
+    """Asked of the daemon, not inferred: a stale containerd/daemon left by an
+    earlier dockerd does not make the system containerd dockerd's own."""
+    from boxmunge.userns.switch import prior_store
+    (tmp_path / "containerd" / "daemon").mkdir(parents=True)
+    inv = Inventory("overlayfs", cm.CONTAINERD_STORE, str(tmp_path), "29.9.0",
+                    containerd_address=address, containerd_namespace="moby")
+    prior = prior_store(inv)
+    assert prior["managed"] is managed and prior["store_root"] == root.format(docker=tmp_path)
+    assert prior["containerd"] == {"address": address, "namespace": "moby"}
+
+
+def test_a_containerd_the_migration_does_not_know_has_no_prior_store(tmp_path) -> None:
+    from boxmunge.userns.switch import prior_store
+    inv = Inventory("overlayfs", cm.CONTAINERD_STORE, str(tmp_path), "29.9.0",
+                    containerd_address="/srv/c.sock", containerd_namespace="moby")
+    with pytest.raises(cm.MigrationError, match="containerd at '/srv/c.sock'"):
+        prior_store(inv)

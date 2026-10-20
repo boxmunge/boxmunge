@@ -45,11 +45,6 @@ ROOT = Path("/var/lib/containerd")
 # On the dind volume: overlayfs cannot stack on the container's own rootfs.
 STORE = Path("/var/lib/docker/boxmunge-system-containerd")
 LOG = Path("/var/log/containerd-system.log")
-# dockerd's own containerd root, left by the earlier modules: kept aside, or
-# the migration would take the system containerd for dockerd's own
-# (switch.prior_store looks for it).
-MANAGED = Path("/var/lib/docker/containerd")
-ASIDE = Path("/var/lib/docker/boxmunge-managed-containerd-aside")
 
 
 def _ctr(namespace: str, *args: str) -> str:
@@ -79,8 +74,9 @@ def _unmount_store() -> None:
 def system_containerd():
     daemon = ProcessDaemon()
     daemon.stop()
-    if MANAGED.exists():
-        MANAGED.rename(ASIDE)
+    # dockerd's own containerd root, from the earlier modules, stays: the
+    # migration asks the daemon which containerd it uses.
+    assert Path("/var/lib/docker/containerd/daemon").is_dir()
     STORE.mkdir()
     ROOT.mkdir(exist_ok=True)
     subprocess.run(["mount", "--bind", str(STORE), str(ROOT)], check=True)
@@ -109,8 +105,6 @@ def system_containerd():
         containerd.wait(timeout=60)
         _unmount_store()
         shutil.rmtree(STORE)
-        if ASIDE.exists():
-            ASIDE.rename(MANAGED)
         write_daemon_json(prior_daemon_json())
         daemon.start()
 
@@ -164,6 +158,7 @@ def test_commit_after_a_rollback_and_a_second_migration_empties_the_old_namespac
     _migrate(paths, images)
     j = load_journal(paths)
     assert j.prior_store["managed"] is False and j.prior_store["store_root"] == str(ROOT)
+    assert j.prior_store["containerd"] == {"address": SOCK, "namespace": "moby"}
     remapped = f"moby-{j.offset}.{j.offset}"
     theirs = {k: _ctr(remapped, k, "ls", "-q") for k in ("containers", "leases")}
     soaked = datetime.fromisoformat(j.applied_at) + timedelta(hours=49)
