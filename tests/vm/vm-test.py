@@ -555,6 +555,15 @@ def phase_2_deploy_v1(work_dir: Path):
     if canary_copy.exists():
         shutil.rmtree(canary_copy)
     shutil.copytree(CANARY_DIR, canary_copy)
+    # canary/ publishes a host port for self-test, which deploys it on its own
+    # platform path; deployed as a user project it is routed through Caddy, and
+    # a user project may not publish ports (security.published_ports aside).
+    compose = canary_copy / "compose.yml"
+    published = '    ports:\n      - "${CANARY_PORT:-19876}:8080"\n'
+    text = compose.read_text()
+    if published not in text:
+        step_fail("canary compose changed", f"expected to drop {published!r} from {compose}")
+    compose.write_text(text.replace(published, "", 1))
     (canary_copy / "VERSION").write_text("v1\n")
     step_pass("Canary project prepared with VERSION=v1")
 
