@@ -27,6 +27,7 @@ from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import deployed_among, load_registered_projects
 from boxmunge.userns import offset as uo
+from boxmunge.userns.durable import barrier
 from boxmunge.userns.images import IMAGES_DIR, remove_tars
 from boxmunge.userns.inventory import CONTAINERD_STORE, Inventory
 from boxmunge.userns.journal import FORWARD, Journal, load_journal, save_journal
@@ -242,6 +243,7 @@ def _commit(paths: BoxPaths, j: Journal, images_dir: Path) -> Journal:
         shutil.rmtree(prior["store_root"])
     if not (prior["driver_type"] == CONTAINERD_STORE and not prior["managed"]):
         _check_freed(prior, old_root, before)
+    barrier(paths, j, images_dir)  # the deletions, before the journal says committed
     j.phase = "committed"
     save_journal(paths, j)
     return j

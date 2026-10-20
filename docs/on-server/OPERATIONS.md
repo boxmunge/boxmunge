@@ -1319,6 +1319,24 @@ root: the supervisor user compares `/etc/docker/daemon.json` with the keys in
 restarts Docker. A `caddy/Caddyfile` that is not world-readable is fixed with the `chmod` the check
 prints.
 
+### Docker will not start after a power cut during userns-migrate or userns-rollback
+
+`journalctl -u docker` shows `panic: assertion failed: Page expected to be: N, but self identifies
+as 0`: one of the daemon's bolt databases was torn by the cut. Find it among the `*.db` files under
+`/var/lib/docker` (the remapped root `/var/lib/docker/<S>.<S>` included) that changed in the seconds
+before the cut (`sudo find /var/lib/docker -name '*.db' -newermt '<time of the cut>'`), or with
+`bbolt check <file>` where Go's bbolt tool is installed.
+
+- BuildKit's databases (`<root>/buildkit/*.db`) are its build cache and history, written without
+  syncing, so a cut can tear them. Move the torn one aside (`sudo mv <file> <file>.torn`), run
+  `sudo systemctl reset-failed docker.socket docker.service && sudo systemctl start docker`, then run
+  the same userns command again. Only cached build steps are lost.
+- Any other database (`<root>/network/files/local-kv.db`, `<root>/volumes/metadata.db`) is not a
+  cache, and Docker syncs it, so a torn one means the disk lost writes it had confirmed: check the disk
+  (`dmesg`). Do not delete it or run the command again. Neither `userns-migrate` nor `userns-rollback`
+  can go on without the daemon that panics, so restore the projects from their `premigrate` backups
+  (synced off-site before the downtime) on a repaired Docker instead.
+
 ---
 
 ### Need to recover from a bad deploy

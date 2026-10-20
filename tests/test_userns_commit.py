@@ -21,6 +21,15 @@ def _journal(paths, root, prior):
 
 
 @pytest.fixture(autouse=True)
+def flushes(monkeypatch):
+    """The durability barrier, recorded with the phase it came before."""
+    seen: list[str] = []
+    monkeypatch.setattr(cm, "barrier", lambda paths, j, images_dir: seen.append(
+        load_journal(paths).phase))
+    return seen
+
+
+@pytest.fixture(autouse=True)
 def alerts(monkeypatch):
     sent = []
     monkeypatch.setattr(cm, "notify", lambda p, title, body, **kw: sent.append(
@@ -77,7 +86,8 @@ def test_nothing_to_commit(paths, journal) -> None:
         cm.commit(paths, now=SOAKED)
 
 
-def test_graph_driver_store_is_removed_and_verified(paths, tmp_path, monkeypatch, remapped) -> None:
+def test_graph_driver_store_is_removed_and_verified(paths, tmp_path, monkeypatch, remapped,
+                                                   flushes) -> None:
     (tmp_path / "overlay2" / "layer").mkdir(parents=True)
     (tmp_path / "overlay2" / "layer" / "f").write_bytes(b"x" * 100000)
     for sub in ("containers", "volumes", "image"):
@@ -91,6 +101,7 @@ def test_graph_driver_store_is_removed_and_verified(paths, tmp_path, monkeypatch
     assert not (tmp_path / "volumes").exists()
     j = load_journal(paths)
     assert j.phase == "committed" and int(j.items["commit-before"]) == size
+    assert flushes == ["applied"]  # the deletions flushed while the journal still said so
 
 
 def test_a_commit_resumed_after_a_crash_measures_against_the_first_size(
