@@ -198,6 +198,9 @@ def cmd_log(args: list[str]) -> None:
     project = parsed.get("--project")
     if project is not None:
         require_project_name("log", project)
+    if parsed.has("--containers") and project is None:
+        usage_error("log", "--containers needs --project <name>: it reads that "
+                           "project's container logs")
     since = parsed.get("--since")
     if since is not None:
         try:

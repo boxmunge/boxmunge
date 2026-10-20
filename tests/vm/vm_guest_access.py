@@ -23,6 +23,12 @@ from pathlib import Path
 
 KNOWN_HOSTS = Path.home() / ".ssh" / "known_hosts"
 EGRESS_PROBE_HOST = "deb.debian.org"
+# Debian and Docker packages, GitHub releases (cosign, boxmunge) and where
+# their downloads redirect, Docker Hub and its layer store, Alpine packages
+# (the system image's build).
+EGRESS_HOSTS = (EGRESS_PROBE_HOST, "download.docker.com", "github.com",
+                "release-assets.githubusercontent.com", "registry-1.docker.io",
+                "production.cloudflare.docker.com", "dl-cdn.alpinelinux.org")
 EGRESS_RETRY_PAUSE = 5  # seconds before the one retry
 
 
@@ -92,13 +98,15 @@ def check_cloud_init(ssh_run, port: int) -> None:
         )
 
 
-def _probe_egress(ssh_run, port: int):
-    dns = ssh_run("test", port, f"timeout 15 getent hosts {EGRESS_PROBE_HOST}",
-                  check=False)
-    https = ssh_run("test", port,
-                    f"curl -sS -o /dev/null --max-time 15 https://{EGRESS_PROBE_HOST}/",
-                    check=False)
-    return dns, https
+def _probe_egress(ssh_run, port: int) -> dict[str, object]:
+    """DNS, then HTTPS to every host the install reaches; any HTTP answer
+    (a 404 too) counts."""
+    probes = {"DNS   (getent hosts " + EGRESS_PROBE_HOST + ")": ssh_run(
+        "test", port, f"timeout 15 getent hosts {EGRESS_PROBE_HOST}", check=False)}
+    for host in EGRESS_HOSTS:
+        probes[f"HTTPS (curl https://{host}/)"] = ssh_run(
+            "test", port, f"curl -sS -o /dev/null --max-time 15 https://{host}/", check=False)
+    return probes
 
 
 def _outcome(result, timed_out_code: int | None = None) -> str:
@@ -111,21 +119,25 @@ def _outcome(result, timed_out_code: int | None = None) -> str:
 
 
 def check_guest_egress(ssh_run, port: int) -> None:
-    """Fail loudly unless the guest can resolve and reach the internet.
+    """Fail loudly unless the guest can resolve names and reach every host
+    the install needs. An application firewall may allow qemu to some hosts
+    and not others: GitHub's release assets have been blocked while
+    deb.debian.org was not.
 
     ssh_run is the harness's ssh_run(user, port, command, check) helper. One
     retry after a short pause covers a guest whose network is still settling.
     """
-    dns, https = _probe_egress(ssh_run, port)
-    if dns.returncode != 0 or https.returncode != 0:
+    probes = _probe_egress(ssh_run, port)
+    if any(r.returncode != 0 for r in probes.values()):
         time.sleep(EGRESS_RETRY_PAUSE)
-        dns, https = _probe_egress(ssh_run, port)
-    if dns.returncode == 0 and https.returncode == 0:
+        probes = _probe_egress(ssh_run, port)
+    if all(r.returncode == 0 for r in probes.values()):
         return
+    report = "\n".join(f"  {what}: {_outcome(r, 124 if what.startswith('DNS') else None)}"
+                       for what, r in probes.items())
     raise RuntimeError(
-        "The VM has no outbound network (checked twice).\n"
-        f"  DNS   (getent hosts {EGRESS_PROBE_HOST}): {_outcome(dns, 124)}\n"
-        f"  HTTPS (curl https://{EGRESS_PROBE_HOST}/): {_outcome(https)}\n"
+        "The VM cannot reach every host the install needs (checked twice).\n"
+        f"{report}\n"
         "QEMU user-mode networking makes every guest connection, DNS included, "
         "from the host's qemu-system-x86_64 process. If the host itself is online, "
         "something on the host is blocking that process: check application "

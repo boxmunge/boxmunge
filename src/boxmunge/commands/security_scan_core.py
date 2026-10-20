@@ -17,6 +17,7 @@ from boxmunge.commands.security_scan_relevance import (
     log_relevance_gaps,
 )
 from boxmunge.commands.security_scan_inputs import (
+    ProjectHardening,
     ProjectMeta,
     ScanTarget,
     hardening_profile,
@@ -34,7 +35,6 @@ from boxmunge.commands.security_enforce import (
 )
 from boxmunge.cve.alerting import emit_scan_alerts
 from boxmunge.cve.grace import GraceError, init_grace_if_missing
-from boxmunge.cve.hardening import HardeningProfile
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.policy import (
     FindingDisposition,
@@ -284,7 +284,7 @@ def _check_declared_runtimes(project: str, meta: ProjectMeta) -> None:
 
 
 def _evaluate(
-    paths: BoxPaths, project: str, meta: ProjectMeta, profile: HardeningProfile,
+    paths: BoxPaths, project: str, meta: ProjectMeta, profile: ProjectHardening,
     supps: tuple[Suppression, ...], results: list[ScanResult], kev: KevCatalog,
 ) -> list[ProjectDecision]:
     """One decision per scanned image, under the project's policy."""
@@ -308,7 +308,8 @@ def _evaluate(
         decision = evaluate_project(
             project, sr,
             posture=posture,
-            hardening_profile=profile,
+            hardening_profile=profile.applied,
+            upcoming=profile.upcoming,
             dangerously_disable_quarantine=dangerously,
             suppressions=supps,
             today=today,
@@ -329,7 +330,7 @@ def _evaluate(
 
 
 def audit_targets(
-    paths: BoxPaths, project: str, *, meta: ProjectMeta, profile: HardeningProfile,
+    paths: BoxPaths, project: str, *, meta: ProjectMeta, profile: ProjectHardening,
     supps: tuple[Suppression, ...], targets: list[ScanTarget],
     unidentified: dict[str, str], kev: KevCatalog, basis: str,
 ) -> ProjectScan:

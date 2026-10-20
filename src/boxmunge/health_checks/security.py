@@ -17,8 +17,10 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from boxmunge.commands.health_cmd import HealthCheck
+from boxmunge.cve.scan_state import read_scan_state
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.project_registry import deployed_among, read_registry
+from boxmunge.state import StateError
 
 # The scan runs daily (03:00-03:30); 36h tolerates one late or missed run's
 # worth of jitter without crying wolf, and catches a second missed night.
@@ -125,3 +127,39 @@ def check_cve_scan_freshness(paths: BoxPaths, *, now: datetime | None = None) ->
         detail=f"all {len(projects)} deployed projects scanned within {int(SCAN_MAX_AGE.total_seconds() // 3600)}h",
     )
 
+
+
+def check_cve_hardening_upcoming(paths: BoxPaths) -> HealthCheck:
+    """Warn when a project has findings that quarantine from 0.12, not now.
+
+    The hardening penalty counts a compose-only service without
+    `read_only: true` (and a manifest `cap_add` / `no_new_privileges: false`);
+    0.11.0 only warns. These findings are not quarantined, so they are not
+    safe either: the fix is named in `boxmunge security <project>`.
+    """
+    registry = read_registry(paths)
+    flagged: list[str] = []
+    for name in deployed_among(registry.names, paths):
+        try:
+            state = read_scan_state(paths.project_scan_state(name))
+        except StateError as e:
+            flagged.append(f"{name}: scan state unreadable ({e})")
+            continue
+        n = len({
+            (f.get("cve_id"), f.get("package"))
+            for d in (state or {}).get("decisions") or []
+            for f in d.get("findings") or []
+            if f.get("hardening_would_quarantine") is True
+        })
+        if n:
+            flagged.append(f"{name}: {n} finding(s)")
+    if flagged:
+        return HealthCheck(
+            name="cve-hardening", status="warn",
+            detail="will quarantine from 0.12 (not quarantined now); add `read_only: true` "
+                   "in compose.yml, declare the service in the manifest, or accept the risk "
+                   "with a `security` declaration; see `boxmunge security <project>` -- "
+                   + "; ".join(flagged),
+        )
+    return HealthCheck(name="cve-hardening", status="ok",
+                       detail="no finding is waiting on the 0.12 hardening rule")

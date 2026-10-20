@@ -25,6 +25,7 @@ AlertKind = Literal[
     "kev_fix_pending",
     "fix_available",
     "kev_at_risk",
+    "hardening_upcoming",
 ]
 
 

@@ -145,3 +145,14 @@ class TestRunLogTornLines:
         _write_log_entries(paths.log_file, SAMPLE_ENTRIES)
         assert run_log(paths) == 0
         assert capsys.readouterr().err == ""
+
+
+def test_containers_without_project_is_a_usage_error(capsys) -> None:
+    """--containers reads one project's container logs: without --project it
+    would do nothing, so it is refused rather than ignored."""
+    import pytest
+    from boxmunge.commands.log_cmd import cmd_log
+    with pytest.raises(SystemExit) as e:
+        cmd_log(["--containers"])
+    assert e.value.code == 2
+    assert "--containers needs --project" in capsys.readouterr().err

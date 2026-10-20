@@ -10,13 +10,13 @@ boxmunge is a minimalist VPS hosting framework for running multiple Docker Compo
 
 Key features:
 
-- **Restricted deploy shell** -- agents connect as `deploy` and can only run boxmunge commands; no filesystem browsing, no raw docker, no shell utilities
+- **Restricted deploy shell** -- agents connect as `deploy` and can only run boxmunge commands; no filesystem browsing, no raw docker, no shell utilities (a project's own `pre_deploy` hook does run on the host, as deploy)
 - **Standard project layout and manifest** -- every project declares its services, routing, backup strategy, and health checks in `manifest.yml`
-- **Staging environment** -- `stage` deploys alongside production at `staging.<hostname>` for verification before `promote`
+- **Staging environment** -- `stage` deploys alongside production at `staging.<host>` (each manifest host) for verification before `promote`
 - **CLI-managed secrets** -- `secrets` manages project-level and host-level secrets; no manual file editing
 - **Caddy reverse proxy in Docker** -- automatic HTTPS via Let's Encrypt, containerised for blast-radius containment
 - **Python CLI** -- `boxmunge` command covers the full lifecycle: deploy, stage, promote, backup, restore, health check
-- **Encrypted backups with mandatory restore** -- all backups encrypted with age; restore script required if backup type is not `none`
+- **Encrypted backups with mandatory restore** -- all backups encrypted with age; `restore_command` required if backup type is not `none`
 - **Health checking with Pushover alerting** -- three-layer checks (Docker, HTTP, smoke test) with graduated alert logic
 - **On-server docs via agent-help** -- documentation accessible via `agent-help <topic>` so agents can orient without filesystem access
 
@@ -30,11 +30,16 @@ Key features:
   config/                     # host-level config (root:deploy 750)
     boxmunge.yml              # main host configuration
     backup.key                # backup encryption key (root:deploy 640)
-    secrets/                  # host-level secrets (deploy:deploy 600)
-  caddy/                      # Caddy container config (root:root 755)
+    secrets.env               # host-level secrets (deploy 600)
+    rclone/                   # rclone.conf for backup-sync (root:deploy 750)
+  system/                     # boxmunge-system container: compose.yml, Dockerfile, .env
+  caddy/                      # Caddy container config (root:deploy 750)
     compose.yml               # Caddy's own compose file
-    Caddyfile                 # main Caddyfile (imports sites/*.conf)
-    sites/                    # generated per-project Caddy configs
+    Caddyfile                 # main Caddyfile (imports sites/*.conf; 0644 on a remapped box)
+    sites/                    # generated per-project Caddy configs (root:deploy 775)
+    maintenance/              # the maintenance page (root:deploy 755)
+  upgrade-state/              # upgrade slots, probation, blocklist (root:deploy 770)
+  upgrade-root/               # root-only (0700): upgrade.lock, userns-migration.json
   projects/                   # project directories (deploy:deploy 755)
     <project-name>/
       manifest.yml            # project manifest (includes id, source)
@@ -45,8 +50,6 @@ Key features:
       caddy.override.conf     # optional: verbatim Caddy config escape hatch (operator-placed)
       boxmunge-scripts/       # project's integration scripts
         smoke.sh
-        backup.sh
-        restore.sh
       backups/                # encrypted local backup archives
       data/                   # persistent volume mounts
       repo/                   # git clone (source: git projects only)
@@ -61,7 +64,8 @@ Key features:
   inbox/                      # uploaded bundles awaiting deployment
   state/                      # operational state (deploy:deploy 755)
     health/                   # per-project health state JSON
-    deploy/                   # per-project deploy state JSON
+    deploy/                   # per-project deploy state; <p>.binds.json, <p>.users.json (who each service runs as)
+    scans/                    # per-project CVE scan state
   docs/                       # on-server documentation (root:root 755)
   logs/                       # boxmunge operational logs (deploy:deploy 755)
     boxmunge.log              # today's entries (UTC); writers rotate it under a lock
@@ -103,7 +107,7 @@ Project containers are reachable from Caddy using project-scoped network aliases
 
 ### Staging Network
 
-When a project is staged, its containers run alongside production as compose project `<project>-staging`, on its own networks with its own volumes, container names, image tags and `-staging` data directories; `stage` proves with `docker compose config` that the two environments share none of them before starting anything. Caddy routes `staging.<hostname>` to the staged containers. Promoting tears down staging and replaces production. Unstaging tears down staging without affecting production.
+When a project is staged, its containers run alongside production as compose project `<project>-staging`, on its own networks with its own volumes, image tags and `-staging` data directories; `stage` proves with `docker compose config` that the two environments share none of them before starting anything. Caddy routes `staging.<host>` (each manifest host) to the staged containers. Promoting deploys the staged release to production (its containers are recreated), then tears down staging. Unstaging tears down staging without affecting production.
 
 ### Config Generation
 
@@ -139,7 +143,8 @@ The `deploy` user runs a restricted boxmunge shell. Agents connect as `deploy`.
 - Gets no SSH forwarding, tunnels or client environment beyond the locale, so nothing
   bypasses the shell (TRUST_MODEL.md, "SSH access")
 
-This is the complete interface for agents. There is nothing else.
+This is the complete interface for agents, apart from the `pre_deploy` hook a project ships,
+which runs on the host as deploy.
 
 ### supervisor (bash + sudo)
 
@@ -157,7 +162,8 @@ The `supervisor` user has a standard bash shell with sudo access, intended for h
 |------|-------------|
 | `/opt/boxmunge/bin/` | root:root 755 |
 | `/opt/boxmunge/config/` | root:deploy 750 |
-| `/opt/boxmunge/caddy/` | root:root 755 |
+| `/opt/boxmunge/caddy/` | root:deploy 750 |
+| `/opt/boxmunge/upgrade-root/` | root:root 700 |
 | `/opt/boxmunge/docs/` | root:root 755 |
 
 **deploy** owns the data plane:
@@ -182,7 +188,7 @@ boxmunge supports two project sources, declared in `manifest.yml` via the `sourc
 
 ### Deploy Steps
 
-`deploy <project>` executes these steps in order:
+`prod-deploy <project>` executes these steps in order:
 
 1. Resolve source -- locate the bundle in the inbox, or fetch the git repo and resolve the ref to a full commit SHA (checked out, detached, once the snapshot below is taken)
 2. Unpack -- a bundle is extracted into `projects/<project>/.releases/incoming/`, not over the live project
@@ -190,23 +196,24 @@ boxmunge supports two project sources, declared in `manifest.yml` via the `sourc
 4. Pre-deploy snapshot -- encrypted backup of the current data, taken with the outgoing release's own backup configuration (unless `--no-snapshot`)
 5. Keep the outgoing release -- its code is copied to `.releases/previous/` and paired with that snapshot, for `rollback`
 6. Install -- only a release that passed every check replaces the live project files
-7. Pre-deploy command -- run `deploy.pre_deploy` from manifest if defined, on the host in the project directory, without a shell, as deploy (PROJECT_CONVENTIONS.md, TRUST_MODEL.md)
-8. Generate configs -- write Caddy site config and compose overlay (networking, env_files, resource limits)
-9. Start containers -- re-validate the installed files, check every bind source without following symlinks and record its kind (creating missing ones as directories), then `docker compose up -d` with overlay. Every later start (upgrade, container update, `recover`, `resume`, `restore`) repeats the check against that record first; see TRUST_MODEL.md, "Container Escape and Root Restarts"
-10. Reload Caddy -- graceful, zero-downtime
-11. Smoke test -- run `boxmunge-scripts/smoke.sh`, interpret exit code
-12. Record state -- write deploy state JSON atomically
-13. Log the deployment -- append to boxmunge operational log
+7. Decide users -- build and pull the release's images, read each image's `USER`, and decide who every service runs as (refusing a registry image that would run as root without a declaration, and data the new user could not own); a refusal leaves the install open and starts nothing
+8. Pre-deploy command -- run `deploy.pre_deploy` from manifest if defined, on the host in the project directory, without a shell, as deploy (PROJECT_CONVENTIONS.md, TRUST_MODEL.md)
+9. Generate configs -- write Caddy site config and compose overlay (networking, env_files, resource limits)
+10. Start containers -- prepare storage (the data helper creates or chowns fresh volumes and bind sources a numeric non-root or remapped service needs), re-validate the installed files, check every bind source without following symlinks and record its kind (creating missing ones as directories), then `docker compose up -d` with overlay. Every later start (upgrade, container update, `recover`, `resume`, `restore`) repeats the check against that record first; see TRUST_MODEL.md, "Container Escape and Root Restarts"
+11. Reload Caddy -- a graceful reload (the containers were recreated in step 10, so the project restarts)
+12. Smoke test -- run `boxmunge-scripts/smoke.sh`, interpret exit code
+13. Record state -- write deploy state JSON atomically
+14. Log the deployment -- append to boxmunge operational log
 
 A bundle that fails validation stays in the inbox (it is not moved to `.consumed/`) and the command exits non-zero: 3 for a compose hardening rejection, 1 otherwise. `stage` uses the same unpack and validate steps, then moves the release into its own tree, `.releases/staged/`, instead of installing it; it takes no snapshot.
 
 If any step fails, the deploy stops and reports the failure. No automatic rollback -- the operator or agent decides what to do next.
 
-Steps 5 to 9 of a bundle deploy, and every bundle rollback, run inside an install transaction (`release_txn`, `.releases/install.json`). It records the release being installed, the one it replaces, the snapshot that pairs with it, and the phase reached: `committed`, `previous_kept` (the keep moves the old rollback target to `previous.superseded/` rather than deleting it), `installed`, `hook_started` and `switching` (a rollback has `data_restored` instead of `previous_kept`). Each phase is written durably before or after the step it names, so a rerun resumes from it with the same snapshot; `prod-deploy <project> --abandon` undoes it before `hook_started`, through its own durable checkpoints so a rerun after a crash finishes it; a different deploy fixes forward and inherits the rollback pairing and what the attempts it replaced may have done (a hook that ran, containers that started), so it cannot be abandoned once data may have changed. While it is open, `compose_guard` refuses every production start except the one passing the transaction's id, so an upgrade restart or `resume` cannot start a half-installed release. The record also holds the hashes of `live.json` and `previous.json`; a mismatch none of its own steps explains marks it stale, and nothing is resumed automatically.
+Steps 5 to 10 of a bundle deploy, and every bundle rollback, run inside an install transaction (`release_txn`, `.releases/install.json`). It records the release being installed, the one it replaces, the snapshot that pairs with it, and the phase reached: `committed`, `previous_kept` (the keep moves the old rollback target to `previous.superseded/` rather than deleting it), `installed`, `hook_started` and `switching` (a rollback has `data_restored` instead of `previous_kept`). Each phase is written durably before or after the step it names, so a rerun resumes from it with the same snapshot; `prod-deploy <project> --abandon` undoes it before `hook_started`, through its own durable checkpoints so a rerun after a crash finishes it; a different deploy fixes forward and inherits the rollback pairing and what the attempts it replaced may have done (a hook that ran, containers that started), so it cannot be abandoned once data may have changed. While it is open, `compose_guard` refuses every production start except the one passing the transaction's id, so an upgrade restart or `resume` cannot start a half-installed release. The record also holds the hashes of `live.json` and `previous.json`; a mismatch none of its own steps explains marks it stale, and nothing is resumed automatically.
 
 ### Staging Flow
 
-`stage <project>` follows the same steps but deploys to the staging environment at `staging.<hostname>`. After verification:
+`stage <project>` uses the same unpack, validate, user and config steps on its own tree and starts staging at `staging.<host>` for each manifest host; it takes no snapshot, opens no install and runs no pre-deploy hook (promote does, as a full install). After verification:
 
 - `promote <project>` -- deploys the staged release to production, then tears down staging
 - `unstage <project>` -- tears down staging and drops the staged release; production is not touched
@@ -225,7 +232,7 @@ fails tears everything down too.
 Secrets are managed via `secrets` and stored in env files:
 
 - **Project-level secrets** -- stored in `projects/<project>/secrets.env`, injected into containers via the compose overlay
-- **Host-level secrets** -- stored in `config/secrets/`, available to all projects, managed with `secrets --host`
+- **Host-level secrets** -- stored in `config/secrets.env`, available to all projects, managed with `secrets --host`
 
 Secrets are never edited manually. The CLI handles file creation, permissions, and format.
 
@@ -285,7 +292,7 @@ Checks run in three layers:
 | 1 | Warning/error | Alert after N consecutive failures (default 3); re-alert if message changes |
 | 2 | Critical failure | Alert immediately, stop containers, enter `critical_stopped` state |
 
-A project in `critical_stopped` state will not restart automatically. It requires an explicit `deploy` to recover.
+A project in `critical_stopped` state will not restart automatically. It stays down until `recover <project>` (the same build) or a deploy.
 
 ---
 
@@ -333,8 +340,10 @@ The `default` profile (applied when no `security:` block is present) injects int
 - `init: true` — Tini for signal handling and zombie reaping
 - `pids_limit: 512` — kills fork bombs and exec storms
 - `cap_drop` of 14 dangerous Linux capabilities not in Docker's default deny set (`NET_ADMIN`, `SYS_PTRACE`, `SYS_MODULE`, `SYS_RAWIO`, `SYS_TIME`, `SYS_BOOT`, `MAC_ADMIN`, `MAC_OVERRIDE`, `MKNOD`, `AUDIT_WRITE`, `WAKE_ALARM`, `BLOCK_SUSPEND`, `LEASE`, `NET_RAW`)
+- `read_only: true` and a `/tmp` tmpfs, for services the manifest declares
+- the decided `user:` (10001:10001 for a `build:` service whose image sets no non-root `USER`)
 
-Existing v1 manifests gain the floor automatically on next deploy — no edits required.
+A project whose registry images run as root needs `security.user` declarations (or a compose `user:`, or `profile: off`) before its next deploy (`boxmunge doctor` lists them); everything else applies with no edits.
 
 ### Relaxation
 
@@ -344,15 +353,11 @@ A last-resort `profile: "off"` requires a non-empty `reason` and triggers repeat
 
 ### compose_validate
 
-Before configs are written, `compose_validate.py` (added in v0.5) inspects the project's user-authored `compose.yml` and rejects any keys that would defeat the hardening floor — e.g. `privileged: true`, `cap_add: [SYS_ADMIN]`, `security_opt` overrides that re-enable privilege escalation — or reach another project. It checks the resolved model from `docker compose -p <project> config` (interpolation, `.env`, `extends`, `include` applied), and the literal files for `include`/`extends`/`env_file` paths leaving the project. This runs at stage, deploy, resume, and upgrade time, so the floor cannot be silently sidestepped from the user side. The overlay generator reads the same resolved model, so services that arrive through `include:` are hardened too.
+Before configs are written, `compose_validate.py` (added in v0.5) inspects the project's user-authored `compose.yml` and rejects any keys that would defeat the hardening floor — e.g. `privileged: true`, `cap_add: [SYS_ADMIN]`, `security_opt` overrides that re-enable privilege escalation — or reach another project. It checks the resolved model from `docker compose -p <project> config` (interpolation, `.env`, `extends`, `include` applied), and the literal files for `include`/`extends`/`env_file` paths leaving the project. This runs at stage, deploy and upgrade time and before every start (`compose_guard`: resume, recover, restore, container-update, security resume, promote), so the floor cannot be silently sidestepped from the user side. The overlay generator reads the same resolved model, so services that arrive through `include:` are hardened too.
 
 ### Where it fits in the deploy flow
 
-Between step 5 ("Generate configs") and step 6 ("Start containers") in the deploy flow above, boxmunge:
-
-1. Resolves the effective security posture per service (profile + project overrides + service overrides + cap_add subtraction).
-2. Runs `compose_validate` on the user's `compose.yml`.
-3. Emits the hardening fields into `compose.boxmunge.yml` so `docker compose up -d` applies them.
+At step 3 of the deploy flow above, and again before every start, boxmunge runs `compose_validate` on the user's `compose.yml`. At step 9 it resolves the effective security posture per service (profile + project overrides + service overrides + cap_add subtraction) and the decided user, and emits them into `compose.boxmunge.yml` so `docker compose up -d` applies them.
 
 See `TRUST_MODEL.md` for the threat model and `agent-help security` for the runtime introspection command.
 
@@ -404,7 +409,7 @@ Beyond per-container hardening, boxmunge runs a CVE policy engine that scans dep
 
 - **Where it sits** — runs after every successful deploy/stage/promote/resume, and via `boxmunge-cve-scan.timer` daily at 03:00 (±30 min jitter). Lives in `src/boxmunge/cve/` (scanner, policy, quarantine, suppressions, alerting, scan_state, grace) plus the orchestrating `commands/security_*.py`.
 - **Inputs** — Trivy's vulnerability DB (refreshed before each scan), the project's `manifest.yml` (`security.posture`, `dangerously_disable_quarantine`, hardening fields), and the project's `security/suppressions.yml` if present.
-- **Outputs** — per-project `.cve/scan_state.json` (the durable record), quarantine actions (`compose stop` + maintenance Caddy fragment + critical Pushover alert), informational alerts for sub-threshold findings, and structured `log_operation` entries under `cve-scan` / `cve-suppress` / `cve-quarantine` components.
+- **Outputs** — per-project `state/scans/<project>.json` (the durable record), quarantine actions (`compose stop` + maintenance Caddy fragment + critical Pushover alert), informational alerts for sub-threshold findings, and structured `log_operation` entries under `cve-scan` / `cve-suppress` / `cve-quarantine` components.
 - **Per-project scan budget** — each project gets a 600-second wall-clock budget across its image scans. Exceeding it skips remaining images (logged at WARNING) and resumes on the next tick.
 
 See `agent-help cve` (CVE_POLICY.md) for posture tiers, hardening penalty, suppression schema, recovery flow, and alerts.

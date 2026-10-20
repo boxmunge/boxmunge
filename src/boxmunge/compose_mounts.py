@@ -152,8 +152,10 @@ def outside_roots(src: str, base_dir: Path, roots: Iterable[Path]) -> bool:
 
 def check_volumes(
     svc: dict[str, Any], base_dir: Path, paths: BoxPaths, roots: Iterable[Path],
-) -> list[tuple[str, str]]:
-    """Return every hostile volume entry of one service as (entry, advice).
+) -> list[tuple[str, str, bool]]:
+    """Return every hostile volume entry of one service as (entry, advice,
+    relaxable). A bind source outside `roots` is never relaxable, not even
+    by `profile: off`: every start refuses it (compose_guard's bind walk).
 
     `roots` are the directories bind mounts may use: the project directory
     (and the directory holding the compose file, when it is validated
@@ -163,7 +165,7 @@ def check_volumes(
     volumes = svc.get("volumes")
     if not isinstance(volumes, list):
         return []
-    hits: list[tuple[str, str]] = []
+    hits: list[tuple[str, str, bool]] = []
     for entry in volumes:
         if isinstance(entry, dict) and entry.get("type") not in _MOUNT_TYPES:
             hits.append((
@@ -171,6 +173,7 @@ def check_volumes(
                 f"uses mount type {entry.get('type')!r}, whose source boxmunge "
                 f"cannot check; use bind (inside the project), volume, tmpfs "
                 f"or image",
+                True,
             ))
             continue
         src = volume_source(entry)
@@ -182,6 +185,7 @@ def check_volumes(
                 "uses env-var substitution in volumes: source, which is not "
                 "supported — write the host path literally for hardening "
                 "verification",
+                True,
             ))
             continue
         if not is_bind_entry(entry):
@@ -193,8 +197,8 @@ def check_volumes(
                 str(entry),
                 f"exposes a protected host path (source resolves to {norm}, "
                 f"which is, contains, or lies inside {denied}); bind-mount a "
-                f"directory inside the project instead, or set "
-                f"security.profile: off with reason",
+                f"directory inside the project instead",
+                False,
             ))
         elif outside_roots(src, base_dir, roots):
             norm, _ = host_path_forms(src, base_dir)
@@ -202,8 +206,8 @@ def check_volumes(
                 str(entry),
                 f"is outside the project directory (source resolves to "
                 f"{norm}); bind mounts may only use paths inside the project "
-                f"directory, such as ./data. Move the data there, or set "
-                f"security.profile: off with reason",
+                f"directory, such as ./data. Move the data there",
+                False,
             ))
     return hits
 

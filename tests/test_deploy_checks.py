@@ -109,6 +109,9 @@ def test_empty_named_volume_replacing_a_full_anonymous_one_is_refused(paths, mon
     problems = dc.replacement_problems(production_target(paths, "shop"), {},
                                        {"db": {"volumes": ["data:/data"]}})
     assert problems and "boxmunge data adopt shop db:/data data" in problems[0]
+    # The refused deploy leaves its install open, which refuses the adopt's
+    # restart: the advice names the step in between.
+    assert "prod-deploy shop --abandon" in problems[0]
 
 
 def test_user_change_with_data_owned_by_the_old_user_is_refused(paths, monkeypatch) -> None:

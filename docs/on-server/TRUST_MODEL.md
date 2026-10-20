@@ -12,11 +12,11 @@ boxmunge's defences are calibrated against a specific set of attackers. Future e
 
 - **Network-level third-party attackers** — scanning, brute-force SSH, DDoS, malicious traffic targeting the public surface. Mitigations: UFW, CrowdSec, fail2ban, kernel hardening, key-only SSH on a non-default port.
 - **Supply-chain compromise of platform releases** — a tampered boxmunge release reaching the box. Mitigations: every release's `SHA256SUMS` is keyless-signed by the GitHub Actions release workflow (Sigstore Fulcio + Rekor), and the upgrade shim verifies the signature against a pinned workflow identity and OIDC issuer before installing. cosign is hard-required — an unsigned release is refused, not silently installed. This closes the prior circularity (where SHA256SUMS and the bundle came from the same release URL and could be replaced in lockstep).
-- **Container-escape blast radius** — a compromised user container should not trivially own the host. Mitigations: per-service capability drops, `no-new-privileges`, `pids_limit`, Tini, the host-level platform-container hardening, and re-checking a project's files and mounts before every start (see "Container Escape and Root Restarts").
+- **Container-escape blast radius** — a compromised user container should not trivially own the host. Mitigations: per-service capability drops, `no-new-privileges`, `pids_limit`, Tini, a non-root user by default, user-namespace remapping (container root is an unprivileged host uid), the host-level platform-container hardening, and re-checking a project's files and mounts before every start (see "Container Escape and Root Restarts").
 
 ### Out of scope (current product)
 
-- **Malicious operators** — whoever holds the `supervisor` key is root by design and fully trusted. The `deploy` key is trusted with every project on the box (single owner), not with the host: it reaches only the restricted shell, whose allowlist is all it can run (see "SSH access" below). A way for the deploy key to run anything else is a security bug.
+- **Malicious operators** — whoever holds the `supervisor` key is root by design and fully trusted. The `deploy` key is trusted with every project on the box (single owner), not with the host: it reaches only the restricted shell, whose allowlist is all it can run (see "SSH access" below), and the code a project ships: a bundle's `deploy.pre_deploy` hook runs on the host as deploy, which the docker group makes root-equivalent. Any other way for the deploy key to run something is a security bug.
 - **Malicious agents / MCP tools** — at present, agents and tools invoked through the deploy shell or MCP are treated equivalently to operators. A future product evolution may split agent trust from operator trust; today they are the same principal. MCP and the shell do take the same privileged paths: MCP `upgrade` uses the shell's sudo route to the upgrade shim, and MCP `restore`/`rollback` require an explicit `confirm: true`.
 
 ### Single human operator
@@ -36,7 +36,8 @@ The `deploy` user can operate on any project — this is by design, not a gap. T
 **Platform tooling** runs inside containers for blast-radius containment:
 
 - **Caddy** (reverse proxy) — containerised, read-only filesystem, all capabilities dropped except NET_BIND_SERVICE
-- **boxmunge-system** (age, rclone) — containerised, read-only, no capabilities, non-root user
+- **boxmunge-system** (age, rclone) — containerised, in the host user namespace (`userns_mode: host`) as the deploy uid, read-only, no capabilities, with `projects/` mounted read-write
+- **The data helper** — the system image run as container root with only CHOWN, DAC_OVERRIDE, FOWNER and FSETID, no network, a read-only root; it does every container-side data operation (see "User namespaces")
 
 **Secrets** are file-permission isolated — each project's `secrets.env` is mode 600, owned by the deploy user. The deploy user can read any project's secrets (single-owner assumption).
 
@@ -57,30 +58,32 @@ would give deploy read and write access to every file deploy can reach (secrets,
 the shell and the `boxmunge-sftp` subsystem wrapper refuse it. Clients upload with
 `scp -O`, the legacy protocol.
 
-**Compose files** are confined to their own project. A project's `compose.yml` cannot set the compose project name, join or declare another project's networks (or `boxmunge-proxy`, so it cannot claim an alias there), use another project's named volumes, bind-mount or read files outside its own directory, or join another container's namespaces. See SECURITY.md, "What `compose.yml` may not do". A platform upgrade validates every project's compose file again with the new release's rules. The upgrade does not rebuild or restart a project whose file is now refused. The project keeps the overlay it had, the upgrade leaves its containers as they were, and the operator is alerted (OPERATIONS.md, "Upgrading the Platform"). That guarantee covers the upgrade alone, not other root-run operations such as container-update.
+**Compose files** are confined to their own project. A project's `compose.yml` cannot set the compose project name, join or declare another project's networks (or `boxmunge-proxy`, so it cannot claim an alias there), use another project's named volumes, bind-mount or read files outside its own directory (refused under every profile, and again at every start), or join another container's namespaces. See SECURITY.md, "What `compose.yml` may not do". A platform upgrade validates every project's compose file again with the new release's rules. The upgrade does not rebuild or restart a project whose file is now refused. The project keeps the overlay it had, the upgrade leaves its containers as they were, and the operator is alerted (OPERATIONS.md, "Upgrading the Platform"). That guarantee covers the upgrade alone, not other root-run operations such as container-update.
 
 **Compose interpolation** sees only the project. Compose fills `${VAR}` from the project's own `.env` and from the environment of the process that runs it. boxmunge runs every docker command that touches project compose files (validation, `config`, `up`, `pull`, `build`, `down`, `exec`, `run`, backup and restore, staging copies), and its other docker calls too (the system container, health and doctor probes), with one fixed environment: `PATH` and `LANG=C.UTF-8`, nothing else, whoever started the command. Two docker-adjacent commands do not use it. One is install.sh, which runs `docker compose` for the platform's own Caddy and system stacks, files that ship with the release, as the admin running the installer. The other is `trivy`, which scans images from the daemon, never reads a compose file, and needs `HOME` for its cache. A deploy over SSH, a root systemd timer, `sudo` and MCP therefore resolve a compose file to exactly the model that was validated: a file cannot test for a variable such as systemd's `INVOCATION_ID`, or `COMPOSE_PROFILES`, to behave differently once a timer runs it. `${HOME}`, `${USER}` and every other caller variable are unset. Put project values in the project's `.env`.
 
-**Logs and state** are per-project by default. The `boxmunge log` command scopes to a single project unless `--all` is passed. This prevents agent context pollution, not security isolation.
+**Logs and state** are not isolated between projects. `boxmunge log` lists the last 50 entries across every project; `--project <name>` narrows it to one, which keeps an agent's context to its project, and `--all` lifts the 50-entry limit.
 
 ## What We Don't Isolate
 
 - **Network** — every routed service (and Caddy) shares the `boxmunge-proxy` Docker network, so a routed container can open connections to another project's routed services on their ports. Services that are not routed (`internal: true`, or not in the manifest) sit only on their project's own networks. There is no network policy between routed services. Acceptable for single-owner.
 - **Docker daemon, kernel, and host resources** — all projects run on one Docker daemon and one kernel; container hardening limits, but does not remove, what a compromised container can do to its neighbours (CPU, memory, and disk are shared unless `limits` are set).
-- **Docker group** — the deploy user is in the `docker` group, which is effectively equivalent to root on the host (a user can mount the host filesystem via `docker run -v /:/host`). This is an intentional trade-off: the deploy user needs to run `docker compose` for deployments, and Docker's permission model requires group membership. Because of that, the restricted shell is the boundary for the deploy key: deploy's login shell is the restricted shell, sshd opens no channel that bypasses it, and the shell runs only its allowlist, in an environment it cleans first. Code that runs as the deploy user any other way, through a bug in an allowlisted command for example, is root.
+- **Docker group** — the deploy user is in the `docker` group, which is effectively equivalent to root on the host (a user can mount the host filesystem via `docker run -v /:/host`). This is an intentional trade-off: the deploy user needs to run `docker compose` for deployments, and Docker's permission model requires group membership. Because of that, the restricted shell and the code projects ship are the boundary for the deploy key: deploy's login shell is the restricted shell, sshd opens no channel that bypasses it, and the shell runs only its allowlist, in an environment it cleans first; a project's `pre_deploy` hook runs as deploy by design. Code that runs as the deploy user any other way, through a bug in an allowlisted command for example, is root.
 - **Backup encryption key** — the deploy user can read the age identity key at `/opt/boxmunge/config/backup.key` (mode 640, group deploy). This is required for backup and restore operations to work without sudo. An authenticated deploy user can decrypt any backup snapshot.
 - **Backups** — the deploy user can trigger backup/restore for any project.
 
 ## Container Escape and Root Restarts
 
-A box installed from this release on is remapped from the first boot:
-container uid N is host uid S+N, so container root is an unprivileged host
-user (OPERATIONS.md, "User-namespace remapping"). A box installed earlier
-runs without user-namespace remapping until it migrates, and the overlay
-does not force a non-root user, so there uid 0 in a container is root for
-every host file the container can reach through a bind mount. A compromised
-container is therefore contained by what it can mount and by what root
-later does with the files it can write.
+On a remapped box (installed from this release on, or migrated with
+`userns-migrate`) container uid N is host uid S+N, so container root is an
+unprivileged host user (see "User namespaces" below). A box installed
+earlier runs without remapping until it migrates, and there uid 0 in a
+container is root for every host file the container can reach through a
+bind mount. Either way, from each project's next deploy, services run as
+a non-root user unless compose.yml's `user:`, `security.user` or
+`profile: off` says otherwise (PROJECT_CONVENTIONS.md, "Who a service
+runs as"). A compromised container is contained by what it can mount and by
+what root later does with the files it can write.
 
 Root does a lot with a project's files after deploy: upgrades restart every
 project, container updates and `security resume` recreate them, and
@@ -147,9 +150,40 @@ What remains:
 - Anything a container can do as root inside its own read-write mounts
   stays possible, and so does a kernel or runtime escape.
 
-Recommended follow-ups, not implemented: migrate boxes installed before
-`userns-remap` was the default, so container root maps to an unprivileged
-host uid there too, and give the overlay a default non-root user.
+### User namespaces
+
+On a remapped box the Docker daemon runs every project container in one
+user namespace (`userns-remap: boxmunge-remap:boxmunge-remap`): container uid N is host
+uid S+N, where S is the start of `boxmunge-remap`'s 65536 ids in
+`/etc/subuid`. Root in a project container has no capabilities on the
+host, so a container that escapes its mounts or its runtime lands as an
+unprivileged host uid. It still owns whatever any remapped container wrote
+as that uid: other projects' data, and Caddy's volumes (Caddy runs
+remapped as container root, so they hold its TLS keys as host S+0).
+
+- One mapping serves every project: container uid 0 of one project is the
+  same host uid as container uid 0 of another. Acceptable for the
+  single-owner model; per-project mappings would need per-container user
+  namespaces, which Docker Engine does not offer.
+- `boxmunge-system` alone runs in the host user namespace
+  (`userns_mode: host`), as the deploy uid with no capabilities and a
+  read-only root, because it must read the root:deploy backup key. A
+  project's compose file may not set `userns_mode` at all, and on a
+  remapped box `privileged` and host `pid`, `network_mode` and `ipc` are
+  refused even under `profile: "off"`.
+- The data helper (the system image, run remapped as container root with
+  only the capabilities a copy or chown needs, no network, a read-only
+  root) does every container-side data operation: staging copies, `data
+  adopt`, `data chown`, removing a deleted project's data.
+- deploy remains root-equivalent through the docker group (`docker run
+  --userns=host --privileged -v /:/host` still works for it); only rootless
+  Docker would close that, and the restricted shell stays deploy's
+  boundary.
+- New services run as a non-root user unless compose.yml's `user:`,
+  `security.user` (a reason is needed for `root` and `image`) or
+  `profile: off` says otherwise; `build:` services whose image sets no
+  non-root `USER` run as 10001:10001, and a registry image that would run
+  as root is refused until declared.
 
 ## The Upgrade Shim and the Root Boundary
 
@@ -220,7 +254,8 @@ these checks are defence in depth, not a boundary.
 Only the deploy uid can write `projects/`, `projects/<p>/` and `<p>/.releases/` (all
 deploy:deploy 0755). That includes project code that runs on the host as deploy (the
 `pre_deploy` hook and what it launches) and the boxmunge-system container (deploy uid). No
-service, staging, build or data-helper container can, and no smoke script can. Read-write binds
+service, staging or build container can, and no smoke script can; nor can the data helper on a
+remapped box (on an unremapped one it is real root, running only boxmunge's own scripts). Read-write binds
 may not be the project directory, a control entry or `.releases`, and remapped container uids
 are "other" on those 0755 directories. So root operations that walk these paths by name
 (`legacy-stage` restore and chown, `install_release` when root runs it, slot teardown, stash
@@ -229,7 +264,7 @@ against a parent swapped by deploy. That is acceptable because deploy is root-eq
 becomes a boundary if deploy ever loses docker access, or if agent trust is split from operator
 trust. Those operations then need dir-fd traversal.
 
-Project code never runs on the host as root. An operator who runs `prod-deploy`, `rollback` or
+Project code never runs on the host as root (it runs as deploy, root-equivalent through the docker group). An operator who runs `prod-deploy`, `rollback` or
 `promote` with sudo makes boxmunge root. The release code root installs, and the copy it keeps
 as the previous release, are handed to deploy (re-owned through directory descriptors, never
 following a link), as if deploy had installed them. The `pre_deploy` hook still runs as deploy: root
@@ -289,7 +324,7 @@ boxmunge hardens the VPS as part of installation:
 - **Kernel hardening** — sysctl overrides (SYN cookies, ASLR, restricted BPF, etc.)
 - **AIDE** — file integrity monitoring on the control plane
 - **Auditd** — kernel audit logging for privilege escalation and sensitive file changes
-- **AppArmor** — tightened profiles for Caddy and system containers
+- **AppArmor** — profiles for Caddy and the system container are installed but not yet applied to them (both run under Docker's default profile)
 - **Unattended upgrades** — automatic OS security patches. `health` (`auto-updates`) and every
   `auto-update` run check that package lists are refreshing and updates are being installed,
   and `auto-update` alerts when they are not
@@ -307,8 +342,10 @@ Every service in `compose.boxmunge.yml` receives:
 - `init: true` — Tini for signal handling and zombie reaping.
 - `pids_limit: 512` — kills fork bombs and exec storms.
 - `cap_drop` of dangerous capabilities not in Docker's default deny set: `NET_ADMIN, SYS_PTRACE, SYS_MODULE, SYS_RAWIO, SYS_TIME, SYS_BOOT, MAC_ADMIN, MAC_OVERRIDE, MKNOD, AUDIT_WRITE, WAKE_ALARM, BLOCK_SUSPEND, LEASE, NET_RAW`.
+- for services the manifest declares, `read_only: true` and a `/tmp` tmpfs.
+- the user the deploy decided (10001:10001 for a `build:` service whose image sets no non-root `USER`).
 
-These defaults are the **silent floor**. Existing v1 manifests need no edits — the v1→v2 migration adds nothing. The next deploy applies the protections automatically.
+These defaults are the floor. A project whose registry images run as root needs a `security.user` declaration (or a compose `user:`, or `profile: off`) before its next deploy (`boxmunge doctor` lists them); the rest applies at the next deploy with no edits.
 
 ### How to relax a protection
 
@@ -336,7 +373,7 @@ Quote `"off"`: PyYAML parses unquoted `off` as YAML 1.1 boolean `False`,
 which the validator catches with a targeted error, but writing the quotes
 in the first place avoids the round-trip.
 
-A deploy-time `[WARNING] SECURITY OFF` message is emitted on every `stage`, `promote`, `deploy`, `prod-deploy`, `resume`, and `upgrade` for any service on `profile: off`. The warning is repeated by design — the shortest path to making it go away is removing `profile: off` from the manifest.
+A deploy-time `[WARNING] SECURITY OFF` message is emitted on every `stage`, `promote`, `prod-deploy`, `resume`, and `upgrade` for any service on `profile: off`. The warning is repeated by design — the shortest path to making it go away is removing `profile: off` from the manifest.
 
 ### Profile ladder
 

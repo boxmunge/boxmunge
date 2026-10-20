@@ -17,7 +17,7 @@ command.""",
 Usage: boxmunge agent-help [topic]
 
 AI agent orientation. Topics: architecture, operations, conventions, rules,
-security, cve, cve-incident, writable.""",
+security, cve, cve-incident, writable, images.""",
     "init-host": """\
 Usage: boxmunge init-host
 
@@ -82,7 +82,7 @@ Remove a stale install record (.releases/install.json): one the files no
 longer match, after a platform rollback or a hand edit, or one that cannot
 be read. Check first that production is what .releases/live.json says. A
 record that still matches is refused: rerun, --abandon, rollback or deploy
-a fix instead.""",
+a fix instead. Operator-only: run it as root, as boxmunge-server.""",
     "legacy-stage": """\
 Usage: boxmunge legacy-stage <project> [--discard [--confirm-recreated] | --keep-staged]
 
@@ -143,8 +143,11 @@ Usage: boxmunge data adopt <project> <service>:<path> <name>
 
 adopt copies the service's anonymous volume at <path> into a new named volume
 <project>_<name> that the next deploy adopts. Stops the service's containers
-for the copy and starts them again. Then add <name>:<path> to the service and
-deploy. The anonymous volume is kept until you remove it.
+for the copy and starts them again. Then add <name>:<path> to the service's
+volumes and <name>: {} to the top-level volumes, and deploy (for a
+writable.persistent entry instead, adopt as <project>_<entry name>). A deploy
+refused for this leaves its install open: prod-deploy <project> --abandon
+first. The anonymous volume is kept until you remove it.
 
 chown stops the service, gives its read-write binds and named volumes to
 <uid>:<gid>, and leaves it stopped until you deploy, which runs it as that
@@ -182,7 +185,10 @@ Validate manifest, env files and compose without deploying. Read-only.""",
 Usage: boxmunge log [--project P] [--component C] [--level L] [--since DUR]
                     [--tail N | --all] [--containers] [--json]
 
-Query the structured operational audit log. DUR is e.g. 30m, 2h, 7d.""",
+Query the structured operational audit log: the last 50 matching entries
+from every project, unless --project, --tail N or --all (every match) says
+otherwise. DUR is e.g. 30m, 2h, 7d. --containers adds the project's
+container logs and needs --project.""",
     "logs": """\
 Usage: boxmunge logs <project> [service] [--tail N] [--follow]
        boxmunge logs --host
@@ -264,7 +270,8 @@ Usage: boxmunge container-update [target] [--force] [--dry-run]
 
 Pull and recreate Caddy and project image: containers. A service that also
 declares build: is not pulled: its image: names the local build. --dry-run
-pulls and reports what would change without recreating anything.""",
+pulls and reports what would change without recreating anything.
+Operator-only: run it as root, as boxmunge-server (its daily timer does).""",
     "_discover-update": """\
 Usage: boxmunge _discover-update --json [--auto]
 

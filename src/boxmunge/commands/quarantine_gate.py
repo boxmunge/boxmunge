@@ -30,12 +30,13 @@ from boxmunge import docker_containers
 from boxmunge.commands.deploy_images import candidate_name
 from boxmunge.commands.security_scan_core import ProjectScan, audit_targets
 from boxmunge.commands.security_scan_inputs import (
-    ProjectMeta, ProjectScanError, ScanTarget, hardening_profile, load_all_suppressions, project_meta,
+    ProjectHardening, ProjectMeta, ProjectScanError, ScanTarget, hardening_profile,
+    load_all_suppressions, project_meta,
 )
 from boxmunge.compose_images import built_image_name
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
-from boxmunge.cve.hardening import HardeningProfile
 from boxmunge.cve.kev import load_kev
+from boxmunge.cve.policy_explain import HARDENING_UPCOMING_FIX, hardening_cause
 from boxmunge.cve.policy import Disposition, FindingDisposition
 from boxmunge.cve.quarantine import (
     QuarantineError, checked_quarantine_record, is_quarantined, lift_quarantine,
@@ -75,7 +76,7 @@ class Clearance:
     compose_project: str
     cve_id: str
     images: dict[str, tuple[str, str]]
-    profile: HardeningProfile
+    profile: ProjectHardening
     policy: dict[str, Any]
     quarantined_under: dict[str, Any] | None
     at_risk: tuple[str, ...]
@@ -129,7 +130,7 @@ def _quarantine_record(paths: BoxPaths, project: str) -> dict[str, Any]:
         raise QuarantineRefused([f"{e} Nothing was started."]) from e
 
 
-def _profile(target: ReleaseTarget, meta: ProjectMeta) -> HardeningProfile:
+def _profile(target: ReleaseTarget, meta: ProjectMeta) -> ProjectHardening:
     """The hardening the release's compose.yml and manifest give its services."""
     release = target.compose.project_directory or target.compose.cwd
     return hardening_profile(meta, resolve_deployed_config(
@@ -139,7 +140,7 @@ def _profile(target: ReleaseTarget, meta: ProjectMeta) -> HardeningProfile:
 
 def _scan(paths: BoxPaths, target: ReleaseTarget, meta: ProjectMeta,
           starts: dict[str, StartImage], unnamed: dict[str, str],
-          ) -> tuple[ProjectScan, dict[str, str], list[ScanTarget], HardeningProfile]:
+          ) -> tuple[ProjectScan, dict[str, str], list[ScanTarget], ProjectHardening]:
     """The audit-only scan, {service: image ID} of what it scanned, the
     scan's targets and the hardening profile it was judged with."""
     project = target.project
@@ -190,6 +191,20 @@ def _finding_lines(scan: ProjectScan, services: dict[str, list[str]],
     return list(lines.values())
 
 
+def _upcoming_lines(scan: ProjectScan, services: dict[str, list[str]]) -> list[str]:
+    """Findings that quarantine from 0.12 but not now: warned, never refused."""
+    lines: dict[tuple[str, str, str], str] = {}
+    for decision in scan.decisions:
+        service = ", ".join(services[decision.image_ref])
+        for f in decision.findings:
+            if f.hardening_would_quarantine:
+                lines.setdefault((f.finding.cve_id, f.finding.package, decision.image_ref), (
+                    f"{f.finding.cve_id} ({f.effective_severity.value}) in {f.finding.package} "
+                    f"{f.finding.installed_version}, service {service} (image "
+                    f"{decision.image_ref})"))
+    return list(lines.values())
+
+
 def clear_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, Any],
                   previous: dict[str, Any] | None = None) -> Clearance:
     """Scan every image the release would start; return the clearance, or
@@ -232,6 +247,13 @@ def clear_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
             f"suppress one that does not apply (`boxmunge security suppress <CVE> --project "
             f"{project} --until <YYYY-MM-DD> --reason <text>`; a CISA KEV finding cannot "
             f"be suppressed) and deploy again."])
+    upcoming = _upcoming_lines(scan, services)
+    if upcoming and profile.upcoming is not None:
+        print(f"  WARNING: from 0.12 this release would still be quarantined for "
+              f"{len(upcoming)} finding(s); 0.11.0 does not refuse it:")
+        for line in upcoming:
+            print(f"    {line}")
+        print(f"    Cause: {hardening_cause(profile.upcoming.services)}. {HARDENING_UPCOMING_FIX}")
     print(f"  Scan: clear ({len(ids)} service image(s), no quarantine-level finding under "
           f"the release's security policy).")
     return Clearance(
@@ -270,9 +292,9 @@ def require_unchanged(paths: BoxPaths, clearance: Clearance) -> None:
             moved.append(f"service {name} would start {ref} "
                          f"({image.image_id if image else 'not in the local image store'}), "
                          f"not the scanned {scanned_ref} ({scanned_id})")
-    if profile != clearance.profile:
-        moved.append(f"the hardening of its services changed from {clearance.profile} to "
-                     f"{profile}")
+    if profile.applied != clearance.profile.applied:
+        moved.append(f"the hardening of its services changed from "
+                     f"{clearance.profile.applied} to {profile.applied}")
     if moved:
         raise QuarantineRefused([*moved, "The release changed after its images were scanned "
                                  "(by its pre-deploy hook?). Nothing was started; the "

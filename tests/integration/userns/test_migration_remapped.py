@@ -8,6 +8,7 @@ and modes before the migration, after it and after the rollback.
 from __future__ import annotations
 
 import os
+import shutil
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -51,6 +52,10 @@ def box(tmp_path_factory):
             daemon = ProcessDaemon()
             daemon.stop()
             write_daemon_json(prior_daemon_json())
+            # The commit emptied the prior store but not the old daemon's
+            # build cache, whose records now name layers that are gone: a
+            # later module's build would fail ("unlazy requires an applier").
+            shutil.rmtree("/var/lib/docker/buildkit", ignore_errors=True)
             daemon.start()  # on a prior store the commit emptied
         elif journal is not None and journal.phase != "rolled-back":
             _rollback(paths, root.parent / "img")

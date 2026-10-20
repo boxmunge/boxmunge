@@ -58,7 +58,10 @@ from dataclasses import replace
 from datetime import date
 from typing import Callable
 
-from boxmunge.cve.hardening import HardeningProfile, calculate_hardening_penalty
+from boxmunge.cve.hardening import (
+    HardeningProfile, UpcomingHardening, calculate_hardening_penalty,
+)
+from boxmunge.cve.hardening_upcoming import flag_upcoming
 from boxmunge.cve.relevance import irrelevant_ecosystem
 from boxmunge.cve.scanner import (
     AttackVector,
@@ -338,7 +341,7 @@ def evaluate_finding(
         )
 
     # 6. Relaxed: KEV is the ONLY quarantine trigger (already handled at step
-    # 3). Every non-KEV finding is informational regardless of distro
+    # 1). Every non-KEV finding is informational regardless of distro
     # severity — the most hands-off tier, for operators who accept
     # severity-based risk.
     if posture is Posture.RELAXED:
@@ -428,6 +431,7 @@ def evaluate_project(
     today: date,
     kev_lookup: Callable[[str], bool] = _kev_never,
     runtimes: frozenset[str] | None = None,
+    upcoming: UpcomingHardening | None = None,
 ) -> ProjectDecision:
     """Aggregate per-finding decisions into a project-level decision.
 
@@ -435,22 +439,33 @@ def evaluate_project(
     through every per-finding evaluation — one penalty per project, not
     per finding. Findings in the result are sorted by effective severity
     desc, then cve_id asc, for deterministic ordering downstream.
+
+    ``upcoming`` is the stricter hardening the policy will apply from 0.12.
+    A finding that does not quarantine under ``hardening_profile`` but would
+    under it keeps its disposition and is flagged hardening_would_quarantine:
+    a warning, never a quarantine.
     """
     penalty = calculate_hardening_penalty(hardening_profile)
 
-    dispositions = tuple(
-        evaluate_finding(
+    def judge(f: Finding, hardening_penalty: int) -> FindingDisposition:
+        return evaluate_finding(
             f,
             posture=posture,
-            hardening_penalty=penalty,
+            hardening_penalty=hardening_penalty,
             dangerously_disable_quarantine=dangerously_disable_quarantine,
             suppressions=suppressions,
             today=today,
             kev_lookup=kev_lookup,
             runtimes=runtimes,
         )
-        for f in scan_result.findings
-    )
+
+    dispositions = tuple(judge(f, penalty) for f in scan_result.findings)
+    if upcoming is not None:
+        upcoming_penalty = calculate_hardening_penalty(upcoming.profile)
+        dispositions = tuple(
+            flag_upcoming(d, judge(d.finding, upcoming_penalty), upcoming)
+            for d in dispositions
+        )
 
     sorted_dispositions = tuple(
         sorted(

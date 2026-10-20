@@ -25,6 +25,8 @@ which the per-project titles below show after it:
 | `[<hostname>] CVE scan incomplete` | Some images were not scanned. They are unprotected until a scan succeeds. |
 | `[<hostname>] Circuit breaker held <N> quarantines` | Many projects would have quarantined at once for the same CVE(s). They are still running. Escalate: applying (`security scan --apply-held`) or host-suppressing is an operator decision. |
 | `[<hostname>] CVE policy enforcement begins in <N>h` | One-time migration grace heads-up after upgrade. Affects the whole fleet. |
+| `[boxmunge:<p>] <N> fixable CVE findings over the quarantine gate — rebuild to apply the fix` | Findings that would quarantine have an upstream fix the image does not run yet. Not quarantined (unless on KEV). Hand off a rebuild and redeploy. |
+| `[<hostname>] CISA KEV feed stale — exploitation defense degraded` / `CISA KEV refresh rejected — previous catalog kept` | The actively-exploited gate is working from an old catalog. Escalate. |
 
 If you got an alert, run these two commands first — they tell you everything.
 
@@ -52,11 +54,14 @@ For every finding marked `QUARANTINE` or `STILL_RUNNING_AT_RISK`:
 
 ### 1. Is there an upstream fix?
 
-If `disposition == IGNORED_FIXED`, a fixed package exists but the running
-image predates it. boxmunge does not rebuild images, and `container-update`
-only re-pulls `image:` tags, so nothing applies it for you: the project
-needs a rebuild (pull the fixed base image) and a redeploy. Hand that off.
-If the CVE is also on CISA KEV, the project is quarantined until the fix is
+If the finding has `fix_available: true` (and a `fixed_version`, in
+`security <project> --json`), a fixed package exists but the running image
+predates it. boxmunge does not rebuild images: a `build:` service needs a
+rebuild (pull the fixed base image) and a redeploy. An `image:` service
+gets a fix published under the same tag from the daily container-update
+(on unless the manifest sets `container_updates: {enabled: false}`), and a
+fix under a new tag from a release that names it, deployed. Hand that off. A fixable finding not on KEV is `IGNORED_FIXED` and does not
+quarantine; a fixable KEV finding is still `QUARANTINE` until the fix is
 running (under `relaxed` it keeps running and alerts every scan).
 
 ### 2. Is it on CISA KEV?
@@ -84,8 +89,8 @@ context. You do (or you can find out).
 > AV:Local / Adjacent / Physical and AV-unknown findings are auto-routed
 > to informational — they aren't reachable from the network surface a
 > hardened web container exposes. So if you see a `QUARANTINE` row, the
-> AV is already known to be Network (or the project is on `paranoid`
-> posture). The AV:L "is this exploitable from network" branch of the
+> AV is already known to be Network, the project is on `paranoid`
+> posture, or the CVE is on CISA KEV (which ignores the AV). The AV:L "is this exploitable from network" branch of the
 > reasoning below is now handled automatically. Most "high but not
 > exploitable" suppressions written under v0.6 / v0.7.0 are no longer
 > needed for AV:L findings — operators MAY clean up moot suppressions
@@ -93,8 +98,8 @@ context. You do (or you can find out).
 
 #### What to read
 
-For the headline finding, the `explanation` field tells you which package
-and severity. The `primary_url` (visible in `security <project> --json`)
+For the headline finding, the `explanation` field tells you the severity
+and why; `package` (in `--json`) names the package. The `primary_url` (visible in `security <project> --json`)
 links to the upstream advisory.
 
 Cross-check with what you know about the project:
@@ -104,17 +109,19 @@ Cross-check with what you know about the project:
 | Package is a build-time tool (pip, npm, apt) | Runtime container probably doesn't invoke it. Often non-exploitable. |
 | Vulnerable code path requires user-initiated action | If your service has no such surface, often non-exploitable. |
 | Network attack vector + project not internet-exposed | Often non-exploitable; suppress with reason citing the closed surface. |
-| Local attack vector (AV:L) | Already auto-informational under non-paranoid posture. Just keep an eye on it; no action needed. |
+| Local attack vector (AV:L) | Already auto-informational under non-paranoid posture, unless it is on CISA KEV. Otherwise just keep an eye on it. |
 | Critical RCE on a runtime-invoked dependency | Treat as exploitable. |
 | You can't tell | **Escalate.** See section 5. |
 
 What you can interrogate to inform the decision:
 
 ```
-status                          # Ports, hosts, exposure surface
+security <project>              # Hardening, writable state, published ports
+validate <project>              # Hosts, routes, compose posture
 log --tail 100 --json           # Recent operational events
-security --json | jq '.at_risk_running, .quarantined'
-                                # Anything else broken at the same time?
+security --json                 # Anything else broken at the same time?
+                                # (no pipes in the deploy shell: filter
+                                # .at_risk_running / .quarantined locally)
 ```
 
 What you cannot interrogate (no shell access): the package source, the
@@ -130,7 +137,6 @@ Stop and write the operator a clear message if any of these hold:
   ~6 months — that's a "we're never fixing this" signal that needs a human.
 - Multiple projects are quarantined at once (fleet-wide upstream issue).
 - The CVSS is 9+ AND the package is a runtime dependency.
-- Caddy itself is quarantined (entire fleet offline).
 - The runtime config has changed in ways relevant to exploitability since
   the existing suppression was reviewed.
 
@@ -221,11 +227,12 @@ in the deploy shell. Hand off:
 
 > Project `<name>` is quarantined on `<CVE>`. The CVE is exploitable but
 > low-impact, and the hardening penalty (+`<n>`) is what pushed effective
-> severity above threshold. Recommend: edit `services/<name>/compose.yml`
+> severity above threshold. Recommend: edit the project's `compose.yml`
 > to remove the explicit `read_only: false` opt-out (the v0.8 overlay
 > default of `read_only: true` will then apply), rebundle, redeploy.
-> If the app needs writable paths under read-only rootfs, add
-> per-service `tmpfs:` entries for those paths. Effective severity
+> If the app needs writable paths under read-only rootfs, declare them
+> under `services.<svc>.writable.ephemeral` (or `.persistent`) in
+> `manifest.yml`. Effective severity
 > should drop to `<X>`, below the `<posture>` threshold.
 
 ### C. Accept the quarantine
@@ -246,7 +253,9 @@ and lifts the quarantine once it is live (no `security resume` needed).
 
 Use only when uptime matters more than reactivity AND blast radius is
 acceptable on compromise (no secrets, no PII, redeployable from clean
-source). Validator requires `read_only: true` on every service — this is
+source). Validator requires `read_only: true` written in compose.yml on
+every service not on `profile: off` (compose-only services too; the overlay
+default does not count) — this is
 the deal: you accept the CVE risk in exchange for non-persistent compromise.
 
 This requires a manifest edit (`security.dangerously_disable_quarantine: true`)

@@ -48,9 +48,10 @@ validate <project>   validate project config
 - Projects are deployed via bundles (scp upload) or git repos
 - Caddy runs in Docker as the reverse proxy, handling automatic HTTPS via Let's Encrypt
 - `boxmunge` reads project manifests to generate Caddy config and orchestrate deployments
-- A staging environment lets you verify changes at `staging.<hostname>` before promoting to production
+- A staging environment lets you verify changes at `staging.<host>` (each manifest host) before promoting to production
 - Secrets are managed via the CLI (`secrets`), not by editing files
-- Backups are encrypted (age) and restore-tested before being considered valid
+- Backups are encrypted (age); `test-restore` checks the latest one decrypts, and `self-test`
+  exercises the whole backup and restore pipeline on a canary project
 - Health checks run on a schedule and send alerts via Pushover on failure
 - The host applies unattended security patches automatically, and alerts you when they stop
   arriving

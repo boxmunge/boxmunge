@@ -33,7 +33,8 @@ ALLOWED_COMMANDS: set[str] = {
     "prod-deploy", "rollback", "project-delete", "diff",
     "project-add", "project-list",
     "pause", "resume", "recover",
-    # Data: `data adopt` names an anonymous volume
+    # Data: `data adopt` names an anonymous volume; `data chown` gives a
+    # service's data to its new user
     "data",
     # Inbox
     "inbox",
@@ -109,7 +110,7 @@ This is a restricted shell. Available commands:
   inbox               List uploaded bundles
   secrets             Manage secrets
 
-Upload bundles with: scp -O bundle.tar.gz deploy@<host>:
+Upload bundles with: scp -O -P 922 (or the SSH port chosen at install) bundle.tar.gz deploy@<host>:
 
 Run 'help' for the full command list.
 """

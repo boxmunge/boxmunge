@@ -8,7 +8,8 @@ workflow, and recovery.
 
 - **Daily scan via Trivy.** Every project's deployed images are scanned
   daily between 03:00 and 03:30 system time, and on demand with
-  `security scan`. There is no scan at deploy or image-update time yet: a
+  `security scan`. The platform's own Caddy image is not scanned (it is not
+  a project); container-update keeps it current. There is no scan at deploy or image-update time yet: a
   newly deployed image is first scanned by the next daily run.
 - **Posture per project (default `balanced`).** Four tiers form a trust ladder
   — `relaxed` quarantines only on CISA KEV, `balanced` (default) quarantines
@@ -42,8 +43,8 @@ workflow, and recovery.
   suppressions file cannot be read is listed with the reason (`unreadable` in
   JSON, an `ERROR:` line on stderr) and the command exits 1; fix or restore
   that file rather than reading the counts as complete.
-- **Recover with `boxmunge security resume <project>`** after a fix lands or
-  you've added a suppression.
+- **Recover** after a suppression with `boxmunge security resume <project>`;
+  with a fix, rebuild or fix the image and `prod-deploy` it: the deploy is refused unless the new release's images clear every quarantine-level finding, and a successful deploy lifts the quarantine.
 
 ## The promise
 
@@ -75,8 +76,8 @@ the distro's triage nor a lower NVD rating can lower it.
 | Posture | Quarantines when (no fix, not suppressed) | Severity source |
 |---|---|---|
 | **relaxed** | CVE is on **CISA KEV** — nothing else. Pure last resort. | — |
-| **balanced** *(default)* | On **KEV** OR distro `Status: affected` + **distro** severity ≥ High + `AV:N` | Debian/vendor |
-| **strict** | On **KEV** OR distro `Status: affected` + **distro** severity ≥ Medium + `AV:N` | Debian/vendor |
+| **balanced** *(default)* | On **KEV** OR distro `Status` `affected`, `end_of_life` or missing + **distro** severity ≥ High + `AV:N` | Debian/vendor |
+| **strict** | On **KEV** OR distro `Status` `affected`, `end_of_life` or missing + **distro** severity ≥ Medium + `AV:N` | Debian/vendor |
 | **paranoid** | Anything ≥ Medium over threshold — no AV filter, no distro trust. KEV can still escalate. | Highest of NVD and every vendor rating |
 
 `balanced` stays the out-of-the-box default. The residual net it keeps
@@ -115,7 +116,7 @@ For every finding, `evaluate_finding` runs these gates in order:
    project is quarantined with a priority-1 alert that names the overridden
    suppression. A fix only helps once it is actually running: a fixable KEV
    finding quarantines under `balanced`, `strict` and `paranoid`, and the
-   alert says a fix exists — rebuild, redeploy, then `security resume`.
+   alert says a fix exists: rebuild or fix the image and `prod-deploy` it: the deploy is refused unless the new release's images clear every quarantine-level finding, and a successful deploy lifts the quarantine.
    **Exception, `relaxed`:** a fixable KEV finding does not quarantine;
    instead a priority-1 alert naming the CVE and the unapplied fix is sent
    on **every scan** while it is live (`IGNORED_FIXED`).
@@ -143,7 +144,7 @@ For every finding, `evaluate_finding` runs these gates in order:
    (step 4, `INFORMATIONAL`). The explanation names the source(s) of the
    rating used.
 6. **Relaxed short-circuit** — under `relaxed`, quarantine is KEV-only (already
-   handled at step 3). Every non-KEV finding is `INFORMATIONAL` regardless of
+   handled at step 1). Every non-KEV finding is `INFORMATIONAL` regardless of
    distro severity — the most hands-off tier, for operators who accept
    severity-based risk. Raise the posture to `balanced`/`strict` for
    distro-severity-based quarantine.
@@ -154,10 +155,11 @@ For every finding, `evaluate_finding` runs these gates in order:
    reason is the most informative one to surface. See "Runtime relevance
    gate" below.
 8. **Distro deprioritized** (balanced/strict) — `Status ∈ {will_not_fix,
-   fix_deferred, not_affected, under_investigation}` → `INFORMATIONAL` with a
-   loud alert. The distro already judged the finding low-risk; the site stays
-   up. The alert quotes the distro status and severity so the operator can see
-   exactly why.
+   fix_deferred, not_affected, under_investigation}` → `INFORMATIONAL`. The
+   distro already judged the finding low-risk; the site stays up. A new such
+   finding is listed once in the new-findings digest (its top five, with a
+   count of the rest), whose explanation quotes the distro status and
+   severity.
 9. **No distro verdict** (balanced/strict) — `distro_severity(finding) is None`
    (only NVD/GHSA data; the distro issued no rating) → `INFORMATIONAL`. Below
    `paranoid`, the engine does not quarantine on an NVD rating the distro never
@@ -421,7 +423,11 @@ As of v0.8, boxmunge's default-profile overlay applies `read_only: true`
 and `tmpfs: ['/tmp']` by default. Apps that legitimately need writable
 rootfs must declare `read_only: false` explicitly in their user
 `compose.yml`, which incurs the +1 penalty above. Missing the field
-means the overlay's `read_only: true` default applies — no penalty.
+on a service the manifest declares means the overlay's `read_only: true`
+default applies — no penalty. A service only compose.yml defines gets no
+read-only root from the overlay, so it counts as read-only only when
+compose.yml says `read_only: true`: declare it in the manifest
+(`internal: true` with a `writable:` block) or set the key.
 
 This inverts the v0.7.x semantics where missing `read_only` was
 penalised even though the system never actually enforced it. v0.8 is
@@ -432,9 +438,11 @@ The overlay generator's user-wins rule: if your `compose.yml` declares
 `read_only` (true or false) on a service, the overlay omits its
 own `read_only` fragment for that service. Compose merge then leaves
 your literal value alone — no merge conflict, no need for a redundancy-
-rejection rule. The same rule applies to `tmpfs: ['/tmp']`: if you
-declare a `tmpfs` or `volumes` entry that targets `/tmp`, the overlay
-omits its own.
+rejection rule. The same rule applies to `tmpfs: ['/tmp']`: when a
+service's compose.yml claims `/tmp` (a `tmpfs`, a bind or a volume), the
+overlay omits its own. On a manifest service without
+`writable.external: true`, compose-side `tmpfs:` and named volumes are
+refused (v0.9); binds are allowed.
 
 ### Overlay-aware penalty (v0.6.2)
 
@@ -447,10 +455,31 @@ declaring it in user compose would trigger a Compose merge duplicate-
 rejection error anyway; see the v0.6.3 dedupe note in
 "Recommendations" below.)
 
-The same overlay-aware logic applies to `read_only` from v0.8: a
-project that doesn't redeclare `read_only` in user compose is treated
-as fully hardened (the overlay provides it). Only an explicit
-`read_only: false` in user compose triggers the +1 penalty.
+The calculator judges each service with what the overlay applies to it.
+A service the manifest declares (not on `profile: off`) is read-only
+unless compose.yml says `read_only: false`; a compose-only service, or one
+on `profile: off`, only when compose.yml says `read_only: true`. A
+relaxation made in the manifest counts like its compose.yml spelling:
+`security.no_new_privileges: false` and a `security.cap_add` list each add
++1. A service on `profile: off` gets no hardening baseline: its
+compose.yml and any manifest `cap_add` are judged.
+
+The penalty is project-wide: a compose-only service without
+`read_only: true` (a typical database) adds +1 to the severity of every
+finding in every image of the project, so a medium finding in the web image
+judges as high.
+
+**0.11.0 warns; 0.12 quarantines.** Releases before 0.11.0 treated every
+compose-only service as read-only. The calculator now applies the rule above,
+but until 0.12 the penalty that quarantines (and that refuses a deploy to a
+quarantined project) is still the old one. A finding that only the stricter
+penalty lifts over the posture's threshold keeps its disposition, is flagged
+`WARN` (`hardening_would_quarantine` in `security --json`), shows as a `cve-hardening` warning in
+`boxmunge health`, and is alerted once per finding (`will quarantine from
+0.12`, naming the service). A finding the old penalty already lifts
+quarantines as before. Fix it by adding `read_only: true` in `compose.yml`,
+declaring the service in the manifest so boxmunge hardens it, or accepting the
+risk with a `security` declaration.
 
 ### v0.9 writable: surface and the penalty
 
@@ -489,18 +518,22 @@ security:
 The compose validator rejects:
 
 - `dangerously_disable_quarantine: true` on a project where any service
-  does not set `read_only: true`. Rationale: if you've told us not to
+  not on `profile: off` does not declare `read_only: true` in compose.yml
+  (the overlay's default does not count, and services only compose.yml
+  defines are checked too). Rationale: if you've told us not to
   react to compromise, the read-only rootfs is the last line of defense
   against post-exploit persistence. The trade is uptime over reaction;
   the read-only rootfs is the price.
-- `posture: strict` on a project where any service does not set
-  `read_only: true`. Strict posture without read-only rootfs is incoherent.
+- `posture: strict` on a project where any such service does not declare
+  `read_only: true` in compose.yml. Strict posture without read-only rootfs
+  is incoherent.
 - Any `posture` value other than `relaxed`, `balanced`, `strict`, or `paranoid`.
 
 These cross-validators run on every entry point that materialises a
 project from its manifest+compose: `prod-deploy`, `stage`, `promote`,
-`resume`, and the config regeneration step of `upgrade`. All of them
-reject the operation with **exit code 3** if `posture: strict` or
+`resume`, and the config regeneration step of `upgrade`. The commands
+reject the operation with **exit code 3** (an upgrade instead lists the
+project as `REFUSED:` and leaves it as it was) if `posture: strict` or
 `dangerously_disable_quarantine: true` is set without `read_only: true`
 on every service. Exit 3 is the reserved code for compose hardening
 rejections (see OPERATIONS.md "Command Exit Codes") so the operator can
@@ -526,30 +559,41 @@ The trade is explicit and signed off in the manifest:
   exists but is not running).
 - In exchange, you must run with `read_only: true` on every service —
   any post-exploit persistence has nowhere to land.
-- Pushover alerts for findings on this project are prefixed
-  `[STILL RUNNING — quarantine disabled by config]`.
+- Alerts for its quarantine-level findings are titled
+  `[STILL RUNNING — quarantine disabled by config]` instead of `QUARANTINED`.
 - The fleet `--json` view always shows the project under
   `at_risk_running` while it has quarantine-level findings.
 
 Example manifest:
 
 ```yaml
-name: weather-app
+# manifest.yml
+schema_version: 3
+id: 01JQXYZ1234567890ABCDEFGHJ
+project: weather-app
+source: bundle
 hosts:
   - weather.example.com
-
 security:
   posture: balanced
   dangerously_disable_quarantine: true
-
 services:
   web:
-    security:
-      read_only: true
+    port: 8080
+    routes:
+      - path: /
 ```
 
-The validator rejects this combination if any service is missing
-`read_only: true`.
+```yaml
+# compose.yml: every service declares read_only itself
+services:
+  web:
+    build: .
+    read_only: true
+```
+
+The validator rejects this combination if any service (not on `profile:
+off`) does not declare `read_only: true` in compose.yml.
 
 ## Suppressions
 
@@ -605,7 +649,8 @@ Rules:
 
 - Expired suppressions revert automatically. There is no grace, no override:
   on the next scan after `until`, the finding is active again and an alert
-  fires.
+  fires. The expired entry stays in the file, so suppressing the CVE again
+  needs an `unsuppress` first.
 - Suppression IDs are unique per project. To replace an existing
   suppression, `unsuppress` first, then `suppress` with the new fields.
   This is deliberate — silent overwrites would erase audit-trail entries.
@@ -671,8 +716,8 @@ for a `build:` service the image Compose built for it. `security resume`
 therefore re-scans exactly what the lift will start. Every container the
 project still has is scanned too, so the scan never covers less than what
 is running. An image `up` would start that is not in the local store makes
-the scan incomplete. `security status <project>` shows which of the two the
-last scan checked.
+the scan incomplete. `security <project>` (`scan_basis` in `--json`) shows which
+of the two the last scan checked.
 
 ## Scan cadence
 
@@ -724,7 +769,7 @@ below): it is alerted and the scan exits 1. It is also logged at WARNING
 with the elapsed time and the count of skipped images:
 
 ```
-boxmunge log --component cve-scan --level warning
+boxmunge log --component cve-scan --level warn
 ```
 
 Rationale: an unbounded scan on a fleet of misbehaving images would
@@ -830,7 +875,8 @@ top-level `grace` field.
 
 ## Alerts you'll see (Pushover)
 
-Titles only — bodies list every finding involved and what to do. Where
+Titles only (each starts with `[<hostname>]`, the box's name) — bodies
+list every finding involved and what to do. Where
 several findings are involved the title names the worst and adds
 `(+N more)`. Priority 1 bypasses the recipient's quiet hours.
 
@@ -842,6 +888,7 @@ several findings are involved the title names the worst and adds
 | `[boxmunge:<project>] [STILL RUNNING — quarantine disabled by config] ACTIVELY EXPLOITED <CVE> (CISA KEV)` (every scan) | priority-1 |
 | `[boxmunge:<project>] ACTIVELY EXPLOITED — <CVE> fix available but not running (CISA KEV)` (`relaxed`, every scan) | priority-1 |
 | `[boxmunge:<project>] <N> fixable CVE findings over the quarantine gate — rebuild to apply the fix` | normal |
+| `[boxmunge:<project>] <N> CVE findings will quarantine from 0.12 (warning only)` (once per finding) | normal |
 | `[boxmunge:<project>] <N> new CVE findings (informational)` (digest, top 5 listed) | normal |
 | `[boxmunge:<project>] Suppression expired — <CVE>` | priority-1 |
 | `[<hostname>] Host suppression expired — <CVE>` (once per fleet scan) | priority-1 |
@@ -938,7 +985,11 @@ first and fail closed (see "Recovering a quarantined project" below).
    ```
 
 2. **Decide:** wait for an upstream fix (and re-run when it's released),
-   or suppress the CVE with a documented reason after review.
+   or suppress the CVE with a documented reason after review. Once a fix
+   is published for a finding that is not on KEV, it stops quarantining
+   (`IGNORED_FIXED`, alerted once), so `security resume` succeeds while
+   the old, unpatched image still runs: rebuild and redeploy straight
+   after it.
 
 3. **If suppressing:**
 
@@ -1049,10 +1100,11 @@ overlay-aware, so the protection counts toward your hardening score
 even when it lives only in the overlay — there is no benefit to
 redeclaring it, only failure modes.
 
-If you need to *relax* a hardening field, use a `security:` block in
-the manifest (see PROJECT_CONVENTIONS.md and SECURITY.md). The
-overlay derives from the manifest, so the manifest is the only place
-to express intent.
+To relax `no_new_privileges`, `init`, `pids_limit` or capabilities, use
+the manifest's `security:` block (see PROJECT_CONVENTIONS.md and
+SECURITY.md). The read-only root filesystem is the exception: opt out
+with `read_only: false` on the service in compose.yml, or hand a
+service's writable paths to compose.yml with `writable.external: true`.
 
 ## Out of scope (v0.6.0)
 

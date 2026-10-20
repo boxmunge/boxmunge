@@ -371,8 +371,7 @@ chown root:"${DEPLOY_USER}" "${BOXMUNGE_ROOT}/config/backup.key"
 
 # Write boxmunge.yml from template values
 cat > "${BOXMUNGE_ROOT}/config/boxmunge.yml" <<EOF
-# boxmunge host configuration
-# Managed by boxmunge. Edit via \`boxmunge config\` commands.
+# boxmunge host configuration. Edited by hand, as root.
 
 hostname: ${HOSTNAME_ARG}
 ssh_port: ${SSH_PORT}
@@ -384,6 +383,12 @@ pushover:
 
 backup_remote: ""
 
+# alert_threshold: failed checks in a row before a project alerts. The
+# other health, reboot and logging values are recorded at install, and
+# changing them changes nothing: the health timer runs every 5 minutes
+# (boxmunge-health.timer), unattended-upgrades reboots in the window set in
+# /etc/apt/apt.conf.d/20auto-upgrades, and Docker rotates container logs as
+# /etc/docker/daemon.json says.
 health:
   check_interval_minutes: 5
   alert_threshold: 3

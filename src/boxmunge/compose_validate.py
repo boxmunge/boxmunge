@@ -426,6 +426,10 @@ def validate_user_compose(
             continue
 
         if svc_name in off:
+            fixed = [f for f in findings if not f.relaxable]
+            if fixed:
+                message = f"service {svc_name}: {fixed[0].key} = {fixed[0].value} {fixed[0].advice}"
+                raise ComposeSecurityError(message + _profile_note(services, message))
             for f in findings:
                 log_warning(
                     "compose-validate",

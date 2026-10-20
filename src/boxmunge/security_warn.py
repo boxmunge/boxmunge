@@ -32,6 +32,9 @@ def undeclared_service_warning(project: str, svc_name: str) -> str:
         f"if it keeps no data in compose.yml volumes, or `external: true` to keep "
         f"its compose.yml volumes and add the paths it writes as compose `tmpfs:` "
         f"entries (PostgreSQL needs /tmp and /var/run/postgresql). "
+        f"Without `read_only: true` in compose.yml it also adds +1 to the CVE "
+        f"severity of every finding in the whole project: in 0.11.0 that only "
+        f"warns (`boxmunge security {project}`), and from 0.12 it quarantines. "
         f"A future boxmunge release will make a read-only root filesystem the "
         f"default for undeclared services too."
     )
