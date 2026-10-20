@@ -94,8 +94,9 @@ NODE = "require('http').createServer((q, s) => s.end('node ' + process.getuid())
 
 def vmweb(version: str) -> dict[str, str]:
     compose = {"services": {
-        "web": {"image": "nginx:1.27-alpine", "read_only": False},
-        "api": {"image": "node:22-alpine", "command": ["node", "-e", NODE]},
+        "web": {"image": "nginx:1.27-alpine", "read_only": False, "restart": "unless-stopped"},
+        "api": {"image": "node:22-alpine", "command": ["node", "-e", NODE],
+                "restart": "unless-stopped"},
     }}
     # A routed manifest service: its writable paths belong in the manifest
     # (compose-side tmpfs is refused without a writable: block), which both
@@ -110,7 +111,9 @@ def vmweb(version: str) -> dict[str, str]:
 
 
 def vmapp(version: str) -> dict[str, str]:
-    compose = {"services": {"web": {"build": ".", "command": HTTPD,
+    # Every long-running service restarts with the box (PROJECT_CONVENTIONS.md):
+    # nothing else starts a project after a reboot.
+    compose = {"services": {"web": {"build": ".", "command": HTTPD, "restart": "unless-stopped",
                                     "volumes": ["./data/uploads:/srv"]}}}
     web = {"port": 8080, "routes": [{"path": "/"}], "writable": {"external": True}}
     files = {"manifest.yml": _manifest("vmapp", {"web": web}, hosts=True,
