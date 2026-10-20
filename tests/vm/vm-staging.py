@@ -314,8 +314,37 @@ def trust_host_key() -> None:
             known.write(f"[localhost]:{port} {' '.join(key)}\n")
 
 
+def preinstall_gnupg_for_old_release() -> None:
+    """0.10.1's installer needs gpg before it installs it; boxes installed
+    when cloud images shipped gnupg have it. Only this legacy base install
+    needs it: the shared cloud-init user-data stays without gnupg so the
+    beta's fresh install (vm-test.py) exercises the real installer path."""
+    result = vm.ssh_run("test", vm.PORTS["ssh_initial"],
+                        "sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive "
+                        "apt-get install -y gnupg", check=False)
+    if result.returncode != 0:
+        vm.step_fail("pre-install gnupg for the 0.10.1 base",
+                     f"stdout: {result.stdout[-3000:]}\nstderr: {result.stderr[-3000:]}")
+    vm.step_pass(f"gnupg on the guest, as a {OLD_VERSION}-era box has it")
+
+
+def match_fleet_old_release_box() -> None:
+    """A fresh 0.10.1 install leaves caddy/.site-journal missing, under a
+    caddy/ that deploy cannot write, so its first deploy fails; boxes on the
+    0.10 line in the field have it, owned by deploy. Make the base box match
+    them. Only this legacy base needs it: the beta's installer creates it."""
+    result = vm.ssh_run("supervisor", vm.PORTS["ssh_boxmunge"],
+                        "sudo install -d -m 755 -o deploy -g deploy "
+                        "/opt/boxmunge/caddy/.site-journal", check=False)
+    if result.returncode != 0:
+        vm.step_fail("create caddy/.site-journal for the 0.10.1 base",
+                     f"stdout: {result.stdout[-3000:]}\nstderr: {result.stderr[-3000:]}")
+    vm.step_pass(f"caddy/.site-journal as a {OLD_VERSION} box in the field has it")
+
+
 def install_old_release(hostname: str, tarball: Path) -> None:
     vm.phase(f"Install boxmunge {OLD_VERSION}")
+    preinstall_gnupg_for_old_release()
     trust_host_key()
     cmd = ["boxmunge", "server-setup", "test@localhost", "-p", str(vm.PORTS["ssh_initial"]),
            "--email", "test@example.com", "--self-signed-tls", "--yes", "--hostname", hostname,
@@ -327,6 +356,7 @@ def install_old_release(hostname: str, tarball: Path) -> None:
     if rc != 0:
         vm.step_fail("server-setup exited non-zero", log.read_text()[-3000:])
     vm.step_pass(f"server-setup installed {tarball.name}")
+    match_fleet_old_release_box()
     run_steps([("0.10.1 is live", "root", LIVE_IS_OLD, 0)])
 
 
