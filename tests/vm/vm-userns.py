@@ -145,7 +145,9 @@ def declare_and_adopt() -> None:
         ("restock the inbox", "root", "vm-restock", 0),
         deploy("vmapp", "v2"),
         ("a suppression to carry", "root",
-         "boxmunge-server security suppress CVE-2024-45337 --project vmweb --until 2099-01-01 "
+         # 30 days on the guest's clock: a suppression may run at most 90 days.
+         "boxmunge-server security suppress CVE-2024-45337 --project vmweb "
+         "--until \"$(date -u -d '+30 days' +%F)\" "
          "--reason 'userns rehearsal'", 0),
         *seeds_hold("after the declarations"),
     ])
