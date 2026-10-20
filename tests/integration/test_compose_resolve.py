@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from boxmunge.compose import load_user_compose
+from boxmunge.compose import generate_compose_override, load_user_compose
 from boxmunge.compose_validate import ComposeSecurityError, validate_user_compose
 from boxmunge.paths import BoxPaths
 
@@ -121,3 +121,20 @@ def test_env_file_placeholder_is_removed_after_validation(tmp_path: Path) -> Non
     })
     _validate(paths, compose)
     assert not (compose.parent / "secrets.env").exists()
+
+
+def test_read_only_false_survives_real_config_and_wins_in_the_overlay(tmp_path: Path) -> None:
+    """Compose's JSON output drops `read_only: false`; the user's literal
+    value is restored from compose.yml so the overlay leaves it alone."""
+    _, compose = _project(tmp_path, {"compose.yml": {"services": {
+        "db": {"image": "postgres:16", "read_only": False},
+        "web": {"image": "nginx"},
+    }}})
+    user_compose = load_user_compose(compose, "myapp")
+    assert user_compose["services"]["db"]["read_only"] is False
+    manifest = {"project": "myapp", "services": {
+        "db": {"internal": True}, "web": {"port": 80, "routes": [{"path": "/"}]}}}
+    services = yaml.safe_load(generate_compose_override(
+        manifest, user_compose=user_compose))["services"]
+    assert "read_only" not in services["db"]
+    assert services["web"]["read_only"] is True

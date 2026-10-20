@@ -208,7 +208,7 @@ active or not: a profiled service still starts when something names it
 | Rejected | Why |
 |---|---|
 | `privileged: true` | Full host access. |
-| `privileged`, `read_only`, or `init` given as anything but an unquoted `true`/`false` | A quoted `"true"` is not checked as a boolean. Write the bare value. |
+| `privileged`, `read_only`, or `init` given as anything but an unquoted `true`/`false` | A quoted `"true"` is not checked as a boolean. Write the bare value. For `read_only` this includes `${VAR}`: the opt-out is read from `compose.yml` as written, so write `read_only: false` on the service itself (not inherited through `extends:` or `include:`). |
 | `pid`, `ipc`, `network_mode`, `uts`, `cgroup` set to `host` | Shares a host namespace. |
 | `use_api_socket: true` | Hands the container the Docker daemon's API, which can start privileged containers with any host path mounted. Remove it. |
 | `privileged` on a `post_start` or `pre_stop` hook, or on a `develop.watch` `exec` hook | The hook regains every capability the hardening drops. Remove `privileged:`; hooks run with the service's own privileges. |
