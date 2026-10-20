@@ -208,14 +208,30 @@ def migrate_measured(results: dict) -> None:
     vm.step_pass(f"{results['downtime_s']} s without a 200 from {PROBE[0]}")
 
 
+def _ctr(project: str, service: str) -> str:
+    return (f"$(docker ps -q --filter label=com.docker.compose.project={project} "
+            f"--filter label=com.docker.compose.service={service})")
+
+
+# After a restart the databases take seconds to accept connections; the
+# checks wait for that (bounded: 3 minutes, then the step fails).
+DBS_READY = ("for i in $(seq 90); do "
+             f"docker exec \"{_ctr('vmdb', 'db')}\" pg_isready -U postgres -q && "
+             f"docker exec \"{_ctr('vmanon', 'db')}\" pg_isready -U postgres -q && "
+             f"docker exec \"{_ctr('vmdb', 'maria')}\" mariadb-admin -uroot -pvm ping --silent "
+             "&& exit 0; sleep 2; done; exit 1")
+UPLOAD_SERVED = ("for i in $(seq 60); do "
+                 "curl -sk --resolve vmapp.localhost:443:127.0.0.1 https://vmapp.localhost/ "
+                 "| grep -qx upload && exit 0; sleep 2; done; exit 1")
+
+
 def after_migration(when: str) -> list[tuple]:
     return [(f"the daemon is remapped {when}", "root", REMAPPED, 0),
             (f"docker-userns is ok {when}", "root",
              "boxmunge-server health | grep -Eq '^  OK +docker-userns'", 0),
+            (f"the databases accept connections {when}", "root", DBS_READY, 0),
             *seeds_hold(when),
-            (f"vmapp serves its upload {when}", "root",
-             "curl -sk --resolve vmapp.localhost:443:127.0.0.1 https://vmapp.localhost/ "
-             "| grep -qx upload", 0)]
+            (f"vmapp serves its upload {when}", "root", UPLOAD_SERVED, 0)]
 
 
 def wait_back(after: str, timeout: int = 300) -> None:
