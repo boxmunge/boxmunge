@@ -147,8 +147,8 @@ def shop_files(project: str) -> dict[str, str]:
             "db": {"security": {"user": "image", "reason": "postgres starts as root and "
                                                            "drops to its own user"}},
         },
-        "backup": {"type": "postgres", "service": "db", "dump_command": "pg_dump -U shop shop",
-                   "restore_command": "psql -U shop shop"},
+        "backup": {"type": "postgres", "service": "db", "dump_command": "pg_dump --clean --if-exists -U shop shop",
+                   "restore_command": "psql -v ON_ERROR_STOP=1 --single-transaction -U shop shop"},
     }
     compose = {
         "services": {

@@ -14,6 +14,6 @@ services:
 backup:
   type: postgres
   service: db
-  dump_command: "pg_dump -U canary canarydb"
-  restore_command: "psql -U canary canarydb"
+  dump_command: "pg_dump --clean --if-exists -U canary canarydb"
+  restore_command: "psql -v ON_ERROR_STOP=1 --single-transaction -U canary canarydb"
   retention: 3

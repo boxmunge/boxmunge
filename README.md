@@ -89,9 +89,11 @@ services:
 backup:
   type: postgres
   service: db
-  dump_command: "pg_dump -U myuser mydb"
-  restore_command: "psql -U myuser mydb"
+  dump_command: "pg_dump --clean --if-exists -U myuser mydb"
+  restore_command: "psql -v ON_ERROR_STOP=1 --single-transaction -U myuser mydb"
 ```
+
+Both postgres flags matter: `--clean --if-exists` makes the dump drop existing tables so a restore replaces the data, and `ON_ERROR_STOP` with `--single-transaction` makes a failed restore exit non-zero and roll back instead of half-applying.
 
 Your project is live at `https://myapp.example.com` with TLS, reverse proxy, and backups configured.
 
