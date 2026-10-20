@@ -29,7 +29,7 @@ EGRESS_PROBE_HOST = "deb.debian.org"
 EGRESS_HOSTS = (EGRESS_PROBE_HOST, "download.docker.com", "github.com",
                 "release-assets.githubusercontent.com", "registry-1.docker.io",
                 "production.cloudflare.docker.com", "dl-cdn.alpinelinux.org")
-EGRESS_RETRY_PAUSE = 5  # seconds before the one retry
+EGRESS_RETRY_PAUSES = (5, 10)  # seconds before the 2nd and 3rd attempt of each check
 
 
 def generate_host_key(key_path: Path) -> str:
@@ -98,14 +98,29 @@ def check_cloud_init(ssh_run, port: int) -> None:
         )
 
 
+def _probe(ssh_run, port: int, command: str, retry_command: str | None = None):
+    """One host check, retried with a backoff: a single slow CDN answer (an
+    IPv6 path timing out while IPv4 is fast) is not an unreachable host.
+    Retries use retry_command (curl -4) when given."""
+    for attempt, pause in enumerate((0, *EGRESS_RETRY_PAUSES)):
+        if pause:
+            time.sleep(pause)
+        result = ssh_run("test", port, command if attempt == 0 else retry_command or command,
+                         check=False)
+        if result.returncode == 0:
+            break
+    return result
+
+
 def _probe_egress(ssh_run, port: int) -> dict[str, object]:
     """DNS, then HTTPS to every host the install reaches; any HTTP answer
     (a 404 too) counts."""
-    probes = {"DNS   (getent hosts " + EGRESS_PROBE_HOST + ")": ssh_run(
-        "test", port, f"timeout 15 getent hosts {EGRESS_PROBE_HOST}", check=False)}
+    probes = {"DNS   (getent hosts " + EGRESS_PROBE_HOST + ")": _probe(
+        ssh_run, port, f"timeout 15 getent hosts {EGRESS_PROBE_HOST}")}
     for host in EGRESS_HOSTS:
-        probes[f"HTTPS (curl https://{host}/)"] = ssh_run(
-            "test", port, f"curl -sS -o /dev/null --max-time 15 https://{host}/", check=False)
+        curl = f"curl -sS -o /dev/null --max-time 15 {{}}https://{host}/"
+        probes[f"HTTPS (curl https://{host}/)"] = _probe(
+            ssh_run, port, curl.format(""), curl.format("-4 "))
     return probes
 
 
@@ -124,19 +139,18 @@ def check_guest_egress(ssh_run, port: int) -> None:
     and not others: GitHub's release assets have been blocked while
     deb.debian.org was not.
 
-    ssh_run is the harness's ssh_run(user, port, command, check) helper. One
-    retry after a short pause covers a guest whose network is still settling.
+    ssh_run is the harness's ssh_run(user, port, command, check) helper. Each
+    check is attempted three times, 5s then 10s apart (the retries over IPv4),
+    which covers a guest whose network is still settling and a CDN that is
+    slow once.
     """
     probes = _probe_egress(ssh_run, port)
-    if any(r.returncode != 0 for r in probes.values()):
-        time.sleep(EGRESS_RETRY_PAUSE)
-        probes = _probe_egress(ssh_run, port)
     if all(r.returncode == 0 for r in probes.values()):
         return
     report = "\n".join(f"  {what}: {_outcome(r, 124 if what.startswith('DNS') else None)}"
                        for what, r in probes.items())
     raise RuntimeError(
-        "The VM cannot reach every host the install needs (checked twice).\n"
+        "The VM cannot reach every host the install needs (each check tried three times).\n"
         f"{report}\n"
         "QEMU user-mode networking makes every guest connection, DNS included, "
         "from the host's qemu-system-x86_64 process. If the host itself is online, "

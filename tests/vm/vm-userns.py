@@ -309,6 +309,7 @@ def install_old_release(hostname: str, tarball: Path) -> None:
     """0.10.1 through this machine's `boxmunge server-setup`, the host key
     confirmed by the fingerprint read over the test user's ssh (as vm-test)."""
     vm.phase(f"Install boxmunge {st.OLD_VERSION}")
+    st.preinstall_gnupg_for_old_release()
     fingerprint = vm.ssh_run("test", vm.PORTS["ssh_initial"],
                              "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub").stdout.split()[1]
     cmd = ["boxmunge", "server-setup", "test@localhost", "-p", str(vm.PORTS["ssh_initial"]),
