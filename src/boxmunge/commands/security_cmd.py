@@ -101,9 +101,6 @@ def load_project_security(project: str, paths: BoxPaths) -> ProjectSecurity:
         manifest = load_manifest(paths.project_manifest(project))
     except ManifestError as e:
         raise SecurityViewError(str(e)) from e
-    if "schema_version" not in manifest:
-        raise SecurityViewError(
-            f"manifest for project '{project}' is missing schema_version")
 
     sec_block = manifest.get("security") or {}
     quarantined = is_quarantined(project, paths)

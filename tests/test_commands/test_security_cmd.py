@@ -162,15 +162,13 @@ def _make_paths(tmp_path):
     return paths
 
 
-def test_security_text_missing_schema_version_fails_loud(monkeypatch, tmp_path, capsys) -> None:
-    """Audit I-2c: a manifest missing schema_version must NOT silently default
-    to 1 — operators get a clear error on stderr and exit 1."""
+def _unversioned(tmp_path, monkeypatch):
+    """A bundle manifest with no schema_version, as deploy writes it."""
     paths = _make_paths(tmp_path)
     proj = paths.projects / "demo"
     proj.mkdir(parents=True)
     (paths.state / "projects.txt").write_text("demo\n")
-    manifest = {
-        # schema_version intentionally omitted
+    (proj / "manifest.yml").write_text(yaml.safe_dump({
         "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
         "source": "bundle",
         "project": "demo",
@@ -178,53 +176,26 @@ def test_security_text_missing_schema_version_fails_loud(monkeypatch, tmp_path, 
         "services": {
             "web": {"port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh"},
         },
-    }
-    (proj / "manifest.yml").write_text(yaml.safe_dump(manifest))
+    }))
     monkeypatch.setattr("boxmunge.commands.security_cmd._paths", lambda: paths)
-    # Bypass load_manifest's own schema validation so we can exercise the
-    # security_cmd fail-loud path directly with a hand-edited manifest.
-    monkeypatch.setattr(
-        "boxmunge.commands.security_cmd.load_manifest",
-        lambda path: manifest,
-    )
 
-    with pytest.raises(SystemExit) as exc:
+
+def test_security_text_reads_absent_schema_version_as_1(monkeypatch, tmp_path) -> None:
+    """Absent schema_version means 1 (agent-help conventions); the view shows
+    the manifest migrated to the current schema, as every reader sees it."""
+    _unversioned(tmp_path, monkeypatch)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
         cmd_security(["demo"])
-    assert exc.value.code == 1
-    captured = capsys.readouterr()
-    assert "schema_version" in captured.err
-    assert "ERROR" in captured.err
+    assert f"(schema_version: {CURRENT_SCHEMA_VERSION}," in buf.getvalue()
 
 
-def test_security_json_missing_schema_version_fails_loud(monkeypatch, tmp_path, capsys) -> None:
-    """Same fail-loud guarantee for the --json code path."""
-    paths = _make_paths(tmp_path)
-    proj = paths.projects / "demo"
-    proj.mkdir(parents=True)
-    (paths.state / "projects.txt").write_text("demo\n")
-    manifest = {
-        # schema_version intentionally omitted
-        "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
-        "source": "bundle",
-        "project": "demo",
-        "hosts": ["demo.example.com"],
-        "services": {
-            "web": {"port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh"},
-        },
-    }
-    (proj / "manifest.yml").write_text(yaml.safe_dump(manifest))
-    monkeypatch.setattr("boxmunge.commands.security_cmd._paths", lambda: paths)
-    monkeypatch.setattr(
-        "boxmunge.commands.security_cmd.load_manifest",
-        lambda path: manifest,
-    )
-
-    with pytest.raises(SystemExit) as exc:
+def test_security_json_reads_absent_schema_version_as_1(monkeypatch, tmp_path) -> None:
+    _unversioned(tmp_path, monkeypatch)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
         cmd_security(["demo", "--json"])
-    assert exc.value.code == 1
-    captured = capsys.readouterr()
-    assert "schema_version" in captured.err
-    assert "ERROR" in captured.err
+    assert json.loads(buf.getvalue())["schema_version"] == CURRENT_SCHEMA_VERSION
 
 
 def test_security_json_off_services(monkeypatch, tmp_path) -> None:

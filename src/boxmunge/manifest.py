@@ -56,10 +56,11 @@ def at_current_schema(manifest: dict[str, Any], path: Path) -> dict[str, Any]:
     A git project's manifest.yml is a link into its checkout, which the
     upgrade never rewrites, so it can stay at an older schema indefinitely.
     A schema_version that is not a supported integer is returned unchanged
-    for validate_manifest to report, and an absent one stays absent: readers
-    that need it refuse to guess (security_cmd).
+    for validate_manifest to report. An absent one means 1, as documented
+    and as validate_manifest and migrate_manifest read it: deploy writes the
+    bundle's manifest as authored, so an unversioned manifest is normal.
     """
-    version = manifest.get("schema_version")
+    version = manifest.get("schema_version", 1)
     if isinstance(version, bool) or not isinstance(version, int):
         return manifest
     if not 1 <= version <= CURRENT_SCHEMA_VERSION:

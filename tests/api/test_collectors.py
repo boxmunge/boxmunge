@@ -93,7 +93,6 @@ def test_load_project_security_reads_posture_and_state(paths) -> None:
 
 @pytest.mark.parametrize("manifest_text,message", [
     (None, "Manifest not found"),
-    ("project: shop\n", "missing schema_version"),
 ])
 def test_load_project_security_errors_carry_the_cli_message(paths, manifest_text, message) -> None:
     (paths.projects / "shop").mkdir()
