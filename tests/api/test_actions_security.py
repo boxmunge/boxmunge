@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 
 import pytest
+import yaml
 
 from boxmunge.api.dev.fixture_host import FixtureHost
 from boxmunge.api.principal import Principal, Tier
 from boxmunge.api.result import ActionError, ErrorCode
 from boxmunge.cve.breaker import breaker_path
+from boxmunge.manifest import CURRENT_SCHEMA_VERSION
 from tests.api.fakes import make_invoker
 
 WEBUI = Principal.plugin("webui", Tier.OBSERVE)
@@ -84,10 +86,14 @@ def test_findings_from_older_scan_files_read_as_null(fixture_paths) -> None:
     assert finding["kev_listed"] is None and finding["pkg_class"] is None
 
 
-def test_manifest_without_schema_version_fails(fixture_paths) -> None:
-    fixture_paths.project_manifest("shop").write_text("project: shop\n")
-    error = _error(fixture_paths, "security.project", {"project": "shop"})
-    assert error.code is ErrorCode.FAILED and "missing schema_version" in error.message
+def test_manifest_without_schema_version_reads_as_1(fixture_paths) -> None:
+    path = fixture_paths.project_manifest("shop")
+    manifest = yaml.safe_load(path.read_text())
+    del manifest["schema_version"]
+    path.write_text(yaml.safe_dump(manifest))
+    before = _call(fixture_paths, "security.project", {"project": "shop"})
+    path.write_text(yaml.safe_dump({**manifest, "schema_version": CURRENT_SCHEMA_VERSION}))
+    assert before == _call(fixture_paths, "security.project", {"project": "shop"})
 
 
 def test_pre_registered_project_has_no_security_view(fixture_paths) -> None:

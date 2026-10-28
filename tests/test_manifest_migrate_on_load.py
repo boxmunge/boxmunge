@@ -41,10 +41,10 @@ class TestMigrateOnLoad:
             k: v for k, v in V1.items() if k != "schema_version"}
         assert path.read_bytes() == before
 
-    def test_absent_schema_version_stays_absent(self, tmp_path: Path) -> None:
+    def test_absent_schema_version_is_read_as_1(self, tmp_path: Path) -> None:
         bare = {k: v for k, v in V1.items() if k != "schema_version"}
         path = _write(tmp_path / "manifest.yml", bare)
-        assert load_manifest(path) == bare
+        assert load_manifest(path) == {**bare, "schema_version": CURRENT_SCHEMA_VERSION}
 
     def test_through_a_symlink(self, tmp_path: Path) -> None:
         target = _write(tmp_path / "repo" / "manifest.yml", V1)
