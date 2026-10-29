@@ -77,7 +77,7 @@ from boxmunge.report_failure import report_failure
 # The active venv is the release being left: one older than this shim has no detail parameter.
 extra = {'detail': os.environ['BM_DETAIL']} if 'detail' in inspect.signature(report_failure).parameters else {}
 report_failure(os.environ['BM_VERSION'], os.environ['BM_FROM_VERSION'], os.environ['BM_STAGE'], **extra)
-" || log "WARNING: the upgrade failure report could not be sent"
+" || { log "WARNING: the upgrade failure report could not be sent"; } || :
 }
 
 send_notification() {

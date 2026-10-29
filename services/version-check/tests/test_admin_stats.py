@@ -78,14 +78,16 @@ class TestStatsEndpointAuth:
         )
         assert resp.status_code == 200
 
-    def test_url_token_accepted(self, client, app):
-        """User asked for url-or-bearer support; URL token is the convenience path
-        for simple weekly bots."""
+    def test_url_token_is_not_accepted(self, client, app):
         app.config["STATS_SECRET"] = "test-stats-secret"
-        resp = client.get(
-            "/v1/admin/version-checks?token=test-stats-secret",
-        )
-        assert resp.status_code == 200
+        resp = client.get("/v1/admin/version-checks?token=test-stats-secret")
+        assert resp.status_code == 401
+
+    def test_non_ascii_credentials_are_401_not_500(self, client, app):
+        app.config["STATS_SECRET"] = "test-stats-secret"
+        resp = client.get("/v1/admin/version-checks",
+                          headers={"Authorization": "Bearer \u00e9".encode().decode("latin-1")})
+        assert resp.status_code == 401
 
     def test_wrong_bearer_returns_401(self, client, app):
         app.config["STATS_SECRET"] = "test-stats-secret"
@@ -93,11 +95,6 @@ class TestStatsEndpointAuth:
             "/v1/admin/version-checks",
             headers={"Authorization": "Bearer wrong"},
         )
-        assert resp.status_code == 401
-
-    def test_wrong_url_token_returns_401(self, client, app):
-        app.config["STATS_SECRET"] = "test-stats-secret"
-        resp = client.get("/v1/admin/version-checks?token=wrong")
         assert resp.status_code == 401
 
     def test_uses_separate_secret_from_circuit_breaker(self, client, app):
@@ -124,7 +121,7 @@ class TestStatsEndpointAuth:
 class TestStatsEndpointShape:
     def test_returns_empty_when_no_data(self, client, app):
         app.config["STATS_SECRET"] = "s"
-        resp = client.get("/v1/admin/version-checks?token=s")
+        resp = client.get("/v1/admin/version-checks", headers={"Authorization": "Bearer s"})
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["totals"] == []
@@ -141,7 +138,7 @@ class TestStatsEndpointShape:
             (_days_ago(3), "0.4.1", 12),
             (_days_ago(10), "0.3.0", 99),  # outside default window
         ])
-        resp = client.get("/v1/admin/version-checks?token=s")
+        resp = client.get("/v1/admin/version-checks", headers={"Authorization": "Bearer s"})
         assert resp.status_code == 200
         data = resp.get_json()
         # 0.3.0 (10d ago) excluded; 0.4.2 + 0.4.1 included
@@ -155,7 +152,7 @@ class TestStatsEndpointShape:
     ):
         app.config["STATS_SECRET"] = "s"
         _seed_checks(app.config["DB_PATH"], [(_today(), "0.4.2", 5)])
-        data = client.get("/v1/admin/version-checks?token=s&last=1").get_json()
+        data = client.get("/v1/admin/version-checks?last=1", headers={"Authorization": "Bearer s"}).get_json()
         assert data["until"] == _today()
         assert data["totals"] == [{"version": "0.4.2", "count": 5, "listed": True}]
 
@@ -167,7 +164,7 @@ class TestStatsEndpointShape:
             (_days_ago(20), "0.3.0", 5),
         ])
         # last=30 should pull in the older entry
-        resp = client.get("/v1/admin/version-checks?token=s&last=30")
+        resp = client.get("/v1/admin/version-checks?last=30", headers={"Authorization": "Bearer s"})
         data = resp.get_json()
         versions = {row["version"] for row in data["totals"]}
         assert "0.3.0" in versions
@@ -176,13 +173,13 @@ class TestStatsEndpointShape:
     def test_last_param_capped_at_90_days(self, client, app):
         """Cap prevents pathological queries against an unbounded table."""
         app.config["STATS_SECRET"] = "s"
-        resp = client.get("/v1/admin/version-checks?token=s&last=9999")
+        resp = client.get("/v1/admin/version-checks?last=9999", headers={"Authorization": "Bearer s"})
         data = resp.get_json()
         assert data["days"] == 90
 
     def test_invalid_last_param_falls_back_to_default(self, client, app):
         app.config["STATS_SECRET"] = "s"
-        resp = client.get("/v1/admin/version-checks?token=s&last=banana")
+        resp = client.get("/v1/admin/version-checks?last=banana", headers={"Authorization": "Bearer s"})
         data = resp.get_json()
         assert data["days"] == 7
 
@@ -195,7 +192,7 @@ class TestStatsEndpointShape:
             (_days_ago(2), "0.4.1", 8),
             (_today(), "0.4.2", 3),
         ])
-        resp = client.get("/v1/admin/version-checks?token=s")
+        resp = client.get("/v1/admin/version-checks", headers={"Authorization": "Bearer s"})
         data = resp.get_json()
         totals = {row["version"]: row["count"] for row in data["totals"]}
         assert totals["0.4.1"] == 30
@@ -210,7 +207,7 @@ class TestStatsEndpointShape:
             (_today(), "0.4.2", 50),
             (_today(), "0.3.0", 1),
         ])
-        resp = client.get("/v1/admin/version-checks?token=s")
+        resp = client.get("/v1/admin/version-checks", headers={"Authorization": "Bearer s"})
         data = resp.get_json()
         counts = [row["count"] for row in data["totals"]]
         assert counts == sorted(counts, reverse=True)
@@ -222,7 +219,7 @@ class TestStatsEndpointShape:
             (_today(), "0.4.2", 3),
             (_today(), "0.4.1", 12),
         ])
-        resp = client.get("/v1/admin/version-checks?token=s")
+        resp = client.get("/v1/admin/version-checks", headers={"Authorization": "Bearer s"})
         data = resp.get_json()
         # Each row has date, version, count
         for row in data["by_date"]:

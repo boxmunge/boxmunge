@@ -79,6 +79,17 @@ class TestFailureDetail:
         assert _rows(db_path)[0][0] == "0.10.1"
 
 
+class TestInstalledFromValidation:
+    @pytest.mark.parametrize("sent", ["unknown", "boxmunge unknown", "0.10.1"])
+    def test_accepted(self, client, sent):
+        assert _report(client, installed_from=sent).status_code == 204
+
+    @pytest.mark.parametrize("sent", ["", "<b>x</b>", "boxmunge", "0.10.1+abc1234", "dev build"])
+    def test_rejected(self, client, db_path, sent):
+        assert _report(client, installed_from=sent).status_code == 400
+        assert _rows(db_path) == []
+
+
 class TestStatsPageAuth:
     def test_no_credentials_is_401(self, client):
         assert client.get("/v1/admin/stats").status_code == 401
@@ -93,7 +104,9 @@ class TestStatsPageAuth:
         assert resp.status_code == 200
         assert resp.content_type.startswith("text/html")
         assert resp.headers["Cache-Control"] == "no-store"
-        assert "script-src" not in resp.headers["Content-Security-Policy"]
+        csp = resp.headers["Content-Security-Policy"]
+        assert "script-src" not in csp
+        assert "frame-ancestors 'none'" in csp and "base-uri 'none'" in csp
 
     def test_wrong_bearer_is_401(self, client):
         assert client.get("/v1/admin/stats",
@@ -125,6 +138,32 @@ class TestStatsPageAuth:
         assert client.get("/v1/admin/stats",
                           headers={"Cookie": "bm_stats=" + SECRET}).status_code == 401
 
+    def test_non_ascii_token_and_bearer_are_401_not_500(self, client):
+        assert client.get("/v1/admin/stats?token=%C3%A9").status_code == 401
+        sent = {"Authorization": "Bearer \u00e9".encode().decode("latin-1")}
+        assert client.get("/v1/admin/stats", headers=sent).status_code == 401
+        assert client.get("/v1/admin/stats",
+                          headers={"Cookie": "bm_stats=1.\u00e9"}).status_code == 401
+
+    def test_cookie_expires_server_side(self, client):
+        import app as app_module
+        issued = 1_800_000_000
+        with patch.object(app_module, "_now_unix", return_value=issued):
+            value = client.get("/v1/admin/stats?token=" + SECRET).headers["Set-Cookie"].split(";")[0]
+        assert value.startswith(f"bm_stats={issued}.")
+        for now, status in ((issued + 8 * 3600, 200), (issued + 8 * 3600 + 1, 401),
+                            (issued - 1, 401)):
+            with patch.object(app_module, "_now_unix", return_value=now):
+                assert client.get("/v1/admin/stats", headers={"Cookie": value}).status_code == status
+
+    def test_cookie_with_altered_issue_time_is_401(self, app):
+        client = app.test_client(use_cookies=False)
+        import app as app_module
+        with patch.object(app_module, "_now_unix", return_value=1_800_000_000):
+            value = client.get("/v1/admin/stats?token=" + SECRET).headers["Set-Cookie"].split(";")[0]
+            forged = value.replace("bm_stats=1800000000.", "bm_stats=1800000001.")
+            assert client.get("/v1/admin/stats", headers={"Cookie": forged}).status_code == 401
+
     def test_cookie_does_not_open_the_json_endpoint(self, client):
         value = client.get("/v1/admin/stats?token=" + SECRET).headers["Set-Cookie"].split(";")[0]
         assert client.get("/v1/admin/version-checks",
@@ -142,6 +181,7 @@ class TestStatsPageContent:
         assert "<th>0.0.9 (unlisted)</th>" in html
         assert "9.9.9-not" not in html
         assert "not unique boxes" in html
+        assert "unverified client text" in html
 
     def test_lists_failure_reports_with_their_reason(self, client):
         _report(client, installed_from="boxmunge 0.10.1",

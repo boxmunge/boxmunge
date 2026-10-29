@@ -156,15 +156,16 @@ def _check_cb_auth(app_config):
     if not secret:
         return False
     auth = request.headers.get("Authorization", "")
-    return hmac.compare_digest(auth, f"Bearer {secret}")
+    return _eq(auth, f"Bearer {secret}")
+
+
+def _eq(a: str, b: str) -> bool:
+    """Constant-time equality; bytes, because compare_digest raises on non-ASCII str."""
+    return hmac.compare_digest(a.encode(), b.encode())
 
 
 def _check_stats_auth(app_config):
-    """Authorize the admin/version-checks endpoint.
-
-    Accepts EITHER `Authorization: Bearer <secret>` OR `?token=<secret>`.
-    URL token is the convenience path for simple poll bots; Bearer is
-    preferred (URLs end up in proxy logs).
+    """Authorize the admin/version-checks endpoint: `Authorization: Bearer <secret>`.
 
     Uses STATS_SECRET, NOT CB_SECRET — different blast radius. A leaked
     stats token is read-only over check counts; a leaked CB token can
@@ -173,19 +174,33 @@ def _check_stats_auth(app_config):
     secret = _stats_secret(app_config)
     if not secret:
         return False
-    bearer = request.headers.get("Authorization", "")
-    if hmac.compare_digest(bearer, f"Bearer {secret}"):
-        return True
-    return hmac.compare_digest(request.args.get("token", ""), secret)
+    return _eq(request.headers.get("Authorization", ""), f"Bearer {secret}")
 
 
 def _stats_secret(app_config) -> str:
     return app_config.get("STATS_SECRET") or os.environ.get("STATS_SECRET", "")
 
 
+def _now_unix() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
+
+
+def _stats_cookie_mac(secret: str, issued: str) -> str:
+    return hmac.new(secret.encode(), f"stats-cookie|{issued}".encode(), hashlib.sha256).hexdigest()
+
+
 def _stats_cookie_value(secret: str) -> str:
-    """What the stats cookie holds: derived from the secret, never the secret itself."""
-    return hmac.new(secret.encode(), b"boxmunge-stats-cookie", hashlib.sha256).hexdigest()
+    """"<issued_unix>.<mac>": derived from the secret, never the secret itself,
+    and checked against its issue time so a stolen cookie dies after STATS_COOKIE_MAX_AGE."""
+    issued = str(_now_unix())
+    return f"{issued}.{_stats_cookie_mac(secret, issued)}"
+
+
+def _stats_cookie_valid(secret: str, value: str) -> bool:
+    issued, _, mac = value.partition(".")
+    if not issued.isascii() or not issued.isdigit() or not _eq(mac, _stats_cookie_mac(secret, issued)):
+        return False
+    return 0 <= _now_unix() - int(issued) <= STATS_COOKIE_MAX_AGE
 
 
 def _check_stats_page_auth(app_config) -> bool:
@@ -193,9 +208,9 @@ def _check_stats_page_auth(app_config) -> bool:
     secret = _stats_secret(app_config)
     if not secret:
         return False
-    if hmac.compare_digest(request.headers.get("Authorization", ""), f"Bearer {secret}"):
+    if _eq(request.headers.get("Authorization", ""), f"Bearer {secret}"):
         return True
-    return hmac.compare_digest(request.cookies.get(STATS_COOKIE, ""), _stats_cookie_value(secret))
+    return _stats_cookie_valid(secret, request.cookies.get(STATS_COOKIE, ""))
 
 
 def _query_version_checks(db_path: Path, days: int, listed: set[str]) -> dict:
@@ -353,6 +368,9 @@ def create_app() -> Flask:
             return jsonify({"error": f"detail must be printable ASCII of at most "
                                      f"{DETAIL_MAX} characters"}), 400
         installed_from = LEGACY_FROM_PREFIX.sub("", installed_from)
+        if installed_from != "unknown" and not VERSION_RE.match(installed_from):
+            return jsonify({"error": "installed_from must be X.Y.Z or \"unknown\" "
+                                     "(optionally prefixed \"boxmunge \")"}), 400
         now = datetime.now(timezone.utc)
         # A repeat from the same reporter is accepted but not stored: the
         # box needs no different answer, and storing it would let one host
@@ -419,7 +437,7 @@ def create_app() -> Flask:
         token = request.args.get("token")
         if token is not None:
             secret = _stats_secret(app.config)
-            if not secret or not hmac.compare_digest(token, secret):
+            if not secret or not _eq(token, secret):
                 return jsonify({"error": "unauthorized"}), 401
             response = redirect(f"/v1/admin/stats?last={_parse_last_param(request.args.get('last'))}",
                                 code=303)
@@ -437,7 +455,8 @@ def create_app() -> Flask:
         response = make_response(page)
         response.headers["Content-Type"] = "text/html; charset=utf-8"
         response.headers["Cache-Control"] = "no-store"
-        response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
         return response
 
     @app.route("/")

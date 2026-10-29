@@ -9,7 +9,8 @@ from html import escape
 NOTE = ("Counts are /v1/check requests, not unique boxes: one box checks about 4 times "
         "a day. A version marked unlisted is not in releases.json (a dev build or a "
         "dropped release); the version \"unlisted\" collects the overflow beyond the "
-        "per-day cap on distinct versions.")
+        "per-day cap on distinct versions. Versions and failure details are "
+        "unverified client text: anyone can send them.")
 
 STYLE = """
 body{font:14px/1.4 system-ui,sans-serif;margin:1.5rem;color:#222;background:#fff}

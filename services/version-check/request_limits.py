@@ -91,7 +91,8 @@ class CheckCounter:
     A day holds at most `max_versions_per_day` distinct versions; counts for
     further ones go to OVERFLOW_VERSION, so a client cycling through valid
     version strings cannot grow the table without bound. `always_count`
-    (the listed releases) is exempt from the cap.
+    (the listed releases) is exempt from the cap, but still counts against it,
+    as does the "unlisted" overflow row itself.
     """
 
     def __init__(self, db_path: Path, flush_interval: float, max_pending: int,
@@ -122,8 +123,11 @@ class CheckCounter:
             self._last_flush = self._clock()
         if not pending:
             return
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, isolation_level=None)
         try:
+            # One write transaction across the select and the insert, so
+            # another worker's flush cannot add versions between them.
+            conn.execute("BEGIN IMMEDIATE")
             known: dict[str, set[str]] = {}
             merged: Counter[tuple[str, str]] = Counter()
             for (d, v), n in sorted(pending.items()):
@@ -141,6 +145,10 @@ class CheckCounter:
                    ON CONFLICT (date, version) DO UPDATE SET count = count + excluded.count""",
                 [(d, v, n) for (d, v), n in merged.items()],
             )
-            conn.commit()
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
         finally:
             conn.close()
