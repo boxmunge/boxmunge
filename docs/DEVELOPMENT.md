@@ -26,6 +26,8 @@ src/boxmunge/            server package
   cve/                   CVE scanning, the trust-ladder policy engine, KEV feed, quarantine
   health_checks/         checks used by health and check-all
   tui/                   the `console` terminal UI
+  api/                   the action registry and boxmunge-apid, the plugin API daemon (dev mode
+                         only so far; see docs/PLUGIN_API.md)
   mcp_server.py          MCP tool registry (_TOOL_DEFS); mcp_tools.py holds the handlers
   paths.py               every on-box path, derived from one root (BoxPaths)
   manifest.py            manifest loading and validation; migration.py upgrades old schemas
@@ -63,9 +65,10 @@ Every server command is a module in `src/boxmunge/commands/`. The usual shape is
 which only runs names in `ALLOWED_COMMANDS` and starts each as a `boxmunge-server` subprocess.
 The MCP server exposes a subset as tools.
 
-**This is changing.** A single action registry with typed results and capability tiers is being
-built so the CLI, shell, MCP, and plugins all derive from one definition. Until it lands, adding a
-command means touching several places, listed below.
+**This is changing.** A single action registry with typed results and capability tiers
+(`src/boxmunge/api/`) is meant to become the one definition the CLI, shell, MCP, and plugins derive
+from. Today only `boxmunge-apid` serves it, in dev mode against a fixture box; the CLI, shell and
+MCP still keep their own tables, so adding a command means touching several places, listed below.
 
 ### Adding a command today
 
@@ -79,9 +82,11 @@ command means touching several places, listed below.
    a comment saying why. A test fails until you choose.
 4. If agents should call it over MCP, add a tool to `_TOOL_DEFS` in `src/boxmunge/mcp_server.py`
    and a handler in `src/boxmunge/mcp_tools.py`.
-5. Add it to `HELP_TEXT` in `src/boxmunge/commands/help.py`, give it a usage entry in
-   `USAGE` in `src/boxmunge/commands/usage.py` (what `help <command>` prints; a test fails until
-   every registered command has one), and document it in `docs/on-server/OPERATIONS.md`.
+5. Add it to `HELP_TEXT` in `src/boxmunge/commands/help.py` (in the operator section if the
+   deploy shell does not allow it), give it a usage entry in `USAGE` in
+   `src/boxmunge/commands/usage.py` (what `help <command>` prints), and document it in
+   `docs/on-server/OPERATIONS.md`. Tests fail until every registered command has a usage entry
+   and a line in `help`.
 6. If it only reads state, give it `--json`.
 7. Validate every project name with `boxmunge.paths.validate_project_name` before use.
    `BoxPaths` also validates names when it builds a project path, so an invalid name raises rather
@@ -109,6 +114,7 @@ command means touching several places, listed below.
 |---|---|---|
 | `/opt/boxmunge/config/` | root:deploy | `boxmunge.yml`, backup key, host secrets, suppressions |
 | `/opt/boxmunge/projects/<p>/` | deploy | manifest, compose files, generated overlay, secrets, backups, data |
+| `/opt/boxmunge/inbox/` | deploy | uploaded bundles waiting for `stage` or `prod-deploy` |
 | `/opt/boxmunge/state/` | deploy | registry, locks, health, deploy, staging, scan, KEV, container-update, platform-update and OS-update state, and the unconfigured-alerts log throttle |
 | `/opt/boxmunge/upgrade-state/` | root:deploy | active venv slot, probation, blocklist |
 | `/opt/boxmunge/logs/boxmunge.log` | deploy, group-writable | structured JSON-lines operational log, written by root and deploy |
@@ -118,12 +124,12 @@ command means touching several places, listed below.
 
 ## Testing
 
-Three tiers, fastest first.
+Four tiers, fastest first.
 
 | Tier | Command | Needs | Covers |
 |---|---|---|---|
 | Unit | `make test` | Python | Logic, validation, policy, generated config; also the pinning, file-length, and sign-off lints |
-| Client | `make test-cli` | Python | The PyPI client |
+| Client | `make test-cli` | Python | The PyPI client (CI also runs `services/version-check/`'s own tests) |
 | Integration | `make test-integration` | Docker, `age` | Real compose deploys, Caddy, backup and restore round-trips, MCP |
 | Full system | `make test-vm` | QEMU, `mkisofs`, the client | Boots Debian 13, runs `server-setup`, deploys, backs up, restores (see `tests/vm/README.md`) |
 

@@ -1,13 +1,13 @@
-#!/usr/bin/env bash
-# Backup script for __PROJECT_NAME__
+#!/bin/sh
+# Backup script for __PROJECT_NAME__ (optional)
 #
-# Output the backup data to stdout. boxmunge handles compression,
-# encryption, and storage.
-#
-# Example: PostgreSQL dump
-# docker compose exec -T db pg_dump --clean --if-exists -U "${POSTGRES_USER:-app}" appdb
-
-set -euo pipefail
+# backup.dump_command runs inside the backup.service container through
+# `sh -c`, so it usually calls the dump tool directly, for example:
+#   dump_command: "pg_dump --clean --if-exists -U $POSTGRES_USER $POSTGRES_DB"
+# A script is only worth it for a longer dump. It must be inside that
+# container (copy it in with the image's Dockerfile) and write the backup
+# to stdout; boxmunge compresses, encrypts and stores it.
+set -eu
 
 echo "ERROR: backup.sh not configured" >&2
 exit 1
