@@ -35,7 +35,7 @@ PROBLEMS = {
     "internal-routes": (_internal_with_routes(), "internal: true but has routes"),
     "strategy": (_manifest(container_updates={"strategy": "rollback"}), "container_updates.strategy"),
     "updates-shape": (_manifest(container_updates="on"), "'container_updates' must be a mapping"),
-    "type": (_manifest(backup={"type": False}), "backup.type must be a non-empty string"),
+    "type": (_manifest(backup={"type": False, "dump_command": "d", "restore_command": "r"}), "backup.type must be a non-empty string"),
     "retention": (_manifest(backup={"type": "none", "retention": "7"}), "backup.retention"),
     "retention-zero": (_manifest(backup={"type": "none", "retention": 0}), "backup.retention"),
 }
@@ -99,7 +99,7 @@ def test_upgrade_leaves_a_project_with_every_new_problem_running(mock_up, tmp_pa
         services={"web": {"port": 80, "internal": True, "routes": [{"path": "/"}],
                           "smoke": "s.sh", "limits": {"memory": "1g"}}},
         container_updates={"strategy": "rollback"},
-        backup={"type": False, "retention": 0},
+        backup={"type": False, "retention": 0, "dump_command": "d", "restore_command": "r"},
     )
     pdir = paths.project_dir("shop")
     pdir.mkdir(parents=True)
@@ -132,3 +132,10 @@ def test_the_sample_project_manifest_validates_cleanly() -> None:
     sample = Path(__file__).parent.parent / "sample-project/manifest.yml"
     errors, warnings = validate_manifest(yaml.safe_load(sample.read_text()), "sample")
     assert errors == [] and warnings == []
+
+
+def test_a_bad_backup_type_still_reports_the_missing_commands() -> None:
+    errors, warnings = validate_manifest(
+        _manifest(backup={"type": False}), "shop", lenient_values=True)
+    assert any("dump_command" in e for e in errors), errors
+    assert any("backup.type must be" in w for w in warnings), warnings

@@ -9,8 +9,10 @@ services:
     port: 8080
     routes:
       - path: /
-    health: /healthz
     smoke: boxmunge-scripts/smoke.sh
+    limits:
+      memory: 128m
+      cpus: "0.5"
 backup:
   type: postgres
   service: db

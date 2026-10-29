@@ -121,7 +121,7 @@ def validate_manifest(
     """
     errors: list[str] = []
     warnings: list[str] = []
-    late: list[str] = []  # errors, or warnings when `upgrading`
+    late: list[str] = []  # errors, or warnings when `lenient_values`
 
     # Top-level shape guard. A YAML document like a list (`- foo`), scalar
     # (`just a string`), or empty file (`None`) would otherwise AttributeError
@@ -359,7 +359,6 @@ def validate_manifest(
     problem = backup_type_problem(backup_type)
     if problem:
         late.append(problem)
-        backup_type = "none"  # reported once; not also as missing commands
     if "retention" in backup:
         problem = retention_problem(backup["retention"])
         if problem:

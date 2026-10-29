@@ -205,7 +205,7 @@ backup:
   restore_command: "psql -v ON_ERROR_STOP=1 --single-transaction -U $POSTGRES_USER $POSTGRES_DB"
 
   # Number of nightly backups to keep (whole number, at least 1). Defaults to 7.
-  # Checked when a backup runs, not by validate. Every other snapshot kind
+  # Checked by validate and deploy as well as when a backup runs. Every other snapshot kind
   # (pre-deploy, pre-update, manual, pre-restore, pre-migrate) has its own
   # fixed count (see OPERATIONS.md, "Snapshot kinds and retention").
   retention: 7
@@ -231,7 +231,8 @@ deploy:
 # when a backup is configured). `enabled: false` opts the project out.
 # `strategy` overrides boxmunge.yml's container_updates.strategy (default
 # leave_broken); rollback_to_previous puts back the image that ran before
-# when an updated container does not come up healthy.
+# when an updated container does not come up healthy. A strategy other than
+# those two is refused (and `container_updates` must be a mapping).
 #
 # container_updates:
 #   enabled: true
@@ -260,9 +261,9 @@ boxmunge validates `manifest.yml` on every deploy and rejects invalid manifests 
 4. **`source` is required** and must be `bundle` or `git`.
 5. **`repo` is required if `source: git`**. The `ref` field defaults to `main` if omitted.
 6. **`hosts` is required** and must contain at least one hostname. Wildcard hosts (e.g. `*.example.com`) are rejected unless the manifest top level sets `allow_wildcard_hosts: true` — see SECURITY.md for the trade-off.
-7. **Each service must have `port`** and **at least one entry in `routes`**, unless it sets `internal: true` (a service Caddy does not route to, declared to give it a read-only root filesystem and `writable:` paths) or is an entry holding only its `security` block (it only says who a compose-only service runs as; see "Who a service runs as"); either may omit both. `internal` must be `true` or `false`. Routes must be dicts with a `path` key. Both values are written into the Caddy config, so they are checked strictly: `port` is an unquoted integer from 1 to 65535, and `path` starts with `/` and contains only letters, digits, `.`, `_`, `~`, `-`, and `/`, with an optional trailing `*` (`/`, `/api/*`, `/static*`). Spaces, braces, quotes, and wildcards in the middle of a path are rejected. `/` is the catch-all; every other path matches exactly unless it ends in `*`, so a path ending in `/` without `*` (such as `/api/`) draws a warning: it would not route `/api/health`.
+7. **Each service must have `port`** and **at least one entry in `routes`**, unless it sets `internal: true` (a service Caddy does not route to, declared to give it a read-only root filesystem and `writable:` paths) or is an entry holding only its `security` block (it only says who a compose-only service runs as; see "Who a service runs as"); either may omit both. `internal` must be `true` or `false`, and `internal: true` together with `routes` is refused: internal means Caddy does not route to the service, so remove one of the two. Routes must be dicts with a `path` key. Both values are written into the Caddy config, so they are checked strictly: `port` is an unquoted integer from 1 to 65535, and `path` starts with `/` and contains only letters, digits, `.`, `_`, `~`, `-`, and `/`, with an optional trailing `*` (`/`, `/api/*`, `/static*`). Spaces, braces, quotes, and wildcards in the middle of a path are rejected. `/` is the catch-all; every other path matches exactly unless it ends in `*`, so a path ending in `/` without `*` (such as `/api/`) draws a warning: it would not route `/api/health`.
 8. **`limits`** fields are optional per service, and a service without `limits` draws a warning. They are copied into the overlay's `deploy.resources.limits` unchecked, so Compose reports a bad value: `limits.memory` takes Docker memory format (e.g., `256m`, `1g`), `limits.cpus` a numeric string (e.g., `"0.5"`, `"2.0"`).
-9. **If `backup.type` is not `none`**, both `dump_command` and `restore_command` are mandatory, and `backup.service` is too unless the manifest has exactly one service. A backup you cannot restore is not a backup.
+9. **`backup.type` is a free-form label** (such as `db-dump` or `postgres`): only `none` changes behaviour, and it must be a non-empty string (quote `"none"`; an unquoted `no` or `off` is a YAML boolean). **`backup.retention`**, when set, must be a whole number of at least 1. **If `backup.type` is not `none`**, both `dump_command` and `restore_command` are mandatory, and `backup.service` is too unless the manifest has exactly one service. A backup you cannot restore is not a backup. The checks in rules 7 and 9, and on `container_updates.strategy`, refuse at deploy, stage, promote and validate; on upgrade, container restart and rollback they only warn, so a project that is already running is never stopped by them.
 10. **Per-service `smoke` is strongly recommended.** Each service can declare a `smoke: boxmunge-scripts/smoke.sh` field. The script is exec'd inside the running container, so `localhost:PORT` naturally works. boxmunge warns if no services have a smoke test.
 11. **`deploy` must be a mapping, and `deploy.pre_deploy`, when set, a string** that splits into words the way a shell would (balanced quotes). It runs without a shell, so `&&`, pipes and redirects belong in a script that `pre_deploy` names.
 12. **`staging`**, when set, must be a mapping. `staging.copy_data` is `true`/`false` or `{sources: {...}}` mapping each staged store (a compose volume key, a `writable.persistent` name, or `./path`) to a production store or `null`. Other keys under `staging` draw a warning.
