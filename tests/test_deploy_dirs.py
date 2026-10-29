@@ -158,5 +158,21 @@ def test_only_root_owned_entries_without_other_links_are_reowned(tmp_path, fake_
     (tmp_path / "shared").write_text("x")
     os.link(tmp_path / "shared", scans / "linked.json")
     prepare_deploy_dirs(paths)
-    assert not [c for c in fake_root if c.endswith("linked.json")]
-    assert any(c.endswith("own.json") for c in fake_root)
+    assert str((scans / "linked.json").stat().st_ino) not in fake_root
+    assert str((scans / "own.json").stat().st_ino) in fake_root
+
+
+def test_a_multi_link_file_already_deploys_is_skipped_without_a_warning(
+    tmp_path, fake_root, monkeypatch, caplog,
+):
+    paths = _box(tmp_path)
+    scans = paths.state / "scans"
+    scans.mkdir()
+    (tmp_path / "shared").write_text("x")
+    os.link(tmp_path / "shared", scans / "linked.json")
+    # The file is deploy's already (as after a `git clone --local`).
+    me = os.getuid()
+    for module in (deploy_dirs, fs_nofollow):
+        monkeypatch.setattr(module, "deploy_ids", lambda: (me, os.getgid()))
+    prepare_deploy_dirs(paths)
+    assert "links" not in caplog.text

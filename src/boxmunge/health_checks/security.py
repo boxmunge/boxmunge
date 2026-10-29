@@ -134,7 +134,8 @@ def check_cve_hardening_upcoming(paths: BoxPaths) -> HealthCheck:
             name="cve-hardening", status="warn",
             detail="will quarantine from 0.12 (not quarantined now); add `read_only: true` "
                    "in compose.yml, declare the service in the manifest, or accept the risk "
-                   "with a `security` declaration; see `boxmunge security <project>` -- "
+                   "(suppress the CVE after review, or lower `security.posture`); see "
+                   "`boxmunge security <project>` -- "
                    + "; ".join(flagged),
         )
     return HealthCheck(name="cve-hardening", status="ok",

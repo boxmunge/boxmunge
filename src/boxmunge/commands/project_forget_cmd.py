@@ -58,6 +58,10 @@ def run_project_forget(project: str, paths: BoxPaths) -> int:
     except (LockError, DockerError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
+    except ValueError as e:  # the entry was removed between the check and the removal
+        print(f"ERROR: {e} Its state files were removed; nothing else to do.",
+              file=sys.stderr)
+        return 1
     # Only now: unlinking a lock file in use would let a second opener lock a
     # fresh inode beside the holder (project-delete leaves it for that reason).
     for lock in (paths.project_lock_file(project), paths.secrets_locks / f"{project}.lock"):

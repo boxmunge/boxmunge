@@ -81,8 +81,10 @@ def explain_fix_available(
     """Explanation for a non-KEV finding with an upstream fix."""
     text = (
         f"Fix available upstream ({fixed_version}) but not running in this "
-        "image. Rebuild the image (pull the base image) and redeploy to pick "
-        "it up; boxmunge does not rebuild images for you."
+        "image. A deploy does not pull a newer base image: bump the image tag "
+        "or digest, change FROM, or set compose `build: {pull: true}`, then "
+        "redeploy (CVE_POLICY.md, \"Shipping a fix the upstream image does not "
+        "have yet\"); boxmunge does not rebuild images for you."
     )
     if would_quarantine:
         text += (
@@ -200,8 +202,8 @@ def explain_threshold(
 
 HARDENING_UPCOMING_FIX = (
     "Add `read_only: true` to the service in compose.yml, declare it in the "
-    "manifest so boxmunge hardens it, or accept the risk with a `security` "
-    "declaration."
+    "manifest so boxmunge hardens it, or accept the risk: suppress the CVE "
+    "after review, or choose a lower `security.posture`."
 )
 
 

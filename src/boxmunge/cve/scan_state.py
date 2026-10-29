@@ -20,7 +20,7 @@ from boxmunge.cve.policy import (
 )
 from boxmunge.cve.scanner import AttackVector, Finding, PkgClass, Severity, VulnStatus
 from boxmunge.fileutil import atomic_write_text
-from boxmunge.state import read_state
+from boxmunge.state import StateError, read_state
 
 # The scan runs daily (03:00-03:30); 36h tolerates one late or missed run's
 # worth of jitter without crying wolf, and catches a second missed night.
@@ -119,11 +119,14 @@ def write_scan_state(
 
 def last_scanned_at(path: Path) -> str | None:
     """When the last recorded scan result was made (ISO text), or None when
-    there is none or it cannot be read."""
-    try:
-        return json.loads(path.read_text())["scanned_at"]
-    except (OSError, ValueError, KeyError, TypeError):
+    there is none. Raises StateError, naming the file, when it is unreadable."""
+    state = read_scan_state(path)
+    if state is None:
         return None
+    when = state.get("scanned_at")
+    if not isinstance(when, str):
+        raise StateError(f"{path}: no scanned_at in the scan state")
+    return when
 
 
 def scan_problem(path: Path, project: str, now: datetime) -> str | None:

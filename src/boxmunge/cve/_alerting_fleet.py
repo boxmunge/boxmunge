@@ -80,13 +80,15 @@ def format_scan_failure_alert(problems: dict[str, list[str]]) -> Alert:
 
 def format_scan_unrecorded_alert(
     problems: Mapping[str, str], last_recorded: Mapping[str, str | None],
+    unreadable: Mapping[str, str],
 ) -> Alert:
     """Projects whose scan ran and was acted on, but whose result could not
     be written.
 
     ``problems`` maps project -> the error (it names the remedy);
     ``last_recorded`` maps it to when its last recorded result was made, or
-    None. The run's quarantines and alerts happened; what is lost is the
+    None; ``unreadable`` maps those whose recorded result cannot be read to
+    why. The run's quarantines and alerts happened; what is lost is the
     record, so the project's view and freshness check show the older result
     until a write succeeds. Priority 1: a scan that cannot be recorded
     keeps failing, and the freshness check will report it stale.
@@ -99,6 +101,10 @@ def format_scan_unrecorded_alert(
                  "but its result was not recorded.")
     for project in sorted(problems):
         when = last_recorded.get(project)
+        if project in unreadable:
+            lines.append(f"- {project}: the recorded result is unreadable "
+                         f"({unreadable[project]}); the scan overwrites it once it can be written")
+            continue
         lines.append(f"- {project}: " + (f"the last recorded result (at {when}) is still "
                      f"what `security {project}` shows" if when else "no result is "
                      f"recorded, so it shows as never scanned"))

@@ -22,9 +22,11 @@ from boxmunge.cve.hardening import (
     HardeningProfile, UpcomingHardening, calculate_hardening_penalty,
     effective_hardening_profile, hardening_profile_from_compose,
 )
-from boxmunge.cve.policy import PolicyError, Posture, parse_posture
+from boxmunge.cve.policy import PolicyError, Posture, ProjectDecision, parse_posture
 from boxmunge.cve.security_policy import security_policy
-from boxmunge.cve.scan_state import BASIS_CONTAINERS, BASIS_STARTUP_IMAGES
+from boxmunge.cve.scan_state import (
+    BASIS_CONTAINERS, BASIS_STARTUP_IMAGES, decisions_from_scan_state, read_scan_state,
+)
 from boxmunge.cve.suppressions import Suppression, SuppressionsError, load_suppressions
 from boxmunge.deployed_inventory import (
     DeployedInventory, InventoryError, load_deployed_inventory, startup_image_ref,
@@ -32,7 +34,9 @@ from boxmunge.deployed_inventory import (
 from boxmunge.docker_run import DockerError
 from boxmunge.lifecycle import is_blocked
 from boxmunge.manifest import load_manifest
+from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
+from boxmunge.state import StateError
 from boxmunge.security_overlay import (
     PROFILE_OFF, effective_profile, resolve_security, services_with_off_profile,
 )
@@ -329,3 +333,24 @@ def identify(paths: BoxPaths, project: str, meta: ProjectMeta) -> ImageInventory
         return identify_startup_images(meta.manifest, deployed, reason)
     except (InventoryError, DockerError) as e:
         raise ProjectScanError(f"project {project!r}: {e}") from e
+
+
+def load_prior_decisions(paths: BoxPaths, project: str) -> tuple[ProjectDecision, ...]:
+    """The previous scan's decisions, for transition detection."""
+    try:
+        prior_state = read_scan_state(paths.project_scan_state(project))
+        if prior_state is None:
+            return ()
+        return decisions_from_scan_state(prior_state, project_name=project)
+    except (StateError, ValueError, KeyError, TypeError, AttributeError) as e:
+        # Audit B-12: a truncated or hand-mangled file (JSON errors are
+        # ValueErrors) must not stop this project's scan, let alone the
+        # fleet's; this scan overwrites it.
+        # A malformed prior state shouldn't block the scan; log and treat
+        # as "no prior" (alerts will be emitted as if first scan).
+        log_warning(
+            "cve-scan",
+            f"ignoring unreadable prior scan state for {project}: {e}",
+            paths, project=project,
+        )
+        return ()
