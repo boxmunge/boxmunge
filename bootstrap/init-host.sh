@@ -411,9 +411,6 @@ logging:
   docker_max_size: "50m"
   docker_max_file: 5
 EOF
-if [ "$SELF_SIGNED_TLS" = "true" ]; then
-    echo "tls_mode: internal" >> "${BOXMUNGE_ROOT}/config/boxmunge.yml"
-fi
 userns_record "${USERNS_OFFSET}"
 chmod 640 "${BOXMUNGE_ROOT}/config/boxmunge.yml"
 chown root:"${DEPLOY_USER}" "${BOXMUNGE_ROOT}/config/boxmunge.yml"
