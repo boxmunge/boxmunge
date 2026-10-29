@@ -124,7 +124,7 @@ def backup_locked(
 
     if paths.is_project_pre_registered(project_name):
         print(f"ERROR: Project '{project_name}' is pre-registered (secrets set) but "
-              f"not yet deployed. Deploy first with: boxmunge deploy {project_name}", file=sys.stderr)
+              f"not yet deployed. Deploy first with: boxmunge prod-deploy {project_name}", file=sys.stderr)
         return 1
 
     if manifest is None:

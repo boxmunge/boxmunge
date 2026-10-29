@@ -167,8 +167,10 @@ def format_fixable_alert(project: str, hits: Sequence[Hit]) -> Alert:
         "A fix exists for each of these, but the running image predates it:",
         *_listing(hits),
         "",
-        "boxmunge does not rebuild images. Rebuild (pull the base image) and",
-        "redeploy to pick up the fixes.",
+        "boxmunge does not rebuild images, and a deploy does not pull a newer",
+        "base image. Bump the image tag or digest, change FROM, or set compose",
+        "`build: {pull: true}` (and no_cache if needed), then redeploy. See",
+        "CVE_POLICY.md, \"Shipping a fix the upstream image does not have yet\".",
     ])
     return Alert(kind="fix_available", title=title, body=body, priority=0)
 

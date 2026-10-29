@@ -109,3 +109,14 @@ def test_a_deploy_that_wins_the_race_keeps_the_project(tmp_path, monkeypatch, ca
     assert is_registered("gone", paths)
     assert paths.project_scan_state("gone").exists()
     assert calls == ["gone"]
+
+
+def test_an_entry_removed_concurrently_is_a_clear_error_not_a_traceback(tmp_path, monkeypatch, capsys):
+    paths = _drifted(tmp_path)
+
+    def gone(project, p):
+        raise ValueError(f"Project '{project}' is not registered on this server.")
+
+    monkeypatch.setattr(project_forget_cmd, "remove_project", gone)
+    assert run_project_forget("gone", paths) == 1
+    assert "is not registered on this server" in capsys.readouterr().err

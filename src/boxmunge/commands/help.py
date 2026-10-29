@@ -51,7 +51,7 @@ Inbox & secrets:
   secrets unset <p|--host> K  Remove a secret
 
 Project operations:
-  check <project>         Run health checks (docker + http + smoke)
+  check <project>         Run the project smoke test
   check-all [--read-only] Check all projects (--read-only skips state writes,
                           Pushover alerts, and compose_down on critical)
   validate <project>      Validate manifest, env, compose without deploying

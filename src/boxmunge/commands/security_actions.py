@@ -43,6 +43,7 @@ from boxmunge.fileutil import LockError, open_shared_lockfile
 from boxmunge.log import log_warning
 from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
+from boxmunge.state import StateError
 from boxmunge.project_registry import (
     deployed_among, forget_advice, is_registered, missing_among, read_registry,
     registry_problem_message, unfinished_removals,
@@ -360,8 +361,14 @@ def _alert_fleet(paths: BoxPaths, run: FleetRun) -> None:
     if run.problems:
         alerts.append(format_scan_failure_alert(run.problems))
     if run.unrecorded:
-        last = {p: last_scanned_at(paths.project_scan_state(p)) for p in run.unrecorded}
-        alerts.append(format_scan_unrecorded_alert(run.unrecorded, last))
+        last: dict[str, str | None] = {}
+        unreadable: dict[str, str] = {}
+        for p in run.unrecorded:
+            try:
+                last[p] = last_scanned_at(paths.project_scan_state(p))
+            except StateError as e:
+                unreadable[p] = str(e)
+        alerts.append(format_scan_unrecorded_alert(run.unrecorded, last, unreadable))
     host_expired = {s.cve_id: s for scan in run.scans.values() for s in scan.host_expired}
     if host_expired:
         alerts.append(format_host_suppression_expired_alert(list(host_expired.values())))

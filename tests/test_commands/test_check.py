@@ -253,7 +253,7 @@ class TestRunCheckPreRegistered:
         assert result == 1
         captured = capsys.readouterr()
         assert "pre-registered" in captured.err
-        assert "boxmunge deploy myapp" in captured.err
+        assert "boxmunge prod-deploy myapp" in captured.err
 
 
 class TestRunCheckSurfacesProfileOff:

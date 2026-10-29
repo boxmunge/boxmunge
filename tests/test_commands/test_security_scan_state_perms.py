@@ -177,3 +177,25 @@ def test_an_enforcement_error_is_not_masked_by_a_write_failure():
     with _p.raises(RuntimeError) as exc:
         raise_enforcement_error("quarantine failed", "could not record the result")
     assert "quarantine failed" in str(exc.value) and "could not record" in str(exc.value)
+
+
+def test_an_unreadable_recorded_result_is_called_unreadable_in_the_alert(tmp_path, monkeypatch):
+    paths = make_box(tmp_path)
+    pushover = Pushover(monkeypatch, paths)
+    paths.project_scan_state("demo").parent.mkdir(parents=True, exist_ok=True)
+    paths.project_scan_state("demo").write_text("{truncated")
+    _unwritable_scans(paths)
+    assert cmd_security_scan(["demo"], paths) == 1
+    [(_, body, _)] = _unrecorded_alerts(pushover)
+    assert "recorded result is unreadable" in body and "no result is recorded" not in body
+
+
+def test_cve_texts_name_real_actions():
+    from boxmunge.cve._alerting_formatters import format_fixable_alert
+    from boxmunge.cve.policy_explain import HARDENING_UPCOMING_FIX, explain_fix_available
+    body = format_fixable_alert("demo", []).body
+    assert "pull the base image" not in body and "build: {pull: true}" in body
+    assert "Shipping a fix the upstream image does not have yet" in body
+    assert "pull the base image" not in explain_fix_available("1.2", would_quarantine=False, posture_label="x")
+    assert "suppress the CVE after review" in HARDENING_UPCOMING_FIX
+    assert "`security` declaration" not in HARDENING_UPCOMING_FIX

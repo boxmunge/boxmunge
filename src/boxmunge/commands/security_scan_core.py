@@ -23,6 +23,7 @@ from boxmunge.commands.security_scan_inputs import (
     hardening_profile,
     identify,
     load_all_suppressions,
+    load_prior_decisions,
     load_project_meta,
     load_user_model,
 )
@@ -48,8 +49,6 @@ from boxmunge.cve.relevance import (
 )
 from boxmunge.cve.scan_state import (
     BASIS_CONTAINERS,
-    decisions_from_scan_state,
-    read_scan_state,
     ScanStateWriteError,
     write_scan_state,
 )
@@ -64,7 +63,6 @@ from boxmunge.cve.scanner import (
 from boxmunge.fileutil import project_lock
 from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
-from boxmunge.state import StateError
 
 
 # Per-project aggregate scan budget.
@@ -196,27 +194,6 @@ def scan_one_project(
             paths, project, in_grace=in_grace, audit_only=audit_only, kev=kev,
             defer_new=defer_new,
         )
-
-
-def _prior_decisions(paths: BoxPaths, project: str) -> tuple[ProjectDecision, ...]:
-    """The previous scan's decisions, for transition detection."""
-    try:
-        prior_state = read_scan_state(paths.project_scan_state(project))
-        if prior_state is None:
-            return ()
-        return decisions_from_scan_state(prior_state, project_name=project)
-    except (StateError, ValueError, KeyError, TypeError, AttributeError) as e:
-        # Audit B-12: a truncated or hand-mangled file (JSON errors are
-        # ValueErrors) must not stop this project's scan, let alone the
-        # fleet's; this scan overwrites it.
-        # A malformed prior state shouldn't block the scan; log and treat
-        # as "no prior" (alerts will be emitted as if first scan).
-        log_warning(
-            "cve-scan",
-            f"ignoring unreadable prior scan state for {project}: {e}",
-            paths, project=project,
-        )
-        return ()
 
 
 def _scan_targets(
@@ -373,7 +350,7 @@ def scan_one_project_locked(
 
     # Load the prior scan_state BEFORE we overwrite it (transition alerts).
     scan_state_path = paths.project_scan_state(project)
-    prior_decisions = _prior_decisions(paths, project)
+    prior_decisions = load_prior_decisions(paths, project)
 
     inventory = identify(paths, project, meta)
     targets, unidentified = inventory.targets, inventory.unidentified

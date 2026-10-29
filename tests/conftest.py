@@ -165,6 +165,7 @@ def fake_containers(request, monkeypatch) -> FakeContainers:
     fake = FakeContainers()
     if not request.node.get_closest_marker("integration"):
         monkeypatch.setattr("boxmunge.docker_containers.project_containers", fake)
+        monkeypatch.setattr("boxmunge.docker_containers.project_volumes", lambda p: [])
         monkeypatch.setattr("boxmunge.docker_containers.local_image", fake.local_image)
         # The start guard inspects a project's existing container bind mounts;
         # off the integration tier there are none unless a test says otherwise.

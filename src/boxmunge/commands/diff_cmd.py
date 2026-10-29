@@ -50,10 +50,27 @@ def _compare_dirs(current: Path, incoming: Path) -> tuple[list[str], list[str], 
     return changed, added, removed
 
 
+def _is_git_project(project_name: str, paths: BoxPaths) -> bool:
+    """Raises ManifestError when the project's manifest cannot be loaded."""
+    return load_manifest(paths.project_manifest(project_name)).get("source") == "git"
+
+
 def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists():
         print(f"ERROR: Project '{project_name}' not found.", file=sys.stderr)
+        return 1
+
+    try:
+        git = _is_git_project(project_name, paths)
+    except ManifestError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    if git:
+        print(f"ERROR: '{project_name}' is a git project, and diff compares inbox bundles "
+              f"only. To preview what a ref would change, run: stage {project_name} "
+              f"--ref <ref> --dry-run; or read the repository's history in "
+              f"{project_dir / 'repo'}.", file=sys.stderr)
         return 1
 
     try:
@@ -128,7 +145,7 @@ def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
                 print("  Compose overlay:  would be created")
 
         print()
-        print(f"  Run 'stage {project_name}' to verify, or 'deploy {project_name}' to deploy directly.")
+        print(f"  Run 'stage {project_name}' to verify, or 'prod-deploy {project_name}' to deploy directly.")
 
     return 0
 

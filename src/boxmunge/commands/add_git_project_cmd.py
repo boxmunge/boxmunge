@@ -86,7 +86,7 @@ def run_add_git_project(
 
     log_operation("add-git-project", f"Added git project from {repo_url}", paths, project=name)
     print(f"Project '{name}' created from {repo_url}.")
-    print(f"  Run 'stage {name}' or 'deploy {name}' to start it.")
+    print(f"  Run 'stage {name}' or 'prod-deploy {name}' to start it.")
     return 0
 
 
