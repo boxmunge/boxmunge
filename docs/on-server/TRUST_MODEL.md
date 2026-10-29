@@ -289,8 +289,9 @@ deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmun
   version is allowed.
 
 Everything else is root-only: `run` (the auto-update timer), `check-probation`
-(the health timer), `clear-blocklist`, and `force-target <version>`, the operator
-override that skips the blocklist and the downgrade floor. sudo matches the whole
+(the health timer), `clear-blocklist`, `install-sudoers`, `install-docs`, the
+`userns-*` commands, and `force-target <version>`, the operator override that
+skips the blocklist and the downgrade floor. sudo matches the whole
 argument string, so `target *` cannot reach `force-target`. The auto-update timer's
 `run` applies the same downgrade floor and skips blocklisted versions.
 
@@ -373,7 +374,7 @@ Quote `"off"`: PyYAML parses unquoted `off` as YAML 1.1 boolean `False`,
 which the validator catches with a targeted error, but writing the quotes
 in the first place avoids the round-trip.
 
-A deploy-time `[WARNING] SECURITY OFF` message is emitted on every `stage`, `promote`, `prod-deploy`, `resume`, and `upgrade` for any service on `profile: off`. The warning is repeated by design — the shortest path to making it go away is removing `profile: off` from the manifest.
+A deploy-time `[WARNING] SECURITY OFF` message is emitted on every `stage`, `promote`, `prod-deploy`, `rollback`, `recover`, `resume`, `security resume`, and `upgrade` for any service on `profile: off`. The warning is repeated by design — the shortest path to making it go away is removing `profile: off` from the manifest.
 
 ### Profile ladder
 
@@ -525,12 +526,13 @@ a poisoned PyPI package does not pass step 13 on the box either (hash pin).
 
 ## CVE Policy as a Defensive Layer
 
-boxmunge's CVE policy provides a defensive layer beyond container hardening. The policy treats unfixed upstream CVEs above the project's posture threshold as actionable: it quarantines projects automatically and surfaces operator-suppressible findings via the audit trail.
+boxmunge's CVE policy provides a defensive layer beyond container hardening. The policy treats CVEs above the project's posture threshold that have no fix upstream, and every CVE on CISA's Known Exploited Vulnerabilities (KEV) catalog, fixed or not, as actionable (`relaxed` and `dangerously_disable_quarantine` alert on every scan instead of quarantining in some of those cases; see CVE_POLICY.md): it quarantines projects automatically and surfaces operator-suppressible findings via the audit trail.
 
 The trust-model assumptions for this layer are explicit:
 
 - **Trivy's vulnerability database is correct.** False negatives in the DB pass through silently; false positives produce noise but never an unsafe outcome.
-- **Suppressions are honest operator decisions.** A suppression is a signed-off declaration that a CVE has been reviewed and judged not exploitable in the deployed config. boxmunge does not second-guess it; the audit trail and the `until` date are the controls.
+- **Suppressions are honest operator decisions.** A suppression is a signed-off declaration that a CVE has been reviewed and judged not exploitable in the deployed config. boxmunge does not second-guess it, with one exception: a suppression never applies to a CVE on the KEV catalog (`suppress` refuses one, and an older suppression stops applying on the first scan after CISA lists the CVE). Otherwise the audit trail, the `until` date (at most 90 days ahead) and the expiry alert are the controls.
+- **The CISA KEV catalog is current.** It is refreshed before every scan; a stale or rejected catalog is alerted at priority 1, and while it is stale the KEV gate is off (fail toward uptime, never toward quarantine).
 - **The operator is responsible for revisiting suppressions before they expire.** boxmunge enforces expiry mechanically (the finding becomes active again on the next scan after `until`) and emits a high-priority Pushover alert; what it cannot do is decide whether the CVE has actually been mitigated upstream or in the deployed code.
 
 Like the rest of the trust model, this layer assumes a single trusted operator. There is no per-project review delegation and no multi-party approval for suppressions; the audit log is the only record of who signed off on what. See `agent-help cve` for the policy reference and `agent-help cve-incident` for the response playbook.

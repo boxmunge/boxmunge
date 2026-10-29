@@ -90,14 +90,15 @@ undeclared services too, so opt in now.
 without `read_only: true` in `compose.yml` as writable: it adds +1 to the CVE
 severity of every finding in the **whole project**, not only that service's
 image (a manifest `cap_add` or `no_new_privileges: false` adds +1 the same
-way). A medium finding in the web image then judges as high. In 0.11.0 this
+way). A medium finding in the web image then judges as high. In 0.11 this
 **only warns**: a finding that only this penalty lifts over the posture's
 quarantine threshold is not quarantined and does not refuse a deploy; it is
 flagged `WARN` in `boxmunge security <project>`, in `boxmunge health`
 (`cve-hardening`) and in one alert per finding. **From 0.12 it quarantines.**
 To clear the warning, add `read_only: true` to the service in `compose.yml`
 (with a `tmpfs:` for what it writes), declare the service in the manifest as
-below, or accept the risk with a `security` declaration.
+below, or drop the manifest relaxation. To accept the risk instead, suppress
+the CVE after review or choose a lower `security.posture` (CVE_POLICY.md).
 
 To opt in, declare the service in the manifest. A service with `internal: true`
 needs no `port` or `routes`; give it a `writable:` block. Use `ephemeral:` for
@@ -167,7 +168,7 @@ get into the habit of writing it correctly the first time.
 Requirements:
 
 - `reason` must be a non-empty string. Schema validation rejects missing or blank reasons.
-- Every `stage`, `promote`, `prod-deploy`, `resume`, and `upgrade` will print a multi-line `[WARNING] SECURITY OFF` message including the reason. This is by design and not silenceable except by removing `profile: off`.
+- Every `stage`, `promote`, `prod-deploy`, `rollback`, `recover`, `resume`, `security resume`, and `upgrade` will print a multi-line `[WARNING] SECURITY OFF` message including the reason. This is by design and not silenceable except by removing `profile: off`.
 - `boxmunge health` raises a warning for any project with services on `profile: off`.
 
 ## Inheritance and resolution
@@ -177,7 +178,7 @@ For each (project, service):
 1. Start from the project's `security.profile` (or `default` if no block).
 2. Apply project-level field overrides on top.
 3. If the service has a `security:` block:
-   a. Its `profile` (if set) replaces the project profile for this service only.
+   a. Its `profile` (if set) replaces the project profile, and the project-level field overrides, for this service only.
    b. Its individual fields apply on top.
 4. `cap_add` is subtracted from `cap_drop` at the end.
 
@@ -213,7 +214,7 @@ active or not: a profiled service still starts when something names it
 | `use_api_socket: true` | Hands the container the Docker daemon's API, which can start privileged containers with any host path mounted. Remove it. |
 | `privileged` on a `post_start` or `pre_stop` hook, or on a `develop.watch` `exec` hook | The hook regains every capability the hardening drops. Remove `privileged:`; hooks run with the service's own privileges. |
 | `cap_add` of a denied capability | See the denylist below. |
-| `security_opt` with `unconfined`, `label:disable`, `no-new-privileges:false`, or a custom `seccomp` profile file | Disables a kernel confinement layer. `seccomp=runtime/default` is fine. |
+| `security_opt` with `unconfined`, `label:disable`, `no-new-privileges:false`, or a custom `seccomp` profile file | Disables a kernel confinement layer. `seccomp=runtime/default` (or `builtin`) is fine. |
 | `devices`, `device_cgroup_rules`, `gpus`, `deploy.resources.reservations.devices` | Exposes host devices. |
 | `cgroup_parent` that is absolute or contains `..` | Escapes the container cgroup. |
 | A bind mount of a protected host path, anything inside one, or any parent of one (refused under every profile) | Protected: the Docker and containerd sockets and state, `/proc`, `/sys`, `/dev`, `/etc`, `/boot`, `/root`, `/home`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, and the boxmunge root outside `projects/`. Paths are compared after `~` expansion, joining relative paths to the project directory, collapsing `..` and `//`, and resolving symlinks, so `/run` (the parent of `/run/docker.sock`), `/tmp/../etc`, and `../../config` are all refused. |
@@ -256,7 +257,7 @@ or the files boxmunge itself reads from the project directory. They apply to eve
 | A top-level network or volume with a `name:` other than Compose's default (`<project>_<key>`) | Remove the `name:` line. |
 | A network with a `driver` other than `bridge` (`macvlan`, `ipvlan`, ...) | Remove the `driver:` line. |
 | A service joining a network the file does not declare | Declare it, or use `default`. Any alias is fine on the project's own networks; they cannot collide with another project's. |
-| An `external: true` volume, or a volume with `driver`/`driver_opts` | Use a plain named volume (`data: {}`) or a bind mount inside the project. |
+| An `external: true` volume, or a volume with `driver_opts` or a `driver` other than `local` | Use a plain named volume (`data: {}`) or a bind mount inside the project. |
 | `container_name`, with any value | Remove it. Compose names every container `<project>-<service>-<n>` itself, inside the project; a fixed name could be another project's while that one is absent, or boxmunge's own (`boxmunge-caddy`, which the host's CrowdSec follows by name). Reach a service by its service name. |
 | `external_links`, or `volumes_from: [container:<name>]` | Reach services in the same file by service name; name a service in `volumes_from`. |
 | A `secrets`/`configs` `file:` outside the project directory, or a `secrets`/`configs` entry sourced from `environment:` | Keep the file inside the project; an `environment:` entry would read the platform's own process environment. Secret values belong in `secrets set`. |

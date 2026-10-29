@@ -10,7 +10,9 @@ workflow, and recovery.
   daily between 03:00 and 03:30 system time, and on demand with
   `security scan`. The platform's own Caddy image is not scanned (it is not
   a project); container-update keeps it current. There is no scan at deploy or image-update time yet: a
-  newly deployed image is first scanned by the next daily run.
+  newly deployed image is first scanned by the next daily run. The exception
+  is a deploy to a quarantined project, which scans the release first (see
+  "Recovering a quarantined project").
 - **Posture per project (default `balanced`).** Four tiers form a trust ladder
   — `relaxed` quarantines only on CISA KEV, `balanced` (default) quarantines
   on KEV or a distro-acknowledged High + AV:N finding, `strict` extends that
@@ -45,6 +47,9 @@ workflow, and recovery.
   that file rather than reading the counts as complete.
 - **Recover** after a suppression with `boxmunge security resume <project>`;
   with a fix, rebuild or fix the image and `prod-deploy` it: the deploy is refused unless the new release's images clear every quarantine-level finding, and a successful deploy lifts the quarantine.
+  A KEV fix the distro ships but the upstream image does not have yet can
+  be built on top of that image (see "Shipping a fix the upstream image
+  does not have yet").
 
 ## The promise
 
@@ -112,11 +117,14 @@ For every finding, `evaluate_finding` runs these gates in order:
    bypasses the AV filter, distro-status routing, the severity threshold,
    any suppression, and an upstream fix the image is not yet running. A
    suppression never hides a KEV-listed CVE: a CVE reviewed and suppressed
-   before CISA listed it is re-activated the day it appears on KEV, and the
+   before CISA listed it stops applying on the first scan after it appears on KEV, and the
    project is quarantined with a priority-1 alert that names the overridden
    suppression. A fix only helps once it is actually running: a fixable KEV
    finding quarantines under `balanced`, `strict` and `paranoid`, and the
    alert says a fix exists: rebuild or fix the image and `prod-deploy` it: the deploy is refused unless the new release's images clear every quarantine-level finding, and a successful deploy lifts the quarantine.
+   When the distro has the fix but no rebuilt upstream image does, build
+   the fix on top of the image (see "Shipping a fix the upstream image does
+   not have yet").
    **Exception, `relaxed`:** a fixable KEV finding does not quarantine;
    instead a priority-1 alert naming the CVE and the unapplied fix is sent
    on **every scan** while it is live (`IGNORED_FIXED`).
@@ -469,17 +477,24 @@ The penalty is project-wide: a compose-only service without
 finding in every image of the project, so a medium finding in the web image
 judges as high.
 
-**0.11.0 warns; 0.12 quarantines.** Releases before 0.11.0 treated every
-compose-only service as read-only. The calculator now applies the rule above,
-but until 0.12 the penalty that quarantines (and that refuses a deploy to a
-quarantined project) is still the old one. A finding that only the stricter
-penalty lifts over the posture's threshold keeps its disposition, is flagged
-`WARN` (`hardening_would_quarantine` in `security --json`), shows as a `cve-hardening` warning in
-`boxmunge health`, and is alerted once per finding (`will quarantine from
-0.12`, naming the service). A finding the old penalty already lifts
-quarantines as before. Fix it by adding `read_only: true` in `compose.yml`,
-declaring the service in the manifest so boxmunge hardens it, or accepting the
-risk with a `security` declaration.
+**0.11 warns; 0.12 quarantines.** Releases before 0.11.0 counted every
+service not on `profile: off` as hardened by the overlay, compose-only ones
+included, and did not count the manifest's `security.cap_add` or
+`security.no_new_privileges: false`. The calculator now applies the rule
+above, but until 0.12 the penalty that quarantines (and that refuses a deploy
+to a quarantined project) is still the old one. A finding that only the
+stricter penalty lifts over the posture's threshold keeps its disposition, is
+flagged `WARN` in `boxmunge security <project>` (`hardening_would_quarantine`
+in `--json`), shows as a `cve-hardening` warning in `boxmunge health`, and is
+alerted once per finding (`will quarantine from 0.12 (warning only)`, naming
+the services that cause the extra penalty). A deploy to a quarantined project
+prints such findings as a `WARNING` and is not refused for them. A finding the
+old penalty already lifts quarantines as before. Fix it by adding
+`read_only: true` to the service in `compose.yml`, declaring the service in
+the manifest so boxmunge hardens it, or dropping the manifest relaxation. To
+accept the risk instead, suppress the CVE after review or choose a lower
+`security.posture`: a finding that would not quarantine under the stricter
+penalty either is not flagged.
 
 ### v0.9 writable: surface and the penalty
 
@@ -727,6 +742,9 @@ of the two the last scan checked.
   `promote` and `container-update` do not scan, and no deploy is rejected
   for CVEs: a new image runs unscanned until the next daily scan. Run
   `boxmunge security scan <project>` after a deploy to check it at once.
+  The exception is a quarantined project: `prod-deploy`, `promote` and
+  `stage` scan its release before starting it (see "Recovering a
+  quarantined project").
 - **Ad-hoc:**
 
   ```
@@ -896,6 +914,8 @@ several findings are involved the title names the worst and adds
 | `[<hostname>] CISA KEV feed stale — exploitation defense degraded` | priority-1 |
 | `[<hostname>] CISA KEV refresh rejected — previous catalog kept` | priority-1 |
 | `[<hostname>] CVE scan incomplete — <N> projects not fully scanned` | priority-1 |
+| `[<hostname>] <project>: quarantine lifted by deploying <ref>` | normal; priority-1 when the release relaxed the policy or the policy at quarantine time is unknown |
+| `[<hostname>] <project>: quarantine held` (a release staged by boxmunge 0.10.1 is open; resolve it with `boxmunge-server legacy-stage <project>`) | priority-1 |
 
 Alerting is best-effort. The durable record is the on-disk scan state
 under `state/scans/<project>.json`. If Pushover isn't configured, or
@@ -1056,6 +1076,15 @@ cleared.
    (and checks what the start ran); production stays quarantined until
    the promote, which scans again.
 
+   A deploy builds and pulls the way any deploy does, which does not by
+   itself pick up a fix. It pulls only images missing from the box, so a
+   fixed image republished under the same tag is not fetched (and
+   container-update skips a quarantined project); name the fixed image by
+   its new tag or digest in `compose.yml`. It builds with Docker's cache
+   and the base image already on the box, so a `build:` service needs
+   `pull: true` (and, for a `RUN` step that upgrades packages,
+   `no_cache: true`) under its `build:` key, or a new `FROM` tag or digest.
+
    Because the release is judged under its own `security:` block, it can
    clear a quarantine by relaxing it (a lower `posture`,
    `dangerously_disable_quarantine`, or declared `security.runtimes` narrowed or replaced by per-image
@@ -1086,6 +1115,44 @@ release's own policy. Nothing else restarts a quarantined project.
 `pause` holds restart policies the same way; when a quarantine
 is lifted from a project that is still paused, the pause record takes over
 the saved policies and `boxmunge resume` restores them.
+
+## Shipping a fix the upstream image does not have yet
+
+A KEV finding quarantines until the fix runs, and cannot be suppressed.
+When the distro already ships the fixed package (the finding's
+`fixed_version` in `security <project> --json`) but the image's publisher
+has not rebuilt the image, build the fix on top of it: turn the service
+into a `build:` service whose Dockerfile starts `FROM` the same image and
+upgrades the package, then `prod-deploy` the release. The quarantine gate
+scans the built image, and a clean deploy lifts the quarantine.
+
+```yaml
+# compose.yml: replaces `image: nginx:1.27` on the service
+services:
+  web:
+    build:
+      context: ./patched
+      pull: true        # use the newest nginx:1.27, not the cached one
+      no_cache: true    # re-run the upgrade on every deploy
+```
+
+```dockerfile
+# patched/Dockerfile
+FROM nginx:1.27
+USER root
+RUN apt-get update \
+    && apt-get install -y --only-upgrade libexpat1 \
+    && rm -rf /var/lib/apt/lists/*
+# If the image runs as a non-root USER, switch back to it here.
+```
+
+- The service is now one of the project's builds, named
+  `boxmunge.invalid/<project>/<service>`.
+- Who it runs as is decided as for any `build:` service: a `security.user`
+  or compose `user:` you already have still applies. Otherwise a build
+  whose last `USER` is root runs as 10001:10001, so end the Dockerfile with
+  the image's own non-root `USER` if it has one.
+- Go back to the plain `image:` once the publisher ships a rebuilt image.
 
 ## Recommendations
 

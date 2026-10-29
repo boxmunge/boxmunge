@@ -26,7 +26,9 @@ which the per-project titles below show after it:
 | `[<hostname>] Circuit breaker held <N> quarantines` | Many projects would have quarantined at once for the same CVE(s). They are still running. Escalate: applying (`security scan --apply-held`) or host-suppressing is an operator decision. |
 | `[<hostname>] CVE policy enforcement begins in <N>h` | One-time migration grace heads-up after upgrade. Affects the whole fleet. |
 | `[boxmunge:<p>] <N> fixable CVE findings over the quarantine gate — rebuild to apply the fix` | Findings that would quarantine have an upstream fix the image does not run yet. Not quarantined (unless on KEV). Hand off a rebuild and redeploy. |
+| `[boxmunge:<p>] <N> CVE findings will quarantine from 0.12 (warning only)` | Findings the stricter 0.12 hardening penalty would quarantine. Not quarantined now; once per finding. Hand off the hardening fix it names (see B below). |
 | `[<hostname>] CISA KEV feed stale — exploitation defense degraded` / `CISA KEV refresh rejected — previous catalog kept` | The actively-exploited gate is working from an old catalog. Escalate. |
+| `[<hostname>] <p>: quarantine lifted by deploying <ref>` | A deploy cleared the quarantine. Priority 1 when it did so by relaxing the security policy, not by a fix: check what it relaxed. |
 
 If you got an alert, run these two commands first — they tell you everything.
 
@@ -42,6 +44,8 @@ What to read in `security <project>`:
 - `status` — `NORMAL` / `QUARANTINED` / `AT_RISK_RUNNING`
 - The `Findings (N)` list — sorted by effective severity desc. The
   `[QUARANTINE]` and `[STILL_RUNNING_AT_RISK]` rows are what need action.
+  `[WARN]` rows will quarantine from 0.12 (the stricter hardening penalty);
+  their explanation names the services and the fix.
 - The `explanation` per finding — tells you base severity, effective
   severity, posture, why this disposition was reached.
 - `Active suppressions:` — what's already been signed off.
@@ -57,10 +61,15 @@ For every finding marked `QUARANTINE` or `STILL_RUNNING_AT_RISK`:
 If the finding has `fix_available: true` (and a `fixed_version`, in
 `security <project> --json`), a fixed package exists but the running image
 predates it. boxmunge does not rebuild images: a `build:` service needs a
-rebuild (pull the fixed base image) and a redeploy. An `image:` service
-gets a fix published under the same tag from the daily container-update
-(on unless the manifest sets `container_updates: {enabled: false}`), and a
-fix under a new tag from a release that names it, deployed. Hand that off. A fixable finding not on KEV is `IGNORED_FIXED` and does not
+rebuild on the fixed base image and a redeploy; a deploy's build uses the
+cached base image unless the service's `build:` sets `pull: true` or the
+`FROM` names a new tag or digest. An `image:` service gets a fix published
+under the same tag from the daily container-update (on unless the manifest
+sets `container_updates: {enabled: false}`), but not while the project is
+quarantined: container-update skips it and a deploy pulls only images
+missing from the box, so the release must name the fixed image's new tag or
+digest. A fix under a new tag comes from a release that names it, deployed.
+Hand that off. A fixable finding not on KEV is `IGNORED_FIXED` and does not
 quarantine; a fixable KEV finding is still `QUARANTINE` until the fix is
 running (under `relaxed` it keeps running and alerts every scan).
 
@@ -70,7 +79,12 @@ If the explanation says the CVE is on the CISA Known Exploited
 Vulnerabilities catalog, it is being exploited in the wild. Suppressions do
 not apply to it — `security suppress` refuses it, and an older suppression
 was overridden when CISA listed it. The only ways forward are a fixed
-image or accepting the quarantine. Escalate if no fix is available.
+image or accepting the quarantine. If the distro ships the fixed package
+(`fixed_version` is set) but no rebuilt upstream image exists yet, the
+operator can build the fix on top of the image: a `build:` service `FROM`
+the same image that upgrades the package, deployed. Hand off with
+`agent-help cve`, "Shipping a fix the upstream image does not have yet".
+Escalate if no fix is available.
 
 ### 3. Is it already suppressed?
 
@@ -221,6 +235,11 @@ no-new-privileges does not incur a penalty. The same overlay-aware
 logic applies to `read_only` from v0.8: the overlay provides
 `read_only: true` by default, so omitting the field from user compose
 does NOT incur a penalty (only an explicit `read_only: false` does).
+The overlay's read-only root covers only services the manifest declares.
+A compose-only service without `read_only: true`, a manifest
+`security.cap_add` or `security.no_new_privileges: false` adds +1 under the
+stricter rule that 0.11 only warns about (`[WARN]` rows) and 0.12 enforces;
+the fix is in the row's explanation.
 
 This is a manifest/compose change — you don't have file-edit authority
 in the deploy shell. Hand off:
@@ -247,7 +266,9 @@ security <project>
 ```
 
 Once a fix lands, rebuild and deploy it: the deploy scans its images first
-and lifts the quarantine once it is live (no `security resume` needed).
+and lifts the quarantine once it is live (no `security resume` needed). The
+release must actually carry the fix: a new image tag or digest, or a
+rebuild that pulls the new base image (step 1).
 
 ### D. dangerously_disable_quarantine
 
@@ -305,7 +326,7 @@ Once a week, even with no alerts:
 
 ```
 security                            # Fleet — any drift?
-log --tail 100 --json | <scan for security events>
+log --component cve-scan --tail 100 --json   # Scan events (no pipes in the deploy shell)
 ```
 
 What to flag:
