@@ -1,10 +1,13 @@
 # boxmunge host configuration: a reference copy of the keys
 # /opt/boxmunge/config/boxmunge.yml accepts. bootstrap/init-host.sh writes
 # most of them at install; the rest (container_updates, auto_update) take
-# the defaults in src/boxmunge/config.py until set. Edited by hand, as root.
+# the defaults in src/boxmunge/config.py until set, and webhooks are off
+# until set. Edited by hand, as root.
 
 hostname: __HOSTNAME__
 ssh_port: 922
+# Required. Install also writes it into caddy/Caddyfile as the ACME contact;
+# changing it here does not change Caddy's.
 admin_email: __ADMIN_EMAIL__
 
 pushover:
@@ -46,3 +49,13 @@ container_updates:
 # breakfix must be true or false.
 auto_update:
   breakfix: true
+
+# Optional webhooks: a JSON POST (event, project, timestamp, hostname,
+# details) to each url whose events list the event. Events: deploy, stage,
+# promote, unstage, rollback. Delivery is best-effort; a failure is logged.
+# webhooks:
+#   - url: https://hooks.example.com/boxmunge
+#     events: [deploy, promote, rollback]
+
+# userns: {name, offset} is written by install and by
+# `boxmunge-upgrade userns-migrate`. Never edit it by hand.

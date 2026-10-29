@@ -280,9 +280,11 @@ def run_upgrade(
 UPGRADE_USAGE = """\
 Usage: boxmunge upgrade [--dry-run | --apply] [--skip-self-test]
 
-Manual upgrade entry point. From the deploy shell, `upgrade` (no args) is
-routed through the root-context bash shim which handles stash + venv swap +
-probation. The flags below are for the shim and direct invocations only.
+Manual upgrade entry point. From the deploy shell, `upgrade` (no args) and
+`upgrade --target VERSION` are routed through the root-context bash shim,
+which handles stash + venv swap + probation; as root, run
+`boxmunge-upgrade target VERSION` instead. The flags below are for the shim
+and direct invocations only.
 
 Flags:
   --dry-run         Render manifest migrations and configs in memory and

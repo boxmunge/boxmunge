@@ -215,7 +215,8 @@ Back up every configured project.""",
     "backup-sync": """\
 Usage: boxmunge backup-sync [project]
 
-Sync encrypted backups to the off-box remote.""",
+Copy encrypted backups to the off-box remote (backup_remote in boxmunge.yml).
+Never deletes anything there.""",
     "restore": """\
 Usage: boxmunge restore <project> [snapshot] [--yes] [--no-safety-snapshot]
 
@@ -258,7 +259,9 @@ Usage: boxmunge upgrade [--dry-run | --apply] [--skip-self-test]
        boxmunge upgrade --target VERSION   (deploy shell only)
 
 Upgrade the boxmunge platform. From the deploy shell, plain `upgrade` and
-`upgrade --target` go through the root upgrade shim.
+`upgrade --target` go through the root upgrade shim; there only those and
+--dry-run are accepted. --target refuses a version older than the installed
+one. As root, run the shim itself: boxmunge-upgrade target VERSION.
   --dry-run         Check migrations and config regeneration; change nothing
   --apply           Migrate/regenerate/restart only (called by the shim)
   --skip-self-test  Skip the post-upgrade self-test""",
