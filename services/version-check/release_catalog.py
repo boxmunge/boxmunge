@@ -35,7 +35,8 @@ from typing import Callable
 RELEASE_CLASSES = ("feature", "breakfix", "security")
 BREAKFIX_CLASSES = frozenset({"breakfix", "security"})
 ENTRY_KEYS = frozenset({"version", "class", "breaking", "url"})
-VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# ASCII digits only and bounded, so a version is safe to store as a stats key.
+VERSION_RE = re.compile(r"^[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}\Z")
 RELEASE_URL_PREFIX = "https://github.com/boxmunge/boxmunge/releases/tag/v"
 HOLD_REASON = "circuit_breaker"
 

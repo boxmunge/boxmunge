@@ -28,6 +28,7 @@ from typing import Any
 
 from boxmunge.config import auto_update_breakfix_enabled
 from boxmunge.paths import BoxPaths
+from boxmunge.version_check_url import version_check_base
 from boxmunge.release_selection import (
     AUTO_CLASSES, GITHUB_REPO, MODE_CLASSES, MODES, VERSION_RE, find_blocked, newer,
     parse_github_releases, select,
@@ -37,7 +38,6 @@ from boxmunge.version import read_installed_version, parse_version_string
 
 
 RELEASES_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
-ENDPOINT_URL = "https://boxmunge.dev/v1/check"
 
 
 class EndpointContractError(ValueError):
@@ -52,7 +52,7 @@ _SOURCE_ERRORS = (OSError, json.JSONDecodeError, UnicodeDecodeError, EndpointCon
 
 def _check_endpoint(current: str) -> dict[str, Any]:
     req = urllib.request.Request(
-        f"{ENDPOINT_URL}?v={current}",
+        f"{version_check_base()}/v1/check?v={current}",
         headers={"User-Agent": f"boxmunge/{current}"},
     )
     resp = urllib.request.urlopen(req, timeout=10)

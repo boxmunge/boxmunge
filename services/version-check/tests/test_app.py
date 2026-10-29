@@ -129,11 +129,39 @@ class TestCounter:
         app.extensions["check_counter"].flush()
         assert _check_counts(tmp_path / "checks.db") == {"0.2.0": 2, "0.3.0": 1}
 
-    def test_unlisted_versions_share_one_bucket(self, app, client, tmp_path) -> None:
+    def test_unlisted_versions_are_recorded_under_their_real_version(
+            self, app, client, tmp_path) -> None:
+        client.get("/v1/check?v=7.7.7")
         client.get("/v1/check?v=7.7.7")
         client.get("/v1/check?v=8.8.8")
         app.extensions["check_counter"].flush()
-        assert _check_counts(tmp_path / "checks.db") == {"unlisted": 2}
+        assert _check_counts(tmp_path / "checks.db") == {"7.7.7": 2, "8.8.8": 1}
+
+    def test_distinct_unlisted_versions_per_day_are_capped(self, tmp_path, migrated_db) -> None:
+        from request_limits import CheckCounter
+        counter = CheckCounter(migrated_db, 60, 1000, max_versions_per_day=4,
+                               always_count=frozenset({"0.2.0"}))
+        for v in ("1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.1", "0.2.0"):
+            counter.record(v)
+        counter.flush()
+        assert _check_counts(migrated_db) == {
+            "1.0.0": 1, "1.0.1": 2, "1.0.2": 1, "unlisted": 1, "0.2.0": 1}
+
+    def test_healthz_counts_nothing(self, app, client, tmp_path) -> None:
+        for _ in range(3):
+            resp = client.get("/healthz")
+            assert resp.status_code == 200 and resp.get_json() == {"status": "ok"}
+        app.extensions["check_counter"].flush()
+        assert _check_counts(tmp_path / "checks.db") == {}
+
+    @pytest.mark.parametrize("version", [
+        "0.0", "1.2.3.4", "1.2.3-dev", "v1.2.3", "\u0661.\u0662.\u0663",
+        "123456.1.1", "boxmunge 0.11.0"])
+    def test_malformed_versions_are_rejected_and_not_counted(
+            self, app, client, tmp_path, version) -> None:
+        assert client.get("/v1/check", query_string={"v": version}).status_code == 400
+        app.extensions["check_counter"].flush()
+        assert _check_counts(tmp_path / "checks.db") == {}
 
     def test_no_counter_on_error(self, app, client, tmp_path) -> None:
         client.get("/v1/check")  # missing param — 400

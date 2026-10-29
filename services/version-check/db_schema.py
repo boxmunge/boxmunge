@@ -76,7 +76,12 @@ def _reporter_identity(conn: sqlite3.Connection) -> None:
                  "WHERE reporter IS NOT NULL")
 
 
-MIGRATIONS = (_baseline, _reporter_identity)
+def _failure_detail(conn: sqlite3.Connection) -> None:
+    """The reason an upgrade failed (bounded, printable ASCII), when the box says."""
+    conn.execute("ALTER TABLE failures ADD COLUMN detail TEXT")
+
+
+MIGRATIONS = (_baseline, _reporter_identity, _failure_detail)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 

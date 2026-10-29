@@ -78,18 +78,30 @@ class RateLimiter:
             return True
 
 
+OVERFLOW_VERSION = "unlisted"
+
+
 class CheckCounter:
     """Daily per-version check counts, buffered in memory.
 
     record() never touches the database unless the buffer is due: every
     `flush_interval` seconds, or immediately when `max_pending` distinct
     (date, version) keys are buffered. flush() runs at process exit too.
+
+    A day holds at most `max_versions_per_day` distinct versions; counts for
+    further ones go to OVERFLOW_VERSION, so a client cycling through valid
+    version strings cannot grow the table without bound. `always_count`
+    (the listed releases) is exempt from the cap, but still counts against it,
+    as does the "unlisted" overflow row itself.
     """
 
     def __init__(self, db_path: Path, flush_interval: float, max_pending: int,
+                 max_versions_per_day: int = 200,
+                 always_count: frozenset[str] = frozenset(),
                  clock: Callable[[], float] = time.monotonic,
                  today: Callable[[], date] = utc_today) -> None:
         self.db_path = db_path
+        self.max_versions_per_day, self.always_count = max_versions_per_day, always_count
         self.flush_interval, self.max_pending = flush_interval, max_pending
         self._clock, self._today = clock, today
         self._lock = threading.Lock()
@@ -111,14 +123,32 @@ class CheckCounter:
             self._last_flush = self._clock()
         if not pending:
             return
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, isolation_level=None)
         try:
+            # One write transaction across the select and the insert, so
+            # another worker's flush cannot add versions between them.
+            conn.execute("BEGIN IMMEDIATE")
+            known: dict[str, set[str]] = {}
+            merged: Counter[tuple[str, str]] = Counter()
+            for (d, v), n in sorted(pending.items()):
+                if d not in known:
+                    known[d] = {r[0] for r in conn.execute(
+                        "SELECT version FROM version_checks WHERE date = ?", (d,))}
+                if (v not in known[d] and v not in self.always_count
+                        and len(known[d]) >= self.max_versions_per_day):
+                    v = OVERFLOW_VERSION
+                known[d].add(v)
+                merged[(d, v)] += n
             conn.executemany(
                 """INSERT INTO version_checks (date, version, count)
                    VALUES (?, ?, ?)
                    ON CONFLICT (date, version) DO UPDATE SET count = count + excluded.count""",
-                [(d, v, n) for (d, v), n in pending.items()],
+                [(d, v, n) for (d, v), n in merged.items()],
             )
-            conn.commit()
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
         finally:
             conn.close()

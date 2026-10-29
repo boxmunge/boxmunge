@@ -279,10 +279,17 @@ chown -R deploy:deploy /srv/vmgit.git
 
 # -- Running -----------------------------------------------------------------
 
+# Root steps run a real upgrade, whose failure reports must never reach the
+# production version-check service. The variable is exported inside the
+# root shell (after sudo's env_reset), so the shim and the pythons it starts
+# inherit it; nothing between sudo and the shim can strip it.
+OFFLINE = "export BOXMUNGE_VERSION_CHECK_URL=http://127.0.0.1:9; "
+
+
 def ssh(user: str, command: str) -> subprocess.CompletedProcess:
     """A step's command: through the deploy shell, or as root via supervisor."""
     login, remote = (("deploy", command) if user == "deploy" else
-                     ("supervisor", f"sudo bash -c {shlex.quote(command)}"))
+                     ("supervisor", f"sudo bash -c {shlex.quote(OFFLINE + command)}"))
     return subprocess.run(["ssh", *vm.SSH_OPTS, "-p", str(PORT), f"{login}@localhost", remote],
                           capture_output=True, text=True, check=False, timeout=SSH_TIMEOUT)
 

@@ -13,6 +13,17 @@ pytest_plugins = ["tests.fake_system_container", "tests.real_docker_guard", "tes
 
 
 @pytest.fixture(autouse=True)
+def _never_reach_production_version_check(monkeypatch):
+    """Point every version-check/report call at a closed local port.
+
+    The shell-shim tests run the real report_failure from the developer's or
+    CI's python, which would otherwise POST bogus failure reports to the
+    production service. They inherit this variable from the test process.
+    """
+    monkeypatch.setenv("BOXMUNGE_VERSION_CHECK_URL", "http://127.0.0.1:9")
+
+
+@pytest.fixture(autouse=True)
 def _reset_boxmunge_logger():
     """Reset the cached "boxmunge" logger between tests.
 

@@ -66,13 +66,18 @@ swap_to() {
     log "Swapped active to slot $slot"
 }
 
+# report_failure <version> <from_version> <stage> [detail]: best-effort report
+# to the fleet service. Never fails the upgrade, but says on stderr when the
+# report could not be sent (the python side prints the reason).
 report_failure() {
-    local version="$1" from_version="$2" stage="$3"
-    BM_VERSION="$version" BM_FROM_VERSION="$from_version" BM_STAGE="$stage" "$(active_venv)/bin/python" -c "
-import os
+    local version="$1" from_version="$2" stage="$3" detail="${4:-}"
+    BM_VERSION="$version" BM_FROM_VERSION="$from_version" BM_STAGE="$stage" BM_DETAIL="$detail" "$(active_venv)/bin/python" -c "
+import inspect, os
 from boxmunge.report_failure import report_failure
-report_failure(os.environ['BM_VERSION'], os.environ['BM_FROM_VERSION'], os.environ['BM_STAGE'])
-" 2>/dev/null || true
+# The active venv is the release being left: one older than this shim has no detail parameter.
+extra = {'detail': os.environ['BM_DETAIL']} if 'detail' in inspect.signature(report_failure).parameters else {}
+report_failure(os.environ['BM_VERSION'], os.environ['BM_FROM_VERSION'], os.environ['BM_STAGE'], **extra)
+" || { log "WARNING: the upgrade failure report could not be sent"; } || :
 }
 
 send_notification() {
@@ -103,7 +108,7 @@ rollback_partial() {
     bm_log error upgrade "rollback partial — manual intervention required" \
         "{\"version\": \"$new_version\", \"stage\": \"$stage\", \"step\": \"$step\", \"exit\": $rc}"
     add_blocklist "$new_version" "${stage}_partial_rollback"
-    [[ "$stage" == interrupted ]] || report_failure "$new_version" "$from_version" "apply_partial_rollback"
+    [[ "$stage" == interrupted ]] || report_failure "$new_version" "$from_version" "apply_partial_rollback" "rollback_step_failed: ${step} exit ${rc}"
     # Truncate output in the alert body — Pushover messages are length-limited.
     send_notification "boxmunge ROLLBACK PARTIAL" \
         "ROLLBACK PARTIAL — manual intervention required.
