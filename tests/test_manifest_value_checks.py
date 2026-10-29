@@ -126,3 +126,9 @@ def test_the_project_template_validates_cleanly() -> None:
             .replace("__PROJECT_ID__", "01HZZZZZZZZZZZZZZZZZZZZZZZ"))
     errors, warnings = validate_manifest(yaml.safe_load(text), "shop")
     assert errors == [] and warnings == []
+
+
+def test_the_sample_project_manifest_validates_cleanly() -> None:
+    sample = Path(__file__).parent.parent / "sample-project/manifest.yml"
+    errors, warnings = validate_manifest(yaml.safe_load(sample.read_text()), "sample")
+    assert errors == [] and warnings == []
