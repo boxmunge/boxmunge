@@ -50,6 +50,7 @@ from boxmunge.cve.scan_state import (
     BASIS_CONTAINERS,
     decisions_from_scan_state,
     read_scan_state,
+    ScanStateWriteError,
     write_scan_state,
 )
 from boxmunge.cve.suppressions import Suppression
@@ -108,6 +109,9 @@ class ProjectScan:
     # Host-scope suppressions that expired since the last scan; the fleet
     # run alerts them once rather than once per project (audit B-14).
     host_expired: tuple[Suppression, ...] = ()
+    # Set when the scan ran and was acted on but its result could not be
+    # written (ScanStateWriteError); the fleet run fails and alerts on it.
+    record_error: str | None = None
 
     @property
     def unidentified_services(self) -> tuple[str, ...]:
@@ -382,17 +386,19 @@ def scan_one_project_locked(
     if not targets:
         # Persist an empty scan-state so we don't wedge the per-project view.
         # Audit-only (resume re-scan, audit A-3) leaves the prior alone.
+        record_error = None
         if not audit_only:
             outcome = _enforce(paths, project, meta, None, in_grace=in_grace)
-            write_scan_state(
+            record_error = _record(
                 scan_state_path, decisions=(),
                 unscanned=tuple(_unscanned(unidentified=unidentified)), **basis,
             )
-            raise_enforcement_error(outcome.error)
+            raise_enforcement_error(outcome.error, record_error)
         return ProjectScan(
             project=project, posture=meta.posture_str, dangerously=dangerously,
             decisions=(), warnings=tuple(warnings),
-            unidentified=tuple(unidentified.items()), **basis,
+            unidentified=tuple(unidentified.items()), record_error=record_error,
+            **basis,
         )
 
     results, failed, skipped, scan_warnings = _scan_targets(paths, project, targets)
@@ -415,8 +421,11 @@ def scan_one_project_locked(
             f"All images failed to scan for project {project!r}{detail}"
         )
 
+    # A write failure must not discard the scan: enforcement has run, and the
+    # alerts below still have to fire; the failure is reported with the result.
+    record_error = None
     if not audit_only:
-        write_scan_state(
+        record_error = _record(
             scan_state_path, decisions=tuple(decisions),
             unscanned=tuple(_unscanned(failed, skipped, unidentified)), **basis,
         )
@@ -431,12 +440,13 @@ def scan_one_project_locked(
         host_expired = _emit_transition_alerts(
             paths, project, decisions, prior_decisions, supps,
         )
-    raise_enforcement_error(outcome.error)
+    raise_enforcement_error(outcome.error, record_error)
 
     return ProjectScan(
         project=project,
         posture=meta.posture_str,
         dangerously=dangerously,
+        record_error=record_error,
         decisions=tuple(decisions),
         warnings=tuple(warnings),
         failed_images=tuple(failed),
@@ -446,6 +456,16 @@ def scan_one_project_locked(
         headline=headline,
         host_expired=host_expired,
     )
+
+
+def _record(path, **kwargs) -> str | None:
+    """write_scan_state; the error text when the result could not be
+    written, so the caller finishes enforcing and alerting first."""
+    try:
+        write_scan_state(path, **kwargs)
+    except ScanStateWriteError as e:
+        return str(e)
+    return None
 
 
 def _enforce(

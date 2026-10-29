@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from boxmunge import deploy_dirs, fs_nofollow
+from boxmunge import deploy_dirs
 from boxmunge.commands.doctor import run_doctor
 from boxmunge.commands.upgrade_cmd import run_upgrade
 from boxmunge.health_checks.registry import check_registry_drift
@@ -19,17 +19,6 @@ from tests.test_commands.cve_helpers import make_box
 pytestmark = pytest.mark.skipif(os.getuid() == 0, reason="root can write a 0555 directory")
 
 
-@pytest.fixture
-def as_root_with_deploy(monkeypatch):
-    ids = (os.getuid() + 4242, os.getgid())
-    for module in (deploy_dirs, fs_nofollow):
-        monkeypatch.setattr(module, "running_as_root", lambda: True)
-        monkeypatch.setattr(module, "deploy_ids", lambda: ids)
-    monkeypatch.setattr(os, "getgrouplist", lambda user, gid: [gid])
-    monkeypatch.setattr(os, "fchown", lambda fd, u, g: os.fchmod(fd, 0o775))
-    monkeypatch.setattr(os, "chown", lambda *a, **k: None)
-
-
 def _doctor(paths, capsys):
     import json
     with patch("shutil.which", return_value=None):
@@ -38,7 +27,7 @@ def _doctor(paths, capsys):
 
 
 def test_doctor_fails_with_the_exact_fix_for_a_root_made_scans_dir(
-    tmp_path, as_root_with_deploy, capsys, docker_down,
+    tmp_path, fake_root, capsys, docker_down,
 ):
     paths = make_box(tmp_path)
     (paths.state / "scans").mkdir()
@@ -48,7 +37,7 @@ def test_doctor_fails_with_the_exact_fix_for_a_root_made_scans_dir(
     assert f"sudo chown -R deploy:deploy {paths.state / 'scans'}" in result["detail"]
 
 
-def test_doctor_passes_when_deploy_can_write(tmp_path, as_root_with_deploy, capsys, docker_down):
+def test_doctor_passes_when_deploy_can_write(tmp_path, fake_root, capsys, docker_down):
     paths = make_box(tmp_path)
     (paths.state / "scans").mkdir()
     (paths.state / "scans").chmod(0o775)
@@ -56,25 +45,53 @@ def test_doctor_passes_when_deploy_can_write(tmp_path, as_root_with_deploy, caps
     assert _doctor(paths, capsys)["Deploy-writable directories"]["status"] == "PASS"
 
 
-def test_doctor_warns_about_a_registry_entry_without_a_directory(tmp_path, capsys, docker_down):
+def test_doctor_warns_about_an_unfinished_removal(tmp_path, capsys, docker_down):
     paths = make_box(tmp_path)
     with (paths.state / "projects.txt").open("a") as f:
         f.write("gone\n")
+    (paths.deploy_state / "gone.json").write_text("{}")
     result = _doctor(paths, capsys)["Project gone registered"]
     assert result["status"] == "WARN"
     assert "sudo boxmunge-server project-forget gone" in result["detail"]
 
 
-def test_health_check_reports_registry_drift(tmp_path):
+def test_doctor_is_quiet_about_a_never_deployed_name(tmp_path, capsys, docker_down):
+    paths = make_box(tmp_path)
+    with (paths.state / "projects.txt").open("a") as f:
+        f.write("pending\n")
+    assert "Project pending registered" not in _doctor(paths, capsys)
+
+
+def test_health_check_reports_an_unfinished_removal_but_not_a_pending_name(tmp_path):
     paths = make_box(tmp_path)
     assert check_registry_drift(paths).status == "ok"
     with (paths.state / "projects.txt").open("a") as f:
-        f.write("gone\n")
+        f.write("pending\ngone\n")
+    assert check_registry_drift(paths).detail.startswith("awaiting first deploy: gone, pending")
+    (paths.deploy_state / "gone.json").write_text("{}")
     check = check_registry_drift(paths)
     assert check.status == "warn" and "project-forget gone" in check.detail
+    assert "pending" not in check.detail
 
 
-def test_upgrade_apply_reowns_a_root_made_scans_dir(tmp_path, as_root_with_deploy, capsys):
+def test_upgrade_prints_fail_when_the_chown_does_not_take(tmp_path, fake_root, monkeypatch, capsys):
+    paths = BoxPaths(root=tmp_path / "bm")
+    for d in ["config", "projects", "state/deploy", "stashes", "logs",
+              "caddy/sites", "upgrade-state"]:
+        (paths.root / d).mkdir(parents=True)
+    paths.config_file.write_text("hostname: test\nadmin_email: t@t\n")
+    write_installed_version(paths, "0.2.0", "abc1234")
+    (paths.state / "scans").mkdir()
+    (paths.state / "scans").chmod(0o555)
+    monkeypatch.setattr(os, "fchown", lambda fd, u, g: None)
+    with patch("boxmunge.commands.upgrade_cmd.caddy_reload"):
+        run_upgrade(paths, apply_only=True)
+    cap = capsys.readouterr()
+    assert "Gave" not in cap.out
+    assert f"FAIL: {paths.state / 'scans'} is still not owned by deploy" in cap.err
+
+
+def test_upgrade_apply_reowns_a_root_made_scans_dir(tmp_path, fake_root, capsys):
     paths = BoxPaths(root=tmp_path / "bm")
     for d in ["config", "projects", "state/deploy", "stashes", "logs",
               "caddy/sites", "upgrade-state"]:

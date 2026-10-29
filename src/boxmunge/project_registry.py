@@ -127,16 +127,27 @@ def deployed_among(names: frozenset[str] | set[str], paths: BoxPaths) -> list[st
 
 
 def missing_among(names: frozenset[str] | set[str], paths: BoxPaths) -> list[str]:
-    """Those of `names` with no project directory, sorted: registered by
-    project-add and not yet deployed, or left behind by a removal that did
-    not finish. Neither has anything to scan; `project-forget` drops the
-    entry (forget_advice)."""
+    """Those of `names` with no project directory, sorted: not yet deployed
+    (project-add), or left behind by a removal that did not finish
+    (unfinished_removals tells them apart). Nothing to scan either way."""
     return sorted(name for name in names if not paths.project_dir(name).exists())
 
 
+def unfinished_removals(names: frozenset[str] | set[str], paths: BoxPaths) -> list[str]:
+    """Those of `names` with no project directory that still have deploy,
+    scan or health state: a project that was deployed and then (partly)
+    removed. A name never deployed has none, and is just awaiting its first
+    deploy."""
+    return [name for name in missing_among(names, paths)
+            if any(f.exists() for f in (paths.project_deploy_state(name),
+                                        paths.project_scan_state(name),
+                                        paths.project_health_state(name)))]
+
+
 def forget_advice(name: str) -> str:
-    return (f"{name} is registered but has no project directory: deploy it, or drop "
-            f"the entry as the supervisor with `sudo boxmunge-server project-forget {name}`")
+    return (f"{name} was deployed and its project directory is gone (an unfinished "
+            f"removal): drop the entry as the supervisor with "
+            f"`sudo boxmunge-server project-forget {name}`")
 
 
 def name_collisions(name: str, others: set[str]) -> list[str]:

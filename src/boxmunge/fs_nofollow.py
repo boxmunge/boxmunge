@@ -203,23 +203,37 @@ def chown_tree_deploy(path: Path) -> None:
         os.close(top)
 
 
-def chown_open_tree_deploy(top: int, label: str) -> None:
+def chown_open_tree_deploy(top: int, label: str, *, only_uid: int | None = None) -> None:
     """chown_tree_deploy for a directory the caller opened without following
     a link (``label`` names it in warnings): the descriptor itself, then
-    everything under it, reached only through directory descriptors."""
+    everything under it, reached only through directory descriptors.
+
+    A file with other links is skipped with a warning, always: its inode may
+    be shared with a file outside the tree, which deploy must not gain. With
+    ``only_uid``, only entries owned by that uid are re-owned, so what a
+    container user or deploy made is not touched.
+    """
     owner = _deploy_owner()
     if owner is None:
         return
     try:
-        os.fchown(top, *owner)
+        if only_uid is None or os.fstat(top).st_uid == only_uid:
+            os.fchown(top, *owner)
     except OSError as e:
         _warn_chown(label, e)
     for root, dirs, files, dirfd in os.fwalk(".", dir_fd=top, follow_symlinks=False):
         for name in dirs + files:
+            where = os.path.join(label, root, name)
             try:
-                os.chown(name, *owner, dir_fd=dirfd, follow_symlinks=False)
+                st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+                if not stat.S_ISDIR(st.st_mode) and st.st_nlink > 1:
+                    logging.getLogger("boxmunge").warning(
+                        "not re-owning %s: it has %d links", where, st.st_nlink)
+                    continue
+                if only_uid is None or st.st_uid == only_uid:
+                    os.chown(name, *owner, dir_fd=dirfd, follow_symlinks=False)
             except OSError as e:
-                _warn_chown(os.path.join(label, root, name), e)
+                _warn_chown(where, e)
 
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC

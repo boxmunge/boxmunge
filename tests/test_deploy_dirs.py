@@ -13,6 +13,7 @@ import os
 import pytest
 
 from boxmunge import deploy_dirs, fs_nofollow
+
 from boxmunge.deploy_dirs import (
     STATE_DIRS, deploy_dirs as existing_dirs, fix_command, prepare_deploy_dirs,
     unwritable_by_deploy,
@@ -20,29 +21,6 @@ from boxmunge.deploy_dirs import (
 from boxmunge.paths import BoxPaths
 
 pytestmark = pytest.mark.skipif(os.getuid() == 0, reason="root can write a 0555 directory")
-
-
-@pytest.fixture
-def fake_root(monkeypatch) -> list[str]:
-    """Run as root with a deploy user nothing here owns. Returns the names
-    chowned (directory fchowns record the inode)."""
-    ids = (os.getuid() + 4242, os.getgid())
-    for module in (deploy_dirs, fs_nofollow):
-        monkeypatch.setattr(module, "running_as_root", lambda: True)
-        monkeypatch.setattr(module, "deploy_ids", lambda: ids)
-    monkeypatch.setattr(os, "getgrouplist", lambda user, gid: [gid])
-    chowned: list[str] = []
-
-    def fchown(fd, uid, gid):
-        chowned.append(str(os.fstat(fd).st_ino))
-        os.fchmod(fd, 0o775)  # stand-in for "deploy owns it now"
-
-    def chown(path, uid, gid, *, dir_fd=None, follow_symlinks=True):
-        chowned.append(str(path))
-
-    monkeypatch.setattr(os, "fchown", fchown)
-    monkeypatch.setattr(os, "chown", chown)
-    return chowned
 
 
 def _box(tmp_path) -> BoxPaths:
@@ -67,7 +45,7 @@ def test_root_made_scans_is_reowned_and_written_by_deploy_afterwards(tmp_path, f
         target.write_text("{}")  # EACCES: what the deploy shell hit
     assert unwritable_by_deploy(paths) == [paths.state / "scans"]
 
-    reowned = prepare_deploy_dirs(paths)
+    reowned = prepare_deploy_dirs(paths).done
 
     assert paths.state / "scans" in reowned
     assert unwritable_by_deploy(paths) == []
@@ -97,7 +75,7 @@ def test_project_security_dirs_are_reowned_and_other_project_dirs_are_not(tmp_pa
     (paths.projects / "demo" / "data").mkdir()
     (paths.projects / "demo" / "data").chmod(0o555)
 
-    reowned = prepare_deploy_dirs(paths)
+    reowned = prepare_deploy_dirs(paths).done
 
     assert paths.projects / "demo" / "security" in reowned
     assert (paths.projects / "demo" / "data").stat().st_mode & 0o777 == 0o555
@@ -132,13 +110,13 @@ def test_deploy_owned_dirs_are_not_reported_as_reowned(tmp_path, fake_root, monk
     uid = os.getuid()
     for module in (deploy_dirs, fs_nofollow):
         monkeypatch.setattr(module, "deploy_ids", lambda: (uid, os.getgid()))
-    assert paths.state / "scans" not in prepare_deploy_dirs(paths)
+    assert paths.state / "scans" not in prepare_deploy_dirs(paths).done
 
 
 def test_not_root_does_nothing(tmp_path, monkeypatch):
     paths = _box(tmp_path)
     monkeypatch.setattr(deploy_dirs, "running_as_root", lambda: False)
-    assert prepare_deploy_dirs(paths) == []
+    assert prepare_deploy_dirs(paths).done == []
     assert not (paths.state / "scans").exists()
 
 
@@ -152,3 +130,33 @@ def test_unwritable_by_deploy_names_the_fix(tmp_path, fake_root):
 def test_unwritable_by_deploy_is_none_without_a_deploy_user(tmp_path, monkeypatch):
     monkeypatch.setattr(deploy_dirs, "deploy_ids", lambda: None)
     assert unwritable_by_deploy(_box(tmp_path)) is None
+
+
+def test_a_chown_that_does_not_take_is_reported_as_failed(tmp_path, fake_root, monkeypatch, caplog):
+    paths = _box(tmp_path)
+    _root_made(paths.state / "scans")
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: None)  # EPERM swallowed, say
+    result = prepare_deploy_dirs(paths)
+    assert paths.state / "scans" in result.failed
+    assert paths.state / "scans" not in result.done
+
+
+def test_a_linked_project_dir_is_not_followed(tmp_path, fake_root):
+    paths = _box(tmp_path)
+    outside = tmp_path / "outside"
+    _root_made(outside / "security")
+    os.symlink(outside, paths.projects / "demo")
+    prepare_deploy_dirs(paths)
+    assert (outside / "security").stat().st_mode & 0o777 == 0o555
+
+
+def test_only_root_owned_entries_without_other_links_are_reowned(tmp_path, fake_root, monkeypatch):
+    paths = _box(tmp_path)
+    scans = paths.state / "scans"
+    scans.mkdir()
+    (scans / "own.json").write_text("{}")
+    (tmp_path / "shared").write_text("x")
+    os.link(tmp_path / "shared", scans / "linked.json")
+    prepare_deploy_dirs(paths)
+    assert not [c for c in fake_root if c.endswith("linked.json")]
+    assert any(c.endswith("own.json") for c in fake_root)

@@ -177,13 +177,13 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
     # Pairs like `foo` / `foo-bar` registered before project-add refused them
     # can share container names (project_registry.name_collisions).
     from boxmunge.project_registry import (
-        forget_advice, missing_among, overlapping_pairs, read_registry,
-        registry_problem_message,
+        forget_advice, overlapping_pairs, read_registry, registry_problem_message,
+        unfinished_removals,
     )
     registry = read_registry(paths)
     if registry.problems:
         check("Project registry", False, registry_problem_message(registry.problems))
-    for name in missing_among(registry.names, paths):
+    for name in unfinished_removals(registry.names, paths):
         warn(f"Project {name} registered", forget_advice(name))
     pairs = overlapping_pairs(set(registry.names))
     if pairs:

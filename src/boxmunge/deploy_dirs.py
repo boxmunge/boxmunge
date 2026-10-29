@@ -18,13 +18,14 @@ from __future__ import annotations
 import errno
 import os
 import stat
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from boxmunge.fs_nofollow import (
     chown_open_tree_deploy, deploy_ids, mkdir_p_deploy, running_as_root,
 )
-from boxmunge.log import log_warning
+from boxmunge.log import log_error, log_warning
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -64,50 +65,80 @@ def deploy_dirs(paths: BoxPaths) -> list[Path]:
             if (parent / name).is_dir() and not (parent / name).is_symlink()]
 
 
-def _reown(paths: BoxPaths, parent: Path, name: str, uid: int) -> Path | None:
-    """Re-own parent/name and everything under it to deploy; the directory
-    when it was not deploy's before. Reached through descriptors that
-    refuse a link, so a link deploy swapped in is left alone."""
-    shown = parent / name
+ROOT_UID = 0
+
+
+def _uid_of(fd: int) -> int:
+    return os.fstat(fd).st_uid
+
+
+@dataclass
+class Reowned:
+    """What prepare_deploy_dirs did: directories that were not deploy's and
+    now are, and those still not deploy's after the attempt."""
+
+    done: list[Path] = field(default_factory=list)
+    failed: list[Path] = field(default_factory=list)
+
+
+def _open_dir(paths: BoxPaths, name: str, dir_fd: int | None, shown: Path) -> int | None:
+    """A directory opened without following a link; None (a link or a
+    non-directory is warned about, never re-owned) when absent or not one."""
     try:
-        pfd = os.open(parent, _DIR_FLAGS)
+        return os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
     except FileNotFoundError:
         return None
-    try:
-        try:
-            fd = os.open(name, _DIR_FLAGS, dir_fd=pfd)
-        except FileNotFoundError:
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOTDIR):
+            log_warning("upgrade", f"{shown} is not a plain directory; not re-owned", paths)
             return None
-        except OSError as e:
-            if e.errno in (errno.ELOOP, errno.ENOTDIR):
-                log_warning("upgrade", f"{shown} is not a plain directory; not re-owned", paths)
-                return None
-            raise
+        raise
+
+
+def _reown(paths: BoxPaths, parent: Path, name: str, uid: int, result: Reowned) -> None:
+    """Re-own parent/name and what root made under it to deploy, through
+    descriptors that refuse a link, so a link deploy swapped in is left
+    alone. Records the directory in ``result`` when it was not deploy's."""
+    shown = parent / name
+    pfd = _open_dir(paths, str(parent), None, parent)
+    if pfd is None:
+        return
+    try:
+        fd = _open_dir(paths, name, pfd, shown)
+        if fd is None:
+            return
         try:
-            was_deploys = os.fstat(fd).st_uid == uid
-            chown_open_tree_deploy(fd, str(shown))
+            was_deploys = _uid_of(fd) == uid
+            chown_open_tree_deploy(fd, str(shown), only_uid=ROOT_UID)
+            now_deploys = _uid_of(fd) == uid
         finally:
             os.close(fd)
     finally:
         os.close(pfd)
-    return None if was_deploys else shown
+    if not now_deploys:
+        log_error("upgrade", f"{shown} is still not owned by deploy after the chown", paths)
+        result.failed.append(shown)
+    elif not was_deploys:
+        result.done.append(shown)
 
 
-def prepare_deploy_dirs(paths: BoxPaths) -> list[Path]:
+def prepare_deploy_dirs(paths: BoxPaths) -> Reowned:
     """Create state/<dir> for each STATE_DIRS entry that is missing, and
-    re-own every directory of the set (and what is in it) to deploy. As
-    root only; returns the directories that were not deploy's.
+    re-own every directory of the set (and what root made in it) to deploy.
+    As root only.
 
     Never re-owns a parent (/opt/boxmunge stays root's; state/ and
     projects/ are deploy's from install).
     """
+    result = Reowned()
     ids = deploy_ids()
     if not running_as_root() or ids is None:
-        return []
+        return result
     for name in STATE_DIRS:
         mkdir_p_deploy(paths.state / name)
-    return [p for parent, name in _targets(paths)
-            if (p := _reown(paths, parent, name, ids[0])) is not None]
+    for parent, name in _targets(paths):
+        _reown(paths, parent, name, ids[0], result)
+    return result
 
 
 def fix_command(directory: Path) -> str:

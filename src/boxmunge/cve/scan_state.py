@@ -117,6 +117,15 @@ def write_scan_state(
         raise ScanStateWriteError(path, e) from e
 
 
+def last_scanned_at(path: Path) -> str | None:
+    """When the last recorded scan result was made (ISO text), or None when
+    there is none or it cannot be read."""
+    try:
+        return json.loads(path.read_text())["scanned_at"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def scan_problem(path: Path, project: str, now: datetime) -> str | None:
     """Why the project has no current, complete scan result at ``path``, or
     None when it has one: recorded within SCAN_MAX_AGE, nothing unscanned."""

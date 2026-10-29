@@ -6,11 +6,18 @@ from types import SimpleNamespace
 
 import pytest
 
+from boxmunge.commands import project_forget_cmd
 from boxmunge.commands.project_forget_cmd import cmd_project_forget, run_project_forget
 from boxmunge.project_registry import (
     forget_advice, is_registered, missing_among, read_registry,
 )
 from tests.test_commands.cve_helpers import make_box
+
+
+@pytest.fixture(autouse=True)
+def as_root(monkeypatch):
+    monkeypatch.setattr("boxmunge.commands.project_forget_cmd.running_as_root", lambda: True)
+    monkeypatch.setattr("boxmunge.docker_containers.project_volumes", lambda p: [])
 
 
 def _drifted(tmp_path):
@@ -64,3 +71,41 @@ def test_cli_entry_exits_with_the_result(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         cmd_project_forget(["gone"])
     assert exc.value.code == 0
+
+
+def test_forget_unlinks_the_lock_files_and_names_the_kept_volumes(tmp_path, monkeypatch, capsys):
+    paths = _drifted(tmp_path)
+    paths.secrets_locks.mkdir()
+    (paths.secrets_locks / "gone.lock").write_text("")
+    monkeypatch.setattr("boxmunge.docker_containers.project_volumes",
+                        lambda p: ["gone_pgdata"])
+    assert run_project_forget("gone", paths) == 0
+    assert not paths.project_lock_file("gone").exists()
+    assert not (paths.secrets_locks / "gone.lock").exists()
+    assert "Docker volumes are kept: gone_pgdata" in capsys.readouterr().out
+
+
+def test_forget_as_non_root_fails_cleanly(tmp_path, monkeypatch, capsys):
+    paths = _drifted(tmp_path)
+    monkeypatch.setattr("boxmunge.commands.project_forget_cmd.running_as_root", lambda: False)
+    assert run_project_forget("gone", paths) == 1
+    assert "operator-only: run it as root" in capsys.readouterr().err
+    assert is_registered("gone", paths)
+
+
+def test_a_deploy_that_wins_the_race_keeps_the_project(tmp_path, monkeypatch, capsys):
+    """The directory appears after the caller's first look, before the lock."""
+    paths = _drifted(tmp_path)
+    real = project_forget_cmd._refusal
+    calls = []
+
+    def racing(project, p):
+        calls.append(project)
+        p.project_dir(project).mkdir()  # a deploy lands just before the check
+        return real(project, p)
+
+    monkeypatch.setattr(project_forget_cmd, "_refusal", racing)
+    assert run_project_forget("gone", paths) == 1
+    assert is_registered("gone", paths)
+    assert paths.project_scan_state("gone").exists()
+    assert calls == ["gone"]

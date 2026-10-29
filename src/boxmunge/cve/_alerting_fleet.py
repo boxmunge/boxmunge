@@ -7,7 +7,7 @@ from ``boxmunge.cve.alerting``.
 from __future__ import annotations
 
 import math
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 
 from boxmunge.cve._alerting_types import Alert
@@ -79,32 +79,30 @@ def format_scan_failure_alert(problems: dict[str, list[str]]) -> Alert:
 
 
 def format_scan_unrecorded_alert(
-    problems: Mapping[str, str], current: Collection[str],
+    problems: Mapping[str, str], last_recorded: Mapping[str, str | None],
 ) -> Alert:
-    """Projects whose scan ran but whose result could not be written.
+    """Projects whose scan ran and was acted on, but whose result could not
+    be written.
 
-    ``problems`` maps project -> the error (it names the remedy). ``current``
-    holds those that still have a recent, complete recorded scan: their
-    coverage stands, so they are not called uncovered. Priority 1 only when
-    one has no current result; otherwise the scan state needs fixing, but
-    nothing is unprotected.
+    ``problems`` maps project -> the error (it names the remedy);
+    ``last_recorded`` maps it to when its last recorded result was made, or
+    None. The run's quarantines and alerts happened; what is lost is the
+    record, so the project's view and freshness check show the older result
+    until a write succeeds. Priority 1: a scan that cannot be recorded
+    keeps failing, and the freshness check will report it stale.
     """
-    uncovered = sorted(set(problems) - set(current))
     n = len(problems)
-    title = (f"CVE scan result not recorded — {n} project{'s' if n != 1 else ''}")
+    title = f"CVE scan result not recorded — {n} project{'s' if n != 1 else ''}"
     lines = [f"- {project}: {problems[project]}" for project in sorted(problems)]
     lines.append("")
-    if uncovered:
-        lines.append(f"No current scan result is recorded for {', '.join(uncovered)}: "
-                     f"until one can be written, its images are not covered by CVE "
-                     f"quarantine.")
-    if current:
-        lines.append(f"{', '.join(sorted(current))} keep their last successful scan, "
-                     f"still current; coverage is unchanged.")
-    lines.append("The scan itself ran; this is a problem with writing its result. "
-                 "`boxmunge doctor` names the directory.")
-    return Alert(kind="scan_unrecorded", title=title, body="\n".join(lines),
-                 priority=1 if uncovered else 0)
+    lines.append("This run's scan was completed and acted on (quarantines, alerts), "
+                 "but its result was not recorded.")
+    for project in sorted(problems):
+        when = last_recorded.get(project)
+        lines.append(f"- {project}: " + (f"the last recorded result (at {when}) is still "
+                     f"what `security {project}` shows" if when else "no result is "
+                     f"recorded, so it shows as never scanned"))
+    return Alert(kind="scan_unrecorded", title=title, body="\n".join(lines), priority=1)
 
 
 def format_breaker_held_alert(
