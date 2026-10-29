@@ -17,12 +17,9 @@ services:
   # backend:
   #   type: backend
   #   port: 8000
-  #   internal: true
   #   routes:
   #     - path: /api/*
-  #   health:
-  #     endpoint: /api/health
-  #     interval: 30s
+  #   smoke: boxmunge-scripts/smoke-backend.sh   # health is checked by smoke
   # db:                     # declared only for a read-only root filesystem;
   #   internal: true        # no port or routes needed
   #   writable:

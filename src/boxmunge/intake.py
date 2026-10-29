@@ -86,8 +86,12 @@ def extract_candidate(bundle_path: Path, workspace: Path) -> Path:
 
 def validate_release_tree(
     tree: Path, project_name: str, paths: BoxPaths, component: str,
+    *, lenient_values: bool = False,
 ) -> dict[str, Any]:
     """Run every pre-install check on a release tree; return its manifest.
+
+    `lenient_values` (see validate_manifest) is for re-checking a release that
+    is already installed, as a start of its containers or a rollback does.
 
     Raises IntakeError (exit 1, or 3 for a compose hardening rejection).
     Warnings are printed; nothing on disk is changed.
@@ -104,7 +108,8 @@ def validate_release_tree(
     except ManifestError as e:
         raise IntakeError(str(e)) from e
 
-    errors, warnings = validate_manifest(written, project_name)
+    errors, warnings = validate_manifest(
+        written, project_name, lenient_values=lenient_values)
     if errors:
         detail = "\n".join(f"  {err}" for err in errors)
         raise IntakeError(f"Manifest validation failed:\n{detail}")

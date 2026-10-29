@@ -49,7 +49,6 @@ validates everything on stage/prod-deploy (--dry-run checks without deploying).
       port: 8080                    # container port
       routes:
         - path: /
-      health: /healthz              # optional
       smoke: boxmunge-scripts/smoke.sh
       limits:
         memory: 256m

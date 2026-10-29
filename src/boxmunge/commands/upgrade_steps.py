@@ -131,7 +131,8 @@ def _migrated(project_dir: Path, manifest: dict[str, Any]) -> dict[str, Any] | N
     if manifest.get("schema_version", 1) == CURRENT_SCHEMA_VERSION:
         return None
     migrated = migrate_manifest(manifest, CURRENT_SCHEMA_VERSION)
-    errors, _ = validate_manifest(migrated, expected_name=project_dir.name)
+    errors, _ = validate_manifest(
+        migrated, expected_name=project_dir.name, lenient_values=True)
     if errors:
         raise MigrationError(
             f"Migrated manifest for {project_dir.name} failed validation. "

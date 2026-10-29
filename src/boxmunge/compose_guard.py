@@ -224,7 +224,8 @@ def check_start(
     _refuse_if_install_open(paths, project_name, component, txn)
     _refuse_if_legacy_stage(paths, project_name, component)
     try:
-        validate_release_tree(project_dir, project_name, paths, component)
+        validate_release_tree(project_dir, project_name, paths, component,
+                              lenient_values=True)
         _, read_files = compose_resolve.walk_references(
             project_dir / compose_files[0], (project_dir,))
         existing = docker_containers.container_bind_sources(project_name)
