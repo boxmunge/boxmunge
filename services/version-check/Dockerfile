@@ -9,6 +9,10 @@ COPY app.py db_schema.py failure_store.py release_catalog.py request_limits.py s
 COPY releases.json .
 COPY static/ static/
 
+# Run as a fixed numeric user: boxmunge 0.11 compares it with the owner of
+# the check-data volume, which a name cannot be.
+RUN adduser -D -u 10001 app && mkdir -p /data && chown app /data
+USER 10001:10001
 EXPOSE 8147
 
 # Migrate the database (and run the first sweep) once, before any worker
