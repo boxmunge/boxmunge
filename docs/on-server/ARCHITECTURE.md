@@ -269,15 +269,9 @@ All state writes are atomic: the new content is written to a temporary file in t
 
 Projects declare their backup type in `manifest.yml`:
 
-| Type | Meaning |
-|------|---------|
-| `none` | No backup |
-| `postgres` | PostgreSQL dump |
-| `mysql` | MySQL dump |
-| `files` | File-based backup |
-| `custom` | Custom backup script |
+The type is a free-form label (a non-empty string). Examples: `postgres`, `mysql`, `files`, `db-dump`, `custom`. `none` means no backup; no other value changes behaviour.
 
-The type is a label: for every type other than `none`, boxmunge runs the manifest's own `dump_command` and `restore_command` inside the `backup.service` container, and both are mandatory (`backup.service` too, unless the manifest has exactly one service). boxmunge refuses a manifest with a backup type but no restore command -- a backup you cannot restore is not a backup.
+For every type other than `none`, boxmunge runs the manifest's own `dump_command` and `restore_command` inside the `backup.service` container, and both are mandatory (`backup.service` too, unless the manifest has exactly one service). boxmunge refuses a manifest with a backup type but no restore command -- a backup you cannot restore is not a backup.
 
 Backup flow:
 

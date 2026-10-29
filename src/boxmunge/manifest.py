@@ -9,7 +9,8 @@ import yaml
 from boxmunge.backup_command_warnings import backup_command_warnings
 from boxmunge.fileutil import LinkedTargetError, atomic_write_text
 from boxmunge.manifest_fields import (
-    SERVICE_NAME_RE, deploy_problems, host_problem, port_problem, route_path_problem,
+    SERVICE_NAME_RE, backup_type_problem, deploy_problems, host_problem, port_problem,
+    retention_problem, route_path_problem, strategy_problem,
 )
 from boxmunge.migration import MigrationError, migrate_manifest
 from boxmunge.user_entries import (
@@ -104,14 +105,23 @@ def write_manifest(path: Path, manifest: dict[str, Any]) -> None:
 
 
 def validate_manifest(
-    manifest: Any, expected_name: str
+    manifest: Any, expected_name: str, *, lenient_values: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Validate a parsed manifest against the boxmunge project conventions.
 
     Returns (errors, warnings). errors is empty if the manifest is valid.
+
+    `lenient_values` is for what acts on a project that is already installed
+    (the server upgrade, every start of its containers, a rollback). Those
+    must not stop a running project over a value it has always been allowed
+    to carry, so the checks added for values once accepted unchecked
+    (internal with routes, container_updates.strategy, backup.type,
+    backup.retention) are warnings there. Deploy, stage, promote and
+    validate keep them errors.
     """
     errors: list[str] = []
     warnings: list[str] = []
+    late: list[str] = []  # errors, or warnings when `lenient_values`
 
     # Top-level shape guard. A YAML document like a list (`- foo`), scalar
     # (`just a string`), or empty file (`None`) would otherwise AttributeError
@@ -197,6 +207,12 @@ def validate_manifest(
             # An internal service (database, cache, worker) may be declared only
             # to give it a read-only rootfs and writable: paths; it needs no route.
             routeless = svc.get("internal") is True and not routes
+            if svc.get("internal") is True and routes:
+                late.append(
+                    f"Service '{svc_name}' is internal: true but has routes. "
+                    f"Internal means Caddy does not route to it, so the routes "
+                    f"would be ignored by intent yet still served. Remove "
+                    f"'internal: true' to route it, or remove 'routes'.")
             if "port" in svc:
                 problem = port_problem(svc["port"])
                 if problem:
@@ -340,6 +356,13 @@ def validate_manifest(
         errors.append("'backup' must be a mapping")
         backup = {}
     backup_type = backup.get("type", "none")
+    problem = backup_type_problem(backup_type)
+    if problem:
+        late.append(problem)
+    if "retention" in backup:
+        problem = retention_problem(backup["retention"])
+        if problem:
+            late.append(problem)
     if backup_type != "none":
         if not backup.get("dump_command"):
             errors.append(
@@ -366,6 +389,14 @@ def validate_manifest(
         warnings.extend(backup_command_warnings(backup))
 
     errors.extend(deploy_problems(manifest.get("deploy", {})))
+
+    updates = manifest.get("container_updates", {})
+    if not isinstance(updates, dict):
+        late.append("'container_updates' must be a mapping")
+    elif "strategy" in updates:
+        problem = strategy_problem(updates["strategy"])
+        if problem:
+            late.append(problem)
 
     # Smoke tests — per-service
     has_any_smoke = any(
@@ -415,6 +446,7 @@ def validate_manifest(
             warnings.append(f"Unknown key in 'staging': '{key}'")
         errors.extend(_copy_data_errors(staging.get("copy_data")))
 
+    (warnings if lenient_values else errors).extend(late)
     return errors, warnings
 
 
@@ -435,20 +467,6 @@ def _copy_data_errors(copy_data: Any) -> list[str]:
         return [f"'staging.copy_data.sources' must map store names to store names "
                 f"or null. {shape}"]
     return []
-
-
-def get_routable_services(
-    manifest: dict[str, Any],
-) -> dict[str, dict[str, Any]]:
-    """Return services that should be connected to the boxmunge-proxy network.
-
-    Excludes services marked internal: true.
-    """
-    result = {}
-    for name, svc in manifest.get("services", {}).items():
-        if not svc.get("internal", False):
-            result[name] = svc
-    return result
 
 
 def get_all_routes(

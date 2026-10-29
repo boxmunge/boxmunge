@@ -105,7 +105,8 @@ def roll_back_git(project_name: str, paths: BoxPaths, target: RollbackTarget,
     crash_point("rollback.installed")
     try:
         manifest = validate_release_tree(paths.project_dir(project_name), project_name,
-                                         paths, "rollback")
+                                         paths, "rollback",
+                                         lenient_values=True)
     except IntakeError as e:
         return report_refusal(e)
     if not txn.reached("data_restored"):

@@ -295,7 +295,8 @@ def _roll_back_release(project_name: str, paths: BoxPaths, target: RollbackTarge
     rerun after any failure or crash resumes from the recorded phase."""
     print("\n--- Checking the previous release ---")
     try:
-        manifest = validate_release_tree(tree, project_name, paths, "rollback")
+        manifest = validate_release_tree(tree, project_name, paths, "rollback",
+                                         lenient_values=True)
         check_installable(tree, paths.project_dir(project_name))
     except IntakeError as e:
         return report_refusal(e)

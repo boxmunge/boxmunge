@@ -1,7 +1,10 @@
 # boxmunge project manifest
 # See /opt/boxmunge/docs/PROJECT_CONVENTIONS.md for full documentation.
 
+schema_version: 3
+id: __PROJECT_ID__        # a ULID, fixed for the project's life; `boxmunge bundle` generates one
 project: __PROJECT_NAME__
+source: git               # git (repo and ref below) | bundle (delete repo and ref)
 repo: git@github.com:YOUR_ORG/__PROJECT_NAME__.git
 ref: main
 
@@ -10,19 +13,20 @@ hosts:
 
 services:
   frontend:
-    type: frontend
     port: 3000
     routes:
       - path: /
+    smoke: boxmunge-scripts/smoke.sh
+    limits:
+      memory: 256m
+      cpus: "0.5"
   # backend:
-  #   type: backend
   #   port: 8000
-  #   internal: true
   #   routes:
   #     - path: /api/*
-  #   health:
-  #     endpoint: /api/health
-  #     interval: 30s
+  #   smoke: boxmunge-scripts/smoke-backend.sh
+  #   limits:
+  #     memory: 512m
   # db:                     # declared only for a read-only root filesystem;
   #   internal: true        # no port or routes needed
   #   writable:
@@ -30,15 +34,16 @@ services:
 
 backup:
   type: none
-  # Uncomment and configure if backups are needed:
-  # type: db-dump           # none | volume | db-dump | both
+  # Uncomment and configure if backups are needed. Any type other than none
+  # is a label (e.g. db-dump) and requires both commands:
+  # type: db-dump
   # dump_command: "boxmunge-scripts/backup.sh"
   # restore_command: "boxmunge-scripts/restore.sh"
+  # service: db             # needed unless the manifest has exactly one service
   # retention: 7
 
 deploy:
   pre_deploy: ""
-  smoke_test: "boxmunge-scripts/smoke.sh"
   snapshot_before_deploy: true
 
 env_files:

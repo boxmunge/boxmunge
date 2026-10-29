@@ -96,6 +96,18 @@ class TestRollbackRestoresCode:
             assert run_rollback("myapp", paths, yes=True) == 0
         assert (two_releases / "VERSION").read_text() == "v1-good\n"
 
+    def test_a_previous_release_with_a_new_manifest_error_warns_and_rolls_back(
+        self, paths, two_releases, capsys,
+    ) -> None:
+        previous = find_rollback_target(paths, "myapp").tree
+        manifest = previous / "manifest.yml"
+        manifest.write_text(manifest.read_text().replace(
+            "    port: 8080\n", "    port: 8080\n    internal: true\n"))
+        with _docker():
+            assert run_rollback("myapp", paths, yes=True) == 0
+        assert "internal: true but has routes" in capsys.readouterr().out
+        assert (two_releases / "VERSION").read_text() == "v1-good\n"
+
     def test_previous_release_failing_validation_changes_nothing(
         self, paths, two_releases,
     ) -> None:

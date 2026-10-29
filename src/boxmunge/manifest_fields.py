@@ -107,3 +107,38 @@ def deploy_problems(deploy: object) -> list[str]:
                 "Check its quoting; it runs without a shell, so put anything with "
                 "&&, pipes or redirects in a script and name the script here."]
     return []
+
+
+# container_updates.strategy: what a failed update does. The update flow
+# (container_update) acts on exactly these; any other value would run as
+# leave_broken, so a typo would silently pick the weaker behaviour.
+VALID_STRATEGIES = ("leave_broken", "rollback_to_previous")
+
+
+def strategy_problem(value: object) -> str | None:
+    if value in VALID_STRATEGIES:
+        return None
+    return (f"container_updates.strategy {value!r} is not recognised. "
+            f"Use one of: {', '.join(VALID_STRATEGIES)}.")
+
+
+def retention_problem(value: object) -> str | None:
+    """Why backup.retention cannot be used, if it cannot. One checker for the
+    deploy-time validation and the backup run, so they cannot disagree."""
+    if type(value) is int and value >= 1:
+        return None
+    return (f"backup.retention must be a whole number of at least 1, got "
+            f"{value!r}. Set the number of backups to keep, e.g. retention: 7.")
+
+
+def backup_type_problem(value: object) -> str | None:
+    """backup.type is a label: the code tells only `none` from everything
+    else (everything else runs dump_command and restore_command), so the one
+    thing it can be wrong about is not being a string. YAML turns an unquoted
+    `none`-like word such as `no` or `off` into a boolean, and an empty value
+    into null, which would silently count as a backup type."""
+    if isinstance(value, str) and value:
+        return None
+    return (f"backup.type must be a non-empty string such as 'none' or "
+            f"'db-dump', got {value!r}. Quote it if it is a YAML keyword "
+            f"(\"none\", not none/no/off).")

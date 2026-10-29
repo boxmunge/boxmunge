@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Container auto-update targets and their persisted per-target state.
 
-Target discovery (Caddy plus opt-in user projects) and the state file each
+Target discovery (Caddy plus every user project, unless its manifest sets
+``container_updates.enabled: false``) and the state file each
 target's run writes under ``state/container-updates/``. The update flow
 itself lives in ``boxmunge.container_update``.
 """
@@ -18,9 +19,6 @@ from boxmunge.manifest import load_manifest
 if TYPE_CHECKING:
     from pathlib import Path
     from boxmunge.paths import BoxPaths
-
-
-VALID_STRATEGIES = {"leave_broken", "rollback_to_previous"}
 
 
 @dataclass

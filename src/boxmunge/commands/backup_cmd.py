@@ -18,6 +18,7 @@ from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import ManifestError
+from boxmunge.manifest_fields import retention_problem
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
@@ -161,9 +162,9 @@ def backup_locked(
         return 1
     retention = (backup_conf.get("retention", 7) if kind is BackupKind.NIGHTLY
                  else SNAPSHOT_RETENTION[kind])
-    if type(retention) is not int or retention < 1:
-        print(f"ERROR: backup.retention must be a whole number of at least 1, "
-              f"got {retention!r}", file=sys.stderr)
+    problem = retention_problem(retention)
+    if problem:
+        print(f"ERROR: {problem}", file=sys.stderr)
         return 1
     key_path = paths.backup_key
 

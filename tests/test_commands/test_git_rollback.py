@@ -128,3 +128,20 @@ def test_abandoning_a_first_git_deploy_leaves_its_checkout(paths, tmp_path, caps
         assert run_abandon("myapp", paths) == 0
     assert load_txn(paths, "myapp") is None and _head(pdir) == tip
     assert f"repo/ stays checked out at {tip}" in capsys.readouterr().out
+
+
+def test_a_rollback_to_a_release_with_a_new_manifest_error_warns(paths, tmp_path, capsys) -> None:
+    """A release that ran before the checks existed (internal with routes)
+    must stay reachable by rollback: the checks are warnings there."""
+    pdir, work = git_project(paths, tmp_path)
+    with staging_docker_off():
+        assert run_deploy("myapp", paths, ref=commit(work, {"VERSION": "B\n"}, "B")) == 0
+        bad = commit(work, {"manifest.yml": git_manifest(tmp_path / "origin.git").replace(
+            "    port: 8080\n", "    port: 8080\n    internal: true\n")}, "legacy")
+        git("fetch", "-q", "origin", cwd=pdir / "repo")
+        state = read_state(paths.project_deploy_state("myapp"))
+        state["history"][0]["ref"] = bad
+        write_state(paths.project_deploy_state("myapp"), state)
+        assert run_rollback("myapp", paths, yes=True) == 0
+    assert _head(pdir) == bad
+    assert "internal: true but has routes" in capsys.readouterr().out
