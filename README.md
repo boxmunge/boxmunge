@@ -125,7 +125,7 @@ SSH into the deploy user and run commands directly — no `boxmunge` prefix need
 | `stage <project>` | Deploy to staging for verification |
 | `promote <project>` | Promote staging to production |
 | `prod-deploy <project>` | Deploy straight to production |
-| `rollback <project>` | Restore pre-deploy snapshot and redeploy |
+| `rollback <project>` | Put back the previous release and its pre-deploy data snapshot |
 | `backup <project>` | Create encrypted backup |
 | `restore <project>` | Restore from backup |
 | `self-test` | Prove backup/restore pipeline actually works |

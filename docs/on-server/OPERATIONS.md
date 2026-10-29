@@ -20,10 +20,11 @@ The standard workflow for deploying a project from a bundle.
 2. Upload the bundle to the server:
 
    ```
-   scp -O -P 922 myapp.tar.gz deploy@<host>:
+   scp -O -P 922 myapp-<timestamp>.tar.gz deploy@<host>:
    ```
 
-   Bundles land in the inbox automatically.
+   `bundle` names the file `<project>-<timestamp>.tar.gz`; 922 is the default SSH port (use the
+   one chosen at install). Bundles land in the inbox automatically.
 
 3. Verify the bundle arrived:
 
@@ -92,14 +93,14 @@ Deploy a specific git ref:
 prod-deploy myapp --ref v1.2.3
 ```
 
-`prod-deploy` and `stage` fetch `origin`, then resolve the ref (`--ref`, else the manifest's `ref`)
-once, to a full commit SHA: a branch is origin's branch as just fetched (never a stale local
-one), a tag is a tag, and a commit is named by all 40 characters. An abbreviated SHA, and a name
-that is both a branch and a tag of origin, are refused (give the full SHA). The deploy then checks
-that commit out detached in `repo/`; there is no `git pull`. Deploy state records the full SHA. A
-deploy runs in the same install transaction as a bundle deploy (see "An interrupted or failed
-install"), and its pre-deploy snapshot is taken with the running release's manifest before
-anything is checked out.
+`prod-deploy` and `stage` fetch `origin`, then resolve the ref (`--ref`, else the manifest's `ref`,
+else `main`) once, to a full commit SHA: a branch is origin's branch as just fetched (never a stale
+local one), a tag is a tag, and a commit is named by all 40 characters. An abbreviated SHA, and a
+name that is both a branch and a tag of origin, are refused (give the full SHA). The deploy then
+checks that commit out detached in `repo/`; there is no `git pull`. Deploy state records the full
+SHA. A deploy runs in the same install transaction as a bundle deploy (see "An interrupted or failed
+install"), and its pre-deploy snapshot is taken with the running release's manifest before anything
+is checked out.
 
 `stage` of a git project checks the resolved commit out in a clone of its own in the slot
 (`.releases/staged/release/repo/`), beside copies of the project directory's other release files
@@ -263,7 +264,7 @@ or `repo/`, is refused. So is an absolute `dockerfile` in the project when the c
 use paths relative to the release. `stage` also checks what each build input resolves to (with
 `${VAR}` filled in) and refuses one in the project dir outside the staged release.
 
-Two behaviour changes in this release:
+Two behaviour changes in 0.11.0:
 
 - staging's copy of a nested data mount moved: `./data/db` used to become `./data/db-staging`
   (inside production's `data/`), and now becomes `./data-staging/db`. The old copies are not used
@@ -364,7 +365,7 @@ Staging is useful for:
 Upload a new bundle and stage or deploy:
 
 ```
-scp -O -P 922 myapp-v2.tar.gz deploy@<host>:
+scp -O -P 922 myapp-<timestamp>.tar.gz deploy@<host>:
 stage myapp
 promote myapp
 ```
@@ -379,9 +380,9 @@ prod-deploy myapp
 Promoting, or deploying, recreates production's containers through Compose: expect a restart's
 worth of downtime. A `stage` with `staging.copy_data` stops production for the copy.
 
-A release that stops bind-mounting a data directory (say `./uploads`) does not delete it: the
-deploy keeps it and prints `WARNING: uploads/ holds data but this release's compose.yml does not
-mount it`. Once neither the running release nor the rollback target needs that data, delete it on
+A release that stops bind-mounting a data directory (say `./uploads`) does not delete it: the deploy
+keeps it and prints `WARNING: uploads/ holds data but this release's compose.yml does not mount it
+read-write`. Once neither the running release nor the rollback target needs that data, delete it on
 the server as root (`rm -rf /opt/boxmunge/projects/myapp/uploads`, and its `uploads-staging` copy if
 there is one). Until then, a bundle that ships an `uploads/` of its own is refused.
 
@@ -395,7 +396,10 @@ Before deploying, preview what would change:
 diff myapp
 ```
 
-This shows differences between the current production state and the pending bundle or git ref, without making any changes.
+This compares the project directory's files with the newest bundle in the inbox (or the one
+`--ref` names: a bundle name or a prefix of its timestamp), and says whether the Caddy config and
+Compose overlay would change, without making any changes. It works on bundle projects only: for a
+git project it reports that the inbox holds no bundle.
 
 ---
 
@@ -476,10 +480,10 @@ project only when its name is exactly `<project>-<timestamp>.tar.gz`, so deployi
 up a `foo-bar` bundle. Once a bundle is deployed it moves to `inbox/.consumed/`, together with that
 project's older bundles. A bundle that fails validation stays in the inbox.
 
-List bundles in the inbox:
+List bundles in the inbox, or one project's (`--json` for machine-readable output):
 
 ```
-inbox
+inbox [<project>] [--json]
 ```
 
 Remove every bundle in the inbox, or one project's, including ones not deployed yet (it asks first
@@ -493,7 +497,9 @@ inbox clean [<project>] [--yes]
 
 ## Checking Health
 
-Run all health checks for one project (Docker container health, HTTP endpoint, smoke test):
+Run one project's smoke tests, inside each running container of every service with a `smoke`
+script (it also prints the services whose security profile is off or overridden). It writes no
+health state; `--json` prints the result as JSON:
 
 ```
 check myapp
@@ -534,14 +540,14 @@ the normal threshold alert fires with the cause. `check-all` also reports an unr
 config (`boxmunge.yml`), since alerts cannot be sent without it, and still runs the checks.
 
 The project registry, `state/projects.txt`, holds one project name per line. Every line is checked
-as a project name when it is read. A line that is not one (`../etc`, a reserved name such as
-`caddy` or `<x>-staging`) is reported as `projects.txt:<line>` with the reason. The nightly
-`security scan` still scans every valid project, then alerts on the bad line and exits 1;
-`security`, `health` and `doctor` name it too. Every valid project keeps working: deploys, stages
-and the other per-project commands only ask whether their own name is registered, and
-`project-add`/`project-delete` keep the bad line as it is when they rewrite the file. Listings
-(`project-list`, `projects.list`) fail naming the line rather than list the registry with it left
-out. Correct or delete the line as root.
+as a project name when it is read. A line that is not one (`../etc`, a reserved name such as `caddy`
+or `<x>-staging`) is reported as `projects.txt:<line>` with the reason. The nightly `security scan`
+still scans every valid project, then alerts on the bad line and exits 1; `security`, `health` and
+`doctor` name it too. Every valid project keeps working: deploys, stages and the other per-project
+commands only ask whether their own name is registered, and `project-add`, `project-delete` and
+`project-forget` keep the bad line as it is when they rewrite the file. Listings (`project-list`,
+`projects.list`) fail naming the line rather than list the registry with it left out. Correct or
+delete the line as root.
 
 An alert counts as sent only when Pushover accepts it. If it is not delivered, the health check logs why (an `error` entry when the config cannot be read or the Pushover request fails, a `warn` entry when Pushover is not configured) and tries again on the next 5-minute tick until it gets through. Without Pushover keys the `warn` entry is written at most once a day, because the retry would otherwise repeat it every tick; `health` reports the missing keys as the `alerts` warning for as long as they are missing. The same applies to the critical alert for a stopped project and to the RECOVERED notice. Find these entries with `log --component health`.
 
@@ -561,7 +567,7 @@ View logs for a specific service within a project:
 logs myapp backend
 ```
 
-Show more lines (default is typically 100):
+Show more lines (default 100):
 
 ```
 logs myapp --tail 500
@@ -571,6 +577,12 @@ Live-tail logs (stream new output, press Ctrl-C to stop):
 
 ```
 logs myapp --follow
+```
+
+View the last 100 journal lines of the boxmunge systemd units (timers and services):
+
+```
+logs --host
 ```
 
 View the boxmunge operational audit log:
@@ -653,7 +665,7 @@ Every snapshot is named `<project>-<UTC timestamp>-<kind>.tar.gz.age`, for examp
 | Kind | Taken by | Local copies kept |
 |---|---|---|
 | `nightly` | `backup-all` (the 02:00 timer) | `backup.retention` in the manifest (default 7) |
-| `predeploy` | `prod-deploy`'s pre-deploy snapshot (`deploy.snapshot_before_deploy`) | 5 |
+| `predeploy` | the pre-deploy snapshot of `prod-deploy` and `promote` (`deploy.snapshot_before_deploy`) | 5 |
 | `premigrate` | `userns-migrate`, before its downtime (not for a paused project) | 2 |
 | `preupdate` | the container-update timer, only when a pulled image changed and the project is about to be recreated | 3 |
 | `prerestore` | `restore`, a safety snapshot of the data about to be replaced (unless `--no-safety-snapshot`) | 3 |
@@ -684,7 +696,8 @@ age and rclone run only inside the `boxmunge-system` container. If it is not run
 sudo docker compose -f /opt/boxmunge/system/compose.yml up -d --build
 ```
 
-Restore from the most recent backup:
+Restore from the most recent backup (it names the snapshot and asks first; `--yes` skips the
+prompt):
 
 ```
 restore myapp
@@ -726,7 +739,9 @@ and runs the smoke test that clears the stop.
 
 Safety snapshots are kept separately: the three newest `prerestore` snapshots per project.
 
-Verify that a backup restores successfully (non-destructive):
+Check that the newest snapshot decrypts and is not empty (nothing is restored and the
+`restore_command` is not run, so this does not prove an end-to-end restore; see "Proving
+Backup/Restore Works"):
 
 ```
 test-restore myapp
@@ -765,7 +780,9 @@ Rollback refuses, with the reason, instead of doing half a rollback:
 - after a first deploy, or once a rollback has used the previous release (there is no older release
   to go back to; deploy a known-good bundle instead);
 - when the project has backups configured but no snapshot was taken before the last deploy (the
-  backup failed or `--no-snapshot` was used), or that snapshot is no longer in `backups/`;
+  backup failed, `--no-snapshot` was used, or the manifest sets `deploy.snapshot_before_deploy:
+  false`), or that snapshot is no longer in `backups/`;
+- while the project is paused or CVE-quarantined (`resume` or `security resume` it first);
 - while an install is open whose pre-deploy hook has not run yet: nothing reached production's
   containers or data, so `prod-deploy <project> --abandon` puts the old files back instead (see
   "An interrupted or failed install").
@@ -830,7 +847,8 @@ If the record no longer matches the files (after a platform rollback, or a hand
 edit), it is reported as stale and nothing is resumed automatically: check that
 production is what `.releases/live.json` says (for a git project, what `repo/` has checked out), then, as root, run
 `boxmunge-server install-txn <project> --drop`. It refuses a record that still
-matches the files; use one of the options above for that.
+matches the files; use one of the options above for that. A record that cannot be read at
+all is dropped the same way.
 
 ---
 
@@ -840,11 +858,16 @@ matches the files; use one of the options above for that.
 project-delete myapp
 ```
 
-This removes the production and staging containers, the project directory (including its local
-backups), the Caddy site configs, and every piece of per-project state: health, deploy, pause and
-quarantine markers, CVE scan state, staging state, and container-update state. It then removes the
-name from the allowlist. A project later created with the same name starts clean, not paused or
-quarantined.
+It lists what will go and asks first (`--yes` skips the prompt). In order, it removes the production
+and staging containers and the images boxmunge built for them, the Caddy site configs (then reloads
+Caddy), every piece of per-project state (health, deploy, pause and quarantine markers, CVE scan
+state, staging state, container-update state and alert records), and the project directory
+(including its local backups). It then removes the name from the allowlist. A project later created
+with the same name starts clean of that state, not paused or quarantined. Off-site copies made by
+`backup-sync` are kept, and so are the project's named Docker volumes: a project later created with
+the same name and volume names mounts them again, so remove them with `docker volume rm` (as the
+supervisor user) when their data is not wanted. If the Caddy reload fails, the delete still finishes
+but exits 1: the project's routes stay live until the next successful reload.
 
 The containers are removed first. If that fails, `project-delete` stops with an error and deletes
 nothing, so the compose files are still there for a retry. Fix the cause (usually Docker) and run it
@@ -863,6 +886,11 @@ emptied first by the data helper (the container `stage` copies data with). If th
 is fixed. The helper is not used while any container of the project or its staging still exists
 (including `compose run` containers and ones a forced delete left behind): the delete then fails,
 naming them, until you remove them with `docker rm -f`.
+
+A name still registered after its project directory is gone (`doctor` and `health` warn about
+it) is cleared by running `project-delete` again, or by the supervisor with
+`sudo boxmunge-server project-forget myapp`, which drops the entry and the leftover state files
+but keeps the project's Docker volumes (see "Host doctor reports problems").
 
 ## Service Users After an Upgrade
 
@@ -914,9 +942,10 @@ again.
 Every command that changes a project holds that project's lock while it works: `prod-deploy`,
 `stage`, `promote`, `unstage`, `rollback`, `restore`, `backup`, `pause`, `resume`, `recover`,
 `project-delete`, `data adopt`, `data chown`, `prod-deploy --abandon`, `security resume`, and, run
-as root, `legacy-stage` and `install-txn --drop`, the daily `container-update` (for the whole
-backup, pull, recreate, and rollback sequence), the CVE scan, and the 5-minute health check. Only one of them runs against a project at a
-time.
+as root, `legacy-stage`, `install-txn --drop` and `project-forget`, the daily `container-update`
+(for the whole backup, pull, recreate, and rollback sequence), the CVE scan, the platform upgrade
+(each project's manifest migration and its restart), and the 5-minute health check. Only one of them
+runs against a project at a time.
 
 If another operation holds the lock, an operator command fails at once and changes nothing:
 
@@ -1103,9 +1132,10 @@ does not page every run); the refusal is logged every time:
 - **"has a release staged by boxmunge 0.10.1"** — the project directory
   may hold that stage's files, so production is not recreated from them
   (upgrade restarts, container updates and `security resume` wait with
-  this alert; `recover`, `resume`, `restore` and `data adopt` refuse on
-  the terminal without one). Running containers keep running. Resolve it with `boxmunge-server legacy-stage <project>`; the
-  next run picks it up. This alert does not mean tampering.
+  this alert; `recover`, `resume`, `restore`, `data adopt` and `data chown`
+  refuse on the terminal without one). Running containers keep running.
+  Resolve it with `boxmunge-server legacy-stage <project>`; the next run
+  picks it up. This alert does not mean tampering.
 - **"an install of <ref> ... is open at phase <phase>"** — a deploy or
   rollback stopped part-way, so the project directory may hold a
   half-installed release. The alert names the options for that phase; see
@@ -1298,19 +1328,26 @@ Run doctor to see the current list of issues:
 doctor
 ```
 
-Each item in the output is labelled OK, WARN, or FAIL with a description. Address each FAIL, then each WARN, then re-run `doctor`.
+Each item in the output is labelled PASS, WARN, or FAIL with a description; `doctor` exits 1 when
+any item is FAIL. Address each FAIL, then each WARN, then re-run `doctor`.
 
 Issues requiring system-level investigation or repair (systemd timers, file permissions, Caddy container state) require the **supervisor** user.
 
-**"Deploy can write state/scans" FAIL.** A box installed before v0.9.3 can have directories root made
-(`state/scans`, `projects/<name>/security`), which the deploy shell cannot write: `security scan`
-fails with "Permission denied". The upgrade re-owns them; until it runs, doctor prints the fix
+**"Deploy can write <directory>" FAIL** (for example `state/scans`). A box installed before v0.9.3
+can have directories root made that the deploy shell writes (`state/scans`, `state/health`,
+`state/deploy`, the other per-project state directories, `projects/<name>/security`), so a command
+in the deploy shell fails there: `security scan` with "Permission denied". The upgrade creates and
+re-owns them (and what root made inside them); until it runs, doctor prints the fix
 (`sudo chown -R deploy:deploy <directory>`), to run as the supervisor.
 
-**"Project <name> registered" WARN.** The name is in the registry but `projects/<name>/` is gone
-(a removal that did not finish), or the project was added and never deployed. Deploy it, or drop
-the entry as the supervisor with `sudo boxmunge-server project-forget <name>` (refused while the
-directory or any container of the project exists).
+**"Project <name> registered" WARN.** The project was deployed (it still has deploy, scan or
+health state) but `projects/<name>/` is gone: a removal that did not finish. `health` warns the same
+under `registry`. A name added and never deployed is not warned about (`health` lists it as
+awaiting its first deploy). Drop the entry as the supervisor with
+`sudo boxmunge-server project-forget <name>`, which removes the entry and the project's leftover
+state files and keeps its Docker volumes. It is refused while the directory or any container of the
+project (or its staging) exists; `project-delete` is the way to remove a project that is still
+there.
 
 ---
 
@@ -1387,13 +1424,14 @@ the exit code. The MCP `health` tool runs the same checks.
 | `permissions`, `age-key` | the backup key or host secrets have the wrong mode, or the backup key is missing or invalid | fix as the supervisor user |
 | `project-containers`, `lifecycle` | a deployed project has no running containers, or is quarantined or stopped by the health monitor | `check <project>`, `logs <project>`, `recover <project>` |
 | `config-drift` | a project's Caddy site config differs from what its manifest generates | redeploy the project |
-| `recent-errors` | more than 10 errors in the log in the last 24 hours | `log --level error --since 24h --all` |
+| `recent-errors` | more than 10 errors in the log in the last 24 hours, or torn lines in the log that may have been errors | `log --level error --since 24h --all` (`log --since 24h` lists torn lines) |
 | `alerts` | Pushover is not configured, so nothing on this box can alert you | see [Alerts not configured](#alerts-not-configured) |
 | `container-updates` | the daily container update failed for a target (also when a service it updates has no container, so its running image is unknown), or has not run for 48 hours | `log --component container-update`; the entry ends with the command's own error output |
 | `platform-updates` | a security or break-fix release cannot be installed automatically | see [Upgrading the Platform](#upgrading-the-platform) |
 | `docker-userns` | Docker does not remap user namespaces yet, remaps them with another identity, or a source cannot be read on a box boxmunge has not remapped (warning; deploys go on); or the record or `daemon.json` claims boxmunge's remap and a source disagrees, or a remapped box's `caddy/Caddyfile` is not a world-readable regular file (error, alerted once a day) | see [User-namespace remapping](#user-namespace-remapping) |
 | `security-profiles` | a service runs with `profile: off` | review the reason in its manifest |
 | `service-users` | a deployed project's services have no recorded user yet (its next deploy decides them, and refuses an undeclared root registry image) | `doctor` lists the lines to add; see [Service Users After an Upgrade](#service-users-after-an-upgrade) |
+| `registry` | a registered project's directory is gone but its deploy, scan or health state is not (a removal that did not finish); a name never deployed is ok | the supervisor user runs `sudo boxmunge-server project-forget <project>` |
 | `sshd-hardening`, `sshd-deploy-env` | `00-boxmunge.conf` is missing or changed, or a later sshd setting widens what deploy accepts (error; `sshd-deploy-env` needs root) | the supervisor user re-runs the installer, or removes the widening setting |
 | `operational-log` | the active log file's first line is not a log entry, which stops all logging | move the file aside (see [Reading Logs](#reading-logs)) |
 | `cve-scan` | a deployed project has not been scanned for 36 hours, was never scanned, or its last scan was incomplete | `security scan <project>`; see `agent-help cve` |
@@ -1402,8 +1440,9 @@ the exit code. The MCP `health` tool runs the same checks.
 | `auto-updates` | OS security updates are not being fetched or installed | see [OS security updates](#os-security-updates) |
 | `timers` | any boxmunge timer (health, backup, backup-sync, auto-update, container-update, cve-scan) is inactive | the supervisor user runs `systemctl enable --now <timer>` |
 
-Every new check warns rather than errors. `health` exiting 2 during the probation after a platform
-upgrade rolls the upgrade back, so only a broken platform reports an error.
+`health` exiting 2 during the probation after a platform upgrade rolls the upgrade back, so only a
+broken platform reports an error: Docker, Caddy, the system container, the backup key, sshd, the
+firewall, the userns remap, or state boxmunge cannot read. Every other check warns.
 
 ### User-namespace remapping
 
@@ -1588,6 +1627,9 @@ The boxmunge CLI uses these conventions across mutating commands
 - `0` — success
 - `1` — generic operational failure (image pull, smoke test, Caddy reload, etc.)
 - `2` — usage error (unknown flag, missing argument) or critical health (`check`)
+- `3` — compose hardening rejection (validate_user_compose found a
+  policy-violating key in the project's `compose.yml`; the deploy/stage/
+  promote/resume aborted before touching containers)
 
 Every command rejects a flag it does not implement with exit 2, `ERROR:` and its usage on
 stderr, and runs nothing. That includes `--dry-run`: only `prod-deploy`, `stage`, `promote`,
@@ -1595,9 +1637,6 @@ stderr, and runs nothing. That includes `--dry-run`: only `prod-deploy`, `stage`
 `project-delete`, `rollback`, `restore`, `pause`, `secrets set`) refuses it instead of acting.
 `check-all` accepts only `--read-only`; a typo such as `--raed-only` is an error, not a run of
 the mutator. `-h` or `--help` on any command prints its usage, exits 0, and never runs it.
-- `3` — compose hardening rejection (validate_user_compose found a
-  policy-violating key in the project's `compose.yml`; the deploy/stage/
-  promote/resume aborted before touching containers)
 
 Exit code 3 is reserved for hardening rejections so an operator can
 distinguish a security-policy failure ("fix your compose.yml") from a
@@ -1703,7 +1742,8 @@ How an upgrade is applied and undone:
 1. The new release is downloaded, its signature and checksum verified, and it is installed
    into the standby venv, built from scratch with every hash-pinned dependency the release
    ships (MCP included); the upgrade needs 250MB free under `/opt/boxmunge`.
-   `upgrade --dry-run` runs against it as a pre-flight. If pip cannot install the
+   `upgrade --dry-run` runs against it as a pre-flight. A failed download, signature, checksum
+   or dry run drops the standby and blocklists the version. If pip cannot install the
    dependencies (a network blip, a full disk), the standby is dropped and a local alert sent.
    The first such failure of a version is not blocklisted or reported, so auto-update retries
    it; a second in a row blocklists it. A successful install and `clear-blocklist` reset the
@@ -1719,8 +1759,12 @@ How an upgrade is applied and undone:
 3. The venvs swap and `upgrade --apply` first rewrites the latest stash without the symlink
    members an older release wrote, so a rollback's `stash restore` cannot abort on them (a
    failure leaves the stash as it is, sends a high-priority alert and does not stop the
-   upgrade). It then migrates manifests and regenerates every project's Caddy site and compose
-   overlay, project by project under that project's lock, reloads Caddy and restarts projects.
+   upgrade). It creates any missing `state/` directory the deploy user writes, and gives
+   deploy any of those, or any `projects/<name>/security`, that root made (boxes installed
+   before v0.9.3); one it cannot re-own is printed as `FAIL` with the `chown` to run, and does
+   not stop the upgrade. It then migrates manifests and regenerates every project's Caddy site
+   and compose overlay, project by project under that project's lock, reloads Caddy and
+   restarts projects.
    Three kinds of project are left exactly as they are (not migrated, regenerated or
    restarted), reported as `LEFT AS IS` or `Skipped (busy)`, alerted, and do not fail the
    upgrade: one with a release staged by boxmunge 0.10.1 (one high-priority alert per project;
@@ -1882,7 +1926,7 @@ Scan cadence:
   ```
   boxmunge security scan              # all projects
   boxmunge security scan myapp        # one project
-  # exit 0 clean, 2 quarantined/at-risk, 1 a project failed or was only
+  # exit 0 clean, 2 quarantined/at-risk/held by the circuit breaker, 1 a project failed or was only
   # partly scanned (also sent as one priority-1 alert per run)
   ```
 
@@ -1903,7 +1947,7 @@ boxmunge security suppress CVE-2026-1234 \
 ```
 
 If a project gets auto-quarantined, the maintenance page goes up and a
-critical Pushover alert fires. Investigate, then either wait for an
+priority-1 Pushover alert fires. Investigate, then either wait for an
 upstream fix or suppress, then:
 
 ```
