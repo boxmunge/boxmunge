@@ -187,7 +187,7 @@ def chown_tree_deploy(path: Path) -> None:
     directory without following a link. Same best-effort rules as
     ``_chown_deploy``.
     """
-    if _deploy_owner() is None:
+    if not running_as_root() or _deploy_owner() is None:
         return
     try:
         top = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
