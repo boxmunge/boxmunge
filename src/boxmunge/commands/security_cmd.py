@@ -56,9 +56,13 @@ Usage:
   boxmunge security <project> [--json]                 Per-project view
   boxmunge security scan [project]                     Scan all/one project(s)
   boxmunge security scan --apply-held                  Apply breaker-held quarantines (operator)
-  boxmunge security suppress <CVE> --project <name> --until <YYYY-MM-DD> --reason <text>
-  boxmunge security unsuppress <CVE> --project <name>
+  boxmunge security suppress <CVE>|--current (--project <name>|--host)
+                             --until <YYYY-MM-DD> --reason <text>
+  boxmunge security unsuppress <CVE> (--project <name>|--host)
   boxmunge security resume <project>                   Lift CVE quarantine
+
+--host suppressions and scan --apply-held are operator-only (refused by the
+deploy shell). --until is at most 90 days ahead.
 """
 
 _SUBCOMMANDS = {"scan", "suppress", "unsuppress", "resume"}

@@ -17,7 +17,7 @@ from boxmunge_cli.manifest_id import add_manifest_id, ManifestIdError
 BUNDLE_EPILOG = """\
 What ships: everything in the project directory except
   - never shipped: .git/ .hg/ .svn/, .env and .env.* (but .env.example ships),
-    the client's .boxmunge config
+    the client's .boxmunge config and .boxmungeignore itself
   - left out by default: node_modules/ .venv/ venv/ __pycache__/ *.pyc tool
     caches, .DS_Store, earlier <project>-*.tar.gz bundles, top-level data/
     and backups/ (re-include with a '!pattern' line in .boxmungeignore)

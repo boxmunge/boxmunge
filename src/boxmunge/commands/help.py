@@ -74,14 +74,15 @@ Container security & CVE policy:
   security suppress <CVE>         Add a CVE suppression with --until and --reason
   security suppress --current     Suppress all currently-quarantining CVEs
                                   for --project, or --host (across all projects)
-  security suppress --host        Host-scope suppression (applies to every project on this box)
-  security unsuppress <CVE>       Remove a suppression (--project NAME or --host)
+  security suppress --host        Suppress for every project on this box (operator)
+  security unsuppress <CVE>       Remove a suppression (--project NAME; --host: operator)
   security resume <project>       Lift a CVE quarantine (re-scans first)
   security scan --apply-held      Apply quarantines the circuit breaker held (operator)
 
 Platform updates:
   upgrade                 Upgrade boxmunge platform from latest release
-  upgrade --target VER    Upgrade to a specific newer version (e.g. 0.3.5)
+  upgrade --target VER    Upgrade to a specific version, never older (e.g. 0.3.5;
+                          deploy shell; as root: boxmunge-upgrade target VER)
   auto-update             Run the auto-update probation/promotion cycle
   mcp-serve               Run MCP server (stdio) for AI agent integration
 
@@ -90,8 +91,17 @@ Operator only (as root, not in the deploy shell):
   install-txn <p> --drop  Drop a stale install record
   project-forget <p>      Drop a registry entry whose project directory is gone
   legacy-stage <p> ...    Resolve a release staged by boxmunge 0.10.1
+  bundle <dir>            Build a bundle on this machine (the client's
+                          'boxmunge bundle' is the usual way)
+  boxmunge-upgrade force-target VER
+                          Install VER despite the blocklist or downgrade refusal
+  boxmunge-upgrade clear-blocklist VER
+                          Take VER off the blocklist so it can install again
   boxmunge-upgrade userns-migrate [--check] | userns-rollback | userns-commit
                           Remap Docker's user namespaces (OPERATIONS.md)
+
+Internal (run by the upgrade shim, not by hand): stash, _discover-update,
+staging-teardown-all
 
 Options (run 'help <command>' to see exactly which a command accepts):
   -h, --help              Show a command's usage; never runs the command
@@ -146,7 +156,7 @@ Operating safely:
 Deploying a bundle-based project (the recommended path):
   1. Build locally:  boxmunge bundle ./myproject
   2. Upload:         scp -O -P 922 <bundle>.tar.gz deploy@<host>:
-  3. Verify:         stage <project>    (check https://staging.<host>)
+  3. Verify:         stage <project>    (check https://staging.<project host>)
   4. Go live:        promote <project>
   Or skip staging:   prod-deploy <project>
 

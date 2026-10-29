@@ -51,7 +51,9 @@ Manifest format (manifest.yml):
         memory: 1g
         cpus: "1.0"
   backup:
-    type: none                      # none | volume | db-dump | both
+    type: none                      # none, or a label such as postgres; any
+                                    # other value needs dump_command and
+                                    # restore_command
 
 After building:
 
@@ -61,7 +63,7 @@ After building:
 
 Or skip staging:
 
-  ssh -p 922 deploy@<host> "deploy <project>"
+  ssh -p 922 deploy@<host> "prod-deploy <project>"
 """
 
 def run_bundle(project_dir_str: str, output: str | None = None,
