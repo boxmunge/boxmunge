@@ -230,7 +230,24 @@ def delete_locked(project_name: str, paths: BoxPaths, force: bool) -> int:
 
     log_operation("project-delete", "Project deleted", paths, project=project_name)
     print(f"Project '{project_name}' deleted.")
+    _report_kept_volumes(project_name)
     return rc
+
+
+def _report_kept_volumes(project_name: str) -> None:
+    """Named volumes outlive `compose down`, and a new project of the same
+    name would mount their old data again: say which are kept."""
+    try:
+        volumes = [v for p in (project_name, f"{project_name}-staging")
+                   for v in docker_containers.project_volumes(p)]
+    except DockerError as e:
+        print(f"  WARN: could not list the project's Docker volumes ({e}); any named "
+              f"volumes were kept (`docker volume ls`).")
+        return
+    if volumes:
+        print(f"  Docker volumes are kept, with their data: {', '.join(volumes)}. A new "
+              f"project named '{project_name}' would mount them again. Remove them as "
+              f"the supervisor with: docker volume rm {' '.join(volumes)}")
 
 
 def cmd_project_delete(args: list[str]) -> None:

@@ -79,7 +79,7 @@ class TestValidate:
         assert exit_code == 1
         captured = capsys.readouterr()
         assert "pre-registered" in captured.err
-        assert "boxmunge deploy myapp" in captured.err
+        assert "boxmunge prod-deploy myapp" in captured.err
 
 
 class TestValidateJson:
