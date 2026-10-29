@@ -51,10 +51,8 @@ def _compare_dirs(current: Path, incoming: Path) -> tuple[list[str], list[str], 
 
 
 def _is_git_project(project_name: str, paths: BoxPaths) -> bool:
-    try:
-        return load_manifest(paths.project_manifest(project_name)).get("source") == "git"
-    except ManifestError:
-        return False
+    """Raises ManifestError when the project's manifest cannot be loaded."""
+    return load_manifest(paths.project_manifest(project_name)).get("source") == "git"
 
 
 def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
@@ -63,10 +61,15 @@ def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
         print(f"ERROR: Project '{project_name}' not found.", file=sys.stderr)
         return 1
 
-    if _is_git_project(project_name, paths):
+    try:
+        git = _is_git_project(project_name, paths)
+    except ManifestError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    if git:
         print(f"ERROR: '{project_name}' is a git project, and diff compares inbox bundles "
-              f"only. To see what a ref would change, run: stage {project_name} --ref <ref> "
-              f"(then check {project_name}); or read the repository's history in "
+              f"only. To preview what a ref would change, run: stage {project_name} "
+              f"--ref <ref> --dry-run; or read the repository's history in "
               f"{project_dir / 'repo'}.", file=sys.stderr)
         return 1
 

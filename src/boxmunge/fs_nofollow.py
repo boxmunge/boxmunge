@@ -234,20 +234,23 @@ def _chown_entry(name: str, dirfd: int, where: str, owner: tuple[int, int],
                  only_uid: int | None) -> None:
     """Re-own one entry through a descriptor opened on it without following a
     link, so the checks and the chown are about the same inode however the
-    name is swapped meanwhile. Never blocks on a FIFO (O_NONBLOCK)."""
+    name is swapped meanwhile. A link is left alone (owning it grants nothing,
+    and a chown by name could be raced). Only regular files and directories
+    are re-owned; the open neither blocks on a FIFO nor takes a terminal."""
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
-                     dir_fd=dirfd)
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY
+                     | os.O_CLOEXEC, dir_fd=dirfd)
     except OSError as e:
-        if e.errno != errno.ELOOP:
-            raise
-        # A link: re-own the link itself, which grants nothing.
-        st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
-        if only_uid is None or st.st_uid == only_uid:
-            os.chown(name, *owner, dir_fd=dirfd, follow_symlinks=False)
-        return
+        if e.errno == errno.ELOOP:
+            return
+        raise
     try:
         st = os.fstat(fd)
+        if not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode)):
+            logging.getLogger("boxmunge").warning(
+                "not re-owning %s: not a regular file or directory (mode %o)",
+                where, st.st_mode)
+            return
         if not stat.S_ISDIR(st.st_mode) and st.st_nlink > 1:
             # Its inode may be shared with a file outside the tree. Already
             # deploy's (a `git clone --local` of a stage) is nothing to report.

@@ -10,8 +10,9 @@ from boxmunge.commands.help import HELP_TEXT as _HELP  # noqa: F401
 from boxmunge.commands.usage import USAGE
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "boxmunge"
-# `boxmunge deploy x`, 'deploy <p>' / "deploy {name}" in quotes, `ssh ... "deploy <p>"`.
-BARE = re.compile(r"""(boxmunge deploy (?!shell)|['"`]deploy [<{])""")
+# A `deploy <p>` / `deploy {project}` hint, quoted or in prose; not `deploy:deploy`,
+# `prod-deploy <p>`, `would deploy {x}` (a verb before a name) or `deploy@host`.
+BARE = re.compile(r"""(?<![-\w.@:])(?<!ould )deploy [<{]""")
 
 
 def test_no_source_string_suggests_a_bare_deploy_command():
@@ -36,4 +37,23 @@ def test_diff_of_a_git_project_says_it_compares_bundles_only(paths, capsys):
     assert run_diff("gitapp", paths) == 1
     err = capsys.readouterr().err
     assert "git project" in err and "compares inbox bundles only" in err
-    assert "stage gitapp --ref" in err and "Upload with scp" not in err
+    assert "stage gitapp --ref <ref> --dry-run" in err and "Upload with scp" not in err
+
+
+def test_the_pattern_catches_the_hints_that_were_fixed():
+    for old in ("; deploy {project_name} to decide from it.",
+                "change, declare security.user if needed, and deploy {project}: the deploy",
+                "Run 'stage {name}' or 'deploy {name}' to start it.",
+                'ssh -p 922 deploy@<host> "deploy <project>"'):
+        assert BARE.search(old), old
+    for fine in ("prod-deploy {project}", "chown -R deploy:deploy {repo}", "deploy@<host>"):
+        assert not BARE.search(fine), fine
+
+
+def test_diff_with_an_unloadable_manifest_reports_it(paths, capsys):
+    from boxmunge.commands.diff_cmd import run_diff
+    pdir = paths.project_dir("broken")
+    pdir.mkdir(parents=True)
+    (pdir / "manifest.yml").write_text("{truncated")
+    assert run_diff("broken", paths) == 1
+    assert "Upload with scp" not in capsys.readouterr().err
