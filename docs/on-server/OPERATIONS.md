@@ -1302,6 +1302,16 @@ Each item in the output is labelled OK, WARN, or FAIL with a description. Addres
 
 Issues requiring system-level investigation or repair (systemd timers, file permissions, Caddy container state) require the **supervisor** user.
 
+**"Deploy can write state/scans" FAIL.** A box installed before v0.9.3 can have directories root made
+(`state/scans`, `projects/<name>/security`), which the deploy shell cannot write: `security scan`
+fails with "Permission denied". The upgrade re-owns them; until it runs, doctor prints the fix
+(`sudo chown -R deploy:deploy <directory>`), to run as the supervisor.
+
+**"Project <name> registered" WARN.** The name is in the registry but `projects/<name>/` is gone
+(a removal that did not finish), or the project was added and never deployed. Deploy it, or drop
+the entry as the supervisor with `sudo boxmunge-server project-forget <name>` (refused while the
+directory or any container of the project exists).
+
 ---
 
 ### docker-userns reports an error

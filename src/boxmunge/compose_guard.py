@@ -48,6 +48,7 @@ from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import compose_up, start_containers
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import discard_dir
+from boxmunge.fs_nofollow import mkdir_p_deploy
 from boxmunge.intake import IntakeError, validate_release_tree
 from boxmunge.legacy_stage import legacy_stage_refusal
 from boxmunge.log import log_error, log_warning
@@ -89,7 +90,7 @@ def _alert_recently(paths: BoxPaths, project_name: str, reason: str, now: dateti
 def _record_alert(paths: BoxPaths, project_name: str, reason: str, now: datetime) -> None:
     path = paths.state / "start-refused" / f"{project_name}.json"
     key = hashlib.sha256(reason.encode()).hexdigest()[:16]
-    path.parent.mkdir(parents=True, exist_ok=True)
+    mkdir_p_deploy(path.parent)
     try:
         doc = json.loads(path.read_text())
         if not isinstance(doc, dict):

@@ -52,6 +52,15 @@ def project_state_files(paths: BoxPaths, name: str) -> list[Path]:
     ]
 
 
+def remove_project_state(paths: BoxPaths, name: str) -> None:
+    """Delete the per-project files kept outside the project directory."""
+    for state_file in project_state_files(paths, name):
+        state_file.unlink(missing_ok=True)
+    alerts_dir = paths.project_alerts_dir(name)
+    if alerts_dir.is_dir():
+        alerts_dir.rmdir()  # fails loudly on a record kind ALERT_KINDS lacks
+
+
 def run_project_delete(
     project_name: str, paths: BoxPaths, yes: bool = False, force: bool = False,
 ) -> int:
@@ -202,11 +211,7 @@ def delete_locked(project_name: str, paths: BoxPaths, force: bool) -> int:
                       paths, project=project_name)
             rc = 1
 
-    for state_file in project_state_files(paths, project_name):
-        state_file.unlink(missing_ok=True)
-    alerts_dir = paths.project_alerts_dir(project_name)
-    if alerts_dir.is_dir():
-        alerts_dir.rmdir()  # fails loudly on a record kind ALERT_KINDS lacks
+    remove_project_state(paths, project_name)
 
     project_dir = paths.project_dir(project_name)
     if project_dir.exists():

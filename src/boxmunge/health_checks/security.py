@@ -12,19 +12,15 @@ is not protected by quarantine (audit B-11).
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from boxmunge.commands.health_cmd import HealthCheck
-from boxmunge.cve.scan_state import read_scan_state
+from boxmunge.cve.scan_state import SCAN_MAX_AGE, read_scan_state, scan_problem
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.project_registry import deployed_among, read_registry
 from boxmunge.state import StateError
 
-# The scan runs daily (03:00-03:30); 36h tolerates one late or missed run's
-# worth of jitter without crying wolf, and catches a second missed night.
-SCAN_MAX_AGE = timedelta(hours=36)
 from boxmunge.security_overlay import (
     services_with_off_profile,
     services_with_overrides,
@@ -87,26 +83,6 @@ def check_security_profiles(paths: BoxPaths) -> HealthCheck:
     )
 
 
-def _scan_problem(paths: BoxPaths, project: str, now: datetime) -> str | None:
-    path = paths.project_scan_state(project)
-    if not path.exists():
-        return f"{project}: never scanned"
-    try:
-        state = json.loads(path.read_text())
-        scanned_at = datetime.fromisoformat(state["scanned_at"])
-    except (OSError, ValueError, KeyError, TypeError) as e:
-        return f"{project}: scan state unreadable ({e})"
-    if scanned_at.tzinfo is None:
-        scanned_at = scanned_at.replace(tzinfo=timezone.utc)
-    age = now - scanned_at
-    if age > SCAN_MAX_AGE:
-        return f"{project}: last scanned {age.days}d {age.seconds // 3600}h ago"
-    unscanned = state.get("unscanned") or []
-    if unscanned:
-        return f"{project}: last scan incomplete ({'; '.join(unscanned)})"
-    return None
-
-
 def check_cve_scan_freshness(paths: BoxPaths, *, now: datetime | None = None) -> HealthCheck:
     """Warn when any deployed project's CVE scan is stale or incomplete."""
     now = now or datetime.now(timezone.utc)
@@ -116,7 +92,7 @@ def check_cve_scan_freshness(paths: BoxPaths, *, now: datetime | None = None) ->
         return HealthCheck(name="cve-scan", status="ok", detail="no projects deployed")
     # A bad registry line may be a project the scan cannot see.
     problems = [f"not a project name, so never scanned: {p}" for p in registry.problems]
-    problems += [p for p in (_scan_problem(paths, name, now) for name in projects) if p]
+    problems += [p for p in (scan_problem(paths.project_scan_state(name), name, now) for name in projects) if p]
     if problems:
         return HealthCheck(
             name="cve-scan", status="warn",

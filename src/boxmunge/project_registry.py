@@ -126,6 +126,19 @@ def deployed_among(names: frozenset[str] | set[str], paths: BoxPaths) -> list[st
                   if (paths.project_dir(name) / "manifest.yml").exists())
 
 
+def missing_among(names: frozenset[str] | set[str], paths: BoxPaths) -> list[str]:
+    """Those of `names` with no project directory, sorted: registered by
+    project-add and not yet deployed, or left behind by a removal that did
+    not finish. Neither has anything to scan; `project-forget` drops the
+    entry (forget_advice)."""
+    return sorted(name for name in names if not paths.project_dir(name).exists())
+
+
+def forget_advice(name: str) -> str:
+    return (f"{name} is registered but has no project directory: deploy it, or drop "
+            f"the entry as the supervisor with `sudo boxmunge-server project-forget {name}`")
+
+
 def name_collisions(name: str, others: set[str]) -> list[str]:
     """Other project names that `name` extends with `-<anything>`, or that
     extend it. Compose names containers `<project>-<service>-1`, so project

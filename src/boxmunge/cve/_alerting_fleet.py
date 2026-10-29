@@ -7,7 +7,7 @@ from ``boxmunge.cve.alerting``.
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import datetime, timezone
 
 from boxmunge.cve._alerting_types import Alert
@@ -76,6 +76,35 @@ def format_scan_failure_alert(problems: dict[str, list[str]]) -> Alert:
         "re-run `boxmunge security scan`.",
     ]
     return Alert(kind="scan_failed", title=title, body="\n".join(lines), priority=1)
+
+
+def format_scan_unrecorded_alert(
+    problems: Mapping[str, str], current: Collection[str],
+) -> Alert:
+    """Projects whose scan ran but whose result could not be written.
+
+    ``problems`` maps project -> the error (it names the remedy). ``current``
+    holds those that still have a recent, complete recorded scan: their
+    coverage stands, so they are not called uncovered. Priority 1 only when
+    one has no current result; otherwise the scan state needs fixing, but
+    nothing is unprotected.
+    """
+    uncovered = sorted(set(problems) - set(current))
+    n = len(problems)
+    title = (f"CVE scan result not recorded — {n} project{'s' if n != 1 else ''}")
+    lines = [f"- {project}: {problems[project]}" for project in sorted(problems)]
+    lines.append("")
+    if uncovered:
+        lines.append(f"No current scan result is recorded for {', '.join(uncovered)}: "
+                     f"until one can be written, its images are not covered by CVE "
+                     f"quarantine.")
+    if current:
+        lines.append(f"{', '.join(sorted(current))} keep their last successful scan, "
+                     f"still current; coverage is unchanged.")
+    lines.append("The scan itself ran; this is a problem with writing its result. "
+                 "`boxmunge doctor` names the directory.")
+    return Alert(kind="scan_unrecorded", title=title, body="\n".join(lines),
+                 priority=1 if uncovered else 0)
 
 
 def format_breaker_held_alert(

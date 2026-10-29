@@ -23,9 +23,11 @@ from boxmunge.cve.alerting import (
     format_host_suppression_expired_alert,
     format_kev_stale_alert,
     format_scan_failure_alert,
+    format_scan_unrecorded_alert,
     send_alerts,
 )
 from boxmunge.cve.kev import KevCatalog, load_kev, refresh_kev
+from boxmunge.cve.scan_state import ScanStateWriteError, scan_problem
 from boxmunge.cve.grace import (
     GraceError,
     init_grace_if_missing,
@@ -40,7 +42,7 @@ from boxmunge.log import log_warning
 from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import (
-    deployed_among, is_registered, read_registry,
+    deployed_among, forget_advice, is_registered, missing_among, read_registry,
     registry_problem_message,
 )
 
@@ -177,6 +179,8 @@ class FleetRun:
     # project → human lines: a hard error, or each image/service not covered.
     problems: dict[str, list[str]] = field(default_factory=dict)
     skipped_locked: list[str] = field(default_factory=list)
+    # Scanned, but the result could not be written: project → the error.
+    unrecorded: dict[str, str] = field(default_factory=dict)
     # Held by the circuit breaker: project → its held CVEs.
     held: dict[str, frozenset[str]] = field(default_factory=dict)
 
@@ -188,9 +192,9 @@ REGISTRY_PROBLEM = "(project registry)"
 
 def _parse_scan_targets(
     args: list[str], paths: BoxPaths,
-) -> tuple[list[str], tuple[str, ...]] | int:
-    """Resolve the projects to scan and any registry problems, or return a
-    lookup exit code.
+) -> tuple[list[str], tuple[str, ...], list[str]] | int:
+    """Resolve the projects to scan, any registry problems and the registered
+    names with no project directory, or return a lookup exit code.
 
     A fleet scan scans every valid registered project and carries each bad
     registry line forward to be reported. Usage errors exit 2 from parse_args.
@@ -199,12 +203,16 @@ def _parse_scan_targets(
     parsed = parse_args("security", args, max_positional=1)
     if not parsed.positional:
         registry = read_registry(paths)
-        return deployed_among(registry.names, paths), registry.problems
+        return (deployed_among(registry.names, paths), registry.problems,
+                missing_among(registry.names, paths))
     project = require_project_name("security", parsed.positional[0])
     if not is_registered(project, paths):
         print(f"ERROR: project '{project}' is not registered.", file=sys.stderr)
         return 1
-    return [project], ()
+    if missing_among({project}, paths):
+        print(f"ERROR: {forget_advice(project)}.", file=sys.stderr)
+        return 1
+    return [project], (), []
 
 
 def _report_registry_problems(
@@ -218,6 +226,19 @@ def _report_registry_problems(
     print(f"ERROR: {message}", file=sys.stderr)
     log_warning("cve-scan", message, paths, detail={"problems": list(problems)})
     run.problems[REGISTRY_PROBLEM] = list(problems)
+
+
+def _report_missing(paths: BoxPaths, missing: list[str]) -> None:
+    """Say once per run which registered names have no project directory.
+    Not a scan failure (there is nothing to scan): doctor and health keep
+    reporting it until the entry is dropped or the project deployed."""
+    if not missing:
+        return
+    message = (f"registered but missing, so not scanned: {', '.join(missing)}. Deploy "
+               f"each, or drop its entry as the supervisor: "
+               f"sudo boxmunge-server project-forget <name>")
+    print(f"NOTE: {message}")
+    log_warning("cve-scan", message, paths, detail={"missing": missing})
 
 
 def _scan_each(
@@ -244,6 +265,14 @@ def _scan_each(
             )
             print(f"{name}: SKIPPED — held by another operation; will be "
                   f"picked up on next scan")
+            continue
+        except ScanStateWriteError as e:
+            print(f"{name}: ERROR — {e}")
+            log_warning(
+                "cve-scan", f"scan of {name} could not be recorded: {e}",
+                paths, project=name, detail={"error": str(e)},
+            )
+            run.unrecorded[name] = str(e)
             continue
         except (RuntimeError, ManifestError, OSError) as e:
             # Audit B-12: a malformed per-project file is reported for that
@@ -305,6 +334,11 @@ def _alert_fleet(paths: BoxPaths, run: FleetRun) -> None:
     alerts = []
     if run.problems:
         alerts.append(format_scan_failure_alert(run.problems))
+    if run.unrecorded:
+        now = datetime.now(timezone.utc)
+        current = {p for p in run.unrecorded
+                   if scan_problem(paths.project_scan_state(p), p, now) is None}
+        alerts.append(format_scan_unrecorded_alert(run.unrecorded, current))
     host_expired = {s.cve_id: s for scan in run.scans.values() for s in scan.host_expired}
     if host_expired:
         alerts.append(format_host_suppression_expired_alert(list(host_expired.values())))
@@ -323,8 +357,9 @@ def _exit_code(paths: BoxPaths, run: FleetRun) -> int:
     2 = scanned, ≥1 project quarantined, at-risk-running or held by the
     circuit breaker; 0 = clean.
     """
-    if run.problems:
-        print(f"Scan incomplete: {', '.join(sorted(run.problems))}. Exit code 1.")
+    if run.problems or run.unrecorded:
+        failed = sorted({*run.problems, *run.unrecorded})
+        print(f"Scan incomplete: {', '.join(failed)}. Exit code 1.")
         return 1
     quarantined = [n for n in run.scans if is_quarantined(n, paths)]
     held = sorted(n for n in run.held if n in run.scans)
@@ -358,9 +393,11 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
     parsed = _parse_scan_targets(args, paths)
     if isinstance(parsed, int):
         return parsed
-    targets, registry_problems = parsed
+    targets, registry_problems, missing = parsed
+    _report_missing(paths, missing)
     if not targets and not registry_problems:
-        print("No projects registered.")
+        if not missing:
+            print("No projects registered.")
         return 0
 
     try:

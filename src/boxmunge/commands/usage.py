@@ -131,6 +131,14 @@ Register a project name in the allowlist.""",
 Usage: boxmunge project-list [--json]
 
 List registered project names.""",
+    "project-forget": """\
+Usage: boxmunge project-forget <project>
+
+Drop a registry entry whose project directory is gone (a removal that did
+not finish): the name leaves the registry and its leftover state files are
+deleted. Refused while the project directory or any container of the
+project exists; use project-delete then. Operator-only: run it as root, as
+boxmunge-server.""",
     "project-delete": """\
 Usage: boxmunge project-delete <project> [--yes] [--force]
 

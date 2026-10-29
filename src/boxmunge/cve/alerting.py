@@ -43,6 +43,7 @@ from boxmunge.cve._alerting_fleet import (
     format_host_suppression_expired_alert,
     format_kev_stale_alert,
     format_scan_failure_alert,
+    format_scan_unrecorded_alert,
 )
 from boxmunge.cve._alerting_formatters import (
     format_fixable_alert,
@@ -78,6 +79,7 @@ __all__ = [
     "format_breaker_held_alert",
     "format_kev_stale_alert",
     "format_scan_failure_alert",
+    "format_scan_unrecorded_alert",
     "detect_transitions",
     "send_alerts",
     "emit_scan_alerts",

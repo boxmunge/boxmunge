@@ -20,6 +20,7 @@ from boxmunge.commands.log_cmd import cmd_log
 from boxmunge.commands.logs import cmd_logs
 from boxmunge.commands.promote_cmd import cmd_promote
 from boxmunge.commands.project_delete_cmd import cmd_project_delete
+from boxmunge.commands.project_forget_cmd import cmd_project_forget
 from boxmunge.commands.data_cmd import cmd_data
 from boxmunge.commands.restore import cmd_restore
 from boxmunge.commands.rollback import cmd_rollback
@@ -64,6 +65,7 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "inbox": cmd_inbox,
     "rollback": cmd_rollback,
     "project-delete": cmd_project_delete,
+    "project-forget": cmd_project_forget,
     "data": cmd_data,
     "check": cmd_check,
     "check-all": cmd_check_all,
