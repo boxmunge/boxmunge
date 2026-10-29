@@ -111,7 +111,7 @@ preflight_fail() {
     log "$4"
     remove_slot "$(standby_slot)"
     add_blocklist "$1" "$3"
-    report_failure "$1" "$2" "${5:-preflight}"
+    report_failure "$1" "$2" "${5:-preflight}" "$3"
     exit 1
 }
 
@@ -173,7 +173,10 @@ upgrade_to() {
 
     local prev_slot from_version standby
     prev_slot="$ACTIVE_SLOT"
-    from_version="$("$(active_venv)/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")"
+    # `--version` prints "boxmunge X.Y.Z[+build]"; the fleet service wants the bare X.Y.Z.
+    from_version="$("$(active_venv)/bin/boxmunge-server" --version 2>/dev/null \
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
+    from_version="${from_version:-unknown}"
     standby="$(standby_slot)"
 
     # 1. PREPARE

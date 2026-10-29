@@ -157,7 +157,7 @@ class TestStatsEndpointShape:
         _seed_checks(app.config["DB_PATH"], [(_today(), "0.4.2", 5)])
         data = client.get("/v1/admin/version-checks?token=s&last=1").get_json()
         assert data["until"] == _today()
-        assert data["totals"] == [{"version": "0.4.2", "count": 5}]
+        assert data["totals"] == [{"version": "0.4.2", "count": 5, "listed": True}]
 
     def test_custom_window_via_last_param(self, client, app):
         app.config["STATS_SECRET"] = "s"

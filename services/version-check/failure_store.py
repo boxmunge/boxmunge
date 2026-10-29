@@ -31,7 +31,7 @@ COUNT_SQL = "SELECT COUNT(*) FROM failures WHERE version = ? AND reported_at > ?
 
 
 def record_failure(db_path: Path, version: str, installed_from: str, stage: str,
-                   reporter: str, now: datetime) -> bool:
+                   reporter: str, now: datetime, detail: str | None = None) -> bool:
     """Store a report; False if `reporter` already reported `version` in the window.
 
     The DUPLICATE_SQL time bound makes this correct between sweeps.
@@ -47,9 +47,9 @@ def record_failure(db_path: Path, version: str, installed_from: str, stage: str,
             duplicate = conn.execute(DUPLICATE_SQL, (reporter, version, window_start)).fetchone()
             if duplicate is None:
                 conn.execute(
-                    "INSERT INTO failures (version, installed_from, stage, reported_at, reporter) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (version, installed_from, stage, now.isoformat(), reporter))
+                    "INSERT INTO failures (version, installed_from, stage, detail, reported_at, "
+                    "reporter) VALUES (?, ?, ?, ?, ?, ?)",
+                    (version, installed_from, stage, detail, now.isoformat(), reporter))
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
@@ -112,6 +112,19 @@ def count_recent(db_path: Path, version: str, now: datetime) -> int:
         return conn.execute(COUNT_SQL, (version, (now - REPORT_WINDOW).isoformat())).fetchone()[0]
     finally:
         conn.close()
+
+
+def recent_failures(db_path: Path, limit: int) -> list[dict]:
+    """The newest `limit` reports, newest first (reporter identities are never exposed)."""
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT reported_at, version, installed_from, stage, detail FROM failures "
+            "ORDER BY reported_at DESC, id DESC LIMIT ?", (limit,)).fetchall()
+    finally:
+        conn.close()
+    keys = ("reported_at", "version", "installed_from", "stage", "detail")
+    return [dict(zip(keys, row)) for row in rows]
 
 
 def query_failures(db_path: Path, version: str) -> dict:

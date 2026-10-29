@@ -11,6 +11,10 @@ SHIM_TEST_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SHIM_TEST_LIB_DIR/../.." && pwd)"
 SHIM="${SHIM_UNDER_TEST:-$REPO_DIR/scripts/boxmunge-upgrade}"
 
+# The shim's report_failure runs a real python that would POST to the
+# production version-check service; point it at a closed local port instead.
+export BOXMUNGE_VERSION_CHECK_URL="http://127.0.0.1:9"
+
 PASS=0
 FAIL=0
 

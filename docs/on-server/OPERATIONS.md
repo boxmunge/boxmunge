@@ -1715,7 +1715,10 @@ Releases are discovered through the version-check service at boxmunge.dev.
 If it is unreachable or answers in an unexpected shape, auto-update falls
 back to the GitHub releases list, applying the same rules to the markers in
 each release's title or notes (`[security]`, `[breakfix]`, `[breaking]`), and
-logs a warning.
+logs a warning. A failed upgrade is also reported there (version, stage, reason;
+no host details). Reporting is best-effort: if it cannot be sent the upgrade
+log says so and the upgrade outcome is unchanged. `BOXMUNGE_VERSION_CHECK_URL`
+points both calls at another service (the test suites use it to stay offline).
 
 Pin to a specific release (for example to roll forward past a bad one):
 

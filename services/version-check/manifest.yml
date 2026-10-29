@@ -9,7 +9,7 @@ services:
     port: 8147
     routes:
       - path: /
-    health: /v1/check?v=0.0.0
+    health: /healthz
     smoke: boxmunge-scripts/smoke.sh
     writable:
       persistent:

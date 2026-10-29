@@ -135,4 +135,4 @@ class TestStatsSeeBufferedCounts:
         client = app.test_client()
         client.get("/v1/check?v=0.2.1")
         data = client.get("/v1/admin/version-checks?token=s").get_json()
-        assert data["totals"] == [{"version": "0.2.1", "count": 1}]
+        assert data["totals"] == [{"version": "0.2.1", "count": 1, "listed": True}]

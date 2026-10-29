@@ -8,7 +8,10 @@ Serves:
 4. POST /v1/circuit-breaker/trip?version=X   — suppress a broken release (auth required)
 5. POST /v1/circuit-breaker/reset?version=X  — re-enable a release (auth required)
 6. GET  /v1/admin/version-checks?last=N  — daily check counts by version (auth required)
-7. GET  /                                — static landing page
+7. GET  /v1/admin/stats?last=N           — the same as an HTML page, plus recent failure
+                                            reports (auth required)
+8. GET  /healthz                         — liveness; counts nothing (smoke and health checks)
+9. GET  /                                — static landing page
 
 Abuse limits (F-12): the client address is taken from the X-Forwarded-For
 header set by the boxmunge Caddy proxy (one trusted hop), every request is
@@ -22,13 +25,15 @@ run once before gunicorn starts.
 Source: https://github.com/boxmunge/boxmunge/tree/main/services/version-check
 """
 
+import hashlib
 import hmac
 import os
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from flask import Flask, request, jsonify
+from flask import Flask, make_response, redirect, request, jsonify
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import failure_store
@@ -36,6 +41,7 @@ from db_schema import require_current
 from release_catalog import (
     VERSION_RE, apply_holds, check_response, find_blocked, load_releases, select_offers,
 )
+import stats_page
 from request_limits import CheckCounter, RateLimiter, client_key, utc_today
 
 SERVICE_DIR = Path(__file__).parent
@@ -71,9 +77,14 @@ RATE_LIMIT_MAX_CLIENTS = 100_000
 MAX_REQUEST_BYTES = 4096
 CHECK_FLUSH_SECONDS = 60
 CHECK_MAX_PENDING = 1000
-# Versions not in releases.json are counted under one bucket, so arbitrary
-# caller input cannot grow the version_checks table.
-UNLISTED_VERSION = "unlisted"
+# Failure-report free text. Boxes send e.g. "system_upgrade_failed: install_sh_exit_100".
+DETAIL_MAX = 200
+PRINTABLE_ASCII = re.compile(r"[ -~]*\Z")
+# The 0.10.x shim sends `boxmunge-server --version` output as installed_from.
+LEGACY_FROM_PREFIX = re.compile(r"^boxmunge\s+")
+STATS_COOKIE = "bm_stats"
+STATS_COOKIE_MAX_AGE = 8 * 3600
+STATS_FAILURES_SHOWN = 100
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +170,7 @@ def _check_stats_auth(app_config):
     stats token is read-only over check counts; a leaked CB token can
     suppress security releases fleetwide.
     """
-    secret = app_config.get("STATS_SECRET") or os.environ.get("STATS_SECRET", "")
+    secret = _stats_secret(app_config)
     if not secret:
         return False
     bearer = request.headers.get("Authorization", "")
@@ -168,7 +179,26 @@ def _check_stats_auth(app_config):
     return hmac.compare_digest(request.args.get("token", ""), secret)
 
 
-def _query_version_checks(db_path: Path, days: int) -> dict:
+def _stats_secret(app_config) -> str:
+    return app_config.get("STATS_SECRET") or os.environ.get("STATS_SECRET", "")
+
+
+def _stats_cookie_value(secret: str) -> str:
+    """What the stats cookie holds: derived from the secret, never the secret itself."""
+    return hmac.new(secret.encode(), b"boxmunge-stats-cookie", hashlib.sha256).hexdigest()
+
+
+def _check_stats_page_auth(app_config) -> bool:
+    """Authorize the stats page: Bearer header, or the cookie set by ?token=."""
+    secret = _stats_secret(app_config)
+    if not secret:
+        return False
+    if hmac.compare_digest(request.headers.get("Authorization", ""), f"Bearer {secret}"):
+        return True
+    return hmac.compare_digest(request.cookies.get(STATS_COOKIE, ""), _stats_cookie_value(secret))
+
+
+def _query_version_checks(db_path: Path, days: int, listed: set[str]) -> dict:
     """Aggregate the version_checks table for the last `days` days.
 
     Returns:
@@ -176,7 +206,7 @@ def _query_version_checks(db_path: Path, days: int) -> dict:
         "since": "YYYY-MM-DD",   # earliest day in window (inclusive)
         "until": "YYYY-MM-DD",   # latest day in window (today, inclusive)
         "days": N,
-        "totals":  [ {"version": "X", "count": N}, ... ],   # sorted by count desc
+        "totals":  [ {"version": "X", "count": N, "listed": bool}, ... ],   # count desc
         "by_date": [ {"date": "...", "version": "X", "count": N}, ... ]
       }
     """
@@ -206,7 +236,7 @@ def _query_version_checks(db_path: Path, days: int) -> dict:
         "since": since_iso,
         "until": until_iso,
         "days": days,
-        "totals": [{"version": v, "count": c} for v, c in totals_rows],
+        "totals": [{"version": v, "count": c, "listed": v in listed} for v, c in totals_rows],
         "by_date": [{"date": d, "version": v, "count": c} for d, v, c in rows],
     }
 
@@ -253,7 +283,8 @@ def create_app() -> Flask:
     auto_trip_threshold = _auto_trip_threshold()
     limiter = RateLimiter(RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_SECONDS,
                           RATE_LIMIT_MAX_CLIENTS)
-    counter = CheckCounter(DB_PATH, CHECK_FLUSH_SECONDS, CHECK_MAX_PENDING)
+    counter = CheckCounter(DB_PATH, CHECK_FLUSH_SECONDS, CHECK_MAX_PENDING,
+                           always_count=frozenset(listed_versions))
     app.extensions["check_counter"] = counter
     sweeper = failure_store.Sweeper(DB_PATH, failure_store.SWEEP_INTERVAL)
     sweeper.start()
@@ -268,6 +299,13 @@ def create_app() -> Flask:
             return response
         return None
 
+    @app.route("/healthz")
+    def healthz():
+        """Liveness for the smoke script and platform health check; counts nothing."""
+        response = jsonify({"status": "ok"})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.route("/v1/check")
     def check():
         version = _version_arg("v")
@@ -279,7 +317,9 @@ def create_app() -> Flask:
             lambda v: _is_circuit_broken(DB_PATH, v),
         )
         result = check_response(offers, held, find_blocked(releases, version))
-        counter.record(version if version in listed_versions else UNLISTED_VERSION)
+        # The real version, listed or not (a dev build, a dropped release): it is
+        # valid X.Y.Z, and the counter caps distinct versions per day.
+        counter.record(version)
 
         response = jsonify(result)
         response.headers["Cache-Control"] = "no-cache"
@@ -307,12 +347,18 @@ def create_app() -> Flask:
         installed_from = body.get("installed_from", "")
         if not isinstance(installed_from, str) or len(installed_from) > 64:
             return jsonify({"error": "installed_from must be a string of at most 64 characters"}), 400
+        detail = body.get("detail")
+        if detail is not None and (not isinstance(detail, str) or len(detail) > DETAIL_MAX
+                                   or not PRINTABLE_ASCII.match(detail)):
+            return jsonify({"error": f"detail must be printable ASCII of at most "
+                                     f"{DETAIL_MAX} characters"}), 400
+        installed_from = LEGACY_FROM_PREFIX.sub("", installed_from)
         now = datetime.now(timezone.utc)
         # A repeat from the same reporter is accepted but not stored: the
         # box needs no different answer, and storing it would let one host
         # count several times towards the auto-trip threshold.
         if failure_store.record_failure(DB_PATH, version, installed_from, stage,
-                                        client_key(request.remote_addr), now):
+                                        client_key(request.remote_addr), now, detail or None):
             _maybe_auto_trip(DB_PATH, version, auto_trip_threshold, now)
         return "", 204
 
@@ -349,7 +395,9 @@ def create_app() -> Flask:
 
         Counts are /v1/check hits, NOT unique boxes — a single box checks
         ~4x/day per its auto-update timer, plus manual upgrades. Versions
-        not in releases.json are counted as "unlisted". Use this as a "is
+        not in releases.json are counted under their own version (marked
+        listed: false); the "unlisted" row only collects the overflow beyond the
+        per-day cap on distinct versions. Use this as a "is
         anyone running boxmunge?" signal, not for precise install counts.
         Counts buffered in other gunicorn workers appear after their next
         flush (at most CHECK_FLUSH_SECONDS later).
@@ -358,7 +406,39 @@ def create_app() -> Flask:
             return jsonify({"error": "unauthorized"}), 401
         counter.flush()
         days = _parse_last_param(request.args.get("last"))
-        return jsonify(_query_version_checks(DB_PATH, days))
+        return jsonify(_query_version_checks(DB_PATH, days, listed_versions))
+
+    @app.route("/v1/admin/stats")
+    def admin_stats():
+        """HTML: daily checks per version and recent failure reports. Auth required.
+
+        Browsers cannot send a Bearer header, so `?token=<secret>` once sets a
+        short-lived HttpOnly cookie and redirects to the page without the token
+        in the URL. The page itself accepts only the header or that cookie.
+        """
+        token = request.args.get("token")
+        if token is not None:
+            secret = _stats_secret(app.config)
+            if not secret or not hmac.compare_digest(token, secret):
+                return jsonify({"error": "unauthorized"}), 401
+            response = redirect(f"/v1/admin/stats?last={_parse_last_param(request.args.get('last'))}",
+                                code=303)
+            response.set_cookie(STATS_COOKIE, _stats_cookie_value(secret),
+                                max_age=STATS_COOKIE_MAX_AGE, path="/v1/admin",
+                                secure=True, httponly=True, samesite="Strict")
+            return response
+        if not _check_stats_page_auth(app.config):
+            return jsonify({"error": "unauthorized"}), 401
+        counter.flush()
+        stats = _query_version_checks(DB_PATH, _parse_last_param(request.args.get("last")),
+                                      listed_versions)
+        page = stats_page.render(stats, failure_store.recent_failures(
+            DB_PATH, STATS_FAILURES_SHOWN))
+        response = make_response(page)
+        response.headers["Content-Type"] = "text/html; charset=utf-8"
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'"
+        return response
 
     @app.route("/")
     def index():
