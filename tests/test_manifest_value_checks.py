@@ -117,3 +117,12 @@ def test_upgrade_leaves_a_project_with_every_new_problem_running(mock_up, tmp_pa
     assert after["services"] == manifest["services"]
     assert after["container_updates"] == manifest["container_updates"]
     assert after["backup"] == manifest["backup"]
+
+
+def test_the_project_template_validates_cleanly() -> None:
+    template = Path(__file__).parent.parent / "templates/project/manifest.yml.template"
+    text = (template.read_text()
+            .replace("__PROJECT_NAME__", "shop")
+            .replace("__PROJECT_ID__", "01HZZZZZZZZZZZZZZZZZZZZZZZ"))
+    errors, warnings = validate_manifest(yaml.safe_load(text), "shop")
+    assert errors == [] and warnings == []
