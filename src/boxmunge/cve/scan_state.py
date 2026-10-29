@@ -7,8 +7,9 @@ without re-running Trivy. The on-disk format is JSON, written atomically.
 """
 from __future__ import annotations
 
+import errno
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,24 @@ from boxmunge.cve.policy import (
 from boxmunge.cve.scanner import AttackVector, Finding, PkgClass, Severity, VulnStatus
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.state import read_state
+
+# The scan runs daily (03:00-03:30); 36h tolerates one late or missed run's
+# worth of jitter without crying wolf, and catches a second missed night.
+SCAN_MAX_AGE = timedelta(hours=36)
+
+
+class ScanStateWriteError(OSError):
+    """The scan itself ran; its result could not be recorded."""
+
+    def __init__(self, path: Path, cause: OSError) -> None:
+        if cause.errno in (errno.EACCES, errno.EPERM):
+            remedy = (f"deploy cannot write {path.parent}. As the supervisor: "
+                      f"sudo chown -R deploy:deploy {path.parent} (or re-run the "
+                      f"scan as root)")
+        else:
+            remedy = f"check the filesystem holding {path.parent}"
+        super().__init__(f"scanned, but could not record the result in {path}: "
+                         f"{cause}. {remedy}")
 
 
 def _serialize_disposition(d: Any) -> dict[str, Any]:
@@ -92,7 +111,40 @@ def write_scan_state(
         "decisions": [_serialize_decision(d) for d in decisions],
         "unscanned": list(unscanned),
     }
-    atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+    try:
+        atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+    except OSError as e:
+        raise ScanStateWriteError(path, e) from e
+
+
+def last_scanned_at(path: Path) -> str | None:
+    """When the last recorded scan result was made (ISO text), or None when
+    there is none or it cannot be read."""
+    try:
+        return json.loads(path.read_text())["scanned_at"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def scan_problem(path: Path, project: str, now: datetime) -> str | None:
+    """Why the project has no current, complete scan result at ``path``, or
+    None when it has one: recorded within SCAN_MAX_AGE, nothing unscanned."""
+    if not path.exists():
+        return f"{project}: never scanned"
+    try:
+        state = json.loads(path.read_text())
+        scanned_at = datetime.fromisoformat(state["scanned_at"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return f"{project}: scan state unreadable ({e})"
+    if scanned_at.tzinfo is None:
+        scanned_at = scanned_at.replace(tzinfo=timezone.utc)
+    age = now - scanned_at
+    if age > SCAN_MAX_AGE:
+        return f"{project}: last scanned {age.days}d {age.seconds // 3600}h ago"
+    unscanned = state.get("unscanned") or []
+    if unscanned:
+        return f"{project}: last scan incomplete ({'; '.join(unscanned)})"
+    return None
 
 
 def read_scan_state(path: Path) -> dict[str, Any] | None:

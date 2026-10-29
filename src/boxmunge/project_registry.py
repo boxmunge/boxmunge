@@ -126,6 +126,30 @@ def deployed_among(names: frozenset[str] | set[str], paths: BoxPaths) -> list[st
                   if (paths.project_dir(name) / "manifest.yml").exists())
 
 
+def missing_among(names: frozenset[str] | set[str], paths: BoxPaths) -> list[str]:
+    """Those of `names` with no project directory, sorted: not yet deployed
+    (project-add), or left behind by a removal that did not finish
+    (unfinished_removals tells them apart). Nothing to scan either way."""
+    return sorted(name for name in names if not paths.project_dir(name).exists())
+
+
+def unfinished_removals(names: frozenset[str] | set[str], paths: BoxPaths) -> list[str]:
+    """Those of `names` with no project directory that still have deploy,
+    scan or health state: a project that was deployed and then (partly)
+    removed. A name never deployed has none, and is just awaiting its first
+    deploy."""
+    return [name for name in missing_among(names, paths)
+            if any(f.exists() for f in (paths.project_deploy_state(name),
+                                        paths.project_scan_state(name),
+                                        paths.project_health_state(name)))]
+
+
+def forget_advice(name: str) -> str:
+    return (f"{name} was deployed and its project directory is gone (an unfinished "
+            f"removal): drop the entry as the supervisor with "
+            f"`sudo boxmunge-server project-forget {name}`")
+
+
 def name_collisions(name: str, others: set[str]) -> list[str]:
     """Other project names that `name` extends with `-<anything>`, or that
     extend it. Compose names containers `<project>-<service>-1`, so project

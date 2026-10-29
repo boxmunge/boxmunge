@@ -78,6 +78,33 @@ def format_scan_failure_alert(problems: dict[str, list[str]]) -> Alert:
     return Alert(kind="scan_failed", title=title, body="\n".join(lines), priority=1)
 
 
+def format_scan_unrecorded_alert(
+    problems: Mapping[str, str], last_recorded: Mapping[str, str | None],
+) -> Alert:
+    """Projects whose scan ran and was acted on, but whose result could not
+    be written.
+
+    ``problems`` maps project -> the error (it names the remedy);
+    ``last_recorded`` maps it to when its last recorded result was made, or
+    None. The run's quarantines and alerts happened; what is lost is the
+    record, so the project's view and freshness check show the older result
+    until a write succeeds. Priority 1: a scan that cannot be recorded
+    keeps failing, and the freshness check will report it stale.
+    """
+    n = len(problems)
+    title = f"CVE scan result not recorded — {n} project{'s' if n != 1 else ''}"
+    lines = [f"- {project}: {problems[project]}" for project in sorted(problems)]
+    lines.append("")
+    lines.append("This run's scan was completed and acted on (quarantines, alerts), "
+                 "but its result was not recorded.")
+    for project in sorted(problems):
+        when = last_recorded.get(project)
+        lines.append(f"- {project}: " + (f"the last recorded result (at {when}) is still "
+                     f"what `security {project}` shows" if when else "no result is "
+                     f"recorded, so it shows as never scanned"))
+    return Alert(kind="scan_unrecorded", title=title, body="\n".join(lines), priority=1)
+
+
 def format_breaker_held_alert(
     held: Mapping[str, frozenset[str]], *, threshold: int, scanned: int,
 ) -> Alert:

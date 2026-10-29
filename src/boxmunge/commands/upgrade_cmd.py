@@ -25,6 +25,7 @@ from boxmunge.commands.upgrade_steps import (
     restart_projects,
 )
 from boxmunge.commands.upgrade_notify import notify_locked_skips, notify_refused
+from boxmunge.deploy_dirs import fix_command, prepare_deploy_dirs
 from boxmunge.docker import caddy_reload, DockerError
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import ManifestError
@@ -72,6 +73,14 @@ def _migrate_regenerate_reload(
     ones, is not an upgrade that should report success. Excluded projects
     are reported and alerted, and do not fail it."""
     print(f"[{step}/{total}] Migrating manifests and regenerating configs, project by project...")
+    # Directories root made before v0.9.3 are root's; deploy writes there.
+    reowned = prepare_deploy_dirs(paths)
+    for directory in reowned.done:
+        print(f"  Gave {directory} to the deploy user (root had made it).")
+        log_operation("upgrade", f"Re-owned {directory} to deploy", paths)
+    for directory in reowned.failed:
+        print(f"  FAIL: {directory} is still not owned by deploy; run: "
+              f"{fix_command(directory)}", file=sys.stderr)
     migrated, regen, excluded = apply_projects(paths)
     if migrated.written:
         print(f"  Migrated: {', '.join(migrated.written)}")

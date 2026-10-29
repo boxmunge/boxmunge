@@ -428,6 +428,8 @@ def collect_health(paths: BoxPaths) -> HealthReport:
     report.checks.append(check_cve_hardening_upcoming(paths))
     from boxmunge.health_checks.service_users import check_service_users
     report.checks.append(check_service_users(paths))
+    from boxmunge.health_checks.registry import check_registry_drift
+    report.checks.append(check_registry_drift(paths))
 
     # Host hardening checks
     from boxmunge.health_checks.hardening import (

@@ -122,6 +122,14 @@ def _container(doc: dict[str, Any], images: dict[str, dict[str, Any]]) -> Projec
     )
 
 
+def project_volumes(project_name: str) -> list[str]:
+    """Names of the Docker volumes labelled as the compose project's.
+    Raises DockerError when Docker cannot be asked."""
+    listed = _run(["docker", "volume", "ls", "-q", *compose_project_filter(project_name)],
+                  capture=True)
+    return listed.stdout.split()
+
+
 def project_containers(project_name: str) -> list[ProjectContainer]:
     """Every container of a compose project, running or stopped, by name.
 

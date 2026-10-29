@@ -21,6 +21,7 @@ AlertKind = Literal[
     "grace_heads_up",
     "kev_stale",
     "scan_failed",
+    "scan_unrecorded",
     "breaker_held",
     "kev_fix_pending",
     "fix_available",

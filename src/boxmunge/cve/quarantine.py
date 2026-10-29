@@ -40,6 +40,7 @@ from boxmunge import restart_hold
 from boxmunge.compose_guard import compose_up_checked
 from boxmunge.docker import DockerError, caddy_reload, compose_stop
 from boxmunge.fileutil import atomic_write_text
+from boxmunge.fs_nofollow import mkdir_p_deploy
 from boxmunge.pause import hand_over_restart_policies, render_maintenance_caddy_config
 from boxmunge.paths import BoxPaths
 
@@ -110,7 +111,7 @@ def read_quarantine_state(
 def _write_record(project_name: str, paths: BoxPaths, data: dict[str, Any]) -> None:
     state_path = paths.project_quarantine_state(project_name)
     try:
-        state_path.parent.mkdir(parents=True, exist_ok=True)
+        mkdir_p_deploy(state_path.parent)
         atomic_write_text(state_path, json.dumps(data, indent=2) + "\n")
     except OSError as e:
         raise QuarantineError(

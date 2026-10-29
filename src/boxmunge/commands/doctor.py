@@ -177,17 +177,33 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
     # Pairs like `foo` / `foo-bar` registered before project-add refused them
     # can share container names (project_registry.name_collisions).
     from boxmunge.project_registry import (
-        overlapping_pairs, read_registry, registry_problem_message,
+        forget_advice, overlapping_pairs, read_registry, registry_problem_message,
+        unfinished_removals,
     )
     registry = read_registry(paths)
     if registry.problems:
         check("Project registry", False, registry_problem_message(registry.problems))
+    for name in unfinished_removals(registry.names, paths):
+        warn(f"Project {name} registered", forget_advice(name))
     pairs = overlapping_pairs(set(registry.names))
     if pairs:
         warn("Project names", "overlapping names can share container names: "
              + ", ".join(f"{a} / {b}" for a, b in pairs)
              + ". Avoid service names in the shorter project that start with the "
                "longer one's suffix (e.g. bar-* in foo next to foo-bar).")
+
+    # Directories deploy writes (a manual `security scan`, suppressions, alert
+    # throttles) that a root-run path may have created as root.
+    from boxmunge.deploy_dirs import fix_command, unwritable_by_deploy
+    blocked = unwritable_by_deploy(paths)
+    if blocked is None:
+        warn("Deploy-writable directories", "no deploy user on this host; not checked")
+    for directory in blocked or []:
+        check(f"Deploy can write {directory.relative_to(paths.root)}", False,
+              f"{directory} is not writable by deploy, so commands in the deploy "
+              f"shell fail there. Fix as the supervisor: {fix_command(directory)}")
+    if blocked == []:
+        check("Deploy-writable directories", True)
 
     from boxmunge.health_checks.userns import check_docker_userns
     userns = check_docker_userns(paths)

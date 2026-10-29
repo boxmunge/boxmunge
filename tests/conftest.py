@@ -9,7 +9,7 @@ from boxmunge.paths import BoxPaths
 
 # Provides the `system_container` fixture (a fake boxmunge-system container),
 # and refuses real docker spawns outside the integration tier.
-pytest_plugins = ["tests.fake_system_container", "tests.real_docker_guard"]
+pytest_plugins = ["tests.fake_system_container", "tests.real_docker_guard", "tests.fake_root"]
 
 
 @pytest.fixture(autouse=True)

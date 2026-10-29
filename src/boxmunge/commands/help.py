@@ -88,6 +88,7 @@ Platform updates:
 Operator only (as root, not in the deploy shell):
   container-update        Pull and recreate Caddy and project image: containers
   install-txn <p> --drop  Drop a stale install record
+  project-forget <p>      Drop a registry entry whose project directory is gone
   legacy-stage <p> ...    Resolve a release staged by boxmunge 0.10.1
   boxmunge-upgrade userns-migrate [--check] | userns-rollback | userns-commit
                           Remap Docker's user namespaces (OPERATIONS.md)

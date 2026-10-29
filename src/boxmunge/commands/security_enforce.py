@@ -157,7 +157,9 @@ def headline_of(
     return None
 
 
-def raise_enforcement_error(error: str | None) -> None:
-    """Fail the project scan loudly once its state has been persisted."""
+def raise_enforcement_error(error: str | None, record_error: str | None = None) -> None:
+    """Fail the project scan loudly once its state has been persisted (or
+    failed to be: that error is carried along, never hiding this one)."""
     if error is not None:
-        raise RuntimeError(f"{error} (the next scan retries it)")
+        also = f"; also: {record_error}" if record_error else ""
+        raise RuntimeError(f"{error} (the next scan retries it){also}")
