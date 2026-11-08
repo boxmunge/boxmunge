@@ -46,14 +46,17 @@ from boxmunge.cve._alerting_fleet import (
     format_scan_unrecorded_alert,
 )
 from boxmunge.cve._alerting_formatters import (
+    format_awaiting_fix_alert,
     format_fixable_alert,
     format_hardening_upcoming_alert,
     format_kev_at_risk_alert,
     format_kev_fix_pending_alert,
     format_new_findings_alert,
     format_quarantine_alert,
+    format_quarantine_lifted_alert,
     format_still_running_alert,
     format_suppression_expired_alert,
+    lift_reason,
 )
 from boxmunge.cve._alerting_types import Alert, AlertKind, Hit
 from boxmunge.cve.policy import Disposition, ProjectDecision
@@ -67,10 +70,13 @@ __all__ = [
     "Hit",
     "Transitions",
     "format_quarantine_alert",
+    "format_quarantine_lifted_alert",
+    "lift_reason",
     "format_still_running_alert",
     "format_new_findings_alert",
     "format_kev_fix_pending_alert",
     "format_kev_at_risk_alert",
+    "format_awaiting_fix_alert",
     "format_fixable_alert",
     "format_hardening_upcoming_alert",
     "format_suppression_expired_alert",
@@ -90,8 +96,9 @@ _LOGGER = logging.getLogger("boxmunge")
 
 # Which disposition represents a (CVE, package) seen in several images.
 _DISPOSITION_RANK = {
-    Disposition.QUARANTINE: 4,
-    Disposition.STILL_RUNNING_AT_RISK: 3,
+    Disposition.QUARANTINE: 5,
+    Disposition.STILL_RUNNING_AT_RISK: 4,
+    Disposition.AWAITING_FIX: 3,
     Disposition.INFORMATIONAL: 2,
     Disposition.SUPPRESSED: 1,
     Disposition.IGNORED_FIXED: 0,
@@ -175,14 +182,21 @@ def detect_transitions(
     A finding that quarantines from 0.12 but not now (hardening_would_quarantine)
     is warned once, when it first carries the flag.
 
+    An AWAITING_FIX finding (balanced: no fix yet, not exploited) is alerted
+    once, when it enters that disposition, never again while it stays there:
+    nothing needs doing. Its next alert is the change — a fix landing (the
+    fix_available alert, with the rebuild advice) or a KEV listing (the
+    quarantine alert).
+
     Order: kev_at_risk, kev_fix_pending, still_running, suppression_expired,
-    fix_available, hardening_upcoming, informational.
+    fix_available, awaiting_fix, hardening_upcoming, informational.
     """
     before = findings_by_key(prior)
     now = findings_by_key(current)
     new_at_risk: list[Hit] = []
     new_info: list[Hit] = []
     new_fixable: list[Hit] = []
+    new_awaiting: list[Hit] = []
     # Standing, not transitions: alerted on every scan while live (B-01, B-09).
     kev_fix_pending: list[Hit] = []
     kev_at_risk: list[Hit] = []
@@ -201,6 +215,8 @@ def detect_transitions(
             new_fixable.append(hit)
         elif disp == Disposition.STILL_RUNNING_AT_RISK and changed:
             new_at_risk.append(hit)
+        elif disp == Disposition.AWAITING_FIX and changed:
+            new_awaiting.append(hit)
         elif disp in (Disposition.INFORMATIONAL, Disposition.IGNORED_FIXED) and old is None:
             # A new below-gate finding, fixable or not, is still reported;
             # one that quarantines from 0.12 has its own warning below.
@@ -231,6 +247,8 @@ def detect_transitions(
         alerts.append(format_suppression_expired_alert(project_name, project_expired))
     if new_fixable:
         alerts.append(format_fixable_alert(project_name, new_fixable))
+    if new_awaiting:
+        alerts.append(format_awaiting_fix_alert(project_name, new_awaiting))
     if new_upcoming:
         alerts.append(format_hardening_upcoming_alert(project_name, new_upcoming))
     if new_info:

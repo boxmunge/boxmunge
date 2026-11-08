@@ -13,8 +13,9 @@
 ## Why it matters on boxmunge
 
 boxmunge scans every running image and can **quarantine** a project: the site goes to a maintenance
-page and its containers stop. Every OS package in your image is something that can be scanned,
-flagged, and acted on, whether or not your app ever uses it.
+page and its containers stop (under the default `balanced` posture only for an actively exploited
+CVE; under `strict`, for any serious unfixed one). Every OS package in your image is something that
+can be scanned, flagged, and acted on, whether or not your app ever uses it.
 
 A full `python:3.x` or `node:N` image ships hundreds of packages: compilers, Perl, image libraries,
 version-control tools. Each carries its own stream of CVEs. A real outage on boxmunge came from a
@@ -44,8 +45,9 @@ security triage: a CVE Debian rates as minor or not affecting the package does n
 down.
 
 Alpine images are small, but Alpine's vulnerability data carries no distro severity rating. Below
-the `paranoid` posture, most Alpine findings are therefore treated as informational. That means
-fewer quarantines, but also less protection for anything short of an actively exploited CVE. Alpine
+the `paranoid` posture, most Alpine findings are therefore treated as informational. Under `strict`
+that means fewer quarantines, and under `balanced` fewer no-fix-yet alerts: less protection for
+anything short of an actively exploited CVE. Alpine
 also uses musl rather than glibc, which some Python and Node packages handle poorly. Choose it
 deliberately, not by default.
 

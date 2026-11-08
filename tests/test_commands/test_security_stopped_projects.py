@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from boxmunge.commands import security_resume, security_scan_core
+from tests.test_commands.cve_helpers import render_site
+from boxmunge.commands import quarantine_lift, security_resume, security_scan_core
 from boxmunge.commands.security_resume import cmd_security_resume
 from boxmunge.commands.security_scan_core import scan_one_project
 from boxmunge.cve.kev import KevCatalog
@@ -115,11 +116,11 @@ def test_missing_startup_image_makes_the_scan_incomplete(box, fake_containers):
 def resume(monkeypatch):
     lifted: list[str] = []
     monkeypatch.setattr(security_resume, "refresh_db", lambda: None)
-    monkeypatch.setattr(security_resume, "prepare_caddy_config", lambda p, m: None)
-    monkeypatch.setattr(security_resume, "prepare_compose_override",
+    monkeypatch.setattr(quarantine_lift, "prepare_caddy_config", render_site)
+    monkeypatch.setattr(quarantine_lift, "prepare_compose_override",
                         lambda p, m, component=None: None)
-    monkeypatch.setattr(security_resume, "run_smoke", lambda p, paths_: (True, "ok"))
-    monkeypatch.setattr(security_resume, "lift_quarantine",
+    monkeypatch.setattr(quarantine_lift, "run_smoke", lambda p, paths_: (True, "ok"))
+    monkeypatch.setattr(quarantine_lift, "lift_quarantine",
                         lambda *a, **k: lifted.append("lift"))
     return lifted
 

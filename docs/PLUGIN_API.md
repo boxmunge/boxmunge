@@ -240,7 +240,7 @@ python3 -m venv .venv
 ```
 
 The fixture is a realistic box: `shop` running with a deploy history and findings, `blog` paused,
-`billing` quarantined for a critical CVE, `wiki` failing its smoke check with a staged release,
+`billing` quarantined for an actively exploited CVE, `wiki` failing its smoke check with a staged release,
 `newapp` registered but never deployed, plus backups, inbox bundles, an operational log, a health
 report and finished jobs with events. Timestamps are relative to when you made it; make a new one
 for fresh data.

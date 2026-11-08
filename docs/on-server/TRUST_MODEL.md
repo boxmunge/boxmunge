@@ -526,7 +526,7 @@ a poisoned PyPI package does not pass step 13 on the box either (hash pin).
 
 ## CVE Policy as a Defensive Layer
 
-boxmunge's CVE policy provides a defensive layer beyond container hardening. The policy treats CVEs above the project's posture threshold that have no fix upstream, and every CVE on CISA's Known Exploited Vulnerabilities (KEV) catalog, fixed or not, as actionable (`relaxed` and `dangerously_disable_quarantine` alert on every scan instead of quarantining in some of those cases; see CVE_POLICY.md): it quarantines projects automatically and surfaces operator-suppressible findings via the audit trail.
+boxmunge's CVE policy provides a defensive layer beyond container hardening. The policy treats every CVE on CISA's Known Exploited Vulnerabilities (KEV) catalog, fixed or not, as actionable, and under `strict` and `paranoid` also CVEs above the posture's severity threshold that have no fix upstream (`balanced`, the default, alerts on those instead; `relaxed` and `dangerously_disable_quarantine` alert on every scan instead of quarantining in some of the KEV cases; see CVE_POLICY.md): it quarantines projects automatically and surfaces operator-suppressible findings via the audit trail.
 
 The trust-model assumptions for this layer are explicit:
 

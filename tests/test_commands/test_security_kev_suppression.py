@@ -109,7 +109,7 @@ def test_suppress_current_skips_kev_listed_and_suppresses_the_rest(
     other = finding("CVE-2026-0002")
     decision = evaluate_project(
         "demo", scan_result("demo-web:1", [CRIT, other]),
-        posture=Posture.BALANCED,
+        posture=Posture.STRICT,
         hardening_profile=HardeningProfile(True, True, False, False),
         dangerously_disable_quarantine=False, suppressions=(),
         today=utc_today(), kev_lookup=lambda c: c == _CVE,
@@ -160,9 +160,10 @@ def test_fleet_view_lists_at_risk_only_with_findings(tmp_path, monkeypatch, caps
     from boxmunge.commands.security_cmd import cmd_security
     from tests.test_commands.cve_helpers import write_project
 
-    paths = make_box(tmp_path, projects=("exposed",),
-                     security={"dangerously_disable_quarantine": True})
-    write_project(paths, "quiet", security={"dangerously_disable_quarantine": True})
+    # Strict: a non-KEV finding quarantines there, so opting out leaves it at risk.
+    opted_out = {"posture": "strict", "dangerously_disable_quarantine": True}
+    paths = make_box(tmp_path, projects=("exposed",), security=opted_out)
+    write_project(paths, "quiet", security=opted_out)
     (paths.state / "projects.txt").write_text("exposed\nquiet\n")
     monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
     monkeypatch.setattr(

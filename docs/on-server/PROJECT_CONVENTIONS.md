@@ -287,7 +287,7 @@ the `default` profile silently — most projects need nothing here.
 | `cap_drop` | list[str] | dangerous-cap list | If specified, REPLACES the default list. Canonical names only, as for `cap_add`. |
 | `published_ports` | list | — | Project level only. Opt-in host-published ports, each `{service, port, reason}` plus optional `host_port`, `protocol`, `host_ip` (default `127.0.0.1`). See SECURITY.md, "Published ports". |
 | `cap_add` | list[str] | `[]` | Capabilities to keep; subtracted from `cap_drop`. Canonical names only (`NET_RAW`). The denylist in SECURITY.md (`SYS_ADMIN`, `SYS_MODULE`, `ALL`, ...) is rejected. |
-| `posture` | string | `balanced` | Project level only. CVE quarantine threshold: `relaxed`, `balanced`, `strict`, `paranoid`. See CVE_POLICY.md. |
+| `posture` | string | `balanced` | Project level only. What the project accepts CVE downtime for: `relaxed` (only an actively exploited CVE with no fix), `balanced` (only an actively exploited CVE, on CISA KEV), `strict` (also an unexploited, network-reachable Medium-or-worse flaw the distro confirms, with no fix), `paranoid` (also anything ≥ Medium any source reports). Everything else is alerted. See CVE_POLICY.md. |
 | `dangerously_disable_quarantine` | bool | `false` | Project level only. See CVE_POLICY.md. |
 | `runtimes` | list[str] | inferred | Project level only. The language runtimes the project uses, for the CVE relevance gate; non-empty when set. See CVE_POLICY.md. |
 | `user` | string | — | Per service only, or project-wide as a default. Who the service runs as: `root`, `image` (the image's own user), or a quoted `"<uid>:<gid>"` (each 1..65535). `root` and `image` **require `reason`**. See "Who a service runs as". |

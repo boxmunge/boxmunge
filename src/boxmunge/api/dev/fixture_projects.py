@@ -27,7 +27,7 @@ _EXIT_CODES = {"ok": 0, "warning": 1, "critical": 2}
 
 
 def finding(cve: str, severity: str, disposition: str, package: str,
-            explanation: str, *, fixed: str | None = None) -> dict[str, Any]:
+            explanation: str, *, fixed: str | None = None, kev: bool = False) -> dict[str, Any]:
     """A scan-state finding, with every key cve.scan_state writes."""
     return {
         "cve_id": cve, "base_severity": severity, "effective_severity": severity,
@@ -36,7 +36,7 @@ def finding(cve: str, severity: str, disposition: str, package: str,
         "primary_url": f"https://cve.example.test/{cve}",
         "title": f"{package}: example vulnerability", "installed_version": "1.0.0-1",
         "attack_vector": "Network", "status": "fixed" if fixed else "affected",
-        "pkg_class": "os-pkgs", "pkg_type": "debian", "kev_listed": False,
+        "pkg_class": "os-pkgs", "pkg_type": "debian", "kev_listed": kev,
         "fix_would_quarantine": False,
         "hardening_would_quarantine": False,
     }
@@ -84,8 +84,10 @@ PROJECTS: tuple[FixtureProject, ...] = (
         "billing", ("api", "db"), deploys_hours_ago=(20,), quarantine_cve=QUARANTINE_CVE,
         findings=(
             finding(QUARANTINE_CVE, "Critical", "quarantine", "libcurl",
-                    "Critical, network-reachable, no upstream fix. Meets the balanced "
-                    "threshold: quarantine."),
+                    f"{QUARANTINE_CVE} is on the CISA Known Exploited Vulnerabilities "
+                    "(KEV) catalog — actively exploited in the wild; quarantined "
+                    "regardless of posture, distro status, attack vector, or severity "
+                    "threshold.", kev=True),
         ),
         backups=(("nightly", 6), ("prerestore", 48)),
         smoke=("warning", "smoke could not run (infrastructure, not app): "

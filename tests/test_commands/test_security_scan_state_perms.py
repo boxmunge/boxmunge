@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from boxmunge.commands import security_actions, security_resume, security_scan_core
+from tests.test_commands.cve_helpers import render_site
+from boxmunge.commands import quarantine_lift, security_actions, security_resume, security_scan_core
 from boxmunge.commands.security_actions import cmd_security_scan
 from boxmunge.commands.security_resume import cmd_security_resume
 from boxmunge.cve.scan_state import write_scan_state
@@ -99,10 +100,10 @@ def test_resume_does_not_write_scan_state(tmp_path, monkeypatch):
     seed_quarantine(paths)
     _unwritable_scans(paths)
     lifted: list[str] = []
-    monkeypatch.setattr(security_resume, "prepare_caddy_config", lambda p, m: None)
-    monkeypatch.setattr(security_resume, "prepare_compose_override", lambda p, m, component=None: None)
-    monkeypatch.setattr(security_resume, "run_smoke", lambda p, paths_: (True, "ok"))
-    monkeypatch.setattr(security_resume, "lift_quarantine", lambda *a, **k: lifted.append("lift"))
+    monkeypatch.setattr(quarantine_lift, "prepare_caddy_config", render_site)
+    monkeypatch.setattr(quarantine_lift, "prepare_compose_override", lambda p, m, component=None: None)
+    monkeypatch.setattr(quarantine_lift, "run_smoke", lambda p, paths_: (True, "ok"))
+    monkeypatch.setattr(quarantine_lift, "lift_quarantine", lambda *a, **k: lifted.append("lift"))
     assert cmd_security_resume(["demo"], paths) == 0
     assert lifted == ["lift"]
     assert list((paths.state / "scans").iterdir()) == []
@@ -196,6 +197,6 @@ def test_cve_texts_name_real_actions():
     body = format_fixable_alert("demo", []).body
     assert "pull the base image" not in body and "build: {pull: true}" in body
     assert "Shipping a fix the upstream image does not have yet" in body
-    assert "pull the base image" not in explain_fix_available("1.2", would_quarantine=False, posture_label="x")
+    assert "pull the base image" not in explain_fix_available("1.2", meets_gate=False, gate_quarantines=True, posture_label="x")
     assert "suppress the CVE after review" in HARDENING_UPCOMING_FIX
     assert "`security` declaration" not in HARDENING_UPCOMING_FIX

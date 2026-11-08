@@ -385,11 +385,15 @@ def scan_one_project_locked(
     headline = headline_of(decisions)
     # Audit-only callers (resume re-scan, audit A-3) are the lift flow
     # itself and never act. Everyone else enforces: an existing quarantine
-    # is re-asserted on every scan (B-03), a new one fires outside grace.
+    # is re-asserted on every scan (B-03) unless this scan cleared it, a new
+    # one fires outside grace.
     outcome = Enforcement()
     if not audit_only:
+        cleared = (headline is None and not (failed or skipped or unidentified)
+                   and not kev.is_stale(_today()))
         outcome = _enforce(
             paths, project, meta, headline, in_grace=in_grace or defer_new,
+            cleared=tuple(decisions) if cleared else None,
         )
 
     if failed and not decisions:
@@ -448,11 +452,11 @@ def _record(path, **kwargs) -> str | None:
 def _enforce(
     paths: BoxPaths, project: str, meta: ProjectMeta,
     headline: tuple[ProjectDecision, FindingDisposition] | None,
-    *, in_grace: bool,
+    *, in_grace: bool, cleared: tuple[ProjectDecision, ...] | None = None,
 ) -> Enforcement:
     return enforce(
         paths, project, hosts=meta.hosts, compose_files=meta.compose_files,
-        policy=meta.policy(), headline=headline, in_grace=in_grace,
+        policy=meta.policy(), headline=headline, in_grace=in_grace, cleared=cleared,
     )
 
 

@@ -125,7 +125,8 @@ def project_meta(project: str, manifest: dict[str, Any],
 class ProjectHardening:
     """The hardening the policy judges a project with, and, until 0.12
     enforces the stricter rule, the profile it will judge from then on
-    (None: nothing differs)."""
+    (None: nothing differs). The policy judges findings under ``upcoming``
+    only on a posture whose severity gate quarantines (strict, paranoid)."""
 
     applied: HardeningProfile
     upcoming: UpcomingHardening | None

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from boxmunge.commands import security_resume, security_scan_core
+from tests.test_commands.cve_helpers import render_site
+from boxmunge.commands import quarantine_lift, security_resume, security_scan_core
 from boxmunge.commands.security_resume import cmd_security_resume
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.cve.scanner import ScannerError
@@ -24,13 +25,13 @@ def lift(monkeypatch):
     """Stub the lift primitives; record whether the lift ran."""
     calls: list[str] = []
     monkeypatch.setattr(security_resume, "refresh_db", lambda: None)
-    monkeypatch.setattr(security_resume, "prepare_caddy_config", lambda p, m: None)
+    monkeypatch.setattr(quarantine_lift, "prepare_caddy_config", render_site)
     monkeypatch.setattr(
-        security_resume, "prepare_compose_override", lambda p, m, component=None: None,
+        quarantine_lift, "prepare_compose_override", lambda p, m, component=None: None,
     )
-    monkeypatch.setattr(security_resume, "run_smoke", lambda p, paths_: (True, "ok"))
+    monkeypatch.setattr(quarantine_lift, "run_smoke", lambda p, paths_: (True, "ok"))
     monkeypatch.setattr(
-        security_resume, "lift_quarantine", lambda *a, **k: calls.append("lift"),
+        quarantine_lift, "lift_quarantine", lambda *a, **k: calls.append("lift"),
     )
     return calls
 
@@ -133,11 +134,11 @@ def real_lift(monkeypatch):
     monkeypatch.setattr(security_resume, "refresh_db", lambda: None)
     monkeypatch.setattr(security_scan_core, "scan_image", lambda ref, timeout: _sr(ref))
     rendered: list[str] = []
-    monkeypatch.setattr(security_resume, "prepare_caddy_config",
-                        lambda p, m: rendered.append("caddy"))
-    monkeypatch.setattr(security_resume, "prepare_compose_override",
+    monkeypatch.setattr(quarantine_lift, "prepare_caddy_config",
+                        lambda p, m: (rendered.append("caddy"), render_site(p, m)))
+    monkeypatch.setattr(quarantine_lift, "prepare_compose_override",
                         lambda p, m, component=None: rendered.append("override"))
-    monkeypatch.setattr(security_resume, "run_smoke", lambda p, paths_: (True, "ok"))
+    monkeypatch.setattr(quarantine_lift, "run_smoke", lambda p, paths_: (True, "ok"))
     fake = Docker(monkeypatch)
     fake.rendered = rendered
     return fake

@@ -131,7 +131,7 @@ Rules that prevent outages (building or changing a project):
   1. Base image: the smallest official image for your stack (-slim or
      distroless), pinned by digest. Never a full or generic distro image:
      every OS package is CVE surface, and a CVE in a package your app never
-     uses can still quarantine the site.          -> agent-help images
+     uses still alerts, and can quarantine the site. -> agent-help images
   2. Multi-stage builds: compilers, pip/npm caches and build headers stay in
      the builder stage, never in the runtime image.
   3. Root filesystems are read-only. Declare every path the app writes in
@@ -151,7 +151,11 @@ Operating safely:
     prod-deploy, stage, promote, unstage and upgrade; other commands
     refuse it.
   - QUARANTINED or STILL_RUNNING_AT_RISK in any output: stop and follow
-    agent-help cve-incident.
+    agent-help cve-incident. AWAITING_FIX needs nothing: no fix yet, not
+    exploited, the site stays up.
+  - security.posture is what a project accepts CVE downtime for: balanced
+    (default) only an actively exploited (CISA KEV) CVE; strict and
+    paranoid also unexploited risk.               -> agent-help cve
 
 Deploying a bundle-based project (the recommended path):
   1. Build locally:  boxmunge bundle ./myproject

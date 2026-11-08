@@ -11,20 +11,16 @@ from __future__ import annotations
 
 import sys
 
-from boxmunge.caddy import prepare_caddy_config
+from boxmunge.commands.quarantine_lift import restore_from_quarantine
 from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project_locked
-from boxmunge.compose import prepare_compose_override
-from boxmunge.compose_guard import ComposeRefused, check_start
 from boxmunge.cve.policy import Disposition, FindingDisposition
-from boxmunge.cve.quarantine import QuarantineError, is_quarantined, lift_quarantine
+from boxmunge.cve.quarantine import QuarantineError, is_quarantined
 from boxmunge.cve.scan_state import BASIS_STARTUP_IMAGES
 from boxmunge.cve.kev import load_kev
 from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.lifecycle import BlockReason, is_blocked
-from boxmunge.health_checks.smoke import run_smoke
-from boxmunge.manifest import ManifestError, load_manifest
-from boxmunge.pause import is_paused
+from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
 
 
@@ -145,76 +141,22 @@ def security_resume_locked(paths: BoxPaths, project: str) -> int:
     return _resume_lift(paths, project)
 
 
-def _compose_files(paths: BoxPaths, project: str) -> list[str]:
-    compose_files = ["compose.yml"]
-    if paths.project_compose_override(project).exists():
-        compose_files.append("compose.boxmunge.yml")
-    return compose_files
-
-
-def _lift_keeping_pause(paths: BoxPaths, project: str) -> int:
-    """Lift the quarantine of a project that is also paused (B-20).
-
-    The pause is the operator's own decision, so the project stays down:
-    maintenance page kept, containers left stopped. `boxmunge resume`
-    brings it back.
-    """
-    try:
-        lift_quarantine(
-            project, paths, project_caddy_site_content=None, compose_files=[],
-        )
-    except QuarantineError as e:
-        _err(f"ERROR: lift_quarantine failed: {e}")
-        return 1
-    print(f"  Quarantine lifted. '{project}' is still paused: the maintenance "
-          f"page stays up and its containers stay stopped.")
-    print(f"  Run `boxmunge resume {project}` to bring it back.")
-    return 0
-
-
 def _resume_lift(paths: BoxPaths, project: str) -> int:
     """Inner lift section. Caller MUST hold the per-project lock."""
-    if is_paused(project, paths):
-        return _lift_keeping_pause(paths, project)
     try:
-        manifest = load_manifest(paths.project_manifest(project))
-    except ManifestError as e:
-        _err(f"ERROR: {e}")
-        return 1
-    # Checked before the live Caddy config is rewritten: a refused project
-    # keeps its quarantine and its maintenance page.
-    try:
-        check_start(paths, project, component="security-resume",
-                    compose_files=_compose_files(paths, project))
-    except ComposeRefused as e:
-        _err(f"ERROR: {e}")
-        return 1
-    try:
-        prepare_caddy_config(paths, manifest)
-        prepare_compose_override(paths, manifest, component="security-resume")
-    except (OSError, ValueError) as e:
-        _err(f"ERROR: Failed to render Caddy/compose: {e}")
-        return 1
-    print("  Caddy config restored.")
-
-    site_path = paths.project_caddy_site(project)
-    site_content = site_path.read_text() if site_path.exists() else ""
-    try:
-        lift_quarantine(
-            project, paths,
-            project_caddy_site_content=site_content,
-            compose_files=_compose_files(paths, project),
-        )
+        restored = restore_from_quarantine(paths, project, component="security-resume")
     except QuarantineError as e:
-        _err(f"ERROR: lift_quarantine failed: {e}")
+        _err(f"ERROR: {e}")
+        _err("  The quarantine stays in place.")
         return 1
+    if restored.paused:
+        print(f"  Quarantine lifted. '{project}' is still paused: the maintenance "
+              f"page stays up and its containers stay stopped.")
+        print(f"  Run `boxmunge resume {project}` to bring it back.")
+        return 0
+    print("  Caddy config restored.")
     print("  Containers started (scanned images, no rebuild).")
-
-    smoke_ok, smoke_msg = run_smoke(project, paths)
-    if smoke_ok:
-        print("  Smoke test: OK")
-    else:
-        print(f"  Smoke test: FAIL — {smoke_msg}")
-
+    smoke_ok, smoke_msg = restored.smoke
+    print("  Smoke test: OK" if smoke_ok else f"  Smoke test: FAIL — {smoke_msg}")
     print(f"Project '{project}' resumed.")
     return 0

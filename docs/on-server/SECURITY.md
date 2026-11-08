@@ -90,15 +90,18 @@ undeclared services too, so opt in now.
 without `read_only: true` in `compose.yml` as writable: it adds +1 to the CVE
 severity of every finding in the **whole project**, not only that service's
 image (a manifest `cap_add` or `no_new_privileges: false` adds +1 the same
-way). A medium finding in the web image then judges as high. In 0.11 this
-**only warns**: a finding that only this penalty lifts over the posture's
-quarantine threshold is not quarantined and does not refuse a deploy; it is
-flagged `WARN` in `boxmunge security <project>`, in `boxmunge health`
-(`cve-hardening`) and in one alert per finding. **From 0.12 it quarantines.**
+way). A medium finding in the web image then judges as high. Under
+`security.posture: strict` or `paranoid`, in 0.11 this **only warns**: a
+finding that only this penalty lifts over the posture's quarantine threshold
+is not quarantined and does not refuse a deploy; it is flagged `WARN` in
+`boxmunge security <project>`, in `boxmunge health` (`cve-hardening`) and in
+one alert per finding. **From 0.12 it quarantines.** Under `balanced` (the
+default) and `relaxed` the penalty never takes a site down: they quarantine
+only on actively exploited (CISA KEV) CVEs.
 To clear the warning, add `read_only: true` to the service in `compose.yml`
 (with a `tmpfs:` for what it writes), declare the service in the manifest as
 below, or drop the manifest relaxation. To accept the risk instead, suppress
-the CVE after review or choose a lower `security.posture` (CVE_POLICY.md).
+the CVE after review or choose `security.posture: balanced` (CVE_POLICY.md).
 
 To opt in, declare the service in the manifest. A service with `internal: true`
 needs no `port` or `routes`; give it a `writable:` block. Use `ephemeral:` for
@@ -382,7 +385,7 @@ See `agent-help architecture` and the on-server `TRUST_MODEL.md` for adjacent co
 
 ## CVE policy
 
-Container hardening is one half of the protection model — the other is responding when a CVE is published against an image you're running. boxmunge v0.6.0+ scans deployed images daily via Trivy and automatically quarantines projects when an unfixed CVE crosses the project's configured posture threshold.
+Container hardening is one half of the protection model — the other is responding when a CVE is published against an image you're running. boxmunge v0.6.0+ scans deployed images daily via Trivy and automatically quarantines a project for what its posture accepts downtime for: under the default `balanced`, only a CVE on CISA's Known Exploited Vulnerabilities catalog; under `strict` and `paranoid`, also an unfixed CVE over the posture's severity threshold. Everything else is alerted, and a quarantine whose cause is gone is lifted by the next scan.
 
 See [CVE_POLICY.md](CVE_POLICY.md) for posture tiers, the suppression workflow, and the recovery flow after a quarantine.
 

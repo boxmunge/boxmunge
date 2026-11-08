@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -282,6 +283,36 @@ def test_quarantine_to_at_risk_emits_still_running_alert() -> None:
     prior = _decision(_disp(disposition=Disposition.QUARANTINE), when=_DAY1)
     current = _decision(_disp(disposition=Disposition.STILL_RUNNING_AT_RISK), when=_DAY2)
     assert [a.kind for a in _alerts(current, prior)] == ["still_running"]
+
+
+# ---------- AWAITING_FIX (balanced: no fix yet, not exploited) ----------
+
+
+_AF = Disposition.AWAITING_FIX
+
+
+def test_awaiting_fix_alerts_once_when_it_enters_the_disposition() -> None:
+    alerts = _alerts(_decision(_disp(disposition=_AF), _disp("CVE-2026-0002", disposition=_AF)))
+    assert [a.kind for a in alerts] == ["awaiting_fix"]
+    assert alerts[0].priority == 0 and "2 CVE findings with no fix yet" in alerts[0].title
+
+
+def test_standing_awaiting_fix_is_silent() -> None:
+    prior = _decision(_disp(disposition=_AF), when=_DAY1)
+    assert _alerts(_decision(_disp(disposition=_AF), when=_DAY2), prior) == ()
+
+
+def test_a_quarantine_level_finding_moved_to_awaiting_fix_is_alerted() -> None:
+    """The first scan under 0.11.2 of a finding the old rule quarantined."""
+    prior = _decision(_disp(disposition=Disposition.QUARANTINE), when=_DAY1)
+    assert [a.kind for a in _alerts(_decision(_disp(disposition=_AF), when=_DAY2), prior)] \
+        == ["awaiting_fix"]
+
+
+def test_awaiting_fix_to_fixable_emits_the_fix_available_alert() -> None:
+    prior = _decision(_disp(disposition=_AF), when=_DAY1)
+    fixed = replace(_disp(disposition=Disposition.IGNORED_FIXED), fix_would_quarantine=True)
+    assert [a.kind for a in _alerts(_decision(fixed, when=_DAY2), prior)] == ["fix_available"]
 
 
 def test_resolved_finding_no_alert() -> None:

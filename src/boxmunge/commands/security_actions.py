@@ -162,6 +162,7 @@ def _summarise_decisions(decisions: list[ProjectDecision]) -> str:
         Disposition.QUARANTINE.value,
         Disposition.SUPPRESSED.value,
         Disposition.STILL_RUNNING_AT_RISK.value,
+        Disposition.AWAITING_FIX.value,
         Disposition.INFORMATIONAL.value,
         Disposition.IGNORED_FIXED.value,
     ):
