@@ -315,6 +315,8 @@ def _scan_each(
         for w in scan.warnings:
             print(f"{name}: WARN — {w}")
         print(f"{name}: {_summarise_decisions(list(scan.decisions))}")
+        if scan.lifted:
+            print(f"{name}: quarantine lifted ({scan.lifted})")
         if not scan.complete:
             run.problems[name] = scan.incomplete_reasons()
             print(f"{name}: INCOMPLETE — {len(run.problems[name])} image(s) "

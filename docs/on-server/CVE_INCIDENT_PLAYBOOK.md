@@ -27,7 +27,7 @@ which the per-project titles below show after it:
 | `[<hostname>] CVE policy enforcement begins in <N>h` | One-time migration grace heads-up after upgrade. Affects the whole fleet. |
 | `[boxmunge:<p>] <N> fixable CVE findings over the posture's gate — rebuild to apply the fix` | Findings over the posture's gate have an upstream fix the image does not run yet (including a fix landing for an `AWAITING_FIX` finding). Not quarantined (unless on KEV). Hand off a rebuild and redeploy. |
 | `[boxmunge:<p>] <N> CVE findings with no fix yet — site stays up, nothing to do now` | `balanced`: serious, network-reachable findings with no fix, not known to be exploited. Nothing to do now; once per finding. The next alert is the fix landing (rebuild) or a KEV listing (it quarantines). Only `strict` or `paranoid` would take the site down for these: that is the operator's call. |
-| `[boxmunge:<p>] Quarantine lifted — back online (<CVE>)` | A scan found nothing quarantine-level any more and lifted the quarantine on its own; the body says why (suppressed, gone, or no longer quarantining — including balanced's KEV-only rule from 0.11.2). `smoke test FAILED` in the title (priority 1): check the project. |
+| `[boxmunge:<p>] Quarantine lifted — back online (<CVE>)` | A `balanced` project's scan found nothing quarantine-level and nothing on KEV, and lifted the quarantine on its own; the body says why (gone, or no longer quarantining under balanced's KEV-only rule from 0.11.2). `smoke test FAILED` in the title (priority 1): check the project. |
 | `[boxmunge:<p>] <N> CVE findings will quarantine from 0.12 (warning only)` | Findings the stricter 0.12 hardening penalty would quarantine. Not quarantined now; once per finding. Hand off the hardening fix it names (see B below). |
 | `[<hostname>] CISA KEV feed stale — exploitation defense degraded` / `CISA KEV refresh rejected — previous catalog kept` | The actively-exploited gate is working from an old catalog. Escalate. |
 | `[<hostname>] <p>: quarantine lifted by deploying <ref>` | A deploy cleared the quarantine. Priority 1 when it did so by relaxing the security policy, not by a fix: check what it relaxed. |
@@ -214,8 +214,7 @@ for a fix. 30-90 days for low-impact CVEs; 14-30 for higher-severity.
 suppressions (`--host`) are operator-only and refused by the deploy shell.
 
 After suppressing a finding that was QUARANTINE-disposition: bring the
-project back online (the next scan would lift the quarantine on its own;
-`resume` does it now).
+project back online.
 
 ```
 security resume <project>
@@ -273,10 +272,7 @@ security <project>
 ```
 
 Once a fix lands, rebuild and deploy it: the deploy scans its images first
-and lifts the quarantine once it is live (no `security resume` needed). A
-non-KEV finding stops quarantining once its fix is published, so the next
-scan lifts the quarantine even before the rebuild: the old image is back up,
-still unpatched, so hand off the rebuild at once. The
+and lifts the quarantine once it is live (no `security resume` needed). The
 release must actually carry the fix: a new image tag or digest, or a
 rebuild that pulls the new base image (step 1).
 
@@ -304,7 +300,7 @@ incident log to write.
 | `security suppress` | `<project>/security/suppressions.yml`, visible via `security <project>` |
 | `security unsuppress` | Same file, entry removed; ops log records the change |
 | `security resume` | Quarantine state file removed; ops log records the resume |
-| Quarantine lifted by a scan | Quarantine state file removed; ops log (`cve-scan`) records why |
+| Quarantine lifted by a scan (`balanced`) | Quarantine state file removed; ops log (`cve-scan`) records why |
 | `security scan` | `state/scans/<project>.json`, visible via `security <project> --json` |
 | Quarantine fired | `state/deploy/<project>.quarantined.json`; ops log entry |
 | Pushover alerts (if configured) | Operator's phone |

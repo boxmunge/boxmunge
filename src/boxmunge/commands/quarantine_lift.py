@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Lifting a CVE quarantine and bringing the project back.
 
-Shared by `boxmunge security resume` and by the scan that finds a
-quarantined project has nothing quarantine-level any more (the quarantine
-lifts on its own then: security_enforce). Both have scanned every image the
-lift will start, and hold the project lock.
+Shared by `boxmunge security resume` and by the scan that clears a
+`balanced` project's quarantine (it lifts on its own then:
+security_enforce.clears_quarantine). Both have scanned every image the lift
+will start, and hold the project lock.
 
 A project that is also paused has its quarantine lifted but stays down: the
 pause is the operator's own decision (B-20), lifted only by `boxmunge resume`.
@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_guard import ComposeRefused, check_start
-from boxmunge.cve.quarantine import QuarantineError, lift_quarantine
+from boxmunge.cve.quarantine import QuarantineError, lift_quarantine, reassert_quarantine
 from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.pause import is_paused
@@ -44,9 +44,11 @@ def restore_from_quarantine(paths: BoxPaths, project: str, *, component: str) ->
     """Lift ``project``'s quarantine and start it again. Caller holds the
     project lock and has scanned what will start.
 
-    Raises QuarantineError, the record kept, when the lift cannot complete:
-    a refused start is refused before the live Caddy config is rewritten, so
-    the project keeps its maintenance page.
+    Raises QuarantineError, the record kept, when the lift cannot complete.
+    A refused start is refused before the live Caddy config is rewritten.
+    A failure once it is (a render, the reload, `compose up`) re-asserts the
+    quarantine before raising, so visitors get the maintenance page back,
+    not a 502 until the next scan.
     """
     if is_paused(project, paths):
         lift_quarantine(project, paths, project_caddy_site_content=None,
@@ -56,17 +58,38 @@ def restore_from_quarantine(paths: BoxPaths, project: str, *, component: str) ->
         manifest = load_manifest(paths.project_manifest(project))
     except ManifestError as e:
         raise QuarantineError(str(e)) from e
-    compose_files = compose_files_for(paths, project)
     try:
-        check_start(paths, project, component=component, compose_files=compose_files)
+        check_start(paths, project, component=component,
+                    compose_files=compose_files_for(paths, project))
     except ComposeRefused as e:
         raise QuarantineError(str(e)) from e
+    try:
+        _start(paths, project, manifest, component)
+    except QuarantineError as e:
+        _put_back(paths, project, manifest, e)
+    return Restored(paused=False, smoke=run_smoke(project, paths))
+
+
+def _start(paths: BoxPaths, project: str, manifest: dict, component: str) -> None:
     try:
         prepare_caddy_config(paths, manifest)
         prepare_compose_override(paths, manifest, component=component)
         site_content = paths.project_caddy_site(project).read_text()
     except (OSError, ValueError) as e:
         raise QuarantineError(f"Failed to render Caddy/compose: {e}") from e
+    # Only now: the override decides whether compose.boxmunge.yml is in.
     lift_quarantine(project, paths, project_caddy_site_content=site_content,
-                    compose_files=compose_files, component=component)
-    return Restored(paused=False, smoke=run_smoke(project, paths))
+                    compose_files=compose_files_for(paths, project), component=component)
+
+
+def _put_back(paths: BoxPaths, project: str, manifest: dict, error: QuarantineError) -> None:
+    """Re-assert the quarantine a failed lift left half undone; always raises."""
+    try:
+        reassert_quarantine(project, paths, project_dir=paths.project_dir(project),
+                            hosts=list(manifest.get("hosts") or []),
+                            compose_files=compose_files_for(paths, project))
+    except QuarantineError as e:
+        raise QuarantineError(f"{error}; putting the maintenance page back failed too: "
+                              f"{e}") from error
+    raise QuarantineError(f"{error}. The quarantine stays: the maintenance page is back "
+                          f"and the containers are stopped.") from error

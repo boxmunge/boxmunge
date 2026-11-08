@@ -1918,7 +1918,8 @@ needs `--project` (it is refused without one).
 
 boxmunge enforces a CVE policy on every deployed image: a daily Trivy
 scan, a posture-based quarantine (under the default `balanced`, only for
-actively exploited CVEs on CISA KEV) lifted by the scan once its cause is gone,
+actively exploited CVEs on CISA KEV, and then lifted by the scan once nothing
+exploited is left),
 and an operator-driven suppression workflow for findings reviewed and
 judged not exploitable.
 

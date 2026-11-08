@@ -499,6 +499,26 @@ def test_format_grace_heads_up_alert_lists_quarantine_projects() -> None:
     assert "posture: balanced" in alert.body
 
 
+def _grace_body(postures: dict[str, str]) -> str:
+    return format_grace_heads_up_alert(
+        expires_at=datetime(2026, 5, 7, 12, tzinfo=timezone.utc),
+        decisions_by_project={n: _decision(project=n) for n in postures},
+        posture_by_project=postures,
+        dangerously_by_project={n: False for n in postures},
+    ).body
+
+
+def test_grace_heads_up_states_what_each_posture_in_use_quarantines() -> None:
+    kev_only = _grace_body({"a": "balanced", "b": "relaxed"})
+    assert "only for an actively exploited (CISA KEV) CVE" in kev_only
+    assert "high-severity" not in kev_only and "strict or paranoid" not in kev_only
+    strict = _grace_body({"a": "strict"})
+    assert "strict or paranoid are also quarantined" in strict
+    assert "relaxed or balanced" not in strict
+    both = _grace_body({"a": "balanced", "b": "paranoid"})
+    assert "relaxed or balanced" in both and "strict or paranoid" in both
+
+
 def test_format_grace_heads_up_alert_lists_at_risk_running_projects() -> None:
     fd = _disp(
         "CVE-2026-9999", base=Severity.CRITICAL,

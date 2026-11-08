@@ -8,13 +8,16 @@ the first enforcing scan after the migration grace window — whose
 dispositions were already QUARANTINE while in grace — still tells the
 operator the site went dark.
 
-A quarantine lifts on its own when a scan covered every image the project
-starts, against a fresh KEV catalog, and found nothing quarantine-level:
-the reason for the downtime is gone (a fix shipped some other way, a
-suppression, a distro re-triage, or a posture rule that no longer
-quarantines it, as balanced's KEV-only rule from 0.11.2). It is announced
-once, naming why. A stale KEV catalog never lifts one: a stale catalog
-reads as "nothing exploited", which is exactly what must not be trusted.
+A quarantine of a `balanced` project lifts on its own when a scan covered
+every image the project starts, against a fresh KEV catalog, and found no
+quarantine-level and no KEV-listed finding: balanced takes a site down only
+for active exploitation (from 0.11.2), so a quarantine the earlier
+severity rule took no longer stands. It is announced once, naming why.
+Every other posture keeps deploy or `security resume` as the way out: a
+published fix not yet deployed, or a distro re-triage, is not evidence the
+running images are safe. A stale KEV catalog never lifts one: it reads as
+"nothing exploited", which is exactly what must not be trusted. Nor does a
+lift start a project the health monitor stopped: `recover` brings that back.
 """
 from __future__ import annotations
 
@@ -22,12 +25,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.quarantine_lift import restore_from_quarantine
 from boxmunge.cve.alerting import (
     findings_by_key, format_quarantine_alert, format_quarantine_lifted_alert, lift_reason,
     send_alerts,
 )
-from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision
+from boxmunge.cve.policy import Disposition, FindingDisposition, Posture, ProjectDecision
 from boxmunge.cve.quarantine import (
     QuarantineError,
     is_quarantined,
@@ -54,8 +58,8 @@ class Enforcement:
     # The CVE that would have quarantined the project, held because a
     # 0.10.1 stage is in place (spec "On the beta, until it is resolved").
     held: str | None = None
-    # The quarantine was lifted on this attempt: the scan cleared it.
-    lifted: bool = False
+    # The CVE whose quarantine this attempt lifted: the scan cleared it.
+    lifted: str | None = None
 
 
 def enforce(
@@ -67,9 +71,9 @@ def enforce(
 ) -> Enforcement:
     """Take, re-assert or lift the quarantine action for ``project``.
 
-    ``cleared`` is this scan's decisions when it covered every image the
-    project starts, with a fresh KEV catalog, and found nothing
-    quarantine-level; then an existing quarantine is lifted. Otherwise an
+    ``cleared`` is this scan's decisions when they clear the quarantine
+    (``clears_quarantine``); then an existing quarantine is lifted, unless
+    ``_may_lift`` says the project must not be started. Otherwise an
     existing record is re-asserted, so a partially failed action converges
     (audit B-03). During grace no NEW quarantine fires; the heads-up alert
     summarises what would. For a project with a 0.10.1 stage both are held
@@ -109,9 +113,25 @@ def enforce(
     return Enforcement()
 
 
+def clears_quarantine(posture: Posture, decisions: Sequence[ProjectDecision], *,
+                      complete: bool, kev_fresh: bool) -> bool:
+    """Whether a scan's ``decisions`` lift the project's quarantine on their
+    own: a balanced project, scanned completely against a fresh KEV catalog,
+    with no quarantine-level and no KEV-listed finding (see the module
+    docstring for why only balanced)."""
+    findings = [f for d in decisions for f in d.findings]
+    return (posture is Posture.BALANCED and complete and kev_fresh
+            and not any(f.kev_listed or f.disposition is Disposition.QUARANTINE
+                        for f in findings))
+
+
 def _may_lift(paths: BoxPaths, project: str) -> bool:
     """A project mid-migration is not started again from here (resume
-    refuses it too); its quarantine is re-asserted until that is done."""
+    refuses it too), nor is one the health monitor stopped (that stop stands
+    until `recover`, and the monitor and container-update skip the project
+    while it does). Their quarantine is re-asserted instead."""
+    if is_monitor_stopped(project, paths):
+        return False
     block = is_blocked(project, paths)
     return block is None or block.reason is not BlockReason.MIGRATING
 
@@ -136,7 +156,7 @@ def _lift_cleared(
     except Exception as e:  # noqa: BLE001 — alerting must never block scan
         log_warning("cve-scan", f"quarantine-lifted alert emission failed for {project}: {e}",
                     paths, project=project, detail={"error": str(e)})
-    return Enforcement(lifted=True)
+    return Enforcement(lifted=cve)
 
 
 def _undetermined(paths: BoxPaths, project: str, error: OSError, *, due: bool) -> Enforcement:

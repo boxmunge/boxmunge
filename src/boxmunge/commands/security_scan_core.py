@@ -30,6 +30,7 @@ from boxmunge.commands.security_scan_inputs import (
 from boxmunge.commands.security_enforce import (
     Enforcement,
     announce_quarantine,
+    clears_quarantine,
     enforce,
     headline_of,
     raise_enforcement_error,
@@ -110,6 +111,8 @@ class ProjectScan:
     # Set when the scan ran and was acted on but its result could not be
     # written (ScanStateWriteError); the fleet run fails and alerts on it.
     record_error: str | None = None
+    # The CVE whose quarantine this scan lifted (security_enforce).
+    lifted: str | None = None
 
     @property
     def unidentified_services(self) -> tuple[str, ...]:
@@ -389,8 +392,9 @@ def scan_one_project_locked(
     # one fires outside grace.
     outcome = Enforcement()
     if not audit_only:
-        cleared = (headline is None and not (failed or skipped or unidentified)
-                   and not kev.is_stale(_today()))
+        cleared = clears_quarantine(
+            meta.posture, decisions, complete=not (failed or skipped or unidentified),
+            kev_fresh=not kev.is_stale(_today()))
         outcome = _enforce(
             paths, project, meta, headline, in_grace=in_grace or defer_new,
             cleared=tuple(decisions) if cleared else None,
@@ -436,6 +440,7 @@ def scan_one_project_locked(
         **basis,
         headline=headline,
         host_expired=host_expired,
+        lifted=outcome.lifted,
     )
 
 

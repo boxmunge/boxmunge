@@ -45,6 +45,14 @@ def test_kev_stale_alert_body_mentions_never_fetched_when_none() -> None:
     assert "never fetched" in alert.body
 
 
+def test_kev_stale_alert_says_kev_only_postures_cannot_quarantine() -> None:
+    from boxmunge.cve._alerting_fleet import format_kev_stale_alert
+
+    body = format_kev_stale_alert(None).body
+    assert "relaxed and balanced (the default) KEV is the only quarantine trigger" in body
+    assert "nothing can quarantine those projects" in body
+
+
 def test_kev_stale_alert_kind() -> None:
     """The alert kind must be 'kev_stale' for correct routing/filtering."""
     from boxmunge.cve._alerting_fleet import format_kev_stale_alert

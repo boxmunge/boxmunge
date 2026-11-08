@@ -13,14 +13,20 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+import yaml
 
-from boxmunge.commands import quarantine_lift, security_scan_core
+from boxmunge.commands import quarantine_lift, security_actions, security_scan_core
+from boxmunge.commands.health_state import is_monitor_stopped
+from boxmunge.commands.security_actions import cmd_security_scan
 from boxmunge.commands.security_scan_core import scan_one_project
 from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.policy import Disposition
 from boxmunge.cve.quarantine import is_quarantined, quarantine_action_complete
-from boxmunge.cve.scanner import ScannerError
+from boxmunge.cve.scanner import ScannerError, Severity
 from boxmunge.pause import is_paused, write_paused_state
+from boxmunge.release import mark_live
+from boxmunge.release_txn import open_txn
+from boxmunge.state import write_state
 from tests.test_commands.cve_helpers import (
     CRIT, Docker, Pushover, finding, make_box, render_site, scan_result, seed_quarantine,
 )
@@ -192,14 +198,112 @@ def test_strict_keeps_the_quarantine(box) -> None:
     assert not _titles(pushover, LIFTED_TITLE)
 
 
-def test_a_failed_lift_keeps_the_record_and_fails_the_scan_loudly(box) -> None:
+def test_a_failed_lift_puts_the_maintenance_page_back_and_fails_loudly(box) -> None:
+    """`compose up` fails after the routing switch: the quarantine is
+    re-asserted at once, not left serving a 502 until the next scan."""
     paths, pushover = box()
     seed_quarantine(paths)
     paths.docker.fail["compose_up"] = 1
-    with pytest.raises(RuntimeError, match="automatic quarantine lift failed"):
+    with pytest.raises(RuntimeError, match="automatic quarantine lift failed.*maintenance "
+                                           "page is back"):
         _scan(paths)
-    assert is_quarantined("demo", paths)
+    assert paths.docker.calls == ["caddy_reload", "compose_up", "caddy_reload", "compose_stop"]
+    assert is_quarantined("demo", paths) and quarantine_action_complete("demo", paths)
+    assert "maintenance" in paths.project_caddy_site("demo").read_text().lower()
     assert not _titles(pushover, LIFTED_TITLE)
     _scan(paths)  # the next scan retries it
     assert not is_quarantined("demo", paths)
     assert _titles(pushover, LIFTED_TITLE)
+
+
+# ---- only balanced lifts on its own ----
+
+
+def test_relaxed_keeps_a_kev_quarantine_whose_fix_is_published_not_deployed(box) -> None:
+    """Under relaxed a fixable KEV finding stops quarantining, but the image
+    running is still the exploited one: only a deploy or resume lifts it."""
+    paths, pushover = box("relaxed")
+    seed_quarantine(paths)
+    paths.found = [finding(fix="3.0.15-1")]
+    fd = _scan(paths, _kev(_CVE)).decisions[0].findings[0]
+    assert fd.disposition is Disposition.IGNORED_FIXED and fd.kev_listed
+    assert is_quarantined("demo", paths) and "compose_up" not in paths.docker.calls
+    assert not _titles(pushover, LIFTED_TITLE)
+
+
+@pytest.mark.parametrize("posture", ["relaxed", "strict", "paranoid"])
+def test_other_postures_never_lift_on_their_own(box, posture) -> None:
+    """A distro re-triage (here: nothing found any more) is not evidence the
+    running images are safe under a posture whose rules did not change."""
+    paths, pushover = box(posture)
+    seed_quarantine(paths)
+    paths.found = [finding(sev=Severity.LOW)] if posture != "relaxed" else []
+    _scan(paths)
+    assert is_quarantined("demo", paths) and "compose_up" not in paths.docker.calls
+    assert not _titles(pushover, LIFTED_TITLE)
+
+
+def test_balanced_with_any_kev_finding_keeps_the_quarantine(box, tmp_path) -> None:
+    """Opted out, a KEV finding runs at risk instead of quarantining: it
+    still is no reason to lift a quarantine on the scan's own say-so."""
+    paths, pushover = box()
+    data = yaml.safe_load(paths.project_manifest("demo").read_text())
+    data["security"] = {"posture": "balanced", "dangerously_disable_quarantine": True}
+    paths.project_manifest("demo").write_text(yaml.safe_dump(data))
+    seed_quarantine(paths)
+    fd = _scan(paths, _kev(_CVE)).decisions[0].findings[0]
+    assert fd.disposition is Disposition.STILL_RUNNING_AT_RISK and fd.kev_listed
+    assert is_quarantined("demo", paths)
+    assert not _titles(pushover, LIFTED_TITLE)
+
+
+# ---- what must not be started from a scan ----
+
+
+def test_a_monitor_stopped_project_keeps_its_quarantine(box) -> None:
+    """Started, it would stay monitor-stopped: unwatched by the monitor and
+    skipped by container-update. `recover` is the way back."""
+    paths, pushover = box()
+    seed_quarantine(paths)
+    write_state(paths.project_health_state("demo"), {
+        "status": "critical_stopped", "stopped_at": "2026-10-01T03:00:00+00:00"})
+    assert is_monitor_stopped("demo", paths)
+    _scan(paths)
+    assert is_quarantined("demo", paths)
+    assert paths.docker.calls == ["caddy_reload", "compose_stop"]  # re-asserted
+    assert not _titles(pushover, LIFTED_TITLE)
+
+
+def test_an_open_install_refuses_the_lift(box) -> None:
+    paths, pushover = box()
+    seed_quarantine(paths)
+    mark_live(paths, "demo", "demo-v1")
+    open_txn(paths, "demo", source="bundle", ref="demo-v2", replaced_ref="demo-v1",
+             staged_id=None, snapshot="")
+    with pytest.raises(RuntimeError, match="automatic quarantine lift failed.*demo-v2"):
+        _scan(paths)
+    assert is_quarantined("demo", paths) and "compose_up" not in paths.docker.calls
+    assert not _titles(pushover, LIFTED_TITLE)
+
+
+# ---- the fleet scan ----
+
+
+def test_the_fleet_scan_reports_the_lift_and_exits_0(box, monkeypatch, capsys) -> None:
+    paths, _ = box()
+    seed_quarantine(paths)
+    monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
+    assert cmd_security_scan([], paths) == 0
+    assert f"demo: quarantine lifted ({_CVE})" in capsys.readouterr().out
+    assert not is_quarantined("demo", paths)
+
+
+def test_a_failed_lift_fails_the_fleet_scan_and_alerts(box, monkeypatch) -> None:
+    paths, pushover = box()
+    seed_quarantine(paths)
+    paths.docker.fail["compose_up"] = 1
+    monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
+    assert cmd_security_scan([], paths) == 1
+    [(title, body, priority)] = [m for m in pushover.sent if "CVE scan incomplete" in m[0]]
+    assert priority == 1 and "automatic quarantine lift failed" in body
+    assert is_quarantined("demo", paths)

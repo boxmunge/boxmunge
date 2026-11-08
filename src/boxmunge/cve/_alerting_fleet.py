@@ -23,9 +23,9 @@ def format_kev_stale_alert(
     """The CISA KEV catalog is stale/missing, or this run's refresh was
     rejected by the sanity floor.
 
-    Priority 1 because a degraded KEV feed silently disables the lowest
-    tier's only quarantine trigger — the operator must know the
-    exploitation-signal protection is at risk.
+    Priority 1 because a degraded KEV feed silently disables the only
+    quarantine trigger of relaxed and balanced (the default) — the operator
+    must know the exploitation-signal protection is at risk.
     """
     when = fetched_at.isoformat() if fetched_at else "never fetched"
     if stale:
@@ -44,7 +44,10 @@ def format_kev_stale_alert(
         "",
         "KEV-based quarantine is fail-safe (sites stay up), so actively-"
         "exploited CVEs will NOT be auto-quarantined once the catalog is "
-        "stale. Check egress to cisa.gov and the cve-scan log.",
+        "stale. Under posture relaxed and balanced (the default) KEV is the "
+        "only quarantine trigger: until the catalog is fresh again, nothing "
+        "can quarantine those projects. Check egress to cisa.gov and the "
+        "cve-scan log.",
     ]
     return Alert(kind="kev_stale", title=title, body="\n".join(lines), priority=1)
 
@@ -206,6 +209,20 @@ def _format_finding_summary(fd: FindingDisposition) -> str:
     return f"{cve} ({eff}, no upstream fix)"
 
 
+def _enforcement_scope(postures: set[str]) -> list[str]:
+    """What will be quarantined after grace, for the postures in use."""
+    kev_only = {"relaxed", "balanced"}
+    lines = []
+    if postures & kev_only:
+        lines.append("projects on posture relaxed or balanced (the default) are "
+                     "quarantined automatically only for an actively exploited "
+                     "(CISA KEV) CVE; other findings are alerted.")
+    if postures - kev_only:
+        lines.append("projects on posture strict or paranoid are also quarantined "
+                     "for an unpatched CVE over the posture's severity threshold.")
+    return lines
+
+
 def format_grace_heads_up_alert(
     *,
     expires_at: datetime,
@@ -269,15 +286,11 @@ def format_grace_heads_up_alert(
         "%Y-%m-%d %H:%M",
     )
 
-    lines: list[str] = []
-    lines.append(
-        "boxmunge v0.6.0 introduces CVE policy. After a 24-hour grace "
-        "window, projects",
-    )
-    lines.append(
-        "with unpatched high-severity CVEs will be quarantined "
-        "automatically.",
-    )
+    lines: list[str] = [
+        "boxmunge v0.6.0 introduces CVE policy. After a 24-hour grace window,",
+        *_enforcement_scope({posture_by_project.get(n, "balanced")
+                             for n in decisions_by_project}),
+    ]
     lines.append("")
     lines.append(f"First scan results across {n_projects} projects:")
     lines.append("")

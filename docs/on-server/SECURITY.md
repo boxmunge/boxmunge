@@ -385,7 +385,7 @@ See `agent-help architecture` and the on-server `TRUST_MODEL.md` for adjacent co
 
 ## CVE policy
 
-Container hardening is one half of the protection model — the other is responding when a CVE is published against an image you're running. boxmunge v0.6.0+ scans deployed images daily via Trivy and automatically quarantines a project for what its posture accepts downtime for: under the default `balanced`, only a CVE on CISA's Known Exploited Vulnerabilities catalog; under `strict` and `paranoid`, also an unfixed CVE over the posture's severity threshold. Everything else is alerted, and a quarantine whose cause is gone is lifted by the next scan.
+Container hardening is one half of the protection model — the other is responding when a CVE is published against an image you're running. boxmunge v0.6.0+ scans deployed images daily via Trivy and automatically quarantines a project for what its posture accepts downtime for: under the default `balanced`, only a CVE on CISA's Known Exploited Vulnerabilities catalog; under `strict` and `paranoid`, also an unfixed CVE over the posture's severity threshold. Everything else is alerted, and a `balanced` quarantine with nothing exploited left is lifted by the next scan.
 
 See [CVE_POLICY.md](CVE_POLICY.md) for posture tiers, the suppression workflow, and the recovery flow after a quarantine.
 

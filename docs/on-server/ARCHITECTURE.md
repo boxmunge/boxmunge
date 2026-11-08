@@ -412,7 +412,7 @@ See `agent-help writable` and `PROJECT_CONVENTIONS.md` for the schema reference.
 
 ## CVE Policy Module
 
-Beyond per-container hardening, boxmunge runs a CVE policy engine that scans deployed images and quarantines projects whose findings meet their posture's quarantine gate (under the default `balanced`, only a CVE on CISA KEV), and lifts the quarantine at the first scan that no longer finds one.
+Beyond per-container hardening, boxmunge runs a CVE policy engine that scans deployed images and quarantines projects whose findings meet their posture's quarantine gate (under the default `balanced`, only a CVE on CISA KEV); a `balanced` quarantine is lifted at the first scan that finds nothing quarantine-level and nothing on KEV.
 
 - **Where it sits** — runs via `boxmunge-cve-scan.timer` daily at 03:00 (up to 30 min jitter), on demand with `security scan [<project>]`, and in `security resume`, which re-scans before lifting a quarantine. An ordinary deploy, stage or promote does not scan; only a quarantined project's release is scanned before it starts (see "Deploy Flow"). Lives in `src/boxmunge/cve/` (scanner, policy, quarantine, suppressions, alerting, scan_state, grace, kev, relevance, breaker) plus the orchestrating `commands/security_*.py`.
 - **Inputs** — Trivy's vulnerability DB (refreshed before each scan), the CISA KEV catalog (cached in `state/kev/`), the project's `manifest.yml` (`security.posture`, `dangerously_disable_quarantine`, hardening fields), the project's `security/suppressions.yml` if present, and the host-scope `config/suppressions.yml`.

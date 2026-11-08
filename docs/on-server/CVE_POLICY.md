@@ -41,9 +41,9 @@ workflow, and recovery.
   scan; `paranoid` does not consult it, and KEV still overrides it.
 - **Auto-quarantine** when a finding crosses the project's quarantine gate:
   maintenance page + `compose stop` (restart policies held at `no`) +
-  priority-1 Pushover alert. **Auto-lift** when a later scan of every image
-  the project starts, against a fresh KEV catalog, finds nothing
-  quarantine-level any more (see "Automatic lift").
+  priority-1 Pushover alert. **Auto-lift** (`balanced` only) when a later
+  scan of every image the project starts, against a fresh KEV catalog,
+  finds nothing quarantine-level and nothing on KEV (see "Automatic lift").
 - **No fix yet, not exploited (`balanced`): alerted once, stays up.** A
   distro-acknowledged High + AV:N finding with no fix is `AWAITING_FIX`:
   one alert says nothing needs doing now; the next comes when a fix lands
@@ -313,8 +313,10 @@ it:
    `CISA KEV feed stale — exploitation defense degraded`.
 
 This alert fires once per scan run, not once per finding, to avoid alert
-storms. The degradation must not go unnoticed — the `relaxed` tier's only
-quarantine protection depends on the KEV feed.
+storms. The degradation must not go unnoticed: under `relaxed` and
+`balanced` (the default) KEV is the only quarantine trigger, so while the
+catalog is stale nothing can quarantine those projects. A stale catalog
+also never lifts a quarantine (see "Automatic lift").
 
 ## Runtime relevance gate
 
@@ -1017,8 +1019,8 @@ project's active suppressions.
 
 Once a project is quarantined, every operational entry point honours
 that state until a deploy of a fixed release, `boxmunge security resume
-<project>`, or a scan that finds nothing quarantine-level lifts it (see
-"Automatic lift"). All three scan what they would start first and fail
+<project>`, or (for a `balanced` project) a scan that finds nothing
+quarantine-level and nothing on KEV lifts it (see "Automatic lift"). All three scan what they would start first and fail
 closed.
 
 The quarantine record (`state/deploy/<project>.quarantined.json`) says
@@ -1059,40 +1061,57 @@ quarantined project"; a project that is also paused is refused.
 
 In both camps the skip is recorded via `log_operation` and visible in
 `boxmunge log --component <component>`. Only a deploy of a fixed release,
-`boxmunge security resume <project>` or a clearing scan lifts the
-quarantine; each scans first and fails closed (see "Automatic lift" and
+`boxmunge security resume <project>` or, under `balanced`, a clearing scan
+lifts the quarantine; each scans first and fails closed (see "Automatic lift" and
 "Recovering a quarantined project" below).
 
 ## Automatic lift
 
-A quarantine exists to keep a site down while a quarantine-level finding
-stands. When it no longer does, the scan lifts the quarantine on its own,
-with no deploy and no operator: the nightly scan, or `boxmunge security
-scan`. That happens when the scan
+`balanced` takes a site down only for an actively exploited CVE. A
+quarantine of a `balanced` project whose cause is no longer exploited, or
+no longer there, is lifted by the scan on its own, with no deploy and no
+operator: the nightly scan, or `boxmunge security scan`. That happens when
+the project's posture is `balanced` and the scan
 
 - covered every image the project would start (the scan of a quarantined
   project is of the images `compose up` would start; a failed or skipped
   image scan, or an image that cannot be identified, never lifts), and
 - ran against a fresh CISA KEV catalog (a stale or missing catalog reads as
   "nothing is exploited", which is exactly what must not be trusted), and
-- found no quarantine-level finding under the project's manifest.
+- found no quarantine-level finding and no KEV-listed finding at all.
+
+The case it exists for: a finding the old `balanced` rule quarantined (a
+distro-acknowledged High, network-reachable, no fix, not on KEV) is lifted
+at the first scan after upgrading to 0.11.2, and the alert says the posture
+rules changed in boxmunge 0.11.2. The finding itself is `AWAITING_FIX` from
+then on.
+
+Every other posture keeps a deploy of a fixed release or `security resume`
+as the way out. Under `relaxed`, a KEV finding stops quarantining once a fix
+is published, while the running image is still the vulnerable one; under
+`strict` and `paranoid`, a distro re-triage or a newly published fix is not
+evidence that what runs is safe. Those decisions stay with the operator.
 
 The lift is `security resume`'s: the normal Caddy site is restored, the
 saved restart policies are given back, the scanned local images are
 started with no pull or build, and the smoke test runs. A project that is
 also paused has only its quarantine lifted and stays down until `boxmunge
-resume`. A project mid-migration keeps its quarantine until the migration
-ends. A lift that cannot complete (its start is refused, `compose up`
-fails) keeps the record, fails that project's scan loudly, and is retried
-by the next scan.
+resume`. These keep their quarantine, re-asserted on every scan:
 
-One alert says so, `Quarantine lifted — back online (<CVE>)`, naming why:
-the CVE is gone from the images, it is suppressed, or it no longer
-quarantines. A finding the old `balanced` rule quarantined (a
-distro-acknowledged High, network-reachable, no fix, not on KEV) is lifted
-at the first scan after upgrading to 0.11.2, and the alert says the posture
-rules changed in boxmunge 0.11.2. The finding itself is `AWAITING_FIX` from
-then on.
+- a project mid-migration, until the migration ends;
+- a project the health monitor stopped: its stop stands until `recover`,
+  and the monitor and container-update skip the project while it does, so
+  a lift would leave it running unwatched. Lift it with `security resume`,
+  then bring it back with `recover`.
+
+A lift that cannot complete (its start is refused, for example by an
+install left open, or `compose up` fails) fails that project's scan loudly
+(the scan-incomplete alert) and is retried by the next scan. A failure after
+the Caddy routing was switched re-asserts the quarantine first, so visitors
+get the maintenance page back, not a 502; `security resume` does the same.
+
+One alert says so, `Quarantine lifted — back online (<CVE>)`, naming why,
+and `security scan` prints `<project>: quarantine lifted (<CVE>)`.
 
 ## Recovering a quarantined project
 
@@ -1105,10 +1124,10 @@ then on.
 2. **Decide:** wait for an upstream fix (and re-run when it's released),
    or suppress the CVE with a documented reason after review. Once a fix
    is published for a finding that is not on KEV, it stops quarantining
-   (`IGNORED_FIXED`, alerted once), so the next scan lifts the quarantine
-   (or `security resume` does at once) while the old, unpatched image
-   still runs: rebuild and redeploy straight after it. A suppression is
-   picked up the same way.
+   (`IGNORED_FIXED`, alerted once), so `security resume` succeeds while
+   the old, unpatched image still runs: rebuild and redeploy straight
+   after it. Only a `balanced` project is lifted by a scan on its own (see
+   "Automatic lift").
 
 3. **If suppressing:**
 
