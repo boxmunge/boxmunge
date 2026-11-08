@@ -147,7 +147,7 @@ confirmation unless --yes. If container teardown fails, nothing is deleted
 and the command exits 1; --force deletes anyway. Does not support --dry-run.""",
     "data": """\
 Usage: boxmunge data adopt <project> <service>:<path> <name>
-       boxmunge data chown <project> <service> <uid>:<gid>
+       boxmunge data chown <project> <service> <uid>:<gid> [--no-snapshot]
 
 adopt copies the service's anonymous volume at <path> into a new named volume
 <project>_<name> that the next deploy adopts. Stops the service's containers
@@ -157,9 +157,14 @@ writable.persistent entry instead, adopt as <project>_<entry name>). A deploy
 refused for this leaves its install open: prod-deploy <project> --abandon
 first. The anonymous volume is kept until you remove it.
 
-chown stops the service, gives its read-write binds and named volumes to
-<uid>:<gid>, and leaves it stopped until you deploy, which runs it as that
-user.""",
+chown first takes the project's backup snapshot (kind prechown) while the
+service still runs, then stops the service, gives its read-write binds and
+named volumes to <uid>:<gid>, and leaves it stopped until you deploy, which
+runs it as that user. When the service is the backup service, that deploy
+uses the snapshot as its pre-deploy snapshot (its own dump could not run), so
+its rollback restores the data from before the change. A failed snapshot
+refuses and changes nothing; --no-snapshot goes on without one. A project
+with backup.type: none has no snapshot to take, and says so.""",
     "inbox": """\
 Usage: boxmunge inbox [project] [--json]
        boxmunge inbox clean [project] [--yes]

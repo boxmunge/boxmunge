@@ -129,6 +129,7 @@ class BackupKind(enum.Enum):
     MANUAL = "manual"          # `backup <project>`, MCP, console, self-test
     PRERESTORE = "prerestore"  # restore's safety snapshot of the data it replaces
     PREMIGRATE = "premigrate"  # userns-migrate, before any downtime
+    PRECHOWN = "prechown"      # data chown, before it stops the service
 
 
 # Snapshots kept per project for each kind other than NIGHTLY, whose count is
@@ -139,6 +140,7 @@ SNAPSHOT_RETENTION = {
     BackupKind.MANUAL: 5,
     BackupKind.PRERESTORE: 3,
     BackupKind.PREMIGRATE: 2,
+    BackupKind.PRECHOWN: 3,
 }
 
 _TIMESTAMP = r"\d{4}-\d{2}-\d{2}T\d{6}"

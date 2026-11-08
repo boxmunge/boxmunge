@@ -95,3 +95,9 @@ def test_premigrate_snapshots_keep_two() -> None:
     from boxmunge.backup import SNAPSHOT_RETENTION, BackupKind
     assert BackupKind("premigrate") is BackupKind.PREMIGRATE
     assert SNAPSHOT_RETENTION[BackupKind.PREMIGRATE] == 2
+
+
+def test_prechown_snapshots_keep_three() -> None:
+    from boxmunge.backup import SNAPSHOT_RETENTION
+    assert BackupKind("prechown") is BackupKind.PRECHOWN
+    assert SNAPSHOT_RETENTION[BackupKind.PRECHOWN] == 3

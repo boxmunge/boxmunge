@@ -18,7 +18,8 @@ SLEEP = ["sleep", "infinity"]
 
 
 def bundle(project: str, services: dict, *, declare: dict | None = None,
-           volumes: tuple[str, ...] = (), files: dict | None = None) -> dict[str, str]:
+           volumes: tuple[str, ...] = (), files: dict | None = None,
+           backup: dict | None = None) -> dict[str, str]:
     # One ULID per project, the same for each of its bundles.
     ulid = ("01" + project.upper()).ljust(26, "0")
     manifest = yaml.safe_load(manifest_text(project, ulid=ulid))
@@ -29,6 +30,8 @@ def bundle(project: str, services: dict, *, declare: dict | None = None,
         name: ({"security": declare[name]} if declare and name in declare
                else {"internal": True, "writable": {"external": True}})
         for name in services}
+    if backup is not None:
+        manifest["backup"] = backup
     compose = {"services": services, **({"volumes": {v: {} for v in volumes}} if volumes else {})}
     return {"manifest.yml": yaml.safe_dump(manifest), "compose.yml": yaml.safe_dump(compose),
             **(files or {})}
@@ -158,4 +161,30 @@ def case_user_change_needs_chown(paths, p, capsys) -> None:
     assert run_data_chown(paths, p, "app", "10001:10001") == 0
     rc, out = deploy(paths, p, bundle(p, svc, files=files), capsys)
     assert rc == 0, out
+    assert compose(paths, p, "exec", "-T", "app", "id", "-u").strip() == "10001"
+
+
+def case_chown_snapshot_pairs_with_the_next_deploy(paths, p, capsys) -> None:
+    """data chown stops the backup service, so the deploy after it cannot
+    dump: it uses the snapshot data chown took while the service still ran,
+    and its rollback restores the data from before the ownership change."""
+    from boxmunge.commands.data_cmd import run_data_chown
+    from boxmunge.commands.rollback import find_rollback_target
+    root = {"app": {"user": "root", "reason": "it ran as root before"}}
+    svc = {"app": {"build": ".", "command": SLEEP, "volumes": ["./uploads:/uploads"]}}
+    backup = {"type": "custom", "service": "app", "dump_command": "cat /uploads/f",
+              "restore_command": "cat > /uploads/f"}
+    files = {"Dockerfile": f"FROM {BUSYBOX}\n"}
+    rc, out = deploy(paths, p, bundle(p, svc, declare=root, files=files, backup=backup), capsys)
+    assert rc == 0, out
+    compose(paths, p, "exec", "-T", "app", "sh", "-c", "echo x > /uploads/f && chmod 600 /uploads/f")
+    assert run_data_chown(paths, p, "app", "10001:10001") == 0
+    out = capsys.readouterr().out
+    assert "is the next deploy's pre-deploy snapshot" in out, out
+    [taken] = [f.name for f in paths.project_backups(p).glob("*-prechown.tar.gz.age")]
+    rc, out = deploy(paths, p, bundle(p, svc, files=files, backup=backup), capsys)
+    assert rc == 0, out
+    assert "Pre-deploy backup failed" not in out
+    assert f"as the pre-deploy snapshot: {taken}" in out, out
+    assert find_rollback_target(paths, p).snapshot == taken
     assert compose(paths, p, "exec", "-T", "app", "id", "-u").strip() == "10001"

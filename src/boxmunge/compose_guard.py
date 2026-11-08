@@ -54,10 +54,12 @@ from boxmunge.legacy_stage import legacy_stage_refusal
 from boxmunge.log import log_error, log_warning
 from boxmunge.notify import notify
 from boxmunge.paths import RESERVED_PROJECT_NAMES
+from boxmunge.pending_snapshot import spend_if_containers_start, spend_if_service_starts
 from boxmunge.release_txn import load_txn, stale_reason, start_refusal
 from boxmunge.staged_release import (
     SlotError, clear_production_stopped, load_slot, staging_target,
 )
+from boxmunge.state import StateError
 from boxmunge.staging_copies import foreign_copies
 from boxmunge.staging_isolation import separation_problems
 
@@ -266,6 +268,10 @@ def compose_up_checked(
         compose_up(target.cwd, build=build, force_recreate=force_recreate,
                    services=services, start=start, pinned=pinned, **target.kwargs())
         return
+    if start:
+        # Before the up: from it on the service's data may change, so a data
+        # chown snapshot kept for the next deploy no longer holds it.
+        spend_if_service_starts(paths, project_name, services, component)
     compose_up(paths.project_dir(project_name), compose_files=compose_files, build=build,
                project_name=project_name, force_recreate=force_recreate,
                services=services, start=start, pinned=pinned)
@@ -352,6 +358,12 @@ def start_containers_checked(
     """check_containers_start, then `docker start` the named containers.
     Raises ComposeRefused or DockerError."""
     check_containers_start(paths, project_name, component=component)
+    try:
+        spend_if_containers_start(paths, project_name, names, component)
+    except (StateError, OSError) as e:
+        # Its callers (a copy that stopped them) handle a refused start.
+        raise _refused(paths, project_name, component, f"its deploy state cannot be read "
+                       f"or written: {e}", tampering=False) from e
     start_containers(names)
 
 

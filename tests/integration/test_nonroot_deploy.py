@@ -31,3 +31,12 @@ def test_anonymous_volume_warns_before_migration(int_paths, helper_image, capsys
         nc.case_anonymous_volume(int_paths, project, capsys, remapped=False)
     finally:
         nc.teardown(int_paths, project)
+
+
+def test_chown_snapshot_pairs_with_the_next_deploy(int_paths, helper_image, system_container,
+                                                    capsys) -> None:
+    project = f"bmnr{uuid.uuid4().hex[:8]}"
+    try:
+        nc.case_chown_snapshot_pairs_with_the_next_deploy(int_paths, project, capsys)
+    finally:
+        nc.teardown(int_paths, project)

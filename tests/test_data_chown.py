@@ -3,14 +3,25 @@ from __future__ import annotations
 
 import pytest
 
-from boxmunge.commands import data_cmd
+from boxmunge.backup import BackupError
+from boxmunge.commands import backup_cmd, data_cmd
+from boxmunge.pending_snapshot import pending, record_pending
 from boxmunge.run_as import ServiceUser, read_users, write_users
+from boxmunge.state import write_state
+
+from tests.bundle_helpers import manifest_text
 
 
-def _setup(paths, monkeypatch, volumes_exist=True):
+def _setup(paths, monkeypatch, volumes_exist=True, backup="none", backup_service="app"):
     calls = []
     project_dir = paths.project_dir("shop")
     (project_dir / "uploads").mkdir(parents=True)
+    manifest = manifest_text("shop", backup=backup)
+    if backup != "none":
+        manifest += f"  service: {backup_service}\n"
+    (project_dir / "manifest.yml").write_text(manifest)
+    paths.deploy_state.mkdir(parents=True, exist_ok=True)
+    write_state(paths.project_deploy_state("shop"), {"current_ref": "shop-r1"})
     services = {"app": {"volumes": [
         {"type": "bind", "source": str(project_dir / "uploads"), "target": "/u"},
         {"type": "bind", "source": str(project_dir / "conf"), "target": "/c", "read_only": True},
@@ -74,3 +85,109 @@ def test_a_bind_inside_another_containers_rw_bind_is_refused(paths, monkeypatch)
                         lambda p: [(str(project_dir), True)] if p == "shop" else [])
     with pytest.raises(data_cmd.DataError, match="mounts read-write"):
         data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
+
+
+def _dumping(paths, monkeypatch, calls, fail=False):
+    def dump(paths_, project, dump_command, service, compose_file=None):
+        calls.append("dump")
+        if fail:
+            raise BackupError("service web is not running")
+        raw = paths.project_backups(project) / ".dump-x.tar.gz"
+        raw.write_bytes(b"dump")
+        return raw
+    paths.project_backups("shop").mkdir(exist_ok=True)
+    monkeypatch.setattr(backup_cmd, "execute_dump", dump)
+
+
+def _snapshots(paths):
+    return sorted(f.name for f in paths.project_backups("shop").glob("*.tar.gz.age"))
+
+
+def test_the_snapshot_is_taken_before_the_stop_and_kept_for_the_deploy(
+        paths, monkeypatch, system_container, capsys) -> None:
+    _project_dir, calls = _setup(paths, monkeypatch, backup="postgres")
+    _dumping(paths, monkeypatch, calls)
+    data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
+    assert calls[0] == "dump" and calls[1][:2] == ["docker", "stop"]
+    [snap] = _snapshots(paths)
+    assert snap.endswith("-prechown.tar.gz.age")
+    entry = pending(paths, "shop")
+    assert (entry["name"], entry["ref"], entry["service"], entry["containers"]) == \
+        (snap, "shop-r1", "app", ["shop-app-1"])
+    assert "is the next deploy's pre-deploy snapshot" in capsys.readouterr().out
+
+
+def test_a_service_other_than_the_backup_service_is_snapshotted_but_not_kept(
+        paths, monkeypatch, system_container, capsys) -> None:
+    """The backup service keeps running, so the deploy's own dump works and
+    holds newer data than data chown's snapshot."""
+    _project_dir, calls = _setup(paths, monkeypatch, backup="postgres", backup_service="db")
+    _dumping(paths, monkeypatch, calls)
+    data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
+    assert calls[0] == "dump" and calls[1][:2] == ["docker", "stop"]
+    assert [s.rsplit("-", 1)[1] for s in _snapshots(paths)] == ["prechown.tar.gz.age"]
+    assert pending(paths, "shop") is None
+    assert "the next deploy takes its own" in capsys.readouterr().out
+
+
+def test_a_failed_snapshot_refuses_and_changes_nothing(
+        paths, monkeypatch, system_container, capsys) -> None:
+    _project_dir, calls = _setup(paths, monkeypatch, backup="postgres")
+    _dumping(paths, monkeypatch, calls, fail=True)
+    write_users(paths, "shop", {"app": ServiceUser(None, "image", "node")})
+    assert data_cmd.run_data_chown(paths, "shop", "app", "10001:10001") == 1
+    err = capsys.readouterr().err
+    assert "snapshot before the ownership change was not taken" in err
+    assert "--no-snapshot" in err
+    assert calls == ["dump"]
+    assert read_users(paths, "shop")["app"] == ServiceUser(None, "image", "node")
+    assert pending(paths, "shop") is None and _snapshots(paths) == []
+
+
+def test_a_backup_that_writes_nothing_refuses(paths, monkeypatch, capsys) -> None:
+    _project_dir, calls = _setup(paths, monkeypatch, backup="postgres")
+    monkeypatch.setattr(backup_cmd, "backup_locked", lambda *a, **kw: 0)
+    with pytest.raises(data_cmd.DataError, match="not taken"):
+        data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
+    assert calls == []
+
+
+def test_type_none_skips_the_snapshot_and_says_so(paths, monkeypatch, capsys) -> None:
+    _project_dir, calls = _setup(paths, monkeypatch)
+    monkeypatch.setattr(backup_cmd, "backup_locked", lambda *a, **kw: pytest.fail("backed up"))
+    data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
+    assert "backup.type is none" in capsys.readouterr().out
+    assert calls[0][:2] == ["docker", "stop"]
+    assert pending(paths, "shop") is None
+
+
+def test_no_snapshot_goes_on_without_one_and_says_so(paths, monkeypatch, capsys) -> None:
+    _project_dir, calls = _setup(paths, monkeypatch, backup="postgres")
+    monkeypatch.setattr(backup_cmd, "backup_locked", lambda *a, **kw: pytest.fail("backed up"))
+    data_cmd.chown_locked(paths, "shop", "app", (10001, 10001), no_snapshot=True)
+    assert "will not be able to restore" in capsys.readouterr().out
+    assert pending(paths, "shop") is None
+
+
+def test_a_second_chown_keeps_the_first_snapshot(paths, monkeypatch, capsys) -> None:
+    """The first chown may have stopped the backup service: the second's
+    dump could not run, and the first snapshot is the data before either."""
+    _project_dir, calls = _setup(paths, monkeypatch, backup="postgres")
+    paths.project_backups("shop").mkdir()
+    first = "shop-2026-11-01T100000-prechown.tar.gz.age"
+    (paths.project_backups("shop") / first).write_bytes(b"x")
+    record_pending(paths, "shop", first, "data chown", "app", ["shop-app-1"])
+    monkeypatch.setattr(backup_cmd, "backup_locked", lambda *a, **kw: pytest.fail("backed up"))
+    data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
+    assert "no new one is taken" in capsys.readouterr().out
+    assert pending(paths, "shop")["name"] == first
+
+
+def test_a_project_whose_running_release_cannot_be_told_refuses(paths, monkeypatch) -> None:
+    from boxmunge.backup_source import BackupSource
+    _project_dir, calls = _setup(paths, monkeypatch, backup="postgres")
+    monkeypatch.setattr(data_cmd, "backup_source",
+                        lambda p, n: BackupSource(None, skip="which release runs is ambiguous"))
+    with pytest.raises(data_cmd.DataError, match="ambiguous.*--no-snapshot"):
+        data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
+    assert calls == []

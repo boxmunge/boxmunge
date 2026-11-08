@@ -204,7 +204,7 @@ boxmunge supports two project sources, declared in `manifest.yml` via the `sourc
 1. Resolve source -- locate the bundle in the inbox, or fetch the git repo and resolve the ref to a full commit SHA (checked out, detached, once the snapshot below is taken)
 2. Unpack -- a bundle is extracted into `projects/<project>/.releases/incoming/`, not over the live project
 3. Validate -- manifest schema and required fields (`id`, `source`, `project`, `hosts`, services), project identity (ULID), the user `compose.yml` against the hardening floor, and the bundle's contents against the server's data directories. For a bundle all of this runs on the unpacked copy: a rejected bundle never touches the live project files, so no later timer or restart can start it
-4. Pre-deploy snapshot -- encrypted backup of the current data, taken with the outgoing release's own backup configuration (unless `--no-snapshot`)
+4. Pre-deploy snapshot -- encrypted backup of the current data, taken with the outgoing release's own backup configuration (unless `--no-snapshot`); a `prechown` snapshot that `data chown` took before it stopped the backup service, which has not run since, is used instead
 5. Keep the outgoing release -- its code is copied to `.releases/previous/` and paired with that snapshot, for `rollback`
 6. Install -- only a release that passed every check replaces the live project files
 7. Decide users -- build and pull the release's images, read each image's `USER`, and decide who every service runs as (refusing a registry image that would run as root without a declaration, and data the new user could not own); a refusal leaves the install open and starts nothing
@@ -258,7 +258,7 @@ Secrets are never edited manually. The CLI handles file creation, permissions, a
 Operational state is stored as JSON files under `/opt/boxmunge/state/`:
 
 - `state/health/<project>.json` -- last check time, status, consecutive failure count, alert state, failure reason
-- `state/deploy/<project>.json` -- current ref (the bundle name, e.g. `myapp-2026-10-13T101500123456`, or the git commit), deploy timestamp, pre-deploy snapshot filename, recent history
+- `state/deploy/<project>.json` -- current ref (the bundle name, e.g. `myapp-2026-10-13T101500123456`, or the git commit), deploy timestamp, pre-deploy snapshot filename, recent history, and a `data chown` snapshot pending for the next deploy
 - `<project>/.releases/staged/meta.json` -- the staged release (id, ref, state); there is none while nothing is staged
 
 All state writes are atomic: the new content is written to a temporary file in the same directory, then renamed into place with `os.rename()`. This prevents partial reads if a check or deploy runs concurrently.
@@ -277,7 +277,7 @@ Backup flow:
 
 1. Run the dump command from the manifest, with a 10-minute limit (on overrun or interruption its processes are killed inside the container). Its output goes to a private (0600) `.dump-*` file in the project's `backups/` directory: the plaintext touches disk until step 2 finishes
 2. Encrypt with age using the backup key, then remove the plaintext dump (also on any failure or timeout)
-3. Write atomically to `<project>/backups/<project>-<YYYY-MM-DDTHHMMSS>-<kind>.tar.gz.age` (UTC), where kind is `nightly`, `predeploy`, `preupdate`, `manual`, `prerestore` (restore's safety snapshot) or `premigrate` (before a user-namespace migration)
+3. Write atomically to `<project>/backups/<project>-<YYYY-MM-DDTHHMMSS>-<kind>.tar.gz.age` (UTC), where kind is `nightly`, `predeploy`, `preupdate`, `manual`, `prerestore` (restore's safety snapshot), `premigrate` (before a user-namespace migration) or `prechown` (`data chown`, before it stops the service)
 4. Prune local archives of the same kind beyond that kind's retention count (see OPERATIONS.md)
 5. Log the backup
 
