@@ -161,10 +161,12 @@ chown first takes the project's backup snapshot (kind prechown) while the
 service still runs, then stops the service, gives its read-write binds and
 named volumes to <uid>:<gid>, and leaves it stopped until you deploy, which
 runs it as that user. When the service is the backup service, that deploy
-uses the snapshot as its pre-deploy snapshot (its own dump could not run), so
-its rollback restores the data from before the change. A failed snapshot
-refuses and changes nothing; --no-snapshot goes on without one. A project
-with backup.type: none has no snapshot to take, and says so.""",
+uses the snapshot as its pre-deploy snapshot (its own dump could not run)
+while Docker shows the service has not run since, so its rollback restores
+the data from before the change; a rollback does not revert the ownership.
+A failed snapshot refuses and changes nothing. --no-snapshot goes on without
+one: a rollback of the next deploy then cannot restore data. A project with
+backup.type: none has no snapshot to take, and says so.""",
     "inbox": """\
 Usage: boxmunge inbox [project] [--json]
        boxmunge inbox clean [project] [--yes]

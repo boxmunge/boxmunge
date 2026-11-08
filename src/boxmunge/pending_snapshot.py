@@ -5,19 +5,21 @@
 it as its new user. When that service is the backup service, the deploy's
 own pre-deploy dump (which runs in it) cannot be taken. data chown takes the
 snapshot itself, while the service still runs, and records it here, in the
-deploy state file, with the release it is of and the service it stopped.
+deploy state file, once the stop succeeded: with the release it is of, the
+service and the containers it stopped.
 
-The record holds only while that service has not run since: the next
-pre-deploy step of that release uses it (deploy_steps), and recording that
-deploy clears it (record_deploy_state). Any production start of the service
-(compose_guard, the only way boxmunge starts containers) clears it first,
-since from then on its data may change.
+The record is trusted only as long as Docker shows the service has not run
+since: it is checked when it is used (pending_for_live). A start boxmunge
+did not make (a restart policy after a reboot, a plain `docker start`), a
+recreate or a removal of its containers drops it, and the deploy takes its
+own snapshot as usual. Recording a deploy clears it (record_deploy_state).
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from boxmunge.log import log_operation
+from boxmunge import docker_containers
+from boxmunge.docker_run import DockerError
 from boxmunge.paths import BoxPaths
 from boxmunge.state import StateError, read_state, write_state
 
@@ -27,6 +29,12 @@ _FIELDS = ("name", "taken_by", "service", "ref", "at")
 
 def record_pending(paths: BoxPaths, project: str, name: str, taken_by: str,
                    service: str, containers: list[str]) -> None:
+    """Record `name` for the next deploy. Only after `containers` (the
+    service's, stopped by the caller) are stopped: the time recorded is
+    what their next start is compared with."""
+    if not containers:
+        raise ValueError(f"{project}: a pending snapshot records the containers stopped; "
+                         f"none was named")
     state_path = paths.project_deploy_state(project)
     state = read_state(state_path)
     state[KEY] = {"name": name, "taken_by": taken_by, "service": service,
@@ -43,54 +51,78 @@ def pending(paths: BoxPaths, project: str) -> dict | None:
         return None
     if not (isinstance(entry, dict)
             and all(isinstance(entry.get(k), str) for k in _FIELDS)
-            and isinstance(entry.get("containers"), list)
+            and isinstance(entry.get("containers"), list) and entry["containers"]
             and all(isinstance(c, str) for c in entry["containers"])):
         raise StateError(f"{paths.project_deploy_state(project)}: {KEY} is not a "
                          f"snapshot record: {entry!r}")
+    try:
+        datetime.fromisoformat(entry["at"])
+    except ValueError as e:
+        raise StateError(f"{paths.project_deploy_state(project)}: {KEY} has an "
+                         f"unreadable time: {entry['at']!r}") from e
     return entry
 
 
 def pending_for_live(paths: BoxPaths, project: str) -> dict | None:
-    """The recorded snapshot when it is of the live release and still in
-    backups/; otherwise None, saying why a recorded one is passed over."""
+    """The recorded snapshot when it still holds the data the next deploy
+    would dump; otherwise None, saying why. A record shown stale (another
+    release, gone from backups/, the service has run since) is dropped. When
+    Docker cannot be asked, it is not used and kept for a later check."""
     entry = pending(paths, project)
     if entry is None:
         return None
+    what = f"The snapshot {entry['name']} that {entry['taken_by']} took"
     live = str(read_state(paths.project_deploy_state(project)).get("current_ref", ""))
-    if entry["ref"] != live:
-        print(f"  The snapshot {entry['name']} that {entry['taken_by']} took is of "
-              f"release {entry['ref'] or 'none'}, not of the live {live}; not using it.")
+    try:
+        stale = (f"it is of release {entry['ref'] or 'none'}, not of the live {live}"
+                 if entry["ref"] != live else
+                 "it is no longer in backups/"
+                 if not (paths.project_backups(project) / entry["name"]).exists() else
+                 _has_run_since(project, entry))
+    except DockerError as e:
+        print(f"  WARN: {what} is not used: whether {entry['service']} has run since it "
+              f"was taken cannot be told ({e}).")
         return None
-    if not (paths.project_backups(project) / entry["name"]).exists():
-        print(f"  WARN: The snapshot {entry['name']} that {entry['taken_by']} took is no "
-              f"longer in backups/; not using it.")
+    if stale:
+        drop(paths, project)
+        print(f"  {what} is not used, and is dropped: {stale}. A new snapshot is taken.")
         return None
     return entry
 
 
-def spend_if_service_starts(paths: BoxPaths, project: str, services: list[str] | None,
-                            component: str) -> None:
-    """Before a production up of `services` (None: every service)."""
-    entry = pending(paths, project)
-    if entry is not None and (services is None or entry["service"] in services):
-        _spend(paths, project, entry, component)
+def _has_run_since(project: str, entry: dict) -> str | None:
+    """Why the service may have changed its data since the record, or None."""
+    at = datetime.fromisoformat(entry["at"])
+    states = docker_containers.start_states(project)
+    gone = sorted(set(entry["containers"]) - set(states))
+    if gone:
+        return (f"{', '.join(gone)} of {entry['service']} no longer exists (removed or "
+                f"recreated), so it may have run since")
+    for name, st in sorted(states.items()):
+        if st.service != entry["service"]:
+            continue
+        if st.running:
+            return f"{entry['service']} is running again ({name})"
+        if st.started_at > at:
+            return (f"{entry['service']} has run since ({name} started at "
+                    f"{st.started_at.isoformat(timespec='seconds')})")
+    return None
 
 
-def spend_if_containers_start(paths: BoxPaths, project: str, names: list[str],
-                              component: str) -> None:
-    """Before a `docker start` of production's containers `names`."""
-    entry = pending(paths, project)
-    if entry is not None and set(entry["containers"]) & set(names):
-        _spend(paths, project, entry, component)
-
-
-def _spend(paths: BoxPaths, project: str, entry: dict, component: str) -> None:
-    # Logged, not printed: the deploy that used the snapshot spends it here
-    # too, and after any other start the next deploy simply dumps afresh.
+def drop(paths: BoxPaths, project: str) -> None:
     state_path = paths.project_deploy_state(project)
     state = read_state(state_path)
-    state.pop(KEY, None)
-    write_state(state_path, state)
-    log_operation(component, f"{entry['service']} starts: the snapshot {entry['name']} "
-                  f"that {entry['taken_by']} took is no longer kept for the next deploy",
-                  paths, project=project)
+    if state.pop(KEY, None) is not None:
+        write_state(state_path, state)
+
+
+def age(entry: dict) -> str:
+    """How long ago the snapshot was recorded, for an operator to judge."""
+    seconds = max(0, int((datetime.now(timezone.utc)
+                          - datetime.fromisoformat(entry["at"])).total_seconds()))
+    hours, rest = divmod(seconds, 3600)
+    if hours >= 48:
+        return f"{hours // 24} days"
+    if hours:
+        return f"{hours} h {rest // 60} min"
+    return f"{rest // 60} min" if rest >= 60 else f"{rest} s"

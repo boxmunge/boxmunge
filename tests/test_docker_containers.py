@@ -15,6 +15,7 @@ from boxmunge.docker_run import DockerError
 project_containers = docker_containers.project_containers
 local_image = docker_containers.local_image
 created_times = docker_containers.created_times
+start_states = docker_containers.start_states
 
 _IMG = "sha256:" + "a" * 64
 
@@ -120,6 +121,18 @@ def test_created_times_read_docker_nanosecond_times(daemon):
         "demo-web-1": datetime(2026, 10, 1, 12, 0, 0, 123456, tzinfo=timezone.utc),
         "demo-worker-1": datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)}
     assert "label=com.docker.compose.project=demo" in daemon["calls"][0]
+
+
+def test_start_states_say_who_runs_and_when_each_last_started(daemon):
+    web, never = _container("demo-web-1", "web", running=False), _container("demo-db-1", "db")
+    web["State"]["StartedAt"] = "2026-10-01T12:00:00.123456789Z"
+    never["State"]["StartedAt"] = "0001-01-01T00:00:00Z"
+    daemon["containers"] = [web, never]
+    assert start_states("demo") == {
+        "demo-web-1": docker_containers.StartState(
+            "web", False, datetime(2026, 10, 1, 12, 0, 0, 123456, tzinfo=timezone.utc)),
+        "demo-db-1": docker_containers.StartState(
+            "db", True, datetime(1, 1, 1, tzinfo=timezone.utc))}
 
 
 def test_created_times_of_no_containers_is_empty(daemon):

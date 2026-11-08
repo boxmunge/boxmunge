@@ -1,18 +1,25 @@
 """data chown: the one deliberate change of a service's data ownership."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
+from boxmunge import docker_containers
 from boxmunge.backup import BackupError
 from boxmunge.commands import backup_cmd, data_cmd
+from boxmunge.docker_containers import StartState
 from boxmunge.pending_snapshot import pending, record_pending
 from boxmunge.run_as import ServiceUser, read_users, write_users
 from boxmunge.state import write_state
 
 from tests.bundle_helpers import manifest_text
 
+LONG_AGO = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
-def _setup(paths, monkeypatch, volumes_exist=True, backup="none", backup_service="app"):
+
+def _setup(paths, monkeypatch, volumes_exist=True, backup="none", backup_service="app",
+           others=None):
     calls = []
     project_dir = paths.project_dir("shop")
     (project_dir / "uploads").mkdir(parents=True)
@@ -26,7 +33,7 @@ def _setup(paths, monkeypatch, volumes_exist=True, backup="none", backup_service
         {"type": "bind", "source": str(project_dir / "uploads"), "target": "/u"},
         {"type": "bind", "source": str(project_dir / "conf"), "target": "/c", "read_only": True},
         {"type": "bind", "source": str(project_dir / "never-made"), "target": "/n"},
-        {"type": "volume", "source": "cache", "target": "/cache"}]}}
+        {"type": "volume", "source": "cache", "target": "/cache"}]}, **(others or {})}
     monkeypatch.setattr(data_cmd, "resolved_services", lambda target: ({}, services))
     monkeypatch.setattr(data_cmd, "_running", lambda p, s: ["shop-app-1"])
     monkeypatch.setattr(data_cmd, "_run", lambda cmd, **kw: calls.append(cmd))
@@ -165,22 +172,78 @@ def test_no_snapshot_goes_on_without_one_and_says_so(paths, monkeypatch, capsys)
     _project_dir, calls = _setup(paths, monkeypatch, backup="postgres")
     monkeypatch.setattr(backup_cmd, "backup_locked", lambda *a, **kw: pytest.fail("backed up"))
     data_cmd.chown_locked(paths, "shop", "app", (10001, 10001), no_snapshot=True)
-    assert "will not be able to restore" in capsys.readouterr().out
+    assert "a rollback of the next deploy then cannot restore data" in capsys.readouterr().out
     assert pending(paths, "shop") is None
 
 
-def test_a_second_chown_keeps_the_first_snapshot(paths, monkeypatch, capsys) -> None:
-    """The first chown may have stopped the backup service: the second's
-    dump could not run, and the first snapshot is the data before either."""
-    _project_dir, calls = _setup(paths, monkeypatch, backup="postgres")
-    paths.project_backups("shop").mkdir()
+def _earlier_chown(paths, monkeypatch, state: StartState) -> str:
+    """An earlier chown's record for app, and what Docker now shows of it."""
+    paths.project_backups("shop").mkdir(exist_ok=True)
     first = "shop-2026-11-01T100000-prechown.tar.gz.age"
     (paths.project_backups("shop") / first).write_bytes(b"x")
     record_pending(paths, "shop", first, "data chown", "app", ["shop-app-1"])
+    monkeypatch.setattr(docker_containers, "start_states", lambda p: {"shop-app-1": state})
+    return first
+
+
+def test_a_second_chown_keeps_the_first_snapshot_while_the_service_stays_stopped(
+        paths, monkeypatch, capsys) -> None:
+    """The first chown stopped the backup service: the second's dump could
+    not run, and the first snapshot is the data before either."""
+    _project_dir, calls = _setup(paths, monkeypatch, backup="postgres")
+    monkeypatch.setattr(data_cmd, "_running", lambda p, s: [])
+    first = _earlier_chown(paths, monkeypatch, StartState("app", False, LONG_AGO))
     monkeypatch.setattr(backup_cmd, "backup_locked", lambda *a, **kw: pytest.fail("backed up"))
     data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
-    assert "no new one is taken" in capsys.readouterr().out
+    assert "No new one is taken" in capsys.readouterr().out
     assert pending(paths, "shop")["name"] == first
+
+
+def test_a_second_chown_of_a_service_running_again_takes_a_new_snapshot(
+        paths, monkeypatch, system_container, capsys) -> None:
+    _project_dir, calls = _setup(paths, monkeypatch, backup="postgres")
+    _dumping(paths, monkeypatch, calls)
+    first = _earlier_chown(paths, monkeypatch, StartState("app", True, LONG_AGO))
+    data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
+    assert "is dropped: app is running again" in capsys.readouterr().out
+    assert calls[0] == "dump"
+    assert pending(paths, "shop")["name"] not in (first, None)
+
+
+def test_a_failed_stop_records_nothing(paths, monkeypatch, system_container) -> None:
+    """The service keeps running, so its data moves on from the snapshot."""
+    from boxmunge.docker_run import DockerError
+    _project_dir, calls = _setup(paths, monkeypatch, backup="postgres")
+    _dumping(paths, monkeypatch, calls)
+
+    def stop(cmd, **kw):
+        raise DockerError("docker stop timed out")
+    monkeypatch.setattr(data_cmd, "_run", stop)
+    with pytest.raises(DockerError):
+        data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
+    assert pending(paths, "shop") is None
+    assert [s.rsplit("-", 1)[1] for s in _snapshots(paths)] == ["prechown.tar.gz.age"]
+
+
+def test_data_another_service_writes_too_is_not_kept(
+        paths, monkeypatch, system_container, capsys) -> None:
+    root = paths.project_dir("shop")
+    project_dir, calls = _setup(paths, monkeypatch, backup="postgres", others={"worker": {
+        "volumes": [{"type": "bind", "source": str(root), "target": "/all"}]}})
+    _dumping(paths, monkeypatch, calls)
+    data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
+    out = capsys.readouterr().out
+    assert f"worker also mounts {project_dir / 'uploads'} read-write" in out
+    assert pending(paths, "shop") is None
+
+
+def test_a_read_only_mount_elsewhere_does_not_stop_it_being_kept(
+        paths, monkeypatch, system_container) -> None:
+    _project_dir, calls = _setup(paths, monkeypatch, backup="postgres", others={"worker": {
+        "volumes": [{"type": "volume", "source": "cache", "target": "/c", "read_only": True}]}})
+    _dumping(paths, monkeypatch, calls)
+    data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
+    assert pending(paths, "shop") is not None
 
 
 def test_a_project_whose_running_release_cannot_be_told_refuses(paths, monkeypatch) -> None:

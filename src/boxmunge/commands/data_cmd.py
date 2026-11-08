@@ -53,7 +53,7 @@ from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation
 from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
-from boxmunge.pending_snapshot import pending_for_live, record_pending
+from boxmunge.pending_snapshot import age, pending_for_live, record_pending
 from boxmunge.release import ReleaseStateError
 from boxmunge.release_target import production_target, resolved_services
 from boxmunge.run_as import (
@@ -66,6 +66,7 @@ _STOP_TIMEOUT = 15
 _USAGE = ("usage: boxmunge data adopt <project> <service>:<path> <name> | "
           "boxmunge data chown <project> <service> <uid>:<gid> [--no-snapshot]")
 _TAKEN_BY = "data chown"
+_NO_SNAPSHOT_COST = "a rollback of the next deploy then cannot restore data"
 
 
 class DataError(Exception):
@@ -217,56 +218,77 @@ def _chown_mount(paths: BoxPaths, project: str, model: dict, m, ids: tuple[int, 
     return True
 
 
-def _snapshot_first(paths: BoxPaths, project: str, service: str, running: list[str],
-                    no_snapshot: bool) -> None:
+def _rw_sharer(services: dict, service: str, mounts: list) -> str | None:
+    """Another service that mounts `service`'s data (`mounts`) read-write,
+    and so can change it while `service` is stopped; None when none does."""
+    def overlaps(own, m) -> bool:
+        if own.kind == "volume":
+            return own.source == m.source
+        a, b = Path(str(own.source)), Path(str(m.source))
+        return a == b or a in b.parents or b in a.parents
+    for other, svc in sorted(services.items()):
+        for m in service_mounts(svc) if other != service else ():
+            if m.read_only or m.kind not in ("bind", "volume"):
+                continue
+            hit = next((own for own in mounts if own.kind == m.kind and overlaps(own, m)), None)
+            if hit is not None:
+                return f"{other} also mounts {hit.source} read-write"
+    return None
+
+
+def _snapshot_first(paths: BoxPaths, project: str, service: str, services: dict,
+                    mounts: list, no_snapshot: bool) -> str | None:
     """Take the project's snapshot while `service` still runs; a failed one
-    refuses the chown. It is kept for the next deploy when `service` is the
-    backup service: stopping it leaves that deploy's dump nothing to run in."""
+    refuses the chown. Returns its name when the next deploy is to use it:
+    `service` is the backup service (stopping it leaves that deploy's dump
+    nothing to run in) and no other service can write its data meanwhile.
+    The caller records it once the stop succeeded."""
     taken = pending_for_live(paths, project)
     if taken is not None:
-        # Kept only while the backup service has not run since: it is stopped.
-        print(f"  The snapshot {taken['name']}, taken before an earlier ownership change "
-              f"(at {taken['at']}), stays the next deploy's pre-deploy snapshot; no new "
-              f"one is taken.")
-        return
+        print(f"  The snapshot {taken['name']}, taken {age(taken)} ago before an earlier "
+              f"ownership change, stays the next deploy's pre-deploy snapshot: "
+              f"{taken['service']} has not run since. No new one is taken.")
+        return None
     if no_snapshot:
-        print("  No snapshot (--no-snapshot): a rollback of the next deploy will not be "
-              "able to restore the data as it is now.")
-        return
+        print(f"  No snapshot (--no-snapshot): {_NO_SNAPSHOT_COST}.")
+        return None
     # The running release's manifest: during an open install the project
     # dir may already hold the new one's.
     source = backup_source(paths, project)
     if source.manifest is None:
         raise DataError(f"no snapshot can be taken before the ownership change: "
                         f"{source.skip}. Nothing was changed. Add --no-snapshot to change "
-                        f"ownership without one")
+                        f"ownership without one ({_NO_SNAPSHOT_COST})")
     if source.manifest.get("backup", {}).get("type", "none") == "none":
         print("  No snapshot: backup.type is none, so there is no data backup to take.")
-        return
+        return None
     print("  Taking a snapshot before changing ownership...")
     rc, name = take_snapshot(project, paths, BackupKind.PRECHOWN, source.manifest,
                              source.compose_file)
     if rc != 0 or name is None:
-        raise DataError("the snapshot before the ownership change was not taken (the "
-                        "backup said why above), so nothing was changed. Fix the backup "
-                        "and run data chown again, or add --no-snapshot to change "
-                        "ownership without one (a rollback of the next deploy could then "
-                        "not restore the data)")
+        raise DataError(f"the snapshot before the ownership change was not taken (the "
+                        f"backup said why above), so nothing was changed. Fix the backup "
+                        f"and run data chown again, or add --no-snapshot to change "
+                        f"ownership without one ({_NO_SNAPSHOT_COST})")
     backup_service = resolve_backup_service(source.manifest)
-    if service == backup_service:
-        record_pending(paths, project, name, _TAKEN_BY, service, running)
-        print(f"  {name} is the next deploy's pre-deploy snapshot: {service} is the "
-              f"backup service and stays stopped until that deploy.")
-    else:
-        print(f"  {name} stays in backups/ for a manual restore. The backup service "
-              f"{backup_service} keeps running, so the next deploy takes its own "
-              f"pre-deploy snapshot.")
+    sharer = _rw_sharer(services, service, mounts) if service == backup_service else None
+    if service == backup_service and sharer is None:
+        return name
+    why = (f"{sharer}, so the data can change after the snapshot while {service} is "
+           f"stopped; the next deploy dumps afresh if it can (it warns if it cannot)"
+           if sharer else
+           f"the backup service {backup_service} keeps running, so the next deploy takes "
+           f"its own pre-deploy snapshot")
+    print(f"  {name} stays in backups/ for a manual restore, not for the next deploy: {why}.")
+    return None
 
 
 def chown_locked(paths: BoxPaths, project: str, service: str, ids: tuple[int, int],
                  no_snapshot: bool = False) -> None:
     """Snapshot the project, stop the service, chown its persistent mounts
-    to `ids`, record the user. Caller holds the project lock. The service
+    to `ids`, record the user. A restart policy is not held: a start Docker
+    makes on its own drops the snapshot record when it is used
+    (pending_snapshot). Caller holds the project lock. The service
     is left stopped: its next start (the deploy) runs it as `ids`. Raises
     DataError, DockerError, BindSourceError, RunAsError, ManifestError,
     ReleaseStateError or StateError."""
@@ -283,10 +305,16 @@ def chown_locked(paths: BoxPaths, project: str, service: str, ids: tuple[int, in
                         f"bind or a named volume; there is nothing to chown")
     users = read_users(paths, project)
     running = _running(project, service)
-    _snapshot_first(paths, project, service, running, no_snapshot)
+    keep = _snapshot_first(paths, project, service, services, mounts, no_snapshot)
     if running:
         print(f"  Stopping {', '.join(running)}; it stays stopped until you deploy.")
         _run(["docker", "stop", "-t", str(_STOP_TIMEOUT), *running], capture=True)
+    if keep is not None:
+        # Only once the stop succeeded: a failed or interrupted stop leaves
+        # the service running, and its data moving on from the snapshot.
+        record_pending(paths, project, keep, _TAKEN_BY, service, running)
+        print(f"  {keep} is the next deploy's pre-deploy snapshot while {service} (the "
+              f"backup service) stays stopped until that deploy.")
     done = [m.target for m in mounts if _chown_mount(paths, project, model, m, ids)]
     image_user = users[service].image_user if service in users else ""
     users[service] = ServiceUser(f"{ids[0]}:{ids[1]}", SOURCE_CHOWN, image_user)

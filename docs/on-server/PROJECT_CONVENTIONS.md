@@ -365,7 +365,7 @@ once); a service whose user changes while it keeps data the old user owns (run
 `boxmunge data chown <project> <service> <uid>:<gid>` first: it takes the project's backup
 snapshot while the service still runs, and refuses if that fails, then stops the service, gives its
 read-write binds and volumes to that user, and leaves it stopped for the deploy; a rollback of that
-deploy restores the data from before the change); a release that
+deploy restores the data from before the change, not its ownership); a release that
 would replace a non-empty anonymous volume with an empty named one (`data adopt` first, see
 OPERATIONS.md). Data in an anonymous volume warns at every deploy until it is adopted, and is refused on a
 box whose Docker daemon remaps user namespaces. A user change is checked even with no earlier

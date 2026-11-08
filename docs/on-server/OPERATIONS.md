@@ -667,7 +667,7 @@ Every snapshot is named `<project>-<UTC timestamp>-<kind>.tar.gz.age`, for examp
 | `nightly` | `backup-all` (the 02:00 timer) | `backup.retention` in the manifest (default 7) |
 | `predeploy` | the pre-deploy snapshot of `prod-deploy` and `promote` (`deploy.snapshot_before_deploy`) | 5 |
 | `premigrate` | `userns-migrate`, before its downtime (not for a paused project) | 2 |
-| `prechown` | `data chown`, before it stops the service; when that is the backup service, the next deploy uses it as its pre-deploy snapshot | 3 |
+| `prechown` | `data chown`, before it stops the service; when that is the backup service and it has not run since, the next deploy uses it as its pre-deploy snapshot | 3 |
 | `preupdate` | the container-update timer, only when a pulled image changed and the project is about to be recreated | 3 |
 | `prerestore` | `restore`, a safety snapshot of the data about to be replaced (unless `--no-safety-snapshot`) | 3 |
 | `manual` | `backup <project>`, the MCP `backup` tool, the console, `self-test` | 5 |
@@ -907,15 +907,22 @@ deploying. A `build:` service with no `USER` moves to 10001:10001 at that deploy
 the old user owns, the deploy is refused until `data chown <project> <service> 10001:10001` (or a
 `security.user` that keeps the old user). `data chown` first takes the project's backup snapshot
 (`prechown`) while the service still runs; if that backup fails it refuses and changes nothing
-(fix the backup, or add `--no-snapshot` to go on without one), and a project with
-`backup.type: none` skips it, saying so. Then it stops the service and leaves it stopped: deploy
-straight after. When the stopped service is the backup service, that deploy's own dump has nothing
-to run in, so its pre-deploy step uses the `prechown` snapshot instead, saying so, and a rollback of
-it restores the data as it was before the ownership change (a second `data chown` before the deploy
-keeps the first snapshot). Any start of that service before the deploy (`recover`, `restore`)
-means its data may change, so the deploy then takes its own snapshot. When another service is the
-backup service, it keeps running and the deploy takes its own snapshot as usual. A refused deploy
-of a new bundle leaves its install open (see
+(fix the backup, or add `--no-snapshot` to go on without one: a rollback of the next deploy then
+cannot restore data), and a project with `backup.type: none` skips it, saying so. Then it stops
+the service and leaves it stopped: deploy straight after. When the stopped service is the backup
+service, that deploy's own dump has nothing to run in, so its pre-deploy step uses the `prechown`
+snapshot instead, saying so and how old it is, and a rollback of that deploy restores the data as
+it was before the ownership change. A rollback does not revert the ownership: the data stays
+owned by the new user, while the restored release runs as its own manifest says (as the recorded
+user when it says nothing), so one that ran as another non-root user may not be able to write it.
+The deploy uses the snapshot only while Docker shows the service has not run since: if a
+container of it runs, has started since (a restart policy after a reboot, a `docker start`,
+`recover`), or was removed or recreated, the deploy says so, drops it and takes its own snapshot
+(warning, as for any failed backup, when the service is stopped). A second `data chown` before
+the deploy keeps the first snapshot on the same terms. It is not kept for the deploy when another
+service mounts the same data read-write, since that service can change it meanwhile; nor when
+another service is the backup service: that one keeps running and the deploy takes its own
+snapshot as usual. A refused deploy of a new bundle leaves its install open (see
 [An interrupted or failed install](#an-interrupted-or-failed-install)); `data chown` works on the
 release it installed, and `prod-deploy <project>` then finishes it, pairing its rollback with the
 snapshot that install took before the chown.
