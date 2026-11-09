@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge.commands.resume_cmd import run_resume
-from boxmunge.pause import is_paused, read_paused_state
+from boxmunge.pause import is_paused
 from tests.test_commands.test_resume_cmd import _setup_paused
 
 
