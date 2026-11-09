@@ -30,6 +30,8 @@ def stopped(paths, fake_containers):
     mark_deployed(paths, P)
     slot = slot_dir(paths, P)
     (slot / "release").mkdir(parents=True)
+    for name in ("compose.staging-base.yml", "compose.boxmunge-staging.yml"):
+        (slot / name).write_text("services:\n  web:\n    image: nginx\n")  # as stage writes
     meta = new_meta("bundle", "shop-v2", None)
     write_meta(slot, meta)
     fake_containers.run(P, "web", "sha256:1", running=False)
