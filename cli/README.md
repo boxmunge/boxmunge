@@ -119,9 +119,10 @@ manifest on `stage` and `prod-deploy` before it changes anything; add
 `--dry-run` to run that check without deploying.
 
 The server builds `build:` services on the current digest of each base
-image. `--no-pull` builds from the base images the server already has, for
-when a registry cannot be reached. Servers older than the release that added
-it refuse the flag.
+image. `--no-pull` (on `stage`, `prod-deploy` and `promote`) builds from the
+base images in the server's local image store, for when a registry cannot be
+reached. The client refuses it, before uploading anything, when the server is
+older than 0.11.4.
 
 If a `prod-deploy` is interrupted or fails before the project's pre-deploy
 hook ran, `boxmunge prod-deploy --abandon` uploads nothing and runs
