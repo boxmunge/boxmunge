@@ -7,52 +7,76 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from boxmunge.bundle import extract_bundle
+from boxmunge.bind_mounts import BindMountError, bind_mounted_dirs
+from boxmunge.bundle import BundleError, check_bundle_contents, extract_bundle
+from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.manifest import load_manifest, ManifestError
+from boxmunge.release import check_install, project_data_dirs
 from boxmunge.source import resolve_bundle_source, SourceError
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 
-def _compare_dirs(current: Path, incoming: Path) -> tuple[list[str], list[str], list[str]]:
-    """Compare two directories recursively.
+def _files(root: Path, skip: set[str]) -> set[str]:
+    """Files under ``root`` as relative paths, outside its top-level ``skip`` entries."""
+    files: set[str] = set()
+    if not root.exists():
+        return files
+    for top in root.iterdir():
+        if top.name in skip:
+            continue
+        for f in (top.rglob("*") if top.is_dir() and not top.is_symlink() else [top]):
+            if f.is_file():
+                files.add(str(f.relative_to(root)))
+    return files
+
+
+def _compare_dirs(current: Path, incoming: Path,
+                  box_state: set[str]) -> tuple[list[str], list[str], list[str]]:
+    """Compare two directories recursively, leaving out the ``box_state``
+    entries: an install keeps the server's (secrets, data, the operator's
+    caddy.override.conf, boxmunge's own files) and never installs a
+    bundle's (release.install_release).
     Returns (changed, added, removed) as lists of relative path strings.
     """
-    changed, added, removed = [], [], []
-
-    current_files = set()
-    if current.exists():
-        for f in current.rglob("*"):
-            if f.is_file():
-                current_files.add(str(f.relative_to(current)))
-
-    incoming_files = set()
-    for f in incoming.rglob("*"):
-        if f.is_file():
-            incoming_files.add(str(f.relative_to(incoming)))
-
-    for rel in sorted(incoming_files & current_files):
-        if not filecmp.cmp(current / rel, incoming / rel, shallow=False):
-            changed.append(rel)
-
-    for rel in sorted(incoming_files - current_files):
-        added.append(rel)
-
-    # Skip boxmunge-generated files in removed list
-    skip_prefixes = ("backups/", "data/", "security/", ".releases/", "compose.boxmunge")
-    skip_exact = {"secrets.env"}
-    for rel in sorted(current_files - incoming_files):
-        if rel in skip_exact or any(rel.startswith(p) for p in skip_prefixes):
-            continue
-        removed.append(rel)
-
-    return changed, added, removed
+    current_files = _files(current, box_state)
+    incoming_files = _files(incoming, box_state)
+    changed = [rel for rel in sorted(incoming_files & current_files)
+               if not filecmp.cmp(current / rel, incoming / rel, shallow=False)]
+    return changed, sorted(incoming_files - current_files), sorted(current_files - incoming_files)
 
 
 def _is_git_project(project_name: str, paths: BoxPaths) -> bool:
     """Raises ManifestError when the project's manifest cannot be loaded."""
     return load_manifest(paths.project_manifest(project_name)).get("source") == "git"
+
+
+def _bundle_manifest(extracted: Path, project_name: str) -> dict:
+    """The bundle's manifest. Raises what a deploy refuses the bundle for
+    first: no compose.yml (BundleError), and a manifest that cannot be read
+    or names another project (ManifestError)."""
+    if not (extracted / "compose.yml").is_file():
+        raise BundleError("it has no compose.yml; add one and upload the bundle again")
+    manifest = load_manifest(extracted / "manifest.yml")
+    named = manifest.get("project")
+    if named is None:
+        raise ManifestError(f"its manifest.yml has no project field (it must "
+                            f"be {project_name!r})")
+    if named != project_name:
+        raise ManifestError(f"its manifest.yml names project {named!r}, not "
+                            f"{project_name!r}")
+    return manifest
+
+
+def _refused(error: Exception, extracted: Path) -> int:
+    """Say why a deploy would refuse the bundle, naming paths inside it, not
+    the temporary dir they were read from. A BundleError already says what
+    to do; the others get the advice added."""
+    reason = str(error).replace(f"{extracted}/", "").rstrip().rstrip(".")
+    advice = "" if isinstance(error, BundleError) else " Fix it and upload the bundle again."
+    print(f"ERROR: a deploy would refuse this bundle: {reason}.{advice}", file=sys.stderr)
+    return 1
 
 
 def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
@@ -85,11 +109,27 @@ def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
         except ValueError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
+        try:
+            notes = check_bundle_contents(extracted)
+            manifest = _bundle_manifest(extracted, project_name)
+            bind_mounted_dirs(extracted / "compose.yml", project_dir)
+        except (BundleError, ManifestError, BindMountError) as e:
+            return _refused(e, extracted)
 
         print(f"{project_name}: comparing current vs {bundle_path.name}")
+        for note in notes:
+            print(f"  {note}")
         print()
 
-        changed, added, removed = _compare_dirs(project_dir, extracted)
+        try:
+            check_install(extracted, project_dir)
+            box_state = project_data_dirs(project_dir, extracted).box_state()
+        except BundleError as e:
+            return _refused(e, extracted)
+        except ReleaseStateError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        changed, added, removed = _compare_dirs(project_dir, extracted, box_state)
 
         if not changed and not added and not removed:
             print("  No changes detected — files are identical.")
@@ -104,45 +144,39 @@ def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
 
         print()
 
-        # Check config changes
-        try:
-            manifest = load_manifest(extracted / "manifest.yml")
-        except ManifestError:
-            manifest = None
+        from boxmunge.caddy import site_config
+        from boxmunge.compose import (
+            generate_compose_override, load_user_compose, recorded_users,
+        )
 
-        if manifest:
-            from boxmunge.caddy import generate_caddy_config
-            from boxmunge.compose import (
-                generate_compose_override, load_user_compose, recorded_users,
-            )
-
-            new_caddy = generate_caddy_config(manifest)
-            current_caddy_path = paths.project_caddy_site(project_name)
-            if current_caddy_path.exists():
-                if new_caddy != current_caddy_path.read_text():
-                    print("  Caddy config:     would change")
-                else:
-                    print("  Caddy config:     unchanged")
+        new_caddy, override = site_config(paths, project_name, manifest)
+        source = f" (from {override.name})" if override is not None else ""
+        current_caddy_path = paths.project_caddy_site(project_name)
+        if current_caddy_path.exists():
+            if new_caddy != current_caddy_path.read_text():
+                print(f"  Caddy config:     would change{source}")
             else:
-                print("  Caddy config:     would be created")
+                print(f"  Caddy config:     unchanged{source}")
+        else:
+            print(f"  Caddy config:     would be created{source}")
 
-            # v0.8: pass the candidate compose.yml from the new bundle so
-            # the overlay omits read_only/tmpfs defaults consistently with
-            # what a real deploy of this bundle would produce. The users are
-            # those decided last: the deploy decides them again from its images.
-            candidate_user_compose = load_user_compose(extracted / "compose.yml", project_name)
-            new_compose = generate_compose_override(
-                manifest, user_compose=candidate_user_compose,
-                users=recorded_users(paths, project_name),
-            )
-            current_compose_path = paths.project_compose_override(project_name)
-            if current_compose_path.exists():
-                if new_compose != current_compose_path.read_text():
-                    print("  Compose overlay:  would change")
-                else:
-                    print("  Compose overlay:  unchanged")
+        # v0.8: pass the candidate compose.yml from the new bundle so
+        # the overlay omits read_only/tmpfs defaults consistently with
+        # what a real deploy of this bundle would produce. The users are
+        # those decided last: the deploy decides them again from its images.
+        candidate_user_compose = load_user_compose(extracted / "compose.yml", project_name)
+        new_compose = generate_compose_override(
+            manifest, user_compose=candidate_user_compose,
+            users=recorded_users(paths, project_name),
+        )
+        current_compose_path = paths.project_compose_override(project_name)
+        if current_compose_path.exists():
+            if new_compose != current_compose_path.read_text():
+                print("  Compose overlay:  would change")
             else:
-                print("  Compose overlay:  would be created")
+                print("  Compose overlay:  unchanged")
+        else:
+            print("  Compose overlay:  would be created")
 
         print()
         print(f"  Run 'stage {project_name}' to verify, or 'prod-deploy {project_name}' to deploy directly.")

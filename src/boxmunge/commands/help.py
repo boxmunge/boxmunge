@@ -56,7 +56,7 @@ Project operations:
                           Pushover alerts, and compose_down on critical)
   validate <project>      Validate manifest, env, compose without deploying
   log [filters]           Query structured operational audit log (deploy/check/rollback)
-  logs <project> [svc]    Tail container logs (--follow, --tail N)
+  logs <project> [svc]    Tail container logs (--staging, --follow, --tail N)
   logs --host             Show host journalctl for boxmunge-* units
   logs --boxmunge         Tail the boxmunge service log
   backup <project>        Backup, encrypt, store locally

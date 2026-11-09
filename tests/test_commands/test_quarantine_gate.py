@@ -44,6 +44,8 @@ class Box:
         self.services = {"web": {"image": candidate_name("demo", "web")},
                          "db": {"image": "postgres:16"}, "cache": {"image": "redis:7"}}
         monkeypatch.setattr(gate, "resolved_services", lambda target: ({}, self.services))
+        monkeypatch.setattr("boxmunge.release_policies.resolved_services",
+                            lambda target: ({}, self.services))
         monkeypatch.setattr(gate.docker_containers, "local_image", self.images.get)
         # compose-only services (the manifest names none) count as read-only only when
         # compose.yml says so
@@ -255,8 +257,9 @@ def test_replace_release_starts_nothing_unscanned_while_quarantined(box, monkeyp
     refused rather than started."""
     from boxmunge.commands import deploy
     started = []
-    monkeypatch.setattr(deploy, "_start_and_verify", lambda *a: started.append(a) or 0)
-    assert deploy.replace_release("demo", box.paths, MANIFEST, "demo-r2", None) == 1
+    monkeypatch.setattr(deploy, "_start", lambda *a: started.append(a) or True)
+    with pytest.raises(deploy.NotStarted):
+        deploy.replace_release("demo", box.paths, MANIFEST, "demo-r2", None)
     assert "were not scanned; nothing was started" in capsys.readouterr().err
     assert started == []
 

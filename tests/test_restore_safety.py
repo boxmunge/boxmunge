@@ -272,3 +272,53 @@ class TestMonitorStoppedStaysStopped:
         assert _restore(box) == 1
         assert box.events[-1] == "down"
         assert "up-all" not in box.events
+
+
+class TestPausedRollbackRestore:
+    """The restore inside a rollback of a pause handed to a deploy (`resume
+    --no-start`): it starts only the backup service, leaves the project
+    stopped, and the rollback's own start (the deploy handover) ends the
+    pause."""
+
+    @staticmethod
+    def _paused_rollback(box: Box, source: str = "rollback") -> str:
+        from boxmunge.pause import mark_awaiting_deploy, mark_pause_complete, write_paused_state
+        from boxmunge.release import mark_live
+        from boxmunge.release_txn import open_txn
+        mark_live(box.paths, PROJECT, f"{PROJECT}-v2")
+        write_paused_state(PROJECT, box.paths)
+        mark_pause_complete(PROJECT, box.paths)
+        mark_awaiting_deploy(PROJECT, box.paths)
+        return open_txn(box.paths, PROJECT, source=source, ref=f"{PROJECT}-v1",
+                        replaced_ref=f"{PROJECT}-v2", staged_id=None, snapshot=SNAPSHOT).id
+
+    def test_compose_down_is_the_last_docker_call_before_the_rollbacks_up(self, box):
+        import yaml
+        from boxmunge.commands.deploy import replace_release
+        from boxmunge.commands.restore import restore_locked
+        from boxmunge.pause import is_paused
+        txn = self._paused_rollback(box)
+        assert restore_locked(PROJECT, box.paths, snapshot=SNAPSHOT, txn=txn) == 0
+        assert box.events == ["decrypt", "start-db", "dump", "encrypt", "down",
+                              "start-db", "restore-cmd", "down"]
+        assert is_paused(PROJECT, box.paths)
+        manifest = yaml.safe_load(MANIFEST)
+        # The rollback's config generation wrote the release's overlay.
+        box.paths.project_compose_override(PROJECT).write_text("services: {}\n")
+        with patch("boxmunge.commands.deploy.caddy_reload"), \
+                patch("boxmunge.commands.deploy.smoke_ok", return_value=True), \
+                patch("boxmunge.commands.deploy_handover.prepare_caddy_config"):
+            assert replace_release(PROJECT, box.paths, manifest, f"{PROJECT}-v1", None,
+                                   component="rollback", txn=txn) == 0
+        assert box.events[-2:] == ["down", "up-all"]
+        assert not is_paused(PROJECT, box.paths)
+
+    @pytest.mark.parametrize("which", ["another install", "a deploy's install"])
+    def test_only_the_open_rollback_passes_the_pause(self, box, which, capsys):
+        from boxmunge.commands.restore import restore_locked
+        txn = self._paused_rollback(box, source="rollback" if which == "another install"
+                                    else "bundle")
+        other = "01NOTTHEOPENINSTALL0000000" if which == "another install" else txn
+        assert restore_locked(PROJECT, box.paths, snapshot=SNAPSHOT, txn=other) == 1
+        assert box.events == []
+        assert "paused" in capsys.readouterr().err

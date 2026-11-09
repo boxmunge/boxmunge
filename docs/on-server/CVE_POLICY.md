@@ -1075,7 +1075,7 @@ several findings are involved the title names the worst and adds
 | `[boxmunge:<project>] ACTIVELY EXPLOITED — <CVE> fix available but not running (CISA KEV)` (`relaxed`, every scan) | priority-1 |
 | `[boxmunge:<project>] <N> fixable CVE findings over the posture's gate — rebuild to apply the fix` (once; also when a fix lands for an `AWAITING_FIX` finding) | normal |
 | `[boxmunge:<project>] <N> CVE findings with no fix yet — site stays up, nothing to do now` (`balanced`, `AWAITING_FIX`, once per finding) | normal |
-| `[boxmunge:<project>] Quarantine lifted — back online (<CVE>)` (a scan cleared it; `still paused`, or `smoke test FAILED` at priority-1) | normal |
+| `[boxmunge:<project>] Quarantine lifted — back online (<CVE>)` (a scan cleared it; `still down` for a paused or monitor-stopped project, or `smoke test FAILED` at priority-1) | normal |
 | `[boxmunge:<project>] <N> CVE findings will quarantine from 0.12 (warning only)` (once per finding) | normal |
 | `[boxmunge:<project>] <N> new CVE findings (informational)` (digest, top 5 listed) | normal |
 | `[boxmunge:<project>] Suppression expired — <CVE>` | priority-1 |
@@ -1149,7 +1149,11 @@ The behaviour splits into two camps:
 These print an error naming the two ways out and abort before touching
 containers or configs. `prod-deploy`, `promote` and `stage` are how a fix
 ships, so they go ahead only through the scan described in "Recovering a
-quarantined project"; a project that is also paused is refused.
+quarantined project". A project that is also paused is refused until its pause is
+handed to the deploy with `boxmunge resume <project> --no-start` (it starts nothing). Then
+a deploy of a fixed release is scanned as above, and once its containers start it ends
+the pause and lifts the quarantine: the way out when only a rebuilt release clears a
+finding (a KEV listing cannot be suppressed).
 
 **Skip with a logged ops entry (background sweeps):**
 
@@ -1201,14 +1205,14 @@ evidence that what runs is safe. Those decisions stay with the operator.
 The lift is `security resume`'s: the normal Caddy site is restored, the
 saved restart policies are given back, the scanned local images are
 started with no pull or build, and the smoke test runs. A project that is
-also paused has only its quarantine lifted and stays down until `boxmunge
-resume`. These keep their quarantine, re-asserted on every scan:
-
-- a project mid-migration, until the migration ends;
-- a project the health monitor stopped: its stop stands until `recover`,
-  and the monitor and container-update skip the project while it does, so
-  a lift would leave it running unwatched. Lift it with `security resume`,
-  then bring it back with `recover`.
+also paused, or that the health monitor stopped, has only its quarantine
+lifted and stays down, behind the maintenance page, until `boxmunge resume`
+or `boxmunge recover` brings it back: the monitor's stop stands until
+`recover`, and the monitor and container-update skip the project while it
+does, so a started one would run unwatched. The scan's lift and `security
+resume` follow the same rule, and the lifted alert (`still down`) names the
+command. A project mid-migration keeps its quarantine, re-asserted on every
+scan, until the migration ends.
 
 A lift that cannot complete (its start is refused, for example by an
 install left open, or `compose up` fails) fails that project's scan loudly
@@ -1327,6 +1331,8 @@ This is distinct from `boxmunge resume` (which lifts a manual `pause`).
 The two are independent: if the project is also paused, `security resume`
 lifts only the quarantine. The maintenance page stays up and the
 containers stay stopped until `boxmunge resume <project>` lifts the pause.
+The same goes for a project the health monitor stopped: `security resume`
+lifts the quarantine and `boxmunge recover <project>` brings it back.
 
 **Quarantine holds across a reboot.** Docker restarts a stopped
 `restart: always` container whenever the daemon starts (a reboot, a

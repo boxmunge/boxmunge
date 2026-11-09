@@ -7,6 +7,10 @@
 #
 # Dependabot is the ONLY path that updates these pins. Manual edits are
 # allowed but should be rare and flagged in code review.
+#
+# Not covered: the per-architecture age and rclone pins in system/Dockerfile
+# and the cosign pins in bootstrap/cosign.sh are bumped by hand, from
+# upstream's signed checksums (see the comments there).
 
 version: 2
 updates:

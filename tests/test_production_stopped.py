@@ -207,7 +207,7 @@ def test_an_unreadable_slot_on_clear_is_alerted(paths, stopped) -> None:
     (slot_dir(paths, P) / "meta.json").write_text("{not json")
     sent: list[tuple] = []
     with patch("boxmunge.compose_guard.compose_up"), \
-            patch("boxmunge.compose_guard.notify",
+            patch("boxmunge.compose_up_steps.notify",
                   lambda *a, **k: sent.append((a[1], a[2], k["priority"]))):
         compose_up_checked(paths, P, component="check-all", compose_files=PROD_FILES)
     assert len(sent) == 1 and "meta.json" in sent[0][1] and sent[0][2] == 1

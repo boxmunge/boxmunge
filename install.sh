@@ -26,23 +26,24 @@ if [[ "${1:-}" == "--upgrade-shim" ]]; then
     shift
 fi
 
-# ---------------------------------------------------------------------------
-# Cosign — pinned version + checksum.
-#
-# Used by the upgrade shim to verify the keyless signature on SHA256SUMS for
-# every release before installing. Hard-required, no fallback. Pin the binary
-# version + checksum so a compromised github.com release page can't swap in
-# a malicious cosign. Source of truth for the checksum is upstream's
-# `cosign_checksums.txt` for the same release.
-# ---------------------------------------------------------------------------
-export COSIGN_VERSION="v2.4.1"
-export COSIGN_SHA256="8b24b946dd5809c6bd93de08033bcf6bc0ed7d336b7785787c080f574b89249b"
+# shellcheck source=bootstrap/cosign.sh
+source "${SCRIPT_DIR}/bootstrap/cosign.sh"
 
 # ---------------------------------------------------------------------------
 # Pre-flight
 # ---------------------------------------------------------------------------
 if [[ "$(id -u)" -ne 0 ]]; then
     echo "ERROR: This script must be run as root." >&2
+    exit 1
+fi
+
+# cosign (bootstrap/cosign.sh) and age and rclone (system/Dockerfile) are
+# pinned for amd64 and arm64 only; on any other CPU the install would fail
+# halfway or leave backups unable to run.
+HOST_ARCH="$(dpkg --print-architecture)"
+if ! cosign_sha256 "${HOST_ARCH}" >/dev/null; then
+    echo "ERROR: boxmunge supports amd64 (x86_64) and arm64 (aarch64) hosts;" \
+         "this one is ${HOST_ARCH}. Install it on a Debian 13 VPS with one of those CPUs." >&2
     exit 1
 fi
 
@@ -152,30 +153,6 @@ ensure_install_prereqs() {
 ensure_install_prereqs
 
 # ---------------------------------------------------------------------------
-# Install cosign (used by the upgrade shim to verify release signatures).
-#
-# Idempotent: if the pinned version is already installed, this is a no-op.
-# Failure is fatal — the upgrade shim hard-requires cosign and would refuse
-# to install future releases otherwise.
-# ---------------------------------------------------------------------------
-install_cosign() {
-    if command -v cosign >/dev/null 2>&1; then
-        local installed_version
-        installed_version="$(cosign version 2>&1 | grep -oE 'GitVersion:[[:space:]]*v[0-9.]+' | head -1 | awk '{print $NF}')"
-        if [[ "${installed_version}" == "${COSIGN_VERSION}" ]]; then
-            return 0
-        fi
-        echo "  cosign present (version='${installed_version}'), upgrading to ${COSIGN_VERSION}"
-    fi
-    echo "  Installing cosign ${COSIGN_VERSION}..."
-    local url="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
-    curl -sSLf "${url}" -o /tmp/cosign
-    echo "${COSIGN_SHA256}  /tmp/cosign" | sha256sum -c -
-    install -m 0755 /tmp/cosign /usr/local/bin/cosign
-    rm -f /tmp/cosign
-}
-
-# ---------------------------------------------------------------------------
 # Trivy install — required for CVE scanning (boxmunge security scan).
 # Failure is fatal — without Trivy, the daily CVE scan timer cannot run.
 #
@@ -229,7 +206,8 @@ echo ""
 echo "========================================================"
 echo "  Ensuring cosign is installed (release signature verification)"
 echo "========================================================"
-install_cosign
+# Fatal on failure: the upgrade shim would refuse every future release.
+install_cosign "${HOST_ARCH}"
 
 echo ""
 echo "========================================================"
@@ -338,12 +316,12 @@ if [[ ! -L "${BOXMUNGE_ROOT}/env-active" ]]; then
     ln -sfn "${BOXMUNGE_ROOT}/env-a" "${BOXMUNGE_ROOT}/env-active"
 fi
 
-# Ensure upgrade-state perms allow deploy access (idempotent — fixes existing v0.3.0/v0.3.1 installs)
+# Ensure upgrade-state perms allow deploy access (idempotent). Not chown -R:
+# that left probation.json unreadable to deploy (see the script).
 if [[ -d "${BOXMUNGE_ROOT}/upgrade-state" ]]; then
-    chown -R root:deploy "${BOXMUNGE_ROOT}/upgrade-state"
+    chown root:deploy "${BOXMUNGE_ROOT}/upgrade-state"
     chmod 770 "${BOXMUNGE_ROOT}/upgrade-state"
-    [[ -f "${BOXMUNGE_ROOT}/upgrade-state/active-slot" ]] && chmod 660 "${BOXMUNGE_ROOT}/upgrade-state/active-slot"
-    [[ -f "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json" ]] && chmod 660 "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json"
+    BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/upgrade-state-perms.sh"
 fi
 
 # Ensure caddy/sites perms: 775 root:deploy so deploy can write generated
@@ -407,40 +385,28 @@ if [[ ! -f "${BOXMUNGE_ROOT}/config/rclone/rclone.conf" ]]; then
     install -m 640 -o root -g deploy /dev/null "${BOXMUNGE_ROOT}/config/rclone/rclone.conf"
 fi
 
-# Build + (re)start the boxmunge-system container — isolation for age/rclone
-# (blast-radius containment). There is no host fallback: while the container
-# is absent, backups, restores and backup-sync fail loudly. A transient
-# build/network failure still must not block an upgrade, so warn and carry
-# on. Rebuild (tagging boxmunge.invalid/system/system, the data helper's image) only when the definition changed or the container isn't
-# running, mirroring the caddy block.
-if [[ -d "${SCRIPT_DIR}/system" ]]; then
-    SYSTEM_CHANGED=0
-    mkdir -p "${BOXMUNGE_ROOT}/system"
-    # The container runs as the deploy user so it can read the 0600 backup
-    # temp files and the root:deploy backup key (compose.yml `user:`).
-    printf 'BOXMUNGE_UID=%s\nBOXMUNGE_GID=%s\nBOXMUNGE_CONFIG=%s\nBOXMUNGE_PROJECTS=%s\n' \
-        "$(id -u deploy)" "$(id -g deploy)" \
-        "${BOXMUNGE_ROOT}/config" "${BOXMUNGE_ROOT}/projects" \
-        > "${BOXMUNGE_ROOT}/system/.env.next"
-    for f in Dockerfile compose.yml; do
-        if ! cmp -s "${SCRIPT_DIR}/system/$f" "${BOXMUNGE_ROOT}/system/$f" 2>/dev/null; then
-            SYSTEM_CHANGED=1
-        fi
-        cp "${SCRIPT_DIR}/system/$f" "${BOXMUNGE_ROOT}/system/$f"
-    done
-    if ! cmp -s "${BOXMUNGE_ROOT}/system/.env.next" "${BOXMUNGE_ROOT}/system/.env" 2>/dev/null; then
-        SYSTEM_CHANGED=1
-    fi
-    mv "${BOXMUNGE_ROOT}/system/.env.next" "${BOXMUNGE_ROOT}/system/.env"
-    chown -R root:root "${BOXMUNGE_ROOT}/system"
-    if [[ "${SYSTEM_CHANGED}" -eq 1 ]] || ! docker inspect boxmunge-system >/dev/null 2>&1; then
-        if ! docker compose -f "${BOXMUNGE_ROOT}/system/compose.yml" up -d --build; then
-            echo "WARNING: boxmunge-system container build failed. Backups," \
-                 "restores and backup-sync will FAIL until it runs. Re-run" \
-                 "install.sh to retry." >&2
-        fi
-    fi
-fi
+# Build + (re)start the boxmunge-system container: isolation for age and
+# rclone, also the data helper's image. There is no host fallback: without it
+# backups, restores, backup-sync and data operations fail. A failed build is
+# recorded and the rest of the install carries on, so the box is complete
+# but for this image; fail_if_system_image_stale then stops a fresh install
+# or an operator's re-run at the end, before "installed successfully".
+# Run by the upgrade shim it only warns: the shim blocklists a release on any
+# install.sh failure, which for a transient download error would hold the
+# release's fixes off the box, while the previous container keeps running on
+# its previous image (`health` and `doctor` warn about it). The installer
+# fingerprint is then left unrecorded, so the next upgrade runs install.sh,
+# and the build, again.
+SYSTEM_IMAGE_STALE=0
+SYSTEM_REBUILD="sudo docker compose -f ${BOXMUNGE_ROOT}/system/compose.yml up -d --build"
+refresh_system_container() {
+    BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/system-container.sh" && return 0
+    SYSTEM_IMAGE_STALE=1
+    echo "WARNING: the boxmunge-system image did not build (see above); the previous" \
+         "container, if any, keeps running. Backups, restores and data operations need" \
+         "it. Rebuild it as supervisor once the cause is fixed: ${SYSTEM_REBUILD}" >&2
+}
+refresh_system_container
 
 # Ensure stashes dir exists and is writable by deploy (group). Stash files
 # are created by deploy during upgrade flows; the dir itself is root-owned
@@ -573,6 +539,20 @@ if [[ "${INSTALLED_VERSION}" != "unknown" && "${FROM_UPGRADE_SHIM}" -eq 0 ]]; th
     echo "${INSTALLED_VERSION}" > "${BOXMUNGE_ROOT}/config/version"
 fi
 
+# The boxmunge-system build failed (refresh_system_container): everything
+# else is in place, so a fresh install or an operator's re-run stops here
+# with the rebuild to run. Under the upgrade shim it only warned.
+fail_if_system_image_stale() {
+    [[ "${SYSTEM_IMAGE_STALE}" -eq 1 && "${FROM_UPGRADE_SHIM}" -eq 0 ]] || return 0
+    echo "" >&2
+    echo "ERROR: boxmunge is installed, but the boxmunge-system image did not build" \
+         "(see the WARNING above), so backups, restores and data operations cannot" \
+         "run yet. Fix the cause, then rebuild it as supervisor: ${SYSTEM_REBUILD}" \
+         "and check with: boxmunge doctor" >&2
+    exit 1
+}
+fail_if_system_image_stale
+
 # ---------------------------------------------------------------------------
 # Record the installer fingerprint (install.sh and the files it installs
 # from, as applied) so the upgrade shim can detect when a future release
@@ -585,16 +565,27 @@ fi
 # next upgrade attempt.
 # ---------------------------------------------------------------------------
 INSTALLER_HASH_FILE="${BOXMUNGE_ROOT}/state/installer.sha256"
-mkdir -p "$(dirname "${INSTALLER_HASH_FILE}")"
-# Covers install.sh and the files it installs from: a release that changes
-# only bootstrap/sshd-hardening.sh must re-run it too. The shim computes the
-# same fingerprint over a new bundle (tests/test_installer_fingerprint.py).
-(cd "${SCRIPT_DIR}" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}' > "${INSTALLER_HASH_FILE}.tmp"
-mv -f "${INSTALLER_HASH_FILE}.tmp" "${INSTALLER_HASH_FILE}"
-chown root:deploy "${INSTALLER_HASH_FILE}" 2>/dev/null || true
-chmod 0644 "${INSTALLER_HASH_FILE}"
+if [[ "${SYSTEM_IMAGE_STALE}" -eq 1 ]]; then
+    echo "  Installer fingerprint not recorded: the next upgrade re-runs install.sh" \
+         "to retry the boxmunge-system build"
+else
+    mkdir -p "$(dirname "${INSTALLER_HASH_FILE}")"
+    # Covers install.sh and the files it installs from: a release that changes
+    # only bootstrap/sshd-hardening.sh, or only system/Dockerfile, must re-run it
+    # too. The shim computes the same fingerprint over a new bundle
+    # (tests/test_installer_fingerprint.py).
+    (cd "${SCRIPT_DIR}" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' -o -path './system/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}' > "${INSTALLER_HASH_FILE}.tmp"
+    mv -f "${INSTALLER_HASH_FILE}.tmp" "${INSTALLER_HASH_FILE}"
+    chown root:deploy "${INSTALLER_HASH_FILE}" 2>/dev/null || true
+    chmod 0644 "${INSTALLER_HASH_FILE}"
+fi
 
 echo ""
 echo "========================================================"
-echo "  boxmunge ${INSTALLED_VERSION} installed successfully"
+if [[ "${SYSTEM_IMAGE_STALE}" -eq 1 ]]; then
+    echo "  boxmunge ${INSTALLED_VERSION} installed, but boxmunge-system did not build"
+    echo "  (see the WARNING above)"
+else
+    echo "  boxmunge ${INSTALLED_VERSION} installed successfully"
+fi
 echo "========================================================"

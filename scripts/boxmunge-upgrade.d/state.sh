@@ -21,18 +21,20 @@ LOCK_HELD=0
 
 printable() { local s="${1:0:80}"; printf '%s' "${s//[^[:alnum:]._+-]/?}"; }
 
+# These four refuse corrupt or planted state, often under the health timer,
+# which discards the shim's stderr: die_logged, so `boxmunge log` shows why.
 require_slot() {  # require_slot <value> <where>
     [[ "$1" == "a" || "$1" == "b" ]] \
-        || die "Invalid slot '$(printable "$1")' in $2 (expected a or b); refusing to continue"
+        || die_logged "Invalid slot '$(printable "$1")' in $2 (expected a or b); refusing to continue"
 }
 
 require_semver() {  # require_semver <value> <where>
     [[ "$1" =~ $SEMVER_RE ]] \
-        || die "Invalid version '$(printable "$1")' in $2 (expected semver like 0.3.5 or 0.3.5-rc.1)"
+        || die_logged "Invalid version '$(printable "$1")' in $2 (expected semver like 0.3.5 or 0.3.5-rc.1)"
 }
 
 refuse_symlink() {
-    [[ ! -L "$1" ]] || die "$1 is a symlink; refusing to use it as root. Remove it and re-run."
+    [[ ! -L "$1" ]] || die_logged "$1 is a symlink; refusing to use it as root. Remove it and re-run."
 }
 
 # read_untrusted <file>: print a deploy-writable file. A FIFO would block a
@@ -55,8 +57,8 @@ with os.fdopen(fd, "rb") as f:
 PYRU
     case "$rc" in
         0) ;;
-        3) die "$1 is a symlink, FIFO or other non-regular file; refusing to read it as root. Remove it and re-run." ;;
-        *) die "Cannot read $1; inspect it and repair or remove it" ;;
+        3) die_logged "$1 is a symlink, FIFO or other non-regular file; refusing to read it as root. Remove it and re-run." ;;
+        *) die_logged "Cannot read $1; inspect it and repair or remove it" ;;
     esac
 }
 

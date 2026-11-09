@@ -177,7 +177,5 @@ def container_bind_problems(
     project directory (or a control file) read-write: the record alone would
     bless that mount, so the running state is inspected directly."""
     protected = _protected(project_dir, project_dir, read_files)
-    binds = [("a running container", src, rw) for src, rw in container_binds]
-    problems = _bind_problems(binds, project_dir, project_dir, protected, binds)
-    return [f"{p} The project's running containers hold this mount; redeploy "
-            f"to replace it." for p in problems]
+    binds = [("an existing container", src, rw) for src, rw in container_binds]
+    return _bind_problems(binds, project_dir, project_dir, protected, binds)

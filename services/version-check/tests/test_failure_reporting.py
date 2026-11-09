@@ -87,7 +87,7 @@ class TestFailureQuery:
                 client.post("/v1/report-failure", json={
                     "version": "0.2.1", "installed_from": "0.2.0",
                     "stage": stage, "timestamp": "2024-01-15T14:30:00Z"},
-                    environ_base={"REMOTE_ADDR": f"10.0.0.{i + 1}"})
+                    environ_base={"REMOTE_ADDR": f"10.0.{i + 1}.1"})
             resp = client.get("/v1/failures?version=0.2.1")
         assert resp.status_code == 200
         data = resp.get_json()
@@ -151,7 +151,7 @@ class TestAutoTrip:
                 client.post("/v1/report-failure", json={
                     "version": "0.2.1", "installed_from": "0.2.0",
                     "stage": "apply", "timestamp": "2024-01-15T14:30:00Z"},
-                    environ_base={"REMOTE_ADDR": f"10.0.0.{i + 1}"})
+                    environ_base={"REMOTE_ADDR": f"10.0.{i + 1}.1"})
             # Should not be tripped (auto-trip disabled)
             resp = client.get("/v1/check?v=0.2.0")
             data = resp.get_json()
@@ -173,7 +173,7 @@ class TestAutoTrip:
                 client.post("/v1/report-failure", json={
                     "version": "0.2.1", "installed_from": "0.2.0",
                     "stage": "apply", "timestamp": "2024-01-15T14:30:00Z"},
-                    environ_base={"REMOTE_ADDR": f"10.0.0.{i + 1}"})
+                    environ_base={"REMOTE_ADDR": f"10.0.{i + 1}.1"})
             resp = client.get("/v1/check?v=0.2.0")
             data = resp.get_json()
         assert data["security"] is None
@@ -217,7 +217,7 @@ class TestShimStages:
         for i, stage in enumerate(sorted(stages)):
             resp = client.post("/v1/report-failure", json={
                 "version": "0.2.1", "installed_from": "0.2.0", "stage": stage},
-                environ_base={"REMOTE_ADDR": f"10.1.0.{i + 1}"})
+                environ_base={"REMOTE_ADDR": f"10.1.{i + 1}.1"})
             assert resp.status_code == 204, stage
 
 

@@ -206,11 +206,12 @@ reads from that directory is checked before use:
   `active-slot`.
 - `probation.json` must be a JSON object with a semver `version`, an
   ISO-8601 `expires_at` with a timezone, and a `previous_slot` of `a` or `b`
-  that is the current standby slot and a working venv (promotion deletes
-  it; a rollback swaps to it). One naming the live slot is stale and is
-  removed. An `expires_at` later than a fresh probation's 6 hours (plus 15
-  minutes for clock steps) counts as expired, so a forged far-future value
-  cannot hold off upgrades.
+  that is the current standby slot. One naming the live slot is stale and is
+  removed. Promotion deletes the standby whatever it holds; a rollback swaps
+  to it only if it is a working venv, and otherwise refuses (with one error
+  and one alert per probation). An `expires_at` later than a fresh
+  probation's 6 hours (plus 15 minutes for clock steps) counts as expired, so
+  a forged far-future value cannot hold off upgrades.
 - `blocklist.json` must be a JSON object keyed by semver versions.
 - None of these files, nor the legacy `upgrade.lock` (below), may be a
   symlink, a FIFO or anything but a plain file. Root opens them without
@@ -466,11 +467,15 @@ compromise of any single one cannot silently propagate.
    `--require-hashes`.
 
 5. **External binaries inside the system container.** age and rclone are
-   downloaded over HTTPS in `system/Dockerfile`, then verified against
-   `AGE_SHA256` and `RCLONE_SHA256` ARGs baked into the Dockerfile via
-   `sha256sum -c`. Mismatched downloads abort the image build. Version
-   and SHA bumps travel together through Dependabot or a single audit-
-   visible commit.
+   downloaded over HTTPS in `system/Dockerfile`, then verified via
+   `sha256sum -c` against a SHA256 baked into the Dockerfile for each
+   supported architecture (`AGE_SHA256_AMD64`, `AGE_SHA256_ARM64`, and the
+   same for rclone). Mismatched downloads abort the image build, and so does
+   any other architecture. Dependabot does not track these: a version and
+   its hashes are bumped by hand in one audit-visible commit, from
+   upstream's signed checksums (rclone's PGP-signed `SHA256SUMS`, age's
+   Sigsum proofs). The cosign that verifies releases is pinned the same way,
+   per architecture, in `bootstrap/cosign.sh`.
 
 6. **Base container images.** Every internal Dockerfile pins its base
    by digest (`FROM image:tag@sha256:<digest>`), not by tag, so a

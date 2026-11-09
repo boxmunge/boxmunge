@@ -224,12 +224,15 @@ def test_recover_reads_the_slot_once(paths, fake_containers) -> None:
 
 def test_recover_prompt_names_what_it_starts(paths, fake_containers, capsys) -> None:
     _stopped(paths, fake_containers)
-    with patch("builtins.input", return_value="n"):
+    with patch("builtins.input", return_value="n") as asked, \
+            patch("sys.stdin", **{"isatty.return_value": True}):
         assert run_recover("myapp", paths) == 1
+    asked.assert_called_once()
     assert "Start the production containers that staging's data copy stopped" in \
         capsys.readouterr().out
     _break_slot(paths)
-    with patch("builtins.input", return_value="n"):
+    with patch("builtins.input", return_value="n") as asked, \
+            patch("sys.stdin", **{"isatty.return_value": True}):
         assert run_recover("myapp", paths) == 1
     assert "Bring production up with its compose files" in capsys.readouterr().out
 
@@ -252,7 +255,7 @@ def test_recover_with_an_unreadable_slot_starts_production(paths, fake_container
     prod_and_stage(paths)
     _break_slot(paths)
     with patch("boxmunge.compose_guard.compose_up") as up, \
-            patch("boxmunge.compose_guard.notify"), \
+            patch("boxmunge.compose_up_steps.notify"), \
             patch("boxmunge.commands.recover_cmd.caddy_reload"), \
             patch("boxmunge.commands.recover_cmd.run_smoke", return_value=(True, "ok")):
         assert run_recover("myapp", paths, yes=True) == 0

@@ -20,7 +20,7 @@ def _function_body(name: str) -> str:
 
 
 def _first_call(name: str) -> int:
-    m = re.search(rf"^{name}$", SCRIPT, re.M)
+    m = re.search(rf"^{name}( .*)?$", SCRIPT, re.M)
     assert m, f"no top-level call of {name} in install.sh"
     return m.start()
 

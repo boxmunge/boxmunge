@@ -33,6 +33,7 @@ from boxmunge.compose_images import BUILT_IMAGE_HOST, built_image_name
 from boxmunge.compose_resolve import ComposeResolveError
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker_run import DockerError, run as _run
+from boxmunge.pause import awaiting_deploy, is_paused
 from boxmunge.paths import BoxPaths
 from boxmunge.release_target import DeployRefused, production_target
 from boxmunge.run_as import RunAsError, ServiceUser
@@ -106,9 +107,17 @@ def decide_release_users(project_name: str, paths: BoxPaths, manifest: dict,
 def generate_release_config(project_name: str, paths: BoxPaths, manifest: dict,
                             component: str, users: dict[str, ServiceUser]) -> None:
     """Write the release's Caddy site and compose overlay (not yet live)
-    with `users`, then record them. Raises OSError or ValueError."""
-    print("  Generating Caddy config...")
-    prepare_caddy_config(paths, manifest)
+    with `users`, then record them. A paused project (awaiting this deploy:
+    deploy_handover) keeps its maintenance site until its start has run.
+    Raises OSError or ValueError."""
+    if is_paused(project_name, paths):
+        if not awaiting_deploy(project_name, paths):
+            raise ValueError(f"{project_name} is paused and its pause was not handed to a "
+                             f"deploy (resume --no-start); nothing may prepare a release")
+        print("  Caddy config: the maintenance page stays until the containers start.")
+    else:
+        print("  Generating Caddy config...")
+        prepare_caddy_config(paths, manifest)
     print("  Generating compose overlay...")
     prepare_compose_override(paths, manifest, component=component, users=users or None)
     deploy_images.record_release_users(paths, production_target(paths, project_name),

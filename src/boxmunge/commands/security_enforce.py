@@ -17,7 +17,9 @@ Every other posture keeps deploy or `security resume` as the way out: a
 published fix not yet deployed, or a distro re-triage, is not evidence the
 running images are safe. A stale KEV catalog never lifts one: it reads as
 "nothing exploited", which is exactly what must not be trusted. Nor does a
-lift start a project the health monitor stopped: `recover` brings that back.
+lift start a paused project or one the health monitor stopped: its quarantine
+is lifted and it stays down (quarantine_lift.start_hold, the rule `security
+resume` follows too) until `resume` or `recover`.
 """
 from __future__ import annotations
 
@@ -25,7 +27,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.kev_withdrawal import withdrawal_hold
 from boxmunge.commands.quarantine_lift import restore_from_quarantine
 from boxmunge.cve.alerting import (
@@ -138,13 +139,9 @@ def clears_quarantine(posture: Posture, decisions: Sequence[ProjectDecision], *,
 
 def _lift_blocker(paths: BoxPaths, project: str) -> str | None:
     """Why a cleared quarantine must not be lifted from here, or None. A
-    project mid-migration is not started again (resume refuses it too), nor
-    is one the health monitor stopped (that stop stands until `recover`, and
-    the monitor and container-update skip the project while it does). Their
-    quarantine is re-asserted instead, and the scan says so."""
-    if is_monitor_stopped(project, paths):
-        return ("quarantine kept: the health monitor stopped it; `security resume`, "
-                "then `recover`")
+    project mid-migration is not lifted (security resume refuses it too):
+    its quarantine is re-asserted instead, and the scan says so. Whether the
+    lift may start the project is quarantine_lift's (start_hold)."""
     block = is_blocked(project, paths)
     if block is not None and block.reason is BlockReason.MIGRATING:
         return "quarantine kept: a userns migration is in progress; the scan after it lifts it"
@@ -165,7 +162,7 @@ def _lift_cleared(
     log_operation("cve-scan", f"{project}: quarantine for {cve} lifted by the scan: {reason}",
                   paths, project=project, detail={"cve": cve})
     alert = format_quarantine_lifted_alert(
-        project, cve, reason, paused=restored.paused, smoke=restored.smoke)
+        project, cve, reason, held=restored.held, smoke=restored.smoke)
     try:
         send_alerts((alert,), paths)
     except Exception as e:  # noqa: BLE001 — alerting must never block scan

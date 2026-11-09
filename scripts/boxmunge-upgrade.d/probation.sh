@@ -32,7 +32,7 @@ print("yes" if now >= expires or beyond_cap else "no")
 print(expires.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
 print("beyond_cap" if beyond_cap else "")
 PYPROB
-)" || die "$PROBATION_FILE is malformed; refusing to act on it"
+)" || die_logged "$PROBATION_FILE is malformed; refusing to act on it"
     PROB_VERSION="$(echo "$out" | sed -n '1p')"
     PROB_PREV_SLOT="$(echo "$out" | sed -n '2p')"
     PROB_EXPIRED="$(echo "$out" | sed -n '3p')"
@@ -48,21 +48,21 @@ PYPROB
 # load_probation: 0 with PROB_* set while a release is on probation, 1 when
 # there is none. A probation naming the live slot as previous_slot is stale
 # (an older shim's rollback left it behind; deploy may remove it anyway), so
-# it is removed with a warning. Otherwise previous_slot must be a slot a
-# rollback could really use; promotion deletes it.
+# it is removed with a warning. previous_slot need not hold a working venv:
+# a pre-0.11 shim could recycle it mid-probation. Only a rollback needs it
+# (do_rollback checks); promotion deletes it, and demanding it here left such
+# a probation unable to expire, deferring every upgrade for good (#119).
 load_probation() {
     [[ -e "$PROBATION_FILE" || -L "$PROBATION_FILE" ]] || return 1
     read_probation
     if [[ "$PROB_PREV_SLOT" == "$ACTIVE_SLOT" ]]; then
         [[ ! -e "$(inflight_marker "$ACTIVE_SLOT")" ]] \
-            || die "$PROBATION_FILE names the live slot during an interrupted upgrade; refusing to act on it"
+            || die_logged "$PROBATION_FILE names the live slot during an interrupted upgrade; refusing to act on it"
         log "WARN: removing stale $PROBATION_FILE: previous_slot '$PROB_PREV_SLOT' is the live slot"
         bm_log warn upgrade "stale probation removed" "{\"version\": \"$PROB_VERSION\"}"
         rm -f "$PROBATION_FILE"
         return 1
     fi
-    rollback_target_ok "$PROB_PREV_SLOT" \
-        || die "$PROBATION_FILE previous_slot '$PROB_PREV_SLOT' is not a working venv a rollback could use; inspect it as supervisor, or remove the file to accept $PROB_VERSION"
 }
 
 # work_interrupted: an upgrade or rollback was cut short, and check-probation
@@ -87,9 +87,13 @@ refuse_during_probation() {
     elif load_probation; then
         why="$PROB_VERSION is on probation (it ends $PROB_EXPIRES_AT)"
         [[ "$PROB_EXPIRED" == "no" ]] || why="$PROB_VERSION is on probation (it has expired and the health timer promotes it within minutes)"
-        why="$why and slot $PROB_PREV_SLOT holds the previous release, the only rollback target"
+        if rollback_target_ok "$PROB_PREV_SLOT"; then
+            why="$why and slot $PROB_PREV_SLOT holds the previous release, the only rollback target"
+        else
+            why="$why; its rollback target, slot $PROB_PREV_SLOT, is not a working venv, so a failing health check cannot roll it back"
+        fi
         retry="Retry after the probation ends."
-        [[ "$mode" != "force" ]] || retry="To accept $PROB_VERSION and give up that fallback now, remove $PROBATION_FILE and re-run."
+        [[ "$mode" != "force" ]] || retry="To accept $PROB_VERSION now and end its probation, remove $PROBATION_FILE and re-run."
     else
         return 0
     fi
@@ -112,9 +116,9 @@ resume_rollback() {
         { read -r version; read -r stage; read -r count; } < "$marker" || true
         require_semver "$version" "$marker"
         [[ "$stage" =~ ^[a-z_]+$ && "$count" =~ ^[0-9]+$ ]] \
-            || die "$marker is malformed; inspect both slots as supervisor"
+            || die_logged "$marker is malformed; inspect both slots as supervisor"
         rollback_target_ok "$slot" \
-            || die "$marker is in env-$slot, which is not a working venv; inspect both slots as supervisor"
+            || die_logged "$marker is in env-$slot, which is not a working venv; inspect both slots as supervisor"
         log "Resuming the interrupted rollback of $version (stage $stage) onto slot $slot"
         complete_rollback "$version" "$("$BOXMUNGE_ROOT/env-$slot/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")" \
             "$stage" "$slot" "$count"
@@ -141,6 +145,22 @@ recover_interrupted_upgrade() {
         interrupted "$(standby_slot)"
 }
 
+# rollback_impossible <version> <prev_slot>: health is critical, but the
+# previous slot cannot take over (a pre-0.11 shim may have recycled it). Said
+# once per probation, as an error and an alert; later timer fires only print
+# it, rather than adding an error to the log every five minutes. The marker
+# is in root-only upgrade-root/ and goes when the probation ends.
+rollback_impossible() {
+    local version="$1" prev_slot="$2" marker="$UPGRADE_ROOT_DIR/rollback-impossible"
+    local msg="$version failed its probation health check, but cannot be rolled back: env-$prev_slot, its rollback target, is not a working venv. Run boxmunge health as supervisor to see what failed; the probation ends, promoting $version, at $PROB_EXPIRES_AT."
+    if [[ "$(cat "$marker" 2>/dev/null)" != "$version" ]]; then
+        bm_log error upgrade "$msg"
+        send_notification "boxmunge rollback needed but impossible" "$msg" 1
+        echo "$version" > "$marker"
+    fi
+    die "$msg"
+}
+
 cmd_check_probation() {
     load_active_slot
     acquire_lock skip  # an upgrade is in progress; retry on the next health-timer fire
@@ -150,6 +170,7 @@ cmd_check_probation() {
     local inactive
     inactive="$(standby_slot)"
     if ! load_probation; then
+        rm -f "$UPGRADE_ROOT_DIR/rollback-impossible"
         # No probation, so a standby venv is an orphan: left by a rollback, an
         # upgrade that failed before its swap, or a promotion made from the
         # deploy context (deploy cannot rmtree root-owned dirs).
@@ -161,10 +182,11 @@ cmd_check_probation() {
     fi
     local version="$PROB_VERSION" prev_slot="$PROB_PREV_SLOT"
 
+    # Expiry first: promotion needs no rollback target (it deletes it).
     if [[ "$PROB_EXPIRED" == "yes" ]]; then
         log "Probation expired for $version — promoting"
         remove_slot "$prev_slot"
-        rm -f "$PROBATION_FILE"
+        rm -f "$PROBATION_FILE" "$UPGRADE_ROOT_DIR/rollback-impossible"
         interruptions "$version" 0
         log "Version $version promoted"
         bm_log info upgrade "probation passed" "{\"version\": \"$version\"}"
@@ -186,6 +208,7 @@ cmd_check_probation() {
     timeout --kill-after=10 180 "$(active_venv)/bin/boxmunge-server" health --json >/dev/null 2>&1 || health_exit=$?
 
     if [[ "$health_exit" -eq 2 ]]; then
+        rollback_target_ok "$prev_slot" || rollback_impossible "$version" "$prev_slot"
         local from_version
         from_version="$("$BOXMUNGE_ROOT/env-$prev_slot/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")"
         log "CRITICAL health failure during probation for $version — rolling back"

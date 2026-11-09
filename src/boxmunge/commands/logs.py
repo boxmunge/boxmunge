@@ -8,8 +8,16 @@ use `log` to query structured deploy/check/rollback events.
 import subprocess
 import sys
 
-from boxmunge.paths import BoxPaths
-from boxmunge.docker import compose_logs, compose_logs_capture, DockerError
+from boxmunge.docker import (
+    DockerError, compose_logs, compose_logs_capture, staging_compose_project,
+)
+from boxmunge.legacy_stage import legacy_staging_compose
+from boxmunge.paths import (
+    STAGING_SUFFIX, BoxPaths, InvalidProjectName, validate_project_name,
+)
+from boxmunge.staged_release import (
+    ComposeTarget, has_slot, refuse_planted, staging_target,
+)
 
 
 def cmd_logs(args: list[str]) -> None:
@@ -28,10 +36,19 @@ def cmd_logs(args: list[str]) -> None:
         usage_error("logs", "--host and --boxmunge take no other arguments")
 
     parsed = parse_args(
-        "logs", args, flags={"--follow"}, options={"--tail"},
+        "logs", args, flags={"--follow", "--staging"}, options={"--tail"},
         min_positional=1, max_positional=2,
     )
-    project = require_project_name("logs", parsed.positional[0])
+    name = parsed.positional[0]
+    paths = BoxPaths()
+    # `<p>-staging` is staging's compose project, unless a legacy project
+    # dir has that name: it gets the rename hint from the name check below.
+    # The disk is consulted only for a valid <p>, never a path.
+    base = name[:-len(STAGING_SUFFIX)] if name.endswith(STAGING_SUFFIX) else None
+    if base is not None and _valid_name(base) and not (paths.projects / name).is_dir():
+        usage_error("logs", f"staging runs as '{name}'; read its logs with: "
+                            f"logs {base} --staging")
+    project = require_project_name("logs", name)
     service = parsed.positional[1] if len(parsed.positional) > 1 else None
     follow = parsed.has("--follow")
     tail = 100
@@ -41,39 +58,70 @@ def cmd_logs(args: list[str]) -> None:
             usage_error("logs", f"--tail must be a whole number, got {raw_tail!r}")
         tail = int(raw_tail)
 
-    paths = BoxPaths()
-    project_dir = paths.project_dir(project)
-    if not project_dir.exists():
+    if not paths.project_dir(project).exists():
         print(f"ERROR: Project not found: {project}", file=sys.stderr)
         sys.exit(1)
-
-    compose_files = ["compose.yml"]
-    override = paths.project_compose_override(project)
-    if override.exists():
-        compose_files.append("compose.boxmunge.yml")
+    try:
+        target = (_staging_target(paths, project) if parsed.has("--staging")
+                  else _production_target(paths, project))
+    except (NothingStaged, OSError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
 
     try:
         if follow:
             # Real-time streaming — pass through unchanged so terminal
             # users get immediate output as docker emits it.
-            compose_logs(
-                project_dir, service=service, tail=tail, follow=follow,
-                compose_files=compose_files, project_name=project,
-            )
+            compose_logs(target.cwd, service=service, tail=tail, follow=follow,
+                         **target.kwargs())
             return
         # Non-follow: capture, print, then append a writable hint
         # postscript if read-only-fs errors are detected. The capture
         # delay is bounded by `--tail=N` and is imperceptible at the
         # default tail=100.
-        output = compose_logs_capture(
-            project_dir, service=service, tail=tail,
-            compose_files=compose_files, project_name=project,
-        )
+        output = compose_logs_capture(target.cwd, service=service, tail=tail,
+                                      **target.kwargs())
         print(output, end="" if output.endswith("\n") else "\n")
         _append_writable_postscript(output)
     except DockerError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+def _valid_name(name: str) -> bool:
+    try:
+        validate_project_name(name)
+    except InvalidProjectName:
+        return False
+    return True
+
+
+class NothingStaged(Exception):
+    """`logs --staging` for a project with no staged release."""
+
+
+def _production_target(paths: BoxPaths, project: str) -> ComposeTarget:
+    files = ["compose.yml"]
+    if paths.project_compose_override(project).exists():
+        files.append("compose.boxmunge.yml")
+    return ComposeTarget(cwd=paths.project_dir(project), project_name=project, files=files)
+
+
+def _staging_target(paths: BoxPaths, project: str) -> ComposeTarget:
+    """Staging's compose project as it runs: from the slot, or from the
+    project dir for a stage left by boxmunge 0.10.1. Raises OSError for a
+    link planted where the slot belongs, NothingStaged when there is none."""
+    if has_slot(paths, project):
+        refuse_planted(paths, project)
+        return staging_target(paths, project)
+    project_dir = paths.project_dir(project)
+    legacy = legacy_staging_compose(project_dir)
+    if legacy is not None:
+        return ComposeTarget(cwd=project_dir, project_name=staging_compose_project(project),
+                             files=legacy)
+    raise NothingStaged(f"'{project}' has no staged release. Stage one with "
+                        f"'stage {project}', or read production's logs with "
+                        f"'logs {project}'.")
 
 
 def _append_writable_postscript(output: str) -> None:
