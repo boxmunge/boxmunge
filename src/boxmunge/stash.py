@@ -176,13 +176,18 @@ def _check_member_safe(member: tarfile.TarInfo) -> None:
 # after the stash was taken. Restoring an old marker would mark a running
 # project paused (so backups and health checks skip it); dropping a new one
 # would put a quarantined project back in rotation. They are left as they are.
-_LIFECYCLE_MARKER_SUFFIXES = (".paused.json", ".quarantined.json")
+#
+# The users records say who each service runs as over its data. Only the
+# commands that decide users (deploy, promote, rollback, stage, legacy-stage)
+# and `data chown` write them, never an upgrade; the record the stash holds
+# is only older. Restored after a `data chown`, it would make the rollback's
+# regenerated overlay start the service as its old user over data its new
+# user owns. They are left as they are too.
+_KEPT_SUFFIXES = (".paused.json", ".quarantined.json", ".users.json")
 
 
-def _is_lifecycle_marker(member_name: str) -> bool:
-    return member_name.startswith("state/deploy/") and member_name.endswith(
-        _LIFECYCLE_MARKER_SUFFIXES
-    )
+def _is_kept_on_disk(member_name: str) -> bool:
+    return member_name.startswith("state/deploy/") and member_name.endswith(_KEPT_SUFFIXES)
 
 
 def _allowed_owner(member: tarfile.TarInfo) -> tuple[int, int] | None:
@@ -277,7 +282,7 @@ def restore_stash(paths: BoxPaths, archive: Path | None = None) -> Path:
         _validate_meta(tar, archive, paths)
 
         for member in tar.getmembers():
-            if member.name == META_FILENAME or _is_lifecycle_marker(member.name):
+            if member.name == META_FILENAME or _is_kept_on_disk(member.name):
                 continue
 
             _check_member_safe(member)

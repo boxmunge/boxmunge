@@ -208,7 +208,8 @@ def _released_at(payload: dict[str, Any], now: datetime) -> datetime:
         # in UTC (0001-01-01T00:00:00+14:00).
         raise _Failed(REJECTED, f"feed 'dateReleased' is not a timestamp: {raw!r}") from None
     if released > now + KEV_MAX_FUTURE_RELEASE:
-        raise _Failed(REJECTED, f"feed 'dateReleased' {raw} is in the future")
+        raise _Failed(REJECTED, f"feed 'dateReleased' {raw} is in the future "
+                                f"(or this box's clock is behind)")
     return released
 
 

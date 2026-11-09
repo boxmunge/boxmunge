@@ -152,7 +152,7 @@ confirmation unless --yes. If container teardown fails, nothing is deleted
 and the command exits 1; --force deletes anyway. Does not support --dry-run.""",
     "data": """\
 Usage: boxmunge data adopt <project> <service>:<path> <name>
-       boxmunge data chown <project> <service> <uid>:<gid> [--no-snapshot]
+       boxmunge data chown <project> <service> <uid>:<gid> [--no-snapshot | --staging]
 
 adopt copies the service's anonymous volume at <path> into a new named volume
 <project>_<name> that the next deploy adopts. Stops the service's containers
@@ -163,15 +163,21 @@ refused for this leaves its install open: prod-deploy <project> --abandon
 first. The anonymous volume is kept until you remove it.
 
 chown first takes the project's backup snapshot (kind prechown) while the
-service still runs, then stops the service, gives its read-write binds and
-named volumes to <uid>:<gid>, and leaves it stopped until you deploy, which
-runs it as that user. When the service is the backup service, that deploy
+service still runs (when the backup service is stopped, the dump runs over
+its data at rest in a one-off container of its image, offline), then stops
+the service, gives its read-write binds and named volumes, and staging's
+copies of them, to <uid>:<gid>, records the user and regenerates the
+overlay, and leaves it stopped (its restart policy held) until you deploy,
+which runs it as that user. When the service is the backup service, that deploy
 uses the snapshot as its pre-deploy snapshot (its own dump could not run)
 while Docker shows the service has not run since, so its rollback restores
 the data from before the change; a rollback does not revert the ownership.
 A failed snapshot refuses and changes nothing. --no-snapshot goes on without
 one: a rollback of the next deploy then cannot restore data. A project with
-backup.type: none has no snapshot to take, and says so.""",
+backup.type: none has no snapshot to take, and says so. --staging gives
+staging's copies alone to <uid>:<gid> (no snapshot; production unchanged),
+as a stage refused for their owner asks (a stage with staging.copy_data
+gives the stores it copies to the staged users itself).""",
     "inbox": """\
 Usage: boxmunge inbox [project] [--json]
        boxmunge inbox clean [project] [--yes]

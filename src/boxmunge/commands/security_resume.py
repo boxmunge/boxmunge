@@ -29,6 +29,7 @@ from boxmunge.cve.quarantine import (
 )
 from boxmunge.cve.scan_state import BASIS_STARTUP_IMAGES
 from boxmunge.cve.kev import load_kev
+from boxmunge.cve.kev_withdrawals import KevWithdrawalsError, accept_withdrawals
 from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.lifecycle import BlockReason, is_blocked
@@ -180,8 +181,23 @@ def security_resume_locked(paths: BoxPaths, project: str, *,
     print(f"Resuming {project}...")
     rc = _resume_lift(paths, project)
     if rc == 0:
+        _accept_withdrawals(paths, project, scan)
         _alert_kev_risk(paths, project, check, accepted=accept_stale_kev)
     return rc
+
+
+def _accept_withdrawals(paths: BoxPaths, project: str, scan: ProjectScan) -> None:
+    """The lift accepts every KEV withdrawal the images still contain, so a
+    later quarantine of this project is not held for it again."""
+    found = {f.finding.cve_id for d in scan.decisions for f in d.findings}
+    try:
+        accepted = accept_withdrawals(paths, project, found)
+    except KevWithdrawalsError as e:
+        _err(f"WARNING: {e}. The quarantine is lifted, but a later quarantine of "
+             f"{project} may be held for these withdrawals again.")
+        return
+    if accepted:
+        print(f"  Accepted the CISA KEV withdrawal of {', '.join(accepted)} for {project}.")
 
 
 def _alert_kev_risk(paths: BoxPaths, project: str, check: KevLiftCheck, *,
