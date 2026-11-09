@@ -24,31 +24,28 @@ cosign_sha256() {
 }
 
 # install_cosign <debian-arch>: install the pinned cosign at COSIGN_BIN unless
-# that version is already there and runs. One that does not run is replaced:
-# installers before 0.11.4 put the amd64 build on arm64 hosts.
+# the file there already has the pinned hash. Anything else there (another
+# version, or the amd64 build installers before 0.11.4 put on arm64 hosts) is
+# replaced; nothing unverified is run. Sets an EXIT trap while it downloads
+# (install.sh has none of its own).
 install_cosign() {
-    local arch="$1" sha256 out installed="" tmp
+    local arch="$1" sha256
     if ! sha256="$(cosign_sha256 "${arch}")"; then
         echo "ERROR: no cosign pin for architecture ${arch}" >&2
         return 1
     fi
-    if [[ -x "${COSIGN_BIN}" ]]; then
-        if out="$("${COSIGN_BIN}" version 2>&1)"; then
-            if [[ "${out}" =~ GitVersion:[[:space:]]*(v[0-9.]+) ]]; then
-                installed="${BASH_REMATCH[1]}"
-            fi
-            [[ "${installed}" != "${COSIGN_VERSION}" ]] || return 0
-            echo "  cosign present (version='${installed}'), upgrading to ${COSIGN_VERSION}"
-        else
-            echo "  ${COSIGN_BIN} did not run on this ${arch} host; replacing it"
-        fi
+    if [[ -f "${COSIGN_BIN}" ]] && echo "${sha256}  ${COSIGN_BIN}" | sha256sum -c --status -; then
+        return 0
     fi
+    [[ ! -e "${COSIGN_BIN}" ]] || echo "  ${COSIGN_BIN} is not the pinned cosign ${COSIGN_VERSION} for ${arch}; replacing it"
     echo "  Installing cosign ${COSIGN_VERSION} (${arch})..."
-    tmp="$(mktemp)"
-    curl -sSLf "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-${arch}" -o "${tmp}"
-    echo "${sha256}  ${tmp}" | sha256sum -c -
-    install -m 0755 "${tmp}" "${COSIGN_BIN}"
-    rm -f "${tmp}"
+    COSIGN_DOWNLOAD="$(mktemp)"
+    trap 'rm -f "${COSIGN_DOWNLOAD}"' EXIT
+    curl -sSLf "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-${arch}" -o "${COSIGN_DOWNLOAD}"
+    echo "${sha256}  ${COSIGN_DOWNLOAD}" | sha256sum -c -
+    install -m 0755 "${COSIGN_DOWNLOAD}" "${COSIGN_BIN}"
+    rm -f "${COSIGN_DOWNLOAD}"
+    trap - EXIT
     if ! "${COSIGN_BIN}" version >/dev/null 2>&1; then
         echo "ERROR: the installed ${COSIGN_BIN} does not run on this ${arch} host" >&2
         return 1
