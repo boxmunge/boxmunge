@@ -201,3 +201,36 @@ def test_a_host_owner_outside_the_remap_range_is_the_overflow_uid(paths) -> None
     mount = dc.Mount("bind", "/u", str(uploads), False)
     assert os.lstat(uploads).st_uid < S
     assert dc._owner_uid(production_target(paths, "shop"), {}, mount, S) == 65534
+
+
+def test_staging_data_another_uid_owns_is_refused_whatever_staging_ran_as(
+        paths, monkeypatch) -> None:
+    """An operator session: production was given to 10001, staging's copy
+    (data-staging) stayed root's, and staging's record already said 10001,
+    so the stage started and the app crashed (sqlite readonly)."""
+    write_users(paths, "shop", {"app": DEFAULT}, staging=True)
+    monkeypatch.setattr(dc, "_owner_uid", lambda target, model, mount, offset: 0)
+    problems = dc.staging_owner_problems(
+        staging_release_target(paths, "shop"), {},
+        {"app": _svc({"type": "bind", "source": "/p/shop/data-staging", "target": "/d"})},
+        {"app": DEFAULT}, 0)
+    assert len(problems) == 1
+    assert "/p/shop/data-staging (uid 0)" in problems[0]
+    assert "boxmunge data chown shop app 10001:10001 --staging" in problems[0]
+
+
+def test_staging_data_its_user_owns_or_not_yet_made_passes(paths, monkeypatch) -> None:
+    owners = iter([10001, None])
+    monkeypatch.setattr(dc, "_owner_uid", lambda target, model, mount, offset: next(owners))
+    assert dc.staging_owner_problems(
+        staging_release_target(paths, "shop"), {},
+        {"app": _svc("data:/data", "cache:/cache")}, {"app": DEFAULT}, 0) == []
+
+
+def test_staging_root_and_name_users_are_not_compared(paths, monkeypatch) -> None:
+    monkeypatch.setattr(dc, "_owner_uid", lambda *a: pytest.fail("compared"))
+    assert dc.staging_owner_problems(
+        staging_release_target(paths, "shop"), {},
+        {"app": _svc("data:/data"), "db": _svc("db:/db")},
+        {"app": ServiceUser("0:0", "manifest"), "db": ServiceUser(None, "image", "postgres")},
+        0) == []

@@ -235,6 +235,37 @@ def user_change_problems(paths: BoxPaths, target: ReleaseTarget, model: dict[str
     return problems
 
 
+def staging_owner_problems(target: ReleaseTarget, model: dict[str, Any],
+                           services: dict[str, dict], users: dict[str, ServiceUser],
+                           offset: int) -> list[str]:
+    """Staging's stores as its start will find them (after the data copy):
+    a numeric non-root user over a store another uid owns. Staging keeps
+    its copies between stages, and data chown or the copy may have given
+    production's data to another user meanwhile, so the owner itself is
+    checked, whatever staging last ran as."""
+    problems = []
+    for name, new in sorted(users.items()):
+        after = new.runs_as()
+        data = persistent(service_mounts(services.get(name) or {}))
+        if not data or not (after.isascii() and after.isdigit()):
+            continue
+        wrong = [f"{m.source or m.target} (uid {uid})" for m in data
+                 if (uid := _owner_uid(target, model, m, offset)) not in (None, int(after))]
+        if not wrong:
+            continue
+        ids = new.owner_ids()
+        spec = f"{ids[0]}:{ids[1]}" if ids else f"{after}:<gid>"
+        problems.append(
+            f"service {name} runs as {after} in staging ({describe(new)}), but staging's "
+            f"data in {', '.join(wrong)} belongs to another user, so its files would be "
+            f"unwritable. Give staging's copies to it with `boxmunge data chown "
+            f"{target.project} {name} {spec} --staging`, then stage again (with "
+            f"staging.copy_data, the copy brings production's owners: run it without "
+            f"--staging, which gives production's data to it too, as a deploy of this "
+            f"release will need)")
+    return problems
+
+
 def unreadable_entries(source: str) -> list[str]:
     """What a container reaching `source` through the "other" bits cannot
     read: files without o+r, directories without o+rx (links are skipped;
