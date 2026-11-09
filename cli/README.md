@@ -51,7 +51,7 @@ on the server's console), or be confirmed at the terminal. An IP target needs
 | `init --server HOST [--host NAME]` | Write `.boxmunge` and scaffold a project |
 | `bundle [DIR] [--list] [--validate] [--json]` | Build `<project>-<timestamp>.tar.gz` |
 | `stage [--dry-run] [--no-pull]` | Bundle, upload, stage |
-| `promote [--dry-run]` | Promote staging to production |
+| `promote [--dry-run] [--no-pull]` | Promote staging to production |
 | `prod-deploy [--dry-run] [--no-snapshot] [--no-pull]` | Bundle, upload, deploy to production |
 | `prod-deploy --abandon` | Undo an interrupted install before its pre-deploy hook ran |
 | `rollback [--yes]` | Roll production back to the previous deploy |

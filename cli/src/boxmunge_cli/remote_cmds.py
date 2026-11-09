@@ -109,7 +109,8 @@ def _cmd_promote(args: argparse.Namespace) -> int:
     from boxmunge_cli.ssh import run_ssh
     config = connect()
     return run_ssh(config, "promote", config["project"],
-                   *(["--dry-run"] if args.dry_run else []))
+                   *(["--dry-run"] if args.dry_run else []),
+                   *(["--no-pull"] if args.no_pull else []))
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
@@ -198,6 +199,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                               description="Run 'promote <project>' on the server.")
     p.add_argument("--dry-run", action="store_true",
                    help="Show what would be promoted without doing it")
+    p.add_argument("--no-pull", action="store_true",
+                   help="Build from the base images the server already has instead of "
+                        "checking their registries for newer digests")
     p.set_defaults(func=_cmd_promote)
 
     p = subparsers.add_parser("status", help="Show the server's project dashboard",

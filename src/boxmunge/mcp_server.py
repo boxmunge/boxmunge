@@ -84,6 +84,9 @@ _TOOL_DEFS: list[dict[str, Any]] = [
             "properties": {
                 "project": {"type": "string", "description": "Project name"},
                 "dry_run": {"type": "boolean", "description": "Preview without applying"},
+                "no_pull": {"type": "boolean", "description": "Build from the base images "
+                            "this box already has instead of checking their registries "
+                            "for newer digests (when a registry is unreachable)"},
             },
             "required": ["project"],
         },

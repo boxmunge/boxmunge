@@ -1,9 +1,10 @@
 """Which builds check the base images' registries (#124).
 
-stage and prod-deploy build with --pull unless the operator passes
---no-pull, so a base image's fixes reach the next release. rollback does
-not pull: it rebuilds the release it goes back to from the base images
-the box has.
+stage, prod-deploy and promote build with --pull unless the operator
+passes --no-pull, so a base image's fixes reach the next release. A pull
+does not move the box's local tag of the base, so promote pulls too, or it
+would build on the base the box had before the stage. rollback does not
+pull: it has to work without the registry.
 """
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ import pytest
 
 from boxmunge import cli
 from boxmunge.commands.deploy import run_deploy
+from boxmunge.commands.promote_cmd import run_promote
 from boxmunge.commands.rollback import run_rollback
 from boxmunge.commands.stage_cmd import run_stage
 from boxmunge.paths import BoxPaths
@@ -59,6 +61,16 @@ def test_stage_pulls_unless_told_not_to(paths, builds, kwargs, pulled) -> None:
     assert builds[-1] == ("stage", pulled)
 
 
+@pytest.mark.parametrize("kwargs, pulled", [({}, True), ({"pull": False}, False)])
+def test_promote_pulls_unless_told_not_to(paths, builds, kwargs, pulled) -> None:
+    _bundles(paths)
+    with staging_docker_off():
+        assert run_deploy("myapp", paths, ref=V1) == 0
+        assert run_stage("myapp", paths, ref=V2) == 0
+        assert run_promote("myapp", paths, **kwargs) == 0
+    assert builds[-1] == ("promote", pulled)
+
+
 def test_rollback_does_not_pull(paths, builds) -> None:
     _bundles(paths)
     with docker_off():
@@ -77,10 +89,11 @@ def _main(argv: list[str], monkeypatch) -> int:
 
 @pytest.fixture
 def runs(monkeypatch, paths: BoxPaths) -> list[tuple[str, dict]]:
-    from boxmunge.commands import deploy, stage_cmd
+    from boxmunge.commands import deploy, promote_cmd, stage_cmd
     monkeypatch.setattr(BoxPaths.__init__, "__defaults__", (paths.root,))
     called: list[tuple[str, dict]] = []
-    for module, name in [(deploy, "run_deploy"), (stage_cmd, "run_stage")]:
+    for module, name in [(deploy, "run_deploy"), (stage_cmd, "run_stage"),
+                         (promote_cmd, "run_promote")]:
         monkeypatch.setattr(module, name,
                             lambda *a, _n=name, **k: called.append((_n, k)) or 0)
     return called
@@ -91,6 +104,8 @@ def runs(monkeypatch, paths: BoxPaths) -> list[tuple[str, dict]]:
     (["prod-deploy", "myapp", "--no-pull"], "run_deploy", False),
     (["stage", "myapp"], "run_stage", True),
     (["stage", "myapp", "--no-pull"], "run_stage", False),
+    (["promote", "myapp"], "run_promote", True),
+    (["promote", "myapp", "--no-pull"], "run_promote", False),
 ])
 def test_no_pull_reaches_the_command(argv, run, pulled, runs, monkeypatch) -> None:
     assert _main(argv, monkeypatch) == 0
@@ -104,17 +119,19 @@ def test_abandon_takes_no_pull_option(runs, monkeypatch, capsys) -> None:
 
 def test_the_mcp_tools_pass_no_pull_and_redeploy(monkeypatch) -> None:
     from boxmunge import mcp_tools
-    from boxmunge.commands import deploy, stage_cmd
+    from boxmunge.commands import deploy, promote_cmd, stage_cmd
     from boxmunge.mcp_server import _TOOL_DEFS
     called: list[dict] = []
     monkeypatch.setattr(deploy, "run_deploy", lambda *a, **k: called.append(k) or 0)
     monkeypatch.setattr(stage_cmd, "run_stage", lambda *a, **k: called.append(k) or 0)
+    monkeypatch.setattr(promote_cmd, "run_promote", lambda *a, **k: called.append(k) or 0)
     monkeypatch.setattr(mcp_tools, "_get_paths", lambda: None)
     mcp_tools._tool_prod_deploy("myapp", no_pull=True, redeploy=True)
     mcp_tools._tool_stage("myapp", no_pull=True)
     mcp_tools._tool_stage("myapp")
+    mcp_tools._tool_promote("myapp", no_pull=True)
     assert (called[0]["pull"], called[0]["redeploy"]) == (False, True)
-    assert [c["pull"] for c in called[1:]] == [False, True]
+    assert [c["pull"] for c in called[1:]] == [False, True, False]
     schemas = {t["name"]: t["inputSchema"]["properties"] for t in _TOOL_DEFS}
     assert {"no_pull", "redeploy"} <= set(schemas["prod_deploy"])
-    assert "no_pull" in schemas["stage"]
+    assert "no_pull" in schemas["stage"] and "no_pull" in schemas["promote"]
