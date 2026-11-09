@@ -24,7 +24,7 @@ DOCS = Path(__file__).resolve().parents[1] / "docs" / "on-server"
 # A message's `prod-deploy {project}` with no option after it (`<project>`
 # forms are command listings: help, usage, the shell's menu).
 BARE = re.compile(r"prod-deploy \{[a-z_]+\}(?!\s*--)")
-# Each bare one left is printed where the bare command is accepted.
+# Files whose bare ones are printed where the bare command is accepted.
 ACCEPTED = {
     "redeploy_hint.py": "a git project never deployed: its ref is what there is",
     "commands/check.py": "not deployed yet: a first deploy of an uploaded bundle",
@@ -33,14 +33,23 @@ ACCEPTED = {
     "commands/add_git_project_cmd.py": "a git project: no inbox",
     "commands/diff_cmd.py": "printed after comparing the bundle waiting in the inbox",
     "commands/deploy_no_bundle.py": "after an upload, or for a git project",
-    "commands/security_resume.py": "after uploading a release that fixes it",
 }
+# Anywhere else a bare one must sit beside the redeploy: the message then
+# names both, an upload's deploy and the installed release's.
+BESIDE = ("redeploy_command(", "redeploy_either(", "--redeploy")
+
+
+def _bare_without_the_redeploy(path: Path) -> list[str]:
+    lines = path.read_text().splitlines()
+    return [f"{path.relative_to(SRC)}:{i + 1}: {line.strip()}"
+            for i, line in enumerate(lines) if BARE.search(line)
+            and not any(b in "\n".join(lines[max(i - 2, 0):i + 3]) for b in BESIDE)]
 
 
 def test_no_remedy_names_a_bare_prod_deploy_where_it_is_refused() -> None:
-    found = sorted({str(p.relative_to(SRC)) for p in SRC.rglob("*.py")
-                    if BARE.search(p.read_text())})
-    assert [f for f in found if f not in ACCEPTED] == []
+    found = [hit for p in SRC.rglob("*.py") if str(p.relative_to(SRC)) not in ACCEPTED
+             for hit in _bare_without_the_redeploy(p)]
+    assert found == []
 
 
 def test_the_operations_guide_names_the_redeploy_for_a_missing_image() -> None:

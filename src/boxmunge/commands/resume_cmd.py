@@ -41,7 +41,7 @@ from boxmunge.pause import (
 )
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
-from boxmunge.redeploy_hint import redeploy_command
+from boxmunge.redeploy_hint import redeploy_command, redeploy_either
 from boxmunge.release_txn import open_install_reason
 from boxmunge.state import read_state, write_state
 
@@ -315,7 +315,8 @@ def resume_locked(
 def _deploy_hint(project_name: str) -> str:
     """For a refusal whose remedy is a deploy, which a pause refuses."""
     return (f"It stays paused. If only a deploy can fix this: `boxmunge resume "
-            f"{project_name} --no-start`, then `boxmunge prod-deploy {project_name}`.")
+            f"{project_name} --no-start`, then `boxmunge prod-deploy {project_name}` of "
+            f"an upload, or `boxmunge {redeploy_either(project_name)}`.")
 
 
 def _stop_again(project_name: str, paths: BoxPaths) -> None:
@@ -366,8 +367,9 @@ def hand_to_deploy_locked(project_name: str, paths: BoxPaths) -> int:
     scanned = (" (its images are scanned first; a clean deploy also lifts the CVE "
                "quarantine)" if is_quarantined(project_name, paths) else "")
     then = (f"Finish its open install{scanned}: {install}" if install is not None else
-            f"Deploy it: `boxmunge prod-deploy {project_name}` (or `promote "
-            f"{project_name}`){scanned}")
+            f"Deploy it: `boxmunge {redeploy_command(paths, project_name)}`, "
+            f"`boxmunge prod-deploy {project_name}` of an upload, or `promote "
+            f"{project_name}`{scanned}")
     print(f"'{project_name}' was not started. It stays down behind its maintenance page, "
           f"with its containers stopped, until the next deploy (or rollback) starts it, "
           f"which ends the pause. {then}.")

@@ -1099,7 +1099,8 @@ The fix is a deploy, which a pause refuses, so each of those refusals names the 
 
 ```
 boxmunge resume myapp --no-start    # starts nothing
-boxmunge prod-deploy myapp          # or promote; ends the pause once its containers start
+boxmunge prod-deploy myapp --redeploy   # or prod-deploy after an upload, or promote;
+                                        # ends the pause once its containers start
 ```
 
 `--no-start` hands the pause to the next deploy. Until that deploy starts the containers, the
@@ -1417,10 +1418,10 @@ check myapp
 validate myapp
 ```
 
-If the config looks stale, redeploy to regenerate:
+If the config looks stale, redeploy the installed release to regenerate it:
 
 ```
-prod-deploy myapp
+prod-deploy myapp --redeploy
 ```
 
 If deeper Caddy investigation is needed (container logs, config file inspection), this requires the **supervisor** user.
@@ -1451,7 +1452,7 @@ Once you have identified and fixed the underlying issue, restart the same build 
 recover myapp
 ```
 
-Or, if the fix needs new code, redeploy:
+Or, if the fix needs new code, upload the fixed bundle and deploy it:
 
 ```
 prod-deploy myapp
