@@ -380,6 +380,23 @@ prod-deploy myapp
 Promoting, or deploying, recreates production's containers through Compose: expect a restart's
 worth of downtime. A `stage` with `staging.copy_data` stops production for the copy.
 
+`stage`, `prod-deploy` and `promote` build `build:` services on the current digest of each base
+image (`FROM`). A base image that has not changed is not downloaded again, and the build cache
+holds. A registry that cannot be reached fails the build before anything starts. `--no-pull`
+builds from the base images the box already has. `promote` checks the registry too: if a base
+image moved between `stage` and `promote`, production gets a base that staging never ran, so stage
+again to test it first. `rollback` builds from the box's local base images (CVE_POLICY.md, "Base
+images and the build cache").
+
+A `stage` takes its bundle out of the inbox, as a deploy does. A `prod-deploy` that finds no new
+bundle refuses and says what to run: `promote` for a staged release, or upload the bundle again.
+To deploy the installed release again on purpose (for example, to rebuild it on fixed base
+images), run:
+
+```
+prod-deploy myapp --redeploy
+```
+
 A release that stops bind-mounting a data directory (say `./uploads`) does not delete it: the deploy
 keeps it and prints `WARNING: uploads/ holds data but this release's compose.yml does not mount it
 read-write`. Once neither the running release nor the rollback target needs that data, delete it on
@@ -477,8 +494,8 @@ for plain `scp`, is disabled for the deploy user because sftp-server cannot be c
 `prod-deploy` and `stage` take the project's newest bundle, or the one named with `--ref` (the full
 bundle name, or a prefix of its timestamp that matches exactly one bundle). A bundle belongs to a
 project only when its name is exactly `<project>-<timestamp>.tar.gz`, so deploying `foo` never picks
-up a `foo-bar` bundle. Once a bundle is deployed it moves to `inbox/.consumed/`, together with that
-project's older bundles. A bundle that fails validation stays in the inbox.
+up a `foo-bar` bundle. Once a bundle is deployed or staged it moves to `inbox/.consumed/`, together
+with that project's older bundles. A bundle that fails validation stays in the inbox.
 
 List bundles in the inbox, or one project's (`--json` for machine-readable output):
 
@@ -797,6 +814,12 @@ Rollback refuses, with the reason, instead of doing half a rollback:
   "An interrupted or failed install").
 
 A project with `backup.type: none` rolls back its code only.
+
+Rollback rebuilds the previous release's `build:` services without asking the registry, so it
+works when the registry cannot be reached. They are built on the base images the box has locally,
+which can be older than the base the release ran on before. Run `prod-deploy <project> --redeploy`
+afterwards to rebuild the rolled-back release on current base images (a git project:
+`prod-deploy <project> --ref <commit>`).
 
 A rollback records each step, so a rerun after a crash carries on where it
 stopped. One window remains: if the machine crashes in the seconds after the
