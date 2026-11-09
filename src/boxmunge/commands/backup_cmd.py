@@ -62,6 +62,21 @@ def list_snapshots(paths: BoxPaths, project_name: str) -> list[Path]:
     )
 
 
+def take_snapshot(
+    project_name: str, paths: BoxPaths, kind: BackupKind, manifest: dict | None = None,
+    compose_file: Path | None = None,
+) -> tuple[int, str | None]:
+    """backup_locked, and the name of the snapshot it wrote. The name is
+    None when it wrote none, whose rc is 0 too: type none, a skip (a
+    quarantined project, or backup_source's). Never the newest older
+    snapshot, which holds older data. Caller holds the project lock."""
+    before = {p.name for p in list_snapshots(paths, project_name)}
+    rc = backup_locked(project_name, paths, kind=kind, manifest=manifest,
+                       compose_file=compose_file)
+    new = [p.name for p in list_snapshots(paths, project_name) if p.name not in before]
+    return rc, (new[0] if rc == 0 and new else None)
+
+
 def run_backup(
     project_name: str, paths: BoxPaths, kind: BackupKind = BackupKind.MANUAL,
 ) -> int:

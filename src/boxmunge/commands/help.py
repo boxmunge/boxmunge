@@ -37,9 +37,9 @@ Project lifecycle:
   project-delete <p>      Destructive: stop, remove files, deregister (with confirm)
   data adopt <p> <svc>:<path> <name>
                           Copy an anonymous volume into a named one deploy adopts
-  data chown <p> <svc> <uid>:<gid>
-                          Give a service's data to its new user (stays stopped
-                          until you deploy)
+  data chown <p> <svc> <uid>:<gid> [--no-snapshot]
+                          Snapshot, then give a service's data to its new user
+                          (stays stopped until you deploy)
 
 Inbox & secrets:
   inbox [project]         List uploaded bundles
@@ -138,6 +138,8 @@ Rules that prevent outages (building or changing a project):
      the manifest's writable: block.              -> agent-help writable
      Services run non-root: a registry image without a non-root USER needs
      services.<svc>.security.user (image/root need a reason).
+     A user change over existing data: 'data chown <p> <svc> <uid>:<gid>'
+     (it snapshots the data first, then stops the service), then deploy.
   4. All ingress goes through Caddy. Do not publish ports: in compose.
   5. smoke.sh is POSIX sh and exits 0 only when the app really works.
                                                   -> agent-help conventions

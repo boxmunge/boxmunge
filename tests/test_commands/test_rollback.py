@@ -125,7 +125,8 @@ class TestRollbackRestoresData:
     def _fake_backup(paths):
         counter = iter(range(100))
 
-        def backup_locked(project_name, paths_, kind=None, manifest=None):
+        def backup_locked(project_name, paths_, kind=None, manifest=None,
+                          compose_file=None):
             assert kind is BackupKind.PREDEPLOY
             n = next(counter)
             snap = paths_.project_backups(project_name) / f"{project_name}-snap{n}.tar.gz.age"

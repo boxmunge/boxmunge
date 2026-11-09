@@ -177,6 +177,32 @@ def created_times(project_name: str) -> dict[str, datetime]:
             for doc in _inspect(["docker", "container", "inspect", *ids])}
 
 
+@dataclass(frozen=True)
+class StartState:
+    service: str
+    running: bool
+    started_at: datetime   # year 1 for a container that never started
+
+
+def start_states(project_name: str) -> dict[str, StartState]:
+    """Each container of the compose project (running or not) -> its service,
+    whether it runs and when it last started. Raises DockerError when
+    Docker cannot be asked."""
+    listed = _run(["docker", "ps", "-a", "--no-trunc", *compose_project_filter(project_name),
+                   "--format", "{{.ID}}"], capture=True)
+    ids = listed.stdout.split()
+    if not ids:
+        return {}
+    out = {}
+    for doc in _inspect(["docker", "container", "inspect", *ids]):
+        state = doc.get("State") or {}
+        labels = (doc.get("Config") or {}).get("Labels") or {}
+        out[str(doc.get("Name", "")).lstrip("/")] = StartState(
+            service=str(labels.get(_SERVICE_LABEL, "")), running=state.get("Running") is True,
+            started_at=_docker_time(str(state.get("StartedAt", ""))))
+    return out
+
+
 def running_by_service(project_name: str) -> dict[str, list[str]]:
     """{service: names of its running containers}, `run` one-offs excluded."""
     running: dict[str, list[str]] = {}
