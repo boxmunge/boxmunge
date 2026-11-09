@@ -116,7 +116,11 @@ jobs:
     # themselves inside a privileged dind container (no systemd there); see
     # tests/integration/userns/run-in-dind.sh. Docker 28 boxes are on the
     # graph driver; Docker 29 boxes may be on either store.
-    runs-on: ubuntu-latest
+    # Pinned: on ubuntu-latest's Ubuntu 26.04 image, the privileged dind
+    # container's root filesystem turns read-only partway through (EROFS on
+    # /etc/docker/daemon.json) and every test after it fails. Boxes run
+    # Debian 13; the runner's OS is only the host for the dind container.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
