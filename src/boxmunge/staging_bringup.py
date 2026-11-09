@@ -16,6 +16,7 @@ from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.caddy_journal import write_site
 from boxmunge.compose import ComposeError, load_user_compose
 from boxmunge.commands import deploy_checks, deploy_images, deploy_storage
+from boxmunge.commands.chown_staging import rechownable
 from boxmunge.compose_guard import compose_up_checked
 from boxmunge.compose_resolve import ComposeResolveError
 from boxmunge.commands.quarantine_gate import Clearance, clear_release, verify_started
@@ -96,8 +97,13 @@ def _give_and_check_owners(paths: BoxPaths, project: str, plan: CopyPlan | None,
     model, services = resolved_services(target)
     if plan is not None:
         give_copies(paths, project, plan, services, users)
+    stores = deploy_checks.StagingStores(
+        copied=frozenset(deploy_checks.store_id(dest.kind, dest.key if dest.kind == "volume"
+                                                else dest.ref)
+                         for _src, dest in (plan.pairs if plan is not None else [])),
+        rechownable=rechownable(paths, project))
     problems = deploy_checks.staging_owner_problems(target, model, services, users,
-                                                    remap_offset(paths))
+                                                    remap_offset(paths), stores)
     if problems:
         raise DeployRefused(problems)
 

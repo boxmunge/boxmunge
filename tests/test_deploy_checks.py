@@ -210,23 +210,47 @@ def test_staging_data_another_uid_owns_is_refused_whatever_staging_ran_as(
     so the stage started and the app crashed (sqlite readonly)."""
     write_users(paths, "shop", {"app": DEFAULT}, staging=True)
     monkeypatch.setattr(dc, "_owner_uid", lambda target, model, mount, offset: 0)
+    stores = dc.StagingStores(rechownable=frozenset({
+        ("app", dc.store_id("bind", "/p/shop/data-staging"))}))
     problems = dc.staging_owner_problems(
         staging_release_target(paths, "shop"), {},
         {"app": _svc({"type": "bind", "source": "/p/shop/data-staging", "target": "/d"})},
-        {"app": DEFAULT}, 0)
+        {"app": DEFAULT}, 0, stores)
     assert len(problems) == 1
     assert "staging's own data in /p/shop/data-staging belongs to another user" in problems[0]
-    assert "boxmunge data chown shop app 10001:10001 --staging" in problems[0]
-    assert "boxmunge unstage shop" in problems[0] and "rm -rf /p/shop/data-staging" in problems[0]
+    assert "did not copy it from production" in problems[0]
+    keep = problems[0].index("boxmunge data chown shop app 10001:10001 --staging")
+    assert keep < problems[0].index("boxmunge unstage shop")
+    assert "rm -rf /p/shop/data-staging" in problems[0]
 
 
-def test_a_leftover_staging_volume_is_named_with_what_removes_it(paths, monkeypatch) -> None:
+def test_data_no_production_mount_stands_for_leads_with_discarding_it(
+        paths, monkeypatch) -> None:
+    """data chown --staging re-owns only the copies of production's mounts of
+    a service production runs: for anything else it would change nothing."""
     monkeypatch.setattr(dc, "_owner_uid", lambda target, model, mount, offset: 0)
     problems = dc.staging_owner_problems(
         staging_release_target(paths, "shop"), {"volumes": {"db": {}}},
         {"app": _svc("db:/db")}, {"app": DEFAULT}, 0)
     assert "volume shop-staging_db" in problems[0]
+    assert "Discard it: `boxmunge unstage shop`" in problems[0]
     assert "docker volume rm shop-staging_db" in problems[0]
+    assert "--staging" not in problems[0]
+
+
+def test_a_copied_store_another_service_writes_says_why_it_was_not_handed_over(
+        paths, monkeypatch) -> None:
+    """Review of #144: the copy skipped it (two writers), so 'the stage did
+    not copy it' was false."""
+    monkeypatch.setattr(dc, "_owner_uid", lambda target, model, mount, offset: 0)
+    stores = dc.StagingStores(copied=frozenset({dc.store_id("volume", "shared")}))
+    problems = dc.staging_owner_problems(
+        staging_release_target(paths, "shop"), {"volumes": {"shared": {}}},
+        {"app": _svc("shared:/s"), "db": _svc("shared:/s")},
+        {"app": DEFAULT, "db": ServiceUser("0:0", "manifest")}, 0, stores)
+    assert len(problems) == 1
+    assert "the stage copied it but did not give it to app's user, because db" in problems[0]
+    assert "did not copy" not in problems[0] and "--staging" not in problems[0]
 
 
 def test_staging_data_its_user_owns_or_not_yet_made_passes(paths, monkeypatch) -> None:

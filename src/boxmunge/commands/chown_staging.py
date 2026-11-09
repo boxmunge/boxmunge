@@ -16,13 +16,17 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from boxmunge.bind_sources import project_rel, source_kind
+from boxmunge.bind_mounts import project_relative
+from boxmunge.bind_sources import source_kind
 from boxmunge.bundle import STAGING_SUFFIX
-from boxmunge.commands.deploy_checks import writable_by_a_container
+from boxmunge.commands.deploy_checks import (
+    persistent, service_mounts, store_id, writable_by_a_container,
+)
 from boxmunge.data_helper import COMPOSE_VOLUME_LABEL, chown_under, run_helper, volume, volume_labels
 from boxmunge.docker import COMPOSE_PROJECT_LABEL, staging_compose_project
 from boxmunge.docker_containers import project_containers
 from boxmunge.paths import BoxPaths
+from boxmunge.release_target import production_target, resolved_services
 from boxmunge.staging_copies import is_staging_copy, production_view, slot_made
 
 
@@ -36,6 +40,48 @@ class StagingCopy:
     where: str
 
 
+def _is_copy(paths: BoxPaths, project: str):
+    dirs = production_view(paths.project_dir(project))
+    made = slot_made(paths, project)
+    return lambda name: is_staging_copy(name, dirs, made)
+
+
+def _bind_copy(project_dir: Path, source: str, is_copy) -> str | None:
+    """Staging's copy of production's bind `source` (relative to the
+    project dir, as Compose reads it), relative to the project dir; None
+    when staging keeps no copy of it (outside the project dir, or not
+    staging's entry)."""
+    rel = project_relative(source, project_dir)
+    if rel is None or rel == ".":
+        return None
+    top, _, rest = rel.partition("/")
+    copy = f"{top}{STAGING_SUFFIX}"
+    if not is_copy(copy):
+        return None
+    return f"{copy}/{rest}" if rest else copy
+
+
+def rechownable(paths: BoxPaths, project: str) -> frozenset[tuple[str, str]]:
+    """(service, store_id) of every staging copy `data chown --staging`
+    would re-own: the copies of production's read-write mounts of each
+    service production runs (none before production's first deploy)."""
+    if not paths.project_compose_override(project).exists():
+        return frozenset()
+    project_dir = paths.project_dir(project)
+    is_copy = _is_copy(paths, project)
+    _model, services = resolved_services(production_target(paths, project))
+    found = set()
+    for name, svc in services.items():
+        for m in persistent(service_mounts(svc)):
+            if m.kind == "volume":
+                found.add((name, store_id("volume", str(m.source))))
+                continue
+            rel = _bind_copy(project_dir, str(m.source), is_copy)
+            if rel is not None:
+                found.add((name, store_id("bind", str(project_dir / rel))))
+    return frozenset(found)
+
+
 def staging_copies(paths: BoxPaths, project: str, service: str,
                    mounts: list) -> list[StagingCopy]:
     """Staging's existing copies of `mounts` (production's persistent mounts
@@ -43,17 +89,12 @@ def staging_copies(paths: BoxPaths, project: str, service: str,
     of `service` and there is a copy to re-own."""
     project_dir = paths.project_dir(project)
     staging = staging_compose_project(project)
-    dirs = production_view(project_dir)
-    made = slot_made(paths, project)
+    is_copy = _is_copy(paths, project)
     found: list[StagingCopy] = []
     for m in mounts:
         if m.kind == "bind":
-            top, _, rest = project_rel(str(m.source), project_dir).partition("/")
-            copy = f"{top}{STAGING_SUFFIX}"
-            if not is_staging_copy(copy, dirs, made):
-                continue
-            rel = f"{copy}/{rest}" if rest else copy
-            if os.path.lexists(project_dir / rel):
+            rel = _bind_copy(project_dir, str(m.source), is_copy)
+            if rel is not None and os.path.lexists(project_dir / rel):
                 found.append(StagingCopy("bind", rel))
             continue
         name = f"{staging}_{m.source}"

@@ -288,3 +288,26 @@ def test_a_boxmunge_start_of_the_service_drops_the_pairing(paths, monkeypatch) -
     assert pending(paths, "shop") is not None
     chown_hold.after_start(paths, "shop", ["app", "db"], "restore")
     assert pending(paths, "shop") is None
+
+
+def test_rechownable_names_the_copies_of_productions_mounts(paths, monkeypatch) -> None:
+    from boxmunge.commands import chown_staging
+    from boxmunge.commands.deploy_checks import store_id
+    project_dir = paths.project_dir("shop")
+    project_dir.mkdir(parents=True, exist_ok=True)
+    paths.project_compose_override("shop").write_text("services: {}\n")
+    monkeypatch.setattr(chown_staging, "slot_made", lambda p, n: ())
+    monkeypatch.setattr(chown_staging, "resolved_services", lambda target: ({}, {
+        "app": {"volumes": [
+            {"type": "bind", "source": str(project_dir / "data" / "db"), "target": "/d"},
+            {"type": "volume", "source": "cache", "target": "/c"},
+            {"type": "bind", "source": str(project_dir / "conf"), "target": "/e",
+             "read_only": True}]}}))
+    assert chown_staging.rechownable(paths, "shop") == {
+        ("app", store_id("bind", str(project_dir / "data-staging" / "db"))),
+        ("app", store_id("volume", "cache"))}
+
+
+def test_nothing_is_rechownable_before_productions_first_deploy(paths) -> None:
+    from boxmunge.commands import chown_staging
+    assert chown_staging.rechownable(paths, "shop") == frozenset()
