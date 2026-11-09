@@ -85,7 +85,7 @@ def pending_for_live(paths: BoxPaths, project: str) -> dict | None:
         return None
     if stale:
         drop(paths, project)
-        print(f"  {what} is not used, and is dropped: {stale}. A new snapshot is taken.")
+        print(f"  {what} is not used, and is dropped: {stale}.")
         return None
     return entry
 

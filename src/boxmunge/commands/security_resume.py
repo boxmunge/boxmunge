@@ -152,10 +152,9 @@ def _resume_lift(paths: BoxPaths, project: str) -> int:
         _err(f"ERROR: {e}")
         _err("  The quarantine stays in place.")
         return 1
-    if restored.paused:
-        print(f"  Quarantine lifted. '{project}' is still paused: the maintenance "
-              f"page stays up and its containers stay stopped.")
-        print(f"  Run `boxmunge resume {project}` to bring it back.")
+    if restored.held is not None:
+        print(f"  Quarantine lifted. '{project}' stays down: {restored.held}. The "
+              f"maintenance page stays up and its containers stay stopped.")
         return 0
     print("  Caddy config restored.")
     print("  Containers started (scanned images, no rebuild).")

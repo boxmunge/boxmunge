@@ -21,7 +21,7 @@ on your machine to verify the release it installs.
 ## Quickstart
 
 ```bash
-# 1. Turn a fresh Debian 13 (x86_64) VPS into a boxmunge server
+# 1. Turn a fresh Debian 13 VPS (x86_64 or arm64) into a boxmunge server
 boxmunge server-setup root@box.example.com --email you@example.com
 
 # 2. Scaffold a project (or run init in an existing one)

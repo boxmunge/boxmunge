@@ -325,3 +325,41 @@ class TestRegenTakesProjectLock:
             os.close(fd)
         assert processed == ["beta"]
         assert paths.project_caddy_site("alpha").read_text() == "# live config for alpha\n"
+
+
+class TestPausedPreRuleContainers:
+    """Logic review 01: a paused project whose stopped containers mount the
+    project directory read-write (0.10.x accepted `.:/app`). The upgrade
+    starts none of them, so it records the new overlay; `resume`, which the
+    upgrade names, recreates them from the checked files."""
+
+    def test_the_upgrade_records_it_and_resume_brings_it_back(
+            self, tmp_path: Path, monkeypatch) -> None:
+        from boxmunge.commands.resume_cmd import resume_locked
+        from boxmunge.pause import is_paused, mark_pause_complete
+        paths = _setup(tmp_path)
+        _project(paths, "alpha")
+        _pause(paths, "alpha")
+        mark_pause_complete("alpha", paths)
+        pdir = str(paths.project_dir("alpha"))
+        monkeypatch.setattr("boxmunge.docker_containers.container_bind_sources",
+                            lambda project: [(pdir, True)])
+        regen = apply_projects(paths)[1]
+        assert regen.refused == {} and "alpha" in regen.processed
+        assert paths.project_compose_override("alpha").exists()
+        with patch("boxmunge.compose_guard.compose_up") as up, \
+                patch("boxmunge.commands.resume_cmd.caddy_reload"), \
+                patch("boxmunge.commands.resume_cmd.run_smoke", return_value=(True, "ok")):
+            assert resume_locked("alpha", paths, skip_security_checks=True) == (0, None)
+        assert up.call_args.kwargs["force_recreate"] is True
+        assert not is_paused("alpha", paths)
+
+    def test_a_refused_paused_project_is_told_to_resume(self, tmp_path: Path) -> None:
+        paths = _setup(tmp_path)
+        _project(paths, "alpha")
+        _pause(paths, "alpha")
+        paths.project_users_record("alpha").write_text('{"web": "not an entry"}\n')
+        with patch("boxmunge.commands.upgrade_steps.log_error") as logged:
+            assert "alpha" in apply_projects(paths)[1].refused
+        message = logged.call_args.args[1]
+        assert "resume alpha" in message and "redeploy" not in message

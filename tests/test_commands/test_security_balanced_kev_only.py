@@ -156,7 +156,7 @@ def test_a_paused_project_has_its_quarantine_lifted_but_stays_down(box) -> None:
     assert not is_quarantined("demo", paths) and is_paused("demo", paths)
     assert "compose_up" not in paths.docker.calls
     [title] = _titles(pushover, LIFTED_TITLE)
-    assert "still paused" in title
+    assert "still down" in title
 
 
 def test_a_still_kev_listed_finding_keeps_the_quarantine(box) -> None:
@@ -283,32 +283,33 @@ def test_balanced_with_any_kev_finding_keeps_the_quarantine(box, tmp_path) -> No
 # ---- what must not be started from a scan ----
 
 
-def test_a_monitor_stopped_project_keeps_its_quarantine(box) -> None:
+def test_a_monitor_stopped_project_has_its_quarantine_lifted_but_stays_down(box) -> None:
     """Started, it would stay monitor-stopped: unwatched by the monitor and
-    skipped by container-update. `recover` is the way back."""
+    skipped by container-update. `recover` is the way back, as after
+    `security resume` (the one rule: quarantine_lift.start_hold)."""
     paths, pushover = box()
     seed_quarantine(paths)
     write_state(paths.project_health_state("demo"), {
         "status": "critical_stopped", "stopped_at": "2026-10-01T03:00:00+00:00"})
     assert is_monitor_stopped("demo", paths)
     scan = _scan(paths)
-    assert scan.kept == ("quarantine kept: the health monitor stopped it; "
-                         "`security resume`, then `recover`")
-    assert is_quarantined("demo", paths)
-    assert paths.docker.calls == ["caddy_reload", "compose_stop"]  # re-asserted
-    assert not _titles(pushover, LIFTED_TITLE)
+    assert scan.lifted and not is_quarantined("demo", paths)
+    assert paths.docker.calls == []   # nothing started, the maintenance page stays
+    assert is_monitor_stopped("demo", paths)
+    [(title, body, _)] = [m for m in pushover.sent if LIFTED_TITLE in m[0]]
+    assert "still down" in title and "boxmunge recover demo" in body
 
 
-def test_the_fleet_scan_says_why_a_quarantine_was_kept(box, monkeypatch, capsys) -> None:
-    paths, _ = box()
+def test_a_userns_migration_keeps_the_quarantine(box) -> None:
+    paths, pushover = box()
     seed_quarantine(paths)
-    write_state(paths.project_health_state("demo"), {
-        "status": "critical_stopped", "stopped_at": "2026-10-01T03:00:00+00:00"})
-    monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
-    assert cmd_security_scan([], paths) == 2  # still quarantined
-    captured = capsys.readouterr()
-    assert "demo: quarantine kept: the health monitor stopped it" in captured.out
-    assert "quarantine kept: the health monitor stopped it" in captured.err  # the log
+    paths.userns_marker.parent.mkdir(parents=True, exist_ok=True)
+    paths.userns_marker.write_text("userns-migrate\n")
+    scan = _scan(paths)
+    assert scan.kept == ("quarantine kept: a userns migration is in progress; the scan "
+                         "after it lifts it")
+    assert is_quarantined("demo", paths) and "compose_up" not in paths.docker.calls
+    assert not _titles(pushover, LIFTED_TITLE)
 
 
 def test_a_corrupt_health_state_is_that_projects_problem(tmp_path, monkeypatch) -> None:

@@ -274,14 +274,14 @@ def lift_reason(cve_id: str, hits: Sequence[Hit]) -> str:
 
 def format_quarantine_lifted_alert(
     project: str, cve_id: str, reason: str, *,
-    paused: bool, smoke: tuple[bool, str] | None,
+    held: str | None, smoke: tuple[bool, str] | None,
 ) -> Alert:
     """A scan found nothing quarantine-level and lifted the quarantine.
     Sent once (the record is gone after); priority 1 only when the smoke
-    test failed after the restart."""
-    if paused:
-        state, tail = ("quarantine lifted, still paused",
-                       [f"It stays down until `boxmunge resume {project}`."])
+    test failed after the restart. ``held``: why the lift left the project
+    down (quarantine_lift.start_hold)."""
+    if held is not None:
+        state, tail = "quarantine lifted, still down", [f"It stays down: {held}."]
     elif smoke is not None and not smoke[0]:
         state, tail = ("back up, smoke test FAILED", [f"Smoke test: {smoke[1]}"])
     else:

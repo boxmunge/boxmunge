@@ -13,7 +13,7 @@ from boxmunge.cve.quarantine import (
 )
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.paths import BoxPaths
-from boxmunge.pause import is_paused, pause_incomplete
+from boxmunge.pause import awaiting_deploy, is_paused, pause_incomplete
 from boxmunge.state import StateError, read_state
 
 
@@ -36,10 +36,11 @@ def _short_ts(raw: str) -> str:
 HEALTH_STATES = ("ok", "failing", MONITOR_STOPPED, "unknown")
 # Every value a row's "state" takes.
 ROW_STATES = (*HEALTH_STATES, "quarantined", "paused", "pause_incomplete",
-              "pre_registered", "error")
+              "awaiting_deploy", "pre_registered", "error")
 _LABELS = {"ok": "OK", MONITOR_STOPPED: "CRITICAL (stopped)", "failing": "FAILING",
            "unknown": "UNKNOWN", "quarantined": "QUARANTINED", "paused": "PAUSED",
            "pause_incomplete": "PAUSED (incomplete)",
+           "awaiting_deploy": "PAUSED (awaiting deploy)",
            "pre_registered": "PRE-REGISTERED", "error": "ERROR"}
 
 
@@ -162,7 +163,8 @@ def _project_row(name: str, paths: BoxPaths) -> dict[str, Any]:
             "quarantined_at": qstate["quarantined_at"],
         })
     if is_paused(name, paths):
-        state = "pause_incomplete" if pause_incomplete(name, paths) else "paused"
+        state = ("pause_incomplete" if pause_incomplete(name, paths) else
+                 "awaiting_deploy" if awaiting_deploy(name, paths) else "paused")
         return _row(name, state, deployed_at=deployed_at)
     health = read_state(paths.project_health_state(name))
     state = health.get("status", "unknown")

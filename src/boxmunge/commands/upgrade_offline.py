@@ -97,9 +97,13 @@ def regenerate_offline(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> 
     except Exception as e:  # noqa: BLE001 — every failure keeps the previous configs
         _put_back(kept)
         return f"its compose overlay could not be regenerated ({e}); {_STAYS}"
+    # deploying: nothing of the project starts here. Its existing containers
+    # are checked by the start that brings it back (resume recreates ones
+    # made before the own-file rules), which needs this record.
     try:
         check_start(paths, name, component="upgrade",
-                    compose_files=["compose.yml", "compose.boxmunge.yml"], record=True)
+                    compose_files=["compose.yml", "compose.boxmunge.yml"], record=True,
+                    deploying=True)
     except Exception as e:  # noqa: BLE001 — a refusal (alerted by the check) or any other
         _put_back(kept)
         return f"its bind sources could not be recorded ({e}); {_STAYS}"

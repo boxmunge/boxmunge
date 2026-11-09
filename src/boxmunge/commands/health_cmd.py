@@ -16,7 +16,7 @@ from boxmunge.docker import COMPOSE_PROJECT_LABEL, compose_command
 from boxmunge.docker_run import docker_env
 from boxmunge.fleet import PROJECT_INPUT_ERRORS
 from boxmunge.lifecycle import is_blocked
-from boxmunge.pause import is_paused, pause_incomplete
+from boxmunge.pause import awaiting_deploy, is_paused, pause_incomplete
 from boxmunge.paths import BoxPaths
 
 
@@ -122,16 +122,22 @@ def check_caddy_container() -> HealthCheck:
 
 
 def check_system_container(paths: BoxPaths) -> HealthCheck:
-    """Check boxmunge-system is running with this root's mounts.
+    """Check boxmunge-system is running with this root's mounts, on an image
+    built from the installed definition.
 
-    An error, not a warning: age and rclone have no host fallback, so
-    backups, restores and backup-sync all fail while this check fails.
+    An error when it is not usable: age and rclone have no host fallback, so
+    backups, restores and backup-sync all fail while it fails. A warning when
+    it runs a previous image (a rebuild failed): backups still work, and an
+    error would roll back a platform upgrade in probation.
     """
-    from boxmunge.system_container import connect, SystemContainerError
+    from boxmunge.system_container import connect, stale_image, SystemContainerError
     try:
         connect(paths)
+        stale = stale_image(paths)
     except SystemContainerError as e:
         return HealthCheck("system-container", "error", str(e))
+    if stale:
+        return HealthCheck("system-container", "warn", stale)
     return HealthCheck("system-container", "ok", "boxmunge-system running")
 
 
@@ -253,6 +259,7 @@ def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
     if not paths.projects.exists():
         return HealthCheck("lifecycle", "ok", "No projects deployed")
     paused: list[str] = []
+    awaiting: list[str] = []
     quarantined: list[tuple[str, str]] = []
     unreadable: list[str] = []
     stopped: list[str] = []
@@ -270,38 +277,30 @@ def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
                 quarantined.append((name, qstate.get("cve_id", "?")))
             elif pause_incomplete(name, paths):
                 incomplete.append(name)
+            elif awaiting_deploy(name, paths):
+                awaiting.append(name)
             elif is_paused(name, paths):
                 paused.append(name)
             elif is_monitor_stopped(name, paths):
                 stopped.append(name)
         except PROJECT_INPUT_ERRORS as e:
             unreadable.append(f"{name} ({e})")
-    parts: list[str] = []
-    if unreadable:
-        parts.append("unreadable state: " + "; ".join(unreadable))
-    if quarantined:
-        parts.append(
-            "quarantined: "
-            + ", ".join(f"{n} ({c})" for n, c in quarantined)
-        )
-    if stopped:
-        parts.append(
-            "monitor-stopped: " + ", ".join(stopped)
-            + " (run `recover <project>` once fixed)"
-        )
-    if incomplete:
-        parts.append(
-            "pause incomplete: " + ", ".join(incomplete)
-            + " (may still be serving; run `pause <project>` again to finish, "
-            "or `resume <project>`)"
-        )
-    if paused:
-        parts.append("paused: " + ", ".join(paused))
+    parts = [label + text for label, text, names in (
+        ("unreadable state: ", "; ".join(unreadable), unreadable),
+        ("quarantined: ", ", ".join(f"{n} ({c})" for n, c in quarantined), quarantined),
+        ("monitor-stopped: ", ", ".join(stopped) + " (run `recover <project>` once fixed)",
+         stopped),
+        ("pause incomplete: ", ", ".join(incomplete) + " (may still be serving; run `pause "
+         "<project>` again to finish, or `resume <project>`)", incomplete),
+        ("paused, awaiting a deploy: ", ", ".join(awaiting) + " (down behind the "
+         "maintenance page until `prod-deploy <project>`)", awaiting),
+        ("paused: ", ", ".join(paused), paused),
+    ) if names]
     if unreadable:
         return HealthCheck("lifecycle", "error", "; ".join(parts))
     # Warn, never error: an app's critical stop is not a platform failure,
     # and `health` exit 2 rolls back a platform upgrade in probation.
-    if quarantined or stopped or incomplete:
+    if quarantined or stopped or incomplete or awaiting:
         return HealthCheck("lifecycle", "warn", "; ".join(parts))
     if paused:
         return HealthCheck("lifecycle", "ok", "; ".join(parts))
