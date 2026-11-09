@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """install.sh records, and the upgrade shim recomputes over a new bundle, one
 fingerprint covering install.sh and the files it installs from, so a release
-that changes only bootstrap/ or the sshd drop-in still re-runs install.sh."""
+that changes only bootstrap/, the sshd drop-in or system/ (the boxmunge-system
+image) still re-runs install.sh."""
 from __future__ import annotations
 
 import os
@@ -27,8 +28,8 @@ def test_install_sh_and_the_shim_compute_the_same_fingerprint() -> None:
 
 
 def _bundle(root: Path) -> Path:
-    for rel in ("install.sh", "bootstrap/sshd-hardening.sh",
-                "src/boxmunge/sshd/00-boxmunge.conf", "src/boxmunge/shell.py"):
+    for rel in ("install.sh", "bootstrap/sshd-hardening.sh", "src/boxmunge/sshd/00-boxmunge.conf",
+                "system/Dockerfile", "src/boxmunge/shell.py"):
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(f"{rel}\n")
     return root
@@ -59,7 +60,8 @@ def test_a_change_to_any_installed_from_file_changes_the_fingerprint(tmp_path: P
     bundle = _bundle(tmp_path / "bundle")
     base = _fingerprint(bundle, tmp_path)
     assert _fingerprint(bundle, tmp_path) == base
-    for rel in ("install.sh", "bootstrap/sshd-hardening.sh", "src/boxmunge/sshd/00-boxmunge.conf"):
+    for rel in ("install.sh", "bootstrap/sshd-hardening.sh", "src/boxmunge/sshd/00-boxmunge.conf",
+                "system/Dockerfile"):
         path = bundle / rel
         original = path.read_text()
         path.write_text(original + "changed\n")
