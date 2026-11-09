@@ -26,23 +26,24 @@ if [[ "${1:-}" == "--upgrade-shim" ]]; then
     shift
 fi
 
-# ---------------------------------------------------------------------------
-# Cosign — pinned version + checksum.
-#
-# Used by the upgrade shim to verify the keyless signature on SHA256SUMS for
-# every release before installing. Hard-required, no fallback. Pin the binary
-# version + checksum so a compromised github.com release page can't swap in
-# a malicious cosign. Source of truth for the checksum is upstream's
-# `cosign_checksums.txt` for the same release.
-# ---------------------------------------------------------------------------
-export COSIGN_VERSION="v2.4.1"
-export COSIGN_SHA256="8b24b946dd5809c6bd93de08033bcf6bc0ed7d336b7785787c080f574b89249b"
+# shellcheck source=bootstrap/cosign.sh
+source "${SCRIPT_DIR}/bootstrap/cosign.sh"
 
 # ---------------------------------------------------------------------------
 # Pre-flight
 # ---------------------------------------------------------------------------
 if [[ "$(id -u)" -ne 0 ]]; then
     echo "ERROR: This script must be run as root." >&2
+    exit 1
+fi
+
+# cosign (bootstrap/cosign.sh) and age and rclone (system/Dockerfile) are
+# pinned for amd64 and arm64 only; on any other CPU the install would fail
+# halfway or leave backups unable to run.
+HOST_ARCH="$(dpkg --print-architecture)"
+if ! cosign_sha256 "${HOST_ARCH}" >/dev/null; then
+    echo "ERROR: boxmunge supports amd64 (x86_64) and arm64 (aarch64) hosts;" \
+         "this one is ${HOST_ARCH}. Install it on a Debian 13 VPS with one of those CPUs." >&2
     exit 1
 fi
 
@@ -152,30 +153,6 @@ ensure_install_prereqs() {
 ensure_install_prereqs
 
 # ---------------------------------------------------------------------------
-# Install cosign (used by the upgrade shim to verify release signatures).
-#
-# Idempotent: if the pinned version is already installed, this is a no-op.
-# Failure is fatal — the upgrade shim hard-requires cosign and would refuse
-# to install future releases otherwise.
-# ---------------------------------------------------------------------------
-install_cosign() {
-    if command -v cosign >/dev/null 2>&1; then
-        local installed_version
-        installed_version="$(cosign version 2>&1 | grep -oE 'GitVersion:[[:space:]]*v[0-9.]+' | head -1 | awk '{print $NF}')"
-        if [[ "${installed_version}" == "${COSIGN_VERSION}" ]]; then
-            return 0
-        fi
-        echo "  cosign present (version='${installed_version}'), upgrading to ${COSIGN_VERSION}"
-    fi
-    echo "  Installing cosign ${COSIGN_VERSION}..."
-    local url="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
-    curl -sSLf "${url}" -o /tmp/cosign
-    echo "${COSIGN_SHA256}  /tmp/cosign" | sha256sum -c -
-    install -m 0755 /tmp/cosign /usr/local/bin/cosign
-    rm -f /tmp/cosign
-}
-
-# ---------------------------------------------------------------------------
 # Trivy install — required for CVE scanning (boxmunge security scan).
 # Failure is fatal — without Trivy, the daily CVE scan timer cannot run.
 #
@@ -229,7 +206,8 @@ echo ""
 echo "========================================================"
 echo "  Ensuring cosign is installed (release signature verification)"
 echo "========================================================"
-install_cosign
+# Fatal on failure: the upgrade shim would refuse every future release.
+install_cosign "${HOST_ARCH}"
 
 echo ""
 echo "========================================================"
