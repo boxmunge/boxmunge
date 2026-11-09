@@ -117,25 +117,48 @@ jobs:
     # compose file as install.sh does, runs its tools, decrypts a snapshot
     # made by age 1.2.1 with them, and installs and runs the pinned arm64
     # cosign through bootstrap/cosign.sh, the library install.sh sources.
+    # A required check: the job always runs and reports, and does its work
+    # only when the change touches what it tests (scripts/ci-touches.sh). No
+    # workflow `paths:` filter or job `if:`, which would leave the check
+    # waiting forever on every other PR.
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+      - name: Does this change touch the system image, the installer or CI?
+        id: scope
+        env:
+          # A pull request: its base. A push to main: the commit before it.
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if bash scripts/ci-touches.sh "$BASE" system/ install.sh bootstrap/ scripts/ .github/workflows/; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Skipping the arm64 checks: this change touches none of the paths they test."
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Build the system image
+        if: steps.scope.outputs.relevant == 'true'
         run: docker build -t boxmunge-system:ci system/
       - name: Build it through system/compose.yml, as install.sh does
+        if: steps.scope.outputs.relevant == 'true'
         run: BOXMUNGE_UID=1000 BOXMUNGE_GID=1000 docker compose -f system/compose.yml build
       - name: age and rclone run in it, as arm64 binaries
+        if: steps.scope.outputs.relevant == 'true'
         run: |
           test "$(docker run --rm --entrypoint uname boxmunge-system:ci -m)" = aarch64
           docker run --rm --entrypoint age boxmunge-system:ci --version
           docker run --rm --entrypoint rclone boxmunge-system:ci version
       - name: Its age decrypts a snapshot made by age 1.2.1
+        if: steps.scope.outputs.relevant == 'true'
         run: |
           docker run --rm -v "$PWD/tests/fixtures/age-v1.2.1:/f:ro" --entrypoint age \
             boxmunge-system:ci --decrypt -i /f/identity.txt -o - /f/snapshot.tar.gz.age \
             > snapshot.tar.gz
           sha256sum -c tests/fixtures/age-v1.2.1/snapshot.tar.gz.sha256
       - name: The pinned arm64 cosign downloads, matches its hash and runs
+        if: steps.scope.outputs.relevant == 'true'
         run: |
           test "$(dpkg --print-architecture)" = arm64
           sudo bash -c 'set -euo pipefail; source bootstrap/cosign.sh; install_cosign "$(dpkg --print-architecture)"'
@@ -182,3 +205,21 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: bash scripts/check-dco.sh "$BASE" "$HEAD"
+
+  ci-ok:
+    # The one check main's ruleset requires: it passes only if every job
+    # above succeeded (dco may skip on a push, where it is skipped by design;
+    # scripts/ci-ok.py). Required checks match exact names, and the
+    # userns-dind matrix names carry image digests Dependabot changes.
+    # `always()` so a failed or cancelled job fails this check rather than
+    # skipping it. Add every new job to `needs`.
+    if: always()
+    needs: [lint, unit, cli, version-check, integration, userns-dind, dco, arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Every CI job passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
+        run: python3 scripts/ci-ok.py
