@@ -34,6 +34,13 @@ slot_works() {
     [[ -x "$server" ]] && "$server" --version >/dev/null 2>&1
 }
 
+# slot_version <slot>: the X.Y.Z release the slot runs (`--version` prints
+# "boxmunge X.Y.Z[+build]"), or nothing when it cannot say.
+slot_version() {
+    "$BOXMUNGE_ROOT/env-$1/bin/boxmunge-server" --version 2>/dev/null \
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true
+}
+
 # rollback_target_ok <slot>: a working venv that is not a half-finished upgrade.
 rollback_target_ok() { slot_works "$1" && [[ ! -e "$(inflight_marker "$1")" ]]; }
 

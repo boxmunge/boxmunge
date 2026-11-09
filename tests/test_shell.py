@@ -181,6 +181,16 @@ class TestDispatchCommand:
         )
 
     @patch("boxmunge.shell.subprocess.run")
+    def test_upgrade_repair_deps_routes_to_shim(self, mock_run: MagicMock) -> None:
+        """`upgrade --repair-deps` is the shim's repair-deps, the one form
+        deploy's sudo rule allows for it (no arguments)."""
+        mock_run.return_value = MagicMock(returncode=0)
+        run_command("upgrade", ["--repair-deps"])
+        mock_run.assert_called_once_with(
+            ["sudo", "-n", "/opt/boxmunge/bin/boxmunge-upgrade", "repair-deps"]
+        )
+
+    @patch("boxmunge.shell.subprocess.run")
     def test_upgrade_target_without_version_errors(self, mock_run: MagicMock) -> None:
         """`upgrade --target` without a version must fail noisily and must NOT
         be routed onward (neither to the shim nor to boxmunge-server)."""
@@ -191,6 +201,7 @@ class TestDispatchCommand:
     @pytest.mark.parametrize("args", [
         ["--apply"], ["--skip-self-test"], ["--dry-run", "--apply"],
         ["--target", "0.3.5", "--force"], ["force-target", "0.3.5"],
+        ["--repair-deps", "0.3.5"], ["--repair-deps", "--dry-run"], ["repair-deps"],
     ])
     @patch("boxmunge.shell.subprocess.run")
     def test_upgrade_shim_internal_flags_are_refused(

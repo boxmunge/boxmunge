@@ -288,16 +288,20 @@ _UPGRADE_IN_PROCESS = (["--dry-run"], ["-h"], ["--help"])
 def _run_upgrade(args: list[str]) -> int:
     """Route `upgrade` the same way MCP does: through the sudo shim.
 
-    The shim (root, via a sudo rule scoped to `auto` and `target <version>`)
-    verifies the release signature, swaps venvs and runs probation. The
-    shim-internal `--apply` would do none of that if run here as deploy, so
-    it is refused, as is anything else this function does not recognise.
+    The shim (root, via a sudo rule scoped to `auto`, `target <version>` and
+    `repair-deps`) verifies the release signature, swaps venvs and runs
+    probation, or for --repair-deps installs the live release's hash-pinned
+    dependencies. The shim-internal `--apply` would do none of that if run
+    here as deploy, so it is refused, as is anything else this function does
+    not recognise.
     """
     from boxmunge.paths import BoxPaths
-    from boxmunge.upgrade_shim import shim_command
+    from boxmunge.upgrade_shim import repair_deps_command, shim_command
 
     if not args:
         argv = shim_command(BoxPaths())
+    elif args == ["--repair-deps"]:
+        argv = repair_deps_command(BoxPaths())
     elif args[0] == "--target":
         if len(args) != 2 or not args[1]:
             print(
@@ -312,7 +316,8 @@ def _run_upgrade(args: list[str]) -> int:
     else:
         print(
             f"ERROR: `upgrade {' '.join(args)}` is not available from the deploy shell. "
-            "Use `upgrade`, `upgrade --target <version>` or `upgrade --dry-run`.",
+            "Use `upgrade`, `upgrade --target <version>`, `upgrade --repair-deps` "
+            "or `upgrade --dry-run`.",
             file=sys.stderr,
         )
         return 2

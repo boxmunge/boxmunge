@@ -3,7 +3,7 @@
 
 The deploy shell and the MCP server both run as deploy. A platform upgrade
 needs root (venv swap, stash of root-owned config, probation), so both go
-through the same sudo rule, which permits exactly these two invocations.
+through the same sudo rule, which permits exactly these invocations.
 See install-sudoers in scripts/boxmunge-upgrade.
 """
 from __future__ import annotations
@@ -24,3 +24,10 @@ def shim_command(paths: BoxPaths, target: str | None = None) -> list[str]:
     if target is None:
         return ["sudo", "-n", shim, "auto"]
     return ["sudo", "-n", shim, "target", target]
+
+
+def repair_deps_command(paths: BoxPaths) -> list[str]:
+    """argv for `upgrade --repair-deps`: the shim installs the installed
+    release's hash-pinned dependencies into the live venv, from that release's
+    verified bundle. It is allowed during probation."""
+    return ["sudo", "-n", str(paths.bin / "boxmunge-upgrade"), "repair-deps"]

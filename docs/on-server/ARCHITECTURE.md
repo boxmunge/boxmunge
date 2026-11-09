@@ -147,9 +147,10 @@ The `deploy` user runs a restricted boxmunge shell. Agents connect as `deploy`.
 
 - Can **only** run `boxmunge` commands -- no `ls`, `cat`, `cd`, `docker`, or any other shell command
 - Cannot browse the filesystem or read files directly
-- Cannot run `sudo` itself. The shell's `upgrade` and `upgrade --target <version>` commands
-  reach the root upgrade shim through a sudo rule that permits exactly
-  `boxmunge-upgrade auto` and `boxmunge-upgrade target <version>`, nothing else
+- Cannot run `sudo` itself. The shell's `upgrade`, `upgrade --target <version>` and
+  `upgrade --repair-deps` commands reach the root upgrade shim through a sudo rule that permits
+  exactly `boxmunge-upgrade auto`, `boxmunge-upgrade target <version>` and
+  `boxmunge-upgrade repair-deps`, nothing else
 - Documentation is accessed via `agent-help <topic>`, not by reading files
 - Gets no SSH forwarding, tunnels or client environment beyond the locale and colour settings, so
   nothing bypasses the shell (TRUST_MODEL.md, "What We Isolate", SSH access)
