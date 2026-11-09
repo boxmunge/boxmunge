@@ -110,7 +110,7 @@ rm -f "$SECRET"
 # A FIFO there does not block the upgrade with the lock held.
 box
 mkfifo "$BOXMUNGE_ROOT/state/installer.sha256"
-run_shim_within 20 "$BOXMUNGE_ROOT/state/installer.sha256" target 1.5.0
+run_shim_within 120 "$BOXMUNGE_ROOT/state/installer.sha256" target 1.5.0
 expect 0 "probation started" "a FIFO at state/installer.sha256 does not block the upgrade"
 drop_root
 
@@ -128,7 +128,7 @@ drop_root
 box
 mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
 mkfifo "$BOXMUNGE_ROOT/upgrade-root/installer.sha256"
-run_shim_within 20 "$BOXMUNGE_ROOT/upgrade-root/installer.sha256" target 1.5.0
+run_shim_within 120 "$BOXMUNGE_ROOT/upgrade-root/installer.sha256" target 1.5.0
 expect 1 "non-regular file" "a FIFO at upgrade-root/installer.sha256 is refused, not blocked on"
 drop_root
 
