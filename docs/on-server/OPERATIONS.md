@@ -1939,9 +1939,9 @@ reported and the date; for a failure report, with the report. A prefix is not an
 a /48 is often one household or company. Both are deleted after 90 days, overwritten in
 the database file, though encrypted backups of the service's database can hold copies
 until the backups expire, and backups from before the service switched to prefixes can
-hold full addresses of failure reporters and admin sign-ins. It also keeps a daily count of checks per
-version. During the beta the maintainer uses the prefixes to see which networks still run
-an old release.
+hold full IP addresses (or IPv6 /64s) of failure reporters and admin sign-ins. It also
+keeps a daily count of checks per version. During the beta the maintainer uses the
+prefixes to see which networks still run an old release.
 
 Two request logs keep the full IP address of every request, for operations and abuse
 protection: the access log of the web server in front of the service and the service's

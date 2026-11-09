@@ -155,7 +155,10 @@ class PrefixLog:
             conn.execute("BEGIN IMMEDIATE")
             known: dict[str, dict[str, set[str]]] = {}
             rows = []
-            for day, prefix, version in sorted(pending):
+            # Oldest version first (numeric order, unlisted last), so a cap
+            # never drops the oldest version a network reported.
+            for day, prefix, version in sorted(
+                    pending, key=lambda s: (s[0], s[1], _version_order(s[2]))):
                 if day not in known:
                     known[day] = {}
                     for p, v in conn.execute(

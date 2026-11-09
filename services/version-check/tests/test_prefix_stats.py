@@ -198,6 +198,14 @@ class TestDailyPrefixCap:
         log.flush()
         assert ("unlisted" in [row[2] for row in _sightings(migrated_db)])
 
+    def test_the_version_cap_keeps_the_oldest_versions_in_numeric_order(self, migrated_db):
+        listed = frozenset({"0.9.0", "0.10.0", "0.11.0"})
+        log = prefix_store.PrefixLog(migrated_db, 60, 1000, listed, max_versions_per_prefix=2)
+        for v in ("0.11.0", "0.10.0", "0.9.0"):
+            log.record("198.51.1.0/24", v)
+        log.flush()
+        assert sorted(r[2] for r in _sightings(migrated_db)) == ["0.10.0", "0.9.0"]
+
     def test_versions_beyond_the_cap_for_a_prefix_are_dropped_loudly(self, migrated_db, capsys):
         listed = frozenset({"0.2.0", "0.2.1", "0.2.2", "0.2.3"})
         log = prefix_store.PrefixLog(migrated_db, 60, 1000, listed, max_versions_per_prefix=2)

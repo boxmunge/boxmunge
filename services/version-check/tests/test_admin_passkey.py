@@ -198,6 +198,22 @@ class TestChallenges:
         admin = {"X-Forwarded-For": admin_addr}
         assert login_from(admin_client, authenticator, admin).status_code == 200
 
+    def test_one_network_cannot_fill_the_global_cap_from_many_slash_64s(
+            self, admin_client, authenticator, migrated_db):
+        """2,000 /64s of one /48 used to fill the 10,000 global cap and lock
+        the admin out; a network may start only CHALLENGES_PER_NETWORK."""
+        register(admin_client, authenticator, ADMIN_SECRET)
+        for n in range(passkey_routes.CHALLENGES_PER_NETWORK):
+            assert admin_client.post("/v1/admin/login/options",
+                                     headers={"X-Forwarded-For": f"2001:db8:7:{n:x}::1"}
+                                     ).status_code == 200
+        refused = admin_client.post("/v1/admin/login/options",
+                                    headers={"X-Forwarded-For": "2001:db8:7:ffff::1"})
+        assert refused.status_code == 429 and "this network" in refused.get_json()["error"]
+        assert len(_challenges(migrated_db)) == passkey_routes.CHALLENGES_PER_NETWORK
+        admin = {"X-Forwarded-For": "2001:db8:8::20"}
+        assert login_from(admin_client, authenticator, admin).status_code == 200
+
     def test_registration_challenges_count_towards_the_client_cap(self, admin_client):
         for _ in range(passkey_routes.CHALLENGES_PER_CLIENT):
             assert admin_client.post("/v1/admin/register/options",

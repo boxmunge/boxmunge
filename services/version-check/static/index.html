@@ -93,10 +93,10 @@ boxmunge server-setup you@your-server.example.com --email you@example.com</code>
     <p>Deleted data is overwritten in the database file, not just hidden.
        Encrypted backups of the database can keep copies for longer than 90
        days, until the backups themselves expire. Backups taken before this
-       service switched to prefixes can also hold the full IPv4
-       address, or the IPv6 /64, of servers that sent a failure report or
-       of anyone who started an admin sign-in, until those backups age
-       out.</p>
+       service switched to prefixes can also hold full IP addresses (IPv4,
+       and in the oldest backups IPv6 too; otherwise an IPv6 /64) of servers
+       that sent a failure report or of anyone who started an admin sign-in,
+       until those backups age out.</p>
 
     <p>Your full IP address is never stored in the service's database. It
        is held in the service's memory to rate-limit requests, and it is
