@@ -137,6 +137,13 @@ Tests that need Docker carry the `integration` marker, wherever they live; `make
 them and `make test-integration` selects them. Integration tests skip when Docker or `age` is missing. CI sets `BOXMUNGE_REQUIRE_INTEGRATION=1`,
 which turns a missing prerequisite into a failure, so a green CI run means they actually ran.
 
+CI splits the integration tests and the remapped-daemon (`userns-dind`) tests into parallel shards
+of whole test files (`--shard K/N`, `tests/shard.py`), balanced by the seconds per file in
+`tests/shard_weights.json`. A new file runs in some shard from its first commit, weighed as the
+average file; stale weights only unbalance the shards. To refresh them, take the per-file times
+from a CI run's `--durations` output, or run a tier with `--store-shard-weights
+tests/shard_weights.json`, which merges its files' times into the file.
+
 Every integration test that backs up, restores or syncs runs through a real `boxmunge-system`
 container, built from `system/Dockerfile` and started from `system/compose.yml` on the test root
 (the `real_system_container` fixture; it uses a unique container name). There is no host fallback.
