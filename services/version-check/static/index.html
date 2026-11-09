@@ -18,6 +18,8 @@
         .tagline { color: #586069; margin-bottom: 2rem; }
         h2 { font-size: 1.25rem; margin-top: 2rem; margin-bottom: 0.5rem; }
         p { margin-bottom: 1rem; }
+        ul { margin: 0 0 1rem 1.25rem; }
+        li { margin-bottom: 0.5rem; }
         code {
             background: #f6f8fa;
             padding: 0.15rem 0.4rem;
@@ -62,17 +64,70 @@ boxmunge server-setup you@your-server.example.com --email you@example.com</code>
 
     <h2 id="privacy">Security updates &amp; privacy</h2>
 
-    <p>Boxmunge servers periodically check for updates to ensure you're
-       protected against known vulnerabilities and critical bugs. This check
-       sends your current version number — nothing else — so the service can
-       tell if a security or break-fix release is available for your release.</p>
+    <p>Every boxmunge server asks this service for updates every six hours,
+       and again when its operator runs a plain <code>upgrade</code> (an
+       <code>upgrade --target</code> names its version and does not ask), so
+       it hears about security and break-fix releases quickly. The request
+       carries the server's boxmunge version (in the address and in the
+       User-Agent header) and, as with any connection, the server's IP
+       address. No hostname, machine identifier or anything about the
+       server's projects is sent. If an upgrade fails, the server also
+       reports the version it tried, the version it came from, the step that
+       failed, a short reason and the time it sent the report.</p>
 
-    <p>Version checks store only a daily count per version. No IP addresses,
-       hostnames, or machine identifiers are stored for them. If an upgrade
-       fails, the server reports the versions and the failed stage. To filter
-       duplicate reports, the sender's IP address (for IPv6, only its /64
-       network prefix) is kept for about six hours, then discarded. The failure
-       reports themselves are deleted after 90 days.</p>
+    <p>What this service stores:</p>
+
+    <ul>
+        <li>For each update check: the network the request came from, as a
+            prefix (a /24 for IPv4, the first three numbers of the address;
+            a /48 for IPv6; an IPv6 address that embeds an IPv4 address
+            counts as that IPv4 address), with the version and the date.
+            A prefix is not anonymous: a /48 is often a single household or
+            company, and so can a /24 be. Every server on one network shares
+            an entry. These entries are deleted after 90 days.</li>
+        <li>For each failure report: the report, with the same network
+            prefix. Reports are deleted after 90 days.</li>
+        <li>A daily count of checks per version.</li>
+    </ul>
+
+    <p>Deleted data is overwritten in the database file, not just hidden.
+       Encrypted backups of the database can keep copies for longer than 90
+       days, until the backups themselves expire. Backups taken before this
+       service switched to prefixes can also hold full IP addresses (IPv4,
+       and in the oldest backups IPv6 too; otherwise an IPv6 /64) of servers
+       that sent a failure report or of anyone who started an admin sign-in,
+       until those backups age out.</p>
+
+    <p>Your full IP address is never stored in the service's database. It
+       is held in the service's memory to rate-limit requests, and it is
+       written to two request logs.</p>
+
+    <p>Request logs: the web server in front of this service (Caddy) and the
+       service itself each log every request, with the full IP address, the
+       time, the URL requested (which includes the version) and the
+       User-Agent. They are there for operations and abuse protection. Both
+       logs are rotated by size under Docker's log settings, up to five files
+       of 50&nbsp;MB each per log, the oldest discarded as new entries arrive;
+       how long an entry lasts depends on traffic, not on a fixed number of
+       days.</p>
+
+    <p>Abuse protection: the server's intrusion prevention (CrowdSec) reads
+       the web server's log to block attackers, and it is registered with
+       CrowdSec's central API. The IP addresses of requests that trigger
+       CrowdSec's attack scenarios are shared with CrowdSec's community
+       blocklist service. Ordinary update checks do not normally trigger
+       them.</p>
+
+    <p>Why prefixes: boxmunge is in early beta, and its maintainer uses them
+       to see which networks still run an old version and nudge those users
+       to upgrade.</p>
+
+    <p>Opting out: boxmunge has no setting to turn version checks off. The
+       scheduled check runs from the <code>boxmunge-auto-update</code> timer;
+       stopping it (<code>systemctl disable --now boxmunge-auto-update.timer</code>)
+       stops the scheduled checks, and with them automatic security updates
+       and the alert when OS security updates stop arriving. Running an
+       upgrade by hand still checks.</p>
 
     <p>The source code for this service is
        <a href="https://github.com/boxmunge/boxmunge/tree/main/services/version-check">open
