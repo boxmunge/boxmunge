@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Images the platform builds for a project: removing them, and taking the
-old `<project>-<service>` style names off them.
+"""Images the platform builds for a project: removing them, naming the ones
+its containers run, and taking the old `<project>-<service>` style names
+off them.
 
 Built images are named `boxmunge.invalid/<compose-project>/<service>`
 (compose_images.BUILT_IMAGE_HOST), a name no registry serves and no other
@@ -8,12 +9,14 @@ project can take.
 """
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import NamedTuple
 
-from boxmunge.compose_images import BUILT_IMAGE_HOST
+from boxmunge import docker_containers
+from boxmunge.compose_images import BUILT_IMAGE_HOST, built_image_name
 from boxmunge.docker import (
-    COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL, check_compose_project_name,
-    compose_project_filter,
+    COMPOSE_ONEOFF_LABEL, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
+    check_compose_project_name, compose_project_filter,
 )
 from boxmunge.docker_run import DockerError, run as _run
 
@@ -38,6 +41,8 @@ class _ContainerImages(NamedTuple):
     own_ids: set[str]       # images this project's build services' containers run
     user_ids: set[str]      # images every other container runs ...
     user_names: set[str]    # ... and the names they were created from
+    # build service -> {image its `up` containers run: their names}
+    by_service: dict[str, dict[str, list[str]]]
 
 
 def _container_images(
@@ -48,14 +53,14 @@ def _container_images(
     that protect an image (another project's, a project-less one, or one of
     this project's image-only services). A leftover container of a service
     this project no longer has is neither."""
-    found = _ContainerImages(set(), set(), set())
+    found = _ContainerImages(set(), set(), set(), {})
     ids = _run(["docker", "ps", "-a", "-q", "--no-trunc"], capture=True).stdout.split()
     if not ids:
         return found
-    labels = (f'{{{{index .Config.Labels "{COMPOSE_PROJECT_LABEL}"}}}}\t'
-              f'{{{{index .Config.Labels "{COMPOSE_SERVICE_LABEL}"}}}}')
+    labels = "\t".join(f'{{{{index .Config.Labels "{label}"}}}}' for label in (
+        COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL, COMPOSE_ONEOFF_LABEL))
     cmd = ["docker", "container", "inspect", "--format",
-           "{{.Image}}\t{{.Config.Image}}\t" + labels, *ids]
+           "{{.Image}}\t{{.Config.Image}}\t" + labels + "\t{{.Name}}", *ids]
     result = _run(cmd, capture=True, check=False)
     # A container removed since `ps` uses no image; any other error is one.
     errors = [e for e in result.stderr.splitlines()
@@ -63,13 +68,51 @@ def _container_images(
     if result.returncode != 0 and errors:
         raise DockerError(f"{' '.join(cmd[:3])} failed: {'; '.join(errors)}")
     for line in filter(None, result.stdout.splitlines()):
-        image_id, image_name, project, service = (line.split("\t") + ["", "", ""])[:4]
+        image_id, image_name, project, service, oneoff, name = (line.split("\t") + [""] * 5)[:6]
         if project == compose_project and service in build_services:
             found.own_ids.add(image_id)
+            # A `compose run` one-off is not what `up` runs, nor what it starts.
+            if oneoff.lower() != "true":
+                found.by_service.setdefault(service, {}).setdefault(image_id, []).append(
+                    name.lstrip("/"))
         elif project != compose_project or service in image_services:
             found.user_ids.add(image_id)
             found.user_names.add(image_name)
     return found
+
+
+def name_running_builds(compose_project: str, build_services: Collection[str]) -> list[str]:
+    """Give each build service's platform name, where it names no image, to
+    the image that service's containers run: the image their deploy built,
+    by the containers' own image ID. Returns the names given.
+
+    Taking a project's old names off an image a container still ran left it
+    with no name: once that container stopped, the graph driver deleted it,
+    and the containerd store kept it nameless. A start that runs only local
+    images by their platform name (a quarantine's lift) then had nothing
+    to start, and any other start built a new image no deploy had vetted.
+    Raises DockerError, also when a service's containers run different
+    images."""
+    check_compose_project_name(compose_project)
+    by_service = _container_images(compose_project, set(build_services), set()).by_service
+    named = []
+    for service, image_ids in sorted(by_service.items()):
+        name = built_image_name(compose_project, service)
+        if docker_containers.local_image(name) is not None:
+            continue
+        # One whose image the store no longer has is recreated at its start.
+        present = sorted(i for i in image_ids if docker_containers.local_image(i) is not None)
+        if len(present) > 1:
+            which = "; ".join(f"{', '.join(image_ids[i])} on {i}" for i in present)
+            raise DockerError(
+                f"the containers of {compose_project}'s service {service} run different "
+                f"images ({which}), so which one its deploy built is unknown. Remove the "
+                f"ones its last deploy did not create (docker rm <container>, as the "
+                f"operator), or deploy the project again.")
+        if present:
+            _run(["docker", "tag", present[0], name], capture=True)
+            named.append(name)
+    return named
 
 
 def _image_names(extra: list[str]) -> dict[str, list[str]]:
@@ -113,7 +156,10 @@ def untag_old_built_names(
     other container uses (another project's, a project-less one, or one of
     this project's image-only services), by ID or by one of its names, is
     left alone, whatever its labels say. A leftover container of a removed
-    service protects nothing: the next up removes it."""
+    service protects nothing: the next up removes it.
+
+    Call name_running_builds first: an image a build service's container
+    runs then keeps a name, the platform's, and the next start runs it."""
     check_compose_project_name(compose_project)
     labelled = _image_names(compose_project_filter(compose_project))
     containers = _container_images(compose_project, set(build_services), image_services)

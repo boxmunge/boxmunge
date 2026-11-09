@@ -264,11 +264,15 @@ Build a validated project bundle (normally run by the client).""",
     "upgrade": """\
 Usage: boxmunge upgrade [--dry-run | --apply] [--skip-self-test]
        boxmunge upgrade --target VERSION   (deploy shell only)
+       boxmunge upgrade --repair-deps      (deploy shell only)
 
-Upgrade the boxmunge platform. From the deploy shell, plain `upgrade` and
-`upgrade --target` go through the root upgrade shim; there only those and
---dry-run are accepted. --target refuses a version older than the installed
-one. As root, run the shim itself: boxmunge-upgrade target VERSION.
+Upgrade the boxmunge platform. From the deploy shell, plain `upgrade`,
+`upgrade --target` and `upgrade --repair-deps` go through the root upgrade
+shim; there only those and --dry-run are accepted. --target refuses a version
+older than the installed one. --repair-deps installs the installed release's
+hash-pinned dependencies (MCP among them) into the live environment from its
+signed bundle; it works during probation. As root, run the shim itself:
+boxmunge-upgrade target VERSION, or boxmunge-upgrade repair-deps.
   --dry-run         Check migrations and config regeneration; change nothing
   --apply           Migrate/regenerate/restart only (called by the shim)
   --skip-self-test  Skip the post-upgrade self-test""",

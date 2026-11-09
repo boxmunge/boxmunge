@@ -367,7 +367,7 @@ def _start_service(
 ) -> None:
     """Start one service for the restore, through the start checks (no
     rebuild, so the exact deployed image comes back)."""
-    _up(paths, project_name, compose_files, canary, txn, build=False, services=[service])
+    _up(paths, project_name, compose_files, canary, txn, services=[service])
 
 
 def _wait_ready(project_name: str, service: str) -> None:

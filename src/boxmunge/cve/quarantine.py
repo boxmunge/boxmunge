@@ -443,10 +443,9 @@ def lift_quarantine(
     # 3. Restart containers, with their own restart policies back.
     _restore_restart_policies(project_name, state, restore)
     try:
-        # Pinned: only the local images that were scanned, never a pull or
-        # a build (`pull_policy`) of something that was not.
+        # Only the local images that were scanned: no start pulls or builds.
         compose_up_checked(paths, project_name, component=component,
-                           compose_files=compose_files, build=False, pinned=True, txn=txn)
+                           compose_files=compose_files, txn=txn)
     except DockerError as e:
         raise QuarantineError(
             f"Failed to restart containers for {project_name!r}: {e}",

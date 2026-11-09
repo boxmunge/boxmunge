@@ -147,9 +147,10 @@ The `deploy` user runs a restricted boxmunge shell. Agents connect as `deploy`.
 
 - Can **only** run `boxmunge` commands -- no `ls`, `cat`, `cd`, `docker`, or any other shell command
 - Cannot browse the filesystem or read files directly
-- Cannot run `sudo` itself. The shell's `upgrade` and `upgrade --target <version>` commands
-  reach the root upgrade shim through a sudo rule that permits exactly
-  `boxmunge-upgrade auto` and `boxmunge-upgrade target <version>`, nothing else
+- Cannot run `sudo` itself. The shell's `upgrade`, `upgrade --target <version>` and
+  `upgrade --repair-deps` commands reach the root upgrade shim through a sudo rule that permits
+  exactly `boxmunge-upgrade auto`, `boxmunge-upgrade target <version>` and
+  `boxmunge-upgrade repair-deps`, nothing else
 - Documentation is accessed via `agent-help <topic>`, not by reading files
 - Gets no SSH forwarding, tunnels or client environment beyond the locale and colour settings, so
   nothing bypasses the shell (TRUST_MODEL.md, "What We Isolate", SSH access)
@@ -210,7 +211,7 @@ boxmunge supports two project sources, declared in `manifest.yml` via the `sourc
 7. Decide users -- build and pull the release's images, read each image's `USER`, and decide who every service runs as (refusing a registry image that would run as root without a declaration, and data the new user could not own); a refusal leaves the install open and starts nothing
 8. Pre-deploy command -- run `deploy.pre_deploy` from manifest if defined, on the host in the project directory, without a shell, as deploy (PROJECT_CONVENTIONS.md, TRUST_MODEL.md)
 9. Generate configs -- write Caddy site config and compose overlay (networking, env_files, resource limits)
-10. Start containers -- prepare storage (the data helper creates or chowns fresh volumes and bind sources a numeric non-root or remapped service needs), re-validate the installed files, check every bind source without following symlinks and record its kind (creating missing ones as directories), then `docker compose up -d` with overlay. Every later start (upgrade, container update, `recover`, `resume`, `restore`) repeats the check against that record first; see TRUST_MODEL.md, "Container Escape and Root Restarts"
+10. Start containers -- prepare storage (the data helper creates or chowns fresh volumes and bind sources a numeric non-root or remapped service needs), re-validate the installed files, check every bind source without following symlinks and record its kind (creating missing ones as directories), then `docker compose up -d` with overlay. Every later start (upgrade, container update, `recover`, `resume`, `restore`) repeats the check against that record first, and runs only the local images the deploy built and pulled: no start pulls or builds (`--pull never --no-build`); a missing image refuses the start; see TRUST_MODEL.md, "Container Escape and Root Restarts"
 11. Reload Caddy -- a graceful reload (the containers were recreated in step 10, so the project restarts). A config Caddy rejects fails the deploy (see "Config Generation"); a reload that fails for another reason, such as Caddy not running, is only a warning
 12. Smoke test -- run each service's smoke script inside its containers. A failure fails the deploy, except on a project's first deploy, where it is only a warning
 13. Record state -- write deploy state JSON atomically

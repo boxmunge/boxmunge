@@ -55,7 +55,7 @@ def box(paths, monkeypatch):
     monkeypatch.setattr(bu, "lifecycle_block", lambda p, paths: held if p == "held" else None)
 
     def up(paths, p, **kw):
-        events.append(("up", p, tuple(kw["services"]), kw["record"], kw["build"]))
+        events.append(("up", p, tuple(kw["services"]), kw["record"]))
         if p == "bad":
             raise bu.DockerError("container exited")
     monkeypatch.setattr(bu, "compose_up_checked", up)
@@ -76,7 +76,7 @@ def test_bring_up_routes_healthy_projects_and_keeps_failures_on_maintenance(path
     assert ("route", "good") in events and ("route", "bad") not in events
     assert events[:2] == [("platform", "system", False), ("connect",)]
     assert events.index(("platform", "caddy", False)) < events.index(("up", "good", ("app",),
-                                                                      True, False))
+                                                                      True))
     assert "maintenance" in paths.project_caddy_site("bad").read_text()
     assert not paths.project_caddy_site("held").exists()  # pause's own page stays
     assert len(saved) == 3
@@ -146,7 +146,7 @@ def test_an_abort_starts_only_the_services_that_are_not_running_now(
     results = bu.bring_up(paths, _carried_on_inv(), Journal(FORWARD, "started", 1048576),
                           lambda: None, component="userns-rollback", prefix="abort",
                           only_stopped=True)
-    assert results["good"] == "up" and ("up", "good", ("worker",), True, False) in box
+    assert results["good"] == "up" and ("up", "good", ("worker",), True) in box
 
 
 def test_an_abort_leaves_a_healthy_running_project_alone(paths, box, monkeypatch) -> None:
@@ -202,4 +202,4 @@ def test_an_abort_redoes_a_project_an_earlier_bring_up_left_failed(
     results = bu.bring_up(paths, _carried_on_inv(), j, lambda: None,
                           component="userns-rollback", prefix="abort", only_stopped=True)
     assert results["good"] == "up" and ("route", "good") in box
-    assert ("up", "good", ("app", "worker"), True, False) in box
+    assert ("up", "good", ("app", "worker"), True) in box

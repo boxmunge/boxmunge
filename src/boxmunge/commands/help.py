@@ -83,6 +83,9 @@ Platform updates:
   upgrade                 Upgrade boxmunge platform from latest release
   upgrade --target VER    Upgrade to a specific version, never older (e.g. 0.3.5;
                           deploy shell; as root: boxmunge-upgrade target VER)
+  upgrade --repair-deps   Install the installed release's missing hash-pinned
+                          dependencies (e.g. MCP), also during probation (deploy
+                          shell; as root: boxmunge-upgrade repair-deps)
   auto-update             Run the auto-update probation/promotion cycle
   mcp-serve               Run MCP server (stdio) for AI agent integration
 

@@ -1269,6 +1269,31 @@ Pick one: declare in manifest, restructure the conflict away, or switch the serv
 
 ---
 
+### "the local image store no longer has the image" a container was created from
+
+`check`, `security scan`, `container-update` or `resume` fails with this for a project on a
+box that uses Docker's containerd image store. A build replaced the image the container's
+name points at while the container kept running: Docker names a build by its image index,
+which a new provenance attestation changes even when every layer came from cache, and
+Compose, which compares the image's platform manifest, left the container as it was. Then
+nothing named the old index, so Docker dropped it. Before 0.11.3 every upgrade restart did
+this, because it rebuilt each project's `build:` services; a `docker compose build` by hand
+does it too.
+
+The project's next start recreates a running container like this from the image its name
+points at (the same image, which is why Compose left it): `prod-deploy <project>`, or the
+next upgrade's restart. The start logs a warning naming the container. A stopped one is not
+recreated; the **supervisor** removes it (`docker rm <container>`) and the next start
+creates it again.
+
+An image that is still there but has no name left (an upgrade from 0.10 to 0.11.0–0.11.2
+took the old name off an image a container still ran) is named again,
+`boxmunge.invalid/<project>/<service>`, by the next overlay regeneration or start, before
+anything is started: by its container's own image ID, so only the image that container's
+deploy built is ever named.
+
+---
+
 ### Smoke script fails after upgrade with "permission denied" on `ping` or `traceroute`
 
 v0.5 hardening drops `NET_RAW` from every container by default — so `ping`, `traceroute`, and a handful of HTTP probe libraries that fall back to ICMP will fail with `Operation not permitted`. Most apps do not need `NET_RAW`; if your smoke script genuinely does, opt back in by adding to the project manifest:
@@ -1358,6 +1383,13 @@ can have directories root made that the deploy shell writes (`state/scans`, `sta
 in the deploy shell fails there: `security scan` with "Permission denied". The upgrade creates and
 re-owns them (and what root made inside them); until it runs, doctor prints the fix
 (`sudo chown -R deploy:deploy <directory>`), to run as the supervisor.
+
+**"MCP package installed" FAIL.** The live environment lacks the `mcp` package, so agents cannot
+reach the box over MCP; usually an upgrade run by an older release's shim (see "Agent Access via
+MCP"). Run `upgrade --repair-deps` from the deploy shell (as the supervisor:
+`sudo /opt/boxmunge/bin/boxmunge-upgrade repair-deps`), also during probation, then re-run
+`doctor`. If it fails, it says why: a failed download or verification changes nothing; after a
+pip failure (network, disk space), fix the cause and run it again.
 
 **"Project <name> registered" WARN.** The project was deployed (it still has deploy, scan or
 health state) but `projects/<name>/` is gone: a removal that did not finish. `health` warns the same
@@ -1767,7 +1799,9 @@ How an upgrade is applied and undone:
    into the standby venv, built from scratch with every hash-pinned dependency the release
    ships (MCP included); the upgrade needs 250MB free under `/opt/boxmunge`.
    `upgrade --dry-run` runs against it as a pre-flight. A failed download, signature, checksum
-   or dry run drops the standby and blocklists the version. If pip cannot install the
+   or dry run drops the standby and blocklists the version. A bundle that passes its checksum but
+   does not extract (a full disk where it is downloaded) drops the standby and sends a local
+   alert without blocklisting, so auto-update retries it. If pip cannot install the
    dependencies (a network blip, a full disk), the standby is dropped and a local alert sent.
    The first such failure of a version is not blocklisted or reported, so auto-update retries
    it; a second in a row blocklists it. A successful install and `clear-blocklist` reset the
@@ -1788,7 +1822,17 @@ How an upgrade is applied and undone:
    before v0.9.3); one it cannot re-own is printed as `FAIL` with the `chown` to run, and does
    not stop the upgrade. It then migrates manifests and regenerates every project's Caddy site
    and compose overlay, project by project under that project's lock, reloads Caddy and
-   restarts projects.
+   restarts projects. A restart starts the images the project's last deploy built and
+   pulled: it never builds or pulls, so an upgrade cannot put an image on the box that no
+   deploy scanned or decided users for. When an upgrade from 0.10 renames a project's built
+   images to `boxmunge.invalid/<project>/<service>`, the image each container runs takes the
+   new name (logged as `named the images ...`) before the old one is removed, so the
+   restart starts that image. A project whose image is missing is not restarted (`start
+   refused: the image for <service> (<image>) is missing ... run prod-deploy <project>`):
+   nothing of it is started or recreated, its running containers are left as they are, and
+   `prod-deploy <project>` builds and starts it. After an upgrade from 0.10 that is a
+   `build:` service that had no container, running or stopped, to take its image from, such
+   as a profiled one that only a restore starts, by name.
    Three kinds of project are left exactly as they are (not migrated, regenerated or
    restarted), reported as `LEFT AS IS` or `Skipped (busy)`, alerted, and do not fail the
    upgrade: one with a release staged by boxmunge 0.10.1 (one high-priority alert per project;
@@ -1853,7 +1897,9 @@ pre-update backup, self-test) does not end it, so container-update keeps waiting
 probation is over.
 
 No other upgrade starts during probation: the standby venv holds the previous release, the
-only rollback target. `upgrade --target` and `force-target` refuse with the time probation
+only rollback target. `upgrade --repair-deps` is not an upgrade and does run: it installs the
+live release's missing hash-pinned dependencies into the live venv only (see "Agent Access via
+MCP"). `upgrade --target` and `force-target` refuse with the time probation
 ends, without blocklisting anything; `upgrade` and auto-update report the deferral, exit 0
 and retry later. To override, an operator ends the probation first (accepting the release on
 probation) by removing `/opt/boxmunge/upgrade-state/probation.json`. A `probation.json` that
@@ -2038,12 +2084,35 @@ The server's `mcp` package is part of every install. `install.sh` and every plat
 whose bundle lacks that file, or whose MCP install fails, stops at pre-flight with the current
 release still live, like any other dependency failure.
 
-If the package is missing anyway, `mcp-serve` exits 1 and `doctor` fails its "MCP package
-installed" check, both with the repair: as root, re-run the installer of the installed release
-(`sudo bash boxmunge-install.sh`, from that version's GitHub release). Do not `pip install` it
-by hand: that is unpinned, and the next upgrade builds a fresh environment without it. The
-first upgrade from 0.10.1 or earlier is run by that release's upgrade shim, which does not
-install MCP; the upgrade after it does, or re-run the installer to have it now.
+An upgrade is run by the box's current upgrade shim, which installs only the requirements files
+it knows; shims up to 0.10.1 do not know `requirements-mcp.txt`. From 0.11.3 on, the new release's
+own `install.sh`, which shims from 0.7.0 run before the venv swap, installs it into the new
+environment. A shim up to 0.10.0 runs `install.sh` without `--upgrade-shim`; `install.sh`
+recognises it by the upgrade lock it holds and still leaves the previous release, the rollback
+target, alone. If pip fails there (a network blip, a full disk), on the hop from 0.10.1 or from an
+older shim alike, `install.sh` exits 75 and the old shim blocklists the release as
+`system_upgrade_failed: install_sh_exit_75`, with the previous release still live. Fix the cause, then run
+`sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist 0.11.3` (for the release concerned) and
+`upgrade` again. A box upgraded to 0.11.0, 0.11.1 or 0.11.2 by an older shim, or to any release by
+a 0.6.x shim (which never runs `install.sh`), comes up without MCP.
+
+If the package is missing, `mcp-serve` exits 1 and `doctor` fails its "MCP package installed"
+check, both with the repair: `upgrade --repair-deps` from the deploy shell, or as `supervisor`:
+
+```bash
+sudo /opt/boxmunge/bin/boxmunge-upgrade repair-deps
+```
+
+It downloads the installed release's bundle, verifies its signature and checksum as an upgrade
+does, and installs its hash-pinned dependencies into the live environment; nothing else changes.
+Like an upgrade, it needs 250MB free under `/opt/boxmunge`. If pip fails, it says whether the live
+environment still runs.
+It works during probation (the previous release kept for a rollback is not touched), and refuses
+while an interrupted upgrade or rollback is unfinished (the health timer finishes those within
+minutes). A box still on 0.11.0 to 0.11.2 has no `repair-deps`: its next upgrade, once probation
+ends, builds a fresh environment with MCP; to have it sooner, re-run that release's installer as
+root (`sudo bash boxmunge-install.sh`, from its GitHub release), which installs into the live
+environment only. Do not `pip install` it by hand: that is unpinned.
 
 Note: `boxmunge` on PyPI is the *client* CLI. The server package is
 `boxmunge-server` and is installed from GitHub releases, not PyPI.

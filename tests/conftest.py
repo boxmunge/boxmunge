@@ -182,6 +182,12 @@ def fake_containers(request, monkeypatch) -> FakeContainers:
         # off the integration tier there are none unless a test says otherwise.
         monkeypatch.setattr("boxmunge.docker_containers.container_bind_sources",
                             lambda project_name: [])
+        # ... and whether a running container's image has gone from the store.
+        monkeypatch.setattr("boxmunge.docker_containers.running_without_image",
+                            lambda project_name: {})
+        # A start's images are all there (the literal model names a build
+        # service's image by Compose's default, which no fake image has).
+        monkeypatch.setattr("boxmunge.docker_containers.absent_images", lambda images: [])
         monkeypatch.setattr("boxmunge.docker_containers.container_mounts",
                             lambda project_name: [])
         # Who a project's containers run as (deploy's user-change check).
@@ -204,6 +210,8 @@ def _no_built_image_removal(request, monkeypatch):
     if request.node.get_closest_marker("integration"):
         return
     monkeypatch.setattr("boxmunge.built_images.untag_old_built_names", lambda project, build_services, image_services: [])
+    monkeypatch.setattr("boxmunge.built_images.name_running_builds",
+                        lambda compose_project, build_services: [])
     monkeypatch.setattr("boxmunge.commands.project_delete_cmd.remove_built_images",
                         lambda compose_project: [])
 

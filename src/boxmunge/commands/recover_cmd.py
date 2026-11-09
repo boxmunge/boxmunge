@@ -204,7 +204,7 @@ def recover_locked(project_name: str, paths: BoxPaths) -> int:
     print("  Starting containers...")
     try:
         compose_up_checked(paths, project_name, component="recover",
-                           compose_files=compose_files, build=False)
+                           compose_files=compose_files)
     except DockerError as e:
         print(f"ERROR: compose up failed: {e}", file=sys.stderr)
         log_error("recover", f"compose up failed: {e}", paths,

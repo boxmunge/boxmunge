@@ -19,9 +19,9 @@ blocklist() { printf '{"%s": {"reason": "apply", "failed_at": "x"}}\n' "$1" \
 new_root a
 run_shim install-sudoers
 expect 0 "Wrote deploy sudo rule" "install-sudoers writes the rule"
-expected_rule="deploy ALL=(root) NOPASSWD: $BOXMUNGE_ROOT/bin/boxmunge-upgrade auto, $BOXMUNGE_ROOT/bin/boxmunge-upgrade target *"
+expected_rule="deploy ALL=(root) NOPASSWD: $BOXMUNGE_ROOT/bin/boxmunge-upgrade auto, $BOXMUNGE_ROOT/bin/boxmunge-upgrade target *, $BOXMUNGE_ROOT/bin/boxmunge-upgrade repair-deps"
 rules="$(grep -v '^#' "$BOXMUNGE_SUDOERS_FILE")"
-[[ "$rules" == "$expected_rule" ]] && pass "sudoers grants exactly auto and target" \
+[[ "$rules" == "$expected_rule" ]] && pass "sudoers grants exactly auto, target and repair-deps (no arguments)" \
     || fail "unexpected sudoers rule: $rules"
 for forbidden in "upgrade run" "check-probation" "clear-blocklist" "force-target" "install-sudoers"; do
     grep -v "^#" "$BOXMUNGE_SUDOERS_FILE" | grep -q -- "$forbidden" && fail "sudoers mentions $forbidden" \

@@ -11,6 +11,15 @@ Each container records the image it was created from by local image ID,
 which is what Docker commands such as `docker tag` accept. A registry
 manifest digest is a different value; a bare `sha256:` digest passed to
 Docker is looked up as an image ID and not found.
+
+On the containerd image store that ID is the digest of the image's index,
+which also holds the build's provenance attestation, so every build has a
+new one, even a build entirely from cache. Compose decides whether to
+recreate a container by its platform manifest, which a cached build
+keeps: a build that moved a name to a new index left the running
+container on the old one, and nothing names the old one any more, so the
+store drops it (boxmunge 0.11.0 to 0.11.2 rebuilt at every upgrade
+restart). The container runs on; its image cannot be inspected.
 """
 from __future__ import annotations
 
@@ -20,11 +29,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from boxmunge.docker import compose_project_filter
+from boxmunge.docker import COMPOSE_ONEOFF_LABEL as _ONEOFF_LABEL, compose_project_filter
 from boxmunge.docker_run import DockerError, run as _run
 
 _SERVICE_LABEL = "com.docker.compose.service"
-_ONEOFF_LABEL = "com.docker.compose.oneoff"
 
 
 @dataclass(frozen=True)
@@ -79,7 +87,10 @@ def _exact_ref(image_id: str, repo_digests: tuple[str, ...]) -> str:
 
 
 def _inspect(cmd: list[str]) -> list[dict[str, Any]]:
-    out = _run(cmd, capture=True).stdout
+    return _documents(cmd, _run(cmd, capture=True).stdout)
+
+
+def _documents(cmd: list[str], out: str) -> list[dict[str, Any]]:
     try:
         doc = json.loads(out)
     except json.JSONDecodeError as e:
@@ -89,19 +100,28 @@ def _inspect(cmd: list[str]) -> list[dict[str, Any]]:
     return doc
 
 
-def _container(doc: dict[str, Any], images: dict[str, dict[str, Any]]) -> ProjectContainer:
-    name = str(doc.get("Name") or doc.get("Id") or "?").lstrip("/")
+def _name(doc: dict[str, Any]) -> str:
+    return str(doc.get("Name") or doc.get("Id") or "?").lstrip("/")
+
+
+def _service(doc: dict[str, Any]) -> str:
     labels = (doc.get("Config") or {}).get("Labels") or {}
     service = labels.get(_SERVICE_LABEL)
-    image_id = doc.get("Image")
     if not isinstance(service, str) or not service:
+        name = _name(doc)
         raise DockerError(
             f"container {name} carries the project's compose label but no "
             f"{_SERVICE_LABEL} label, so its service is unknown. Remove it "
             f"(`docker rm -f {name}`) or relabel it."
         )
-    if not isinstance(image_id, str) or not image_id.startswith("sha256:"):
-        raise DockerError(f"container {name}: docker reports image {image_id!r}, not an image ID")
+    return service
+
+
+def _container(doc: dict[str, Any], images: dict[str, dict[str, Any]]) -> ProjectContainer:
+    name = _name(doc)
+    labels = (doc.get("Config") or {}).get("Labels") or {}
+    service = _service(doc)
+    image_id = doc["Image"]  # checked by _container_docs
     state = doc.get("State") or {}
     health = (state.get("Health") or {}).get("Status")
     running = state.get("Running") is True
@@ -130,27 +150,89 @@ def project_volumes(project_name: str) -> list[str]:
     return listed.stdout.split()
 
 
-def project_containers(project_name: str) -> list[ProjectContainer]:
-    """Every container of a compose project, running or stopped, by name.
-
-    Raises DockerError when Docker cannot be asked: an empty answer must
-    mean "no containers", never "could not tell".
-    """
+def _container_docs(project_name: str) -> list[dict[str, Any]]:
     listed = _run(
         ["docker", "ps", "-a", "--no-trunc", *compose_project_filter(project_name),
          "--format", "{{.ID}}"],
         capture=True,
     )
     ids = listed.stdout.split()
-    if not ids:
-        return []
-    docs = _inspect(["docker", "container", "inspect", *ids])
-    image_ids = sorted({d.get("Image") for d in docs if isinstance(d.get("Image"), str)})
-    images = {img.get("Id"): img for img in _inspect(["docker", "image", "inspect", *image_ids])}
-    missing = [i for i in image_ids if i not in images]
-    if missing:
-        raise DockerError(f"docker image inspect did not describe {', '.join(missing)}")
+    docs = _inspect(["docker", "container", "inspect", *ids]) if ids else []
+    for doc in docs:
+        image_id = doc.get("Image")
+        if not isinstance(image_id, str) or not image_id.startswith("sha256:"):
+            raise DockerError(f"container {_name(doc)}: docker reports image {image_id!r}, "
+                              f"not an image ID")
+    return docs
+
+
+def _local_images(docs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """{image ID: its inspect document} for the images the containers were
+    created from that the local image store still has (see the module
+    docstring for one that it does not). Raises DockerError for any other
+    failure."""
+    image_ids = sorted({str(d["Image"]) for d in docs})  # IDs, checked by _container_docs
+    if not image_ids:
+        return {}
+    cmd = ["docker", "image", "inspect", *image_ids]
+    result = _run(cmd, capture=True, check=False)
+    lines = [e.strip() for e in (result.stderr or "").splitlines() if e.strip()]
+    errors = [e for e in lines if "no such image" not in e.lower()]
+    if result.returncode != 0 and errors:
+        raise DockerError(f"{' '.join(cmd[:3])} failed: {'; '.join(errors)}")
+    found = {str(d["Id"]): d for d in _documents(cmd, result.stdout or "")
+             if d.get("Id") in image_ids}
+    # An image counts as gone only when Docker says so; a failure that names
+    # nothing must not make a start recreate every container.
+    unsaid = [i for i in image_ids if i not in found
+              and not any("no such image" in e.lower() and e.endswith(i) for e in lines)]
+    if unsaid or (result.returncode != 0 and len(found) == len(image_ids)):
+        raise DockerError(f"{' '.join(cmd[:3])} described neither the image nor its absence "
+                          f"for {', '.join(unsaid) or 'any image'} (exit "
+                          f"{result.returncode}): {'; '.join(lines) or 'no output'}")
+    return found
+
+
+def _image_gone(project_name: str, docs: list[dict[str, Any]]) -> DockerError:
+    named = "; ".join(f"{_name(d)} (image {d.get('Image')}, created from "
+                      f"{(d.get('Config') or {}).get('Image')})" for d in docs)
+    return DockerError(
+        f"the local image store no longer has the image these containers of {project_name} "
+        f"were created from: {named}. A build replaced the image their name points at "
+        f"while they kept running. The project's next start recreates a running one from "
+        f"the deployed image: prod-deploy {project_name} (or stage, for its staged copy). "
+        f"A stopped one must be removed first (docker rm, as the operator).")
+
+
+def project_containers(project_name: str) -> list[ProjectContainer]:
+    """Every container of a compose project, running or stopped, by name.
+
+    Raises DockerError when Docker cannot be asked: an empty answer must
+    mean "no containers", never "could not tell". So does a container whose
+    image the local image store no longer has, saying how to recreate it.
+    """
+    docs = _container_docs(project_name)
+    images = _local_images(docs)
+    gone = [d for d in docs if d["Image"] not in images]
+    if gone:
+        raise _image_gone(project_name, gone)
     return sorted((_container(d, images) for d in docs), key=lambda c: c.name)
+
+
+def running_without_image(project_name: str) -> dict[str, list[str]]:
+    """{service: names of its running containers (`run` one-offs excluded)
+    whose image the local image store no longer has}. A start recreates
+    them (compose_guard). Raises DockerError when Docker cannot be asked."""
+    docs = _container_docs(project_name)
+    images = _local_images(docs)
+    out: dict[str, list[str]] = {}
+    for doc in docs:
+        labels = (doc.get("Config") or {}).get("Labels") or {}
+        if (doc["Image"] in images or (doc.get("State") or {}).get("Running") is not True
+                or str(labels.get(_ONEOFF_LABEL, "")).lower() == "true"):
+            continue
+        out.setdefault(_service(doc), []).append(_name(doc))
+    return {svc: sorted(names) for svc, names in sorted(out.items())}
 
 
 def _docker_time(value: str) -> datetime:
@@ -233,6 +315,12 @@ def local_image(ref: str) -> LocalImage | None:
     if not isinstance(image_id, str) or not image_id.startswith("sha256:"):
         raise DockerError(f"docker image inspect {ref} reports image ID {image_id!r}")
     return LocalImage(image_id=image_id, repo_digests=tuple(digests))
+
+
+def absent_images(images: dict[str, str]) -> list[tuple[str, str]]:
+    """(service, image) for each image ({service: ref}) the local image store
+    does not have. Raises DockerError when Docker cannot be asked."""
+    return [(svc, ref) for svc, ref in sorted(images.items()) if local_image(ref) is None]
 
 
 def container_bind_sources(project_name: str) -> list[tuple[str, bool]]:

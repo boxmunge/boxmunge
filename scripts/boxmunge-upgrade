@@ -6,9 +6,11 @@
 # Python code — it only calls Python commands as subprocesses and checks
 # exit codes. This ensures rollback works even if the new code is broken.
 #
-# Entry points (deploy may sudo only the two marked *; see install-sudoers):
+# Entry points (deploy may sudo only the three marked *; see install-sudoers):
 # * auto                       discover the latest release and upgrade to it
 # * target <version>           upgrade to a specific newer, non-blocklisted version
+# * repair-deps                install the installed release's hash-pinned
+#                              dependencies into the live slot (also in probation)
 #   force-target <version>     operator only: ignore the blocklist and downgrade floor
 #   run <version> <url>        auto-update timer: upgrade to a discovered version
 #                              (the bundle URL is always derived from <version>)
@@ -21,7 +23,7 @@
 #   userns-commit              operator only: delete the old root after the soak
 #
 # In the source tree the functions live in boxmunge-upgrade.d/ (state, slots,
-# probation, system, userns). The release build (scripts/build-shim.py)
+# probation, release, system, userns). The release build (scripts/build-shim.py)
 # inlines them, so the shim a box runs is this one self-contained file:
 # whatever installs it (install.sh, or an older release's shim
 # self-updating) copies only this file.
@@ -97,7 +99,7 @@ PYBM
 SHIM_LIB_DIR="$(dirname "$SHIM_PATH")/boxmunge-upgrade.d"
 [[ -d "$SHIM_LIB_DIR" ]] \
     || die "This is the unbuilt source shim and $SHIM_LIB_DIR is missing; install a release bundle, whose shim is built"
-for lib in state slots probation system userns; do
+for lib in state slots probation release system userns; do
     # shellcheck source=/dev/null
     source "$SHIM_LIB_DIR/$lib.sh"
 done
@@ -149,8 +151,20 @@ stash_failed() {
     exit 1
 }
 
-TMP_DOWNLOAD=""
-cleanup_download() { [[ -z "$TMP_DOWNLOAD" ]] || rm -rf "$TMP_DOWNLOAD"; }
+# extract_failed <version> <message>: the bundle passed its checksum but did
+# not extract, so the box failed (a full disk under the download directory),
+# not the release: like stash_failed, not blocklisted or reported, and the
+# operator is alerted, so an auto-update stopping here every run is seen.
+extract_failed() {
+    local version="$1" message="$2"
+    log "$message; $version not blocklisted"
+    remove_slot "$(standby_slot)"
+    bm_log error upgrade "upgrade to $version aborted before any change: bundle extract failed" \
+        "{\"version\": \"$version\"}"
+    send_notification "boxmunge upgrade failed" \
+        "The verified bundle of $version did not extract, so the upgrade stopped before changing anything (not blocklisted; auto-update will retry it). Free disk space and retry: $message"
+    exit 1
+}
 
 cmd_run() {
     local version="${1:?Usage: boxmunge-upgrade run <version> <url>}"
@@ -173,106 +187,37 @@ upgrade_to() {
 
     local prev_slot from_version standby
     prev_slot="$ACTIVE_SLOT"
-    # `--version` prints "boxmunge X.Y.Z[+build]"; the fleet service wants the bare X.Y.Z.
-    from_version="$("$(active_venv)/bin/boxmunge-server" --version 2>/dev/null \
-        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
+    # The fleet service wants the bare X.Y.Z.
+    from_version="$(slot_version "$ACTIVE_SLOT")"
     from_version="${from_version:-unknown}"
     standby="$(standby_slot)"
 
     # 1. PREPARE
     log "Preparing standby venv (slot $standby)..."
-    # A slot is about 90MB on Debian, MCP included. pip runs with
-    # --no-cache-dir, so no wheel cache builds up under /root; the rest is
-    # headroom for the stash.
-    local avail_mb
-    avail_mb=$(df -m "$BOXMUNGE_ROOT" | awk 'NR==2{print $4}')
-    [[ "$avail_mb" -lt 250 ]] && die "Insufficient disk space: ${avail_mb}MB available, need 250MB"
+    require_free_space
 
     remove_slot "$standby"
     python3 -m venv "$BOXMUNGE_ROOT/env-$standby"
 
-    # Download bundle from GitHub release
-    local tmp_download
-    TMP_DOWNLOAD="$(mktemp -d)"
-    tmp_download="$TMP_DOWNLOAD"
-    trap cleanup_download EXIT
-    local release_base="https://github.com/boxmunge/boxmunge/releases/download/v${version}"
-    local bundle_url="${release_base}/boxmunge-${version}.tar.gz"
-    local sums_url="${release_base}/SHA256SUMS"
-    local sums_sig_url="${release_base}/SHA256SUMS.sig"
-    local sums_cert_url="${release_base}/SHA256SUMS.cert"
-
-    log "Downloading bundle from ${bundle_url}"
-    curl -sLf -o "$tmp_download/boxmunge-${version}.tar.gz" "$bundle_url" \
-        || preflight_fail "$version" "$from_version" "preflight_failed: bundle_download" \
-            "Failed to download bundle"
-    curl -sLf -o "$tmp_download/SHA256SUMS" "$sums_url" \
-        || preflight_fail "$version" "$from_version" "preflight_failed: checksum_download" \
-            "Failed to download SHA256SUMS"
-    curl -sLf -o "$tmp_download/SHA256SUMS.sig" "$sums_sig_url" \
-        || preflight_fail "$version" "$from_version" "preflight_failed: signature_download" \
-            "Failed to download SHA256SUMS.sig (release is unsigned or sig artifact missing)"
-    curl -sLf -o "$tmp_download/SHA256SUMS.cert" "$sums_cert_url" \
-        || preflight_fail "$version" "$from_version" "preflight_failed: certificate_download" \
-            "Failed to download SHA256SUMS.cert (release is unsigned or cert artifact missing)"
-
-    # Verify cosign signature on SHA256SUMS BEFORE running sha256sum -c.
-    #
-    # This breaks the circularity of the prior design (where SHA256SUMS and
-    # the bundle came from the same release URL — an attacker who replaced
-    # the bundle could replace SHA256SUMS in lockstep). Cosign's keyless
-    # signature chains to a Fulcio cert tying SHA256SUMS to the release
-    # workflow on a tagged release of this exact repo; without the OIDC
-    # issuer pinning the attacker would need to compromise GitHub Actions
-    # OIDC, not just the release artifacts.
-    #
-    # cosign is hard-required: if the host is missing it, abort.
-    if ! verify_release_signature "$tmp_download"; then
-        preflight_fail "$version" "$from_version" "preflight_failed: cosign_verify" \
-            "Cosign verification of SHA256SUMS FAILED — refusing to install."
+    # Download the bundle from its GitHub release and verify its signature
+    # and checksum (fetch_release).
+    start_download
+    # shellcheck disable=SC2153  # TMP_DOWNLOAD is set by start_download
+    local tmp_download="$TMP_DOWNLOAD"
+    if ! fetch_release "$version" "$tmp_download"; then
+        [[ "$FETCH_STEP" != bundle_extract ]] || extract_failed "$version" "$FETCH_ERROR"
+        preflight_fail "$version" "$from_version" "preflight_failed: $FETCH_STEP" "$FETCH_ERROR"
     fi
-    log "Cosign signature on SHA256SUMS verified (release-workflow identity)"
-    bm_log info upgrade "signature verified" "{\"version\": \"$version\"}"
 
-    # Verify checksum.
-    #
-    # SHA256SUMS lines are produced by `sha256sum <file>` and have the
-    # canonical form: `<64-hex-hash>  <filename>` (two spaces, bare filename
-    # — the release workflow takes care to write bare filenames).
-    #
-    # We do NOT pass --ignore-missing: it makes `sha256sum -c` succeed when
-    # the SHA256SUMS file lists zero matching files. An adversary who could
-    # publish a SHA256SUMS without a line for our bundle would then pass
-    # verification trivially. So instead we (a) require that SHA256SUMS
-    # contains a line for the exact bundle filename we just downloaded, and
-    # (b) run the full check.
-    local expected_filename="boxmunge-${version}.tar.gz"
-    if ! grep -q "  ${expected_filename}\$" "${tmp_download}/SHA256SUMS"; then
-        preflight_fail "$version" "$from_version" "preflight_failed: checksum_missing_entry" \
-            "Checksum verification FAILED: SHA256SUMS does not list ${expected_filename}"
-    fi
-    # SHA256SUMS may also list boxmunge-install.sh and other release artefacts
-    # we did not download; restrict the check to just the bundle line.
-    (cd "$tmp_download" && grep "  ${expected_filename}\$" SHA256SUMS | sha256sum -c -) \
-        || preflight_fail "$version" "$from_version" "preflight_failed: checksum_mismatch" \
-            "Checksum verification FAILED"
-
-    # Extract and pip install
-    tar xzf "$tmp_download/boxmunge-${version}.tar.gz" -C "$tmp_download"
     # Dependencies only from the bundle's hash-pinned requirements (covered by
-    # the signed SHA256SUMS); the package itself with no further resolution,
-    # built by the hash-pinned backend. No pip self-upgrade: one more
-    # unpinned download. MCP is part of every install: the slot is built from
-    # scratch, so anything not installed here is gone after the swap.
-    local bundle="$tmp_download/boxmunge" req reqs=()
-    for req in requirements-build.txt requirements-tui.txt requirements-mcp.txt; do
-        [[ -f "$bundle/$req" ]] \
-            || preflight_fail "$version" "$from_version" "preflight_failed: no_pinned_requirements" \
-                "Bundle has no hash-pinned $req; refusing an unpinned install"
-        reqs+=(-r "$bundle/$req")
-    done
-    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --no-cache-dir --require-hashes "${reqs[@]}" \
-        || dependency_install_failed "$version" "$from_version"
+    # the signed SHA256SUMS), every one of them, MCP included; the package
+    # itself with no further resolution, built by the hash-pinned backend.
+    local bundle="$tmp_download/boxmunge" missing
+    if missing="$(missing_requirement "$bundle")"; then
+        preflight_fail "$version" "$from_version" "preflight_failed: no_pinned_requirements" \
+            "Bundle has no hash-pinned $missing; refusing an unpinned install"
+    fi
+    install_pinned_deps "$bundle" "$standby" || dependency_install_failed "$version" "$from_version"
     pip_failures "$version" 0
     "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --no-cache-dir --no-deps --no-build-isolation "$bundle" \
         || preflight_fail "$version" "$from_version" "preflight_failed: pip_install" \
@@ -348,6 +293,11 @@ upgrade_to() {
     # Missing-fingerprint case (first upgrade past this feature): treated
     # as "needs upgrade" — install.sh re-runs, writes the fingerprint, and
     # subsequent upgrades only re-run when the bundle changes install.sh.
+    #
+    # Called with --upgrade-shim, install.sh also installs its bundle's
+    # hash-pinned requirements into the standby (bootstrap/venv-deps.sh).
+    # After the install above pip has nothing to do; it is there for older
+    # shims, which install only the requirements files they know.
     local new_install_sh="$tmp_download/boxmunge/install.sh"
     local installer_hash_file="$BOXMUNGE_ROOT/state/installer.sha256"
     if [[ -f "$new_install_sh" ]]; then
@@ -496,5 +446,6 @@ case "${1:-}" in
     userns-migrate)  shift; cmd_userns_migrate "$@" ;;
     userns-rollback) shift; cmd_userns_rollback "$@" ;;
     userns-commit)   shift; cmd_userns_commit "$@" ;;
-    *)               die "Usage: boxmunge-upgrade {run|auto|target|force-target|check-probation|clear-blocklist|install-sudoers|install-docs|userns-migrate|userns-rollback|userns-commit} [args]" ;;
+    repair-deps)     shift; cmd_repair_deps "$@" ;;
+    *)               die "Usage: boxmunge-upgrade {run|auto|target|force-target|check-probation|clear-blocklist|install-sudoers|install-docs|userns-migrate|userns-rollback|userns-commit|repair-deps} [args]" ;;
 esac

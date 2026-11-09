@@ -19,6 +19,7 @@ def test_missing_mcp_package_gives_the_repair(capsys) -> None:
     err = capsys.readouterr().err
     assert "requires the 'mcp' package" in err
     assert "requirements-mcp.txt" in err
-    assert "sudo bash boxmunge-install.sh" in err
+    assert "upgrade --repair-deps" in err
+    assert "sudo /opt/boxmunge/bin/boxmunge-upgrade repair-deps" in err
     # Never an unpinned install into the live venv: the next upgrade drops it.
     assert "pip install" not in err

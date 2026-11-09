@@ -224,6 +224,7 @@ active or not: a profiled service still starts when something names it
 | `${VAR}` or `$VAR` inside a bind-mount source | The path cannot be verified. Write it literally. |
 | A bind mount outside the project directory (refused under every profile) | One project must not read or write another's files. Use paths such as `./data`; an absolute path is fine if it is inside `/opt/boxmunge/projects/<project>/`. Symlinks are resolved before the check. |
 | `build.network: host`, `build.privileged`, `build.entitlements` | Build steps run in a container too; keep them off the host network and unprivileged. |
+| `pull_policy` other than `missing`, `if_not_present` or `never` (`always`, `daily`, `every_<interval>`, `build`) | Every start would pull or build an image no deploy scanned or decided users for. Remove it: a deploy builds and pulls what the release needs, and container-update takes new registry images. A project already deployed with one gets a warning at its starts, the upgrade and a rollback instead, and its starts do not apply it: every start runs local images only (`--pull never --no-build`). |
 | A long-syntax mount of `type: npipe` or `type: cluster` | Its source cannot be checked. Use `bind` (inside the project), `volume`, `tmpfs` or `image`. |
 
 ### Capability denylist

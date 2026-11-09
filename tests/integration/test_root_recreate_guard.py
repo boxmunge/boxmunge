@@ -26,6 +26,15 @@ pytestmark = [
 ]
 
 PROJECT = "guardint"
+IMAGE = "nginx:1.27-alpine"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _deployed_image() -> None:
+    """The image a deploy would have pulled: a start runs only local images,
+    and refuses before `up` when one is missing."""
+    if subprocess.run(["docker", "image", "inspect", IMAGE], capture_output=True).returncode:
+        subprocess.run(["docker", "pull", "-q", IMAGE], check=True, capture_output=True)
 
 
 def _paths(tmp_path: Path) -> BoxPaths:
@@ -201,7 +210,7 @@ def test_provider_project_is_refused_before_any_host_exec(tmp_path, alerts) -> N
     }}))
     with pytest.raises(ComposeRefused, match="provider"):
         compose_up_checked(paths, PROJECT, component="upgrade",
-                           compose_files=["compose.yml"], build=False)
+                           compose_files=["compose.yml"])
     assert not marker.exists()
     assert alerts and "provider" in alerts[0]
 

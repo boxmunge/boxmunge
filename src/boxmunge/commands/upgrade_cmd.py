@@ -283,8 +283,10 @@ Usage: boxmunge upgrade [--dry-run | --apply] [--skip-self-test]
 Manual upgrade entry point. From the deploy shell, `upgrade` (no args) and
 `upgrade --target VERSION` are routed through the root-context bash shim,
 which handles stash + venv swap + probation; as root, run
-`boxmunge-upgrade target VERSION` instead. The flags below are for the shim
-and direct invocations only.
+`boxmunge-upgrade target VERSION` instead. `upgrade --repair-deps` (deploy
+shell; as root `boxmunge-upgrade repair-deps`) installs the installed
+release's hash-pinned dependencies into the live environment, also during
+probation. The flags below are for the shim and direct invocations only.
 
 Flags:
   --dry-run         Render manifest migrations and configs in memory and

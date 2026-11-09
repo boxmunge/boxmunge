@@ -2,10 +2,11 @@
 # tests/shim/lib.sh — shared helpers for the upgrade-shim shell tests.
 #
 # Source this from a test script. It provides PASS/FAIL counters, assertions,
-# a throwaway BOXMUNGE_ROOT with a mock venv, and stand-ins for flock(1) and
-# timeout(1) on hosts that lack them (macOS), so the locking and probation
-# paths run everywhere. The stand-ins only exist when the real tool is
-# missing; on Debian the real util-linux and coreutils binaries are used.
+# a throwaway BOXMUNGE_ROOT with a mock venv, and stand-ins for flock(1),
+# sha256sum(1) and timeout(1) on hosts that lack them (macOS), so the locking,
+# checksum and probation paths run everywhere. The stand-ins only exist when
+# the real tool is missing; on Debian the real util-linux and coreutils
+# binaries are used.
 
 SHIM_TEST_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SHIM_TEST_LIB_DIR/../.." && pwd)"
@@ -79,6 +80,10 @@ try:
 except BlockingIOError:
     sys.exit(1)' "$2"
 EOF
+fi
+if ! command -v sha256sum >/dev/null 2>&1; then
+    # Same output, and the same `-c` check of "<hash>  <file>" lines.
+    printf '#!/usr/bin/env bash\nexec shasum -a 256 "$@"\n' > "$FAKEBIN/sha256sum"
 fi
 if ! command -v timeout >/dev/null 2>&1; then
     # timeout [--kill-after=N] <secs> cmd...

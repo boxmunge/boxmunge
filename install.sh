@@ -8,8 +8,8 @@
 # Upgrade (SSH in as deploy user, elevate with sudo):
 #   sudo bash install.sh
 #
-# From the upgrade shim (system pieces only; the shim installs the package
-# into the standby venv and records the version itself):
+# From the upgrade shim (system pieces and the standby venv's hash-pinned
+# dependencies; the shim installs the package and records the version itself):
 #   bash install.sh --upgrade-shim
 
 set -euo pipefail
@@ -18,8 +18,8 @@ BOXMUNGE_ROOT="/opt/boxmunge"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # During an upgrade env-active is still the PREVIOUS release's venv, the one a
-# rollback returns to. Installing the new package into it would leave nothing
-# to roll back to, so the shim passes --upgrade-shim and keeps venvs to itself.
+# rollback returns to, so a run by the shim leaves it alone. Shims up to 0.10.0
+# pass no --upgrade-shim; after the pre-flight, run-by-old-shim.sh spots them.
 FROM_UPGRADE_SHIM=0
 if [[ "${1:-}" == "--upgrade-shim" ]]; then
     FROM_UPGRADE_SHIM=1
@@ -54,6 +54,7 @@ if grep -q '^# >>> boxmunge-upgrade.d:' "${SCRIPT_DIR}/scripts/boxmunge-upgrade"
     echo "       Install from a release bundle (boxmunge-install.sh, or \`make bundle\`), not a source checkout." >&2
     exit 1
 fi
+[[ "${FROM_UPGRADE_SHIM}" -eq 1 ]] || FROM_UPGRADE_SHIM="$(BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/run-by-old-shim.sh")"
 
 # ---------------------------------------------------------------------------
 # Docker Compose version.
@@ -457,17 +458,16 @@ if [[ -f "${BOXMUNGE_ROOT}/config/backup.key" ]]; then
     chown root:deploy "${BOXMUNGE_ROOT}/config/backup.key"
     chmod 640 "${BOXMUNGE_ROOT}/config/backup.key"
 fi
-# Dependencies come only from the hash-pinned requirements files in the signed
-# bundle; the package itself installs without resolving anything further and
-# builds with the hash-pinned backend already in the venv. The venv's own pip
-# (from the distro's python3-venv) is used as is: upgrading it would be one
-# more unpinned download. MCP is always installed: it is how agents operate
-# the box, and every upgrade installs the same files into the new slot.
+# Dependencies only from the bundle's hash-pinned requirements, MCP included
+# (bootstrap/venv-deps.sh); the package with no further resolution, built by the
+# hash-pinned backend in the venv; the venv's own pip as is (upgrading it is one
+# more unpinned download). From a shim, the standby it built is completed
+# instead: an older shim leaves out requirements files it does not know.
 if [[ "${FROM_UPGRADE_SHIM}" -eq 0 ]]; then
-    "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --no-cache-dir --require-hashes \
-        -r "${SCRIPT_DIR}/requirements-build.txt" -r "${SCRIPT_DIR}/requirements-tui.txt" \
-        -r "${SCRIPT_DIR}/requirements-mcp.txt"
+    BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/venv-deps.sh" active
     "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --no-cache-dir --no-deps --no-build-isolation "${SCRIPT_DIR}"
+else
+    BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/venv-deps.sh" standby
 fi
 
 # pip install as root leaves root-owned build artifacts in the source directory.
@@ -553,12 +553,12 @@ systemctl enable --now \
     boxmunge-cve-scan.timer
 
 # ---------------------------------------------------------------------------
-# Sudoers: deploy may run exactly `boxmunge-upgrade auto` and
-# `boxmunge-upgrade target <version>` as root, so `upgrade` from the deploy
-# shell reaches the shim that handles stash + venv swap + probation. The rule
-# text lives in the shim (install-sudoers), which validates it with visudo
-# before replacing /etc/sudoers.d/boxmunge-deploy. Every upgrade rewrites it
-# too, so a box carrying an older, wider rule is tightened on upgrade.
+# Sudoers: deploy may run exactly `boxmunge-upgrade auto`, `target <version>`
+# and `repair-deps` as root, so the deploy shell's `upgrade`, `--target` and
+# `--repair-deps` reach the shim. The rule text lives in the shim
+# (install-sudoers), which validates it with visudo before replacing
+# /etc/sudoers.d/boxmunge-deploy. Every upgrade rewrites it too, so a box
+# carrying an older, wider rule is tightened on upgrade.
 # ---------------------------------------------------------------------------
 "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade" install-sudoers
 

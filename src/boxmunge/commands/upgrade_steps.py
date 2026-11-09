@@ -175,6 +175,7 @@ def compose_refusal(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> str
             cve_policy=manifest.get("security"),
             manifest_services=manifest.get("services"),
             user_entries=manifest.get(USER_ENTRIES),
+            lenient_values=True,
         )
     except ComposeSecurityError as e:
         return str(e)
