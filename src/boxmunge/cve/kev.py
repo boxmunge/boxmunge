@@ -13,8 +13,9 @@ is degraded so the gap is never silent.
 
 Freshness has two conditions (issue #121), because the catalog can come from
 a mirror:
-- a source must have answered within KEV_MAX_AGE_DAYS (``fetched_at``): a box
-  that can reach no source goes stale after a week, as before;
+- a catalog must have been accepted from a source within KEV_MAX_AGE_DAYS
+  (``fetched_at``): a box that gets no usable catalog goes stale after a
+  week, as before;
 - the catalog's own ``dateReleased`` must be within KEV_MAX_RELEASE_AGE_DAYS:
   a mirror that stopped syncing keeps answering, so the fetch time alone
   would make its old catalog look fresh forever.
@@ -79,7 +80,9 @@ class KevCatalog:
     ``fetched_at`` is when a source last answered with a catalog we
     accepted, ``released_at`` the catalog's own ``dateReleased`` and
     ``source`` the URL that answered. ``unreadable`` is why the cache file
-    could not be read (the catalog is then empty).
+    could not be read (the catalog is then empty). ``withdrawn`` holds the
+    IDs that this run's refresh dropped from the previous catalog; it is
+    never cached, and only the scan that refreshed sees it.
     """
 
     cve_ids: frozenset[str]
@@ -87,6 +90,7 @@ class KevCatalog:
     released_at: datetime | None
     source: str | None
     unreadable: str | None = None
+    withdrawn: frozenset[str] = frozenset()
 
     def stale_reason(self, today: date) -> str | None:
         """Why this catalog cannot be trusted on ``today``, or None if fresh."""
@@ -100,8 +104,8 @@ class KevCatalog:
             return (f"the cached catalog was fetched in the future "
                     f"({_when(self.fetched_at)}): check the box clock")
         if fetch_age > KEV_MAX_AGE_DAYS:
-            return (f"no KEV source has answered for {fetch_age} days (limit "
-                    f"{KEV_MAX_AGE_DAYS}); last answer {_when(self.fetched_at)} "
+            return (f"no KEV catalog has been accepted for {fetch_age} days (limit "
+                    f"{KEV_MAX_AGE_DAYS}); last accepted {_when(self.fetched_at)} "
                     f"from {self.source or 'an unrecorded source'}")
         # A cache written before release dates were recorded has an unknown
         # release age, not a stale one: only the fetch condition applies

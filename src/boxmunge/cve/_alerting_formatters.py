@@ -295,3 +295,24 @@ def format_quarantine_lifted_alert(
     ])
     failed = smoke is not None and not smoke[0]
     return Alert(kind="quarantine_lifted", title=title, body=body, priority=1 if failed else 0)
+
+
+def format_kev_withdrawal_hold_alert(project: str, cve_id: str, source: str) -> Alert:
+    """This scan would have lifted the quarantine because the refreshed KEV
+    catalog no longer lists its CVE. One source can do that, so the lift
+    waits for the operator. Priority 1: the site stays down until then."""
+    return Alert(
+        kind="kev_withdrawal_held",
+        title=f"[boxmunge:{project}] Quarantine kept — CISA KEV withdrew {cve_id}",
+        body="\n".join([
+            f"Project: {project}",
+            f"Quarantined for {cve_id}. The KEV catalog this scan fetched from {source}",
+            "no longer lists it, so nothing else keeps the project quarantined.",
+            "A single source can drop an entry, so this scan did not lift the",
+            "quarantine on its own. Check CISA's KEV page; if the withdrawal is real,",
+            "accept it with:",
+            f"  boxmunge security resume {project}",
+            f"Details: boxmunge security {project}",
+        ]),
+        priority=1,
+    )

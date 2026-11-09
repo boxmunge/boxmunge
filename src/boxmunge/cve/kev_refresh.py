@@ -10,10 +10,16 @@ result, so the stale/rejected alert can name each one (issue #121).
 Checks per source (audit B-06 and #121). A catalog is rejected when it:
 - is larger than KEV_MAX_BYTES, is not a JSON object with a
   'vulnerabilities' list, or has no valid 'dateReleased';
-- was released more than KEV_MAX_FUTURE_DAYS in the future (a bogus date
-  would otherwise block every genuine catalog as "older than the cache");
-- was released before the cached one (a lagging source must not roll the
-  catalog back; logged, but not alerted while the cache is fresh);
+- was released more than KEV_MAX_FUTURE_RELEASE in the future (a bogus
+  date would otherwise block every genuine catalog as "older than the
+  cache");
+- was released before the cached one, when the cache came from this source
+  or one earlier in the list (a lagging source must not roll the catalog
+  back; logged, but not alerted while the cache is fresh). A source earlier
+  in the list than the cache's own is not held to the cached date, so a
+  later source stamping a newer date (a compromised mirror, an internal
+  mirror stamping its sync time) cannot lock the earlier ones out; the
+  removal check still guards what it drops;
 - holds fewer than KEV_MIN_ENTRIES IDs (an error page, a truncated file);
 - drops more than KEV_MAX_REMOVALS of the cached IDs (a poisoned or
   rolled-back list: dropping a KEV CVE would lift its quarantines).
@@ -32,7 +38,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from boxmunge.config import ConfigError, load_config
-from boxmunge.cve.kev import KEV_DEFAULT_SOURCES, KEV_MAX_FUTURE_DAYS, KevCatalog, load_kev
+from boxmunge.cve.kev import KEV_DEFAULT_SOURCES, KevCatalog, load_kev
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
 
@@ -47,6 +53,9 @@ KEV_MIN_ENTRIES = 1000
 KEV_MAX_REMOVALS = 3
 # The catalog was ~1.8 MB in November 2026; anything past this is not it.
 KEV_MAX_BYTES = 16 * 1024 * 1024
+# A dateReleased further ahead than this is bogus, not clock skew: CISA
+# stamps the catalog when it publishes it.
+KEV_MAX_FUTURE_RELEASE = timedelta(hours=1)
 _FETCH_TIMEOUT = 30
 _MAX_LISTED = 10
 
@@ -191,26 +200,40 @@ def _released_at(payload: dict[str, Any], now: datetime) -> datetime:
         raise _Failed(REJECTED, "feed payload has no 'dateReleased'")
     try:
         released = datetime.fromisoformat(raw)
-    except ValueError:
+        released = released.astimezone(timezone.utc) if released.tzinfo else (
+            released.replace(tzinfo=timezone.utc))
+    except (ValueError, OverflowError):
+        # OverflowError: a valid-looking date that leaves datetime's range
+        # in UTC (0001-01-01T00:00:00+14:00).
         raise _Failed(REJECTED, f"feed 'dateReleased' is not a timestamp: {raw!r}") from None
-    released = released.astimezone(timezone.utc) if released.tzinfo else (
-        released.replace(tzinfo=timezone.utc))
-    if released > now + timedelta(days=KEV_MAX_FUTURE_DAYS):
+    if released > now + KEV_MAX_FUTURE_RELEASE:
         raise _Failed(REJECTED, f"feed 'dateReleased' {raw} is in the future")
     return released
 
 
-def _baseline(cached: KevCatalog, now: datetime) -> datetime | None:
-    """The cached release time to guard against rollback, if trustworthy.
-    A future one (cached before future dates were refused) is no baseline."""
+def _baseline(cached: KevCatalog, now: datetime, *, held_to_cache: bool) -> datetime | None:
+    """The cached release time to guard against rollback, or None.
+
+    Only a source no earlier in the list than the cache's own is held to it
+    (``held_to_cache``). A future cached date (stored before future dates
+    were refused) is no baseline either."""
     released = cached.released_at
-    if released is None or released > now + timedelta(days=KEV_MAX_FUTURE_DAYS):
+    if not held_to_cache or released is None or released > now + KEV_MAX_FUTURE_RELEASE:
         return None
     return released
 
 
+def _held_to_cache(url: str, sources: tuple[str, ...], cached: KevCatalog) -> bool:
+    """Whether ``url`` ranks no higher than the source the cache came from.
+    A cache from a source not on the list ranks below every listed one."""
+    cache_rank = (sources.index(cached.source) if cached.source in sources
+                  else len(sources))
+    return sources.index(url) >= cache_rank
+
+
 def _validate(
-    payload: Any, cached: KevCatalog, now: datetime, paths: BoxPaths,
+    payload: Any, cached: KevCatalog, now: datetime, paths: BoxPaths, *,
+    held_to_cache: bool,
 ) -> tuple[list[str], datetime, list[str]]:
     """The catalog's sorted IDs, its release time and the cached IDs it
     drops, or _Failed."""
@@ -220,7 +243,7 @@ def _validate(
     if not isinstance(vulns, list):
         raise _Failed(REJECTED, "feed payload malformed (no 'vulnerabilities' list)")
     released = _released_at(payload, now)
-    baseline = _baseline(cached, now)
+    baseline = _baseline(cached, now, held_to_cache=held_to_cache)
     # Before the content checks: a lagging catalog also lacks the entries
     # added since, which would otherwise read as mass withdrawal.
     if baseline is not None and released < baseline:
@@ -245,12 +268,13 @@ def _validate(
 
 
 def _try_source(
-    paths: BoxPaths, url: str, cached: KevCatalog,
+    paths: BoxPaths, url: str, cached: KevCatalog, *, held_to_cache: bool,
 ) -> tuple[SourceFailure | None, list[str]]:
     """Fetch, check and cache one source's catalog: (failure, withdrawn IDs)."""
     now = datetime.now(timezone.utc)
     try:
-        cve_ids, released, withdrawn = _validate(_parse(_download(url)), cached, now, paths)
+        cve_ids, released, withdrawn = _validate(
+            _parse(_download(url)), cached, now, paths, held_to_cache=held_to_cache)
     except _Failed as e:
         prefix = "rejected: " if e.kind == REJECTED else ""
         return SourceFailure(url, e.kind, f"{prefix}{e}"), []
@@ -276,7 +300,8 @@ def refresh_from(paths: BoxPaths, sources: tuple[str, ...]) -> KevRefresh:
     cached = load_kev(paths)
     failures: list[SourceFailure] = []
     for url in sources:
-        failure, withdrawn = _try_source(paths, url, cached)
+        failure, withdrawn = _try_source(
+            paths, url, cached, held_to_cache=_held_to_cache(url, sources, cached))
         if failure is None:
             if withdrawn:
                 _LOGGER.warning(

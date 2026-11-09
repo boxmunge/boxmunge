@@ -270,3 +270,74 @@ def test_a_few_withdrawn_cves_send_a_normal_notice(tmp_path, monkeypatch):
     assert [(a.kind, a.priority) for a in alerts] == [("kev_withdrawn", 0)]
     assert "- CVE-2026-0001" in alerts[0].body and "- CVE-2026-0002" in alerts[0].body
     assert CISA in alerts[0].body
+
+
+def test_a_lower_ranked_source_cannot_lock_out_cisa_by_leapfrogging(tmp_path, monkeypatch):
+    """After one CISA timeout, a mirror stamping a near-future date gets
+    cached. CISA's genuine, older-dated catalog must still be accepted, not
+    classed as lagging, or CISA is bypassed for good."""
+    paths = BoxPaths(root=tmp_path)
+    ahead = (datetime.now(timezone.utc) + timedelta(minutes=50)).isoformat()
+    _serve(monkeypatch, {CISA: urllib.error.URLError(TimeoutError("timed out")),
+                         MIRROR: _feed(released=ahead)})
+    assert refresh_from(paths, (CISA, MIRROR)).source == MIRROR
+
+    _serve(monkeypatch, {CISA: _feed(released=RECENT), MIRROR: _feed(released=ahead)})
+    result = refresh_from(paths, (CISA, MIRROR))
+    assert result.source == CISA and result.failures == ()
+    cat = load_kev(paths)
+    assert cat.source == CISA and cat.released_at.isoformat() == RECENT
+
+    # The mirror, ranked below the cache's source, is held to its date again.
+    _serve(monkeypatch, {CISA: _forbidden(CISA),
+                         MIRROR: _feed(released="2026-01-01T00:00:00Z")})
+    result = refresh_from(paths, (CISA, MIRROR))
+    assert result.source is None and result.failures[1].kind == "lagging"
+
+
+def test_a_cache_from_an_unlisted_source_does_not_hold_the_list(tmp_path, monkeypatch):
+    paths = BoxPaths(root=tmp_path)
+    paths.kev_catalog.parent.mkdir(parents=True, exist_ok=True)
+    paths.kev_catalog.write_text(json.dumps({
+        "source": "https://old-mirror.example/kev.json", "released_at": RECENT,
+        "fetched_at": RECENT, "cve_ids": _ids(1400)}))
+    _serve(monkeypatch, {CISA: _feed(released="2026-01-01T00:00:00Z")})
+    assert refresh_from(paths, (CISA,)).source == CISA
+
+
+@pytest.mark.parametrize("released, accepted", [
+    (timedelta(minutes=50), True), (timedelta(hours=2), False), (timedelta(hours=23), False),
+])
+def test_a_release_date_over_an_hour_ahead_is_rejected(tmp_path, monkeypatch, released, accepted):
+    paths = BoxPaths(root=tmp_path)
+    stamp = (datetime.now(timezone.utc) + released).isoformat()
+    _serve(monkeypatch, {CISA: _feed(released=stamp)})
+    result = refresh_from(paths, (CISA,))
+    assert result.updated is accepted
+    if not accepted:
+        assert "is in the future" in result.failures[0].error
+
+
+def test_an_out_of_range_release_date_is_rejected_and_the_next_source_tried(
+        tmp_path, monkeypatch):
+    paths = BoxPaths(root=tmp_path)
+    _serve(monkeypatch, {CISA: _feed(released="0001-01-01T00:00:00+14:00"), MIRROR: _feed()})
+    result = refresh_from(paths, (CISA, MIRROR))
+    assert result.source == MIRROR
+    assert result.failures[0].kind == REJECTED
+    assert "is not a timestamp" in result.failures[0].error
+
+
+def test_stale_with_every_source_lagging_says_they_answered(tmp_path, monkeypatch):
+    paths = BoxPaths(root=tmp_path)
+    old = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+    paths.kev_catalog.parent.mkdir(parents=True, exist_ok=True)
+    paths.kev_catalog.write_text(json.dumps({
+        "source": CISA, "released_at": RECENT, "fetched_at": old, "cve_ids": _ids(1400)}))
+    older = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+    _serve(monkeypatch, {CISA: _feed(released=older), MIRROR: _feed(released=older)})
+    [alert] = _scan(monkeypatch, tmp_path)
+    assert "no KEV catalog has been accepted for 10 days" in alert.body
+    assert "every source answered this run, but with a catalog older than the cached one" \
+        in alert.body
+    assert "no KEV source has answered" not in alert.body

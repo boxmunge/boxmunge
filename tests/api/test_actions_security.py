@@ -180,7 +180,7 @@ def test_summary_reports_where_the_kev_catalog_came_from(fixture_paths) -> None:
     assert kev["released_at"] == "2026-01-06T19:44:45.179700Z"
     assert kev["fetched_at"] == "2026-01-07T00:00:00Z"
     assert kev["entries"] == 1
-    assert "no KEV source has answered" in kev["stale_reason"]
+    assert "no KEV catalog has been accepted" in kev["stale_reason"]
 
 
 def test_summary_without_a_kev_cache_says_so(paths) -> None:

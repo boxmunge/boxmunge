@@ -83,7 +83,7 @@ def test_old_format_cache_is_judged_by_its_fetch_time_alone(tmp_path):
     assert cat.stale_reason(date(2026, 7, 9)) is None
     assert cat.is_known_exploited("CVE-2021-44228", today=date(2026, 7, 9)) is True
     reason = cat.stale_reason(date(2026, 7, 10))
-    assert "no KEV source has answered for 9 days" in reason
+    assert "no KEV catalog has been accepted for 9 days" in reason
     assert "an unrecorded source" in reason
 
 
@@ -122,7 +122,7 @@ def test_is_stale_day_8_fresh_day_9_stale():
     cat = _catalog({"CVE-1"}, fetched)
     assert cat.is_stale(date(2026, 6, 9)) is False
     assert cat.is_stale(date(2026, 6, 10)) is True
-    assert "no KEV source has answered for 9 days" in cat.stale_reason(date(2026, 6, 10))
+    assert "no KEV catalog has been accepted for 9 days" in cat.stale_reason(date(2026, 6, 10))
 
 
 def test_staleness_follows_the_catalogs_release_date_not_the_fetch():

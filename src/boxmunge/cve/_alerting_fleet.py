@@ -61,9 +61,9 @@ def format_kev_stale_alert(
 
 def format_kev_withdrawn_alert(source: str | None, withdrawn: Sequence[str]) -> Alert:
     """The refreshed KEV catalog no longer lists a few CVEs the cached one
-    did. Accepted (CISA does withdraw the odd entry), but a quarantine for
-    one of them can now lift, so the operator hears about it. Normal
-    priority: more withdrawals than that are rejected with a P1 instead."""
+    did. Accepted (CISA does withdraw the odd entry). Normal priority: a
+    quarantine held for one of them is kept with its own P1, and more
+    withdrawals than that are rejected with a P1 instead."""
     n = len(withdrawn)
     return Alert(
         kind="kev_withdrawn",
@@ -72,9 +72,11 @@ def format_kev_withdrawn_alert(source: str | None, withdrawn: Sequence[str]) -> 
             f"The KEV catalog from {source} no longer lists:",
             *(f"- {cve}" for cve in withdrawn),
             "",
-            "They no longer count as actively exploited, so a quarantine held only "
-            "for one of them can lift at the next scan. Check CISA's KEV page if "
-            "that is unexpected.",
+            "They no longer count as actively exploited. A quarantine held for one "
+            "of them is not lifted automatically: this scan keeps it and sends a "
+            "priority-1 alert naming the project, and `boxmunge security resume "
+            "<project>` accepts the withdrawal. Check CISA's KEV page if this is "
+            "unexpected.",
         ]),
         priority=0,
     )

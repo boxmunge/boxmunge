@@ -3,6 +3,7 @@
 run, load it, and alert on what the refresh found."""
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 
 from boxmunge.cve.alerting import (
@@ -12,7 +13,7 @@ from boxmunge.cve.alerting import (
     send_alerts,
 )
 from boxmunge.cve.kev import KevCatalog, load_kev
-from boxmunge.cve.kev_refresh import KevRefresh, refresh_kev
+from boxmunge.cve.kev_refresh import LAGGING, KevRefresh, refresh_kev
 from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
 
@@ -24,15 +25,20 @@ def refresh_kev_and_alert(paths: BoxPaths, now: datetime) -> KevCatalog:
     signal is consistent fleet-wide. Fail-safe: a stale catalog never
     quarantines, and a rejected refresh keeps the previous cache (B-06), but
     either fires ONE priority-1 alert per run naming each source's error.
-    Entries CISA withdrew (a few, accepted) get a normal-priority notice.
+    Entries CISA withdrew (a few, accepted) get a normal-priority notice,
+    and ride on the returned catalog (``withdrawn``) so this run's scans
+    hold, not lift, a quarantine kept for one of them (kev_withdrawal).
     """
     refresh = refresh_kev(paths)
-    kev = load_kev(paths)
+    kev = replace(load_kev(paths), withdrawn=frozenset(refresh.withdrawn))
     if refresh.withdrawn:
         _send(paths, format_kev_withdrawn_alert(refresh.source, refresh.withdrawn))
     stale_reason = kev.stale_reason(now.date())
     if stale_reason is None and not refresh.needs_alert:
         return kev
+    if stale_reason is not None and _all_lagging(refresh):
+        stale_reason += ("; every source answered this run, but with a catalog "
+                         "older than the cached one")
     tried = _tried(refresh)
     log_warning(
         "cve-scan",
@@ -43,6 +49,10 @@ def refresh_kev_and_alert(paths: BoxPaths, now: datetime) -> KevCatalog:
     )
     _send(paths, format_kev_stale_alert(kev, stale_reason=stale_reason, tried=tried))
     return kev
+
+
+def _all_lagging(refresh: KevRefresh) -> bool:
+    return bool(refresh.failures) and all(f.kind == LAGGING for f in refresh.failures)
 
 
 def _tried(refresh: KevRefresh) -> list[str]:

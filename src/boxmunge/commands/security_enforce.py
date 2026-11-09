@@ -26,11 +26,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from boxmunge.commands.health_state import is_monitor_stopped
+from boxmunge.commands.kev_withdrawal import withdrawal_hold
 from boxmunge.commands.quarantine_lift import restore_from_quarantine
 from boxmunge.cve.alerting import (
     findings_by_key, format_quarantine_alert, format_quarantine_lifted_alert, lift_reason,
     send_alerts,
 )
+from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.policy import Disposition, FindingDisposition, Posture, ProjectDecision
 from boxmunge.cve.quarantine import (
     QuarantineError,
@@ -70,12 +72,14 @@ def enforce(
     headline: tuple[ProjectDecision, FindingDisposition] | None,
     in_grace: bool,
     cleared: Sequence[ProjectDecision] | None = None,
+    kev: KevCatalog | None = None,
 ) -> Enforcement:
     """Take, re-assert or lift the quarantine action for ``project``.
 
     ``cleared`` is this scan's decisions when they clear the quarantine
     (``clears_quarantine``); then an existing quarantine is lifted, unless
-    ``_may_lift`` says the project must not be started. Otherwise an
+    ``_lift_blocker`` says the project must not be started, or the KEV
+    refresh behind ``kev`` withdrew its CVE (kev_withdrawal). Otherwise an
     existing record is re-asserted, so a partially failed action converges
     (audit B-03). During grace no NEW quarantine fires; the heads-up alert
     summarises what would. For a project with a 0.10.1 stage both are held
@@ -92,7 +96,9 @@ def enforce(
             if legacy:
                 # Re-asserting stops the containers again: production's.
                 return _hold(paths, project, _recorded_cve(project, paths), reasserting=True)
-            blocker = _lift_blocker(paths, project) if cleared is not None else None
+            blocker = None
+            if cleared is not None:
+                blocker = withdrawal_hold(paths, project, kev) or _lift_blocker(paths, project)
             if cleared is not None and blocker is None:
                 return _lift_cleared(paths, project, cleared)
             was_complete = quarantine_action_complete(project, paths)
