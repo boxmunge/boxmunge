@@ -222,9 +222,10 @@ each with its own credential, never interchangeable:
 Without `STATS_SECRET`, or with one shorter than 32 characters, every admin route answers 503 and
 names the setting. Wrong secrets, whether sent as a Bearer header or as the registration code,
 count against one limit per client (10 per 15 minutes); past it, that client is refused even
-with the right secret until the window ends. Pending sign-in and registration challenges are
-capped at 5 per client network (IPv4 /24, IPv6 /48), so one network cannot block another's
-sign-in. The relying
+with the right secret until the window ends. Each client (IPv4 address or IPv6 /64) may start
+5 sign-in or registration ceremonies per 5 minutes in each worker, counted in memory, so one
+client cannot block another's sign-in and no address is stored; the database holds only a
+global backstop of 10,000 pending challenges. The relying
 party is `ADMIN_RP_ID` (default `boxmunge.dev`) with origin `https://<ADMIN_RP_ID>`, so the passkey
 works on the production host only, not on `staging.<host>`. One passkey can be registered. It must
 use ES256 or EdDSA, and the authenticator must verify the user.
