@@ -14,6 +14,7 @@ from typing import Any
 from boxmunge.cve.kev import load_kev
 from boxmunge.cve.policy import Disposition
 from boxmunge.cve.scan_state import read_scan_state
+from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.log import log_error
 from boxmunge.paths import BoxPaths
 
@@ -96,7 +97,14 @@ def all_currently_quarantining_cves(paths: BoxPaths) -> list[str]:
     for proj_dir in sorted(paths.projects.iterdir()):
         if not proj_dir.is_dir() or not (proj_dir / "manifest.yml").exists():
             continue
-        for f in current_quarantine_cves(paths, proj_dir.name):
+        try:
+            findings = current_quarantine_cves(paths, proj_dir.name)
+        except PROJECT_INPUT_ERRORS as e:
+            report_project_failure("cve-suppress", proj_dir.name, e, paths)
+            print(f"  {proj_dir.name}'s quarantine-level findings, if any, are left "
+                  f"out of this suppression.", file=sys.stderr)
+            continue
+        for f in findings:
             cve = f["cve_id"]
             existing = seen.get(cve)
             sev_new = f.get("effective_severity") or ""
