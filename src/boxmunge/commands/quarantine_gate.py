@@ -10,8 +10,8 @@ scan, a budget skip or an image that cannot be identified refuses), with
 the cached KEV catalog, under the release's own manifest and compose
 (its posture and hardening) and the project's suppressions (server-side
 state no release carries). A quarantine-level finding refuses the release,
-and so does the quarantine's own CVE when a KEV refresh withdrew it
-(kev_withdrawal): the operator accepts that with `security resume`.
+and so does any CVE in it that a KEV refresh withdrew (kev_withdrawal):
+the operator accepts that with `security resume`.
 
 A production release that clears starts as any deploy does, and once its
 smoke test passes the quarantine is lifted (cve.quarantine.lift_quarantine).
@@ -256,7 +256,7 @@ def clear_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
             f"{project} --until <YYYY-MM-DD> --reason <text>`; a CISA KEV finding cannot "
             f"be suppressed) and deploy again."])
     # Staging lifts nothing; the promote is judged again.
-    held = None if target.staging else gate_hold(paths, project, cve, scan.decisions)
+    held = None if target.staging else gate_hold(paths, project, scan.decisions)
     if held:
         raise QuarantineRefused(held)
     upcoming = _upcoming_lines(scan, services)

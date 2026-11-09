@@ -24,7 +24,7 @@ from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.cve.scanner import ScannerError
 from boxmunge.release_target import production_target
 from tests.test_commands.cve_helpers import (
-    CRIT, Docker, Pushover, make_box, render_site, scan_result, seed_quarantine,
+    CRIT, Docker, Pushover, finding, make_box, render_site, scan_result, seed_quarantine,
 )
 from tests.test_commands.test_quarantine_gate import MANIFEST, Box
 
@@ -101,7 +101,7 @@ def _sent(pushover, words: str) -> list[tuple[str, str, int]]:
 
 def test_the_refresh_records_the_withdrawal(box) -> None:
     paths, _ = box
-    assert load_withdrawals(paths)[_CVE][0] == MIRROR
+    assert load_withdrawals(paths)[_CVE].source == MIRROR
 
 
 def test_a_clean_scan_holds_the_quarantine_and_alerts_once(box) -> None:
@@ -176,7 +176,7 @@ def test_the_deploy_gate_holds_a_release_that_still_has_the_cve(tmp_path, monkey
     with pytest.raises(gate.QuarantineRefused) as e:
         gate_box.clear(MANIFEST)
     text = str(e.value)
-    assert "still contains CVE-2026-0001" in text and MIRROR in text
+    assert "still contains CVE-2026-0001 (catalog from " + MIRROR in text
     assert "boxmunge security resume demo" in text
     gate_box.findings.clear()  # a release without the CVE is a fix
     assert gate.clear_release(paths, production_target(paths, "demo"), MANIFEST)
@@ -239,3 +239,57 @@ def test_a_run_scanning_only_another_project_then_a_nightly_scan_holds(
     _fleet(paths, monkeypatch, _ids(1400), [])
     assert is_quarantined("demo", paths)
     assert _sent(pushover, HELD) and not _sent(pushover, LIFTED)
+
+
+
+# ---- another withdrawn CVE in the same images (the quarantine's own is fixed) ----
+
+_OTHER = "CVE-2026-0002"
+
+
+def _kev_listing(*extra: str) -> KevCatalog:
+    now = datetime.now(timezone.utc)
+    return KevCatalog(frozenset(_ids(1400)) | frozenset(extra), now, now, MIRROR)
+
+
+def test_fixing_the_quarantines_cve_does_not_lift_past_another_withdrawn_one(
+        tmp_path, monkeypatch) -> None:
+    """Quarantined for KEV CVE A; the images also have KEV CVE B; a source
+    withdraws B; the operator fixes A. B is still in the images, so the
+    quarantine is held, not lifted."""
+    paths = make_box(tmp_path, security={"posture": "balanced"})
+    paths.found = [CRIT, finding(_OTHER, pkg="zlib")]
+    monkeypatch.setattr(security_scan_core, "scan_image",
+                        lambda ref, timeout: scan_result(ref, paths.found))
+    monkeypatch.setattr(quarantine_lift, "prepare_caddy_config", render_site)
+    monkeypatch.setattr(quarantine_lift, "prepare_compose_override",
+                        lambda p, m, component=None: None)
+    paths.docker = Docker(monkeypatch)
+    pushover = Pushover(monkeypatch, paths)
+    seed_quarantine(paths)
+    _catalog(paths, _ids(1400) + [_CVE, _OTHER])
+    _refresh(paths, monkeypatch, _ids(1400) + [_CVE])  # withdraws B only
+    paths.found = [finding(_OTHER, pkg="zlib")]  # A fixed
+    scan_one_project(paths, "demo", in_grace=False, kev=_kev_listing(_CVE))
+    assert is_quarantined("demo", paths)
+    [(title, body, priority)] = _sent(pushover, HELD)
+    assert _OTHER in title and priority == 1
+
+    # Resume accepts B for this project; a later quarantine is not held for it.
+    _catalog(paths, _ids(1400) + [_CVE])
+    assert security_resume_locked(paths, "demo") == 0
+    assert load_withdrawals(paths)[_OTHER].accepted == frozenset({"demo"})
+    seed_quarantine(paths)
+    scan_one_project(paths, "demo", in_grace=False, kev=_kev_listing(_CVE))
+    assert not is_quarantined("demo", paths)
+
+
+def test_the_gate_holds_a_release_with_another_withdrawn_cve(tmp_path, monkeypatch) -> None:
+    gate_box = Box(tmp_path, monkeypatch)
+    paths = gate_box.paths
+    _catalog(paths, _ids(1400) + [_CVE, _OTHER])
+    _refresh(paths, monkeypatch, _ids(1400) + [_CVE])  # withdraws B only
+    gate_box.findings["postgres@sha256:" + "b" * 64] = (finding(_OTHER, pkg="zlib"),)
+    with pytest.raises(gate.QuarantineRefused) as e:
+        gate_box.clear(MANIFEST)
+    assert f"still contains {_OTHER} (catalog from {MIRROR})" in str(e.value)

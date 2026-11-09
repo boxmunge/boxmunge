@@ -1,27 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Hold a quarantine whose CVE a KEV refresh withdrew.
+"""Hold a quarantine while its images contain a CVE a KEV refresh withdrew.
 
-Under balanced, a quarantine is held only for a KEV-listed CVE, so a
-catalog that drops it would let the next clean scan, or a deploy that
-still ships the CVE, lift the quarantine. A single source can drop an
-entry (up to KEV_MAX_REMOVALS are accepted from one refresh), so that lift
-waits for the operator. The refresh records each withdrawal
-(cve.kev_withdrawals) before it caches the catalog, so the hold applies in
-every later run, including one that did not scan this project or whose scan
-of it was incomplete, until `security resume` accepts the withdrawal (it
-lifts the quarantine) or the catalog lists the CVE again.
+Under balanced, a quarantine stands only on KEV-listed CVEs. If a catalog
+drops one the images still contain, the next clean scan, or a deploy that
+still ships it, would lift the quarantine. That holds whether it is the
+CVE the quarantine was recorded for or another one in the same images: fix
+A, and B (withdrawn by one source, maybe still exploited) would go live. A
+single source can drop an entry (up to KEV_MAX_REMOVALS are accepted from
+one refresh), so that lift waits for the operator.
 
-The hold applies only while the images still contain the CVE: a scan or a
-release without it is a fix, not a withdrawal. One priority-1 alert per
-withdrawal names the project, the CVE and the source; the quarantine
-record remembers it was sent (quarantine.KEV_WITHDRAWAL_HOLD).
+The refresh records each withdrawal (cve.kev_withdrawals) before it caches
+the catalog, so the hold applies in every later run, including one that
+did not scan this project or whose scan of it was incomplete. It lasts
+until `security resume` accepts the withdrawal for this project (recorded,
+so it is not held for it again) or the catalog lists the CVE again.
+
+The hold applies only to withdrawn CVEs the images still contain: a scan or
+release without them is a fix. One priority-1 alert per withdrawal names
+the project, the CVE and the source; the quarantine record remembers which
+were sent (quarantine.KEV_WITHDRAWAL_HOLD).
 """
 from __future__ import annotations
 
 from collections.abc import Sequence
 
 from boxmunge.cve.alerting import format_kev_withdrawal_hold_alert, send_alerts
-from boxmunge.cve.kev_withdrawals import KevWithdrawalsError, load_withdrawals
+from boxmunge.cve.kev_withdrawals import KevWithdrawalsError, Withdrawal, load_withdrawals
 from boxmunge.cve.policy import ProjectDecision
 from boxmunge.cve.quarantine import (
     KEV_WITHDRAWAL_HOLD, hold_for_kev_withdrawal, read_quarantine_state,
@@ -30,52 +34,61 @@ from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
 
 
-def _still_found(cve: str, decisions: Sequence[ProjectDecision]) -> bool:
-    return any(f.finding.cve_id == cve for d in decisions for f in d.findings)
+def held_withdrawals(
+    paths: BoxPaths, project: str, decisions: Sequence[ProjectDecision],
+) -> dict[str, Withdrawal]:
+    """The withdrawn CVEs ``decisions`` still find that ``project`` has not
+    accepted. Raises KevWithdrawalsError."""
+    found = {f.finding.cve_id for d in decisions for f in d.findings}
+    return {cve: w for cve, w in sorted(load_withdrawals(paths).items())
+            if cve in found and project not in w.accepted}
 
 
 def _resume(project: str) -> str:
     return f"`boxmunge security resume {project}` accepts the withdrawal"
 
 
+def _named(held: dict[str, Withdrawal]) -> str:
+    return ", ".join(f"{cve} (catalog from {w.source})" for cve, w in held.items())
+
+
 def withdrawal_hold(
     paths: BoxPaths, project: str, decisions: Sequence[ProjectDecision],
 ) -> str | None:
     """Why the quarantine that ``decisions`` (a clear scan) would lift is
-    kept, or None. Marks the record and alerts once per withdrawal. Raises
-    QuarantineError when the record cannot be read or written."""
-    state = read_quarantine_state(project, paths) or {}
-    cve = state.get("cve_id")
+    kept, or None. Alerts once per withdrawal. Raises QuarantineError when
+    the record cannot be read or written."""
     try:
-        withdrawals = load_withdrawals(paths)
+        held = held_withdrawals(paths, project, decisions)
     except KevWithdrawalsError as e:
         return f"quarantine kept: {e}; repair or remove it as root"
-    withdrawal = withdrawals.get(cve)
-    if withdrawal is None or not _still_found(cve, decisions):
+    if not held:
         return None
-    source, at = withdrawal
-    if state.get(KEV_WITHDRAWAL_HOLD) != at:
-        hold_for_kev_withdrawal(project, paths, at)
-        _alert(paths, project, cve, source)
-    return (f"quarantine kept: CISA KEV no longer lists {cve} (catalog from {source}); "
+    announced = dict((read_quarantine_state(project, paths) or {}).get(KEV_WITHDRAWAL_HOLD) or {})
+    new = {cve: w for cve, w in held.items() if announced.get(cve) != w.at}
+    if new:
+        hold_for_kev_withdrawal(project, paths, {**announced, **{c: w.at for c, w in new.items()}})
+        for cve, w in new.items():
+            _alert(paths, project, cve, w.source)
+    return (f"quarantine kept: CISA KEV no longer lists {_named(held)}, still in the images; "
             f"{_resume(project)}")
 
 
 def gate_hold(
-    paths: BoxPaths, project: str, cve: str, decisions: Sequence[ProjectDecision],
+    paths: BoxPaths, project: str, decisions: Sequence[ProjectDecision],
 ) -> list[str] | None:
     """Why a release that clears ``project``'s quarantine must not lift it,
     as refusal lines, or None."""
     try:
-        withdrawal = load_withdrawals(paths).get(cve)
+        held = held_withdrawals(paths, project, decisions)
     except KevWithdrawalsError as e:
         return [f"{e}. Repair or remove it as root, then deploy again."]
-    if withdrawal is None or not _still_found(cve, decisions):
+    if not held:
         return None
-    return [f"This release still contains {cve}, which the CISA KEV catalog from "
-            f"{withdrawal[0]} no longer lists. A single source can withdraw an entry, so "
-            f"the quarantine stays until the operator accepts it: {_resume(project)}. "
-            f"Or ship a release without {cve}. Nothing was started."]
+    return [f"This release still contains {_named(held)}, which the CISA KEV catalog no "
+            f"longer lists. A single source can withdraw an entry, so the quarantine stays "
+            f"until the operator accepts it: {_resume(project)}. Or ship a release without "
+            f"{', '.join(held)}. Nothing was started."]
 
 
 def _alert(paths: BoxPaths, project: str, cve: str, source: str) -> None:
