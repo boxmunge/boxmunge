@@ -268,10 +268,61 @@ def test_a_monitor_stopped_project_keeps_its_quarantine(box) -> None:
     write_state(paths.project_health_state("demo"), {
         "status": "critical_stopped", "stopped_at": "2026-10-01T03:00:00+00:00"})
     assert is_monitor_stopped("demo", paths)
-    _scan(paths)
+    scan = _scan(paths)
+    assert scan.kept == ("quarantine kept: the health monitor stopped it; "
+                         "`security resume`, then `recover`")
     assert is_quarantined("demo", paths)
     assert paths.docker.calls == ["caddy_reload", "compose_stop"]  # re-asserted
     assert not _titles(pushover, LIFTED_TITLE)
+
+
+def test_the_fleet_scan_says_why_a_quarantine_was_kept(box, monkeypatch, capsys) -> None:
+    paths, _ = box()
+    seed_quarantine(paths)
+    write_state(paths.project_health_state("demo"), {
+        "status": "critical_stopped", "stopped_at": "2026-10-01T03:00:00+00:00"})
+    monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
+    assert cmd_security_scan([], paths) == 2  # still quarantined
+    captured = capsys.readouterr()
+    assert "demo: quarantine kept: the health monitor stopped it" in captured.out
+    assert "quarantine kept: the health monitor stopped it" in captured.err  # the log
+
+
+def test_a_corrupt_health_state_is_that_projects_problem(tmp_path, monkeypatch) -> None:
+    """The fleet scan reports it, alerts and exits 1, and scans the rest."""
+    paths = make_box(tmp_path, projects=("aaa", "bbb"), security={"posture": "balanced"})
+    monkeypatch.setattr(security_scan_core, "scan_image",
+                        lambda ref, timeout: scan_result(ref, [CRIT]))
+    monkeypatch.setattr(quarantine_lift, "prepare_caddy_config", render_site)
+    Docker(monkeypatch)
+    pushover = Pushover(monkeypatch, paths)
+    seed_quarantine(paths, "aaa")
+    paths.project_health_state("aaa").parent.mkdir(parents=True, exist_ok=True)
+    paths.project_health_state("aaa").write_text("{not json")
+    monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
+    assert cmd_security_scan([], paths) == 1
+    [(_, body, priority)] = [m for m in pushover.sent if "CVE scan incomplete" in m[0]]
+    assert priority == 1 and "aaa" in body and "bbb" not in body
+    assert str(paths.project_health_state("aaa")) in body
+    assert is_quarantined("aaa", paths)
+    assert paths.project_scan_state("bbb").exists()
+
+
+def test_a_failed_put_back_leaves_the_record_incomplete(box) -> None:
+    paths, _ = box()
+    seed_quarantine(paths)
+    paths.docker.fail.update({"compose_up": 1, "compose_stop": 1})
+    with pytest.raises(RuntimeError, match="putting the maintenance page back failed too"):
+        _scan(paths)
+    assert is_quarantined("demo", paths) and not quarantine_action_complete("demo", paths)
+
+
+def test_the_scan_reports_the_parsed_posture(box) -> None:
+    paths, _ = box()
+    data = yaml.safe_load(paths.project_manifest("demo").read_text())
+    data["security"] = {"posture": "Balanced"}
+    paths.project_manifest("demo").write_text(yaml.safe_dump(data))
+    assert _scan(paths).posture == "balanced"
 
 
 def test_an_open_install_refuses_the_lift(box) -> None:

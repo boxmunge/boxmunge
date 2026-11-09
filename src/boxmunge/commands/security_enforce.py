@@ -60,6 +60,8 @@ class Enforcement:
     held: str | None = None
     # The CVE whose quarantine this attempt lifted: the scan cleared it.
     lifted: str | None = None
+    # Why a quarantine the scan cleared was kept (re-asserted) instead.
+    kept: str | None = None
 
 
 def enforce(
@@ -90,14 +92,17 @@ def enforce(
             if legacy:
                 # Re-asserting stops the containers again: production's.
                 return _hold(paths, project, _recorded_cve(project, paths), reasserting=True)
-            if cleared is not None and _may_lift(paths, project):
+            blocker = _lift_blocker(paths, project) if cleared is not None else None
+            if cleared is not None and blocker is None:
                 return _lift_cleared(paths, project, cleared)
             was_complete = quarantine_action_complete(project, paths)
             reassert_quarantine(
                 project, paths, project_dir=project_dir,
                 hosts=hosts, compose_files=compose_files,
             )
-            return Enforcement(landed=not was_complete)
+            if blocker is not None:
+                log_warning("cve-scan", f"{project}: {blocker}", paths, project=project)
+            return Enforcement(landed=not was_complete, kept=blocker)
         if headline is not None and not in_grace:
             if legacy:
                 return _hold(paths, project, headline[1].finding.cve_id, reasserting=False)
@@ -125,15 +130,19 @@ def clears_quarantine(posture: Posture, decisions: Sequence[ProjectDecision], *,
                         for f in findings))
 
 
-def _may_lift(paths: BoxPaths, project: str) -> bool:
-    """A project mid-migration is not started again from here (resume
-    refuses it too), nor is one the health monitor stopped (that stop stands
-    until `recover`, and the monitor and container-update skip the project
-    while it does). Their quarantine is re-asserted instead."""
+def _lift_blocker(paths: BoxPaths, project: str) -> str | None:
+    """Why a cleared quarantine must not be lifted from here, or None. A
+    project mid-migration is not started again (resume refuses it too), nor
+    is one the health monitor stopped (that stop stands until `recover`, and
+    the monitor and container-update skip the project while it does). Their
+    quarantine is re-asserted instead, and the scan says so."""
     if is_monitor_stopped(project, paths):
-        return False
+        return ("quarantine kept: the health monitor stopped it; `security resume`, "
+                "then `recover`")
     block = is_blocked(project, paths)
-    return block is None or block.reason is not BlockReason.MIGRATING
+    if block is not None and block.reason is BlockReason.MIGRATING:
+        return "quarantine kept: a userns migration is in progress; the scan after it lifts it"
+    return None
 
 
 def _lift_cleared(

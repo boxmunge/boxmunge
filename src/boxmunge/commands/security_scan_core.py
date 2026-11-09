@@ -111,8 +111,10 @@ class ProjectScan:
     # Set when the scan ran and was acted on but its result could not be
     # written (ScanStateWriteError); the fleet run fails and alerts on it.
     record_error: str | None = None
-    # The CVE whose quarantine this scan lifted (security_enforce).
+    # The CVE whose quarantine this scan lifted, or why a quarantine it
+    # cleared was kept (security_enforce).
     lifted: str | None = None
+    kept: str | None = None
 
     @property
     def unidentified_services(self) -> tuple[str, ...]:
@@ -326,7 +328,7 @@ def audit_targets(
     results, failed, skipped, warnings = _scan_targets(paths, project, targets)
     decisions = _evaluate(paths, project, meta, profile, supps, results, kev)
     return ProjectScan(
-        project=project, posture=meta.posture_str, dangerously=meta.dangerously,
+        project=project, posture=meta.posture.value, dangerously=meta.dangerously,
         decisions=tuple(decisions),
         warnings=tuple(_unscanned(unidentified=unidentified) + warnings),
         failed_images=tuple(failed), skipped_images=tuple(skipped),
@@ -375,7 +377,7 @@ def scan_one_project_locked(
             )
             raise_enforcement_error(outcome.error, record_error)
         return ProjectScan(
-            project=project, posture=meta.posture_str, dangerously=dangerously,
+            project=project, posture=meta.posture.value, dangerously=dangerously,
             decisions=(), warnings=tuple(warnings),
             unidentified=tuple(unidentified.items()), record_error=record_error,
             **basis,
@@ -429,7 +431,7 @@ def scan_one_project_locked(
 
     return ProjectScan(
         project=project,
-        posture=meta.posture_str,
+        posture=meta.posture.value,
         dangerously=dangerously,
         record_error=record_error,
         decisions=tuple(decisions),
@@ -441,6 +443,7 @@ def scan_one_project_locked(
         headline=headline,
         host_expired=host_expired,
         lifted=outcome.lifted,
+        kept=outcome.kept,
     )
 
 

@@ -16,7 +16,9 @@ from dataclasses import dataclass
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_guard import ComposeRefused, check_start
-from boxmunge.cve.quarantine import QuarantineError, lift_quarantine, reassert_quarantine
+from boxmunge.cve.quarantine import (
+    QuarantineError, lift_quarantine, mark_quarantine_incomplete, reassert_quarantine,
+)
 from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.pause import is_paused
@@ -89,6 +91,10 @@ def _put_back(paths: BoxPaths, project: str, manifest: dict, error: QuarantineEr
                             hosts=list(manifest.get("hosts") or []),
                             compose_files=compose_files_for(paths, project))
     except QuarantineError as e:
+        try:
+            mark_quarantine_incomplete(project, paths)
+        except QuarantineError as mark_error:
+            e = QuarantineError(f"{e}; marking the record incomplete failed too: {mark_error}")
         raise QuarantineError(f"{error}; putting the maintenance page back failed too: "
                               f"{e}") from error
     raise QuarantineError(f"{error}. The quarantine stays: the maintenance page is back "

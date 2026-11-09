@@ -51,7 +51,6 @@ class ProjectMeta:
     """The manifest facts a scan needs, validated once."""
 
     manifest: dict[str, Any]
-    posture_str: str
     posture: Posture
     dangerously: bool
     declared_runtimes: Any
@@ -99,9 +98,8 @@ def project_meta(project: str, manifest: dict[str, Any],
             f"project {project!r}: manifest security: must be a mapping, "
             f"got {type(sec_block).__name__}"
         )
-    posture_str = sec_block.get("posture") or "balanced"
     try:
-        posture = parse_posture(posture_str)
+        posture = parse_posture(sec_block.get("posture") or "balanced")
     except PolicyError as e:
         raise ProjectScanError(f"project {project!r}: {e}") from e
     ddq = sec_block.get("dangerously_disable_quarantine", False)
@@ -112,7 +110,6 @@ def project_meta(project: str, manifest: dict[str, Any],
         )
     return ProjectMeta(
         manifest=manifest,
-        posture_str=posture_str,
         posture=posture,
         dangerously=ddq,
         declared_runtimes=sec_block.get("runtimes"),

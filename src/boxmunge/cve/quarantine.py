@@ -159,6 +159,15 @@ def quarantine_action_complete(project_name: str, paths: BoxPaths) -> bool:
     return bool(state and state.get("action_complete") is True)
 
 
+def mark_quarantine_incomplete(project_name: str, paths: BoxPaths) -> None:
+    """Record that the action no longer holds (a lift half undid it), so
+    the next scan re-asserts it and nothing reads it as complete."""
+    state = read_quarantine_state(project_name, paths)
+    if state is None:
+        raise QuarantineError(f"cannot mark the quarantine of {project_name!r}: no record")
+    _write_record(project_name, paths, {**state, "action_complete": False})
+
+
 def clear_quarantine_state(project_name: str, paths: BoxPaths) -> None:
     """Remove the quarantine state file. Idempotent (no-op if missing)."""
     paths.project_quarantine_state(project_name).unlink(missing_ok=True)
