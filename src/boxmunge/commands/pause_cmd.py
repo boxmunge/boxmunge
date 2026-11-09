@@ -6,6 +6,7 @@ import sys
 
 from boxmunge.commands import pause_snapshot
 from boxmunge.commands.confirm import confirm
+from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import compose_stop, caddy_reload, DockerError
 from boxmunge.fileutil import LockError, atomic_write_text, project_lock
 from boxmunge.legacy_stage import refuse_if_legacy_stage
@@ -53,6 +54,7 @@ def run_pause(
         print(f"  - Visitors to {', '.join(hosts)} see a maintenance page")
         print(f"  - Containers stopped (state preserved)")
         print(f"  - Health checks, backups, container-updates skip this project")
+        print(f"  - {pause_snapshot.plan_line(paths, project_name, no_snapshot)}")
         if not confirm("pause"):
             return 1
 
@@ -137,7 +139,8 @@ def pause_locked(project_name: str, paths: BoxPaths, reason: str | None,
     else:
         try:
             snap = pause_snapshot.take(paths, project_name, no_snapshot)
-        except (pause_snapshot.PauseRefused, DockerError) as e:
+        except (pause_snapshot.PauseRefused, DockerError, ManifestError,
+                ReleaseStateError) as e:
             print(f"ERROR: Cannot pause '{project_name}': {e}.", file=sys.stderr)
             return 1
         write_paused_state(project_name, paths, reason=reason)

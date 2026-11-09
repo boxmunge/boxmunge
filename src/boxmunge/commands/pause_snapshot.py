@@ -20,6 +20,8 @@ from boxmunge.commands.backup_cmd import take_snapshot
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge import docker_containers
+from boxmunge.data_dirs import ReleaseStateError
+from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.pending_snapshot import record_pending
 
@@ -39,27 +41,57 @@ class PauseSnapshot:
     containers: list[str]   # its containers, running when the snapshot was taken
 
 
-def take(paths: BoxPaths, project: str, no_snapshot: bool) -> PauseSnapshot | None:
-    """Snapshot the running project. None when there is nothing to take
-    (--no-snapshot, backup.type none, or nothing runs: a quarantined or
-    monitor-stopped project). Raises PauseRefused, DockerError."""
+def _skip(paths: BoxPaths, project: str, no_snapshot: bool) -> str | None:
+    """Why no snapshot is taken, before the backup is looked at (the line
+    both the prompt and the pause print), or None."""
     if no_snapshot:
-        print(f"  No snapshot (--no-snapshot): {NO_SNAPSHOT_COST}.")
-        return None
+        return f"No snapshot (--no-snapshot): {NO_SNAPSHOT_COST}"
     stopped = ("is CVE-quarantined" if is_quarantined(project, paths) else
                "was stopped by the health monitor" if is_monitor_stopped(project, paths)
                else None)
     if stopped is not None:
-        print(f"  No snapshot: {project} {stopped}, so nothing runs to dump; "
-              f"{NO_SNAPSHOT_COST}.")
+        return f"No snapshot: {project} {stopped}, so nothing runs to dump; {NO_SNAPSHOT_COST}"
+    return None
+
+
+_NO_BACKUP = "No snapshot: backup.type is none, so there is no data backup to take"
+
+
+def _no_backup(manifest: dict | None) -> bool:
+    return manifest is not None and manifest.get("backup", {}).get("type", "none") == "none"
+
+
+def plan_line(paths: BoxPaths, project: str, no_snapshot: bool) -> str:
+    """The confirmation prompt's line about the snapshot. A backup source
+    that cannot be read is the pause's to refuse, under the lock."""
+    skip = _skip(paths, project, no_snapshot)
+    if skip is not None:
+        return skip
+    try:
+        if _no_backup(backup_source(paths, project).manifest):
+            return _NO_BACKUP
+    except (ManifestError, ReleaseStateError):
+        pass
+    return ("A data snapshot is taken first, for the deploy that ends the pause to roll "
+            "back to (--no-snapshot skips it, e.g. in an emergency)")
+
+
+def take(paths: BoxPaths, project: str, no_snapshot: bool) -> PauseSnapshot | None:
+    """Snapshot the running project. None when there is nothing to take
+    (--no-snapshot, backup.type none, or nothing runs: a quarantined or
+    monitor-stopped project). Raises PauseRefused, DockerError, ManifestError,
+    ReleaseStateError."""
+    skip = _skip(paths, project, no_snapshot)
+    if skip is not None:
+        print(f"  {skip}.")
         return None
     source = backup_source(paths, project)
     if source.manifest is None:
         raise PauseRefused(f"no snapshot can be taken before the pause: {source.skip}. "
                            f"Nothing was changed. Add --no-snapshot to pause without one "
                            f"({NO_SNAPSHOT_COST})")
-    if source.manifest.get("backup", {}).get("type", "none") == "none":
-        print("  No snapshot: backup.type is none, so there is no data backup to take.")
+    if _no_backup(source.manifest):
+        print(f"  {_NO_BACKUP}.")
         return None
     service = resolve_backup_service(source.manifest)
     running = [c.name for c in docker_containers.project_containers(project)

@@ -172,3 +172,31 @@ def test_nothing_running_to_dump_pauses_without_a_snapshot(live_v1, capsys, stat
     assert _pause(paths, service_running=False) == 0
     assert is_paused("myapp", paths) and pending(paths, "myapp") is None
     assert "nothing runs to dump" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("case, line", [
+    ("default", "A data snapshot is taken first, for the deploy that ends the pause to roll "
+                "back to (--no-snapshot skips it, e.g. in an emergency)"),
+    ("no-snapshot", f"No snapshot (--no-snapshot): {NO_SNAPSHOT_COST}"),
+    ("quarantined", "No snapshot: myapp is CVE-quarantined, so nothing runs to dump"),
+])
+def test_the_confirmation_says_what_happens_to_the_snapshot(live_v1, capsys, case, line) -> None:
+    from tests.test_commands.cve_helpers import seed_quarantine
+    paths = live_v1
+    if case == "quarantined":
+        seed_quarantine(paths, "myapp")
+    with patch.object(pause_cmd, "confirm", return_value=False) as asked:
+        assert pause_cmd.run_pause("myapp", paths, no_snapshot=case == "no-snapshot") == 1
+    asked.assert_called_once_with("pause")
+    assert f"  - {line}" in capsys.readouterr().out
+    assert not is_paused("myapp", paths)
+
+
+def test_the_deploy_shell_passes_no_snapshot_and_yes() -> None:
+    from boxmunge.shell import operator_only_reason, run_command
+    args = ["myapp", "--no-snapshot", "--yes"]
+    assert operator_only_reason("pause", args) is None
+    with patch("boxmunge.shell.subprocess.run") as run:
+        run.return_value.returncode = 0
+        run_command("pause", args)
+    run.assert_called_once_with(["boxmunge-server", "pause", *args])
