@@ -113,14 +113,17 @@ jobs:
 
   arm64:
     # boxmunge supports arm64 hosts. Builds the system image natively on
-    # arm64 (age and rclone are pinned per architecture), runs its tools,
-    # decrypts a snapshot made by age 1.2.1 with them, and installs and runs
-    # the pinned arm64 cosign through install.sh's own function.
+    # arm64 (age and rclone are pinned per architecture), also through its
+    # compose file as install.sh does, runs its tools, decrypts a snapshot
+    # made by age 1.2.1 with them, and installs and runs the pinned arm64
+    # cosign through bootstrap/cosign.sh, the library install.sh sources.
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Build the system image
         run: docker build -t boxmunge-system:ci system/
+      - name: Build it through system/compose.yml, as install.sh does
+        run: BOXMUNGE_UID=1000 BOXMUNGE_GID=1000 docker compose -f system/compose.yml build
       - name: age and rclone run in it, as arm64 binaries
         run: |
           test "$(docker run --rm --entrypoint uname boxmunge-system:ci -m)" = aarch64
