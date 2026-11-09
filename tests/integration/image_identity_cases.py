@@ -19,13 +19,16 @@ import uuid
 from pathlib import Path
 
 import pytest
+import yaml
 
 from boxmunge.commands.upgrade_steps import restart_projects
+from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_guard import ComposeRefused, compose_up_checked
 from boxmunge.docker import compose_up
-from boxmunge.docker_containers import project_containers
+from boxmunge.docker_containers import local_image, project_containers
 from boxmunge.docker_run import DockerError
 from boxmunge.paths import BoxPaths
+from tests.deploy_helpers import mark_deployed
 from tests.integration import nonroot_cases as nc
 
 
@@ -190,10 +193,60 @@ def case_a_pinned_up_applies_no_pull_policy(paths: BoxPaths, project: str, capsy
     assert _docker("exec", f"{project}-web-1", "cat", "/marker") == "built"
 
 
+def _old_naming(paths: BoxPaths, project: str) -> dict:
+    """A project as boxmunge 0.10 left it: Compose named its build by the
+    service's own `image:`, and its container was created from that name."""
+    project_dir = paths.project_dir(project)
+    project_dir.mkdir(parents=True)
+    files = nc.bundle(project, {"web": {"build": ".", "image": f"{project}-custom",
+                                        "command": nc.SLEEP}},
+                      files={"Dockerfile": f"FROM {nc.BUSYBOX}\nCOPY marker /marker\n",
+                             "marker": "deployed\n"})
+    for name, text in files.items():
+        (project_dir / name).write_text(text)
+    compose_up(project_dir, project_name=project)
+    return yaml.safe_load(files["manifest.yml"])
+
+
+def case_regenerating_names_a_stopped_containers_build(
+        paths: BoxPaths, project: str, capsys) -> None:
+    """The overlay's regeneration (an upgrade from 0.10) takes the old name
+    off: the stopped container's image gets its platform name first. Before,
+    the graph driver deleted it and the containerd store left it nameless."""
+    manifest = _old_naming(paths, project)
+    _docker("stop", "-t", "0", f"{project}-web-1")
+    image_id = _web(project)["Image"]
+    prepare_compose_override(paths, manifest, component="upgrade")
+    assert local_image(f"{project}-custom") is None
+    built = local_image(f"boxmunge.invalid/{project}/web")
+    assert built is not None and built.image_id == image_id
+
+
+def case_a_pinned_start_names_a_nameless_build_and_runs_it(
+        paths: BoxPaths, project: str, capsys) -> None:
+    """The container's image lost every name (as an upgrade from 0.10 left
+    some): the next start, which neither pulls nor builds (`--pull never
+    --no-build`, as a quarantine's lift always did), names it and runs it.
+    Without the name it would have had nothing to start; a start that
+    could build would have built the edited files on disk."""
+    manifest = _old_naming(paths, project)
+    image_id = _web(project)["Image"]
+    prepare_compose_override(paths, manifest, component="upgrade")
+    _docker("image", "rm", "-f", f"boxmunge.invalid/{project}/web")
+    assert local_image(image_id) is not None
+    (paths.project_dir(project) / "marker").write_text("edited after the deploy\n")
+    mark_deployed(paths, project)
+    compose_up_checked(paths, project, component="resume",
+                       compose_files=["compose.yml", "compose.boxmunge.yml"])
+    assert local_image(f"boxmunge.invalid/{project}/web").image_id == image_id
+    assert _web(project)["Image"] == image_id
+    assert nc.compose(paths, project, "exec", "-T", "web", "cat", "/marker") == "deployed\n"
+
+
 def teardown(paths: BoxPaths, project: str) -> None:
     nc.teardown(paths, project)
     if (paths.project_dir(project) / "compose.yml").exists():
         subprocess.run(["docker", "compose", "-p", project, "down", "-t", "0"],
                        cwd=paths.project_dir(project), capture_output=True)
-    subprocess.run(["docker", "image", "rm", f"{project}-web",
+    subprocess.run(["docker", "image", "rm", f"{project}-web", f"{project}-custom",
                     f"boxmunge.invalid/{project}/cache:1"], capture_output=True)

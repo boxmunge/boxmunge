@@ -43,22 +43,25 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from boxmunge import bind_sources, compose_resolve, docker_containers
+import yaml
+
+from boxmunge import bind_sources, built_images, compose_resolve, docker_containers
 from boxmunge.bind_sources import BindSourceError
+from boxmunge.compose_images import built_image_name
 from boxmunge.compose_own_files import container_bind_problems
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import compose_up, start_containers
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import discard_dir
-from boxmunge.fs_nofollow import mkdir_p_deploy
+from boxmunge.fs_nofollow import mkdir_p_deploy, read_text_nofollow
 from boxmunge.intake import IntakeError, validate_release_tree
 from boxmunge.legacy_stage import legacy_stage_refusal
-from boxmunge.log import log_error, log_warning
+from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
 from boxmunge.paths import RESERVED_PROJECT_NAMES
 from boxmunge.release_txn import load_txn, stale_reason, start_refusal
 from boxmunge.staged_release import (
-    SlotError, clear_production_stopped, load_slot, staging_target,
+    STAGING_OVERLAY, SlotError, clear_production_stopped, load_slot, slot_dir, staging_target,
 )
 from boxmunge.staging_copies import foreign_copies
 from boxmunge.staging_isolation import separation_problems
@@ -264,10 +267,11 @@ def compose_up_checked(
     No start pulls or builds (`--pull never --no-build`, whatever a
     service's `pull_policy` says): it runs only the local images a deploy
     (or stage) built, pulled and decided users for, or that container-update
-    pulled and checked. A start whose image is missing is refused, naming
-    it. A running container whose image the local image store no longer
-    has is recreated (_recreate_without_image). Raises ComposeRefused or
-    DockerError."""
+    pulled and checked. The image a build service's container runs gets
+    back a platform name it lost first (_name_running_builds). A start
+    whose image is missing is refused, naming it. A running container whose
+    image the local image store no longer has is recreated
+    (_recreate_without_image). Raises ComposeRefused or DockerError."""
     check_start(paths, project_name, component=component, compose_files=compose_files,
                 staging=staging, record=record, deploying=deploying, txn=txn)
     if staging:
@@ -275,12 +279,17 @@ def compose_up_checked(
         where = {"project_dir": target.cwd, "project_directory": target.project_directory,
                  "env_file": target.env_file}
         files, compose_project = list(target.files), target.project_name
+        overlay = slot_dir(paths, project_name) / STAGING_OVERLAY
     else:
         where = {"project_dir": paths.project_dir(project_name)}
         files, compose_project = list(compose_files or []), project_name
+        overlay = paths.project_compose_override(project_name)
+        if overlay.name not in files:
+            overlay = None
     run_dir = where.pop("project_dir")
     up = functools.partial(compose_up, run_dir, compose_files=files, build=False,
                            project_name=compose_project, start=start, pinned=True, **where)
+    _name_running_builds(paths, project_name, compose_project, overlay, component)
     redo = f"stage {project_name}" if staging else f"prod-deploy {project_name}"
     try:
         images = _start_images(run_dir, files, compose_project, services, where)
@@ -308,6 +317,31 @@ def compose_up_checked(
     if not staging and start and not services:
         _clear_production_stopped(paths, project_name, component)
         _sweep_live_scripts(paths, project_name, component)
+
+
+def _name_running_builds(paths: BoxPaths, project_name: str, compose_project: str,
+                         overlay: Path | None, component: str) -> None:
+    """Name the images the build services' containers run by their platform
+    name where it names nothing (built_images.name_running_builds), so the
+    start runs them instead of building new ones. The overlay says which
+    services are built: it gives each one its platform name (an overlay
+    from before boxmunge named built images gives none; a start without
+    one has none to name)."""
+    if overlay is None:
+        return
+    try:
+        doc = yaml.safe_load(read_text_nofollow(overlay)) or {}
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
+        raise DockerError(f"cannot read {overlay}: {e}") from e
+    services = doc.get("services") if isinstance(doc, dict) else None
+    built = sorted(svc for svc, spec in (services or {}).items()
+                   if isinstance(spec, dict)
+                   and spec.get("image") == built_image_name(compose_project, svc))
+    named = built_images.name_running_builds(compose_project, built) if built else []
+    if named:
+        log_operation(component, f"named the images {compose_project}'s containers run: "
+                      f"{', '.join(named)} (their old names had been taken off them)",
+                      paths, project=project_name)
 
 
 def _missing_text(missing: list[tuple[str, str]]) -> str:
