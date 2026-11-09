@@ -98,7 +98,21 @@ def test_load_kev_corrupt_cve_ids_non_list_is_fail_safe(tmp_path):
     cat = load_kev(paths)
     assert cat.cve_ids == frozenset()
     assert cat.fetched_at is None
-    assert cat.is_stale(date(2026, 7, 1)) is True
+    reason = cat.stale_reason(date(2026, 7, 1))
+    assert reason.startswith("the KEV cache is unreadable (")
+    assert "cve_ids is not a list" in reason and str(paths.kev_catalog) in reason
+
+
+def test_cached_times_are_converted_to_utc(tmp_path):
+    paths = BoxPaths(root=tmp_path)
+    paths.kev_catalog.parent.mkdir(parents=True, exist_ok=True)
+    paths.kev_catalog.write_text(json.dumps({
+        "source": MIRROR, "released_at": "2026-07-01T01:30:00+02:00",
+        "fetched_at": "2026-07-01T01:30:00+02:00", "cve_ids": []}))
+    cat = load_kev(paths)
+    assert cat.released_at.tzinfo is timezone.utc
+    assert cat.released_at == datetime(2026, 6, 30, 23, 30, tzinfo=timezone.utc)
+    assert cat.fetched_at.date() == date(2026, 6, 30)
 
 
 def test_is_stale_day_8_fresh_day_9_stale():

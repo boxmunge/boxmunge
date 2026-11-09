@@ -38,7 +38,7 @@ def _format_iso_compact(iso: str | None) -> str:
     if not iso:
         return "never"
     try:
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(iso)
     except ValueError:
         return iso
     return dt.strftime("%Y-%m-%d %H:%M UTC")

@@ -5,7 +5,6 @@ from typing import Any
 
 import yaml
 
-from boxmunge.cve.kev import KEV_DEFAULT_SOURCES
 from boxmunge.paths import BoxPaths
 
 
@@ -27,12 +26,9 @@ DEFAULTS: dict[str, Any] = {
     # Platform auto-update. Security releases always apply; break-fix
     # releases (critical non-security fixes) apply unless disabled here.
     "auto_update": {"breakfix": True},
-    # CISA KEV catalog sources, tried in order (see cve/kev.py).
-    "kev": {"sources": list(KEV_DEFAULT_SOURCES)},
 }
 
 AUTO_UPDATE_KEYS = frozenset({"breakfix"})
-KEV_KEYS = frozenset({"sources"})
 
 REQUIRED_FIELDS = ["hostname", "admin_email"]
 
@@ -77,7 +73,6 @@ def load_config(paths: BoxPaths) -> dict[str, Any]:
             )
 
     _validate_auto_update(config, config_file)
-    _validate_kev(config, config_file)
     return config
 
 
@@ -99,32 +94,6 @@ def _validate_auto_update(config: dict[str, Any], config_file: object) -> None:
         raise ConfigError(
             f"'auto_update.breakfix' in {config_file} must be true or false, "
             f"got {block['breakfix']!r}"
-        )
-
-
-def _validate_kev(config: dict[str, Any], config_file: object) -> None:
-    """kev must be a mapping whose sources is a non-empty list of https URLs."""
-    block = config["kev"]
-    example = f"'kev: {{sources: [{KEV_DEFAULT_SOURCES[0]}]}}'"
-    if not isinstance(block, dict):
-        raise ConfigError(f"'kev' in {config_file} must be a mapping, e.g. {example}")
-    unknown = sorted(set(block) - KEV_KEYS)
-    if unknown:
-        raise ConfigError(
-            f"Unknown key(s) under 'kev' in {config_file}: "
-            f"{', '.join(map(str, unknown))} (allowed: {', '.join(sorted(KEV_KEYS))})"
-        )
-    sources = block["sources"]
-    if not isinstance(sources, list) or not sources:
-        raise ConfigError(
-            f"'kev.sources' in {config_file} must be a non-empty list of URLs; "
-            f"remove it to use the defaults"
-        )
-    bad = [s for s in sources if not (isinstance(s, str) and s.startswith("https://"))]
-    if bad:
-        raise ConfigError(
-            f"'kev.sources' in {config_file} must hold https:// URLs, got "
-            f"{', '.join(map(repr, bad))}"
         )
 
 

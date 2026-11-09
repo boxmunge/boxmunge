@@ -7,27 +7,32 @@ whose catalog passes every check is cached, with the URL that answered.
 Every source that failed is logged with its error and reported in the
 result, so the stale/rejected alert can name each one (issue #121).
 
-Checks per source (audit B-06 and #121). CISA's catalog only grows, so a
-catalog is rejected when it:
-- is not a JSON object with a 'vulnerabilities' list and a valid
-  'dateReleased';
-- holds fewer than KEV_MIN_ENTRIES IDs, or shrinks the cached catalog by
-  more than KEV_MAX_SHRINK (an error page, a truncated download);
+Checks per source (audit B-06 and #121). A catalog is rejected when it:
+- is larger than KEV_MAX_BYTES, is not a JSON object with a
+  'vulnerabilities' list, or has no valid 'dateReleased';
+- was released more than KEV_MAX_FUTURE_DAYS in the future (a bogus date
+  would otherwise block every genuine catalog as "older than the cache");
 - was released before the cached one (a lagging source must not roll the
-  catalog back).
+  catalog back; logged, but not alerted while the cache is fresh);
+- holds fewer than KEV_MIN_ENTRIES IDs (an error page, a truncated file);
+- drops more than KEV_MAX_REMOVALS of the cached IDs (a poisoned or
+  rolled-back list: dropping a KEV CVE would lift its quarantines).
+Up to KEV_MAX_REMOVALS dropped IDs are accepted (CISA does withdraw the odd
+entry) and reported in the result as ``withdrawn``.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from boxmunge.config import ConfigError, load_config
-from boxmunge.cve.kev import KevCatalog, load_kev
+from boxmunge.cve.kev import KEV_DEFAULT_SOURCES, KEV_MAX_FUTURE_DAYS, KevCatalog, load_kev
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
 
@@ -36,15 +41,23 @@ _LOGGER = logging.getLogger("boxmunge")
 # The catalog held ~1,770 entries in November 2026 and only grows. A refresh
 # below this floor is a broken feed, not a smaller catalog.
 KEV_MIN_ENTRIES = 1000
-# Entries are very rarely withdrawn; losing more than 5% at once is a
-# truncated feed.
-KEV_MAX_SHRINK = 0.05
+# CISA very rarely withdraws an entry, and never many at once. More than
+# this many cached IDs missing from a new catalog is a poisoned or
+# rolled-back list.
+KEV_MAX_REMOVALS = 3
+# The catalog was ~1.8 MB in November 2026; anything past this is not it.
+KEV_MAX_BYTES = 16 * 1024 * 1024
 _FETCH_TIMEOUT = 30
+_MAX_LISTED = 10
 
 # SourceFailure.kind values.
 UNREACHABLE = "unreachable"  # no catalog came back (HTTP error, timeout, DNS)
 REJECTED = "rejected"        # a catalog came back but failed a check
-CONFIG = "config"            # boxmunge.yml could not say which sources to use
+LAGGING = "lagging"          # a catalog came back, older than the cached one
+CONFIG = "config"            # kev.sources in boxmunge.yml is unreadable or invalid
+# Kinds that need the operator even while the cached catalog is fresh: a
+# broken catalog or config would otherwise go unnoticed until it aged out.
+_ALERTING_KINDS = (REJECTED, CONFIG)
 
 
 def _extra(detail: dict[str, Any]) -> dict[str, Any]:
@@ -67,10 +80,12 @@ class KevRefresh:
 
     ``source`` is the URL whose catalog was cached (None if none was).
     ``failures`` lists every source tried before it, or all of them.
+    ``withdrawn`` holds the cached IDs the accepted catalog no longer lists.
     """
 
     source: str | None
     failures: tuple[SourceFailure, ...] = ()
+    withdrawn: tuple[str, ...] = ()
 
     @property
     def updated(self) -> bool:
@@ -78,41 +93,74 @@ class KevRefresh:
 
     @property
     def needs_alert(self) -> bool:
-        """True when nothing was cached and a failure was not mere
-        unreachability. A broken catalog or config would otherwise go
-        unnoticed until the cache aged out."""
-        return not self.updated and any(f.kind != UNREACHABLE for f in self.failures)
+        """True when nothing was cached and a failure needs the operator."""
+        return not self.updated and any(f.kind in _ALERTING_KINDS for f in self.failures)
 
 
-class _Rejected(Exception):
-    """A source answered with a catalog that failed a check."""
+class _Failed(Exception):
+    """A source answered with a catalog that cannot be used."""
+
+    def __init__(self, kind: str, reason: str) -> None:
+        super().__init__(reason)
+        self.kind = kind
+
+
+def _listed(ids: list[str]) -> str:
+    more = len(ids) - _MAX_LISTED
+    return ", ".join(ids[:_MAX_LISTED]) + (f" and {more} more" if more > 0 else "")
 
 
 def kev_sources(paths: BoxPaths) -> tuple[str, ...]:
-    """The configured source list (validated by load_config)."""
-    return tuple(load_config(paths)["kev"]["sources"])
+    """The KEV sources from boxmunge.yml, or the defaults if it sets none.
+
+    Validated here rather than in load_config, so a mistake in kev.sources
+    fails only the KEV refresh (with an alert that can still be sent), not
+    every command that reads the config.
+    """
+    config = load_config(paths)
+    if "kev" not in config:
+        return KEV_DEFAULT_SOURCES
+    block = config["kev"]
+    where = paths.config_file
+    if not isinstance(block, dict) or set(block) != {"sources"}:
+        raise ConfigError(
+            f"'kev' in {where} must be a mapping with only 'sources', e.g. "
+            f"'kev: {{sources: [{KEV_DEFAULT_SOURCES[0]}]}}'; remove it to use the defaults")
+    sources = block["sources"]
+    if not isinstance(sources, list) or not sources:
+        raise ConfigError(f"'kev.sources' in {where} must be a non-empty list of URLs; "
+                          f"remove it to use the defaults")
+    bad = [s for s in sources if not (isinstance(s, str) and s.startswith("https://"))]
+    if bad:
+        raise ConfigError(f"'kev.sources' in {where} must hold https:// URLs, got "
+                          f"{', '.join(map(repr, bad))}")
+    return tuple(sources)
 
 
-def check_catalog_sanity(new_count: int, cached_count: int) -> str | None:
-    """Return why a refreshed catalog of ``new_count`` IDs is implausible."""
-    if new_count < KEV_MIN_ENTRIES:
-        return (
-            f"feed returned {new_count} entries, below the floor of "
-            f"{KEV_MIN_ENTRIES} (the catalog only grows)"
-        )
-    if cached_count and new_count < cached_count * (1 - KEV_MAX_SHRINK):
-        return (
-            f"feed returned {new_count} entries, {cached_count - new_count} "
-            f"fewer than the {cached_count} cached (more than "
-            f"{KEV_MAX_SHRINK:.0%} shrink)"
-        )
-    return None
+class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to another https:// URL."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not newurl.startswith("https://"):
+            raise urllib.error.HTTPError(
+                newurl, code, f"redirect to non-https URL {newurl} refused", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _fetch(url: str) -> Any:
+_OPENER = urllib.request.build_opener(_HttpsOnlyRedirects)
+
+
+def _open(req: urllib.request.Request) -> Any:
+    return _OPENER.open(req, timeout=_FETCH_TIMEOUT)
+
+
+def _download(url: str) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "boxmunge"})
-    with urllib.request.urlopen(req, timeout=_FETCH_TIMEOUT) as resp:
-        return json.loads(resp.read())
+    with _open(req) as resp:
+        body = resp.read(KEV_MAX_BYTES + 1)
+    if len(body) > KEV_MAX_BYTES:
+        raise _Failed(REJECTED, f"response is larger than {KEV_MAX_BYTES // 2**20} MiB")
+    return body
 
 
 def _describe(e: Exception) -> str:
@@ -122,68 +170,105 @@ def _describe(e: Exception) -> str:
         isinstance(e, urllib.error.URLError) and isinstance(e.reason, TimeoutError)
     ):
         return f"timed out after {_FETCH_TIMEOUT}s"
-    if isinstance(e, ValueError):
-        return f"response is not JSON: {e}"
+    if isinstance(e, http.client.HTTPException):
+        return f"bad HTTP response: {e!r}"
     return str(e)
 
 
-def _released_at(payload: dict[str, Any]) -> datetime:
+def _parse(body: bytes) -> Any:
+    try:
+        return json.loads(body)
+    except RecursionError:
+        raise _Failed(REJECTED, "response JSON is nested too deeply") from None
+    except ValueError as e:
+        # An HTML error page served with 200: the source did not answer.
+        raise _Failed(UNREACHABLE, f"response is not JSON: {e}") from None
+
+
+def _released_at(payload: dict[str, Any], now: datetime) -> datetime:
     raw = payload.get("dateReleased")
     if not isinstance(raw, str):
-        raise _Rejected("feed payload has no 'dateReleased'")
+        raise _Failed(REJECTED, "feed payload has no 'dateReleased'")
     try:
         released = datetime.fromisoformat(raw)
     except ValueError:
-        raise _Rejected(f"feed 'dateReleased' is not a timestamp: {raw!r}") from None
-    return released if released.tzinfo else released.replace(tzinfo=timezone.utc)
+        raise _Failed(REJECTED, f"feed 'dateReleased' is not a timestamp: {raw!r}") from None
+    released = released.astimezone(timezone.utc) if released.tzinfo else (
+        released.replace(tzinfo=timezone.utc))
+    if released > now + timedelta(days=KEV_MAX_FUTURE_DAYS):
+        raise _Failed(REJECTED, f"feed 'dateReleased' {raw} is in the future")
+    return released
 
 
-def _validate(payload: Any, cached: KevCatalog) -> tuple[list[str], datetime]:
-    """The catalog's sorted IDs and release time, or _Rejected."""
+def _baseline(cached: KevCatalog, now: datetime) -> datetime | None:
+    """The cached release time to guard against rollback, if trustworthy.
+    A future one (cached before future dates were refused) is no baseline."""
+    released = cached.released_at
+    if released is None or released > now + timedelta(days=KEV_MAX_FUTURE_DAYS):
+        return None
+    return released
+
+
+def _validate(
+    payload: Any, cached: KevCatalog, now: datetime, paths: BoxPaths,
+) -> tuple[list[str], datetime, list[str]]:
+    """The catalog's sorted IDs, its release time and the cached IDs it
+    drops, or _Failed."""
     # The feed may return valid JSON that is not an object (e.g. [] or null
     # from an error page).
     vulns = payload.get("vulnerabilities") if isinstance(payload, dict) else None
     if not isinstance(vulns, list):
-        raise _Rejected("feed payload malformed (no 'vulnerabilities' list)")
-    released = _released_at(payload)
+        raise _Failed(REJECTED, "feed payload malformed (no 'vulnerabilities' list)")
+    released = _released_at(payload, now)
+    baseline = _baseline(cached, now)
+    # Before the content checks: a lagging catalog also lacks the entries
+    # added since, which would otherwise read as mass withdrawal.
+    if baseline is not None and released < baseline:
+        raise _Failed(LAGGING, f"catalog released {released.isoformat()} is older than "
+                               f"the cached one released {baseline.isoformat()} "
+                               f"(from {cached.source}): the source is lagging")
     cve_ids = sorted({
         v["cveID"] for v in vulns
         if isinstance(v, dict) and isinstance(v.get("cveID"), str)
     })
-    reason = check_catalog_sanity(len(cve_ids), len(cached.cve_ids))
-    if reason is not None:
-        raise _Rejected(reason)
-    if cached.released_at is not None and released < cached.released_at:
-        raise _Rejected(
-            f"catalog released {released.isoformat()} is older than the cached "
-            f"one released {cached.released_at.isoformat()} "
-            f"(from {cached.source}): the source is lagging")
-    return cve_ids, released
+    if len(cve_ids) < KEV_MIN_ENTRIES:
+        raise _Failed(REJECTED, f"feed returned {len(cve_ids)} entries, below the floor "
+                                f"of {KEV_MIN_ENTRIES} (the catalog only grows)")
+    withdrawn = sorted(cached.cve_ids - set(cve_ids))
+    if len(withdrawn) > KEV_MAX_REMOVALS:
+        raise _Failed(REJECTED, (
+            f"{len(withdrawn)} cached CVEs are missing from it (more than "
+            f"{KEV_MAX_REMOVALS}): {_listed(withdrawn)}. If CISA really withdrew them, "
+            f"remove the cache as root (rm {paths.kev_catalog}) and the next scan "
+            f"accepts the catalog"))
+    return cve_ids, released, withdrawn
 
 
-def _try_source(paths: BoxPaths, url: str, cached: KevCatalog) -> SourceFailure | None:
-    """Fetch, check and cache one source's catalog; None on success."""
+def _try_source(
+    paths: BoxPaths, url: str, cached: KevCatalog,
+) -> tuple[SourceFailure | None, list[str]]:
+    """Fetch, check and cache one source's catalog: (failure, withdrawn IDs)."""
+    now = datetime.now(timezone.utc)
     try:
-        payload = _fetch(url)
-    except (OSError, ValueError) as e:
-        # HTTPError/URLError are OSErrors; a body that is not JSON is a
-        # ValueError (an HTML error page served with 200).
-        return SourceFailure(url, UNREACHABLE, _describe(e))
-    try:
-        cve_ids, released = _validate(payload, cached)
-    except _Rejected as e:
-        return SourceFailure(url, REJECTED, f"rejected: {e}")
+        cve_ids, released, withdrawn = _validate(_parse(_download(url)), cached, now, paths)
+    except _Failed as e:
+        prefix = "rejected: " if e.kind == REJECTED else ""
+        return SourceFailure(url, e.kind, f"{prefix}{e}"), []
+    except (OSError, http.client.HTTPException) as e:
+        # HTTPError/URLError and socket errors are OSErrors; a body cut
+        # short is an http.client.IncompleteRead.
+        return SourceFailure(url, UNREACHABLE, _describe(e)), []
     doc = {
         "source": url,
         "released_at": released.isoformat(),
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "fetched_at": now.isoformat(),
         "cve_ids": cve_ids,
     }
     try:
         atomic_write_text(paths.kev_catalog, json.dumps(doc, indent=2) + "\n")
     except OSError as e:
-        return SourceFailure(url, REJECTED, f"fetched, but the cache write failed: {e}")
-    return None
+        return SourceFailure(url, REJECTED, f"fetched, but the cache write failed: {e}"), []
+    return None, withdrawn
 
 
 def refresh_from(paths: BoxPaths, sources: tuple[str, ...]) -> KevRefresh:
@@ -191,14 +276,15 @@ def refresh_from(paths: BoxPaths, sources: tuple[str, ...]) -> KevRefresh:
     cached = load_kev(paths)
     failures: list[SourceFailure] = []
     for url in sources:
-        failure = _try_source(paths, url, cached)
+        failure, withdrawn = _try_source(paths, url, cached)
         if failure is None:
-            if failures:
-                _LOGGER.info(
-                    "KEV catalog refreshed from %s", url,
-                    extra=_extra({"source": url}),
+            if withdrawn:
+                _LOGGER.warning(
+                    "KEV catalog from %s no longer lists %s", url, ", ".join(withdrawn),
+                    extra=_extra({"source": url, "withdrawn": withdrawn}),
                 )
-            return KevRefresh(source=url, failures=tuple(failures))
+            return KevRefresh(source=url, failures=tuple(failures),
+                              withdrawn=tuple(withdrawn))
         _LOGGER.warning(
             "KEV source %s failed (%s)", url, failure.error,
             extra=_extra({"source": url, "kind": failure.kind, "error": failure.error}),

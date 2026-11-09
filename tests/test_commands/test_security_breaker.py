@@ -91,7 +91,7 @@ def test_apply_held_quarantines_and_clears(fleet):
 def test_kev_quarantines_are_not_held(fleet, monkeypatch):
     paths, pushover = fleet
     kev = KevCatalog(frozenset({_SHARED}), datetime.now(timezone.utc), datetime.now(timezone.utc), 'test')
-    monkeypatch.setattr(security_actions, "load_kev", lambda p: kev)
+    monkeypatch.setattr("boxmunge.commands.security_kev.load_kev", lambda p: kev)
     assert cmd_security_scan([], paths) == 2
     assert all(is_quarantined(p, paths) for p in ("aaa", "bbb", "ccc"))
     assert read_held(paths) == {} and _breaker_alerts(pushover) == []

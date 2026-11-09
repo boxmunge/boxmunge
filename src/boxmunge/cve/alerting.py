@@ -42,6 +42,7 @@ from boxmunge.cve._alerting_fleet import (
     format_grace_heads_up_alert,
     format_host_suppression_expired_alert,
     format_kev_stale_alert,
+    format_kev_withdrawn_alert,
     format_scan_failure_alert,
     format_scan_unrecorded_alert,
 )
@@ -84,6 +85,7 @@ __all__ = [
     "format_grace_heads_up_alert",
     "format_breaker_held_alert",
     "format_kev_stale_alert",
+    "format_kev_withdrawn_alert",
     "format_scan_failure_alert",
     "format_scan_unrecorded_alert",
     "detect_transitions",

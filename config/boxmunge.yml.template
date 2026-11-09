@@ -1,8 +1,9 @@
 # boxmunge host configuration: a reference copy of the keys
 # /opt/boxmunge/config/boxmunge.yml accepts. bootstrap/init-host.sh writes
-# most of them at install; the rest (container_updates, auto_update, kev) take
-# the defaults in src/boxmunge/config.py until set, and webhooks are off
-# until set. Edited by hand, as root.
+# most of them at install; the rest (container_updates, auto_update) take
+# the defaults in src/boxmunge/config.py until set, kev takes those in
+# src/boxmunge/cve/kev.py, and webhooks are off until set. Edited by hand,
+# as root.
 
 hostname: __HOSTNAME__
 ssh_port: 922
@@ -54,7 +55,8 @@ auto_update:
 # whose catalog passes the sanity checks is cached, and `boxmunge security`
 # shows which one answered. The default is CISA's feed, then CISA's own
 # mirror on GitHub (for address ranges CISA's CDN refuses). Set sources to
-# replace the list; each must be an https:// URL serving the same JSON.
+# replace the list; each must be an https:// URL serving the same JSON. A
+# mistake here fails only the KEV refresh, which alerts naming it.
 # kev:
 #   sources:
 #     - https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json

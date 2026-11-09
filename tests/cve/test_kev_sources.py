@@ -13,13 +13,15 @@ from pathlib import Path
 import pytest
 import yaml
 
-from boxmunge.commands import security_actions, security_scan_core
+from boxmunge.commands import security_actions, security_kev, security_scan_core
 from boxmunge.config import ConfigError, load_config
 from boxmunge.cve import kev_refresh
 from boxmunge.cve.kev import KEV_DEFAULT_SOURCES, load_kev
-from boxmunge.cve.kev_refresh import CONFIG, REJECTED, UNREACHABLE, refresh_from, refresh_kev
+from boxmunge.cve.kev_refresh import (
+    CONFIG, REJECTED, UNREACHABLE, kev_sources, refresh_from, refresh_kev,
+)
 from boxmunge.paths import BoxPaths
-from tests.test_commands.cve_helpers import Pushover, make_box, scan_result
+from tests.test_commands.cve_helpers import Docker, Pushover, make_box, scan_result
 
 CISA, MIRROR = KEV_DEFAULT_SOURCES
 RECENT = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
@@ -35,7 +37,7 @@ class _Resp:
     def __exit__(self, *exc):
         return False
 
-    def read(self) -> bytes:
+    def read(self, limit: int = -1) -> bytes:
         return self._body
 
 
@@ -56,14 +58,14 @@ def _serve(monkeypatch, answers: dict) -> list[str]:
     """Answer each URL with bytes or raise the given exception; record calls."""
     calls: list[str] = []
 
-    def urlopen(req, timeout=None):
+    def open_(req):
         calls.append(req.full_url)
         answer = answers[req.full_url]
         if isinstance(answer, Exception):
             raise answer
         return _Resp(answer)
 
-    monkeypatch.setattr(kev_refresh.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(kev_refresh, "_open", open_)
     return calls
 
 
@@ -98,13 +100,14 @@ def test_first_source_answering_stops_the_list(tmp_path, monkeypatch):
 
 def test_sanity_checks_apply_to_each_source(tmp_path, monkeypatch):
     """A truncated catalog from one source is rejected and the next tried;
-    the floor and the shrink limit hold for the mirror too."""
+    the floor and the removal limit hold for the mirror too."""
     paths = BoxPaths(root=tmp_path)
     _seed(paths, 1400)
     _serve(monkeypatch, {CISA: _feed(1200), MIRROR: _feed(1400)})
     result = refresh_from(paths, (CISA, MIRROR))
     assert result.source == MIRROR
-    assert result.failures[0].kind == REJECTED and "shrink" in result.failures[0].error
+    assert result.failures[0].kind == REJECTED
+    assert "200 cached CVEs are missing" in result.failures[0].error
 
     _serve(monkeypatch, {CISA: _forbidden(CISA), MIRROR: _feed(10)})
     result = refresh_from(paths, (CISA, MIRROR))
@@ -119,7 +122,7 @@ def test_a_lagging_mirror_cannot_roll_the_catalog_back(tmp_path, monkeypatch):
     _serve(monkeypatch, {CISA: _forbidden(CISA),
                          MIRROR: _feed(released="2026-11-01T00:00:00Z")})
     result = refresh_from(paths, (CISA, MIRROR))
-    assert result.source is None and result.needs_alert
+    assert result.source is None and not result.needs_alert  # cache still fresh enough
     assert "older than the cached one" in result.failures[1].error
     assert load_kev(paths).released_at.isoformat() == "2026-11-06T19:44:45+00:00"
 
@@ -147,7 +150,7 @@ def _config(paths: BoxPaths, **extra) -> None:
 def test_default_sources_are_cisa_then_its_github_mirror(tmp_path):
     paths = BoxPaths(root=tmp_path)
     _config(paths)
-    assert load_config(paths)["kev"]["sources"] == list(KEV_DEFAULT_SOURCES)
+    assert kev_sources(paths) == KEV_DEFAULT_SOURCES
     assert CISA.startswith("https://www.cisa.gov/")
     assert MIRROR.startswith("https://raw.githubusercontent.com/cisagov/kev-data/")
 
@@ -163,16 +166,19 @@ def test_configured_sources_replace_the_defaults(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("block, match", [
     ("not-a-mapping", "'kev' .* must be a mapping"),
-    ({"source": [CISA]}, "Unknown key"),
+    ({"source": [CISA]}, "only 'sources'"),
     ({"sources": []}, "non-empty list"),
     ({"sources": CISA}, "non-empty list"),
     ({"sources": ["http://www.cisa.gov/kev.json"]}, "https://"),
 ])
-def test_bad_kev_config_is_refused(tmp_path, block, match):
+def test_bad_kev_config_fails_only_the_kev_refresh(tmp_path, block, match):
     paths = BoxPaths(root=tmp_path)
     _config(paths, kev=block)
+    load_config(paths)  # every other config reader is unaffected
     with pytest.raises(ConfigError, match=match):
-        load_config(paths)
+        kev_sources(paths)
+    failure = refresh_kev(paths).failures[0]
+    assert failure.kind == CONFIG and failure.source == "boxmunge.yml"
 
 
 def test_unreadable_config_is_a_refresh_failure_that_alerts(tmp_path):
@@ -194,14 +200,14 @@ def test_template_documents_the_kev_sources():
 def _scan(monkeypatch, tmp_path) -> list:
     paths = make_box(tmp_path)
     Pushover(monkeypatch, paths)  # writes boxmunge.yml
-    monkeypatch.setattr(security_actions, "refresh_kev", refresh_kev)
-    monkeypatch.setattr(security_actions, "load_kev", load_kev)
+    monkeypatch.setattr(security_kev, "refresh_kev", refresh_kev)
+    monkeypatch.setattr(security_kev, "load_kev", load_kev)
     monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
     monkeypatch.setattr(security_scan_core, "scan_image", lambda r, timeout: scan_result(r))
     sent: list = []
-    monkeypatch.setattr(security_actions, "send_alerts", lambda a, p: sent.extend(a))
+    monkeypatch.setattr(security_kev, "send_alerts", lambda a, p: sent.extend(a))
     assert security_actions.cmd_security_scan([], paths) == 0
-    return [a for a in sent if a.kind == "kev_stale"]
+    return [a for a in sent if a.kind.startswith("kev_")]
 
 
 def test_both_sources_failing_names_each_error_in_the_stale_alert(tmp_path, monkeypatch):
@@ -233,3 +239,34 @@ def test_a_lagging_mirror_alerts_with_its_release_date(tmp_path, monkeypatch):
     assert f"{MIRROR} last served a catalog released {old:%Y-%m-%d %H:%M} UTC" in body
     assert f"- {MIRROR}: answered" in body
     assert load_kev(BoxPaths(root=tmp_path)).is_stale(date.today()) is True
+
+
+def test_a_bad_kev_sources_setting_still_delivers_its_alert(tmp_path, monkeypatch):
+    """A typo in kev.sources fails only the KEV refresh: Pushover still reads
+    the config, so the alert naming the mistake reaches the operator."""
+    paths = make_box(tmp_path)
+    pushover = Pushover(monkeypatch, paths)
+    config = yaml.safe_load(paths.config_file.read_text())
+    paths.config_file.write_text(yaml.safe_dump({**config, "kev": {"sources": ["http://x"]}}))
+    Docker(monkeypatch)
+    monkeypatch.setattr(security_kev, "refresh_kev", refresh_kev)
+    monkeypatch.setattr(security_kev, "load_kev", load_kev)
+    monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
+    monkeypatch.setattr(security_scan_core, "scan_image", lambda r, timeout: scan_result(r))
+    assert security_actions.cmd_security_scan([], paths) == 0
+    kev = [(t, b) for t, b, _ in pushover.sent if "KEV" in t]
+    assert len(kev) == 1
+    assert "'kev.sources'" in kev[0][1] and "must hold https:// URLs" in kev[0][1]
+
+
+def test_a_few_withdrawn_cves_send_a_normal_notice(tmp_path, monkeypatch):
+    paths = BoxPaths(root=tmp_path)
+    paths.kev_catalog.parent.mkdir(parents=True, exist_ok=True)
+    paths.kev_catalog.write_text(json.dumps({
+        "source": CISA, "released_at": RECENT, "fetched_at": RECENT,
+        "cve_ids": _ids(1400) + ["CVE-2026-0001", "CVE-2026-0002"]}))
+    _serve(monkeypatch, {CISA: _feed()})
+    alerts = _scan(monkeypatch, tmp_path)
+    assert [(a.kind, a.priority) for a in alerts] == [("kev_withdrawn", 0)]
+    assert "- CVE-2026-0001" in alerts[0].body and "- CVE-2026-0002" in alerts[0].body
+    assert CISA in alerts[0].body

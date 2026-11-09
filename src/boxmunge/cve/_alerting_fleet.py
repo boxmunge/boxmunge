@@ -59,6 +59,27 @@ def format_kev_stale_alert(
     return Alert(kind="kev_stale", title=title, body="\n".join(lines), priority=1)
 
 
+def format_kev_withdrawn_alert(source: str | None, withdrawn: Sequence[str]) -> Alert:
+    """The refreshed KEV catalog no longer lists a few CVEs the cached one
+    did. Accepted (CISA does withdraw the odd entry), but a quarantine for
+    one of them can now lift, so the operator hears about it. Normal
+    priority: more withdrawals than that are rejected with a P1 instead."""
+    n = len(withdrawn)
+    return Alert(
+        kind="kev_withdrawn",
+        title=f"CISA KEV no longer lists {n} CVE{'s' if n != 1 else ''}",
+        body="\n".join([
+            f"The KEV catalog from {source} no longer lists:",
+            *(f"- {cve}" for cve in withdrawn),
+            "",
+            "They no longer count as actively exploited, so a quarantine held only "
+            "for one of them can lift at the next scan. Check CISA's KEV page if "
+            "that is unexpected.",
+        ]),
+        priority=0,
+    )
+
+
 def _iso(value: datetime | None, missing: str) -> str:
     return value.isoformat() if value else missing
 

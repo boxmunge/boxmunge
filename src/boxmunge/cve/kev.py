@@ -53,8 +53,9 @@ KEV_MAX_AGE_DAYS = 8
 # run without a new entry was 18 days. 21 days clears those quiet spells
 # while still catching a mirror that stopped syncing.
 KEV_MAX_RELEASE_AGE_DAYS = 21
-# A timestamp further than this in the future is clock skew, not freshness.
-_MAX_FUTURE_DAYS = 1
+# A timestamp further than this in the future is clock skew or a bogus
+# catalog, not freshness.
+KEV_MAX_FUTURE_DAYS = 1
 
 
 def _extra(detail: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -62,7 +63,9 @@ def _extra(detail: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def _utc(value: datetime) -> datetime:
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _when(value: datetime) -> str:
@@ -75,20 +78,25 @@ class KevCatalog:
 
     ``fetched_at`` is when a source last answered with a catalog we
     accepted, ``released_at`` the catalog's own ``dateReleased`` and
-    ``source`` the URL that answered.
+    ``source`` the URL that answered. ``unreadable`` is why the cache file
+    could not be read (the catalog is then empty).
     """
 
     cve_ids: frozenset[str]
     fetched_at: datetime | None
     released_at: datetime | None
     source: str | None
+    unreadable: str | None = None
 
     def stale_reason(self, today: date) -> str | None:
         """Why this catalog cannot be trusted on ``today``, or None if fresh."""
+        if self.unreadable is not None:
+            return (f"the KEV cache is unreadable ({self.unreadable}); the next "
+                    f"successful refresh replaces it")
         if self.fetched_at is None:
             return "no KEV catalog has been fetched yet"
         fetch_age = (today - self.fetched_at.date()).days
-        if fetch_age < -_MAX_FUTURE_DAYS:
+        if fetch_age < -KEV_MAX_FUTURE_DAYS:
             return (f"the cached catalog was fetched in the future "
                     f"({_when(self.fetched_at)}): check the box clock")
         if fetch_age > KEV_MAX_AGE_DAYS:
@@ -101,7 +109,7 @@ class KevCatalog:
         if self.released_at is None:
             return None
         release_age = (today - self.released_at.date()).days
-        if release_age < -_MAX_FUTURE_DAYS:
+        if release_age < -KEV_MAX_FUTURE_DAYS:
             return (f"the cached catalog's release date is in the future "
                     f"({_when(self.released_at)}): check the box clock")
         if release_age > KEV_MAX_RELEASE_AGE_DAYS:
@@ -162,12 +170,13 @@ def load_kev(paths: BoxPaths) -> KevCatalog:
             source=source if isinstance(source, str) else None,
         )
     except (ValueError, TypeError, OSError, AttributeError) as e:
-        # A corrupt cache must not wedge the scan; treat as "no catalog".
+        # A corrupt cache must not wedge the scan; treat as "no catalog",
+        # and say why wherever its staleness is reported.
         _LOGGER.warning(
             "KEV catalog cache unreadable (%s) — treating as empty", e,
             extra=_extra(detail={"error": str(e)}),
         )
-        return _EMPTY
+        return KevCatalog(frozenset(), None, None, None, unreadable=f"{path}: {e}")
 
 
 def kev_status(paths: BoxPaths, today: date) -> dict[str, Any]:
