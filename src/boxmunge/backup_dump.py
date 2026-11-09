@@ -17,6 +17,7 @@ from pathlib import Path
 
 import boxmunge.backup as _backup
 from boxmunge.backup import BACKUP_CMD_TIMEOUT, BackupError
+from boxmunge.backup_offline import run_offline
 from boxmunge.paths import BoxPaths
 from boxmunge.service_exec import ServiceCommandTimeout, run_in_service
 
@@ -25,10 +26,12 @@ DUMP_PREFIX = ".dump-"
 
 def execute_dump(
     paths: BoxPaths, project_name: str, dump_command: str, service: str,
-    compose_file: Path | None = None,
+    compose_file: Path | None = None, *, offline: bool = False,
 ) -> Path:
     """Run the dump command inside the project container and capture output.
-    ``compose_file``: see service_exec.run_in_service.
+    ``compose_file``: see service_exec.run_in_service. ``offline``: the
+    service is stopped, and the dump runs in a one-off container of it
+    instead (backup_offline), over production's own files.
 
     This function removes the plaintext on every failure; once it returns
     the path, removing it is the caller's job.
@@ -52,11 +55,20 @@ def execute_dump(
         with os.fdopen(fd, "wb") as outf:
             _backup.fchown_for_system_container(outf.fileno(), paths)
             try:
-                result = run_in_service(
-                    project_dir, project_name, service, dump_command,
-                    timeout=BACKUP_CMD_TIMEOUT, stdout=outf, stderr=subprocess.PIPE,
-                    compose_file=compose_file,
-                )
+                if offline:
+                    if compose_file is not None:
+                        raise BackupError("an offline dump runs production's own files; "
+                                          f"{compose_file} was named instead")
+                    result = run_offline(
+                        paths, project_name, service, dump_command,
+                        timeout=BACKUP_CMD_TIMEOUT, component="backup", stdout=outf,
+                        stderr=subprocess.PIPE)
+                else:
+                    result = run_in_service(
+                        project_dir, project_name, service, dump_command,
+                        timeout=BACKUP_CMD_TIMEOUT, stdout=outf, stderr=subprocess.PIPE,
+                        compose_file=compose_file,
+                    )
             except ServiceCommandTimeout as e:
                 # The project lock is held for the whole dump; without a bound
                 # a stuck database would also stall every later backup-all run.

@@ -20,6 +20,7 @@ from boxmunge.pause import (
 from boxmunge.paths import BoxPaths
 from boxmunge.release_txn import open_install_reason
 from boxmunge.staged_release import SlotError, clear_production_stopped
+from boxmunge.state import StateError
 
 
 def run_pause(
@@ -140,7 +141,7 @@ def pause_locked(project_name: str, paths: BoxPaths, reason: str | None,
         try:
             snap = pause_snapshot.take(paths, project_name, no_snapshot)
         except (pause_snapshot.PauseRefused, DockerError, ManifestError,
-                ReleaseStateError) as e:
+                ReleaseStateError, StateError) as e:
             print(f"ERROR: Cannot pause '{project_name}': {e}.", file=sys.stderr)
             return 1
         write_paused_state(project_name, paths, reason=reason)

@@ -308,7 +308,7 @@ def copy_production_data(paths: BoxPaths, project: str, plan: CopyPlan) -> None:
             for (src, dest), is_file in zip(plan.pairs, kinds)]
     stopped = _running(project)
     if stopped:
-        check_containers_start(paths, project, component="stage")
+        check_containers_start(paths, project, stopped, component="stage")
         _mark_stopped(paths, project, stopped)
     try:
         if stopped:
