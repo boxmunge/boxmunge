@@ -18,6 +18,7 @@ from boxmunge.fileutil import project_lock, LockError
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.legacy_stage import alert_legacy, cannot_tell, legacy_stage
 from boxmunge.lifecycle import BlockReason, is_blocked
+from boxmunge.pause import awaiting_deploy
 from boxmunge.log import log_error, log_operation
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
@@ -429,6 +430,9 @@ def _check_one(name: str, paths: BoxPaths, read_only: bool) -> int:
                 "check-all", block.skip_message,
                 paths, project=name,
             )
+        elif awaiting_deploy(name, paths):
+            print(f"{name}: PAUSED (awaiting deploy; down behind its maintenance page "
+                  f"until `prod-deploy {name}`)")
         return 0
     held = tick_hold(name, paths, read_only)
     if held is not None:

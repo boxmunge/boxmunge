@@ -6,8 +6,12 @@ Shared by `boxmunge security resume` and by the scan that clears a
 security_enforce.clears_quarantine). Both have scanned every image the lift
 will start, and hold the project lock.
 
-A project that is also paused has its quarantine lifted but stays down: the
-pause is the operator's own decision (B-20), lifted only by `boxmunge resume`.
+Whether a lift may start the project is decided here, for both (start_hold):
+a project that is also paused, or that the health monitor stopped, has its
+quarantine lifted but stays down. The pause is the operator's own decision
+(B-20), lifted only by `boxmunge resume`; the monitor's stop stands until
+`boxmunge recover`, and the monitor and container-update skip the project
+while it does, so a started one would run unwatched.
 """
 from __future__ import annotations
 
@@ -15,6 +19,7 @@ from dataclasses import dataclass
 
 from boxmunge.bind_sources import BindSourceError
 from boxmunge.caddy import prepare_caddy_config
+from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_guard import ComposeRefused, check_start
 from boxmunge.cve.quarantine import (
@@ -31,10 +36,23 @@ from boxmunge.paths import BoxPaths
 class Restored:
     """What the lift left running."""
 
-    # Also paused: the quarantine is lifted, the project stays down.
-    paused: bool
-    # (passed, message) of the smoke test; None when paused.
+    # Why the project stays down (start_hold), naming the command that brings
+    # it back; None when it was started.
+    held: str | None = None
+    # (passed, message) of the smoke test; None when held.
     smoke: tuple[bool, str] | None = None
+
+
+def start_hold(paths: BoxPaths, project: str) -> str | None:
+    """Why a quarantine lift must leave ``project`` down, naming what brings
+    it back, or None when the lift may start it. The one rule for every
+    lift: the scan's and `security resume`."""
+    if is_paused(project, paths):
+        return f"it is paused; `boxmunge resume {project}` brings it back"
+    if is_monitor_stopped(project, paths):
+        return (f"the health monitor stopped it; `boxmunge recover {project}` brings "
+                f"it back")
+    return None
 
 
 def compose_files_for(paths: BoxPaths, project: str) -> list[str]:
@@ -55,10 +73,11 @@ def restore_from_quarantine(paths: BoxPaths, project: str, *, component: str) ->
     `compose up`) re-asserts the quarantine before raising, so visitors get
     the maintenance page back, not a 502 until the next scan.
     """
-    if is_paused(project, paths):
+    held = start_hold(paths, project)
+    if held is not None:
         lift_quarantine(project, paths, project_caddy_site_content=None,
                         compose_files=[], component=component)
-        return Restored(paused=True)
+        return Restored(held=held)
     try:
         manifest = load_manifest(paths.project_manifest(project))
     except ManifestError as e:
@@ -76,7 +95,7 @@ def restore_from_quarantine(paths: BoxPaths, project: str, *, component: str) ->
         _start(paths, project, manifest, component)
     except QuarantineError as e:
         _put_back(paths, project, manifest, e)
-    return Restored(paused=False, smoke=run_smoke(project, paths))
+    return Restored(smoke=run_smoke(project, paths))
 
 
 def _start(paths: BoxPaths, project: str, manifest: dict, component: str) -> None:

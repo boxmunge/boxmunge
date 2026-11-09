@@ -49,7 +49,9 @@ from boxmunge.cve.security_policy import relaxations
 from boxmunge.docker_run import DockerError
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
+from boxmunge.pause import is_paused
 from boxmunge.paths import BoxPaths
+from boxmunge.release_policies import ReleasePolicyError, release_policies
 from boxmunge.release_target import (
     DeployRefused, ReleaseTarget, production_target, resolved_services,
 )
@@ -119,6 +121,8 @@ def production_now(paths: BoxPaths, project: str) -> str:
     """Where production stands when a deploy stops before its start."""
     if is_quarantined(project, paths):
         return "production stays CVE-quarantined behind its maintenance page"
+    if is_paused(project, paths):
+        return "production stays paused behind its maintenance page, awaiting a deploy"
     return "production runs its previous containers"
 
 
@@ -331,35 +335,15 @@ def _verify_running(paths: BoxPaths, clearance: Clearance, component: str, *,
     return services
 
 
-_CONDITIONS = {"none": "no", "any": "always", "on-failure": "on-failure"}
-
-
-def _policy(svc: dict[str, Any]) -> str:
-    """The restart policy compose gives a container of ``svc``."""
-    if svc.get("restart"):
-        return str(svc["restart"])
-    rule = (svc.get("deploy") or {}).get("restart_policy") or {}
-    condition = rule.get("condition")
-    if not condition:
-        return "no"
-    if condition not in _CONDITIONS:
-        raise QuarantineError(f"deploy.restart_policy.condition {condition!r} is not one "
-                              f"of {', '.join(_CONDITIONS)}")
-    attempts = rule.get("max_attempts")
-    return f"on-failure:{attempts}" if condition == "on-failure" and attempts else \
-        _CONDITIONS[condition]
-
-
 def _release_policies(paths: BoxPaths, project: str,
                       services: dict[str, str]) -> dict[str, str]:
-    """{container: its release's own restart policy}: what compose gives a
-    container it creates, so a held one the deploy did not recreate gets the
-    same, never a policy saved from an earlier release."""
-    _model, model = resolved_services(production_target(paths, project))
-    gone = sorted({svc for svc in services.values() if svc not in model})
-    if gone:
-        raise QuarantineError(f"services {', '.join(gone)} are no longer in the release")
-    return {name: _policy(model[svc]) for name, svc in services.items()}
+    """{container: its release's own restart policy} (release_policies), so
+    a held one the deploy did not recreate gets the same, never a policy
+    saved from an earlier release. Raises QuarantineError."""
+    try:
+        return release_policies(paths, project, services)
+    except ReleasePolicyError as e:
+        raise QuarantineError(str(e)) from e
 
 
 def keep_quarantined(paths: BoxPaths, project: str) -> None:

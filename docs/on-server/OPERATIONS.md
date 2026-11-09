@@ -675,6 +675,7 @@ Every snapshot is named `<project>-<UTC timestamp>-<kind>.tar.gz.age`, for examp
 | `predeploy` | the pre-deploy snapshot of `prod-deploy` and `promote` (`deploy.snapshot_before_deploy`) | 5 |
 | `premigrate` | `userns-migrate`, before its downtime (not for a paused project) | 2 |
 | `prechown` | `data chown`, before it stops the service; when that is the backup service and it has not run since, the next deploy uses it as its pre-deploy snapshot | 3 |
+| `prepause` | `pause`, before it stops the project (unless `--no-snapshot`); while the backup service has not run since, the deploy that ends the pause (`resume --no-start`) uses it as its pre-deploy snapshot | 3 |
 | `preupdate` | the container-update timer, only when a pulled image changed and the project is about to be recreated | 3 |
 | `prerestore` | `restore`, a safety snapshot of the data about to be replaced (unless `--no-safety-snapshot`) | 3 |
 | `manual` | `backup <project>`, the MCP `backup` tool, the console, `self-test` | 5 |
@@ -842,9 +843,11 @@ While an install is open the health check runs no smoke and takes no critical
 action (the install may already have replaced the smoke scripts): `check-all`
 reports the project as `WARNING (install open: ...)`, naming these options.
 
-A failure once the containers were started (compose, Caddy or the smoke test)
-closes the install as before: production may run the new release, and
-`rollback` returns to the old one.
+A start refused or failed before `docker compose up` ran (a start check, an image missing from
+the local image store, preparing the storage) changes no container: production still runs the old
+release, the deploy state still names it, and the install stays open at `switching` with these
+options. A failure once `compose up` has run (compose, Caddy or the smoke test) closes the install:
+production may run the new release, and `rollback` returns to the old one.
 
 While an install is open, backups use the manifest and compose file of the
 release the containers still run, and are skipped with an alert when that is
@@ -1009,10 +1012,19 @@ Use pause for planned maintenance, post-incident triage, or while you reconfigur
 boxmunge pause myapp --reason "rolling key rotation"
 ```
 
+Before it stops anything, `pause` takes a data snapshot of the running project (kind `prepause`): a
+deploy that ends the pause (see `resume --no-start` below) cannot dump stopped containers, so it
+uses that snapshot as its pre-deploy snapshot and its rollback can restore the data. If the
+snapshot fails, `pause` refuses and changes nothing; `pause myapp --no-snapshot` pauses without
+one, giving up that data rollback. Use `--no-snapshot` for an emergency pause, when the site must
+go down now and a dump would take too long or cannot run. A CVE-quarantined or monitor-stopped
+project has nothing running to dump, so `pause` takes no snapshot there and says so.
+
 Containers are stopped via `docker compose stop`, so state is preserved on disk and resume is fast. While paused:
 
 - Health checks, scheduled backups, and container-update sweeps skip the project
-- `prod-deploy`, `stage`, and `promote` refuse to run against it
+- `prod-deploy`, `stage`, and `promote` refuse to run against it, naming `resume` (after `resume
+  --no-start`, below, they are accepted)
 - `backup-sync` continues (it only copies; existing off-box snapshots are never removed)
 - Platform upgrades keep it paused: the maintenance page stays in place and the containers stay stopped
 - A Docker restart or reboot keeps it stopped: pause sets each container's restart policy to `no` (saving the original), and `resume` restores the originals before starting the containers
@@ -1026,11 +1038,52 @@ pause is the one case where pausing a paused project is accepted), or `resume my
 `status` shows it as `PAUSED (incomplete)`, `health` warns about it under `lifecycle`, and
 `container-update` logs that it may still be serving on images it does not update while paused.
 
+`pause` is refused while an install is open (`.releases/install.json`, see "An interrupted or
+failed install"): its ways out are a deploy, a rollback or `--abandon`, and a pause would refuse
+the first two. The refusal names them; pause once the install is finished. A project paused over an
+open install by an earlier boxmunge is refused by `resume` too (only the install may start
+production); `resume myapp --no-start` (below) hands the pause to the install's own rerun or to a
+fix-forward deploy.
+
 To bring it back:
 
 ```
 boxmunge resume myapp
 ```
+
+A project whose stopped containers were created before the current mount rules (boxmunge 0.10.x
+accepted a read-write mount of the project directory, `.:/app`) cannot simply be started again,
+and a deploy is refused while it is paused, so `resume` recreates its containers from the deployed
+files instead (it says so). It still refuses files that changed since the deploy.
+
+### When only a deploy can fix it: `resume --no-start`
+
+`resume` refuses to start a release whose files are not the ones deployed: a compose file or
+manifest edited in place, a mount the deploy did not record, a file this boxmunge's validator now
+rejects, a missing bind-source record, an image no longer in the local store, an open install.
+The fix is a deploy, which a pause refuses, so each of those refusals names the way out:
+
+```
+boxmunge resume myapp --no-start    # starts nothing
+boxmunge prod-deploy myapp          # or promote; ends the pause once its containers start
+```
+
+`--no-start` hands the pause to the next deploy. Until that deploy starts the containers, the
+project stays paused for everything else: the maintenance page stays up, the containers stay
+stopped with their restart policies held (a reboot does not start them), health checks, backups,
+container updates and upgrade restarts skip it, and `status` shows `PAUSED (awaiting deploy)`
+(`health` warns about it under `lifecycle`). `prod-deploy` and `promote` are accepted (`stage` too,
+which leaves the pause to the promote). The deploy uses the pause's snapshot as its pre-deploy
+snapshot, keeps the maintenance page while it prepares, and once `docker compose up` has started
+the containers gives them their restart policies back and ends the pause. A deploy that stops
+before that leaves it paused and awaiting a deploy; one whose `compose up` fails part-way stops
+what it started again and keeps the pause. A CVE-quarantined project that is also paused takes
+the same way: its deploy is scanned first, and a clean one also lifts the quarantine. `rollback`
+is accepted too (not for a quarantined project): it restores the paired data with the project left
+stopped, and its start ends the pause. So a deploy that fails after `--no-start` can be rolled back
+to the previous release with the data the pause's snapshot saved. `resume myapp` still works if the
+cause goes away. `--no-start` also takes a pause that did not finish while an install is open (`pause` itself
+is refused then).
 
 `resume` pulls the latest images by default. This is a deliberate safety guarantee: a project that was paused for hours or days should not come back on stale, potentially vulnerable images.
 
@@ -1343,7 +1396,7 @@ If deeper Caddy investigation is needed (container logs, config file inspection)
 
 This state means the smoke test exited with code 2 -- a critical failure that caused boxmunge to stop the project containers. The project will not restart automatically.
 
-The stop is sticky. Later 5-minute health checks do not run smoke against the stopped project, do not change its recorded failure reason, and do not send more alerts. The daily `container-update` skips it rather than recreating it, and a platform upgrade does not restart it either (the upgrade output lists it under `Not restarted (stopped by the health monitor ...)`). `check-all` reports it as `CRITICAL (stopped by the health monitor ...)`, and `health` lists it under `lifecycle` as `monitor-stopped`. The stop stays in place until you run `recover`, or until a later deploy, rollback, or resume starts the project successfully.
+The stop is sticky. Later 5-minute health checks do not run smoke against the stopped project, do not change its recorded failure reason, and do not send more alerts. The daily `container-update` skips it rather than recreating it, and a platform upgrade does not restart it either (the upgrade output lists it under `Not restarted (stopped by the health monitor ...)`). `check-all` reports it as `CRITICAL (stopped by the health monitor ...)`, and `health` lists it under `lifecycle` as `monitor-stopped`. The stop stays in place until you run `recover`, or until a later deploy, rollback, or resume starts the project successfully. A CVE quarantine lifted from it (by the scan or by `security resume`) leaves it stopped: `recover` brings it back.
 
 Check the dashboard to confirm the state:
 
@@ -1866,7 +1919,9 @@ How an upgrade is applied and undone:
    stays offline until `resume`, `security resume` or `recover` brings it back. A paused or
    quarantined project keeps its maintenance page, but the upgrade still regenerates its
    compose overlay and records the bind sources it mounts, so `resume`, `security resume`
-   and the scan's automatic lift start it on its deployed files without a deploy. If its
+   and the scan's automatic lift start it on its deployed files without a deploy (its stopped
+   containers are not checked here: nothing of it starts, and a paused project's containers
+   made before the current mount rules are recreated by `resume`). If its
    overlay cannot be regenerated or recorded (an unreadable users record, say), it does not
    fail the upgrade: it is listed as `REFUSED` and alerted with the others, keeps its previous
    overlay and record, and stays offline. Once the cause is fixed, `resume` or `security

@@ -41,7 +41,9 @@ from boxmunge.compose_guard import compose_up_checked
 from boxmunge.docker import DockerError, caddy_reload, compose_stop
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.fs_nofollow import mkdir_p_deploy
-from boxmunge.pause import hand_over_restart_policies, render_maintenance_caddy_config
+from boxmunge.pause import (
+    hand_over_restart_policies, is_paused, render_maintenance_caddy_config,
+)
 from boxmunge.paths import BoxPaths
 
 _LOGGER = logging.getLogger("boxmunge")
@@ -379,7 +381,8 @@ def lift_quarantine(
 
     ``project_caddy_site_content=None`` lifts the quarantine but leaves the
     project down: the maintenance page stays and nothing starts. Used when
-    the project is also paused — pause is lifted only by `resume` (B-20).
+    the project is also paused — pause is lifted only by `resume` (B-20) —
+    or the health monitor stopped it (commands/quarantine_lift.start_hold).
 
     The caller is responsible for regenerating the normal Caddyfile
     fragment (the resume command does this via existing helpers) and
@@ -408,13 +411,18 @@ def lift_quarantine(
     state = read_quarantine_state(project_name, paths) or {}
 
     if project_caddy_site_content is None:
-        # Paused as well: keep the maintenance page, the stop and the held
-        # restart policies; the pause record takes over the originals so
-        # `resume` gives them back.
-        hand_over_restart_policies(project_name, paths, state.get("restart_policies") or {})
+        # Left down: keep the maintenance page and the stop. A pause takes
+        # the held originals over, so `resume` gives them back. The health
+        # monitor's stop holds none (it removes the containers): one that is
+        # left gets its own policy back, as after any monitor stop.
+        if is_paused(project_name, paths):
+            hand_over_restart_policies(project_name, paths,
+                                       state.get("restart_policies") or {})
+        else:
+            _restore_restart_policies(project_name, state)
         clear_quarantine_state(project_name, paths)
         _LOGGER.info(
-            "quarantine: %s lifted; project stays paused", project_name,
+            "quarantine: %s lifted; project stays down", project_name,
             extra=_extra(project=project_name),
         )
         return

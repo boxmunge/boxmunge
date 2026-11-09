@@ -92,8 +92,9 @@ These commands prompt for confirmation before executing. Use `--yes` only when y
 - `rollback <project>` -- puts back the previous release's code and its pre-deploy data snapshot (refuses, with the reason, if either is unavailable)
 - `restore <project>` -- restores from a backup
 - `project-delete <project>` -- destructively deletes a project (containers, files including local backups, registry entry); off-site backup copies are kept
-- `pause <project>` -- takes the site offline with a maintenance page
+- `pause <project>` -- takes the site offline with a maintenance page, after a data snapshot (the deploy that ends the pause rolls back to it); `pause <project> --no-snapshot` for an emergency pause, giving up that data rollback
 - `resume <project>` -- brings it back online; with `--skip-security-checks` (DANGEROUS) it starts potentially vulnerable images without pulling fresh ones
+- `resume <project> --no-start` -- starts nothing: hands the pause to the next `prod-deploy`/`promote` (or `rollback`), which ends it once its containers start. Use it when `resume` refuses and names it (only a deploy can repair what it found)
 - `recover <project>` -- restarts a project the health monitor stopped
 - `inbox clean [project]` -- removes every uploaded bundle (of that project)
 

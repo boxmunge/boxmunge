@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from boxmunge import restart_hold
+from boxmunge.docker import compose_stop
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state
@@ -73,6 +74,24 @@ def mark_pause_complete(project_name: str, paths: BoxPaths) -> None:
     _update_paused_state(project_name, paths, action_complete=True)
 
 
+def mark_pause_incomplete(project_name: str, paths: BoxPaths) -> None:
+    """A step of keeping it paused failed: `pause` finishes it."""
+    _update_paused_state(project_name, paths, action_complete=False)
+
+
+def awaiting_deploy(project_name: str, paths: BoxPaths) -> bool:
+    """True if `resume --no-start` handed the pause to the next deploy: the
+    project stays paused for everything else (maintenance page, stopped
+    containers, held restart policies, timers skip it), but a deploy or
+    promote may start it, and the pause ends once that start has run."""
+    state = read_paused_state(project_name, paths)
+    return state is not None and state.get("awaiting_deploy") is True
+
+
+def mark_awaiting_deploy(project_name: str, paths: BoxPaths) -> None:
+    _update_paused_state(project_name, paths, awaiting_deploy=True)
+
+
 def hold_restart_policies(project_name: str, paths: BoxPaths) -> None:
     """Keep a paused project's containers stopped across a Docker restart.
 
@@ -84,6 +103,17 @@ def hold_restart_policies(project_name: str, paths: BoxPaths) -> None:
         project_name, state.get("restart_policies") or {},
         lambda saved: _update_paused_state(project_name, paths, restart_policies=saved),
     )
+
+
+def stop_again(project_name: str, paths: BoxPaths) -> None:
+    """A start that failed part-way on a paused project (resume, or the deploy
+    a pause was handed to): stop what it started and hold the restart
+    policies again, so the project is paused as before. Raises DockerError."""
+    files = ["compose.yml"] + (["compose.boxmunge.yml"]
+                               if paths.project_compose_override(project_name).exists() else [])
+    compose_stop(paths.project_dir(project_name), compose_files=files,
+                 project_name=project_name)
+    hold_restart_policies(project_name, paths)
 
 
 def release_restart_policies(project_name: str, paths: BoxPaths) -> None:
