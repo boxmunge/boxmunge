@@ -269,6 +269,7 @@ def _compose_config_without_docker(request, monkeypatch, fake_containers):
     if request.node.get_closest_marker("integration"):
         return
     import json
+    import os
 
     import yaml
 
@@ -284,12 +285,16 @@ def _compose_config_without_docker(request, monkeypatch, fake_containers):
             raise docker.DockerError(f"compose config failed: {e}") from e
         services = doc.get("services") if isinstance(doc, dict) else None
         # Like Compose, bring in the services of included files (one level),
-        # so the resolver's literal-versus-resolved service check holds.
+        # so the resolver's literal-versus-resolved service check holds, with
+        # their env files made absolute from the included file's base.
         includes = doc.get("include") if isinstance(doc, dict) else None
         for ref in includes if isinstance(includes, list) else []:
             inc = path.parent / (ref if isinstance(ref, str) else "")
             if isinstance(ref, str) and inc.is_file() and isinstance(services, dict):
                 inc_doc = yaml.safe_load(inc.read_text()) or {}
+                for svc in (inc_doc.get("services") or {}).values():
+                    if isinstance(svc, dict) and isinstance(svc.get("env_file"), str):
+                        svc["env_file"] = os.path.normpath(inc.parent / svc["env_file"])
                 services.update(inc_doc.get("services") or {})
         if not all_profiles and isinstance(services, dict):
             # Like Compose, leave out services behind a profile.
