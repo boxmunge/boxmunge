@@ -43,9 +43,8 @@ These operations are safe to run without human confirmation:
 | Run a backup | `backup <project>` |
 | Run diagnostics | `doctor` |
 | Read documentation | `agent-help <topic>` |
-| Pause a project (planned maintenance) | `pause <project>` |
-| Resume a paused project (pulls latest images) | `resume <project>` |
-| Restart a project the health monitor stopped (same build) | `recover <project>` |
+| Resume a paused project (pulls latest images) | `resume <project> --yes` (it asks first; without a terminal it needs `--yes`) |
+| Restart a project the health monitor stopped (same build) | `recover <project> --yes` (it asks first; without a terminal it needs `--yes`) |
 | Show effective container security posture | `security <project> [--json]` |
 | Audit overall platform health | `health` |
 | Show server boxmunge version | `version` |
