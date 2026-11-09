@@ -92,6 +92,17 @@ class TestCheckNotInstalled:
         with pytest.raises(PreflightError, match="already installed"):
             check_not_installed(target, False)
 
+    def test_install_without_its_system_container_names_the_rebuild(self, target, fake_remote) -> None:
+        """An install whose boxmunge-system image did not build finishes
+        everything else, then fails: the recovery is the rebuild, not
+        another server-setup."""
+        fake_remote.respond("ssh", "test -f /opt/boxmunge", rc=0)
+        fake_remote.respond("ssh", "docker inspect --type container boxmunge-system", rc=1)
+        with pytest.raises(PreflightError) as e:
+            check_not_installed(target, False)
+        assert "sudo docker compose -f /opt/boxmunge/system/compose.yml up -d --build" in str(e.value)
+        assert "boxmunge doctor" in str(e.value)
+
     def test_partial_install_is_explained(self, target, fake_remote) -> None:
         fake_remote.respond("ssh", "test -f /opt/boxmunge", rc=1)
         fake_remote.respond("ssh", "test -d /opt/boxmunge", rc=0)

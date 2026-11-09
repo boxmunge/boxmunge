@@ -100,6 +100,18 @@ def check_not_installed(target: Target, needs_sudo: bool) -> None:
     """Verify boxmunge is not installed, fully or partly."""
     done = _run_check(target, ["test", "-f", "/opt/boxmunge/config/boxmunge.yml"], needs_sudo)
     if done.returncode == 0:
+        system = _run_check(target, ["docker", "inspect", "--type", "container",
+                                     "boxmunge-system"], needs_sudo)
+        if system.returncode != 0:
+            raise PreflightError(
+                "boxmunge is installed on this server, but its boxmunge-system container "
+                "(backups, restores, data operations) is missing: the install could not "
+                "build it. Don't run server-setup again. Log in as supervisor "
+                f"(ssh -p 922 supervisor@{target.host}, or the SSH port you chose), fix "
+                "the cause the installer reported, "
+                "then run: sudo docker compose -f /opt/boxmunge/system/compose.yml "
+                "up -d --build, and check with: boxmunge doctor"
+            )
         raise PreflightError(
             "boxmunge is already installed on this server. Upgrade it on the server "
             "with 'upgrade' (as deploy or supervisor), not with server-setup."
