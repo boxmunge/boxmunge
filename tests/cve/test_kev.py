@@ -69,18 +69,22 @@ def test_load_kev_reads_written_catalog(tmp_path):
     ) is True
 
 
-def test_old_format_cache_keeps_its_ids_but_reads_stale(tmp_path):
-    """A cache written before source tracking has no released_at: it needs
-    a refresh, and says why, but its IDs still guard the shrink check."""
+def test_old_format_cache_is_judged_by_its_fetch_time_alone(tmp_path):
+    """A cache written before release dates were recorded has an unknown
+    release age, not a stale one: it keeps working across the upgrade until
+    a refresh records dateReleased, and still ages out by fetch time."""
     paths = BoxPaths(root=tmp_path)
     paths.kev_catalog.parent.mkdir(parents=True, exist_ok=True)
     paths.kev_catalog.write_text(json.dumps({
         "fetched_at": "2026-07-01T00:00:00+00:00", "cve_ids": ["CVE-2021-44228"],
     }))
     cat = load_kev(paths)
-    assert cat.cve_ids == frozenset({"CVE-2021-44228"})
-    assert "older boxmunge" in cat.stale_reason(date(2026, 7, 1))
-    assert cat.is_known_exploited("CVE-2021-44228", today=date(2026, 7, 1)) is False
+    assert cat.released_at is None and cat.source is None
+    assert cat.stale_reason(date(2026, 7, 9)) is None
+    assert cat.is_known_exploited("CVE-2021-44228", today=date(2026, 7, 9)) is True
+    reason = cat.stale_reason(date(2026, 7, 10))
+    assert "no KEV source has answered for 9 days" in reason
+    assert "an unrecorded source" in reason
 
 
 def test_load_kev_corrupt_cve_ids_non_list_is_fail_safe(tmp_path):

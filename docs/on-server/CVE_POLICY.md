@@ -322,10 +322,12 @@ The catalog is stale when either of these holds:
   spells.
 
 A catalog dated more than a day in the future (fetch or release time) is
-also stale, since that means the clock was wrong when it was written. So
-is a cache written by a boxmunge older than 0.11.4. That cache has no
-release date: its CVE IDs still count for the shrink check below, and the
-first successful refresh replaces it.
+also stale, since that means the clock was wrong when it was written. A
+cache written by a boxmunge older than 0.11.4 has no release date or
+source. Its release age is unknown, not stale, so only the fetch-time
+condition applies to it, and KEV quarantine and lifts keep working across
+the upgrade. The first successful refresh records the release date and
+source.
 
 ### Refresh checks
 

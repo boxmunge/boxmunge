@@ -87,19 +87,23 @@ class KevCatalog:
         """Why this catalog cannot be trusted on ``today``, or None if fresh."""
         if self.fetched_at is None:
             return "no KEV catalog has been fetched yet"
-        if self.released_at is None:
-            return ("the cached catalog has no release date (written by an older "
-                    "boxmunge); the next successful refresh replaces it")
         fetch_age = (today - self.fetched_at.date()).days
-        release_age = (today - self.released_at.date()).days
-        if fetch_age < -_MAX_FUTURE_DAYS or release_age < -_MAX_FUTURE_DAYS:
-            return (f"the cached catalog is dated in the future (fetched "
-                    f"{_when(self.fetched_at)}, released {_when(self.released_at)}): "
-                    f"check the box clock")
+        if fetch_age < -_MAX_FUTURE_DAYS:
+            return (f"the cached catalog was fetched in the future "
+                    f"({_when(self.fetched_at)}): check the box clock")
         if fetch_age > KEV_MAX_AGE_DAYS:
             return (f"no KEV source has answered for {fetch_age} days (limit "
                     f"{KEV_MAX_AGE_DAYS}); last answer {_when(self.fetched_at)} "
-                    f"from {self.source}")
+                    f"from {self.source or 'an unrecorded source'}")
+        # A cache written before release dates were recorded has an unknown
+        # release age, not a stale one: only the fetch condition applies
+        # until the next successful refresh records dateReleased.
+        if self.released_at is None:
+            return None
+        release_age = (today - self.released_at.date()).days
+        if release_age < -_MAX_FUTURE_DAYS:
+            return (f"the cached catalog's release date is in the future "
+                    f"({_when(self.released_at)}): check the box clock")
         if release_age > KEV_MAX_RELEASE_AGE_DAYS:
             return (f"the catalog is lagging: {self.source} last served a catalog "
                     f"released {_when(self.released_at)}, {release_age} days ago "
@@ -134,9 +138,9 @@ def _optional_time(data: dict[str, Any], key: str) -> datetime | None:
 def load_kev(paths: BoxPaths) -> KevCatalog:
     """Load the cached KEV catalog. Missing/malformed cache → empty + stale.
 
-    A cache from before source tracking has no ``released_at``: its IDs
-    still count for the shrink check, but it reads as stale until a refresh
-    replaces it.
+    A cache from before source tracking has no ``released_at`` or
+    ``source``: it is judged by its fetch time alone until a refresh
+    replaces it (see KevCatalog.stale_reason).
     """
     path = paths.kev_catalog
     if not path.exists():
