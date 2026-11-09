@@ -9,6 +9,7 @@ from __future__ import annotations
 import functools
 import json
 import subprocess
+import sys
 
 import pytest
 import yaml
@@ -99,7 +100,7 @@ def test_broken_project_inputs_warn_and_the_report_completes(broken_box, capsys)
     drift = checks["config-drift"]["detail"]
     assert "`validate badyaml`" in drift and "nodir" in drift
     assert "badname: its project field '../x' does not match" in drift
-    assert "nohosts: cannot generate its Caddy config" in drift
+    assert "nohosts: cannot generate its Caddy config: 'hosts' must contain" in drift
 
 
 def test_project_containers_timeout_is_a_warning_naming_the_project(paths, monkeypatch):
@@ -181,3 +182,101 @@ def test_system_container_inspect_timeout_is_a_warning(paths, monkeypatch):
     monkeypatch.setattr(system_container.subprocess, "run", _raise_timeout)
     check = health_cmd.check_system_container(paths)
     assert check.status == "warn" and "timed out" in check.detail
+
+
+def test_a_generate_failure_on_a_valid_manifest_is_not_blamed_on_it(paths, monkeypatch):
+    """Only validation decides it is the manifest's fault; else run_guarded sees it."""
+    from boxmunge import caddy
+    from boxmunge.health_checks.projects import check_config_drift
+    _project(paths, "aaa", _manifest("aaa"))
+    paths.project_caddy_site("aaa").parent.mkdir(parents=True, exist_ok=True)
+    paths.project_caddy_site("aaa").write_text("old\n")
+
+    def broken(manifest):
+        raise KeyError("upstream")
+
+    monkeypatch.setattr(caddy, "generate_caddy_config", broken)
+    with pytest.raises(KeyError):
+        check_config_drift(paths)
+    check = run_guarded("config-drift", lambda: check_config_drift(paths), paths)
+    assert check.status == "warn" and "KeyError" in check.detail
+
+
+# ---- a defect in this release's own code rolls back: exit 2 ----
+
+@pytest.mark.parametrize("exc,named", [
+    (ModuleNotFoundError("No module named 'boxmunge.gone'", name="boxmunge.gone"),
+     "cannot import boxmunge.gone"),
+    (NameError("name 'helper' is not defined", name="helper"), "'helper' is not defined"),
+    (SyntaxError("invalid syntax", ("boxmunge/x.py", 3, 1, "x")), "boxmunge/x.py:3"),
+    (AttributeError("module 'boxmunge.notify' has no attribute 'gone'", name="gone",
+                    obj=sys.modules["boxmunge.log"]), "boxmunge.log has no attribute 'gone'"),
+])
+def test_a_code_defect_is_an_error_naming_what_is_broken(paths, exc, named):
+    def check():
+        raise exc
+
+    result = run_guarded("alerts", check, paths)
+    assert result.status == "error" and named in result.detail
+    assert "this boxmunge release is broken" in paths.log_file.read_text()
+
+
+@pytest.mark.parametrize("exc", [KeyError("decisions"), TypeError("bad"),
+                                 AttributeError("'list' object has no attribute 'get'")])
+def test_a_data_driven_exception_still_warns(paths, exc):
+    def check():
+        raise exc
+
+    assert run_guarded("cve-hardening", check, paths).status == "warn"
+
+
+@pytest.mark.parametrize("broken", ["boxmunge.health_checks.alerts", "boxmunge.notify"],
+                         ids=["check-module", "module-it-imports"])
+@pytest.mark.usefixtures("docker_down", "platform_ok")
+def test_an_unimportable_module_fails_its_check_with_exit_2(paths, monkeypatch, capsys, broken):
+    monkeypatch.delitem(sys.modules, "boxmunge.health_checks.alerts")
+    monkeypatch.setitem(sys.modules, broken, None)   # import of it raises ImportError
+    rc = run_health(paths, as_json=True)
+    checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)["checks"]}
+    assert rc == 2
+    assert checks["alerts"]["status"] == "error"
+    assert f"cannot import {broken}" in checks["alerts"]["detail"]
+    assert "timers" in checks   # the rest of the report still ran
+
+
+# ---- a platform component seen broken is still critical ----
+
+def _health_with(monkeypatch, capsys, paths, run) -> dict:
+    monkeypatch.setattr(subprocess, "run", run)
+    rc = run_health(paths, as_json=True)
+    checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)["checks"]}
+    assert rc == 2
+    return checks
+
+
+def test_a_missing_caddy_container_is_exit_2(paths, monkeypatch, capsys):
+    def run(cmd, *a, **k):
+        if cmd[:2] == ["docker", "inspect"] and cmd[-1] == "boxmunge-caddy":
+            return subprocess.CompletedProcess(cmd, 1, "", "Error: No such object: boxmunge-caddy")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    checks = _health_with(monkeypatch, capsys, paths, run)
+    assert checks["caddy"]["status"] == "error"
+
+
+def test_an_inactive_firewall_is_exit_2(paths, monkeypatch, capsys):
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+
+    def run(cmd, *a, **k):
+        out = "Status: inactive\n" if cmd[:2] == ["ufw", "status"] else ""
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+    checks = _health_with(monkeypatch, capsys, paths, run)
+    assert checks["ufw"]["status"] == "error"
+
+
+def test_a_missing_docker_cli_is_exit_2(paths, monkeypatch, capsys):
+    def run(cmd, *a, **k):
+        if cmd[0] == "docker":
+            raise FileNotFoundError(2, "No such file or directory", "docker")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    checks = _health_with(monkeypatch, capsys, paths, run)
+    assert checks["docker"]["status"] == "error" and "docker CLI not found" in checks["docker"]["detail"]

@@ -169,7 +169,7 @@ def _drifted(paths: BoxPaths, project_dir: Path) -> str | None:
     """The project's name if its generated Caddy config drifted, else None.
     Raises a PROJECT_INPUT_ERRORS error when an input cannot be read."""
     from boxmunge.caddy import generate_caddy_config
-    from boxmunge.manifest import load_manifest
+    from boxmunge.manifest import load_manifest, validate_manifest
 
     manifest = load_manifest(project_dir / "manifest.yml")
     name = project_dir.name
@@ -185,9 +185,13 @@ def _drifted(paths: BoxPaths, project_dir: Path) -> str | None:
         return None
     try:
         expected = generate_caddy_config(manifest)
-    except (KeyError, TypeError, ValueError, AttributeError) as e:
-        raise ManifestError(f"cannot generate its Caddy config ({type(e).__name__}: "
-                            f"{e}): a field is missing or malformed") from e
+    except Exception as e:
+        # The manifest's fault only if validation says so; otherwise a
+        # defect in boxmunge, which run_guarded reports as such.
+        errors, _ = validate_manifest(manifest, name, lenient_values=True)
+        if errors:
+            raise ManifestError(f"cannot generate its Caddy config: {'; '.join(errors)}") from e
+        raise
     return name if site_conf.read_text() != expected else None
 
 

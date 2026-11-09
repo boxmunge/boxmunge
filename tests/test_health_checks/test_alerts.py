@@ -57,4 +57,4 @@ def test_unreadable_config_warns(paths):
 
 def test_health_report_includes_the_check():
     from boxmunge.commands import health_cmd
-    assert "check_alerts(paths)" in inspect.getsource(health_cmd._checks)
+    assert '"check_alerts"' in inspect.getsource(health_cmd._checks)

@@ -5,16 +5,20 @@ Checks system configuration, component health, config drift, and
 recent log patterns. No writes, no restarts.
 
 Exit 2 during an upgrade's probation rolls the platform back and blocklists
-the release, and a traceback exits 1, which reads as healthy. So only a
-platform component a probe positively saw broken is an error; a probe that
-timed out or could not tell, and any per-project input, warns; and no check
-can take the report down with it (run_guarded).
+the release, and a traceback exits 1, which reads as healthy. So an error is
+either a platform component a probe saw broken, or a defect in this
+release's own code (a check module that cannot be imported, a missing
+name): rolling back is the fix for both. A probe that timed out or could
+not tell, any per-project input, and any other exception a check raises
+warn. Each check runs under run_guarded, so none can take the report down.
 """
 
+import importlib
 import json
 import os
 import subprocess
 import sys
+import types
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -95,34 +99,49 @@ def check_docker_running() -> HealthCheck:
 
 
 def check_caddy_container() -> HealthCheck:
-    """Check if Caddy container is running and healthy.
+    """Check that the platform's Caddy container is running and healthy.
+
+    Error when it is missing, not running or restarting: no site is served.
+    Warn when it runs but is starting or unhealthy, or `docker inspect`
+    fails for another reason (container-update recreating it, a busy
+    daemon): neither shows Caddy down.
 
     The host's CrowdSec follows boxmunge-caddy by name, so a container of
     that name from any compose project but the platform's own `caddy`
     (caddy/compose.yml) is an error: CrowdSec would read its output as
     Caddy's. Compose sets the project label itself; a service cannot."""
+    fmt = ("{{.State.Running}}|{{.State.Restarting}}|"
+           "{{if .State.Health}}{{.State.Health.Status}}{{end}}|"
+           f'{{{{index .Config.Labels "{COMPOSE_PROJECT_LABEL}"}}}}')
     try:
         result = subprocess.run(
-            ["docker", "inspect", "--format",
-             f'{{{{.State.Health.Status}}}}|{{{{index .Config.Labels "{COMPOSE_PROJECT_LABEL}"}}}}',
-             "boxmunge-caddy"],
+            ["docker", "inspect", "--format", fmt, "boxmunge-caddy"],
             capture_output=True, text=True, check=False, timeout=10,
             env=docker_env(),
         )
-        if result.returncode != 0:
-            return HealthCheck("caddy", "error", "Caddy container not found")
-        status, _, project = result.stdout.strip().partition("|")
-        if project != "caddy":
-            return HealthCheck(
-                "caddy", "error",
-                f"boxmunge-caddy belongs to compose project {project!r}, not the "
-                f"platform's caddy: CrowdSec reads its output as Caddy's. Remove it "
-                f"and run: docker compose -f /opt/boxmunge/caddy/compose.yml up -d")
-        if status == "healthy":
-            return HealthCheck("caddy", "ok", "Caddy container healthy")
-        return HealthCheck("caddy", "warn", f"Caddy container status: {status}")
     except FileNotFoundError:
         return HealthCheck("caddy", "error", "docker CLI not found, so Caddy cannot be checked")
+    if result.returncode != 0:
+        if "No such object" in result.stderr or "No such container" in result.stderr:
+            return HealthCheck("caddy", "error", "Caddy container not found")
+        return HealthCheck("caddy", "warn", f"`docker inspect boxmunge-caddy` failed "
+                           f"({result.stderr.strip() or result.returncode}); run `health` again")
+    running, restarting, health, project = (result.stdout.strip().split("|") + [""] * 4)[:4]
+    if project != "caddy":
+        return HealthCheck(
+            "caddy", "error",
+            f"boxmunge-caddy belongs to compose project {project!r}, not the "
+            f"platform's caddy: CrowdSec reads its output as Caddy's. Remove it "
+            f"and run: docker compose -f /opt/boxmunge/caddy/compose.yml up -d")
+    if restarting == "true":
+        return HealthCheck("caddy", "error", "Caddy container is restarting (it keeps exiting); "
+                           "`docker logs boxmunge-caddy` shows why")
+    if running != "true":
+        return HealthCheck("caddy", "error", "Caddy container is not running; "
+                           "`docker logs boxmunge-caddy` shows why")
+    if health == "healthy":
+        return HealthCheck("caddy", "ok", "Caddy container healthy")
+    return HealthCheck("caddy", "warn", f"Caddy container status: {health or 'no healthcheck'}")
 
 
 def check_system_container(paths: BoxPaths) -> HealthCheck:
@@ -221,13 +240,29 @@ def timeout_detail(e: subprocess.TimeoutExpired) -> str:
             f"(a busy host does this); run `health` again, and `doctor` if it repeats")
 
 
+def _code_defect(e: Exception) -> str | None:
+    """What is broken, when *e* means this release's own code is: a module
+    that cannot be imported, a missing name or module attribute, a syntax
+    error. None for anything a check's input or the host can cause."""
+    if isinstance(e, ImportError):
+        return f"cannot import {e.name or 'a module'}"
+    if isinstance(e, SyntaxError):
+        return f"syntax error in {e.filename}:{e.lineno}"
+    if isinstance(e, NameError):
+        return f"name {e.name!r} is not defined"
+    if isinstance(e, AttributeError) and isinstance(getattr(e, "obj", None), types.ModuleType):
+        return f"module {e.obj.__name__} has no attribute {e.name!r}"
+    return None
+
+
 def run_guarded(name: str, check: Callable[[], HealthCheck], paths: BoxPaths) -> HealthCheck:
     """Run one check so that nothing it raises takes the report down.
 
     A timed-out probe warns, naming the command. A PermissionError from a
     non-root caller (the deploy shell) is a SKIP: the root health timer gives
-    the verdict. Anything else is a defect in the check: it warns with the
-    exception and is logged, so the operator sees it and can report it.
+    the verdict. A defect in boxmunge's own code (_code_defect) is an error,
+    so an upgrade's probation rolls the release back. Anything else warns
+    with the exception. Both are logged.
     """
     try:
         return check()
@@ -238,8 +273,13 @@ def run_guarded(name: str, check: Callable[[], HealthCheck], paths: BoxPaths) ->
             return HealthCheck(name, "skip", f"needs root ({e}); "
                                f"`sudo boxmunge-server health` checks it")
         from boxmunge.log import log_error
-        message = f"the {name} check failed unexpectedly ({type(e).__name__}: {e})"
+        defect = _code_defect(e)
+        message = (f"the {name} check cannot run: this boxmunge release is broken "
+                   f"({defect}; {type(e).__name__}: {e})" if defect else
+                   f"the {name} check failed unexpectedly ({type(e).__name__}: {e})")
         log_error("health", message, paths)
+        if defect:
+            return HealthCheck(name, "error", f"{message}; reinstall or roll back the release")
         return HealthCheck(name, "warn", f"{message}; run `health` again, and report it "
                            f"with this line if it repeats")
 
@@ -254,43 +294,47 @@ def _ssh_port(paths: BoxPaths) -> int:
         return 922
 
 
+def _in(module: str, func: str, *args, **kwargs) -> Callable[[], HealthCheck]:
+    """boxmunge.health_checks.<module>.<func>(*args, **kwargs), imported when
+    the check runs, so a module that cannot be imported fails only its check."""
+    def check() -> HealthCheck:
+        mod = importlib.import_module(f"boxmunge.health_checks.{module}")
+        return getattr(mod, func)(*args, **kwargs)
+    return check
+
+
 def _checks(paths: BoxPaths) -> list[tuple[str, Callable[[], HealthCheck]]]:
     """(name, check) for every health check, in report order."""
-    from boxmunge.health_checks import (
-        alerts, container_updates, hardening, operational_log, os_updates,
-        platform_updates, projects, registry, security, service_users, sshd,
-        upgrade_probation, userns,
-    )
     return [
         ("docker", check_docker_running),
         ("caddy", check_caddy_container),
         ("system-container", lambda: check_system_container(paths)),
         ("permissions", lambda: check_file_permissions(paths)),
         ("age-key", lambda: check_age_key(paths)),
-        ("project-containers", lambda: projects.check_project_containers(paths)),
-        ("lifecycle", lambda: projects.check_lifecycle_blocked(paths)),
-        ("config-drift", lambda: projects.check_config_drift(paths)),
+        ("project-containers", _in("projects", "check_project_containers", paths)),
+        ("lifecycle", _in("projects", "check_lifecycle_blocked", paths)),
+        ("config-drift", _in("projects", "check_config_drift", paths)),
         ("recent-errors", lambda: check_recent_errors(paths)),
-        ("operational-log", lambda: operational_log.check_operational_log(paths)),
-        ("alerts", lambda: alerts.check_alerts(paths)),
-        ("container-updates", lambda: container_updates.check_container_updates(paths)),
-        ("platform-updates", lambda: platform_updates.check_platform_updates(paths)),
-        ("upgrade-probation", lambda: upgrade_probation.check_upgrade_probation(paths)),
-        ("docker-userns", lambda: userns.check_docker_userns(paths)),
-        ("sshd-hardening", lambda: sshd.check_sshd_hardening()),
-        ("sshd-deploy-env", lambda: sshd.check_sshd_deploy_env()),
-        ("security-profiles", lambda: security.check_security_profiles(paths)),
-        ("cve-scan", lambda: security.check_cve_scan_freshness(paths)),
-        ("cve-hardening", lambda: security.check_cve_hardening_upcoming(paths)),
-        ("service-users", lambda: service_users.check_service_users(paths)),
-        ("registry", lambda: registry.check_registry_drift(paths)),
-        ("ufw", lambda: hardening.check_ufw(ssh_port=_ssh_port(paths))),
-        ("crowdsec", lambda: hardening.check_crowdsec()),
-        ("aide", lambda: hardening.check_aide_status()),
-        ("auditd", lambda: hardening.check_auditd()),
-        ("auto-updates", lambda: os_updates.check_os_updates()),
-        ("sysctl", lambda: hardening.check_sysctl_hardening()),
-        ("timers", lambda: hardening.check_systemd_timers()),
+        ("operational-log", _in("operational_log", "check_operational_log", paths)),
+        ("alerts", _in("alerts", "check_alerts", paths)),
+        ("container-updates", _in("container_updates", "check_container_updates", paths)),
+        ("platform-updates", _in("platform_updates", "check_platform_updates", paths)),
+        ("upgrade-probation", _in("upgrade_probation", "check_upgrade_probation", paths)),
+        ("docker-userns", _in("userns", "check_docker_userns", paths)),
+        ("sshd-hardening", _in("sshd", "check_sshd_hardening")),
+        ("sshd-deploy-env", _in("sshd", "check_sshd_deploy_env")),
+        ("security-profiles", _in("security", "check_security_profiles", paths)),
+        ("cve-scan", _in("security", "check_cve_scan_freshness", paths)),
+        ("cve-hardening", _in("security", "check_cve_hardening_upcoming", paths)),
+        ("service-users", _in("service_users", "check_service_users", paths)),
+        ("registry", _in("registry", "check_registry_drift", paths)),
+        ("ufw", lambda: _in("hardening", "check_ufw", ssh_port=_ssh_port(paths))()),
+        ("crowdsec", _in("hardening", "check_crowdsec")),
+        ("aide", _in("hardening", "check_aide_status")),
+        ("auditd", _in("hardening", "check_auditd")),
+        ("auto-updates", _in("os_updates", "check_os_updates")),
+        ("sysctl", _in("hardening", "check_sysctl_hardening")),
+        ("timers", _in("hardening", "check_systemd_timers")),
     ]
 
 

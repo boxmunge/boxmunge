@@ -1563,7 +1563,7 @@ next fire, not rolled back.
 
 | Check | Warns (or errors) when | What to do |
 |---|---|---|
-| `docker`, `caddy`, `system-container` | Docker, the Caddy container or the boxmunge-system container is not running (error) | `doctor`, then the supervisor user restarts the component |
+| `docker`, `caddy`, `system-container` | Docker, the Caddy container or the boxmunge-system container is missing or not running, or Caddy is restarting (error); Caddy runs but is starting or unhealthy, or a probe timed out or failed for another reason (warning) | `doctor`, then the supervisor user restarts the component |
 | `system-container` | boxmunge-system runs an image built from an older definition than `/opt/boxmunge/system` (an upgrade's rebuild failed, so it still has the previous Alpine, age and rclone; warning, backups still work) | fix what stopped the build (the upgrade's output says), then the supervisor user runs `sudo docker compose -f /opt/boxmunge/system/compose.yml up -d --build`; the next upgrade also retries it |
 | `permissions`, `age-key` | the backup key or host secrets have the wrong mode, or the backup key is missing or invalid | fix as the supervisor user |
 | `project-containers`, `lifecycle` | a deployed project has no running containers, or is quarantined or stopped by the health monitor, or its state cannot be read (warning; the detail names the file and the fix) | `check <project>`, `logs <project>`, `recover <project>` |
@@ -1577,7 +1577,7 @@ next fire, not rolled back.
 | `security-profiles` | a service runs with `profile: off` | review the reason in its manifest |
 | `service-users` | a deployed project's services have no recorded user yet (its next deploy decides them, and refuses an undeclared root registry image) | `doctor` lists the lines to add; see [Service Users After an Upgrade](#service-users-after-an-upgrade) |
 | `registry` | a registered project's directory is gone but its deploy, scan or health state is not (a removal that did not finish); a name never deployed is ok | the supervisor user runs `sudo boxmunge-server project-forget <project>` |
-| `sshd-hardening`, `sshd-deploy-env` | `00-boxmunge.conf` is missing or changed, or a later sshd setting widens what deploy accepts (error; `sshd-deploy-env` needs root) | the supervisor user re-runs the installer, or removes the widening setting |
+| `sshd-hardening`, `sshd-deploy-env` | `00-boxmunge.conf` is missing or changed, or `sshd -T` shows a later setting widening what deploy accepts (error; `sshd-deploy-env` needs root); `sshd -T` itself fails or times out (warning) | the supervisor user re-runs the installer, or removes the widening setting; `sudo sshd -t` names a config error |
 | `operational-log` | the active log file's first line is not a log entry, which stops all logging | move the file aside (see [Reading Logs](#reading-logs)) |
 | `cve-scan` | a deployed project has not been scanned for 36 hours, was never scanned, or its last scan was incomplete | `security scan <project>`; see `agent-help cve` |
 | `cve-hardening` | under posture `strict` or `paranoid`, a finding will quarantine from 0.12 because a compose-only service lacks `read_only: true` (or the manifest adds `cap_add` / `no_new_privileges: false`); not quarantined now | add `read_only: true` in compose.yml, or declare the service in the manifest; to accept the risk instead, suppress the CVE after review or choose `security.posture: balanced` (KEV-only quarantine); `security <project>` names it |
@@ -1585,10 +1585,14 @@ next fire, not rolled back.
 | `auto-updates` | OS security updates are not being fetched or installed | see [OS security updates](#os-security-updates) |
 | `timers` | any boxmunge timer (health, backup, backup-sync, auto-update, container-update, cve-scan) is inactive | the supervisor user runs `systemctl enable --now <timer>` |
 
-Because exit 2 during probation rolls the upgrade back, only a platform component a probe saw
-broken reports an error: Docker not running (`docker info` fails), Caddy or the system container missing or wrong,
-the backup key missing or unreadable, sshd's drop-in changed or widened, the firewall off or not
-installed, or the userns remap inconsistent. Everything else warns:
+Because exit 2 during probation rolls the upgrade back, only two things report an error. One is a
+platform component a probe saw broken: Docker not running (`docker info` fails) or its CLI
+missing, Caddy missing, stopped, restarting or from another compose project, the system container
+missing or wrong, the backup key missing or unreadable, sshd's drop-in changed or widened, the
+firewall off or not installed, or the userns remap inconsistent. The other is a defect in the
+release's own code: a check whose module cannot be imported, or that hits a missing name or module
+attribute or a syntax error, is an error naming what is broken, so the release is rolled back.
+Everything else warns:
 
 - a project whose files cannot be read (its manifest, a torn quarantine or pause marker, a
   directory named `<x>-staging` from before 0.10.1) is named under `lifecycle`,
@@ -1597,8 +1601,8 @@ installed, or the userns remap inconsistent. Everything else warns:
 - a probe that does not answer in time (`docker info`, `docker inspect`, `ufw status`, `sshd -T`,
   `docker compose ps`) warns, naming the command: a busy host is not a broken platform. So does
   `ufw status` failing (often a held xtables lock), since it says nothing about the firewall;
-- a check that fails unexpectedly warns with the exception and logs it (`log --component health`)
-  instead of crashing the report.
+- any other exception from a check (bad data it did not expect, say) warns with the exception and
+  is logged (`log --component health`) instead of crashing the report.
 
 ### User-namespace remapping
 
