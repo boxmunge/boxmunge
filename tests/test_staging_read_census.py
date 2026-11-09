@@ -112,7 +112,11 @@ def _pause_resume(box, seen):
     from boxmunge.commands.resume_cmd import resume_locked
     with staging_docker_off(), patch("boxmunge.commands.pause_cmd.caddy_reload"), \
             patch("boxmunge.commands.resume_cmd.caddy_reload"):
-        assert pause_locked("myapp", box.paths, reason=None) == 0
+        # The pause's snapshot dumps with production's command (refused at the
+        # spawn, so the pause refuses); without one it pauses.
+        assert pause_locked("myapp", box.paths, reason=None) == 1
+        _dumped(seen)
+        assert pause_locked("myapp", box.paths, reason=None, no_snapshot=True) == 0
         assert resume_locked("myapp", box.paths, True)[0] == 0
     assert "stop" in seen.docker
 

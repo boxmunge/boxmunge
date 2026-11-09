@@ -105,10 +105,11 @@ Usage: boxmunge rollback <project> [--yes]
 
 Restore the previous deployment. Does not support --dry-run.""",
     "pause": """\
-Usage: boxmunge pause <project> [--reason TEXT] [--yes]
+Usage: boxmunge pause <project> [--reason TEXT] [--no-snapshot] [--yes]
 
-Take a project offline behind a styled maintenance page. Does not support
---dry-run.""",
+Take a project offline behind a styled maintenance page. A data snapshot is
+taken first (the pre-deploy snapshot of a deploy that ends the pause);
+--no-snapshot pauses without one. Does not support --dry-run.""",
     "resume": """\
 Usage: boxmunge resume <project> [--skip-security-checks] [--yes]
        boxmunge resume <project> --no-start

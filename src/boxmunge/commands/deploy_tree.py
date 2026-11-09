@@ -30,7 +30,6 @@ from boxmunge.commands.quarantine_gate import (
     keep_quarantined, manifest_in_force, require_unchanged,
 )
 from boxmunge.crashpoint import crash_point
-from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker_run import DockerError
 from boxmunge.data_dirs import ReleaseStateError, SetAsideError, log_kept, set_aside_announcer
 from boxmunge.intake import IntakeError, report_refusal, validate_release_tree
@@ -44,7 +43,7 @@ from boxmunge.release_keep import (
 from boxmunge.release_target import DeployRefused
 from boxmunge.release_txn import (
     InstallTxn, advance, close_txn, load_txn, open_txn, options_text, stale_reason,
-    start_refusal, supersede_txn,
+    rollback_refused, start_refusal, supersede_txn,
 )
 from boxmunge.staged_release import has_slot, sweep_debris
 from boxmunge.staging_isolation import StagingIsolationError, check_install_isolation
@@ -246,8 +245,9 @@ def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: I
     if not resumed_switch:
         txn = advance(paths, project_name, txn, "switching")
     else:
-        print(f"Finishing the interrupted install of {req.ref}: production may now run "
-              f"it, so its pre-deploy hook is not run again and no new snapshot is taken.")
+        print(f"Finishing the install of {req.ref} from its switch: its pre-deploy hook has "
+              f"run (and its containers may have started), so the hook is not run again "
+              f"and no new snapshot is taken.")
     crash_point("txn.switching")
     try:
         rc = replace_release(project_name, paths, req.manifest, req.ref, txn.snapshot or None,
@@ -271,7 +271,7 @@ def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: I
 def report_left_open(project_name: str, paths: BoxPaths, txn: InstallTxn, req: TreeDeploy,
                      why: str, rc: int = 1, *, rerun: bool = True) -> int:
     options = options_text(project_name, txn, rerun=rerun,
-                           quarantined=is_quarantined(project_name, paths))
+                           rollback_refused=rollback_refused(paths, project_name))
     print(f"ERROR: The install of {req.ref} stopped at {txn.phase}: {why}. This attempt "
           f"did not start or change production's containers, and other starts of "
           f"{project_name} are refused until this install is finished: {options}.",

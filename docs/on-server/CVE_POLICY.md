@@ -1043,7 +1043,11 @@ The behaviour splits into two camps:
 These print an error naming the two ways out and abort before touching
 containers or configs. `prod-deploy`, `promote` and `stage` are how a fix
 ships, so they go ahead only through the scan described in "Recovering a
-quarantined project"; a project that is also paused is refused.
+quarantined project". A project that is also paused is refused until its pause is
+handed to the deploy with `boxmunge resume <project> --no-start` (it starts nothing). Then
+a deploy of a fixed release is scanned as above, and once its containers start it ends
+the pause and lifts the quarantine: the way out when only a rebuilt release clears a
+finding (a KEV listing cannot be suppressed).
 
 **Skip with a logged ops entry (background sweeps):**
 

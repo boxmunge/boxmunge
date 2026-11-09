@@ -668,6 +668,7 @@ Every snapshot is named `<project>-<UTC timestamp>-<kind>.tar.gz.age`, for examp
 | `predeploy` | the pre-deploy snapshot of `prod-deploy` and `promote` (`deploy.snapshot_before_deploy`) | 5 |
 | `premigrate` | `userns-migrate`, before its downtime (not for a paused project) | 2 |
 | `prechown` | `data chown`, before it stops the service; when that is the backup service and it has not run since, the next deploy uses it as its pre-deploy snapshot | 3 |
+| `prepause` | `pause`, before it stops the project (unless `--no-snapshot`); while the backup service has not run since, the deploy that ends the pause (`resume --no-start`) uses it as its pre-deploy snapshot | 3 |
 | `preupdate` | the container-update timer, only when a pulled image changed and the project is about to be recreated | 3 |
 | `prerestore` | `restore`, a safety snapshot of the data about to be replaced (unless `--no-safety-snapshot`) | 3 |
 | `manual` | `backup <project>`, the MCP `backup` tool, the console, `self-test` | 5 |
@@ -1004,6 +1005,12 @@ Use pause for planned maintenance, post-incident triage, or while you reconfigur
 boxmunge pause myapp --reason "rolling key rotation"
 ```
 
+Before it stops anything, `pause` takes a data snapshot of the running project (kind `prepause`): a
+deploy that ends the pause (see `resume --no-start` below) cannot dump stopped containers, so it
+uses that snapshot as its pre-deploy snapshot and its rollback can restore the data. If the
+snapshot fails, `pause` refuses and changes nothing; `pause myapp --no-snapshot` pauses without
+one, giving up that data rollback.
+
 Containers are stopped via `docker compose stop`, so state is preserved on disk and resume is fast. While paused:
 
 - Health checks, scheduled backups, and container-update sweeps skip the project
@@ -1056,11 +1063,16 @@ boxmunge prod-deploy myapp          # or promote; ends the pause once its contai
 project stays paused for everything else: the maintenance page stays up, the containers stay
 stopped with their restart policies held (a reboot does not start them), health checks, backups,
 container updates and upgrade restarts skip it, and `status` shows `PAUSED (awaiting deploy)`
-(`health` warns about it under `lifecycle`). `prod-deploy`, `promote` and `stage` are accepted. The
-deploy keeps the maintenance page while it prepares, gives the containers their restart policies
-back, and ends the pause once `docker compose up` has run. A deploy that stops before that leaves it
-paused and awaiting a deploy. A rollback stays refused until a deploy has ended the pause, and
-`resume myapp` still works if the cause goes away.
+(`health` warns about it under `lifecycle`). `prod-deploy` and `promote` are accepted (`stage` too,
+which leaves the pause to the promote). The deploy uses the pause's snapshot as its pre-deploy
+snapshot, keeps the maintenance page while it prepares, and once `docker compose up` has started
+the containers gives them their restart policies back and ends the pause. A deploy that stops
+before that leaves it paused and awaiting a deploy; one whose `compose up` fails part-way stops
+what it started again and keeps the pause. A CVE-quarantined project that is also paused takes
+the same way: its deploy is scanned first, and a clean one also lifts the quarantine. A rollback
+stays refused until a deploy has ended the pause, and `resume myapp` still works if the cause goes
+away. `--no-start` also takes a pause that did not finish while an install is open (`pause` itself
+is refused then).
 
 `resume` pulls the latest images by default. This is a deliberate safety guarantee: a project that was paused for hours or days should not come back on stale, potentially vulnerable images.
 

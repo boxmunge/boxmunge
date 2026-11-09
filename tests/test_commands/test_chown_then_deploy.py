@@ -105,8 +105,8 @@ def test_the_deploy_uses_the_chown_snapshot_and_its_rollback_restores_it(
         _deploy(paths, V2)
     out = capsys.readouterr().out
     assert "Pre-deploy backup failed" not in out
-    assert "Using the snapshot data chown took before it changed the data (" in out
-    assert " ago; web has not run since) as the pre-deploy snapshot: " + taken in out
+    assert "Using the snapshot data chown took before it stopped web (" in out
+    assert " ago; it has not run since) as the pre-deploy snapshot: " + taken in out
     assert "pending_snapshot" not in read_state(paths.project_deploy_state("myapp"))
 
     assert find_rollback_target(paths, "myapp").snapshot == taken

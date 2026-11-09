@@ -43,12 +43,25 @@ def test_pause_holds_restart_policies_and_saves_originals(box):
     }
 
 
-def test_resume_gives_the_policies_back_before_starting(box):
+def test_resume_gives_the_policies_back_once_started(box):
+    """Held until the start has run: a failed or interrupted start leaves
+    nothing that a Docker restart brings back while it is still paused."""
     paths, fake = box
     run_pause("demo", paths, yes=True)
     assert run_resume("demo", paths, yes=True) == 0
     assert fake.policies == {"demo-web-1": "always", "demo-worker-1": "unless-stopped"}
-    assert fake.order == ["stop", "up with web=always"]
+    assert fake.order == ["stop", "up with web=no"]
+
+
+def test_a_failed_resume_start_leaves_the_policies_held(box, monkeypatch):
+    paths, fake = box
+    run_pause("demo", paths, yes=True)
+
+    def fail(*a, **k):
+        raise DockerError("container web exited (1)")
+    monkeypatch.setattr("boxmunge.compose_guard.compose_up", fail)
+    assert run_resume("demo", paths, yes=True) == 1
+    assert fake.policies == {"demo-web-1": "no", "demo-worker-1": "no"}
 
 
 def test_pause_fails_loudly_when_the_hold_fails(box, monkeypatch, capsys):

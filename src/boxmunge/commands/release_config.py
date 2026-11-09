@@ -33,7 +33,7 @@ from boxmunge.compose_images import BUILT_IMAGE_HOST, built_image_name
 from boxmunge.compose_resolve import ComposeResolveError
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker_run import DockerError, run as _run
-from boxmunge.pause import is_paused
+from boxmunge.pause import awaiting_deploy, is_paused
 from boxmunge.paths import BoxPaths
 from boxmunge.release_target import DeployRefused, production_target
 from boxmunge.run_as import RunAsError, ServiceUser
@@ -111,6 +111,9 @@ def generate_release_config(project_name: str, paths: BoxPaths, manifest: dict,
     deploy_handover) keeps its maintenance site until its start has run.
     Raises OSError or ValueError."""
     if is_paused(project_name, paths):
+        if not awaiting_deploy(project_name, paths):
+            raise ValueError(f"{project_name} is paused and its pause was not handed to a "
+                             f"deploy (resume --no-start); nothing may prepare a release")
         print("  Caddy config: the maintenance page stays until the containers start.")
     else:
         print("  Generating Caddy config...")

@@ -14,6 +14,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from boxmunge.commands.deploy_steps import record_deploy_state
 from boxmunge.commands.deploy import (
     NotStarted, replace_release, run_pre_deploy_hook,
 )
@@ -395,14 +396,30 @@ def start_rolled_back(project_name: str, paths: BoxPaths, manifest: dict,
         rc = replace_release(project_name, paths, manifest, target.ref, None,
                              component="rollback", txn=txn.id)
     except NotStarted:
-        print(f"ERROR: The previous release was not started; production's containers were "
-              f"not changed. Rerun 'rollback {project_name}' once the cause above is fixed.",
-              file=sys.stderr)
+        _report_not_started(project_name, paths, target, txn)
         return 1
     if rc == 0 and target.tree is not None:
         discard_previous_release(paths, project_name)
     close_txn(paths, project_name, txn)
     return rc
+
+
+def _report_not_started(project_name: str, paths: BoxPaths, target: RollbackTarget,
+                        txn: InstallTxn) -> None:
+    """The switch's start was refused before `compose up`. The install stays
+    open for a rerun. If this rollback restored data, the restore started
+    the previous release already: production runs it, so the switch is
+    recorded (a rerun records it again, keeping the pairing)."""
+    if target.snapshot and txn.reached("data_restored"):
+        record_deploy_state(paths, project_name, target.ref, None)
+        print(f"ERROR: {target.ref} runs on the restored data ({target.snapshot}): the "
+              f"restore started it. Its start for the switch was refused, so it was not "
+              f"checked or smoke-tested. Rerun 'rollback {project_name}' once the cause "
+              f"above is fixed.", file=sys.stderr)
+        return
+    print(f"ERROR: The previous release was not started; production's containers were not "
+          f"changed. Rerun 'rollback {project_name}' once the cause above is fixed.",
+          file=sys.stderr)
 
 
 def cmd_rollback(args: list[str]) -> None:

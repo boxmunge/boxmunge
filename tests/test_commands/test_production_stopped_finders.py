@@ -252,7 +252,7 @@ def test_recover_with_an_unreadable_slot_starts_production(paths, fake_container
     prod_and_stage(paths)
     _break_slot(paths)
     with patch("boxmunge.compose_guard.compose_up") as up, \
-            patch("boxmunge.compose_guard.notify"), \
+            patch("boxmunge.compose_up_steps.notify"), \
             patch("boxmunge.commands.recover_cmd.caddy_reload"), \
             patch("boxmunge.commands.recover_cmd.run_smoke", return_value=(True, "ok")):
         assert run_recover("myapp", paths, yes=True) == 0

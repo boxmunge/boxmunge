@@ -34,34 +34,26 @@ failed start.
 from __future__ import annotations
 
 import functools
-import hashlib
-import json
-import os
-import sys
-from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import yaml
 
-from boxmunge import bind_sources, built_images, compose_resolve, docker_containers
+from boxmunge import bind_sources, compose_resolve, docker_containers, start_alerts
+from boxmunge import compose_up_steps as up_steps
 from boxmunge.bind_sources import BindSourceError
-from boxmunge.compose_images import built_image_name
 from boxmunge.compose_own_files import container_bind_problems
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import compose_up, start_containers
 from boxmunge.docker_run import DockerError
-from boxmunge.fileutil import discard_dir
-from boxmunge.fs_nofollow import mkdir_p_deploy, read_text_nofollow
 from boxmunge.intake import IntakeError, validate_release_tree
 from boxmunge.legacy_stage import legacy_stage_refusal
-from boxmunge.log import log_error, log_operation, log_warning
+from boxmunge.log import log_error
 from boxmunge.notify import notify
 from boxmunge.paths import RESERVED_PROJECT_NAMES
 from boxmunge.release_txn import load_txn, stale_reason, start_refusal
 from boxmunge.staged_release import (
-    STAGING_OVERLAY, SlotError, clear_production_stopped, load_slot, slot_dir, staging_target,
+    STAGING_OVERLAY, SlotError, load_slot, slot_dir, staging_target,
 )
 from boxmunge.staging_copies import foreign_copies
 from boxmunge.staging_isolation import separation_problems
@@ -74,57 +66,18 @@ class ComposeRefused(DockerError):
     """A start refused because the project's files or mounts fail a check."""
 
 
-class ComposeUpFailed(DockerError):
-    """`docker compose up` ran and failed: it may have created, recreated or
-    started some of the project's containers. Any other error from
-    compose_up_checked was raised before the up, which changed none."""
-
-
-# A persistently tampered project is checked on every timer tick (container
-# update daily, health every few minutes); without this an operator is paged
-# on each one. The refusal is always logged; the alert repeats only this
-# often per project and reason.
-_ALERT_INTERVAL = timedelta(hours=24)
-
-
-def _alert_recently(paths: BoxPaths, project_name: str, reason: str, now: datetime) -> bool:
-    path = paths.state / "start-refused" / f"{project_name}.json"
-    key = hashlib.sha256(reason.encode()).hexdigest()[:16]
-    try:
-        doc = json.loads(path.read_text())
-        last = datetime.fromisoformat(doc[key])
-    except (OSError, ValueError, KeyError, TypeError):
-        return False
-    return last.tzinfo is not None and now - last < _ALERT_INTERVAL
-
-
-def _record_alert(paths: BoxPaths, project_name: str, reason: str, now: datetime) -> None:
-    path = paths.state / "start-refused" / f"{project_name}.json"
-    key = hashlib.sha256(reason.encode()).hexdigest()[:16]
-    mkdir_p_deploy(path.parent)
-    try:
-        doc = json.loads(path.read_text())
-        if not isinstance(doc, dict):
-            doc = {}
-    except (OSError, ValueError):
-        doc = {}
-    doc[key] = now.isoformat()
-    from boxmunge.fileutil import atomic_write_text
-    atomic_write_text(path, json.dumps(doc) + "\n")
-
-
 def _refused(paths: BoxPaths, project_name: str, component: str, reason: str,
              *, tampering: bool = True) -> ComposeRefused:
     message = (f"Refused to start {project_name}: {reason}. Nothing was started "
                f"or recreated; its running containers were left as they are.")
     log_error(component, message, paths, project=project_name)
     now = datetime.now(timezone.utc)
-    if not _alert_recently(paths, project_name, reason, now):
+    if not start_alerts.alerted_recently(paths, project_name, reason, now):
         hint = (" If you did not make this change, a container may have tampered with "
                 "the project's files: inspect it before redeploying." if tampering else "")
         notify(paths, f"{project_name}: start refused", message + hint,
                component=component, project=project_name, priority=1)
-        _record_alert(paths, project_name, reason, now)
+        start_alerts.record(paths, project_name, reason, now)
     return ComposeRefused(message)
 
 
@@ -305,10 +258,10 @@ def compose_up_checked(
     service's `pull_policy` says): it runs only the local images a deploy
     (or stage) built, pulled and decided users for, or that container-update
     pulled and checked. The image a build service's container runs gets
-    back a platform name it lost first (_name_running_builds). A start
+    back a platform name it lost first (compose_up_steps). A start
     whose image is missing is refused, naming it. A running container whose
     image the local image store no longer has is recreated
-    (_recreate_without_image). Raises ComposeRefused, ComposeUpFailed once
+    (compose_up_steps). Raises ComposeRefused, compose_up_steps.ComposeUpFailed once
     the up has run, or DockerError before it."""
     check_start(paths, project_name, component=component, compose_files=compose_files,
                 staging=staging, record=record, deploying=deploying, txn=txn)
@@ -327,177 +280,32 @@ def compose_up_checked(
     run_dir = where.pop("project_dir")
     up = functools.partial(compose_up, run_dir, compose_files=files, build=False,
                            project_name=compose_project, start=start, pinned=True, **where)
-    _name_running_builds(paths, project_name, compose_project, overlay, component)
+    up_steps.restore_build_names(paths, project_name, compose_project, overlay, component)
     redo = f"stage {project_name}" if staging else f"prod-deploy {project_name}"
     try:
-        images = _start_images(run_dir, files, compose_project, services, where)
+        images = up_steps.start_images(run_dir, files, compose_project, services, where)
     except compose_resolve.ComposeResolveError as e:
         raise _refused(paths, project_name, component, str(e)) from e
     # Before the up: Compose creates in dependency order and fails only at
     # the service whose image is missing, after those ahead of it.
     missing = docker_containers.absent_images(images)
     if missing:
-        raise _refused(paths, project_name, component, _missing_text(missing)
+        raise _refused(paths, project_name, component, up_steps.missing_text(missing)
                        + f": a start runs only images a deploy built or pulled; run {redo}",
                        tampering=False)
     try:
         up(force_recreate=force_recreate, services=services)
     except DockerError as e:
-        raise _up_failed(e, images, redo) from e
+        raise up_steps.up_failed(e, images, redo) from e
     try:
-        _recreate_without_image(paths, project_name, compose_project, component, services, up)
+        up_steps.recreate_without_image(paths, project_name, compose_project, component,
+                                        services, up)
     except DockerError as e:
-        raise ComposeUpFailed(str(e)) from e
+        raise up_steps.ComposeUpFailed(str(e)) from e
     # A partial up (restore's one service) may leave the rest stopped.
     if not staging and start and not services:
-        _clear_production_stopped(paths, project_name, component)
-        _sweep_live_scripts(paths, project_name, component)
-
-
-def _name_running_builds(paths: BoxPaths, project_name: str, compose_project: str,
-                         overlay: Path | None, component: str) -> None:
-    """Name the images the build services' containers run by their platform
-    name where it names nothing (built_images.name_running_builds), so the
-    start runs them instead of building new ones. The overlay says which
-    services are built: it gives each one its platform name (an overlay
-    from before boxmunge named built images gives none; a start without
-    one has none to name)."""
-    if overlay is None:
-        return
-    try:
-        doc = yaml.safe_load(read_text_nofollow(overlay)) or {}
-    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
-        raise DockerError(f"cannot read {overlay}: {e}") from e
-    services = doc.get("services") if isinstance(doc, dict) else None
-    built = sorted(svc for svc, spec in (services or {}).items()
-                   if isinstance(spec, dict)
-                   and spec.get("image") == built_image_name(compose_project, svc))
-    named = built_images.name_running_builds(compose_project, built) if built else []
-    if named:
-        log_operation(component, f"named the images {compose_project}'s containers run: "
-                      f"{', '.join(named)} (their old names had been taken off them)",
-                      paths, project=project_name)
-
-
-def _up_failed(error: DockerError, images: dict[str, str], redo: str) -> ComposeUpFailed:
-    """The up's failure, naming an image that went from the store during it."""
-    try:
-        gone = docker_containers.absent_images(images)
-    except DockerError as e:
-        return ComposeUpFailed(f"{error} (whether an image went from the local image store "
-                               f"during the start cannot be told: {e})")
-    if not gone:
-        return ComposeUpFailed(str(error))
-    return ComposeUpFailed(
-        f"{error}. {_missing_text(gone)}: it went from the local image store during the "
-        f"start, which may already have created or recreated the services ahead of it. "
-        f"Run {redo}.")
-
-
-def _missing_text(missing: list[tuple[str, str]]) -> str:
-    return "; ".join(f"the image for {svc} ({image}) is missing" for svc, image in missing)
-
-
-def _start_images(run_dir: Path, files: list[str], compose_project: str,
-                  services: list[str] | None, where: dict) -> dict[str, str]:
-    """{service: image} for every service the up would create or start:
-    `services`, or every service without a profile (boxmunge runs Compose
-    with no profile enabled), and those they depend on. Compose names a
-    build service without an `image:` (an overlay from before boxmunge
-    named built images) `<project>-<service>`."""
-    model = compose_resolve.resolve_deployed_config(
-        run_dir, files, compose_project, all_profiles=True, **where)
-    specs = model.get("services") or {}
-    wanted: set[str] = set()
-    todo = list(services if services is not None else
-                (svc for svc, spec in specs.items()
-                 if isinstance(spec, dict) and not spec.get("profiles")))
-    while todo:
-        svc = todo.pop()
-        spec = specs.get(svc)
-        if svc in wanted or not isinstance(spec, dict):
-            continue
-        wanted.add(svc)
-        todo.extend(spec.get("depends_on") or ())
-    images = {}
-    for svc in sorted(wanted):
-        spec = specs[svc]
-        image = spec.get("image") or (f"{compose_project}-{svc}" if "build" in spec else None)
-        if isinstance(image, str):
-            images[svc] = image
-    return images
-
-
-def _recreate_without_image(paths: BoxPaths, project_name: str, compose_project: str,
-                            component: str, services: list[str] | None,
-                            up: Callable[..., None]) -> None:
-    """Recreate the running containers whose image the local image store no
-    longer has, from the image their name points at now.
-
-    A build that moved a name to a new image index left them there:
-    Compose compares the platform manifest, which a cached build keeps, so
-    it does not recreate them, and on the containerd store the index they
-    were created from goes with its last name (boxmunge.docker_containers).
-    Compose left them because their platform manifest is still the one
-    the name points at, so the recreated containers run the same image."""
-    gone = docker_containers.running_without_image(compose_project)
-    recreate = sorted(svc for svc in gone if services is None or svc in services)
-    if not recreate:
-        return
-    names = ", ".join(n for svc in recreate for n in gone[svc])
-    message = (f"{compose_project}: recreating {', '.join(recreate)}: the local image store "
-               f"no longer has the image {names} was created from (a build replaced it "
-               f"under its name)")
-    print(f"  WARNING: {message}", file=sys.stderr)
-    log_warning(component, message, paths, project=project_name)
-    up(force_recreate=True, services=recreate)
-
-
-def _clear_production_stopped(paths: BoxPaths, project_name: str, component: str) -> None:
-    """Production runs again, so a staging copy's stop no longer stands
-    (boxmunge.production_stopped). Production is up by now: an unreadable
-    slot must not turn that into a failed start, so it is said loudly and
-    left for the slot's own cores, which refuse it."""
-    try:
-        clear_production_stopped(paths, project_name)
-    except (SlotError, OSError) as e:
-        message = (f"{project_name}: production is running, but its staged slot cannot be "
-                   f"read or written to clear the production_stopped marker: {e}. Inspect "
-                   f"the slot and unstage {project_name}.")
-        print(f"ERROR: {message}", file=sys.stderr)
-        log_error(component, message, paths, project=project_name)
-        notify(paths, f"{project_name}: staged slot unreadable", message,
-               component=component, project=project_name, priority=1)
-
-
-# The bind source boxmunge 0.10.1's production overlay used for the copy.
-LIVE_SCRIPTS_SOURCE = "./.releases/live-scripts"
-
-
-def _sweep_live_scripts(paths: BoxPaths, project_name: str, component: str) -> None:
-    """boxmunge 0.10.1 mounted production's smoke scripts from
-    .releases/live-scripts. Once production's overlay no longer names it and
-    no container of the project mounts it, it is removed. Production is up
-    by now, so a failure to tell or to remove is said, not raised."""
-    live = paths.project_releases(project_name) / "live-scripts"
-    if not os.path.lexists(live):
-        return
-    try:
-        overlay = paths.project_compose_override(project_name)
-        if overlay.exists() and LIVE_SCRIPTS_SOURCE in overlay.read_text():
-            return
-        roots = {str(live), os.path.realpath(live)}
-        if any(src == root or src.startswith(root + os.sep)
-               for src, _rw in docker_containers.container_bind_sources(project_name)
-               for root in roots):
-            return
-        discard_dir(live)
-    except (OSError, DockerError) as e:
-        message = (f"{project_name}: production is running, but {live} (the smoke-script "
-                   f"copy boxmunge 0.10.1 mounted) was not removed: {e}. The next "
-                   f"production start tries again; if it is not a directory, inspect it.")
-        print(f"WARNING: {message}", file=sys.stderr)
-        log_warning(component, message, paths, project=project_name)
+        up_steps.clear_copy_stop(paths, project_name, component)
+        up_steps.sweep_live_scripts(paths, project_name, component)
 
 
 def check_containers_start(paths: BoxPaths, project_name: str, *, component: str) -> None:

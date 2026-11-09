@@ -27,12 +27,13 @@ from boxmunge.deployed_inventory import (
 from boxmunge.docker import compose_pull, caddy_reload, DockerError
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.health_checks.smoke import run_smoke
-from boxmunge.lifecycle import BlockReason, is_blocked
+from boxmunge.cve.quarantine import is_quarantined
+from boxmunge.lifecycle import BlockReason, is_blocked, paused_refusal
 from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import (
-    awaiting_deploy, clear_paused_state, hold_restart_policies, is_paused,
+    awaiting_deploy, clear_paused_state, is_paused,
     mark_awaiting_deploy, pause_incomplete, release_restart_policies,
 )
 from boxmunge.notify import notify
@@ -59,7 +60,9 @@ def _refuse_unless_resumable(project_name: str, paths: BoxPaths) -> bool:
     # message is the security one.
     block = is_blocked(project_name, paths)
     if block and block.reason in (BlockReason.QUARANTINED, BlockReason.MIGRATING):
-        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
+        refusal = (paused_refusal(project_name, block) if is_paused(project_name, paths)
+                   else block.refuse_message)
+        print(f"ERROR: {refusal}", file=sys.stderr)
         return False
     # Positive precondition: this command can only be invoked when the
     # project is paused.
@@ -98,8 +101,6 @@ def run_resume(
     if not project_dir.exists() or not (project_dir / "manifest.yml").exists():
         print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
         return 1
-    if not _refuse_unless_resumable(project_name, paths):
-        return 1
     if no_start:
         try:
             with project_lock(project_name, paths):
@@ -107,6 +108,8 @@ def run_resume(
         except LockError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
+    if not _refuse_unless_resumable(project_name, paths):
+        return 1
 
     if not yes:
         try:
@@ -239,10 +242,11 @@ def resume_locked(
                       project=project_name)
             return 1, None
 
-    # Start containers, with the restart policies the pause held back.
+    # Start containers, then give back the restart policies the pause held:
+    # until the start has run they stay held, so nothing a failed start
+    # leaves behind comes back on a Docker restart.
     print("  Starting containers...")
     try:
-        release_restart_policies(project_name, paths)
         compose_up_checked(paths, project_name, component="resume",
                            compose_files=compose_files, deploying=recreate,
                            force_recreate=recreate)
@@ -250,9 +254,16 @@ def resume_locked(
         print(f"ERROR: compose up failed: {e}", file=sys.stderr)
         log_error("resume", f"compose up failed: {e}", paths,
                   project=project_name)
-        _hold_again(project_name, paths)
         print(f"  {_deploy_hint(project_name)}", file=sys.stderr)
         return 1, None
+    try:
+        release_restart_policies(project_name, paths)
+    except DockerError as e:
+        print(f"ERROR: {project_name} runs, but its containers' restart policies could not "
+              f"be given back ({e}): a Docker restart will not restart them. Deploy it "
+              f"again, or set them with `docker update --restart`.", file=sys.stderr)
+        log_error("resume", f"Restart policies not given back: {e}", paths,
+                  project=project_name)
 
     # Restore Caddy site config from manifest (regenerated).
     print("  Restoring Caddy routing...")
@@ -303,28 +314,25 @@ def _deploy_hint(project_name: str) -> str:
             f"{project_name} --no-start`, then `boxmunge prod-deploy {project_name}`.")
 
 
-def _hold_again(project_name: str, paths: BoxPaths) -> None:
-    """The start failed: what stays paused keeps its restart policies held,
-    so a Docker restart does not start it."""
-    try:
-        hold_restart_policies(project_name, paths)
-    except DockerError as e:
-        print(f"ERROR: {project_name}'s restart policies could not be held again: {e}. A "
-              f"Docker restart may start its `restart: always` services.", file=sys.stderr)
-        log_error("resume", f"Restart policies not held again: {e}", paths,
-                  project=project_name)
-
-
 def hand_to_deploy_locked(project_name: str, paths: BoxPaths) -> int:
     """`resume --no-start`: start nothing, and hand the pause to the next
     deploy (pause.awaiting_deploy, commands/deploy_handover). For a project
     resume cannot start and only a deploy can repair. It stays paused for
-    everything else until that deploy starts it. Caller holds the lock."""
+    everything else until that deploy starts it. A quarantined project's
+    deploy is scanned first (quarantine_gate). Caller holds the lock."""
     if refuse_if_legacy_stage(paths, project_name):
         return 1
-    if not _refuse_unless_resumable(project_name, paths):
+    block = is_blocked(project_name, paths)
+    if block is not None and block.reason is BlockReason.MIGRATING:
+        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
         return 1
-    if pause_incomplete(project_name, paths):
+    if not is_paused(project_name, paths):
+        print(f"ERROR: Project '{project_name}' is not paused.", file=sys.stderr)
+        return 1
+    install = open_install_reason(paths, project_name)
+    # An unfinished pause is finished by pausing again, which an open install
+    # refuses: then only its install's deploy can end it.
+    if pause_incomplete(project_name, paths) and install is None:
         print(f"ERROR: Pausing '{project_name}' did not finish, so it may still be serving. "
               f"Run `boxmunge pause {project_name}` to finish it first, or `boxmunge resume "
               f"{project_name}`.", file=sys.stderr)
@@ -333,11 +341,13 @@ def hand_to_deploy_locked(project_name: str, paths: BoxPaths) -> int:
         mark_awaiting_deploy(project_name, paths)
         log_operation("resume", "Pause handed to the next deploy (--no-start)", paths,
                       project=project_name)
-    install = open_install_reason(paths, project_name)
-    then = (f"Finish its open install: {install} (a rollback waits until a deploy has "
-            f"ended the pause)" if install is not None else
+    scanned = (" (its images are scanned first; a clean deploy also lifts the CVE "
+               "quarantine)" if is_quarantined(project_name, paths) else "")
+    then = (f"Finish its open install by rerunning it or deploying a fix{scanned}; a "
+            f"rollback waits until a deploy has ended the pause. {install}"
+            if install is not None else
             f"Deploy it: `boxmunge prod-deploy {project_name}` (or `promote "
-            f"{project_name}`)")
+            f"{project_name}`){scanned}")
     print(f"'{project_name}' was not started. It stays down behind its maintenance page, "
           f"with its containers stopped, until the next deploy starts it; that deploy "
           f"ends the pause. {then}.")

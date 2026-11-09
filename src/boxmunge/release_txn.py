@@ -329,17 +329,18 @@ def _fix_forward(txn: InstallTxn) -> str:
 
 
 def options_text(project: str, txn: InstallTxn, *, rerun: bool = True,
-                 quarantined: bool = False) -> str:
+                 rollback_refused: bool = False) -> str:
     """The operator's ways out of an open install, for its phase. ``rerun``
-    False leaves out resuming it (its bundle is gone); ``quarantined``
-    leaves out rollback, which a CVE quarantine refuses."""
+    False leaves out resuming it (its bundle is gone); ``rollback_refused``
+    leaves out rollback, which a CVE quarantine or a pause refuses
+    (rollback_refused())."""
     if txn.abandoning:
         return f"rerun 'prod-deploy {project} --abandon' to finish abandoning it"
     lines = [f"rerun '{rerun_command(project, txn)}' to finish it"] if rerun else []
     if not txn.data_may_have_changed():
         lines.append(abandon_text(project, txn))
     if txn.source != "rollback" and txn.data_may_have_changed() and txn.replaced_ref \
-            and not quarantined:
+            and not rollback_refused:
         lines.append(f"'rollback {project}' restores {txn.snapshot or 'no data snapshot'} "
                      f"with {txn.replaced_ref}")
     lines.append(_fix_forward(txn))
@@ -352,12 +353,14 @@ def start_refusal(paths: BoxPaths, project: str, txn: InstallTxn, stale: str | N
                 f"in .releases/install.json, but {stale}. Check that production is what "
                 f"live.json says, then run 'boxmunge-server install-txn {project} --drop'")
     return (f"an install of {txn.ref} ({txn.source}) is open at phase {txn.phase}: "
-            f"{options_text(project, txn, quarantined=quarantined(paths, project))}")
+            f"{options_text(project, txn, rollback_refused=rollback_refused(paths, project))}")
 
 
-def quarantined(paths: BoxPaths, project: str) -> bool:
-    """For the ways out an install offers: a quarantine refuses rollback."""
+def rollback_refused(paths: BoxPaths, project: str) -> bool:
+    """For the ways out an install offers: a quarantine or a pause refuses
+    rollback (a pause handed to a deploy too: only a deploy may end it)."""
     # cve.quarantine starts containers through compose_guard, which imports
     # this module: imported here, not at module load.
     from boxmunge.cve.quarantine import is_quarantined
-    return is_quarantined(project, paths)
+    from boxmunge.pause import is_paused
+    return is_quarantined(project, paths) or is_paused(project, paths)

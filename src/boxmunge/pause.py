@@ -73,6 +73,11 @@ def mark_pause_complete(project_name: str, paths: BoxPaths) -> None:
     _update_paused_state(project_name, paths, action_complete=True)
 
 
+def mark_pause_incomplete(project_name: str, paths: BoxPaths) -> None:
+    """A step of keeping it paused failed: `pause` finishes it."""
+    _update_paused_state(project_name, paths, action_complete=False)
+
+
 def awaiting_deploy(project_name: str, paths: BoxPaths) -> bool:
     """True if `resume --no-start` handed the pause to the next deploy: the
     project stays paused for everything else (maintenance page, stopped

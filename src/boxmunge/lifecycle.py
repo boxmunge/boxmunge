@@ -127,40 +127,51 @@ def migration_refusal(what: str, paths: BoxPaths) -> str | None:
 
 
 def refuse_if_blocked(project_name: str, paths: BoxPaths, *,
-                      ships_fix: bool = False) -> bool:
+                      ships_fix: bool = False, staging: bool = False) -> bool:
     """Print the refusal and return True if the project is blocked.
 
     Operate cores call this under the project lock, immediately before
     they mutate: a pause or quarantine that completed while the caller
     waited for the lock must win (see boxmunge.fileutil, "Lock order").
 
-    ``ships_fix``: a deploy, promote or stage, which may carry the fix for
-    a quarantine. A quarantine alone lets it through, because it scans the
-    images its release would start before anything starts and refuses if
-    a quarantine-level finding remains (commands/quarantine_gate). A pause
-    is the operator's own decision and still refuses, unless the operator
-    handed it to the next deploy (`resume --no-start`, pause.awaiting_deploy):
-    the deploy ends it once its start has run (commands/deploy_handover).
+    ``ships_fix``: a deploy, promote or stage (``staging``), which may
+    carry the fix for a quarantine. A quarantine alone lets it through,
+    because it scans the images its release would start before anything
+    starts and refuses if a quarantine-level finding remains
+    (commands/quarantine_gate). A pause is the operator's own decision and
+    still refuses, unless the operator handed it to the next deploy
+    (`resume --no-start`, pause.awaiting_deploy): a production deploy ends
+    it once its start has run (commands/deploy_handover); a stage leaves it.
     """
     block = is_blocked(project_name, paths)
     if block is None:
         return False
-    if ships_fix and block.reason is BlockReason.PAUSED and awaiting_deploy(project_name, paths):
-        print(f"  {project_name} is paused, awaiting this deploy: the pause ends once its "
-              f"containers start; until then the maintenance page stays up.")
-        return False
-    if ships_fix and block.reason is BlockReason.QUARANTINED:
-        if not is_paused(project_name, paths):
-            cve = block.detail.get("cve_id", "<unknown>")
-            print(f"  {project_name} is CVE-quarantined ({cve}): "
-                  f"the images this release would start are scanned before anything "
-                  f"starts, and the release is refused if a quarantine-level finding "
-                  f"remains.")
-            return False
-        print(f"ERROR: Project '{project_name}' is paused and CVE-quarantined. A deploy "
-              f"does not end a pause: run `boxmunge security resume {project_name}` once "
-              f"its images are clean (it stays paused), then `boxmunge resume "
-              f"{project_name}`.", file=sys.stderr)
+    if not ships_fix or block.reason is BlockReason.MIGRATING:
+        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
         return True
-    print(f"ERROR: {block.refuse_message}", file=sys.stderr)
-    return True
+    paused = is_paused(project_name, paths)
+    if paused and not awaiting_deploy(project_name, paths):
+        print(f"ERROR: {paused_refusal(project_name, block)}", file=sys.stderr)
+        return True
+    if block.reason is BlockReason.QUARANTINED:
+        print(f"  {project_name} is CVE-quarantined ({block.detail.get('cve_id', '<unknown>')}"
+              f"): the images this release would start are scanned before anything "
+              f"starts, and the release is refused if a quarantine-level finding remains.")
+    if paused:
+        print(f"  {project_name} is paused, awaiting a deploy: staging does not end the "
+              f"pause; `promote {project_name}` does." if staging else
+              f"  {project_name} is paused, awaiting this deploy: the pause ends once its "
+              f"containers start; until then the maintenance page stays up.")
+    return False
+
+
+def paused_refusal(project_name: str, block: Block) -> str:
+    """A deploy of a paused project: the pause is handed to it first."""
+    if block.reason is not BlockReason.QUARANTINED:
+        return block.refuse_message
+    return (f"Project '{project_name}' is paused and CVE-quarantined. To deploy a fixed "
+            f"release: `boxmunge resume {project_name} --no-start` (it starts nothing), "
+            f"then `boxmunge prod-deploy {project_name}`: its images are scanned first, and "
+            f"once it starts it ends the pause and lifts the quarantine. Or, once the "
+            f"images it runs are clean: `boxmunge security resume {project_name}` (it stays "
+            f"paused), then `boxmunge resume {project_name}`.")

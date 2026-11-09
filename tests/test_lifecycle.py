@@ -126,7 +126,25 @@ class TestRefuseIfBlocked:
         _quarantine(paths, "myapp")
         assert refuse_if_blocked("myapp", paths, ships_fix=True) is True
         err = capsys.readouterr().err
-        assert "paused and CVE-quarantined" in err and "does not end a pause" in err
+        assert "paused and CVE-quarantined" in err
+        assert "`boxmunge resume myapp --no-start`" in err and "prod-deploy myapp" in err
+
+    def test_paused_and_quarantined_handed_to_a_deploy_lets_a_fix_through(self, paths, capsys):
+        from boxmunge.pause import mark_awaiting_deploy
+        write_paused_state("myapp", paths)
+        mark_awaiting_deploy("myapp", paths)
+        _quarantine(paths, "myapp")
+        assert refuse_if_blocked("myapp", paths, ships_fix=True) is False
+        out = capsys.readouterr().out
+        assert "scanned before anything starts" in out and "the pause ends" in out
+        assert refuse_if_blocked("myapp", paths) is True   # rollback, restore
+
+    def test_a_stage_of_a_project_awaiting_a_deploy_does_not_end_the_pause(self, paths, capsys):
+        from boxmunge.pause import mark_awaiting_deploy
+        write_paused_state("myapp", paths)
+        mark_awaiting_deploy("myapp", paths)
+        assert refuse_if_blocked("myapp", paths, ships_fix=True, staging=True) is False
+        assert "staging does not end the pause; `promote myapp` does" in capsys.readouterr().out
 
 
 class TestComposeUpCallersUseIsBlocked:

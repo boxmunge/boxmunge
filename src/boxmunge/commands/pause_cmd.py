@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 
+from boxmunge.commands import pause_snapshot
 from boxmunge.docker import compose_stop, caddy_reload, DockerError
 from boxmunge.fileutil import LockError, atomic_write_text, project_lock
 from boxmunge.legacy_stage import refuse_if_legacy_stage
@@ -24,6 +25,7 @@ def run_pause(
     paths: BoxPaths,
     yes: bool = False,
     reason: str | None = None,
+    no_snapshot: bool = False,
 ) -> int:
     """pause: confirm, take the project lock and pause. Returns 0 on
     success, 1 on failure.
@@ -57,7 +59,7 @@ def run_pause(
 
     try:
         with project_lock(project_name, paths):
-            return pause_locked(project_name, paths, reason)
+            return pause_locked(project_name, paths, reason, no_snapshot)
     except LockError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
@@ -102,10 +104,13 @@ def _manifest_hosts(project_name: str, paths: BoxPaths) -> list[str] | None:
     return hosts
 
 
-def pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int:
+def pause_locked(project_name: str, paths: BoxPaths, reason: str | None,
+                 no_snapshot: bool = False) -> int:
     """The pause core. Caller holds the project lock; never takes it.
 
-    The pause record is written first, marked incomplete, so automation
+    A new pause first snapshots the running project (pause_snapshot) unless
+    `no_snapshot`, and refuses, changing nothing, if that fails. The pause
+    record is written next, marked incomplete, so automation
     (health checks, backups, updates, upgrade restarts) leaves the project
     alone from the start. It is marked complete only once the maintenance
     page is live, the containers are stopped and their restart policies
@@ -127,9 +132,15 @@ def pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int:
     if hosts is None:
         return 1
 
+    snap = None
     if is_paused(project_name, paths):
         print(f"Finishing the incomplete pause of '{project_name}'...")
     else:
+        try:
+            snap = pause_snapshot.take(paths, project_name, no_snapshot)
+        except (pause_snapshot.PauseRefused, DockerError) as e:
+            print(f"ERROR: Cannot pause '{project_name}': {e}.", file=sys.stderr)
+            return 1
         write_paused_state(project_name, paths, reason=reason)
 
     # Swap Caddy site config BEFORE stopping containers — visitors should
@@ -153,6 +164,8 @@ def pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int:
     except DockerError as e:
         return _pause_incomplete(
             project_name, paths, f"stopping the containers failed: {e}")
+    if snap is not None:
+        pause_snapshot.record(paths, project_name, snap)
     _take_over_copy_stop(project_name, paths)
     # Keep it stopped across a Docker restart or reboot (B-19 for pause).
     try:
@@ -199,7 +212,7 @@ def _pause_incomplete(project_name: str, paths: BoxPaths, what: str) -> int:
 def cmd_pause(args: list[str]) -> None:
     from boxmunge.commands.argv import parse_args, require_project_name
     parsed = parse_args(
-        "pause", args, flags={"--yes"}, options={"--reason"},
+        "pause", args, flags={"--yes", "--no-snapshot"}, options={"--reason"},
         min_positional=1, max_positional=1,
     )
     project = require_project_name("pause", parsed.positional[0])
@@ -207,4 +220,5 @@ def cmd_pause(args: list[str]) -> None:
     reason = parsed.get("--reason")
 
     paths = BoxPaths()
-    sys.exit(run_pause(project, paths, yes=yes, reason=reason))
+    sys.exit(run_pause(project, paths, yes=yes, reason=reason,
+                       no_snapshot=parsed.has("--no-snapshot")))

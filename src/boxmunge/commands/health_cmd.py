@@ -280,30 +280,17 @@ def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
             paused.append(name)
         elif is_monitor_stopped(name, paths):
             stopped.append(name)
-    parts: list[str] = []
-    if unreadable:
-        parts.append("unreadable state: " + "; ".join(unreadable))
-    if quarantined:
-        parts.append(
-            "quarantined: "
-            + ", ".join(f"{n} ({c})" for n, c in quarantined)
-        )
-    if stopped:
-        parts.append(
-            "monitor-stopped: " + ", ".join(stopped)
-            + " (run `recover <project>` once fixed)"
-        )
-    if incomplete:
-        parts.append(
-            "pause incomplete: " + ", ".join(incomplete)
-            + " (may still be serving; run `pause <project>` again to finish, "
-            "or `resume <project>`)"
-        )
-    if awaiting:
-        parts.append("paused, awaiting a deploy: " + ", ".join(awaiting)
-                     + " (down behind the maintenance page until `prod-deploy <project>`)")
-    if paused:
-        parts.append("paused: " + ", ".join(paused))
+    parts = [label + text for label, text, names in (
+        ("unreadable state: ", "; ".join(unreadable), unreadable),
+        ("quarantined: ", ", ".join(f"{n} ({c})" for n, c in quarantined), quarantined),
+        ("monitor-stopped: ", ", ".join(stopped) + " (run `recover <project>` once fixed)",
+         stopped),
+        ("pause incomplete: ", ", ".join(incomplete) + " (may still be serving; run `pause "
+         "<project>` again to finish, or `resume <project>`)", incomplete),
+        ("paused, awaiting a deploy: ", ", ".join(awaiting) + " (down behind the "
+         "maintenance page until `prod-deploy <project>`)", awaiting),
+        ("paused: ", ", ".join(paused), paused),
+    ) if names]
     if unreadable:
         return HealthCheck("lifecycle", "error", "; ".join(parts))
     # Warn, never error: an app's critical stop is not a platform failure,

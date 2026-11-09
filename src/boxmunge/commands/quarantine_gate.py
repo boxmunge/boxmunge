@@ -49,6 +49,7 @@ from boxmunge.cve.security_policy import relaxations
 from boxmunge.docker_run import DockerError
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
+from boxmunge.pause import is_paused
 from boxmunge.paths import BoxPaths
 from boxmunge.release_target import (
     DeployRefused, ReleaseTarget, production_target, resolved_services,
@@ -119,6 +120,8 @@ def production_now(paths: BoxPaths, project: str) -> str:
     """Where production stands when a deploy stops before its start."""
     if is_quarantined(project, paths):
         return "production stays CVE-quarantined behind its maintenance page"
+    if is_paused(project, paths):
+        return "production stays paused behind its maintenance page, awaiting a deploy"
     return "production runs its previous containers"
 
 

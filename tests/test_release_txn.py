@@ -125,7 +125,7 @@ def test_a_quarantined_project_is_offered_no_rollback(paths, releases) -> None:
     txn = _open(paths)
     for phase in ("previous_kept", "installed", "hook_started"):
         txn = advance(paths, P, txn, phase)
-    assert "rollback myapp" not in options_text(P, txn, quarantined=True)
+    assert "rollback myapp" not in options_text(P, txn, rollback_refused=True)
 
 
 def test_a_first_deploy_offers_no_rollback(paths, releases) -> None:

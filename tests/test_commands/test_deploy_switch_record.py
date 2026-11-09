@@ -47,7 +47,7 @@ BEFORE_UP = {
     "missing image": lambda: patch("boxmunge.docker_containers.absent_images",
                                    return_value=[("web", "nginx:1.27")]),
     "naming the running builds": lambda: patch(
-        "boxmunge.compose_guard._name_running_builds",
+        "boxmunge.compose_up_steps.restore_build_names",
         side_effect=DockerError("cannot read the overlay")),
 }
 
@@ -110,21 +110,52 @@ def test_a_first_deploy_never_started_stays_a_first_deploy(paths, capsys) -> Non
 
 
 def test_a_rollback_that_never_started_stays_open(paths, capsys) -> None:
-    """Rolling back a deploy that ran: the old release's start is refused
-    before `compose up`, so production still runs v2 and says so."""
+    """Rolling back a deploy that ran, with no data snapshot to restore:
+    the old release's start is refused before `compose up`, so production
+    still runs v2 and says so."""
     from boxmunge.commands.rollback import run_rollback
-    _prod_v1(paths)
-    with docker_off(), fake_backups([]):
+    add_project("myapp", paths)   # backup.type none: a rollback restores no data
+    place_bundle(paths, timestamp=V1)
+    place_bundle(paths, timestamp=V2)
+    with docker_off():
+        assert run_deploy("myapp", paths, ref=V1) == 0
         assert run_deploy("myapp", paths, ref=V2) == 0
-    restore = patch("boxmunge.commands.rollback.restore_locked",
-                    lambda p, pa, snapshot, txn=None: 0)
-    with docker_off() as up, restore, BEFORE_UP["start check"]():
+    with docker_off() as up, BEFORE_UP["start check"]():
         assert run_rollback("myapp", paths, yes=True) == 1
         up.assert_not_called()
     assert read_state(paths.project_deploy_state("myapp"))["current_ref"] == REF2
     txn = load_txn(paths, "myapp")
     assert txn.source == "rollback" and txn.phase == "switching"
-    assert "Rerun 'rollback myapp'" in capsys.readouterr().err
-    with docker_off(), restore:
+    assert "production's containers were not changed" in capsys.readouterr().err
+    with docker_off():
         assert run_rollback("myapp", paths, yes=True) == 0
     assert read_state(paths.project_deploy_state("myapp"))["current_ref"] == REF1
+
+
+def test_a_rollback_whose_restore_started_v1_records_it(paths, capsys) -> None:
+    """The data restore starts the previous release (restore's own up):
+    when the switch's start is then refused, v1 runs on the restored data,
+    and the deploy state says so."""
+    import boxmunge.compose_guard as guard
+    from boxmunge.commands.rollback import run_rollback
+    _prod_v1(paths)
+    with docker_off(), fake_backups([]):
+        assert run_deploy("myapp", paths, ref=V2) == 0
+    restored: list[str] = []
+
+    def restore(p, pa, snapshot, txn=None):
+        restored.append(snapshot)
+        guard.compose_up(pa.project_dir(p), project_name=p)   # restore's start of v1
+        return 0
+    restore_patch = patch("boxmunge.commands.rollback.restore_locked", restore)
+    with docker_off() as up, restore_patch, BEFORE_UP["start check"]():
+        assert run_rollback("myapp", paths, yes=True) == 1
+        assert up.call_count == 1   # only the restore's
+    assert restored
+    assert read_state(paths.project_deploy_state("myapp"))["current_ref"] == REF1
+    err = capsys.readouterr().err
+    assert f"{REF1} runs on the restored data" in err and "not changed" not in err
+    assert load_txn(paths, "myapp").phase == "switching"
+    with docker_off(), restore_patch:
+        assert run_rollback("myapp", paths, yes=True) == 0
+    assert load_txn(paths, "myapp") is None

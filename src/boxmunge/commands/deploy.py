@@ -15,7 +15,8 @@ from boxmunge.commands.deploy_steps import (
     post_deploy_diagnostics, record_deploy_state, smoke_ok, take_pre_deploy_snapshot,
 )
 from boxmunge.compose import ComposeError
-from boxmunge.compose_guard import ComposeUpFailed, compose_up_checked
+from boxmunge.compose_guard import compose_up_checked
+from boxmunge.compose_up_steps import ComposeUpFailed
 from boxmunge.commands.quarantine_gate import (
     Clearance, keep_quarantined, lift_after_deploy, production_now, require_unchanged,
 )
@@ -308,22 +309,19 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
               f"were not scanned; nothing was started.", file=sys.stderr)
         raise NotStarted(f"the images of {actual_ref} were not scanned")
     first_deploy = "current_ref" not in read_state(paths.project_deploy_state(project_name))
-    try:
-        handover = deploy_handover.begin(paths, project_name)
-    except DockerError as e:
-        print(f"ERROR: {project_name}'s restart policies could not be given back: {e}",
-              file=sys.stderr)
-        raise NotStarted(str(e)) from e
+    handover = deploy_handover.pending(paths, project_name)
     try:
         started = _start(project_name, paths, component, txn)
     except NotStarted:
         if handover:
-            deploy_handover.keep(paths, project_name, component)
+            deploy_handover.not_started(project_name)
         if clearance is not None:
             keep_quarantined(paths, project_name)
         raise
-    if handover:
+    if handover and started:
         deploy_handover.end(paths, project_name, manifest, component)
+    elif handover:
+        deploy_handover.failed_start(paths, project_name, component)
     rc = 1
     try:
         if started:
