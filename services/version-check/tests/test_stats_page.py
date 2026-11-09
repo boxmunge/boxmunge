@@ -152,6 +152,7 @@ class TestMigration:
         conn.execute("DROP TABLE admin_credential")
         conn.execute("DROP TABLE admin_challenges")
         conn.execute("DROP TABLE admin_session_key")
+        conn.execute("DROP TABLE prefix_checks")
         conn.execute("PRAGMA user_version = 2")
         conn.commit()
         conn.close()

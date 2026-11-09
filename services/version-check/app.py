@@ -9,7 +9,8 @@ Serves:
 5. POST /v1/circuit-breaker/reset?version=X  — re-enable a release (auth required)
 6. GET  /v1/admin/version-checks?last=N  — daily check counts by version (Bearer
                                             STATS_SECRET)
-7. GET  /v1/admin/stats?last=N           — the same as an HTML page, plus recent failure
+7. GET  /v1/admin/stats?last=N           — the same as an HTML page, plus the network
+                                            prefixes that checked and recent failure
                                             reports (passkey session)
 8. /v1/admin/register, /v1/admin/login   — passkey registration and sign-in (passkey_routes)
 9. GET  /healthz                         — liveness; counts nothing (smoke and health checks)
@@ -20,9 +21,13 @@ header set by the boxmunge Caddy proxy (one trusted hop), every request is
 rate-limited per client, request bodies are capped, and check counts are
 buffered in memory and flushed periodically rather than written per request.
 Failure reports are accepted only for listed releases and count once per
-reporter (IPv4 address or IPv6 /64) per version per six hours; see
+reporter (IPv4 /24 or IPv6 /48) per version per six hours; see
 failure_store. The database schema changes only through db_schema migrations,
 run once before gunicorn starts.
+
+Privacy: the database holds a client's network prefix (prefix_store), never
+its address; the address itself lives only in memory, for rate limiting.
+Stored rows expire on a schedule (retention).
 
 Source: https://github.com/boxmunge/boxmunge/tree/main/services/version-check
 """
@@ -39,6 +44,8 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import admin_auth
 import failure_store
 import passkey_routes
+import prefix_store
+import retention
 from db_schema import require_current
 from release_catalog import (
     VERSION_RE, apply_holds, check_response, find_blocked, load_releases, select_offers,
@@ -86,6 +93,7 @@ PRINTABLE_ASCII = re.compile(r"[ -~]*\Z")
 # The 0.10.x shim sends `boxmunge-server --version` output as installed_from.
 LEGACY_FROM_PREFIX = re.compile(r"^boxmunge\s+")
 STATS_FAILURES_SHOWN = 100
+PREFIXES_SHOWN = 500
 
 
 # ---------------------------------------------------------------------------
@@ -249,9 +257,12 @@ def create_app() -> Flask:
     counter = CheckCounter(DB_PATH, CHECK_FLUSH_SECONDS, CHECK_MAX_PENDING,
                            always_count=frozenset(listed_versions))
     app.extensions["check_counter"] = counter
-    sweeper = failure_store.Sweeper(DB_PATH, failure_store.SWEEP_INTERVAL)
+    prefixes = prefix_store.PrefixLog(DB_PATH, CHECK_FLUSH_SECONDS, CHECK_MAX_PENDING,
+                                      frozenset(listed_versions))
+    app.extensions["prefix_log"] = prefixes
+    sweeper = retention.Sweeper(DB_PATH, retention.SWEEP_INTERVAL)
     sweeper.start()
-    app.extensions["failure_sweeper"] = sweeper
+    app.extensions["retention_sweeper"] = sweeper
 
     app.extensions[admin_auth.SESSION_KEY] = webauthn_store.session_key(DB_PATH)
     app.extensions[admin_auth.GUESSES] = admin_auth.guess_limiter()
@@ -286,6 +297,7 @@ def create_app() -> Flask:
         version = _version_arg("v")
         if version is None:
             return jsonify({"error": "missing or malformed version parameter (want X.Y.Z)"}), 400
+        prefix = prefix_store.network_prefix(request.remote_addr)
 
         offers, held = apply_holds(
             select_offers(releases, version),
@@ -295,6 +307,7 @@ def create_app() -> Flask:
         # The real version, listed or not (a dev build, a dropped release): it is
         # valid X.Y.Z, and the counter caps distinct versions per day.
         counter.record(version)
+        prefixes.record(prefix, version)
 
         response = jsonify(result)
         response.headers["Cache-Control"] = "no-cache"
@@ -336,7 +349,8 @@ def create_app() -> Flask:
         # box needs no different answer, and storing it would let one host
         # count several times towards the auto-trip threshold.
         if failure_store.record_failure(DB_PATH, version, installed_from, stage,
-                                        client_key(request.remote_addr), now, detail or None):
+                                        prefix_store.network_prefix(request.remote_addr), now,
+                                        detail or None):
             _maybe_auto_trip(DB_PATH, version, auto_trip_threshold, now)
         return "", 204
 
@@ -392,12 +406,15 @@ def create_app() -> Flask:
     @app.route("/v1/admin/stats")
     @admin_auth.require_session
     def admin_stats():
-        """HTML: daily checks per version and recent failure reports, for a signed-in browser."""
+        """HTML for a signed-in browser: daily checks per version, the network
+        prefixes that checked, and recent failure reports."""
         counter.flush()
+        prefixes.flush()
         stats = _query_version_checks(DB_PATH, _parse_last_param(request.args.get("last")),
                                       listed_versions)
         return admin_auth.html_response(stats_page.render(
-            stats, failure_store.recent_failures(DB_PATH, STATS_FAILURES_SHOWN)))
+            stats, prefix_store.by_prefix(DB_PATH, PREFIXES_SHOWN),
+            failure_store.recent_failures(DB_PATH, STATS_FAILURES_SHOWN)))
 
     @app.route("/")
     def index():

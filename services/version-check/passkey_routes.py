@@ -31,7 +31,7 @@ from webauthn.helpers.structs import (
 import admin_auth
 import admin_pages
 import webauthn_store
-from request_limits import client_key
+from prefix_store import network_prefix
 
 ALGORITHMS = [COSEAlgorithmIdentifier.ECDSA_SHA_256, COSEAlgorithmIdentifier.EDDSA]
 RP_NAME = "boxmunge version-check"
@@ -96,7 +96,7 @@ def create_blueprint(db_path: Path) -> Blueprint:
 
     def issue(challenge: bytes, purpose: str) -> None:
         webauthn_store.issue_challenge(db_path, challenge, purpose,
-                                       client_key(request.remote_addr), admin_auth.now_unix())
+                                       network_prefix(request.remote_addr), admin_auth.now_unix())
 
     def registered(secret: str) -> webauthn_store.Credential | None:
         return webauthn_store.active_credential(db_path, admin_auth.code_mac(secret))

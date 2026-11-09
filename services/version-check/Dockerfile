@@ -6,7 +6,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 COPY admin_auth.py admin_pages.py app.py db_schema.py failure_store.py passkey_routes.py \
-     release_catalog.py request_limits.py stats_page.py webauthn_store.py ./
+     prefix_store.py release_catalog.py request_limits.py retention.py stats_page.py \
+     webauthn_store.py ./
 COPY releases.json .
 COPY static/ static/
 
@@ -19,4 +20,7 @@ EXPOSE 8147
 # Migrate the database (and run the first sweep) once, before any worker
 # starts: workers only check the schema version. Not --preload: per-worker
 # state (check counter, sweeper thread) must be created after the fork.
-CMD ["sh", "-c", "python db_schema.py /data/checks.db && exec gunicorn --bind 0.0.0.0:8147 --workers 2 --access-logfile - 'app:create_app()'"]
+# No gunicorn access log: it would be a second copy of every client's full
+# address. The Caddy proxy's access log (read by CrowdSec) is the only one,
+# as the privacy statement in static/index.html says.
+CMD ["sh", "-c", "python db_schema.py /data/checks.db && exec gunicorn --bind 0.0.0.0:8147 --workers 2 'app:create_app()'"]

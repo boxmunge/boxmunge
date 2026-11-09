@@ -180,7 +180,7 @@ class TestChallenges:
         assert response.status_code == 400
         assert "expired or already used" in response.get_json()["error"]
 
-    def test_one_client_flooding_sign_in_cannot_block_another(
+    def test_one_network_flooding_sign_in_cannot_block_another(
             self, admin_client, authenticator):
         register(admin_client, authenticator, ADMIN_SECRET)
         flooder = {"X-Forwarded-For": "203.0.113.7"}
@@ -188,7 +188,7 @@ class TestChallenges:
             assert admin_client.post("/v1/admin/login/options",
                                      headers=flooder).status_code == 200
         refused = admin_client.post("/v1/admin/login/options", headers=flooder)
-        assert refused.status_code == 429 and "this client" in refused.get_json()["error"]
+        assert refused.status_code == 429 and "this network" in refused.get_json()["error"]
         admin = {"X-Forwarded-For": "198.51.100.20"}
         assert login_from(admin_client, authenticator, admin).status_code == 200
 
@@ -204,7 +204,7 @@ class TestChallenges:
         with patch("webauthn_store.MAX_PENDING_CHALLENGES", 2):
             for n, status in ((1, 200), (2, 200), (3, 429)):
                 response = admin_client.post("/v1/admin/login/options",
-                                             headers={"X-Forwarded-For": f"192.0.2.{n}"})
+                                             headers={"X-Forwarded-For": f"192.0.{n}.1"})
                 assert response.status_code == status
 
 
