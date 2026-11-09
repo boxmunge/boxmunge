@@ -579,6 +579,13 @@ Live-tail logs (stream new output, press Ctrl-C to stop):
 logs myapp --follow
 ```
 
+Read the staged release's containers instead of production's (with any of the options above):
+
+```
+logs myapp --staging
+logs myapp backend --staging --follow
+```
+
 View the last 100 journal lines of the boxmunge systemd units (timers and services):
 
 ```
@@ -1767,8 +1774,8 @@ Releases are discovered through the version-check service at boxmunge.dev.
 If it is unreachable or answers in an unexpected shape, auto-update falls
 back to the GitHub releases list, applying the same rules to the markers in
 each release's title or notes (`[security]`, `[breakfix]`, `[breaking]`), and
-logs a warning. A failed upgrade is also reported there (version, stage, reason;
-no host details). Reporting is best-effort: if it cannot be sent the upgrade
+logs a warning. A failed upgrade is also reported there (see "What boxmunge
+sends home" below). Reporting is best-effort: if it cannot be sent the upgrade
 log says so and the upgrade outcome is unchanged. `BOXMUNGE_VERSION_CHECK_URL`
 points both calls at another service (the test suites use it to stay offline).
 (The version-check service's stats page is for its maintainer only: browsers sign in
@@ -1928,6 +1935,54 @@ validator would refuse, as `<project>: would be refused by this release's compos
 The dry run writes nothing and sends no alert. The upgrade shim runs it as a pre-flight check
 against the new release before touching anything, so `upgrade --dry-run` run by hand
 reports against the installed release.
+
+### What boxmunge sends home
+
+The box contacts one boxmunge service, the version-check service at boxmunge.dev:
+
+- **Update checks**, every 6 hours from the `boxmunge-auto-update` timer and on a plain
+  `upgrade` (`upgrade --target` names its version and does not check): an HTTPS request
+  for `/v1/check?v=<installed version>`, with User-Agent `boxmunge/<installed version>`.
+  Nothing else: no hostname, machine ID or project names.
+- **Failure reports**, when an upgrade fails: the version it tried, the version it came
+  from, the step that failed, a short reason (for example
+  `system_upgrade_failed: install_sh_exit_100`) and the time the box sent it.
+
+Like any connection, both carry the box's IP address. The service stores the network
+prefix it came from (IPv4 /24, IPv6 /48; an IPv6 address that embeds an IPv4 address
+counts as that address's /24), never the full address: for a check, with the version
+reported and the date; for a failure report, with the report. A prefix is not anonymous:
+a /48 is often one household or company. Both are deleted after 90 days, overwritten in
+the database file, though encrypted backups of the service's database can hold copies
+until the backups expire, and backups from before the service switched to prefixes can
+hold full IP addresses (or IPv6 /64s) of failure reporters and admin sign-ins. It also
+keeps a daily count of checks per version. During the beta the maintainer uses the
+prefixes to see which networks still run an old release.
+
+Two request logs keep the full IP address of every request, for operations and abuse
+protection: the access log of the web server in front of the service and the service's
+own container log (gunicorn's access log). Both are rotated by size under Docker's log
+settings, at most five 50 MB files each. CrowdSec on that server reads the web server's
+log and is registered with CrowdSec's central API, so the addresses of requests that
+trigger its attack scenarios are shared with CrowdSec's community blocklist. The public
+statement is at <https://boxmunge.dev/#privacy>.
+
+The box's other outbound requests go to third parties, never to a boxmunge service:
+
+- public sources: GitHub releases, PyPI (hash-pinned dependencies at install and
+  upgrade), CISA's list of exploited vulnerabilities, OS and image registries;
+- Let's Encrypt (or another ACME authority), which Caddy contacts to issue and renew
+  each site's TLS certificate, naming the site's hostnames;
+- CrowdSec's central API: the Debian CrowdSec package registers the box with it at
+  install (check with `cscli capi status`), and a registered box shares with CrowdSec the
+  IP addresses of requests that trigger its attack scenarios, and receives its community
+  blocklist;
+- alert channels the operator set up (Pushover, webhooks).
+
+There is no setting to turn version checks off. Stopping the timer
+(`systemctl disable --now boxmunge-auto-update.timer`) stops the scheduled checks, and
+with them automatic security updates and the alert when OS security updates stop
+arriving; a plain `upgrade` still checks.
 
 ## Upgrading from 0.10.1 with a release staged
 

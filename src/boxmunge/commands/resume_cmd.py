@@ -13,6 +13,7 @@ from __future__ import annotations
 import sys
 
 
+from boxmunge.commands.confirm import confirm
 from boxmunge.bind_sources import BindSourceError
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.compose import prepare_compose_override
@@ -106,9 +107,7 @@ def run_resume(
             print("  - No image: services to pull")
         print("  - Start containers")
         print("  - Restore Caddy routing + run smoke test")
-        response = input("\nProceed? [y/N] ")
-        if response.lower() != "y":
-            print("Aborted.")
+        if not confirm("resume"):
             return 1
 
     try:

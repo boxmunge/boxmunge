@@ -56,16 +56,16 @@ class TestForwardedClientAddress:
         client = make_app().test_client()
         client.post("/v1/report-failure", json=_report(), environ_base=PROXY,
                     headers={"X-Forwarded-For": "198.51.100.9"})
-        assert _failure_addrs(tmp_path / "checks.db") == ["198.51.100.9"]
+        assert _failure_addrs(tmp_path / "checks.db") == ["198.51.100.0/24"]
 
     def test_dedupe_is_per_client_not_per_proxy(self, make_app, tmp_path):
         """Behind the proxy every request used to share one address, so one
         report per version per hour was accepted fleet-wide."""
         client = make_app().test_client()
-        for addr in ("198.51.100.1", "198.51.100.2", "198.51.100.2"):
+        for addr in ("198.51.100.1", "198.51.101.1", "198.51.101.2"):
             client.post("/v1/report-failure", json=_report(), environ_base=PROXY,
                         headers={"X-Forwarded-For": addr})
-        assert _failure_addrs(tmp_path / "checks.db") == ["198.51.100.1", "198.51.100.2"]
+        assert _failure_addrs(tmp_path / "checks.db") == ["198.51.100.0/24", "198.51.101.0/24"]
 
     def test_only_the_proxy_hop_is_trusted(self, make_app, tmp_path):
         """A client-supplied X-Forwarded-For prefix is ignored: only the
@@ -73,7 +73,7 @@ class TestForwardedClientAddress:
         client = make_app().test_client()
         client.post("/v1/report-failure", json=_report(), environ_base=PROXY,
                     headers={"X-Forwarded-For": "10.9.9.9, 198.51.100.9"})
-        assert _failure_addrs(tmp_path / "checks.db") == ["198.51.100.9"]
+        assert _failure_addrs(tmp_path / "checks.db") == ["198.51.100.0/24"]
 
 
 class TestRateLimit:

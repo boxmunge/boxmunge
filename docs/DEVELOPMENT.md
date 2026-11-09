@@ -209,7 +209,9 @@ PyPI Trusted Publishing, so no API token exists anywhere.
 `services/version-check` serves two maintainer-only views of update checks and failure reports,
 each with its own credential, never interchangeable:
 
-- `/v1/admin/stats` (HTML, for a browser) needs a passkey sign-in. Signing in sets an 8-hour
+- `/v1/admin/stats` (HTML, for a browser) shows daily checks per version, each network prefix
+  (IPv4 /24, IPv6 /48) that checked in the last 90 days with its latest version and first and
+  last day seen, and recent failure reports with their prefix. It needs a passkey sign-in. Signing in sets an 8-hour
   session cookie (`Path=/v1/admin`, HttpOnly, Secure, SameSite=Strict). Its signing key needs both
   `STATS_SECRET` and a random key created in the service's database on first start, so the
   Bearer secret alone cannot forge a session. Without a session, the page redirects to
@@ -220,8 +222,11 @@ each with its own credential, never interchangeable:
 Without `STATS_SECRET`, or with one shorter than 32 characters, every admin route answers 503 and
 names the setting. Wrong secrets, whether sent as a Bearer header or as the registration code,
 count against one limit per client (10 per 15 minutes); past it, that client is refused even
-with the right secret until the window ends. Pending sign-in and registration challenges are
-capped at 5 per client, so one client cannot block another's sign-in. The relying
+with the right secret until the window ends. Each client (IPv4 address or IPv6 /64) may start
+5 sign-in or registration ceremonies per 5 minutes in each worker, and each network (IPv4 /24 or
+IPv6 /48) 20, both counted in memory: one client cannot block another's sign-in, the many /64s
+of one /48 cannot fill the database's global backstop of 10,000 pending challenges, and no
+address is stored. The relying
 party is `ADMIN_RP_ID` (default `boxmunge.dev`) with origin `https://<ADMIN_RP_ID>`, so the passkey
 works on the production host only, not on `staging.<host>`. One passkey can be registered. It must
 use ES256 or EdDSA, and the authenticator must verify the user.
