@@ -20,6 +20,7 @@ stage <project>      stage alongside production for verification
 promote <project>    promote staging to production
 unstage <project>    tear down staging without promoting
 prod-deploy <p>      deploy directly to production
+prod-deploy <p> --redeploy  deploy the installed release again (no new upload)
 rollback <p>         restore previous deployment
 pause <project>      take offline with maintenance page
 resume <project>     bring back online (pulls latest images first)

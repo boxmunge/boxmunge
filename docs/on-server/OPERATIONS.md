@@ -382,11 +382,14 @@ worth of downtime. A `stage` with `staging.copy_data` stops production for the c
 
 `stage`, `prod-deploy` and `promote` build `build:` services on the current digest of each base
 image (`FROM`). A base image that has not changed is not downloaded again, and the build cache
-holds. A registry that cannot be reached fails the build before anything starts. `--no-pull`
-builds from the base images the box already has. `promote` checks the registry too: if a base
-image moved between `stage` and `promote`, production gets a base that staging never ran, so stage
-again to test it first. `rollback` builds from the box's local base images (CVE_POLICY.md, "Base
-images and the build cache").
+holds. A base image that cannot be read from its registry (unreachable, rate-limited, credentials
+refused, or no such image) fails the build before anything starts. `--no-pull` builds from the
+base images in the box's local image store (`docker image ls`). A base a pulling build fetched is
+not put there, so `--no-pull` still needs the registry for a base the store does not have. A
+service whose `FROM` names an image only this box has sets `build: {pull: false}` in
+`compose.yml`. `promote` checks the registry too: if a base image moved between `stage` and
+`promote`, production gets a base that staging never ran, so stage again to test it first.
+`rollback` builds from the local image store (CVE_POLICY.md, "Base images and the build cache").
 
 A `stage` takes its bundle out of the inbox, as a deploy does. A `prod-deploy` that finds no new
 bundle refuses and says what to run: `promote` for a staged release, or upload the bundle again.
@@ -396,6 +399,11 @@ images), run:
 ```
 prod-deploy myapp --redeploy
 ```
+
+A redeploy checks the release as strictly as a new deploy: a release that this boxmunge's rules
+refuse (one deployed by an older version, say) has to be fixed and uploaded again. `--redeploy`
+does not take a bundle waiting in the inbox (it says so), and an install left open is finished
+first.
 
 A release that stops bind-mounting a data directory (say `./uploads`) does not delete it: the deploy
 keeps it and prints `WARNING: uploads/ holds data but this release's compose.yml does not mount it
@@ -815,11 +823,14 @@ Rollback refuses, with the reason, instead of doing half a rollback:
 
 A project with `backup.type: none` rolls back its code only.
 
-Rollback rebuilds the previous release's `build:` services without asking the registry, so it
-works when the registry cannot be reached. They are built on the base images the box has locally,
-which can be older than the base the release ran on before. Run `prod-deploy <project> --redeploy`
-afterwards to rebuild the rolled-back release on current base images (a git project:
-`prod-deploy <project> --ref <commit>`).
+Rollback rebuilds the previous release's `build:` services without `--pull`, so it works when the
+registry cannot be reached, provided each base image is in the box's local image store
+(`docker image ls`; a base that only a pulling build fetched is not, and still needs its
+registry). The rebuild uses that local base, which can be older than the base the release ran on
+before. Run `prod-deploy <project> --redeploy` afterwards to rebuild the rolled-back release on
+current base images (a git project: `prod-deploy <project> --ref <commit>`). The redeploy checks
+the release as strictly as a new deploy, where the rollback kept the recorded decisions a release
+from an older boxmunge does not make, so such a release can be refused.
 
 A rollback records each step, so a rerun after a crash carries on where it
 stopped. One window remains: if the machine crashes in the seconds after the
@@ -1311,8 +1322,9 @@ this, because it rebuilt each project's `build:` services; a `docker compose bui
 does it too.
 
 The project's next start recreates a running container like this from the image its name
-points at (the same image, which is why Compose left it): `prod-deploy <project>`, or the
-next upgrade's restart. The start logs a warning naming the container. A stopped one is not
+points at (the same image, which is why Compose left it): `prod-deploy <project> --redeploy`
+(a git project: `prod-deploy <project> --ref <its deployed commit>`), or the next upgrade's
+restart. The start logs a warning naming the container. A stopped one is not
 recreated; the **supervisor** removes it (`docker rm <container>`) and the next start
 creates it again.
 
@@ -1860,9 +1872,10 @@ How an upgrade is applied and undone:
    images to `boxmunge.invalid/<project>/<service>`, the image each container runs takes the
    new name (logged as `named the images ...`) before the old one is removed, so the
    restart starts that image. A project whose image is missing is not restarted (`start
-   refused: the image for <service> (<image>) is missing ... run prod-deploy <project>`):
-   nothing of it is started or recreated, its running containers are left as they are, and
-   `prod-deploy <project>` builds and starts it. After an upgrade from 0.10 that is a
+   refused: the image for <service> (<image>) is missing ... run prod-deploy <project>
+   --redeploy`): nothing of it is started or recreated, its running containers are left as
+   they are, and `prod-deploy <project> --redeploy` (a git project: `prod-deploy <project>
+   --ref <its deployed commit>`) builds and starts it. After an upgrade from 0.10 that is a
    `build:` service that had no container, running or stopped, to take its image from, such
    as a profiled one that only a restore starts, by name.
    Three kinds of project are left exactly as they are (not migrated, regenerated or

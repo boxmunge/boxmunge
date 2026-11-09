@@ -1253,13 +1253,41 @@ image (`FROM`) the build asks the registry for the tag's current digest.
 
 To take a base-image fix for a bundle release that is already deployed,
 without uploading it again, run `prod-deploy <project> --redeploy`. A git
-project's `prod-deploy <project>` rebuilds the commit its ref names.
+project's `prod-deploy <project>` rebuilds the commit its ref names. A
+redeploy checks the release as strictly as a new deploy, so an old release
+that this boxmunge's rules refuse must be fixed and uploaded again.
 
-A registry that cannot be reached fails the build before anything starts.
-The error says why and names `--no-pull`. `stage`, `prod-deploy` and
-`promote` accept `--no-pull`, which builds from the base images this box
-already has. Those may miss fixes the registry has. A build never falls
-back to the cached base on its own.
+A base image that cannot be read from its registry (unreachable,
+rate-limited, credentials refused, or no such image) fails the build before
+anything starts. The error says why and names `--no-pull`. `stage`,
+`prod-deploy` and `promote` accept `--no-pull`. It builds from the base
+images in the box's local image store (`docker image ls`), which may miss
+fixes the registry has. A build never falls back to them on its own.
+
+A pulling build does not put the base it fetched in that store. Docker
+keeps it in the builder's cache only, and the store's tag for that base
+stays where it was, or stays absent. A build without `--pull` asks the
+registry for any base the store does not have, so `--no-pull` (and
+`rollback`) work without the registry only for bases the store already
+holds. To keep one there, `docker pull` it on the box.
+
+A `FROM` that names an image only this box has (one from `docker load` or a
+hand build) cannot be pulled, so a pulling build fails on it. Set
+`build: {pull: false}` on that service in `compose.yml` (not in an included
+file). Its build then uses the local image store while the others pull. To
+build on another service of the same project instead, use a named context
+rather than its image name:
+
+```yaml
+services:
+  base:
+    build: ./base
+  web:
+    build:
+      context: ./web
+      additional_contexts:
+        base: service:base   # FROM base in web/Dockerfile
+```
 
 `promote` checks the registry again. It does not reuse the base the stage
 pulled. Docker keeps a pulled base in the builder's cache and does not move
@@ -1270,12 +1298,16 @@ base the stage tested. If the base image's tag moved between `stage` and
 `promote`, production gets the newer base, which staging never ran. To
 test it first, stage again before promoting.
 
-`rollback` does not pull, because it has to work when the registry cannot
-be reached. It rebuilds the previous release on the base image the box has
-locally, which can be older than the base that release ran on. To rebuild
-the rolled-back release on current base images, follow the rollback with
+`rollback` does not pull, so that it works in an incident even when the
+registry cannot be reached, as long as each base image is in the box's
+local image store. It rebuilds the previous release on that local base,
+which can be older than the base the release ran on. To rebuild the
+rolled-back release on current base images, follow the rollback with
 `prod-deploy <project> --redeploy`. For a git project,
-`prod-deploy <project> --ref <commit>` does the same.
+`prod-deploy <project> --ref <commit>` does the same. Unlike the rollback,
+which keeps the recorded decisions a release from an older boxmunge does not
+make, the redeploy checks the release as strictly as a new deploy, so such a
+release can be refused.
 
 ## Shipping a fix the upstream image does not have yet
 
