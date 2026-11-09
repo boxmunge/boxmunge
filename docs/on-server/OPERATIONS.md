@@ -1005,7 +1005,7 @@ boxmunge pause myapp --reason "rolling key rotation"
 Containers are stopped via `docker compose stop`, so state is preserved on disk and resume is fast. While paused:
 
 - Health checks, scheduled backups, and container-update sweeps skip the project
-- `prod-deploy`, `stage`, and `promote` refuse to run against it
+- `prod-deploy`, `stage`, and `promote` refuse to run against it, naming `resume`
 - `backup-sync` continues (it only copies; existing off-box snapshots are never removed)
 - Platform upgrades keep it paused: the maintenance page stays in place and the containers stay stopped
 - A Docker restart or reboot keeps it stopped: pause sets each container's restart policy to `no` (saving the original), and `resume` restores the originals before starting the containers
@@ -1019,11 +1019,22 @@ pause is the one case where pausing a paused project is accepted), or `resume my
 `status` shows it as `PAUSED (incomplete)`, `health` warns about it under `lifecycle`, and
 `container-update` logs that it may still be serving on images it does not update while paused.
 
+`pause` is refused while an install is open (`.releases/install.json`, see "An interrupted or
+failed install"): its ways out are a deploy, a rollback or `--abandon`, and a pause would refuse
+the first two. The refusal names them; pause once the install is finished. A project paused over an
+open install by an earlier boxmunge is let out by `resume`: it lifts the pause without starting
+anything (the maintenance page stays up) and names the install's options, which then run.
+
 To bring it back:
 
 ```
 boxmunge resume myapp
 ```
+
+A project whose stopped containers were created before the current mount rules (boxmunge 0.10.x
+accepted a read-write mount of the project directory, `.:/app`) cannot simply be started again,
+and a deploy is refused while it is paused, so `resume` recreates its containers from the deployed
+files instead (it says so). It still refuses files that changed since the deploy.
 
 `resume` pulls the latest images by default. This is a deliberate safety guarantee: a project that was paused for hours or days should not come back on stale, potentially vulnerable images.
 
@@ -1858,7 +1869,9 @@ How an upgrade is applied and undone:
    stays offline until `resume`, `security resume` or `recover` brings it back. A paused or
    quarantined project keeps its maintenance page, but the upgrade still regenerates its
    compose overlay and records the bind sources it mounts, so `resume`, `security resume`
-   and the scan's automatic lift start it on its deployed files without a deploy. If its
+   and the scan's automatic lift start it on its deployed files without a deploy (its stopped
+   containers are not checked here: nothing of it starts, and a paused project's containers
+   made before the current mount rules are recreated by `resume`). If its
    overlay cannot be regenerated or recorded (an unreadable users record, say), it does not
    fail the upgrade: it is listed as `REFUSED` and alerted with the others, keeps its previous
    overlay and record, and stays offline. Once the cause is fixed, `resume` or `security

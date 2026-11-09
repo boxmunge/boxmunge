@@ -18,7 +18,9 @@ from boxmunge.caddy import prepare_caddy_config
 from boxmunge.compose import prepare_compose_override
 from boxmunge.run_as import RunAsError
 from boxmunge.user_drift import guard_pull, image_ids
-from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
+from boxmunge.compose_guard import (
+    ComposeRefused, check_start, compose_up_checked, stale_containers,
+)
 from boxmunge.deployed_inventory import (
     InventoryError, load_deployed_inventory, pulled_services,
 )
@@ -32,6 +34,7 @@ from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import clear_paused_state, is_paused, release_restart_policies
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
+from boxmunge.release_txn import open_install_reason
 from boxmunge.state import read_state, write_state
 
 
@@ -137,6 +140,9 @@ def resume_locked(
         return 1, None
     if not _refuse_unless_resumable(project_name, paths):
         return 1, None
+    install = open_install_reason(paths, project_name)
+    if install is not None:
+        return _lift_for_install(project_name, paths, install), None
     project_dir = paths.project_dir(project_name)
     try:
         manifest = load_manifest(paths.project_manifest(project_name))
@@ -157,13 +163,29 @@ def resume_locked(
     # Check compose.yml and the bind sources BEFORE any container action. A
     # hostile compose.yml introduced while the project was paused must not
     # survive even an image pull or the release of its restart policies
-    # (audit A-NEW-1); the start below checks again.
+    # (audit A-NEW-1); the start below checks again. Containers made before
+    # the own-file rules are recreated from the checked files, not refused:
+    # resume is the pause's only exit, and a deploy (the other way to
+    # replace them) is refused while the project is paused.
     try:
-        check_start(paths, project_name, component="resume", compose_files=compose_files)
+        stale = stale_containers(paths, project_name, component="resume",
+                                 compose_files=compose_files)
+        recreate = stale is not None
+        check_start(paths, project_name, component="resume", compose_files=compose_files,
+                    deploying=recreate)
     except ComposeRefused as e:
         # Exit code 3 reserved for compose hardening rejections (audit H-N2).
         print(f"ERROR: {e}", file=sys.stderr)
         return 3, None
+    except DockerError as e:
+        print(f"ERROR: cannot inspect the project's containers: {e}", file=sys.stderr)
+        log_error("resume", f"Container inspection failed: {e}", paths, project=project_name)
+        return 1, None
+    if recreate:
+        print(f"  Its containers were made before the current mount rules: {stale}")
+        print("  Recreating them from the deployed files instead of starting them again.")
+        log_warning("resume", f"Recreating containers made before the mount rules: {stale}",
+                    paths, project=project_name)
 
     # Pull images (unless overridden or no image: services).
     try:
@@ -202,7 +224,8 @@ def resume_locked(
     try:
         release_restart_policies(project_name, paths)
         compose_up_checked(paths, project_name, component="resume",
-                           compose_files=compose_files)
+                           compose_files=compose_files, deploying=recreate,
+                           force_recreate=recreate)
     except DockerError as e:
         print(f"ERROR: compose up failed: {e}", file=sys.stderr)
         log_error("resume", f"compose up failed: {e}", paths,
@@ -250,6 +273,30 @@ def resume_locked(
     suffix = f" — {smoke_msg}" if not smoke_ok else ""
     print(f"  Smoke: {'PASS' if smoke_ok else 'FAIL'}{suffix}")
     return 0, (None if smoke_ok else smoke_msg)
+
+
+def _lift_for_install(project_name: str, paths: BoxPaths, install: str) -> int:
+    """A pause taken while an install was open (pause refuses that since
+    0.11.4). Every way out of the install is a deploy or a rollback, which
+    the pause refuses, and only the install may start production. So the
+    pause is lifted without starting anything: the containers stay stopped
+    and the maintenance page stays up until the install's start replaces
+    it. Returns 1: the project is not back online."""
+    try:
+        release_restart_policies(project_name, paths)
+    except DockerError as e:
+        print(f"ERROR: {project_name}'s restart policies could not be given back: {e}. It "
+              f"stays paused; run 'resume {project_name}' again once Docker answers.",
+              file=sys.stderr)
+        return 1
+    clear_paused_state(project_name, paths)
+    log_warning("resume", f"Pause lifted without a start (an install is open): {install}",
+                paths, project=project_name)
+    print(f"ERROR: '{project_name}' was paused while an install was open. The pause is "
+          f"lifted, but nothing was started: production starts only from that install, "
+          f"and its maintenance page stays up until then. {install[0].upper()}{install[1:]}.",
+          file=sys.stderr)
+    return 1
 
 
 def _alert_smoke_failed(project_name: str, paths: BoxPaths, smoke_msg: str) -> None:

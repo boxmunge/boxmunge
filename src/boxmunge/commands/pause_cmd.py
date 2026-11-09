@@ -15,6 +15,7 @@ from boxmunge.pause import (
     render_maintenance_caddy_config, write_paused_state,
 )
 from boxmunge.paths import BoxPaths
+from boxmunge.release_txn import open_install_reason
 from boxmunge.staged_release import SlotError, clear_production_stopped
 
 
@@ -36,7 +37,8 @@ def run_pause(
         print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
         return 1
 
-    if _refuse_if_already_paused(project_name, paths):
+    if _refuse_if_already_paused(project_name, paths) \
+            or _refuse_if_installing(project_name, paths):
         return 1
 
     hosts = _manifest_hosts(project_name, paths)
@@ -65,10 +67,24 @@ def _refuse_if_already_paused(project_name: str, paths: BoxPaths) -> bool:
     """A completed pause refuses; an incomplete one is finished by pausing
     again."""
     if is_paused(project_name, paths) and pause_action_complete(project_name, paths):
-        print(f"ERROR: Project '{project_name}' is already paused.",
-              file=sys.stderr)
+        print(f"ERROR: Project '{project_name}' is already paused. Run "
+              f"`boxmunge resume {project_name}` to bring it back.", file=sys.stderr)
         return True
     return False
+
+
+def _refuse_if_installing(project_name: str, paths: BoxPaths) -> bool:
+    """An open install (release_txn) refuses a pause. Every way out of it is
+    a deploy, a rollback or an abandon, and a pause refuses the first two
+    while resume waits for the install: nothing could proceed. The stop
+    would also run the project directory's compose files, the new
+    release's, over the old release's containers."""
+    reason = open_install_reason(paths, project_name)
+    if reason is None:
+        return False
+    print(f"ERROR: Cannot pause '{project_name}' while its install is open: {reason}. "
+          f"Pause it once that is done.", file=sys.stderr)
+    return True
 
 
 def _manifest_hosts(project_name: str, paths: BoxPaths) -> list[str] | None:
@@ -102,9 +118,10 @@ def pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int:
         return 1
     if refuse_if_legacy_stage(paths, project_name):
         return 1
-    # Re-check under the lock: a pause may have landed while the operator
-    # was answering the prompt.
-    if _refuse_if_already_paused(project_name, paths):
+    # Re-check under the lock: a pause or an install may have landed while
+    # the operator was answering the prompt.
+    if _refuse_if_already_paused(project_name, paths) \
+            or _refuse_if_installing(project_name, paths):
         return 1
     hosts = _manifest_hosts(project_name, paths)
     if hosts is None:

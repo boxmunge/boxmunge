@@ -207,12 +207,15 @@ def check_start(
     sha256 of every file boxmunge reads, instead of comparing them with the
     record; missing sources are created first.
 
-    Unless `deploying` (deploy, promote and stage install a freshly
-    validated release and recreate every container from it), the project's
-    EXISTING containers' bind mounts are inspected too: a project deployed
-    before these rules whose container already mounts the project directory,
-    or a control file, read-write is refused — a plain restart would just
-    re-run the compromised mount, so a redeploy is required.
+    Unless `deploying`, the project's EXISTING containers' bind mounts are
+    inspected too (stale_containers): a project deployed before these rules
+    whose container already mounts the project directory, or a control
+    file, read-write is refused — a plain restart would just re-run the
+    compromised mount. `deploying` callers replace every container from the
+    checked files (deploy, promote and stage install a freshly validated
+    release; resume recreates what stale_containers names) or start none
+    (the upgrade's record of a paused or quarantined project, whose own
+    start checks them).
 
     Raises ComposeRefused.
     """
@@ -233,11 +236,10 @@ def check_start(
                               lenient_values=True)
         _, read_files = compose_resolve.walk_references(
             project_dir / compose_files[0], (project_dir,))
-        existing = docker_containers.container_bind_sources(project_name)
         if not deploying:
-            problems = container_bind_problems(existing, project_dir, read_files)
+            problems = _container_problems(project_name, project_dir, read_files)
             if problems:
-                raise BindSourceError(problems[0])
+                raise BindSourceError(problems[0] + _REDEPLOY)
         model = compose_resolve.resolve_deployed_config(
             project_dir, compose_files, project_name, all_profiles=True)
         sources = bind_sources.model_sources(model, project_dir)
@@ -249,6 +251,35 @@ def check_start(
             bind_sources.check_control(project_dir, read_files, rec["control"])
     except (IntakeError, compose_resolve.ComposeResolveError, BindSourceError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
+
+
+# A container_bind_problems refusal: the containers must be replaced, which a
+# deploy does (resume does it itself: stale_containers).
+_REDEPLOY = " The project's containers hold this mount; redeploy to replace it."
+
+
+def _container_problems(project_name: str, project_dir: Path,
+                        read_files: list[Path]) -> list[str]:
+    existing = docker_containers.container_bind_sources(project_name)
+    return container_bind_problems(existing, project_dir, read_files)
+
+
+def stale_containers(paths: BoxPaths, project_name: str, *, component: str,
+                     compose_files: list[str]) -> str | None:
+    """Why the project's existing containers must be recreated rather than
+    started again (a mount the own-file rules refuse, made before them), or
+    None. The files are checked by check_start either way; a start that
+    recreates passes `deploying` and `force_recreate`. Raises ComposeRefused
+    when the compose files cannot be read, DockerError when Docker cannot
+    be asked."""
+    project_dir = paths.project_dir(project_name)
+    try:
+        _, read_files = compose_resolve.walk_references(
+            project_dir / compose_files[0], (project_dir,))
+    except (compose_resolve.ComposeResolveError, OSError) as e:
+        raise _refused(paths, project_name, component, str(e)) from e
+    problems = _container_problems(project_name, project_dir, read_files)
+    return problems[0] if problems else None
 
 
 def compose_up_checked(
@@ -466,7 +497,7 @@ def check_containers_start(paths: BoxPaths, project_name: str, *, component: str
         existing = docker_containers.container_bind_sources(project_name)
         problems = container_bind_problems(existing, project_dir, [])
         if problems:
-            raise BindSourceError(problems[0])
+            raise BindSourceError(problems[0] + _REDEPLOY)
         sources = {bind_sources.project_rel(src, project_dir) for src, _rw in existing}
         rec = bind_sources.read_record(paths.project_bind_record(project_name))
         bind_sources.check_sources(project_dir, sources, rec["sources"])
