@@ -23,7 +23,7 @@ import yaml
 
 from boxmunge.commands.upgrade_steps import restart_projects
 from boxmunge.compose import prepare_compose_override
-from boxmunge.compose_guard import compose_up_checked
+from boxmunge.compose_guard import ComposeRefused, compose_up_checked
 from boxmunge.docker import compose_up
 from boxmunge.docker_containers import local_image, project_containers
 from boxmunge.docker_run import DockerError
@@ -134,6 +134,33 @@ def case_a_start_whose_image_is_missing_is_refused(
         paths.log_file.read_text()
     assert subprocess.run(["docker", "image", "inspect", f"boxmunge.invalid/{project}/web"],
                           capture_output=True).returncode != 0
+
+
+def case_a_start_missing_an_image_touches_nothing(
+        paths: BoxPaths, project: str, capsys) -> None:
+    """web needs db and its image is gone. Compose would recreate db and then
+    fail at web; the start is refused before Compose runs, so db keeps its
+    container and no stray one is left."""
+    files = nc.bundle(project, {
+        "db": {"image": nc.BUSYBOX, "command": nc.SLEEP},
+        "web": {"build": ".", "command": nc.SLEEP, "depends_on": ["db"]}},
+        declare={"db": nc.IMAGE},
+        files={"Dockerfile": f"FROM {nc.BUSYBOX}\nCOPY marker /marker\n",
+               "marker": "deployed\n"})
+    rc, out = nc.deploy(paths, project, files, capsys)
+    assert rc == 0, out
+    db = _docker("inspect", "--format", "{{.Id}}", f"{project}-db-1")
+    nc.compose(paths, project, "rm", "-f", "-s", "web")
+    _docker("image", "rm", f"boxmunge.invalid/{project}/web")
+    with pytest.raises(ComposeRefused, match=r"the image for web .* is missing.*Nothing was "
+                                             r"started or recreated"):
+        compose_up_checked(paths, project, component="restore", force_recreate=True,
+                           compose_files=["compose.yml", "compose.boxmunge.yml"])
+    assert _docker("inspect", "--format", "{{.Id}} {{.State.Running}}",
+                   f"{project}-db-1") == f"{db} true"
+    listed = _docker("ps", "-a", "--format", "{{.Names}}",
+                     "--filter", f"label=com.docker.compose.project={project}")
+    assert listed.split() == [f"{project}-db-1"]
 
 
 def case_a_pinned_up_applies_no_pull_policy(paths: BoxPaths, project: str, capsys) -> None:

@@ -1819,8 +1819,11 @@ How an upgrade is applied and undone:
    images to `boxmunge.invalid/<project>/<service>`, the image each container runs takes the
    new name (logged as `named the images ...`) before the old one is removed, so the
    restart starts that image. A project whose image is missing is not restarted (`start
-   refused: the image for <service> (<image>) is missing ... run prod-deploy <project>`);
-   its running containers are left as they are.
+   refused: the image for <service> (<image>) is missing ... run prod-deploy <project>`):
+   nothing of it is started or recreated, its running containers are left as they are, and
+   `prod-deploy <project>` builds and starts it. After an upgrade from 0.10 that is a
+   `build:` service that had no container, running or stopped, to take its image from, such
+   as a profiled one that only a restore starts, by name.
    Three kinds of project are left exactly as they are (not migrated, regenerated or
    restarted), reported as `LEFT AS IS` or `Skipped (busy)`, alerted, and do not fail the
    upgrade: one with a release staged by boxmunge 0.10.1 (one high-priority alert per project;

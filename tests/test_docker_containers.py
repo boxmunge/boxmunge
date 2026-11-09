@@ -182,6 +182,20 @@ def test_an_image_counts_as_gone_only_when_docker_says_so(daemon, monkeypatch, a
         project_containers("demo")
 
 
+@pytest.mark.parametrize("image", [None, "", "nginx:1.27"], ids=["absent", "empty", "a name"])
+def test_a_container_without_an_image_id_fails_naming_it(daemon, image):
+    """Never counted as one whose image is gone, which a start would recreate."""
+    stray = _container("demo-web-1", "web")
+    if image is None:
+        del stray["Image"]
+    else:
+        stray["Image"] = image
+    daemon["containers"] = [_container("demo-db-1", "db"), stray]
+    for listing in (project_containers, running_without_image):
+        with pytest.raises(DockerError, match="container demo-web-1: docker reports image"):
+            listing("demo")
+
+
 def test_docker_failure_is_not_an_empty_answer(monkeypatch):
     def run(cmd, capture=False, **kwargs):
         raise DockerError("Cannot connect to the Docker daemon")

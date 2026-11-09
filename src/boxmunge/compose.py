@@ -363,9 +363,10 @@ def prepare_compose_override(
     # any other project could run. Drop those names from images whose
     # Compose labels prove this project built them. The image a production
     # container runs gets its platform name first, so it keeps one and the
-    # next up starts it rather than building a new one. Staging's builds are
-    # the staged release's, which production reads nothing of: staging's own
-    # start names them, from its overlay (compose_guard).
+    # next start runs it; a build service with no container to take it from
+    # is refused for want of an image until a deploy builds one. Staging's
+    # builds are the staged release's, which production reads nothing of:
+    # staging's own start names them, from its overlay (compose_guard).
     services = _user_services(user_compose)
     build_services = {name: svc.get("image") for name, svc in services.items()
                       if isinstance(svc, dict) and svc.get("build") is not None}

@@ -34,6 +34,7 @@ def box():
 @pytest.mark.parametrize("case", [ic.case_restart_starts_the_deployed_image,
                                   ic.case_a_start_recreates_a_container_whose_image_is_gone,
                                   ic.case_a_start_whose_image_is_missing_is_refused,
+                                  ic.case_a_start_missing_an_image_touches_nothing,
                                   ic.case_a_pinned_up_applies_no_pull_policy,
                                   ic.case_regenerating_names_a_stopped_containers_build,
                                   ic.case_a_pinned_start_names_a_nameless_build_and_runs_it],
