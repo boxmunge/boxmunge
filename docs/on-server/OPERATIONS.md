@@ -835,9 +835,11 @@ While an install is open the health check runs no smoke and takes no critical
 action (the install may already have replaced the smoke scripts): `check-all`
 reports the project as `WARNING (install open: ...)`, naming these options.
 
-A failure once the containers were started (compose, Caddy or the smoke test)
-closes the install as before: production may run the new release, and
-`rollback` returns to the old one.
+A start refused or failed before `docker compose up` ran (a start check, an image missing from
+the local image store, preparing the storage) changes no container: production still runs the old
+release, the deploy state still names it, and the install stays open at `switching` with these
+options. A failure once `compose up` has run (compose, Caddy or the smoke test) closes the install:
+production may run the new release, and `rollback` returns to the old one.
 
 While an install is open, backups use the manifest and compose file of the
 release the containers still run, and are skipped with an alert when that is

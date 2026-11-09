@@ -8,8 +8,9 @@ its left-open report. The phases and what happens at each failure point are the
 spec's closing table: a failed keep closes the transaction with nothing
 changed; a failed install, hook or config generation leaves it open (rerun,
 --abandon before hook_started, rollback from hook_started on, or a
-different deploy); once replace_release returns, it is closed whatever the
-result. A rerun of the same source and ref resumes from the recorded phase,
+different deploy), and so does a start that stops before `compose up` ran
+(deploy.NotStarted: no container changed, nothing was recorded); once
+replace_release returns, it is closed whatever the result. A rerun of the same source and ref resumes from the recorded phase,
 reusing the recorded snapshot. While a release is staged, a new install
 (fresh or fix-forward) first proves itself disjoint from staging (D8).
 """
@@ -20,7 +21,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from boxmunge.commands.deploy import replace_release, run_pre_deploy_hook
+from boxmunge.commands.deploy import NotStarted, replace_release, run_pre_deploy_hook
 from boxmunge.commands.deploy_steps import snapshot_live_release
 from boxmunge.commands.release_config import (
     ReleaseDecision, decide_release_users, generate_release_config,
@@ -248,9 +249,13 @@ def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: I
         print(f"Finishing the interrupted install of {req.ref}: production may now run "
               f"it, so its pre-deploy hook is not run again and no new snapshot is taken.")
     crash_point("txn.switching")
-    rc = replace_release(project_name, paths, req.manifest, req.ref, txn.snapshot or None,
-                         component=req.component, txn=txn.id, replaced_ref=txn.replaced_ref,
-                         clearance=decision.clearance)
+    try:
+        rc = replace_release(project_name, paths, req.manifest, req.ref, txn.snapshot or None,
+                             component=req.component, txn=txn.id,
+                             replaced_ref=txn.replaced_ref, clearance=decision.clearance)
+    except NotStarted as e:
+        return report_left_open(project_name, paths, txn, req,
+                                f"its start stopped before `compose up` ran: {e}")
     crash_point("txn.replaced")
     # on_switched must stay the first write after replace_release returns:
     # nothing durable separates the two, so a crash before it is a crash

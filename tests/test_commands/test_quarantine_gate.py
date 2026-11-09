@@ -254,8 +254,9 @@ def test_replace_release_starts_nothing_unscanned_while_quarantined(box, monkeyp
     refused rather than started."""
     from boxmunge.commands import deploy
     started = []
-    monkeypatch.setattr(deploy, "_start_and_verify", lambda *a: started.append(a) or 0)
-    assert deploy.replace_release("demo", box.paths, MANIFEST, "demo-r2", None) == 1
+    monkeypatch.setattr(deploy, "_start", lambda *a: started.append(a) or True)
+    with pytest.raises(deploy.NotStarted):
+        deploy.replace_release("demo", box.paths, MANIFEST, "demo-r2", None)
     assert "were not scanned; nothing was started" in capsys.readouterr().err
     assert started == []
 

@@ -74,6 +74,12 @@ class ComposeRefused(DockerError):
     """A start refused because the project's files or mounts fail a check."""
 
 
+class ComposeUpFailed(DockerError):
+    """`docker compose up` ran and failed: it may have created, recreated or
+    started some of the project's containers. Any other error from
+    compose_up_checked was raised before the up, which changed none."""
+
+
 # A persistently tampered project is checked on every timer tick (container
 # update daily, health every few minutes); without this an operator is paged
 # on each one. The refusal is always logged; the alert repeats only this
@@ -302,7 +308,8 @@ def compose_up_checked(
     back a platform name it lost first (_name_running_builds). A start
     whose image is missing is refused, naming it. A running container whose
     image the local image store no longer has is recreated
-    (_recreate_without_image). Raises ComposeRefused or DockerError."""
+    (_recreate_without_image). Raises ComposeRefused, ComposeUpFailed once
+    the up has run, or DockerError before it."""
     check_start(paths, project_name, component=component, compose_files=compose_files,
                 staging=staging, record=record, deploying=deploying, txn=txn)
     if staging:
@@ -336,14 +343,11 @@ def compose_up_checked(
     try:
         up(force_recreate=force_recreate, services=services)
     except DockerError as e:
-        gone = docker_containers.absent_images(images)
-        if not gone:
-            raise
-        raise DockerError(
-            f"{e}. {_missing_text(gone)}: it went from the local image store during the "
-            f"start, which may already have created or recreated the services ahead of "
-            f"it. Run {redo}.") from e
-    _recreate_without_image(paths, project_name, compose_project, component, services, up)
+        raise _up_failed(e, images, redo) from e
+    try:
+        _recreate_without_image(paths, project_name, compose_project, component, services, up)
+    except DockerError as e:
+        raise ComposeUpFailed(str(e)) from e
     # A partial up (restore's one service) may leave the rest stopped.
     if not staging and start and not services:
         _clear_production_stopped(paths, project_name, component)
@@ -373,6 +377,21 @@ def _name_running_builds(paths: BoxPaths, project_name: str, compose_project: st
         log_operation(component, f"named the images {compose_project}'s containers run: "
                       f"{', '.join(named)} (their old names had been taken off them)",
                       paths, project=project_name)
+
+
+def _up_failed(error: DockerError, images: dict[str, str], redo: str) -> ComposeUpFailed:
+    """The up's failure, naming an image that went from the store during it."""
+    try:
+        gone = docker_containers.absent_images(images)
+    except DockerError as e:
+        return ComposeUpFailed(f"{error} (whether an image went from the local image store "
+                               f"during the start cannot be told: {e})")
+    if not gone:
+        return ComposeUpFailed(str(error))
+    return ComposeUpFailed(
+        f"{error}. {_missing_text(gone)}: it went from the local image store during the "
+        f"start, which may already have created or recreated the services ahead of it. "
+        f"Run {redo}.")
 
 
 def _missing_text(missing: list[tuple[str, str]]) -> str:

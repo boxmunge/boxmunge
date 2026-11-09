@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from boxmunge.commands.deploy import (
-    replace_release, run_pre_deploy_hook,
+    NotStarted, replace_release, run_pre_deploy_hook,
 )
 from boxmunge.commands.release_config import (
     decide_release_users, generate_release_config, promote_candidates,
@@ -391,8 +391,14 @@ def start_rolled_back(project_name: str, paths: BoxPaths, manifest: dict,
     if not txn.reached("switching"):
         txn = advance(paths, project_name, txn, "switching")
     crash_point("rollback.switching")
-    rc = replace_release(project_name, paths, manifest, target.ref, None,
-                         component="rollback", txn=txn.id)
+    try:
+        rc = replace_release(project_name, paths, manifest, target.ref, None,
+                             component="rollback", txn=txn.id)
+    except NotStarted:
+        print(f"ERROR: The previous release was not started; production's containers were "
+              f"not changed. Rerun 'rollback {project_name}' once the cause above is fixed.",
+              file=sys.stderr)
+        return 1
     if rc == 0 and target.tree is not None:
         discard_previous_release(paths, project_name)
     close_txn(paths, project_name, txn)

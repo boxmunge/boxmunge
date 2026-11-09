@@ -15,7 +15,7 @@ from boxmunge.commands.deploy_steps import (
     post_deploy_diagnostics, record_deploy_state, smoke_ok, take_pre_deploy_snapshot,
 )
 from boxmunge.compose import ComposeError
-from boxmunge.compose_guard import compose_up_checked
+from boxmunge.compose_guard import ComposeUpFailed, compose_up_checked
 from boxmunge.commands.quarantine_gate import (
     Clearance, keep_quarantined, lift_after_deploy, production_now, require_unchanged,
 )
@@ -222,8 +222,13 @@ def _start_release(
         log_error(component, f"Deploy refused before the start: {e}", paths,
                   project=project_name)
         return 1
-    return replace_release(project_name, paths, manifest, actual_ref, snapshot_name,
-                           component=component, clearance=decision.clearance)
+    try:
+        return replace_release(project_name, paths, manifest, actual_ref, snapshot_name,
+                               component=component, clearance=decision.clearance)
+    except NotStarted:
+        print(f"ERROR: {project_name} was not started ({production_now(paths, project_name)})."
+              f" Fix the cause above and deploy again.", file=sys.stderr)
+        return 1
 
 
 def run_pre_deploy_hook(project_name: str, paths: BoxPaths, manifest: dict) -> int:
@@ -270,6 +275,12 @@ def run_pre_deploy_hook(project_name: str, paths: BoxPaths, manifest: dict) -> i
     return 0
 
 
+class NotStarted(Exception):
+    """replace_release stopped before `compose up` ran: no container changed,
+    production runs the release it ran before, and nothing was recorded.
+    Its error is printed and logged; the caller leaves its install open."""
+
+
 def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
                     actual_ref: str, snapshot_name: str | None,
                     component: str = "deploy", txn: str | None = None,
@@ -277,11 +288,14 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
                     clearance: Clearance | None = None) -> int:
     """Start the release in production, route it, smoke-test, record.
 
-    From the container start on, production runs (or partly runs) this
-    release whatever fails afterwards, so the deploy state records it
-    either way: the release it replaced becomes the rollback target, paired
-    with the snapshot taken before this deploy. Only a first deploy that
-    fails records nothing, so a retry is still treated as a first deploy.
+    From `compose up` on, production runs (or partly runs) this release
+    whatever fails afterwards, so the deploy state records it either way:
+    the release it replaced becomes the rollback target, paired with the
+    snapshot taken before this deploy. Only a first deploy that fails
+    records nothing, so a retry is still treated as a first deploy. A start
+    refused or failed before the up changed no container: it raises
+    NotStarted and records nothing, so the deploy state keeps naming the
+    release that runs.
 
     `txn` is the id of the install transaction this start finishes
     (release_txn), and `replaced_ref` the release it replaced (the
@@ -292,12 +306,18 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
     if clearance is None and is_quarantined(project_name, paths):
         print(f"ERROR: {project_name} is CVE-quarantined and the images of {actual_ref} "
               f"were not scanned; nothing was started.", file=sys.stderr)
-        return 1
+        raise NotStarted(f"the images of {actual_ref} were not scanned")
     first_deploy = "current_ref" not in read_state(paths.project_deploy_state(project_name))
+    try:
+        started = _start(project_name, paths, component, txn)
+    except NotStarted:
+        if clearance is not None:
+            keep_quarantined(paths, project_name)
+        raise
     rc = 1
     try:
-        rc = _start_and_verify(project_name, paths, manifest, component, txn,
-                               clearance, actual_ref)
+        if started:
+            rc = _verify(project_name, paths, manifest, component, txn, clearance, actual_ref)
     finally:
         if rc == 0 or not first_deploy:
             record_deploy_state(paths, project_name, actual_ref, snapshot_name, replaced_ref)
@@ -315,12 +335,11 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
     return 0
 
 
-def _start_and_verify(project_name: str, paths: BoxPaths, manifest: dict,
-                      component: str, txn: str | None, clearance: Clearance | None,
-                      ref: str) -> int:
-    project_dir = paths.project_dir(project_name)
+def _start(project_name: str, paths: BoxPaths, component: str, txn: str | None) -> bool:
+    """Start the containers. True: started; False: `compose up` ran and
+    failed (production may partly run the release). Raises NotStarted for
+    anything before the up."""
     print("  Starting containers...")
-    compose_files = ["compose.yml", "compose.boxmunge.yml"]
     try:
         promote_candidates(paths, project_name)
         deploy_storage.prepare_storage(paths, production_target(paths, project_name))
@@ -328,14 +347,25 @@ def _start_and_verify(project_name: str, paths: BoxPaths, manifest: dict,
         # decided from (and a quarantine's fix scanned); the start pulls and
         # builds nothing.
         compose_up_checked(paths, project_name, component=component,
-                           compose_files=compose_files, record=True, deploying=True,
-                           txn=txn)
+                           compose_files=["compose.yml", "compose.boxmunge.yml"],
+                           record=True, deploying=True, txn=txn)
+    except ComposeUpFailed as e:
+        print(f"  ERROR: {e}", file=sys.stderr)
+        log_error("deploy", f"Deploy failed: container start: {e}", paths, project=project_name)
+        return False
     except (DockerError, BindSourceError, RunAsError, ComposeResolveError, RemapError,
             ComposeError, OSError) as e:
         print(f"  ERROR: {e}", file=sys.stderr)
-        log_error("deploy", f"Deploy failed: container start: {e}", paths, project=project_name)
-        return 1
+        log_error("deploy", f"Deploy stopped before the container start: {e}", paths,
+                  project=project_name)
+        raise NotStarted(str(e)) from e
+    return True
 
+
+def _verify(project_name: str, paths: BoxPaths, manifest: dict, component: str,
+            txn: str | None, clearance: Clearance | None, ref: str) -> int:
+    project_dir = paths.project_dir(project_name)
+    compose_files = ["compose.yml", "compose.boxmunge.yml"]
     post_deploy_diagnostics(project_name, paths, project_dir, manifest)
 
     print("  Reloading Caddy...")
