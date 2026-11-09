@@ -387,26 +387,24 @@ fi
 
 # Build + (re)start the boxmunge-system container: isolation for age and
 # rclone, also the data helper's image. There is no host fallback: without it
-# backups, restores, backup-sync and data operations fail. So a failed build
-# stops a fresh install or an operator's re-run here, before "installed
-# successfully". Run by the upgrade shim it only warns: the shim blocklists a
-# release on any install.sh failure, which for a transient download error
-# would hold the release's fixes off the box, while the previous container
-# keeps running on its previous image. The installer fingerprint is then left
-# unrecorded, so the next upgrade runs install.sh, and the build, again.
+# backups, restores, backup-sync and data operations fail. A failed build is
+# recorded and the rest of the install carries on, so the box is complete
+# but for this image; fail_if_system_image_stale then stops a fresh install
+# or an operator's re-run at the end, before "installed successfully".
+# Run by the upgrade shim it only warns: the shim blocklists a release on any
+# install.sh failure, which for a transient download error would hold the
+# release's fixes off the box, while the previous container keeps running on
+# its previous image (`health` and `doctor` warn about it). The installer
+# fingerprint is then left unrecorded, so the next upgrade runs install.sh,
+# and the build, again.
 SYSTEM_IMAGE_STALE=0
+SYSTEM_REBUILD="sudo docker compose -f ${BOXMUNGE_ROOT}/system/compose.yml up -d --build"
 refresh_system_container() {
     BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/system-container.sh" && return 0
-    if [[ "${FROM_UPGRADE_SHIM}" -eq 1 ]]; then
-        SYSTEM_IMAGE_STALE=1
-        echo "WARNING: the boxmunge-system image did not build (see above); the previous" \
-             "container, if any, keeps running. The next upgrade retries the build, or" \
-             "run: docker compose -f ${BOXMUNGE_ROOT}/system/compose.yml up -d --build" >&2
-        return 0
-    fi
-    echo "ERROR: the boxmunge-system image did not build (see above). Without it backups," \
-         "restores and data operations cannot run. Fix the cause and re-run the installer." >&2
-    exit 1
+    SYSTEM_IMAGE_STALE=1
+    echo "WARNING: the boxmunge-system image did not build (see above); the previous" \
+         "container, if any, keeps running. Backups, restores and data operations need" \
+         "it. Rebuild it as supervisor once the cause is fixed: ${SYSTEM_REBUILD}" >&2
 }
 refresh_system_container
 
@@ -540,6 +538,20 @@ INSTALLED_VERSION="$("${BOXMUNGE_ROOT}/env-active/bin/pip" show boxmunge-server 
 if [[ "${INSTALLED_VERSION}" != "unknown" && "${FROM_UPGRADE_SHIM}" -eq 0 ]]; then
     echo "${INSTALLED_VERSION}" > "${BOXMUNGE_ROOT}/config/version"
 fi
+
+# The boxmunge-system build failed (refresh_system_container): everything
+# else is in place, so a fresh install or an operator's re-run stops here
+# with the rebuild to run. Under the upgrade shim it only warned.
+fail_if_system_image_stale() {
+    [[ "${SYSTEM_IMAGE_STALE}" -eq 1 && "${FROM_UPGRADE_SHIM}" -eq 0 ]] || return 0
+    echo "" >&2
+    echo "ERROR: boxmunge is installed, but the boxmunge-system image did not build" \
+         "(see the WARNING above), so backups, restores and data operations cannot" \
+         "run yet. Fix the cause, then rebuild it as supervisor: ${SYSTEM_REBUILD}" \
+         "and check with: boxmunge doctor" >&2
+    exit 1
+}
+fail_if_system_image_stale
 
 # ---------------------------------------------------------------------------
 # Record the installer fingerprint (install.sh and the files it installs

@@ -18,13 +18,26 @@ import boxmunge.system_container as sc
 from boxmunge.paths import BoxPaths
 
 
+REPO = Path(__file__).resolve().parents[1]
+
+
+def _definition(paths: BoxPaths) -> str | None:
+    """The installed definition, as the image would be labelled after a
+    successful build; None where the root has no system/ (connect-only tests)."""
+    try:
+        return sc.system_definition(paths)
+    except FileNotFoundError:
+        return None
+
+
 def healthy_inspect(paths: BoxPaths, *, user: str | None = None) -> dict[str, Any]:
     """A `docker inspect` document for a correctly configured container."""
     owner = paths.projects.stat()
     return {
         "State": {"Status": "running"},
-        "Config": {"User": user or f"{owner.st_uid}:{owner.st_gid}"},
         "HostConfig": {"UsernsMode": "host"},
+        "Config": {"User": user or f"{owner.st_uid}:{owner.st_gid}",
+                   "Labels": {sc.DEFINITION_LABEL: _definition(paths)}},
         "Mounts": [
             {"Source": str(m.host), "Destination": m.container}
             for m in sc.system_mounts(paths)
@@ -76,6 +89,9 @@ class FakeSystemContainer:
 @pytest.fixture
 def system_container(paths: BoxPaths, monkeypatch: pytest.MonkeyPatch) -> FakeSystemContainer:
     """A running, correctly mounted fake system container for `paths`."""
+    paths.system.mkdir(parents=True, exist_ok=True)
+    for name in ("Dockerfile", "compose.yml"):  # as install.sh installs them
+        (paths.system / name).write_bytes((REPO / "system" / name).read_bytes())
     paths.rclone_config_dir.mkdir(parents=True, exist_ok=True)
     if not paths.backup_key.exists():
         paths.backup_key.write_text("AGE-SECRET-KEY-1TEST\n")
