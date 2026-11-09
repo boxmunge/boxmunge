@@ -57,9 +57,11 @@ Usage: boxmunge add-git-project <name> <repo-url> [--ref REF]
 
 Register a git-backed project.""",
     "stage": """\
-Usage: boxmunge stage <project> [--ref REF] [--dry-run]
+Usage: boxmunge stage <project> [--ref REF] [--no-pull] [--dry-run]
 
-Deploy alongside production on the staging hostname for verification.""",
+Deploy alongside production on the staging hostname for verification.
+Build services are built on their base images' current registry digests;
+--no-pull builds from the base images this box already has instead.""",
     "promote": """\
 Usage: boxmunge promote <project> [--dry-run]
 
@@ -69,12 +71,16 @@ Usage: boxmunge unstage <project> [--dry-run]
 
 Tear down staging.""",
     "prod-deploy": """\
-Usage: boxmunge prod-deploy <project> [--ref REF] [--no-snapshot] [--dry-run]
+Usage: boxmunge prod-deploy <project> [--ref REF] [--no-snapshot] [--no-pull] [--dry-run]
+       boxmunge prod-deploy <project> --redeploy [--no-snapshot] [--no-pull] [--dry-run]
        boxmunge prod-deploy <project> --abandon
 
-Deploy directly to production (skips staging). --abandon undoes an install
-that stopped before its pre-deploy hook ran: the replaced release's files
-go back; containers and data are not touched.""",
+Deploy directly to production (skips staging). Build services are built on
+their base images' current registry digests; --no-pull builds from the base
+images this box already has instead. With no new bundle in the inbox,
+prod-deploy refuses; --redeploy deploys the installed release again.
+--abandon undoes an install that stopped before its pre-deploy hook ran:
+the replaced release's files go back; containers and data are not touched.""",
     "install-txn": """\
 Usage: boxmunge install-txn <project> --drop
 

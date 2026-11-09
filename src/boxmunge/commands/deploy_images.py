@@ -8,6 +8,12 @@ registry image behind container-update's back), then inspect them, decide
 each service's user (run_as.effective_user), check what that means for the
 service's data (deploy_checks) and record the decision. Profiled services
 are included: `up <service>` (restore) starts them from the same record.
+
+A pulling build (`build --pull`, unless the operator passed --no-pull)
+asks each base image's registry for its current digest, so a base image's
+fixes reach the build. An unchanged digest downloads nothing and keeps the
+build cache. The pull does not move the box's local tag of the base, so a
+build without --pull (rollback) builds from the base the box had before.
 """
 from __future__ import annotations
 
@@ -62,18 +68,42 @@ def _pull_again(target: ReleaseTarget, services: dict[str, dict],
     return decided
 
 
+# BuildKit's wording when it cannot read a base image's manifest from its
+# registry (unreachable, refused, rate-limited), on both image stores.
+_BASE_UNREADABLE = "failed to resolve source metadata"
+
+
+def _build(target: ReleaseTarget, builds: list[str], *, pull: bool) -> None:
+    """`compose build`; with `pull`, every base image's registry is asked for
+    its current digest. A base that cannot be read fails the build: the
+    deploy never silently falls back to the base the box has."""
+    print(f"  Building {', '.join(builds)}"
+          + (", checking each base image's registry for a newer digest..." if pull
+             else " from the base images this box already has (--no-pull)..."))
+    try:
+        _run([*target.command(), "build", *(["--pull"] if pull else []), *builds],
+             cwd=target.compose.cwd, timeout=_BUILD_TIMEOUT)
+    except DockerError as e:
+        if pull and _BASE_UNREADABLE in str(e):
+            raise DockerError(
+                f"A base image's registry could not be read, so the build stopped "
+                f"before anything was started:\n{e}\nIf the registry is unreachable "
+                f"for now, run the command again with --no-pull: it builds from the "
+                f"base images this box already has, which miss any fix published "
+                f"since they were pulled.") from e
+        raise
+
+
 def build_and_pull(target: ReleaseTarget, services: dict[str, dict],
-                   refetch: frozenset[str] = frozenset()) -> dict[str, str]:
-    """Build, pull what is missing, and pull `refetch` again under candidate
-    names (returned: {service: ref to decide from})."""
+                   refetch: frozenset[str] = frozenset(), *, pull: bool) -> dict[str, str]:
+    """Build (`pull`: with --pull), pull what is missing, and pull `refetch`
+    again under candidate names (returned: {service: ref to decide from})."""
     builds = sorted(n for n, s in services.items() if s.get("build") is not None)
     pulls = sorted(n for n, s in services.items() if s.get("build") is None
                    and isinstance(s.get("image"), str) and not is_platform_image(s["image"]))
     again = sorted(n for n in pulls if n in refetch)
     if builds:
-        print(f"  Building {', '.join(builds)}...")
-        _run([*target.command(), "build", *builds], cwd=target.compose.cwd,
-             timeout=_BUILD_TIMEOUT)
+        _build(target, builds, pull=pull)
     decided = _pull_again(target, services, again) if again else {}
     rest = [n for n in pulls if n not in refetch]
     if rest:
@@ -125,17 +155,18 @@ def _log_opt_outs(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
 
 
 def prepare_release_users(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, Any], *,
-                          component: str, rollback: bool = False,
+                          component: str, pull: bool, rollback: bool = False,
                           refetch: frozenset[str] = frozenset()) -> dict[str, ServiceUser]:
     """Build/pull, inspect, decide and check every service's user; nothing
     is recorded (record_release_users does, once the release's configs are
-    written). A rollback keeps what the record decided; one with no record
-    only builds and returns {}. `refetch`: services whose registry image is
-    pulled again (a USER change container-update held back). Raises
-    DeployRefused, DockerError or RunAsError (the record cannot be read)."""
+    written). `pull`: build with --pull (build_and_pull). A rollback keeps
+    what the record decided; one with no record only builds and returns {}.
+    `refetch`: services whose registry image is pulled again (a USER change
+    container-update held back). Raises DeployRefused, DockerError or
+    RunAsError (the record cannot be read)."""
     carried = read_users(paths, target.project, staging=target.staging) if rollback else None
     model, services = resolved_services(target)
-    decide_from = build_and_pull(target, services, refetch)
+    decide_from = build_and_pull(target, services, refetch, pull=pull)
     if carried == {}:
         # A rollback of a project whose users no deploy has decided: it
         # goes back to running as its images say, as it did; its next

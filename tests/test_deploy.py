@@ -41,7 +41,7 @@ class TestDeployEnvFiles:
         write_state(paths.project_deploy_state("testapp"), {"current_ref": "testapp-1"})
         paths.host_secrets.write_text("HOST_TOKEN=abc\n")
 
-        run_deploy("testapp", paths)
+        run_deploy("testapp", paths, redeploy=True)
 
         override = (pdir / "compose.boxmunge.yml").read_text()
         assert "secrets.env" in override

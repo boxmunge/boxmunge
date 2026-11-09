@@ -84,7 +84,13 @@ def test_prod_deploy_abandon_forwards_without_bundling(project, fake_remote) -> 
     assert not list(project.glob("*.tar.gz"))
 
 
-@pytest.mark.parametrize("flag", ["--dry-run", "--no-snapshot"])
+@pytest.mark.parametrize("command", ["stage", "prod-deploy"])
+def test_no_pull_is_forwarded(project, fake_remote, command) -> None:
+    assert run_cli([command, "--no-pull"]) == 0
+    assert _remote_commands(fake_remote)[-1].endswith(f"{command} myapp --no-pull")
+
+
+@pytest.mark.parametrize("flag", ["--dry-run", "--no-snapshot", "--no-pull"])
 def test_prod_deploy_abandon_takes_no_other_options(project, fake_remote, flag,
                                                     capsys) -> None:
     assert run_cli(["prod-deploy", "--abandon", flag]) == 2

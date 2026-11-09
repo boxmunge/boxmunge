@@ -49,6 +49,11 @@ _TOOL_DEFS: list[dict[str, Any]] = [
                 "ref": {"type": "string", "description": "Git ref or bundle to deploy"},
                 "no_snapshot": {"type": "boolean", "description": "Skip pre-deploy snapshot"},
                 "dry_run": {"type": "boolean", "description": "Preview without applying"},
+                "no_pull": {"type": "boolean", "description": "Build from the base images "
+                            "this box already has instead of checking their registries "
+                            "for newer digests (when a registry is unreachable)"},
+                "redeploy": {"type": "boolean", "description": "Deploy the installed "
+                             "release again when the inbox has no new bundle"},
             },
             "required": ["project"],
         },
@@ -63,6 +68,9 @@ _TOOL_DEFS: list[dict[str, Any]] = [
                 "project": {"type": "string", "description": "Project name"},
                 "ref": {"type": "string", "description": "Bundle to stage"},
                 "dry_run": {"type": "boolean", "description": "Preview without applying"},
+                "no_pull": {"type": "boolean", "description": "Build from the base images "
+                            "this box already has instead of checking their registries "
+                            "for newer digests (when a registry is unreachable)"},
             },
             "required": ["project"],
         },

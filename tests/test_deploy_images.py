@@ -5,6 +5,7 @@ import pytest
 
 from boxmunge.commands import deploy_images as di
 from boxmunge.docker_containers import ImageFacts
+from boxmunge.docker_run import DockerError
 from boxmunge.release_target import (
     DeployRefused, ReleaseTarget, production_target, staging_release_target,
 )
@@ -25,11 +26,52 @@ def test_build_and_pull_names_services_and_pulls_only_missing(paths, monkeypatch
         "web": {"build": {"context": "."}, "image": "boxmunge.invalid/app/web"},
         "db": {"image": "postgres:16"},
         "side": {"image": "boxmunge.invalid/app/web"},
-    })
+    }, pull=False)
     (build, kw), (pull, _) = calls
     assert build[-4:] == ["--profile", "*", "build", "web"]
     assert pull[-5:] == ["pull", "--ignore-buildable", "--policy", "missing", "db"]
     assert "--profile" in pull and kw["cwd"] == paths.project_dir("app")
+
+
+def test_a_pulling_build_asks_for_each_base_images_current_digest(paths, monkeypatch) -> None:
+    calls = _calls(monkeypatch)
+    di.build_and_pull(production_target(paths, "app"),
+                      {"web": {"build": ".", "image": "boxmunge.invalid/app/web"}}, pull=True)
+    assert calls[0][0][-3:] == ["build", "--pull", "web"]
+
+
+_UNREADABLE = ("Command failed: docker compose build --pull web\nfailed to solve: "
+               "registry.example/base:1: failed to resolve source metadata for "
+               "registry.example/base:1: failed to do request: dial tcp: i/o timeout")
+
+
+def _failing_build(monkeypatch, message: str) -> None:
+    def run(cmd, **kw):
+        raise DockerError(message)
+    monkeypatch.setattr(di, "_run", run)
+
+
+def test_an_unreadable_base_registry_fails_naming_no_pull(paths, monkeypatch) -> None:
+    _failing_build(monkeypatch, _UNREADABLE)
+    with pytest.raises(DockerError) as e:
+        di.build_and_pull(production_target(paths, "app"),
+                          {"web": {"build": ".", "image": "boxmunge.invalid/app/web"}},
+                          pull=True)
+    assert "--no-pull" in str(e.value) and "i/o timeout" in str(e.value)
+
+
+@pytest.mark.parametrize("pull, message", [
+    (True, "failed to solve: process \"/bin/sh -c make\" did not complete"),
+    (False, _UNREADABLE),  # --no-pull cannot help a build that did not pull
+])
+def test_other_build_failures_are_not_blamed_on_the_pull(paths, monkeypatch, pull,
+                                                         message) -> None:
+    _failing_build(monkeypatch, message)
+    with pytest.raises(DockerError) as e:
+        di.build_and_pull(production_target(paths, "app"),
+                          {"web": {"build": ".", "image": "boxmunge.invalid/app/web"}},
+                          pull=pull)
+    assert str(e.value) == message
 
 
 def test_staging_target_passes_project_directory_and_env_file(tmp_path, monkeypatch) -> None:
@@ -37,7 +79,7 @@ def test_staging_target_passes_project_directory_and_env_file(tmp_path, monkeypa
     target = ReleaseTarget("app", ComposeTarget(
         cwd=tmp_path / "rel", project_name="app-staging", files=["/s/base.yml", "/s/over.yml"],
         project_directory=tmp_path / "rel", env_file=tmp_path / "rel" / ".env"), staging=True)
-    di.build_and_pull(target, {"db": {"image": "postgres:16"}})
+    di.build_and_pull(target, {"db": {"image": "postgres:16"}}, pull=True)
     cmd = calls[0][0]
     assert cmd[cmd.index("--project-directory") + 1] == str(tmp_path / "rel")
     assert cmd[cmd.index("--env-file") + 1] == str(tmp_path / "rel" / ".env")

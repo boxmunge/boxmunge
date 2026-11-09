@@ -27,7 +27,7 @@ def images(monkeypatch):
     """No builds or pulls; every image sets no USER."""
     built: list[list[str]] = []
     monkeypatch.setattr(di, "build_and_pull",
-                        lambda target, s, refetch=frozenset(): built.append(sorted(s)) or {})
+                        lambda target, s, refetch=frozenset(), *, pull: built.append(sorted(s)) or {})
     monkeypatch.setattr(di, "image_facts", lambda ref: ImageFacts("sha256:" + "a" * 64, "", ()))
     return built
 
@@ -46,7 +46,7 @@ def test_every_root_registry_service_is_listed_and_nothing_recorded(
     _resolved(monkeypatch, {**SERVICES, "cache": {"image": "redis:7"}})
     with pytest.raises(DeployRefused) as e:
         di.prepare_release_users(paths, production_target(paths, "shop"), MANIFEST,
-                                 component="deploy")
+                                 component="deploy", pull=False)
     assert len(e.value.problems) == 3  # cache and db, both named, and how to merge them
     assert "merge their blocks" in e.value.problems[-1]
     assert read_users(paths, "shop") == {}
@@ -56,7 +56,7 @@ def test_decisions_are_recorded_and_opt_outs_logged(paths, images, monkeypatch) 
     _resolved(monkeypatch, SERVICES)
     manifest = {**MANIFEST, "services": {**MANIFEST["services"], "db": DB_IMAGE}}
     users = di.prepare_release_users(paths, production_target(paths, "shop"), manifest,
-                                     component="deploy")
+                                     component="deploy", pull=False)
     assert users["web"].emitted() == "10001:10001" and users["db"].emitted() is None
     assert read_users(paths, "shop") == {}  # recorded only once the configs are written
     di.record_release_users(paths, production_target(paths, "shop"), manifest, users,
@@ -72,7 +72,7 @@ def test_the_overlays_own_user_is_not_taken_for_compose_ymls(paths, images, monk
         **SERVICES["web"], "user": "1000"}}
     _resolved(monkeypatch, services, compose_users={"worker": 1000})
     users = di.prepare_release_users(paths, production_target(paths, "shop"), MANIFEST,
-                                     component="deploy")
+                                     component="deploy", pull=False)
     assert users["web"].source == "default" and users["worker"].source == "compose"
 
 
@@ -82,7 +82,7 @@ def test_check_refusals_stop_before_recording(paths, images, monkeypatch) -> Non
     manifest = {**MANIFEST, "services": {**MANIFEST["services"], "db": DB_IMAGE}}
     with pytest.raises(DeployRefused, match="no"):
         di.prepare_release_users(paths, production_target(paths, "shop"), manifest,
-                                 component="deploy")
+                                 component="deploy", pull=False)
     assert read_users(paths, "shop") == {}
 
 
@@ -91,12 +91,12 @@ def test_a_rollback_keeps_the_recorded_user_of_an_undeclared_service(
     _resolved(monkeypatch, SERVICES)
     write_users(paths, "shop", {"db": ServiceUser(None, "manifest")})
     users = di.prepare_release_users(paths, production_target(paths, "shop"), MANIFEST,
-                                     component="rollback", rollback=True)
+                                     component="rollback", pull=False, rollback=True)
     assert users["db"] == ServiceUser(None, "manifest")
     assert "keeps its recorded user" in capsys.readouterr().out
     with pytest.raises(DeployRefused):
         di.prepare_release_users(paths, production_target(paths, "shop"), MANIFEST,
-                                 component="deploy")
+                                 component="deploy", pull=False)
 
 
 COMPOSE = "services:\n  web:\n    build: .\n  db:\n    image: postgres:16\n"
@@ -214,7 +214,7 @@ def test_a_refused_stage_starts_nothing_and_a_good_one_records_staging_users(
 def test_a_rollback_of_an_undecided_project_stays_undecided(paths, images, monkeypatch) -> None:
     _resolved(monkeypatch, SERVICES)
     assert di.prepare_release_users(paths, production_target(paths, "shop"), MANIFEST,
-                                    component="rollback", rollback=True) == {}
+                                    component="rollback", pull=False, rollback=True) == {}
     assert images == [["db", "web"]]  # still built: the start does not build
     assert read_users(paths, "shop") == {}
 

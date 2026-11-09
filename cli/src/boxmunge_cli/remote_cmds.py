@@ -79,7 +79,8 @@ def _bundle_upload_and_run(command: str, server_flags: list[str]) -> int:
 
 
 def _cmd_stage(args: argparse.Namespace) -> int:
-    return _bundle_upload_and_run("stage", ["--dry-run"] if args.dry_run else [])
+    return _bundle_upload_and_run("stage", [*(["--dry-run"] if args.dry_run else []),
+                                            *(["--no-pull"] if args.no_pull else [])])
 
 
 def _cmd_prod_deploy(args: argparse.Namespace) -> int:
@@ -90,13 +91,15 @@ def _cmd_prod_deploy(args: argparse.Namespace) -> int:
         flags.append("--dry-run")
     if args.no_snapshot:
         flags.append("--no-snapshot")
+    if args.no_pull:
+        flags.append("--no-pull")
     return _bundle_upload_and_run("prod-deploy", flags)
 
 
 def _abandon_install(args: argparse.Namespace) -> int:
     """Undo the open install on the server; nothing is bundled or uploaded."""
     from boxmunge_cli.ssh import run_ssh
-    if args.dry_run or args.no_snapshot:
+    if args.dry_run or args.no_snapshot or args.no_pull:
         raise CliExit(USAGE, "--abandon takes no other options.")
     config = connect()
     return run_ssh(config, "prod-deploy", config["project"], "--abandon")
@@ -168,6 +171,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                     "on the server. Verify the staging site, then 'promote'.")
     p.add_argument("--dry-run", action="store_true",
                    help="Upload and validate on the server without staging")
+    p.add_argument("--no-pull", action="store_true",
+                   help="Build from the base images the server already has instead of "
+                        "checking their registries for newer digests")
     p.set_defaults(func=_cmd_stage)
 
     p = subparsers.add_parser(
@@ -178,6 +184,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                    help="Upload and validate on the server without deploying")
     p.add_argument("--no-snapshot", action="store_true",
                    help="Skip the pre-deploy backup snapshot")
+    p.add_argument("--no-pull", action="store_true",
+                   help="Build from the base images the server already has instead of "
+                        "checking their registries for newer digests")
     p.add_argument("--abandon", action="store_true",
                    help="Undo an interrupted install whose pre-deploy hook has not "
                         "run: the previous release's files go back (a first "

@@ -61,6 +61,7 @@ class TreeDeploy:
     staged_id: str | None = None
     component: str = "deploy"
     no_snapshot: bool = False
+    pull: bool = False         # build with --pull (deploy_images.build_and_pull)
     on_installed: Callable[[], None] | None = None   # after the code is in place
     on_switched: Callable[[int], None] | None = None  # after replace_release returns
     # A quarantined project's manifest before this install replaced it; set by
@@ -193,7 +194,7 @@ def _decide(project_name: str, paths: BoxPaths, req: TreeDeploy,
     clearance), or the exit code of a refusal (reported)."""
     try:
         return decide_release_users(project_name, paths, req.manifest, req.component,
-                                    req.previous_manifest)
+                                    req.previous_manifest, pull=req.pull)
     except DeployRefused as e:
         print(f"ERROR: {req.ref} cannot start as it is:\n{e}", file=sys.stderr)
         log_error(req.component, f"{req.ref} cannot start as it is: {e}", paths,
@@ -367,7 +368,7 @@ def bundle_resume_problem(project_name: str, paths: BoxPaths, txn: InstallTxn,
 
 
 def resume_without_bundle(project_name: str, paths: BoxPaths, txn: InstallTxn,
-                          ref: str | None, component: str) -> int:
+                          ref: str | None, component: str, *, pull: bool) -> int:
     """`prod-deploy` found no bundle while an install is open: a bundle
     install that reached `installed` resumes from the project dir."""
     problem = bundle_resume_problem(project_name, paths, txn, ref)
@@ -380,4 +381,5 @@ def resume_without_bundle(project_name: str, paths: BoxPaths, txn: InstallTxn,
     except IntakeError as e:
         return report_refusal(e)
     return deploy_tree_locked(project_name, paths, TreeDeploy(
-        tree=None, ref=txn.ref, source="bundle", manifest=manifest, component=component))
+        tree=None, ref=txn.ref, source="bundle", manifest=manifest, component=component,
+        pull=pull))

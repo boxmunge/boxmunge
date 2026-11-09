@@ -50,9 +50,9 @@ on the server's console), or be confirmed at the terminal. An IP target needs
 |---|---|
 | `init --server HOST [--host NAME]` | Write `.boxmunge` and scaffold a project |
 | `bundle [DIR] [--list] [--validate] [--json]` | Build `<project>-<timestamp>.tar.gz` |
-| `stage [--dry-run]` | Bundle, upload, stage |
+| `stage [--dry-run] [--no-pull]` | Bundle, upload, stage |
 | `promote [--dry-run]` | Promote staging to production |
-| `prod-deploy [--dry-run] [--no-snapshot]` | Bundle, upload, deploy to production |
+| `prod-deploy [--dry-run] [--no-snapshot] [--no-pull]` | Bundle, upload, deploy to production |
 | `prod-deploy --abandon` | Undo an interrupted install before its pre-deploy hook ran |
 | `rollback [--yes]` | Roll production back to the previous deploy |
 | `status [--json]` | The server's project dashboard |
@@ -117,6 +117,11 @@ This needs OpenSSH 8.7 or newer on your machine. To upload by hand, use
 The client checks only the manifest's shape. The server validates the full
 manifest on `stage` and `prod-deploy` before it changes anything; add
 `--dry-run` to run that check without deploying.
+
+The server builds `build:` services on the current digest of each base
+image. `--no-pull` builds from the base images the server already has, for
+when a registry cannot be reached. Servers older than the release that added
+it refuse the flag.
 
 If a `prod-deploy` is interrupted or fails before the project's pre-deploy
 hook ran, `boxmunge prod-deploy --abandon` uploads nothing and runs
