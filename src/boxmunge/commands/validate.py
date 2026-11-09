@@ -27,7 +27,8 @@ def _gather_validation(
     if paths.is_project_pre_registered(project_name):
         errors.append(
             f"Project '{project_name}' is pre-registered (secrets set) but "
-            f"not yet deployed. Deploy first with: boxmunge prod-deploy {project_name}"
+            f"not yet deployed. Upload its first bundle, then deploy it with: "
+            f"boxmunge prod-deploy {project_name}"
         )
         return errors, warnings
 

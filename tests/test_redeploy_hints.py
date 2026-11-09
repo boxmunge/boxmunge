@@ -27,16 +27,14 @@ BARE = re.compile(r"prod-deploy \{[a-z_]+\}(?!\s*--)")
 # Files whose bare ones are printed where the bare command is accepted.
 ACCEPTED = {
     "redeploy_hint.py": "a git project never deployed: its ref is what there is",
-    "commands/check.py": "not deployed yet: a first deploy of an uploaded bundle",
-    "commands/validate.py": "not deployed yet: a first deploy of an uploaded bundle",
-    "commands/backup_cmd.py": "not deployed yet: a first deploy of an uploaded bundle",
     "commands/add_git_project_cmd.py": "a git project: no inbox",
     "commands/diff_cmd.py": "printed after comparing the bundle waiting in the inbox",
     "commands/deploy_no_bundle.py": "after an upload, or for a git project",
 }
-# Anywhere else a bare one must sit beside the redeploy: the message then
-# names both, an upload's deploy and the installed release's.
-BESIDE = ("redeploy_command(", "redeploy_either(", "--redeploy")
+# Anywhere else a bare one must sit beside the redeploy (the message then
+# names both, an upload's deploy and the installed release's), or say that
+# it follows an upload, after which the bare command is accepted.
+BESIDE = ("redeploy_command(", "redeploy_either(", "--redeploy", "pload")
 
 
 def _bare_without_the_redeploy(path: Path) -> list[str]:
