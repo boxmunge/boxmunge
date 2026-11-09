@@ -210,32 +210,37 @@ PyPI Trusted Publishing, so no API token exists anywhere.
 each with its own credential, never interchangeable:
 
 - `/v1/admin/stats` (HTML, for a browser) needs a passkey sign-in. Signing in sets an 8-hour
-  session cookie (`Path=/v1/admin`, HttpOnly, Secure, SameSite=Strict) signed with a key derived
-  from `STATS_SECRET`. Without a session, the page redirects to `/v1/admin/login`.
+  session cookie (`Path=/v1/admin`, HttpOnly, Secure, SameSite=Strict). Its signing key needs both
+  `STATS_SECRET` and a random key created in the service's database on first start, so the
+  Bearer secret alone cannot forge a session. Without a session, the page redirects to
+  `/v1/admin/login`.
 - `/v1/admin/version-checks` (JSON, for scripts) needs `Authorization: Bearer <STATS_SECRET>`.
   The session cookie does not open it, and the HTML page ignores the Bearer header.
 
-Without `STATS_SECRET`, every admin route answers 503 and names the missing setting. The relying
+Without `STATS_SECRET`, or with one shorter than 32 characters, every admin route answers 503 and
+names the setting. Wrong secrets, whether sent as a Bearer header or as the registration code,
+count against one limit per client (10 per 15 minutes); past it, that client is refused even
+with the right secret until the window ends. Pending sign-in and registration challenges are
+capped at 5 per client, so one client cannot block another's sign-in. The relying
 party is `ADMIN_RP_ID` (default `boxmunge.dev`) with origin `https://<ADMIN_RP_ID>`, so the passkey
 works on the production host only, not on `staging.<host>`. One passkey can be registered. It must
 use ES256 or EdDSA, and the authenticator must verify the user.
 
 ### First-time setup
 
-1. Set the registration code (it is `STATS_SECRET`), from the deploy shell:
-   `secrets set boxmunge-web STATS_SECRET=<long random value>`, for example from
+1. Set the registration code (it is `STATS_SECRET`, at least 32 characters), from the deploy
+   shell: `secrets set boxmunge-web STATS_SECRET=<value>`, generating the value with
    `openssl rand -hex 32`.
 2. Redeploy the service (`stage boxmunge-web`, then `promote boxmunge-web`) so it reads the secret.
 3. Open `https://boxmunge.dev/v1/admin/register`, paste the code into the form, and create the
    passkey when the browser asks. Registration then closes.
 4. Sign in at `https://boxmunge.dev/v1/admin/login`.
 
-The code goes only in the form, never in a URL. Registration-code attempts are rate-limited per
-client.
+The code goes only in the form, never in a URL.
 
 ### Recovery
 
 If the passkey is lost, or you suspect `STATS_SECRET` has leaked, set a new `STATS_SECRET` and
-redeploy. The stored passkey was registered under the old code, so it is ignored and registration
+redeploy (`openssl rand -hex 32` again). The stored passkey was registered under the old code, so it is ignored and registration
 reopens. Every existing session ends too, because the session key changes. Then repeat steps 3
 and 4. Nothing on the web resets the passkey.
