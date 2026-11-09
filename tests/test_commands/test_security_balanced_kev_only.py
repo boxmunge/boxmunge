@@ -39,7 +39,7 @@ LIFTED_TITLE = "Quarantine lifted"
 
 
 def _kev(*ids: str) -> KevCatalog:
-    return KevCatalog(frozenset(ids), datetime.now(timezone.utc))
+    return KevCatalog(frozenset(ids), datetime.now(timezone.utc), datetime.now(timezone.utc), 'test')
 
 
 @pytest.fixture
@@ -172,7 +172,7 @@ def test_a_stale_kev_catalog_never_lifts(box) -> None:
     """A stale catalog reads as "nothing exploited": it cannot clear a site."""
     paths, pushover = box()
     seed_quarantine(paths)
-    _scan(paths, KevCatalog(frozenset(), None))
+    _scan(paths, KevCatalog(frozenset(), None, None, None))
     assert is_quarantined("demo", paths)
     assert paths.docker.calls == ["caddy_reload", "compose_stop"]
     assert not _titles(pushover, LIFTED_TITLE)

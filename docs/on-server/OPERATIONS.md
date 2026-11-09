@@ -1287,7 +1287,11 @@ does not page every run); the refusal is logged every time:
   boxmunge reads (compose, manifest, `.env`, the overlay, an include or
   env/label file) is not what deploy recorded. A tampered manifest
   (`security.profile: off`) or compose is caught here even when it still
-  validates. Redeploy to run the new content.
+  validates. Redeploy to run the new content (for a staged copy, stage
+  again).
+- **"control file ... is newly tracked"** — this boxmunge reads a file
+  the project's record does not cover yet (for example the `.env` of an
+  included file's directory). Redeploy (or stage again) to record it.
 - **"redeploy to replace it"** — the project's running containers mount
   the project directory, or a file boxmunge reads, read-write (a project
   deployed before this rule). A plain restart would re-run the compromised
@@ -2198,7 +2202,7 @@ Scan cadence:
 Inspect state:
 
 ```
-boxmunge security                    # fleet summary
+boxmunge security                    # fleet summary (incl. KEV catalog source and freshness)
 boxmunge security myapp              # per-project view
 boxmunge security --json             # machine-readable
 ```

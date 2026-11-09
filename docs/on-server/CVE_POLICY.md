@@ -265,12 +265,36 @@ falls through to step 11 (the threshold gate) alongside `Status: affected`.
 
 ## CISA KEV feed
 
-### Source and refresh
+### Sources and refresh
 
-The KEV feed is CISA's Known Exploited Vulnerabilities catalog:
+The KEV feed is CISA's Known Exploited Vulnerabilities catalog. boxmunge
+reads it from an ordered list of sources, which by default is CISA's feed
+and then CISA's own mirror of it on GitHub (`cisagov/kev-data`):
 
 ```
 https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+https://raw.githubusercontent.com/cisagov/kev-data/main/known_exploited_vulnerabilities.json
+```
+
+CISA's CDN refuses some hosting providers' address ranges (HTTP 403), and
+the mirror serves the same file. The sources are tried in order on every
+refresh. The first one whose catalog passes every check below is cached,
+along with the URL that served it. Each source that failed is logged with
+its error (`boxmunge log --component cve-scan`). This is not a hidden
+fallback. Every source on the list is a copy of CISA's catalog that boxmunge
+trusts, and `boxmunge security` shows which one answered.
+
+To replace the list, set `kev.sources` in `boxmunge.yml`. It must be a
+non-empty list of `https://` URLs that serve the same JSON, for example an
+internal mirror. A redirect to a non-`https://` URL is refused. A mistake
+in the setting fails only the KEV refresh, with the priority-1 alert
+below naming it; every other command still reads the config:
+
+```yaml
+kev:
+  sources:
+    - https://kev-mirror.internal.example/known_exploited_vulnerabilities.json
+    - https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
 ```
 
 `refresh_kev()` is called once per scan run alongside `refresh_db()` (the
@@ -281,26 +305,121 @@ After refresh, the catalog is loaded and a single `kev_lookup` predicate is
 threaded into every project's `evaluate_finding` call for that run — the
 exploitation signal is consistent fleet-wide within a scan run.
 
+The fleet view (`boxmunge security`, `--json` and the `security.summary`
+action) shows the cached catalog under `kev`. It lists the source that
+served it, the catalog's release date (`dateReleased`), when it was
+fetched, how many CVEs it holds and, if it is stale, why.
+
 ### Staleness and fail-safe
 
-The catalog is considered stale when its `fetched_at` timestamp is older than
-`KEV_MAX_AGE_DAYS` (currently 8 days — a week of fetch failures before the
-gate degrades), or more than a day in the future (clock skew when the cache
-was written).
+The catalog is stale when either of these holds:
+- **No catalog has been accepted** for more than `KEV_MAX_AGE_DAYS`
+  (8 days), counted from the last accepted fetch. This is a week of
+  refreshes in which every source failed or lagged. If the sources did
+  answer, but only with catalogs older than the cached one, the alert says
+  so.
+- **The catalog is lagging.** Its own `dateReleased` is more than
+  `KEV_MAX_RELEASE_AGE_DAYS` (21 days) old. A mirror that stopped syncing
+  keeps answering, so the fetch time alone would make its old catalog look
+  fresh. CISA does not publish daily. Since 2025 the catalog has gone up to
+  18 days without a new release, so the limit leaves room for those quiet
+  spells.
 
-### Refresh sanity floor
+A catalog dated more than a day in the future (fetch or release time) is
+also stale, since that means the clock was wrong when it was written. A
+cache written by a boxmunge older than 0.11.4 has no release date or
+source. Its release age is unknown, not stale, so only the fetch-time
+condition applies to it, and KEV quarantine and lifts keep working across
+the upgrade. The first successful refresh records the release date and
+source. A cache file that cannot be read counts as no catalog, and the
+staleness reason says `the KEV cache is unreadable (…)`.
 
-CISA's catalog only grows. A refresh is **rejected** — the previous cache
-is kept untouched — when the feed's payload is malformed, when it holds
-fewer than `KEV_MIN_ENTRIES` (1,000) CVEs, or when it would shrink the
-cached catalog by more than `KEV_MAX_SHRINK` (5%). An empty or truncated
-feed (an error page, a CDN serving a partial file) would otherwise be
-accepted as a fresh catalog and switch the exploitation gate off without
-ever going stale. A rejected refresh fires the priority-1 KEV alert for
-that run (title `CISA KEV refresh rejected — previous catalog kept`, with
-the reason), even while the kept cache is still fresh. A plain network
-failure is not a rejection: the cache ages normally and the staleness
-alert below takes over after `KEV_MAX_AGE_DAYS`.
+### Refresh checks
+
+CISA's catalog only grows, and it very rarely withdraws an entry. Each
+source's catalog is checked on its own, and rejected if any of these hold:
+- the response is larger than `KEV_MAX_BYTES` (16 MiB; the catalog was
+  about 1.8 MB in November 2026), is not JSON, or is malformed (no
+  `vulnerabilities` list, or no valid `dateReleased`);
+- its `dateReleased` is more than an hour in the future
+  (`KEV_MAX_FUTURE_RELEASE`). A compromised mirror, a typo or a box
+  clock that is behind would
+  otherwise be cached and then block every genuine catalog as older than
+  it. A date that is out of range (for example
+  `0001-01-01T00:00:00+14:00`) is rejected too;
+- it holds fewer than `KEV_MIN_ENTRIES` (1,000) CVEs;
+- more than `KEV_MAX_REMOVALS` (3) of the cached CVE IDs are missing from
+  it. The IDs are compared, not just counted, so a same-size poisoned or
+  rolled-back list is caught too. Dropping a KEV CVE would lift the
+  quarantines held for it.
+
+A rejected catalog is never cached, and the next source is tried. An empty
+or truncated feed (an error page, a CDN serving a partial file) would
+otherwise be accepted as a fresh catalog and switch the exploitation gate
+off without ever going stale. If no source's catalog was accepted and at
+least one was rejected (or `kev.sources` in `boxmunge.yml` could not be
+read), the run fires the priority-1 KEV alert (title `CISA KEV refresh
+rejected — previous catalog kept`), even while the kept cache is still
+fresh. The alert names each source's error. For too many missing CVEs,
+that includes the missing IDs.
+
+If CISA really did withdraw more than three entries at once, accept the
+new catalog by removing the cache as root:
+
+```
+sudo rm /opt/boxmunge/state/kev/catalog.json
+```
+
+The next scan then fetches the catalog with no baseline to compare
+against. Until then, the kept cache stays in use. Removing the cache this
+way accepts those withdrawals outright. With no baseline, nothing is
+recorded as withdrawn, so no quarantine is held for them: a quarantine
+that stood only on one of them lifts at its next clean scan.
+
+Up to three missing CVEs are accepted. They are logged, and the run sends
+a normal-priority notice, `CISA KEV no longer lists <N> CVEs`, that names
+them.
+
+A single source can drop an entry, so a quarantine is not lifted
+automatically while the project's images contain a withdrawn CVE. That
+CVE can be the one the quarantine was recorded for, or another in the
+same images: fixing the recorded CVE must not put a withdrawn, possibly
+still exploited one live. The refresh records each withdrawal in
+`state/kev/withdrawn.json` before it caches the catalog. While the
+project's images still contain such a CVE:
+- every later scan keeps the quarantine, including scans in runs that did
+  not refresh it away, a run that did not scan the project, or a scan
+  that was incomplete;
+- a production deploy or promote that still ships the CVE is refused.
+
+The first such scan sends one priority-1 alert per withdrawal (`Quarantine
+kept — CISA KEV withdrew <CVE>`) naming the project, the CVE and the
+source. To accept the withdrawal, run `boxmunge security resume
+<project>`. The resume records the acceptance for that project, so a later
+quarantine of it is not held for that CVE again. A scan or release whose
+images no longer contain the withdrawn CVEs is a fix, and lifts the
+quarantine as usual. When an accepted catalog lists the CVE again, its
+withdrawal record is dropped. If `withdrawn.json` cannot be read, scans
+keep every cleared quarantine, and refreshes are rejected (priority 1),
+until root repairs or removes the file.
+
+Two outcomes are logged but do not alert while the cached catalog is
+fresh:
+- **Unreachable sources** (HTTP errors, timeouts, a response cut short,
+  an HTML page instead of JSON, a redirect to `http://`). The cache ages
+  normally, and the staleness alert below takes over.
+- **Lagging sources.** A catalog released before the cached one is not
+  cached, so a lagging source cannot roll the catalog back. This applies
+  only when the cache came from the same source or from one earlier in
+  the list. A source earlier in the list than the cache's own is not held
+  to the cached date. Otherwise a later source stamping a newer date (a
+  compromised mirror, or an internal mirror stamping its own sync time)
+  would lock the earlier ones out for good. The missing-ID check still
+  guards what such a catalog drops. A cache from a source no longer on the
+  list ranks below every listed one. The lagging check runs before the
+  missing-ID check, because a lagging catalog also lacks the entries added
+  since. A cached release date that is in the future is not used as the
+  baseline.
 
 **Fail-safe: toward uptime, never toward quarantine.** When the catalog is
 missing or stale, `is_known_exploited` returns `False`. The site is not taken
@@ -308,9 +427,13 @@ down on an exploitation signal that cannot currently be verified.
 
 Staleness is never silent. When a scan run detects a stale or missing catalog,
 it:
-1. Logs a WARNING with the last fetch timestamp (if any).
+1. Logs a WARNING with the reason and each source's error.
 2. Fires a single priority-1 Pushover alert per run:
-   `CISA KEV feed stale — exploitation defense degraded`.
+   `CISA KEV feed stale — exploitation defense degraded`. The body says which
+   condition fired (no catalog accepted, or the catalog is lagging). It also
+   gives the cached catalog's release date, fetch time and source, and lists
+   every source this run tried with its error (for example `HTTP 403
+   Forbidden` or `timed out after 30s`).
 
 This alert fires once per scan run, not once per finding, to avoid alert
 storms. The degradation must not go unnoticed: under `relaxed` and
@@ -819,7 +942,7 @@ of the two the last scan checked.
 The Trivy DB and the CISA KEV catalog are both refreshed before each scan
 run (one call each). DB-refresh and KEV-refresh failures are non-fatal:
 the scan proceeds against whatever cache exists and a warning is logged. A
-stale KEV catalog, or a KEV refresh rejected by the sanity floor, fires a
+stale KEV catalog, or a KEV refresh rejected by the refresh checks, fires a
 priority-1 alert (see "CISA KEV feed" above).
 
 Idempotency: the daily cron does not re-fire alerts for unchanged
@@ -927,7 +1050,7 @@ then either:
 **KEV is never held.** A project with a KEV-listed quarantine-level finding
 is quarantined at once, whatever else is happening: active exploitation is
 exactly when blast radius is acceptable. A broken KEV feed is guarded
-earlier, by the refresh sanity floor (see "CISA KEV feed").
+earlier, by the refresh checks (see "CISA KEV feed").
 
 A single-project box never trips (the threshold is at least 2). On a
 two-project box both projects quarantining for new findings in the same
@@ -979,6 +1102,8 @@ several findings are involved the title names the worst and adds
 | `[<hostname>] CVE policy enforcement begins in <N>h` (one-time) | priority-1 |
 | `[<hostname>] CISA KEV feed stale — exploitation defense degraded` | priority-1 |
 | `[<hostname>] CISA KEV refresh rejected — previous catalog kept` | priority-1 |
+| `[<hostname>] CISA KEV no longer lists <N> CVEs` (up to 3 withdrawn) | normal |
+| `[boxmunge:<project>] Quarantine kept — CISA KEV withdrew <CVE>` (once; `security resume` accepts it) | priority-1 |
 | `[<hostname>] CVE scan incomplete — <N> projects not fully scanned` | priority-1 |
 | `[<hostname>] <project>: quarantine lifted by deploying <ref>` | normal; priority-1 when the release relaxed the policy or the policy at quarantine time is unknown |
 | `[<hostname>] <project>: quarantine held` (a release staged by boxmunge 0.10.1 is open; resolve it with `boxmunge-server legacy-stage <project>`) | priority-1 |

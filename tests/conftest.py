@@ -236,19 +236,21 @@ def _no_kev_network(monkeypatch):
     _fresh_empty = KevCatalog(
         cve_ids=frozenset(),
         fetched_at=datetime.now(timezone.utc),
+        released_at=datetime.now(timezone.utc),
+        source="test",
     )
 
-    monkeypatch.setattr(
-        "boxmunge.cve.kev.refresh_kev", lambda paths: None,
-    )
-    from boxmunge.cve.kev import KevRefresh
+    from boxmunge.cve.kev_refresh import KevRefresh
 
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.refresh_kev",
-        lambda paths: KevRefresh(updated=False),
+        "boxmunge.cve.kev_refresh.refresh_kev", lambda paths: KevRefresh(source=None),
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.load_kev", lambda paths: _fresh_empty,
+        "boxmunge.commands.security_kev.refresh_kev",
+        lambda paths: KevRefresh(source=None),
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_kev.load_kev", lambda paths: _fresh_empty,
     )
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.load_kev", lambda paths: _fresh_empty,
@@ -269,6 +271,7 @@ def _compose_config_without_docker(request, monkeypatch, fake_containers):
     if request.node.get_closest_marker("integration"):
         return
     import json
+    import os
 
     import yaml
 
@@ -284,12 +287,16 @@ def _compose_config_without_docker(request, monkeypatch, fake_containers):
             raise docker.DockerError(f"compose config failed: {e}") from e
         services = doc.get("services") if isinstance(doc, dict) else None
         # Like Compose, bring in the services of included files (one level),
-        # so the resolver's literal-versus-resolved service check holds.
+        # so the resolver's literal-versus-resolved service check holds, with
+        # their env files made absolute from the included file's base.
         includes = doc.get("include") if isinstance(doc, dict) else None
         for ref in includes if isinstance(includes, list) else []:
             inc = path.parent / (ref if isinstance(ref, str) else "")
             if isinstance(ref, str) and inc.is_file() and isinstance(services, dict):
                 inc_doc = yaml.safe_load(inc.read_text()) or {}
+                for svc in (inc_doc.get("services") or {}).values():
+                    if isinstance(svc, dict) and isinstance(svc.get("env_file"), str):
+                        svc["env_file"] = os.path.normpath(inc.parent / svc["env_file"])
                 services.update(inc_doc.get("services") or {})
         if not all_profiles and isinstance(services, dict):
             # Like Compose, leave out services behind a profile.
