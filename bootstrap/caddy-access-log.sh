@@ -107,17 +107,24 @@ PY
 # deploy planted there is ever opened as root.
 as_deploy() { runuser -u "${DEPLOY_USER}" -- "$@"; }
 
+# The check reads what Caddy imports (caddy/sites/*.conf), the pending journal
+# entries and the project overrides: the files the rewrite edits, and only
+# regular ones. Not all of caddy/sites, which may hold an operator's TLS key
+# that deploy cannot read; grep failing on that blocklisted the upgrade (#105).
 sites() {
     [[ -d "${SITES}" ]] || return 0
     as_deploy python3 -I -c "${REWRITE}" "${SITES}" "${JOURNAL}"
-    local targets=("${SITES}") left status=0
-    if [[ -d "${JOURNAL}" ]]; then
-        targets+=("${JOURNAL}")
-    fi
+    local targets=() target left status=0
     shopt -s nullglob
+    for target in "${SITES}"/*.conf "${JOURNAL}"/*.json; do
+        if [[ -f "${target}" && ! -L "${target}" ]]; then
+            targets+=("${target}")
+        fi
+    done
     targets+=("${BOXMUNGE_ROOT}"/projects/*/caddy.override.conf)
     shopt -u nullglob
-    left="$(as_deploy grep -rlF --devices=skip /var/log/caddy "${targets[@]}")" || status=$?
+    [[ ${#targets[@]} -gt 0 ]] || return 0
+    left="$(as_deploy grep -lF --devices=skip /var/log/caddy "${targets[@]}")" || status=$?
     if [[ ${status} -eq 1 ]]; then
         return 0
     fi
@@ -130,8 +137,10 @@ sites() {
         echo "       the install or upgrade again (after 'boxmunge-upgrade clear-blocklist" >&2
         echo "       <version>' if an upgrade stopped here)." >&2
     else
-        echo "ERROR: could not check ${targets[*]} for" >&2
-        echo "       /var/log/caddy (grep exit ${status}); fix what grep reported above." >&2
+        echo "ERROR: could not check the Caddy configs for /var/log/caddy (grep exit" >&2
+        echo "       ${status}). Fix what grep reported above, then run the install or" >&2
+        echo "       upgrade again (after 'boxmunge-upgrade clear-blocklist <version>' if" >&2
+        echo "       an upgrade stopped here)." >&2
     fi
     exit 1
 }
