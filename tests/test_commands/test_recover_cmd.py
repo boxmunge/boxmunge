@@ -1,7 +1,12 @@
 """Tests for boxmunge recover — un-stop a health-monitor-stopped prod."""
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 import yaml
+
+from boxmunge.bind_sources import BindSourceError
+from boxmunge.compose import ComposeError
 
 from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state, write_state
@@ -49,6 +54,36 @@ def _patched(fn):
 
 
 class TestRunRecover:
+    @_patched
+    def test_regenerates_the_overlay_before_the_checked_start(
+        self, mock_smoke, _reload, mock_up, _caddy, mock_override, tmp_path,
+    ):
+        """The start checks and `up` see the overlay that will run."""
+        mock_smoke.return_value = (True, "ok")
+        order = []
+        mock_override.side_effect = lambda *a, **k: order.append("overlay")
+        mock_up.side_effect = lambda *a, **k: order.append("up")
+        from boxmunge.commands.recover_cmd import run_recover
+        paths, name = _setup(tmp_path)
+        assert run_recover(name, paths, yes=True) == 0
+        assert order == ["overlay", "up"]
+
+    @pytest.mark.parametrize("error", [
+        ComposeError("cannot read the users record"),
+        BindSourceError("cannot read state/deploy/myapp.binds.json"),
+    ])
+    @_patched
+    def test_an_overlay_that_cannot_be_regenerated_starts_nothing(
+        self, _smoke, _reload, mock_up, _caddy, mock_override, error, tmp_path, capsys,
+    ):
+        from boxmunge.commands.recover_cmd import run_recover
+        mock_override.side_effect = error
+        paths, name = _setup(tmp_path)
+        assert run_recover(name, paths, yes=True) == 1
+        assert "cannot regenerate the compose overlay" in capsys.readouterr().err
+        mock_up.assert_not_called()
+        assert read_state(paths.project_health_state(name))["status"] == "critical_stopped"
+
     @_patched
     def test_recovers_monitor_stopped_prod(
         self, mock_smoke, _reload, _up, _caddy, _override, tmp_path,

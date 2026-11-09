@@ -302,9 +302,8 @@ class TestSkipsQuarantined:
 
         processed = apply_projects(paths)[1].processed
 
-        # alpha was quarantined, so the normal-regen path must have been
-        # skipped (alpha not in processed).
-        assert "alpha" not in processed
+        # Its overlay is regenerated (the lift starts it), its routing is not.
+        assert "alpha" in processed
         # The maintenance fragment must be on disk now.
         content = site_conf.read_text()
         assert "503" in content
@@ -328,9 +327,9 @@ class TestSkipsQuarantined:
         assert len(skip_logs) == 1, mock_log.call_args_list
 
     def test_regen_does_not_call_prepare_caddy_for_quarantined(self, tmp_path):
-        """Defensive: prepare_caddy_config / prepare_compose_override
-        MUST NOT be invoked for a quarantined project — the maintenance
-        fragment is hand-rendered."""
+        """Defensive: prepare_caddy_config MUST NOT be invoked for a
+        quarantined project — the maintenance fragment is hand-rendered.
+        Its overlay is regenerated: the lift starts this release's."""
         from boxmunge.upgrade_exclusions import apply_projects
         paths = _setup_paths(tmp_path)
         self._make_project(paths, "alpha")
@@ -339,12 +338,12 @@ class TestSkipsQuarantined:
         with patch(
             "boxmunge.commands.upgrade_steps.prepare_caddy_config",
         ) as mock_caddy, patch(
-            "boxmunge.commands.upgrade_steps.prepare_compose_override",
+            "boxmunge.commands.upgrade_offline.prepare_compose_override",
         ) as mock_overlay:
             apply_projects(paths)[1]
 
         mock_caddy.assert_not_called()
-        mock_overlay.assert_not_called()
+        mock_overlay.assert_called_once()
 
 
 class TestCvePolicyValidatorWiring:

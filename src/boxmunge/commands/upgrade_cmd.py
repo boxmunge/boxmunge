@@ -98,8 +98,8 @@ def _migrate_regenerate_reload(
     for name, why in sorted(regen.refused.items()):
         print(f"  REFUSED: {name}: {why}")
     if regen.refused:
-        print("  Refused projects keep their previous configs and running "
-              "containers and are not restarted. Fix compose.yml and redeploy.")
+        print("  Refused projects keep their previous configs and containers and "
+              "are not restarted. Fix the cause each line names and redeploy.")
     for name, kind in sorted(excluded.legacy.items()):
         print(f"  LEFT AS IS: {name}: a release staged by boxmunge 0.10.1 ({kind}); "
               f"resolve it with boxmunge-server legacy-stage {name}")

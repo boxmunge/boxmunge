@@ -1854,7 +1854,18 @@ How an upgrade is applied and undone:
    operations that recreate containers (the daily container-update, for one) do not consult
    the upgrade's refusal.
    Paused, quarantined and health-monitor-stopped projects are not restarted either; each
-   stays offline until `resume`, `security resume` or `recover` brings it back.
+   stays offline until `resume`, `security resume` or `recover` brings it back. A paused or
+   quarantined project keeps its maintenance page, but the upgrade still regenerates its
+   compose overlay and records the bind sources it mounts, so `resume`, `security resume`
+   and the scan's automatic lift start it on its deployed files without a deploy. If its
+   overlay cannot be regenerated or recorded (an unreadable users record, say), it does not
+   fail the upgrade: it is listed as `REFUSED` and alerted with the others, keeps its previous
+   overlay and record, and stays offline. Once the cause is fixed, `resume` or `security
+   resume` brings it back, and for a `balanced` project whose finding no longer quarantines,
+   every scan retries the automatic lift on its own. A project last deployed by boxmunge
+   0.10.1 needs a redeploy (or the next upgrade) instead: its previous overlay names its
+   image by the old name, which the upgrade dropped, and its previous record lacks this
+   release's mounts, so the scan and the start checks refuse it.
 4. A health check runs, then a 6-hour probation. A critical health result during probation
    rolls back.
 

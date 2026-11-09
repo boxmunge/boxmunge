@@ -13,12 +13,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from boxmunge.bind_sources import BindSourceError
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_guard import ComposeRefused, check_start
 from boxmunge.cve.quarantine import (
     QuarantineError, lift_quarantine, mark_quarantine_incomplete, reassert_quarantine,
 )
+from boxmunge.docker_run import DockerError
 from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.pause import is_paused
@@ -47,10 +49,11 @@ def restore_from_quarantine(paths: BoxPaths, project: str, *, component: str) ->
     project lock and has scanned what will start.
 
     Raises QuarantineError, the record kept, when the lift cannot complete.
-    A refused start is refused before the live Caddy config is rewritten.
-    A failure once it is (a render, the reload, `compose up`) re-asserts the
-    quarantine before raising, so visitors get the maintenance page back,
-    not a 502 until the next scan.
+    The overlay is regenerated first, so the start checks see the overlay
+    `compose up` will run, and a refused start is refused before the live
+    Caddy config is rewritten. A failure once it is (a render, the reload,
+    `compose up`) re-asserts the quarantine before raising, so visitors get
+    the maintenance page back, not a 502 until the next scan.
     """
     if is_paused(project, paths):
         lift_quarantine(project, paths, project_caddy_site_content=None,
@@ -60,6 +63,10 @@ def restore_from_quarantine(paths: BoxPaths, project: str, *, component: str) ->
         manifest = load_manifest(paths.project_manifest(project))
     except ManifestError as e:
         raise QuarantineError(str(e)) from e
+    try:
+        prepare_compose_override(paths, manifest, component=component)
+    except (OSError, ValueError, DockerError, BindSourceError) as e:
+        raise QuarantineError(f"Failed to regenerate the compose overlay: {e}") from e
     try:
         check_start(paths, project, component=component,
                     compose_files=compose_files_for(paths, project))
@@ -75,11 +82,9 @@ def restore_from_quarantine(paths: BoxPaths, project: str, *, component: str) ->
 def _start(paths: BoxPaths, project: str, manifest: dict, component: str) -> None:
     try:
         prepare_caddy_config(paths, manifest)
-        prepare_compose_override(paths, manifest, component=component)
         site_content = paths.project_caddy_site(project).read_text()
     except (OSError, ValueError) as e:
-        raise QuarantineError(f"Failed to render Caddy/compose: {e}") from e
-    # Only now: the override decides whether compose.boxmunge.yml is in.
+        raise QuarantineError(f"Failed to render Caddy: {e}") from e
     lift_quarantine(project, paths, project_caddy_site_content=site_content,
                     compose_files=compose_files_for(paths, project), component=component)
 

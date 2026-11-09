@@ -15,7 +15,10 @@ from typing import Any, Iterator
 
 from boxmunge.caddy import generate_caddy_config, prepare_caddy_config
 from boxmunge.commands.health_state import is_monitor_stopped
-from boxmunge.compose import generate_compose_override, load_user_compose, prepare_compose_override
+from boxmunge.commands.upgrade_offline import (
+    PutBackError, offline_dry_run_line, regenerate_offline, render_overlay,
+)
+from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.user_entries import USER_ENTRIES, split_user_entries
 from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
@@ -226,21 +229,18 @@ class Regeneration:
 def _regenerate_project(
     paths: BoxPaths, name: str, manifest: dict[str, Any], regen: Regeneration,
 ) -> None:
-    """Write one project's Caddy site config and compose overlay. Caller
-    holds its project lock and has excluded it if it must be left alone."""
+    """Write one project's Caddy site config and compose overlay, and record
+    the bind sources the overlay mounts. Caller holds its project lock and
+    has excluded it if it must be left alone."""
     # A paused or CVE-quarantined project is deliberately offline. Its Caddy
     # fragment must stay the maintenance page: regenerating live routing
     # would send visitors to stopped upstreams (502) instead of the page the
     # operator chose. Re-render the maintenance page (so a template change
-    # still reaches it) and leave the overlay alone; resume and security
-    # resume regenerate both when the project comes back.
+    # still reaches it). Its overlay is regenerated and recorded all the
+    # same (boxmunge.commands.upgrade_offline).
     block = is_blocked(name, paths)
     if block:
         write_maintenance_page(paths, name, manifest)
-        log_operation("upgrade", block.skip_message, paths, project=name)
-        if not paths.project_bind_record(name).exists():
-            _record_bind_sources(paths, name)
-        return
     # A compose.yml that predates a validator fix must not get a fresh
     # overlay, nor be rebuilt and re-run as root by restart_projects. Its
     # old configs and running containers are left untouched; the upgrade
@@ -254,6 +254,9 @@ def _regenerate_project(
                   f"is not restarted; fix compose.yml and redeploy.",
                   paths, project=name)
         return
+    if block:
+        _regenerate_offline(paths, name, manifest, block.reason.value, regen)
+        return
     try:
         prepare_caddy_config(paths, manifest)
         prepare_compose_override(paths, manifest, component="upgrade")
@@ -265,6 +268,27 @@ def _regenerate_project(
     if refusal is not None:
         regen.refused[name] = refusal
         return
+    regen.processed.append(name)
+
+
+def _regenerate_offline(paths: BoxPaths, name: str, manifest: dict[str, Any], reason: str,
+                        regen: Regeneration) -> None:
+    """A paused or quarantined project's overlay and record
+    (boxmunge.commands.upgrade_offline): refused, not fatal, unless its
+    previous files cannot be put back, which would leave the two disagreeing."""
+    try:
+        refusal = regenerate_offline(paths, name, manifest)
+    except PutBackError as e:
+        raise UpgradeGateError(f"{name}: its overlay or bind record changed and the "
+                               f"previous ones could not be put back: {e}") from e
+    if refusal is not None:
+        regen.refused[name] = refusal
+        log_error("upgrade", f"{name} ({reason}): {refusal}. Fix the cause, then bring it "
+                  f"back or redeploy it.", paths, project=name)
+        return
+    log_operation("upgrade", f"{name} is {reason}: it keeps its maintenance page and is not "
+                  f"restarted; its overlay was regenerated and recorded for when it comes "
+                  f"back", paths, project=name)
     regen.processed.append(name)
 
 
@@ -339,22 +363,20 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
             manifest = migrated
         manifest = split_user_entries(manifest)  # as loading does
         block = is_blocked(name, paths)
-        if block:
-            if manifest.get("hosts"):
-                render_maintenance_caddy_config(manifest["hosts"])
-            report.append(f"{name}: {block.reason.value}; keeps its maintenance page")
-            continue
+        if block and manifest.get("hosts"):
+            render_maintenance_caddy_config(manifest["hosts"])
         refusal = compose_refusal(paths, name, manifest)
         if refusal is not None:
             report.append(f"{name}: would be refused by this release's compose "
                           f"validator and left on its current configs and "
                           f"containers, not restarted: {refusal}")
             continue
+        if block:
+            report.append(offline_dry_run_line(paths, name, manifest, block.reason.value))
+            continue
         if not paths.project_caddy_override(name).exists():
             generate_caddy_config(manifest)
-        generate_compose_override(
-            manifest, user_compose=load_user_compose(paths.project_compose(name), name),
-        )
+        render_overlay(paths, name, manifest)
         report.append(f"{name}: configs render OK")
     return report
 

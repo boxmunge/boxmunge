@@ -141,7 +141,7 @@ def test_the_scan_finds_the_checked_call_sites() -> None:
     assert sites == [
         "commands/data_cmd.py", "commands/deploy.py", "commands/quarantine_lift.py",
         "commands/recover_cmd.py", "commands/restore.py",
-        "commands/resume_cmd.py", "commands/rollback.py",
+        "commands/resume_cmd.py", "commands/rollback.py", "commands/upgrade_offline.py",
         "commands/upgrade_steps.py", "container_update.py", "cve/quarantine.py",
         "legacy_stage_ops.py", "production_stopped.py", "staging_bringup.py", "staging_data.py",
         "userns/bringup.py",
