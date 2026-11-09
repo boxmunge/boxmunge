@@ -104,8 +104,7 @@ def _prepare_storage(paths: BoxPaths, project: str,
     # into it while neither side runs.
     print("  Creating staging containers for the data copy...")
     compose_up_checked(paths, project, component="stage", staging=True,
-                       record=True, deploying=True, start=False,
-                       pinned=is_quarantined(project, paths))
+                       record=True, deploying=True, start=False)
     copy_production_data(paths, project, plan)
     print("  Data copy complete.")
     return clearance
@@ -163,9 +162,10 @@ def bring_up_staging(paths: BoxPaths, project: str, manifest: dict[str, Any]) ->
         return 1
     print("  Starting staging containers...")
     try:
-        # A quarantined project's staging starts only the images it scanned.
+        # Only the images this stage built and pulled (and, for a
+        # quarantined project, scanned): no start pulls or builds.
         compose_up_checked(paths, project, component="stage", staging=True, record=True,
-                           deploying=True, pinned=is_quarantined(project, paths))
+                           deploying=True)
     except DockerError as e:
         print(f"  ERROR: {e}", file=sys.stderr)
         log_error("stage", f"Stage failed: {e}", paths, project=project)

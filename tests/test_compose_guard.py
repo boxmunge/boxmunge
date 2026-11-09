@@ -90,7 +90,28 @@ def test_no_start_builds_an_image(box) -> None:
     paths, _, up, _, _ = box
     _deploy(paths)
     _restart(paths)
-    assert [c.kwargs["build"] for c in up.call_args_list] == [False, False]
+    assert [(c.kwargs["build"], c.kwargs["pinned"]) for c in up.call_args_list] == [
+        (False, True), (False, True)]
+
+
+def test_a_start_whose_image_is_missing_is_refused_naming_it(box, fake_containers) -> None:
+    paths, _, up, _, sent = box
+    _deploy(paths)
+    up.side_effect = DockerError("Error response from daemon: No such image: nginx:1.27")
+    fake_containers.images["nginx:1.27"] = None
+    with pytest.raises(ComposeRefused, match=r"the image for web \(nginx:1.27\) is missing.*"
+                       r"run prod-deploy shop"):
+        _restart(paths)
+    assert "the image for web" in sent[0]
+
+
+def test_a_failed_start_with_every_image_present_keeps_its_own_error(box) -> None:
+    paths, _, up, _, _ = box
+    _deploy(paths)
+    up.side_effect = DockerError("port is already allocated")
+    with pytest.raises(DockerError, match="port is already allocated") as failed:
+        _restart(paths)
+    assert not isinstance(failed.value, ComposeRefused)
 
 
 def test_a_running_container_whose_image_is_gone_is_recreated(box, monkeypatch) -> None:

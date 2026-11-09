@@ -1807,10 +1807,11 @@ How an upgrade is applied and undone:
    before v0.9.3); one it cannot re-own is printed as `FAIL` with the `chown` to run, and does
    not stop the upgrade. It then migrates manifests and regenerates every project's Caddy site
    and compose overlay, project by project under that project's lock, reloads Caddy and
-   restarts projects. A restart starts the images the project's last deploy built: it
-   never rebuilds a `build:` service, so an upgrade cannot put a build on the box that no
-   deploy scanned or decided users for. (An image that is missing is built, as when an
-   upgrade from 0.10 renames a project's built images.)
+   restarts projects. A restart starts the images the project's last deploy built and
+   pulled: it never builds or pulls, so an upgrade cannot put an image on the box that no
+   deploy scanned or decided users for. A project whose image is missing is not restarted
+   (`start refused: the image for <service> (<image>) is missing ... run prod-deploy
+   <project>`); its running containers are left as they are.
    Three kinds of project are left exactly as they are (not migrated, regenerated or
    restarted), reported as `LEFT AS IS` or `Skipped (busy)`, alerted, and do not fail the
    upgrade: one with a release staged by boxmunge 0.10.1 (one high-priority alert per project;
