@@ -130,7 +130,7 @@ def box(tmp_path, monkeypatch):
 
 
 def _kev() -> KevCatalog:
-    return KevCatalog(frozenset(), datetime.now(timezone.utc))
+    return KevCatalog(frozenset(), datetime.now(timezone.utc), datetime.now(timezone.utc), 'test')
 
 
 def _upgrade(paths):

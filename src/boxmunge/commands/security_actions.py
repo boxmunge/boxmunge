@@ -21,12 +21,12 @@ from boxmunge.cve.breaker import BreakerError
 from boxmunge.cve.alerting import (
     format_grace_heads_up_alert,
     format_host_suppression_expired_alert,
-    format_kev_stale_alert,
     format_scan_failure_alert,
     format_scan_unrecorded_alert,
     send_alerts,
 )
-from boxmunge.cve.kev import KevCatalog, load_kev, refresh_kev
+from boxmunge.commands.security_kev import refresh_kev_and_alert
+from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.scan_state import last_scanned_at
 from boxmunge.cve.grace import (
     GraceError,
@@ -110,41 +110,6 @@ def _maybe_fire_grace_heads_up(
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
-
-
-def _refresh_kev_and_alert(paths: BoxPaths, now: datetime) -> KevCatalog:
-    """Refresh the CISA KEV catalog once per run and load it.
-
-    The one catalog is threaded into every project scan so the exploitation
-    signal is consistent fleet-wide. Fail-safe: a stale catalog never
-    quarantines, and a rejected refresh keeps the previous cache (B-06), but
-    either fires ONE priority-1 alert per run so the degradation is never
-    silent.
-    """
-    refresh = refresh_kev(paths)
-    kev = load_kev(paths)
-    stale = kev.is_stale(now.date())
-    if not stale and refresh.rejected is None:
-        return kev
-    log_warning(
-        "cve-scan",
-        "CISA KEV catalog degraded — exploitation-based quarantine at risk"
-        + (f" (refresh rejected: {refresh.rejected})" if refresh.rejected else ""),
-        paths, project=None,
-        detail={
-            "kev_fetched_at": kev.fetched_at.isoformat() if kev.fetched_at else None,
-            "stale": stale,
-            "rejected": refresh.rejected,
-        },
-    )
-    alert = format_kev_stale_alert(kev.fetched_at, stale=stale, rejected=refresh.rejected)
-    try:
-        send_alerts((alert,), paths)
-    except Exception as e:  # noqa: BLE001 — alerting must never block scan
-        log_warning(
-            "cve-scan", f"KEV alert emission failed: {e}", paths, project=None,
-        )
-    return kev
 
 
 def _summarise_decisions(decisions: list[ProjectDecision]) -> str:
@@ -443,7 +408,7 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
         return 1
 
     now = datetime.now(timezone.utc)
-    kev = _refresh_kev_and_alert(paths, now)
+    kev = refresh_kev_and_alert(paths, now)
 
     # Migration grace window — bootstrap lazily on first scan after upgrade.
     # Corrupt grace state aborts the scan rather than silently proceeding

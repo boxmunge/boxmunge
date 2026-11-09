@@ -69,7 +69,7 @@ def test_quarantine_is_reasserted_even_when_findings_are_gone(
     paths = make_box(tmp_path)
     seed_quarantine(paths, action_complete=False)
     _scan_returns(monkeypatch, [])
-    scan_one_project(paths, "demo", in_grace=False, kev=KevCatalog(frozenset(), None))
+    scan_one_project(paths, "demo", in_grace=False, kev=KevCatalog(frozenset(), None, None, None))
     assert docker.calls == ["caddy_reload", "compose_stop"]
     assert q.quarantine_action_complete("demo", paths)
 

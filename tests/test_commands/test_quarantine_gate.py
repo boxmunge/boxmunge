@@ -65,7 +65,8 @@ class Box:
     def kev(self, *cves: str) -> None:
         self.paths.kev_catalog.parent.mkdir(parents=True, exist_ok=True)
         self.paths.kev_catalog.write_text(json.dumps({
-            "fetched_at": datetime.now(timezone.utc).isoformat(), "cve_ids": list(cves)}))
+            "fetched_at": datetime.now(timezone.utc).isoformat(), "source": "test",
+            "released_at": datetime.now(timezone.utc).isoformat(), "cve_ids": list(cves)}))
 
     def clear(self, manifest=MANIFEST):
         return gate.clear_release(self.paths, production_target(self.paths, "demo"), manifest)

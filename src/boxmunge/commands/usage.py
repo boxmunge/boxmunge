@@ -256,10 +256,12 @@ Usage: boxmunge security [--json]
        boxmunge security suppress <CVE>|--current (--project <name>|--host)
                                   --until <YYYY-MM-DD> --reason <text>
        boxmunge security unsuppress <CVE> (--project <name>|--host)
-       boxmunge security resume <project>
+       boxmunge security resume <project> [--accept-stale-kev]
 
 Container security and CVE policy: fleet or per-project view, scan,
 suppressions, and lifting a quarantine. --until is at most 90 days ahead.
+--accept-stale-kev lifts a quarantine the CISA KEV catalog cannot back (stale
+and listing a CVE involved, or missing); it is logged and alerted.
 Operator only (refused by the deploy shell): --host suppressions, and
 scan --apply-held, which applies quarantines the CVE circuit breaker held.""",
     "bundle": """\

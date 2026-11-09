@@ -6,8 +6,12 @@ audit-only re-scan of every one of the project's current images succeeds
 and shows no quarantine-level finding. A failed image scan, an image the
 per-project budget skipped, or a service whose image cannot be identified
 keeps the quarantine, because boxmunge cannot show the finding is resolved.
-So does a stale CISA KEV catalog when the quarantine rests on it
-(cve.lift_rule, the rule the scan's lift and the deploy gate share).
+So does a CISA KEV catalog that cannot back the lift (cve.lift_rule, the
+rule the deploy gate shares): a stale one that lists the quarantine's CVE
+or a CVE in the images, or none at all. `--accept-stale-kev` lifts anyway,
+for an operator who has judged that risk: it is logged before the lift and
+alerted after it, and says what it gives up. A lift on a stale catalog the
+rule allows is alerted the same way, naming what could not be checked.
 """
 from __future__ import annotations
 
@@ -16,8 +20,10 @@ from datetime import datetime, timezone
 
 from boxmunge.commands.quarantine_lift import restore_from_quarantine
 from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project_locked
-from boxmunge.cve.lift_rule import stale_kev_lift_refusal
-from boxmunge.cve.policy import Disposition, FindingDisposition, Posture
+from boxmunge.cve.lift_rule import (
+    ACCEPT_FLAG, KevLiftCheck, accept_advice, check_kev_for_lift, fresh_data_advice,
+)
+from boxmunge.cve.policy import Disposition, FindingDisposition
 from boxmunge.cve.quarantine import (
     QuarantineError, checked_quarantine_record, is_quarantined, read_quarantine_state,
 )
@@ -26,7 +32,9 @@ from boxmunge.cve.kev import load_kev
 from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.lifecycle import BlockReason, is_blocked
+from boxmunge.log import log_warning
 from boxmunge.manifest import ManifestError
+from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 
 
@@ -81,7 +89,8 @@ def _report_blocking(project: str, blocking: list[FindingDisposition]) -> None:
 
 def cmd_security_resume(args: list[str], paths: BoxPaths) -> int:
     from boxmunge.commands.argv import parse_args, require_project_name
-    parsed = parse_args("security", args, min_positional=1, max_positional=1)
+    parsed = parse_args("security", args, flags={ACCEPT_FLAG},
+                        min_positional=1, max_positional=1)
     project = require_project_name("security", parsed.positional[0])
 
     if not is_quarantined(project, paths):
@@ -101,13 +110,15 @@ def cmd_security_resume(args: list[str], paths: BoxPaths) -> int:
     # that starts them.
     try:
         with project_lock(project, paths):
-            return security_resume_locked(paths, project)
+            return security_resume_locked(paths, project,
+                                          accept_stale_kev=parsed.has(ACCEPT_FLAG))
     except LockError:
         _err(f"ERROR: Another operation is in progress for '{project}'. Try again shortly.")
         return 1
 
 
-def security_resume_locked(paths: BoxPaths, project: str) -> int:
+def security_resume_locked(paths: BoxPaths, project: str, *,
+                           accept_stale_kev: bool = False) -> int:
     """The security-resume core: re-scan, then lift. Caller holds the
     project lock; never takes it."""
     block = is_blocked(project, paths)
@@ -146,18 +157,50 @@ def security_resume_locked(paths: BoxPaths, project: str) -> int:
     except QuarantineError as e:
         _err(f"ERROR: {e}")
         return 1
-    refusal = stale_kev_lift_refusal(Posture(scan.posture), record["cve_id"], kev,
-                                     datetime.now(timezone.utc).date())
-    if refusal is not None:
-        _err(f"ERROR: Cannot resume '{project}' — the re-scan is clear, but {refusal}")
-        _err("  The quarantine stays in place.")
+    check = check_kev_for_lift(record["cve_id"], scan.decisions, kev,
+                               datetime.now(timezone.utc).date())
+    if check.refusal is not None and not accept_stale_kev:
+        _err(f"ERROR: Cannot resume '{project}' — the re-scan is clear, but "
+             f"{check.refusal}. The quarantine stays in place.")
+        _err(f"  {fresh_data_advice()}, then retry.")
+        _err(f"  {accept_advice(project)}.")
         return 1
+    if accept_stale_kev and check.refusal is None:
+        print(f"  {ACCEPT_FLAG}: nothing to accept, the KEV catalog backs this lift.")
+    elif accept_stale_kev:
+        print(f"  {ACCEPT_FLAG}: lifting although {check.refusal}. A CVE that is actively "
+              f"exploited may come back online.")
+        log_warning("security-resume", f"{ACCEPT_FLAG}: lift accepted on an unusable KEV "
+                    f"catalog", paths, project=project,
+                    detail={"reason": check.refusal, "kev_stale": check.stale})
 
     what = ("every image the lift will start" if scan.basis == BASIS_STARTUP_IMAGES
             else "every container's image")
     print(f"  Re-scan: clear ({what} scanned, no quarantine-level findings)")
     print(f"Resuming {project}...")
-    return _resume_lift(paths, project)
+    rc = _resume_lift(paths, project)
+    if rc == 0:
+        _alert_kev_risk(paths, project, check, accepted=accept_stale_kev)
+    return rc
+
+
+def _alert_kev_risk(paths: BoxPaths, project: str, check: KevLiftCheck, *,
+                    accepted: bool) -> None:
+    """A lift the KEV catalog did not fully back is a priority-1 alert."""
+    if check.refusal is not None and accepted:
+        title = f"{project}: quarantine lifted with {ACCEPT_FLAG}"
+        why = (f"the operator accepted lifting it although {check.refusal} "
+               f"(`security resume {ACCEPT_FLAG}`)")
+    elif check.gap is not None:
+        title = f"{project}: quarantine lifted on a stale KEV catalog"
+        why = f"it was lifted although {check.gap}"
+    else:
+        return
+    print(f"  WARNING: {why[0].upper()}{why[1:]}.")
+    log_warning("security-resume", title, paths, project=project,
+                detail={"reason": why, "kev_stale": check.stale})
+    notify(paths, title, f"{project}: {why}. {fresh_data_advice()}.",
+           component="security-resume", project=project, priority=1)
 
 
 def _resume_lift(paths: BoxPaths, project: str) -> int:
