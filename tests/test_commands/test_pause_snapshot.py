@@ -142,14 +142,17 @@ def test_a_rollbacks_restore_on_a_paused_project_leaves_it_stopped(live_v1) -> N
     pause and starts nothing; the rollback's own start ends the pause."""
     from boxmunge.commands import restore
     from boxmunge.pause import mark_awaiting_deploy
+    from boxmunge.release_txn import open_txn
     paths = live_v1
     paths.backup_key.parent.mkdir(parents=True, exist_ok=True)
     paths.backup_key.write_text("key")
     assert _pause(paths) == 0
     mark_awaiting_deploy("myapp", paths)
     snapshot = pending(paths, "myapp")["name"]
+    txn = open_txn(paths, "myapp", source="rollback", ref=f"myapp-{V1}",
+                   replaced_ref=f"myapp-{V2}", staged_id=None, snapshot=snapshot).id
     with patch.object(restore, "_run_restore_inner", return_value=0) as inner:
-        assert restore.restore_locked("myapp", paths, snapshot=snapshot, txn="T1") == 0
+        assert restore.restore_locked("myapp", paths, snapshot=snapshot, txn=txn) == 0
         assert restore.restore_locked("myapp", paths, snapshot=snapshot) == 1   # not alone
     [call] = inner.call_args_list
     assert call.args[6] is True   # leave_stopped

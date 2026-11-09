@@ -44,6 +44,8 @@ class Box:
         self.services = {"web": {"image": candidate_name("demo", "web")},
                          "db": {"image": "postgres:16"}, "cache": {"image": "redis:7"}}
         monkeypatch.setattr(gate, "resolved_services", lambda target: ({}, self.services))
+        monkeypatch.setattr("boxmunge.release_policies.resolved_services",
+                            lambda target: ({}, self.services))
         monkeypatch.setattr(gate.docker_containers, "local_image", self.images.get)
         # compose-only services (the manifest names none) count as read-only only when
         # compose.yml says so

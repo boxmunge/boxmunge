@@ -14,6 +14,7 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge.commands.deploy import deploy_eligible, run_deploy
+from boxmunge.commands.pause_cmd import run_pause
 from boxmunge.commands.resume_cmd import run_resume
 from boxmunge.compose_guard import ComposeRefused
 from boxmunge.lifecycle import BlockReason, is_blocked
@@ -170,7 +171,7 @@ def test_a_deploy_that_never_started_leaves_it_awaiting(paths, capsys) -> None:
     _paused_v1(paths)
     assert _resume(paths, no_start=True) == 0
     with docker_off() as up, \
-            patch("boxmunge.commands.deploy_handover.release_restart_policies") as released, \
+            patch("boxmunge.commands.deploy_handover.give_release_policies") as released, \
             patch("boxmunge.compose_guard.check_start",
                   side_effect=ComposeRefused("bind source changed kind")):
         assert run_deploy("myapp", paths) == 1
@@ -185,7 +186,7 @@ def test_policies_are_given_back_only_after_the_up(paths) -> None:
     _paused_v1(paths)
     assert _resume(paths, no_start=True) == 0
     order: list[str] = []
-    with docker_off() as up, patch("boxmunge.commands.deploy_handover.release_restart_policies",
+    with docker_off() as up, patch("boxmunge.commands.deploy_handover.give_release_policies",
                                    side_effect=lambda *a: order.append("release")):
         up.side_effect = lambda *a, **k: order.append("up")
         assert run_deploy("myapp", paths) == 0
@@ -283,3 +284,33 @@ def test_no_start_takes_an_unfinished_pause_over_an_open_install(paths, capsys, 
     with docker_off():
         assert run_deploy("myapp", paths, ref=V2) == 0
     assert not is_paused("myapp", paths)
+
+
+def test_each_container_gets_its_new_releases_policy(paths, fake_containers, monkeypatch) -> None:
+    """The pause saved V1's policies; V2 changes them both ways. Each
+    container ends with V2's own policy, never one saved from V1: `always`
+    added must survive a reboot, and `no` must not bring back a one-shot."""
+    two = ("services:\n  web:\n    image: nginx\n    restart: {web}\n"
+           "  job:\n    image: busybox\n    restart: \"{job}\"\n")
+    add_project("myapp", paths)
+    place_bundle(paths, timestamp=V1, files={"compose.yml": two.format(web="no", job="always")})
+    with docker_off():
+        assert run_deploy("myapp", paths, ref=V1) == 0
+    fake_containers.run("myapp", "web", "sha256:w")
+    fake_containers.run("myapp", "job", "sha256:j")
+    policies = {"myapp-web-1": "no", "myapp-job-1": "always"}
+    monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies",
+                        lambda *, project_name: dict(policies))
+
+    def set_policy(names, policy):
+        policies.update({n: policy for n in names})
+    monkeypatch.setattr("boxmunge.restart_hold.set_restart_policy", set_policy)
+    with patch("boxmunge.commands.pause_cmd.caddy_reload"), \
+            patch("boxmunge.commands.pause_cmd.compose_stop"):
+        assert run_pause("myapp", paths, yes=True) == 0
+    assert policies == {"myapp-web-1": "no", "myapp-job-1": "no"}   # held
+    assert _resume(paths, no_start=True) == 0
+    place_bundle(paths, timestamp=V2, files={"compose.yml": two.format(web="always", job="no")})
+    with docker_off():
+        assert run_deploy("myapp", paths, ref=V2) == 0
+    assert policies == {"myapp-web-1": "always", "myapp-job-1": "no"}

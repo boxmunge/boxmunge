@@ -46,7 +46,8 @@ from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import is_paused
 from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
-from boxmunge.release_txn import refuse_if_install_open
+from boxmunge.data_dirs import ReleaseStateError
+from boxmunge.release_txn import load_txn, refuse_if_install_open
 from boxmunge.restore_safety import RestoreError, take_safety_snapshot, verify_plaintext
 from boxmunge.service_exec import ServiceCommandTimeout, run_in_service
 
@@ -165,9 +166,10 @@ def restore_locked(project_name: str, paths: BoxPaths, snapshot: str | None,
     if refuse_if_legacy_stage(paths, project_name):
         return 1
     sweep_stale_dumps(paths, project_name)
-    # A rollback's own restore (its install `txn`) may run on a pause handed
-    # to a deploy; the rollback's start ends that pause.
-    if refuse_if_blocked(project_name, paths, rollback=txn is not None):
+    # A rollback's own restore may run on a pause handed to a deploy; the
+    # rollback's start ends that pause.
+    if refuse_if_blocked(project_name, paths,
+                         rollback=_open_rollback(paths, project_name, txn)):
         return 1
     if refuse_if_install_open(paths, project_name, component="restore", txn=txn):
         return 1
@@ -186,6 +188,18 @@ def restore_locked(project_name: str, paths: BoxPaths, snapshot: str | None,
         plan.restore_command, plan.dump_command if safety_snapshot else None,
         leave_stopped, canary, txn,
     )
+
+
+def _open_rollback(paths: BoxPaths, project_name: str, txn: str | None) -> bool:
+    """True when ``txn`` is the open install and it is a rollback's. An
+    unreadable record is not one (the install check below refuses it)."""
+    if txn is None:
+        return False
+    try:
+        open_txn = load_txn(paths, project_name)
+    except ReleaseStateError:
+        return False
+    return open_txn is not None and open_txn.id == txn and open_txn.source == "rollback"
 
 
 def _choose_snapshot(paths: BoxPaths, project_name: str, snapshot: str | None) -> Path | None:
