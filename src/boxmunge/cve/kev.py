@@ -80,9 +80,7 @@ class KevCatalog:
     ``fetched_at`` is when a source last answered with a catalog we
     accepted, ``released_at`` the catalog's own ``dateReleased`` and
     ``source`` the URL that answered. ``unreadable`` is why the cache file
-    could not be read (the catalog is then empty). ``withdrawn`` holds the
-    IDs that this run's refresh dropped from the previous catalog; it is
-    never cached, and only the scan that refreshed sees it.
+    could not be read (the catalog is then empty).
     """
 
     cve_ids: frozenset[str]
@@ -90,7 +88,6 @@ class KevCatalog:
     released_at: datetime | None
     source: str | None
     unreadable: str | None = None
-    withdrawn: frozenset[str] = frozenset()
 
     def stale_reason(self, today: date) -> str | None:
         """Why this catalog cannot be trusted on ``today``, or None if fresh."""

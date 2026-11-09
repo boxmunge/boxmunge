@@ -73,10 +73,10 @@ def format_kev_withdrawn_alert(source: str | None, withdrawn: Sequence[str]) -> 
             *(f"- {cve}" for cve in withdrawn),
             "",
             "They no longer count as actively exploited. A quarantine held for one "
-            "of them is not lifted automatically: this scan keeps it and sends a "
-            "priority-1 alert naming the project, and `boxmunge security resume "
-            "<project>` accepts the withdrawal. Check CISA's KEV page if this is "
-            "unexpected.",
+            "of them is not lifted automatically while its images still contain it: "
+            "scans and deploys keep it, a priority-1 alert names the project, and "
+            "`boxmunge security resume <project>` accepts the withdrawal. Check "
+            "CISA's KEV page if this is unexpected.",
         ]),
         priority=0,
     )

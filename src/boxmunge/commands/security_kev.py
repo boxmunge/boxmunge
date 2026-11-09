@@ -3,7 +3,6 @@
 run, load it, and alert on what the refresh found."""
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import datetime
 
 from boxmunge.cve.alerting import (
@@ -25,12 +24,12 @@ def refresh_kev_and_alert(paths: BoxPaths, now: datetime) -> KevCatalog:
     signal is consistent fleet-wide. Fail-safe: a stale catalog never
     quarantines, and a rejected refresh keeps the previous cache (B-06), but
     either fires ONE priority-1 alert per run naming each source's error.
-    Entries CISA withdrew (a few, accepted) get a normal-priority notice,
-    and ride on the returned catalog (``withdrawn``) so this run's scans
-    hold, not lift, a quarantine kept for one of them (kev_withdrawal).
+    Entries CISA withdrew (a few, accepted) get a normal-priority notice;
+    the refresh recorded them (cve.kev_withdrawals), so a quarantine held
+    for one is kept, not lifted (kev_withdrawal).
     """
     refresh = refresh_kev(paths)
-    kev = replace(load_kev(paths), withdrawn=frozenset(refresh.withdrawn))
+    kev = load_kev(paths)
     if refresh.withdrawn:
         _send(paths, format_kev_withdrawn_alert(refresh.source, refresh.withdrawn))
     stale_reason = kev.stale_reason(now.date())

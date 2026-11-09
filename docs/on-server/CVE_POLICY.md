@@ -376,13 +376,23 @@ Up to three missing CVEs are accepted. They are logged, and the run sends
 a normal-priority notice, `CISA KEV no longer lists <N> CVEs`, that names
 them.
 
-A single source can drop an entry, so a quarantine held for a CVE that
-this refresh withdrew is not lifted automatically. The scan keeps the
-quarantine, marks its record, and sends one priority-1 alert (`Quarantine
-kept — CISA KEV withdrew <CVE>`) naming the project, the CVE and the
-source. Later scans keep it too. To accept the withdrawal, run
-`boxmunge security resume <project>`. Deploying a release also lifts it,
-as for any quarantine.
+A single source can drop an entry, so a quarantine held for a withdrawn
+CVE is not lifted automatically. The refresh records each withdrawal in
+`state/kev/withdrawn.json` before it caches the catalog. While the
+project's images still contain that CVE:
+- every later scan keeps the quarantine, including scans in runs that did
+  not refresh it away, a run that did not scan the project, or a scan
+  that was incomplete;
+- a production deploy or promote that still ships the CVE is refused.
+
+The first such scan sends one priority-1 alert (`Quarantine kept — CISA
+KEV withdrew <CVE>`) naming the project, the CVE and the source. To accept
+the withdrawal, run `boxmunge security resume <project>`. A scan or
+release whose images no longer contain the CVE is a fix, and lifts the
+quarantine as usual. When an accepted catalog lists the CVE again, its
+withdrawal record is dropped. If `withdrawn.json` cannot be read, scans
+keep every cleared quarantine, and refreshes are rejected (priority 1),
+until root repairs or removes the file.
 
 Two outcomes are logged but do not alert while the cached catalog is
 fresh:

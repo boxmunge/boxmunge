@@ -39,6 +39,7 @@ from typing import Any
 
 from boxmunge.config import ConfigError, load_config
 from boxmunge.cve.kev import KEV_DEFAULT_SOURCES, KevCatalog, load_kev
+from boxmunge.cve.kev_withdrawals import KevWithdrawalsError, record_withdrawals
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
 
@@ -282,6 +283,12 @@ def _try_source(
         # HTTPError/URLError and socket errors are OSErrors; a body cut
         # short is an http.client.IncompleteRead.
         return SourceFailure(url, UNREACHABLE, _describe(e)), []
+    try:
+        # Before the cache: a withdrawal must outlive the catalog that made it.
+        record_withdrawals(paths, url, withdrawn, cve_ids)
+    except KevWithdrawalsError as e:
+        return SourceFailure(url, REJECTED, f"fetched, but not cached: {e}. Repair or "
+                                            f"remove it as root"), []
     doc = {
         "source": url,
         "released_at": released.isoformat(),

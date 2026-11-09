@@ -399,7 +399,7 @@ def scan_one_project_locked(
             kev_fresh=not kev.is_stale(_today()))
         outcome = _enforce(
             paths, project, meta, headline, in_grace=in_grace or defer_new,
-            cleared=tuple(decisions) if cleared else None, kev=kev,
+            cleared=tuple(decisions) if cleared else None,
         )
 
     if failed and not decisions:
@@ -461,12 +461,10 @@ def _enforce(
     paths: BoxPaths, project: str, meta: ProjectMeta,
     headline: tuple[ProjectDecision, FindingDisposition] | None,
     *, in_grace: bool, cleared: tuple[ProjectDecision, ...] | None = None,
-    kev: KevCatalog | None = None,
 ) -> Enforcement:
     return enforce(
         paths, project, hosts=meta.hosts, compose_files=meta.compose_files,
         policy=meta.policy(), headline=headline, in_grace=in_grace, cleared=cleared,
-        kev=kev,
     )
 
 
