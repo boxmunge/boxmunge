@@ -1,21 +1,22 @@
-"""Integration: included files resolve where real `docker compose config`
-resolves them (tests/test_compose_include_base.py has the unit cases).
+"""Integration: `include:` against real `docker compose config`
+(tests/test_compose_include_base.py has the unit cases).
 
-Compose resolves an included file's relative paths against the include
-entry's project_directory, or the directory of the entry's first path, not
-the included file's own directory. Each escape below plants a decoy inside
-the project where a file-relative reading would look, while Compose really
-reads another project's file.
+boxmunge allows an include entry only as a path or a list of paths naming
+files inside the project, two levels deep; an included file's relative
+paths resolve against its entry's first path's directory. Each escape
+below makes real Compose read another project's file (the premise test
+proves it), and validation refuses it.
 """
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
 import pytest
 import yaml
 
-from boxmunge import compose_resolve
+from boxmunge import compose_references, compose_resolve
 from boxmunge.compose_validate import ComposeSecurityError, validate_user_compose
 from boxmunge.paths import BoxPaths
 
@@ -24,73 +25,129 @@ pytestmark = [
     pytest.mark.skipif(shutil.which("docker") is None, reason="docker CLI not on PATH"),
 ]
 
-PROJDIR = {"include": [{"path": "./sub/deep/inc.yml", "project_directory": "./sub"}]}
-MULTI = {"include": [{"path": ["./a/x.yml", "./b/deep/y.yml"]}]}
 
+def _top(include: list) -> dict:
+    return {"include": include, "services": {"web": {"image": "busybox"}}}
+
+
+def _svc(**kw) -> dict:
+    return {"services": {"leak": {"image": "busybox", **kw}}}
+
+
+_ENV = {"environment": {"S": "${DB_PASSWORD:-unset}"}}
+_PROJDIR = [{"path": "./sub/deep/inc.yml", "project_directory": "./sub"}]
+_MULTI = [{"path": ["./a/x.yml", "./b/deep/y.yml"]}]
+
+# (files of the evil project, what the model shows when Compose read the
+# victim project, what the refusal says). `victim/` inside the evil project
+# is the decoy a file-relative reading would find.
 ESCAPES = {
-    "project_directory env_file": (PROJDIR, "sub/deep/inc.yml", {"services": {"leak": {
-        "image": "busybox", "env_file": "../../victim/secrets.env"}}}),
-    "project_directory label_file": (PROJDIR, "sub/deep/inc.yml", {"services": {"leak": {
-        "image": "busybox", "label_file": "../../victim/secrets.env"}}}),
-    "project_directory extends": (PROJDIR, "sub/deep/inc.yml", {"services": {"leak": {
-        "extends": {"file": "../../victim/ext.yml", "service": "base"}}}}),
-    "multi-path env_file": (MULTI, "b/deep/y.yml", {"services": {"leak": {
-        "image": "busybox", "env_file": "../../victim/secrets.env"}}}),
-    "multi-path extends": (MULTI, "b/deep/y.yml", {"services": {"leak": {
-        "extends": {"file": "../../victim/ext.yml", "service": "base"}}}}),
+    "project_directory env_file": ({
+        "compose.yml": _top(_PROJDIR),
+        "sub/deep/inc.yml": _svc(env_file="../../victim/secrets.env"),
+        "sub/deep/victim/secrets.env": "X=decoy\n",
+    }, "victim/secrets.env", "sets project_directory"),
+    "project_directory label_file": ({
+        "compose.yml": _top(_PROJDIR),
+        "sub/deep/inc.yml": _svc(label_file="../../victim/secrets.env"),
+        "sub/deep/victim/secrets.env": "X=decoy\n",
+    }, "victim-secret", "sets project_directory"),
+    "project_directory extends": ({
+        "compose.yml": _top(_PROJDIR),
+        "sub/deep/inc.yml": {"services": {"leak": {
+            "extends": {"file": "../../victim/ext.yml", "service": "base"}}}},
+        "sub/deep/victim/ext.yml": {"services": {"base": {"image": "busybox"}}},
+    }, '"from": "victim"', "sets project_directory"),
+    "path list env_file": ({
+        "compose.yml": _top(_MULTI),
+        "a/x.yml": {"services": {"xa": {"image": "busybox"}}},
+        "b/deep/y.yml": _svc(env_file="../../victim/secrets.env"),
+        "b/victim/secrets.env": "X=decoy\n",
+    }, "victim/secrets.env", "victim.*outside the project"),
+    "path list extends": ({
+        "compose.yml": _top(_MULTI),
+        "a/x.yml": {"services": {"xa": {"image": "busybox"}}},
+        "b/deep/y.yml": {"services": {"leak": {
+            "extends": {"file": "../../victim/ext.yml", "service": "base"}}}},
+        "b/victim/ext.yml": {"services": {"base": {"image": "busybox"}}},
+    }, '"from": "victim"', "victim.*outside the project"),
+    # The second review's residual cases.
+    "missing project_directory moves the base up": ({
+        "compose.yml": _top([{"path": "sub/inc.yml", "project_directory": "nonexist"}]),
+        "sub/inc.yml": _svc(label_file="../victim/secrets.env"),
+        "victim/secrets.env": "X=decoy\n",
+    }, "victim-secret", "sets project_directory"),
+    "include env_file three levels deep": ({
+        "compose.yml": _top(["p/inc.yml"]),
+        "p/inc.yml": {"include": ["q/inc2.yml"]},
+        "p/q/inc2.yml": {"include": [{"path": "i3.yml", "env_file": "../../victim/secrets.env"}]},
+        "p/q/i3.yml": _svc(**_ENV),
+        "p/victim/secrets.env": "DB_PASSWORD=decoy\n",
+    }, "victim-secret", "sets env_file"),
+    "project_directory chain to another project's .env": ({
+        "compose.yml": _top([{"path": "p/deep/inc.yml", "project_directory": "p"}]),
+        "p/deep/inc.yml": {"include": [{"path": "q/deep2/inc2.yml", "project_directory": "q"}]},
+        "p/q/deep2/inc2.yml": {"include": [{"path": "../../victim/i3.yml",
+                                            "project_directory": "../../victim"}]},
+        "victim/i3.yml": _svc(**_ENV),
+        "victim/.env": "DB_PASSWORD=decoy\n",
+    }, "victim-dotenv", "sets project_directory"),
+    "project_directory chain shifting a depth-4 path": ({
+        "compose.yml": _top([{"path": "p/deep/inc.yml", "project_directory": "p"}]),
+        "p/deep/inc.yml": {"include": [{"path": "q/deep2/inc2.yml", "project_directory": "q"}]},
+        "p/q/deep2/inc2.yml": {"include": [{"path": "r/i3.yml", "project_directory": "r"}]},
+        "p/q/r/i3.yml": {"include": ["../../../victim/inc.yml"]},
+        "victim/inc.yml": {"services": {"foreign": {"image": "busybox",
+                                                    "labels": {"from": "decoy"}}}},
+    }, '"from": "victim"', "sets project_directory"),
 }
 
 
-def _write(root: Path, files: dict[str, object]) -> None:
+def _write(root: Path, files: dict[str, object]) -> Path:
     for name, content in files.items():
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content if isinstance(content, str) else yaml.safe_dump(content))
+    return root / "compose.yml"
 
 
 @pytest.fixture
 def box(tmp_path: Path) -> BoxPaths:
     paths = BoxPaths(root=tmp_path / "bm")
     _write(paths.project_dir("victim"), {
+        "compose.yml": "services: {}\n",
         "secrets.env": "DB_PASSWORD=victim-secret\n",
-        "ext.yml": {"services": {"base": {"image": "busybox", "labels": {"from": "outside"}}}},
+        ".env": "DB_PASSWORD=victim-dotenv\n",
+        "ext.yml": {"services": {"base": {"image": "busybox", "labels": {"from": "victim"}}}},
+        "inc.yml": {"services": {"foreign": {"image": "busybox", "labels": {"from": "victim"}}}},
     })
     return paths
 
 
-def _evil(paths: BoxPaths, top: dict, inc: str, inc_doc: dict) -> Path:
-    project_dir = paths.project_dir("evil")
-    _write(project_dir, {
-        "compose.yml": {**top, "services": {"web": {"image": "busybox"}}},
-        inc: inc_doc,
-        "a/x.yml": {"services": {"xa": {"image": "busybox"}}},
-        "victim/secrets.env": "X=decoy\n",
-        "victim/ext.yml": {"services": {"base": {"image": "busybox",
-                                                 "labels": {"from": "inside"}}}},
-    })
-    return project_dir / "compose.yml"
-
-
-@pytest.mark.parametrize("top,inc,inc_doc", ESCAPES.values(), ids=ESCAPES.keys())
+@pytest.mark.parametrize("files,leaked,_match", ESCAPES.values(), ids=ESCAPES.keys())
 def test_compose_really_reads_the_other_project(
-    box: BoxPaths, top: dict, inc: str, inc_doc: dict,
+    box: BoxPaths, files: dict, leaked: str, _match: str,
 ) -> None:
-    """The premise: real Compose resolves these against the entry's base."""
-    model = compose_resolve.resolve_compose_config(_evil(box, top, inc, inc_doc), "evil")
-    leak = model["services"]["leak"]
-    victim = box.project_dir("victim")
-    env = [e["path"] for e in leak.get("env_file", [])]
-    labels = leak.get("labels", {})
-    assert (env == [str(victim / "secrets.env")] or labels.get("from") == "outside"
-            or labels.get("DB_PASSWORD") == "victim-secret"), leak
+    """The premise: real Compose reads the victim project for every shape."""
+    model = compose_resolve.resolve_compose_config(_write(box.project_dir("evil"), files), "evil")
+    assert leaked in json.dumps(model), model
 
 
-@pytest.mark.parametrize("top,inc,inc_doc", ESCAPES.values(), ids=ESCAPES.keys())
-def test_escape_through_include_base_is_refused(
-    box: BoxPaths, top: dict, inc: str, inc_doc: dict,
-) -> None:
-    compose = _evil(box, top, inc, inc_doc)
-    with pytest.raises(ComposeSecurityError, match=r"victim.*outside the project.*prod-deploy evil"):
+@pytest.mark.parametrize("files,_leaked,match", ESCAPES.values(), ids=ESCAPES.keys())
+def test_escape_is_refused(box: BoxPaths, files: dict, _leaked: str, match: str) -> None:
+    compose = _write(box.project_dir("evil"), files)
+    with pytest.raises(ComposeSecurityError, match=rf"{match}.*prod-deploy evil\.$"):
+        validate_user_compose(compose, box, project_name="evil")
+
+
+def test_scp_style_git_remote_is_refused(box: BoxPaths) -> None:
+    """Compose would fetch `user@host:repo` with git, for include and extends."""
+    compose = _write(box.project_dir("evil"), {"compose.yml": {
+        "include": ["bob@192.0.2.1:repo.git"],
+        "services": {"web": {"extends": {"file": "bob@192.0.2.1:repo.git", "service": "a"}}}}})
+    problems, _ = compose_references.walk_references(compose, (compose.parent,))
+    assert len(problems) == 2 and all("is remote" in p for p in problems)
+    with pytest.raises(ComposeSecurityError, match="is remote"):
         validate_user_compose(compose, box, project_name="evil")
 
 
@@ -99,35 +156,39 @@ def test_model_check_refuses_what_a_diverging_walk_would_miss(
 ) -> None:
     """Belt and braces: with the literal walk blinded, the env_file real
     Compose resolves outside the project is still refused."""
-    compose = _evil(box, *ESCAPES["project_directory env_file"])
-    monkeypatch.setattr(compose_resolve, "walk_references", lambda *a, **kw: ([], []))
+    compose = _write(box.project_dir("evil"), ESCAPES["path list env_file"][0])
+    monkeypatch.setattr(compose_references, "walk_references", lambda *a, **kw: ([], []))
     with pytest.raises(ComposeSecurityError, match=r"env_file .*victim/secrets.env.*outside"):
         validate_user_compose(compose, box, project_name="evil")
 
 
-def test_walk_and_compose_agree_on_the_files_an_include_reads(box: BoxPaths) -> None:
-    """A benign project: every env file of the real model is a file the
-    walk recorded, so the control record hashes what Compose reads."""
+def test_walk_and_compose_agree_on_the_files_the_subset_reads(box: BoxPaths) -> None:
+    """A benign project using the whole subset, two levels deep: every env
+    file of the real model is a file the walk recorded, and the services the
+    walk's census expects are the ones Compose resolved."""
     project_dir = box.project_dir("good")
-    _write(project_dir, {
-        "compose.yml": {"include": [
-            {"path": ["./a/x.yml", "./b/deep/y.yml"]},
-            {"path": "./sub/deep/inc.yml", "project_directory": "./sub"},
-        ], "services": {"web": {"image": "busybox"}}},
+    compose = _write(project_dir, {
+        "compose.yml": _top([{"path": ["./a/x.yml", "./b/deep/y.yml"]}, "./c/inc.yml"]),
         "a/x.yml": {"services": {"xa": {"image": "busybox"}}},
-        "b/deep/y.yml": {"services": {"yb": {"image": "busybox", "env_file": "y.env"}}},
+        "b/deep/y.yml": {"include": ["n/nest.yml"], "services": {
+            "yb": {"image": "busybox", "env_file": "y.env"}}},
         "a/y.env": "Y=1\n",
-        "sub/deep/inc.yml": {"include": ["n/nest.yml"], "services": {
-            "si": {"image": "busybox", "env_file": "s.env"}}},
-        "sub/s.env": "S=1\n",
-        "sub/n/nest.yml": {"services": {"nest": {"image": "busybox", "env_file": "n.env"}}},
-        "sub/n/n.env": "N=1\n",
+        "a/n/nest.yml": {"services": {"nest": {"image": "busybox", "env_file": "n.env",
+                                               "extends": {"file": "e/ext.yml",
+                                                           "service": "base"}}}},
+        "b/deep/n/nest.yml": {"services": {"decoy": {"image": "busybox"}}},
+        "a/n/n.env": "N=1\n",
+        "a/n/e/ext.yml": {"services": {"base": {"image": "busybox", "env_file": "e.env"}}},
+        "a/n/e/e.env": "E=1\n",
+        "c/inc.yml": {"services": {"ci": {"image": "busybox", "env_file": "c.env"}}},
+        "c/c.env": "C=1\n",
     })
-    compose = project_dir / "compose.yml"
     validate_user_compose(compose, box, project_name="good")
     model = compose_resolve.resolve_compose_config(compose, "good")
-    _, read_files = compose_resolve.walk_references(compose, (project_dir,))
-    model_files = compose_resolve.model_env_files(model, project_dir)
-    assert {project_dir / "a/y.env", project_dir / "sub/s.env",
-            project_dir / "sub/n/n.env"} == set(model_files)
-    assert set(model_files) <= set(read_files)
+    assert set(model["services"]) == {"web", "xa", "yb", "nest", "ci"}
+    problems, read_files = compose_references.walk_references(compose, (project_dir,))
+    model_files = set(compose_resolve.model_env_files(model, project_dir))
+    assert problems == []
+    assert model_files == {project_dir / f for f in (
+        "a/y.env", "a/n/n.env", "a/n/e/e.env", "c/c.env")}
+    assert model_files <= set(read_files)

@@ -18,7 +18,7 @@ from typing import Any
 
 import yaml
 
-from boxmunge import compose_resolve
+from boxmunge import compose_references, compose_resolve
 from boxmunge.compose_images import image_warnings
 from boxmunge.compose_isolation import isolation_problems
 from boxmunge.compose_mounts import has_named_volume
@@ -381,9 +381,8 @@ def validate_user_compose(
             f"got {type(doc['services']).__name__}"
         )
 
-    # include/extends/env_file references only exist in the literal files;
-    # everything else is checked on the model Compose will actually run.
-    references, read_files = compose_resolve.walk_references(compose_path, roots, base=base_dir)
+    # File references are checked on the literal files, everything else on the model.
+    references, read_files = compose_references.walk_references(compose_path, roots, base=base_dir)
     if references:
         raise ComposeSecurityError(f"{references[0]} Then deploy the fixed release: "
                                    f"prod-deploy {project_name}.")
@@ -396,6 +395,7 @@ def validate_user_compose(
 
     isolation = isolation_problems(doc, project_name, base_dir, roots)
     isolation += compose_resolve.model_env_file_problems(doc, base_dir, roots, project_name)
+    read_files += compose_resolve.model_env_files(doc, base_dir)
     isolation += own_file_problems(doc, base_dir, paths.project_dir(project_name), read_files,
                                    in_place=project_directory is not None)
     if isolation:

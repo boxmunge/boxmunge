@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import yaml
 
-from boxmunge import compose_resolve
+from boxmunge import compose_references
 from boxmunge.bind_sources import model_sources, record
 from boxmunge.paths import BoxPaths
 
@@ -15,6 +15,6 @@ def mark_deployed(paths: BoxPaths, name: str) -> None:
     timers accept it."""
     project_dir = paths.project_dir(name)
     model = yaml.safe_load((project_dir / "compose.yml").read_text()) or {}
-    _, read_files = compose_resolve.walk_references(project_dir / "compose.yml", (project_dir,))
+    _, read_files = compose_references.walk_references(project_dir / "compose.yml", (project_dir,))
     record(project_dir, model_sources(model, project_dir), read_files,
            paths.project_bind_record(name))

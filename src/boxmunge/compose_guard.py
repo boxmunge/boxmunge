@@ -39,7 +39,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 
-from boxmunge import bind_sources, chown_hold, compose_resolve, docker_containers, start_alerts
+from boxmunge import bind_sources, chown_hold, compose_references, compose_resolve
+from boxmunge import docker_containers, start_alerts
 from boxmunge import compose_up_steps as up_steps
 from boxmunge.bind_sources import BindSourceError
 from boxmunge.compose_own_files import container_bind_problems
@@ -138,7 +139,7 @@ def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
     release = target.cwd
     try:
         validate_release_tree(release, project_name, paths, component)
-        _, read_files = compose_resolve.walk_references(release / "compose.yml", (release,))
+        _, read_files = compose_references.walk_references(release / "compose.yml", (release,))
         read_files = [*read_files, *(Path(f) for f in target.files)]
         model = compose_resolve.resolve_deployed_config(
             target.cwd, target.files, target.project_name, all_profiles=True,
@@ -157,7 +158,7 @@ def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
             rec = bind_sources.read_record(record_path)
             bind_sources.check_sources(project_dir, sources, rec["sources"])
             bind_sources.check_control(project_dir, read_files, rec["control"],
-                                       control_root=release)
+                                       control_root=release, redo=f"stage {project_name} again")
     except (IntakeError, compose_resolve.ComposeResolveError, BindSourceError, OSError,
             ReleaseStateError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
@@ -211,7 +212,7 @@ def check_start(
     try:
         validate_release_tree(project_dir, project_name, paths, component,
                               lenient_values=True)
-        _, read_files = compose_resolve.walk_references(
+        _, read_files = compose_references.walk_references(
             project_dir / compose_files[0], (project_dir,))
         if not deploying:
             problems = _container_problems(project_name, project_dir, read_files)
@@ -226,7 +227,8 @@ def check_start(
         else:
             rec = bind_sources.read_record(record_path)
             bind_sources.check_sources(project_dir, sources, rec["sources"])
-            bind_sources.check_control(project_dir, read_files, rec["control"])
+            bind_sources.check_control(project_dir, read_files, rec["control"],
+                                       redo=f"prod-deploy {project_name}")
     except (IntakeError, compose_resolve.ComposeResolveError, BindSourceError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
 
@@ -252,7 +254,7 @@ def stale_containers(paths: BoxPaths, project_name: str, *, component: str,
     be asked."""
     project_dir = paths.project_dir(project_name)
     try:
-        _, read_files = compose_resolve.walk_references(
+        _, read_files = compose_references.walk_references(
             project_dir / compose_files[0], (project_dir,))
     except (compose_resolve.ComposeResolveError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
