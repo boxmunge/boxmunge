@@ -4,8 +4,8 @@ quarantine (cve.lift_rule).
 
 A stale catalog reads as "nothing is exploited". `security resume` and the
 deploy gate used to lift the same KEV-listed, unpatched image on one. Now:
-a stale catalog whose cached IDs list the quarantine's CVE or a CVE in the
-images refuses; one that lists neither allows the lift with a priority-1
+a stale catalog whose cached IDs list a CVE the re-scan finds in the images
+refuses; one that lists none of them allows the lift with a priority-1
 alert naming the gap; no usable catalog refuses under every posture. Every
 refusal names the ways to fresh data and `security resume
 --accept-stale-kev`, the audited override.
@@ -67,16 +67,20 @@ class TestRule:
         assert (check.stale, check.refusal, check.gap) == (None, None, None)
 
     @pytest.mark.parametrize("cve,found,needle", [
-        (KEV_CVE, (), "the quarantine's CVE"),
-        (KEV_CVE, (KEV_CVE,), "still in the images"),
-        (OTHER_CVE, (KEV_CVE,), f"{KEV_CVE} (in the images)"),
+        (KEV_CVE, (KEV_CVE,), f"{KEV_CVE} (the quarantine's CVE)"),
+        (OTHER_CVE, (KEV_CVE,), f"lists {KEV_CVE}, still in the images"),
     ])
-    def test_stale_refuses_when_the_cached_ids_list_a_cve_involved(self, cve, found,
-                                                                   needle) -> None:
+    def test_stale_refuses_when_the_cached_ids_list_a_cve_in_the_images(self, cve, found,
+                                                                       needle) -> None:
         check = check_kev_for_lift(cve, _decisions(*found), _catalog(KEV_CVE, age_days=20),
                                    TODAY)
         assert check.refusal is not None and needle in check.refusal
         assert "no KEV catalog has been accepted for 20 days" in check.refusal
+
+    def test_stale_lifts_a_fix_whose_images_no_longer_contain_the_listed_cve(self) -> None:
+        check = check_kev_for_lift(KEV_CVE, _decisions("CVE-2026-1111"),
+                                   _catalog(KEV_CVE, age_days=20), TODAY)
+        assert check.refusal is None and "could not be checked" in check.gap
 
     def test_stale_without_a_listed_cve_lifts_naming_the_gap(self) -> None:
         check = check_kev_for_lift(OTHER_CVE, _decisions("CVE-2026-1111"),
@@ -116,7 +120,7 @@ def test_resume_refuses_the_same_kev_image_on_a_stale_catalog(
     assert cmd_security_resume(["demo"], paths) == 1
     assert is_quarantined("demo", paths)
     err = capsys.readouterr().err
-    assert "still in the images" in err and "stays in place" in err
+    assert f"{KEV_CVE} (the quarantine's CVE)" in err and "stays in place" in err
     assert "kev.sources" in err and "--accept-stale-kev" in err
 
 
@@ -206,6 +210,14 @@ def test_gate_refuses_the_same_kev_image_on_a_stale_catalog(gate_box, capsys) ->
     assert "still in the images" in text and "nothing was started" in text
     assert "kev.sources" in text and "--accept-stale-kev" in text
     assert "Scan: clear" not in capsys.readouterr().out
+
+
+def test_gate_lifts_a_fix_on_a_stale_catalog_listing_the_quarantine_cve(gate_box) -> None:
+    """The quarantine's CVE is on the cached list, but the fix's images no longer
+    contain it: cleared, with the gap carried into the lift alert."""
+    _write_kev(gate_box, KEV_CVE, age_days=20)
+    clearance = gate.clear_release(gate_box, production_target(gate_box, "demo"), _manifest())
+    assert clearance.kev_gap is not None
 
 
 def test_gate_refuses_with_no_catalog_under_strict_too(gate_box) -> None:

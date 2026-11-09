@@ -1245,9 +1245,11 @@ does not show a quarantine's cause is gone. `security resume` and a deploy
 of a fix to production judge the catalog the same way:
 
 - **Fresh:** the lift goes ahead.
-- **Stale, with a cached catalog:** judged against the cached IDs. If they
-  list the quarantine's own CVE, or any CVE the re-scan found in the images,
-  the lift is refused. Otherwise it goes ahead, and a priority-1 alert says
+- **Stale, with a cached catalog:** the CVEs the re-scan found in the
+  images are judged against the cached IDs. If any is listed (the
+  quarantine's own CVE on unchanged images, for example), the lift is
+  refused. A fix whose images no longer contain a listed CVE goes ahead,
+  and a priority-1 alert says
   it was lifted on a stale catalog: CVEs CISA added since the catalog was
   fetched could not be checked, and why the catalog is stale.
 - **No usable catalog** (never fetched, or the cache is unreadable): the
@@ -1311,8 +1313,8 @@ promote is.
      example), or every image did;
    - the per-project scan budget ran out before every image was scanned;
    - an image the lift would start is not in the local image store;
-   - the CISA KEV catalog cannot back the lift: it is stale and lists the
-     quarantine's CVE or a CVE in the images, or there is none (see "Lifting
+   - the CISA KEV catalog cannot back the lift: it is stale and lists a CVE
+     still in the images, or there is none (see "Lifting
      on a stale catalog"; `--accept-stale-kev` is the audited override).
 
    The error lists each image or service that was not covered. Fix the

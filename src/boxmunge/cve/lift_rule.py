@@ -7,9 +7,10 @@ can be trusted. A stale catalog reads as "nothing is exploited"
 end a quarantine judge the catalog first, the same way:
 
 - **fresh**: the lift goes ahead;
-- **stale, but a catalog is cached**: judged against the cached IDs. If
-  they list the quarantine's own CVE, or any CVE the scan found in the
-  images, the lift is refused. Otherwise it goes ahead, and the lift alert
+- **stale, but a catalog is cached**: the CVEs the re-scan found in the
+  images are judged against the cached IDs. If any is listed (the
+  quarantine's own CVE on unchanged images, say), the lift is refused. A
+  fix whose images no longer contain it goes ahead, and the lift alert
   (priority 1) names the gap: CVEs CISA added since the catalog was fetched
   could not be checked;
 - **no usable catalog** (never fetched, or the cache is unreadable): refused
@@ -71,18 +72,14 @@ def check_kev_for_lift(quarantined_cve: str, decisions: Sequence[ProjectDecision
             f"there is no usable CISA KEV catalog ({stale}), so boxmunge cannot tell "
             f"whether {quarantined_cve} or anything in the images is actively exploited"))
     in_images = {f.finding.cve_id for d in decisions for f in d.findings} & kev.cve_ids
-    listed = []
-    if quarantined_cve in kev.cve_ids:
-        still = ", still in the images" if quarantined_cve in in_images else ""
-        listed.append(f"{quarantined_cve} (the quarantine's CVE{still})")
-    listed += [f"{cve} (in the images)" for cve in sorted(in_images - {quarantined_cve})]
-    if listed:
+    if in_images:
+        listed = [f"{cve} (the quarantine's CVE)" if cve == quarantined_cve else cve
+                  for cve in sorted(in_images)]
         return KevLiftCheck(stale, refusal=(
             f"the CISA KEV catalog is stale ({stale}), and the cached copy lists "
-            f"{', '.join(listed)} as actively exploited; a stale catalog cannot show that "
-            f"has changed"))
+            f"{', '.join(listed)}, still in the images, as actively exploited; a stale "
+            f"catalog cannot show that has changed"))
     fetched = kev.fetched_at.date().isoformat()
     return KevLiftCheck(stale, gap=(
-        f"the CISA KEV catalog is stale ({stale}). Neither the quarantine's CVE nor any CVE "
-        f"in the images is on the cached copy, but CVEs CISA added since it was fetched "
-        f"({fetched}) could not be checked"))
+        f"the CISA KEV catalog is stale ({stale}). No CVE in the images is on the cached "
+        f"copy, but CVEs CISA added since it was fetched ({fetched}) could not be checked"))
