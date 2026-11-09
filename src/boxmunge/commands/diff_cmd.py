@@ -8,46 +8,42 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from boxmunge.bundle import extract_bundle
+from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.manifest import load_manifest, ManifestError
+from boxmunge.release import project_data_dirs
 from boxmunge.source import resolve_bundle_source, SourceError
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 
-def _compare_dirs(current: Path, incoming: Path) -> tuple[list[str], list[str], list[str]]:
-    """Compare two directories recursively.
+def _files(root: Path, skip: set[str]) -> set[str]:
+    """Files under ``root`` as relative paths, outside its top-level ``skip`` entries."""
+    files: set[str] = set()
+    if not root.exists():
+        return files
+    for top in root.iterdir():
+        if top.name in skip:
+            continue
+        for f in (top.rglob("*") if top.is_dir() and not top.is_symlink() else [top]):
+            if f.is_file():
+                files.add(str(f.relative_to(root)))
+    return files
+
+
+def _compare_dirs(current: Path, incoming: Path,
+                  box_state: set[str]) -> tuple[list[str], list[str], list[str]]:
+    """Compare two directories recursively, leaving out the ``box_state``
+    entries: an install keeps the server's (secrets, data, the operator's
+    caddy.override.conf, boxmunge's own files) and never installs a
+    bundle's (release.install_release).
     Returns (changed, added, removed) as lists of relative path strings.
     """
-    changed, added, removed = [], [], []
-
-    current_files = set()
-    if current.exists():
-        for f in current.rglob("*"):
-            if f.is_file():
-                current_files.add(str(f.relative_to(current)))
-
-    incoming_files = set()
-    for f in incoming.rglob("*"):
-        if f.is_file():
-            incoming_files.add(str(f.relative_to(incoming)))
-
-    for rel in sorted(incoming_files & current_files):
-        if not filecmp.cmp(current / rel, incoming / rel, shallow=False):
-            changed.append(rel)
-
-    for rel in sorted(incoming_files - current_files):
-        added.append(rel)
-
-    # Skip boxmunge-generated files in removed list
-    skip_prefixes = ("backups/", "data/", "security/", ".releases/", "compose.boxmunge")
-    skip_exact = {"secrets.env"}
-    for rel in sorted(current_files - incoming_files):
-        if rel in skip_exact or any(rel.startswith(p) for p in skip_prefixes):
-            continue
-        removed.append(rel)
-
-    return changed, added, removed
+    current_files = _files(current, box_state)
+    incoming_files = _files(incoming, box_state)
+    changed = [rel for rel in sorted(incoming_files & current_files)
+               if not filecmp.cmp(current / rel, incoming / rel, shallow=False)]
+    return changed, sorted(incoming_files - current_files), sorted(current_files - incoming_files)
 
 
 def _is_git_project(project_name: str, paths: BoxPaths) -> bool:
@@ -89,7 +85,12 @@ def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
         print(f"{project_name}: comparing current vs {bundle_path.name}")
         print()
 
-        changed, added, removed = _compare_dirs(project_dir, extracted)
+        try:
+            box_state = project_data_dirs(project_dir, extracted).box_state()
+        except ReleaseStateError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        changed, added, removed = _compare_dirs(project_dir, extracted, box_state)
 
         if not changed and not added and not removed:
             print("  No changes detected — files are identical.")
@@ -111,20 +112,21 @@ def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
             manifest = None
 
         if manifest:
-            from boxmunge.caddy import generate_caddy_config
+            from boxmunge.caddy import site_config
             from boxmunge.compose import (
                 generate_compose_override, load_user_compose, recorded_users,
             )
 
-            new_caddy = generate_caddy_config(manifest)
+            new_caddy, override = site_config(paths, manifest)
+            source = f" (from {override.name})" if override is not None else ""
             current_caddy_path = paths.project_caddy_site(project_name)
             if current_caddy_path.exists():
                 if new_caddy != current_caddy_path.read_text():
-                    print("  Caddy config:     would change")
+                    print(f"  Caddy config:     would change{source}")
                 else:
-                    print("  Caddy config:     unchanged")
+                    print(f"  Caddy config:     unchanged{source}")
             else:
-                print("  Caddy config:     would be created")
+                print(f"  Caddy config:     would be created{source}")
 
             # v0.8: pass the candidate compose.yml from the new bundle so
             # the overlay omits read_only/tmpfs defaults consistently with
