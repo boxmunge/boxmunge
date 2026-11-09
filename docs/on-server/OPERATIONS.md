@@ -1825,10 +1825,18 @@ that fails is rolled back and blocklisted on this box. The auto-update log
 entry names the class that was applied (`log --component auto-update`).
 
 Releases are discovered through the version-check service at boxmunge.dev.
-If it is unreachable or answers in an unexpected shape, auto-update falls
-back to the GitHub releases list, applying the same rules to the markers in
-each release's title or notes (`[security]`, `[breakfix]`, `[breaking]`), and
-logs a warning. A failed upgrade is also reported there (see "What boxmunge
+Its answer also names any release its circuit breaker holds (withdrawn as
+broken); a held release is never installed, and auto-update logs the hold.
+If the service cannot be reached at all (DNS, connection or timeout failure),
+auto-update falls back to the GitHub releases list, applying the same rules to
+the markers in each release's title or notes (`[security]`, `[breakfix]`,
+`[breaking]`), and logs a warning. If the service answers but the answer
+cannot be used (an HTTP error such as its rate limit's 429, or an unexpected
+shape), nothing is installed and the check fails with the reason: GitHub
+cannot know about holds, so its answer could install a held release. The
+next run (every 6 hours) tries again. A security release can therefore wait
+while the service answers with errors; that is the price of never installing
+a release the maintainer has held. A failed upgrade is also reported there (see "What boxmunge
 sends home" below). Reporting is best-effort: if it cannot be sent the upgrade
 log says so and the upgrade outcome is unchanged. `BOXMUNGE_VERSION_CHECK_URL`
 points both calls at another service (the test suites use it to stay offline).

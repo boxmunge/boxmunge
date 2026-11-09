@@ -1,7 +1,7 @@
 """Tests for upgrade discovery — release-class selection via endpoint and GitHub."""
 import json
 from unittest.mock import patch, MagicMock
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -140,27 +140,32 @@ class TestEndpointSelection:
 
 
 class TestEndpointContract:
-    """A response that breaks the contract is not trusted: discovery falls back
-    to GitHub and records why, so the caller can log it."""
+    """A response that breaks the contract is not trusted, and it is not
+    replaced by GitHub's answer either: only the service knows which releases
+    its circuit breaker holds. Discovery fails with the reason and the box
+    retries on its next check."""
+
+    def _refused(self, mock_open, tmp_path, mode, *needles):
+        result = discover_update(_setup(tmp_path), mode=mode)
+        assert result["action"] == "error"
+        assert mock_open.call_count == 1  # GitHub was never asked
+        for needle in needles:
+            assert needle in result["message"]
+        assert "held" in result["message"]
+        return result
 
     @patch("urllib.request.urlopen")
-    def test_missing_breakfix_field_falls_back_to_github(self, mock_open, tmp_path):
+    def test_missing_breakfix_field_is_an_error(self, mock_open, tmp_path):
         stale = _response({"status": "up_to_date", "security": None, "latest": None})
         mock_open.side_effect = [stale, _github([_gh_release("0.3.1", body="[breakfix] fix")])]
-        result = discover_update(_setup(tmp_path), mode="breakfix")
-        assert result["action"] == "upgrade"
-        assert result["version"] == "0.3.1"
-        assert result["source"] == "github"
-        assert "breakfix" in result["endpoint_error"]
+        self._refused(mock_open, tmp_path, "breakfix", "breakfix")
 
     @patch("urllib.request.urlopen")
-    def test_missing_blocked_field_falls_back_to_github(self, mock_open, tmp_path):
+    def test_missing_blocked_field_is_an_error(self, mock_open, tmp_path):
         stale = _response({"status": "up_to_date", "security": None, "breakfix": None,
                            "latest": None})
         mock_open.side_effect = [stale, _github([])]
-        result = discover_update(_setup(tmp_path), mode="breakfix")
-        assert result["source"] == "github"
-        assert "blocked" in result["endpoint_error"]
+        self._refused(mock_open, tmp_path, "breakfix", "blocked")
 
     @pytest.mark.parametrize("blocked", [
         "0.4.2",
@@ -178,24 +183,83 @@ class TestEndpointContract:
     @patch("urllib.request.urlopen")
     def test_malformed_blocked_is_rejected(self, mock_open, tmp_path, blocked):
         mock_open.side_effect = [_endpoint(blocked=blocked), _github([])]
-        result = discover_update(_setup(tmp_path), mode="security")
-        assert result["source"] == "github"
-        assert "blocked" in result["endpoint_error"]
+        self._refused(mock_open, tmp_path, "security", "blocked")
 
     @patch("urllib.request.urlopen")
     def test_offer_of_wrong_class_is_rejected(self, mock_open, tmp_path):
         bad = _endpoint(breakfix=_offer("0.3.3", "feature"))
         mock_open.side_effect = [bad, _github([])]
-        result = discover_update(_setup(tmp_path), mode="breakfix")
-        assert result["source"] == "github"
-        assert "feature" in result["endpoint_error"]
+        self._refused(mock_open, tmp_path, "breakfix", "feature")
 
     @patch("urllib.request.urlopen")
     def test_non_object_response_is_rejected(self, mock_open, tmp_path):
         mock_open.side_effect = [_response([1, 2]), _github([])]
+        self._refused(mock_open, tmp_path, "security", "JSON object")
+
+    @patch("urllib.request.urlopen")
+    def test_non_json_answer_is_rejected(self, mock_open, tmp_path):
+        page = MagicMock()
+        page.read.return_value = b"<html>not json</html>"
+        mock_open.side_effect = [page, _github([])]
+        self._refused(mock_open, tmp_path, "security", "not JSON")
+
+
+class TestServiceErrorAnswers:
+    """An HTTP error from the service (its own rate limiter, a server error)
+    is an answer, not an outage: falling back to GitHub would offer a release
+    the circuit breaker holds, because GitHub cannot know about holds."""
+
+    @pytest.mark.parametrize("status", [429, 500, 502, 503])
+    @patch("urllib.request.urlopen")
+    def test_http_error_does_not_fall_back_to_github(self, mock_open, tmp_path, status):
+        held_on_github = [_gh_release("0.3.2", title="v0.3.2 [security] fix")]
+        mock_open.side_effect = [HTTPError("https://x/v1/check", status, "nope", {}, None),
+                                 _github(held_on_github)]
+        result = discover_update(_setup(tmp_path), mode="security")
+        assert result["action"] == "error"
+        assert mock_open.call_count == 1
+        assert f"HTTP {status}" in result["message"]
+        assert "next check" in result["message"]
+
+
+class TestHeld:
+    """``held`` lists the releases the service's circuit breaker withholds."""
+
+    @patch("urllib.request.urlopen")
+    def test_held_versions_ride_along(self, mock_open, tmp_path):
+        body = {"status": "up_to_date", "security": None, "breakfix": None,
+                "latest": _offer("0.3.2", "security"), "blocked": None,
+                "held": [{"version": "0.3.2", "reason": "circuit_breaker"}]}
+        mock_open.return_value = _response(body)
         result = discover_update(_setup(tmp_path), mode="security")
         assert result["action"] == "up_to_date"
-        assert result["source"] == "github"
+        assert result["held"] == ["0.3.2"]
+
+    @pytest.mark.parametrize("mode", ["security", "breakfix", "latest"])
+    @patch("urllib.request.urlopen")
+    def test_a_held_candidate_is_never_installed(self, mock_open, tmp_path, mode):
+        offer = _offer("0.3.2", "security")
+        body = {"status": "security_update_available", "security": offer,
+                "breakfix": offer, "latest": offer, "blocked": None,
+                "held": [{"version": "0.3.2", "reason": "circuit_breaker"}]}
+        mock_open.return_value = _response(body)
+        result = discover_update(_setup(tmp_path), mode=mode)
+        assert result["action"] == "error"
+        assert "0.3.2" in result["message"] and "circuit breaker" in result["message"]
+
+    @pytest.mark.parametrize("held", [
+        "0.3.2", [{"version": "0.3"}], [{"version": "0.3.2"}], ["0.3.2"],
+        [{"version": "0.3.2", "reason": 1}],
+    ])
+    @patch("urllib.request.urlopen")
+    def test_malformed_held_is_rejected(self, mock_open, tmp_path, held):
+        body = {"status": "up_to_date", "security": None, "breakfix": None,
+                "latest": None, "blocked": None, "held": held}
+        mock_open.side_effect = [_response(body), _github([])]
+        result = discover_update(_setup(tmp_path), mode="security")
+        assert result["action"] == "error"
+        assert mock_open.call_count == 1
+        assert "'held'" in result["message"]
 
 
 class TestGitHubFallback:

@@ -72,6 +72,12 @@ def run_auto_update(paths: BoxPaths) -> int:
         log_warning("auto-update", "Version-check endpoint not used; fell back to GitHub",
                     paths, detail={"endpoint_error": result["endpoint_error"]})
 
+    if result.get("held"):
+        held = ", ".join(result["held"])
+        print(f"Release(s) {held} held by the version-check circuit breaker; not installed.")
+        log_operation("auto-update", f"Release(s) {held} held by the circuit breaker",
+                      paths, detail={"held": result["held"]})
+
     if action == "up_to_date":
         print(f"No {scope} updates available.")
         record_blocked(paths, result)

@@ -179,7 +179,8 @@ either rule is broken. To change a dependency, edit the matching `.in` file or `
 3. Once the release is published, the maintainer redeploys the version-check service so it serves
    the new `releases.json`. Do not redeploy it before then: it would offer a release boxes cannot
    download yet. Servers discover new releases through that service, with the GitHub releases
-   list (and its `[security]` / `[breakfix]` / `[breaking]` markers) as the fallback. If you
+   list (and its `[security]` / `[breakfix]` / `[breaking]` markers) as the fallback only when
+   the service cannot be reached at all; an error answer from it is not a reason to fall back. If you
    change an existing entry in `releases.json`, edit that release's title on GitHub to match, and
    confirm with `python scripts/release-lint.py audit --github-releases FILE`, where FILE is the
    output of `gh api --paginate --slurp 'repos/boxmunge/boxmunge/releases?per_page=100'`.

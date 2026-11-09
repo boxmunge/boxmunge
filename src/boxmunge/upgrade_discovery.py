@@ -14,15 +14,24 @@ minor line (see boxmunge.release_selection). Every result also carries
 ``blocked``: the newest security or break-fix release auto-update may not
 install, and why, or None.
 
-The version-check endpoint is asked first. If it is unreachable or returns
-a response that does not match its contract, the GitHub releases API is the
-fallback, using the same rules on the ``[security]``, ``[breakfix]`` and
-``[breaking]`` markers in release titles and notes. A fallback result
-carries ``endpoint_error`` so callers can log it.
+The version-check endpoint is asked first. Its answer also carries the
+releases its circuit breaker holds (``held``): a held release is never
+installed, in any mode. Only when the endpoint cannot be reached at all (no
+HTTP answer: DNS, connection or timeout failure) is the GitHub releases API
+the fallback, using the same rules on the ``[security]``, ``[breakfix]`` and
+``[breaking]`` markers in release titles and notes; a fallback result carries
+``endpoint_error`` so callers can log it. An answer the box cannot use (an
+HTTP error such as the service's own 429, or a body that breaks the contract)
+is an error, not a reason to ask GitHub: GitHub cannot know about holds, so
+its answer could install the very release the maintainer withdrew. The box
+retries on its next check. The trade-off: a security release waits while the
+service answers with errors, rather than a held (known-broken) release being
+installed fleet-wide.
 """
 from __future__ import annotations
 
 import json
+import urllib.error
 import urllib.request
 from typing import Any
 
@@ -44,19 +53,30 @@ class EndpointContractError(ValueError):
     """The version-check endpoint answered with a response we cannot trust."""
 
 
-# What makes a discovery source unusable: network failures and timeouts
-# (URLError and socket timeouts are OSErrors), undecodable bodies, and
-# responses that break the contract.
+# What makes GitHub unusable: network failures and timeouts (URLError and
+# socket timeouts are OSErrors), undecodable bodies, and responses that break
+# the contract.
 _SOURCE_ERRORS = (OSError, json.JSONDecodeError, UnicodeDecodeError, EndpointContractError)
 
 
-def _check_endpoint(current: str) -> dict[str, Any]:
+def _check_endpoint(current: str) -> Any:
+    """The decoded /v1/check answer.
+
+    Raises OSError when no answer arrived (the only case discovery falls back
+    to GitHub for) and EndpointContractError for an answer it cannot use.
+    """
     req = urllib.request.Request(
         f"{version_check_base()}/v1/check?v={current}",
         headers={"User-Agent": f"boxmunge/{current}"},
     )
-    resp = urllib.request.urlopen(req, timeout=10)
-    return json.loads(resp.read())
+    try:
+        raw = urllib.request.urlopen(req, timeout=10).read()
+    except urllib.error.HTTPError as e:  # an answer, not an outage
+        raise EndpointContractError(f"it answered HTTP {e.code} ({e.reason})") from e
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise EndpointContractError(f"its answer is not JSON ({e})") from e
 
 
 def _endpoint_candidate(result: dict[str, Any], mode: str) -> dict[str, Any] | None:
@@ -102,15 +122,32 @@ def _endpoint_blocked(blocked: Any) -> dict[str, Any] | None:
     return {"version": version, "url": url, "class": cls, "reason": dict(reason)}
 
 
-def _read_endpoint(result: Any, mode: str) -> tuple[dict[str, Any] | None, dict | None]:
-    """(candidate, blocked) from a /v1/check response."""
+def _endpoint_held(held: Any) -> list[str]:
+    """Read the optional ``held`` list from a /v1/check response, strictly."""
+    if not isinstance(held, list):
+        raise EndpointContractError("'held' is not a list")
+    versions = []
+    for entry in held:
+        if (not isinstance(entry, dict) or not isinstance(entry.get("version"), str)
+                or not VERSION_RE.match(entry["version"])
+                or not isinstance(entry.get("reason"), str)):
+            raise EndpointContractError("'held' entries need an X.Y.Z version and a reason")
+        versions.append(entry["version"])
+    return versions
+
+
+def _read_endpoint(
+    result: Any, mode: str,
+) -> tuple[dict[str, Any] | None, dict | None, list[str]]:
+    """(candidate, blocked, held versions) from a /v1/check response."""
     if not isinstance(result, dict):
         raise EndpointContractError("response is not a JSON object")
     for field in ("security", "breakfix", "latest", "blocked"):
         if field not in result:
             raise EndpointContractError(
                 f"response has no '{field}' field (version-check service out of date?)")
-    return _endpoint_candidate(result, mode), _endpoint_blocked(result["blocked"])
+    return (_endpoint_candidate(result, mode), _endpoint_blocked(result["blocked"]),
+            _endpoint_held(result.get("held", [])))
 
 
 def _check_github(current: str, mode: str) -> tuple[dict[str, Any] | None, dict | None]:
@@ -150,9 +187,12 @@ def discover_update(paths: BoxPaths, mode: str) -> dict[str, Any]:
     current, _ = parse_version_string(read_installed_version(paths))
 
     meta: dict[str, Any] = {"source": "endpoint"}
+    held: list[str] = []
     try:
-        candidate, blocked = _read_endpoint(_check_endpoint(current), mode)
-    except _SOURCE_ERRORS as e:
+        candidate, blocked, held = _read_endpoint(_check_endpoint(current), mode)
+    except EndpointContractError as e:
+        return {"action": "error", "message": _unusable_answer(e)}
+    except OSError as e:  # no answer at all: the service is unreachable
         meta = {"source": "github", "endpoint_error": str(e)}
         try:
             candidate, blocked = _check_github(current, mode)
@@ -160,7 +200,14 @@ def discover_update(paths: BoxPaths, mode: str) -> dict[str, Any]:
             return {"action": "error",
                     "message": f"Cannot use boxmunge.dev ({e}) or GitHub ({gh})"}
     meta = {"current_version": current, "blocked": blocked, **meta}
+    if held:
+        meta["held"] = held
 
+    if candidate is not None and candidate["version"] in held:
+        return {"action": "error", "message": (
+            f"Release {candidate['version']} is held by the version-check circuit "
+            "breaker (withdrawn as broken); not installing it. It is offered again "
+            "once the hold is reset.")}
     if candidate is None or not newer(candidate["version"], current):
         return {"action": "up_to_date", **meta}
 
@@ -173,3 +220,10 @@ def discover_update(paths: BoxPaths, mode: str) -> dict[str, Any]:
                 "class": candidate["class"], **meta}
 
     return {"action": "upgrade", **candidate, **meta}
+
+
+def _unusable_answer(error: EndpointContractError) -> str:
+    return (f"The version-check service at {version_check_base()} gave an answer this "
+            f"box cannot use: {error}. GitHub is not asked instead: it cannot know "
+            "which releases the service has held as broken. Nothing is installed; "
+            "auto-update retries on its next check, or run `boxmunge upgrade` again later.")
