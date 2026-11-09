@@ -140,7 +140,7 @@ Output (truncated): ${output:0:500}"
 do_rollback() {
     local new_version="$1" from_version="$2" stage="$3" prev_slot="$4" count=0
     rollback_target_ok "$prev_slot" \
-        || die "Cannot roll back $new_version: env-$prev_slot is not a working venv, or is itself a half-finished upgrade; inspect it as supervisor"
+        || die_logged "Cannot roll back $new_version: env-$prev_slot is not a working venv, or is itself a half-finished upgrade; inspect it as supervisor"
     [[ "$stage" != interrupted ]] || count=$(( $(interruptions "$new_version") + 1 ))
     printf '%s\n%s\n%s\n' "$new_version" "$stage" "$count" > "$(rollback_marker "$prev_slot")"
     sync

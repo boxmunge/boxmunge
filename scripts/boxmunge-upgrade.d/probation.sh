@@ -32,7 +32,7 @@ print("yes" if now >= expires or beyond_cap else "no")
 print(expires.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
 print("beyond_cap" if beyond_cap else "")
 PYPROB
-)" || die "$PROBATION_FILE is malformed; refusing to act on it"
+)" || die_logged "$PROBATION_FILE is malformed; refusing to act on it"
     PROB_VERSION="$(echo "$out" | sed -n '1p')"
     PROB_PREV_SLOT="$(echo "$out" | sed -n '2p')"
     PROB_EXPIRED="$(echo "$out" | sed -n '3p')"
@@ -48,21 +48,21 @@ PYPROB
 # load_probation: 0 with PROB_* set while a release is on probation, 1 when
 # there is none. A probation naming the live slot as previous_slot is stale
 # (an older shim's rollback left it behind; deploy may remove it anyway), so
-# it is removed with a warning. Otherwise previous_slot must be a slot a
-# rollback could really use; promotion deletes it.
+# it is removed with a warning. previous_slot need not hold a working venv:
+# a pre-0.11 shim could recycle it mid-probation. Only a rollback needs it
+# (do_rollback checks); promotion deletes it, and demanding it here left such
+# a probation unable to expire, deferring every upgrade for good (#119).
 load_probation() {
     [[ -e "$PROBATION_FILE" || -L "$PROBATION_FILE" ]] || return 1
     read_probation
     if [[ "$PROB_PREV_SLOT" == "$ACTIVE_SLOT" ]]; then
         [[ ! -e "$(inflight_marker "$ACTIVE_SLOT")" ]] \
-            || die "$PROBATION_FILE names the live slot during an interrupted upgrade; refusing to act on it"
+            || die_logged "$PROBATION_FILE names the live slot during an interrupted upgrade; refusing to act on it"
         log "WARN: removing stale $PROBATION_FILE: previous_slot '$PROB_PREV_SLOT' is the live slot"
         bm_log warn upgrade "stale probation removed" "{\"version\": \"$PROB_VERSION\"}"
         rm -f "$PROBATION_FILE"
         return 1
     fi
-    rollback_target_ok "$PROB_PREV_SLOT" \
-        || die "$PROBATION_FILE previous_slot '$PROB_PREV_SLOT' is not a working venv a rollback could use; inspect it as supervisor, or remove the file to accept $PROB_VERSION"
 }
 
 # work_interrupted: an upgrade or rollback was cut short, and check-probation
@@ -87,7 +87,11 @@ refuse_during_probation() {
     elif load_probation; then
         why="$PROB_VERSION is on probation (it ends $PROB_EXPIRES_AT)"
         [[ "$PROB_EXPIRED" == "no" ]] || why="$PROB_VERSION is on probation (it has expired and the health timer promotes it within minutes)"
-        why="$why and slot $PROB_PREV_SLOT holds the previous release, the only rollback target"
+        if rollback_target_ok "$PROB_PREV_SLOT"; then
+            why="$why and slot $PROB_PREV_SLOT holds the previous release, the only rollback target"
+        else
+            why="$why; its rollback target, slot $PROB_PREV_SLOT, is not a working venv, so a failing health check cannot roll it back"
+        fi
         retry="Retry after the probation ends."
         [[ "$mode" != "force" ]] || retry="To accept $PROB_VERSION and give up that fallback now, remove $PROBATION_FILE and re-run."
     else
@@ -112,9 +116,9 @@ resume_rollback() {
         { read -r version; read -r stage; read -r count; } < "$marker" || true
         require_semver "$version" "$marker"
         [[ "$stage" =~ ^[a-z_]+$ && "$count" =~ ^[0-9]+$ ]] \
-            || die "$marker is malformed; inspect both slots as supervisor"
+            || die_logged "$marker is malformed; inspect both slots as supervisor"
         rollback_target_ok "$slot" \
-            || die "$marker is in env-$slot, which is not a working venv; inspect both slots as supervisor"
+            || die_logged "$marker is in env-$slot, which is not a working venv; inspect both slots as supervisor"
         log "Resuming the interrupted rollback of $version (stage $stage) onto slot $slot"
         complete_rollback "$version" "$("$BOXMUNGE_ROOT/env-$slot/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")" \
             "$stage" "$slot" "$count"
@@ -161,6 +165,7 @@ cmd_check_probation() {
     fi
     local version="$PROB_VERSION" prev_slot="$PROB_PREV_SLOT"
 
+    # Expiry first: promotion needs no rollback target (it deletes it).
     if [[ "$PROB_EXPIRED" == "yes" ]]; then
         log "Probation expired for $version — promoting"
         remove_slot "$prev_slot"

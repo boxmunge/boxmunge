@@ -206,9 +206,9 @@ reads from that directory is checked before use:
   `active-slot`.
 - `probation.json` must be a JSON object with a semver `version`, an
   ISO-8601 `expires_at` with a timezone, and a `previous_slot` of `a` or `b`
-  that is the current standby slot and a working venv (promotion deletes
-  it; a rollback swaps to it). One naming the live slot is stale and is
-  removed. An `expires_at` later than a fresh probation's 6 hours (plus 15
+  that is the current standby slot. One naming the live slot is stale and is
+  removed. Promotion deletes the standby whatever it holds; a rollback swaps
+  to it only if it is a working venv, and otherwise refuses. An `expires_at` later than a fresh probation's 6 hours (plus 15
   minutes for clock steps) counts as expired, so a forged far-future value
   cannot hold off upgrades.
 - `blocklist.json` must be a JSON object keyed by semver versions.

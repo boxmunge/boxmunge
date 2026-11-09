@@ -1479,6 +1479,7 @@ the exit code. The MCP `health` tool runs the same checks.
 | `alerts` | Pushover is not configured, so nothing on this box can alert you | see [Alerts not configured](#alerts-not-configured) |
 | `container-updates` | the daily container update failed for a target (also when a service it updates has no container, so its running image is unknown), or has not run for 48 hours | `log --component container-update`; the entry ends with the command's own error output |
 | `platform-updates` | a security or break-fix release cannot be installed automatically | see [Upgrading the Platform](#upgrading-the-platform) |
+| `upgrade-probation` | a platform upgrade's probation expired more than 30 minutes ago and the health timer has not promoted it, or `probation.json` cannot be read | the supervisor user runs `sudo /opt/boxmunge/bin/boxmunge-upgrade check-probation` to see why; `sudo rm /opt/boxmunge/upgrade-state/probation.json` accepts the release |
 | `docker-userns` | Docker does not remap user namespaces yet, remaps them with another identity, or a source cannot be read on a box boxmunge has not remapped (warning; deploys go on); or the record or `daemon.json` claims boxmunge's remap and a source disagrees, or a remapped box's `caddy/Caddyfile` is not a world-readable regular file (error, alerted once a day) | see [User-namespace remapping](#user-namespace-remapping) |
 | `security-profiles` | a service runs with `profile: off` | review the reason in its manifest |
 | `service-users` | a deployed project's services have no recorded user yet (its next deploy decides them, and refuses an undeclared root registry image) | `doctor` lists the lines to add; see [Service Users After an Upgrade](#service-users-after-an-upgrade) |
@@ -1896,7 +1897,14 @@ PARTIAL" alert and the shim exits 2; inspect the box as `supervisor`.
 Probation ends early, promoting the upgrade, when you deploy, roll back, restore, or run
 `backup` yourself. Timer-driven work (the nightly `backup-all`, container-update's
 pre-update backup, self-test) does not end it, so container-update keeps waiting until
-probation is over.
+probation is over. If the deploy user cannot read `probation.json`, the command warns, names
+the fix, and carries on; the probation then ends when it expires.
+
+The previous release does not have to be there for probation to end: at expiry the health
+timer promotes the release whether or not the previous venv still works. Only a rollback needs
+it. If a critical health result calls for a rollback and the previous venv is missing or broken,
+the shim refuses the rollback and logs an error (`log --component upgrade --level error`), and
+the probation stays until it expires.
 
 No other upgrade starts during probation: the standby venv holds the previous release, the
 only rollback target. `upgrade --repair-deps` is not an upgrade and does run: it installs the
