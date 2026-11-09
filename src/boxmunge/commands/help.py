@@ -38,7 +38,7 @@ Project lifecycle:
   project-delete <p>      Destructive: stop, remove files, deregister (with confirm)
   data adopt <p> <svc>:<path> <name>
                           Copy an anonymous volume into a named one deploy adopts
-  data chown <p> <svc> <uid>:<gid> [--no-snapshot]
+  data chown <p> <svc> <uid>:<gid> [--no-snapshot | --staging]
                           Snapshot, then give a service's data to its new user
                           (stays stopped until you deploy)
 

@@ -23,7 +23,8 @@ from boxmunge import docker_containers
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
-from boxmunge.pending_snapshot import record_pending
+from boxmunge.pending_snapshot import age, pending, pending_for_live, record_pending
+from boxmunge.state import StateError
 
 TAKEN_BY = "pause"
 NO_SNAPSHOT_COST = ("a deploy that ends this pause (`resume --no-start`) then cannot roll "
@@ -63,7 +64,15 @@ def _no_backup(manifest: dict | None) -> bool:
 
 def plan_line(paths: BoxPaths, project: str, no_snapshot: bool) -> str:
     """The confirmation prompt's line about the snapshot. A backup source
-    that cannot be read is the pause's to refuse, under the lock."""
+    or pairing that cannot be read is the pause's to refuse, under the lock."""
+    try:
+        kept = pending(paths, project)
+    except StateError:
+        kept = None
+    if kept is not None:
+        return (f"The snapshot {kept['name']} that {kept['taken_by']} took stays the "
+                f"pre-deploy snapshot while {kept['service']} has not run since; no new "
+                f"one is taken")
     skip = _skip(paths, project, no_snapshot)
     if skip is not None:
         return skip
@@ -80,7 +89,18 @@ def take(paths: BoxPaths, project: str, no_snapshot: bool) -> PauseSnapshot | No
     """Snapshot the running project. None when there is nothing to take
     (--no-snapshot, backup.type none, or nothing runs: a quarantined or
     monitor-stopped project). Raises PauseRefused, DockerError, ManifestError,
-    ReleaseStateError."""
+    ReleaseStateError, StateError.
+
+    A snapshot already paired with the next deploy (`data chown` stopped the
+    backup service after taking it) is kept while Docker shows that service
+    has not run since: it holds the data as it was before the change, and a
+    dump now would have nothing to run in."""
+    kept = pending_for_live(paths, project)
+    if kept is not None:
+        print(f"  The snapshot {kept['name']} that {kept['taken_by']} took {age(kept)} ago "
+              f"stays the next deploy's pre-deploy snapshot: {kept['service']} has not run "
+              f"since. No new one is taken.")
+        return None
     skip = _skip(paths, project, no_snapshot)
     if skip is not None:
         print(f"  {skip}.")

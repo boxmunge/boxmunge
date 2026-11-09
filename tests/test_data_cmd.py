@@ -27,7 +27,8 @@ class _Box:
         monkeypatch.setattr(data_cmd, "copy_into_volume",
                             lambda label, src, dst: self.calls.append(("copy", src, dst)))
         monkeypatch.setattr(data_cmd, "check_containers_start",
-                            lambda paths, project, component: self.calls.append(("check",)))
+                            lambda paths, project, names, component:
+                            self.calls.append(("check",)))
         monkeypatch.setattr(data_cmd, "start_containers_checked",
                             lambda paths, project, names, component:
                             self.calls.append(("start", names)))

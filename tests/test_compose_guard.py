@@ -402,7 +402,7 @@ def test_container_mount_outside_the_project_is_refused(box) -> None:
     _deploy(paths)
     with patch("boxmunge.docker_containers.container_bind_sources", return_value=[("/", True)]):
         with pytest.raises(ComposeRefused, match="outside the project"):
-            check_containers_start(paths, NAME, component="stage")
+            check_containers_start(paths, NAME, [f"{NAME}-web-1"], component="stage")
 
 
 def test_platform_start_is_only_for_platform_stacks(box) -> None:

@@ -15,7 +15,8 @@ from boxmunge.bind_sources import BindSourceError
 from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.caddy_journal import write_site
 from boxmunge.compose import ComposeError, load_user_compose
-from boxmunge.commands import deploy_images, deploy_storage
+from boxmunge.commands import deploy_checks, deploy_images, deploy_storage
+from boxmunge.commands.chown_staging import rechownable
 from boxmunge.compose_guard import compose_up_checked
 from boxmunge.compose_resolve import ComposeResolveError
 from boxmunge.commands.quarantine_gate import Clearance, clear_release, verify_started
@@ -26,12 +27,13 @@ from boxmunge.docker import (
     CaddyConfigRejected, DockerError, caddy_config_lock, caddy_reload,
 )
 from boxmunge.log import log_error
-from boxmunge.release_target import DeployRefused, staging_release_target
-from boxmunge.run_as import RunAsError, default_user_hint
-from boxmunge.userns.offset import RemapError
+from boxmunge.release_target import DeployRefused, resolved_services, staging_release_target
+from boxmunge.run_as import RunAsError, ServiceUser, default_user_hint
+from boxmunge.userns.offset import RemapError, remap_offset
 from boxmunge.security_warn import warn_off_services, warn_writable_state
 from boxmunge.staged_release import SlotError, release_dir, slot_dir, staging_target
-from boxmunge.staging_copy_plan import StagingDataError
+from boxmunge.staging_copy_owner import give_copies
+from boxmunge.staging_copy_plan import CopyPlan, StagingDataError
 from boxmunge.staging_data import copy_production_data, prepare_destinations
 from boxmunge.staging_isolation import StagingIsolationError
 from boxmunge.staging_prepare import check_staging_storage, write_staging_overlay
@@ -63,13 +65,13 @@ def _staging_auth(project_name: str, paths: BoxPaths) -> tuple[str, str] | None:
 
 
 def _decide_users(paths: BoxPaths, project: str, manifest: dict[str, Any], *,
-                  pull: bool) -> Clearance | None:
+                  pull: bool) -> tuple[Clearance | None, dict[str, ServiceUser]]:
     """Build staging's images (`pull`: with --pull), decide and record who
     each service runs as (deploy_images), and write the slot's overlay
     with those users. A CVE-quarantined project's staging starts only if
     every image it would start scans clean (quarantine_gate; its clearance
     is returned, to check what the start ran); production stays
-    quarantined."""
+    quarantined. Returns the clearance and the users."""
     slot = slot_dir(paths, project)
     print("  Building images and deciding who each service runs as...")
     try:
@@ -83,7 +85,28 @@ def _decide_users(paths: BoxPaths, project: str, manifest: dict[str, Any], *,
     write_staging_overlay(paths, project, manifest, release_dir(slot), slot, users)
     deploy_images.record_release_users(paths, staging_release_target(paths, project),
                                        manifest, users, component="stage")
-    return clearance
+    return clearance, users
+
+
+def _give_and_check_owners(paths: BoxPaths, project: str, plan: CopyPlan | None,
+                           users: dict[str, ServiceUser]) -> None:
+    """The stores the copy filled go to the users that run them
+    (staging_copy_owner); then every store, as the start will mount it,
+    must belong to its user (deploy_checks.staging_owner_problems). Raises
+    DeployRefused."""
+    target = staging_release_target(paths, project)
+    model, services = resolved_services(target)
+    if plan is not None:
+        give_copies(paths, project, plan, services, users)
+    stores = deploy_checks.StagingStores(
+        copied=frozenset(deploy_checks.store_id(dest.kind, dest.key if dest.kind == "volume"
+                                                else dest.ref)
+                         for _src, dest in (plan.pairs if plan is not None else [])),
+        rechownable=rechownable(paths, project))
+    problems = deploy_checks.staging_owner_problems(target, model, services, users,
+                                                    remap_offset(paths), stores)
+    if problems:
+        raise DeployRefused(problems)
 
 
 def _prepare_storage(paths: BoxPaths, project: str, manifest: dict[str, Any], *,
@@ -91,7 +114,7 @@ def _prepare_storage(paths: BoxPaths, project: str, manifest: dict[str, Any], *,
     """Decide staging's users, check staging's files from the slot and,
     with copy_data, copy production's data into staging's created, never
     started containers. Returns the quarantine gate's clearance, if any."""
-    clearance = _decide_users(paths, project, manifest, pull=pull)
+    clearance, users = _decide_users(paths, project, manifest, pull=pull)
     release = release_dir(slot_dir(paths, project))
     user_compose = load_user_compose(release / "compose.yml", project)
     # Deploy-time warnings, repeated by design (spec "Deploy-time warning").
@@ -101,15 +124,15 @@ def _prepare_storage(paths: BoxPaths, project: str, manifest: dict[str, Any], *,
     if plan is not None:
         prepare_destinations(paths, project, plan)
     deploy_storage.prepare_storage(paths, staging_release_target(paths, project))
-    if plan is None:
-        return clearance
-    # Create staging (and so its volumes) without starting it, then copy
-    # into it while neither side runs.
-    print("  Creating staging containers for the data copy...")
-    compose_up_checked(paths, project, component="stage", staging=True,
-                       record=True, deploying=True, start=False)
-    copy_production_data(paths, project, plan)
-    print("  Data copy complete.")
+    if plan is not None:
+        # Create staging (and so its volumes) without starting it, then copy
+        # into it while neither side runs.
+        print("  Creating staging containers for the data copy...")
+        compose_up_checked(paths, project, component="stage", staging=True,
+                           record=True, deploying=True, start=False)
+        copy_production_data(paths, project, plan)
+        print("  Data copy complete.")
+    _give_and_check_owners(paths, project, plan, users)
     return clearance
 
 

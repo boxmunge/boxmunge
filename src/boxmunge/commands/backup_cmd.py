@@ -64,15 +64,19 @@ def list_snapshots(paths: BoxPaths, project_name: str) -> list[Path]:
 
 def take_snapshot(
     project_name: str, paths: BoxPaths, kind: BackupKind, manifest: dict | None = None,
-    compose_file: Path | None = None,
+    compose_file: Path | None = None, *, offline: bool = False,
 ) -> tuple[int, str | None]:
     """backup_locked, and the name of the snapshot it wrote. The name is
     None when it wrote none, whose rc is 0 too: type none, a skip (a
     quarantined project, or backup_source's). Never the newest older
     snapshot, which holds older data. Caller holds the project lock."""
     before = {p.name for p in list_snapshots(paths, project_name)}
-    rc = backup_locked(project_name, paths, kind=kind, manifest=manifest,
-                       compose_file=compose_file)
+    if offline:
+        rc = backup_locked(project_name, paths, kind=kind, manifest=manifest,
+                           compose_file=compose_file, offline=True)
+    else:
+        rc = backup_locked(project_name, paths, kind=kind, manifest=manifest,
+                           compose_file=compose_file)
     new = [p.name for p in list_snapshots(paths, project_name) if p.name not in before]
     return rc, (new[0] if rc == 0 and new else None)
 
@@ -95,6 +99,7 @@ def backup_locked(
     kind: BackupKind = BackupKind.MANUAL,
     manifest: dict | None = None,
     compose_file: Path | None = None,
+    offline: bool = False,
 ) -> int:
     """The backup core. Caller holds the project lock; never takes it.
 
@@ -114,12 +119,17 @@ def backup_locked(
     cleanly with rc=0 (cron-driven backup-all should not fail just
     because a project is offline for security reasons; volume-empty
     warnings would be noise). Different rc shapes preserved by reason.
+
+    ``offline`` (data chown, over a stopped backup service) dumps in a
+    one-off container of the service instead (backup_offline): the data is
+    at rest, so a pause or a quarantine does not stop it.
     """
     block = is_blocked(project_name, paths)
-    if block and block.reason in (BlockReason.PAUSED, BlockReason.MIGRATING):
+    if block and block.reason is BlockReason.MIGRATING or (
+            block and block.reason is BlockReason.PAUSED and not offline):
         print(f"ERROR: {block.refuse_message}", file=sys.stderr)
         return 1
-    if block and block.reason is BlockReason.QUARANTINED:
+    if block and block.reason is BlockReason.QUARANTINED and not offline:
         # Backups of stopped services are pointless and would emit
         # confusing "volume empty" warnings — skip cleanly with a
         # structured log entry, returning 0.
@@ -189,7 +199,7 @@ def backup_locked(
         return 1
 
     return _run_backup_inner(
-        project_name, paths, dump_command, service, kind, retention, compose_file,
+        project_name, paths, dump_command, service, kind, retention, compose_file, offline,
     )
 
 
@@ -201,12 +211,14 @@ def _run_backup_inner(
     kind: BackupKind,
     retention: int,
     compose_file: Path | None = None,
+    offline: bool = False,
 ) -> int:
     print(f"{project_name}: starting {kind.value} backup (service: {service})...")
     sweep_stale_dumps(paths, project_name)
 
     try:
-        raw_path = execute_dump(paths, project_name, dump_command, service, compose_file)
+        raw_path = execute_dump(paths, project_name, dump_command, service, compose_file,
+                                offline=offline)
     except BackupError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         log_error("backup", f"Backup dump failed: {e}", paths, project=project_name)

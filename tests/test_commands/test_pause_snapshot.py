@@ -200,3 +200,27 @@ def test_the_deploy_shell_passes_no_snapshot_and_yes() -> None:
         run.return_value.returncode = 0
         run_command("pause", args)
     run.assert_called_once_with(["boxmunge-server", "pause", *args])
+
+
+def test_a_pause_after_data_chown_keeps_the_chown_s_pairing(
+        live_v1, monkeypatch, capsys) -> None:
+    """Review of #144 (P3-1): data chown stopped the backup service after its
+    snapshot; the pause tried to dump in it, failed, and refused naming the
+    cost of --no-snapshot. The chown's snapshot is the data before either."""
+    from boxmunge.pending_snapshot import record_pending
+    paths = live_v1
+    bdir = paths.project_backups("myapp")
+    bdir.mkdir(parents=True, exist_ok=True)
+    (bdir / "myapp-2026-11-01T100000-prechown.tar.gz.age").write_text("prechown")
+    record_pending(paths, "myapp", "myapp-2026-11-01T100000-prechown.tar.gz.age",
+                   "data chown", "web", ["myapp-web-1"])
+    monkeypatch.setattr(docker_containers, "start_states", lambda project: {
+        "myapp-web-1": StartState(service="web", running=False, started_at=BEFORE)})
+    capsys.readouterr()
+    assert _pause(paths, service_running=False) == 0
+    out = capsys.readouterr().out
+    assert "that data chown took" in out and "No new one is taken" in out
+    assert NO_SNAPSHOT_COST not in out
+    kept = pending(paths, "myapp")
+    assert (kept["name"], kept["taken_by"]) == (
+        "myapp-2026-11-01T100000-prechown.tar.gz.age", "data chown")
