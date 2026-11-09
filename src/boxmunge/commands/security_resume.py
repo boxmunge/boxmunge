@@ -6,15 +6,21 @@ audit-only re-scan of every one of the project's current images succeeds
 and shows no quarantine-level finding. A failed image scan, an image the
 per-project budget skipped, or a service whose image cannot be identified
 keeps the quarantine, because boxmunge cannot show the finding is resolved.
+So does a stale CISA KEV catalog when the quarantine rests on it
+(cve.lift_rule, the rule the scan's lift and the deploy gate share).
 """
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 
 from boxmunge.commands.quarantine_lift import restore_from_quarantine
 from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project_locked
-from boxmunge.cve.policy import Disposition, FindingDisposition
-from boxmunge.cve.quarantine import QuarantineError, is_quarantined
+from boxmunge.cve.lift_rule import stale_kev_lift_refusal
+from boxmunge.cve.policy import Disposition, FindingDisposition, Posture
+from boxmunge.cve.quarantine import (
+    QuarantineError, checked_quarantine_record, is_quarantined, read_quarantine_state,
+)
 from boxmunge.cve.scan_state import BASIS_STARTUP_IMAGES
 from boxmunge.cve.kev import load_kev
 from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
@@ -113,9 +119,10 @@ def security_resume_locked(paths: BoxPaths, project: str) -> int:
         return 1
     # audit_only=True (audit A-3): the pre-lift scan must not mutate
     # scan_state.json or emit transition alerts.
+    kev = load_kev(paths)
     try:
         scan = scan_one_project_locked(
-            paths, project, in_grace=False, kev=load_kev(paths), audit_only=True,
+            paths, project, in_grace=False, kev=kev, audit_only=True,
         )
     except (TrivyNotInstalledError, RuntimeError, ManifestError) as e:
         _err(f"ERROR: {e}")
@@ -132,6 +139,18 @@ def security_resume_locked(paths: BoxPaths, project: str) -> int:
     ]
     if blocking:
         _report_blocking(project, blocking)
+        return 1
+    try:
+        record = checked_quarantine_record(read_quarantine_state(project, paths),
+                                           paths.project_quarantine_state(project))
+    except QuarantineError as e:
+        _err(f"ERROR: {e}")
+        return 1
+    refusal = stale_kev_lift_refusal(Posture(scan.posture), record["cve_id"], kev,
+                                     datetime.now(timezone.utc).date())
+    if refusal is not None:
+        _err(f"ERROR: Cannot resume '{project}' — the re-scan is clear, but {refusal}")
+        _err("  The quarantine stays in place.")
         return 1
 
     what = ("every image the lift will start" if scan.basis == BASIS_STARTUP_IMAGES

@@ -316,7 +316,8 @@ This alert fires once per scan run, not once per finding, to avoid alert
 storms. The degradation must not go unnoticed: under `relaxed` and
 `balanced` (the default) KEV is the only quarantine trigger, so while the
 catalog is stale nothing can quarantine those projects. A stale catalog
-also never lifts a quarantine (see "Automatic lift").
+also never lifts a quarantine that rests on it, by any route (see
+"Automatic lift").
 
 ## Runtime relevance gate
 
@@ -1096,6 +1097,17 @@ is published, while the running image is still the vulnerable one; under
 `strict` and `paranoid`, a distro re-triage or a newly published fix is not
 evidence that what runs is safe. Those decisions stay with the operator.
 
+**A stale catalog never lifts a quarantine that rests on it**, whichever
+route asks: the scan, `security resume` or a deploy of a fix. Under
+`balanced` and `relaxed` every quarantine rests on it (KEV is their only
+trigger); under `strict` and `paranoid`, one recorded for a CVE the cached
+catalog lists does. `security resume` and the deploy refuse with the cause
+and the quarantine stays: refresh the catalog with `boxmunge security scan`
+(it fetches the catalog first; if the fetch keeps failing, its KEV alert
+names why), then retry. A `strict` or `paranoid` quarantine recorded for a
+CVE the catalog does not list was judged on severity, which a stale catalog
+does not hide, so it lifts as before.
+
 The lift is `security resume`'s: the normal Caddy site is restored, the
 saved restart policies are given back, the scanned local images are
 started with no pull or build, and the smoke test runs. A project that is
@@ -1161,7 +1173,9 @@ and `security scan` prints `<project>: quarantine lifted (<CVE>)`.
    - any image failed to scan (Trivy DB or registry unreachable, for
      example), or every image did;
    - the per-project scan budget ran out before every image was scanned;
-   - an image the lift would start is not in the local image store.
+   - an image the lift would start is not in the local image store;
+   - the quarantine rests on the CISA KEV catalog and the catalog is stale
+     or missing (see "Automatic lift").
 
    The error lists each image or service that was not covered. Fix the
    cause and retry; an incomplete re-scan is never treated as clean.
@@ -1181,7 +1195,10 @@ cleared.
    and pulls them all. A quarantine-level finding, a failed or skipped
    image scan, or an image that cannot be identified refuses the release:
    the error names each CVE, package, service and image and the fix, the
-   candidates are removed, and the quarantine stays. A first attempt
+   candidates are removed, and the quarantine stays. So does a clear scan
+   while the quarantine rests on a stale KEV catalog (see "Automatic lift"):
+   the project is not started on an exploitation signal that cannot be
+   checked. A first attempt
    leaves the install open before its hook, so `prod-deploy <project>
    --abandon` or a different release (fix-forward) ends it; a resumed
    install stays at its phase. A clean release deploys as usual, refused

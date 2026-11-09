@@ -38,6 +38,7 @@ from boxmunge.commands.security_enforce import (
 from boxmunge.cve.alerting import emit_scan_alerts
 from boxmunge.cve.grace import GraceError, init_grace_if_missing
 from boxmunge.cve.kev import KevCatalog, load_kev
+from boxmunge.cve.lift_rule import stale_kev_lift_refusal
 from boxmunge.cve.policy import (
     FindingDisposition,
     Posture,
@@ -396,7 +397,7 @@ def scan_one_project_locked(
     if not audit_only:
         cleared = clears_quarantine(
             meta.posture, decisions, complete=not (failed or skipped or unidentified),
-            kev_fresh=not kev.is_stale(_today()))
+            kev_fresh=stale_kev_lift_refusal(meta.posture, None, kev, _today()) is None)
         outcome = _enforce(
             paths, project, meta, headline, in_grace=in_grace or defer_new,
             cleared=tuple(decisions) if cleared else None,
