@@ -56,12 +56,13 @@ def test_redeploy_deploys_the_installed_release_again(paths, capsys) -> None:
     assert "deployed successfully" in capsys.readouterr().out
 
 
-def test_redeploy_leaves_a_waiting_bundle_in_the_inbox(paths) -> None:
+def test_redeploy_leaves_a_waiting_bundle_in_the_inbox_and_says_so(paths, capsys) -> None:
     _prod_v1(paths)
     waiting = place_bundle(paths, timestamp=V2, files={"VERSION": "v2\n"})
     with docker_off():
         assert run_deploy("myapp", paths, redeploy=True) == 0
     assert waiting.exists()
+    assert f"{waiting.name} is waiting in the inbox" in capsys.readouterr().out
     assert (paths.project_dir("myapp") / "VERSION").read_text() == "v1\n"
 
 
@@ -82,6 +83,32 @@ def test_redeploy_with_a_ref_is_refused(paths, capsys) -> None:
 
 
 def test_redeploy_is_refused_for_a_git_project() -> None:
-    problem = redeploy_problem("myapp", is_new=False, git=True, ref=None)
+    problem = redeploy_problem("myapp", git=True, ref=None)
     assert problem and "git project" in problem and "'prod-deploy myapp'" in problem
-    assert redeploy_problem("myapp", is_new=False, git=False, ref=None) is None
+    assert redeploy_problem("myapp", git=False, ref=None) is None
+
+
+def test_redeploy_finishes_an_open_first_install(paths, capsys) -> None:
+    """A first install that stopped after its code was in place: there is
+    no installed release yet, so --redeploy resumes it."""
+    from tests.txn_helpers import crash_at
+    add_project("myapp", paths)
+    place_bundle(paths, timestamp=V1)
+    with docker_off():
+        assert crash_at("txn.installed", lambda: run_deploy("myapp", paths, ref=V1)) == 137
+        assert run_deploy("myapp", paths, redeploy=True) == 0
+    assert "--redeploy finishes it first" in capsys.readouterr().out
+    assert _current_ref(paths) == f"myapp-{V1}"
+
+
+def test_a_refused_deploy_leaves_upgrade_probation_alone(paths, monkeypatch) -> None:
+    _prod_v1(paths)
+    cleared: list[str] = []
+    monkeypatch.setattr("boxmunge.commands.deploy.clear_probation_if_active",
+                        lambda p, component: cleared.append(component))
+    with docker_off():
+        assert run_deploy("myapp", paths) == 1
+        assert run_deploy("myapp", paths, redeploy=True, dry_run=True) == 0
+        assert cleared == []
+        assert run_deploy("myapp", paths, redeploy=True) == 0
+    assert cleared == ["deploy"]

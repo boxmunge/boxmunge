@@ -15,17 +15,15 @@ from typing import TYPE_CHECKING
 
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.release import live_ref
+from boxmunge.source import SourceError, resolve_bundle_source
 from boxmunge.staged_release import SlotError, load_slot
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 
-def redeploy_problem(project: str, *, is_new: bool, git: bool, ref: str | None) -> str | None:
+def redeploy_problem(project: str, *, git: bool, ref: str | None) -> str | None:
     """Why `prod-deploy <project> --redeploy` cannot run as asked, or None."""
-    if is_new:
-        return (f"--redeploy deploys the release already installed, and '{project}' has "
-                f"none yet. Upload its first bundle, then run 'prod-deploy {project}'.")
     if git:
         return (f"'{project}' is a git project: prod-deploy deploys the commit its ref "
                 f"names and has no inbox bundle to miss. Run 'prod-deploy {project}' "
@@ -35,6 +33,21 @@ def redeploy_problem(project: str, *, is_new: bool, git: bool, ref: str | None) 
                 f"bundle to deploy instead. Run 'prod-deploy {project} --ref {ref}' or "
                 f"'prod-deploy {project} --redeploy'.")
     return None
+
+
+def nothing_installed(project: str) -> str:
+    return (f"--redeploy deploys the release already installed, and '{project}' has "
+            f"none yet. Upload its first bundle, then run 'prod-deploy {project}'.")
+
+
+def note_waiting_bundle(project: str, paths: BoxPaths) -> None:
+    """--redeploy leaves a bundle waiting in the inbox where it is; say so."""
+    try:
+        waiting = resolve_bundle_source(project, paths)
+    except SourceError:
+        return
+    print(f"Note: {waiting.name} is waiting in the inbox and is not deployed by "
+          f"--redeploy; 'prod-deploy {project}' deploys it.")
 
 
 def _staged_hint(project: str, paths: BoxPaths) -> str | None:
@@ -48,9 +61,13 @@ def _staged_hint(project: str, paths: BoxPaths) -> str | None:
             f"'promote {project}' to put it live.")
 
 
+# How the refusal starts (the TUI offers a redeploy when it sees it).
+REFUSAL = "ERROR: No new bundle for"
+
+
 def refuse_no_new_bundle(project: str, paths: BoxPaths) -> int:
     """Refuse a prod-deploy that has no new bundle to deploy. Returns 1."""
-    lines = [f"ERROR: No new bundle for '{project}' in the inbox, so prod-deploy has "
+    lines = [f"{REFUSAL} '{project}' in the inbox, so prod-deploy has "
              f"nothing new to deploy. Nothing was changed."]
     hint = _staged_hint(project, paths)
     if hint:

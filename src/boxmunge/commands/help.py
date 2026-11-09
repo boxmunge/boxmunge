@@ -27,6 +27,7 @@ Project lifecycle:
   unstage <project>       Tear down staging
   prod-deploy <project>   Deploy directly to production (skip staging)
   prod-deploy <p> --abandon  Put back the files of an install left open
+  prod-deploy <p> --redeploy Deploy the installed release again (no new upload)
   rollback <project>      Restore previous deployment
   pause <project>         Take offline with a styled maintenance page
   resume <project>        Bring back online (pulls latest images first)
