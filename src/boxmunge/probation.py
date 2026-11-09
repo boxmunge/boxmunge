@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from boxmunge.log import log_operation
-from boxmunge.upgrade_state import read_probation, clear_probation
+from boxmunge.log import log_operation, log_warning
+from boxmunge.upgrade_state import UpgradeStateUnreadable, clear_probation, read_probation
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -28,8 +28,24 @@ def clear_probation_if_active(paths: BoxPaths, command: str) -> None:
     user which doesn't have permission to rmtree root-owned venv dirs.
     The next health-timer fire (root context) sees the orphan venv and
     cleans it up via boxmunge-upgrade check-probation.
+
+    A marker this user cannot read is the one case that warns and carries
+    on: ending probation early is a courtesy to the operator, and the health
+    timer still ends it at expiry. Aborting the operator's deploy, backup or
+    restore over it would only block the work (#107).
     """
-    prob = read_probation(paths)
+    try:
+        prob = read_probation(paths)
+    except UpgradeStateUnreadable as e:
+        log_warning(
+            "upgrade",
+            f"Cannot end the upgrade probation early: {e}. The {command} carries on; "
+            "until the probation expires, a failing health check can still roll the "
+            "platform back. To end it now, accepting the release, run as root: "
+            f"sudo rm {paths.probation}",
+            paths,
+        )
+        return
     if prob is None:
         return
 

@@ -14,8 +14,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, TYPE_CHECKING
 
-from boxmunge.fileutil import atomic_write_text
-from boxmunge.fs_nofollow import open_regular_nofollow, read_text_nofollow
+from boxmunge.fileutil import atomic_write_bytes
+from boxmunge.fs_nofollow import (
+    deploy_ids, open_regular_nofollow, read_text_nofollow, running_as_root,
+)
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -28,6 +30,10 @@ class UpgradeStateError(OSError):
     def of(cls, path: Path, e: OSError) -> UpgradeStateError:
         detail = e.strerror or str(e)
         return cls(detail if str(path) in detail else f"{path}: {detail}")
+
+
+class UpgradeStateUnreadable(UpgradeStateError):
+    """A file in upgrade-state/ exists but this user may not read it."""
 
 
 # What each state file holds, so an error can say how to repair it.
@@ -60,6 +66,8 @@ def _read_json(path: Path) -> dict[str, Any]:
     except UnicodeDecodeError as e:
         raise UpgradeStateError(
             f"{path} is not UTF-8 text ({e.reason}); inspect it and repair or remove it") from e
+    except PermissionError as e:
+        raise UpgradeStateUnreadable.of(path, e) from e
     except OSError as e:
         logging.getLogger("boxmunge").error("Cannot read %s: %s", path, e)
         raise UpgradeStateError.of(path, e) from e
@@ -68,12 +76,13 @@ def _read_json(path: Path) -> dict[str, Any]:
     return data
 
 
-def _write_json(path: Path, data: dict[str, Any]) -> None:
+def _write_json(path: Path, data: dict[str, Any], **perms: Any) -> None:
     """Write JSON atomically. A link or FIFO deploy left at the name needs no
     refusal: rename(2) replaces the name itself, never opening or following
     what is there. (Deploy can still make a write fail, e.g. with a
-    directory at the name, as it can remove any file here.)"""
-    atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+    directory at the name, as it can remove any file here.) ``perms`` are
+    atomic_write_bytes's mode and owner."""
+    atomic_write_bytes(path, (json.dumps(data, indent=2) + "\n").encode(), **perms)
 
 
 # --- Blocklist ---
@@ -105,13 +114,17 @@ def read_probation(paths: BoxPaths) -> dict[str, Any] | None:
 
 
 def write_probation(paths: BoxPaths, version: str, previous_slot: str, *, hours: int = 6) -> None:
+    """root:deploy 0660, as install.sh leaves every upgrade-state file: the
+    shim (root) writes it, and deploy reads it to end probation early (#107).
+    Off a box (not root, or no deploy user) it stays the writer's."""
     now = datetime.now(timezone.utc)
+    ids = deploy_ids() if running_as_root() else None
     _write_json(paths.probation, {
         "version": version,
         "started_at": now.isoformat(),
         "expires_at": (now + timedelta(hours=hours)).isoformat(),
         "previous_slot": previous_slot,
-    })
+    }, mode=0o660, owner=(0, ids[1]) if ids else None)
 
 
 def clear_probation(paths: BoxPaths) -> None:
