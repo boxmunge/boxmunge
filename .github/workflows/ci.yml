@@ -202,8 +202,9 @@ jobs:
     # container's root filesystem turns read-only partway through (EROFS on
     # /etc/docker/daemon.json) and every test after it fails. Boxes run
     # Debian 13; the runner's OS is only the host for the dind container.
-    # Each daemon runs every test, split into shards of whole files as the
-    # integration job is, and is skipped by the same scope rule.
+    # Each daemon runs every test, split into shards as the integration job
+    # is (the migration crash sweeps one per shard: `shard_by_test`), and is
+    # skipped by the same scope rule.
     name: userns-dind (${{ matrix.daemon.label }}, ${{ matrix.shard }}/3)
     runs-on: ubuntu-24.04
     strategy:
