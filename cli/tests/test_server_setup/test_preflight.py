@@ -47,10 +47,15 @@ class TestCheckIsDebian:
         with pytest.raises(PreflightError, match="Debian 13"):
             check_is_debian(target)
 
-    def test_arm_fails(self, target, fake_remote) -> None:
+    def test_arm64_passes(self, target, fake_remote) -> None:
         fake_remote.respond("ssh", "os-release", stdout='ID=debian\nVERSION_ID="13"\n')
         fake_remote.respond("ssh", "uname -m", stdout="aarch64\n")
-        with pytest.raises(PreflightError, match="aarch64"):
+        check_is_debian(target)
+
+    def test_other_arch_fails(self, target, fake_remote) -> None:
+        fake_remote.respond("ssh", "os-release", stdout='ID=debian\nVERSION_ID="13"\n')
+        fake_remote.respond("ssh", "uname -m", stdout="armv7l\n")
+        with pytest.raises(PreflightError, match="armv7l"):
             check_is_debian(target)
 
     def test_ubuntu_fails(self, target, fake_remote) -> None:

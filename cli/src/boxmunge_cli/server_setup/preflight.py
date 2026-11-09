@@ -24,10 +24,11 @@ def _run_check(target: Target, argv: list[str],
                           text=True, check=False)
 
 
-# Debian releases boxmunge is built and tested on, and the CPU it installs for
-# (install.sh downloads an amd64 cosign).
+# Debian releases boxmunge is built and tested on, and the CPUs it installs
+# for: install.sh and system/Dockerfile pin cosign, age and rclone for these
+# two only, and install.sh refuses any other.
 SUPPORTED_DEBIAN = ("13",)
-SUPPORTED_ARCH = ("x86_64",)
+SUPPORTED_ARCH = ("x86_64", "aarch64")
 
 
 def check_ssh_access(target: Target) -> None:
