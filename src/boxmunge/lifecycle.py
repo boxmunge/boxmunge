@@ -97,8 +97,9 @@ def lifecycle_block(project_name: str, paths: BoxPaths) -> Block | None:
                 refuse_message=(
                     f"Project '{project_name}' is paused, awaiting a deploy (`resume "
                     f"{project_name} --no-start`): it stays down behind its maintenance "
-                    f"page until `prod-deploy {project_name}` or `promote {project_name}` "
-                    f"starts it, or `boxmunge resume {project_name}` does."
+                    f"page until `prod-deploy {project_name}`, `promote {project_name}` or "
+                    f"`rollback {project_name}` starts it, or `boxmunge resume {project_name}` "
+                    f"does."
                 ),
                 skip_message=(f"Skipped paused project '{project_name}' (awaiting a "
                               f"deploy: prod-deploy {project_name})"),
@@ -127,7 +128,8 @@ def migration_refusal(what: str, paths: BoxPaths) -> str | None:
 
 
 def refuse_if_blocked(project_name: str, paths: BoxPaths, *,
-                      ships_fix: bool = False, staging: bool = False) -> bool:
+                      ships_fix: bool = False, staging: bool = False,
+                      rollback: bool = False) -> bool:
     """Print the refusal and return True if the project is blocked.
 
     Operate cores call this under the project lock, immediately before
@@ -140,13 +142,16 @@ def refuse_if_blocked(project_name: str, paths: BoxPaths, *,
     starts and refuses if a quarantine-level finding remains
     (commands/quarantine_gate). A pause is the operator's own decision and
     still refuses, unless the operator handed it to the next deploy
-    (`resume --no-start`, pause.awaiting_deploy): a production deploy ends
-    it once its start has run (commands/deploy_handover); a stage leaves it.
+    (`resume --no-start`, pause.awaiting_deploy): a production deploy, or a
+    ``rollback`` (and the data restore inside it), ends it once its start
+    has run (commands/deploy_handover); a stage leaves it. A quarantine
+    refuses a rollback: its images are not scanned.
     """
     block = is_blocked(project_name, paths)
     if block is None:
         return False
-    if not ships_fix or block.reason is BlockReason.MIGRATING:
+    if block.reason is BlockReason.MIGRATING or not (ships_fix or rollback) \
+            or (rollback and block.reason is BlockReason.QUARANTINED):
         print(f"ERROR: {block.refuse_message}", file=sys.stderr)
         return True
     paused = is_paused(project_name, paths)
@@ -160,8 +165,9 @@ def refuse_if_blocked(project_name: str, paths: BoxPaths, *,
     if paused:
         print(f"  {project_name} is paused, awaiting a deploy: staging does not end the "
               f"pause; `promote {project_name}` does." if staging else
-              f"  {project_name} is paused, awaiting this deploy: the pause ends once its "
-              f"containers start; until then the maintenance page stays up.")
+              f"  {project_name} is paused, awaiting this {'rollback' if rollback else 'deploy'}"
+              f": the pause ends once its containers start; until then the maintenance "
+              f"page stays up.")
     return False
 
 

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from boxmunge.commands.deploy_steps import record_deploy_state
+from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.deploy import (
     NotStarted, replace_release, run_pre_deploy_hook,
 )
@@ -35,6 +36,7 @@ from boxmunge.lifecycle import refuse_if_blocked
 from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_error, log_operation
 from boxmunge.manifest import ManifestError, load_manifest
+from boxmunge.pause import is_paused
 from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
 from boxmunge.release import (
@@ -132,7 +134,8 @@ def find_rollback_target(paths: BoxPaths, project_name: str,
 
 def run_rollback(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
     """rollback: show the plan, confirm, take the project lock and roll back."""
-    if refuse_if_blocked(project_name, paths) or refuse_if_legacy_stage(paths, project_name):
+    if refuse_if_blocked(project_name, paths, rollback=True) \
+            or refuse_if_legacy_stage(paths, project_name):
         return 1
     # Checked before the prompt too (and again under the lock): an open
     # install may make a rollback meaningless, or already finished.
@@ -180,7 +183,8 @@ def rollback_locked(project_name: str, paths: BoxPaths,
     ``expected`` is the plan the operator confirmed: if the deploy state
     changed since, nothing is done.
     """
-    if refuse_if_blocked(project_name, paths) or refuse_if_legacy_stage(paths, project_name):
+    if refuse_if_blocked(project_name, paths, rollback=True) \
+            or refuse_if_legacy_stage(paths, project_name):
         return 1
     ok, txn = _open_install(project_name, paths)
     if not ok:
@@ -408,14 +412,23 @@ def _report_not_started(project_name: str, paths: BoxPaths, target: RollbackTarg
                         txn: InstallTxn) -> None:
     """The switch's start was refused before `compose up`. The install stays
     open for a rerun. If this rollback restored data, the restore started
-    the previous release already: production runs it, so the switch is
-    recorded (a rerun records it again, keeping the pairing)."""
-    if target.snapshot and txn.reached("data_restored"):
+    the previous release, unless it left the project stopped (paused, or
+    stopped by the health monitor): then production runs it, so the switch
+    is recorded (a rerun records it again, keeping the pairing)."""
+    restored = bool(target.snapshot) and txn.reached("data_restored")
+    left_down = is_paused(project_name, paths) or is_monitor_stopped(project_name, paths)
+    if restored and not left_down:
         record_deploy_state(paths, project_name, target.ref, None)
         print(f"ERROR: {target.ref} runs on the restored data ({target.snapshot}): the "
               f"restore started it. Its start for the switch was refused, so it was not "
               f"checked or smoke-tested. Rerun 'rollback {project_name}' once the cause "
               f"above is fixed.", file=sys.stderr)
+        return
+    if restored:
+        print(f"ERROR: The data was restored ({target.snapshot}), but {target.ref} was not "
+              f"started: its start was refused, and the restore left the project stopped. "
+              f"Rerun 'rollback {project_name}' once the cause above is fixed.",
+              file=sys.stderr)
         return
     print(f"ERROR: The previous release was not started; production's containers were not "
           f"changed. Rerun 'rollback {project_name}' once the cause above is fixed.",

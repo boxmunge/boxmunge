@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from boxmunge.backup import BackupKind, resolve_backup_service
 from boxmunge.backup_source import backup_source
 from boxmunge.commands.backup_cmd import take_snapshot
+from boxmunge.commands.health_state import is_monitor_stopped
+from boxmunge.cve.quarantine import is_quarantined
 from boxmunge import docker_containers
 from boxmunge.paths import BoxPaths
 from boxmunge.pending_snapshot import record_pending
@@ -39,9 +41,17 @@ class PauseSnapshot:
 
 def take(paths: BoxPaths, project: str, no_snapshot: bool) -> PauseSnapshot | None:
     """Snapshot the running project. None when there is nothing to take
-    (--no-snapshot, backup.type none). Raises PauseRefused, DockerError."""
+    (--no-snapshot, backup.type none, or nothing runs: a quarantined or
+    monitor-stopped project). Raises PauseRefused, DockerError."""
     if no_snapshot:
         print(f"  No snapshot (--no-snapshot): {NO_SNAPSHOT_COST}.")
+        return None
+    stopped = ("is CVE-quarantined" if is_quarantined(project, paths) else
+               "was stopped by the health monitor" if is_monitor_stopped(project, paths)
+               else None)
+    if stopped is not None:
+        print(f"  No snapshot: {project} {stopped}, so nothing runs to dump; "
+              f"{NO_SNAPSHOT_COST}.")
         return None
     source = backup_source(paths, project)
     if source.manifest is None:

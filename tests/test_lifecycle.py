@@ -139,6 +139,21 @@ class TestRefuseIfBlocked:
         assert "scanned before anything starts" in out and "the pause ends" in out
         assert refuse_if_blocked("myapp", paths) is True   # rollback, restore
 
+    def test_a_rollback_takes_a_pause_handed_to_a_deploy_but_not_a_quarantine(self, paths,
+                                                                             capsys):
+        from boxmunge.pause import mark_awaiting_deploy
+        from boxmunge.release_txn import rollback_refused
+        write_paused_state("myapp", paths)
+        assert refuse_if_blocked("myapp", paths, rollback=True) is True
+        assert rollback_refused(paths, "myapp")
+        mark_awaiting_deploy("myapp", paths)
+        assert refuse_if_blocked("myapp", paths, rollback=True) is False
+        assert "awaiting this rollback" in capsys.readouterr().out
+        assert not rollback_refused(paths, "myapp")
+        _quarantine(paths, "myapp")
+        assert refuse_if_blocked("myapp", paths, rollback=True) is True
+        assert rollback_refused(paths, "myapp")
+
     def test_a_stage_of_a_project_awaiting_a_deploy_does_not_end_the_pause(self, paths, capsys):
         from boxmunge.pause import mark_awaiting_deploy
         write_paused_state("myapp", paths)

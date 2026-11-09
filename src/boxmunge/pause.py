@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from boxmunge import restart_hold
+from boxmunge.docker import compose_stop
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state
@@ -102,6 +103,17 @@ def hold_restart_policies(project_name: str, paths: BoxPaths) -> None:
         project_name, state.get("restart_policies") or {},
         lambda saved: _update_paused_state(project_name, paths, restart_policies=saved),
     )
+
+
+def stop_again(project_name: str, paths: BoxPaths) -> None:
+    """A start that failed part-way on a paused project (resume, or the deploy
+    a pause was handed to): stop what it started and hold the restart
+    policies again, so the project is paused as before. Raises DockerError."""
+    files = ["compose.yml"] + (["compose.boxmunge.yml"]
+                               if paths.project_compose_override(project_name).exists() else [])
+    compose_stop(paths.project_dir(project_name), compose_files=files,
+                 project_name=project_name)
+    hold_restart_policies(project_name, paths)
 
 
 def release_restart_policies(project_name: str, paths: BoxPaths) -> None:

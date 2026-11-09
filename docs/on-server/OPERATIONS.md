@@ -1009,7 +1009,9 @@ Before it stops anything, `pause` takes a data snapshot of the running project (
 deploy that ends the pause (see `resume --no-start` below) cannot dump stopped containers, so it
 uses that snapshot as its pre-deploy snapshot and its rollback can restore the data. If the
 snapshot fails, `pause` refuses and changes nothing; `pause myapp --no-snapshot` pauses without
-one, giving up that data rollback.
+one, giving up that data rollback. Use `--no-snapshot` for an emergency pause, when the site must
+go down now and a dump would take too long or cannot run. A CVE-quarantined or monitor-stopped
+project has nothing running to dump, so `pause` takes no snapshot there and says so.
 
 Containers are stopped via `docker compose stop`, so state is preserved on disk and resume is fast. While paused:
 
@@ -1069,9 +1071,11 @@ snapshot, keeps the maintenance page while it prepares, and once `docker compose
 the containers gives them their restart policies back and ends the pause. A deploy that stops
 before that leaves it paused and awaiting a deploy; one whose `compose up` fails part-way stops
 what it started again and keeps the pause. A CVE-quarantined project that is also paused takes
-the same way: its deploy is scanned first, and a clean one also lifts the quarantine. A rollback
-stays refused until a deploy has ended the pause, and `resume myapp` still works if the cause goes
-away. `--no-start` also takes a pause that did not finish while an install is open (`pause` itself
+the same way: its deploy is scanned first, and a clean one also lifts the quarantine. `rollback`
+is accepted too (not for a quarantined project): it restores the paired data with the project left
+stopped, and its start ends the pause. So a deploy that fails after `--no-start` can be rolled back
+to the previous release with the data the pause's snapshot saved. `resume myapp` still works if the
+cause goes away. `--no-start` also takes a pause that did not finish while an install is open (`pause` itself
 is refused then).
 
 `resume` pulls the latest images by default. This is a deliberate safety guarantee: a project that was paused for hours or days should not come back on stale, potentially vulnerable images.

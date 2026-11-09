@@ -200,8 +200,8 @@ def test_a_start_that_fails_part_way_keeps_the_pause(paths, capsys) -> None:
     _paused_v1(paths)
     assert _resume(paths, no_start=True) == 0
     with docker_off() as up, \
-            patch("boxmunge.commands.deploy_handover.compose_stop") as stopped, \
-            patch("boxmunge.commands.deploy_handover.hold_restart_policies") as held:
+            patch("boxmunge.pause.compose_stop") as stopped, \
+            patch("boxmunge.pause.hold_restart_policies") as held:
         up.side_effect = DockerError("container web exited (1)")
         assert run_deploy("myapp", paths) == 1
     stopped.assert_called_once()

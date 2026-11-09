@@ -102,3 +102,70 @@ def test_no_snapshot_pauses_without_one_and_says_what_it_gives_up(
     assert "No pre-deploy snapshot: myapp is paused" in captured.out
     assert "Pre-deploy backup failed" not in captured.out
     assert "ERROR" not in captured.err
+
+
+def test_a_failed_handover_deploy_rolls_back_to_the_paused_data(
+        live_v1, monkeypatch, capsys) -> None:
+    """pause, --no-start, a deploy of V2 whose start fails part-way (the
+    pause stays; V2 is recorded, paired with the pause's snapshot), then
+    rollback: V1 comes back with the data the pause's snapshot saved, and
+    its start ends the pause."""
+    from boxmunge.commands.rollback import run_rollback
+    from boxmunge.docker_run import DockerError
+    from boxmunge.pause import awaiting_deploy
+    paths = live_v1
+    assert _pause(paths) == 0
+    taken = pending(paths, "myapp")["name"]
+    assert run_resume("myapp", paths, no_start=True) == 0
+    monkeypatch.setattr(docker_containers, "start_states", lambda project: {
+        "myapp-web-1": StartState(service="web", running=False, started_at=BEFORE)})
+    place_bundle(paths, timestamp=V2, files={"manifest.yml": MANIFEST})
+    with docker_off() as up, _backups(paths, service_running=False), \
+            patch("boxmunge.pause.compose_stop"):
+        up.side_effect = DockerError("container web exited (1)")
+        assert run_deploy("myapp", paths) == 1
+    assert awaiting_deploy("myapp", paths)
+    state = read_state(paths.project_deploy_state("myapp"))
+    assert state["current_ref"] == f"myapp-{V2}" and state["pre_deploy_snapshot"] == taken
+    assert "rollback myapp" in capsys.readouterr().err
+    restored: list[str] = []
+    with docker_off(), patch("boxmunge.commands.rollback.restore_locked",
+                             lambda p, pa, snapshot, txn=None: restored.append(snapshot) or 0):
+        assert run_rollback("myapp", paths, yes=True) == 0
+    assert restored == [taken]
+    assert not is_paused("myapp", paths)
+    assert read_state(paths.project_deploy_state("myapp"))["current_ref"] == f"myapp-{V1}"
+
+
+def test_a_rollbacks_restore_on_a_paused_project_leaves_it_stopped(live_v1) -> None:
+    """The restore inside the rollback's install runs on the handed-over
+    pause and starts nothing; the rollback's own start ends the pause."""
+    from boxmunge.commands import restore
+    from boxmunge.pause import mark_awaiting_deploy
+    paths = live_v1
+    paths.backup_key.parent.mkdir(parents=True, exist_ok=True)
+    paths.backup_key.write_text("key")
+    assert _pause(paths) == 0
+    mark_awaiting_deploy("myapp", paths)
+    snapshot = pending(paths, "myapp")["name"]
+    with patch.object(restore, "_run_restore_inner", return_value=0) as inner:
+        assert restore.restore_locked("myapp", paths, snapshot=snapshot, txn="T1") == 0
+        assert restore.restore_locked("myapp", paths, snapshot=snapshot) == 1   # not alone
+    [call] = inner.call_args_list
+    assert call.args[6] is True   # leave_stopped
+
+
+@pytest.mark.parametrize("state", ["quarantined", "monitor-stopped"])
+def test_nothing_running_to_dump_pauses_without_a_snapshot(live_v1, capsys, state) -> None:
+    from boxmunge.state import write_state
+    from tests.test_commands.cve_helpers import seed_quarantine
+    paths = live_v1
+    if state == "quarantined":
+        seed_quarantine(paths, "myapp")
+    else:
+        write_state(paths.project_health_state("myapp"), {
+            "status": "critical_stopped",
+            "stopped_at": datetime.now(timezone.utc).isoformat()})
+    assert _pause(paths, service_running=False) == 0
+    assert is_paused("myapp", paths) and pending(paths, "myapp") is None
+    assert "nothing runs to dump" in capsys.readouterr().out

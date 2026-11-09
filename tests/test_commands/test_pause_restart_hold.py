@@ -60,6 +60,7 @@ def test_a_failed_resume_start_leaves_the_policies_held(box, monkeypatch):
     def fail(*a, **k):
         raise DockerError("container web exited (1)")
     monkeypatch.setattr("boxmunge.compose_guard.compose_up", fail)
+    monkeypatch.setattr("boxmunge.pause.compose_stop", lambda *a, **k: None)
     assert run_resume("demo", paths, yes=True) == 1
     assert fake.policies == {"demo-web-1": "no", "demo-worker-1": "no"}
 
@@ -123,3 +124,19 @@ def test_resume_holds_back_a_pulled_image_whose_user_changed(box, monkeypatch, c
     assert run_resume("demo", paths, yes=True) == 0
     assert tags[ref] == "sha256:" + "0" * 64 and user_drift.held_back(paths, "demo") == {svc}
     assert "resumes on its previous image" in capsys.readouterr().out
+
+
+def test_a_resume_whose_up_fails_part_way_stops_what_it_started(box, monkeypatch):
+    """Like a handover deploy's failed start: the project is paused as before."""
+    paths, fake = box
+    run_pause("demo", paths, yes=True)
+    fake.order.clear()
+
+    def fail(*a, **k):
+        fake.order.append("up")
+        raise DockerError("container worker exited (1)")
+    monkeypatch.setattr("boxmunge.compose_guard.compose_up", fail)
+    monkeypatch.setattr("boxmunge.pause.compose_stop", lambda *a, **k: fake.order.append("stop"))
+    assert run_resume("demo", paths, yes=True) == 1
+    assert fake.order == ["up", "stop"]
+    assert fake.policies == {"demo-web-1": "no", "demo-worker-1": "no"}

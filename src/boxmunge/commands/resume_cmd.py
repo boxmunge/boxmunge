@@ -21,6 +21,7 @@ from boxmunge.user_drift import guard_pull, image_ids
 from boxmunge.compose_guard import (
     ComposeRefused, check_start, compose_up_checked, stale_containers,
 )
+from boxmunge.compose_up_steps import ComposeUpFailed
 from boxmunge.deployed_inventory import (
     InventoryError, load_deployed_inventory, pulled_services,
 )
@@ -34,7 +35,8 @@ from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import (
     awaiting_deploy, clear_paused_state, is_paused,
-    mark_awaiting_deploy, pause_incomplete, release_restart_policies,
+    mark_awaiting_deploy, mark_pause_incomplete, pause_incomplete,
+    release_restart_policies, stop_again,
 )
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
@@ -254,6 +256,8 @@ def resume_locked(
         print(f"ERROR: compose up failed: {e}", file=sys.stderr)
         log_error("resume", f"compose up failed: {e}", paths,
                   project=project_name)
+        if isinstance(e, ComposeUpFailed):
+            _stop_again(project_name, paths)
         print(f"  {_deploy_hint(project_name)}", file=sys.stderr)
         return 1, None
     try:
@@ -314,6 +318,24 @@ def _deploy_hint(project_name: str) -> str:
             f"{project_name} --no-start`, then `boxmunge prod-deploy {project_name}`.")
 
 
+def _stop_again(project_name: str, paths: BoxPaths) -> None:
+    """The up failed part-way: what it started is stopped again, held, as
+    the pause left it (pause.stop_again). If that fails, the pause is marked
+    incomplete for `pause` to finish."""
+    try:
+        stop_again(project_name, paths)
+    except DockerError as e:
+        mark_pause_incomplete(project_name, paths)
+        print(f"ERROR: stopping what the failed start started, or holding its restart "
+              f"policies, failed: {e}. It may be running behind its maintenance page; run "
+              f"`boxmunge pause {project_name}` to finish the pause.", file=sys.stderr)
+        log_error("resume", f"Not stopped again after a failed start: {e}", paths,
+                  project=project_name)
+        return
+    print(f"  What the failed start started was stopped again; {project_name} stays paused.",
+          file=sys.stderr)
+
+
 def hand_to_deploy_locked(project_name: str, paths: BoxPaths) -> int:
     """`resume --no-start`: start nothing, and hand the pause to the next
     deploy (pause.awaiting_deploy, commands/deploy_handover). For a project
@@ -343,14 +365,12 @@ def hand_to_deploy_locked(project_name: str, paths: BoxPaths) -> int:
                       project=project_name)
     scanned = (" (its images are scanned first; a clean deploy also lifts the CVE "
                "quarantine)" if is_quarantined(project_name, paths) else "")
-    then = (f"Finish its open install by rerunning it or deploying a fix{scanned}; a "
-            f"rollback waits until a deploy has ended the pause. {install}"
-            if install is not None else
+    then = (f"Finish its open install{scanned}: {install}" if install is not None else
             f"Deploy it: `boxmunge prod-deploy {project_name}` (or `promote "
             f"{project_name}`){scanned}")
     print(f"'{project_name}' was not started. It stays down behind its maintenance page, "
-          f"with its containers stopped, until the next deploy starts it; that deploy "
-          f"ends the pause. {then}.")
+          f"with its containers stopped, until the next deploy (or rollback) starts it, "
+          f"which ends the pause. {then}.")
     return 0
 
 

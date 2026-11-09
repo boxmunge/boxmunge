@@ -43,6 +43,7 @@ from boxmunge.lifecycle import refuse_if_blocked
 from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
+from boxmunge.pause import is_paused
 from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
 from boxmunge.release_txn import refuse_if_install_open
@@ -164,7 +165,9 @@ def restore_locked(project_name: str, paths: BoxPaths, snapshot: str | None,
     if refuse_if_legacy_stage(paths, project_name):
         return 1
     sweep_stale_dumps(paths, project_name)
-    if refuse_if_blocked(project_name, paths):
+    # A rollback's own restore (its install `txn`) may run on a pause handed
+    # to a deploy; the rollback's start ends that pause.
+    if refuse_if_blocked(project_name, paths, rollback=txn is not None):
         return 1
     if refuse_if_install_open(paths, project_name, component="restore", txn=txn):
         return 1
@@ -172,10 +175,12 @@ def restore_locked(project_name: str, paths: BoxPaths, snapshot: str | None,
     if plan is None:
         return 1
     clear_probation_if_active(paths, "restore")
-    leave_stopped = is_monitor_stopped(project_name, paths)
+    leave_stopped = is_monitor_stopped(project_name, paths) or is_paused(project_name, paths)
     if leave_stopped:
-        print(f"  '{project_name}' was stopped by the health monitor: only "
-              f"{plan.service} is started for the restore, and it stays stopped.")
+        why = ("is paused" if is_paused(project_name, paths)
+               else "was stopped by the health monitor")
+        print(f"  '{project_name}' {why}: only {plan.service} is started for the restore, "
+              f"and it stays stopped.")
     return _run_restore_inner(
         project_name, paths, plan.snapshot_path, plan.service,
         plan.restore_command, plan.dump_command if safety_snapshot else None,
@@ -355,7 +360,7 @@ def _replace_data(
         BackupKind.PRERESTORE, SNAPSHOT_RETENTION[BackupKind.PRERESTORE],
     )
     print(f"{project_name}: restore complete")
-    if leave_stopped:
+    if leave_stopped and not is_paused(project_name, paths):
         print(f"  It is still stopped by the health monitor: run 'recover "
               f"{project_name}' to start it on the restored data.")
     return 0
