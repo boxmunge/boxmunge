@@ -15,8 +15,8 @@ from typing import NamedTuple
 from boxmunge import docker_containers
 from boxmunge.compose_images import BUILT_IMAGE_HOST, built_image_name
 from boxmunge.docker import (
-    COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL, check_compose_project_name,
-    compose_project_filter,
+    COMPOSE_ONEOFF_LABEL, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
+    check_compose_project_name, compose_project_filter,
 )
 from boxmunge.docker_run import DockerError, run as _run
 
@@ -41,7 +41,8 @@ class _ContainerImages(NamedTuple):
     own_ids: set[str]       # images this project's build services' containers run
     user_ids: set[str]      # images every other container runs ...
     user_names: set[str]    # ... and the names they were created from
-    by_service: dict[str, set[str]]   # build service -> the images its containers run
+    # build service -> {image its `up` containers run: their names}
+    by_service: dict[str, dict[str, list[str]]]
 
 
 def _container_images(
@@ -56,10 +57,10 @@ def _container_images(
     ids = _run(["docker", "ps", "-a", "-q", "--no-trunc"], capture=True).stdout.split()
     if not ids:
         return found
-    labels = (f'{{{{index .Config.Labels "{COMPOSE_PROJECT_LABEL}"}}}}\t'
-              f'{{{{index .Config.Labels "{COMPOSE_SERVICE_LABEL}"}}}}')
+    labels = "\t".join(f'{{{{index .Config.Labels "{label}"}}}}' for label in (
+        COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL, COMPOSE_ONEOFF_LABEL))
     cmd = ["docker", "container", "inspect", "--format",
-           "{{.Image}}\t{{.Config.Image}}\t" + labels, *ids]
+           "{{.Image}}\t{{.Config.Image}}\t" + labels + "\t{{.Name}}", *ids]
     result = _run(cmd, capture=True, check=False)
     # A container removed since `ps` uses no image; any other error is one.
     errors = [e for e in result.stderr.splitlines()
@@ -67,10 +68,13 @@ def _container_images(
     if result.returncode != 0 and errors:
         raise DockerError(f"{' '.join(cmd[:3])} failed: {'; '.join(errors)}")
     for line in filter(None, result.stdout.splitlines()):
-        image_id, image_name, project, service = (line.split("\t") + ["", "", ""])[:4]
+        image_id, image_name, project, service, oneoff, name = (line.split("\t") + [""] * 5)[:6]
         if project == compose_project and service in build_services:
             found.own_ids.add(image_id)
-            found.by_service.setdefault(service, set()).add(image_id)
+            # A `compose run` one-off is not what `up` runs, nor what it starts.
+            if oneoff.lower() != "true":
+                found.by_service.setdefault(service, {}).setdefault(image_id, []).append(
+                    name.lstrip("/"))
         elif project != compose_project or service in image_services:
             found.user_ids.add(image_id)
             found.user_names.add(image_name)
@@ -99,10 +103,12 @@ def name_running_builds(compose_project: str, build_services: Collection[str]) -
         # One whose image the store no longer has is recreated at its start.
         present = sorted(i for i in image_ids if docker_containers.local_image(i) is not None)
         if len(present) > 1:
+            which = "; ".join(f"{', '.join(image_ids[i])} on {i}" for i in present)
             raise DockerError(
                 f"the containers of {compose_project}'s service {service} run different "
-                f"images ({', '.join(present)}), so which one its deploy built is unknown. "
-                f"Deploy the project again.")
+                f"images ({which}), so which one its deploy built is unknown. Remove the "
+                f"ones its last deploy did not create (docker rm <container>, as the "
+                f"operator), or deploy the project again.")
         if present:
             _run(["docker", "tag", present[0], name], capture=True)
             named.append(name)

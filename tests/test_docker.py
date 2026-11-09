@@ -433,9 +433,17 @@ class TestNameRunningBuilds:
         containers = "sha256:aaa\tboxmunge.invalid/myapp/web\tmyapp\tweb\n"
         assert self._name(monkeypatch, containers, set()) == ([], [])
 
-    def test_replicas_on_different_images_fail_loudly(self, monkeypatch):
+    def test_replicas_on_different_images_fail_naming_them(self, monkeypatch):
         from boxmunge.docker_run import DockerError
-        containers = ("sha256:aaa\tmyapp-web\tmyapp\tweb\n"
-                      "sha256:bbb\tmyapp-web\tmyapp\tweb\n")
-        with pytest.raises(DockerError, match="run different images"):
+        containers = ("sha256:aaa\tmyapp-web\tmyapp\tweb\t\t/myapp-web-1\n"
+                      "sha256:bbb\tmyapp-web\tmyapp\tweb\t\t/myapp-web-2\n")
+        with pytest.raises(DockerError, match=r"myapp-web-1 on sha256:aaa; myapp-web-2 on "
+                                              r"sha256:bbb.*docker rm"):
             self._name(monkeypatch, containers, {"sha256:aaa", "sha256:bbb"})
+
+    def test_a_leftover_one_off_on_another_image_is_not_counted(self, monkeypatch):
+        """`compose run` left it; `up` neither runs nor starts it."""
+        containers = ("sha256:aaa\tmyapp-web\tmyapp\tweb\t\t/myapp-web-1\n"
+                      "sha256:old\tmyapp-web\tmyapp\tweb\tTrue\t/myapp-web-run-1f2e\n")
+        named, tags = self._name(monkeypatch, containers, {"sha256:aaa", "sha256:old"})
+        assert tags == [["docker", "tag", "sha256:aaa", "boxmunge.invalid/myapp/web"]]

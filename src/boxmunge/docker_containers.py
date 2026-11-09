@@ -29,11 +29,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from boxmunge.docker import compose_project_filter
+from boxmunge.docker import COMPOSE_ONEOFF_LABEL as _ONEOFF_LABEL, compose_project_filter
 from boxmunge.docker_run import DockerError, run as _run
 
 _SERVICE_LABEL = "com.docker.compose.service"
-_ONEOFF_LABEL = "com.docker.compose.oneoff"
 
 
 @dataclass(frozen=True)

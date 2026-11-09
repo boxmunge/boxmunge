@@ -24,7 +24,9 @@ from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.upgrade_steps import (
     compose_refusal, require_manifest, write_maintenance_page,
 )
-from boxmunge.compose import prepare_compose_override
+from boxmunge.commands.deploy_images import record_release_users
+from boxmunge.commands.release_config import decide_release_users, promote_candidates
+from boxmunge.compose import ComposeError, prepare_compose_override
 from boxmunge.compose_guard import check_start, compose_up_checked
 from boxmunge.data_dirs import log_kept, set_aside_announcer
 from boxmunge import docker_containers
@@ -47,6 +49,7 @@ from boxmunge.manifest import load_manifest, load_manifest_as_written
 from boxmunge.notify import notify
 from boxmunge.release import install_release, live_code_entries, mark_live, previous_meta_text
 from boxmunge.staging_cleanup import remove_retired_staging_data
+from boxmunge.release_target import DeployRefused, production_target
 from boxmunge.state import read_state
 from boxmunge.upgrade_exclusions import migrate_one
 from boxmunge.upgrade_state import read_probation
@@ -325,6 +328,24 @@ def drop_stage_record(paths: BoxPaths, project: str) -> None:
     discard_dir(releases / f"prestage{DISCARDED}")  # a crash inside the discard above
 
 
+def _build_release(paths: BoxPaths, project: str, manifest: dict) -> dict:
+    """Build the release now in the project directory under candidate names,
+    decide and check its users, and give its images their names, as a
+    deploy does (rollback's restore_rolled_back_data). Production's
+    containers may run the other release's images: the staged release's
+    when 0.10.1 started production from its files (--discard
+    --confirm-recreated), or production's own, which --keep-staged
+    replaces. No start builds, so without this the start would run them
+    over this release's files. Returns the users decided."""
+    try:
+        users = decide_release_users(project, paths, manifest, COMPONENT).users
+        promote_candidates(paths, project)
+    except (DeployRefused, DockerError, ComposeError) as e:
+        raise LegacyStageError(f"building and checking this release's images failed: {e}. "
+                               f"Fix the cause and run this again") from e
+    return users
+
+
 def finish_apply(paths: BoxPaths, project: str) -> None:
     """Step 7: what the upgrade apply skipped (the manifest migration and the
     configs), then production recreated on this release's overlay as a
@@ -346,7 +367,10 @@ def finish_apply(paths: BoxPaths, project: str) -> None:
     if refusal is not None:
         raise LegacyStageError(f"compose.yml is refused: {refusal}. Fix it and run this "
                                f"again, or deploy a fixed release")
-    prepare_compose_override(paths, manifest, component=COMPONENT)
+    users = _build_release(paths, project, manifest)
+    prepare_compose_override(paths, manifest, component=COMPONENT, users=users or None)
+    record_release_users(paths, production_target(paths, project), manifest, users,
+                         component=COMPONENT)
     block = is_blocked(project, paths)
     held = (f"it is {block.reason.value}" if block else
             "the health monitor stopped it; `recover` starts it"
