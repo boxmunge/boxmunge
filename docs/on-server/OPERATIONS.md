@@ -1813,7 +1813,10 @@ How an upgrade is applied and undone:
    stays offline until `resume`, `security resume` or `recover` brings it back. A paused or
    quarantined project keeps its maintenance page, but the upgrade still regenerates its
    compose overlay and records the bind sources it mounts, so `resume`, `security resume`
-   and the scan's automatic lift start it on its deployed files without a deploy.
+   and the scan's automatic lift start it on its deployed files without a deploy. If its
+   overlay cannot be regenerated (an unreadable users record, say), it does not fail the
+   upgrade: it is listed as `REFUSED` and alerted with the others, keeps its previous overlay
+   and record, and stays offline until the cause is fixed and it is redeployed.
 4. A health check runs, then a 6-hour probation. A critical health result during probation
    rolls back.
 

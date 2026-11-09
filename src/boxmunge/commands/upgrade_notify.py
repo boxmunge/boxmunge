@@ -36,7 +36,7 @@ def notify_refused(paths: BoxPaths, refused: dict[str, str]) -> None:
     from boxmunge.notify import notify
     lines = "\n".join(f"- {name}: {why}" for name, why in sorted(refused.items()))
     notify(paths, "upgrade — compose refused",
-           f"The upgrade's compose validator refused {len(refused)} project(s). "
-           f"They keep their previous configs and running containers and were "
-           f"not restarted. Fix compose.yml and redeploy:\n{lines}",
+           f"The upgrade refused {len(refused)} project(s). They keep their "
+           f"previous configs and containers and were not restarted. Fix the "
+           f"cause each line names and redeploy:\n{lines}",
            component="upgrade", priority=1)

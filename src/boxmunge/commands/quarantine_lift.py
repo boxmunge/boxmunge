@@ -19,6 +19,7 @@ from boxmunge.compose_guard import ComposeRefused, check_start
 from boxmunge.cve.quarantine import (
     QuarantineError, lift_quarantine, mark_quarantine_incomplete, reassert_quarantine,
 )
+from boxmunge.docker_run import DockerError
 from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.pause import is_paused
@@ -63,8 +64,8 @@ def restore_from_quarantine(paths: BoxPaths, project: str, *, component: str) ->
         raise QuarantineError(str(e)) from e
     try:
         prepare_compose_override(paths, manifest, component=component)
-    except (OSError, ValueError) as e:
-        raise QuarantineError(f"Failed to render the compose overlay: {e}") from e
+    except (OSError, ValueError, DockerError) as e:
+        raise QuarantineError(f"Failed to regenerate the compose overlay: {e}") from e
     try:
         check_start(paths, project, component=component,
                     compose_files=compose_files_for(paths, project))

@@ -15,7 +15,10 @@ from typing import Any, Iterator
 
 from boxmunge.caddy import generate_caddy_config, prepare_caddy_config
 from boxmunge.commands.health_state import is_monitor_stopped
-from boxmunge.compose import generate_compose_override, load_user_compose, prepare_compose_override
+from boxmunge.commands.upgrade_offline import (
+    offline_dry_run_line, regenerate_offline_overlay, render_overlay,
+)
+from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.user_entries import USER_ENTRIES, split_user_entries
 from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
@@ -233,14 +236,13 @@ def _regenerate_project(
     # would send visitors to stopped upstreams (502) instead of the page the
     # operator chose. Re-render the maintenance page (so a template change
     # still reaches it). Its overlay is regenerated and recorded all the
-    # same: resume and the quarantine lift start this release's overlay,
-    # whose mounts may differ from the old one's (0.10.1 mounted the smoke
-    # scripts from .releases/live-scripts), and they check it against the
-    # record taken here.
+    # same (boxmunge.commands.upgrade_offline).
     block = is_blocked(name, paths)
     if block:
         write_maintenance_page(paths, name, manifest)
-        log_operation("upgrade", block.skip_message, paths, project=name)
+        log_operation("upgrade", f"{name} is {block.reason.value}: it keeps its maintenance "
+                      f"page and is not restarted; its overlay is regenerated for when it "
+                      f"comes back", paths, project=name)
     # A compose.yml that predates a validator fix must not get a fresh
     # overlay, nor be rebuilt and re-run as root by restart_projects. Its
     # old configs and running containers are left untouched; the upgrade
@@ -254,14 +256,25 @@ def _regenerate_project(
                   f"is not restarted; fix compose.yml and redeploy.",
                   paths, project=name)
         return
-    try:
-        if not block:
+    if block:
+        try:
+            refusal = regenerate_offline_overlay(paths, name, manifest)
+        except OSError as e:
+            raise UpgradeGateError(f"Failed to keep the previous overlay and bind record "
+                                   f"of {name}: {e}") from e
+        if refusal is not None:
+            regen.refused[name] = refusal
+            log_error("upgrade", f"{name} ({block.reason.value}): {refusal}; fix the cause "
+                      f"and redeploy it.", paths, project=name)
+            return
+    else:
+        try:
             prepare_caddy_config(paths, manifest)
-        prepare_compose_override(paths, manifest, component="upgrade")
-    except Exception as e:
-        # The project would restart on its old overlay; fail so the shim
-        # rolls back instead of reporting a half-applied upgrade (D-07).
-        raise UpgradeGateError(f"Failed to regenerate configs for {name}: {e}") from e
+            prepare_compose_override(paths, manifest, component="upgrade")
+        except Exception as e:
+            # The project would restart on its old overlay; fail so the shim
+            # rolls back instead of reporting a half-applied upgrade (D-07).
+            raise UpgradeGateError(f"Failed to regenerate configs for {name}: {e}") from e
     refusal = _record_bind_sources(paths, name)
     if refusal is not None:
         regen.refused[name] = refusal
@@ -348,13 +361,13 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
                           f"validator and left on its current configs and "
                           f"containers, not restarted: {refusal}")
             continue
-        if not block and not paths.project_caddy_override(name).exists():
+        if block:
+            report.append(offline_dry_run_line(paths, name, manifest, block.reason.value))
+            continue
+        if not paths.project_caddy_override(name).exists():
             generate_caddy_config(manifest)
-        generate_compose_override(
-            manifest, user_compose=load_user_compose(paths.project_compose(name), name),
-        )
-        report.append(f"{name}: {block.reason.value}; keeps its maintenance page, overlay "
-                      f"renders OK" if block else f"{name}: configs render OK")
+        render_overlay(paths, name, manifest)
+        report.append(f"{name}: configs render OK")
     return report
 
 

@@ -184,6 +184,14 @@ def recover_locked(project_name: str, paths: BoxPaths) -> int:
     except ManifestError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
+    # The start runs this release's overlay, so it is regenerated first and
+    # the start checks see what will run.
+    try:
+        prepare_compose_override(paths, manifest, component="recover")
+    except (OSError, ValueError, DockerError) as e:
+        print(f"ERROR: cannot regenerate the compose overlay: {e}", file=sys.stderr)
+        log_error("recover", f"Overlay regeneration failed: {e}", paths, project=project_name)
+        return 1
 
     compose_files = ["compose.yml"]
     if paths.project_compose_override(project_name).exists():
@@ -207,7 +215,6 @@ def recover_locked(project_name: str, paths: BoxPaths) -> int:
     print("  Restoring Caddy routing...")
     try:
         prepare_caddy_config(paths, manifest)
-        prepare_compose_override(paths, manifest, component="recover")
         caddy_reload(paths.caddy, paths.state)
     except (DockerError, OSError) as e:
         print(f"ERROR: Caddy restore failed: {e}", file=sys.stderr)

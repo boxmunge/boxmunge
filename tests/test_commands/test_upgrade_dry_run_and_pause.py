@@ -8,10 +8,13 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import yaml
 
 from boxmunge.commands.upgrade_cmd import run_upgrade
 from boxmunge.commands.upgrade_steps import check_upgrade
+from boxmunge.compose import ComposeError
+from boxmunge.docker_run import DockerError
 from boxmunge.upgrade_exclusions import apply_projects
 from boxmunge.manifest import CURRENT_SCHEMA_VERSION
 from boxmunge.pause import render_maintenance_caddy_config, write_paused_state
@@ -80,7 +83,7 @@ class TestPausedProjectsKeepMaintenancePage:
         _project(paths, "alpha")
         _pause(paths, "alpha")
         with patch("boxmunge.commands.upgrade_steps.prepare_caddy_config") as caddy, \
-             patch("boxmunge.commands.upgrade_steps.prepare_compose_override") as overlay, \
+             patch("boxmunge.commands.upgrade_offline.prepare_compose_override") as overlay, \
              patch("boxmunge.commands.upgrade_steps.check_start") as check:
             processed = apply_projects(paths)[1].processed
         caddy.assert_not_called()
@@ -131,21 +134,35 @@ class TestDryRunWritesNothing:
         paths = _setup(tmp_path)
         _project(paths, "live")
         before = _snapshot(paths.root)
-        with patch("boxmunge.commands.upgrade_steps.generate_compose_override",
+        with patch("boxmunge.commands.upgrade_offline.render_compose_override",
                    side_effect=RuntimeError("generator bug")):
             assert run_upgrade(paths, dry_run=True) == 1
         assert _snapshot(paths.root) == before
 
-    def test_a_paused_projects_overlay_failure_fails_the_dry_run(self, tmp_path: Path) -> None:
-        """The apply regenerates a paused project's overlay too."""
+    def test_an_unreadable_users_record_fails_the_dry_run(self, tmp_path: Path) -> None:
+        """The dry run renders the overlay the apply writes, users record
+        included: the apply would fail on this one after the swap."""
+        paths = _setup(tmp_path)
+        _project(paths, "live")
+        paths.project_users_record("live").write_text("not json\n")
+        with pytest.raises(ComposeError, match="cannot read the users record"):
+            check_upgrade(paths)
+        assert run_upgrade(paths, dry_run=True) == 1
+
+    def test_a_paused_project_whose_overlay_fails_is_reported_not_fatal(
+            self, tmp_path: Path) -> None:
+        """The apply regenerates a paused project's overlay too, and refuses
+        (not fails on) one it cannot."""
         paths = _setup(tmp_path)
         _project(paths, "paused")
         _pause(paths, "paused")
         assert check_upgrade(paths) == [
             "paused: paused; keeps its maintenance page, overlay renders OK"]
-        with patch("boxmunge.commands.upgrade_steps.generate_compose_override",
-                   side_effect=RuntimeError("generator bug")):
-            assert run_upgrade(paths, dry_run=True) == 1
+        paths.project_users_record("paused").write_text("not json\n")
+        [line] = check_upgrade(paths)
+        assert line.startswith("paused: paused; keeps its maintenance page; would be refused")
+        assert "cannot read the users record" in line
+        assert run_upgrade(paths, dry_run=True) == 0
 
     def test_corrupt_manifest_fails_the_dry_run(self, tmp_path: Path) -> None:
         """apply raises on a corrupt manifest, so the pre-flight must too."""
@@ -160,6 +177,60 @@ class TestDryRunWritesNothing:
         with patch("boxmunge.commands.upgrade_steps.migrate_manifest",
                    side_effect=__import__("boxmunge.migration").migration.MigrationError("x")):
             assert run_upgrade(paths, dry_run=True) == 1
+
+
+class TestOfflineOverlayRefused:
+    """A paused or quarantined project whose overlay cannot be regenerated
+    is refused like a compose refusal: alerted, left on its previous overlay
+    and bind record (which still agree), and the upgrade goes on."""
+
+    @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
+    @patch("boxmunge.compose_guard.compose_up")
+    def test_refused_and_alerted_keeping_its_previous_files(
+            self, mock_up, _reload, tmp_path: Path) -> None:
+        paths = _setup(tmp_path)
+        _project(paths, "alpha")
+        _project(paths, "beta")
+        _quarantine(paths, "alpha")
+        paths.project_compose_override("alpha").write_text("# previous overlay\n")
+        paths.project_users_record("alpha").write_text('{"web": "not an entry"}\n')
+        kept = {f: f.read_bytes() for f in (paths.project_compose_override("alpha"),
+                                            paths.project_bind_record("alpha"))}
+        with patch("boxmunge.notify.notify") as alert:
+            assert run_upgrade(paths, apply_only=True) == 0
+        assert {f: f.read_bytes() for f in kept} == kept
+        [(title, body)] = [c.args[1:3] for c in alert.call_args_list
+                           if "refused" in c.args[1]]
+        assert "- alpha: its compose overlay could not be regenerated" in body
+        assert "entry 'web' is not {user, source, image_user}" in body
+        assert [c.args[0].name for c in mock_up.call_args_list] == ["beta"]
+        assert "status 503" in paths.project_caddy_site("alpha").read_text()
+
+    def test_a_failure_after_the_write_puts_the_previous_files_back(
+            self, tmp_path: Path) -> None:
+        paths = _setup(tmp_path)
+        _project(paths, "alpha")
+        _project(paths, "beta")
+        _pause(paths, "alpha")
+        _pause(paths, "beta")
+        paths.project_compose_override("alpha").write_text("# previous overlay\n")
+        record = paths.project_bind_record("alpha").read_bytes()
+        assert not paths.project_compose_override("beta").exists()
+
+        def written_then_failed(paths, manifest, component):
+            name = manifest["project"]
+            paths.project_compose_override(name).write_text("# half written\n")
+            paths.project_bind_record(name).write_text("{}\n")
+            raise DockerError("docker image rm timed out")
+
+        with patch("boxmunge.commands.upgrade_offline.prepare_compose_override",
+                   written_then_failed):
+            regen = apply_projects(paths)[1]
+        assert set(regen.refused) == {"alpha", "beta"}
+        assert "docker image rm timed out" in regen.refused["alpha"]
+        assert paths.project_compose_override("alpha").read_text() == "# previous overlay\n"
+        assert paths.project_bind_record("alpha").read_bytes() == record
+        assert not paths.project_compose_override("beta").exists()
 
 
 class TestRegenTakesProjectLock:

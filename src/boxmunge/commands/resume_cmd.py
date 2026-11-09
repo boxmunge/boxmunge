@@ -142,6 +142,15 @@ def resume_locked(
     except ManifestError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1, None
+    # The start runs this release's overlay, so it is regenerated first and
+    # the checks below see what will run (it may mount differently from the
+    # one the project was paused on).
+    try:
+        prepare_compose_override(paths, manifest, component="resume")
+    except (OSError, ValueError, DockerError) as e:
+        print(f"ERROR: cannot regenerate the compose overlay: {e}", file=sys.stderr)
+        log_error("resume", f"Overlay regeneration failed: {e}", paths, project=project_name)
+        return 1, None
     compose_files = _compose_files(project_name, paths)
 
     # Check compose.yml and the bind sources BEFORE any container action. A
@@ -203,7 +212,6 @@ def resume_locked(
     print("  Restoring Caddy routing...")
     try:
         prepare_caddy_config(paths, manifest)
-        prepare_compose_override(paths, manifest, component="resume")
         caddy_reload(paths.caddy, paths.state)
     except (DockerError, OSError) as e:
         print(f"ERROR: Caddy restore failed: {e}", file=sys.stderr)

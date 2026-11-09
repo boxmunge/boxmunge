@@ -338,7 +338,7 @@ class TestSkipsQuarantined:
         with patch(
             "boxmunge.commands.upgrade_steps.prepare_caddy_config",
         ) as mock_caddy, patch(
-            "boxmunge.commands.upgrade_steps.prepare_compose_override",
+            "boxmunge.commands.upgrade_offline.prepare_compose_override",
         ) as mock_overlay:
             apply_projects(paths)[1]
 
