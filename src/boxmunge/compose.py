@@ -16,7 +16,6 @@ from boxmunge.paths import BoxPaths
 from boxmunge.published_ports import overlay_ports
 from boxmunge.compose_hardening import apply_run_user, hardening_fragment
 from boxmunge.run_as import RunAsError, read_users
-from boxmunge.staged_release import release_dir, slot_dir
 from boxmunge.security_warn import (
     warn_off_services, warn_published_ports, warn_writable_state,
 )
@@ -336,17 +335,6 @@ def render_compose_override(paths: BoxPaths, manifest: dict[str, Any],
     )
 
 
-def _staged_build_services(paths: BoxPaths, project_name: str) -> set[str]:
-    """The build services of the release staged in the slot, which staging's
-    containers run; none without one."""
-    compose_path = release_dir(slot_dir(paths, project_name)) / "compose.yml"
-    if not compose_path.is_file():
-        return set()
-    return {name for name, svc in _user_services(load_user_compose(
-        compose_path, project_name)).items()
-        if isinstance(svc, dict) and svc.get("build") is not None}
-
-
 def prepare_compose_override(
     paths: BoxPaths,
     manifest: dict[str, Any],
@@ -373,19 +361,19 @@ def prepare_compose_override(
     # Before the overlay named built images under boxmunge.invalid/, Compose
     # tagged them `<project>-<service>` or the service's own `image:`, names
     # any other project could run. Drop those names from images whose
-    # Compose labels prove this project built them. The image a container
-    # runs gets its platform name first, so it keeps one and the next up
-    # starts it rather than building a new one.
+    # Compose labels prove this project built them. The image a production
+    # container runs gets its platform name first, so it keeps one and the
+    # next up starts it rather than building a new one. Staging's builds are
+    # the staged release's, which production reads nothing of: staging's own
+    # start names them, from its overlay (compose_guard).
     services = _user_services(user_compose)
     build_services = {name: svc.get("image") for name, svc in services.items()
                       if isinstance(svc, dict) and svc.get("build") is not None}
-    staged = _staged_build_services(paths, project_name)
-    for compose_project, built in ((project_name, build_services),
-                                   (f"{project_name}-staging", staged)):
-        named = built_images.name_running_builds(compose_project, built)
-        if named:
-            log_operation(component, f"named the images {compose_project}'s containers run: "
-                          f"{', '.join(named)}", paths, project=project_name)
+    named = built_images.name_running_builds(project_name, build_services)
+    if named:
+        log_operation(component, f"named the images {project_name}'s containers run: "
+                      f"{', '.join(named)}", paths, project=project_name)
+    for compose_project in (project_name, f"{project_name}-staging"):
         built_images.untag_old_built_names(
             compose_project, build_services, set(services) - set(build_services))
 

@@ -92,25 +92,9 @@ def test_prepare_names_running_builds_before_it_untags(paths, monkeypatch) -> No
     monkeypatch.setattr("boxmunge.built_images.untag_old_built_names",
                         lambda cp, built, others: calls.append(("untag", cp)) or [])
     prepare_compose_override(paths, MANIFEST, component="upgrade")
-    # Nothing staged: staging runs no build to name.
-    assert calls == [("name", "app", ["web"]), ("untag", "app"),
-                     ("name", "app-staging", []), ("untag", "app-staging")]
+    # Production's builds only: staging's start names staging's (compose_guard).
+    assert calls == [("name", "app", ["web"]), ("untag", "app"), ("untag", "app-staging")]
     log = paths.log_file.read_text()
     assert "named the images app's containers run: boxmunge.invalid/app/web" in log
     assert '"component": "upgrade"' in log
 
-
-def test_staging_names_the_staged_releases_builds(paths, monkeypatch) -> None:
-    """Staging's containers run the staged release, whose build services
-    need not be production's."""
-    from boxmunge.staged_release import release_dir, slot_dir
-    _project(paths)
-    release = release_dir(slot_dir(paths, "app"))
-    release.mkdir(parents=True)
-    (release / "compose.yml").write_text(yaml.safe_dump(
-        {"services": {"api": {"build": "."}, "db": {"image": "postgres:16"}}}))
-    named: dict = {}
-    monkeypatch.setattr("boxmunge.built_images.name_running_builds",
-                        lambda cp, built: named.setdefault(cp, sorted(built)) and [])
-    prepare_compose_override(paths, MANIFEST)
-    assert named == {"app": ["web"], "app-staging": ["api"]}
