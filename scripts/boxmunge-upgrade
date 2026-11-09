@@ -79,10 +79,14 @@ die() { log "FATAL: $*"; exit 1; }
 # `2>/dev/null || true`.
 #
 # Levels: info | warn | error. Detail JSON defaults to {}.
-bm_log() {
-    local level="$1" component="$2" msg="$3" detail="${4:-"{}"}"
+bm_log() { bm_log_via "$(active_venv)/bin/python" "$@" || true; }
+
+# bm_log_via <python> <level> <component> <msg> [<detail-json>]: bm_log through
+# that venv's python, returning whether it was written.
+bm_log_via() {
+    local python="$1" level="$2" component="$3" msg="$4" detail="${5:-"{}"}"
     BM_LEVEL="$level" BM_COMPONENT="$component" BM_MSG="$msg" BM_DETAIL="$detail" \
-        "$(active_venv)/bin/python" - <<'PYBM' 2>/dev/null || true
+        "$python" - <<'PYBM' 2>/dev/null
 import json, os
 from boxmunge.paths import BoxPaths
 from boxmunge.log import log_operation, log_warning, log_error
@@ -308,6 +312,11 @@ upgrade_to() {
     # --kill-after=10 to escalate SIGTERM -> SIGKILL if the process refuses
     # to die. Budget is shorter than probation's 180s because this is the
     # post-swap quick check; probation does the long-running validation.
+    # Only exit 2 rolls back here. A health that cannot run at all (126/127)
+    # is left to check-probation, which re-checks the live slot and rolls
+    # back if it still does not run on the next health-timer fire: swap_to
+    # has just run this slot's boxmunge-server, so one failure here is more
+    # likely a blip than a broken release worth blocklisting.
     local health_exit=0
     timeout --kill-after=10 60 "$(active_venv)/bin/boxmunge-server" health --json >/dev/null 2>&1 || health_exit=$?
     if [[ "$health_exit" -eq 2 ]]; then
