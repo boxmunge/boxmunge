@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from boxmunge import bind_sources, built_images, compose_resolve, docker_containers
+from boxmunge import bind_sources, built_images, chown_hold, compose_resolve, docker_containers
 from boxmunge.bind_sources import BindSourceError
 from boxmunge.compose_images import built_image_name
 from boxmunge.compose_own_files import container_bind_problems
@@ -58,6 +58,7 @@ from boxmunge.intake import IntakeError, validate_release_tree
 from boxmunge.legacy_stage import legacy_stage_refusal
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
+from boxmunge.overlay_users import stale_containers_problem, stale_overlay_problem
 from boxmunge.paths import RESERVED_PROJECT_NAMES
 from boxmunge.release_txn import load_txn, stale_reason, start_refusal
 from boxmunge.staged_release import (
@@ -136,6 +137,20 @@ def _refuse_if_install_open(paths: BoxPaths, project_name: str, component: str,
         return
     reason = start_refusal(paths, project_name, open_txn, stale_reason(paths, project_name, open_txn))
     raise _refused(paths, project_name, component, reason, tampering=False)
+
+
+def _refuse_stale_overlay(paths: BoxPaths, project_name: str, component: str,
+                          compose_files: list[str], deploying: bool, txn: str | None) -> None:
+    """A start that runs the overlay as it is, after the users record
+    changed, would run a service as its old user (overlay_users). Deploys
+    and the cores resuming an install write the overlay themselves."""
+    if deploying or txn is not None:
+        return
+    if paths.project_compose_override(project_name).name not in compose_files:
+        return
+    problem = stale_overlay_problem(paths, project_name)
+    if problem is not None:
+        raise _refused(paths, project_name, component, problem, tampering=False)
 
 
 def _refuse_if_legacy_stage(paths: BoxPaths, project_name: str, component: str) -> None:
@@ -228,6 +243,7 @@ def check_start(
     record_path = paths.project_bind_record(project_name)
     _refuse_if_install_open(paths, project_name, component, txn)
     _refuse_if_legacy_stage(paths, project_name, component)
+    _refuse_stale_overlay(paths, project_name, component, compose_files, deploying, txn)
     try:
         validate_release_tree(project_dir, project_name, paths, component,
                               lenient_values=True)
@@ -313,6 +329,8 @@ def compose_up_checked(
             f"start, which may already have created or recreated the services ahead of "
             f"it. Run {redo}.") from e
     _recreate_without_image(paths, project_name, compose_project, component, services, up)
+    if not staging and start:
+        chown_hold.release_after_start(paths, project_name, services, component)
     # A partial up (restore's one service) may leave the rest stopped.
     if not staging and start and not services:
         _clear_production_stopped(paths, project_name, component)
@@ -472,6 +490,11 @@ def check_containers_start(paths: BoxPaths, project_name: str, *, component: str
         bind_sources.check_sources(project_dir, sources, rec["sources"])
     except (BindSourceError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
+    if paths.project_users_record(project_name).exists():
+        stale = stale_containers_problem(
+            paths, project_name, docker_containers.container_users(project_name))
+        if stale is not None:
+            raise _refused(paths, project_name, component, stale, tampering=False)
 
 
 def start_containers_checked(
