@@ -122,9 +122,7 @@ def _container(doc: dict[str, Any], images: dict[str, dict[str, Any]]) -> Projec
     name = _name(doc)
     labels = (doc.get("Config") or {}).get("Labels") or {}
     service = _service(doc)
-    image_id = doc.get("Image")
-    if not isinstance(image_id, str) or not image_id.startswith("sha256:"):
-        raise DockerError(f"container {name}: docker reports image {image_id!r}, not an image ID")
+    image_id = doc["Image"]  # checked by _container_docs
     state = doc.get("State") or {}
     health = (state.get("Health") or {}).get("Status")
     running = state.get("Running") is True
@@ -160,7 +158,13 @@ def _container_docs(project_name: str) -> list[dict[str, Any]]:
         capture=True,
     )
     ids = listed.stdout.split()
-    return _inspect(["docker", "container", "inspect", *ids]) if ids else []
+    docs = _inspect(["docker", "container", "inspect", *ids]) if ids else []
+    for doc in docs:
+        image_id = doc.get("Image")
+        if not isinstance(image_id, str) or not image_id.startswith("sha256:"):
+            raise DockerError(f"container {_name(doc)}: docker reports image {image_id!r}, "
+                              f"not an image ID")
+    return docs
 
 
 def _local_images(docs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -168,7 +172,7 @@ def _local_images(docs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     created from that the local image store still has (see the module
     docstring for one that it does not). Raises DockerError for any other
     failure."""
-    image_ids = sorted({d.get("Image") for d in docs if isinstance(d.get("Image"), str)})
+    image_ids = sorted({str(d["Image"]) for d in docs})  # IDs, checked by _container_docs
     if not image_ids:
         return {}
     cmd = ["docker", "image", "inspect", *image_ids]
@@ -177,7 +181,7 @@ def _local_images(docs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     errors = [e for e in lines if "no such image" not in e.lower()]
     if result.returncode != 0 and errors:
         raise DockerError(f"{' '.join(cmd[:3])} failed: {'; '.join(errors)}")
-    found = {d.get("Id"): d for d in _documents(cmd, result.stdout or "")
+    found = {str(d["Id"]): d for d in _documents(cmd, result.stdout or "")
              if d.get("Id") in image_ids}
     # An image counts as gone only when Docker says so; a failure that names
     # nothing must not make a start recreate every container.
@@ -210,7 +214,7 @@ def project_containers(project_name: str) -> list[ProjectContainer]:
     """
     docs = _container_docs(project_name)
     images = _local_images(docs)
-    gone = [d for d in docs if isinstance(d.get("Image"), str) and d["Image"] not in images]
+    gone = [d for d in docs if d["Image"] not in images]
     if gone:
         raise _image_gone(project_name, gone)
     return sorted((_container(d, images) for d in docs), key=lambda c: c.name)
@@ -225,7 +229,7 @@ def running_without_image(project_name: str) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for doc in docs:
         labels = (doc.get("Config") or {}).get("Labels") or {}
-        if (doc.get("Image") in images or (doc.get("State") or {}).get("Running") is not True
+        if (doc["Image"] in images or (doc.get("State") or {}).get("Running") is not True
                 or str(labels.get(_ONEOFF_LABEL, "")).lower() == "true"):
             continue
         out.setdefault(_service(doc), []).append(_name(doc))
@@ -312,6 +316,12 @@ def local_image(ref: str) -> LocalImage | None:
     if not isinstance(image_id, str) or not image_id.startswith("sha256:"):
         raise DockerError(f"docker image inspect {ref} reports image ID {image_id!r}")
     return LocalImage(image_id=image_id, repo_digests=tuple(digests))
+
+
+def absent_images(images: dict[str, str]) -> list[tuple[str, str]]:
+    """(service, image) for each image ({service: ref}) the local image store
+    does not have. Raises DockerError when Docker cannot be asked."""
+    return [(svc, ref) for svc, ref in sorted(images.items()) if local_image(ref) is None]
 
 
 def container_bind_sources(project_name: str) -> list[tuple[str, bool]]:

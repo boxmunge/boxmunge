@@ -14,6 +14,7 @@ pytestmark = [pytest.mark.integration, skip_no_docker]
 @pytest.mark.parametrize("case", [ic.case_restart_starts_the_deployed_image,
                                   ic.case_a_start_recreates_a_container_whose_image_is_gone,
                                   ic.case_a_start_whose_image_is_missing_is_refused,
+                                  ic.case_a_start_missing_an_image_touches_nothing,
                                   ic.case_a_pinned_up_applies_no_pull_policy],
                          ids=lambda c: c.__name__)
 def test_case(tmp_path, capsys, case) -> None:

@@ -361,7 +361,8 @@ def prepare_compose_override(
     # tagged them `<project>-<service>` or the service's own `image:`, names
     # any other project could run. Drop those names from images whose
     # Compose labels prove this project built them; a running container keeps
-    # its image, and the next up rebuilds under the new name.
+    # its image. No start builds, so the next start is refused for want of an
+    # image under the new name until a deploy builds one.
     services = _user_services(user_compose)
     build_services = {name: svc.get("image") for name, svc in services.items()
                       if isinstance(svc, dict) and svc.get("build") is not None}

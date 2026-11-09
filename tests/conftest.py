@@ -185,6 +185,9 @@ def fake_containers(request, monkeypatch) -> FakeContainers:
         # ... and whether a running container's image has gone from the store.
         monkeypatch.setattr("boxmunge.docker_containers.running_without_image",
                             lambda project_name: {})
+        # A start's images are all there (the literal model names a build
+        # service's image by Compose's default, which no fake image has).
+        monkeypatch.setattr("boxmunge.docker_containers.absent_images", lambda images: [])
         monkeypatch.setattr("boxmunge.docker_containers.container_mounts",
                             lambda project_name: [])
         # Who a project's containers run as (deploy's user-change check).
