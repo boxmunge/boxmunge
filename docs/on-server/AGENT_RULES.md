@@ -37,7 +37,7 @@ These operations are safe to run without human confirmation:
 | Set a host-level secret | `secrets set --host KEY=value` |
 | List secrets | `secrets list <project>` |
 | Check server/project health | `status` or `check <project>` |
-| Tail container logs | `logs <project>` |
+| Tail container logs | `logs <project>` (staging: `logs <project> --staging`) |
 | Query ops audit log | `log --tail 50` |
 | Validate a project config | `validate <project>` |
 | Run a backup | `backup <project>` |
