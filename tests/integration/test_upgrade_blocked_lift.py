@@ -11,10 +11,10 @@ when the project was last deployed". The upgrade now regenerates such a
 project's overlay and records the bind sources from it, as for a running
 project, keeping the maintenance page and starting nothing.
 
-Real files, `docker compose config`, containers and bind mounts. Trivy,
-Caddy and Pushover are stubbed. The image half is provided by the fixture:
-the 0.10.1 build is also tagged with its platform name
-(boxmunge.invalid/<project>/web), which the overlay starts it by.
+Real files, `docker compose config`, containers, images and bind mounts;
+Trivy, Caddy and Pushover are stubbed. The 0.10.1 build carries only the
+name 0.10.1 gave it; the regenerated overlay names it
+boxmunge.invalid/<project>/web before the old name is dropped.
 """
 from __future__ import annotations
 
@@ -115,7 +115,6 @@ def box(tmp_path, monkeypatch):
         compose_up(pdir, compose_files=FILES, project_name=p)
         compose_stop(pdir, compose_files=FILES, project_name=p)
         image_id = _container(p)["Image"]
-        _docker("tag", image_id, f"boxmunge.invalid/{p}/web")
         monkeypatch.setattr(security_scan_core, "scan_image",
                             lambda ref, timeout: scan_result(ref, [CRIT]))
         monkeypatch.setattr(quarantine_lift, "prepare_caddy_config", render_site)

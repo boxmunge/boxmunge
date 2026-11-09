@@ -1863,8 +1863,9 @@ How an upgrade is applied and undone:
    overlay and record, and stays offline. Once the cause is fixed, `resume` or `security
    resume` brings it back, and for a `balanced` project whose finding no longer quarantines,
    every scan retries the automatic lift on its own. A project last deployed by boxmunge
-   0.10.1 needs a redeploy (or the next upgrade) instead: its previous record lacks this
-   release's mounts, so the start checks refuse it.
+   0.10.1 needs a redeploy (or the next upgrade) instead: its previous overlay names its
+   image by the old name, which the upgrade dropped, and its previous record lacks this
+   release's mounts, so the scan and the start checks refuse it.
 4. A health check runs, then a 6-hour probation. A critical health result during probation
    rolls back.
 
