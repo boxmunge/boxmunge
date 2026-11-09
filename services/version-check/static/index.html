@@ -65,29 +65,38 @@ boxmunge server-setup you@your-server.example.com --email you@example.com</code>
     <h2 id="privacy">Security updates &amp; privacy</h2>
 
     <p>Every boxmunge server asks this service for updates every six hours,
-       and again when its operator runs an upgrade, so it hears about security
-       and break-fix releases quickly. The request carries the server's
-       boxmunge version (in the address and in the User-Agent header) and, as
-       with any connection, the server's IP address. No hostname, machine
-       identifier or anything about the server's projects is sent. If an
-       upgrade fails, the server also reports the version it tried, the
-       version it came from, the step that failed and a short reason.</p>
+       and again when its operator runs a plain <code>upgrade</code> (an
+       <code>upgrade --target</code> names its version and does not ask), so
+       it hears about security and break-fix releases quickly. The request
+       carries the server's boxmunge version (in the address and in the
+       User-Agent header) and, as with any connection, the server's IP
+       address. No hostname, machine identifier or anything about the
+       server's projects is sent. If an upgrade fails, the server also
+       reports the version it tried, the version it came from, the step that
+       failed, a short reason and the time it sent the report.</p>
 
     <p>What this service stores:</p>
 
     <ul>
-        <li>For each update check: the network the request came from, cut down
-            to a prefix (a /24 for IPv4, the first three numbers of the
-            address; a /48 for IPv6), with the version and the date. Every
-            server on one network shares that entry. These entries are
-            deleted after 90 days.</li>
+        <li>For each update check: the network the request came from, as a
+            prefix (a /24 for IPv4, the first three numbers of the address;
+            a /48 for IPv6; an IPv6 address that embeds an IPv4 address
+            counts as that IPv4 address), with the version and the date.
+            A prefix is not anonymous: a /48 is often a single household or
+            company, and so can a /24 be. Every server on one network shares
+            an entry. These entries are deleted after 90 days.</li>
         <li>For each failure report: the report, with the same network
             prefix. Reports are deleted after 90 days.</li>
         <li>A daily count of checks per version.</li>
     </ul>
 
-    <p>Encrypted backups of the service's database can keep copies of these
-       for longer than 90 days, until the backups themselves expire.</p>
+    <p>Deleted data is overwritten in the database file, not just hidden.
+       Encrypted backups of the database can keep copies for longer than 90
+       days, until the backups themselves expire. Backups taken before this
+       service switched to prefixes can also hold the full IPv4
+       address, or the IPv6 /64, of servers that sent a failure report or
+       of anyone who started an admin sign-in, until those backups age
+       out.</p>
 
     <p>Your full IP address is never stored in the service's database. It
        is held in the service's memory to rate-limit requests, and it is
@@ -96,12 +105,18 @@ boxmunge server-setup you@your-server.example.com --email you@example.com</code>
     <p>Request logs: the web server in front of this service (Caddy) and the
        service itself each log every request, with the full IP address, the
        time, the URL requested (which includes the version) and the
-       User-Agent. They are there for operations
-       and abuse protection: the server's intrusion prevention (CrowdSec)
-       reads the web server's log to block attackers. Both logs are rotated by
-       size under Docker's log settings, up to five files of 50&nbsp;MB each
-       per log, the oldest discarded as new entries arrive; how long an entry
-       lasts depends on traffic, not on a fixed number of days.</p>
+       User-Agent. They are there for operations and abuse protection. Both
+       logs are rotated by size under Docker's log settings, up to five files
+       of 50&nbsp;MB each per log, the oldest discarded as new entries arrive;
+       how long an entry lasts depends on traffic, not on a fixed number of
+       days.</p>
+
+    <p>Abuse protection: the server's intrusion prevention (CrowdSec) reads
+       the web server's log to block attackers, and it is registered with
+       CrowdSec's central API. The IP addresses of requests that trigger
+       CrowdSec's attack scenarios are shared with CrowdSec's community
+       blocklist service. Ordinary update checks do not normally trigger
+       them.</p>
 
     <p>Why prefixes: boxmunge is in early beta, and its maintainer uses them
        to see which networks still run an old version and nudge those users

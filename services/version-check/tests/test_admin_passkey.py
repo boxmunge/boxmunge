@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 import admin_auth
-import webauthn_store
+import passkey_routes
 from conftest import ADMIN_RP_ID, ADMIN_SECRET
 from softauthn import SoftAuthenticator, b64url, login, register, session_header
 
@@ -180,20 +180,26 @@ class TestChallenges:
         assert response.status_code == 400
         assert "expired or already used" in response.get_json()["error"]
 
-    def test_one_network_flooding_sign_in_cannot_block_another(
-            self, admin_client, authenticator):
+    @pytest.mark.parametrize("flooder_addr", [
+        "203.0.113.7",
+        "198.51.100.7",          # a neighbour on the admin's /24
+        "2001:db8:1:2::7",       # a neighbour on the admin's /48
+    ])
+    def test_one_client_flooding_sign_in_cannot_block_another(
+            self, admin_client, authenticator, flooder_addr):
         register(admin_client, authenticator, ADMIN_SECRET)
-        flooder = {"X-Forwarded-For": "203.0.113.7"}
-        for _ in range(webauthn_store.MAX_PENDING_PER_CLIENT):
+        flooder = {"X-Forwarded-For": flooder_addr}
+        for _ in range(passkey_routes.CHALLENGES_PER_CLIENT):
             assert admin_client.post("/v1/admin/login/options",
                                      headers=flooder).status_code == 200
         refused = admin_client.post("/v1/admin/login/options", headers=flooder)
-        assert refused.status_code == 429 and "this network" in refused.get_json()["error"]
-        admin = {"X-Forwarded-For": "198.51.100.20"}
+        assert refused.status_code == 429 and "this client" in refused.get_json()["error"]
+        admin_addr = "2001:db8:1:3::20" if ":" in flooder_addr else "198.51.100.20"
+        admin = {"X-Forwarded-For": admin_addr}
         assert login_from(admin_client, authenticator, admin).status_code == 200
 
     def test_registration_challenges_count_towards_the_client_cap(self, admin_client):
-        for _ in range(webauthn_store.MAX_PENDING_PER_CLIENT):
+        for _ in range(passkey_routes.CHALLENGES_PER_CLIENT):
             assert admin_client.post("/v1/admin/register/options",
                                      json={"code": ADMIN_SECRET}).status_code == 200
         assert admin_client.post("/v1/admin/register/options",

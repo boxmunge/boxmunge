@@ -11,19 +11,18 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+import db
+
 CHALLENGE_TTL_SECONDS = 5 * 60
-# Issuing a sign-in challenge needs no credentials, so pending challenges
-# are capped per client network (prefix_store.network_prefix: IPv4 /24 or
-# IPv6 /48, never the address): one network can hold up the next ceremony
-# only for itself. The global cap is a backstop on table size that no single
-# network can reach.
-MAX_PENDING_PER_CLIENT = 5
+# Issuing a sign-in challenge needs no credentials. Each client is limited in
+# memory (passkey_routes), so no address is stored; this global cap is a
+# backstop on table size that no single client can reach.
 MAX_PENDING_CHALLENGES = 10_000
 PURPOSES = ("register", "login")
 
 
 class TooManyChallenges(RuntimeError):
-    """The network, or every network together, already holds its cap of unexpired challenges."""
+    """The client, or every client together, already holds its cap of challenges."""
 
 
 @dataclass(frozen=True)
@@ -34,7 +33,7 @@ class Credential:
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
-    return sqlite3.connect(db_path, isolation_level=None)
+    return db.connect(db_path, isolation_level=None)
 
 
 def _check_purpose(purpose: str) -> None:
@@ -42,8 +41,7 @@ def _check_purpose(purpose: str) -> None:
         raise ValueError(f"challenge purpose must be one of {PURPOSES}, got {purpose!r}")
 
 
-def issue_challenge(db_path: Path, challenge: bytes, purpose: str, client: str,
-                    now: int) -> None:
+def issue_challenge(db_path: Path, challenge: bytes, purpose: str, now: int) -> None:
     """Record a challenge that redeem_challenge accepts once, until it expires."""
     _check_purpose(purpose)
     conn = _connect(db_path)
@@ -51,20 +49,14 @@ def issue_challenge(db_path: Path, challenge: bytes, purpose: str, client: str,
         conn.execute("BEGIN IMMEDIATE")
         try:
             conn.execute("DELETE FROM admin_challenges WHERE expires_unix <= ?", (now,))
-            mine = conn.execute("SELECT COUNT(*) FROM admin_challenges WHERE client = ?",
-                                (client,)).fetchone()[0]
-            if mine >= MAX_PENDING_PER_CLIENT:
-                raise TooManyChallenges(
-                    f"this network already has {mine} unfinished passkey ceremonies; "
-                    f"try again in {CHALLENGE_TTL_SECONDS // 60} minutes")
             pending = conn.execute("SELECT COUNT(*) FROM admin_challenges").fetchone()[0]
             if pending >= MAX_PENDING_CHALLENGES:
                 raise TooManyChallenges(
                     f"{pending} passkey ceremonies are pending; "
                     f"try again in {CHALLENGE_TTL_SECONDS // 60} minutes")
-            conn.execute("INSERT INTO admin_challenges (challenge, purpose, client, expires_unix) "
-                         "VALUES (?, ?, ?, ?)",
-                         (challenge, purpose, client, now + CHALLENGE_TTL_SECONDS))
+            conn.execute("INSERT INTO admin_challenges (challenge, purpose, expires_unix) "
+                         "VALUES (?, ?, ?)",
+                         (challenge, purpose, now + CHALLENGE_TTL_SECONDS))
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")

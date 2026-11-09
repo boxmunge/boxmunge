@@ -5,8 +5,8 @@ so the admin stats page lists the networks that checked for updates, the
 version each reported and when, to tell who to nudge off an old release.
 
 network_prefix() is the only form of a client address this service writes
-to its database (here, as failure reporters and as passkey-challenge
-owners); the full address is never stored. A sighting is (UTC date, prefix,
+to its database (here, and as failure reporters); the full address is never
+stored. A sighting is (UTC date, prefix,
 version), one row per distinct triple. Rows older than RETENTION_DAYS are
 purged by retention.sweep (at start and every few minutes), so the published
 privacy statement (static/index.html) holds whether or not checks arrive.
@@ -14,13 +14,13 @@ privacy statement (static/index.html) holds whether or not checks arrive.
 PrefixLog buffers sightings in memory and writes them in one transaction,
 like request_limits.CheckCounter, so an unauthenticated check never waits on
 a write. Rows are bounded: unlisted versions are stored as UNLISTED, and a
-day holds at most max_prefixes_per_day distinct prefixes.
+day holds at most max_prefixes_per_day distinct prefixes, each with at most
+max_versions_per_prefix versions.
 """
 
 import atexit
 import ipaddress
 import re
-import sqlite3
 import sys
 import threading
 import time
@@ -28,18 +28,26 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
+import db
 from request_limits import utc_today
 
 RETENTION_DAYS = 90
 UNLISTED = "unlisted"
-# A handful of beta users is a few dozen prefixes; this only bounds abuse.
+# A handful of beta users is a few dozen prefixes; these only bound abuse,
+# so a day holds at most MAX_PREFIXES_PER_DAY * MAX_VERSIONS_PER_PREFIX_PER_DAY
+# rows. Three versions covers an upgrade and a rollback on one day.
 MAX_PREFIXES_PER_DAY = 5000
+MAX_VERSIONS_PER_PREFIX_PER_DAY = 3
 PURGE_SQL = "DELETE FROM prefix_checks WHERE date <= ?"
 _VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)\Z")
 
 
 def network_prefix(addr: str | None) -> str:
-    """The IPv4 /24 or IPv6 /48 containing `addr` (IPv4-mapped IPv6 counts as IPv4).
+    """The IPv4 /24 or IPv6 /48 containing `addr`.
+
+    IPv6 that embeds an IPv4 address counts as that IPv4 address: an
+    IPv4-mapped address, and a 6to4 address (2002::/16), whose /48 would be
+    the whole IPv4 address.
 
     Raises ValueError for anything that is not an IP address: behind the
     trusted proxy the client address always is one, so anything else is a
@@ -50,8 +58,8 @@ def network_prefix(addr: str | None) -> str:
     except ValueError:
         raise ValueError(f"client address {addr!r} is not an IP address; the service must "
                          f"sit behind the boxmunge Caddy proxy, which sets X-Forwarded-For") from None
-    if ip.version == 6 and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
+    if ip.version == 6:
+        ip = ip.ipv4_mapped or ip.sixtofour or ip
     bits = 24 if ip.version == 4 else 48
     return str(ipaddress.ip_network(f"{ip}/{bits}", strict=False))
 
@@ -59,7 +67,7 @@ def network_prefix(addr: str | None) -> str:
 def purge(db_path: Path, now: datetime) -> None:
     """Delete sightings RETENTION_DAYS or more days old (UTC)."""
     cutoff = (now.date() - timedelta(days=RETENTION_DAYS)).isoformat()
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     try:
         conn.execute(PURGE_SQL, (cutoff,))
         conn.commit()
@@ -78,7 +86,7 @@ def by_prefix(db_path: Path, limit: int) -> tuple[list[dict], int]:
     Each entry: prefix, first_seen, last_seen (UTC dates) and versions, every
     version seen on last_seen (two on the day a box upgraded), oldest first.
     """
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     try:
         rows = conn.execute(
             "WITH seen AS (SELECT prefix, MIN(date) AS first_seen, MAX(date) AS last_seen "
@@ -103,18 +111,21 @@ class PrefixLog:
     """Sightings buffered in memory; written every `flush_interval` seconds,
     when `max_pending` are buffered, before the admin page reads, and at exit.
 
-    `listed` versions are stored as reported, any other as UNLISTED. New
-    prefixes beyond `max_prefixes_per_day` on a day are dropped, and each
+    `listed` versions are stored as reported, any other as UNLISTED. A new
+    prefix beyond `max_prefixes_per_day` on a day, or a new version beyond
+    `max_versions_per_prefix` for a prefix on a day, is dropped, and each
     flush that drops any says so on stderr.
     """
 
     def __init__(self, db_path: Path, flush_interval: float, max_pending: int,
                  listed: frozenset[str], max_prefixes_per_day: int = MAX_PREFIXES_PER_DAY,
+                 max_versions_per_prefix: int = MAX_VERSIONS_PER_PREFIX_PER_DAY,
                  clock: Callable[[], float] = time.monotonic,
                  today: Callable[[], date] = utc_today) -> None:
         self.db_path, self.listed = db_path, listed
         self.flush_interval, self.max_pending = flush_interval, max_pending
         self.max_prefixes_per_day = max_prefixes_per_day
+        self.max_versions_per_prefix = max_versions_per_prefix
         self._clock, self._today = clock, today
         self._lock = threading.Lock()
         self._pending: set[tuple[str, str, str]] = set()
@@ -136,22 +147,29 @@ class PrefixLog:
             self._last_flush = self._clock()
         if not pending:
             return
-        dropped: set[tuple[str, str]] = set()
-        conn = sqlite3.connect(self.db_path, isolation_level=None)
+        dropped = 0
+        conn = db.connect(self.db_path, isolation_level=None)
         try:
             # One write transaction, so another worker's flush cannot add
-            # prefixes between the count and the insert.
+            # rows between the count and the insert.
             conn.execute("BEGIN IMMEDIATE")
-            known: dict[str, set[str]] = {}
+            known: dict[str, dict[str, set[str]]] = {}
             rows = []
             for day, prefix, version in sorted(pending):
                 if day not in known:
-                    known[day] = {r[0] for r in conn.execute(
-                        "SELECT DISTINCT prefix FROM prefix_checks WHERE date = ?", (day,))}
-                if prefix not in known[day] and len(known[day]) >= self.max_prefixes_per_day:
-                    dropped.add((day, prefix))
+                    known[day] = {}
+                    for p, v in conn.execute(
+                            "SELECT prefix, version FROM prefix_checks WHERE date = ?", (day,)):
+                        known[day].setdefault(p, set()).add(v)
+                versions = known[day].get(prefix)
+                if versions is None and len(known[day]) >= self.max_prefixes_per_day:
+                    dropped += 1
                     continue
-                known[day].add(prefix)
+                versions = known[day].setdefault(prefix, set())
+                if version not in versions and len(versions) >= self.max_versions_per_prefix:
+                    dropped += 1
+                    continue
+                versions.add(version)
                 rows.append((day, prefix, version))
             conn.executemany("INSERT OR IGNORE INTO prefix_checks (date, prefix, version) "
                              "VALUES (?, ?, ?)", rows)
@@ -163,5 +181,6 @@ class PrefixLog:
         finally:
             conn.close()
         if dropped:
-            print(f"prefix-log: dropped {len(dropped)} new network prefixes beyond the cap of "
-                  f"{self.max_prefixes_per_day} per day", file=sys.stderr, flush=True)
+            print(f"prefix-log: dropped {dropped} sighting(s) beyond the daily caps "
+                  f"({self.max_prefixes_per_day} prefixes, {self.max_versions_per_prefix} "
+                  f"versions per prefix)", file=sys.stderr, flush=True)

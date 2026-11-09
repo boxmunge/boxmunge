@@ -35,7 +35,6 @@ Source: https://github.com/boxmunge/boxmunge/tree/main/services/version-check
 
 import os
 import re
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -43,6 +42,7 @@ from flask import Flask, request, jsonify
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import admin_auth
+import db
 import failure_store
 import passkey_routes
 import prefix_store
@@ -102,7 +102,7 @@ PREFIXES_SHOWN = 500
 # ---------------------------------------------------------------------------
 
 def _is_circuit_broken(db_path, version):
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     try:
         row = conn.execute(
             "SELECT tripped FROM circuit_breaker WHERE version = ? AND tripped = 1",
@@ -114,7 +114,7 @@ def _is_circuit_broken(db_path, version):
 
 def _trip_circuit_breaker(db_path, version, tripped_by):
     now = datetime.now(timezone.utc).isoformat()
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     try:
         conn.execute(
             """INSERT INTO circuit_breaker (version, tripped, tripped_by, tripped_at)
@@ -127,7 +127,7 @@ def _trip_circuit_breaker(db_path, version, tripped_by):
 
 
 def _reset_circuit_breaker(db_path, version):
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     try:
         conn.execute("UPDATE circuit_breaker SET tripped = 0 WHERE version = ?", (version,))
         conn.commit()
@@ -186,7 +186,7 @@ def _query_version_checks(db_path: Path, days: int, listed: set[str]) -> dict:
     since_iso = since.isoformat()
     until_iso = until.isoformat()
 
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     try:
         rows = conn.execute(
             "SELECT date, version, count FROM version_checks "
@@ -261,7 +261,8 @@ def create_app() -> Flask:
     prefixes = prefix_store.PrefixLog(DB_PATH, CHECK_FLUSH_SECONDS, CHECK_MAX_PENDING,
                                       frozenset(listed_versions))
     app.extensions["prefix_log"] = prefixes
-    sweeper = retention.Sweeper(DB_PATH, retention.SWEEP_INTERVAL)
+    sweeper = retention.Sweeper(DB_PATH, retention.SWEEP_INTERVAL,
+                                flushes=(counter.flush, prefixes.flush))
     sweeper.start()
     app.extensions["retention_sweeper"] = sweeper
 

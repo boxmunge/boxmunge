@@ -80,6 +80,9 @@ class TestNetworkPrefix:
         ("2001:db8:1:2:3:4:5:6", "2001:db8:1::/48"),
         ("2001:db8:ffff::1", "2001:db8:ffff::/48"),
         ("::ffff:198.51.100.77", "198.51.100.0/24"),
+        # 6to4: the /48 is 2002: plus the whole IPv4 address, so use its /24.
+        ("2002:c633:644d::1", "198.51.100.0/24"),
+        ("2002:c633:644d:1:2:3:4:5", "198.51.100.0/24"),
     ])
     def test_prefix(self, addr, prefix):
         assert prefix_store.network_prefix(addr) == prefix
@@ -190,10 +193,25 @@ class TestDailyPrefixCap:
         log.record("198.51.1.0/24", "0.2.0")
         log.flush()
         assert [row[1] for row in _sightings(migrated_db)] == ["198.51.1.0/24", "198.51.2.0/24"]
-        assert "dropped 2 new network prefixes" in capsys.readouterr().err
+        assert "dropped 2 sighting(s) beyond the daily caps" in capsys.readouterr().err
         log.record("198.51.1.0/24", "9.9.9")  # a known prefix is still recorded
         log.flush()
         assert ("unlisted" in [row[2] for row in _sightings(migrated_db)])
+
+    def test_versions_beyond_the_cap_for_a_prefix_are_dropped_loudly(self, migrated_db, capsys):
+        listed = frozenset({"0.2.0", "0.2.1", "0.2.2", "0.2.3"})
+        log = prefix_store.PrefixLog(migrated_db, 60, 1000, listed, max_versions_per_prefix=2)
+        for v in ("0.2.0", "0.2.1", "0.2.2"):
+            log.record("198.51.1.0/24", v)
+        log.flush()
+        log.record("198.51.1.0/24", "0.2.3")   # a later flush still sees the cap
+        log.record("198.51.1.0/24", "0.2.0")   # a version already stored is fine
+        log.record("198.51.2.0/24", "0.2.3")   # another prefix has its own cap
+        log.flush()
+        assert _sightings(migrated_db)[0][0] == _today().isoformat()
+        assert [(r[1], r[2]) for r in _sightings(migrated_db)] == [
+            ("198.51.1.0/24", "0.2.0"), ("198.51.1.0/24", "0.2.1"), ("198.51.2.0/24", "0.2.3")]
+        assert capsys.readouterr().err.count("dropped 1 sighting(s)") == 2
 
 
 class TestPurge:
@@ -204,6 +222,21 @@ class TestPurge:
         retention.sweep(migrated_db, datetime.now(timezone.utc))
         assert sorted(row[1] for row in _sightings(migrated_db)) == [
             "198.51.0.0/24", "198.51.89.0/24"]
+
+    def test_expired_rows_are_gone_from_the_file_bytes(self, migrated_db):
+        old = datetime.now(timezone.utc) - timedelta(days=120)
+        _seed(migrated_db, [(old.date().isoformat(), "203.0.113.0/24", "0.2.0")])
+        conn = sqlite3.connect(migrated_db)
+        conn.execute("INSERT INTO failures (version, installed_from, stage, detail, reported_at, "
+                     "reporter) VALUES ('0.2.1', '0.2.0', 'apply', 'expired-detail-marker', ?, "
+                     "'192.0.2.0/24')", (old.isoformat(),))
+        conn.commit()
+        conn.close()
+        assert b"203.0.113.0/24" in migrated_db.read_bytes()
+        retention.sweep(migrated_db, datetime.now(timezone.utc))
+        raw = migrated_db.read_bytes()
+        for gone in (b"203.0.113.0/24", b"192.0.2.0/24", b"expired-detail-marker"):
+            assert gone not in raw
 
     def test_pre_start_step_purges(self, migrated_db):
         _seed(migrated_db, [((_today() - timedelta(days=120)).isoformat(),
@@ -224,6 +257,28 @@ class TestPurge:
         finally:
             sweeper.stop()
         assert _sightings(migrated_db) == []
+
+    def test_each_tick_flushes_buffers_even_if_one_flush_fails(self, migrated_db):
+        flushed = []
+
+        def broken():
+            raise RuntimeError("disk full")
+        sweeper = retention.Sweeper(migrated_db, timedelta(milliseconds=10),
+                                    flushes=(broken, lambda: flushed.append(1)))
+        sweeper.start()
+        try:
+            deadline = time.monotonic() + 5
+            while not flushed and time.monotonic() < deadline:
+                time.sleep(0.01)
+        finally:
+            sweeper.stop()
+        assert flushed
+
+    def test_app_sweeper_flushes_the_check_counter_and_prefix_log(self, make_app):
+        app = make_app()
+        sweeper = app.extensions["retention_sweeper"]
+        assert sweeper.flushes == (app.extensions["check_counter"].flush,
+                                   app.extensions["prefix_log"].flush)
 
     def test_purge_uses_an_index(self, migrated_db):
         conn = sqlite3.connect(migrated_db)
@@ -300,40 +355,81 @@ class TestAdminPrefixTable:
         assert "<b>p</b>" not in html and "&lt;b&gt;p&lt;/b&gt;" in html
 
 
-class TestMigration:
-    def _db_at_version_4(self, path):
-        db_schema.migrate(path)
-        conn = sqlite3.connect(path)
-        now = datetime.now(timezone.utc).isoformat()
-        conn.execute("DROP TABLE prefix_checks")
-        conn.executemany(
-            "INSERT INTO failures (version, installed_from, stage, reported_at, reporter) "
-            "VALUES ('0.2.1', '0.2.0', 'apply', ?, ?)",
-            [(now, "198.51.100.4"), (now, "2001:db8:5:6::/64"), (now, "unknown"), (now, None)])
-        conn.execute("INSERT INTO admin_challenges VALUES (x'01', 'login', '198.51.100.4', 1)")
-        # A reporter forgotten before this release: deleted, but its bytes
+def _v4_database(path, residue: bool = True) -> None:
+    """A database as release 4 of the schema left it, holding full addresses."""
+    conn = sqlite3.connect(path, isolation_level=None)  # secure_delete off, as before
+    for step in db_schema.MIGRATIONS[:4]:
+        step(conn)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.executemany(
+        "INSERT INTO failures (version, installed_from, stage, reported_at, reporter) "
+        "VALUES ('0.2.1', '0.2.0', 'apply', ?, ?)",
+        [(now, "198.51.100.4"), (now, "2001:db8:5:6::/64"), (now, "unknown"), (now, None)])
+    conn.execute("INSERT INTO admin_challenges VALUES (x'01', 'login', '198.51.100.5', 1)")
+    if residue:
+        # A reporter forgotten by an earlier release: deleted, but its bytes
         # stay in the file's free space until something overwrites them.
         conn.execute("INSERT INTO failures (version, installed_from, stage, reported_at, "
                      "reporter) VALUES ('0.2.1', '0.2.0', 'apply', ?, '198.51.100.99')", (now,))
         conn.execute("DELETE FROM failures WHERE reporter = '198.51.100.99'")
-        conn.execute("PRAGMA user_version = 4")
-        conn.commit()
+    conn.execute("PRAGMA user_version = 4")
+    conn.close()
+
+
+def _scalar(path, sql):
+    conn = sqlite3.connect(path)
+    try:
+        return conn.execute(sql).fetchone()[0]
+    finally:
         conn.close()
 
-    def test_stored_addresses_become_prefixes(self, tmp_path):
+
+class TestMigration:
+    def test_stored_addresses_become_prefixes(self, tmp_path, capsys):
         path = tmp_path / "v4.db"
-        self._db_at_version_4(path)
+        _v4_database(path)
         db_schema.prepare(path, datetime.now(timezone.utc))
         conn = sqlite3.connect(path)
         try:
             assert [r[0] for r in conn.execute("SELECT reporter FROM failures ORDER BY id")] == [
                 "198.51.100.0/24", "2001:db8:5::/48", None, None]
             assert conn.execute("SELECT COUNT(*) FROM admin_challenges").fetchone()[0] == 0
+            assert "client" not in [r[1] for r in conn.execute(
+                "PRAGMA table_info(admin_challenges)")]
             assert conn.execute("SELECT COUNT(*) FROM prefix_checks").fetchone()[0] == 0
         finally:
             conn.close()
+        assert "cleared 1 failure reporter(s) that were not IP addresses" in capsys.readouterr().out
         raw = path.read_bytes()
-        assert b"198.51.100.4" not in raw and b"198.51.100.99" not in raw
+        for addr in (b"198.51.100.4", b"198.51.100.5", b"198.51.100.99", b"2001:db8:5:6"):
+            assert addr not in raw
+
+    def test_an_interrupted_first_start_still_vacuums(self, tmp_path):
+        """migrate() commits schema version 5 before the VACUUM; a start cut
+        off between the two must vacuum on the next start."""
+        path = tmp_path / "v4.db"
+        _v4_database(path)
+        db_schema.migrate(path)  # the first start dies here
+        assert _scalar(path, "SELECT COUNT(*) FROM pending_vacuum") == 1
+        db_schema.prepare(path, datetime.now(timezone.utc))
+        assert _scalar(path, "SELECT COUNT(*) FROM pending_vacuum") == 0
+        assert b"198.51.100.99" not in path.read_bytes()
+
+    def test_migrate_alone_zeroes_the_addresses_it_replaces(self, tmp_path):
+        path = tmp_path / "v4.db"
+        _v4_database(path, residue=False)
+        db_schema.migrate(path)
+        raw = path.read_bytes()
+        for addr in (b"198.51.100.4", b"198.51.100.5", b"2001:db8:5:6"):
+            assert addr not in raw
+
+    def test_every_connection_zeroes_what_it_frees(self, migrated_db):
+        import db
+        conn = db.connect(migrated_db)
+        try:
+            assert conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+        finally:
+            conn.close()
 
 
 class TestPrivacyStatement:
@@ -352,6 +448,14 @@ class TestPrivacyStatement:
     def test_states_that_the_web_server_logs_full_addresses(self):
         assert "Request logs:" in self._text()
         assert "full IP address" in self._text()
+
+    def test_states_what_the_code_does_with_deleted_and_embedded_addresses(self):
+        text = self._text()
+        assert "Deleted data is overwritten in the database file" in text  # db.connect
+        assert "embeds an IPv4 address counts as that IPv4 address" in text  # 6to4, mapped
+        assert "A prefix is not anonymous" in text
+        assert "Backups taken before this service switched to prefixes" in text
+        assert "shared with CrowdSec's community blocklist service" in text
 
     def test_no_longer_claims_no_addresses_are_stored(self):
         assert "No IP addresses" not in self._text()

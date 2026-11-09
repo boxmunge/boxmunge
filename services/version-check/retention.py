@@ -3,7 +3,10 @@
 sweep() deletes failure reports past failure_store.RETENTION and prefix
 sightings past prefix_store.RETENTION_DAYS. It runs once in the pre-start
 step (db_schema.prepare), then every SWEEP_INTERVAL in each worker, so the
-published privacy statement (static/index.html) holds.
+published privacy statement (static/index.html) holds. Each tick also
+flushes the worker's buffered check counts and prefix sightings, so the
+admin page lags by at most one interval and a killed worker loses at most
+that much.
 """
 
 import sys
@@ -25,15 +28,18 @@ def sweep(db_path: Path, now: datetime) -> None:
 
 
 class Sweeper:
-    """Runs sweep() every `interval` on a daemon thread, one per worker.
+    """Runs each of `flushes`, then sweep(), every `interval` on a daemon
+    thread, one per worker.
 
-    A failed sweep is logged with its traceback and retried on the next tick;
-    stopping the sweeper would quietly break the retention promise.
+    A failed step is logged with its traceback and retried on the next tick,
+    and does not stop the others; stopping the sweeper would quietly break
+    the retention promise.
     """
 
     def __init__(self, db_path: Path, interval: timedelta,
+                 flushes: tuple[Callable[[], None], ...] = (),
                  now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> None:
-        self.db_path, self.interval, self._now = db_path, interval, now
+        self.db_path, self.interval, self.flushes, self._now = db_path, interval, flushes, now
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="retention-sweeper", daemon=True)
 
@@ -46,9 +52,11 @@ class Sweeper:
 
     def _run(self) -> None:
         while not self._stop.wait(self.interval.total_seconds()):
-            try:
-                sweep(self.db_path, self._now())
-            except Exception:
-                print(f"retention-sweeper: sweep of {self.db_path} failed; retrying in "
-                      f"{self.interval}", file=sys.stderr, flush=True)
-                traceback.print_exc()
+            steps = [*self.flushes, lambda: sweep(self.db_path, self._now())]
+            for step in steps:
+                try:
+                    step()
+                except Exception:
+                    print(f"retention-sweeper: a step on {self.db_path} failed; retrying in "
+                          f"{self.interval}", file=sys.stderr, flush=True)
+                    traceback.print_exc()

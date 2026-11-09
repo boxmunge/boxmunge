@@ -8,9 +8,10 @@ Reports, reporter included, are deleted after RETENTION by expire(), which
 retention.sweep runs on a schedule.
 """
 
-import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
+
+import db
 
 REPORT_WINDOW = timedelta(hours=6)
 RETENTION = timedelta(days=90)
@@ -29,7 +30,7 @@ def record_failure(db_path: Path, version: str, installed_from: str, stage: str,
     concurrent reports from one reporter (one per gunicorn worker) store one.
     """
     window_start = (now - REPORT_WINDOW).isoformat()
-    conn = sqlite3.connect(db_path, isolation_level=None)
+    conn = db.connect(db_path, isolation_level=None)
     try:
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -50,7 +51,7 @@ def record_failure(db_path: Path, version: str, installed_from: str, stage: str,
 
 def expire(db_path: Path, now: datetime) -> None:
     """Delete reports past retention."""
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     try:
         conn.execute(EXPIRE_SQL, ((now - RETENTION).isoformat(),))
         conn.commit()
@@ -60,7 +61,7 @@ def expire(db_path: Path, now: datetime) -> None:
 
 def count_recent(db_path: Path, version: str, now: datetime) -> int:
     """Reports for `version` in the window: the number of distinct reporters."""
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     try:
         return conn.execute(COUNT_SQL, (version, (now - REPORT_WINDOW).isoformat())).fetchone()[0]
     finally:
@@ -69,7 +70,7 @@ def count_recent(db_path: Path, version: str, now: datetime) -> int:
 
 def recent_failures(db_path: Path, limit: int) -> list[dict]:
     """The newest `limit` reports, newest first, with the reporter's network prefix."""
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     try:
         rows = conn.execute(
             "SELECT reported_at, version, installed_from, stage, detail, reporter FROM failures "
@@ -81,7 +82,7 @@ def recent_failures(db_path: Path, limit: int) -> list[dict]:
 
 
 def query_failures(db_path: Path, version: str) -> dict:
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     try:
         rows = conn.execute(
             "SELECT stage, COUNT(*) FROM failures WHERE version = ? GROUP BY stage",

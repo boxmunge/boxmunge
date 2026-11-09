@@ -31,13 +31,16 @@ from webauthn.helpers.structs import (
 import admin_auth
 import admin_pages
 import webauthn_store
-from prefix_store import network_prefix
+from request_limits import RateLimiter, client_key
 
 ALGORITHMS = [COSEAlgorithmIdentifier.ECDSA_SHA_256, COSEAlgorithmIdentifier.EDDSA]
 RP_NAME = "boxmunge version-check"
 # Fixed, so registering again on the same authenticator replaces its old
 # passkey for this site instead of adding a second one.
 USER_ID = b"boxmunge-version-check-admin"
+# Passkey ceremonies one client may start per challenge lifetime, per worker.
+CHALLENGES_PER_CLIENT = 5
+CHALLENGE_LIMITER_CLIENTS = 10_000
 USER_NAME = "admin"
 DEFAULT_NEXT = "/v1/admin/stats"
 NEXT_RE = re.compile(r"/v1/admin/[a-z0-9][a-z0-9_-]*(?:/[a-z0-9][a-z0-9_-]*)*\Z")
@@ -86,6 +89,10 @@ def _options(options) -> Response:
 
 def create_blueprint(db_path: Path) -> Blueprint:
     bp = Blueprint("passkey", __name__)
+    # Per client (IPv4 address or IPv6 /64), per worker, in memory: one client
+    # can hold up only its own ceremonies, and no address is stored.
+    started = RateLimiter(CHALLENGES_PER_CLIENT, webauthn_store.CHALLENGE_TTL_SECONDS,
+                          CHALLENGE_LIMITER_CLIENTS)
     @bp.errorhandler(Refusal)
     def refused(exc: Refusal):
         return jsonify({"error": str(exc)}), exc.status
@@ -95,8 +102,11 @@ def create_blueprint(db_path: Path) -> Blueprint:
         return jsonify({"error": str(exc)}), 429
 
     def issue(challenge: bytes, purpose: str) -> None:
-        webauthn_store.issue_challenge(db_path, challenge, purpose,
-                                       network_prefix(request.remote_addr), admin_auth.now_unix())
+        if not started.allow(client_key(request.remote_addr)):
+            raise webauthn_store.TooManyChallenges(
+                f"this client started {CHALLENGES_PER_CLIENT} passkey ceremonies in the last "
+                f"{webauthn_store.CHALLENGE_TTL_SECONDS // 60} minutes; try again later")
+        webauthn_store.issue_challenge(db_path, challenge, purpose, admin_auth.now_unix())
 
     def registered(secret: str) -> webauthn_store.Credential | None:
         return webauthn_store.active_credential(db_path, admin_auth.code_mac(secret))
