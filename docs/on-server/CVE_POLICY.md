@@ -265,12 +265,34 @@ falls through to step 11 (the threshold gate) alongside `Status: affected`.
 
 ## CISA KEV feed
 
-### Source and refresh
+### Sources and refresh
 
-The KEV feed is CISA's Known Exploited Vulnerabilities catalog:
+The KEV feed is CISA's Known Exploited Vulnerabilities catalog. boxmunge
+reads it from an ordered list of sources, which by default is CISA's feed
+and then CISA's own mirror of it on GitHub (`cisagov/kev-data`):
 
 ```
 https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+https://raw.githubusercontent.com/cisagov/kev-data/main/known_exploited_vulnerabilities.json
+```
+
+CISA's CDN refuses some hosting providers' address ranges (HTTP 403), and
+the mirror serves the same file. The sources are tried in order on every
+refresh. The first one whose catalog passes every check below is cached,
+along with the URL that served it. Each source that failed is logged with
+its error (`boxmunge log --component cve-scan`). This is not a hidden
+fallback. Every source on the list is a copy of CISA's catalog that boxmunge
+trusts, and `boxmunge security` shows which one answered.
+
+To replace the list, set `kev.sources` in `boxmunge.yml`. It must be a
+non-empty list of `https://` URLs that serve the same JSON, for example an
+internal mirror:
+
+```yaml
+kev:
+  sources:
+    - https://kev-mirror.internal.example/known_exploited_vulnerabilities.json
+    - https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
 ```
 
 `refresh_kev()` is called once per scan run alongside `refresh_db()` (the
@@ -281,26 +303,50 @@ After refresh, the catalog is loaded and a single `kev_lookup` predicate is
 threaded into every project's `evaluate_finding` call for that run — the
 exploitation signal is consistent fleet-wide within a scan run.
 
+The fleet view (`boxmunge security`, `--json` and the `security.summary`
+action) shows the cached catalog under `kev`. It lists the source that
+served it, the catalog's release date (`dateReleased`), when it was
+fetched, how many CVEs it holds and, if it is stale, why.
+
 ### Staleness and fail-safe
 
-The catalog is considered stale when its `fetched_at` timestamp is older than
-`KEV_MAX_AGE_DAYS` (currently 8 days — a week of fetch failures before the
-gate degrades), or more than a day in the future (clock skew when the cache
-was written).
+The catalog is stale when either of these holds:
+- **No source has answered** for more than `KEV_MAX_AGE_DAYS` (8 days),
+  counted from the last accepted fetch. This is a week of failed refreshes
+  from every source.
+- **The catalog is lagging.** Its own `dateReleased` is more than
+  `KEV_MAX_RELEASE_AGE_DAYS` (21 days) old. A mirror that stopped syncing
+  keeps answering, so the fetch time alone would make its old catalog look
+  fresh. CISA does not publish daily. Since 2025 the catalog has gone up to
+  18 days without a new release, so the limit leaves room for those quiet
+  spells.
 
-### Refresh sanity floor
+A catalog dated more than a day in the future (fetch or release time) is
+also stale, since that means the clock was wrong when it was written. So
+is a cache written by a boxmunge older than 0.11.4. That cache has no
+release date: its CVE IDs still count for the shrink check below, and the
+first successful refresh replaces it.
 
-CISA's catalog only grows. A refresh is **rejected** — the previous cache
-is kept untouched — when the feed's payload is malformed, when it holds
-fewer than `KEV_MIN_ENTRIES` (1,000) CVEs, or when it would shrink the
-cached catalog by more than `KEV_MAX_SHRINK` (5%). An empty or truncated
-feed (an error page, a CDN serving a partial file) would otherwise be
-accepted as a fresh catalog and switch the exploitation gate off without
-ever going stale. A rejected refresh fires the priority-1 KEV alert for
-that run (title `CISA KEV refresh rejected — previous catalog kept`, with
-the reason), even while the kept cache is still fresh. A plain network
-failure is not a rejection: the cache ages normally and the staleness
-alert below takes over after `KEV_MAX_AGE_DAYS`.
+### Refresh checks
+
+CISA's catalog only grows. Each source's catalog is checked on its own,
+and rejected if any of these hold:
+- the payload is malformed (no `vulnerabilities` list, or no valid
+  `dateReleased`);
+- it holds fewer than `KEV_MIN_ENTRIES` (1,000) CVEs;
+- it would shrink the cached catalog by more than `KEV_MAX_SHRINK` (5%);
+- it was released before the cached catalog (a lagging source must not roll
+  the catalog back).
+
+A rejected catalog is never cached, and the next source is tried. An empty
+or truncated feed (an error page, a CDN serving a partial file) would
+otherwise be accepted as a fresh catalog and switch the exploitation gate
+off without ever going stale. If no source's catalog was accepted and at
+least one was rejected (or `boxmunge.yml` could not be read), the run fires
+the priority-1 KEV alert (title `CISA KEV refresh rejected — previous
+catalog kept`), even while the kept cache is still fresh. Sources that
+could not be reached (HTTP errors, timeouts) are not a rejection: the cache
+ages normally, and the staleness alert below takes over.
 
 **Fail-safe: toward uptime, never toward quarantine.** When the catalog is
 missing or stale, `is_known_exploited` returns `False`. The site is not taken
@@ -308,9 +354,13 @@ down on an exploitation signal that cannot currently be verified.
 
 Staleness is never silent. When a scan run detects a stale or missing catalog,
 it:
-1. Logs a WARNING with the last fetch timestamp (if any).
+1. Logs a WARNING with the reason and each source's error.
 2. Fires a single priority-1 Pushover alert per run:
-   `CISA KEV feed stale — exploitation defense degraded`.
+   `CISA KEV feed stale — exploitation defense degraded`. The body says which
+   condition fired (no source answered, or the catalog is lagging). It also
+   gives the cached catalog's release date, fetch time and source, and lists
+   every source this run tried with its error (for example `HTTP 403
+   Forbidden` or `timed out after 30s`).
 
 This alert fires once per scan run, not once per finding, to avoid alert
 storms. The degradation must not go unnoticed: under `relaxed` and
@@ -819,7 +869,7 @@ of the two the last scan checked.
 The Trivy DB and the CISA KEV catalog are both refreshed before each scan
 run (one call each). DB-refresh and KEV-refresh failures are non-fatal:
 the scan proceeds against whatever cache exists and a warning is logged. A
-stale KEV catalog, or a KEV refresh rejected by the sanity floor, fires a
+stale KEV catalog, or a KEV refresh rejected by the refresh checks, fires a
 priority-1 alert (see "CISA KEV feed" above).
 
 Idempotency: the daily cron does not re-fire alerts for unchanged
@@ -927,7 +977,7 @@ then either:
 **KEV is never held.** A project with a KEV-listed quarantine-level finding
 is quarantined at once, whatever else is happening: active exploitation is
 exactly when blast radius is acceptable. A broken KEV feed is guarded
-earlier, by the refresh sanity floor (see "CISA KEV feed").
+earlier, by the refresh checks (see "CISA KEV feed").
 
 A single-project box never trips (the threshold is at least 2). On a
 two-project box both projects quarantining for new findings in the same

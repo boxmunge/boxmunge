@@ -26,7 +26,8 @@ from boxmunge.cve.alerting import (
     format_scan_unrecorded_alert,
     send_alerts,
 )
-from boxmunge.cve.kev import KevCatalog, load_kev, refresh_kev
+from boxmunge.cve.kev import KevCatalog, load_kev
+from boxmunge.cve.kev_refresh import refresh_kev
 from boxmunge.cve.scan_state import last_scanned_at
 from boxmunge.cve.grace import (
     GraceError,
@@ -118,26 +119,24 @@ def _refresh_kev_and_alert(paths: BoxPaths, now: datetime) -> KevCatalog:
     The one catalog is threaded into every project scan so the exploitation
     signal is consistent fleet-wide. Fail-safe: a stale catalog never
     quarantines, and a rejected refresh keeps the previous cache (B-06), but
-    either fires ONE priority-1 alert per run so the degradation is never
-    silent.
+    either fires ONE priority-1 alert per run naming each source's error.
     """
     refresh = refresh_kev(paths)
     kev = load_kev(paths)
-    stale = kev.is_stale(now.date())
-    if not stale and refresh.rejected is None:
+    stale_reason = kev.stale_reason(now.date())
+    if stale_reason is None and not refresh.needs_alert:
         return kev
+    tried = [f.line() for f in refresh.failures]
+    if refresh.source is not None:
+        tried.append(f"{refresh.source}: answered")
     log_warning(
         "cve-scan",
-        "CISA KEV catalog degraded — exploitation-based quarantine at risk"
-        + (f" (refresh rejected: {refresh.rejected})" if refresh.rejected else ""),
+        "CISA KEV catalog degraded — exploitation-based quarantine at risk ("
+        + (stale_reason or "refresh failed") + ")",
         paths, project=None,
-        detail={
-            "kev_fetched_at": kev.fetched_at.isoformat() if kev.fetched_at else None,
-            "stale": stale,
-            "rejected": refresh.rejected,
-        },
+        detail={"kev_source": kev.source, "stale_reason": stale_reason, "tried": tried},
     )
-    alert = format_kev_stale_alert(kev.fetched_at, stale=stale, rejected=refresh.rejected)
+    alert = format_kev_stale_alert(kev, stale_reason=stale_reason, tried=tried)
     try:
         send_alerts((alert,), paths)
     except Exception as e:  # noqa: BLE001 — alerting must never block scan

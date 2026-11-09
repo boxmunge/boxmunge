@@ -1,22 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CISA KEV (Known Exploited Vulnerabilities) feed — active-exploitation signal.
+"""CISA KEV (Known Exploited Vulnerabilities) catalog: the cached copy and
+its freshness. Fetching it from the configured sources is kev_refresh.py.
 
-The CVE policy engine's lowest tier (relaxed) quarantines only on findings
-that CISA lists as actively exploited; higher tiers use KEV as an override
-that bypasses every de-escalation. This module fetches, caches, and looks up
-that catalog.
+The CVE policy engine's lowest tiers (relaxed, balanced) quarantine only on
+findings that CISA lists as actively exploited; higher tiers use KEV as an
+override that bypasses every de-escalation.
 
 Fail-safe philosophy: a KEV signal we cannot currently verify (missing or
 stale cache) must NOT take a site down. is_known_exploited returns False when
 the catalog is stale or empty, and callers alert the operator that the feed
 is degraded so the gap is never silent.
 
-Sanity floor (audit B-06): CISA's catalog only grows. A refresh that would
-replace the cache with fewer than KEV_MIN_ENTRIES IDs, or that shrinks the
-cached catalog by more than KEV_MAX_SHRINK, is rejected: the previous cache
-is kept, and the caller alerts. An empty or truncated feed (an error page,
-a CDN hiccup) would otherwise be accepted as a fresh catalog and switch the
-exploitation gate off with no staleness alert.
+Freshness has two conditions (issue #121), because the catalog can come from
+a mirror:
+- a source must have answered within KEV_MAX_AGE_DAYS (``fetched_at``): a box
+  that can reach no source goes stale after a week, as before;
+- the catalog's own ``dateReleased`` must be within KEV_MAX_RELEASE_AGE_DAYS:
+  a mirror that stopped syncing keeps answering, so the fetch time alone
+  would make its old catalog look fresh forever.
 
 EPSS seam: the policy engine consumes only the is_known_exploited predicate.
 A future EPSS layer becomes a second predicate on this object, wired into the
@@ -26,49 +27,87 @@ from __future__ import annotations
 
 import json
 import logging
-import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
 
-from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
 
 _LOGGER = logging.getLogger("boxmunge")
 
-KEV_FEED_URL = (
+# Tried in order; the first whose catalog passes the sanity checks wins.
+# cisagov/kev-data is CISA's own mirror of the feed on GitHub, for boxes
+# whose address range CISA's CDN refuses (HTTP 403, issue #121). Override
+# with kev.sources in boxmunge.yml.
+KEV_DEFAULT_SOURCES = (
     "https://www.cisa.gov/sites/default/files/feeds/"
-    "known_exploited_vulnerabilities.json"
+    "known_exploited_vulnerabilities.json",
+    "https://raw.githubusercontent.com/cisagov/kev-data/main/"
+    "known_exploited_vulnerabilities.json",
 )
-KEV_MAX_AGE_DAYS = 8  # daily feed; >1 week stale = degraded.
-# The catalog held ~1,400 entries in late 2026 and only grows. A refresh
-# below this floor is a broken feed, not a smaller catalog.
-KEV_MIN_ENTRIES = 1000
-# Entries are very rarely withdrawn; losing more than 5% at once is a
-# truncated feed.
-KEV_MAX_SHRINK = 0.05
-# A fetched_at further than this in the future is clock skew at write time,
-# not a fresh catalog.
+# A week of failed refreshes (from every source) before the gate degrades.
+KEV_MAX_AGE_DAYS = 8
+# CISA does not publish daily. The mirror's history of file changes from
+# 2025-01 to 2026-11 has gaps of 8.9, 11.9, 12.0 and 17.9 days with no new
+# dateReleased (e.g. 2025-05-22 to 2025-06-09), and since 2023 the longest
+# run without a new entry was 18 days. 21 days clears those quiet spells
+# while still catching a mirror that stopped syncing.
+KEV_MAX_RELEASE_AGE_DAYS = 21
+# A timestamp further than this in the future is clock skew, not freshness.
 _MAX_FUTURE_DAYS = 1
-_FETCH_TIMEOUT = 30
 
 
 def _extra(detail: dict[str, Any] | None = None) -> dict[str, Any]:
     return {"component": "cve-scan", "project": None, "detail": detail}
 
 
+def _utc(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _when(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
 @dataclass(frozen=True)
 class KevCatalog:
-    """In-memory view of the cached KEV catalog."""
+    """In-memory view of the cached KEV catalog.
+
+    ``fetched_at`` is when a source last answered with a catalog we
+    accepted, ``released_at`` the catalog's own ``dateReleased`` and
+    ``source`` the URL that answered.
+    """
 
     cve_ids: frozenset[str]
     fetched_at: datetime | None
+    released_at: datetime | None
+    source: str | None
 
-    def is_stale(self, today: date, max_age_days: int = KEV_MAX_AGE_DAYS) -> bool:
+    def stale_reason(self, today: date) -> str | None:
+        """Why this catalog cannot be trusted on ``today``, or None if fresh."""
         if self.fetched_at is None:
-            return True
-        age = today - self.fetched_at.date()
-        return age.days > max_age_days or age.days < -_MAX_FUTURE_DAYS
+            return "no KEV catalog has been fetched yet"
+        if self.released_at is None:
+            return ("the cached catalog has no release date (written by an older "
+                    "boxmunge); the next successful refresh replaces it")
+        fetch_age = (today - self.fetched_at.date()).days
+        release_age = (today - self.released_at.date()).days
+        if fetch_age < -_MAX_FUTURE_DAYS or release_age < -_MAX_FUTURE_DAYS:
+            return (f"the cached catalog is dated in the future (fetched "
+                    f"{_when(self.fetched_at)}, released {_when(self.released_at)}): "
+                    f"check the box clock")
+        if fetch_age > KEV_MAX_AGE_DAYS:
+            return (f"no KEV source has answered for {fetch_age} days (limit "
+                    f"{KEV_MAX_AGE_DAYS}); last answer {_when(self.fetched_at)} "
+                    f"from {self.source}")
+        if release_age > KEV_MAX_RELEASE_AGE_DAYS:
+            return (f"the catalog is lagging: {self.source} last served a catalog "
+                    f"released {_when(self.released_at)}, {release_age} days ago "
+                    f"(limit {KEV_MAX_RELEASE_AGE_DAYS})")
+        return None
+
+    def is_stale(self, today: date) -> bool:
+        return self.stale_reason(today) is not None
 
     def is_known_exploited(
         self, cve_id: str, *, today: date | None = None,
@@ -84,19 +123,26 @@ class KevCatalog:
         return cve_id in self.cve_ids
 
 
+_EMPTY = KevCatalog(cve_ids=frozenset(), fetched_at=None, released_at=None, source=None)
+
+
+def _optional_time(data: dict[str, Any], key: str) -> datetime | None:
+    raw = data.get(key)
+    return _utc(datetime.fromisoformat(raw)) if raw else None
+
+
 def load_kev(paths: BoxPaths) -> KevCatalog:
-    """Load the cached KEV catalog. Missing/malformed cache → empty + stale."""
+    """Load the cached KEV catalog. Missing/malformed cache → empty + stale.
+
+    A cache from before source tracking has no ``released_at``: its IDs
+    still count for the shrink check, but it reads as stale until a refresh
+    replaces it.
+    """
     path = paths.kev_catalog
     if not path.exists():
-        return KevCatalog(cve_ids=frozenset(), fetched_at=None)
+        return _EMPTY
     try:
         data = json.loads(path.read_text())
-        fetched_raw = data.get("fetched_at")
-        fetched_at = (
-            datetime.fromisoformat(fetched_raw) if fetched_raw else None
-        )
-        if fetched_at is not None and fetched_at.tzinfo is None:
-            fetched_at = fetched_at.replace(tzinfo=timezone.utc)
         raw_ids = data.get("cve_ids")
         # A well-formed document has cve_ids as a list. A truthy non-list
         # (e.g. cve_ids: 42) is a corrupt document, not a partial one:
@@ -104,104 +150,29 @@ def load_kev(paths: BoxPaths) -> KevCatalog:
         # treated as authoritative. Fail safe — discard the whole document.
         if not isinstance(raw_ids, list):
             raise ValueError(f"cve_ids is not a list: {type(raw_ids).__name__}")
-        cve_ids = frozenset(c for c in raw_ids if isinstance(c, str))
-        return KevCatalog(cve_ids=cve_ids, fetched_at=fetched_at)
+        source = data.get("source")
+        return KevCatalog(
+            cve_ids=frozenset(c for c in raw_ids if isinstance(c, str)),
+            fetched_at=_optional_time(data, "fetched_at"),
+            released_at=_optional_time(data, "released_at"),
+            source=source if isinstance(source, str) else None,
+        )
     except (ValueError, TypeError, OSError, AttributeError) as e:
         # A corrupt cache must not wedge the scan; treat as "no catalog".
         _LOGGER.warning(
             "KEV catalog cache unreadable (%s) — treating as empty", e,
             extra=_extra(detail={"error": str(e)}),
         )
-        return KevCatalog(cve_ids=frozenset(), fetched_at=None)
+        return _EMPTY
 
 
-@dataclass(frozen=True)
-class KevRefresh:
-    """Outcome of one refresh attempt.
-
-    ``rejected`` carries the reason when the feed answered but its content
-    failed the sanity floor (or was malformed). The cache is untouched in
-    that case and the caller must alert: unlike a transient network
-    failure, a bad feed would otherwise go unnoticed until the cache aged
-    out a week later.
-    """
-
-    updated: bool
-    rejected: str | None = None
-
-
-def check_catalog_sanity(new_count: int, cached_count: int) -> str | None:
-    """Return why a refreshed catalog of ``new_count`` IDs is implausible."""
-    if new_count < KEV_MIN_ENTRIES:
-        return (
-            f"feed returned {new_count} entries, below the floor of "
-            f"{KEV_MIN_ENTRIES} (the catalog only grows)"
-        )
-    if cached_count and new_count < cached_count * (1 - KEV_MAX_SHRINK):
-        return (
-            f"feed returned {new_count} entries, {cached_count - new_count} "
-            f"fewer than the {cached_count} cached (more than "
-            f"{KEV_MAX_SHRINK:.0%} shrink)"
-        )
-    return None
-
-
-def _reject(reason: str, detail: dict[str, Any]) -> KevRefresh:
-    _LOGGER.warning(
-        "KEV feed refresh rejected (%s) — keeping the cached catalog", reason,
-        extra=_extra(detail={"reason": reason, **detail}),
-    )
-    return KevRefresh(updated=False, rejected=reason)
-
-
-def refresh_kev(paths: BoxPaths) -> KevRefresh:
-    """Fetch the CISA KEV catalog and, if it is plausible, cache it.
-
-    A network failure is logged at WARNING and the scan proceeds against
-    the cache (possibly stale, which the policy engine handles fail-safe
-    and the caller alerts on). A malformed or implausible payload is
-    rejected: the cache is kept and the result says why.
-    """
-    req = urllib.request.Request(
-        KEV_FEED_URL, headers={"User-Agent": "boxmunge"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=_FETCH_TIMEOUT) as resp:
-            payload = json.loads(resp.read())
-    except (OSError, ValueError) as e:
-        _LOGGER.warning(
-            "KEV feed refresh failed (%s) — continuing with cached catalog", e,
-            extra=_extra(detail={"error": str(e)}),
-        )
-        return KevRefresh(updated=False)
-
-    # The feed may return valid JSON that is not an object (e.g. [] or null
-    # from an error page).
-    vulns = payload.get("vulnerabilities") if isinstance(payload, dict) else None
-    if not isinstance(vulns, list):
-        return _reject(
-            "feed payload malformed (no 'vulnerabilities' list)",
-            {"payload_type": type(payload).__name__},
-        )
-    cve_ids = sorted({
-        v["cveID"] for v in vulns
-        if isinstance(v, dict) and isinstance(v.get("cveID"), str)
-    })
-    cached = load_kev(paths)
-    reason = check_catalog_sanity(len(cve_ids), len(cached.cve_ids))
-    if reason is not None:
-        return _reject(reason, {"new_count": len(cve_ids),
-                                "cached_count": len(cached.cve_ids)})
-    doc = {
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "cve_ids": cve_ids,
+def kev_status(paths: BoxPaths, today: date) -> dict[str, Any]:
+    """The cached catalog's provenance and freshness, for status views."""
+    kev = load_kev(paths)
+    return {
+        "source": kev.source,
+        "released_at": kev.released_at.isoformat() if kev.released_at else None,
+        "fetched_at": kev.fetched_at.isoformat() if kev.fetched_at else None,
+        "entries": len(kev.cve_ids),
+        "stale_reason": kev.stale_reason(today),
     }
-    try:
-        atomic_write_text(paths.kev_catalog, json.dumps(doc, indent=2) + "\n")
-    except OSError as e:
-        _LOGGER.warning(
-            "KEV catalog write failed (%s)", e,
-            extra=_extra(detail={"error": str(e)}),
-        )
-        return KevRefresh(updated=False)
-    return KevRefresh(updated=True)

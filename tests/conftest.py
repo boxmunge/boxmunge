@@ -236,16 +236,18 @@ def _no_kev_network(monkeypatch):
     _fresh_empty = KevCatalog(
         cve_ids=frozenset(),
         fetched_at=datetime.now(timezone.utc),
+        released_at=datetime.now(timezone.utc),
+        source="test",
     )
+
+    from boxmunge.cve.kev_refresh import KevRefresh
 
     monkeypatch.setattr(
-        "boxmunge.cve.kev.refresh_kev", lambda paths: None,
+        "boxmunge.cve.kev_refresh.refresh_kev", lambda paths: KevRefresh(source=None),
     )
-    from boxmunge.cve.kev import KevRefresh
-
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_kev",
-        lambda paths: KevRefresh(updated=False),
+        lambda paths: KevRefresh(source=None),
     )
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.load_kev", lambda paths: _fresh_empty,

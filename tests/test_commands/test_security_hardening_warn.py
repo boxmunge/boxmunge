@@ -41,7 +41,7 @@ UPCOMING_TITLE = "will quarantine from 0.12"
 
 
 def _kev() -> KevCatalog:
-    return KevCatalog(frozenset(), datetime.now(timezone.utc))
+    return KevCatalog(frozenset(), datetime.now(timezone.utc), datetime.now(timezone.utc), 'test')
 
 
 def _scan_box(tmp_path, monkeypatch, db: dict, posture: str = "strict", found=LOW):

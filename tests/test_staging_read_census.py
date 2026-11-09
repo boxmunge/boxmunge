@@ -144,7 +144,7 @@ def _scan_and_quarantine(box, seen, monkeypatch):
     monkeypatch.setattr(security_scan_core, "scan_image",
                         lambda ref, timeout: scan_result(ref, [CRIT]))
     # KEV-listed: the default (balanced) posture quarantines only on KEV.
-    kev = KevCatalog(frozenset({CRIT.cve_id}), datetime.now(timezone.utc))
+    kev = KevCatalog(frozenset({CRIT.cve_id}), datetime.now(timezone.utc), datetime.now(timezone.utc), 'test')
     with staging_docker_off(), patch("boxmunge.cve.quarantine.caddy_reload"):
         security_scan_core.scan_one_project_locked(
             box.paths, "myapp", in_grace=False, kev=kev)
