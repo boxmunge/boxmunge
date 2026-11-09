@@ -33,6 +33,7 @@ from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import clear_paused_state, is_paused, release_restart_policies
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
+from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.state import read_state, write_state
 
 
@@ -182,7 +183,7 @@ def resume_locked(
                               component="resume")
             for svc, why in held.items():
                 print(f"  WARNING: {svc} resumes on its previous image: the new one's "
-                      f"{why}; prod-deploy {project_name} to decide from it.")
+                      f"{why}; {redeploy_command(paths, project_name)} decides from it.")
         except RunAsError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             log_error("resume", str(e), paths, project=project_name)

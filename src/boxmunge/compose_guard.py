@@ -59,6 +59,7 @@ from boxmunge.legacy_stage import legacy_stage_refusal
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
 from boxmunge.paths import RESERVED_PROJECT_NAMES
+from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.release_txn import load_txn, stale_reason, start_refusal
 from boxmunge.staged_release import (
     STAGING_OVERLAY, SlotError, clear_production_stopped, load_slot, slot_dir, staging_target,
@@ -290,7 +291,7 @@ def compose_up_checked(
     up = functools.partial(compose_up, run_dir, compose_files=files, build=False,
                            project_name=compose_project, start=start, pinned=True, **where)
     _name_running_builds(paths, project_name, compose_project, overlay, component)
-    redo = f"stage {project_name}" if staging else f"prod-deploy {project_name}"
+    redo = f"stage {project_name}" if staging else redeploy_command(paths, project_name)
     try:
         images = _start_images(run_dir, files, compose_project, services, where)
     except compose_resolve.ComposeResolveError as e:

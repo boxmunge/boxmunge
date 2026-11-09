@@ -22,6 +22,7 @@ from boxmunge.fileutil import LockError, project_lock
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
+from boxmunge.redeploy_hint import redeploy_either
 
 
 def _err(msg: str) -> None:
@@ -68,8 +69,10 @@ def _report_blocking(project: str, blocking: list[FindingDisposition]) -> None:
         f"    - Suppress one: boxmunge security suppress {h.finding.cve_id} "
         f"--project {project} --until <YYYY-MM-DD> --reason <text>"
     )
-    _err(f"    - Deploy a release that fixes it: prod-deploy {project} (its images are "
-         f"scanned first; the quarantine lifts once it is live).")
+    _err(f"    - Deploy a release that fixes it: upload it and run prod-deploy {project}, "
+         f"or rebuild the installed release on fixed base images with "
+         f"{redeploy_either(project)} (its images are scanned first; the quarantine "
+         f"lifts once it is live).")
     _err("    - Wait for upstream fix and rescan.")
 
 

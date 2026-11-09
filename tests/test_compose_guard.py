@@ -105,7 +105,7 @@ def test_a_start_whose_image_is_missing_is_refused_before_anything_runs(
     monkeypatch.setattr("boxmunge.docker_containers.absent_images",
                         lambda images: asked.append(images) or [("web", images["web"])])
     with pytest.raises(ComposeRefused, match=r"the image for web \(nginx:1.27\) is missing.*"
-                       r"run prod-deploy shop. Nothing was started"):
+                       r"run prod-deploy shop --redeploy. Nothing was started"):
         _restart(paths)
     up.assert_not_called()
     assert asked == [{"web": "nginx:1.27"}] and "the image for web" in sent[0]
