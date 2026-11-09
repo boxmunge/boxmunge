@@ -12,7 +12,8 @@ from boxmunge.commands.release_config import (
     decide_release_users, generate_release_config, promote_candidates,
 )
 from boxmunge.commands.deploy_steps import (
-    post_deploy_diagnostics, record_deploy_state, smoke_ok, take_pre_deploy_snapshot,
+    going_ahead, post_deploy_diagnostics, record_deploy_state, smoke_ok,
+    take_pre_deploy_snapshot,
 )
 from boxmunge.compose import ComposeError
 from boxmunge.compose_guard import compose_up_checked
@@ -34,7 +35,6 @@ from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
-from boxmunge.probation import clear_probation_if_active
 from boxmunge.release import ReleaseStateError, live_ref, previous_dir
 from boxmunge.release_target import DeployRefused, production_target
 from boxmunge.run_as import RunAsError
@@ -71,7 +71,7 @@ def _run_deploy_inner(
     # Git projects have a repo/ dir and check a commit out in place. Bundle
     # projects take a release from the inbox.
     if git:
-        _going_ahead(paths, dry_run)
+        going_ahead(paths, dry_run)
         return _deploy_repo(project_name, paths, ref, no_snapshot, dry_run, component, pull)
 
     missing: SourceError | None = None
@@ -80,49 +80,12 @@ def _run_deploy_inner(
     except SourceError as e:
         bundle_path, missing = None, e
     if bundle_path is not None:
-        _going_ahead(paths, dry_run)
+        going_ahead(paths, dry_run)
         return _deploy_bundle(project_name, paths, bundle_path, is_new,
                               no_snapshot, dry_run, component, pull)
-    from boxmunge.commands.deploy_tree import resume_without_bundle
-    from boxmunge.release_txn import load_txn
-    try:
-        txn = load_txn(paths, project_name)
-    except ReleaseStateError as err:
-        print(f"ERROR: {err}", file=sys.stderr)
-        return 1
-    if txn is None:
-        if redeploy and is_new:
-            print(f"ERROR: {no_bundle.nothing_installed(project_name)}", file=sys.stderr)
-            return 1
-        if missing is not None and (is_new or ref):
-            print(f"ERROR: {missing}", file=sys.stderr)
-            return 1
-        if not redeploy:
-            return no_bundle.refuse_no_new_bundle(project_name, paths)
-        no_bundle.note_waiting_bundle(project_name, paths)
-    elif redeploy:
-        print(f"An install of {txn.ref} is open; --redeploy finishes it first.")
-    if txn is not None and dry_run:
-        from boxmunge.commands.deploy_tree import bundle_resume_problem
-        problem = bundle_resume_problem(project_name, paths, txn, ref)
-        if problem:
-            print(f"ERROR: {problem}.", file=sys.stderr)
-            return 1
-        print(f"[DRY RUN] Would resume the open install of {txn.ref} "
-              f"(phase {txn.phase}) from the project dir")
-        return 0
-    _going_ahead(paths, dry_run)
-    if txn is not None:
-        return resume_without_bundle(project_name, paths, txn, ref, component, pull=pull)
-    return redeploy_installed(project_name, paths, None, no_snapshot,
-                              dry_run, component, pull=pull)
-
-
-def _going_ahead(paths: BoxPaths, dry_run: bool) -> None:
-    """A deploy going ahead ends the upgrade's probation; a refusal or a
-    dry run does not."""
-    if not dry_run:
-        clear_probation_if_active(paths, "deploy")
+    return no_bundle.deploy_without_bundle(
+        project_name, paths, missing=missing, is_new=is_new, ref=ref, redeploy=redeploy,
+        no_snapshot=no_snapshot, dry_run=dry_run, component=component, pull=pull)
 
 
 def _deploy_bundle(

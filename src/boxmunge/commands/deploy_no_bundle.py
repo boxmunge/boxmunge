@@ -6,7 +6,7 @@ prod-deploy run after it used to fall back to redeploying the release
 already installed, and said so in one line that read like success. Now it
 is refused, naming what the operator most likely meant: promote the staged
 release, upload the bundle again, or redeploy the installed release on
-purpose (--redeploy).
+purpose (--redeploy). An install left open is finished either way.
 """
 from __future__ import annotations
 
@@ -83,3 +83,44 @@ def refuse_no_new_bundle(project: str, paths: BoxPaths) -> int:
                      f"images, run 'prod-deploy {project} --redeploy'.")
     print("\n".join(lines), file=sys.stderr)
     return 1
+
+
+def deploy_without_bundle(project: str, paths: BoxPaths, *, missing: SourceError | None,
+                          is_new: bool, ref: str | None, redeploy: bool, no_snapshot: bool,
+                          dry_run: bool, component: str, pull: bool) -> int:
+    """prod-deploy of a bundle project with no bundle to take (none in the
+    inbox, or --redeploy): finish an open install, refuse, or (--redeploy)
+    deploy the installed release again. Caller holds the project lock."""
+    from boxmunge.commands.deploy import redeploy_installed
+    from boxmunge.commands.deploy_steps import going_ahead
+    from boxmunge.commands.deploy_tree import bundle_resume_problem, resume_without_bundle
+    from boxmunge.release_txn import load_txn
+    try:
+        txn = load_txn(paths, project)
+    except ReleaseStateError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    if txn is None:
+        if redeploy and is_new:
+            print(f"ERROR: {nothing_installed(project)}", file=sys.stderr)
+            return 1
+        if missing is not None and (is_new or ref):
+            print(f"ERROR: {missing}", file=sys.stderr)
+            return 1
+        if not redeploy:
+            return refuse_no_new_bundle(project, paths)
+        note_waiting_bundle(project, paths)
+    elif redeploy:
+        print(f"An install of {txn.ref} is open; --redeploy finishes it first.")
+    if txn is not None and dry_run:
+        problem = bundle_resume_problem(project, paths, txn, ref)
+        if problem:
+            print(f"ERROR: {problem}.", file=sys.stderr)
+            return 1
+        print(f"[DRY RUN] Would resume the open install of {txn.ref} "
+              f"(phase {txn.phase}) from the project dir")
+        return 0
+    going_ahead(paths, dry_run)
+    if txn is not None:
+        return resume_without_bundle(project, paths, txn, ref, component, pull=pull)
+    return redeploy_installed(project, paths, None, no_snapshot, dry_run, component, pull=pull)

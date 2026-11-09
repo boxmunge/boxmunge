@@ -104,7 +104,7 @@ def test_redeploy_finishes_an_open_first_install(paths, capsys) -> None:
 def test_a_refused_deploy_leaves_upgrade_probation_alone(paths, monkeypatch) -> None:
     _prod_v1(paths)
     cleared: list[str] = []
-    monkeypatch.setattr("boxmunge.commands.deploy.clear_probation_if_active",
+    monkeypatch.setattr("boxmunge.commands.deploy_steps.clear_probation_if_active",
                         lambda p, component: cleared.append(component))
     with docker_off():
         assert run_deploy("myapp", paths) == 1
