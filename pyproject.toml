@@ -34,6 +34,7 @@ markers = [
     "userns_dind: needs a daemon the test can remap and restart (the privileged dind CI job)",
     "decides_users: runs deploy's image build, user decision and storage steps (unit tier stubs them otherwise)",
     "runs_long: takes tens of seconds; collected first, so a parallel (-n) run starts it early instead of finishing on it",
+    "shard_by_test: CI's --shard places each test of this module on its own, not the module whole (tests/shard.py)",
 ]
 testpaths = ["tests"]
 pythonpath = ["src"]

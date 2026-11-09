@@ -50,24 +50,44 @@ def test_the_committed_weights_are_seconds_per_existing_file() -> None:
     weights = json.loads(WEIGHTS.read_text())
     assert weights
     for name, seconds in weights.items():
-        assert (REPO / name).is_file(), f"{name} in {WEIGHTS.name} no longer exists"
+        path, _, test = name.partition("::")
+        assert (REPO / path).is_file(), f"{name} in {WEIGHTS.name} no longer exists"
+        assert not test or f"def {test}(" in (REPO / path).read_text(), f"{name} is gone"
         assert isinstance(seconds, (int, float)) and seconds >= 0
 
 
-def _selected(*args: str) -> set[str]:
+# The two CI tiers that are sharded, as CI selects them.
+TIERS = {
+    "integration": ["tests/integration", "--ignore=tests/integration/userns",
+                    "-m", "integration and not userns_dind"],
+    "userns-dind": ["tests/integration/userns", "-m", "userns_dind"],
+}
+
+
+def _selected(tier: str, *args: str) -> list[str]:
     out = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
-         "tests/integration", "--ignore=tests/integration/userns", "-m", "integration", *args],
+         *TIERS[tier], *args],
         cwd=REPO, capture_output=True, text=True, check=True).stdout
-    return {line for line in out.splitlines() if "::" in line}
+    return [line for line in out.splitlines() if "::" in line]
 
 
-def test_the_shards_of_a_run_partition_its_tests() -> None:
-    everything = _selected()
-    shards = [_selected("--shard", f"{k}/3") for k in (1, 2, 3)]
+@pytest.mark.parametrize("tier", TIERS)
+def test_the_shards_of_a_run_partition_its_tests(tier: str) -> None:
+    everything = _selected(tier)
+    shards = [_selected(tier, "--shard", f"{k}/3") for k in (1, 2, 3)]
     assert all(shards)
-    assert set().union(*shards) == everything
-    assert sum(len(s) for s in shards) == len(everything)
+    assert sorted(t for shard in shards for t in shard) == sorted(everything)
+
+
+def test_a_shard_by_test_module_is_split_and_every_other_kept_whole() -> None:
+    shards = [_selected("userns-dind", "--shard", f"{k}/3") for k in (1, 2, 3)]
+    homes: dict[str, set[int]] = {}
+    for k, shard in enumerate(shards):
+        for test in shard:
+            homes.setdefault(test.split("::")[0], set()).add(k)
+    split = {path for path, ks in homes.items() if len(ks) > 1}
+    assert split == {"tests/integration/userns/test_migration_remapped.py"}
 
 
 @pytest.mark.parametrize("job", ["integration", "userns-dind"])

@@ -3,14 +3,18 @@
 
 `--shard K/N` runs shard K (1-based) of N. Every test file goes to exactly
 one shard, whole, so module-scoped fixtures (a built image, a remapped
-daemon) are set up once, as in an unsharded run. Files are balanced by the
-seconds each took in a measured run (tests/shard_weights.json, written by
-`--store-shard-weights`, or taken from the per-file seconds a sharded run
-prints last); a file not measured yet weighs the mean of those that were.
+daemon) are set up once, as in an unsharded run. A module marked
+`shard_by_test` is the exception: each of its tests is a unit of its own,
+for a module whose tests are long and do not depend on each other (its
+module fixtures are then set up in each shard that runs one). Units are
+balanced by the seconds each took in a measured run (tests/shard_weights.json,
+written by `--store-shard-weights`, or taken from the per-unit seconds a
+sharded run prints last); a unit not measured yet weighs the mean of those
+that were.
 Stale weights only unbalance the shards: they never drop a test.
 
-The split happens after `-m` and `-k` selection, over the files that still
-hold a test, so every shard of the same command line sees the same files and
+The split happens after `-m` and `-k` selection, over the units that still
+hold a test, so every shard of the same command line sees the same units and
 the shards partition them.
 """
 from __future__ import annotations
@@ -54,15 +58,16 @@ def assign(files: list[str], weights: dict[str, float], shards: int) -> list[lis
 def pytest_addoption(parser: pytest.Parser) -> None:
     group = parser.getgroup("shard")
     group.addoption("--shard", metavar="K/N",
-                    help="run only shard K of N: whole test files, balanced by "
-                         "tests/shard_weights.json")
+                    help="run only shard K of N: whole test files (single tests of a "
+                         "`shard_by_test` module), balanced by tests/shard_weights.json")
     group.addoption("--store-shard-weights", metavar="PATH",
-                    help="write each test file's total seconds to PATH (JSON), "
+                    help="write each unit's total seconds to PATH (JSON), "
                          "merged over what PATH already holds")
 
 
-def _file_of(nodeid: str) -> str:
-    return nodeid.split("::", 1)[0]
+def _unit(nodeid: str, keywords) -> str:
+    """A test's shard unit: its file, or itself in a `shard_by_test` module."""
+    return nodeid if "shard_by_test" in keywords else nodeid.split("::", 1)[0]
 
 
 @pytest.hookimpl(trylast=True)
@@ -72,17 +77,17 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         return
     k, n = parse_shard(spec)
     weights = json.loads(WEIGHTS.read_text())
-    files = sorted({_file_of(item.nodeid) for item in items})
-    mine = set(assign(files, weights, n)[k - 1])
-    keep = [item for item in items if _file_of(item.nodeid) in mine]
-    dropped = [item for item in items if _file_of(item.nodeid) not in mine]
+    units = sorted({_unit(item.nodeid, item.keywords) for item in items})
+    mine = set(assign(units, weights, n)[k - 1])
+    keep = [item for item in items if _unit(item.nodeid, item.keywords) in mine]
+    dropped = [item for item in items if _unit(item.nodeid, item.keywords) not in mine]
     if dropped:
         config.hook.pytest_deselected(items=dropped)
     items[:] = keep
 
 
 class _WeightRecorder:
-    """Each file's seconds: written to `path` (merged), or printed after a
+    """Each unit's seconds: written to `path` (merged), or printed after a
     sharded run, so a CI log holds the numbers to refresh the weights."""
 
     def __init__(self, path: Path | None) -> None:
@@ -93,7 +98,7 @@ class _WeightRecorder:
         return {f: round(s, 1) for f, s in sorted(self.seconds.items())}
 
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
-        self.seconds[_file_of(report.nodeid)] += report.duration
+        self.seconds[_unit(report.nodeid, report.keywords)] += report.duration
 
     def pytest_sessionfinish(self) -> None:
         if self.path is None:
@@ -105,7 +110,7 @@ class _WeightRecorder:
     def pytest_terminal_summary(self, terminalreporter) -> None:
         if self.path is None:
             terminalreporter.write_line(
-                f"shard weights (seconds per file): {json.dumps(self._rounded())}")
+                f"shard weights (seconds per unit): {json.dumps(self._rounded())}")
 
 
 def pytest_configure(config: pytest.Config) -> None:
