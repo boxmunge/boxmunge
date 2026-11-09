@@ -104,10 +104,14 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
         check("Docker Compose version supported", problem is None, problem or "")
 
     # age and rclone run only inside the system container (no host fallback)
-    from boxmunge.system_container import connect, SystemContainerError
+    from boxmunge.system_container import connect, stale_image, SystemContainerError
     try:
         connect(paths)
-        check("System container (age, rclone)", True)
+        stale = stale_image(paths)
+        if stale:
+            warn("System container (age, rclone)", stale)
+        else:
+            check("System container (age, rclone)", True)
     except SystemContainerError as e:
         check("System container (age, rclone)", False, str(e))
 

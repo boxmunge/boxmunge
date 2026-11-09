@@ -7,6 +7,7 @@ is missing, stopped, or mounted differently from this boxmunge root, every
 operation that needs it fails with a message saying how to fix it.
 """
 
+import hashlib
 import json
 import subprocess
 from dataclasses import dataclass
@@ -20,6 +21,10 @@ from boxmunge.userns.offset import RemapError, daemon_remapped
 CONTAINER_NAME = "boxmunge-system"
 # Where the container sees the operator's rclone config (system/compose.yml).
 RCLONE_CONFIG = "/config/rclone/rclone.conf"
+# Image label holding the definition (system_definition) the image was built
+# from: system/compose.yml sets it from BOXMUNGE_SYSTEM_DEFINITION, which
+# bootstrap/system-container.sh computes the same way and writes to .env.
+DEFINITION_LABEL = "boxmunge.system-definition"
 _DEFAULT_TIMEOUT = 600  # 10 minutes (backup dumps can be large)
 _INSPECT_TIMEOUT = 10
 
@@ -83,6 +88,36 @@ def start_hint(paths: BoxPaths) -> str:
         "(install.sh does this on every install and upgrade). Backups, "
         "restores and backup-sync never fall back to host tools."
     )
+
+
+def system_definition(paths: BoxPaths) -> str:
+    """sha256 of the installed Dockerfile followed by compose.yml."""
+    digest = hashlib.sha256()
+    for name in ("Dockerfile", "compose.yml"):
+        digest.update((paths.system / name).read_bytes())
+    return digest.hexdigest()
+
+
+def stale_image(paths: BoxPaths) -> str | None:
+    """Why the running container's image is not built from the installed
+    definition, or None if it is (or there is no container: ``connect``
+    reports that). An upgrade whose rebuild failed leaves the previous image
+    running; backups still work, on the previous age and rclone."""
+    info = _inspect(CONTAINER_NAME)
+    if info is None:
+        return None
+    try:
+        want = system_definition(paths)
+    except FileNotFoundError as e:
+        return (f"{e.filename} is missing, so the {CONTAINER_NAME} image cannot be "
+                "checked or rebuilt. Re-run the installer (sudo bash boxmunge-install.sh).")
+    built = ((info.get("Config") or {}).get("Labels") or {}).get(DEFINITION_LABEL)
+    if built == want:
+        return None
+    return (f"{CONTAINER_NAME} runs an image built from an older definition than "
+            f"{paths.system} (its last rebuild failed or never ran), so it still has "
+            "the previous Alpine, age and rclone. Rebuild it as supervisor: "
+            f"sudo docker compose -f {paths.system_compose} up -d --build")
 
 
 def _inspect(name: str) -> dict[str, Any] | None:
