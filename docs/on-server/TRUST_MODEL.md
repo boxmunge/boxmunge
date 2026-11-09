@@ -119,8 +119,9 @@ What closes them:
   than leaving Docker to create them as root through whatever a symlink
   points at. An upgrade re-records each project from the configs it
   regenerates. The check also confirms every file boxmunge reads (the
-  compose files, the manifest, `.env`, the generated overlay, and whatever
-  `compose.yml` includes, extends or names in `env_file`/`label_file`)
+  compose files, the manifest, `.env`, the generated overlay, whatever
+  `compose.yml` includes, extends or names in `env_file`/`label_file`,
+  resolved from the base Compose uses, and every env file of the model)
   still hashes to what deploy recorded, so a container that rewrote a
   control file boxmunge's validator would still accept — a manifest set to
   `security.profile: off`, say — is refused until a redeploy re-blesses it.

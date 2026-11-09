@@ -68,7 +68,7 @@ class ComposeRefused(DockerError):
 
 def _refused(paths: BoxPaths, project_name: str, component: str, reason: str,
              *, tampering: bool = True) -> ComposeRefused:
-    message = (f"Refused to start {project_name}: {reason}. Nothing was started "
+    message = (f"Refused to start {project_name}: {reason.rstrip('.')}. Nothing was started "
                f"or recreated; its running containers were left as they are.")
     log_error(component, message, paths, project=project_name)
     now = datetime.now(timezone.utc)
@@ -128,6 +128,7 @@ def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
         model = compose_resolve.resolve_deployed_config(
             target.cwd, target.files, target.project_name, all_profiles=True,
             project_directory=target.project_directory, env_file=target.env_file)
+        read_files += compose_resolve.model_env_files(model, target.project_directory or release)
         problems = separation_problems(model, project_dir, release,
                                        foreign_copies(project_dir, meta.made))
         if problems:
@@ -163,7 +164,8 @@ def check_start(
     production start of a project staged by boxmunge 0.10.1 is refused.
 
     `record` (deploy, stage, upgrade) records the sources' kinds and the
-    sha256 of every file boxmunge reads, instead of comparing them with the
+    sha256 of every file boxmunge reads (those the reference walk found and
+    the env files of the resolved model), instead of comparing them with the
     record; missing sources are created first.
 
     Unless `deploying`, the project's EXISTING containers' bind mounts are
@@ -201,6 +203,7 @@ def check_start(
                 raise BindSourceError(problems[0] + _REDEPLOY)
         model = compose_resolve.resolve_deployed_config(
             project_dir, compose_files, project_name, all_profiles=True)
+        read_files = [*read_files, *compose_resolve.model_env_files(model, project_dir)]
         sources = bind_sources.model_sources(model, project_dir)
         if record:
             bind_sources.record(project_dir, sources, read_files, record_path)

@@ -396,3 +396,37 @@ def test_f09_profile_off_does_not_relax_protected_host_paths(paths: BoxPaths) ->
 def test_f09_profile_off_does_not_relax_network_confinement(paths: BoxPaths) -> None:
     with pytest.raises(ComposeSecurityError, match="does not declare"):
         _validate_off(paths, {"networks": {"projb_default": {"aliases": ["projb-web"]}}})
+
+
+# ---------------------------------------------------------------------------
+# Included files resolve against the include entry's base, as Compose does:
+# its project_directory, else the directory of its FIRST path. A decoy sits
+# where the included file's own directory would point.
+# ---------------------------------------------------------------------------
+
+_LEAK_ENV = {"services": {"leak": {"image": "x", "env_file": "../../projb/secrets.env"}}}
+_LEAK_EXT = {"services": {"leak": {"extends": {"file": "../../projb/ext.yml", "service": "b"}}}}
+
+INCLUDE_BASE_REJECTED = {
+    "include project_directory, env_file": (
+        [{"path": "sub/deep/inc.yml", "project_directory": "sub"}], "sub/deep/inc.yml", _LEAK_ENV),
+    "include project_directory, extends": (
+        [{"path": "sub/deep/inc.yml", "project_directory": "sub"}], "sub/deep/inc.yml", _LEAK_EXT),
+    "include path list, env_file": (
+        [{"path": ["a/x.yml", "b/deep/y.yml"]}], "b/deep/y.yml", _LEAK_ENV),
+}
+
+
+@pytest.mark.parametrize("include,inc,inc_doc", INCLUDE_BASE_REJECTED.values(),
+                         ids=INCLUDE_BASE_REJECTED.keys())
+def test_include_base_escape_rejected(
+    paths: BoxPaths, include: list, inc: str, inc_doc: dict,
+) -> None:
+    project_dir = paths.project_dir("myapp")
+    for rel, doc in {inc: inc_doc, "a/x.yml": {"services": {}},
+                     "projb/ext.yml": {"services": {"b": {"image": "x"}}}}.items():
+        (project_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+        (project_dir / rel).write_text(yaml.safe_dump(doc))
+    (project_dir / "projb" / "secrets.env").write_text("X=decoy\n")
+    with pytest.raises(ComposeSecurityError, match="projb.*outside the project directory"):
+        _validate(paths, {}, {"include": include})
