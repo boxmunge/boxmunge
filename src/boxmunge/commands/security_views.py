@@ -38,7 +38,7 @@ def _format_iso_compact(iso: str | None) -> str:
     if not iso:
         return "never"
     try:
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(iso)
     except ValueError:
         return iso
     return dt.strftime("%Y-%m-%d %H:%M UTC")
@@ -383,7 +383,23 @@ def format_fleet_text(summary: dict[str, Any]) -> str:
     lines.append("")
     last = summary.get("last_fleet_scan")
     lines.append(f"Last fleet scan: {_format_iso_compact(last)}")
+    lines += _kev_lines(summary["kev"])
     return "\n".join(lines)
+
+
+def _kev_lines(kev: dict[str, Any]) -> list[str]:
+    """Where the CISA KEV catalog came from, and whether it is fresh."""
+    head = "CISA KEV catalog: " + ("STALE" if kev["stale_reason"] else "fresh")
+    lines = ["", head]
+    if kev["stale_reason"]:
+        lines.append(f"  why:      {kev['stale_reason']}")
+    lines += [
+        f"  source:   {kev['source'] or 'none'}",
+        f"  released: {_format_iso_compact(kev['released_at']) if kev['released_at'] else 'unknown'}",
+        f"  fetched:  {_format_iso_compact(kev['fetched_at'])}",
+        f"  entries:  {kev['entries']}",
+    ]
+    return lines
 
 
 def format_fleet_json(summary: dict[str, Any]) -> str:

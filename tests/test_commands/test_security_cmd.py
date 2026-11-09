@@ -3062,6 +3062,7 @@ def test_kev_listed_cve_quarantines_via_scan_flow(
     kev = KevCatalog(
         cve_ids=frozenset({"CVE-2023-45853"}),
         fetched_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        released_at=datetime(2026, 7, 1, tzinfo=timezone.utc), source="test",
     )
 
     # Pin the scan's notion of "today" to the catalog's fetch date so the KEV
@@ -3102,9 +3103,10 @@ def test_fleet_scan_fires_priority1_kev_stale_alert(
     stale_kev = KevCatalog(
         cve_ids=frozenset(),
         fetched_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        released_at=datetime(2020, 1, 1, tzinfo=timezone.utc), source="test",
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.load_kev",
+        "boxmunge.commands.security_kev.load_kev",
         lambda paths: stale_kev,
     )
 
@@ -3131,6 +3133,9 @@ def test_fleet_scan_fires_priority1_kev_stale_alert(
         return len(alerts)
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.send_alerts", fake_send_alerts,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_kev.send_alerts", fake_send_alerts,
     )
 
     rc = cmd_security_scan([], paths)

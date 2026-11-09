@@ -167,3 +167,23 @@ def test_every_enum_reads_as_a_lowercase_machine_value(fixture_paths) -> None:
     assert (billing["severity"], billing["effective_severity"]) == ("critical", "critical")
     summary = _call(fixture_paths, "security.summary")
     assert [q["severity"] for q in summary["quarantined"]] == ["critical"]
+
+
+def test_summary_reports_where_the_kev_catalog_came_from(fixture_paths) -> None:
+    fixture_paths.kev_catalog.parent.mkdir(parents=True, exist_ok=True)
+    fixture_paths.kev_catalog.write_text(json.dumps({
+        "source": "https://raw.githubusercontent.com/cisagov/kev-data/main/x.json",
+        "released_at": "2026-01-06T19:44:45.179700+00:00",
+        "fetched_at": "2026-01-07T00:00:00+00:00", "cve_ids": ["CVE-2026-1"]}))
+    kev = _call(fixture_paths, "security.summary")["kev"]
+    assert kev["source"] == "https://raw.githubusercontent.com/cisagov/kev-data/main/x.json"
+    assert kev["released_at"] == "2026-01-06T19:44:45.179700Z"
+    assert kev["fetched_at"] == "2026-01-07T00:00:00Z"
+    assert kev["entries"] == 1
+    assert "no KEV catalog has been accepted" in kev["stale_reason"]
+
+
+def test_summary_without_a_kev_cache_says_so(paths) -> None:
+    kev = _call(paths, "security.summary")["kev"]
+    assert kev == {"source": None, "released_at": None, "fetched_at": None, "entries": 0,
+                   "stale_reason": "no KEV catalog has been fetched yet"}

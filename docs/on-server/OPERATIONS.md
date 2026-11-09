@@ -2165,7 +2165,7 @@ Scan cadence:
 Inspect state:
 
 ```
-boxmunge security                    # fleet summary
+boxmunge security                    # fleet summary (incl. KEV catalog source and freshness)
 boxmunge security myapp              # per-project view
 boxmunge security --json             # machine-readable
 ```

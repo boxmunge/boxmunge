@@ -179,7 +179,7 @@ The catalog is the authority on parameters and result fields; this table is the 
 | `project.health` | `project` | Runs the smoke checks now: `exit_code`, `status`, `smoke` |
 | `project.logs` | `project`, `service`?, `tail`? (1-1000, default 100) | `lines` of container log output |
 | `oplog.query` | `project`?, `component`?, `level`?, `since`? (`30m`, `6h`, `7d`), `tail`? (default 50) | `entries` of the operational log; `detail` is compact JSON text or null |
-| `security.summary` | none | Fleet CVE view: posture counts, quarantined and at-risk projects, suppressions, breaker holds |
+| `security.summary` | none | Fleet CVE view: posture counts, quarantined and at-risk projects, suppressions, breaker holds, KEV catalog source and freshness |
 | `security.project` | `project` | `status` (normal, quarantined, at_risk_running), `findings` with dispositions, `quarantine`, `active_suppressions`, `off_services` |
 | `backups.list` | `project` | `snapshots`, newest first: `name`, `kind`, `taken_at`, `size` |
 | `inbox.list` | `project`? | `bundles` uploaded and not yet deployed |
@@ -228,7 +228,7 @@ actions.
 
 ## Dev mode: build without a server
 
-You need Python 3.10 or newer and a clone of this repository.
+You need Python 3.11 or newer and a clone of this repository.
 
 ```sh
 python3 -m venv .venv

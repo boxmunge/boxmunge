@@ -22,7 +22,7 @@ _CVE = CRIT.cve_id
 
 
 def _kev(*ids: str) -> KevCatalog:
-    return KevCatalog(frozenset(ids), datetime.now(timezone.utc))
+    return KevCatalog(frozenset(ids), datetime.now(timezone.utc), datetime.now(timezone.utc), 'test')
 
 
 def _suppress(paths, cve: str = _CVE) -> None:
@@ -80,7 +80,8 @@ def test_kev_listed_flag_round_trips_through_scan_state(box, monkeypatch):
 def _seed_kev_cache(paths, *ids: str) -> None:
     paths.kev_catalog.parent.mkdir(parents=True, exist_ok=True)
     paths.kev_catalog.write_text(kev_module.json.dumps({
-        "fetched_at": datetime.now(timezone.utc).isoformat(), "cve_ids": list(ids),
+        "fetched_at": datetime.now(timezone.utc).isoformat(), "source": "test",
+        "released_at": datetime.now(timezone.utc).isoformat(), "cve_ids": list(ids),
     }))
 
 
