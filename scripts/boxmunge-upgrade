@@ -151,6 +151,21 @@ stash_failed() {
     exit 1
 }
 
+# extract_failed <version> <message>: the bundle passed its checksum but did
+# not extract, so the box failed (a full disk under the download directory),
+# not the release: like stash_failed, not blocklisted or reported, and the
+# operator is alerted, so an auto-update stopping here every run is seen.
+extract_failed() {
+    local version="$1" message="$2"
+    log "$message; $version not blocklisted"
+    remove_slot "$(standby_slot)"
+    bm_log error upgrade "upgrade to $version aborted before any change: bundle extract failed" \
+        "{\"version\": \"$version\"}"
+    send_notification "boxmunge upgrade failed" \
+        "The verified bundle of $version did not extract, so the upgrade stopped before changing anything (not blocklisted; auto-update will retry it). Free disk space and retry: $message"
+    exit 1
+}
+
 cmd_run() {
     local version="${1:?Usage: boxmunge-upgrade run <version> <url>}"
     : "${2:?Usage: boxmunge-upgrade run <version> <url>}"
@@ -179,12 +194,7 @@ upgrade_to() {
 
     # 1. PREPARE
     log "Preparing standby venv (slot $standby)..."
-    # A slot is about 90MB on Debian, MCP included. pip runs with
-    # --no-cache-dir, so no wheel cache builds up under /root; the rest is
-    # headroom for the stash.
-    local avail_mb
-    avail_mb=$(df -m "$BOXMUNGE_ROOT" | awk 'NR==2{print $4}')
-    [[ "$avail_mb" -lt 250 ]] && die "Insufficient disk space: ${avail_mb}MB available, need 250MB"
+    require_free_space
 
     remove_slot "$standby"
     python3 -m venv "$BOXMUNGE_ROOT/env-$standby"
@@ -194,8 +204,10 @@ upgrade_to() {
     start_download
     # shellcheck disable=SC2153  # TMP_DOWNLOAD is set by start_download
     local tmp_download="$TMP_DOWNLOAD"
-    fetch_release "$version" "$tmp_download" \
-        || preflight_fail "$version" "$from_version" "preflight_failed: $FETCH_STEP" "$FETCH_ERROR"
+    if ! fetch_release "$version" "$tmp_download"; then
+        [[ "$FETCH_STEP" != bundle_extract ]] || extract_failed "$version" "$FETCH_ERROR"
+        preflight_fail "$version" "$from_version" "preflight_failed: $FETCH_STEP" "$FETCH_ERROR"
+    fi
 
     # Dependencies only from the bundle's hash-pinned requirements (covered by
     # the signed SHA256SUMS), every one of them, MCP included; the package

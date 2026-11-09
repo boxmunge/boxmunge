@@ -113,9 +113,13 @@ def test_a_bundle_without_a_pinned_file_installs_nothing(box: Path) -> None:
     assert _pip_calls(box) == []
 
 
-def test_a_pip_failure_fails_the_script(box: Path) -> None:
+def test_a_pip_failure_exits_75(box: Path) -> None:
+    """install.sh exits with it, so a shim that blocklists the failed
+    install.sh records the cause: system_upgrade_failed: install_sh_exit_75."""
     _stub(box / "root" / "env-b" / "bin" / "pip", "exit 1\n")
-    assert _run(box, "standby").returncode != 0
+    result = _run(box, "standby")
+    assert result.returncode == 75
+    assert "pip could not install the hash-pinned dependencies into" in result.stderr
 
 
 def test_active_installs_into_env_active(box: Path) -> None:

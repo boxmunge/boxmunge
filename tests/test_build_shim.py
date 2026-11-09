@@ -77,6 +77,9 @@ def _install_head(tmp_path: Path, shim: Path) -> subprocess.CompletedProcess:
     (root / "scripts").mkdir(parents=True)
     (root / "install.sh").write_text(install.split(_FIRST_STEP)[0] + "\necho HEAD-COMPLETED\n")
     shutil.copy(shim, root / "scripts" / "boxmunge-upgrade")
+    # The head ends by asking whether a shim from 0.10.0 or earlier runs it.
+    (root / "bootstrap").mkdir()
+    shutil.copy(REPO / "bootstrap" / "run-by-old-shim.sh", root / "bootstrap")
     fake = tmp_path / "fakebin"
     fake.mkdir()
     (fake / "id").write_text("#!/bin/sh\necho 0\n")  # pass the root check

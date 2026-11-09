@@ -12,8 +12,12 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
 # Stand-ins: curl serves a local release (and records what it fetched), cosign
-# and sha256sum accept it unless told not to, and each slot's pip records its
-# arguments and fails when FAIL_PIP is set. No test reaches the network.
+# accepts it unless told not to, df reports 100MB free when LOW_DISK is set,
+# and each slot's pip records its arguments and fails when FAIL_PIP is set
+# (and with FAIL_PIP=break also stops the slot's boxmunge-server running).
+# sha256sum is the real one: release() writes a true SHA256SUMS. No test
+# reaches the network (tests/shim/test_bundle_verification.sh has the
+# checksum failures).
 FIXTURE="$(mktemp -d)"
 mkdir -p "$FIXTURE/bin"
 stub() {  # stub <path> <bash body>
@@ -22,7 +26,9 @@ stub() {  # stub <path> <bash body>
 }
 stub "$FIXTURE/bin/curl" 'echo "curl ${*: -1}" >> "$BOXMUNGE_ROOT/calls"; cp "$RELEASE/$(basename "${@: -1}")" "$3"'
 stub "$FIXTURE/bin/cosign" '[[ -z "${FAIL_COSIGN:-}" ]]'
-stub "$FIXTURE/bin/sha256sum" 'cat >/dev/null; exit 0'
+REAL_DF="$(command -v df)"
+stub "$FIXTURE/bin/df" "if [[ -n \"\${LOW_DISK:-}\" ]]; then printf 'Filesystem 1M-blocks Used Available\\nfake 1000 900 100\\n'; exit 0; fi
+exec '$REAL_DF' \"\$@\""
 export PATH="$FIXTURE/bin:$PATH"
 
 # release <requirements file>...: a 1.5.0 bundle shipping those files.
@@ -33,7 +39,7 @@ release() {
     local f
     for f in "$@"; do echo "${f%.txt}==1" > "$RELEASE/boxmunge/$f"; done
     tar czf "$RELEASE/boxmunge-1.5.0.tar.gz" -C "$RELEASE" boxmunge
-    echo "0000  boxmunge-1.5.0.tar.gz" > "$RELEASE/SHA256SUMS"
+    (cd "$RELEASE" && sha256sum boxmunge-1.5.0.tar.gz > SHA256SUMS)
     touch "$RELEASE/SHA256SUMS.sig" "$RELEASE/SHA256SUMS.cert"
 }
 
@@ -47,7 +53,9 @@ on_probation() {
     mock_server b '[[ "$1" != --version ]] || echo "boxmunge 1.4.0"; exit 0'
     local s
     for s in a b; do
-        stub "$BOXMUNGE_ROOT/env-$s/bin/pip" 'echo "pip $0 $*" >> "$BOXMUNGE_ROOT/calls"; [[ -z "${FAIL_PIP:-}" ]]'
+        stub "$BOXMUNGE_ROOT/env-$s/bin/pip" 'echo "pip $0 $*" >> "$BOXMUNGE_ROOT/calls"
+[[ "${FAIL_PIP:-}" != break ]] || printf "#!/usr/bin/env bash\nexit 1\n" > "$(dirname "$0")/boxmunge-server"
+[[ -z "${FAIL_PIP:-}" ]]'
         rm "$BOXMUNGE_ROOT/env-$s/bin/python"
         stub "$BOXMUNGE_ROOT/env-$s/bin/python" '[[ "$1" != "-" ]] || cat >/dev/null
 echo "python $0 msg=${BM_MSG:-} reason=${BM_REASON:-} $*" >> "$BOXMUNGE_ROOT/calls"'
@@ -166,15 +174,33 @@ expect 1 "Bundle 1.5.0 has no hash-pinned requirements-mcp.txt; refusing an unpi
 drop_root
 rm -rf "$RELEASE"
 
-# --- a pip failure fails noisily, without blocklisting -----------------------
+# --- too little disk space is refused before downloading ----------------------
 
 release "${ALL[@]}"
 on_probation
 RC=0
+OUT="$(LOW_DISK=1 bash "$SHIM" repair-deps 2>&1)" || RC=$?
+expect 1 "Insufficient disk space: 100MB available, need 250MB" "repair-deps checks free space"
+! downloaded && [[ -z "$(installs)" ]] && pass "low disk: nothing downloaded or installed" || fail "low disk: $(calls)"
+drop_root
+
+# --- a pip failure fails noisily, without blocklisting, and says whether the
+# --- live slot still runs ------------------------------------------------------
+
+on_probation
+RC=0
 OUT="$(FAIL_PIP=1 bash "$SHIM" repair-deps 2>&1)" || RC=$?
-expect 1 "pip could not install the hash-pinned dependencies of 1.5.0 into slot a" "a pip failure is reported"
-[[ "$OUT" == *"retry once the cause"* ]] && pass "the pip failure says to retry" || fail "out: $OUT"
+expect 1 "pip could not install the hash-pinned dependencies of 1.5.0 into the live slot a" "a pip failure is reported"
+[[ "$OUT" == *"its boxmunge-server still runs; retry once the cause"* ]] \
+    && pass "the pip failure says the live slot still runs, and to retry" || fail "out: $OUT"
 untouched "pip failure"
+drop_root
+
+on_probation
+RC=0
+OUT="$(FAIL_PIP="break" bash "$SHIM" repair-deps 2>&1)" || RC=$?
+expect 1 "its boxmunge-server NO LONGER RUNS: inspect env-a as supervisor" \
+    "a pip failure that breaks the live slot says so"
 drop_root
 rm -rf "$RELEASE"
 

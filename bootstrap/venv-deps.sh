@@ -5,8 +5,9 @@
 # (covered by the release's signed SHA256SUMS). Run by install.sh.
 #
 #   active    env-active: a fresh install, or the installer re-run by hand
-#   standby   the slot the upgrade shim running `install.sh --upgrade-shim`
-#             has just installed this release into, and swaps to next
+#   standby   the slot the upgrade shim running install.sh has just
+#             installed this release into, and swaps to next (install.sh
+#             --upgrade-shim, or a shim run-by-old-shim.sh recognises)
 #
 # Every file goes in, in one pip run; MCP always: it is how agents operate the
 # box. The standby case exists because an upgrade is run by the box's current
@@ -54,4 +55,10 @@ for req in "${REQUIREMENTS[@]}"; do
     args+=(-r "$BUNDLE/$req")
 done
 echo "  Installing the hash-pinned dependencies into $venv"
-"$venv/bin/pip" install --quiet --no-cache-dir --require-hashes "${args[@]}"
+# A pip failure (a network blip, a full disk) exits 75, so install.sh does
+# too: a shim that blocklists a failed install.sh names the cause in the
+# reason, system_upgrade_failed: install_sh_exit_75 (OPERATIONS.md).
+"$venv/bin/pip" install --quiet --no-cache-dir --require-hashes "${args[@]}" || {
+    echo "ERROR: venv-deps.sh: pip could not install the hash-pinned dependencies into $venv" >&2
+    exit 75
+}

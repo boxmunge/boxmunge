@@ -43,6 +43,15 @@ verify_release_signature() {
         "$sums" >/dev/null 2>&1
 }
 
+# require_free_space: an upgrade or a repair needs 250MB under BOXMUNGE_ROOT.
+# A slot is about 90MB on Debian, MCP included. pip runs with --no-cache-dir,
+# so no wheel cache builds up under /root; the rest is headroom for the stash.
+require_free_space() {
+    local avail_mb
+    avail_mb=$(df -m "$BOXMUNGE_ROOT" | awk 'NR==2{print $4}')
+    [[ "$avail_mb" -ge 250 ]] || die "Insufficient disk space: ${avail_mb}MB available, need 250MB"
+}
+
 TMP_DOWNLOAD=""
 cleanup_download() { [[ -z "$TMP_DOWNLOAD" ]] || rm -rf "$TMP_DOWNLOAD"; }
 
@@ -57,8 +66,11 @@ start_download() {
 # signed SHA256SUMS into <dir>, verify both, and extract the bundle to
 # <dir>/boxmunge. On failure it returns 1 with FETCH_STEP (the step that
 # failed, for a blocklist reason) and FETCH_ERROR set; nothing outside <dir>
-# has changed. Callers run it as `fetch_release ... || <handle the failure>`,
-# which suspends set -e here, so every step checks its own result.
+# has changed. Every step but the last fails on the release or its download;
+# bundle_extract fails on the box (the bundle passed its checksum, so it is
+# the release's own bytes: a full disk). Callers run it as
+# `fetch_release ... || <handle the failure>`, which suspends set -e here, so
+# every step checks its own result.
 FETCH_STEP=""
 FETCH_ERROR=""
 # shellcheck disable=SC2034  # FETCH_STEP is read by upgrade_to, in the shim itself
@@ -114,8 +126,9 @@ fetch_release() {
     (cd "$dir" && grep "  ${bundle}\$" SHA256SUMS | sha256sum -c -) \
         || { fetch_failed checksum_mismatch "Checksum verification FAILED"; return 1; }
 
-    tar xzf "$dir/$bundle" -C "$dir" \
-        || { fetch_failed bundle_extract "Failed to extract the verified bundle"; return 1; }
+    local out
+    out="$(tar xzf "$dir/$bundle" -C "$dir" 2>&1)" \
+        || { fetch_failed bundle_extract "Failed to extract the verified bundle in $dir: $out"; return 1; }
 }
 
 # The bundle's hash-pinned requirements files (covered by the signed
@@ -166,14 +179,18 @@ cmd_repair_deps() {
     [[ "$running" == "$version" ]] \
         || die "The live slot env-$ACTIVE_SLOT runs boxmunge '${running:-nothing}', but $VERSION_FILE records $version; refusing to install $version's dependencies into it. Inspect it as supervisor"
 
+    require_free_space
     log "Repairing the hash-pinned dependencies of $version in the live slot $ACTIVE_SLOT"
     start_download
     fetch_release "$version" "$TMP_DOWNLOAD" || die "$FETCH_ERROR (nothing was changed)"
     if missing="$(missing_requirement "$TMP_DOWNLOAD/boxmunge")"; then
         die "Bundle $version has no hash-pinned $missing; refusing an unpinned install. Nothing was changed."
     fi
-    install_pinned_deps "$TMP_DOWNLOAD/boxmunge" "$ACTIVE_SLOT" \
-        || die "pip could not install the hash-pinned dependencies of $version into slot $ACTIVE_SLOT (see above); retry once the cause (network, disk space) is fixed"
+    if ! install_pinned_deps "$TMP_DOWNLOAD/boxmunge" "$ACTIVE_SLOT"; then
+        local state="its boxmunge-server still runs"
+        slot_works "$ACTIVE_SLOT" || state="its boxmunge-server NO LONGER RUNS: inspect env-$ACTIVE_SLOT as supervisor"
+        die "pip could not install the hash-pinned dependencies of $version into the live slot $ACTIVE_SLOT (see above), and $state; retry once the cause (network, disk space) is fixed"
+    fi
     slot_works "$ACTIVE_SLOT" \
         || die "env-$ACTIVE_SLOT/bin/boxmunge-server no longer runs after the dependency install; inspect it as supervisor"
     bm_log info upgrade "dependencies repaired" "{\"version\": \"$version\", \"slot\": \"$ACTIVE_SLOT\"}"

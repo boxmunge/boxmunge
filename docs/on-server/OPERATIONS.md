@@ -1774,7 +1774,9 @@ How an upgrade is applied and undone:
    into the standby venv, built from scratch with every hash-pinned dependency the release
    ships (MCP included); the upgrade needs 250MB free under `/opt/boxmunge`.
    `upgrade --dry-run` runs against it as a pre-flight. A failed download, signature, checksum
-   or dry run drops the standby and blocklists the version. If pip cannot install the
+   or dry run drops the standby and blocklists the version. A bundle that passes its checksum but
+   does not extract (a full disk where it is downloaded) drops the standby and sends a local
+   alert without blocklisting, so auto-update retries it. If pip cannot install the
    dependencies (a network blip, a full disk), the standby is dropped and a local alert sent.
    The first such failure of a version is not blocklisted or reported, so auto-update retries
    it; a second in a row blocklists it. A successful install and `clear-blocklist` reset the
@@ -2038,10 +2040,16 @@ whose bundle lacks that file, or whose MCP install fails, stops at pre-flight wi
 release still live, like any other dependency failure.
 
 An upgrade is run by the box's current upgrade shim, which installs only the requirements files
-it knows. The 0.10.1 shim does not know `requirements-mcp.txt`; from 0.11.3 on, the new release's
-own `install.sh`, which that shim runs before the venv swap, installs it into the new
-environment. A box upgraded from 0.10.1 to 0.11.0, 0.11.1 or 0.11.2, or from 0.10.0 or earlier to
-any release, comes up without it.
+it knows; shims up to 0.10.1 do not know `requirements-mcp.txt`. From 0.11.3 on, the new release's
+own `install.sh`, which shims from 0.7.0 run before the venv swap, installs it into the new
+environment. A shim up to 0.10.0 runs `install.sh` without `--upgrade-shim`; `install.sh`
+recognises it by the upgrade lock it holds and still leaves the previous release, the rollback
+target, alone. If pip fails there (a network blip, a full disk), `install.sh` exits 75 and the old
+shim blocklists the release as `system_upgrade_failed: install_sh_exit_75`, with the previous
+release still live. Fix the cause, then run
+`sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist 0.11.3` (for the release concerned) and
+`upgrade` again. A box upgraded to 0.11.0, 0.11.1 or 0.11.2 by an older shim, or to any release by
+a 0.6.x shim (which never runs `install.sh`), comes up without MCP.
 
 If the package is missing, `mcp-serve` exits 1 and `doctor` fails its "MCP package installed"
 check, both with the repair: `upgrade --repair-deps` from the deploy shell, or as `supervisor`:
@@ -2052,6 +2060,8 @@ sudo /opt/boxmunge/bin/boxmunge-upgrade repair-deps
 
 It downloads the installed release's bundle, verifies its signature and checksum as an upgrade
 does, and installs its hash-pinned dependencies into the live environment; nothing else changes.
+Like an upgrade, it needs 250MB free under `/opt/boxmunge`. If pip fails, it says whether the live
+environment still runs.
 It works during probation (the previous release kept for a rollback is not touched), and refuses
 while an interrupted upgrade or rollback is unfinished (the health timer finishes those within
 minutes). A box still on 0.11.0 to 0.11.2 has no `repair-deps`: its next upgrade, once probation
