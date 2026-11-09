@@ -24,7 +24,7 @@ def _expr(path: Path) -> str:
 
 
 def test_install_sh_and_the_shim_compute_the_same_fingerprint() -> None:
-    assert _expr(REPO / "install.sh") == _expr(REPO / "scripts" / "boxmunge-upgrade")
+    assert _expr(REPO / "install.sh") == _expr(REPO / "scripts" / "boxmunge-upgrade.d" / "system.sh")
 
 
 def _bundle(root: Path) -> Path:

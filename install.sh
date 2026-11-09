@@ -564,20 +564,27 @@ fail_if_system_image_stale
 # leaves the prior fingerprint in place — the shim will then re-run on the
 # next upgrade attempt.
 # ---------------------------------------------------------------------------
-INSTALLER_HASH_FILE="${BOXMUNGE_ROOT}/state/installer.sha256"
+# Root-only: deploy can write state/, where releases up to 0.11.3 kept it
+# (and a link planted at the temp file there would have been written through).
+INSTALLER_HASH_FILE="${BOXMUNGE_ROOT}/upgrade-root/installer.sha256"
+rm -f "${BOXMUNGE_ROOT}/state/installer.sha256"
+if [[ -L "${BOXMUNGE_ROOT}/upgrade-root" ]]; then
+    echo "ERROR: ${BOXMUNGE_ROOT}/upgrade-root is a symlink; remove it and run install.sh again" >&2
+    exit 1
+fi
+install -d -m 700 -o root -g root "${BOXMUNGE_ROOT}/upgrade-root"
 if [[ "${SYSTEM_IMAGE_STALE}" -eq 1 ]]; then
+    rm -f "${INSTALLER_HASH_FILE}"
     echo "  Installer fingerprint not recorded: the next upgrade re-runs install.sh" \
          "to retry the boxmunge-system build"
 else
-    mkdir -p "$(dirname "${INSTALLER_HASH_FILE}")"
     # Covers install.sh and the files it installs from: a release that changes
     # only bootstrap/sshd-hardening.sh, or only system/Dockerfile, must re-run it
     # too. The shim computes the same fingerprint over a new bundle
     # (tests/test_installer_fingerprint.py).
     (cd "${SCRIPT_DIR}" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' -o -path './system/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}' > "${INSTALLER_HASH_FILE}.tmp"
+    chmod 0600 "${INSTALLER_HASH_FILE}.tmp"
     mv -f "${INSTALLER_HASH_FILE}.tmp" "${INSTALLER_HASH_FILE}"
-    chown root:deploy "${INSTALLER_HASH_FILE}" 2>/dev/null || true
-    chmod 0644 "${INSTALLER_HASH_FILE}"
 fi
 
 echo ""

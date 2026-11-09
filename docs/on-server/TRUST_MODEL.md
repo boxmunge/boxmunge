@@ -228,7 +228,8 @@ the file as `supervisor` and re-run.
 
 The shim deletes a venv slot only while the live one runs, and never the live
 one. State deploy must not influence is root-only: the crash-safety markers
-inside the venv slots, and the interruption counts and `upgrade.lock` in
+inside the venv slots, and the interruption counts, `upgrade.lock` and the
+installer fingerprint (which decides whether an upgrade re-runs `install.sh`) in
 `/opt/boxmunge/upgrade-root/` (root, 0700). One upgrade runs at a time because
 the shim, `auto-update`, `check-probation` and `legacy-stage` all hold that
 lock, which deploy cannot replace. Shims up to 0.10.1 locked
