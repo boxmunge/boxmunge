@@ -350,22 +350,25 @@ def _missing_text(missing: list[tuple[str, str]]) -> str:
 
 def _start_images(run_dir: Path, files: list[str], compose_project: str,
                   services: list[str] | None, where: dict) -> dict[str, str]:
-    """{service: image} for every service the up would create or start: the
-    active ones, or `services` and those they depend on. Compose names a
+    """{service: image} for every service the up would create or start:
+    `services`, or every service without a profile (boxmunge runs Compose
+    with no profile enabled), and those they depend on. Compose names a
     build service without an `image:` (an overlay from before boxmunge
     named built images) `<project>-<service>`."""
     model = compose_resolve.resolve_deployed_config(
-        run_dir, files, compose_project, all_profiles=services is not None, **where)
+        run_dir, files, compose_project, all_profiles=True, **where)
     specs = model.get("services") or {}
-    wanted, todo = set(), list(specs if services is None else services)
+    wanted: set[str] = set()
+    todo = list(services if services is not None else
+                (svc for svc, spec in specs.items()
+                 if isinstance(spec, dict) and not spec.get("profiles")))
     while todo:
         svc = todo.pop()
         spec = specs.get(svc)
         if svc in wanted or not isinstance(spec, dict):
             continue
         wanted.add(svc)
-        if services is not None:
-            todo.extend(spec.get("depends_on") or ())
+        todo.extend(spec.get("depends_on") or ())
     images = {}
     for svc in sorted(wanted):
         spec = specs[svc]
