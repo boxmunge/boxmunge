@@ -39,7 +39,8 @@ def repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
-PATHS = ["system/", "install.sh", "bootstrap/", "scripts/", ".github/workflows/"]
+PATHS = ["system/", "install.sh", "bootstrap/", "scripts/", ".github/workflows/",
+         "tests/fixtures/age-v1.2.1/"]
 
 
 def _touches(repo: Path, base: str) -> subprocess.CompletedProcess:
@@ -48,7 +49,8 @@ def _touches(repo: Path, base: str) -> subprocess.CompletedProcess:
 
 
 @pytest.mark.parametrize("changed", ["system/Dockerfile", "install.sh", "bootstrap/cosign.sh",
-                                     "scripts/boxmunge-upgrade", ".github/workflows/ci.yml"])
+                                     "scripts/boxmunge-upgrade", ".github/workflows/ci.yml",
+                                     "tests/fixtures/age-v1.2.1/identity.txt"])
 def test_a_change_under_a_path_is_relevant(repo: Path, changed: str) -> None:
     base = _git(repo, "rev-parse", "HEAD")
     _commit(repo, changed)
@@ -90,6 +92,45 @@ def test_an_unknown_base_does_the_work(repo: Path, base: str) -> None:
 def test_usage(repo: Path) -> None:
     proc = subprocess.run(["bash", str(SCRIPT), "HEAD"], cwd=repo, capture_output=True, text=True)
     assert proc.returncode == 2
+
+
+def test_a_failing_git_diff_is_an_error_not_a_skip(repo: Path, tmp_path_factory) -> None:
+    """Exit 1 means "skip the checks"; a broken comparison must not look like it."""
+    base = _git(repo, "rev-parse", "HEAD")
+    _commit(repo, "system/Dockerfile")
+    shim = tmp_path_factory.mktemp("bin")
+    real = subprocess.run(["sh", "-c", "command -v git"], capture_output=True, text=True).stdout.strip()
+    (shim / "git").write_text(f'#!/bin/sh\n[ "$1" = diff ] && exit 128\nexec {real} "$@"\n')
+    (shim / "git").chmod(0o755)
+    proc = subprocess.run(["bash", str(SCRIPT), base, *PATHS], cwd=repo, capture_output=True,
+                          text=True, env={"PATH": f"{shim}:/usr/bin:/bin"})
+    assert proc.returncode not in (0, 1), proc.stdout
+
+
+def _scope(touches_rc: int, tmp: Path) -> subprocess.CompletedProcess:
+    """Run the workflow's scope step with ci-touches.sh exiting touches_rc."""
+    (tmp / "scripts").mkdir()
+    (tmp / "scripts" / "ci-touches.sh").write_text(f"exit {touches_rc}\n")
+    out = tmp / "github_output"
+    step = yaml.safe_load((REPO / ".github" / "workflows" / "ci.yml").read_text())["jobs"]["arm64"]["steps"][1]
+    proc = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=tmp, capture_output=True, text=True,
+                          env={"PATH": "/usr/bin:/bin", "BASE": "x", "GITHUB_OUTPUT": str(out)})
+    proc.stdout += out.read_text() if out.exists() else ""
+    return proc
+
+
+@pytest.mark.parametrize(("rc", "relevant"), [(0, "true"), (1, "false")])
+def test_the_scope_step_runs_or_skips(tmp_path: Path, rc: int, relevant: str) -> None:
+    proc = _scope(rc, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert f"relevant={relevant}\n" in proc.stdout
+
+
+@pytest.mark.parametrize("rc", [2, 128])
+def test_the_scope_step_fails_on_any_other_exit(tmp_path: Path, rc: int) -> None:
+    proc = _scope(rc, tmp_path)
+    assert proc.returncode != 0
+    assert "relevant=" not in proc.stdout
 
 
 def test_the_arm64_job_always_runs_and_gates_its_steps() -> None:

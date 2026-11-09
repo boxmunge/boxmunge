@@ -131,13 +131,18 @@ jobs:
         env:
           # A pull request: its base. A push to main: the commit before it.
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        # 0: run the checks; 1: skip them; anything else (bad usage, git
+        # failing) fails the job rather than skipping silently.
         run: |
-          if bash scripts/ci-touches.sh "$BASE" system/ install.sh bootstrap/ scripts/ .github/workflows/; then
-            echo "relevant=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Skipping the arm64 checks: this change touches none of the paths they test."
-            echo "relevant=false" >> "$GITHUB_OUTPUT"
-          fi
+          rc=0
+          bash scripts/ci-touches.sh "$BASE" system/ install.sh bootstrap/ scripts/ \
+            .github/workflows/ tests/fixtures/age-v1.2.1/ || rc=$?
+          case "$rc" in
+            0) echo "relevant=true" >> "$GITHUB_OUTPUT" ;;
+            1) echo "Skipping the arm64 checks: this change touches none of the paths they test."
+               echo "relevant=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "scripts/ci-touches.sh failed (exit $rc)" >&2; exit "$rc" ;;
+          esac
       - name: Build the system image
         if: steps.scope.outputs.relevant == 'true'
         run: docker build -t boxmunge-system:ci system/
