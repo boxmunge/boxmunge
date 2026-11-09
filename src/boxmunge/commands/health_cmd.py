@@ -122,16 +122,22 @@ def check_caddy_container() -> HealthCheck:
 
 
 def check_system_container(paths: BoxPaths) -> HealthCheck:
-    """Check boxmunge-system is running with this root's mounts.
+    """Check boxmunge-system is running with this root's mounts, on an image
+    built from the installed definition.
 
-    An error, not a warning: age and rclone have no host fallback, so
-    backups, restores and backup-sync all fail while this check fails.
+    An error when it is not usable: age and rclone have no host fallback, so
+    backups, restores and backup-sync all fail while it fails. A warning when
+    it runs a previous image (a rebuild failed): backups still work, and an
+    error would roll back a platform upgrade in probation.
     """
-    from boxmunge.system_container import connect, SystemContainerError
+    from boxmunge.system_container import connect, stale_image, SystemContainerError
     try:
         connect(paths)
+        stale = stale_image(paths)
     except SystemContainerError as e:
         return HealthCheck("system-container", "error", str(e))
+    if stale:
+        return HealthCheck("system-container", "warn", stale)
     return HealthCheck("system-container", "ok", "boxmunge-system running")
 
 

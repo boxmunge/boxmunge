@@ -467,11 +467,15 @@ compromise of any single one cannot silently propagate.
    `--require-hashes`.
 
 5. **External binaries inside the system container.** age and rclone are
-   downloaded over HTTPS in `system/Dockerfile`, then verified against
-   `AGE_SHA256` and `RCLONE_SHA256` ARGs baked into the Dockerfile via
-   `sha256sum -c`. Mismatched downloads abort the image build. Version
-   and SHA bumps travel together through Dependabot or a single audit-
-   visible commit.
+   downloaded over HTTPS in `system/Dockerfile`, then verified via
+   `sha256sum -c` against a SHA256 baked into the Dockerfile for each
+   supported architecture (`AGE_SHA256_AMD64`, `AGE_SHA256_ARM64`, and the
+   same for rclone). Mismatched downloads abort the image build, and so does
+   any other architecture. Dependabot does not track these: a version and
+   its hashes are bumped by hand in one audit-visible commit, from
+   upstream's signed checksums (rclone's PGP-signed `SHA256SUMS`, age's
+   Sigsum proofs). The cosign that verifies releases is pinned the same way,
+   per architecture, in `bootstrap/cosign.sh`.
 
 6. **Base container images.** Every internal Dockerfile pins its base
    by digest (`FROM image:tag@sha256:<digest>`), not by tag, so a
