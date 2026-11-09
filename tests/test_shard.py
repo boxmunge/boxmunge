@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tests.shard import WEIGHTS, assign, parse_shard
 
@@ -67,3 +69,15 @@ def test_the_shards_of_a_run_partition_its_tests() -> None:
     assert set().union(*shards) == everything
     assert sum(len(s) for s in shards) == len(everything)
 
+
+@pytest.mark.parametrize("job", ["integration", "userns-dind"])
+def test_a_sharded_ci_job_runs_every_shard(job: str) -> None:
+    """A shard missing from the matrix would drop its files without a word."""
+    spec = yaml.safe_load((REPO / ".github" / "workflows" / "ci.yml").read_text())["jobs"][job]
+    runs = " ".join(step.get("run", "") for step in spec["steps"])
+    m = re.search(r"--shard \$\{\{ matrix\.shard \}\}/(\d+)\b", runs)
+    assert m, f"{job} does not pass --shard K/N"
+    n = int(m.group(1))
+    assert spec["strategy"]["matrix"]["shard"] == list(range(1, n + 1))
+    assert spec["strategy"]["fail-fast"] is False
+    assert f"{{{{ matrix.shard }}}}/{n})" in spec["name"]
