@@ -31,7 +31,10 @@ from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
-from boxmunge.pause import clear_paused_state, is_paused, release_restart_policies
+from boxmunge.pause import (
+    awaiting_deploy, clear_paused_state, hold_restart_policies, is_paused,
+    mark_awaiting_deploy, pause_incomplete, release_restart_policies,
+)
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 from boxmunge.release_txn import open_install_reason
@@ -79,8 +82,12 @@ def run_resume(
     paths: BoxPaths,
     yes: bool = False,
     skip_security_checks: bool = False,
+    no_start: bool = False,
 ) -> int:
     """Resume a paused project. Returns 0 on success, 1 on failure.
+
+    ``no_start`` (`--no-start`) starts nothing: it hands the pause to the
+    next deploy (hand_to_deploy_locked).
 
     Preconditions are checked before the confirmation prompt (so the
     operator is not asked to confirm something that cannot happen) and
@@ -93,6 +100,13 @@ def run_resume(
         return 1
     if not _refuse_unless_resumable(project_name, paths):
         return 1
+    if no_start:
+        try:
+            with project_lock(project_name, paths):
+                return hand_to_deploy_locked(project_name, paths)
+        except LockError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
 
     if not yes:
         try:
@@ -142,7 +156,12 @@ def resume_locked(
         return 1, None
     install = open_install_reason(paths, project_name)
     if install is not None:
-        return _lift_for_install(project_name, paths, install), None
+        print(f"ERROR: {project_name} cannot be resumed while its install is open "
+              f"(nothing may start production but the install): {install}. Those are "
+              f"refused while it is paused: run `boxmunge resume {project_name} "
+              f"--no-start` first, which hands the pause to the install's deploy.",
+              file=sys.stderr)
+        return 1, None
     project_dir = paths.project_dir(project_name)
     try:
         manifest = load_manifest(paths.project_manifest(project_name))
@@ -155,7 +174,8 @@ def resume_locked(
     try:
         prepare_compose_override(paths, manifest, component="resume")
     except (OSError, ValueError, DockerError, BindSourceError) as e:
-        print(f"ERROR: cannot regenerate the compose overlay: {e}", file=sys.stderr)
+        print(f"ERROR: cannot regenerate the compose overlay: {e}. {_deploy_hint(project_name)}",
+              file=sys.stderr)
         log_error("resume", f"Overlay regeneration failed: {e}", paths, project=project_name)
         return 1, None
     compose_files = _compose_files(project_name, paths)
@@ -175,7 +195,7 @@ def resume_locked(
                     deploying=recreate)
     except ComposeRefused as e:
         # Exit code 3 reserved for compose hardening rejections (audit H-N2).
-        print(f"ERROR: {e}", file=sys.stderr)
+        print(f"ERROR: {e} {_deploy_hint(project_name)}", file=sys.stderr)
         return 3, None
     except DockerError as e:
         print(f"ERROR: cannot inspect the project's containers: {e}", file=sys.stderr)
@@ -230,6 +250,8 @@ def resume_locked(
         print(f"ERROR: compose up failed: {e}", file=sys.stderr)
         log_error("resume", f"compose up failed: {e}", paths,
                   project=project_name)
+        _hold_again(project_name, paths)
+        print(f"  {_deploy_hint(project_name)}", file=sys.stderr)
         return 1, None
 
     # Restore Caddy site config from manifest (regenerated).
@@ -275,28 +297,51 @@ def resume_locked(
     return 0, (None if smoke_ok else smoke_msg)
 
 
-def _lift_for_install(project_name: str, paths: BoxPaths, install: str) -> int:
-    """A pause taken while an install was open (pause refuses that since
-    0.11.4). Every way out of the install is a deploy or a rollback, which
-    the pause refuses, and only the install may start production. So the
-    pause is lifted without starting anything: the containers stay stopped
-    and the maintenance page stays up until the install's start replaces
-    it. Returns 1: the project is not back online."""
+def _deploy_hint(project_name: str) -> str:
+    """For a refusal whose remedy is a deploy, which a pause refuses."""
+    return (f"It stays paused. If only a deploy can fix this: `boxmunge resume "
+            f"{project_name} --no-start`, then `boxmunge prod-deploy {project_name}`.")
+
+
+def _hold_again(project_name: str, paths: BoxPaths) -> None:
+    """The start failed: what stays paused keeps its restart policies held,
+    so a Docker restart does not start it."""
     try:
-        release_restart_policies(project_name, paths)
+        hold_restart_policies(project_name, paths)
     except DockerError as e:
-        print(f"ERROR: {project_name}'s restart policies could not be given back: {e}. It "
-              f"stays paused; run 'resume {project_name}' again once Docker answers.",
-              file=sys.stderr)
+        print(f"ERROR: {project_name}'s restart policies could not be held again: {e}. A "
+              f"Docker restart may start its `restart: always` services.", file=sys.stderr)
+        log_error("resume", f"Restart policies not held again: {e}", paths,
+                  project=project_name)
+
+
+def hand_to_deploy_locked(project_name: str, paths: BoxPaths) -> int:
+    """`resume --no-start`: start nothing, and hand the pause to the next
+    deploy (pause.awaiting_deploy, commands/deploy_handover). For a project
+    resume cannot start and only a deploy can repair. It stays paused for
+    everything else until that deploy starts it. Caller holds the lock."""
+    if refuse_if_legacy_stage(paths, project_name):
         return 1
-    clear_paused_state(project_name, paths)
-    log_warning("resume", f"Pause lifted without a start (an install is open): {install}",
-                paths, project=project_name)
-    print(f"ERROR: '{project_name}' was paused while an install was open. The pause is "
-          f"lifted, but nothing was started: production starts only from that install, "
-          f"and its maintenance page stays up until then. {install[0].upper()}{install[1:]}.",
-          file=sys.stderr)
-    return 1
+    if not _refuse_unless_resumable(project_name, paths):
+        return 1
+    if pause_incomplete(project_name, paths):
+        print(f"ERROR: Pausing '{project_name}' did not finish, so it may still be serving. "
+              f"Run `boxmunge pause {project_name}` to finish it first, or `boxmunge resume "
+              f"{project_name}`.", file=sys.stderr)
+        return 1
+    if not awaiting_deploy(project_name, paths):
+        mark_awaiting_deploy(project_name, paths)
+        log_operation("resume", "Pause handed to the next deploy (--no-start)", paths,
+                      project=project_name)
+    install = open_install_reason(paths, project_name)
+    then = (f"Finish its open install: {install} (a rollback waits until a deploy has "
+            f"ended the pause)" if install is not None else
+            f"Deploy it: `boxmunge prod-deploy {project_name}` (or `promote "
+            f"{project_name}`)")
+    print(f"'{project_name}' was not started. It stays down behind its maintenance page, "
+          f"with its containers stopped, until the next deploy starts it; that deploy "
+          f"ends the pause. {then}.")
+    return 0
 
 
 def _alert_smoke_failed(project_name: str, paths: BoxPaths, smoke_msg: str) -> None:
@@ -308,9 +353,9 @@ def _alert_smoke_failed(project_name: str, paths: BoxPaths, smoke_msg: str) -> N
 
 
 def cmd_resume(args: list[str]) -> None:
-    from boxmunge.commands.argv import parse_args, require_project_name
+    from boxmunge.commands.argv import parse_args, require_project_name, usage_error
     parsed = parse_args(
-        "resume", args, flags={"--yes", "--skip-security-checks"},
+        "resume", args, flags={"--yes", "--skip-security-checks", "--no-start"},
         min_positional=1, max_positional=1,
     )
     project = require_project_name("resume", parsed.positional[0])
@@ -318,5 +363,8 @@ def cmd_resume(args: list[str]) -> None:
     skip_security_checks = parsed.has("--skip-security-checks")
 
     paths = BoxPaths()
+    if parsed.has("--no-start") and skip_security_checks:
+        usage_error("resume", "--no-start starts nothing, so it takes no --skip-security-checks")
     sys.exit(run_resume(project, paths, yes=yes,
-                        skip_security_checks=skip_security_checks))
+                        skip_security_checks=skip_security_checks,
+                        no_start=parsed.has("--no-start")))

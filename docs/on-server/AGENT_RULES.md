@@ -96,6 +96,7 @@ These commands prompt for confirmation before executing. Use `--yes` only when y
 - `project-delete <project>` -- destructively deletes a project (containers, files including local backups, registry entry); off-site backup copies are kept
 - `pause <project>` -- takes the site offline with a maintenance page
 - `resume <project>` -- brings it back online; with `--skip-security-checks` (DANGEROUS) it starts potentially vulnerable images without pulling fresh ones
+- `resume <project> --no-start` -- starts nothing: hands the pause to the next `prod-deploy`/`promote`, which ends it once its containers start. Use it when `resume` refuses and names it (only a deploy can repair what it found)
 - `recover <project>` -- restarts a project the health monitor stopped
 - `inbox clean [project]` -- removes every uploaded bundle (of that project)
 

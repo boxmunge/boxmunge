@@ -73,6 +73,19 @@ def mark_pause_complete(project_name: str, paths: BoxPaths) -> None:
     _update_paused_state(project_name, paths, action_complete=True)
 
 
+def awaiting_deploy(project_name: str, paths: BoxPaths) -> bool:
+    """True if `resume --no-start` handed the pause to the next deploy: the
+    project stays paused for everything else (maintenance page, stopped
+    containers, held restart policies, timers skip it), but a deploy or
+    promote may start it, and the pause ends once that start has run."""
+    state = read_paused_state(project_name, paths)
+    return state is not None and state.get("awaiting_deploy") is True
+
+
+def mark_awaiting_deploy(project_name: str, paths: BoxPaths) -> None:
+    _update_paused_state(project_name, paths, awaiting_deploy=True)
+
+
 def hold_restart_policies(project_name: str, paths: BoxPaths) -> None:
     """Keep a paused project's containers stopped across a Docker restart.
 

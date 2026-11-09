@@ -111,9 +111,13 @@ Take a project offline behind a styled maintenance page. Does not support
 --dry-run.""",
     "resume": """\
 Usage: boxmunge resume <project> [--skip-security-checks] [--yes]
+       boxmunge resume <project> --no-start
 
 Bring a paused project back online (pulls latest images first). Does not
-support --dry-run.""",
+support --dry-run. --no-start starts nothing: the project stays down behind
+its maintenance page until the next prod-deploy or promote starts it, which
+ends the pause (for a project resume refuses to start and only a deploy can
+repair).""",
     "recover": """\
 Usage: boxmunge recover <project> [--yes]
 

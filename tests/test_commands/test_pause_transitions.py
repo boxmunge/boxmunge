@@ -106,26 +106,27 @@ def test_a_paused_project_refuses_to_pause_again_naming_resume(tmp_path, capsys)
 
 
 @pytest.mark.parametrize("phase", ["installed", "hook_started", "switching"])
-def test_resume_lifts_a_pause_taken_over_an_open_install(tmp_path, capsys, phase) -> None:
+def test_a_pause_taken_over_an_open_install_is_handed_to_it(tmp_path, capsys, phase) -> None:
     """Paused over an open install by an earlier boxmunge: the install's
-    options are all refused while it is paused, and nothing may start
-    production but the install. Resume lifts the pause without starting
-    anything, so the install's own options are accepted again."""
+    options are deploys, refused while it is paused, and nothing may start
+    production but the install. Resume refuses, naming `--no-start`, which
+    hands the pause to the install's deploy without starting anything."""
     from boxmunge.commands.deploy import deploy_eligible
-    from boxmunge.commands.resume_cmd import resume_locked
-    from boxmunge.pause import mark_pause_complete, write_paused_state
+    from boxmunge.commands.resume_cmd import hand_to_deploy_locked, resume_locked
+    from boxmunge.pause import awaiting_deploy, mark_pause_complete, write_paused_state
     paths = _setup(tmp_path)
     _open_install(paths, phase)
     write_paused_state(NAME, paths, reason="maintenance")
     mark_pause_complete(NAME, paths)
     site = paths.project_caddy_site(NAME).read_text()
-    with patch("boxmunge.compose_guard.compose_up") as up, \
-            patch("boxmunge.commands.resume_cmd.release_restart_policies") as release:
+    with patch("boxmunge.compose_guard.compose_up") as up:
         assert resume_locked(NAME, paths, skip_security_checks=True) == (1, None)
+        err = capsys.readouterr().err
+        assert f"resume {NAME} --no-start" in err
+        assert not deploy_eligible(NAME, paths)
+        assert hand_to_deploy_locked(NAME, paths) == 0
     up.assert_not_called()
-    release.assert_called_once()
-    assert not is_paused(NAME, paths)
+    assert is_paused(NAME, paths) and awaiting_deploy(NAME, paths)
     assert paths.project_caddy_site(NAME).read_text() == site   # the page stays up
-    err = capsys.readouterr().err
-    assert "nothing was started" in err and f"prod-deploy {NAME} --ref {NAME}-v2" in err
+    assert f"prod-deploy {NAME} --ref {NAME}-v2" in capsys.readouterr().out
     assert deploy_eligible(NAME, paths)

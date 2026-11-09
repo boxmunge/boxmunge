@@ -1007,7 +1007,8 @@ boxmunge pause myapp --reason "rolling key rotation"
 Containers are stopped via `docker compose stop`, so state is preserved on disk and resume is fast. While paused:
 
 - Health checks, scheduled backups, and container-update sweeps skip the project
-- `prod-deploy`, `stage`, and `promote` refuse to run against it, naming `resume`
+- `prod-deploy`, `stage`, and `promote` refuse to run against it, naming `resume` (after `resume
+  --no-start`, below, they are accepted)
 - `backup-sync` continues (it only copies; existing off-box snapshots are never removed)
 - Platform upgrades keep it paused: the maintenance page stays in place and the containers stay stopped
 - A Docker restart or reboot keeps it stopped: pause sets each container's restart policy to `no` (saving the original), and `resume` restores the originals before starting the containers
@@ -1024,8 +1025,9 @@ pause is the one case where pausing a paused project is accepted), or `resume my
 `pause` is refused while an install is open (`.releases/install.json`, see "An interrupted or
 failed install"): its ways out are a deploy, a rollback or `--abandon`, and a pause would refuse
 the first two. The refusal names them; pause once the install is finished. A project paused over an
-open install by an earlier boxmunge is let out by `resume`: it lifts the pause without starting
-anything (the maintenance page stays up) and names the install's options, which then run.
+open install by an earlier boxmunge is refused by `resume` too (only the install may start
+production); `resume myapp --no-start` (below) hands the pause to the install's own rerun or to a
+fix-forward deploy.
 
 To bring it back:
 
@@ -1037,6 +1039,28 @@ A project whose stopped containers were created before the current mount rules (
 accepted a read-write mount of the project directory, `.:/app`) cannot simply be started again,
 and a deploy is refused while it is paused, so `resume` recreates its containers from the deployed
 files instead (it says so). It still refuses files that changed since the deploy.
+
+### When only a deploy can fix it: `resume --no-start`
+
+`resume` refuses to start a release whose files are not the ones deployed: a compose file or
+manifest edited in place, a mount the deploy did not record, a file this boxmunge's validator now
+rejects, a missing bind-source record, an image no longer in the local store, an open install.
+The fix is a deploy, which a pause refuses, so each of those refusals names the way out:
+
+```
+boxmunge resume myapp --no-start    # starts nothing
+boxmunge prod-deploy myapp          # or promote; ends the pause once its containers start
+```
+
+`--no-start` hands the pause to the next deploy. Until that deploy starts the containers, the
+project stays paused for everything else: the maintenance page stays up, the containers stay
+stopped with their restart policies held (a reboot does not start them), health checks, backups,
+container updates and upgrade restarts skip it, and `status` shows `PAUSED (awaiting deploy)`
+(`health` warns about it under `lifecycle`). `prod-deploy`, `promote` and `stage` are accepted. The
+deploy keeps the maintenance page while it prepares, gives the containers their restart policies
+back, and ends the pause once `docker compose up` has run. A deploy that stops before that leaves it
+paused and awaiting a deploy. A rollback stays refused until a deploy has ended the pause, and
+`resume myapp` still works if the cause goes away.
 
 `resume` pulls the latest images by default. This is a deliberate safety guarantee: a project that was paused for hours or days should not come back on stale, potentially vulnerable images.
 

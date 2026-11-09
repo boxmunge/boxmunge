@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from boxmunge.bind_sources import BindSourceError
-from boxmunge.commands import deploy_storage
+from boxmunge.commands import deploy_handover, deploy_storage
 from boxmunge.commands.release_config import (
     decide_release_users, generate_release_config, promote_candidates,
 )
@@ -309,11 +309,21 @@ def replace_release(project_name: str, paths: BoxPaths, manifest: dict,
         raise NotStarted(f"the images of {actual_ref} were not scanned")
     first_deploy = "current_ref" not in read_state(paths.project_deploy_state(project_name))
     try:
+        handover = deploy_handover.begin(paths, project_name)
+    except DockerError as e:
+        print(f"ERROR: {project_name}'s restart policies could not be given back: {e}",
+              file=sys.stderr)
+        raise NotStarted(str(e)) from e
+    try:
         started = _start(project_name, paths, component, txn)
     except NotStarted:
+        if handover:
+            deploy_handover.keep(paths, project_name, component)
         if clearance is not None:
             keep_quarantined(paths, project_name)
         raise
+    if handover:
+        deploy_handover.end(paths, project_name, manifest, component)
     rc = 1
     try:
         if started:

@@ -20,7 +20,7 @@ from enum import Enum
 from typing import Any
 
 from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
-from boxmunge.pause import is_paused, read_paused_state
+from boxmunge.pause import awaiting_deploy, is_paused, read_paused_state
 from boxmunge.paths import BoxPaths
 from boxmunge.userns.marker import SHIM, migration_in_progress
 
@@ -90,6 +90,19 @@ def lifecycle_block(project_name: str, paths: BoxPaths) -> Block | None:
         )
     if is_paused(project_name, paths):
         state = read_paused_state(project_name, paths) or {}
+        if state.get("awaiting_deploy") is True:
+            return Block(
+                reason=BlockReason.PAUSED,
+                detail=state,
+                refuse_message=(
+                    f"Project '{project_name}' is paused, awaiting a deploy (`resume "
+                    f"{project_name} --no-start`): it stays down behind its maintenance "
+                    f"page until `prod-deploy {project_name}` or `promote {project_name}` "
+                    f"starts it, or `boxmunge resume {project_name}` does."
+                ),
+                skip_message=(f"Skipped paused project '{project_name}' (awaiting a "
+                              f"deploy: prod-deploy {project_name})"),
+            )
         return Block(
             reason=BlockReason.PAUSED,
             detail=state,
@@ -125,10 +138,16 @@ def refuse_if_blocked(project_name: str, paths: BoxPaths, *,
     a quarantine. A quarantine alone lets it through, because it scans the
     images its release would start before anything starts and refuses if
     a quarantine-level finding remains (commands/quarantine_gate). A pause
-    is the operator's own decision and still refuses.
+    is the operator's own decision and still refuses, unless the operator
+    handed it to the next deploy (`resume --no-start`, pause.awaiting_deploy):
+    the deploy ends it once its start has run (commands/deploy_handover).
     """
     block = is_blocked(project_name, paths)
     if block is None:
+        return False
+    if ships_fix and block.reason is BlockReason.PAUSED and awaiting_deploy(project_name, paths):
+        print(f"  {project_name} is paused, awaiting this deploy: the pause ends once its "
+              f"containers start; until then the maintenance page stays up.")
         return False
     if ships_fix and block.reason is BlockReason.QUARANTINED:
         if not is_paused(project_name, paths):
