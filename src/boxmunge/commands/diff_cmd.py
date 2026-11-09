@@ -57,9 +57,12 @@ def _bundle_manifest(extracted: Path, project_name: str) -> dict:
     first: no compose.yml (BundleError), and a manifest that cannot be read
     or names another project (ManifestError)."""
     if not (extracted / "compose.yml").is_file():
-        raise BundleError("it has no compose.yml")
+        raise BundleError("it has no compose.yml; add one and upload the bundle again")
     manifest = load_manifest(extracted / "manifest.yml")
     named = manifest.get("project")
+    if named is None:
+        raise ManifestError(f"its manifest.yml has no project field (it must "
+                            f"be {project_name!r})")
     if named != project_name:
         raise ManifestError(f"its manifest.yml names project {named!r}, not "
                             f"{project_name!r}")
@@ -67,10 +70,12 @@ def _bundle_manifest(extracted: Path, project_name: str) -> dict:
 
 
 def _refused(error: Exception, extracted: Path) -> int:
-    # Name paths inside the bundle, not the temporary dir they were read from.
-    print(f"ERROR: a deploy would refuse this bundle: "
-          f"{str(error).replace(f'{extracted}/', '')}. Fix it and upload the "
-          f"bundle again.", file=sys.stderr)
+    """Say why a deploy would refuse the bundle, naming paths inside it, not
+    the temporary dir they were read from. A BundleError already says what
+    to do; the others get the advice added."""
+    reason = str(error).replace(f"{extracted}/", "").rstrip().rstrip(".")
+    advice = "" if isinstance(error, BundleError) else " Fix it and upload the bundle again."
+    print(f"ERROR: a deploy would refuse this bundle: {reason}.{advice}", file=sys.stderr)
     return 1
 
 

@@ -250,6 +250,15 @@ def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
     if use_current:
         if use_host:
             cve_ids, left_out = all_currently_quarantining_cves(paths)
+            if not cve_ids and left_out:
+                print(
+                    f"ERROR: no current quarantine-level findings in the projects "
+                    f"that could be read, and {', '.join(left_out)} could not be "
+                    f"read (see above), so nothing was suppressed. Fix that, then "
+                    f"retry, or specify a CVE id explicitly.",
+                    file=sys.stderr,
+                )
+                return 1
             if not cve_ids:
                 print(
                     "ERROR: no current quarantine-level findings across any "

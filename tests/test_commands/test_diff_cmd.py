@@ -270,3 +270,20 @@ def test_content_for_a_data_dir_is_refused_as_a_deploy_would(paths, capsys) -> N
     assert run_diff("testapp", paths) == 1
     err = capsys.readouterr().err
     assert "a deploy would refuse this bundle" in err and "uploads" in err
+
+
+def test_manifest_without_project_field(paths, capsys) -> None:
+    _setup_project(paths)
+    _bundle_with(paths, {"manifest.yml": MANIFEST_V1.replace("project: testapp\n", "")})
+    assert run_diff("testapp", paths) == 1
+    err = capsys.readouterr().err
+    assert "has no project field" in err and "None" not in err
+
+
+def test_bundle_refusal_reads_as_one_sentence_of_advice(paths, capsys) -> None:
+    _setup_project(paths)
+    _bundle_with(paths, {"secrets.env": "x\n"})
+    assert run_diff("testapp", paths) == 1
+    err = capsys.readouterr().err
+    assert ".." not in err and "upload the bundle again" not in err
+    assert err.rstrip().endswith("upload it again.")

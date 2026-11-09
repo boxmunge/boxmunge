@@ -178,3 +178,12 @@ def test_legacy_project_dir_of_that_name_gets_the_rename_hint(box, capsys) -> No
     err = capsys.readouterr().err
     assert "Choose a name without the suffix" in err
     assert "logs myapp --staging" not in err
+
+
+def test_a_path_shaped_staging_name_never_probes_the_disk(box, capsys) -> None:
+    from pathlib import Path
+    with patch.object(Path, "is_dir", side_effect=AssertionError("probed the disk")):
+        rc, cap, _ = _run(["../../x-staging"])
+    assert rc == 2
+    cap.assert_not_called()
+    assert "read its logs with" not in capsys.readouterr().err

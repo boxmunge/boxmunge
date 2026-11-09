@@ -112,3 +112,17 @@ def test_fleet_security_view_lists_the_legacy_dir_as_unreadable(box: BoxPaths) -
     summary = fleet_summary(box)
     unreadable = summary["unreadable"]
     assert any(LEGACY in u["error"] and HINT in u["error"] for u in unreadable)
+
+
+def test_suppress_current_host_with_only_unreadable_projects_says_so(
+        box: BoxPaths, capsys, monkeypatch) -> None:
+    from datetime import date, timedelta
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    monkeypatch.setenv("USER", "jon")
+    until = (date.today() + timedelta(days=30)).isoformat()
+    rc = cmd_security_suppress(
+        ["--current", "--host", "--until", until, "--reason", "fleet-wide ack"], box)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert f"{LEGACY} could not be read" in err and "security scan" not in err
+    assert not box.host_suppressions.exists()

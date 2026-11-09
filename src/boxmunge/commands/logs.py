@@ -12,7 +12,9 @@ from boxmunge.docker import (
     DockerError, compose_logs, compose_logs_capture, staging_compose_project,
 )
 from boxmunge.legacy_stage import legacy_staging_compose
-from boxmunge.paths import STAGING_SUFFIX, BoxPaths
+from boxmunge.paths import (
+    STAGING_SUFFIX, BoxPaths, InvalidProjectName, validate_project_name,
+)
 from boxmunge.staged_release import (
     ComposeTarget, has_slot, refuse_planted, staging_target,
 )
@@ -39,11 +41,13 @@ def cmd_logs(args: list[str]) -> None:
     )
     name = parsed.positional[0]
     paths = BoxPaths()
-    # A legacy project dir of that name gets the rename hint (from the name
-    # check below); otherwise the name is staging's compose project.
-    if name.endswith(STAGING_SUFFIX) and not (paths.projects / name).is_dir():
+    # `<p>-staging` is staging's compose project, unless a legacy project
+    # dir has that name: it gets the rename hint from the name check below.
+    # The disk is consulted only for a valid <p>, never a path.
+    base = name[:-len(STAGING_SUFFIX)] if name.endswith(STAGING_SUFFIX) else None
+    if base is not None and _valid_name(base) and not (paths.projects / name).is_dir():
         usage_error("logs", f"staging runs as '{name}'; read its logs with: "
-                            f"logs {name[:-len(STAGING_SUFFIX)]} --staging")
+                            f"logs {base} --staging")
     project = require_project_name("logs", name)
     service = parsed.positional[1] if len(parsed.positional) > 1 else None
     follow = parsed.has("--follow")
@@ -82,6 +86,14 @@ def cmd_logs(args: list[str]) -> None:
     except DockerError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+def _valid_name(name: str) -> bool:
+    try:
+        validate_project_name(name)
+    except InvalidProjectName:
+        return False
+    return True
 
 
 class NothingStaged(Exception):
