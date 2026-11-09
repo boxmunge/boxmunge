@@ -145,20 +145,35 @@ recover_interrupted_upgrade() {
         interrupted "$(standby_slot)"
 }
 
-# rollback_impossible <version> <prev_slot>: health is critical, but the
-# previous slot cannot take over (a pre-0.11 shim may have recycled it). Said
-# once per probation, as an error and an alert; later timer fires only print
-# it, rather than adding an error to the log every five minutes. The marker
-# is in root-only upgrade-root/ and goes when the probation ends.
+# rollback_impossible <version> <prev_slot> <why>: the release on probation
+# failed (<why>), but the previous slot cannot take over (a pre-0.11 shim may
+# have recycled it). Said once per probation, as an error and an alert; later
+# timer fires only print it, rather than adding an error to the log every five
+# minutes. The marker is in root-only upgrade-root/ and goes when the
+# probation ends. With a live slot that still runs, expiry promotes the
+# release; with one that does not, nothing can until it is reinstalled.
 rollback_impossible() {
-    local version="$1" prev_slot="$2" marker="$UPGRADE_ROOT_DIR/rollback-impossible"
-    local msg="$version failed its probation health check, but cannot be rolled back: env-$prev_slot, its rollback target, is not a working venv. Run boxmunge health as supervisor to see what failed; the probation ends, promoting $version, at $PROB_EXPIRES_AT."
+    local version="$1" prev_slot="$2" why="$3" marker="$UPGRADE_ROOT_DIR/rollback-impossible" next
+    next="Run boxmunge health as supervisor to see what failed; the probation ends, promoting $version, at $PROB_EXPIRES_AT."
+    slot_works "$ACTIVE_SLOT" \
+        || next="Nothing runs the platform until $version is reinstalled into the live slot: as root, run the installer from the $version GitHub release (sudo bash boxmunge-install.sh). The health timer then carries on with the probation."
+    local msg="$version $why, but cannot be rolled back: env-$prev_slot, its rollback target, is not a working venv. $next"
     if [[ "$(cat "$marker" 2>/dev/null)" != "$version" ]]; then
         bm_log error upgrade "$msg"
         send_notification "boxmunge rollback needed but impossible" "$msg" 1
         echo "$version" > "$marker"
     fi
     die "$msg"
+}
+
+# probation_failed <version> <prev_slot> <why>: roll the release on probation
+# back to the previous slot, or say why it cannot be.
+probation_failed() {
+    local version="$1" prev_slot="$2" why="$3" from_version
+    rollback_target_ok "$prev_slot" || rollback_impossible "$version" "$prev_slot" "$why"
+    from_version="$("$BOXMUNGE_ROOT/env-$prev_slot/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")"
+    log "CRITICAL: $version $why during probation — rolling back"
+    do_rollback "$version" "$from_version" "health_probation" "$prev_slot"
 }
 
 cmd_check_probation() {
@@ -182,7 +197,13 @@ cmd_check_probation() {
     fi
     local version="$PROB_VERSION" prev_slot="$PROB_PREV_SLOT"
 
-    # Expiry first: promotion needs no rollback target (it deletes it).
+    # A live slot that cannot run boxmunge-server cannot be checked or
+    # promoted (promotion deletes the previous slot, which remove_slot refuses
+    # while the live one is dead), so it is rolled back first, expired or not.
+    slot_works "$ACTIVE_SLOT" \
+        || probation_failed "$version" "$prev_slot" "is broken: env-$ACTIVE_SLOT/bin/boxmunge-server does not run"
+
+    # Expiry next: promotion needs no rollback target (it deletes it).
     if [[ "$PROB_EXPIRED" == "yes" ]]; then
         log "Probation expired for $version — promoting"
         remove_slot "$prev_slot"
@@ -194,12 +215,15 @@ cmd_check_probation() {
     fi
 
     # Probation health check semantics:
-    #   exit 2     -> CRITICAL: real health regression -> rollback
-    #   exit 124+  -> OPERATIONAL: timed out / killed (e.g. multiple sequential
-    #                 docker subprocess timeouts on a busy host can exceed our
-    #                 budget without any platform regression). Skip rollback;
-    #                 the next health-timer fire will retry.
-    #   else        -> healthy (or warnings only) -> continue probation
+    #   exit 2        -> CRITICAL: real health regression -> rollback
+    #   exit 126/127  -> CRITICAL: health could not run at all (timeout's
+    #                    exit when the command cannot be executed or found)
+    #   other 124+    -> OPERATIONAL: timed out / killed (e.g. multiple
+    #                    sequential docker subprocess timeouts on a busy host
+    #                    can exceed our budget without any platform
+    #                    regression). Skip rollback; the next health-timer
+    #                    fire will retry.
+    #   else          -> healthy (or warnings only) -> continue probation
     # --kill-after=10 escalates SIGTERM -> SIGKILL if the health subprocess
     # ignores the initial SIGTERM (e.g. wedged docker socket). Without it,
     # `timeout 180` waits indefinitely for an unresponsive process and
@@ -207,15 +231,12 @@ cmd_check_probation() {
     local health_exit=0
     timeout --kill-after=10 180 "$(active_venv)/bin/boxmunge-server" health --json >/dev/null 2>&1 || health_exit=$?
 
-    if [[ "$health_exit" -eq 2 ]]; then
-        rollback_target_ok "$prev_slot" || rollback_impossible "$version" "$prev_slot"
-        local from_version
-        from_version="$("$BOXMUNGE_ROOT/env-$prev_slot/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")"
-        log "CRITICAL health failure during probation for $version — rolling back"
-        do_rollback "$version" "$from_version" "health_probation" "$prev_slot"
-    elif [[ "$health_exit" -ge 124 ]]; then
-        log "WARN: probation health check timed out (exit $health_exit) for $version — skipping rollback, next health-timer will retry"
-    fi
+    case "$health_exit" in
+        2) probation_failed "$version" "$prev_slot" "failed its probation health check" ;;
+        126|127) probation_failed "$version" "$prev_slot" "could not run its probation health check (exit $health_exit)" ;;
+        *) [[ "$health_exit" -lt 124 ]] \
+            || log "WARN: probation health check timed out (exit $health_exit) for $version — skipping rollback, next health-timer will retry" ;;
+    esac
 
     exit 0
 }
