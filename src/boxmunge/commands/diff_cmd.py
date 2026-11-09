@@ -7,10 +7,11 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from boxmunge.bundle import extract_bundle
+from boxmunge.bind_mounts import BindMountError, bind_mounted_dirs
+from boxmunge.bundle import BundleError, check_bundle_contents, extract_bundle
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.manifest import load_manifest, ManifestError
-from boxmunge.release import project_data_dirs
+from boxmunge.release import check_install, project_data_dirs
 from boxmunge.source import resolve_bundle_source, SourceError
 
 if TYPE_CHECKING:
@@ -51,6 +52,28 @@ def _is_git_project(project_name: str, paths: BoxPaths) -> bool:
     return load_manifest(paths.project_manifest(project_name)).get("source") == "git"
 
 
+def _bundle_manifest(extracted: Path, project_name: str) -> dict:
+    """The bundle's manifest. Raises what a deploy refuses the bundle for
+    first: no compose.yml (BundleError), and a manifest that cannot be read
+    or names another project (ManifestError)."""
+    if not (extracted / "compose.yml").is_file():
+        raise BundleError("it has no compose.yml")
+    manifest = load_manifest(extracted / "manifest.yml")
+    named = manifest.get("project")
+    if named != project_name:
+        raise ManifestError(f"its manifest.yml names project {named!r}, not "
+                            f"{project_name!r}")
+    return manifest
+
+
+def _refused(error: Exception, extracted: Path) -> int:
+    # Name paths inside the bundle, not the temporary dir they were read from.
+    print(f"ERROR: a deploy would refuse this bundle: "
+          f"{str(error).replace(f'{extracted}/', '')}. Fix it and upload the "
+          f"bundle again.", file=sys.stderr)
+    return 1
+
+
 def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists():
@@ -81,12 +104,23 @@ def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
         except ValueError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
+        try:
+            notes = check_bundle_contents(extracted)
+            manifest = _bundle_manifest(extracted, project_name)
+            bind_mounted_dirs(extracted / "compose.yml", project_dir)
+        except (BundleError, ManifestError, BindMountError) as e:
+            return _refused(e, extracted)
 
         print(f"{project_name}: comparing current vs {bundle_path.name}")
+        for note in notes:
+            print(f"  {note}")
         print()
 
         try:
+            check_install(extracted, project_dir)
             box_state = project_data_dirs(project_dir, extracted).box_state()
+        except BundleError as e:
+            return _refused(e, extracted)
         except ReleaseStateError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
@@ -105,46 +139,39 @@ def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
 
         print()
 
-        # Check config changes
-        try:
-            manifest = load_manifest(extracted / "manifest.yml")
-        except ManifestError:
-            manifest = None
+        from boxmunge.caddy import site_config
+        from boxmunge.compose import (
+            generate_compose_override, load_user_compose, recorded_users,
+        )
 
-        if manifest:
-            from boxmunge.caddy import site_config
-            from boxmunge.compose import (
-                generate_compose_override, load_user_compose, recorded_users,
-            )
-
-            new_caddy, override = site_config(paths, manifest)
-            source = f" (from {override.name})" if override is not None else ""
-            current_caddy_path = paths.project_caddy_site(project_name)
-            if current_caddy_path.exists():
-                if new_caddy != current_caddy_path.read_text():
-                    print(f"  Caddy config:     would change{source}")
-                else:
-                    print(f"  Caddy config:     unchanged{source}")
+        new_caddy, override = site_config(paths, project_name, manifest)
+        source = f" (from {override.name})" if override is not None else ""
+        current_caddy_path = paths.project_caddy_site(project_name)
+        if current_caddy_path.exists():
+            if new_caddy != current_caddy_path.read_text():
+                print(f"  Caddy config:     would change{source}")
             else:
-                print(f"  Caddy config:     would be created{source}")
+                print(f"  Caddy config:     unchanged{source}")
+        else:
+            print(f"  Caddy config:     would be created{source}")
 
-            # v0.8: pass the candidate compose.yml from the new bundle so
-            # the overlay omits read_only/tmpfs defaults consistently with
-            # what a real deploy of this bundle would produce. The users are
-            # those decided last: the deploy decides them again from its images.
-            candidate_user_compose = load_user_compose(extracted / "compose.yml", project_name)
-            new_compose = generate_compose_override(
-                manifest, user_compose=candidate_user_compose,
-                users=recorded_users(paths, project_name),
-            )
-            current_compose_path = paths.project_compose_override(project_name)
-            if current_compose_path.exists():
-                if new_compose != current_compose_path.read_text():
-                    print("  Compose overlay:  would change")
-                else:
-                    print("  Compose overlay:  unchanged")
+        # v0.8: pass the candidate compose.yml from the new bundle so
+        # the overlay omits read_only/tmpfs defaults consistently with
+        # what a real deploy of this bundle would produce. The users are
+        # those decided last: the deploy decides them again from its images.
+        candidate_user_compose = load_user_compose(extracted / "compose.yml", project_name)
+        new_compose = generate_compose_override(
+            manifest, user_compose=candidate_user_compose,
+            users=recorded_users(paths, project_name),
+        )
+        current_compose_path = paths.project_compose_override(project_name)
+        if current_compose_path.exists():
+            if new_compose != current_compose_path.read_text():
+                print("  Compose overlay:  would change")
             else:
-                print("  Compose overlay:  would be created")
+                print("  Compose overlay:  unchanged")
+        else:
+            print("  Compose overlay:  would be created")
 
         print()
         print(f"  Run 'stage {project_name}' to verify, or 'prod-deploy {project_name}' to deploy directly.")

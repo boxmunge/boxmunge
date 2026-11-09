@@ -42,7 +42,6 @@ These operations are safe to run without human confirmation:
 | Validate a project config | `validate <project>` |
 | Run a backup | `backup <project>` |
 | Run diagnostics | `doctor` |
-| Remove uploaded bundles from the inbox | `inbox clean [project]` |
 | Read documentation | `agent-help <topic>` |
 | Pause a project (planned maintenance) | `pause <project>` |
 | Resume a paused project (pulls latest images) | `resume <project>` |

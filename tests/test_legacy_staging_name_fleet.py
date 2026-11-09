@@ -69,18 +69,46 @@ def test_registry_migration_reports_a_legacy_dir_instead_of_registering_it(
     assert deployed_among(read.names, box) == ["aaa"]
 
 
-def test_suppress_current_host_reports_the_legacy_dir_and_unions_the_rest(
-        box: BoxPaths, capsys) -> None:
-    from boxmunge.commands.security_suppress_targets import (
-        all_currently_quarantining_cves,
-    )
+def _quarantined_aaa(box: BoxPaths) -> None:
     path = box.project_scan_state("aaa")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"scanned_at": "2026-05-30T00:00:00+00:00", "decisions": [
         {"image_ref": "aaa:1", "findings": [
             {"cve_id": "CVE-2026-1001", "effective_severity": "High",
              "disposition": "quarantine"}]}]}))
-    assert all_currently_quarantining_cves(box) == ["CVE-2026-1001"]
+
+
+def test_suppress_current_host_reports_the_legacy_dir_and_unions_the_rest(
+        box: BoxPaths, capsys) -> None:
+    from boxmunge.commands.security_suppress_targets import (
+        all_currently_quarantining_cves,
+    )
+    _quarantined_aaa(box)
+    assert all_currently_quarantining_cves(box) == (["CVE-2026-1001"], [LEGACY])
     err = capsys.readouterr().err
     assert LEGACY in err and HINT in err
     assert "left out" in err
+
+
+def test_suppress_current_host_writes_the_rest_and_exits_nonzero(
+        box: BoxPaths, capsys, monkeypatch) -> None:
+    """fleet.py's contract: a project the loop could not process shows in
+    the exit code, after the others were handled."""
+    from datetime import date, timedelta
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    monkeypatch.setenv("USER", "jon")
+    _quarantined_aaa(box)
+    until = (date.today() + timedelta(days=30)).isoformat()
+    rc = cmd_security_suppress(
+        ["--current", "--host", "--until", until, "--reason", "fleet-wide ack"], box)
+    assert rc == 1
+    assert "CVE-2026-1001" in box.host_suppressions.read_text()
+    assert LEGACY in capsys.readouterr().err
+
+
+def test_fleet_security_view_lists_the_legacy_dir_as_unreadable(box: BoxPaths) -> None:
+    from boxmunge.commands.security_cmd import fleet_summary
+    (box.state / "projects.txt").write_text(f"aaa\n{LEGACY}\n")
+    summary = fleet_summary(box)
+    unreadable = summary["unreadable"]
+    assert any(LEGACY in u["error"] and HINT in u["error"] for u in unreadable)

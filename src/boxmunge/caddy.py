@@ -96,12 +96,13 @@ def generate_caddy_config(manifest: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def site_config(paths: BoxPaths, manifest: dict[str, Any]) -> tuple[str, Path | None]:
-    """(content, override) of the project's production site config: the
+def site_config(paths: BoxPaths, project: str,
+                manifest: dict[str, Any]) -> tuple[str, Path | None]:
+    """(content, override) of ``project``'s production site config: the
     operator's caddy.override.conf verbatim when it exists, else the block
     generated from ``manifest``; ``override`` is the file used, or None.
     prepare_caddy_config writes this, and diff previews it."""
-    override = paths.project_caddy_override(manifest["project"])
+    override = paths.project_caddy_override(project)
     if override.exists():
         return override.read_text(), override
     return generate_caddy_config(manifest), None
@@ -122,7 +123,7 @@ def prepare_caddy_config(paths: BoxPaths, manifest: dict[str, Any]) -> None:
     """
     project_name = manifest["project"]
     site_conf = paths.project_caddy_site(project_name)
-    content, override = site_config(paths, manifest)
+    content, override = site_config(paths, project_name, manifest)
     if override is not None:
         log_operation(
             "deploy",

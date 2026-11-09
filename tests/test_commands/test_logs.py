@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import io
 from contextlib import redirect_stderr
+from unittest.mock import patch
 
-from boxmunge.commands.logs import _append_writable_postscript
+import pytest
+
+from boxmunge.commands.logs import _append_writable_postscript, cmd_logs
+from boxmunge.staged_release import STAGING_BASE, STAGING_OVERLAY, slot_dir
 
 
 class TestWritablePostscript:
@@ -78,12 +82,6 @@ class TestWritablePostscript:
 
 
 # ---- which compose project `logs` reads: production, or staging (--staging)
-
-import pytest
-from unittest.mock import patch
-
-from boxmunge.commands.logs import cmd_logs
-from boxmunge.staged_release import STAGING_BASE, STAGING_OVERLAY, slot_dir
 
 
 @pytest.fixture
@@ -170,3 +168,13 @@ def test_planted_slot_is_refused(box, capsys, tmp_path) -> None:
     assert rc == 1
     cap.assert_not_called()
     assert "symbolic link" in capsys.readouterr().err
+
+
+def test_legacy_project_dir_of_that_name_gets_the_rename_hint(box, capsys) -> None:
+    (box.projects / "myapp-staging").mkdir()
+    rc, cap, _ = _run(["myapp-staging"])
+    assert rc == 2
+    cap.assert_not_called()
+    err = capsys.readouterr().err
+    assert "Choose a name without the suffix" in err
+    assert "logs myapp --staging" not in err

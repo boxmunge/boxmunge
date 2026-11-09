@@ -82,8 +82,10 @@ def current_quarantine_cves(
     )
 
 
-def all_currently_quarantining_cves(paths: BoxPaths) -> list[str]:
-    """Union of QUARANTINE-disposition CVE ids across every project on the box.
+def all_currently_quarantining_cves(paths: BoxPaths) -> tuple[list[str], list[str]]:
+    """Union of QUARANTINE-disposition CVE ids across every project on the
+    box, and the projects left out because their state cannot be read
+    (each reported on stderr and in the log).
 
     Used by `--current --host` to suppress every CVE currently blocking any
     project in a single operation. Deduped by CVE id (a CVE quarantining
@@ -92,8 +94,9 @@ def all_currently_quarantining_cves(paths: BoxPaths) -> list[str]:
     ordering for consistent operator UX.
     """
     if not paths.projects.exists():
-        return []
+        return [], []
     seen: dict[str, dict[str, Any]] = {}
+    left_out: list[str] = []
     for proj_dir in sorted(paths.projects.iterdir()):
         if not proj_dir.is_dir() or not (proj_dir / "manifest.yml").exists():
             continue
@@ -103,6 +106,7 @@ def all_currently_quarantining_cves(paths: BoxPaths) -> list[str]:
             report_project_failure("cve-suppress", proj_dir.name, e, paths)
             print(f"  {proj_dir.name}'s quarantine-level findings, if any, are left "
                   f"out of this suppression.", file=sys.stderr)
+            left_out.append(proj_dir.name)
             continue
         for f in findings:
             cve = f["cve_id"]
@@ -124,7 +128,7 @@ def all_currently_quarantining_cves(paths: BoxPaths) -> list[str]:
                 f.get("cve_id", ""),
             ),
         )
-    ]
+    ], left_out
 
 
 def drop_kev_listed(

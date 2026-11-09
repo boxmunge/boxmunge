@@ -38,7 +38,10 @@ def cmd_logs(args: list[str]) -> None:
         min_positional=1, max_positional=2,
     )
     name = parsed.positional[0]
-    if name.endswith(STAGING_SUFFIX):
+    paths = BoxPaths()
+    # A legacy project dir of that name gets the rename hint (from the name
+    # check below); otherwise the name is staging's compose project.
+    if name.endswith(STAGING_SUFFIX) and not (paths.projects / name).is_dir():
         usage_error("logs", f"staging runs as '{name}'; read its logs with: "
                             f"logs {name[:-len(STAGING_SUFFIX)]} --staging")
     project = require_project_name("logs", name)
@@ -51,7 +54,6 @@ def cmd_logs(args: list[str]) -> None:
             usage_error("logs", f"--tail must be a whole number, got {raw_tail!r}")
         tail = int(raw_tail)
 
-    paths = BoxPaths()
     if not paths.project_dir(project).exists():
         print(f"ERROR: Project not found: {project}", file=sys.stderr)
         sys.exit(1)

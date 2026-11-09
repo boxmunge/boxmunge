@@ -1,5 +1,7 @@
 """Tests for boxmunge diff command."""
 import tarfile
+
+import pytest
 from boxmunge.commands.diff_cmd import run_diff
 
 MANIFEST_V1 = """\
@@ -193,3 +195,78 @@ class TestDiffKeepsWhatInstallKeeps:
         _identical_bundle(paths)
         assert run_diff("testapp", paths) == 0
         assert "old.py" in capsys.readouterr().out
+
+
+def _bundle_with(paths, files: dict[str, str]) -> None:
+    staging = paths.root / "tmp_staging" / "testapp"
+    staging.mkdir(parents=True, exist_ok=True)
+    base = {"manifest.yml": MANIFEST_V1,
+            "compose.yml": "services:\n  web:\n    image: nginx\n",
+            "src/app.py": "print('hello')\n"}
+    for rel, text in {**base, **files}.items():
+        (staging / rel).parent.mkdir(parents=True, exist_ok=True)
+        (staging / rel).write_text(text)
+    with tarfile.open(paths.inbox / "testapp-2026-03-31T091500000000.tar.gz", "w:gz") as tar:
+        tar.add(staging, arcname="testapp")
+
+
+class TestDiffRefusesWhatADeployRefuses:
+    @pytest.mark.parametrize("entry", ["caddy.override.conf", "secrets.env"])
+    def test_box_owned_entry_in_the_bundle(self, paths, capsys, entry):
+        _setup_project(paths)
+        _bundle_with(paths, {entry: "x\n"})
+        assert run_diff("testapp", paths) == 1
+        err = capsys.readouterr().err
+        assert "a deploy would refuse this bundle" in err and entry in err
+
+    @pytest.mark.parametrize("named", ["other", "testapp-staging", "../../etc"])
+    def test_manifest_naming_another_project(self, paths, capsys, named):
+        _setup_project(paths)
+        paths.project_caddy_override("testapp").write_text("x\n")
+        _bundle_with(paths, {"manifest.yml": MANIFEST_V1.replace(
+            "project: testapp", f"project: '{named}'")})
+        assert run_diff("testapp", paths) == 1
+        err = capsys.readouterr().err
+        assert "a deploy would refuse this bundle" in err
+        assert repr(named) in err and "'testapp'" in err
+
+    def test_unreadable_compose_names_the_bundle_file(self, paths, capsys):
+        _setup_project(paths)
+        _bundle_with(paths, {"compose.yml": "services: [\n"})
+        assert run_diff("testapp", paths) == 1
+        err = capsys.readouterr().err
+        assert "a deploy would refuse this bundle: cannot read compose.yml" in err
+        assert "upload the bundle again" in err
+        assert "/tmp" not in err and "fix the file by hand" not in err
+
+    def test_missing_compose(self, paths, capsys):
+        _setup_project(paths)
+        staging = paths.root / "tmp_staging" / "testapp"
+        staging.mkdir(parents=True)
+        (staging / "manifest.yml").write_text(MANIFEST_V1)
+        with tarfile.open(paths.inbox / "testapp-2026-03-31T091500000000.tar.gz",
+                          "w:gz") as tar:
+            tar.add(staging, arcname="testapp")
+        assert run_diff("testapp", paths) == 1
+        assert "no compose.yml" in capsys.readouterr().err
+
+
+def test_site_config_reads_the_named_projects_override(paths) -> None:
+    import yaml
+    from boxmunge.caddy import site_config
+    for name in ("testapp", "other"):
+        paths.project_dir(name).mkdir(parents=True, exist_ok=True)
+    paths.project_caddy_override("other").write_text("other's\n")
+    manifest = yaml.safe_load(MANIFEST_V1.replace("project: testapp", "project: other"))
+    content, override = site_config(paths, "testapp", manifest)
+    assert override is None and "other's" not in content
+
+
+def test_content_for_a_data_dir_is_refused_as_a_deploy_would(paths, capsys) -> None:
+    _setup_project(paths)
+    rw = "services:\n  web:\n    image: nginx\n    volumes:\n      - ./uploads:/u\n"
+    (paths.project_dir("testapp") / "compose.yml").write_text(rw)
+    _bundle_with(paths, {"compose.yml": rw, "uploads/seed.png": "x"})
+    assert run_diff("testapp", paths) == 1
+    err = capsys.readouterr().err
+    assert "a deploy would refuse this bundle" in err and "uploads" in err
