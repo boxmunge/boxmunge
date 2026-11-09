@@ -29,6 +29,7 @@ slot_gone() {
     rm "$BOXMUNGE_ROOT/env-a/bin/python"
     printf '%s\n' '#!/usr/bin/env bash' \
         'if [[ "$1" == "-" ]]; then cat >/dev/null; echo "bm_log $BM_LEVEL $BM_MSG" >> "$BOXMUNGE_ROOT/calls"; exit 0; fi' \
+        'if [[ -n "${BM_TITLE:-}" ]]; then echo "notify p=$BM_PRIORITY $BM_TITLE" >> "$BOXMUNGE_ROOT/calls"; exit 0; fi' \
         'printf "%s\n" "$*" >> "$BOXMUNGE_ROOT/calls"' > "$BOXMUNGE_ROOT/env-a/bin/python"
     chmod +x "$BOXMUNGE_ROOT/env-a/bin/python"
     rm -r "$BOXMUNGE_ROOT/env-b"
@@ -85,14 +86,29 @@ expect 1 "1.4.0 is on probation" "an upgrade during a slot-less probation is def
 drop_root
 
 # A rollback that cannot happen fails loudly: the health timer discards the
-# shim's exit status and stderr, so the reason must reach the operational log.
+# shim's exit status and stderr, so the reason reaches the operational log and
+# an alert, once per probation rather than on every five-minute fire.
 slot_gone "$SOON" 2
 run_shim check-probation
-expect 1 "Cannot roll back 1.4.0" "a needed rollback without a target refuses"
-[[ "$(calls)" == *"bm_log error Cannot roll back 1.4.0"* ]] && pass "the refused rollback is logged as an error" \
+expect 1 "1.4.0 failed its probation health check, but cannot be rolled back" "a needed rollback without a target refuses"
+[[ "$(calls)" == *"bm_log error 1.4.0 failed its probation health check, but cannot be rolled back"* ]] \
+    && pass "the refused rollback is logged as an error" \
     || fail "the refused rollback is not in the operational log: $(calls)"
+[[ "$(calls)" == *"notify p=1 boxmunge rollback needed but impossible"* ]] && pass "the refused rollback is alerted" \
+    || fail "the refused rollback is not alerted: $(calls)"
 live_intact "refused rollback"
 probation_left && pass "the probation stays for the operator" || fail "probation removed by a refused rollback"
+rm "$BOXMUNGE_ROOT/calls"
+run_shim check-probation
+expect 1 "cannot be rolled back" "the next fire still refuses"
+[[ "$(calls)" != *"bm_log error"* && "$(calls)" != *notify* ]] && pass "the next fire neither logs nor alerts again" \
+    || fail "the next fire repeated the error or alert: $(calls)"
+# Once the probation ends, a new probation that needs it gets its own alert.
+write_probation "1.4.0" "b" "$EXPIRED"
+run_shim check-probation
+expect 0 "promoted" "the slot-less probation is promoted at expiry"
+[[ ! -e "$BOXMUNGE_ROOT/upgrade-root/rollback-impossible" ]] && pass "promotion clears the once-only marker" \
+    || fail "the once-only marker survived promotion"
 drop_root
 
 # A malformed marker is just as silent under the timer.

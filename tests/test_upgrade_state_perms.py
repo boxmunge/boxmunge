@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import grp
 import os
+import socket
 import stat
 import subprocess
 from pathlib import Path
@@ -76,6 +77,17 @@ def test_a_planted_link_is_not_followed(state, tmp_path):
     assert _mode(victim) == 0o600
     assert "probation.json is not a plain regular file; left as is" in result.stderr
     assert "blocklist.json is not a plain regular file; left as is" in result.stderr
+
+
+def test_a_planted_socket_is_left_alone(state, monkeypatch):
+    """Opening a socket fails (ENXIO, or EOPNOTSUPP on some systems) instead
+    of returning a descriptor: that must not stop the installer."""
+    monkeypatch.chdir(state)  # a relative bind keeps under AF_UNIX's path limit
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.bind("probation.json")
+        result = _run(state.parent)
+    assert result.returncode == 0, result.stderr
+    assert "probation.json is not a plain regular file; left as is" in result.stderr
 
 
 def test_install_sh_no_longer_reowns_the_whole_directory():

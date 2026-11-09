@@ -9,9 +9,13 @@
 # probation.json root:deploy 0600, so every deploy, rollback, restore and
 # backup during probation crashed on it (#107). Owners are left as they are.
 #
-# upgrade-state/ is deploy-writable, so deploy may have put a link or a FIFO
-# at any of these names: each file is opened without following a link or
-# blocking, and only a plain regular file is changed, through its descriptor.
+# upgrade-state/ is deploy-writable, so deploy may have put a link, a FIFO or
+# a socket at any of these names: each file is opened without following a
+# link or blocking, and only a plain regular file is changed, through its
+# descriptor. Anything else is left as is with a note, never a failure: a
+# failed install.sh blocklists the release. The same checks as
+# boxmunge.fs_nofollow.open_regular_nofollow (installed code may not exist
+# yet when this runs); keep the two in step.
 set -euo pipefail
 
 BOXMUNGE_ROOT="${BOXMUNGE_ROOT:-/opt/boxmunge}"
@@ -29,7 +33,8 @@ for name in ("active-slot", "blocklist.json", "probation.json"):
     except FileNotFoundError:
         continue
     except OSError as e:
-        if e.errno != errno.ELOOP:
+        # ELOOP: a link. ENXIO (Linux) or EOPNOTSUPP (BSD): a socket.
+        if e.errno not in (errno.ELOOP, errno.ENXIO, errno.EOPNOTSUPP):
             raise
         print(f"  {state}/{name} is not a plain regular file; left as is", file=sys.stderr)
         continue

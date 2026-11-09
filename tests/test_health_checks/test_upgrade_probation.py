@@ -49,6 +49,7 @@ def test_warns_when_expired_and_not_promoted(box):
     assert "expired 75 h ago and was not promoted" in check.detail
     assert f"sudo {box.bin / 'boxmunge-upgrade'} check-probation" in check.detail
     assert f"sudo rm {box.probation}" in check.detail
+    assert "`backup <project>` from the deploy shell" in check.detail
 
 
 def test_never_errors_so_probation_cannot_roll_back_on_it(box):

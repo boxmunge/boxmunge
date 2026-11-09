@@ -59,7 +59,7 @@ class TestUnreadableMarker:
         assert "WARNING" in err and "Cannot end the upgrade probation early" in err
         assert "Cannot read" not in err  # said once, as a warning, not also as an error
         assert str(paths.probation) in err and "Permission denied" in err
-        assert f"sudo chmod 660 {paths.probation}" in err
+        assert f"sudo rm {paths.probation}" in err
         paths.probation.chmod(0o600)
         assert paths.probation.exists()
         log = (paths.logs / "boxmunge.log").read_text()

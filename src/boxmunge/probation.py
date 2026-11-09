@@ -41,8 +41,8 @@ def clear_probation_if_active(paths: BoxPaths, command: str) -> None:
             "upgrade",
             f"Cannot end the upgrade probation early: {e}. The {command} carries on; "
             "until the probation expires, a failing health check can still roll the "
-            f"platform back. To let {command} end it, run as root: "
-            f"sudo chown root:deploy {paths.probation} && sudo chmod 660 {paths.probation}",
+            "platform back. To end it now, accepting the release, run as root: "
+            f"sudo rm {paths.probation}",
             paths,
         )
         return

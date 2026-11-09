@@ -59,5 +59,6 @@ def check_upgrade_probation(paths: BoxPaths, *, now: datetime | None = None) -> 
     return HealthCheck(
         NAME, "warn",
         f"the probation of {version} expired {_ago(overdue)} ago and was not promoted. "
-        f"`sudo {shim} check-probation` shows why; to accept {version} now, "
-        f"`sudo rm {paths.probation}`")
+        f"`sudo {shim} check-probation` shows why. To accept {version} now, "
+        f"`sudo rm {paths.probation}`, or run `backup <project>` from the deploy "
+        "shell, which ends a probation the deploy user can read")

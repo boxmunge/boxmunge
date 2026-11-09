@@ -111,6 +111,8 @@ as_deploy() { runuser -u "${DEPLOY_USER}" -- "$@"; }
 # entries and the project overrides: the files the rewrite edits, and only
 # regular ones. Not all of caddy/sites, which may hold an operator's TLS key
 # that deploy cannot read; grep failing on that blocklisted the upgrade (#105).
+# A snippet in a subdirectory that a *.conf imports is not checked: boxmunge
+# writes no such file, and the rewrite does not edit one either.
 sites() {
     [[ -d "${SITES}" ]] || return 0
     as_deploy python3 -I -c "${REWRITE}" "${SITES}" "${JOURNAL}"

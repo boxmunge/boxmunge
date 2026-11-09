@@ -30,7 +30,7 @@ for standby in absent half-built inflight; do
     write_probation "9.9.9" "b" "$SOON"
     for fire in 1 2; do
         run_shim check-probation
-        expect 1 "Cannot roll back 9.9.9: env-b is not a working venv" "$standby standby: check-probation fire $fire refuses the rollback"
+        expect 1 "9.9.9 failed its probation health check, but cannot be rolled back" "$standby standby: check-probation fire $fire refuses the rollback"
         live_intact "$standby standby, fire $fire"
     done
     run_shim target 9.9.10

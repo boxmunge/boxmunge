@@ -51,9 +51,9 @@ remove_slot() {
     local slot="$1"
     require_slot "$slot" "slot removal"
     [[ "$slot" != "$ACTIVE_SLOT" && "$(readlink "$BOXMUNGE_ROOT/env-active" 2>/dev/null)" != "$BOXMUNGE_ROOT/env-$slot" ]] \
-        || die "Refusing to remove env-$slot: it is the live slot"
+        || die_logged "Refusing to remove env-$slot: it is the live slot"
     slot_works "$ACTIVE_SLOT" \
-        || die "Refusing to remove env-$slot: the live slot env-$ACTIVE_SLOT is not a working venv; inspect both as supervisor"
+        || die_logged "Refusing to remove env-$slot: the live slot env-$ACTIVE_SLOT is not a working venv; inspect both as supervisor"
     rm -rf "${BOXMUNGE_ROOT:?}/env-$slot"
 }
 
