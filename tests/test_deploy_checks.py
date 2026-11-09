@@ -215,8 +215,18 @@ def test_staging_data_another_uid_owns_is_refused_whatever_staging_ran_as(
         {"app": _svc({"type": "bind", "source": "/p/shop/data-staging", "target": "/d"})},
         {"app": DEFAULT}, 0)
     assert len(problems) == 1
-    assert "/p/shop/data-staging (uid 0)" in problems[0]
+    assert "staging's own data in /p/shop/data-staging belongs to another user" in problems[0]
     assert "boxmunge data chown shop app 10001:10001 --staging" in problems[0]
+    assert "boxmunge unstage shop" in problems[0] and "rm -rf /p/shop/data-staging" in problems[0]
+
+
+def test_a_leftover_staging_volume_is_named_with_what_removes_it(paths, monkeypatch) -> None:
+    monkeypatch.setattr(dc, "_owner_uid", lambda target, model, mount, offset: 0)
+    problems = dc.staging_owner_problems(
+        staging_release_target(paths, "shop"), {"volumes": {"db": {}}},
+        {"app": _svc("db:/db")}, {"app": DEFAULT}, 0)
+    assert "volume shop-staging_db" in problems[0]
+    assert "docker volume rm shop-staging_db" in problems[0]
 
 
 def test_staging_data_its_user_owns_or_not_yet_made_passes(paths, monkeypatch) -> None:

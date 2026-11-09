@@ -171,7 +171,8 @@ A failed snapshot refuses and changes nothing. --no-snapshot goes on without
 one: a rollback of the next deploy then cannot restore data. A project with
 backup.type: none has no snapshot to take, and says so. --staging gives
 staging's copies alone to <uid>:<gid> (no snapshot; production unchanged),
-as a stage refused for their owner asks.""",
+as a stage refused for their owner asks (a stage with staging.copy_data
+gives the stores it copies to the staged users itself).""",
     "inbox": """\
 Usage: boxmunge inbox [project] [--json]
        boxmunge inbox clean [project] [--yes]

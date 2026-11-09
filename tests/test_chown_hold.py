@@ -71,8 +71,8 @@ def test_a_failed_release_after_a_start_is_said_and_kept_for_the_next(
     def boom(*a, **k):
         raise DockerError("daemon not responding")
     monkeypatch.setattr("boxmunge.restart_hold.set_restart_policy", boom)
-    chown_hold.release_after_start(paths, "shop", None, "container-update")
-    assert "could not be given back" in capsys.readouterr().err
+    chown_hold.after_start(paths, "shop", None, "container-update")
+    assert "could not be undone" in capsys.readouterr().err
     assert chown_hold.KEY in read_state(paths.project_deploy_state("shop"))
 
 

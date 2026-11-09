@@ -2,7 +2,8 @@
 
 data chown dumps a stopped backup service's data this way (backup_offline).
 The one-off runs as the service's user over its mounts, sees no network but
-loopback, publishes nothing, and is gone afterwards, also when it overruns.
+loopback, publishes nothing, runs none of the service's lifecycle hooks, and
+is gone afterwards, also when it overruns.
 The start checks are stood in for: they are the unit tier's.
 """
 import subprocess
@@ -27,7 +28,12 @@ services:
     cap_drop: [ALL]
     networks: [inner]
     ports: ["127.0.0.1::8080"]
-    volumes: ["./data:/data:ro"]
+    volumes: ["./data:/data:ro", "./hooked:/hooked"]
+    post_start:
+      - command: ["sh", "-c", "touch /hooked/post_start"]
+        user: root
+    pre_stop:
+      - command: ["sh", "-c", "touch /hooked/pre_stop"]
 networks:
   inner: {}
 """
@@ -40,6 +46,8 @@ def project(tmp_path):
     project_dir = paths.project_dir(PROJECT)
     (project_dir / "data").mkdir(parents=True)
     (project_dir / "data" / "rows").write_text("ROW-1\n")
+    (project_dir / "hooked").mkdir()
+    (project_dir / "hooked").chmod(0o777)
     (project_dir / "compose.yml").write_text(COMPOSE)
     (project_dir / "compose.boxmunge.yml").write_text("services:\n  app: {}\n")
     with patch.object(backup_offline, "check_start"):
@@ -63,6 +71,8 @@ def test_the_dump_reads_the_data_as_the_service_with_no_network(project) -> None
     assert lines[:2] == ["ROW-1", "10002"]
     assert "eth0" not in lines
     assert _left() == ""
+    # The service's lifecycle hooks (a root post_start over the data) never ran.
+    assert list((project.project_dir(PROJECT) / "hooked").iterdir()) == []
 
 
 def test_an_overrun_leaves_no_one_off_behind(project) -> None:

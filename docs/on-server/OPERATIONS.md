@@ -911,21 +911,24 @@ the old user owns, the deploy is refused until `data chown <project> <service> 1
 cannot restore data), and a project with `backup.type: none` skips it, saying so. When the
 backup service is not running (the project is CVE-quarantined, paused or stopped by the health
 monitor, or the service is stopped), its data is at rest, and the dump runs in a one-off
-container of the service's image, as its user, over its mounts, with no network and no ports,
-only for the dump (`sh` is its entrypoint, so the service itself never starts); the output says
-so. A dump that needs its service running (`pg_dump`) cannot run that way: the refusal then names
-the state's own way out first (`security resume`, `resume`, `recover`, or a deploy that starts
-the service), and `--no-snapshot` only last. Then it stops the service, gives its read-write
+container of the image the service's stopped container runs, as its user, over its mounts, with
+no network, no ports, no stdin and none of its `post_start`/`pre_stop` hooks, only for the dump
+(`sh` is its entrypoint, so the service itself never starts); the output says so. A dump that
+needs its service running (`pg_dump`) cannot run that way: the refusal then names the state's own
+way out first (an open install's own options, `security resume`, `resume`, `recover`, or a deploy
+that starts the service), and `--no-snapshot` only last. Then it stops the service, gives its read-write
 binds and named volumes, and staging's own copies of them (`<entry>-staging`, the
 `<project>-staging` volumes), to the new user, records the user and regenerates the compose
 overlay with it, so whatever starts the service next runs it as the new user. It leaves the
 service stopped, with its restart policy held at "no" (as a pause holds a project's) until
 boxmunge starts it again, so a reboot does not bring it back first: deploy straight after. While
 staging has a container of the service, `data chown` refuses and names `unstage <project>` (it
-keeps the copies). A stage refuses a service whose user does not own staging's data (its copies
-outlive stages, and the data copy brings production's owners): `data chown <project> <service>
-<uid>:<gid> --staging` gives staging's copies alone to that user, changing nothing of
-production's. A start that would run the overlay or a container as it was before the users
+keeps the copies). A stage with `staging.copy_data` gives each store it copies to the user the
+staged release runs its service as, so staging tries a new user before production's data changes
+hands. A stage refuses a service whose user does not own the rest of staging's data (stores the
+copy did not fill outlive stages): `data chown <project> <service> <uid>:<gid> --staging` keeps
+that data, giving staging's copies alone to that user and changing nothing of production's; or
+`unstage <project>` (which keeps them) and remove them as the refusal says, then stage again. A start that would run the overlay or a container as it was before the users
 record changed (the overlay could not be regenerated, or an install was open) is refused, naming
 `prod-deploy`. When the stopped service is the backup
 service, that deploy's own dump has nothing to run in, so its pre-deploy step uses the `prechown`

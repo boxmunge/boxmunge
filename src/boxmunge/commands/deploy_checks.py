@@ -238,10 +238,10 @@ def user_change_problems(paths: BoxPaths, target: ReleaseTarget, model: dict[str
 def staging_owner_problems(target: ReleaseTarget, model: dict[str, Any],
                            services: dict[str, dict], users: dict[str, ServiceUser],
                            offset: int) -> list[str]:
-    """Staging's stores as its start will find them (after the data copy):
-    a numeric non-root user over a store another uid owns. Staging keeps
-    its copies between stages, and data chown or the copy may have given
-    production's data to another user meanwhile, so the owner itself is
+    """Staging's stores as its start will find them (after the data copy,
+    whose stores go to their users: staging_copy_owner): a numeric non-root
+    user over a store another uid owns. Staging keeps its stores between
+    stages and records nothing of who owns them, so the owner itself is
     checked, whatever staging last ran as."""
     problems = []
     for name, new in sorted(users.items()):
@@ -249,21 +249,31 @@ def staging_owner_problems(target: ReleaseTarget, model: dict[str, Any],
         data = persistent(service_mounts(services.get(name) or {}))
         if not data or not (after.isascii() and after.isdigit()):
             continue
-        wrong = [f"{m.source or m.target} (uid {uid})" for m in data
-                 if (uid := _owner_uid(target, model, m, offset)) not in (None, int(after))]
-        if not wrong:
-            continue
-        ids = new.owner_ids()
-        spec = f"{ids[0]}:{ids[1]}" if ids else f"{after}:<gid>"
-        problems.append(
-            f"service {name} runs as {after} in staging ({describe(new)}), but staging's "
-            f"data in {', '.join(wrong)} belongs to another user, so its files would be "
-            f"unwritable. Give staging's copies to it with `boxmunge data chown "
-            f"{target.project} {name} {spec} --staging`, then stage again (with "
-            f"staging.copy_data, the copy brings production's owners: run it without "
-            f"--staging, which gives production's data to it too, as a deploy of this "
-            f"release will need)")
+        wrong = [m for m in data
+                 if _owner_uid(target, model, m, offset) not in (None, int(after))]
+        if wrong:
+            problems.append(_staging_owner_problem(target, model, name, new, wrong))
     return problems
+
+
+def _staging_owner_problem(target: ReleaseTarget, model: dict[str, Any], name: str,
+                           new: ServiceUser, wrong: list[Mount]) -> str:
+    ids = new.owner_ids()
+    spec = f"{ids[0]}:{ids[1]}" if ids else f"{new.runs_as()}:<gid>"
+    where = [str(m.source) if m.kind == "bind" else
+             f"volume {volume_name(model, target.compose_project, str(m.source))}"
+             for m in wrong]
+    removes = "; ".join(
+        f"rm -rf {str(m.source)}" if m.kind == "bind" else
+        f"docker volume rm {volume_name(model, target.compose_project, str(m.source))}"
+        for m in wrong)
+    return (f"service {name} runs as {new.runs_as()} in staging ({describe(new)}), but "
+            f"staging's own data in {', '.join(where)} belongs to another user (the stage "
+            f"did not copy it from production), so its files would be unwritable. Keep it, "
+            f"giving it to that user with `boxmunge data chown {target.project} {name} "
+            f"{spec} --staging` (production is not changed); or discard it: `boxmunge "
+            f"unstage {target.project}` (which keeps it), then as the supervisor: "
+            f"{removes}. Then stage again")
 
 
 def unreadable_entries(source: str) -> list[str]:

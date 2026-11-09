@@ -23,6 +23,7 @@ from boxmunge.docker_containers import running_by_service
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.paths import BoxPaths
 from boxmunge.pending_snapshot import age, pending_for_live
+from boxmunge.release_txn import open_install_reason
 
 NO_SNAPSHOT_COST = "a rollback of the next deploy then cannot restore data"
 
@@ -50,7 +51,14 @@ def _rw_sharer(services: dict, service: str, mounts: list) -> str | None:
 
 
 def _why_stopped(paths: BoxPaths, project: str, backup_service: str) -> tuple[str, str]:
-    """(why the backup service is not running, the state's own way out)."""
+    """(why the backup service is not running, the state's own way out). An
+    open install comes first: it refuses every start, the one-off dump's
+    included, until its own ways out."""
+    install = open_install_reason(paths, project)
+    if install is not None:
+        return (install,
+                "take one of that install's ways out first (abandoning it leaves the "
+                "containers and data as they are), then run data chown again")
     block = is_blocked(project, paths)
     if block is not None and block.reason is BlockReason.QUARANTINED:
         return ("the project is CVE-quarantined",
@@ -86,7 +94,7 @@ def _take(paths: BoxPaths, project: str, manifest: dict, compose_file: Path | No
     why, way_out = _why_stopped(paths, project, backup_service)
     print(f"  The backup service {backup_service} is not running ({why}): taking the "
           f"snapshot from its data at rest, in a one-off container of its image run "
-          f"offline (no network, no ports) only for the dump...")
+          f"offline (no network, no ports, none of its hooks) only for the dump...")
     rc, name = take_snapshot(project, paths, BackupKind.PRECHOWN, manifest, compose_file,
                              offline=True)
     if rc == 0 and name is not None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
+from boxmunge import chown_hold
 from boxmunge.commands import backup_cmd, chown_snapshot, data_cmd
 from boxmunge.commands.chown_staging import StagingCopy
 from boxmunge.pending_snapshot import pending
@@ -63,8 +64,13 @@ def test_a_failed_regeneration_says_the_data_was_changed_and_to_deploy(
     def boom(*a, **k):
         raise ComposeError("cannot resolve compose.yml")
     monkeypatch.setattr(data_cmd, "prepare_compose_override", boom)
-    with pytest.raises(data_cmd.DataError, match="given to its new user.*prod-deploy shop"):
+    with pytest.raises(data_cmd.DataError, match="given to 10002:10002.*prod-deploy shop.*"
+                       "--staging"):
         data_cmd.chown_locked(paths, "shop", "app", (10002, 10002))
+    from boxmunge.pause import write_paused_state
+    write_paused_state("shop", paths, reason="maintenance")
+    with pytest.raises(data_cmd.DataError, match="boxmunge resume shop"):
+        data_cmd.chown_locked(paths, "shop", "app", (10002, 10002), no_snapshot=True)
 
 
 def test_the_restart_policy_is_held(paths, monkeypatch) -> None:
@@ -92,7 +98,7 @@ def test_a_stopped_backup_service_is_dumped_offline_and_paired(
     data_cmd.chown_locked(paths, "shop", "app", (10002, 10002))
     out = capsys.readouterr().out
     assert "is not running (the project is CVE-quarantined)" in out
-    assert "offline (no network, no ports) only for the dump" in out
+    assert "offline (no network, no ports, none of its hooks) only for the dump" in out
     assert calls[0] == "dump-offline"
     [snap] = _snapshots(paths)
     entry = pending(paths, "shop")
@@ -104,6 +110,7 @@ def test_a_stopped_backup_service_is_dumped_offline_and_paired(
     ("paused", "paused", "boxmunge resume shop"),
     ("monitor", "health monitor stopped", "boxmunge recover shop"),
     ("stopped", "app is stopped", "prod-deploy shop"),
+    ("installing", "an install is open", "that install's ways out"),
 ])
 def test_a_dump_that_cannot_run_offline_names_the_states_way_out_first(
         paths, monkeypatch, system_container, capsys, state, why, way_out) -> None:
@@ -118,12 +125,19 @@ def test_a_dump_that_cannot_run_offline_names_the_states_way_out_first(
         write_paused_state("shop", paths, reason="maintenance")
     elif state == "monitor":
         monkeypatch.setattr(chown_snapshot, "is_monitor_stopped", lambda p, paths_: True)
+    elif state == "installing":
+        # Review of #144: the install refuses the one-off, and resume or
+        # recover with it; its own ways out come first.
+        _quarantine(paths)
+        monkeypatch.setattr(chown_snapshot, "open_install_reason", lambda p, n: (
+            "an install is open at phase installed: rerun 'prod-deploy shop --ref r2'"))
     _dumping(paths, monkeypatch, calls, fail=True)
     assert data_cmd.run_data_chown(paths, "shop", "app", "10002:10002") == 1
     err = capsys.readouterr().err
     assert why in err and way_out in err
     assert err.index(way_out) < err.index("--no-snapshot")
     assert "Only if you cannot" in err
+    assert state != "installing" or "security resume" not in err
     assert calls == ["dump-offline"] and pending(paths, "shop") is None
 
 
@@ -234,3 +248,43 @@ def test_a_staging_volume_not_labelled_as_staging_s_is_refused(paths, monkeypatc
     monkeypatch.setattr(chown_staging, "volume_labels", lambda n: {})
     with pytest.raises(chown_staging.StagingChownRefused, match="not labelled"):
         chown_staging.staging_copies(paths, "shop", "app", [_mount("volume", "cache")])
+
+
+def _paired(paths, monkeypatch):
+    from boxmunge.pending_snapshot import record_pending
+    paths.deploy_state.mkdir(parents=True, exist_ok=True)
+    write_state(paths.project_deploy_state("shop"), {"current_ref": "shop-r1"})
+    paths.project_backups("shop").mkdir(parents=True)
+    (paths.project_backups("shop") / "snap.tar.gz.age").write_bytes(b"x")
+    record_pending(paths, "shop", "snap.tar.gz.age", "data chown", "app", ["shop-app-1"])
+
+
+def test_stop_recover_stop_does_not_pass_off_a_stale_pairing(paths, monkeypatch) -> None:
+    """Review of #144: the first stop noted shop-app-1 as removed unrun;
+    recover recreated it under the same name and it ran and wrote; a second
+    stop removed it again. Its name in the note must not hide that run."""
+    from datetime import datetime, timezone
+    from boxmunge import docker_containers
+    from boxmunge.docker_containers import StartState
+    from boxmunge.pending_snapshot import note_removal, pending, pending_for_live
+    _paired(paths, monkeypatch)
+    long_ago = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(docker_containers, "start_states",
+                        lambda p: {"shop-app-1": StartState("app", False, long_ago)})
+    note_removal(paths, "shop")                          # the first critical stop
+    assert pending(paths, "shop") is not None
+    monkeypatch.setattr(docker_containers, "start_states", lambda p: {
+        "shop-app-1": StartState("app", True, datetime.now(timezone.utc))})
+    note_removal(paths, "shop")                          # recover ran it; the second stop
+    monkeypatch.setattr(docker_containers, "start_states", lambda p: {})
+    assert pending(paths, "shop") is None
+    assert pending_for_live(paths, "shop") is None
+
+
+def test_a_boxmunge_start_of_the_service_drops_the_pairing(paths, monkeypatch) -> None:
+    from boxmunge.pending_snapshot import pending
+    _paired(paths, monkeypatch)
+    chown_hold.after_start(paths, "shop", ["db"], "restore")
+    assert pending(paths, "shop") is not None
+    chown_hold.after_start(paths, "shop", ["app", "db"], "restore")
+    assert pending(paths, "shop") is None

@@ -19,7 +19,7 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING
 
-from boxmunge import restart_hold
+from boxmunge import pending_snapshot, restart_hold
 from boxmunge.docker import set_restart_policy
 from boxmunge.docker_containers import project_containers
 from boxmunge.docker_run import DockerError
@@ -85,16 +85,21 @@ def release(paths: BoxPaths, project: str, services: Collection[str] | None) -> 
     _write(paths, project, {n: v for n, v in held.items() if n not in mine})
 
 
-def release_after_start(paths: BoxPaths, project: str, services: Collection[str] | None,
-                        component: str) -> None:
-    """release, for a start that has just run: production is up by now, so
-    a failure is said loudly and left for the next start to retry, not
-    turned into a failed start."""
+def after_start(paths: BoxPaths, project: str, services: Collection[str] | None,
+                component: str) -> None:
+    """What data chown left for a service, once boxmunge has started it
+    (`services`; None: every service): its restart policies go back, and a
+    snapshot pending for the next deploy no longer holds the data that
+    deploy would dump (pending_snapshot). Production is up by now, so a
+    failure is said loudly and left for the next start to retry, not turned
+    into a failed start."""
     try:
+        pending_snapshot.drop_if_started(paths, project,
+                                         None if services is None else set(services))
         release(paths, project, services)
     except (DockerError, StateError) as e:
-        message = (f"{project}: started, but the restart policies data chown held at "
-                   f"\"no\" could not be given back: {e}. The next start tries again; "
-                   f"until then a reboot does not restart those containers.")
+        message = (f"{project}: started, but what data chown left for it could not be "
+                   f"undone: {e}. The next start tries again; until then a reboot may not "
+                   f"restart the containers it held at restart policy \"no\".")
         print(f"ERROR: {message}", file=sys.stderr)
         log_error(component, message, paths, project=project)

@@ -94,5 +94,6 @@ def stale_overlay_problem(paths: BoxPaths, project: str) -> str | None:
     return (f"{overlay.name} does not run {', '.join(wrong)}: the users record changed "
             f"after it was generated (data chown writes the record), so a start would "
             f"run the old user over data the new one owns. Run `prod-deploy {project}`, "
-            f"which generates it again (`resume {project}` or `recover {project}` when "
-            f"it is paused or stopped by the health monitor)")
+            f"which generates it again (`resume {project}`, `recover {project}` or "
+            f"`security resume {project}` when it is paused, stopped by the health "
+            f"monitor or CVE-quarantined)")

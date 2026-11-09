@@ -162,7 +162,7 @@ def adopt_locked(paths: BoxPaths, project: str, service: str, path: str, name: s
     target, create = _prepare_target(project, name)
     stopped = _running(project, service)
     if stopped:
-        check_containers_start(paths, project, component="data-adopt")
+        check_containers_start(paths, project, stopped, component="data-adopt")
     if create:
         _run(["docker", "volume", "create", *compose_volume_labels(project, name), target],
              capture=True)
@@ -225,7 +225,19 @@ def _chown_mount(paths: BoxPaths, project: str, model: dict, m, ids: tuple[int, 
     return True
 
 
-def _regenerate_overlay(paths: BoxPaths, project: str, manifest: dict) -> None:
+def _regenerates(paths: BoxPaths, project: str) -> str:
+    """The command that regenerates the overlay from the state the project is in."""
+    block = is_blocked(project, paths)
+    if block is not None and block.reason is BlockReason.PAUSED:
+        return f"`boxmunge resume {project}`"
+    if block is not None and block.reason is BlockReason.QUARANTINED:
+        return (f"a deploy of a fixed release, or `boxmunge security resume {project}` once "
+                f"its images are clean")
+    return f"`prod-deploy {project}`"
+
+
+def _regenerate_overlay(paths: BoxPaths, project: str, manifest: dict, service: str,
+                        ids: tuple[int, int]) -> None:
     """The overlay replays the record only when it is rendered: render it
     now, so every start from here on (container-update, restore, a staging
     copy's restart, an upgrade) runs the new user. While an install is
@@ -237,10 +249,12 @@ def _regenerate_overlay(paths: BoxPaths, project: str, manifest: dict) -> None:
     try:
         prepare_compose_override(paths, manifest, component="data-chown")
     except (ComposeError, OSError, ValueError, DockerError, BindSourceError) as e:
-        raise DataError(f"the data was given to its new user and the user recorded, but "
-                        f"regenerating the compose overlay failed: {e}. Every start but a "
-                        f"deploy is refused until it is regenerated: fix the cause and "
-                        f"run `prod-deploy {project}`") from e
+        raise DataError(f"{service}'s data was given to {ids[0]}:{ids[1]} and the user "
+                        f"recorded, but regenerating the compose overlay failed: {e}. Every "
+                        f"start that does not regenerate it is refused until then: fix the "
+                        f"cause and run {_regenerates(paths, project)}. Staging's copies "
+                        f"were not given to the new user: then run `boxmunge data chown "
+                        f"{project} {service} {ids[0]}:{ids[1]} --staging`") from e
 
 
 def _hold_restarts(paths: BoxPaths, project: str, service: str) -> None:
@@ -309,7 +323,7 @@ def chown_locked(paths: BoxPaths, project: str, service: str, ids: tuple[int, in
     image_user = users[service].image_user if service in users else ""
     users[service] = ServiceUser(f"{ids[0]}:{ids[1]}", SOURCE_CHOWN, image_user)
     write_users(paths, project, users)
-    _regenerate_overlay(paths, project, manifest)
+    _regenerate_overlay(paths, project, manifest, service, ids)
     try:
         staged = chown_staging_copies(paths, project, copies, ids)
     except StagingChownRefused as e:

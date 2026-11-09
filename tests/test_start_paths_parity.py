@@ -34,6 +34,10 @@ PROD = ["compose.yml", "compose.boxmunge.yml"]
 RENDERS = "renders the overlay from the record first"
 DEPLOYS = "a deploy or stage: writes the overlay and the record together"
 GUARDED = "renders nothing: refused while the overlay or containers are stale"
+# lift_quarantine renders nothing itself: `security resume` and the scan's
+# lift (quarantine_lift) render first, and a deploy's lift (quarantine_gate)
+# runs inside that deploy, which wrote the overlay with the record.
+LIFTS = "renders nothing itself: every caller renders first or is a deploy"
 CALLERS = {
     ("commands/deploy.py", "_start_and_verify"): DEPLOYS,
     ("legacy_stage_ops.py", "finish_apply"): DEPLOYS,
@@ -43,7 +47,7 @@ CALLERS = {
     ("commands/recover_cmd.py", "recover_locked"): RENDERS,
     ("commands/upgrade_steps.py", "_restart_locked"): RENDERS,
     ("userns/bringup.py", "_project"): RENDERS,
-    ("cve/quarantine.py", "lift_quarantine"): RENDERS,
+    ("cve/quarantine.py", "lift_quarantine"): LIFTS,
     ("container_update.py", "_recreate"): GUARDED,
     ("commands/restore.py", "_up"): GUARDED,
     ("production_stopped.py", "start_stopped"): GUARDED,
@@ -65,6 +69,25 @@ def _callers() -> set[tuple[str, str]]:
                         "compose_up_checked", "start_containers_checked"):
                     found.add((str(path.relative_to(SRC)), fn.name))
     return found
+
+
+def test_every_lift_is_rendered_for_or_a_deploys() -> None:
+    callers = {}
+    for path in SRC.rglob("*.py"):
+        for fn in ast.walk(ast.parse(path.read_text())):
+            if isinstance(fn, ast.FunctionDef) and any(
+                    isinstance(n, ast.Call) and getattr(n.func, "id", None) == "lift_quarantine"
+                    for n in ast.walk(fn)):
+                callers[(str(path.relative_to(SRC)), fn.name)] = ast.unparse(fn)
+    # restore_from_quarantine's own call starts nothing (compose_files=[]: a
+    # paused project stays down); it renders, then _start lifts.
+    assert set(callers) == {("commands/quarantine_lift.py", "restore_from_quarantine"),
+                            ("commands/quarantine_lift.py", "_start"),
+                            ("commands/quarantine_gate.py", "lift_after_deploy")}
+    restore = callers[("commands/quarantine_lift.py", "restore_from_quarantine")]
+    assert "compose_files=[]" in restore
+    assert restore.index("prepare_compose_override") < restore.index("_start(")
+    assert "txn=txn" in callers[("commands/quarantine_gate.py", "lift_after_deploy")]
 
 
 def test_every_start_is_placed() -> None:
@@ -154,15 +177,34 @@ def test_a_start_that_renders_nothing_is_refused_over_a_stale_overlay(stale, sta
     up.assert_not_called()
 
 
-def test_a_docker_start_of_containers_created_as_the_old_user_is_refused(
-        stale, monkeypatch) -> None:
-    from boxmunge.compose_guard import start_containers_checked
-    paths, _up, start = stale
+@pytest.fixture
+def created(stale, monkeypatch):
+    """app's stopped container was created as 10001; db's as its image's user."""
+    from boxmunge.docker_containers import ProjectContainer
     monkeypatch.setattr(docker_containers, "container_bind_sources", lambda p: [])
     monkeypatch.setattr(docker_containers, "container_users",
                         lambda p: {"app": "10001:10001", "db": "postgres"})
+    monkeypatch.setattr(docker_containers, "project_containers", lambda p: [
+        ProjectContainer(name=f"{NAME}-{svc}-1", service=svc, image_id="sha256:x",
+                         repo_digests=(), running=False, health=None, oneoff=False,
+                         exit_code=0, restart_policy="always") for svc in ("app", "db")])
     monkeypatch.setattr("boxmunge.bind_sources.read_record", lambda p: {"sources": {}})
     monkeypatch.setattr("boxmunge.bind_sources.check_sources", lambda *a: None)
+    return stale
+
+
+def test_a_docker_start_of_containers_created_as_the_old_user_is_refused(created) -> None:
+    from boxmunge.compose_guard import start_containers_checked
+    paths, _up, start = created
     with pytest.raises(ComposeRefused, match="created before the users record changed"):
         start_containers_checked(paths, NAME, [f"{NAME}-app-1"], component="data-adopt")
     start.assert_not_called()
+
+
+def test_a_docker_start_of_another_services_containers_goes_on(created) -> None:
+    """Review of #144: after app was chowned, starting db (a staging copy's
+    restart, a data adopt) was refused too, and paged production down."""
+    from boxmunge.compose_guard import start_containers_checked
+    paths, _up, start = created
+    start_containers_checked(paths, NAME, [f"{NAME}-db-1"], component="stage")
+    start.assert_called_once_with([f"{NAME}-db-1"])

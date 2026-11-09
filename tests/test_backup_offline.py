@@ -19,11 +19,13 @@ def run(paths, monkeypatch):
     monkeypatch.setattr(backup_offline, "resolve_deployed_config",
                         lambda *a, **k: {"services": {"app": {"image": "shop-app:1"}}})
     monkeypatch.setattr(backup_offline, "absent_images", lambda images: [])
+    monkeypatch.setattr(backup_offline, "project_containers", lambda p: seen["containers"])
+    seen["containers"] = []
     monkeypatch.setattr(backup_offline, "_run",
                         lambda cmd, **k: seen["removed"].append(cmd[-1]))
 
     def fake_run(cmd, **kwargs):
-        seen["cmd"] = cmd
+        seen["cmd"], seen["stdin"] = cmd, kwargs.get("stdin")
         seen["overlay"] = open(cmd[cmd.index("-f", cmd.index("compose.boxmunge.yml")) + 1]
                                ).read()
         if seen.get("timeout"):
@@ -45,6 +47,22 @@ def test_the_dump_runs_once_offline_as_the_service_without_starting_it(paths, ru
     assert "-u" not in tail and "--user" not in tail      # the service's own user
     assert "network_mode: none" in run["overlay"]
     assert "networks: !reset null" in run["overlay"] and "ports: !reset []" in run["overlay"]
+    # A post_start hook would run, as whatever user it names, over the data.
+    assert "post_start: !reset []" in run["overlay"] and "pre_stop: !reset []" in run["overlay"]
+    assert "image:" not in run["overlay"]
+    assert run["stdin"] == subprocess.DEVNULL
+
+
+def test_the_stopped_containers_image_is_the_one_run(paths, run, monkeypatch) -> None:
+    """Its name may point at a newer image since; the stopped container's
+    is the one that wrote the data, and is present by definition."""
+    from boxmunge.docker_containers import ProjectContainer
+    run["containers"] = [ProjectContainer(
+        name="shop-app-1", service="app", image_id="sha256:" + "a" * 64, repo_digests=(),
+        running=False, health=None, oneoff=False, exit_code=0, restart_policy="always")]
+    monkeypatch.setattr(backup_offline, "absent_images", lambda images: pytest.fail("looked"))
+    backup_offline.run_offline(paths, "shop", "app", "dump", timeout=10, component="c")
+    assert f'image: "sha256:{"a" * 64}"' in run["overlay"]
 
 
 def test_a_refused_start_check_is_a_backup_error(paths, run, monkeypatch) -> None:

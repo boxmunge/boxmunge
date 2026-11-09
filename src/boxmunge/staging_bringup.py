@@ -31,7 +31,8 @@ from boxmunge.run_as import RunAsError, ServiceUser, default_user_hint
 from boxmunge.userns.offset import RemapError, remap_offset
 from boxmunge.security_warn import warn_off_services, warn_writable_state
 from boxmunge.staged_release import SlotError, release_dir, slot_dir, staging_target
-from boxmunge.staging_copy_plan import StagingDataError
+from boxmunge.staging_copy_owner import give_copies
+from boxmunge.staging_copy_plan import CopyPlan, StagingDataError
 from boxmunge.staging_data import copy_production_data, prepare_destinations
 from boxmunge.staging_isolation import StagingIsolationError
 from boxmunge.staging_prepare import check_staging_storage, write_staging_overlay
@@ -85,12 +86,16 @@ def _decide_users(paths: BoxPaths, project: str, manifest: dict[str, Any]
     return clearance, users
 
 
-def _check_owners(paths: BoxPaths, project: str, users: dict[str, ServiceUser]) -> None:
-    """Staging's stores, as the start will mount them, belong to the users
-    that run them (deploy_checks.staging_owner_problems). Raises
+def _give_and_check_owners(paths: BoxPaths, project: str, plan: CopyPlan | None,
+                           users: dict[str, ServiceUser]) -> None:
+    """The stores the copy filled go to the users that run them
+    (staging_copy_owner); then every store, as the start will mount it,
+    must belong to its user (deploy_checks.staging_owner_problems). Raises
     DeployRefused."""
     target = staging_release_target(paths, project)
     model, services = resolved_services(target)
+    if plan is not None:
+        give_copies(paths, project, plan, services, users)
     problems = deploy_checks.staging_owner_problems(target, model, services, users,
                                                     remap_offset(paths))
     if problems:
@@ -120,7 +125,7 @@ def _prepare_storage(paths: BoxPaths, project: str,
                            record=True, deploying=True, start=False)
         copy_production_data(paths, project, plan)
         print("  Data copy complete.")
-    _check_owners(paths, project, users)
+    _give_and_check_owners(paths, project, plan, users)
     return clearance
 
 

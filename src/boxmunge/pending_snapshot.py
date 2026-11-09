@@ -117,10 +117,18 @@ def note_removal(paths: BoxPaths, project: str) -> None:
     """Before every container of the project is removed (the health
     monitor's critical stop): note those of the recorded service, while
     Docker still shows whether they ran since the record. A removal is not
-    a start, so the record stays usable; one that has run is left to be
-    dropped when it is used. Raises DockerError or StateError."""
+    a start, so the record stays usable. One whose service has run is
+    dropped now: once its containers are gone (and a later one may reuse a
+    noted name) nothing could show it ran. Raises DockerError or
+    StateError."""
     entry = pending(paths, project)
-    if entry is None or _has_run_since(project, entry) is not None:
+    if entry is None:
+        return
+    stale = _has_run_since(project, entry)
+    if stale is not None:
+        drop(paths, project)
+        print(f"  The snapshot {entry['name']} that {entry['taken_by']} took is dropped: "
+              f"{stale}.")
         return
     states = docker_containers.start_states(project)
     removed = sorted(set(entry.get(_REMOVED, [])) | {
@@ -129,6 +137,15 @@ def note_removal(paths: BoxPaths, project: str) -> None:
     state = read_state(state_path)
     state[KEY] = {**entry, _REMOVED: removed}
     write_state(state_path, state)
+
+
+def drop_if_started(paths: BoxPaths, project: str, services: set[str] | None) -> None:
+    """boxmunge has just started `services` (None: every service): a record
+    of one of them no longer holds the data its next deploy would dump.
+    Raises StateError."""
+    entry = pending(paths, project)
+    if entry is not None and (services is None or entry["service"] in services):
+        drop(paths, project)
 
 
 def drop(paths: BoxPaths, project: str) -> None:

@@ -330,7 +330,9 @@ def compose_up_checked(
             f"it. Run {redo}.") from e
     _recreate_without_image(paths, project_name, compose_project, component, services, up)
     if not staging and start:
-        chown_hold.release_after_start(paths, project_name, services, component)
+        # `services` brings up those they depend on too (_start_images).
+        chown_hold.after_start(paths, project_name,
+                               None if services is None else sorted(images), component)
     # A partial up (restore's one service) may leave the rest stopped.
     if not staging and start and not services:
         _clear_production_stopped(paths, project_name, component)
@@ -468,12 +470,14 @@ def _sweep_live_scripts(paths: BoxPaths, project_name: str, component: str) -> N
         log_warning(component, message, paths, project=project_name)
 
 
-def check_containers_start(paths: BoxPaths, project_name: str, *, component: str) -> None:
+def check_containers_start(paths: BoxPaths, project_name: str, names: list[str], *,
+                           component: str) -> None:
     """Check what starting production's existing, stopped containers would
     mount. A `docker start` reads no compose file — it mounts what each
     container was created with — so only the containers' own bind mounts
     are checked: the own-file and nesting rules, and each source walked
-    without following links, of the kind recorded at deploy. Raises
+    without following links, of the kind recorded at deploy. The containers
+    to start (`names`) must run as the users record says. Raises
     ComposeRefused, also while an install transaction is open (no install
     resumes by restarting stopped containers) and for a project staged by
     boxmunge 0.10.1, as check_start does."""
@@ -491,8 +495,11 @@ def check_containers_start(paths: BoxPaths, project_name: str, *, component: str
     except (BindSourceError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
     if paths.project_users_record(project_name).exists():
-        stale = stale_containers_problem(
-            paths, project_name, docker_containers.container_users(project_name))
+        starting = {c.service for c in docker_containers.project_containers(project_name)
+                    if c.name in names}
+        created = {svc: user for svc, user in
+                   docker_containers.container_users(project_name).items() if svc in starting}
+        stale = stale_containers_problem(paths, project_name, created)
         if stale is not None:
             raise _refused(paths, project_name, component, stale, tampering=False)
 
@@ -502,7 +509,7 @@ def start_containers_checked(
 ) -> None:
     """check_containers_start, then `docker start` the named containers.
     Raises ComposeRefused or DockerError."""
-    check_containers_start(paths, project_name, component=component)
+    check_containers_start(paths, project_name, names, component=component)
     start_containers(names)
 
 
