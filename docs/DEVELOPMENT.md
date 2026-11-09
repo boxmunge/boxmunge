@@ -203,3 +203,39 @@ The full trust chain is in `docs/on-server/TRUST_MODEL.md`.
 
 The client is published to PyPI by `.github/workflows/publish-cli.yml` on a `cli-v*` tag, using
 PyPI Trusted Publishing, so no API token exists anywhere.
+
+## The version-check admin pages
+
+`services/version-check` serves two maintainer-only views of update checks and failure reports,
+each with its own credential, never interchangeable:
+
+- `/v1/admin/stats` (HTML, for a browser) needs a passkey sign-in. Signing in sets an 8-hour
+  session cookie (`Path=/v1/admin`, HttpOnly, Secure, SameSite=Strict) signed with a key derived
+  from `STATS_SECRET`. Without a session, the page redirects to `/v1/admin/login`.
+- `/v1/admin/version-checks` (JSON, for scripts) needs `Authorization: Bearer <STATS_SECRET>`.
+  The session cookie does not open it, and the HTML page ignores the Bearer header.
+
+Without `STATS_SECRET`, every admin route answers 503 and names the missing setting. The relying
+party is `ADMIN_RP_ID` (default `boxmunge.dev`) with origin `https://<ADMIN_RP_ID>`, so the passkey
+works on the production host only, not on `staging.<host>`. One passkey can be registered. It must
+use ES256 or EdDSA, and the authenticator must verify the user.
+
+### First-time setup
+
+1. Set the registration code (it is `STATS_SECRET`), from the deploy shell:
+   `secrets set boxmunge-web STATS_SECRET=<long random value>`, for example from
+   `openssl rand -hex 32`.
+2. Redeploy the service (`stage boxmunge-web`, then `promote boxmunge-web`) so it reads the secret.
+3. Open `https://boxmunge.dev/v1/admin/register`, paste the code into the form, and create the
+   passkey when the browser asks. Registration then closes.
+4. Sign in at `https://boxmunge.dev/v1/admin/login`.
+
+The code goes only in the form, never in a URL. Registration-code attempts are rate-limited per
+client.
+
+### Recovery
+
+If the passkey is lost, or you suspect `STATS_SECRET` has leaked, set a new `STATS_SECRET` and
+redeploy. The stored passkey was registered under the old code, so it is ignored and registration
+reopens. Every existing session ends too, because the session key changes. Then repeat steps 3
+and 4. Nothing on the web resets the passkey.
