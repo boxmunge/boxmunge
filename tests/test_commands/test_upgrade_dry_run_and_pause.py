@@ -11,6 +11,7 @@ from unittest.mock import patch
 import yaml
 
 from boxmunge.commands.upgrade_cmd import run_upgrade
+from boxmunge.commands.upgrade_steps import check_upgrade
 from boxmunge.upgrade_exclusions import apply_projects
 from boxmunge.manifest import CURRENT_SCHEMA_VERSION
 from boxmunge.pause import render_maintenance_caddy_config, write_paused_state
@@ -71,16 +72,21 @@ class TestPausedProjectsKeepMaintenancePage:
         assert "status 503" in content
         assert "reverse_proxy" not in content
 
-    def test_regen_does_not_regenerate_paused_overlay(self, tmp_path: Path) -> None:
+    def test_regen_keeps_paused_routing_but_regenerates_its_overlay(self, tmp_path: Path) -> None:
+        """Resume starts this release's overlay, so the upgrade writes it and
+        records its bind sources, as for a running project (see
+        tests/integration/test_upgrade_blocked_lift.py)."""
         paths = _setup(tmp_path)
         _project(paths, "alpha")
         _pause(paths, "alpha")
         with patch("boxmunge.commands.upgrade_steps.prepare_caddy_config") as caddy, \
-             patch("boxmunge.commands.upgrade_steps.prepare_compose_override") as overlay:
+             patch("boxmunge.commands.upgrade_steps.prepare_compose_override") as overlay, \
+             patch("boxmunge.commands.upgrade_steps.check_start") as check:
             processed = apply_projects(paths)[1].processed
         caddy.assert_not_called()
-        overlay.assert_not_called()
-        assert "alpha" not in processed
+        overlay.assert_called_once()
+        assert check.call_args.kwargs["record"] is True
+        assert "alpha" in processed
 
     @patch("boxmunge.commands.upgrade_cmd.caddy_reload")
     @patch("boxmunge.compose_guard.compose_up")
@@ -129,6 +135,17 @@ class TestDryRunWritesNothing:
                    side_effect=RuntimeError("generator bug")):
             assert run_upgrade(paths, dry_run=True) == 1
         assert _snapshot(paths.root) == before
+
+    def test_a_paused_projects_overlay_failure_fails_the_dry_run(self, tmp_path: Path) -> None:
+        """The apply regenerates a paused project's overlay too."""
+        paths = _setup(tmp_path)
+        _project(paths, "paused")
+        _pause(paths, "paused")
+        assert check_upgrade(paths) == [
+            "paused: paused; keeps its maintenance page, overlay renders OK"]
+        with patch("boxmunge.commands.upgrade_steps.generate_compose_override",
+                   side_effect=RuntimeError("generator bug")):
+            assert run_upgrade(paths, dry_run=True) == 1
 
     def test_corrupt_manifest_fails_the_dry_run(self, tmp_path: Path) -> None:
         """apply raises on a corrupt manifest, so the pre-flight must too."""

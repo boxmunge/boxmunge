@@ -1810,7 +1810,10 @@ How an upgrade is applied and undone:
    operations that recreate containers (the daily container-update, for one) do not consult
    the upgrade's refusal.
    Paused, quarantined and health-monitor-stopped projects are not restarted either; each
-   stays offline until `resume`, `security resume` or `recover` brings it back.
+   stays offline until `resume`, `security resume` or `recover` brings it back. A paused or
+   quarantined project keeps its maintenance page, but the upgrade still regenerates its
+   compose overlay and records the bind sources it mounts, so `resume`, `security resume`
+   and the scan's automatic lift start it on its deployed files without a deploy.
 4. A health check runs, then a 6-hour probation. A critical health result during probation
    rolls back.
 

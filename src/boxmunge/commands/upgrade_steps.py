@@ -225,21 +225,22 @@ class Regeneration:
 def _regenerate_project(
     paths: BoxPaths, name: str, manifest: dict[str, Any], regen: Regeneration,
 ) -> None:
-    """Write one project's Caddy site config and compose overlay. Caller
-    holds its project lock and has excluded it if it must be left alone."""
+    """Write one project's Caddy site config and compose overlay, and record
+    the bind sources the overlay mounts. Caller holds its project lock and
+    has excluded it if it must be left alone."""
     # A paused or CVE-quarantined project is deliberately offline. Its Caddy
     # fragment must stay the maintenance page: regenerating live routing
     # would send visitors to stopped upstreams (502) instead of the page the
     # operator chose. Re-render the maintenance page (so a template change
-    # still reaches it) and leave the overlay alone; resume and security
-    # resume regenerate both when the project comes back.
+    # still reaches it). Its overlay is regenerated and recorded all the
+    # same: resume and the quarantine lift start this release's overlay,
+    # whose mounts may differ from the old one's (0.10.1 mounted the smoke
+    # scripts from .releases/live-scripts), and they check it against the
+    # record taken here.
     block = is_blocked(name, paths)
     if block:
         write_maintenance_page(paths, name, manifest)
         log_operation("upgrade", block.skip_message, paths, project=name)
-        if not paths.project_bind_record(name).exists():
-            _record_bind_sources(paths, name)
-        return
     # A compose.yml that predates a validator fix must not get a fresh
     # overlay, nor be rebuilt and re-run as root by restart_projects. Its
     # old configs and running containers are left untouched; the upgrade
@@ -254,7 +255,8 @@ def _regenerate_project(
                   paths, project=name)
         return
     try:
-        prepare_caddy_config(paths, manifest)
+        if not block:
+            prepare_caddy_config(paths, manifest)
         prepare_compose_override(paths, manifest, component="upgrade")
     except Exception as e:
         # The project would restart on its old overlay; fail so the shim
@@ -338,23 +340,21 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
             manifest = migrated
         manifest = split_user_entries(manifest)  # as loading does
         block = is_blocked(name, paths)
-        if block:
-            if manifest.get("hosts"):
-                render_maintenance_caddy_config(manifest["hosts"])
-            report.append(f"{name}: {block.reason.value}; keeps its maintenance page")
-            continue
+        if block and manifest.get("hosts"):
+            render_maintenance_caddy_config(manifest["hosts"])
         refusal = compose_refusal(paths, name, manifest)
         if refusal is not None:
             report.append(f"{name}: would be refused by this release's compose "
                           f"validator and left on its current configs and "
                           f"containers, not restarted: {refusal}")
             continue
-        if not paths.project_caddy_override(name).exists():
+        if not block and not paths.project_caddy_override(name).exists():
             generate_caddy_config(manifest)
         generate_compose_override(
             manifest, user_compose=load_user_compose(paths.project_compose(name), name),
         )
-        report.append(f"{name}: configs render OK")
+        report.append(f"{name}: {block.reason.value}; keeps its maintenance page, overlay "
+                      f"renders OK" if block else f"{name}: configs render OK")
     return report
 
 
